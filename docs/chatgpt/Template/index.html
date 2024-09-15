@@ -1,0 +1,59 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Template (chatgpt.Template)</title><meta charset="utf-8"/><link rel="stylesheet" href="../../odoc.support/odoc.css"/><meta name="generator" content="odoc 2.4.2"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><script src="../../odoc.support/highlight.pack.js"></script><script>hljs.initHighlightingOnLoad();</script><script>let base_url = '../../';
+let search_urls = ['../db.js','../../sherlodoc.js'];
+</script><script src="../../odoc.support/odoc_search.js" defer="defer"></script></head><body class="odoc"><nav class="odoc-nav"><a href="../index.html">Up</a> – <a href="../index.html">chatgpt</a> &#x00BB; Template</nav><div class="odoc-search"><div class="search-inner"><input class="search-bar" placeholder="🔎 Search..."/><div class="search-snake"></div><div class="search-result"></div></div></div><header class="odoc-preamble"><h1>Module <code><span>Template</span></code></h1><p>Example use of this module</p><pre class="language-ocaml"><code> module Items = struct
+     type t = string list
+
+     let to_key_value_pairs items =
+     let items =
+         List.map ~f:(fun item -&gt; Printf.sprintf &quot;- %s&quot; item) items
+         |&gt; String.concat ~sep:&quot;\n&quot;
+     in
+     [ &quot;items&quot;, items ]
+     ;;
+ end
+ 
+ module ItemsTemplate = Make (Items) 
+ module Person = struct
+     type t =
+     { name : string
+     ; age : int
+     ; items : string list
+     }
+
+     let items_template = ItemsTemplate.create {|items
+ -----------
+ {{items}}|}
+
+     let to_key_value_pairs person =
+     [ &quot;name&quot;, person.name
+     ; &quot;age&quot;, Int.to_string person.age
+     ; &quot;items&quot;, ItemsTemplate.render items_template person.items
+     ]
+     ;;
+ end
+ 
+ module PersonTemplate = Make (Person) 
+ let template =
+     PersonTemplate.create
+     {|
+ Hello, {{ name }}! 
+ Your age is {{ age }}.
+ What do You need from this list 
+ {{items}}
+ |}
+ 
+ let person =
+     { Person.name = &quot;John Doe&quot;; age = 30; items = [ &quot;milk&quot;; &quot;eggs&quot;; &quot;toast&quot; ] }
+ 
+ let rendered = PersonTemplate.render template person
+ let () = printf &quot;%s\n&quot; rendered;
+ 
+&quot;Hello, John Doe!
+ Your age is 30.
+ What do You need from this list
+ items
+ -----------
+ - milk
+ - eggs
+ - toast&quot;</code></pre></header><div class="odoc-content"><div class="odoc-spec"><div class="spec module-type anchored" id="module-type-RENDERABLE"><a href="#module-type-RENDERABLE" class="anchor"></a><code><span><span class="keyword">module</span> <span class="keyword">type</span> <a href="module-type-RENDERABLE/index.html">RENDERABLE</a></span><span> = <span class="keyword">sig</span> ... <span class="keyword">end</span></span></code></div><div class="spec-doc"><p>The RENDERABLE module type defines an interface for types that can be converted to key-value pairs for use in templating.</p></div></div><div class="odoc-spec"><div class="spec module anchored" id="module-Make_Template"><a href="#module-Make_Template" class="anchor"></a><code><span><span class="keyword">module</span> <a href="Make_Template/index.html">Make_Template</a></span><span> (<a href="Make_Template/argument-1-R/index.html">R</a> : <a href="module-type-RENDERABLE/index.html">RENDERABLE</a>) : <span class="keyword">sig</span> ... <span class="keyword">end</span></span></code></div><div class="spec-doc"><p>The Make functor creates a templating module for a given RENDERABLE type. Supports variable replacement with the syntax <code>{variable</code></p></div></div><div class="odoc-spec"><div class="spec module-type anchored" id="module-type-PARSABLE"><a href="#module-type-PARSABLE" class="anchor"></a><code><span><span class="keyword">module</span> <span class="keyword">type</span> <a href="module-type-PARSABLE/index.html">PARSABLE</a></span><span> = <span class="keyword">sig</span> ... <span class="keyword">end</span></span></code></div></div><div class="odoc-spec"><div class="spec module anchored" id="module-Make_parser"><a href="#module-Make_parser" class="anchor"></a><code><span><span class="keyword">module</span> <a href="Make_parser/index.html">Make_parser</a></span><span> (<a href="Make_parser/argument-1-P/index.html">P</a> : <a href="module-type-PARSABLE/index.html">PARSABLE</a>) : <span class="keyword">sig</span> ... <span class="keyword">end</span></span></code></div></div></div></body></html>
