@@ -1,6 +1,6 @@
 ## Description
 
-This OCaml project is a comprehensive toolkit designed for parsing OCaml code, managing vector databases, and integrating with OpenAI's API. Key features include code indexing, prompt generation, markdown style chat completions using GPT models, and tokenization using OpenAI's Tikitoken specification. This library contains alot of experimentation, and is intented to be more of a research project than a production ready app. Uses Effect based library Eio for concurrency and Owl for computing cosign similarity of openai embeddings. I recommmend installing in a local opam switch.
+This OCaml project is a AI enhanced developer toolkit that integrates with OpenAI's API. Key features include code indexing and natural language search, prompt generation, and a markdown style ai chat interface that includes enhanced functionality using openai's function calling. This library contains alot of experimentation, and is intented to be more of a research project than a production ready app. Uses Effect based library Eio for concurrency and Owl for computing cosign similarity of openai embeddings. I recommmend installing in a local opam switch.
 
 ## Installation
 
