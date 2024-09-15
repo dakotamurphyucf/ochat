@@ -1,0 +1,171 @@
+
+COMPLETE COMMAND OF OUTPUT:
+-------------------------
+
+Programming language Ocaml
+You are an AI assistant helping an expert developer program in the Ocaml Playground below. You are intelligent, helpful an an expert developer, who always gives the correct answer and only does what is instructed. You should provide answers to any question, whether related to OCaml programming or not, but always format your response as an OCaml comment.
+When responding to a request, if the response is related to programming, You should follow odoc conventions for proper documentation of code.
+This ensures that any information or answer you provide, even if not related to code, will be placed in a comment, making it easy to insert the response into the OCaml Playground
+
+In the current Ocaml Playground, you have access to the following module interfaces, libraries, and dependencies:
+
+Core, Core_unix.Command_unix
+
+(**  The Core.Command module provides a convenient way to create command-line interfaces with subcommands, flags, and arguments. Here's a simple example to demonstrate its usage:
+{[
+let main_command =
+  let open  Command.Let_syntax in
+  Command.basic
+    ~summary:"A simple command-line app using Jane Street Core.Command"
+    ~readme:(fun () -> "More detailed information about the app goes here.")
+    (let%map_open name =
+       flag "-name" (required string) ~doc:"NAME Your name"
+     and age = flag "-age" (optional int) ~doc:"AGE Your age" in
+     fun () ->
+       printf "Hello, %s!\n" name;
+       match age with
+       | Some age -> printf "You are %d years old.\n" age
+       | None -> printf "You didn't provide your age.\n")
+
+let () = Command_unix.run main_command }]
+
+
+
+Run the compiled app with flags:
+./my_app -name "John Doe" -age 30
+
+This example demonstrates a simple command-line app that takes a name and an optional age as input and prints a greeting message. You can extend this example to create more complex command-line interfaces with subcommands and additional flags.
+*)
+
+
+Ocaml Playground:
+
+
+
+Request:
+
+use Janestreet Core.Command library to create command line app. The command line app will need a command to take in parameters to initialize the parsing and indexing of ocaml code in a user specified folder for a code vector search database using openai embeddings. The command should accept params for location of folder to index, as well as a folder to store vector db data. The command line app should also have a command to start a http server to serve query to vector database. Just write the boiler plate code for defining the comands and the params that they need 
+
+
+
+Model:
+(** Here's a boilerplate example of a command-line app using Jane Street Core.Command library that takes in parameters for initializing the parsing and indexing of OCaml code in a user-specified folder for a code vector search database using OpenAI embeddings, and starting an HTTP server to serve queries to the vector database:
+
+{[
+open Core
+open Command.Let_syntax
+
+let index_command =
+  Command.basic
+    ~summary:"Index OCaml code in the specified folder for a code vector search database using OpenAI embeddings."
+    (let%map_open folder_to_index =
+       flag "-folder-to-index" (required string) ~doc:"FOLDER Path to the folder containing OCaml code to index"
+     and vector_db_folder =
+       flag "-vector-db-folder" (required string) ~doc:"FOLDER Path to the folder to store vector database data" in
+     fun () ->
+       printf "Indexing OCaml code in folder: %s\n" folder_to_index;
+       printf "Storing vector database data in folder: %s\n" vector_db_folder;
+       (* Implement the indexing and parsing logic here *))
+
+let http_server_command =
+  Command.basic
+    ~summary:"Start an HTTP server to serve queries to the vector database."
+    (let%map_open port =
+       flag "-port" (optional_with_default 8080 int) ~doc:"PORT Port number to start the HTTP server on" in
+     fun () ->
+       printf "Starting HTTP server on port: %d\n" port;
+       (* Implement the HTTP server logic here *))
+
+let main_command =
+  Command.group
+    ~summary:"A command-line app for indexing OCaml code and serving queries to a code vector search database using OpenAI embeddings."
+    [("index", index_command); ("http-server", http_server_command)]
+
+let () = Command_unix.run main_command
+]}
+
+This example demonstrates a command-line app with two subcommands: "index" for initializing the parsing and indexing of OCaml code, and "http-server" for starting an HTTP server to serve queries to the vector database. You can extend this example to implement the actual indexing, parsing, and server logic.
+*)
+
+
+
+
+
+EDIT COMMAND OF PREVIOUS OUTPUT:
+-------------------------
+
+You are an AI assistant helping a developer make edits to code. You are intelligent, helpful, and always gives the correct answer and only does what is instructed.
+Given a context, a code snippet, and instruction on how to edit the snippet, you return the code snippet with the
+edit applied.
+Context:
+(** Here's a boilerplate example of a command-line app using Jane Street Core.Command library that takes in parameters for initializing the parsing and indexing of OCaml code in a user-specified folder for a code vector search database using OpenAI embeddings, and starting an HTTP server to serve queries to the vector database:
+This example demonstrates a command-line app with two subcommands: "index" for initializing the parsing and indexing of OCaml code, and "http-server" for starting an HTTP server to serve queries to the vector database. You can extend this example to implement the actual indexing, parsing, and server logic.
+*)
+open Core
+open Command.Let_syntax
+
+
+Snippet:
+let index_command =
+  Command.basic
+    ~summary:"Index OCaml code in the specified folder for a code vector search database using OpenAI embeddings."
+    (let%map_open folder_to_index =
+        flag "-folder-to-index" (required string) ~doc:"FOLDER Path to the folder containing OCaml code to index"
+      and vector_db_folder =
+        flag "-vector-db-folder" (required string) ~doc:"FOLDER Path to the folder to store vector database data" in
+      fun () ->
+        printf "Indexing OCaml code in folder: %s\n" folder_to_index;
+        printf "Storing vector database data in folder: %s\n" vector_db_folder;
+        (* Implement the indexing and parsing logic here *))
+
+let http_server_command =
+  Command.basic
+    ~summary:"Start an HTTP server to serve queries to the vector database."
+    (let%map_open port =
+        flag "-port" (optional_with_default 8080 int) ~doc:"PORT Port number to start the HTTP server on" in
+      fun () ->
+        printf "Starting HTTP server on port: %d\n" port;
+        (* Implement the HTTP server logic here *))
+
+let main_command =
+  Command.group
+    ~summary:"A command-line app for indexing OCaml code and serving queries to a code vector search database using OpenAI embeddings."
+    [("index", index_command); ("http-server", http_server_command)]
+
+let () = Command_unix.run main_command
+Instuction:
+update the server commands to also include a param for db location, and update the index command to make the index and vector folder params optional and default to ./ and ./vector respectivley
+
+
+
+Output:
+let index_command =
+  Command.basic
+    ~summary:"Index OCaml code in the specified folder for a code vector search database using OpenAI embeddings."
+    (let%map_open folder_to_index =
+        flag "-folder-to-index" (optional_with_default "./" string) ~doc:"FOLDER Path to the folder containing OCaml code to index (default: ./)"
+      and vector_db_folder =
+        flag "-vector-db-folder" (optional_with_default "./vector" string) ~doc:"FOLDER Path to the folder to store vector database data (default: ./vector)" in
+      fun () ->
+        printf "Indexing OCaml code in folder: %s\n" folder_to_index;
+        printf "Storing vector database data in folder: %s\n" vector_db_folder;
+        (* Implement the indexing and parsing logic here *))
+
+let http_server_command =
+  Command.basic
+    ~summary:"Start an HTTP server to serve queries to the vector database."
+    (let%map_open port =
+        flag "-port" (optional_with_default 8080 int) ~doc:"PORT Port number to start the HTTP server on"
+      and vector_db_folder =
+        flag "-vector-db-folder" (required string) ~doc:"FOLDER Path to the folder containing vector database data" in
+      fun () ->
+        printf "Starting HTTP server on port: %d\n" port;
+        printf "Using vector database data from folder: %s\n" vector_db_folder;
+        (* Implement the HTTP server logic here *))
+
+let main_command =
+  Command.group
+    ~summary:"A command-line app for indexing OCaml code and serving queries to a code vector search database using OpenAI embeddings."
+    [("index", index_command); ("http-server", http_server_command)]
+
+let () = Command_unix.run main_command

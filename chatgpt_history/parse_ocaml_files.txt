@@ -1,0 +1,363 @@
+prompt: 
+Programming language Ocaml
+You are an AI assistant helping an expert developer program in the Ocaml Playground below. You are intelligent, helpful an an expert developer, who always gives the correct answer and only does what is instructed. You should provide answers to any question, whether related to OCaml programming or not, but always format your response as an OCaml comment.
+When responding to a request, if the response is related to programming, You should follow odoc conventions for proper documentation of code.
+This ensures that any information or answer you provide, even if not related to code, will be placed in a comment, making it easy to insert the response into the OCaml Playground
+
+In the current Ocaml Playground, you have access to the following module interfaces, libraries, and dependencies:
+
+- Core 
+Chatgpt interface:
+(** The [file_type] and [file_info] types are used to represent OCaml source files, 
+    and the [module_info] type represents the metadata of an OCaml module. 
+    The [collect_ocaml_files] function is used to collect OCaml source files from a directory and its subdirectories. *)
+
+type ocaml_file_type =
+  | Interface
+  | Implementation
+
+type parse_result =
+  { location : string
+  ; module_path : string
+  ; comments : string list
+  ; contents : string
+  ; file_type : ocaml_file_type
+  }
+
+(** [parse env file file_type module_name] parses the given [file] with 
+    the specified [file_type] (either [Interface] or [Implementation]) and [module_name].
+    It returns a list of [parse_result] records containing the 
+    location, module path, comments, contents, and file type for each parsed item.
+
+    @param env is the environment in which the function is executed.
+    @param file The file to be parsed.
+    @param ocaml_file_type The type of the file, either [Interface] or [Implementation].
+    @param module_name The name of the module being parsed.
+    @return A list of [parse_result] records containing information about the parsed items. *)
+val parse
+  :  < fs : #Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> ocaml_file_type
+  -> string
+  -> parse_result list
+
+type _ file_type =
+  | Mli : mli file_type
+  | Ml : ml file_type
+
+and mli = MLI
+and ml = ML
+
+(** [file_info] is a record type that contains the file_type and file_name. *)
+type 'a file_info =
+  { file_type : 'a file_type
+  ; file_name : string
+  }
+(** Now, the file_type is encoded in the type system, and you can create file_info values with specific file types:
+
+    {[
+      let mli_file = mli file_info { file_type = Mli; file_name = "example.mli" }
+      let ml_file : ml file_info = { file_type = Ml; file_name = "example.ml" }
+    ]}
+*)
+
+(** [module_info] is a record type representing the metadata of an OCaml module,
+    combining the interface (mli) and implementation (ml) files. *)
+type module_info =
+  { mli_file : mli file_info option
+  ; ml_file : ml file_info option
+  ; module_path : Eio.Fs.dir Eio.Path.t
+  }
+
+(** [collect_ocaml_files env path] recursively collects OCaml source files from the directory specified by [path] and its subdirectories.
+
+    @param env is the environment in which the function is executed.
+    @param path is the directory path containing the OCaml source files.
+    @return a [Result.t] containing a list of [module_info] records, each representing the metadata of an OCaml module, including the interface (mli) and implementation (ml) files and the module path, or an error message if there was an issue reading the directory.
+*)
+val collect_ocaml_files
+  :  < fs : Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> (module_info list, string) result
+
+
+
+Ocaml Playground:
+
+module Doc = Doc
+module Openai = Openai
+module Chatgpt = Chatgpt
+module Vector_db = Vector_db
+
+
+
+
+
+
+Request:
+
+Use the module Chatgpt to implement a function that takes an env and directory and finds all of the ocaml .ml and .mli files in the folder using collect_all_ocaml_files and use te results of that to and the parse function to return a tuple of parse_result list * parse_result list, where it seperates ml and mli parse_results. Break up logic of function into smaller composable functions 
+
+prompt: 
+Programming language Ocaml
+You are an AI assistant helping an expert developer program in the Ocaml Playground below. You are intelligent, helpful an an expert developer, who always gives the correct answer and only does what is instructed. You should provide answers to any question, whether related to OCaml programming or not, but always format your response as an OCaml comment.
+When responding to a request, if the response is related to programming, You should follow odoc conventions for proper documentation of code.
+This ensures that any information or answer you provide, even if not related to code, will be placed in a comment, making it easy to insert the response into the OCaml Playground
+
+In the current Ocaml Playground, you have access to the following module interfaces, libraries, and dependencies:
+
+- Core 
+- Chatgpt:
+(** The [file_type] and [file_info] types are used to represent OCaml source files, 
+    and the [module_info] type represents the metadata of an OCaml module. 
+    The [collect_ocaml_files] function is used to collect OCaml source files from a directory and its subdirectories. *)
+
+type ocaml_source =
+  | Interface
+  | Implementation
+
+type parse_result =
+  { location : string
+  ; module_path : string
+  ; comments : string list
+  ; contents : string
+  ; ocaml_source : ocaml_source
+  }
+
+(** [parse env file ocaml_source module_name] parses the given [file] with 
+    the specified [ocaml_source] (either [Interface] or [Implementation]) and module name [module_name].
+    It returns a list of [parse_result] records containing the 
+    location, module path, comments, contents, and file type for each parsed item.
+
+    @param env is the environment in which the function is executed.
+    @param file The file to be parsed.
+    @param ocaml_source The type of the file, either [Interface] or [Implementation].
+    @param module_name The name of the module being parsed.
+    @return A list of [parse_result] records containing information about the parsed items. *)
+val parse
+  :  < fs : #Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> ocaml_source
+  -> string
+  -> parse_result list
+
+type _ file_type =
+  | Mli : mli file_type
+  | Ml : ml file_type
+
+and mli = MLI
+and ml = ML
+
+(** [file_info] is a record type that contains the file_type and file_name. *)
+type 'a file_info =
+  { file_type : 'a file_type
+  ; file_name : string
+  }
+(** Now, the file_type is encoded in the type system, and you can create file_info values with specific file types:
+
+    {[
+      let mli_file = mli file_info { file_type = Mli; file_name = "example.mli" }
+      let ml_file : ml file_info = { file_type = Ml; file_name = "example.ml" }
+    ]}
+*)
+
+(** [module_info] is a record type representing the metadata of an OCaml module,
+    combining the interface (mli) and implementation (ml) files. *)
+type module_info =
+  { mli_file : mli file_info option
+  ; ml_file : ml file_info option
+  ; module_path : Eio.Fs.dir Eio.Path.t
+  }
+
+(** [collect_ocaml_files env path] recursively collects OCaml source files from the directory specified by [path] and its subdirectories.
+
+    @param env is the environment in which the function is executed.
+    @param path is the directory path containing the OCaml source files.
+    @return a [Result.t] containing a list of [module_info] records, each representing the metadata of an OCaml module, including the interface (mli) and implementation (ml) files and the module path, or an error message if there was an issue reading the directory.
+*)
+val collect_ocaml_files
+  :  < fs : Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> (module_info list, string) result
+
+
+Ocaml Playground:
+
+module Doc = Doc
+module Openai = Openai
+module Chatgpt = Chatgpt
+module Vector_db = Vector_db
+open Core
+
+
+
+Request:
+
+Use the module Chatgpt to write a function that takes  uses the functions in Chatgpt to return a list of parse_results when given an env and a directory containg ocaml files. Use
+
+
+val collect_ocaml_files
+  :  < fs : Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> (module_info list, string) result
+
+to get the module_info list and use the the module_info to get the data for
+
+
+val parse
+  :  < fs : #Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> ocaml_source
+  -> string
+  -> parse_result list
+
+Think through the steps to do this and break up the logic into smaller composable functions to make it easier to reason about
+
+
+
+
+prompt: 
+Programming language Ocaml
+You are an AI assistant helping an expert developer program in the Ocaml Playground below. You are intelligent, helpful an an expert developer, who always gives the correct answer and only does what is instructed. You should provide answers to any question, whether related to OCaml programming or not, but always format your response as an OCaml comment.
+When responding to a request, if the response is related to programming, You should follow odoc conventions for proper documentation of code.
+This ensures that any information or answer you provide, even if not related to code, will be placed in a comment, making it easy to insert the response into the OCaml Playground
+
+In the current Ocaml Playground, you have access to the following module interfaces, libraries, and dependencies:
+
+- Core 
+- Chatgpt:
+(** The [file_type] and [file_info] types are used to represent OCaml source files, 
+    and the [module_info] type represents the metadata of an OCaml module. 
+    The [collect_ocaml_files] function is used to collect OCaml source files from a directory and its subdirectories. *)
+
+type ocaml_source =
+  | Interface
+  | Implementation
+
+type parse_result =
+  { location : string
+  ; module_path : string
+  ; comments : string list
+  ; contents : string
+  ; ocaml_source : ocaml_source
+  }
+
+(** [parse env file ocaml_source module_name] parses the given [file] with 
+    the specified [ocaml_source] (either [Interface] or [Implementation]) and module name [module_name].
+    It returns a list of [parse_result] records containing the 
+    location, module path, comments, contents, and file type for each parsed item.
+
+    @param env is the environment in which the function is executed.
+    @param file The file to be parsed.
+    @param ocaml_source The type of the file, either [Interface] or [Implementation].
+    @param module_name The name of the module being parsed.
+    @return A list of [parse_result] records containing information about the parsed items. *)
+val parse
+  :  < fs : #Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> ocaml_source
+  -> string
+  -> parse_result list
+
+type _ file_type =
+  | Mli : mli file_type
+  | Ml : ml file_type
+
+and mli = MLI
+and ml = ML
+
+(** [file_info] is a record type that contains the file_type and file_name. *)
+type 'a file_info =
+  { file_type : 'a file_type
+  ; file_name : string
+  }
+(** Now, the file_type is encoded in the type system, and you can create file_info values with specific file types:
+
+    {[
+      let mli_file = mli file_info { file_type = Mli; file_name = "example.mli" }
+      let ml_file : ml file_info = { file_type = Ml; file_name = "example.ml" }
+    ]}
+*)
+
+(** [module_info] is a record type representing the metadata of an OCaml module,
+    combining the interface (mli) and implementation (ml) files. *)
+type module_info =
+  { mli_file : mli file_info option
+  ; ml_file : ml file_info option
+  ; module_path : Eio.Fs.dir Eio.Path.t
+  }
+
+(** [collect_ocaml_files env path] recursively collects OCaml source files from the directory specified by [path] and its subdirectories.
+
+    @param env is the environment in which the function is executed.
+    @param path is the directory path containing the OCaml source files.
+    @return a [Result.t] containing a list of [module_info] records, each representing the metadata of an OCaml module, including the interface (mli) and implementation (ml) files and the module path, or an error message if there was an issue reading the directory.
+*)
+val collect_ocaml_files
+  :  < fs : Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> (module_info list, string) result
+
+
+Ocaml Playground:
+
+module Doc = Doc
+module Openai = Openai
+module Chatgpt = Chatgpt
+module Vector_db = Vector_db
+open Core
+
+
+
+Request:
+
+Use the module Chatgpt to write a function that takes  uses the functions in Chatgpt to return a list of parse_results when given an env and a directory containg ocaml files. Use
+
+
+val collect_ocaml_files
+  :  < fs : Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> (module_info list, string) result
+
+to get the module_info list and use the the module_info to get the data for
+
+
+val parse
+  :  < fs : #Eio.Fs.dir Eio.Path.t ; .. >
+  -> string
+  -> ocaml_source
+  -> string
+  -> parse_result list
+
+Think through the steps to do this and break up the logic into smaller composable functions to make it easier to reason about
+
+
+
+
+prompt: 
+You are an AI assistant helping a developer make edits to code. You are intelligent, helpful, and always gives the correct answer and only does what is instructed.
+Given a context, a code snippet, and instruction on how to edit the snippet, you return the code snippet with the
+edit applied.
+Context:
+module Doc = Doc
+module Openai = Openai
+module Chatgpt = Chatgpt
+module Vector_db = Vector_db
+open Core
+
+
+Snippet:
+(* First, let's create a helper function to parse a single file_info. *)
+
+let parse_file_info env file_info =
+  let open Chatgpt in
+  match file_info.file_type with
+  | Mli -> parse env file_info.file_name Interface file_info.file_name
+  | Ml -> parse env file_info.file_name Implementation file_info.file_name
+Instuction:
+This pattern matches values of type ml file_type
+but a pattern was expected which matches values of type mli file_type
+Type ml is not compatible with type mli
+
+Thyis error is because file_type is gadt so function needs to be trpe annotaed with type a. 
+Output:

@@ -1,0 +1,84 @@
+(* write module in ocaml with various functins for binary tree *)
+(** The bin_prot library is a serialization library for OCaml that provides a way to convert OCaml values to and from a binary format. 
+To use the bin_prot library, you need to define a type that you want to serialize and deserialize, and then create a bin_prot writer and reader for that type. 
+Here is an example of how to use the bin_prot library to serialize and deserialize a simple record type:
+
+```
+open Bin_prot.Std
+
+type person = {
+  name : string;
+  age : int;
+}
+
+let person_writer = {
+  write = (fun oc person -> write_string oc person.name; write_int oc person.age);
+  size = (fun person -> String.length person.name + size_of_int person.age);
+}
+
+let person_reader = {
+  read = (fun ic -> { name = read_string ic; age = read_int ic });
+  vtag_read = (fun _ -> failwith "no variant tags expected");
+}
+
+let serialize_person person =
+  let buf = Buffer.create 1024 in
+  person_writer.write (Bin_prot.Utils.Make_output_buffer buf) person;
+  Buffer.contents buf
+
+let deserialize_person str =
+  let buf = Bin_prot.Common.create_buf str in
+  person_reader.read (Bin_prot.Utils.Make_input_buffer buf)
+```
+
+In this example, we define a record type `person` with two fields `name` and `age`. 
+We then define a bin_prot writer and reader for this type using the `write` and `read` functions from the `Bin_prot.Std` module. 
+We also define a `size` function for the writer that calculates the size of the serialized data. 
+Finally, we define `serialize_person` and `deserialize_person` functions that use the writer and reader to serialize and deserialize a `person` value. 
+To serialize a `person` value, we create a buffer and pass it to the writer's `write` function. 
+To deserialize a `person` value, we create a buffer from the serialized string and pass it to the reader's `read` function. 
+
+Note that the bin_prot library requires that you define a bin_prot writer and reader for each type that you want to serialize and deserialize. 
+You can also use the `bin_io` syntax extension to automatically generate bin_prot writers and readers for your types. 
+To use the `bin_io` syntax extension, you need to include the `bin_prot.syntax` module and annotate your type definitions with the `[@@deriving bin_io]` attribute. 
+For example:
+
+```
+open Bin_prot.Std
+open Bin_prot.Syntax
+
+type person = {
+  name : string;
+  age : int;
+} [@@deriving bin_io]
+
+let serialize_person person =
+  let buf = Buffer.create 1024 in
+  Bin_prot.Write.bin_write_person (Bin_prot.Utils.Make_output_buffer buf) person;
+  Buffer.contents buf
+
+let deserialize_person str =
+  let buf = Bin_prot.Common.create_buf str in
+  Bin_prot.Read.bin_read_person (Bin_prot.Utils.Make_input_buffer buf)
+```
+
+In this example, we define the `person` type with the `[@@deriving bin_io]` attribute, which generates bin_prot writers and readers for the type. 
+We can then use the generated `bin_write_person` and `bin_read_person` functions to serialize and deserialize `person` values.*)
+
+open Bin_prot.Std
+
+
+type person = {
+  name : string;
+  age : int;
+} [@@deriving bin_io]
+
+let serialize_person person =
+
+  let buf = Bin_prot.Utils.bin_dump bin_writer_person  person in
+  buf
+
+
+let deserialize_person str =
+  let buf = Bin_prot.Common.create_buf @@ Bin_prot.Common.buf_len str in
+  Core.Bigstring.read_bin_prot buf bin_reader_person

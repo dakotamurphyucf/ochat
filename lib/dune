@@ -1,0 +1,201 @@
+(library
+ (name ocaml_parser)
+ (modules ocaml_parser)
+ (public_name chatgpt.ocaml_parser)
+ (libraries io ppxlib core bin_prot_utils vector_db openai owl re pcre)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name tikitoken)
+ (modules tikitoken)
+ (public_name chatgpt.tikitoken)
+ (libraries io ppxlib core pcre eio eio_main eio.unix base64)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name doc)
+ (modules doc)
+ (public_name chatgpt.doc)
+ (libraries io ppxlib core eio eio_main eio.unix)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name vector_db)
+ (public_name chatgpt.vector_db)
+ (modules vector_db)
+ (libraries io ppxlib core bin_prot_utils openai owl doc)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name bin_prot_utils)
+ (public_name chatgpt.bin_prot_utils)
+ (modules bin_prot_utils)
+ (libraries core core_unix.bigstring_unix core_unix)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name openai_chat_completion)
+ (public_name chatgpt.openai_chat_completion)
+ (modules openai_chat_completion)
+ (libraries
+  io
+  jsonaf
+  tls-eio
+  core
+  eio
+  eio_main
+  eio.unix
+  cohttp-eio
+  mirage-crypto-rng-eio)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name openai)
+ (public_name chatgpt.openai)
+ (modules openai)
+ (libraries
+  io
+  jsonaf
+  tls-eio
+  core
+  eio
+  eio_main
+  eio.unix
+  cohttp-eio
+  mirage-crypto-rng-eio)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name github)
+ (modules github)
+ (public_name chatgpt.github)
+ (libraries
+  doc
+  io
+  cohttp
+  jsonaf
+  tls-eio
+  core
+  eio
+  eio_main
+  eio.unix
+  cohttp-eio
+  mirage-crypto-rng-eio)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name filter_file)
+ (public_name chatgpt.filter_file)
+ (modules filter_file)
+ (libraries core))
+
+(library
+ (name template)
+ (modules template)
+ (public_name chatgpt.template)
+ (libraries core expect_test_helpers_core re2 angstrom)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name prompt_template)
+ (modules prompt_template)
+ (public_name chatgpt.prompt_template)
+ (libraries core jsonaf expect_test_helpers_core re2 angstrom markup openai_chat_completion)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect ppx_jsonaf_conv)))
+
+(library
+ (name io)
+ (public_name chatgpt.io)
+ (modules io)
+ (libraries
+  jsonaf
+  cohttp
+  tls-eio
+  core
+  eio
+  eio_main
+  eio.unix
+  cohttp-eio
+  mirage-crypto-rng-eio
+  lwt
+  lwt.unix)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name merlin)
+ (public_name chatgpt.merlin)
+ (modules merlin)
+ (libraries jsonaf core eio eio.unix)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name indexer)
+ (public_name chatgpt.indexer)
+ (modules indexer)
+ (libraries vector_db doc core openai tikitoken ocaml_parser)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name gpt_function)
+ (public_name chatgpt.gpt_function)
+ (modules gpt_function)
+ (libraries core openai jsonaf io)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name chat_completion)
+ (public_name chatgpt.chat_completion)
+ (modules chat_completion)
+ (libraries
+  core
+  openai
+  jsonaf
+  io
+  gpt_function
+  definitions
+  functions
+  prompt_template)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name definitions)
+ (public_name chatgpt.definitions)
+ (modules definitions)
+ (libraries core openai jsonaf io gpt_function)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name functions)
+ (public_name chatgpt.functions)
+ (modules functions)
+ (libraries
+  core
+  ezgzip
+  lambdasoup
+  openai
+  jsonaf
+  io
+  gpt_function
+  definitions
+  vector_db
+  indexer)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))

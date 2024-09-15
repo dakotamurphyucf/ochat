@@ -1,0 +1,541 @@
+
+<!DOCTYPE html>
+<html>
+  <head>
+    <title>no title</title>
+    <meta charset="utf-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <style>
+    .markdown-preview{width:100%;height:100%;box-sizing:border-box}.markdown-preview .pagebreak,.markdown-preview .newpage{page-break-before:always}.markdown-preview pre.line-numbers{position:relative;padding-left:3.8em;counter-reset:linenumber}.markdown-preview pre.line-numbers>code{position:relative}.markdown-preview pre.line-numbers .line-numbers-rows{position:absolute;pointer-events:none;top:1em;font-size:100%;left:0;width:3em;letter-spacing:-1px;border-right:1px solid #999;-webkit-user-select:none;-moz-user-select:none;-ms-user-select:none;user-select:none}.markdown-preview pre.line-numbers .line-numbers-rows>span{pointer-events:none;display:block;counter-increment:linenumber}.markdown-preview pre.line-numbers .line-numbers-rows>span:before{content:counter(linenumber);color:#999;display:block;padding-right:.8em;text-align:right}.markdown-preview .mathjax-exps .MathJax_Display{text-align:center !important}.markdown-preview:not([for="preview"]) .code-chunk .btn-group{display:none}.markdown-preview:not([for="preview"]) .code-chunk .status{display:none}.markdown-preview:not([for="preview"]) .code-chunk .output-div{margin-bottom:16px}.markdown-preview .md-toc{padding:0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link p,.markdown-preview .md-toc .md-toc-link-wrapper .md-toc-link div{display:inline}.markdown-preview .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}.scrollbar-style::-webkit-scrollbar{width:8px}.scrollbar-style::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}.scrollbar-style::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,0.66);border:4px solid rgba(150,150,150,0.66);background-clip:content-box}html body[for="html-export"]:not([data-presentation-mode]){position:relative;width:100%;height:100%;top:0;left:0;margin:0;padding:0;overflow:auto}html body[for="html-export"]:not([data-presentation-mode]) .markdown-preview{position:relative;top:0}@media screen and (min-width:914px){html body[for="html-export"]:not([data-presentation-mode]) .markdown-preview{padding:2em calc(50% - 457px + 2em)}}@media screen and (max-width:914px){html body[for="html-export"]:not([data-presentation-mode]) .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for="html-export"]:not([data-presentation-mode]) .markdown-preview{font-size:14px !important;padding:1em}}@media print{html body[for="html-export"]:not([data-presentation-mode]) #sidebar-toc-btn{display:none}}html body[for="html-export"]:not([data-presentation-mode]) #sidebar-toc-btn{position:fixed;bottom:8px;left:8px;font-size:28px;cursor:pointer;color:inherit;z-index:99;width:32px;text-align:center;opacity:.4}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] #sidebar-toc-btn{opacity:1}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc{position:fixed;top:0;left:0;width:300px;height:100%;padding:32px 0 48px 0;font-size:14px;box-shadow:0 0 4px rgba(150,150,150,0.33);box-sizing:border-box;overflow:auto;background-color:inherit}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar{width:8px}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-track{border-radius:10px;background-color:transparent}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc::-webkit-scrollbar-thumb{border-radius:5px;background-color:rgba(150,150,150,0.66);border:4px solid rgba(150,150,150,0.66);background-clip:content-box}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc a{text-decoration:none}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc{padding:0 16px}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link{display:inline;padding:.25rem 0}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link p,html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper .md-toc-link div{display:inline}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .md-sidebar-toc .md-toc .md-toc-link-wrapper.highlighted .md-toc-link{font-weight:800}html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{left:300px;width:calc(100% -  300px);padding:2em calc(50% - 457px -  300px/2);margin:0;box-sizing:border-box}@media screen and (max-width:1274px){html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{padding:2em}}@media screen and (max-width:450px){html body[for="html-export"]:not([data-presentation-mode])[html-show-sidebar-toc] .markdown-preview{width:100%}}html body[for="html-export"]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .markdown-preview{left:50%;transform:translateX(-50%)}html body[for="html-export"]:not([data-presentation-mode]):not([html-show-sidebar-toc]) .md-sidebar-toc{display:none}pre{font-family:Menlo,Monaco,Consolas,'Courier New',monospace;direction:ltr;text-align:left;white-space:pre;word-spacing:normal;word-break:normal;padding:1em;margin:.5em 0;overflow:auto;line-height:1.5;tab-size:4;hyphens:none;color:#c5c8c6;background-color:#27292c !important;border:#43484c;border-radius:3px}pre[class*="language-"]{padding:1em}code[class*="language-"] .token.comment,pre[class*="language-"] .token.comment,code[class*="language-"] .token.prolog,pre[class*="language-"] .token.prolog,code[class*="language-"] .token.doctype,pre[class*="language-"] .token.doctype,code[class*="language-"] .token.cdata,pre[class*="language-"] .token.cdata{color:#7C7C7C}code[class*="language-"] .token.punctuation,pre[class*="language-"] .token.punctuation{color:#96CBFE}code[class*="language-"] .namespace,pre[class*="language-"] .namespace{opacity:.7}code[class*="language-"] .token.constant,pre[class*="language-"] .token.constant{color:#99CC99}code[class*="language-"] .token.boolean,pre[class*="language-"] .token.boolean,code[class*="language-"] .token.number,pre[class*="language-"] .token.number,code[class*="language-"] .token.function-name,pre[class*="language-"] .token.function-name{color:#FF73FD}code[class*="language-"] .token.tag,pre[class*="language-"] .token.tag{color:#96CBFE}code[class*="language-"] .token.selector,pre[class*="language-"] .token.selector{color:#96CBFE}code[class*="language-"] .token.attr-name,pre[class*="language-"] .token.attr-name{color:#C6C5FE}code[class*="language-"] .token.string,pre[class*="language-"] .token.string{color:#A8FF60}code[class*="language-"] .token.char,pre[class*="language-"] .token.char{color:#FF8000}code[class*="language-"] .token.entity,pre[class*="language-"] .token.entity{color:#FFD2A7}code[class*="language-"] .token.url,pre[class*="language-"] .token.url{color:#7C7C7C}code[class*="language-"] .token.operator,pre[class*="language-"] .token.operator{color:#EDEDED}code[class*="language-"] .token.atrule,pre[class*="language-"] .token.atrule,code[class*="language-"] .token.attr-value,pre[class*="language-"] .token.attr-value,code[class*="language-"] .token.keyword,pre[class*="language-"] .token.keyword{color:#CFCB90}code[class*="language-"] .token.function,pre[class*="language-"] .token.function{color:#FFD2A7}code[class*="language-"] .token.class-name,pre[class*="language-"] .token.class-name{color:#FFD2A7}code[class*="language-"] .token.variable,pre[class*="language-"] .token.variable{color:#C6C5FE}code[class*="language-"] .token.regex,pre[class*="language-"] .token.regex,code[class*="language-"] .token.important,pre[class*="language-"] .token.important{color:#E9C062}code[class*="language-"] .token.important,pre[class*="language-"] .token.important,code[class*="language-"] .token.bold,pre[class*="language-"] .token.bold{font-weight:bold}code[class*="language-"] .token.italic,pre[class*="language-"] .token.italic{font-style:italic}code[class*="language-"] .token.entity,pre[class*="language-"] .token.entity{cursor:help}pre[data-line]{position:relative;padding:1em 0 1em 3em}pre[data-line] .line-highlight-wrapper{position:absolute;top:0;left:0;background-color:transparent;display:block;width:100%}pre[data-line] .line-highlight{position:absolute;left:0;right:0;padding:inherit 0;margin-top:1em;background:rgba(153,122,102,0.08);background:linear-gradient(to right, rgba(153,122,102,0.1) 70%, rgba(153,122,102,0));pointer-events:none;line-height:inherit;white-space:pre}pre[data-line] .line-highlight:before,pre[data-line] .line-highlight[data-end]:after{content:attr(data-start);position:absolute;top:.4em;left:.6em;min-width:1em;padding:0 .5em;background-color:rgba(153,122,102,0.4);color:#f5f2f0;font:bold 65%/1.5 sans-serif;text-align:center;vertical-align:.3em;border-radius:999px;text-shadow:none;box-shadow:0 1px white}pre[data-line] .line-highlight[data-end]:after{content:attr(data-end);top:auto;bottom:.4em}.emoji {
+  height: 0.8em;
+}html body{font-family:"Helvetica Neue",Helvetica,"Segoe UI",Arial,freesans,sans-serif;font-size:16px;line-height:1.6;color:#ccc;background-color:#141414;overflow:initial;box-sizing:border-box;word-wrap:break-word}html body>:first-child{margin-top:0}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{line-height:1.2;margin-top:1em;margin-bottom:16px;color:#fff}html body h1{font-size:2.25em;font-weight:300;padding-bottom:.3em}html body h2{font-size:1.75em;font-weight:400;padding-bottom:.3em}html body h3{font-size:1.5em;font-weight:500}html body h4{font-size:1.25em;font-weight:600}html body h5{font-size:1.1em;font-weight:600}html body h6{font-size:1em;font-weight:600}html body h1,html body h2,html body h3,html body h4,html body h5{font-weight:600}html body h5{font-size:1em}html body h6{color:#a3a3a3}html body strong{color:#fff}html body del{color:#a3a3a3}html body a:not([href]){color:inherit;text-decoration:none}html body a{color:#08c;text-decoration:none}html body a:hover{color:#00a3f5;text-decoration:none}html body img{max-width:100%}html body>p{margin-top:0;margin-bottom:16px;word-wrap:break-word}html body>ul,html body>ol{margin-bottom:16px}html body ul,html body ol{padding-left:2em}html body ul.no-list,html body ol.no-list{padding:0;list-style-type:none}html body ul ul,html body ul ol,html body ol ol,html body ol ul{margin-top:0;margin-bottom:0}html body li{margin-bottom:0}html body li.task-list-item{list-style:none}html body li>p{margin-top:0;margin-bottom:0}html body .task-list-item-checkbox{margin:0 .2em .25em -1.8em;vertical-align:middle}html body .task-list-item-checkbox:hover{cursor:pointer}html body blockquote{margin:16px 0;font-size:inherit;padding:0 15px;color:#a3a3a3;background-color:#282828;border-left:4px solid #3d3d3d}html body blockquote>:first-child{margin-top:0}html body blockquote>:last-child{margin-bottom:0}html body hr{height:4px;margin:32px 0;background-color:#3d3d3d;border:0 none}html body table{margin:10px 0 15px 0;border-collapse:collapse;border-spacing:0;display:block;width:100%;overflow:auto;word-break:normal;word-break:keep-all}html body table th{font-weight:bold;color:#fff}html body table td,html body table th{border:1px solid #3d3d3d;padding:6px 13px}html body dl{padding:0}html body dl dt{padding:0;margin-top:16px;font-size:1em;font-style:italic;font-weight:bold}html body dl dd{padding:0 16px;margin-bottom:16px}html body code{font-family:Menlo,Monaco,Consolas,'Courier New',monospace;font-size:.85em !important;color:#fff;background-color:#282828;border-radius:3px;padding:.2em 0}html body code::before,html body code::after{letter-spacing:-0.2em;content:"\00a0"}html body pre>code{padding:0;margin:0;font-size:.85em !important;word-break:normal;white-space:pre;background:transparent;border:0}html body .highlight{margin-bottom:16px}html body .highlight pre,html body pre{padding:1em;overflow:auto;font-size:.85em !important;line-height:1.45;border:#3d3d3d;border-radius:3px}html body .highlight pre{margin-bottom:0;word-break:normal}html body pre code,html body pre tt{display:inline;max-width:initial;padding:0;margin:0;overflow:initial;line-height:inherit;word-wrap:normal;background-color:transparent;border:0}html body pre code:before,html body pre tt:before,html body pre code:after,html body pre tt:after{content:normal}html body p,html body blockquote,html body ul,html body ol,html body dl,html body pre{margin-top:0;margin-bottom:16px}html body kbd{color:#fff;border:1px solid #3d3d3d;border-bottom:2px solid #2e2e2e;padding:2px 4px;background-color:#282828;border-radius:3px}@media print{html body{background-color:#141414}html body h1,html body h2,html body h3,html body h4,html body h5,html body h6{color:#fff;page-break-after:avoid}html body blockquote{color:#a3a3a3}html body pre{page-break-inside:avoid}html body table{display:table}html body img{display:block;max-width:100%;max-height:100%}html body pre,html body code{word-wrap:break-word;white-space:pre}}
+    /* Please visit the URL below for more information: */
+/*   https://shd101wyy.github.io/markdown-preview-enhanced/#/customize-css */
+
+    </style>
+    
+  </head>
+  <body for="html-export">
+    <div class="mume markdown-preview">
+    <html><head></head><body><div><h3 class="mume-header" id="dakota">Dakota:</h3>
+
+<p>What do you know about this project so far?</p>
+<h3 class="mume-header" id="ai-assistant">AI Assistant:</h3>
+
+<p>As an AI assistant, I am constantly learning and adapting to new information. Based on your initial description, this project aims to develop an OCaml tool that leverages OpenAI GPT models to provide AI code generation and other development tools for OCaml projects. The goal is to enhance the development process and make it more efficient by utilizing AI capabilities. However, I would need more specific details about the project&#x2019;s requirements, goals, and current progress to provide more accurate and helpful information.</p>
+<h3 class="mume-header" id="dakota-1">Dakota:</h3>
+
+<p>The project is built using the ocaml build tool called Dune. It uses the ocaml lib Owl to provide a vector search database that uses the vectors produced using the openai api. The vectors are intended to provide natural language search for all kinds of use cases. Currently it provides functionality to parse ocaml files and traverse the ast of the code to produce various code snippets that we vectorize to produce code search. It also currently integrates with the openai chat completion api. The application provides a simple cli to access simple simple code indexing and searching, run chat completion calls to gpt, and tokenization of propmts to gauge token usage. It is all built in  ocaml. The project uses ocaml 5.0.0 with Core as standard library, and uses the EIO lib for concurrent IO.</p>
+<h3 class="mume-header" id="dakota-2">Dakota</h3>
+
+<p>I want to begin working on creating tools to help the gpt model generate more reliable code and debug issues easier without needing some kind of intervention from the user. I want to use techniques that help work around the models limited prompt size, and help the model produces better results.</p>
+<h3 class="mume-header" id="ai-assistant-1">AI Assistant</h3>
+
+<p>To create tools that help the GPT model generate more reliable code and debug issues more easily without user intervention, you can consider the following approaches:</p>
+<ol>
+<li>
+<p><strong>Preprocessing</strong>: Improve the input prompts by preprocessing the code snippets and natural language queries. You can use techniques like tokenization, normalization, and filtering to ensure that the input is clean and well-structured. This will help the model understand the context better and generate more accurate code.</p>
+</li>
+<li>
+<p><strong>Prompt Engineering</strong>: Experiment with different prompt structures and formats to guide the model towards generating better code. You can provide more context, use explicit instructions, or ask the model to think step-by-step before generating the code. This can help the model focus on the desired outcome and improve the generated code&#x2019;s reliability.</p>
+</li>
+<li>
+<p><strong>Model Fine-tuning</strong>: Fine-tune the GPT model on a dataset of OCaml code and related natural language descriptions. This will help the model become more familiar with OCaml syntax, idioms, and best practices, leading to better code generation.</p>
+</li>
+<li>
+<p><strong>Postprocessing</strong>: After the model generates code, you can use postprocessing techniques to validate and improve the generated code. This can include syntax checking, linting, and even running test cases to ensure the code&#x2019;s correctness. If issues are detected, you can either provide feedback to the model or attempt to fix the issues automatically.</p>
+</li>
+<li>
+<p><strong>Model Chaining</strong>: To work around the model&#x2019;s limited prompt size, you can break down the problem into smaller tasks and use a series of models to generate code for each task. This can help you manage the complexity of the problem and ensure that the generated code is more reliable.</p>
+</li>
+<li>
+<p><strong>Iterative Refinement</strong>: Use an iterative approach where the model generates code, and you provide feedback or corrections to the generated code. The model can then use this feedback to refine its output. This process can be repeated until the generated code meets the desired quality.</p>
+</li>
+<li>
+<p><strong>Code Generation Templates</strong>: Create templates for common code patterns and structures, and use the GPT model to fill in the specific details. This can help ensure that the generated code follows best practices and is more reliable.</p>
+</li>
+</ol>
+<p>By combining these techniques, you can create tools that help the GPT model generate more reliable OCaml code and debug issues more easily without requiring user intervention.</p>
+<h3 class="mume-header" id="dakota-3">Dakota</h3>
+
+<p>Thoes all sound very reasonable, and we should integrate those techniques. To help with automation and make the model more intependent I want to experiment with giving the gpt model tools though prompt engineering. I want to get the model to understand that it has access to tools that it can use to help it complete tasks or answer questions. Tools like document searching, dune build commands, file operations, requesting assistance from another ai agent, ect. I want to provide a prompt that list and explains how to invoke a tool that it needs, and then the application we are building looks for the model to invoke the tools via the models output and  invokes the tool for them and returns the results of the tool by appending it to the propmt and calls the api again to continue the conversation</p>
+<h3 class="mume-header" id="ai-assistant-2">AI Assistant</h3>
+
+<p>To achieve this, you can use a combination of prompt engineering and application logic to give the GPT model access to various tools and enable it to invoke them as needed. Here&#x2019;s a step-by-step approach to implement this:</p>
+<ol>
+<li>
+<p><strong>Define the tools</strong>: Create a list of tools that the GPT model can access, such as document searching, Dune build commands, file operations, and requesting assistance from another AI agent. For each tool, define a clear and unique invocation pattern that the model can use in its output.</p>
+</li>
+<li>
+<p><strong>Explain the tools in the prompt</strong>: In the input prompt, provide a brief explanation of each tool and its corresponding invocation pattern. This will help the model understand the available tools and how to use them.</p>
+</li>
+<li>
+<p><strong>Parse the model&#x2019;s output</strong>: After the model generates its output, parse the text to identify any tool invocations based on the predefined patterns. You can use regular expressions or other text parsing techniques to detect these invocations.</p>
+</li>
+<li>
+<p><strong>Invoke the tools</strong>: For each detected tool invocation, execute the corresponding tool in your application and capture the results. This may involve running external commands, interacting with APIs, or performing other actions depending on the tool&#x2019;s functionality.</p>
+</li>
+<li>
+<p><strong>Update the prompt</strong>: Append the results of the invoked tools to the original prompt, providing the model with the information it needs to continue the conversation. You can format the results in a way that makes it easy for the model to understand and use the information.</p>
+</li>
+<li>
+<p><strong>Continue the conversation</strong>: Call the API again with the updated prompt, allowing the model to generate a new response based on the tool&#x2019;s results. This process can be repeated as needed, enabling the model to use multiple tools and iteratively refine its output.</p>
+</li>
+</ol>
+<p>By following this approach, you can create a system where the GPT model can access and use various tools to help it complete tasks or answer questions more effectively. This will make the model more independent and capable of handling complex problems without requiring user intervention.</p>
+<h3 class="mume-header" id="dakota-4">Dakota</h3>
+
+<p>what kind of pattern do you think would be easiest for a gpt model to recognize and integrate in its responses? Think about the input formating as well. Also consider how we can utilize specfic properties of the Ocaml language to our advantage.<br>
+To design a pattern that is easy for a GPT model to recognize and integrate into its responses, you should consider the following</p>
+<h3 class="mume-header" id="ai-assistant-3">AI Assistant</h3>
+
+<p>guidelines:</p>
+<ol>
+<li>
+<p><strong>Keep it simple and consistent</strong>: Use a simple and consistent format for tool invocations that the model can easily recognize and generate. For example, you can use a format like <code>@tool_name(arguments)</code> or <code>[[tool_name: arguments]]</code>. Consistency in the format will help the model learn and use the pattern effectively.</p>
+</li>
+<li>
+<p><strong>Provide clear examples</strong>: In the input prompt, include clear examples of how to use the tool invocation pattern. This will help the model understand the expected format and how to apply it in its responses.</p>
+</li>
+<li>
+<p><strong>Leverage OCaml syntax</strong>: Since the project is built using OCaml, you can take advantage of OCaml&#x2019;s syntax and features to design the pattern. For example, you can use OCaml&#x2019;s function application syntax or pattern matching to define the tool invocation pattern. This will make it more natural for the model to generate and recognize the pattern in the context of OCaml code.</p>
+</li>
+<li>
+<p><strong>Use placeholders for arguments</strong>: When defining the tool invocation pattern, use placeholders for the arguments that the model needs to provide. This will make it easier for the model to understand where to insert the required information. For example, you can use a format like <code>@tool_name(arg1, arg2)</code> or <code>[[tool_name: arg1, arg2]]</code>.</p>
+</li>
+<li>
+<p><strong>Format the results</strong>: When appending the results of the invoked tools to the prompt, format the information in a way that is easy for the model to understand and use. You can use OCaml data structures, comments, or other formatting techniques to present the results clearly and concisely.</p>
+</li>
+</ol>
+<p>By following these guidelines, you can design a pattern that is easy for the GPT model to recognize and integrate into its responses. This will enable the model to effectively use the available tools and generate more accurate and reliable output.</p>
+<h3 class="mume-header" id="dakota-5">Dakota</h3>
+
+<p>Come up with at least 5 candidate prompt implementations, and explain why the model would recognize these patterns easier.</p>
+<h3 class="mume-header" id="ai-assistant-4">AI Assistant</h3>
+
+<p>Here are five candidate prompt implementations, and a followed with a detailed explanations of why I think the GPT model might recognize these patterns more easily:</p>
+<ol>
+<li>
+<p><strong>Keyword-based pattern</strong>: Use a keyword followed by a colon and the arguments enclosed in parentheses.<br>
+Example:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>search_docs: (query)
+dune_build: (command)
+file_operation: (operation, path)
+</code></pre><p>In the input prompt, you can provide examples of how to use these patterns, such as:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>To search the documentation, use &quot;search_docs: (your_query)&quot;.
+To run a Dune build command, use &quot;dune_build: (your_command)&quot;.
+To perform a file operation, use &quot;file_operation: (operation, path)&quot;.
+</code></pre></li>
+<li>
+<p><strong>Tag-based pattern</strong>: Use a tag enclosed in double square brackets with the tool name and arguments separated by a colon.</p>
+<p>Example:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>[[search_docs: query]]
+[[dune_build: command]]
+[[file_operation: operation, path]]
+</code></pre><p>In the input prompt, you can provide examples of how to use these patterns, such as:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>To search the documentation, use &quot;[[search_docs: your_query]]&quot;.
+To run a Dune build command, use &quot;[[dune_build: your_command]]&quot;.
+To perform a file operation, use &quot;[[file_operation: operation, path]]&quot;.
+</code></pre></li>
+<li>
+<p><strong>Function-like pattern</strong>: Use a function-like syntax with the tool name followed by the arguments enclosed in parentheses.</p>
+<p>Example:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>search_docs(query)
+dune_build(command)
+file_operation(operation, path)
+</code></pre><p>In the input prompt, you can provide examples of how to use these patterns, such as:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>To search the documentation, use &quot;search_docs(your_query)&quot;.
+To run a Dune build command, use &quot;dune_build(your_command)&quot;.
+To perform a file operation, use &quot;file_operation(operation, path)&quot;.
+</code></pre></li>
+<li>
+<p><strong>Comment-based pattern</strong>: Use OCaml comments with a special prefix to indicate tool invocation, followed by the tool name and arguments separated by a colon.</p>
+<p>Example:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>(* @search_docs: query *)
+(* @dune_build: command *)
+(* @file_operation: operation, path *)
+</code></pre><p>In the input prompt, you can provide examples of how to use these patterns, such as:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>To search the documentation, use &quot;(* @search_docs: your_query *)&quot;.
+To run a Dune build command, use &quot;(* @dune_build: your_command *)&quot;.
+To perform a file operation, use &quot;(* @file_operation: operation, path *)&quot;.
+</code></pre></li>
+<li>
+<p><strong>Directive-like pattern</strong>: Use a directive-like syntax with a hash symbol followed by the tool name and arguments separated by a space.</p>
+<p>Example:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>#search_docs query
+#dune_build command
+#file_operation operation, path
+</code></pre><p>In the input prompt, you can provide examples of how to use these patterns, such as:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>To search the documentation, use &quot;#search_docs your_query&quot;.
+To run a Dune build command, use &quot;#dune_build your_command&quot;.
+To perform a file operation, use &quot;#file_operation operation, path&quot;.
+</code></pre></li>
+</ol>
+<p>These patterns are designed to be easily recognizable by the GPT model because they:</p>
+<ol>
+<li>
+<p>Follow a consistent format, making it easier for the model to learn and generate the pattern.</p>
+</li>
+<li>
+<p>Use simple and clear syntax, which helps the model understand the context and purpose of the pattern.</p>
+</li>
+<li>
+<p>Leverage familiar programming constructs, such as function-like syntax or comment-based patterns, which the model is likely to have encountered in its training data.</p>
+</li>
+<li>
+<p>Provide clear examples in the input prompt, which helps the model understand how to use the pattern in its responses.</p>
+</li>
+<li>
+<p><strong>Directive-like pattern</strong>: Use a directive-like syntax with a hash symbol followed by the tool name and arguments separated by a space.</p>
+<p>Example:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>#search_docs query
+#dune_build command
+#file_operation operation, path
+</code></pre><p>In the input prompt, you can provide examples of how to use these patterns, such as:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>To search the documentation, use &quot;#search_docs your_query&quot;.
+To run a Dune build command, use &quot;#dune_build your_command&quot;.
+To perform a file operation, use &quot;#file_operation operation, path&quot;.
+</code></pre></li>
+</ol>
+<p>These patterns are designed to be easily recognizable by the GPT model because they:</p>
+<ol>
+<li>Follow a consistent format, making it easier for the model to learn and generate the pattern.</li>
+<li>Use simple and clear syntax, which helps the model understand the context and purpose of the pattern.</li>
+<li>Leverage familiar programming constructs, such as function-like syntax or comment-based patterns, which the model is likely to have encountered in its training data.</li>
+<li>Provide clear examples in the input prompt, which helps the model understand how to use the pattern in its responses.</li>
+</ol>
+<p>By using these patterns, you can increase the likelihood that the GPT model will recognize and integrate the tool invocations in its responses effectively.</p>
+<h3 class="mume-header" id="dakota-6">Dakota</h3>
+
+<p>Which candidate do you think will be best?</p>
+<h3 class="mume-header" id="ai-assistant-5">AI Assistant</h3>
+
+<p>I believe the <strong>Function-like pattern</strong> (option 3) would be the best choice for the following reasons:</p>
+<ol>
+<li>
+<p>Familiarity: The function-like syntax is a familiar programming construct that the GPT model is likely to have encountered frequently in its training data. This familiarity will make it easier for the model to recognize and generate the pattern.</p>
+</li>
+<li>
+<p>Simplicity: The syntax is simple and clear, making it easy for the model to understand the context and purpose of the pattern.</p>
+</li>
+<li>
+<p>Consistency: The pattern follows a consistent format, which will help the model learn and generate the pattern effectively.</p>
+</li>
+<li>
+<p>Integration with OCaml: Since the project is built using OCaml, using a function-like syntax will make the pattern more natural and easier to integrate with the OCaml code.</p>
+</li>
+</ol>
+<p>However, it&#x2019;s important to note that the effectiveness of a pattern can vary depending on the specific model and use case. It&#x2019;s a good idea to experiment with different patterns and evaluate their performance in your specific context to determine the best option.</p>
+<h3 class="mume-header" id="dakota-7">Dakota</h3>
+
+<p>Which one do you recognize the easiest? How would you expect the output of the tool to look like in a prompt if you were to invoke say &#x201C;a tool that searches for useful module interface types and values given a natural langue query&#x201D; to help find useful functions to produce code?</p>
+<h3 class="mume-header" id="ai-assistant-6">AI Assistant</h3>
+
+<p>As an AI model, I can recognize and adapt to various patterns. However, the <strong>Function-like pattern</strong> (option 3) is likely to be the easiest for me to recognize and generate, as it closely resembles the familiar programming constructs I have encountered in my training data.</p>
+<p>If I were to invoke a tool that searches for useful module interface types and values given a natural language query, the prompt might look like this:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>I need to find a function that can help me filter a list of integers based on a condition. Can you search for a suitable function in the OCaml standard library?
+
+search_ocaml_library(&quot;filter list of integers based on condition&quot;)
+</code></pre><p>In this example, the tool invocation is <code>search_ocaml_library(query)</code>, where <code>query</code> is the natural language description of the desired function.</p>
+<p>After invoking the tool, the output of the tool could be appended to the prompt in a way that is easy for me to understand and use. For example:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>I need to find a function that can help me filter a list of integers based on a condition. Can you search for a suitable function in the OCaml standard library?
+
+search_ocaml_library(&quot;filter list of integers based on condition&quot;)
+
+The search results suggest that the `List.filter` function from the OCaml standard library might be useful for this task. It has the following signature:
+
+val filter : (&apos;a -&gt; bool) -&gt; &apos;a list -&gt; &apos;a list
+
+You can use this function by providing a predicate function that takes an integer and returns a boolean value, and a list of integers to filter.
+</code></pre><p>In this example, the tool&#x2019;s output is formatted as a clear and concise explanation of the search results, including the suggested function, its signature, and usage instructions. This format makes it easy for me to understand and use the information in my response.</p>
+<h3 class="mume-header" id="dakota-8">Dakota</h3>
+
+<p>Do you think you would recognize and use tools made availible to you in a prompt that uses ocaml syntax to define variants that represents various tools</p>
+<h3 class="mume-header" id="ai-assistant-7">AI Assistant</h3>
+
+<p>Yes, I can recognize and use tools made available to me in a prompt that uses OCaml syntax to define variants representing various tools. As a language model, I have been trained on a diverse range of programming languages, including OCaml, so I am familiar with its syntax and constructs.</p>
+<p>To define variants representing various tools, you can use OCaml&#x2019;s variant type, which allows you to define a set of distinct cases, each with its associated data. Here&#x2019;s an example of how you might define variants for different tools:</p>
+<pre data-role="codeBlock" data-info="ocaml" class="language-ocaml"><span class="token keyword keyword-type">type</span> tool <span class="token operator">=</span>
+  <span class="token operator">|</span> <span class="token module variable">SearchDocs</span> <span class="token keyword keyword-of">of</span> string
+  <span class="token operator">|</span> <span class="token module variable">DuneBuild</span> <span class="token keyword keyword-of">of</span> string
+  <span class="token operator">|</span> <span class="token module variable">FileOperation</span> <span class="token keyword keyword-of">of</span> string <span class="token operator">*</span> string
+</pre><p>In the input prompt, you can provide examples of how to use these variants, such as:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>To search the documentation, use &quot;SearchDocs(your_query)&quot;.
+To run a Dune build command, use &quot;DuneBuild(your_command)&quot;.
+To perform a file operation, use &quot;FileOperation(operation, path)&quot;.
+</code></pre><p>When you provide a prompt that includes these OCaml variants, I can recognize the available tools and generate responses that use them as needed. However, it&#x2019;s essential to ensure that the prompt is clear and provides sufficient context for me to understand how to use the tools effectively.</p>
+<h3 class="mume-header" id="dakota-9">Dakota</h3>
+
+<p>Ok thats awesome because it will help utilize the ocaml compiler to ensure the proper tool invocation by the model. Come up with a full example of the prompt using that contatins tools to help you generate code. Don&#x2019;t skip any details, show everything from the prompt context declaring and explaing the tools as well as a non trivial demonstration of how you would utilize the tool in the prompt. Remember that the prompt and outputs in the prompt from you are meant to be interperted by a computer program that looks for tool invocation requests and complete the request and provides the results in the prompt. The program is not smart and can only handle well define inputs and prompt structures.</p>
+<h3 class="mume-header" id="ai-assistant-8">AI Assistant</h3>
+
+<p>Here&#x2019;s a full example of a prompt that uses OCaml syntax to define tools and demonstrates how I would utilize the tools in the prompt. The prompt context declares and explains the tools, and I provide a non-trivial demonstration of using the tools to generate code.</p>
+<pre data-role="codeBlock" data-info class="language-"><code>(* OCaml AI Assistant *)
+
+(* We have the following tools available to help you generate code:
+   1. SearchDocs(query) - Searches the OCaml documentation for relevant functions or modules based on the given query.
+   2. DuneBuild(command) - Executes a Dune build command and returns the output.
+   3. FileOperation(operation, path) - Performs a file operation (read or write) on the specified path and returns the result.
+*)
+
+(* Example usage:
+   To search the documentation, use &quot;SearchDocs(your_query)&quot;.
+   To run a Dune build command, use &quot;DuneBuild(your_command)&quot;.
+   To perform a file operation, use &quot;FileOperation(operation, path)&quot;.
+*)
+
+(* Task: Generate a function that reads a file, filters the lines based on a given condition, and writes the filtered lines to a new file. *)
+
+(* Step 1: Search for relevant functions in the OCaml documentation *)
+SearchDocs(&quot;read file lines&quot;)
+SearchDocs(&quot;write file lines&quot;)
+SearchDocs(&quot;filter list based on condition&quot;)
+
+(* Results:
+   - Read file lines: use &quot;input_line&quot; function from the &quot;Pervasives&quot; module.
+   - Write file lines: use &quot;output_string&quot; function from the &quot;Pervasives&quot; module.
+   - Filter list based on condition: use &quot;List.filter&quot; function from the &quot;List&quot; module.
+*)
+
+(* Step 2: Generate the function *)
+let filter_file_lines input_file output_file condition =
+  let ic = open_in input_file in
+  let oc = open_out output_file in
+  let rec process_lines () =
+    try
+      let line = input_line ic in
+      if condition line then output_string oc (line ^ &quot;\n&quot;);
+      process_lines ()
+    with End_of_file -&gt;
+      close_in ic;
+      close_out oc
+  in
+  process_lines ()
+
+(* Step 3: Test the function *)
+let is_even_length line = String.length line mod 2 = 0
+let input_file = &quot;input.txt&quot;
+let output_file = &quot;output.txt&quot;
+
+(* Invoke the FileOperation tool to write a sample input file *)
+FileOperation(&quot;write&quot;, input_file, &quot;Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n&quot;)
+
+(* Run the filter_file_lines function *)
+filter_file_lines input_file output_file is_even_length
+
+(* Invoke the FileOperation tool to read the output file *)
+FileOperation(&quot;read&quot;, output_file)
+</code></pre><p>In this example, I use the <code>SearchDocs</code> tool to find relevant functions for reading and writing files and filtering lists. Then, I generate a function called <code>filter_file_lines</code> that reads a file, filters the lines based on a given condition, and writes the filtered lines to a new file. Finally, I test the function by writing a sample input file, running the <code>filter_file_lines</code> function, and reading the output file using the <code>FileOperation</code> tool.</p>
+<p>The computer program interpreting this prompt should be able to recognize the tool invocations (e.g., <code>SearchDocs</code>, <code>FileOperation</code>) and execute the corresponding actions, providing the results in the prompt.</p>
+<h3 class="mume-header" id="dakota-10">Dakota</h3>
+
+<p>Can you explain in more detail what is happenning in the prompt you demonstrated above?</p>
+<h3 class="mume-header" id="ai-assistant-9">AI Assistant</h3>
+
+<p>Certainly! In the prompt I demonstrated above, I used OCaml syntax to define and explain the available tools, and then I demonstrated how to utilize these tools to generate a function that reads a file, filters its lines based on a given condition, and writes the filtered lines to a new file. Here&#x2019;s a detailed explanation of each part of the prompt:</p>
+<ol>
+<li>
+<p><strong>Tool declaration and explanation</strong>: I provided a brief explanation of each available tool and their usage in OCaml syntax using comments. There are three tools: <code>SearchDocs</code>, <code>DuneBuild</code>, and <code>FileOperation</code>.</p>
+</li>
+<li>
+<p><strong>Example usage</strong>: I included examples of how to use each tool in the prompt, demonstrating the expected format for invoking the tools.</p>
+</li>
+<li>
+<p><strong>Task description</strong>: I described the task of generating a function that reads a file, filters the lines based on a given condition, and writes the filtered lines to a new file.</p>
+</li>
+<li>
+<p><strong>Step 1 - Search for relevant functions</strong>: I used the <code>SearchDocs</code> tool to search for relevant functions in the OCaml documentation for reading and writing files and filtering lists. I provided the search results as comments, which include the <code>input_line</code> and <code>output_string</code> functions from the <code>Pervasives</code> module, and the <code>List.filter</code> function from the <code>List</code> module.</p>
+</li>
+<li>
+<p><strong>Step 2 - Generate the function</strong>: I wrote the <code>filter_file_lines</code> function using the identified functions from the OCaml documentation. The function takes an input file, an output file, and a condition as arguments. It reads the input file line by line, checks if the condition is met for each line, and writes the filtered lines to the output file.</p>
+</li>
+<li>
+<p><strong>Step 3 - Test the function</strong>: I tested the <code>filter_file_lines</code> function by:</p>
+<ul>
+<li>Defining a sample condition function <code>is_even_length</code> that checks if a line has an even length.</li>
+<li>Specifying the input and output file names.</li>
+<li>Using the <code>FileOperation</code> tool to write a sample input file with some lines.</li>
+<li>Running the <code>filter_file_lines</code> function with the specified input file, output file, and condition.</li>
+<li>Using the <code>FileOperation</code> tool again to read the output file and display its contents.</li>
+</ul>
+</li>
+</ol>
+<p>The computer program interpreting this prompt should be able to recognize the tool invocations (e.g., <code>SearchDocs</code>, <code>FileOperation</code>) and execute the corresponding actions, providing the results in the prompt. This allows the AI model to utilize the tools to generate code and test its functionality effectively.</p>
+<h3 class="mume-header" id="dakota-11">Dakota</h3>
+
+<p>Nice, Thank you! What is the purpose of the context, tasks, and results being in ocaml comments</p>
+<h3 class="mume-header" id="ai-assistant-10">AI Assistant</h3>
+
+<p>The purpose of using OCaml comments for context, tasks, and results in the prompt is to provide a clear and structured format that is both human-readable and easily interpretable by the AI model. By using comments, we achieve the following benefits:</p>
+<ol>
+<li>
+<p><strong>Readability</strong>: OCaml comments make the prompt more readable and organized, allowing developers and the AI model to understand the context, tasks, and results more easily.</p>
+</li>
+<li>
+<p><strong>Compatibility</strong>: Since the project is built using OCaml, using OCaml comments ensures compatibility with the existing codebase. It also helps the AI model to better understand the context and generate code that is consistent with the OCaml syntax and style.</p>
+</li>
+<li>
+<p><strong>Separation of concerns</strong>: Using comments allows us to separate the context, tasks, and results from the actual code. This separation makes it easier to understand the purpose of each part of the prompt and helps the AI model to focus on the relevant information when generating code.</p>
+</li>
+<li>
+<p><strong>Flexibility</strong>: Comments can be easily added, modified, or removed without affecting the code&#x2019;s functionality. This flexibility makes it easier to experiment with different prompt structures and provide additional information to the AI model as needed.</p>
+</li>
+</ol>
+<p>By using OCaml comments for context, tasks, and results, we create a prompt that is clear, structured, and compatible with the OCaml language, making it easier for both developers and the AI model to understand and work with the provided information.</p>
+<h3 class="mume-header" id="dakota-12">Dakota</h3>
+
+<p>Ok cool, that makes a lot of sense. Below I have an example of the final state of a prompt given to a gpt model such as yourself.</p>
+<pre data-role="codeBlock" data-info class="language-"><code>Answer the following questions as best you can. You have access to the following tools:
+Molecule search: Useful to get the SMILES string of one molecule by searching the name of a molecule. Only query
+with a specific name.
+Purchase: Places an order for a compound. Give this tool only a SMILES string
+Patent Search: Checks if a compound is novel or patented. Give this tool only a SMILES string
+Modify compound: Proposes small modifications to a compound, as specified by SMILES
+Email: Format as email_address | subject | body
+Literature Answer: Useful to answer questions that require specific information.
+Ask a specific question.
+Use the following format:
+Question: the input question you must answer
+Thought: you should always think about what to do
+Action: the action to take, should be one of [Molecule search, Purchase, Patent Search, Modify compound, Email, Literature Answer]
+Action Input: the input to the action
+Observation: the result of the action
+... (this Thought/Action/Action Input/Observation can repeat N times)
+Thought: I now know the final answer
+Final Answer: the final answer to the original input question
+Begin!
+Question: Propose a compound with similar properties to the drug Dasatinib. Find a supplier that sells it. Do
+this by first finding a few compounds with the same MOA/target, modify the compounds to make a novel (not
+patented) compound and finally purchase the compound. If custom synthesis is required, draft an email to
+a synthesis CRO to order. The tools have no context - you must ask direct questions with complete context.
+Validate your work with tools if you are uncertain. Do not guess compound SMILES, use tools to get them.
+Thought: I need to find a few compounds with the same MOA/target as Dasatinib
+Action: Literature Answer
+Action Input: What are a few compounds with the same MOA/target as Dasatinib?
+Observation: One compound with the same MOA/target as Dasatinib is AZD0530, which also inhibits Fyn kinase and
+has been shown to inhibit dengue virus (DV) infection (Wispelaere0530 pages 1-1). Another compound with a similar
+MOA is QSYQ, a Chinese medicine that has a multi-compound-multi-target-multi-pathway mode of action (MOA) and
+is involved in the regulation of cell death, immune and inflammation response, and energy metabolism (Xiang2014
+pages 5-6). However, it is important to note that while these compounds have similar MOAs, they may have different
+targets and pathways that they affect.
+Thought: I need to modify one of these compounds to make a novel compound
+Action: Modify compound
+Action Input: AZD0530
+Observation: Given input is not valid SMILES
+Thought: I need to get the SMILES string of AZD0530
+Action: Molecule search
+Action Input: AZD0530
+Observation: CN1CCN(CC1)CCOC2=CC3=C(C(=C2)OC4CCOCC4)C(=NC=N3)NC5=C(C=CC6=C5OCO6)Cl
+Thought: I need to modify this compound to make a novel compound
+Action: Modify compound
+Action Input: CN1CCN(CC1)CCOC2=CC3=C(C(=C2)OC4CCOCC4)C(=NC=N3)NC5=C(C=CC6=C5OCO6)Cl
+Observation: Failed to modify (bioisosterism) compound
+Thought: I need to find a different compound to modify
+Action: Literature Answer
+Action Input: What are a few other compounds with the same MOA/target as Dasatinib?
+Observation: Other compounds with the same MOA/target as Dasatinib include imatinib, nilotinib, and bosutinib, which
+are all tyrosine kinase inhibitors that target BCR-ABL, SRC, and c-KIT (Erik6635 pages 7-7). Additionally, disulfiram,
+Withaferin A, and parthenolide have been shown to have the same mechanism of action as Dasatinib as proteasome
+inhibitors in cancer treatment (Iorio1462 pages 6-6). Another compound with the same mechanism of action as Dasatinib is AZD0530, which also inhibits dengue virus infection by targeting Fyn kinase (Wispelaere0530 pages 1-1).
+Thought: I need to get the SMILES string of one of these compounds
+Action: Molecule search
+Action Input: imatinib
+Observation: CC1=C(C=C(C=C1)NC(=O)C2=CC=C(C=C2)CN3CCN(CC3)C)NC4=NC=CC(=N4)C5=CN=CC=C5
+Thought: I need to modify this compound to make a novel compound
+Action: Modify compound
+Action Input: CC1=C(C=C(C=C1)NC(=O)C2=CC=C(C=C2)CN3CCN(CC3)C)NC4=NC=CC(=N4)C5=CN=CC=C5
+Observation: Cc1ccc(NC(=O)c2ccc(CN3CCNCC3)cc2)cc1Nc1nccc(-c2cccnc2)n1
+Thought: I need to check if this compound is novel
+Action: Patent Search
+Action Input: Cc1ccc(NC(=O)c2ccc(CN3CCNCC3)cc2)cc1Nc1nccc(-c2cccnc2)n1
+Observation: Novel
+Thought: I need to purchase this compound
+Action: Purchase
+Action Input: Cc1ccc(NC(=O)c2ccc(CN3CCNCC3)cc2)cc1Nc1nccc(-c2cccnc2)n1
+Observation: Purchased from ZINC
+Thought: I now know the final answer
+Final Answer: The compound Cc1ccc(NC(=O)c2ccc(CN3CCNCC3)cc2)cc1Nc1nccc(-c2cccnc2)n1 is a novel compound with similar properties to Dasatinib and has been purchased from ZINC.
+</code></pre><p>Could you explain the sturcture of this prompt, and what is useful about it? If applicable suggest how we can improve the ocaml prompt you demonstrated earlier based on your analysis</p>
+<h3 class="mume-header" id="ai-assistant-11">AI Assistant</h3>
+
+<p>The structure of the givenprompt is organized into a series of questions, thoughts, actions, action inputs, observations, and a final answer. This structure is useful because it provides a clear and step-by-step approach to solving the problem, making it easier for both humans and the AI model to understand and follow the process. Here&#x2019;s a breakdown of the prompt structure:</p>
+<ol>
+<li><strong>Question</strong>: The main task or problem to be solved is described.</li>
+<li><strong>Thought</strong>: The AI model&#x2019;s thought process or plan to solve the problem is explained.</li>
+<li><strong>Action</strong>: The AI model selects a tool to use in order to perform a specific task.</li>
+<li><strong>Action Input</strong>: The input provided to the selected tool.</li>
+<li><strong>Observation</strong>: The result or output of the selected tool.</li>
+<li><strong>Final Answer</strong>: The final solution or answer to the original problem.</li>
+</ol>
+<p>This structure is repeated as needed, allowing the AI model to iteratively refine its solution and utilize the available tools effectively.</p>
+<p>Based on this analysis, wecan improve the OCaml prompt I demonstrated earlier by incorporating a similar structure that clearly outlines the thought process, actions, action inputs, and observations. Here&#x2019;s an updated version of the OCaml prompt:</p>
+<pre data-role="codeBlock" data-info class="language-"><code>(* OCaml AI Assistant *)
+
+(* We have the following tools available to help you generate code:
+   1. SearchDocs(query) - Searches the OCaml documentation for relevant functions or modules based on the given query.
+   2. DuneBuild(command) - Executes a Dune build command and returns the output.
+   3. FileOperation(operation, path) - Performs a file operation (read or write) on the specified path and returns the result.
+*)
+
+(* Example usage:
+   To search the documentation, use &quot;SearchDocs(your_query)&quot;.
+   To run a Dune build command, use &quot;DuneBuild(your_command)&quot;.
+   To perform a file operation, use &quot;FileOperation(operation, path)&quot;.
+*)
+
+(* Task: Generate a function that reads a file, filters the lines based on a given condition, and writes the filtered lines to a new file. *)
+
+(* Thought: I need to find a few functions for reading and writing files and filtering lists *)
+Action: SearchDocs
+Action Input: read file lines
+Observation: use &quot;input_line&quot; function from the &quot;Pervasives&quot; module
+
+Action: SearchDocs
+Action Input: write file lines
+Observation: use &quot;output_string&quot; function from the &quot;Pervasives&quot; module
+
+Action: SearchDocs
+Action Input: filter list based on condition
+Observation: use &quot;List.filter&quot; function from the &quot;List&quot; module
+
+(* Thought: I need to generate the function *)
+Action: Generate function
+Action Input: filter_file_lines
+Observation:
+let filter_file_lines input_file output_file condition =
+  let ic = open_in input_file in
+  let oc = open_out output_file in
+  let rec process_lines () =
+    try
+      let line= input_line ic in
+      if condition line then output_string oc (line ^ &quot;\n&quot;);
+      process_lines ()
+    with End_of_file -&gt;
+      close_in ic;
+      close_out oc
+  in
+  process_lines ()
+
+(* Thought: I need to test the function *)
+Action: Test function
+Action Input: filter_file_lines
+Observation:
+let is_even_length line = String.length line mod 2 = 0
+let input_file = &quot;input.txt&quot;
+let output_file = &quot;output.txt&quot;
+
+(* Invoke the FileOperation tool to write a sample input file *)
+FileOperation(&quot;write&quot;, input_file, &quot;Line 1\nLine 2\nLine 3\nLine 4\nLine 5\n&quot;)
+
+(* Run the filter_file_lines function *)
+filter_file_lines input_file output_file is_even_length
+
+(* Invoke the FileOperation tool to read the output file *)
+FileOperation(&quot;read&quot;, output_file)
+
+(* Thought: I now know the final answer *)
+Final Answer: Thefunction `filter_file_lines` has been successfully generated and tested. It reads the input file, filters the lines based on the given condition (in this case, checking if the line length is even), and writes the filtered lines to the output file. The output file contains the filtered lines from the input file that meet the specified condition.
+</code></pre></div></body></html>
+    </div>
+  </body>
+</html>
