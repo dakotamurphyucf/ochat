@@ -128,34 +128,18 @@ tokenize -file ./my_ocaml_code/my_file.ml
 dune exe ./bin/main.exe --
 ```
 
-## Library Code Overview
-
-The project is structured into several library modules, each responsible for a distinct aspect of the application's functionality. Below is an overview of each library module:
-
-(Include detailed library code information here, as provided in the previous message.)
 
 ## Contributing
 
-Contributions are what make the open-source community such an amazing place to learn, inspire, and create. Any contributions you make are **greatly appreciated**.
+Any contributions you make are **greatly appreciated**.
 
 If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
 
-Don't forget to give the project a star! Thanks again!
 
 ## License
 
 Distributed under the MIT License. See `LICENSE.txt` for more information.
 
-## Authors and Acknowledgment
-
-Thank you to all the contributors who have helped to build this project.
-
 ## Status
 
-This project is in active development and new features are being added regularly.
-
-
-Please ensure that you replace the placeholders with the actual information about your project, such as the repository URL and project title. If you have any specific content or additional sections you would like to include, let me know, and I can help you add them to the README.
-
-If everything looks good, you can go ahead and use this content for your project's README file. If you need any further assistance or modifications, feel free to ask!
-
+This project is Highly Experimental
