@@ -1,50 +1,60 @@
-type template_element =
-  | System_message : string -> template_element
-  | Variable : string -> template_element
-  | Expression : string -> template_element
-  | Text : string -> template_element
-
-val insides : string Angstrom.t
-val c : template_element Angstrom.t
-val system_message_parser : string Angstrom.t
-val expression_parser : 'a Angstrom.t -> 'a Angstrom.t
-val text_parser : template_element Angstrom.t
-val template_parser : template_element list Angstrom.t
-
-module type TemplateHandler = sig
-  type t
-
-  val handle_variable : string -> t
-  val handle_function : string -> t
-  val handle_text : string -> t
-  val to_string : t -> string
-end
-
-module MakeTemplateProcessor : functor (Handler : TemplateHandler) -> sig
-  val process_template : template_element list -> Handler.t list
-end
-
-module MyTemplateHandler : TemplateHandler
-
-module MyTemplateProcessor : sig
-  val process_template : template_element list -> MyTemplateHandler.t list
-end
-
-val run : unit -> unit
-
 module Chat_markdown : sig
   type function_call =
-  { name : string
-  ; arguments : string
-  }
-[@@deriving jsonaf, sexp]
+    { name : string
+    ; arguments : string
+    }
+  [@@deriving jsonaf, sexp]
 
-type msg =
-  { role : string
-  ; content : string option
-  ; name : string option [@jsonaf.option]
-  ; function_call : function_call option [@jsonaf.option]
-  }
-[@@deriving jsonaf, sexp]
-  val parse_chat_inputs : string -> msg list
+  type tool_call =
+    { id : string
+    ; function_ : function_call
+    }
+  [@@deriving jsonaf, sexp]
+
+  type image_url = { url : string } [@@deriving sexp, jsonaf]
+
+  (* A single item of content, which can be text or an image. *)
+  type content_item =
+    { type_ : string [@key "type"]
+    ; text : string option [@jsonaf.option]
+    ; image_url : image_url option [@jsonaf.option]
+    ; document_url : string option [@jsonaf.option]
+    ; is_local : bool [@default false]
+    ; cleanup_html : bool [@default false]
+    }
+  [@@deriving sexp, jsonaf]
+
+  (* The overall content can be either a single string or a list of items. *)
+  type chat_message_content =
+    | Text of string
+    | Items of content_item list
+  [@@deriving sexp]
+
+  type msg =
+    { role : string
+    ; content : chat_message_content option [@jsonaf.option]
+    ; name : string option [@jsonaf.option]
+    ; function_call : function_call option [@jsonaf.option]
+    ; tool_call : tool_call option [@jsonaf.option]
+    ; tool_call_id : string option [@jsonaf.option]
+    }
+  [@@deriving jsonaf, sexp]
+
+  type config =
+    { max_tokens : int option [@jsonaf.option]
+    ; model : string option [@jsonaf.option]
+    ; reasoning_effort : string option [@jsonaf.option]
+    ; temperature : float option [@jsonaf.option]
+    }
+  [@@deriving jsonaf, sexp]
+
+  type top_level_elements =
+    | Msg of msg
+    | Config of config
+  [@@deriving sexp]
+
+  val parse_chat_inputs
+    :  dir:Eio.Fs.dir_ty Eio.Path.t
+    -> string
+    -> top_level_elements list
 end

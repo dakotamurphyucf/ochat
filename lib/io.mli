@@ -113,3 +113,6 @@ module Run_server : sig
   val main : net:_ Eio.Net.t -> clock:_ Eio.Time.clock -> unit
   val run : unit -> unit
 end
+ module Base64 : sig
+  val file_to_data_uri : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string
+end

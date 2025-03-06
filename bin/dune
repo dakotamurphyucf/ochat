@@ -1,19 +1,34 @@
 (executable
-(package chatgpt)
+ (package chatgpt)
  (public_name gpt)
  (name main)
  (modules main)
- (libraries lwt_eio io omd ocaml_parser lambdasoup vector_db doc core core_unix.command_unix openai tikitoken indexer github template prompt_template gpt_function  chat_completion )
+ (libraries
+  lwt_eio
+  io
+  dune_describe
+  omd
+  ocaml_parser
+  lambdasoup
+  vector_db
+  doc
+  core
+  core_unix.command_unix
+  openai
+  tikitoken
+  indexer
+  github
+  template
+  prompt_template
+  gpt_function
+  chat_completion)
  (preprocess
-  (pps ppx_jane )))
+  (pps ppx_jane)))
 
-
- (executable
+(executable
  (public_name parse_html)
  (name parse_html)
  (modules parse_html)
- (libraries lambdasoup io )
+ (libraries lambdasoup io)
  (preprocess
-  (pps ppx_jane )))
-
-
+  (pps ppx_jane)))

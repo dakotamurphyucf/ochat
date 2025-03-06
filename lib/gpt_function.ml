@@ -17,7 +17,7 @@ end
 
 (* represents a gpt function implementation *)
 type t =
-  { info : Openai.func
+  { info : Openai.tool
   ; run : string -> string
   }
 
@@ -25,7 +25,7 @@ type t =
 let create_function (type a) (module M : Def with type input = a) f =
   let run s = f @@ M.input_of_string s in
   let info =
-    Openai.{ name = M.name; description = M.description; parameters = M.parameters }
+   Openai.{type_="function"; function_=Openai.{ name = M.name; description = M.description; parameters = M.parameters; strict = true }}
   in
   { info; run }
 ;;
@@ -38,7 +38,7 @@ let functions gpt_funcs =
   let tbl = Hashtbl.create (module String) in
   let details =
     List.fold gpt_funcs ~init:[] ~f:(fun funcs t ->
-      Hashtbl.add_exn tbl ~key:t.info.name ~data:t.run;
+      Hashtbl.add_exn tbl ~key:t.info.function_.name ~data:t.run;
       t.info :: funcs)
   in
   details, tbl

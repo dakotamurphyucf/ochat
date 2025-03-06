@@ -1,8 +1,3 @@
-(** This module provides functions to interact with the OpenAI API for embeddings.
-
-    It includes functions to make HTTP POST requests to the OpenAI API embeddings endpoint and parse the response. *)
-
-(** Type definition for the input to the embeddings API. *)
 type embeddings_input =
   { model : string
   ; input : string list
@@ -10,14 +5,78 @@ type embeddings_input =
 [@@deriving jsonaf, sexp, bin_io]
 
 (** Type definition for the response from the embeddings API. *)
-type response = { data : embedding list } [@@jsonaf.allow_extra_fields]
+type response = { data : embedding list }
 
 (** Type definition for an individual embedding in the response. *)
 and embedding =
   { embedding : float list
   ; index : int
   }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+[@@deriving jsonaf, sexp, bin_io]
+
+(** [post_openai_embeddings ~input net] makes an HTTP POST request to the OpenAI API embeddings endpoint with the given [input] and [net].
+
+    It returns the parsed response as a [response] record. *)
+val post_openai_embeddings : _ Eio.Net.t -> input:string list -> response
+
+(* Define the function call structure *)
+type function_call =
+  { arguments : string [@default ""]
+  ; name : string [@default ""]
+  }
+[@@deriving jsonaf, sexp, bin_io]
+
+(* Define the tool call structure *)
+type tool_call_chunk =
+  { id : string [@default ""]
+  ; function_ : function_call [@key "function"]
+  ; type_ : string [@key "type"] [@default ""]
+  }
+[@@deriving jsonaf, sexp, bin_io]
+
+(* Define the tool call structure *)
+type tool_call_default =
+  { id : string option [@default None]
+  ; function_ : function_call option [@key "function"] [@default None]
+  ; type_ : string option [@key "type"] [@default None]
+  }
+[@@deriving jsonaf, sexp, bin_io]
+
+(* First, define a type to represent each item in the array of content objects. *)
+type image_url = { url : string } [@@deriving jsonaf, sexp]
+
+type content_item =
+  { type_ : string [@key "type"] (* e.g. "text" or "image_url" *)
+  ; text : string option [@jsonaf.option]
+  ; image_url : image_url option [@jsonaf.option]
+  }
+[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+
+(* Next, define a sum type that can be either a string or a list of content items. *)
+type chat_message_content =
+  | Text of string
+  | Items of content_item list
+[@@deriving sexp, jsonaf]
+
+type chat_message =
+  { role : string
+  ; content : chat_message_content option [@jsonaf.option]
+  ; name : string option [@jsonaf.option]
+  ; tool_call_id : string option [@jsonaf.option]
+  ; function_call : function_call option [@jsonaf.option]
+  ; tool_calls : tool_call_default list option [@jsonaf.option]
+  }
+[@@jsonaf.allow_extra_fields] [@@deriving sexp, jsonaf]
+
+(* Define the message structure for default responses *)
+type message =
+  { content : string option [@default None]
+  ; refusal : string option [@default None]
+  ; role : string
+  ; function_call : function_call option [@jsonaf.option]
+  ; tool_calls : tool_call_default list option [@jsonaf.option]
+  }
+[@@deriving jsonaf, sexp, bin_io]
 
 type func =
   { name : string
@@ -26,56 +85,78 @@ type func =
   }
 [@@deriving jsonaf, sexp]
 
-(** [post_openai_embeddings ~input net] makes an HTTP POST request to the OpenAI API embeddings endpoint with the given [input] and [net].
-
-    It returns the parsed response as a [response] record. *)
-val post_openai_embeddings : _ Eio.Net.t -> input:string list -> response
-
-type function_call =
-  { name : string [@default ""]
-  ; arguments : string [@default ""]
+type tool_func =
+  { name : string
+  ; description : string option
+  ; parameters : Jsonaf.t
+  ; strict : bool
   }
-[@@deriving jsonaf, sexp, bin_io]
+[@@deriving jsonaf, sexp]
 
-type message =
-  { role : string
-  ; content : string option
-  ; name : string option [@jsonaf.option]
-  ; function_call : function_call option [@jsonaf.option]
+type tool =
+  { type_ : string [@key "type"]
+  ; function_ : tool_func [@key "function"]
   }
-[@@deriving jsonaf, sexp, bin_io]
+[@@deriving jsonaf, sexp]
 
+type schema =
+  { description : string option [@jsonaf.option]
+  ; name : string
+  ; schema : Jsonaf.t
+  ; strict : bool
+  }
+[@@deriving jsonaf, sexp]
+
+type response_format =
+  { type_ : string [@key "type"]
+  ; json_schema : schema
+  }
+[@@deriving jsonaf, sexp]
+
+(* Define the delta structure for streamed responses *)
 type delta =
-  { role : string option [@jsonaf.option]
-  ; content : string option [@jsonaf.option]
+  { content : string option [@default None]
   ; function_call : function_call option [@jsonaf.option]
+  ; refusal : string option [@default None]
+  ; role : string option [@jsonaf.option]
+  ; tool_calls : tool_call_chunk list option [@jsonaf.option]
   }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+[@@deriving jsonaf, sexp, bin_io]
 
-type choice =
+(* Define the choice structure for streamed responses *)
+type stream_choice =
   { delta : delta
-  ; finish_reason : string option
+  ; finish_reason : string option [@default None]
+  ; index : int
   }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+[@@deriving jsonaf, sexp, bin_io]
 
-type message_response =
-  { message : delta
-  ; finish_reason : string option
+(* Define the chat completion chunk for streamed responses *)
+type chat_completion_chunk = { choices : stream_choice list }
+[@@deriving jsonaf, sexp, bin_io]
+
+(* Define the choice structure for default responses *)
+type default_choice =
+  { finish_reason : string option
+  ; message : message
   }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+[@@deriving jsonaf, sexp, bin_io]
+
+(* Define the chat completion for default responses *)
+type chat_completion = { choices : default_choice list } [@@deriving jsonaf, sexp, bin_io]
 
 type _ response_type =
-  | Stream : (choice -> unit) -> unit response_type
-  | Default : message_response response_type
+  | Stream : (stream_choice -> unit) -> unit response_type
+  | Default : default_choice response_type
 
 type model =
+  | O3_Mini
   | Gpt4
   | Gpt3
   | Gpt3_16k
+[@@deriving jsonaf, sexp]
 
-(** [post_chat_completion ?max_tokens ?stream env inputs] makes an HTTP POST request to the OpenAI API chat completion endpoint with the given optional [max_tokens], optional [stream], [env], and [inputs].
-
-    It returns the parsed response as a string. *)
+val model_of_str_exn : string -> model
 
 val post_chat_completion
   : 'a.
@@ -83,71 +164,9 @@ val post_chat_completion
   -> ?max_tokens:int
   -> ?temperature:float
   -> ?functions:func list
+  -> ?tools:tool list
   -> ?model:model
+  -> ?reasoning_effort:string
   -> 'n Eio.Net.t
-  -> inputs:message list
+  -> inputs:chat_message list
   -> 'a
-
-(* module type GPT_PROMPT_INTERACTION = sig
-   (* Type representing a problem with its interaction history *)
-   type problem
-
-   (* Type representing a tool *)
-   type tool
-
-   (* Type representing a tool output *)
-   type tool_output
-   type tool_input
-
-   (* Type representing a response *)
-   type response
-
-   (* Type representing a prompt output *)
-   type prompt_output = ToolInput of tool_input | Response of response
-
-   (* Function to create a problem *)
-   val create_problem :  unit -> problem
-
-   (* Function to update the problem with a new interaction *)
-   val update_problem :
-   problem -> tool_output -> (problem, string) result
-
-   (* Function to get the current prompt from the problem *)
-   val get_current_prompt : problem -> string
-
-   (* Function to get the interaction history from the problem *)
-   val get_interaction_history : problem -> prompt_output list
-
-   (* Function to check if a final answer has been reached or a threshold is met *)
-   val is_threshold_reached :
-   problem -> bool
-
-   end *)
-(* module type OPENAI_CALL = sig
-   module Gpt: GPT_PROMPT_INTERACTION
-   type openai_response
-   type openai_request
-   val env : < net : Eio.Net.t ; stdout : #Eio.Flow.sink ; .. >
-   (* Function to map a problem to an OpenAI call *)
-   val make_openai_call : Gpt.problem -> openai_request
-
-   (* Function to map an OpenAI response to a prompt_output *)
-   val parse_openai_response : openai_response -> Gpt.prompt_output
-   end
-
-   module type ProblemRuntime =
-   functor
-
-   (M: OPENAI_CALL )
-   ->
-   sig
-   exception Threshold_reached
-   type runtime
-   module Gpt = M.Gpt
-
-   (* Function to create a new runtime for a problem *)
-   val create_runtime : unit -> runtime
-
-   (* Function to evaluate the problem using the runtime *)
-   val evaluate_problem : runtime -> Gpt.problem -> response
-   end *)

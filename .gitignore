@@ -4,3 +4,4 @@ app/
 logs.txt
 dalle/
 interview/
+.DS_Store

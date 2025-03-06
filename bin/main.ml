@@ -81,48 +81,55 @@ let query_command =
 let chat_completion_command =
   Command.basic
     ~summary:
-      "Call OpenAI API to provide chat completion based on the content of a prompt file \
-      ."
+      "Call OpenAI API to provide chat completion based on the content of a prompt file ."
     (let%map_open prompt_file =
        flag
          "-prompt-file"
          (optional string)
-         ~doc:"FILE Path to the file containing inital prompt (optional). Think of this as a  prompt template, and output-file as a conversation instance using the prompt-template. \
-         If you are trying to continue a previous conversation do not include this flag and only provide the output file"
+         ~doc:
+           "FILE Path to the file containing inital prompt (optional). Think of this as \
+            a  prompt template, and output-file as a conversation instance using the \
+            prompt-template. If you are trying to continue a previous conversation do \
+            not include this flag and only provide the output file"
      and output_file =
        flag
          "-output-file"
          (optional_with_default "./prompts/default.md" string)
          ~doc:
            "FILE Path to the file to save the chat completion output (default: \
-           /prompts/default.md). If prompt-file is provided contents of prompt file will be appended to the output file. "
-     and max_tokens =
-       flag
-         "-max-tokens"
-         (optional_with_default 3000 int)
-         ~doc:
-           "TOKENS Maximum number of tokens to generate in the chat completion (default: \
-            600)"
-     
+            /prompts/default.md). If prompt-file is provided contents of prompt file \
+            will be appended to the output file. "
      in
      fun () ->
        run_main
        @@ fun env ->
-       let dir = Eio.Stdenv.fs env in
+       (* let dir = Eio.Stdenv.fs env in *)
        (* Prompt_template.run (); *)
-      
-       log ~dir @@ sprintf "Saving chat completion output to: %s\n" output_file;
-       Chat_completion.run_completion
-         ~env
-         ~output_file
-         ~max_tokens
-         ~prompt_file
-         )
+
+       (* log ~dir @@ sprintf "Saving chat completion output to: %s\n" output_file; *)
+       Chat_completion.run_completion ~env ~output_file ~prompt_file)
+;;
+
+let describe_command =
+  Command.basic
+    ~summary:"get dune describe output."
+    (let%map_open _ =
+       flag
+         "-file"
+         (optional_with_default "bin/main.ml" string)
+         ~doc:"FILE Path to the file to tokenize (default: bin/main.ml)"
+     in
+     fun () ->
+       run_main
+       @@ fun env ->
+       let output = Dune_describe.run env in
+       let json = Dune_describe.jsonaf_of_project_details output in
+       Io.console_log ~stdout:env#stdout @@ Jsonaf.to_string json)
 ;;
 
 let tokenize_command =
   Command.basic
-    ~summary:"Tokenize the provided file using the OpenAI Tikitoken spec."
+    ~summary:"Tokenize the provided file using the OpenAI Tikitoken spec"
     (let%map_open file =
        flag
          "-file"
@@ -152,6 +159,7 @@ let main_command =
     ; "query", query_command
     ; "chat-completion", chat_completion_command
     ; "tokenize", tokenize_command
+    ; "dune-describe", describe_command
     ]
 ;;
 

@@ -54,14 +54,14 @@ let get_contents ~dir : Gpt_function.t =
 let edit_code ~net =
   let f (instruction, code) =
     let content =
-      Some
+      Openai.Text
         {|\nYou are an expert software engineer that edits code given a user instruction.  Only return the lines that have been edited from original output i.e \n\nUpdate The following ocaml function sub so that it decreases the return value by 2.\n1. \n2. let sub a d = \n3.  let c = a * d in\n4.  let r = c - d in\n5.  c + r \noutput\n5.  c + r - 2|}
     in
-    let system = { Openai.role = "system"; content; name = None; function_call = None } in
+    let system = { Openai.role = "system"; content = Some content; name = None; function_call = None ; tool_calls = None; tool_call_id = None} in
     let content =
-      Some (sprintf "instruction: %s\n%s" instruction (add_line_numbers code))
+      Openai.Text (sprintf "instruction: %s\n%s" instruction (add_line_numbers code))
     in
-    let user = { Openai.role = "user"; content; name = None; function_call = None } in
+    let user = { Openai.role = "user"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
     let msg =
       Openai.post_chat_completion
         Openai.Default
@@ -97,10 +97,10 @@ let append_to_file ~dir : Gpt_function.t =
 let summarize_file ~dir ~net : Gpt_function.t =
   let f file =
     let text = Io.load_doc ~dir file in
-    let content = Some "You are an AI language model. Summarize the following text:" in
-    let system = { Openai.role = "system"; content; name = None; function_call = None } in
-    let content = Some text in
-    let user = { Openai.role = "user"; content; name = None; function_call = None } in
+    let content = Openai.Text "You are an AI language model. Summarize the following text:" in
+    let system = { Openai.role = "system"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
+    let content = Openai.Text text in
+    let user = { Openai.role = "user"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
     let msg =
       Openai.post_chat_completion
         Openai.Default
@@ -118,14 +118,14 @@ let generate_interface ~dir ~net : Gpt_function.t =
   let f file =
     let code = Io.load_doc ~dir file in
     let content =
-      Some
+      Openai.Text
         "You are an AI language model. You are an expert Ocaml developer, and always \
          include comments that follow odoc standards. Generate an interface file for the \
          following OCaml file:"
     in
-    let system = { Openai.role = "system"; content; name = None; function_call = None } in
-    let content = Some (Printf.sprintf "```ocaml\n%s\n```" code) in
-    let user = { Openai.role = "user"; content; name = None; function_call = None } in
+    let system = { Openai.role = "system"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
+    let content = Openai.Text (Printf.sprintf "```ocaml\n%s\n```" code) in
+    let user = { Openai.role = "user"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
     let msg =
       Openai.post_chat_completion
         Openai.Default
@@ -143,16 +143,16 @@ let generate_code_context_from_query ~dir ~net : Gpt_function.t =
   let f (file, query, context) =
     let code = Io.load_doc ~dir file in
     let content =
-      Some
+      Openai.Text
         "You are an AI language model and an expert Ocaml developer. You are being given a user query for generating ocaml code, code from an ocaml file, and an aggregated context. \
          Use the query and the aggregated context to determine what the most relevant information (code snippets/ functions / examples / ect) is from the provided ocaml code that will aid in generating the code described in the query. \
          respond with only the MOST relevant information, make sure you are not duplicating any info that is already in the aggregated context. Begin response with  'Relevant info from <filename>:'"
     in
-    let system = { Openai.role = "system"; content; name = None; function_call = None } in
+    let system = { Openai.role = "system"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None} in
     let content =
-      Some (Printf.sprintf "Context: %s\n Code for %s:\n```ocaml\n%s\n```\nQuery: %s" query file context code)
+      Openai.Text (Printf.sprintf "Context: %s\n Code for %s:\n```ocaml\n%s\n```\nQuery: %s" query file context code)
     in
-    let user = { Openai.role = "user"; content; name = None; function_call = None } in
+    let user = { Openai.role = "user"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
     let msg =
       Openai.post_chat_completion
         Openai.Default

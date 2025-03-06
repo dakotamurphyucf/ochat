@@ -15,6 +15,7 @@ module Create_file : Gpt_function.Def with type input = string * string = struct
             ; "content", `Object [ "type", `String "string" ]
             ] )
       ; "required", `Array [ `String "file"; `String "content" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -36,6 +37,7 @@ module Get_contents : Gpt_function.Def with type input = string = struct
       [ "type", `String "object"
       ; "properties", `Object [ "file", `Object [ "type", `String "string" ] ]
       ; "required", `Array [ `String "file" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -63,6 +65,7 @@ module Edit_code : Gpt_function.Def with type input = string * string = struct
             ; "code", `Object [ "type", `String "string" ]
             ] )
       ; "required", `Array [ `String "instruction"; `String "code" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -84,6 +87,7 @@ module Add_line_numbers : Gpt_function.Def with type input = string = struct
       [ "type", `String "object"
       ; "properties", `Object [ "text", `Object [ "type", `String "string" ] ]
       ; "required", `Array [ `String "text" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -124,6 +128,7 @@ module Update_file_lines :
                   ] )
             ] )
       ; "required", `Array [ `String "file"; `String "edits" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -154,6 +159,7 @@ module Insert_code : Gpt_function.Def with type input = string * int * string = 
             ; "code", `Object [ "type", `String "string" ]
             ] )
       ; "required", `Array [ `String "file"; `String "line"; `String "code" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -180,6 +186,7 @@ module Append_to_file : Gpt_function.Def with type input = string * string = str
             ; "content", `Object [ "type", `String "string" ]
             ] )
       ; "required", `Array [ `String "file"; `String "content" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -201,6 +208,7 @@ module Summarize_file : Gpt_function.Def with type input = string = struct
       [ "type", `String "object"
       ; "properties", `Object [ "file", `Object [ "type", `String "string" ] ]
       ; "required", `Array [ `String "file" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -221,6 +229,7 @@ module Generate_interface : Gpt_function.Def with type input = string = struct
       [ "type", `String "object"
       ; "properties", `Object [ "file", `Object [ "type", `String "string" ] ]
       ; "required", `Array [ `String "file" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -253,6 +262,7 @@ module Generate_code_context_from_query :
             ; "context", `Object [ "type", `String "string" ]
             ] )
       ; "required", `Array [ `String "file"; `String "query";`String "context" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -276,6 +286,7 @@ module Get_url_content : Gpt_function.Def with type input = string = struct
       [ "type", `String "object"
       ; "properties", `Object [ "url", `Object [ "type", `String "string" ] ]
       ; "required", `Array [ `String "url" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -300,6 +311,7 @@ module Index_ocaml_code : Gpt_function.Def with type input = string * string = s
             ; "vector_db_folder", `Object [ "type", `String "string" ]
             ] )
       ; "required", `Array [ `String "folder_to_index"; `String "vector_db_folder" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -325,9 +337,10 @@ module Query_vector_db : Gpt_function.Def with type input = string * string * in
             [ "vector_db_folder", `Object [ "type", `String "string" ]
             ; "query", `Object [ "type", `String "string" ]
             ; "num_results", `Object [ "type", `String "integer" ]
-            ; "index", `Object [ "type", `String "string" ]
+            ; "index", `Object [ "type",  `Array [ `String "string"; `String "null" ] ]
             ] )
-      ; "required", `Array [ `String "vector_db_folder"; `String "query"; `String "num_results" ]
+      ; "required", `Array [ `String "vector_db_folder"; `String "query"; `String "num_results"; `String "index" ]
+      ; "additionalProperties", `False
       ]
   ;;
 
@@ -359,6 +372,7 @@ module Replace_lines : Gpt_function.Def with type input = string * int * int * s
             ; "text", `Object [ "type", `String "string" ]
             ] )
       ; "required", `Array [ `String "file"; `String "start_line"; `String "end_line"; `String "text" ]
+      ; "additionalProperties", `False
       ]
   ;;
 

@@ -110,7 +110,7 @@
  (name prompt_template)
  (modules prompt_template)
  (public_name chatgpt.prompt_template)
- (libraries core jsonaf expect_test_helpers_core re2 angstrom markup openai_chat_completion)
+ (libraries core str jsonaf expect_test_helpers_core re2 angstrom markup openai openai_chat_completion)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect ppx_jsonaf_conv)))
@@ -197,5 +197,13 @@
   definitions
   vector_db
   indexer)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name dune_describe)
+ (modules dune_describe)
+ (public_name chatgpt.dune_describe)
+ (libraries io jsonaf ppxlib csexp core eio eio_main eio.unix)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
