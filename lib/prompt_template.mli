@@ -14,7 +14,7 @@ module Chat_markdown : sig
   type image_url = { url : string } [@@deriving sexp, jsonaf]
 
   (* A single item of content, which can be text or an image. *)
-  type content_item =
+  type basic_content_item =
     { type_ : string [@key "type"]
     ; text : string option [@jsonaf.option]
     ; image_url : image_url option [@jsonaf.option]
@@ -22,6 +22,20 @@ module Chat_markdown : sig
     ; is_local : bool [@default false]
     ; cleanup_html : bool [@default false]
     }
+  [@@deriving sexp, jsonaf]
+
+  (* Agent content: has a url, is_local, and sub-items. *)
+  type agent_content =
+    { url : string
+    ; is_local : bool
+    ; items : content_item list [@default []]
+    }
+  [@@deriving sexp, jsonaf]
+
+  (* content_item can be either a Basic variant or an Agent variant. *)
+  and content_item =
+    | Basic of basic_content_item
+    | Agent of agent_content
   [@@deriving sexp, jsonaf]
 
   (* The overall content can be either a single string or a list of items. *)

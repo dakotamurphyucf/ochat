@@ -267,12 +267,14 @@ type _ response_type =
 type model =
   | O3_Mini
   | Gpt4
+  | Gpt4o
   | Gpt3
   | Gpt3_16k
 [@@deriving jsonaf, sexp]
 
 let model_to_str = function
   | O3_Mini -> "o1"
+  | Gpt4o -> "gpt-4o"
   | Gpt3 -> "gpt-3.5-turbo"
   | Gpt3_16k -> "gpt-3.5-turbo-16k"
   | Gpt4 -> "gpt-4.5-preview"
@@ -283,6 +285,7 @@ let model_of_str_exn = function
   | "gpt-3.5-turbo" -> Gpt3
   | "gpt-3.5-turbo-16k" -> Gpt3_16k
   | "gpt-4.5" -> Gpt4
+  | "gpt-4o" -> Gpt4o
   | _ -> failwith "Invalid model"
 ;;
 
@@ -295,6 +298,7 @@ let post_chat_completion
     -> ?tools:tool list
     -> ?model:model
     -> ?reasoning_effort:string
+    -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> _ Eio.Net.t
     -> inputs:chat_message list
     -> a
@@ -306,6 +310,7 @@ let post_chat_completion
     ?tools
     ?(model = Gpt4)
     ?reasoning_effort
+    ~dir
     net
     ~inputs ->
   let host = "api.openai.com" in
@@ -359,6 +364,7 @@ let post_chat_completion
       match Seq.uncons seq with
       | None -> ()
       | Some (line, seq) ->
+        Io.log ~dir ~file:"./raw-openai-chat-streaming-response.txt" (line ^ "\n");
         let json_result =
           Jsonaf.parse line
           |> Result.bind ~f:(fun json ->

@@ -171,7 +171,7 @@ module Chat_content = struct
   type image_url = { url : string } [@@deriving sexp, jsonaf]
 
   (* A single item of content, which can be text or an image or doc. *)
-  type content_item =
+  type basic_content_item =
     { type_ : string [@key "type"]
     ; text : string option [@jsonaf.option]
     ; image_url : image_url option [@jsonaf.option]
@@ -179,6 +179,20 @@ module Chat_content = struct
     ; is_local : bool [@default false]
     ; cleanup_html : bool [@default false]
     }
+  [@@deriving sexp, jsonaf]
+
+  (* Agent content: has a url, is_local, and sub-items. *)
+  type agent_content =
+    { url : string
+    ; is_local : bool
+    ; items : content_item list [@default []]
+    }
+  [@@deriving sexp, jsonaf]
+
+  (* content_item can be either a Basic variant or an Agent variant. *)
+  and content_item =
+    | Basic of basic_content_item
+    | Agent of agent_content
   [@@deriving sexp, jsonaf]
 
   type content_item_list = content_item list [@@deriving sexp, jsonaf]
@@ -246,26 +260,28 @@ module Chat_markdown = struct
   (* The internal chat_element used while building the final messages. *)
   type chat_element =
     | Message of msg
+    | Config of config
     | Text of string
     | Image of string * bool
     | Document of string * bool * bool
-    | Config of config
-
+    | Agent of string (* url *) * bool (* is_local *) * chat_element list
   (* Convert a <msg> element’s children into an Items or a single Text. *)
+
   let rec content_items_of_elements (elts : chat_element list) : content_item list =
     match elts with
     | [] -> []
     | Text s :: rest ->
-      { type_ = "text"
-      ; text = Some s
-      ; image_url = None
-      ; document_url = None
-      ; is_local = false
-      ; cleanup_html = false
-      }
+      Basic
+        { type_ = "text"
+        ; text = Some s
+        ; image_url = None
+        ; document_url = None
+        ; is_local = false
+        ; cleanup_html = false
+        }
       :: content_items_of_elements rest
     | Image (url, is_local) :: rest ->
-      let i =
+      Basic
         { type_ = "image_url"
         ; text = None
         ; image_url = Some { url }
@@ -273,10 +289,9 @@ module Chat_markdown = struct
         ; is_local
         ; cleanup_html = false
         }
-      in
-      i :: content_items_of_elements rest
+      :: content_items_of_elements rest
     | Document (url, local, clean) :: rest ->
-      let i =
+      Basic
         { type_ = "text"
         ; text = None
         ; image_url = None
@@ -284,28 +299,27 @@ module Chat_markdown = struct
         ; is_local = local
         ; cleanup_html = clean
         }
-      in
-      i :: content_items_of_elements rest
-    | Message _ :: rest -> content_items_of_elements rest
+      :: content_items_of_elements rest
+    | Agent (url, is_local, children) :: rest ->
+      let sub_items = content_items_of_elements children in
+      Agent { url; is_local; items = sub_items } :: content_items_of_elements rest
+    | Message _ :: rest ->
+      (* By design, skip top-level messages if found in "content" context. *)
+      content_items_of_elements rest
     | Config _ :: rest ->
-      print_endline "Ignoring <config> element in content.";
+      (* Similarly skip any config in content. *)
       content_items_of_elements rest
   ;;
 
   (* Actually parse the child elements to produce a (Text ...) or (Items ...). *)
+  (* Converts a list of child chat_elements into either a single text or a list
+     of content items, stored in chat_message_content. *)
   let parse_msg_children (children : chat_element list) : chat_message_content option =
     let items = content_items_of_elements children in
-    print_endline @@ Jsonaf.to_string_hum @@ jsonaf_of_content_item_list items;
     match items with
     | [] -> None
-    | [ { type_ = "text"
-        ; text = Some txt
-        ; image_url = None
-        ; document_url = None
-        ; is_local = false
-        ; cleanup_html = false
-        }
-      ] -> Some (Text txt)
+    (* If there is exactly one Basic text item, store as Text. Otherwise use Items. *)
+    | [ Basic { type_ = "text"; text = Some txt; _ } ] -> Some (Text txt)
     | _ -> Some (Items items)
   ;;
 
@@ -335,7 +349,7 @@ module Chat_markdown = struct
         if Hashtbl.mem hash_tbl "tool_call"
         then (
           let name = Hashtbl.find_exn hash_tbl "function_name" in
-          let id = Hashtbl.find_exn hash_tbl "tool_id" in
+          let id = Hashtbl.find_exn hash_tbl "tool_call_id" in
           let arguments =
             match content_opt with
             | Some (Text t) -> t
@@ -356,7 +370,14 @@ module Chat_markdown = struct
   ;;
 
   (* Helper to turn a chat_element back to string (for unrecognized markup). *)
-  let chat_element_to_string = function
+  let rec chat_element_to_string = function
+    | Agent (url, is_local, children) ->
+      let sub_items = List.map children ~f:chat_element_to_string in
+      Printf.sprintf
+        "<agent src=\"%s\" local=\"%b\">%s</agent>"
+        url
+        is_local
+        (String.concat ~sep:"" sub_items)
     | Text s -> s
     | Image (url, is_local) ->
       if is_local
@@ -384,16 +405,25 @@ module Chat_markdown = struct
       (match m.content with
        | Some (Text t) -> t
        | Some (Items items) ->
-         let pieces =
-           List.map items ~f:(fun it ->
-             match it.type_ with
-             | "text" -> Option.value it.text ~default:""
-             | "image_url" ->
-               (match it.image_url with
-                | Some { url } -> Printf.sprintf "<img src=\"%s\" />" url
-                | None -> "")
-             | _ -> Option.value it.text ~default:"")
+         let rec aux it =
+           match it with
+           | Basic it ->
+             (match it.type_ with
+              | "text" -> Option.value it.text ~default:""
+              | "image_url" ->
+                (match it.image_url with
+                 | Some { url } -> Printf.sprintf "<img src=\"%s\" />" url
+                 | None -> "")
+              | _ -> Option.value it.text ~default:"")
+           | Agent { url; is_local; items } ->
+             let pieces = List.map items ~f:aux in
+             Printf.sprintf
+               "<agent src=\"%s\" local=\"%b\">%s</agent>"
+               url
+               is_local
+               (String.concat ~sep:"" pieces)
          in
+         let pieces = List.map items ~f:aux in
          String.concat ~sep:"" pieces
        | None -> "")
   ;;
@@ -406,19 +436,21 @@ module Chat_markdown = struct
       ~element:(fun (_, name) attr children ->
         match name with
         | "msg" ->
-          let role_attr =
-            List.find_map attr ~f:(fun ((_, nm), _) ->
-              if String.equal nm "role" then Some nm else None)
-          in
-          (match role_attr with
-           | Some "assistant" ->
+          (* let role_attr =
+             List.find_map attr ~f:(fun ((_, nm), _) ->
+             if String.equal nm "role" then Some nm else None)
+             in
+             (match role_attr with
+             | Some "assistant" ->
              let verbatim_text =
-               String.concat ~sep:"" (List.map children ~f:chat_element_to_string)
+             String.concat ~sep:"" (List.map children ~f:chat_element_to_string)
              in
              Message (attr_to_msg attr (Some (Text verbatim_text)))
-           | _ ->
+             | _ ->
              let content_opt = parse_msg_children children in
-             Message (attr_to_msg attr content_opt))
+             Message (attr_to_msg attr content_opt)) *)
+          let content_opt = parse_msg_children children in
+          Message (attr_to_msg attr content_opt)
         | "img" ->
           let tbl = Hashtbl.create (module String) in
           List.iter attr ~f:(fun ((_, nm), v) -> Hashtbl.set tbl ~key:nm ~data:v);
@@ -442,6 +474,16 @@ module Chat_markdown = struct
             Option.map (Hashtbl.find tbl "temperature") ~f:Float.of_string
           in
           Config { max_tokens; model; reasoning_effort; temperature }
+        | "agent" ->
+          let url_attr =
+            List.find_map attr ~f:(fun ((_, nm), v) ->
+              if String.equal nm "src" then Some v else None)
+          in
+          let agent_url = Option.value url_attr ~default:"" in
+          let agent_is_local =
+            List.exists attr ~f:(fun ((_, nm), _) -> String.(nm = "local"))
+          in
+          Agent (agent_url, agent_is_local, children)
         | _ ->
           let raw_content =
             match children with
@@ -471,7 +513,7 @@ module Chat_markdown = struct
     | None -> None
     | Some (Message m) -> Some (Msg m)
     | Some (Config c) -> Some (Chat_content.Config c)
-    | Some (Text _) | Some (Image _) | Some (Document _) ->
+    | Some (Text _) | Some (Image _) | Some (Document _) | Some (Agent _) ->
       (* We ignore these at the top level. *)
       None
   ;;

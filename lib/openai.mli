@@ -152,6 +152,7 @@ type _ response_type =
 type model =
   | O3_Mini
   | Gpt4
+  | Gpt4o
   | Gpt3
   | Gpt3_16k
 [@@deriving jsonaf, sexp]
@@ -167,6 +168,7 @@ val post_chat_completion
   -> ?tools:tool list
   -> ?model:model
   -> ?reasoning_effort:string
+  -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> 'n Eio.Net.t
   -> inputs:chat_message list
   -> 'a

@@ -51,22 +51,39 @@ let get_contents ~dir : Gpt_function.t =
   Gpt_function.create_function (module Definitions.Get_contents) f
 ;;
 
-let edit_code ~net =
+let edit_code ~net ~dir =
   let f (instruction, code) =
     let content =
       Openai.Text
         {|\nYou are an expert software engineer that edits code given a user instruction.  Only return the lines that have been edited from original output i.e \n\nUpdate The following ocaml function sub so that it decreases the return value by 2.\n1. \n2. let sub a d = \n3.  let c = a * d in\n4.  let r = c - d in\n5.  c + r \noutput\n5.  c + r - 2|}
     in
-    let system = { Openai.role = "system"; content = Some content; name = None; function_call = None ; tool_calls = None; tool_call_id = None} in
+    let system =
+      { Openai.role = "system"
+      ; content = Some content
+      ; name = None
+      ; function_call = None
+      ; tool_calls = None
+      ; tool_call_id = None
+      }
+    in
     let content =
       Openai.Text (sprintf "instruction: %s\n%s" instruction (add_line_numbers code))
     in
-    let user = { Openai.role = "user"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
+    let user =
+      { Openai.role = "user"
+      ; content = Some content
+      ; name = None
+      ; function_call = None
+      ; tool_calls = None
+      ; tool_call_id = None
+      }
+    in
     let msg =
       Openai.post_chat_completion
         Openai.Default
         ~max_tokens:2000
         net
+        ~dir
         ~inputs:[ system; user ]
     in
     Option.value_exn msg.message.content
@@ -97,16 +114,35 @@ let append_to_file ~dir : Gpt_function.t =
 let summarize_file ~dir ~net : Gpt_function.t =
   let f file =
     let text = Io.load_doc ~dir file in
-    let content = Openai.Text "You are an AI language model. Summarize the following text:" in
-    let system = { Openai.role = "system"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
+    let content =
+      Openai.Text "You are an AI language model. Summarize the following text:"
+    in
+    let system =
+      { Openai.role = "system"
+      ; content = Some content
+      ; name = None
+      ; function_call = None
+      ; tool_calls = None
+      ; tool_call_id = None
+      }
+    in
     let content = Openai.Text text in
-    let user = { Openai.role = "user"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
+    let user =
+      { Openai.role = "user"
+      ; content = Some content
+      ; name = None
+      ; function_call = None
+      ; tool_calls = None
+      ; tool_call_id = None
+      }
+    in
     let msg =
       Openai.post_chat_completion
         Openai.Default
         ~max_tokens:8000
         ~model:Gpt3_16k
         net
+        ~dir
         ~inputs:[ system; user ]
     in
     Option.value_exn msg.message.content
@@ -123,15 +159,32 @@ let generate_interface ~dir ~net : Gpt_function.t =
          include comments that follow odoc standards. Generate an interface file for the \
          following OCaml file:"
     in
-    let system = { Openai.role = "system"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
+    let system =
+      { Openai.role = "system"
+      ; content = Some content
+      ; name = None
+      ; function_call = None
+      ; tool_calls = None
+      ; tool_call_id = None
+      }
+    in
     let content = Openai.Text (Printf.sprintf "```ocaml\n%s\n```" code) in
-    let user = { Openai.role = "user"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
+    let user =
+      { Openai.role = "user"
+      ; content = Some content
+      ; name = None
+      ; function_call = None
+      ; tool_calls = None
+      ; tool_call_id = None
+      }
+    in
     let msg =
       Openai.post_chat_completion
         Openai.Default
         ~max_tokens:2000
         ~model:Gpt4
         net
+        ~dir
         ~inputs:[ system; user ]
     in
     Option.value_exn msg.message.content
@@ -144,20 +197,48 @@ let generate_code_context_from_query ~dir ~net : Gpt_function.t =
     let code = Io.load_doc ~dir file in
     let content =
       Openai.Text
-        "You are an AI language model and an expert Ocaml developer. You are being given a user query for generating ocaml code, code from an ocaml file, and an aggregated context. \
-         Use the query and the aggregated context to determine what the most relevant information (code snippets/ functions / examples / ect) is from the provided ocaml code that will aid in generating the code described in the query. \
-         respond with only the MOST relevant information, make sure you are not duplicating any info that is already in the aggregated context. Begin response with  'Relevant info from <filename>:'"
+        "You are an AI language model and an expert Ocaml developer. You are being given \
+         a user query for generating ocaml code, code from an ocaml file, and an \
+         aggregated context. Use the query and the aggregated context to determine what \
+         the most relevant information (code snippets/ functions / examples / ect) is \
+         from the provided ocaml code that will aid in generating the code described in \
+         the query. respond with only the MOST relevant information, make sure you are \
+         not duplicating any info that is already in the aggregated context. Begin \
+         response with  'Relevant info from <filename>:'"
     in
-    let system = { Openai.role = "system"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None} in
+    let system =
+      { Openai.role = "system"
+      ; content = Some content
+      ; name = None
+      ; function_call = None
+      ; tool_calls = None
+      ; tool_call_id = None
+      }
+    in
     let content =
-      Openai.Text (Printf.sprintf "Context: %s\n Code for %s:\n```ocaml\n%s\n```\nQuery: %s" query file context code)
+      Openai.Text
+        (Printf.sprintf
+           "Context: %s\n Code for %s:\n```ocaml\n%s\n```\nQuery: %s"
+           query
+           file
+           context
+           code)
     in
-    let user = { Openai.role = "user"; content = Some content; name = None; function_call = None; tool_calls = None; tool_call_id = None } in
+    let user =
+      { Openai.role = "user"
+      ; content = Some content
+      ; name = None
+      ; function_call = None
+      ; tool_calls = None
+      ; tool_call_id = None
+      }
+    in
     let msg =
       Openai.post_chat_completion
         Openai.Default
         ~max_tokens:3000
         ~model:Gpt4
+        ~dir
         net
         ~inputs:[ system; user ]
     in
@@ -184,35 +265,37 @@ let get_url_content ~net : Gpt_function.t =
   Gpt_function.create_function (module Definitions.Get_url_content) f
 ;;
 
-
 let index_ocaml_code ~dir ~dm ~net : Gpt_function.t =
   let f (folder_to_index, vector_db_folder) =
     Eio.Switch.run
-       @@ (fun sw ->
-       Indexer.index ~sw ~dir ~dm ~net ~vector_db_folder ~folder_to_index; "code has been indexed")
+    @@ fun sw ->
+    Indexer.index ~sw ~dir ~dm ~net ~vector_db_folder ~folder_to_index;
+    "code has been indexed"
   in
   Gpt_function.create_function (module Definitions.Index_ocaml_code) f
 ;;
 
-
 let query_vector_db ~dir ~net : Gpt_function.t =
   let f (vector_db_folder, query, num_results, index) =
-  
-       let vf = dir / vector_db_folder in
-       let index = Option.value ~default:"" @@ Option.map ~f:(fun index -> "." ^ index) index in
-       let file = String.concat ["vectors"; index; ".binio" ] in
-       let vec_file = String.concat [ vector_db_folder; "/"; file ] in
-       let vecs = Vector_db.Vec.read_vectors_from_disk vec_file in
-       let corpus = Vector_db.create_corpus vecs in
-       let response = Openai.post_openai_embeddings net ~input:[ query ] in
-       let query_vector =
-         Owl.Mat.of_arrays [| Array.of_list (List.hd_exn response.data).embedding |]
-         |> Owl.Mat.transpose
-       in
-       let top_indices = Vector_db.query corpus query_vector num_results in
-       let docs = Vector_db.get_docs vf corpus top_indices in
-       let results = List.map ~f:(fun doc -> sprintf "\n**Result:**\n```ocaml\n%s\n```\n" doc) docs in
-       String.concat ~sep:"\n" results
+    let vf = dir / vector_db_folder in
+    let index =
+      Option.value ~default:"" @@ Option.map ~f:(fun index -> "." ^ index) index
+    in
+    let file = String.concat [ "vectors"; index; ".binio" ] in
+    let vec_file = String.concat [ vector_db_folder; "/"; file ] in
+    let vecs = Vector_db.Vec.read_vectors_from_disk vec_file in
+    let corpus = Vector_db.create_corpus vecs in
+    let response = Openai.post_openai_embeddings net ~input:[ query ] in
+    let query_vector =
+      Owl.Mat.of_arrays [| Array.of_list (List.hd_exn response.data).embedding |]
+      |> Owl.Mat.transpose
+    in
+    let top_indices = Vector_db.query corpus query_vector num_results in
+    let docs = Vector_db.get_docs vf corpus top_indices in
+    let results =
+      List.map ~f:(fun doc -> sprintf "\n**Result:**\n```ocaml\n%s\n```\n" doc) docs
+    in
+    String.concat ~sep:"\n" results
   in
   Gpt_function.create_function (module Definitions.Query_vector_db) f
 ;;
@@ -223,7 +306,7 @@ let replace_lines_in_file ~dir : Gpt_function.t =
     let lines = String.split_lines s in
     let before = List.take lines (start_line - 1) in
     let after = List.drop lines end_line in
-    let updated_content = String.concat ~sep:"\n" (before @ [text] @ after) in
+    let updated_content = String.concat ~sep:"\n" (before @ [ text ] @ after) in
     Io.save_doc ~dir file updated_content;
     sprintf "%s updated with new text from line %d to %d" file start_line end_line
   in
