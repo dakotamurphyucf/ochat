@@ -32,3 +32,14 @@
  (libraries lambdasoup io)
  (preprocess
   (pps ppx_jane)))
+
+
+(executable
+ (public_name dsl_script)
+ (name dsl_script)
+ (modules dsl_script)
+ (libraries menhirLib  chatml chatml_builtin_modules chatml_typechecker core)
+ (preprocess
+  (pps ppx_jane)))
+
+  

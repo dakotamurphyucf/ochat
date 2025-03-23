@@ -128,7 +128,7 @@
   eio_main
   eio.unix
   cohttp-eio
-  mirage-crypto-rng-eio
+  mirage-crypto-rng.unix
   lwt
   lwt.unix)
  (preprocess
@@ -170,7 +170,10 @@
   gpt_function
   definitions
   functions
-  prompt_template)
+  prompt_template
+  lru_cache
+  ttl_lru_cache
+  bin_prot_utils)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
@@ -207,3 +210,53 @@
  (libraries io jsonaf ppxlib csexp core eio eio_main eio.unix)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
+ (name ttl_lru_cache)
+ (modules ttl_lru_cache)
+ (public_name chatgpt.ttl_lru_cache)
+ (libraries core lru_cache)
+ (preprocess
+  (pps ppx_jane -dont-apply=sexp_message)))
+
+(library
+ (name lru_cache)
+ (modules lru_cache Lru_cache_intf)
+ (public_name chatgpt.lru_cache)
+ (libraries core)
+ (preprocess
+  (pps ppx_jane -dont-apply=sexp_message)))
+
+(library
+  (name chatml)
+  (public_name chatgpt.chatml)
+  (modules chatml_lang chatml_lexer chatml_parser)
+  (libraries core menhirLib)
+  (preprocess
+  (pps ppx_jane)))
+
+(library
+  (name chatml_typechecker)
+  (public_name chatgpt.chatml_typechecker)
+  (modules chatml_typechecker)
+  (libraries core chatml)
+  (preprocess
+  (pps ppx_jane)))
+
+(library
+  (name chatml_builtin_modules)
+  (public_name chatgpt.chatml_builtin_modules)
+  (modules chatml_builtin_modules)
+  (libraries chatml core)
+  (preprocess
+  (pps ppx_jane)))
+
+
+
+(menhir
+  (modules chatml_parser)
+  (flags --table --dump)
+  
+  )
+
+(ocamllex chatml_lexer)

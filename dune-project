@@ -5,7 +5,7 @@
 
 (generate_opam_files true)
 
-
+(using menhir 3.0)
 
 (package
  (name chatgpt)

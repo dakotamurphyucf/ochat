@@ -1,5 +1,47 @@
 open Core
 
+module Agent_key = struct
+  type t = Prompt_template.Chat_markdown.agent_content
+  [@@deriving sexp, bin_io, hash, compare]
+
+  let invariant (_ : t) = ()
+end
+
+module Agent_res_LRU = Ttl_lru_cache.Make (Agent_key)
+
+type persistent_form =
+  { max_size : int
+  ; items :
+      (Prompt_template.Chat_markdown.agent_content * string Agent_res_LRU.entry) list
+    (* in LRU order *)
+  }
+[@@deriving bin_io]
+
+let to_persistent_form (t : string Agent_res_LRU.t) : persistent_form =
+  { max_size = Agent_res_LRU.max_size t
+  ; items = Agent_res_LRU.to_alist t (* least -> most recently used *)
+  }
+;;
+
+(* Rebuild a new LRU in the original order. *)
+let of_persistent_form (pf : persistent_form) : string Agent_res_LRU.t =
+  let t = Agent_res_LRU.create ~max_size:pf.max_size () in
+  (* Insert pairs from least- to most-recently used order. *)
+  List.iter pf.items ~f:(fun (key, data) -> Agent_res_LRU.set t ~key ~data);
+  t
+;;
+
+(* Cstruct.of_bigarray  to convet bigarray to cstruct and then we can use eio to write using Path.with_open_out to get flow then we can use Writer to write the cstruct *)
+let write_lru_to_file ~filename (lru : string Agent_res_LRU.t) =
+  let pf = to_persistent_form lru in
+  Bin_prot_utils.write_bin_prot' filename [%bin_writer: persistent_form] pf
+;;
+
+let read_lru_from_file ~filename : string Agent_res_LRU.t =
+  let pf = Bin_prot_utils.read_bin_prot' filename [%bin_reader: persistent_form] in
+  of_persistent_form pf
+;;
+
 let clean_html raw_html =
   let decompressed =
     Option.value ~default:raw_html @@ Result.ok (Ezgzip.decompress raw_html)
@@ -49,7 +91,7 @@ let get_content ~dir ~net url is_local =
     doc
 ;;
 
-let rec get_user_msg ~dir ~net items =
+let rec get_user_msg ~dir ~net ~cache items =
   List.map
     ~f:(fun item ->
       match item with
@@ -75,14 +117,20 @@ let rec get_user_msg ~dir ~net items =
                   | true -> sprintf "<doc src=\"%s\" %s />" url "strip"
                   | false -> sprintf "<doc src=\"%s\" />" url))
             | None -> Option.value ~default:"" item.text))
-      | Agent { url; is_local; items } ->
-        let prompt = get_content ~dir ~net url is_local in
+      | Agent ({ url; is_local; items } as agent) ->
+        let a =
+          Agent_res_LRU.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
+            let prompt = get_content ~dir ~net url is_local in
+            run_agent ~dir ~net ~cache prompt items)
+        in
+        a
+      (* let prompt = get_content ~dir ~net url is_local in
         let contents = run_agent ~dir ~net prompt items in
-        contents)
+        contents) *))
     items
   |> String.concat ~sep:"\n"
 
-and convert ~dir ~net msg =
+and convert ~dir ~net ~cache msg =
   let { Prompt_template.Chat_markdown.role
       ; content
       ; name
@@ -151,9 +199,19 @@ and convert ~dir ~net msg =
                  | None -> item.text
                in
                Openai.{ type_ = item.type_; text; image_url }
-             | Agent { url; is_local; items } ->
-               let prompt = get_content ~dir ~net url is_local in
-               let contents = run_agent ~dir ~net prompt items in
+             | Agent ({ url; is_local; items } as agent) ->
+               print_endline "agent hit rate";
+               Agent_res_LRU.hit_rate cache |> Float.to_string_hum |> print_endline;
+               let contents =
+                 Agent_res_LRU.find_or_add
+                   cache
+                   agent
+                   ~ttl:Time_ns.Span.day
+                   ~default:(fun () ->
+                     let prompt = get_content ~dir ~net url is_local in
+                     run_agent ~dir ~net ~cache prompt items)
+               in
+               Agent_res_LRU.hit_rate cache |> Float.to_string_hum |> print_endline;
                Openai.{ type_ = "text"; text = Some contents; image_url = None })))
   in
   (* (match content with
@@ -167,7 +225,7 @@ and convert ~dir ~net msg =
    | Some tool_call_id -> print_endline tool_call_id);
   { Openai.role; content; name; function_call; tool_calls; tool_call_id }
 
-and run_agent prompt items ~dir ~net =
+and run_agent prompt items ~dir ~net ~cache =
   let funcs, tbl =
     (* add replace_in_file *)
     Gpt_function.functions
@@ -188,7 +246,7 @@ and run_agent prompt items ~dir ~net =
     match items with
     | [] -> ""
     | items ->
-      let c = get_user_msg ~dir ~net items in
+      let c = get_user_msg ~dir ~net ~cache items in
       sprintf "<msg role=\"user\">\n%s\n</msg>" c
   in
   let prompt = prompt ^ "\n" ^ content in
@@ -210,7 +268,7 @@ and run_agent prompt items ~dir ~net =
   let messages = get_messages @@ elements in
   List.iter messages ~f:(fun m ->
     print_endline @@ Jsonaf.to_string_hum @@ Prompt_template.Chat_markdown.jsonaf_of_msg m);
-  let inputs = List.map ~f:(convert ~dir ~net) @@ get_messages @@ elements in
+  let inputs = List.map ~f:(convert ~dir ~net ~cache) @@ get_messages @@ elements in
   print_endline "inputs";
   List.iter inputs ~f:(fun i ->
     print_endline @@ Jsonaf.to_string_hum @@ Openai.jsonaf_of_chat_message i);
@@ -253,11 +311,16 @@ and run_agent prompt items ~dir ~net =
         id
         res
     in
-    run_agent (prompt ^ call ^ call_result) [] ~dir ~net
+    run_agent (prompt ^ call ^ call_result) [] ~dir ~net ~cache
 ;;
 
 let run_completion ~env ~output_file ~prompt_file =
   let dir = Eio.Stdenv.fs env in
+  let cache =
+    match Eio.Path.is_file Eio.Path.(dir / "./cache.bin") with
+    | true -> read_lru_from_file ~filename:"./cache.bin"
+    | false -> Agent_res_LRU.create ~max_size:1000 ()
+  in
   (* let dm = Eio.Stdenv.domain_mgr env in *)
   let append_doc s = Io.append_doc ~dir:(Eio.Stdenv.fs env) output_file s in
   let () =
@@ -272,7 +335,7 @@ let run_completion ~env ~output_file ~prompt_file =
     let run = ref false in
     (* append_doc "\n<msg role=\"assistant\">\n"; *)
     let content = Option.value ~default:"" in
-    let funcs, tbl =
+    let _funcs, tbl =
       (* add replace_in_file *)
       Gpt_function.functions
         [ (* Functions.create_file ~dir *)
@@ -298,9 +361,10 @@ let run_completion ~env ~output_file ~prompt_file =
       fun choice ->
         match choice.Openai.delta.role with
         | Some _ | None ->
-          if String.length (choice.delta.content |> content) > 0
-             && (not !contents)
-             && not !function_call
+          if
+            String.length (choice.delta.content |> content) > 0
+            && (not !contents)
+            && not !function_call
           then (
             append_doc "\n<msg role=\"assistant\">\n\t<raw>\n\t\t";
             contents := true);
@@ -396,7 +460,7 @@ let run_completion ~env ~output_file ~prompt_file =
     in
     let inputs =
       func_tool_system_msg
-      :: (List.map ~f:(convert ~dir ~net:env#net) @@ get_messages @@ elements)
+      :: (List.map ~f:(convert ~dir ~net:env#net ~cache) @@ get_messages @@ elements)
     in
     print_endline "inputs";
     List.iter inputs ~f:(fun i ->
@@ -405,13 +469,13 @@ let run_completion ~env ~output_file ~prompt_file =
       (Openai.Stream (f ()))
       ?max_tokens
       ~dir
-      env#net
-      ~tools:funcs
+      env#net (* ~tools:funcs *)
       ~model
       ?reasoning_effort
       ?temperature
       ~inputs;
     if !run then start () else ()
   in
-  start ()
+  start ();
+  write_lru_to_file ~filename:"./cache.bin" cache
 ;;

@@ -9,8 +9,8 @@ let grow_buffer buf ~new_size_request =
 let append_bin_list_to_file file writer lst =
   let f fd =
     List.iter lst ~f:(fun v ->
-        let buf = Bin_prot.Utils.bin_dump ~header:true writer v in
-        Bigstring_unix.really_write fd buf)
+      let buf = Bin_prot.Utils.bin_dump ~header:true writer v in
+      Bigstring_unix.really_write fd buf)
   in
   Core_unix.with_file
     file
@@ -23,7 +23,10 @@ let write_bin_prot' file writer v =
     let buf = Bin_prot.Utils.bin_dump ~header:true writer v in
     Bigstring_unix.really_write fd buf
   in
-  Core_unix.with_file file ~mode:[ Core_unix.O_WRONLY; Core_unix.O_CREAT ] ~f
+  Core_unix.with_file
+    file
+    ~mode:[ Core_unix.O_TRUNC; Core_unix.O_WRONLY; Core_unix.O_CREAT ]
+    ~f
 ;;
 
 let read_bin_prot' file reader =
@@ -37,7 +40,7 @@ let read_bin_prot' file reader =
     | Error err -> failwith (Error.to_string_hum err)
     | Ok (v, _) -> v
   in
-  Core_unix.with_file file ~mode:[ Core_unix.O_RDONLY ] ~f
+  Core_unix.with_file file ~mode:[ Core_unix.O_RDONLY; Core_unix.O_CREAT ] ~f
 ;;
 
 let fold_bin_file_list file reader ~init ~f =
@@ -70,10 +73,10 @@ let read_bin_prot (type a) (module M : Bin_prot.Binable.S with type t = a) file 
 ;;
 
 let write_bin_prot_list
-    (type a)
-    (module M : Bin_prot.Binable.S with type t = a)
-    file
-    (l : a list)
+      (type a)
+      (module M : Bin_prot.Binable.S with type t = a)
+      file
+      (l : a list)
   =
   append_bin_list_to_file file M.bin_writer_t l
 ;;

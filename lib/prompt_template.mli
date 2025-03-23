@@ -3,15 +3,15 @@ module Chat_markdown : sig
     { name : string
     ; arguments : string
     }
-  [@@deriving jsonaf, sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type tool_call =
     { id : string
     ; function_ : function_call
     }
-  [@@deriving jsonaf, sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
-  type image_url = { url : string } [@@deriving sexp, jsonaf]
+  type image_url = { url : string } [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (* A single item of content, which can be text or an image. *)
   type basic_content_item =
@@ -22,7 +22,7 @@ module Chat_markdown : sig
     ; is_local : bool [@default false]
     ; cleanup_html : bool [@default false]
     }
-  [@@deriving sexp, jsonaf]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (* Agent content: has a url, is_local, and sub-items. *)
   type agent_content =
@@ -30,19 +30,19 @@ module Chat_markdown : sig
     ; is_local : bool
     ; items : content_item list [@default []]
     }
-  [@@deriving sexp, jsonaf]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (* content_item can be either a Basic variant or an Agent variant. *)
   and content_item =
     | Basic of basic_content_item
     | Agent of agent_content
-  [@@deriving sexp, jsonaf]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (* The overall content can be either a single string or a list of items. *)
   type chat_message_content =
     | Text of string
     | Items of content_item list
-  [@@deriving sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type msg =
     { role : string
@@ -52,7 +52,7 @@ module Chat_markdown : sig
     ; tool_call : tool_call option [@jsonaf.option]
     ; tool_call_id : string option [@jsonaf.option]
     }
-  [@@deriving jsonaf, sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type config =
     { max_tokens : int option [@jsonaf.option]
@@ -60,12 +60,12 @@ module Chat_markdown : sig
     ; reasoning_effort : string option [@jsonaf.option]
     ; temperature : float option [@jsonaf.option]
     }
-  [@@deriving jsonaf, sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type top_level_elements =
     | Msg of msg
     | Config of config
-  [@@deriving sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   val parse_chat_inputs
     :  dir:Eio.Fs.dir_ty Eio.Path.t

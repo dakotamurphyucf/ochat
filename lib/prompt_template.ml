@@ -168,7 +168,7 @@ end
 
 module Chat_content = struct
   (* Minimal “image_url” type, analogous to what you might have in the OpenAI API code. *)
-  type image_url = { url : string } [@@deriving sexp, jsonaf]
+  type image_url = { url : string } [@@deriving sexp, jsonaf, hash, bin_io, compare]
 
   (* A single item of content, which can be text or an image or doc. *)
   type basic_content_item =
@@ -179,7 +179,7 @@ module Chat_content = struct
     ; is_local : bool [@default false]
     ; cleanup_html : bool [@default false]
     }
-  [@@deriving sexp, jsonaf]
+  [@@deriving sexp, jsonaf, hash, bin_io, compare]
 
   (* Agent content: has a url, is_local, and sub-items. *)
   type agent_content =
@@ -187,20 +187,21 @@ module Chat_content = struct
     ; is_local : bool
     ; items : content_item list [@default []]
     }
-  [@@deriving sexp, jsonaf]
+  [@@deriving sexp, jsonaf, hash, bin_io, compare]
 
   (* content_item can be either a Basic variant or an Agent variant. *)
   and content_item =
     | Basic of basic_content_item
     | Agent of agent_content
-  [@@deriving sexp, jsonaf]
+  [@@deriving sexp, jsonaf, hash, bin_io, compare]
 
-  type content_item_list = content_item list [@@deriving sexp, jsonaf]
+  type content_item_list = content_item list
+  [@@deriving sexp, jsonaf, hash, bin_io, compare]
 
   type chat_message_content =
     | Text of string
     | Items of content_item list
-  [@@deriving sexp]
+  [@@deriving sexp, jsonaf, hash, bin_io, compare]
 
   let chat_message_content_of_jsonaf (j : Jsonaf.t) =
     match j with
@@ -218,26 +219,26 @@ module Chat_content = struct
     { name : string
     ; arguments : string
     }
-  [@@deriving jsonaf, sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type tool_call =
     { id : string
     ; function_ : function_call
     }
-  [@@deriving jsonaf, sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type msg =
     { role : string
     ; content : chat_message_content option
-         [@jsonaf.option]
-         [@jsonaf.of chat_message_content_of_jsonaf]
-         [@jsonaf.to jsonaf_of_chat_message_content]
+          [@jsonaf.option]
+          [@jsonaf.of chat_message_content_of_jsonaf]
+          [@jsonaf.to jsonaf_of_chat_message_content]
     ; name : string option [@jsonaf.option]
     ; function_call : function_call option [@jsonaf.option]
     ; tool_call : tool_call option [@jsonaf.option]
     ; tool_call_id : string option [@jsonaf.option]
     }
-  [@@deriving jsonaf, sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type config =
     { max_tokens : int option [@jsonaf.option]
@@ -245,12 +246,12 @@ module Chat_content = struct
     ; reasoning_effort : string option [@jsonaf.option]
     ; temperature : float option [@jsonaf.option]
     }
-  [@@deriving jsonaf, sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type top_level_elements =
     | Msg of msg
     | Config of config
-  [@@deriving sexp]
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
 end
 
 module Chat_markdown = struct
