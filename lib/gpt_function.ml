@@ -17,7 +17,7 @@ end
 
 (* represents a gpt function implementation *)
 type t =
-  { info : Openai.tool
+  { info : Openai.Completions.tool
   ; run : string -> string
   }
 
@@ -25,7 +25,15 @@ type t =
 let create_function (type a) (module M : Def with type input = a) f =
   let run s = f @@ M.input_of_string s in
   let info =
-   Openai.{type_="function"; function_=Openai.{ name = M.name; description = M.description; parameters = M.parameters; strict = true }}
+    Openai.Completions.
+      { type_ = "function"
+      ; function_ =
+          { name = M.name
+          ; description = M.description
+          ; parameters = M.parameters
+          ; strict = true
+          }
+      }
   in
   { info; run }
 ;;

@@ -44,10 +44,27 @@ module Chat_markdown : sig
     | Items of content_item list
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type reasoning_summary =
+    { text : string
+    ; _type : string (* usually "summary" *)
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  type reasoning =
+    { summary : reasoning_summary list
+    ; id : string
+    ; status : string option
+    ; _type : string (* always "reasoning" *)
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  (* msg gets id / status so we can round‑trip assistant output              *)
   type msg =
     { role : string
     ; content : chat_message_content option [@jsonaf.option]
     ; name : string option [@jsonaf.option]
+    ; id : string option [@jsonaf.option] (** NEW *)
+    ; status : string option [@jsonaf.option] (** NEW *)
     ; function_call : function_call option [@jsonaf.option]
     ; tool_call : tool_call option [@jsonaf.option]
     ; tool_call_id : string option [@jsonaf.option]
@@ -65,6 +82,7 @@ module Chat_markdown : sig
   type top_level_elements =
     | Msg of msg
     | Config of config
+    | Reasoning of reasoning
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   val parse_chat_inputs

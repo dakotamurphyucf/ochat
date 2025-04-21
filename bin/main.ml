@@ -64,7 +64,9 @@ let query_command =
        let vec_file = String.concat [ vector_db_folder; "/"; "vectors.binio" ] in
        let vecs = Vector_db.Vec.read_vectors_from_disk vec_file in
        let corpus = Vector_db.create_corpus vecs in
-       let response = Openai.post_openai_embeddings env#net ~input:[ query_text ] in
+       let response =
+         Openai.Embeddings.post_openai_embeddings env#net ~input:[ query_text ]
+       in
        let query_vector =
          Owl.Mat.of_arrays [| Array.of_list (List.hd_exn response.data).embedding |]
          |> Owl.Mat.transpose
@@ -107,8 +109,13 @@ let chat_completion_command =
        (* Prompt_template.run (); *)
 
        (* log ~dir @@ sprintf "Saving chat completion output to: %s\n" output_file; *)
-       Chat_completion.run_completion ~env ~output_file ~prompt_file)
+       (* Chat_completion.run_completion ~env ~output_file ~prompt_file *)
+       Chat_response.run_completion ~env ?prompt_file ~output_file ())
 ;;
+
+(* let output = Chat_completion.run env in *)
+(* let json = Dune_describe.jsonaf_of_project_details output in *)
+(* Io.console_log ~stdout:env#stdout @@ Jsonaf.to_string json) *)
 
 let describe_command =
   Command.basic

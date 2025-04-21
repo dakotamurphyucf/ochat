@@ -21,17 +21,11 @@
   template
   prompt_template
   gpt_function
-  chat_completion)
+  chat_completion
+  chat_response)
  (preprocess
   (pps ppx_jane)))
 
-(executable
- (public_name parse_html)
- (name parse_html)
- (modules parse_html)
- (libraries lambdasoup io)
- (preprocess
-  (pps ppx_jane)))
 
 
 (executable

@@ -14,7 +14,10 @@ type poly_row_bound =
   | AtLeast (* e.g. `[> `Tag1(...) ]` must contain at least these tags *)
   | AtMost (* e.g. `[< `Tag1(...) ]` must not contain anything else   *)
 
-(* For records, same as your previous REmpty/RExtend approach. *)
+type record_bound =
+  | RB_open (* “At least these fields” *)
+  | RB_closed (* “Exactly these fields” *)
+
 type row =
   | REmpty
   | RExtend of string * ttype * row
@@ -42,7 +45,7 @@ and ttype =
   | TFun of ttype list * ttype
   | TArray of ttype
   | TPolyVariant of poly_row
-  | TRecord of row
+  | TRecord of row * record_bound
   | TModule of (string * scheme) list
   | TDynamic
 
@@ -237,7 +240,7 @@ let rec expand (ty : ttype) : ttype =
        TypeUF.set_root_type rid (Some e);
        e)
   | TFun (args, ret) -> TFun (List.map ~f:expand args, expand ret)
-  | TRecord row -> TRecord (expand_row row)
+  | TRecord (row, bound) -> TRecord (expand_row row, bound)
   | TPolyVariant pv -> TPolyVariant (expand_poly_row pv)
   | TArray t -> TArray (expand t)
   | TModule fields ->
@@ -369,13 +372,31 @@ and unify (t1 : ttype) (t2 : ttype) : unit =
   | _, TDynamic -> ()
   | TInt, TInt | TBool, TBool | TFloat, TFloat | TString, TString | TUnit, TUnit -> ()
   | TVar x, TVar y -> TypeUF.union x y
-  | TVar x, other -> TypeUF.set_root_type x (Some other)
-  | other, TVar x -> TypeUF.set_root_type x (Some other)
+  | TVar x, other ->
+    print_endline "TVar x, other";
+    TypeUF.set_root_type x (Some other)
+  | other, TVar x ->
+    print_endline "other, TVar x";
+    TypeUF.set_root_type x (Some other)
   | TFun (a1, r1), TFun (a2, r2) ->
     if List.length a1 <> List.length a2 then raise (Type_error "Function arity mismatch");
     List.iter2_exn a1 a2 ~f:unify;
     unify r1 r2
-  | TRecord ra, TRecord rb -> unify_rows ra rb
+  | TRecord (ra, boundA), TRecord (rb, boundB) ->
+    (match t1 with
+     | TVar x ->
+       TypeUF.set_root_type x (Some (TRecord (ra, boundA)));
+       print_endline "ra is tvar"
+     | _ -> print_endline "ra is not tvar");
+    (match t2 with
+     | TVar x ->
+       TypeUF.set_root_type x (Some (TRecord (ra, boundA)));
+       print_endline "rb is tvar"
+     | _ -> print_endline "rb is not tvar");
+    let _merged_row, _merged_bound = unify_rows ra boundA rb boundB in
+    (* unify_rows already updates row variables in its union-find store.
+		       So we don't necessarily need more here, as unify() returns unit. *)
+    ()
   | TPolyVariant pvA, TPolyVariant pvB -> unify_poly_variant_rows pvA pvB
   | TArray e1, TArray e2 -> unify e1 e2
   | TModule _, TModule _ ->
@@ -418,59 +439,130 @@ and unify_poly_variant_rows (pvA : poly_row) (pvB : poly_row) : unit =
    | None -> ());
   ()
 
-and unify_rows (ra : row) (rb : row) : unit =
-  let mapA, leftoverA = row_to_map ra in
-  let mapB, leftoverB = row_to_map rb in
+(** unify_rows:
+		    Given (rowA, boundA) and (rowB, boundB),
+		    produce a unified row shape that is consistent with both. *)
+and unify_rows (rowA : row) (boundA : record_bound) (rowB : row) (boundB : record_bound)
+  : row * record_bound
+  =
+  (* First, expand each row so we see its fully resolved shape. *)
+  (* Expand each row so we see its fully resolved shape. *)
+  let ea = expand_row rowA in
+  let eb = expand_row rowB in
+  print_endline "unify_rows";
+  print_endline (show_type (TRecord (ea, boundA)));
+  print_endline (show_type (TRecord (eb, boundB)));
+  (* Convert each row to (Map<label,type> plus leftover row var). *)
+  let mapA, leftoverA = row_to_map ea in
+  let mapB, leftoverB = row_to_map eb in
+  print_s [%message (leftoverA : int option)];
+  print_s [%message (leftoverB : int option)];
+  (* All keys present on either side. *)
   let all_keys =
     Set.union
       (Set.of_list (module String) (Map.keys mapA))
       (Set.of_list (module String) (Map.keys mapB))
   in
-  let merged_fields = ref String.Map.empty in
+  (* We'll accumulate the merged label->type in a map. *)
+  let merged_map = ref String.Map.empty in
   Set.iter all_keys ~f:(fun lbl ->
-    let tA_opt = Map.find mapA lbl in
-    let tB_opt = Map.find mapB lbl in
-    match tA_opt, tB_opt with
-    | Some tyA, Some tyB ->
-      unify tyA tyB;
-      merged_fields := Map.set !merged_fields ~key:lbl ~data:(expand tyA)
-    | Some tyA, None ->
-      (match leftoverB with
-       | Some _ -> merged_fields := Map.set !merged_fields ~key:lbl ~data:(expand tyA)
-       | None ->
+    print_endline lbl;
+    print_endline "-----------------";
+    let tyA_opt = Map.find mapA lbl in
+    let tyB_opt = Map.find mapB lbl in
+    match tyA_opt, tyB_opt with
+    | Some tA, Some tB ->
+      (* Both sides have this label -> unify. *)
+      unify tA tB;
+      merged_map := Map.set !merged_map ~key:lbl ~data:(expand tA);
+      print_endline "Both sides have this label -> unify."
+    | Some tA, None ->
+      (* Label only on side A.  If side B is closed & leftoverB=None,
+		         that's an error: B doesn't allow new fields. *)
+      (match boundB, leftoverB with
+       | RB_closed, None ->
          raise
            (Type_error
               (Printf.sprintf
                  "Extra field '%s' not allowed; record is closed on RHS."
-                 lbl)))
-    | None, Some tyB ->
-      (match leftoverA with
-       | Some _ -> merged_fields := Map.set !merged_fields ~key:lbl ~data:(expand tyB)
-       | None ->
+                 lbl))
+       | _ ->
+         (* B is open, or leftoverB is Some, so we accept it. *)
+         merged_map := Map.set !merged_map ~key:lbl ~data:(expand tA));
+      print_endline
+        "Label only on side A. B is open, or leftoverB is Some, so we accept it."
+    | None, Some tB ->
+      (* Label only on side B.  If side A is closed & leftoverA=None,
+		         that's an error. *)
+      (match boundA, leftoverA with
+       | RB_closed, None ->
          raise
            (Type_error
-              (Printf.sprintf "Missing field '%s' not present in record on LHS." lbl)))
-    | None, None -> ());
-  let final_leftover =
-    match leftoverA, leftoverB with
-    | None, None -> None
-    | Some rvA, None -> Some rvA
-    | None, Some rvB -> Some rvB
-    | Some rvA, Some rvB ->
-      RowUF.union rvA rvB;
-      let root, _ = RowUF.find rvA in
-      Some root
+              (Printf.sprintf
+                 "Extra field '%s' not allowed; record is closed on LHS."
+                 lbl))
+       | _ -> merged_map := Map.set !merged_map ~key:lbl ~data:(expand tB));
+      print_endline
+        "Label only on side B. A is open, or leftoverA is Some, so we accept it."
+    | None, None ->
+      (* Shouldn't happen, since lbl is in all_keys. *)
+      ());
+  (* Decide how leftover row variables unify. If either side is open,
+		     we remain open. If both are closed, but leftover is Some, we forcibly close it. *)
+  let merged_bound =
+    match boundA, boundB with
+    | RB_open, _ -> RB_open
+    | _, RB_open -> RB_open
+    | RB_closed, RB_closed -> RB_closed
   in
-  let final_row = row_of_map !merged_fields final_leftover in
-  let store_final (r : row) =
+  let bound_str =
+    match merged_bound with
+    | RB_open -> "open"
+    | RB_closed -> "closed"
+  in
+  print_endline @@ "merged_bound: " ^ bound_str;
+  (* For leftover row actual union, unify leftoverA and leftoverB if both exist.
+		     If both sides are closed, leftover is None. If one is open with leftover Some,
+		     we keep that leftover open. *)
+  let leftover_merged =
+    match leftoverA, leftoverB with
+    | None, None ->
+      (match merged_bound with
+       | RB_open -> Some (fresh_rvar ())
+       | _ -> None)
+    | Some la, None ->
+      (match merged_bound with
+       | RB_open -> Some la
+       | _ -> None)
+    | None, Some lb ->
+      (match merged_bound with
+       | RB_open -> Some lb
+       | _ -> None)
+    | Some la, Some lb ->
+      (* unify them so they become the same leftover var. *)
+      RowUF.union la lb;
+      let root, _ = RowUF.find la in
+      (match merged_bound with
+       | RB_open -> Some root
+       | _ -> None)
+  in
+  print_s [%message "leftover_merged: " (leftover_merged : int option)];
+  (* Build a final row out of merged_map plus leftover_merged. *)
+  let final_row = row_of_map !merged_map leftover_merged in
+  (* Optionally store final_row in rowA, rowB's rowvars so expansions see the updated shape. *)
+  let store_final r =
     match expand_row r with
     | RVar rv ->
+      print_endline "RVar";
       let root, _ = RowUF.find rv in
       RowUF.set_root root (Some final_row)
-    | _ -> ()
+    | REmpty -> print_endline "Not RVar REmpty"
+    | RExtend _ -> print_endline "Not RVar RExtend"
   in
-  store_final ra;
-  store_final rb
+  store_final rowA;
+  store_final rowB;
+  print_endline @@ "final_row: " ^ show_row final_row;
+  final_row, merged_bound
 
 (***************************************************************************)
 (* Symmetrical row_to_map for records                                      *)
@@ -529,7 +621,13 @@ and show_type (ty : ttype) : string =
       List.map fields ~f:(fun (nm, Scheme (_bvs, body)) -> nm ^ ":" ^ show_type body)
     in
     Printf.sprintf "Module{%s}" (String.concat ~sep:"; " fs)
-  | TRecord row -> Printf.sprintf "{%s}" (show_row row)
+  | TRecord (row, bound) ->
+    let bound_str =
+      match bound with
+      | RB_open -> "open"
+      | RB_closed -> "closed"
+    in
+    Printf.sprintf "{%s} %s" (show_row row) bound_str
   | TPolyVariant pv -> show_poly_variant pv
   | TDynamic -> "dynamic"
 
@@ -595,7 +693,7 @@ let rec free_tvars (ty : ttype) : Int.Set.t =
       |> Set.union_list (module Int)
     in
     tvs_for_tags
-  | TRecord r -> free_row_tvars r
+  | TRecord (r, _bound) -> free_row_tvars r
   | TModule fields ->
     List.fold fields ~init:Int.Set.empty ~f:(fun acc (_, Scheme (_bvs, body)) ->
       Set.union acc (free_tvars body))
@@ -635,7 +733,7 @@ let rec instantiate (Scheme (bvars, body)) : ttype =
        | None -> TVar tv)
     | TFun (a, r) -> TFun (List.map a ~f:repl, repl r)
     | TArray el -> TArray (repl el)
-    | TRecord row -> TRecord (repl_row row)
+    | TRecord (row, bound) -> TRecord (repl_row row, bound)
     | TPolyVariant pv ->
       let new_tags = List.map pv.tags ~f:(fun (tg, tys) -> tg, List.map tys ~f:repl) in
       TPolyVariant { pv with tags = new_tags }
@@ -668,6 +766,26 @@ let add_to_env (env : (string, scheme) Hashtbl.t) (x : string) (ty : ttype) =
   Hashtbl.set env ~key:x ~data:(generalize env ty)
 ;;
 
+let rec close_row (r : row) : row =
+  match expand_row r with
+  | REmpty -> REmpty
+  | RExtend (lbl, fty, tail) ->
+    (* Recursively close the tail, so we disallow further extension. *)
+    RExtend (lbl, fty, close_row tail)
+  | RVar rv ->
+    let root, row_opt = RowUF.find rv in
+    (match row_opt with
+     | None ->
+       (* No constraints yet, so force it to be exactly REmpty. *)
+       RowUF.set_root root (Some REmpty);
+       REmpty
+     | Some actual_row ->
+       (* Recursively close whatever that variable points to. *)
+       let closed = close_row actual_row in
+       RowUF.set_root root (Some closed);
+       closed)
+;;
+
 let rec infer_expr (env : (string, scheme) Hashtbl.t) (e : expr) : ttype =
   match e with
   | EInt _ -> TInt
@@ -676,20 +794,36 @@ let rec infer_expr (env : (string, scheme) Hashtbl.t) (e : expr) : ttype =
   | EString _ -> TString
   | EVar x -> lookup_env env x
   | ELambda (params, body) ->
-    let local_env = Hashtbl.copy env in
     let param_tys =
       List.map params ~f:(fun p ->
         let tv = fresh_tvar () in
-        Hashtbl.set local_env ~key:p ~data:(Scheme ([], tv));
+        Hashtbl.set env ~key:p ~data:(Scheme ([], tv));
         tv)
     in
-    let ret_ty = infer_expr local_env body in
+    let ret_ty = infer_expr env body in
+    (* print_endline "Lambda params:"; *)
+    List.iter param_tys ~f:(fun t -> print_endline (show_type t));
+    (* print_endline "Lambda body:";
+    print_endline (show_type ret_ty); *)
     TFun (param_tys, ret_ty)
   | EApp (fn_expr, arg_exprs) ->
     let fn_ty = infer_expr env fn_expr in
+    print_endline "Function type:";
+    print_endline @@ show_type fn_ty;
     let arg_tys = List.map arg_exprs ~f:(infer_expr env) in
+    print_endline "Function args:";
+    List.iter arg_tys ~f:(fun t -> print_endline (show_type t));
     let ret_ty = fresh_tvar () in
     unify fn_ty (TFun (arg_tys, ret_ty));
+    (* print_endline "Function type:";
+    print_endline (show_type fn_ty);
+    print_endline "Argument types:"; *)
+    print_endline "Function args2:";
+    List.iteri arg_tys ~f:(fun i t ->
+      print_endline @@ Int.to_string i;
+      print_endline (show_type t));
+    (* print_endline "Result type:";
+    print_endline (show_type ret_ty); *)
     ret_ty
   | EIf (cond_expr, then_expr, else_expr) ->
     let cty = infer_expr env cond_expr in
@@ -703,22 +837,27 @@ let rec infer_expr (env : (string, scheme) Hashtbl.t) (e : expr) : ttype =
     ignore (infer_expr env body_expr);
     TUnit
   | ESequence (e1, e2) ->
+    print_endline "ESequence1";
     ignore (infer_expr env e1);
+    print_endline "ESequence2";
     infer_expr env e2
   | ELetIn (x, rhs, body) ->
     let rhs_ty = infer_expr env rhs in
-    let local = Hashtbl.copy env in
-    add_to_env local x rhs_ty;
-    infer_expr local body
+    add_to_env env x rhs_ty;
+    let e = infer_expr env body in
+    (* print_endline "Expression type Eletin:";
+    print_endline (show_type rhs_ty);
+    print_endline "Expression type Eletinbody:";
+    print_endline (show_type e); *)
+    e
   | ELetRec (bindings, body) ->
-    let local = Hashtbl.copy env in
     List.iter bindings ~f:(fun (nm, _) ->
-      Hashtbl.set local ~key:nm ~data:(Scheme ([], fresh_tvar ())));
+      Hashtbl.set env ~key:nm ~data:(Scheme ([], fresh_tvar ())));
     List.iter bindings ~f:(fun (nm, rhs_expr) ->
-      let rhs_ty = infer_expr local rhs_expr in
-      let (Scheme (_, tv)) = Hashtbl.find_exn local nm in
+      let rhs_ty = infer_expr env rhs_expr in
+      let (Scheme (_, tv)) = Hashtbl.find_exn env nm in
       unify rhs_ty tv);
-    infer_expr local body
+    infer_expr env body
   | EMatch (scrut, cases) ->
     let s_ty = infer_expr env scrut in
     let result_ty = fresh_tvar () in
@@ -730,23 +869,32 @@ let rec infer_expr (env : (string, scheme) Hashtbl.t) (e : expr) : ttype =
       unify rt result_ty);
     result_ty
   | ERecord fields ->
+    (* 1) Infer each field’s type, build a row *)
     let row =
       List.fold_right fields ~init:REmpty ~f:(fun (fld, fexpr) acc ->
         let fty = infer_expr env fexpr in
         RExtend (fld, fty, acc))
     in
-    TRecord row
+    let expanded_row = expand_row row in
+    (* Now *close* it. That means leftover row vars become REmpty, 
+		       so no new fields can unify into it later. *)
+    let closed_row = close_row expanded_row in
+    TRecord (closed_row, RB_closed)
   | EFieldGet (obj_expr, field) ->
     let obj_ty = infer_expr env obj_expr in
+    print_endline "FieldGet obj_ty:";
+    print_endline @@ show_type obj_ty;
     let field_ty = fresh_tvar () in
     let leftover = fresh_rvar () in
-    unify obj_ty (TRecord (RExtend (field, field_ty, RVar leftover)));
+    unify obj_ty (TRecord (RExtend (field, field_ty, RVar leftover), RB_open));
     field_ty
   | EFieldSet (obj_expr, field, new_val_expr) ->
     let obj_ty = infer_expr env obj_expr in
+    print_endline "FieldSet obj_ty:";
+    print_endline @@ show_type obj_ty;
     let val_ty = infer_expr env new_val_expr in
     let leftover = fresh_rvar () in
-    unify obj_ty (TRecord (RExtend (field, val_ty, RVar leftover)));
+    unify obj_ty (TRecord (RExtend (field, val_ty, RVar leftover), RB_open));
     TUnit
   | EVariant (tag, exprs) ->
     let arg_tys = List.map exprs ~f:(infer_expr env) in
@@ -806,6 +954,8 @@ let rec infer_stmt (env : (string, scheme) Hashtbl.t) (s : stmt) : unit =
   match s with
   | SLet (x, e) ->
     let t = infer_expr env e in
+    print_endline ("Expression type slet " ^ x ^ ":");
+    show_type t |> print_endline;
     add_to_env env x t
   | SLetRec bindings ->
     List.iter bindings ~f:(fun (nm, _) ->
@@ -828,7 +978,11 @@ let rec infer_stmt (env : (string, scheme) Hashtbl.t) (s : stmt) : unit =
   | SOpen _mname ->
     (* For brevity, omitted. You'd unify or copy names in real code. *)
     raise (Type_error "Open not implemented in this example.")
-  | SExpr e -> ignore (infer_expr env e)
+  | SExpr e ->
+    let t = infer_expr env e in
+    print_endline "Expression type:";
+    show_type t |> print_endline;
+    ignore t
 ;;
 
 (***************************************************************************)

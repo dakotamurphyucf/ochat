@@ -234,6 +234,8 @@ module Chat_content = struct
           [@jsonaf.of chat_message_content_of_jsonaf]
           [@jsonaf.to jsonaf_of_chat_message_content]
     ; name : string option [@jsonaf.option]
+    ; id : string option [@jsonaf.option] (* NEW *)
+    ; status : string option [@jsonaf.option] (* NEW *)
     ; function_call : function_call option [@jsonaf.option]
     ; tool_call : tool_call option [@jsonaf.option]
     ; tool_call_id : string option [@jsonaf.option]
@@ -248,9 +250,24 @@ module Chat_content = struct
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type reasoning_summary =
+    { text : string
+    ; _type : string
+    }
+  [@@deriving sexp, jsonaf, hash, bin_io, compare]
+
+  type reasoning =
+    { summary : reasoning_summary list
+    ; id : string
+    ; status : string option
+    ; _type : string
+    }
+  [@@deriving sexp, jsonaf, hash, bin_io, compare]
+
   type top_level_elements =
     | Msg of msg
     | Config of config
+    | Reasoning of reasoning
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 end
 
@@ -262,13 +279,17 @@ module Chat_markdown = struct
   type chat_element =
     | Message of msg
     | Config of config
+    | Reasoning of reasoning
+    | Summary of reasoning_summary
     | Text of string
     | Image of string * bool
     | Document of string * bool * bool
     | Agent of string (* url *) * bool (* is_local *) * chat_element list
   (* Convert a <msg> element’s children into an Items or a single Text. *)
 
-  let rec content_items_of_elements (elts : chat_element list) : content_item list =
+  let rec content_items_of_elements (elts : chat_element list)
+    : Chat_content.content_item list
+    =
     match elts with
     | [] -> []
     | Text s :: rest ->
@@ -281,34 +302,30 @@ module Chat_markdown = struct
         ; cleanup_html = false
         }
       :: content_items_of_elements rest
-    | Image (url, is_local) :: rest ->
+    | Image (u, loc) :: rest ->
       Basic
         { type_ = "image_url"
         ; text = None
-        ; image_url = Some { url }
+        ; image_url = Some { url = u }
         ; document_url = None
-        ; is_local
+        ; is_local = loc
         ; cleanup_html = false
         }
       :: content_items_of_elements rest
-    | Document (url, local, clean) :: rest ->
+    | Document (u, loc, cln) :: rest ->
       Basic
         { type_ = "text"
         ; text = None
         ; image_url = None
-        ; document_url = Some url
-        ; is_local = local
-        ; cleanup_html = clean
+        ; document_url = Some u
+        ; is_local = loc
+        ; cleanup_html = cln
         }
       :: content_items_of_elements rest
-    | Agent (url, is_local, children) :: rest ->
-      let sub_items = content_items_of_elements children in
-      Agent { url; is_local; items = sub_items } :: content_items_of_elements rest
-    | Message _ :: rest ->
-      (* By design, skip top-level messages if found in "content" context. *)
-      content_items_of_elements rest
-    | Config _ :: rest ->
-      (* Similarly skip any config in content. *)
+    | Agent (u, loc, ch) :: rest ->
+      Agent { url = u; is_local = loc; items = content_items_of_elements ch }
+      :: content_items_of_elements rest
+    | (Message _ | Config _ | Reasoning _ | Summary _) :: rest ->
       content_items_of_elements rest
   ;;
 
@@ -363,6 +380,8 @@ module Chat_markdown = struct
     in
     { role = Hashtbl.find_exn hash_tbl "role"
     ; name = Hashtbl.find hash_tbl "name"
+    ; id = Hashtbl.find hash_tbl "id" (* NEW *)
+    ; status = Hashtbl.find hash_tbl "status" (* NEW *)
     ; function_call
     ; tool_call
     ; content = content_opt
@@ -372,6 +391,10 @@ module Chat_markdown = struct
 
   (* Helper to turn a chat_element back to string (for unrecognized markup). *)
   let rec chat_element_to_string = function
+    | Summary s -> s.text
+    | Reasoning r ->
+      let ss = List.map r.summary ~f:(fun s -> s.text) |> String.concat ~sep:" " in
+      Printf.sprintf "<reasoning id=\"%s\">%s</reasoning>" r.id ss
     | Agent (url, is_local, children) ->
       let sub_items = List.map children ~f:chat_element_to_string in
       Printf.sprintf
@@ -475,6 +498,31 @@ module Chat_markdown = struct
             Option.map (Hashtbl.find tbl "temperature") ~f:Float.of_string
           in
           Config { max_tokens; model; reasoning_effort; temperature }
+        | "summary" ->
+          let typ =
+            List.find_map attr ~f:(fun ((_, n), v) ->
+              if String.equal n "type" then Some v else None)
+            |> Option.value ~default:"summary_text"
+          in
+          let txt =
+            List.map children ~f:chat_element_to_string
+            |> String.concat ~sep:""
+            |> String.strip
+          in
+          Summary { text = txt; _type = typ }
+        | "reasoning" ->
+          let tbl = Hashtbl.create (module String) in
+          List.iter attr ~f:(fun ((_, n), v) -> Hashtbl.set tbl ~key:n ~data:v);
+          let id = Hashtbl.find_exn tbl "id" in
+          let status = Hashtbl.find tbl "status" in
+          let summaries =
+            List.filter_map children ~f:(function
+              | Summary s -> Some s
+              | Text t when not (String.is_empty (String.strip t)) ->
+                Some { text = String.strip t; _type = "summary_text" }
+              | _ -> None)
+          in
+          Reasoning { id; status; _type = "reasoning"; summary = summaries }
         | "agent" ->
           let url_attr =
             List.find_map attr ~f:(fun ((_, nm), v) ->
@@ -502,9 +550,9 @@ module Chat_markdown = struct
   (* We only want to capture top‐level <msg> or <config>. So we scan the stream
      for those elements, parse them with parse_chat_elements, then flatten. *)
   let chat_elements_stream =
-    Markup.elements (fun (_, name) _attrs ->
+    Markup.elements (fun (_, name) _ ->
       match name with
-      | "msg" | "config" -> true
+      | "msg" | "config" | "reasoning" -> true
       | _ -> false)
   ;;
 
@@ -514,9 +562,8 @@ module Chat_markdown = struct
     | None -> None
     | Some (Message m) -> Some (Msg m)
     | Some (Config c) -> Some (Chat_content.Config c)
-    | Some (Text _) | Some (Image _) | Some (Document _) | Some (Agent _) ->
-      (* We ignore these at the top level. *)
-      None
+    | Some (Reasoning r) -> Some (Reasoning r)
+    | Some _ -> None
   ;;
 
   (* Parse an entire file of chat markup into either <msg> or <config> elements,

@@ -137,17 +137,21 @@ and convert ~dir ~net ~cache msg =
       ; function_call
       ; tool_call
       ; tool_call_id
+      ; id = _
+      ; status = _
       }
     =
     msg
   in
   let function_call =
     Option.map function_call ~f:(fun function_call ->
-      { Openai.name = function_call.name; arguments = function_call.arguments })
+      { Openai.Completions.name = function_call.name
+      ; arguments = function_call.arguments
+      })
   in
   let tool_calls =
     Option.map tool_call ~f:(fun tool_call ->
-      [ { Openai.id = Some tool_call.id
+      [ { Openai.Completions.id = Some tool_call.id
         ; function_ =
             Some
               { arguments = tool_call.function_.arguments
@@ -160,9 +164,9 @@ and convert ~dir ~net ~cache msg =
   let content =
     Option.map content ~f:(fun s ->
       match s with
-      | Prompt_template.Chat_markdown.Text t -> Openai.Text t
+      | Prompt_template.Chat_markdown.Text t -> Openai.Completions.Text t
       | Items items ->
-        Openai.Items
+        Openai.Completions.Items
           (List.map items ~f:(fun item ->
              match item with
              | Basic item ->
@@ -171,8 +175,10 @@ and convert ~dir ~net ~cache msg =
                  | Some url ->
                    (match item.is_local with
                     | true ->
-                      Some { Openai.url = Io.Base64.file_to_data_uri ~dir url.url }
-                    | false -> Some { Openai.url = url.url })
+                      Some
+                        { Openai.Completions.url = Io.Base64.file_to_data_uri ~dir url.url
+                        }
+                    | false -> Some { Openai.Completions.url = url.url })
                  | None -> None
                in
                let text =
@@ -198,7 +204,7 @@ and convert ~dir ~net ~cache msg =
                          Some doc))
                  | None -> item.text
                in
-               Openai.{ type_ = item.type_; text; image_url }
+               Openai.Completions.{ type_ = item.type_; text; image_url }
              | Agent ({ url; is_local; items } as agent) ->
                print_endline "agent hit rate";
                Agent_res_LRU.hit_rate cache |> Float.to_string_hum |> print_endline;
@@ -212,7 +218,8 @@ and convert ~dir ~net ~cache msg =
                      run_agent ~dir ~net ~cache prompt items)
                in
                Agent_res_LRU.hit_rate cache |> Float.to_string_hum |> print_endline;
-               Openai.{ type_ = "text"; text = Some contents; image_url = None })))
+               Openai.Completions.
+                 { type_ = "text"; text = Some contents; image_url = None })))
   in
   (* (match content with
        | None -> ()
@@ -223,7 +230,7 @@ and convert ~dir ~net ~cache msg =
   (match tool_call_id with
    | None -> ()
    | Some tool_call_id -> print_endline tool_call_id);
-  { Openai.role; content; name; function_call; tool_calls; tool_call_id }
+  { Openai.Completions.role; content; name; function_call; tool_calls; tool_call_id }
 
 and run_agent prompt items ~dir ~net ~cache =
   let funcs, tbl =
@@ -262,7 +269,7 @@ and run_agent prompt items ~dir ~net ~cache =
     match model with
     | Some m ->
       print_endline m;
-      Openai.model_of_str_exn m
+      Openai.Completions.model_of_str_exn m
     | None -> Gpt4
   in
   let messages = get_messages @@ elements in
@@ -271,10 +278,10 @@ and run_agent prompt items ~dir ~net ~cache =
   let inputs = List.map ~f:(convert ~dir ~net ~cache) @@ get_messages @@ elements in
   print_endline "inputs";
   List.iter inputs ~f:(fun i ->
-    print_endline @@ Jsonaf.to_string_hum @@ Openai.jsonaf_of_chat_message i);
+    print_endline @@ Jsonaf.to_string_hum @@ Openai.Completions.jsonaf_of_chat_message i);
   let choice =
-    Openai.post_chat_completion
-      Openai.Default
+    Openai.Completions.post_chat_completion
+      Openai.Completions.Default
       ?max_tokens
       ~dir
       net
@@ -359,7 +366,7 @@ let run_completion ~env ~output_file ~prompt_file =
       let tool_id = ref "" in
       let args = Hashtbl.create (module String) in
       fun choice ->
-        match choice.Openai.delta.role with
+        match choice.Openai.Completions.delta.role with
         | Some _ | None ->
           if
             String.length (choice.delta.content |> content) > 0
@@ -435,7 +442,7 @@ let run_completion ~env ~output_file ~prompt_file =
       match model with
       | Some m ->
         print_endline m;
-        Openai.model_of_str_exn m
+        Openai.Completions.model_of_str_exn m
       | None -> Gpt4
     in
     let messages = get_messages @@ elements in
@@ -450,8 +457,8 @@ let run_completion ~env ~output_file ~prompt_file =
     |}
     in
     let func_tool_system_msg =
-      { Openai.role = "developer"
-      ; content = Some (Openai.Text text)
+      { Openai.Completions.role = "developer"
+      ; content = Some (Openai.Completions.Text text)
       ; name = None
       ; function_call = None
       ; tool_calls = None
@@ -464,9 +471,9 @@ let run_completion ~env ~output_file ~prompt_file =
     in
     print_endline "inputs";
     List.iter inputs ~f:(fun i ->
-      print_endline @@ Jsonaf.to_string_hum @@ Openai.jsonaf_of_chat_message i);
-    Openai.post_chat_completion
-      (Openai.Stream (f ()))
+      print_endline @@ Jsonaf.to_string_hum @@ Openai.Completions.jsonaf_of_chat_message i);
+    Openai.Completions.post_chat_completion
+      (Openai.Completions.Stream (f ()))
       ?max_tokens
       ~dir
       env#net (* ~tools:funcs *)

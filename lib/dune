@@ -178,6 +178,25 @@
   (pps ppx_jane ppx_jsonaf_conv)))
 
 (library
+ (name chat_response)
+ (public_name chatgpt.chat_response)
+ (modules chat_response) 
+ (libraries
+  core
+  openai
+  jsonaf
+  io
+  gpt_function
+  definitions
+  functions
+  prompt_template
+  lru_cache
+  ttl_lru_cache
+  bin_prot_utils)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+(library
  (name definitions)
  (public_name chatgpt.definitions)
  (modules definitions)

@@ -88,6 +88,19 @@ let copy_env (parent : env) : env =
 let find_var (e : env) (x : string) : value option = Hashtbl.find e x
 let set_var (e : env) (x : string) (v : value) : unit = Hashtbl.set e ~key:x ~data:v
 
+let a =
+  fun x y z ->
+  print_endline x;
+  print_endline y;
+  print_endline z;
+  while
+    print_endline "d";
+    true
+  do
+    print_endline "Hello"
+  done
+;;
+
 (***************************************************************************)
 (* 4) Pattern Matching                                                      *)
 (***************************************************************************)
@@ -312,3 +325,243 @@ and eval_stmt (env : env) (s : stmt) : unit =
 (***************************************************************************)
 
 let eval_program (env : env) (prog : program) : unit = List.iter prog ~f:(eval_stmt env)
+
+module Chatml_alpha = struct
+  (***************************************************************************)
+  (* 1) Fresh name generator                                                *)
+  (***************************************************************************)
+
+  let counter = ref 0
+
+  let fresh_name base =
+    incr counter;
+    Printf.sprintf "%s_%d" base !counter
+  ;;
+
+  (***************************************************************************)
+  (* 2) Patterns                                                             *)
+  (***************************************************************************)
+
+  (* alpha_convert_pattern env pat saved_bindings
+		     - env: (string -> string) table for name rewriting
+		     - pat: the pattern to rename
+		     - saved_bindings: used to remember old environment bindings, so we can restore them
+		       once we exit the pattern's scope
+  *)
+  let rec alpha_convert_pattern
+            (env : (string, string) Hashtbl.t)
+            (pat : pattern)
+            (saved_bindings : (string * string option) list ref)
+    : pattern
+    =
+    match pat with
+    | PWildcard | PInt _ | PBool _ | PFloat _ | PString _ -> pat
+    | PVar x ->
+      let new_x = fresh_name x in
+      let old = Hashtbl.find env x in
+      (* Save old info so we can restore it later. *)
+      saved_bindings := (x, old) :: !saved_bindings;
+      Hashtbl.set env ~key:x ~data:new_x;
+      PVar new_x
+    | PVariant (tag, subpats) ->
+      let subpats' =
+        List.map subpats ~f:(fun sp -> alpha_convert_pattern env sp saved_bindings)
+      in
+      PVariant (tag, subpats')
+  ;;
+
+  (***************************************************************************)
+  (* 3) Expressions                                                          *)
+  (***************************************************************************)
+
+  let rec alpha_convert_expr (env : (string, string) Hashtbl.t) (e : expr) : expr =
+    match e with
+    (* Simple literals & constants: no renaming needed. *)
+    | EInt _ | EBool _ | EFloat _ | EString _ -> e
+    (* Variable reference: EVar x -> EVar (env[x]) if present. *)
+    | EVar x ->
+      (match Hashtbl.find env x with
+       | Some new_x -> EVar new_x
+       | None -> EVar x (* If missing, treat as free var. *))
+    (* Function definition: create fresh names for each parameter. *)
+    | ELambda (params, body) ->
+      let saved_bindings = ref [] in
+      (* Generate fresh names for each parameter. *)
+      let new_params =
+        List.map params ~f:(fun p ->
+          let new_p = fresh_name p in
+          let old = Hashtbl.find env p in
+          saved_bindings := (p, old) :: !saved_bindings;
+          Hashtbl.set env ~key:p ~data:new_p;
+          new_p)
+      in
+      (* Recurse on the body using the updated env. *)
+      let new_body = alpha_convert_expr env body in
+      (* Restore environment. *)
+      List.iter !saved_bindings ~f:(fun (old_p, old_opt) ->
+        match old_opt with
+        | None -> Hashtbl.remove env old_p
+        | Some prev -> Hashtbl.set env ~key:old_p ~data:prev);
+      ELambda (new_params, new_body)
+    (* Function application: just rename subexpressions. *)
+    | EApp (fn, args) ->
+      let fn' = alpha_convert_expr env fn in
+      let args' = List.map args ~f:(alpha_convert_expr env) in
+      EApp (fn', args')
+    (* If-then-else. *)
+    | EIf (cond, t, f) ->
+      EIf (alpha_convert_expr env cond, alpha_convert_expr env t, alpha_convert_expr env f)
+    (* While & do. *)
+    | EWhile (cond, body) ->
+      EWhile (alpha_convert_expr env cond, alpha_convert_expr env body)
+    (* Sequence e1; e2 *)
+    | ESequence (e1, e2) ->
+      ESequence (alpha_convert_expr env e1, alpha_convert_expr env e2)
+    (* Let-binding: rename the bound variable, rename rhs & body. *)
+    | ELetIn (x, rhs, body) ->
+      let rhs' = alpha_convert_expr env rhs in
+      (* rename x to new_x, update env. *)
+      let saved = Hashtbl.find env x in
+      let new_x = fresh_name x in
+      Hashtbl.set env ~key:x ~data:new_x;
+      let body' = alpha_convert_expr env body in
+      (* restore environment *)
+      (match saved with
+       | None -> Hashtbl.remove env x
+       | Some old -> Hashtbl.set env ~key:x ~data:old);
+      ELetIn (new_x, rhs', body')
+    (* Let-rec: rename each bound variable, alpha-convert each RHS. *)
+    | ELetRec (bindings, body) ->
+      (* 1. Reserve fresh names for each binding so they can refer to each other. *)
+      let binding_names =
+        List.map bindings ~f:(fun (nm, _) ->
+          (* produce new name for nm *)
+          let new_nm = fresh_name nm in
+          nm, new_nm)
+      in
+      (* 2. Save old environment for each. *)
+      let saved = ref [] in
+      List.iter binding_names ~f:(fun (old_nm, new_nm) ->
+        let old_val = Hashtbl.find env old_nm in
+        saved := (old_nm, old_val) :: !saved;
+        Hashtbl.set env ~key:old_nm ~data:new_nm);
+      (* 3. Now alpha-convert each RHS. *)
+      let new_bindings =
+        List.map2_exn bindings binding_names ~f:(fun (_, rhs_expr) (_old_nm, new_nm) ->
+          let rhs' = alpha_convert_expr env rhs_expr in
+          new_nm, rhs')
+      in
+      (* 4. alpha-convert the body. *)
+      let body' = alpha_convert_expr env body in
+      (* 5. restore the environment. *)
+      List.iter !saved ~f:(fun (old_nm, old_opt) ->
+        match old_opt with
+        | None -> Hashtbl.remove env old_nm
+        | Some oldv -> Hashtbl.set env ~key:old_nm ~data:oldv);
+      ELetRec (new_bindings, body')
+    (* Match/cases: rename scrut, then each case pattern & RHS. *)
+    | EMatch (scrut, cases) ->
+      let scrut' = alpha_convert_expr env scrut in
+      let cases' =
+        List.map cases ~f:(fun (pat, rhs) ->
+          let saved_bindings = ref [] in
+          let pat' = alpha_convert_pattern env pat saved_bindings in
+          let rhs' = alpha_convert_expr env rhs in
+          (* restore environment after each pattern+rhs *)
+          List.iter !saved_bindings ~f:(fun (old_nm, old_opt) ->
+            match old_opt with
+            | None -> Hashtbl.remove env old_nm
+            | Some oldv -> Hashtbl.set env ~key:old_nm ~data:oldv);
+          pat', rhs')
+      in
+      EMatch (scrut', cases')
+    (* Record creation, field get/set, arrays, etc. - rename subexpressions. *)
+    | ERecord fields ->
+      let fields' =
+        List.map fields ~f:(fun (fld, fe) -> fld, alpha_convert_expr env fe)
+      in
+      ERecord fields'
+    | EFieldGet (obj, field) -> EFieldGet (alpha_convert_expr env obj, field)
+    | EFieldSet (obj, field, new_val) ->
+      EFieldSet (alpha_convert_expr env obj, field, alpha_convert_expr env new_val)
+    (* Polymorphic variant, rename subexprs. *)
+    | EVariant (tag, vs) ->
+      let vs' = List.map vs ~f:(alpha_convert_expr env) in
+      EVariant (tag, vs')
+    (* Arrays & indexing. *)
+    | EArray elts -> EArray (List.map elts ~f:(alpha_convert_expr env))
+    | EArrayGet (arr, idx) ->
+      EArrayGet (alpha_convert_expr env arr, alpha_convert_expr env idx)
+    | EArraySet (arr, idx, v) ->
+      EArraySet
+        (alpha_convert_expr env arr, alpha_convert_expr env idx, alpha_convert_expr env v)
+    (* References, setref, deref just rename subexpressions. *)
+    | ERef e1 -> ERef (alpha_convert_expr env e1)
+    | ESetRef (r, v) -> ESetRef (alpha_convert_expr env r, alpha_convert_expr env v)
+    | EDeref e1 -> EDeref (alpha_convert_expr env e1)
+  ;;
+
+  (***************************************************************************)
+  (* 4) Statements                                                           *)
+  (***************************************************************************)
+
+  let rec alpha_convert_stmt (env : (string, string) Hashtbl.t) (s : stmt) : stmt =
+    match s with
+    | SLet (x, rhs) ->
+      (* no restore for top-level let *)
+      let rhs' = alpha_convert_expr env rhs in
+      let new_x = fresh_name x in
+      Hashtbl.set env ~key:x ~data:new_x;
+      SLet (new_x, rhs')
+    | SLetRec bindings ->
+      (* 1) First, create fresh names for each binding. *)
+      let binding_names =
+        List.map bindings ~f:(fun (nm, _rhs) ->
+          let new_nm = fresh_name nm in
+          nm, new_nm)
+      in
+      (* 2) Insert these new names into the environment so that
+		     (a) they see each other (for mutually recursive definitions)
+		     (b) subsequent statements can reference them. *)
+      List.iter binding_names ~f:(fun (old_nm, new_nm) ->
+        Hashtbl.set env ~key:old_nm ~data:new_nm);
+      (* 3) Now alpha-convert each binding’s RHS with the updated env. *)
+      let new_binds =
+        List.map2_exn bindings binding_names ~f:(fun (_, rhs_expr) (_old_nm, new_nm) ->
+          let rhs' = alpha_convert_expr env rhs_expr in
+          new_nm, rhs')
+      in
+      (* 4) Do NOT restore the old environment here, because it’s top-level.
+		     We want “f -> f_1” (for example) to stay in the env so that later
+		     statements can see it. *)
+      SLetRec new_binds
+    | SModule (mname, stmts) ->
+      (* rename mname, but do NOT restore it at top level *)
+      let new_m = fresh_name mname in
+      Hashtbl.set env ~key:mname ~data:new_m;
+      let stmts' = List.map stmts ~f:(alpha_convert_stmt env) in
+      SModule (new_m, stmts')
+    | SOpen mname ->
+      (* If you want to rename modules too, do so. Otherwise handle as you prefer. *)
+      (match Hashtbl.find env mname with
+       | Some new_name -> SOpen new_name
+       | None -> SOpen mname)
+    | SExpr e ->
+      let e' = alpha_convert_expr env e in
+      SExpr e'
+  ;;
+
+  (***************************************************************************)
+  (* 5) Entire program                                                      *)
+  (***************************************************************************)
+
+  let alpha_convert_program (prog : program) : program =
+    let env = Hashtbl.create (module String) in
+    List.map prog ~f:(fun stmt ->
+      let result = alpha_convert_stmt env stmt in
+      print_endline @@ Printf.sprintf "After stmt: environment =\n";
+      Hashtbl.iteri env ~f:(fun ~key ~data ->
+        print_endline @@ Printf.sprintf "  %s -> %s\n" key data);
+      result)
+  ;;
+end

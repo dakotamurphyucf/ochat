@@ -12,6 +12,7 @@ opam install . --deps-only
 #  try this 
 opam pin -n git+https://github.com/mseri/owl.git#arm64 --with-version=1.1.0
 PKG_CONFIG_PATH="/opt/homebrew/opt/openblas/lib/pkgconfig" opam install owl.1.1.0
+# if installing on ocaml 5.3 and you get an error installing core_unix version 17 on macOS ARM https://github.com/janestreet/core_unix/issues/14#issuecomment-2684149962
 ```
 
 # Command Line Application Documentation

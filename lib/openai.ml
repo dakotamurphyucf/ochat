@@ -7,406 +7,1089 @@ open Eio
 open Io.Net
 open Jsonaf.Export
 
-(** Type definition for the input to the embeddings API. *)
-type embeddings_input =
-  { model : string
-  ; input : string list
-  }
-[@@deriving jsonaf, sexp, bin_io]
-
-(** Type definition for the response from the embeddings API. *)
-type response = { data : embedding list } [@@jsonaf.allow_extra_fields]
-
-(** Type definition for an individual embedding in the response. *)
-and embedding =
-  { embedding : float list
-  ; index : int
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
-
 (** [api_key] is the API key for the OpenAI API. *)
 let api_key = Sys.getenv "OPENAI_API_KEY" |> Option.value ~default:""
 
-(** [post_openai_embeddings ~input env] makes an HTTP POST request to the OpenAI API embeddings endpoint with the given [input] and [env].
+module Embeddings = struct
+  (** Type definition for the input to the embeddings API. *)
+  type embeddings_input =
+    { model : string
+    ; input : string list
+    }
+  [@@deriving jsonaf, sexp, bin_io]
+
+  (** Type definition for the response from the embeddings API. *)
+  type response = { data : embedding list } [@@jsonaf.allow_extra_fields]
+
+  (** Type definition for an individual embedding in the response. *)
+  and embedding =
+    { embedding : float list
+    ; index : int
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+
+  (** [post_openai_embeddings ~input env] makes an HTTP POST request to the OpenAI API embeddings endpoint with the given [input] and [env].
 
     It returns the parsed response as a [response] record. *)
-let post_openai_embeddings net ~input =
-  let host = "api.openai.com" in
-  let headers =
-    Http.Header.of_list
-      [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
-  in
-  let input = { input; model = "text-embedding-ada-002" } in
-  let json = Jsonaf.to_string @@ jsonaf_of_embeddings_input input in
-  let res = post Default ~net ~host ~headers ~path:"/v1/embeddings" json in
-  let json = Jsonaf.of_string res in
-  try response_of_jsonaf json with
-  | _ as exe ->
-    print_endline @@ Fmt.str "%a" Eio.Exn.pp exe;
-    print_endline @@ String.concat ~sep:"\n" input.input;
-    print_endline @@ Jsonaf.to_string json;
-    raise exe
-;;
+  let post_openai_embeddings net ~input =
+    let host = "api.openai.com" in
+    let headers =
+      Http.Header.of_list
+        [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
+    in
+    let input = { input; model = "text-embedding-ada-002" } in
+    let json = Jsonaf.to_string @@ jsonaf_of_embeddings_input input in
+    let res = post Default ~net ~host ~headers ~path:"/v1/embeddings" json in
+    let json = Jsonaf.of_string res in
+    try response_of_jsonaf json with
+    | _ as exe ->
+      print_endline @@ Fmt.str "%a" Eio.Exn.pp exe;
+      print_endline @@ String.concat ~sep:"\n" input.input;
+      print_endline @@ Jsonaf.to_string json;
+      raise exe
+  ;;
+end
 
-(* Define the function call structure *)
-type function_call =
-  { arguments : string [@default ""]
-  ; name : string [@default ""]
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+module Completions = struct
+  (* Define the function call structure *)
+  (** Type definition for the input to the completions API. *)
+  type function_call =
+    { arguments : string [@default ""]
+    ; name : string [@default ""]
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
-(* Define the tool call structure *)
-type tool_call_chunk =
-  { id : string [@default ""]
-  ; function_ : function_call [@key "function"]
-  ; type_ : string [@key "type"] [@default ""]
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+  (* Define the tool call structure *)
+  type tool_call_chunk =
+    { id : string [@default ""]
+    ; function_ : function_call [@key "function"]
+    ; type_ : string [@key "type"] [@default ""]
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
-(* Define the tool call structure *)
-type tool_call_default =
-  { id : string option [@default None]
-  ; function_ : function_call option [@key "function"] [@default None]
-  ; type_ : string option [@key "type"] [@default None]
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+  (* Define the tool call structure *)
+  type tool_call_default =
+    { id : string option [@default None]
+    ; function_ : function_call option [@key "function"] [@default None]
+    ; type_ : string option [@key "type"] [@default None]
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
-(* First, define a type to represent each item in the array of content objects. *)
-type image_url = { url : string } [@@deriving jsonaf, sexp]
+  (* First, define a type to represent each item in the array of content objects. *)
+  type image_url = { url : string } [@@deriving jsonaf, sexp]
 
-type content_item =
-  { type_ : string [@key "type"] (* e.g. "text" or "image_url" *)
-  ; text : string option [@jsonaf.option]
-  ; image_url : image_url option [@jsonaf.option]
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+  type content_item =
+    { type_ : string [@key "type"] (* e.g. "text" or "image_url" *)
+    ; text : string option [@jsonaf.option]
+    ; image_url : image_url option [@jsonaf.option]
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
 
-(* Next, define a sum type that can be either a string or a list of content items. *)
-type chat_message_content =
-  | Text of string
-  | Items of content_item list
-[@@deriving sexp, jsonaf]
+  (* Next, define a sum type that can be either a string or a list of content items. *)
+  type chat_message_content =
+    | Text of string
+    | Items of content_item list
+  [@@deriving sexp, jsonaf]
 
-(* Provide custom Jsonaf serialization/deserialization for chat_message_content. *)
-let chat_message_content_of_jsonaf (json : Jsonaf_kernel__Type.t) =
-  match json with
-  | `String s -> Text s
-  | `Array _ -> Items (list_of_jsonaf content_item_of_jsonaf json)
-  | _ -> failwith "chat_message_content_of_jsonaf: Expected string or list."
-;;
+  (* Provide custom Jsonaf serialization/deserialization for chat_message_content. *)
+  let chat_message_content_of_jsonaf (json : Jsonaf_kernel__Type.t) =
+    match json with
+    | `String s -> Text s
+    | `Array _ -> Items (list_of_jsonaf content_item_of_jsonaf json)
+    | _ -> failwith "chat_message_content_of_jsonaf: Expected string or list."
+  ;;
 
-let jsonaf_of_chat_message_content = function
-  | Text s -> `String s
-  | Items lst -> jsonaf_of_list jsonaf_of_content_item lst
-;;
+  let jsonaf_of_chat_message_content = function
+    | Text s -> `String s
+    | Items lst -> jsonaf_of_list jsonaf_of_content_item lst
+  ;;
 
-(* Now integrate that into chat_message, using the [@jsonaf.of] and [@jsonaf.to] attributes
+  (* Now integrate that into chat_message, using the [@jsonaf.of] and [@jsonaf.to] attributes
    to tell ppx_jsonaf how to handle the custom content field. *)
-type chat_message =
-  { role : string
-  ; content : chat_message_content option
-       [@jsonaf.option]
-       [@jsonaf.of chat_message_content_of_jsonaf]
-       [@jsonaf.to jsonaf_of_chat_message_content]
-  ; name : string option [@jsonaf.option]
-  ; tool_call_id : string option [@jsonaf.option]
-  ; function_call : function_call option [@jsonaf.option]
-  ; tool_calls : tool_call_default list option [@jsonaf.option]
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving sexp, jsonaf]
+  type chat_message =
+    { role : string
+    ; content : chat_message_content option
+          [@jsonaf.option]
+          [@jsonaf.of chat_message_content_of_jsonaf]
+          [@jsonaf.to jsonaf_of_chat_message_content]
+    ; name : string option [@jsonaf.option]
+    ; tool_call_id : string option [@jsonaf.option]
+    ; function_call : function_call option [@jsonaf.option]
+    ; tool_calls : tool_call_default list option [@jsonaf.option]
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving sexp, jsonaf]
 
-(* Define the message structure for default responses *)
-type message =
-  { content : string option [@default None]
-  ; refusal : string option [@default None]
-  ; role : string
-  ; function_call : function_call option [@jsonaf.option]
-  ; tool_calls : tool_call_default list option [@jsonaf.option]
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+  (* Define the message structure for default responses *)
+  type message =
+    { content : string option [@default None]
+    ; refusal : string option [@default None]
+    ; role : string
+    ; function_call : function_call option [@jsonaf.option]
+    ; tool_calls : tool_call_default list option [@jsonaf.option]
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
-type func =
-  { name : string
-  ; description : string option
-  ; parameters : Jsonaf.t
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+  type func =
+    { name : string
+    ; description : string option
+    ; parameters : Jsonaf.t
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
 
-type tool_func =
-  { name : string
-  ; description : string option
-  ; parameters : Jsonaf.t
-  ; strict : bool
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+  type tool_func =
+    { name : string
+    ; description : string option
+    ; parameters : Jsonaf.t
+    ; strict : bool
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
 
-type tool =
-  { type_ : string [@key "type"]
-  ; function_ : tool_func [@key "function"]
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+  type tool =
+    { type_ : string [@key "type"]
+    ; function_ : tool_func [@key "function"]
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
 
-type schema =
-  { description : string option [@jsonaf.option]
-  ; name : string
-  ; schema : Jsonaf.t
-  ; strict : bool
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+  type schema =
+    { description : string option [@jsonaf.option]
+    ; name : string
+    ; schema : Jsonaf.t
+    ; strict : bool
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
 
-type response_format =
-  { type_ : string [@key "type"]
-  ; json_schema : schema
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+  type response_format =
+    { type_ : string [@key "type"]
+    ; json_schema : schema
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
 
-type completion_body =
-  { model : string
-  ; messages : chat_message list
-  ; store : bool
-  ; functions : func list option [@jsonaf.option]
-  ; tools : tool list option [@jsonaf.option]
-  ; temperature : float option [@jsonaf.option]
-  ; top_p : float option [@jsonaf.option]
-  ; n : int option [@jsonaf.option]
-  ; stream : bool option [@jsonaf.option]
-  ; stop : string list option [@jsonaf.option]
-  ; max_completion_tokens : int option [@jsonaf.option]
-  ; presence_penalty : float option [@jsonaf.option]
-  ; frequency_penalty : float option [@jsonaf.option]
-  ; logit_bias : (int * float) list option [@jsonaf.option]
-  ; user : string option [@jsonaf.option]
-  ; response_format : response_format option [@jsonaf.option]
-  ; parallel_tool_calls : bool option [@jsonaf.option]
-  ; reasoning_effort : string option [@jsonaf.option]
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+  type completion_body =
+    { model : string
+    ; messages : chat_message list
+    ; store : bool
+    ; functions : func list option [@jsonaf.option]
+    ; tools : tool list option [@jsonaf.option]
+    ; temperature : float option [@jsonaf.option]
+    ; top_p : float option [@jsonaf.option]
+    ; n : int option [@jsonaf.option]
+    ; stream : bool option [@jsonaf.option]
+    ; stop : string list option [@jsonaf.option]
+    ; max_completion_tokens : int option [@jsonaf.option]
+    ; presence_penalty : float option [@jsonaf.option]
+    ; frequency_penalty : float option [@jsonaf.option]
+    ; logit_bias : (int * float) list option [@jsonaf.option]
+    ; user : string option [@jsonaf.option]
+    ; response_format : response_format option [@jsonaf.option]
+    ; parallel_tool_calls : bool option [@jsonaf.option]
+    ; reasoning_effort : string option [@jsonaf.option]
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
 
-let create_request_body
-  ~model
-  ~messages
-  ?(store = true)
-  ?functions
-  ?tools
-  ?temperature
-  ?top_p
-  ?n
-  ?stream
-  ?stop
-  ?max_tokens
-  ?presence_penalty
-  ?frequency_penalty
-  ?logit_bias
-  ?user
-  ?parallel_tool_calls
-  ?response_format
-  ?reasoning_effort
-  ()
-  =
-  { model
-  ; messages
-  ; store
-  ; functions
-  ; tools
-  ; temperature
-  ; top_p
-  ; n
-  ; stream
-  ; stop
-  ; max_completion_tokens = max_tokens
-  ; presence_penalty
-  ; frequency_penalty
-  ; logit_bias
-  ; user
-  ; response_format
-  ; parallel_tool_calls
-  ; reasoning_effort
-  }
-;;
+  let create_request_body
+        ~model
+        ~messages
+        ?(store = true)
+        ?functions
+        ?tools
+        ?temperature
+        ?top_p
+        ?n
+        ?stream
+        ?stop
+        ?max_tokens
+        ?presence_penalty
+        ?frequency_penalty
+        ?logit_bias
+        ?user
+        ?parallel_tool_calls
+        ?response_format
+        ?reasoning_effort
+        ()
+    =
+    { model
+    ; messages
+    ; store
+    ; functions
+    ; tools
+    ; temperature
+    ; top_p
+    ; n
+    ; stream
+    ; stop
+    ; max_completion_tokens = max_tokens
+    ; presence_penalty
+    ; frequency_penalty
+    ; logit_bias
+    ; user
+    ; response_format
+    ; parallel_tool_calls
+    ; reasoning_effort
+    }
+  ;;
 
-(* Define the delta structure for streamed responses *)
-type delta =
-  { content : string option [@default None]
-  ; function_call : function_call option [@jsonaf.option]
-  ; refusal : string option [@default None]
-  ; role : string option [@jsonaf.option]
-  ; tool_calls : tool_call_chunk list option [@jsonaf.option]
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+  (* Define the delta structure for streamed responses *)
+  type delta =
+    { content : string option [@default None]
+    ; function_call : function_call option [@jsonaf.option]
+    ; refusal : string option [@default None]
+    ; role : string option [@jsonaf.option]
+    ; tool_calls : tool_call_chunk list option [@jsonaf.option]
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
-(* Define the choice structure for streamed responses *)
-type stream_choice =
-  { delta : delta
-  ; finish_reason : string option [@default None]
-  ; index : int
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+  (* Define the choice structure for streamed responses *)
+  type stream_choice =
+    { delta : delta
+    ; finish_reason : string option [@default None]
+    ; index : int
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
-(* Define the chat completion chunk for streamed responses *)
-type chat_completion_chunk = { choices : stream_choice list }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+  (* Define the chat completion chunk for streamed responses *)
+  type chat_completion_chunk = { choices : stream_choice list }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
-(* Define the choice structure for default responses *)
-type default_choice =
-  { finish_reason : string option
-  ; message : message
-  }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+  (* Define the choice structure for default responses *)
+  type default_choice =
+    { finish_reason : string option
+    ; message : message
+    }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
-(* Define the chat completion for default responses *)
-type chat_completion = { choices : default_choice list }
-[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+  (* Define the chat completion for default responses *)
+  type chat_completion = { choices : default_choice list }
+  [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
-type _ response_type =
-  | Stream : (stream_choice -> unit) -> unit response_type
-  | Default : default_choice response_type
+  type _ response_type =
+    | Stream : (stream_choice -> unit) -> unit response_type
+    | Default : default_choice response_type
 
-(* let log ~env = Io.log ~dir:(Eio.Stdenv.fs env) *)
-(* let console_log = Io.console_log *)
+  (* let log ~env = Io.log ~dir:(Eio.Stdenv.fs env) *)
+  (* let console_log = Io.console_log *)
 
-type model =
-  | O3_Mini
-  | Gpt4
-  | Gpt4o
-  | Gpt3
-  | Gpt3_16k
-[@@deriving jsonaf, sexp]
+  type model =
+    | O3_Mini
+    | Gpt4
+    | Gpt4o
+    | Gpt3
+    | Gpt3_16k
+  [@@deriving jsonaf, sexp]
 
-let model_to_str = function
-  | O3_Mini -> "o1"
-  | Gpt4o -> "gpt-4o"
-  | Gpt3 -> "gpt-3.5-turbo"
-  | Gpt3_16k -> "gpt-3.5-turbo-16k"
-  | Gpt4 -> "gpt-4.5-preview"
-;;
+  let model_to_str = function
+    | O3_Mini -> "o3"
+    | Gpt4o -> "gpt-4o"
+    | Gpt3 -> "gpt-3.5-turbo"
+    | Gpt3_16k -> "gpt-3.5-turbo-16k"
+    | Gpt4 -> "gpt-4.5-preview"
+  ;;
 
-let model_of_str_exn = function
-  | "o1" -> O3_Mini
-  | "gpt-3.5-turbo" -> Gpt3
-  | "gpt-3.5-turbo-16k" -> Gpt3_16k
-  | "gpt-4.5" -> Gpt4
-  | "gpt-4o" -> Gpt4o
-  | _ -> failwith "Invalid model"
-;;
+  let model_of_str_exn = function
+    | "o3" -> O3_Mini
+    | "gpt-3.5-turbo" -> Gpt3
+    | "gpt-3.5-turbo-16k" -> Gpt3_16k
+    | "gpt-4.5" -> Gpt4
+    | "gpt-4o" -> Gpt4o
+    | _ -> failwith "Invalid model"
+  ;;
 
-let post_chat_completion
-  : type a.
-    a response_type
-    -> ?max_tokens:int
-    -> ?temperature:float
-    -> ?functions:func list
-    -> ?tools:tool list
-    -> ?model:model
-    -> ?reasoning_effort:string
-    -> dir:Eio.Fs.dir_ty Eio.Path.t
-    -> _ Eio.Net.t
-    -> inputs:chat_message list
-    -> a
-  =
-  fun res_typ
-    ?(max_tokens = 600)
-    ?temperature
-    ?functions
-    ?tools
-    ?(model = Gpt4)
-    ?reasoning_effort
-    ~dir
-    net
-    ~inputs ->
-  let host = "api.openai.com" in
-  let headers =
-    Http.Header.of_list
-      [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
-  in
-  let messages = inputs in
-  let stream =
-    match res_typ with
-    | Default -> false
-    | Stream _ -> true
-  in
-  let input =
-    create_request_body
-      ~model:(model_to_str model)
-      ~messages
+  let post_chat_completion
+    : type a.
+      a response_type
+      -> ?max_tokens:int
+      -> ?temperature:float
+      -> ?functions:func list
+      -> ?tools:tool list
+      -> ?model:model
+      -> ?reasoning_effort:string
+      -> dir:Eio.Fs.dir_ty Eio.Path.t
+      -> _ Eio.Net.t
+      -> inputs:chat_message list
+      -> a
+    =
+    fun res_typ
+      ?(max_tokens = 600)
+      ?temperature
       ?functions
       ?tools
-      ?temperature
-      ~max_tokens
-      ~stream
+      ?(model = Gpt4)
       ?reasoning_effort
-      ()
-  in
-  let json = Jsonaf.to_string @@ jsonaf_of_completion_body input in
-  let post json f = post ~net ~host ~headers ~path:"/v1/chat/completions" (Raw f) json in
-  post json
-  @@ fun res ->
-  let _, reader = res in
-  match res_typ with
-  | Default ->
-    let read_all flow = Eio.Buf_read.(parse_exn take_all) flow ~max_size:Int.max_value in
-    let data = read_all reader in
-    let json_result =
-      Jsonaf.parse data
-      |> Result.bind ~f:(fun json ->
-        match Jsonaf.member "error" json with
-        | None -> Or_error.error_string ""
-        | Some json -> Ok json)
+      ~dir
+      net
+      ~inputs ->
+    let host = "api.openai.com" in
+    let headers =
+      Http.Header.of_list
+        [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
     in
-    (match json_result with
-     | Ok _ -> failwith data
-     | Error _ ->
-       let event = chat_completion_of_jsonaf @@ Jsonaf.of_string @@ data in
-       (List.hd_exn event.choices : a))
-  | Stream cb ->
-    let reader = Eio.Buf_read.of_flow reader ~max_size:Int.max_value in
-    let lines = Buf_read.lines reader in
-    let rec loop seq =
-      match Seq.uncons seq with
-      | None -> ()
-      | Some (line, seq) ->
-        Io.log ~dir ~file:"./raw-openai-chat-streaming-response.txt" (line ^ "\n");
-        let json_result =
-          Jsonaf.parse line
-          |> Result.bind ~f:(fun json ->
-            match Jsonaf.member "error" json with
-            | None -> Or_error.error_string ""
-            | Some json -> Ok json)
-        in
-        (match json_result with
-         | Ok _ -> failwith line
-         | Error _ ->
-           let line =
-             String.concat
-             @@ List.filter ~f:(fun s -> not @@ String.is_empty s)
-             @@ String.split_lines line
-           in
-           let choice =
-             match
-               String.is_prefix ~prefix:"data: " line
-               && (not @@ String.is_prefix ~prefix:"data: [DONE]" line)
-             with
-             | false -> None
-             | true ->
-               (match
-                  Jsonaf.parse @@ String.chop_prefix_exn line ~prefix:"data: "
-                  |> Result.bind ~f:(fun json -> Ok json)
-                with
-                | Ok json ->
-                  let event = chat_completion_chunk_of_jsonaf @@ json in
-                  Some (List.hd_exn event.choices)
-                | Error _ -> None)
-           in
-           (match choice with
-            | None ->
-              let done_ =
-                match line with
-                | "data: [DONE]" -> true
-                | _ -> false
-              in
-              if done_ then () else loop seq
-            | Some choice ->
-              cb choice;
-              loop seq))
+    let messages = inputs in
+    let stream =
+      match res_typ with
+      | Default -> false
+      | Stream _ -> true
     in
-    loop lines
-;;
+    let input =
+      create_request_body
+        ~model:(model_to_str model)
+        ~messages
+        ?functions
+        ?tools
+        ?temperature
+        ~max_tokens
+        ~stream
+        ?reasoning_effort
+        ()
+    in
+    let json = Jsonaf.to_string @@ jsonaf_of_completion_body input in
+    let post json f =
+      post ~net ~host ~headers ~path:"/v1/chat/completions" (Raw f) json
+    in
+    post json
+    @@ fun res ->
+    let _, reader = res in
+    match res_typ with
+    | Default ->
+      let read_all flow =
+        Eio.Buf_read.(parse_exn take_all) flow ~max_size:Int.max_value
+      in
+      let data = read_all reader in
+      let json_result =
+        Jsonaf.parse data
+        |> Result.bind ~f:(fun json ->
+          match Jsonaf.member "error" json with
+          | None -> Or_error.error_string ""
+          | Some json -> Ok json)
+      in
+      (match json_result with
+       | Ok _ -> failwith data
+       | Error _ ->
+         let event = chat_completion_of_jsonaf @@ Jsonaf.of_string @@ data in
+         (List.hd_exn event.choices : a))
+    | Stream cb ->
+      let reader = Eio.Buf_read.of_flow reader ~max_size:Int.max_value in
+      let lines = Buf_read.lines reader in
+      let rec loop seq =
+        match Seq.uncons seq with
+        | None -> ()
+        | Some (line, seq) ->
+          Io.log ~dir ~file:"./raw-openai-chat-streaming-response.txt" (line ^ "\n");
+          let json_result =
+            Jsonaf.parse line
+            |> Result.bind ~f:(fun json ->
+              match Jsonaf.member "error" json with
+              | None -> Or_error.error_string ""
+              | Some json -> Ok json)
+          in
+          (match json_result with
+           | Ok _ -> failwith line
+           | Error _ ->
+             let line =
+               String.concat
+               @@ List.filter ~f:(fun s -> not @@ String.is_empty s)
+               @@ String.split_lines line
+             in
+             let choice =
+               match
+                 String.is_prefix ~prefix:"data: " line
+                 && (not @@ String.is_prefix ~prefix:"data: [DONE]" line)
+               with
+               | false -> None
+               | true ->
+                 (match
+                    Jsonaf.parse @@ String.chop_prefix_exn line ~prefix:"data: "
+                    |> Result.bind ~f:(fun json -> Ok json)
+                  with
+                  | Ok json ->
+                    let event = chat_completion_chunk_of_jsonaf @@ json in
+                    Some (List.hd_exn event.choices)
+                  | Error _ -> None)
+             in
+             (match choice with
+              | None ->
+                let done_ =
+                  match line with
+                  | "data: [DONE]" -> true
+                  | _ -> false
+                in
+                if done_ then () else loop seq
+              | Some choice ->
+                cb choice;
+                loop seq))
+      in
+      loop lines
+  ;;
+end
+
+module Responses = struct
+  module Input_message = struct
+    type role =
+      | User [@name "user"]
+      | Assistant [@name "assistant"]
+      | System [@name "system"]
+      | Developer [@name "developer"]
+    [@@deriving sexp, bin_io]
+
+    let jsonaf_of_role = function
+      | User -> `String "user"
+      | Assistant -> `String "assistant"
+      | System -> `String "system"
+      | Developer -> `String "developer"
+    ;;
+
+    let role_of_jsonaf = function
+      | `String "user" -> User
+      | `String "assistant" -> Assistant
+      | `String "system" -> System
+      | `String "developer" -> Developer
+      | _ -> failwith "Invalid role"
+    ;;
+
+    let role_to_string = function
+      | User -> "user"
+      | Assistant -> "assistant"
+      | System -> "system"
+      | Developer -> "developer"
+    ;;
+
+    let role_of_string = function
+      | "user" -> User
+      | "assistant" -> Assistant
+      | "system" -> System
+      | "developer" -> Developer
+      | _ -> failwith "Invalid role"
+    ;;
+
+    type text_input =
+      { text : string
+      ; _type : string [@key "type"]
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+
+    type image_detail =
+      | High [@name "high"]
+      | Low [@name "low"]
+      | Auto [@name "auto"]
+    [@@deriving sexp, bin_io]
+
+    let jsonaf_of_image_detail = function
+      | High -> `String "high"
+      | Low -> `String "low"
+      | Auto -> `String "auto"
+    ;;
+
+    let image_detail_of_jsonaf = function
+      | `String "high" -> High
+      | `String "low" -> Low
+      | `String "auto" -> Auto
+      | _ -> failwith "Invalid image detail"
+    ;;
+
+    type image_input =
+      { image_url : string
+      ; detail : string
+      ; _type : string [@key "type"]
+      }
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+
+    type content_item =
+      | Text of text_input
+      | Image of image_input
+    [@@deriving sexp, bin_io]
+
+    let jsonaf_of_content_item = function
+      | Text text_input -> jsonaf_of_text_input text_input
+      | Image image_input -> jsonaf_of_image_input image_input
+    ;;
+
+    let content_item_of_jsonaf json =
+      match (json : Jsonaf.t) with
+      | `Object obj ->
+        (match Jsonaf.member "type" (`Object obj) with
+         | Some (`String "input_text") -> Text (text_input_of_jsonaf (`Object obj))
+         | Some (`String "input_image") -> Image (image_input_of_jsonaf (`Object obj))
+         | _ -> failwith "Invalid content type")
+      | `String str -> Text { text = str; _type = "input_text" }
+      | _ -> failwith "Invalid content format"
+    ;;
+
+    type content = content_item list [@@deriving jsonaf_of, sexp, bin_io]
+
+    let content_of_jsonaf = function
+      | `Array arr -> List.map ~f:content_item_of_jsonaf arr
+      | `String str -> [ Text { text = str; _type = "input_text" } ]
+      | _ -> failwith "Invalid content format"
+    ;;
+
+    type t =
+      { role : role
+      ; content : content
+      ; _type : string [@key "type"]
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Output_message = struct
+    type role = Assistant [@name "assistant"] [@@deriving sexp, bin_io]
+
+    let jsonaf_of_role = function
+      | Assistant -> `String "assistant"
+    ;;
+
+    let role_of_jsonaf = function
+      | `String "assistant" -> Assistant
+      | _ -> failwith "Invalid role"
+    ;;
+
+    type content =
+      { annotations : string list
+      ; text : string
+      ; _type : string [@key "type"]
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+
+    type t =
+      { role : role
+      ; id : string
+      ; content : content list
+      ; status : string
+      ; _type : string [@key "type"]
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Function_call = struct
+    type t =
+      { name : string
+      ; arguments : string
+      ; call_id : string
+      ; _type : string [@key "type"]
+      ; id : string option [@jsonaf.option]
+      ; status : string option [@jsonaf.option]
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Function_call_output = struct
+    type t =
+      { output : string
+      ; call_id : string
+      ; _type : string [@key "type"]
+      ; id : string option [@jsonaf.option]
+      ; status : string option [@jsonaf.option]
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Reasoning = struct
+    type summary =
+      { text : string
+      ; _type : string [@key "type"]
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+
+    type t =
+      { summary : summary list
+      ; _type : string [@key "type"]
+      ; id : string
+      ; status : string option [@jsonaf.option]
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Item = struct
+    type t =
+      | Input_message of Input_message.t
+      | Output_message of Output_message.t
+      | Function_call of Function_call.t
+      | Function_call_output of Function_call_output.t
+      | Reasoning of Reasoning.t
+    [@@deriving sexp, bin_io]
+
+    let jsonaf_of_t = function
+      | Input_message input_message -> Input_message.jsonaf_of_t input_message
+      | Output_message output_message -> Output_message.jsonaf_of_t output_message
+      | Function_call function_too_call -> Function_call.jsonaf_of_t function_too_call
+      | Function_call_output function_too_call_output ->
+        Function_call_output.jsonaf_of_t function_too_call_output
+      | Reasoning reasoning -> Reasoning.jsonaf_of_t reasoning
+    ;;
+
+    let t_of_jsonaf json =
+      match json with
+      | `Object obj ->
+        (match Jsonaf.member "type" (`Object obj) with
+         | Some (`String "message") ->
+           (match Jsonaf.member "role" (`Object obj) with
+            | Some (`String "assistant") ->
+              Output_message (Output_message.t_of_jsonaf (`Object obj))
+            | _ -> Input_message (Input_message.t_of_jsonaf (`Object obj)))
+         | Some (`String "function_call") ->
+           Function_call (Function_call.t_of_jsonaf (`Object obj))
+         | Some (`String "function_call_output") ->
+           Function_call_output (Function_call_output.t_of_jsonaf (`Object obj))
+         | Some (`String "reasoning") -> Reasoning (Reasoning.t_of_jsonaf (`Object obj))
+         | _ -> failwith "Invalid content type")
+      | _ -> failwith "Invalid content format"
+    ;;
+  end
+
+  module Request = struct
+    type model =
+      | O3 [@name "o3"]
+      | Gpt4 [@name "gpt-4.5-preview"]
+      | Gpt4o [@name "gpt-4o"]
+      | Gpt3 [@name "gpt-3.5-turbo"]
+      | Gpt3_16k [@name "gpt-3.5-turbo-16k"]
+    [@@deriving sexp, bin_io]
+
+    let jsonaf_of_model = function
+      | O3 -> `String "o3"
+      | Gpt4 -> `String "gpt-4.5-preview"
+      | Gpt4o -> `String "gpt-4o"
+      | Gpt3 -> `String "gpt-3.5-turbo"
+      | Gpt3_16k -> `String "gpt-3.5-turbo-16k"
+    ;;
+
+    let model_of_jsonaf = function
+      | `String "o3" -> O3
+      | `String "gpt-4.5-preview" -> Gpt4
+      | `String "gpt-4o" -> Gpt4o
+      | `String "gpt-3.5-turbo" -> Gpt3
+      | `String "gpt-3.5-turbo-16k" -> Gpt3_16k
+      | _ -> failwith "Invalid model"
+    ;;
+
+    let model_to_str = function
+      | O3 -> "o3"
+      | Gpt4o -> "gpt-4o"
+      | Gpt3 -> "gpt-3.5-turbo"
+      | Gpt3_16k -> "gpt-3.5-turbo-16k"
+      | Gpt4 -> "gpt-4.5-preview"
+    ;;
+
+    let model_of_str_exn = function
+      | "o3" -> O3
+      | "gpt-3.5-turbo" -> Gpt3
+      | "gpt-3.5-turbo-16k" -> Gpt3_16k
+      | "gpt-4.5" -> Gpt4
+      | "gpt-4o" -> Gpt4o
+      | _ -> failwith "Invalid model"
+    ;;
+
+    module Reasoning = struct
+      module Effort = struct
+        type t =
+          | Low [@name "low"]
+          | Medium [@name "medium"]
+          | High [@name "high"]
+        [@@deriving sexp, bin_io]
+
+        let jsonaf_of_t = function
+          | Low -> `String "low"
+          | Medium -> `String "medium"
+          | High -> `String "high"
+        ;;
+
+        let t_of_jsonaf = function
+          | `String "low" -> Low
+          | `String "medium" -> Medium
+          | `String "high" -> High
+          | _ -> failwith "Invalid effort"
+        ;;
+
+        let to_str = function
+          | Low -> "low"
+          | Medium -> "medium"
+          | High -> "high"
+        ;;
+
+        let of_str_exn = function
+          | "low" -> Low
+          | "medium" -> Medium
+          | "high" -> High
+          | _ -> failwith "Invalid effort"
+        ;;
+      end
+
+      module Summary = struct
+        type t =
+          | Auto [@name "auto"]
+          | Consise [@name "consise"]
+          | Detailed [@name "detailed"]
+        [@@deriving sexp, bin_io]
+
+        let jsonaf_of_t = function
+          | Auto -> `String "auto"
+          | Consise -> `String "consise"
+          | Detailed -> `String "detailed"
+        ;;
+
+        let t_of_jsonaf = function
+          | `String "auto" -> Auto
+          | `String "consise" -> Consise
+          | `String "detailed" -> Detailed
+          | _ -> failwith "Invalid summary"
+        ;;
+
+        let to_str = function
+          | Auto -> "auto"
+          | Consise -> "consise"
+          | Detailed -> "detailed"
+        ;;
+
+        let of_str_exn = function
+          | "auto" -> Auto
+          | "consise" -> Consise
+          | "detailed" -> Detailed
+          | _ -> failwith "Invalid summary"
+        ;;
+      end
+
+      type t =
+        { effort : Effort.t option [@jsonaf.option]
+        ; summary : Summary.t option [@jsonaf.option]
+        }
+      [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Tool = struct
+      type t =
+        { name : string
+        ; description : string option
+        ; parameters : Jsonaf.t
+        ; strict : bool
+        ; type_ : string [@key "type"]
+        }
+      [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+    end
+
+    type t =
+      { input : Item.t list
+      ; model : model
+      ; max_output_tokens : int option [@jsonaf.option]
+      ; parallel_tool_calls : bool option [@jsonaf.option]
+      ; reasoning : Reasoning.t option [@jsonaf.option]
+      ; store : bool option [@jsonaf.option]
+      ; stream : bool option [@jsonaf.option]
+      ; temperature : float option [@jsonaf.option]
+      ; tools : Tool.t list option [@jsonaf.option]
+      ; top_p : float option [@jsonaf.option]
+      }
+    [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
+
+    let create
+          ?(max_output_tokens = 600)
+          ?(parallel_tool_calls = false)
+          ?(store = true)
+          ?(stream = false)
+          ?temperature
+          ?top_p
+          ?reasoning
+          ?tools
+          ~model
+          ~input
+          ()
+      =
+      { input
+      ; model
+      ; max_output_tokens = Some max_output_tokens
+      ; parallel_tool_calls = Some parallel_tool_calls
+      ; store = Some store
+      ; stream = Some stream
+      ; temperature
+      ; top_p
+      ; reasoning
+      ; tools
+      }
+    ;;
+  end
+
+  module Status = struct
+    type t =
+      | Completed [@name "completed"]
+      | In_progress [@name "in_progress"]
+      | Failed [@name "failed"]
+      | Incomplete [@name "incomplete"]
+    [@@deriving sexp, bin_io]
+
+    let jsonaf_of_t = function
+      | Completed -> `String "completed"
+      | In_progress -> `String "in_progress"
+      | Failed -> `String "failed"
+      | Incomplete -> `String "incomplete"
+    ;;
+
+    let t_of_jsonaf = function
+      | `String "completed" -> Completed
+      | `String "in_progress" -> In_progress
+      | `String "failed" -> Failed
+      | `String "incomplete" -> Incomplete
+      | _ -> failwith "Invalid status"
+    ;;
+
+    let to_str = function
+      | Completed -> "completed"
+      | In_progress -> "in_progress"
+      | Failed -> "failed"
+      | Incomplete -> "incomplete"
+    ;;
+
+    let of_str_exn = function
+      | "completed" -> Completed
+      | "in_progress" -> In_progress
+      | "failed" -> Failed
+      | "incomplete" -> Incomplete
+      | _ -> failwith "Invalid status"
+    ;;
+  end
+
+  module Response = struct
+    type t =
+      { status : Status.t
+      ; output : Item.t list
+      }
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+  end
+
+  module Response_stream = struct
+    module Item = struct
+      type t =
+        | Input_message of Input_message.t
+        | Output_message of Output_message.t
+        | Function_call of Function_call.t
+        | Reasoning of Reasoning.t
+      [@@deriving sexp, bin_io]
+
+      let jsonaf_of_t = function
+        | Input_message input_message -> Input_message.jsonaf_of_t input_message
+        | Output_message output_message -> Output_message.jsonaf_of_t output_message
+        | Function_call function_too_call -> Function_call.jsonaf_of_t function_too_call
+        | Reasoning reasoning -> Reasoning.jsonaf_of_t reasoning
+      ;;
+
+      let t_of_jsonaf json =
+        match json with
+        | `Object obj ->
+          (match Jsonaf.member "type" (`Object obj) with
+           | Some (`String "message") ->
+             (match Jsonaf.member "role" (`Object obj) with
+              | Some (`String "assistant") ->
+                Output_message (Output_message.t_of_jsonaf (`Object obj))
+              | _ -> Input_message (Input_message.t_of_jsonaf (`Object obj)))
+           | Some (`String "function_call") ->
+             Function_call (Function_call.t_of_jsonaf (`Object obj))
+           | Some (`String "reasoning") -> Reasoning (Reasoning.t_of_jsonaf (`Object obj))
+           | _ -> failwith "Invalid content type")
+        | _ -> failwith "Invalid content format"
+      ;;
+    end
+
+    module Output_item_added = struct
+      type t =
+        { item : Item.t
+        ; output_index : int
+        ; type_ : string [@key "type"]
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module Output_item_done = struct
+      type t =
+        { item : Item.t
+        ; output_index : int
+        ; type_ : string [@key "type"]
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module Output_text_delta = struct
+      type t =
+        { context_index : int
+        ; delta : string
+        ; item_id : string
+        ; output_index : int
+        ; type_ : string [@key "type"]
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module Function_call_arguments_delta = struct
+      type t =
+        { delta : string
+        ; item_id : string
+        ; output_index : int
+        ; type_ : string [@key "type"]
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module Function_call_arguments_done = struct
+      type t =
+        { arguments : string
+        ; item_id : string
+        ; output_index : int
+        ; type_ : string [@key "type"]
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    type t =
+      | Output_item_added of Output_item_added.t
+      | Output_item_done of Output_item_done.t
+      | Output_text_delta of Output_text_delta.t
+      | Function_call_arguments_delta of Function_call_arguments_delta.t
+      | Function_call_arguments_done of Function_call_arguments_done.t
+    [@@deriving sexp, bin_io]
+
+    let jsonaf_of_t = function
+      | Output_item_added output_item_added ->
+        Output_item_added.jsonaf_of_t output_item_added
+      | Output_item_done output_item_done -> Output_item_done.jsonaf_of_t output_item_done
+      | Output_text_delta output_text_delta ->
+        Output_text_delta.jsonaf_of_t output_text_delta
+      | Function_call_arguments_delta function_call_arguments_delta ->
+        Function_call_arguments_delta.jsonaf_of_t function_call_arguments_delta
+      | Function_call_arguments_done function_call_arguments_done ->
+        Function_call_arguments_done.jsonaf_of_t function_call_arguments_done
+    ;;
+
+    let t_of_jsonaf json =
+      match json with
+      | `Object obj ->
+        (match Jsonaf.member "type" (`Object obj) with
+         | Some (`String "response.output_item.added") ->
+           Output_item_added (Output_item_added.t_of_jsonaf (`Object obj))
+         | Some (`String "response.output_item.done") ->
+           Output_item_done (Output_item_done.t_of_jsonaf (`Object obj))
+         | Some (`String "response.output_text.delta") ->
+           Output_text_delta (Output_text_delta.t_of_jsonaf (`Object obj))
+         | Some (`String "response.function_call_arguments.delta") ->
+           Function_call_arguments_delta
+             (Function_call_arguments_delta.t_of_jsonaf (`Object obj))
+         | Some (`String "response.function_call_arguments.done") ->
+           Function_call_arguments_done
+             (Function_call_arguments_done.t_of_jsonaf (`Object obj))
+         | _ -> failwith "Invalid content type")
+      | _ -> failwith "Invalid content format"
+    ;;
+  end
+
+  type _ response_type =
+    | Stream : (Response_stream.t -> unit) -> unit response_type
+    | Default : Response.t response_type
+
+  let post_response
+    : type a.
+      a response_type
+      -> ?max_output_tokens:int
+      -> ?temperature:float
+      -> ?tools:Request.Tool.t list
+      -> ?model:Request.model
+      -> ?reasoning:Request.Reasoning.t
+      -> dir:Eio.Fs.dir_ty Eio.Path.t
+      -> _ Eio.Net.t
+      -> inputs:Item.t list
+      -> a
+    =
+    fun res_typ
+      ?(max_output_tokens = 600)
+      ?temperature
+      ?tools
+      ?(model = Request.Gpt4)
+      ?reasoning
+      ~dir
+      net
+      ~inputs ->
+    let host = "api.openai.com" in
+    let headers =
+      Http.Header.of_list
+        [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
+    in
+    let input =
+      Request.create
+        ~model
+        ~input:inputs
+        ~max_output_tokens
+        ?temperature
+        ?tools
+        ?reasoning
+        ()
+    in
+    let json = Jsonaf.to_string @@ Request.jsonaf_of_t input in
+    let post json f = post ~net ~host ~headers ~path:"/v1/responses" (Raw f) json in
+    post json
+    @@ fun res ->
+    let _, reader = res in
+    match res_typ with
+    | Default ->
+      let read_all flow =
+        Eio.Buf_read.(parse_exn take_all) flow ~max_size:Int.max_value
+      in
+      let data = read_all reader in
+      print_endline "Received data:";
+      print_endline data;
+      let json_result =
+        Jsonaf.parse data
+        |> Result.bind ~f:(fun json ->
+          match Jsonaf.member "error" json with
+          | None -> Or_error.error_string ""
+          | Some `Null -> Or_error.error_string ""
+          | Some json -> Ok json)
+      in
+      (match json_result with
+       | Ok _ -> failwith data
+       | Error _ -> (Response.t_of_jsonaf @@ Jsonaf.of_string @@ data : a))
+    | Stream cb ->
+      let reader = Eio.Buf_read.of_flow reader ~max_size:Int.max_value in
+      let lines = Buf_read.lines reader in
+      let rec loop seq =
+        match Seq.uncons seq with
+        | None -> ()
+        | Some (line, seq) ->
+          Io.log ~dir ~file:"./raw-openai-streaming-response.txt" (line ^ "\n");
+          let json_result =
+            Jsonaf.parse line
+            |> Result.bind ~f:(fun json ->
+              match Jsonaf.member "error" json with
+              | None -> Or_error.error_string ""
+              | Some json -> Ok json)
+          in
+          (match json_result with
+           | Ok _ -> failwith line
+           | Error _ ->
+             let line =
+               String.concat
+               @@ List.filter ~f:(fun s -> not @@ String.is_empty s)
+               @@ String.split_lines line
+             in
+             let choice =
+               match
+                 String.is_prefix ~prefix:"data: " line
+                 && (not @@ String.is_prefix ~prefix:"data: [DONE]" line)
+               with
+               | false -> None
+               | true ->
+                 (match
+                    Jsonaf.parse @@ String.chop_prefix_exn line ~prefix:"data: "
+                    |> Result.bind ~f:(fun json -> Ok json)
+                  with
+                  | Ok json ->
+                    let event = Response_stream.t_of_jsonaf @@ json in
+                    Some event
+                  | Error _ -> None)
+             in
+             (match choice with
+              | None ->
+                let done_ =
+                  match line with
+                  | "data: [DONE]" -> true
+                  | _ -> false
+                in
+                if done_ then () else loop seq
+              | Some choice ->
+                cb choice;
+                loop seq))
+      in
+      loop lines
+  ;;
+end

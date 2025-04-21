@@ -16,31 +16,15 @@ let () =
     {|
     (* Type checking succeeded! Uncaught exception: (Failure "No field 'age' in record") *)
     (* --------------------------------------- *)
-    let p = { name = "Charlie"; age = 25 }
+    let p = {name = "Alice"}
     let f p =
-		  let inc_age person =
-		    person.age <- person.age + 1
-		  in
-      print([p.name]);
-      inc_age(p)
-    f(p)
-
-    let rec fib n =
-      if n <= 1 then n
-      else fib(n - 1) + fib(n - 2)
-    print([fib(10)])
+        let inc_age person =
+            person.age <- person.age + 1
+        in
+        print([p.name]);
+        inc_age(p)
     
- 
-  
-   let fn s =
-      if s == "" then
-        `None
-      else
-        `Some(s)
-    match fn("") with
-    | `Some(x) -> print([`Some(x)])
-    | `None -> print(["None"])
-  
+    f(p)
 
 
   |}
@@ -76,6 +60,7 @@ let () =
   |}
   in
   let ast = parse code in
-  Chatml_typechecker.infer_program ast;
-  eval_program env ast
+  let alpha_prog = Chatml_alpha.alpha_convert_program ast in
+  Chatml_typechecker.infer_program alpha_prog;
+  eval_program env alpha_prog
 ;;

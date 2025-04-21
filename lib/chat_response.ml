@@ -1,0 +1,390 @@
+open Core
+module CM = Prompt_template.Chat_markdown
+module Res = Openai.Responses
+
+(*──────────────────────── 1.  Agent response cache ─────────────────────*)
+module Agent_key = struct
+  type t = CM.agent_content [@@deriving sexp, bin_io, hash, compare]
+
+  let invariant (_ : t) = ()
+end
+
+module Agent_LRU = Ttl_lru_cache.Make (Agent_key)
+
+type persistent_form =
+  { max_size : int
+  ; items : (Agent_key.t * string Agent_LRU.entry) list
+  }
+[@@deriving bin_io]
+
+let to_persistent lru =
+  { max_size = Agent_LRU.max_size lru; items = Agent_LRU.to_alist lru }
+;;
+
+let of_persistent pf =
+  let cache = Agent_LRU.create ~max_size:pf.max_size () in
+  List.iter pf.items ~f:(fun (k, v) -> Agent_LRU.set cache ~key:k ~data:v);
+  cache
+;;
+
+let write_cache ~file cache =
+  Bin_prot_utils.write_bin_prot' file [%bin_writer: persistent_form] (to_persistent cache)
+;;
+
+let read_cache ~file =
+  of_persistent (Bin_prot_utils.read_bin_prot' file [%bin_reader: persistent_form])
+;;
+
+(*──────────────────────── 2.  Helpers ───────────────────────────────────*)
+let clean_html raw =
+  let decompressed = Option.value ~default:raw (Result.ok (Ezgzip.decompress raw)) in
+  let soup = Soup.parse decompressed in
+  soup
+  |> Soup.texts
+  |> List.map ~f:String.strip
+  |> List.filter ~f:(Fn.non String.is_empty)
+  |> String.concat ~sep:"\n"
+;;
+
+let tab_on_newline (input : string) : string =
+  let buffer = Buffer.create (String.length input) in
+  String.iter
+    ~f:(fun c ->
+      let open Char in
+      Buffer.add_char buffer c;
+      if c = '\n'
+      then (
+        Buffer.add_char buffer '\t';
+        Buffer.add_char buffer '\t'))
+    input;
+  Buffer.contents buffer
+;;
+
+let get_remote ?(gzip = false) ~net url =
+  let host = Io.Net.get_host url
+  and path = Io.Net.get_path url in
+  let headers =
+    Http.Header.of_list
+      (if gzip
+       then [ "Accept", "*/*"; "Accept-Encoding", "gzip" ]
+       else [ "Accept", "*/*" ])
+  in
+  Io.Net.get Io.Net.Default ~net ~host ~headers path
+;;
+
+let get_content ~dir ~net url is_local ~cleanup_html =
+  if is_local
+  then Io.load_doc ~dir url
+  else (
+    let raw = get_remote ~net url in
+    if cleanup_html then clean_html raw else raw)
+;;
+
+(*──────────────────────── 3.  Converting CM → Res.Item.t ────────────────*)
+let rec string_of_items ~dir ~net ~cache (items : CM.content_item list) : string =
+  items
+  |> List.map ~f:(function
+    | CM.Basic b ->
+      (match b.image_url, b.document_url with
+       | Some { url }, _ ->
+         if b.is_local
+         then Printf.sprintf "<img src=\"%s\" local=\"true\"/>" url
+         else Printf.sprintf "<img src=\"%s\"/>" url
+       | _, Some doc_url ->
+         get_content ~dir ~net doc_url b.is_local ~cleanup_html:b.cleanup_html
+       | _, _ -> Option.value ~default:"" b.text)
+    | CM.Agent ({ url; is_local; items } as agent) ->
+      Agent_LRU.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
+        let prompt = get_content ~dir ~net url is_local ~cleanup_html:false in
+        run_agent ~dir ~net ~cache prompt items))
+  |> String.concat ~sep:"\n"
+
+and convert_basic_item ~dir ~net ~cache:_ (b : CM.basic_content_item)
+  : Res.Input_message.content_item
+  =
+  match b.image_url, b.document_url with
+  | Some { url }, _ ->
+    let final = if b.is_local then Io.Base64.file_to_data_uri ~dir url else url in
+    Image { image_url = final; detail = "auto"; _type = "input_image" }
+  | _, Some doc ->
+    let txt = get_content ~dir ~net doc b.is_local ~cleanup_html:b.cleanup_html in
+    Text { text = txt; _type = "input_text" }
+  | _ -> Text { text = Option.value ~default:"" b.text; _type = "input_text" }
+
+and convert_content_item ~dir ~net ~cache (ci : CM.content_item)
+  : Res.Input_message.content_item
+  =
+  match ci with
+  | CM.Basic b -> convert_basic_item ~dir ~net ~cache b
+  | CM.Agent ({ url; is_local; items } as agent) ->
+    let txt =
+      Agent_LRU.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
+        let prompt = get_content ~dir ~net url is_local ~cleanup_html:false in
+        run_agent ~dir ~net ~cache prompt items)
+    in
+    Text { text = txt; _type = "input_text" }
+
+and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
+  let role =
+    match String.lowercase m.role with
+    | "assistant" -> `Assistant
+    | "user" -> `User
+    | "system" -> `System
+    | "developer" -> `Developer
+    | other -> failwithf "unknown role %s" other ()
+  in
+  match role with
+  | `Assistant ->
+    let text =
+      match m.content with
+      | None -> ""
+      | Some (CM.Text t) -> t
+      | Some (CM.Items items) -> string_of_items ~dir ~net ~cache items
+    in
+    Res.Item.Output_message
+      { role = Assistant
+      ; id = Option.value ~default:"" m.id
+      ; status = Option.value m.status ~default:"completed"
+      ; _type = "message"
+      ; content = [ { annotations = []; text; _type = "output_text" } ]
+      }
+  | (`User | `System | `Developer) as r ->
+    let role_val =
+      match r with
+      | `User -> Res.Input_message.User
+      | `System -> Res.Input_message.System
+      | `Developer -> Res.Input_message.Developer
+    in
+    let content_items =
+      match m.content with
+      | None -> []
+      | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
+      | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~dir ~net ~cache)
+    in
+    Res.Item.Input_message { role = role_val; content = content_items; _type = "message" }
+
+and convert_reasoning (r : CM.reasoning) : Res.Item.t =
+  let summ =
+    List.map r.summary ~f:(fun s -> { Res.Reasoning.text = s.text; _type = s._type })
+  in
+  Res.Item.Reasoning { id = r.id; status = r.status; _type = "reasoning"; summary = summ }
+
+and elements_to_items ~dir ~net ~cache (els : CM.top_level_elements list)
+  : Res.Item.t list
+  =
+  List.filter_map els ~f:(function
+    | CM.Msg m -> Some (convert_msg ~dir ~net ~cache m)
+    | CM.Reasoning r -> Some (convert_reasoning r)
+    | CM.Config _ -> None)
+
+(*──────────────────────── 4.  Tools conversion  ─────────────────────────*)
+and convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list =
+  List.map ts ~f:(fun { type_; function_ = { name; description; parameters; strict } } ->
+    Res.Request.Tool.{ name; description; parameters; strict; type_ })
+
+(*──────────────────────── 5.  Agent recursion using Responses API ───────*)
+and run_agent ~dir ~net ~cache (prompt_xml : string) (items : CM.content_item list)
+  : string
+  =
+  let user_suffix =
+    if List.is_empty items
+    then ""
+    else "<msg role=\"user\">\n" ^ string_of_items ~dir ~net ~cache items ^ "\n</msg>"
+  in
+  let full_xml = prompt_xml ^ "\n" ^ user_suffix in
+  let parsed = CM.parse_chat_inputs ~dir full_xml in
+  let req_items = elements_to_items ~dir ~net ~cache parsed in
+  let resp = Res.post_response Res.Default ~dir net ~inputs:req_items in
+  resp.output
+  |> List.filter_map ~f:(function
+    | Res.Item.Output_message o ->
+      Some (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
+    | _ -> None)
+  |> String.concat ~sep:"\n"
+;;
+
+(*──────────────────────── 6.  Main driver  ───────────────────────────────*)
+let rec execute_response_loop
+          ~dir
+          ~net
+          ~cache
+          ?temperature
+          ?max_output_tokens
+          ?tools
+          ?reasoning
+          ~model
+          ~tool_tbl
+          (history : Res.Item.t list)
+  : Res.Item.t list
+  =
+  let response =
+    Res.post_response
+      Res.Default
+      ~dir
+      ~model
+      ?temperature
+      ?max_output_tokens
+      ?tools
+      ?reasoning
+      net
+      ~inputs:history
+  in
+  let new_items = response.output in
+  let function_calls =
+    List.filter_map new_items ~f:(function
+      | Res.Item.Function_call fc -> Some fc
+      | _ -> None)
+  in
+  if List.is_empty function_calls
+  then history @ new_items
+  else (
+    (* run every function, create corresponding Function_call_output items *)
+
+    (* adapt to your function set *)
+    let outputs =
+      List.map function_calls ~f:(fun fc ->
+        let f = Hashtbl.find_exn tool_tbl fc.name in
+        let res = f fc.arguments in
+        Res.Item.Function_call_output
+          { output = res
+          ; call_id = fc.call_id
+          ; _type = "function_call_output"
+          ; id = None
+          ; status = None
+          })
+    in
+    execute_response_loop
+      ~dir
+      ~net
+      ~cache
+      ?temperature
+      ?max_output_tokens
+      ?tools
+      ?reasoning
+      ~model
+      ~tool_tbl
+      (history @ new_items @ outputs))
+;;
+
+(*──────────────────────── 7.  Public helper  ─────────────────────────────*)
+let run_completion
+      ~env
+      ?prompt_file (* optional template to prepend *)
+      ~output_file (* evolving conversation buffer *)
+      ()
+  =
+  let dir = Eio.Stdenv.fs env in
+  let net = env#net in
+  let cache =
+    if Eio.Path.is_file Eio.Path.(dir / "cache.bin")
+    then read_cache ~file:"./cache.bin"
+    else Agent_LRU.create ~max_size:1000 ()
+  in
+  (* 1 • append initial prompt file if provided *)
+  Option.iter prompt_file ~f:(fun file ->
+    Io.append_doc ~dir output_file (Io.load_doc ~dir file));
+  (* 2 • main loop *)
+  let rec loop () =
+    let xml = Io.load_doc ~dir output_file in
+    let elements = CM.parse_chat_inputs ~dir xml in
+    (* gather config *)
+    let cfg =
+      List.filter_map elements ~f:(function
+        | CM.Config c -> Some c
+        | _ -> None)
+      |> List.hd
+    in
+    let CM.{ max_tokens = model_tokens; model = model_opt; reasoning_effort; temperature }
+      =
+      Option.value
+        cfg
+        ~default:
+          { max_tokens = None; model = None; reasoning_effort = None; temperature = None }
+    in
+    let reasoning =
+      Option.map reasoning_effort ~f:(fun eff ->
+        { Res.Request.Reasoning.effort =
+            Some (Res.Request.Reasoning.Effort.of_str_exn eff)
+        ; summary = Some Detailed
+        })
+    in
+    (* tools / function mapping *)
+    let comp_tools, tool_tbl = Gpt_function.functions [] in
+    let tools = convert_tools comp_tools in
+    (* convert xml → items and fire first request *)
+    let init_items = elements_to_items ~dir ~net ~cache elements in
+    let all_items =
+      execute_response_loop
+        ~dir
+        ~net
+        ~cache
+        ?temperature
+        ?max_output_tokens:model_tokens
+        ~tools
+        ?reasoning
+        ~tool_tbl
+        ~model:
+          (Option.value_map
+             model_opt
+             ~default:Res.Request.Gpt4
+             ~f:Res.Request.model_of_str_exn)
+        init_items
+    in
+    (* 3 • render assistant text back into XML buffer *)
+    let append = Io.append_doc ~dir output_file in
+    List.iter
+      (List.drop all_items (List.length init_items))
+      ~f:(function
+        | Res.Item.Output_message o ->
+          append
+            (Printf.sprintf
+               "<msg role=\"assistant\" id=\"%s\">\n\t<raw>\n\t\t%s\n\t</raw>\n</msg>\n"
+               o.id
+               (tab_on_newline
+                  (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")))
+        | Res.Item.Reasoning r ->
+          (match r.summary with
+           | [] -> ()
+           | _ ->
+             let summaries =
+               List.map r.summary ~f:(fun s ->
+                 Printf.sprintf
+                   "\n<summary>\n\t\t%s\n</summary>\n"
+                   (tab_on_newline s.text))
+               |> String.concat ~sep:""
+             in
+             print_endline "summaries";
+             print_endline summaries;
+             append
+               (Printf.sprintf
+                  "\n<reasoning id=\"%s\">\n%s\n</reasoning>\n"
+                  r.id
+                  (tab_on_newline summaries)))
+        | Res.Item.Function_call fc ->
+          append
+            (Printf.sprintf
+               "\n\
+                <msg role=\"assistant\" function_call function_name=\"%s\" call_id=\"%s\">\n\
+                <raw>%s</raw>\n\
+                </msg>\n"
+               fc.name
+               fc.call_id
+               fc.arguments)
+        | Res.Item.Function_call_output fco ->
+          append
+            (Printf.sprintf
+               "\n<msg role=\"tool\" call_id=\"%s\"><raw>%s</raw></msg>\n"
+               fco.call_id
+               fco.output)
+        | Res.Item.Input_message _ -> ());
+    (* stop if no new function calls were produced *)
+    if
+      List.exists all_items ~f:(function
+        | Res.Item.Function_call _ -> true
+        | _ -> false)
+    then loop ()
+    else append "\n<msg role=\"user\">\n\n</msg>"
+  in
+  loop ();
+  write_cache ~file:"./cache.bin" cache
+;;

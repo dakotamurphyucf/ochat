@@ -23,18 +23,25 @@ let handle_job traverse_input =
   List.map ~f:(fun input -> Ocaml_parser.traverse input) traverse_input
   |> List.concat
   |> List.map ~f:Ocaml_parser.format_parse_result
-  |> List.map ~f:(fun (metadata, doc) -> Doc.hash_string_md5 (metadata  ^ "\n" ^ doc), doc, metadata)
+  |> List.map ~f:(fun (metadata, doc) ->
+    Doc.hash_string_md5 (metadata ^ "\n" ^ doc), doc, metadata)
 ;;
 
 let chunk n = List.groupi ~break:(fun i _ _ -> i mod n = 0)
 
 let get_vectors ~net docs =
   let tbl = Hashtbl.create (module Int) in
-  List.iteri ~f:(fun i (id, doc, meta) -> Hashtbl.add_exn tbl ~key:i ~data:(id, doc, meta)) docs;
-  let response = Openai.post_openai_embeddings net ~input:(List.map ~f:(fun  (_id, doc, _meta) -> doc ) docs) in
+  List.iteri
+    ~f:(fun i (id, doc, meta) -> Hashtbl.add_exn tbl ~key:i ~data:(id, doc, meta))
+    docs;
+  let response =
+    Openai.Embeddings.post_openai_embeddings
+      net
+      ~input:(List.map ~f:(fun (_id, doc, _meta) -> doc) docs)
+  in
   List.map response.data ~f:(fun item ->
     let id, doc, meta = Hashtbl.find_exn tbl item.index in
-    meta  ^ "\n" ^ doc, Vector_db.Vec.{ id; vector = Array.of_list item.embedding })
+    meta ^ "\n" ^ doc, Vector_db.Vec.{ id; vector = Array.of_list item.embedding })
 ;;
 
 let index ~sw ~dir ~dm ~net ~vector_db_folder ~folder_to_index =
@@ -54,12 +61,12 @@ let index ~sw ~dir ~dm ~net ~vector_db_folder ~folder_to_index =
     save_doc ~dir:vf v.Vector_db.Vec.id doc;
     v
   in
-  let f (iface, imple)  info =
+  let f (iface, imple) info =
     match info with
-    | None, None -> (iface, imple)
-    | Some mli, Some ml -> (mli :: iface, ml :: imple)
-    | Some mli, None -> (mli :: iface,  imple)
-    | None, Some ml -> (iface, ml :: imple)
+    | None, None -> iface, imple
+    | Some mli, Some ml -> mli :: iface, ml :: imple
+    | Some mli, None -> mli :: iface, imple
+    | None, Some ml -> iface, ml :: imple
   in
   let task thunks =
     traceln "Client  submitting job...";

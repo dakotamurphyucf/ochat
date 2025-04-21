@@ -8,3 +8,5 @@ interview/
 out.txt
 raw-openai-chat-streaming-response.txt
 .vscode/
+prompts/
+chatgpt_history/
