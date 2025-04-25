@@ -110,7 +110,7 @@ let chat_completion_command =
 
        (* log ~dir @@ sprintf "Saving chat completion output to: %s\n" output_file; *)
        (* Chat_completion.run_completion ~env ~output_file ~prompt_file *)
-       Chat_response.run_completion ~env ?prompt_file ~output_file ())
+       Chat_response.run_completion_stream ~env ?prompt_file ~output_file ())
 ;;
 
 (* let output = Chat_completion.run env in *)

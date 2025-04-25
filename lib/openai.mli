@@ -396,6 +396,120 @@ module Responses : sig
   end
 
   module Response_stream : sig
+    module Error : sig
+      type t =
+        { code : string option
+        ; message : string
+        ; param : string option
+        ; type_ : string [@key "type"]
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Incomplete_details : sig
+      type t =
+        { reason : string option
+        ; model_output_start : int option
+        ; tokens : int option
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Text_cfg : sig
+      module Format : sig
+        module Text : sig
+          type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
+        end
+
+        module Json_schema : sig
+          type t =
+            { type_ : string
+            ; name : string
+            ; schema : Jsonaf.t
+            ; description : string
+            ; strict : bool option
+            }
+          [@@deriving jsonaf, sexp, bin_io]
+        end
+
+        module Json_Object : sig
+          type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
+        end
+
+        type t =
+          | Text of Text.t
+          | Json_schema of Json_schema.t
+          | Json_Object of Json_Object.t
+        [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      type t = { format : Format.t } [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Tool_choice : sig
+      module Hosted_tool : sig
+        type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      module Function_tool : sig
+        type t =
+          { name : string
+          ; type_ : string
+          }
+        [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      type t =
+        | Mode of string
+        | Hosted of Hosted_tool.t
+        | Function of Function_tool.t
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Usage : sig
+      type t =
+        { input_tokens : int
+        ; input_tokens_details : Jsonaf.t
+        ; output_tokens : int
+        ; output_tokens_details : Jsonaf.t
+        ; total_tokens : int
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Metadata : sig
+      type t = (string * string) list [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Response_obj : sig
+      type t =
+        { id : string
+        ; object_ : string
+        ; created_at : int
+        ; status : Status.t
+        ; error : Error.t option
+        ; incomplete_details : Incomplete_details.t option
+        ; instructions : string option
+        ; max_output_tokens : int option
+        ; model : string
+        ; output : Item.t list
+        ; parallel_tool_calls : bool option
+        ; previous_response_id : string option
+        ; reasoning : Request.Reasoning.t option
+        ; store : bool option
+        ; temperature : float option
+        ; text : Text_cfg.t option
+        ; tool_choice : Tool_choice.t option
+        ; tools : Request.Tool.t list option
+        ; top_p : float option
+        ; truncation : string option
+        ; usage : Usage.t option
+        ; user : string option
+        ; metadata : Metadata.t option
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
     module Item : sig
       type t =
         | Input_message of Input_message.t
@@ -425,7 +539,29 @@ module Responses : sig
 
     module Output_text_delta : sig
       type t =
-        { context_index : int
+        { content_index : int
+        ; delta : string
+        ; item_id : string
+        ; output_index : int
+        ; type_ : string
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Output_text_done : sig
+      type t =
+        { content_index : int
+        ; text : string
+        ; item_id : string
+        ; output_index : int
+        ; type_ : string
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Reasoning_summary_text_delta : sig
+      type t =
+        { summary_index : int
         ; delta : string
         ; item_id : string
         ; output_index : int
@@ -454,12 +590,137 @@ module Responses : sig
       [@@deriving jsonaf, sexp, bin_io]
     end
 
+    module Response_created : sig
+      type t =
+        { type_ : string
+        ; response : Response_obj.t
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Response_in_progress : sig
+      type t =
+        { type_ : string
+        ; response : Response_obj.t
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Response_completed : sig
+      type t =
+        { type_ : string
+        ; response : Response_obj.t
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Response_incomplete : sig
+      type t =
+        { type_ : string
+        ; response : Response_obj.t
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Response_failed : sig
+      type t =
+        { type_ : string
+        ; response : Response_obj.t
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Part : sig
+      module Output_text : sig
+        type t =
+          { type_ : string
+          ; text : string
+          ; annotations : string list
+          }
+        [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      module Refusal : sig
+        type t =
+          { type_ : string
+          ; refusal : string
+          }
+        [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      type t =
+        | Output_text of Output_text.t
+        | Refusal of Refusal.t
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Content_part_added : sig
+      type t =
+        { type_ : string
+        ; content_index : int
+        ; item_id : string
+        ; output_index : int
+        ; part : Part.t
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Content_part_done : sig
+      type t =
+        { type_ : string
+        ; content_index : int
+        ; item_id : string
+        ; output_index : int
+        ; part : Part.t
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Response_refusal_delta : sig
+      type t =
+        { content_index : int
+        ; delta : string
+        ; item_id : string
+        ; output_index : int
+        ; type_ : string
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Response_refusal_done : sig
+      type t =
+        { content_index : int
+        ; refusal : string
+        ; item_id : string
+        ; output_index : int
+        ; type_ : string
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Unknown : sig
+      type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
+    end
+
     type t =
       | Output_item_added of Output_item_added.t
       | Output_item_done of Output_item_done.t
       | Output_text_delta of Output_text_delta.t
+      | Output_text_done of Output_text_done.t
       | Function_call_arguments_delta of Function_call_arguments_delta.t
       | Function_call_arguments_done of Function_call_arguments_done.t
+      | Response_created of Response_created.t
+      | Response_in_progress of Response_in_progress.t
+      | Reasoning_summary_text_delta of Reasoning_summary_text_delta.t
+      | Response_completed of Response_completed.t
+      | Response_incomplete of Response_incomplete.t
+      | Response_failed of Response_failed.t
+      | Content_part_added of Content_part_added.t
+      | Content_part_done of Content_part_done.t
+      | Response_refusal_delta of Response_refusal_delta.t
+      | Response_refusal_done of Response_refusal_done.t
+      | Error of Error.t
+      | Unknown of Unknown.t
     [@@deriving jsonaf, sexp, bin_io]
   end
 

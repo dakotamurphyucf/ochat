@@ -61,7 +61,7 @@
  (modules openai)
  (libraries
   io
-  jsonaf
+  jsonaf_ext
   tls-eio
   core
   eio
@@ -270,7 +270,13 @@
   (preprocess
   (pps ppx_jane)))
 
-
+(library
+  (name jsonaf_ext)
+  (public_name chatgpt.jsonaf_ext)
+  (modules jsonaf_ext)
+  (libraries jsonaf core)
+  (preprocess
+  (pps ppx_jane)))
 
 (menhir
   (modules chatml_parser)

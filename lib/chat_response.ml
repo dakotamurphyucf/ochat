@@ -343,23 +343,18 @@ let run_completion
                (tab_on_newline
                   (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")))
         | Res.Item.Reasoning r ->
-          (match r.summary with
-           | [] -> ()
-           | _ ->
-             let summaries =
-               List.map r.summary ~f:(fun s ->
-                 Printf.sprintf
-                   "\n<summary>\n\t\t%s\n</summary>\n"
-                   (tab_on_newline s.text))
-               |> String.concat ~sep:""
-             in
-             print_endline "summaries";
-             print_endline summaries;
-             append
-               (Printf.sprintf
-                  "\n<reasoning id=\"%s\">\n%s\n</reasoning>\n"
-                  r.id
-                  (tab_on_newline summaries)))
+          let summaries =
+            List.map r.summary ~f:(fun s ->
+              Printf.sprintf "\n<summary>\n\t\t%s\n</summary>\n" (tab_on_newline s.text))
+            |> String.concat ~sep:""
+          in
+          print_endline "summaries";
+          print_endline summaries;
+          append
+            (Printf.sprintf
+               "\n<reasoning id=\"%s\">\n%s\n</reasoning>\n"
+               r.id
+               (tab_on_newline summaries))
         | Res.Item.Function_call fc ->
           append
             (Printf.sprintf
@@ -386,5 +381,181 @@ let run_completion
     else append "\n<msg role=\"user\">\n\n</msg>"
   in
   loop ();
+  write_cache ~file:"./cache.bin" cache
+;;
+
+let run_completion_stream
+      ~env
+      ?prompt_file (* optional template to prepend once          *)
+      ~output_file (* evolving conversation buffer               *)
+      ()
+  =
+  (* ─────────────────────── 0.  setup & helpers ───────────────────────── *)
+  let dir = Eio.Stdenv.fs env
+  and net = env#net in
+  let cache =
+    if Eio.Path.is_file Eio.Path.(dir / "cache.bin")
+    then read_cache ~file:"./cache.bin"
+    else Agent_LRU.create ~max_size:1_000 ()
+  in
+  let append_doc = Io.append_doc ~dir output_file in
+  Option.iter prompt_file ~f:(fun file -> append_doc (Io.load_doc ~dir file));
+  (* Pretty logger: every event – even if we do not act on it *)
+  let log_event ev =
+    print_endline "STREAM EVENT:";
+    print_endline (Jsonaf.to_string_hum (Res.Response_stream.jsonaf_of_t ev))
+  in
+  (* ─────────────────────── 1.  main recursive turn ────────────────────── *)
+  let rec turn () =
+    (* 1‑A • read current prompt XML and parse *)
+    let xml = Io.load_doc ~dir output_file in
+    let elements = CM.parse_chat_inputs ~dir xml in
+    (* 1‑B • current config (max_tokens, model, …) *)
+    let cfg =
+      List.filter_map elements ~f:(function
+        | CM.Config c -> Some c
+        | _ -> None)
+      |> List.hd
+    in
+    let CM.{ max_tokens; model; reasoning_effort; temperature } =
+      Option.value
+        cfg
+        ~default:
+          { max_tokens = None; model = None; reasoning_effort = None; temperature = None }
+    in
+    let model =
+      Option.value_map model ~f:Res.Request.model_of_str_exn ~default:Res.Request.Gpt4
+    in
+    let reasoning =
+      Option.map reasoning_effort ~f:(fun eff ->
+        Res.Request.Reasoning.
+          { effort = Some (Effort.of_str_exn eff); summary = Some Summary.Detailed })
+    in
+    (* 1‑C • tools / functions *)
+    let comp_tools, tool_tbl = Gpt_function.functions [] in
+    let tools = convert_tools comp_tools in
+    (* 1‑D • initial request items *)
+    let inputs = elements_to_items ~dir ~net ~cache elements in
+    (* ────────────────── 2.  streaming callback state ─────────────────── *)
+    (* existing tables … *)
+    let opened_msgs : (string, unit) Hashtbl.t = Hashtbl.create (module String)
+    and func_info : (string, string * string) Hashtbl.t = Hashtbl.create (module String)
+    (* NEW – track currently open reasoning‑blocks, mapping id → current summary_index *)
+    and reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
+    let run_again = ref false in
+    let output_text_delta ~id txt =
+      if not (Hashtbl.mem opened_msgs id)
+      then (
+        append_doc
+          (Printf.sprintf "\n<msg role=\"assistant\" id=\"%s\">\n\t<raw>\n\t\t" id);
+        Hashtbl.set opened_msgs ~key:id ~data:());
+      append_doc (tab_on_newline txt)
+    in
+    let close_message id =
+      if Hashtbl.mem opened_msgs id
+      then (
+        append_doc "\n\t</raw>\n</msg>\n";
+        Hashtbl.remove opened_msgs id)
+    in
+    let lt, gt = "<", ">" in
+    (* avoid raw “<tag>” in the output *)
+    let open_reasoning id =
+      append_doc
+        (Printf.sprintf "\n%sreasoning id=\"%s\"%s\n\t%ssummary%s\n\t\t" lt id gt lt gt)
+    in
+    let open_new_summary () = append_doc (Printf.sprintf "\n\t%ssummary%s\n\t\t" lt gt) in
+    let close_summary () = append_doc (Printf.sprintf "\n\t%s/summary%s" lt gt) in
+    let close_reasoning () = append_doc (Printf.sprintf "\n%s/reasoning%s\n" lt gt) in
+    let handle_function_done ~item_id ~arguments =
+      match Hashtbl.find func_info item_id with
+      | None -> () (* should not happen *)
+      | Some (name, call_id) ->
+        (* assistant’s tool‑call request *)
+        append_doc
+          (Printf.sprintf
+             "\n\
+              <msg role=\"assistant\" tool_call tool_call_id=\"%s\" function_name=\"%s\">\n\
+              <raw>\n\
+              %s\n\
+              </raw>\n\
+              </msg>\n\n"
+             call_id
+             name
+             arguments);
+        (* run the tool *)
+        let fn = Hashtbl.find_exn tool_tbl name in
+        let result = fn arguments in
+        append_doc
+          (Printf.sprintf
+             "\n<msg role=\"tool\" tool_call_id=\"%s\">\n<raw>\n%s\n</raw>\n</msg>\n\n"
+             call_id
+             result);
+        run_again := true
+    in
+    let callback (ev : Res.Response_stream.t) =
+      log_event ev;
+      match ev with
+      (* ─────────────────────────── assistant text ─────────────────────── *)
+      | Res.Response_stream.Output_text_delta { item_id; delta; _ } ->
+        output_text_delta ~id:item_id delta
+      | Res.Response_stream.Output_item_done { item; _ } ->
+        (match item with
+         | Res.Response_stream.Item.Output_message om -> close_message om.id
+         | Res.Response_stream.Item.Reasoning r ->
+           (* close an open reasoning block, if any *)
+           (match Hashtbl.find reasoning_state r.id with
+            | Some _ ->
+              close_summary ();
+              close_reasoning ();
+              Hashtbl.remove reasoning_state r.id
+            | None -> ())
+         | _ -> ())
+      (* ─────────────────────────── reasoning deltas ───────────────────── *)
+      | Res.Response_stream.Reasoning_summary_text_delta
+          { item_id; delta; summary_index; _ } ->
+        (match Hashtbl.find reasoning_state item_id with
+         | None ->
+           (* first chunk for this reasoning item *)
+           open_reasoning item_id;
+           Hashtbl.set reasoning_state ~key:item_id ~data:summary_index
+         | Some current when current = summary_index -> () (* same summary → continue *)
+         | Some _ ->
+           (* moved to the next summary *)
+           close_summary ();
+           open_new_summary ();
+           Hashtbl.set reasoning_state ~key:item_id ~data:summary_index);
+        append_doc (tab_on_newline delta)
+      (* ─────────────────────────── function calls etc. ────────────────── *)
+      | Res.Response_stream.Output_item_added { item; _ } ->
+        (match item with
+         | Res.Response_stream.Item.Function_call fc ->
+           let idx = Option.value fc.id ~default:fc.call_id in
+           Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
+         | Res.Response_stream.Item.Reasoning r ->
+           (* first chunk for this reasoning item *)
+           open_reasoning r.id;
+           Hashtbl.set reasoning_state ~key:r.id ~data:0
+         | _ -> ())
+      | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
+        handle_function_done ~item_id ~arguments
+      | _ -> ()
+    in
+    (* ────────────────── 3.  fire request in stream mode ──────────────── *)
+    Res.post_response
+      (Res.Stream callback)
+      ?max_output_tokens:max_tokens
+      ?temperature
+      ~tools
+      ?reasoning
+      ~model
+      ~dir
+      net
+      ~inputs;
+    (* make sure any dangling assistant block is closed *)
+    Hashtbl.iter_keys opened_msgs ~f:(fun id -> close_message id);
+    (* 4 • If a function call just happened, recurse for the next turn.   *)
+    if !run_again then turn () else append_doc "\n<msg role=\"user\">\n\n</msg>"
+  in
+  turn ();
   write_cache ~file:"./cache.bin" cache
 ;;
