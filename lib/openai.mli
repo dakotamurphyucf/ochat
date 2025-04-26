@@ -412,14 +412,116 @@ module Responses : sig
     end
 
     module Tool : sig
+      module File_search : sig
+        module Filter : sig
+          module Value : sig
+            type t =
+              | String of string
+              | Number of float
+              | Boolean of bool
+            [@@deriving jsonaf, sexp, bin_io]
+          end
+
+          module Comparison : sig
+            module Type : sig
+              type t =
+                | Eq
+                | Ne
+                | Gt
+                | Gte
+                | Lt
+                | Lte
+              [@@deriving jsonaf, sexp, bin_io]
+            end
+
+            type t =
+              { key : string
+              ; type_ : Type.t
+              ; value : Value.t
+              }
+            [@@deriving jsonaf, sexp, bin_io]
+          end
+
+          module Compound : sig
+            module Type : sig
+              type t =
+                | And
+                | Or
+              [@@deriving jsonaf, sexp, bin_io]
+            end
+
+            type filters =
+              | Comparison of Comparison.t
+              | Compound of t
+            [@@deriving jsonaf, sexp, bin_io]
+
+            and t =
+              { type_ : Type.t
+              ; filters : filters list
+              }
+            [@@deriving jsonaf, sexp, bin_io]
+          end
+
+          type t =
+            | Comparison of Comparison.t
+            | Compound of Compound.t
+          [@@deriving jsonaf, sexp, bin_io]
+        end
+
+        module Ranking_options : sig
+          type t =
+            { ranker : string option
+            ; score_threshold : float option
+            }
+          [@@deriving jsonaf, sexp, bin_io]
+        end
+
+        type t =
+          { type_ : string
+          ; vector_store_ids : string list
+          ; filters : Filter.t list option
+          ; max_num_results : int option
+          ; ranking_options : Ranking_options.t option
+          }
+        [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      module Web_search : sig
+        module User_location : sig
+          type t =
+            { type_ : string
+            ; city : string option
+            ; country : string option
+            ; region : string option
+            ; timezone : string option
+            }
+          [@@deriving jsonaf, sexp, bin_io]
+        end
+
+        type t =
+          { type_ : string
+          ; search_context_size : string option
+          ; user_location : User_location.t option
+          }
+        [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      module Function : sig
+        type t =
+          { name : string
+          ; description : string option
+          ; parameters : Jsonaf.t
+          ; strict : bool
+          ; type_ : string
+          }
+        [@@deriving jsonaf, bin_io, sexp]
+      end
+
       type t =
-        { name : string
-        ; description : string option
-        ; parameters : Jsonaf.t
-        ; strict : bool
-        ; type_ : string
-        }
-      [@@deriving jsonaf, sexp]
+        | File_search of File_search.t
+        | Web_search of Web_search.t
+        | Function of Function.t
+      [@@deriving jsonaf, bin_io, sexp]
     end
 
     type t =

@@ -867,15 +867,241 @@ module Responses = struct
     end
 
     module Tool = struct
+      module File_search = struct
+        module Filter = struct
+          module Value = struct
+            type t =
+              | String of string
+              | Number of float
+              | Boolean of bool
+            [@@deriving sexp, bin_io]
+
+            let jsonaf_of_t = function
+              | String s -> `String s
+              | Number n -> `Number (Float.to_string n)
+              | Boolean b -> if b then `True else `False
+            ;;
+
+            let t_of_jsonaf = function
+              | `String s -> String s
+              | `Number n -> Number (Float.of_string n)
+              | `False -> Boolean false
+              | `True -> Boolean true
+              | _ -> failwith "Invalid value type"
+            ;;
+          end
+
+          module Comparison = struct
+            module Type = struct
+              type t =
+                | Eq
+                | Ne
+                | Gt
+                | Gte
+                | Lt
+                | Lte
+              [@@deriving sexp, bin_io]
+
+              let jsonaf_of_t = function
+                | Eq -> `String "eq"
+                | Ne -> `String "ne"
+                | Gt -> `String "gt"
+                | Gte -> `String "gte"
+                | Lt -> `String "lt"
+                | Lte -> `String "lte"
+              ;;
+
+              let t_of_jsonaf = function
+                | `String "eq" -> Eq
+                | `String "ne" -> Ne
+                | `String "gt" -> Gt
+                | `String "gte" -> Gte
+                | `String "lt" -> Lt
+                | `String "lte" -> Lte
+                | _ -> failwith "Invalid comparison type"
+              ;;
+            end
+
+            type t =
+              { key : string
+              ; type_ : Type.t [@key "type"]
+              ; value : Value.t
+              }
+            [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, bin_io, sexp]
+          end
+
+          module Compound = struct
+            module Type = struct
+              type t =
+                | And
+                | Or
+              [@@deriving sexp, bin_io]
+
+              let jsonaf_of_t = function
+                | And -> `String "and"
+                | Or -> `String "or"
+              ;;
+
+              let t_of_jsonaf = function
+                | `String "and" -> And
+                | `String "or" -> Or
+                | _ -> failwith "Invalid comparison type"
+              ;;
+            end
+
+            type filters =
+              | Comparison of Comparison.t
+              | Compound of t
+            [@@deriving sexp, bin_io]
+
+            and t =
+              { type_ : Type.t
+              ; filters : filters list
+              }
+            [@@deriving bin_io, sexp]
+
+            let rec jsonaf_of_filters = function
+              | Comparison comparison -> Comparison.jsonaf_of_t comparison
+              | Compound compound -> jsonaf_of_t compound
+
+            and filters_of_jsonaf = function
+              | `Object obj ->
+                (match Jsonaf.member "type" (`Object obj) with
+                 | Some (`String "eq")
+                 | Some (`String "ne")
+                 | Some (`String "gt")
+                 | Some (`String "gte")
+                 | Some (`String "lt")
+                 | Some (`String "lte") ->
+                   Comparison (Comparison.t_of_jsonaf (`Object obj))
+                 | Some (`String "or") | Some (`String "and") ->
+                   Compound (t_of_jsonaf (`Object obj))
+                 | _ -> failwith "Invalid filter type")
+              | _ -> failwith "Invalid filter format"
+
+            and jsonaf_of_t t =
+              let filters = List.map ~f:jsonaf_of_filters t.filters in
+              `Object (("type", Type.jsonaf_of_t t.type_) :: [ "filters", `Array filters ])
+
+            and t_of_jsonaf json =
+              match json with
+              | `Object obj ->
+                (match Jsonaf.member "type" (`Object obj) with
+                 | Some (`String "and") | Some (`String "or") ->
+                   let type_ =
+                     Type.t_of_jsonaf (Jsonaf.member_exn "type" (`Object obj))
+                   in
+                   let filters = Jsonaf.member_exn "filters" (`Object obj) in
+                   (match filters with
+                    | `Array arr ->
+                      let filters = List.map ~f:filters_of_jsonaf arr in
+                      { type_; filters }
+                    | _ -> failwith "Invalid filter type")
+                 | _ -> failwith "Invalid filter type")
+              | _ -> failwith "Invalid filter format"
+            ;;
+          end
+
+          type t =
+            | Comparison of Comparison.t
+            | Compound of Compound.t
+          [@@deriving bin_io, sexp]
+
+          let jsonaf_of_t = function
+            | Comparison comparison -> Comparison.jsonaf_of_t comparison
+            | Compound compound -> Compound.jsonaf_of_t compound
+          ;;
+
+          let t_of_jsonaf = function
+            | `Object obj ->
+              (match Jsonaf.member "type" (`Object obj) with
+               | Some (`String "eq")
+               | Some (`String "ne")
+               | Some (`String "gt")
+               | Some (`String "gte")
+               | Some (`String "lt")
+               | Some (`String "lte") -> Comparison (Comparison.t_of_jsonaf (`Object obj))
+               | Some (`String "or") | Some (`String "and") ->
+                 Compound (Compound.t_of_jsonaf (`Object obj))
+               | _ -> failwith "Invalid filter type")
+            | _ -> failwith "Invalid filter format"
+          ;;
+        end
+
+        module Ranking_options = struct
+          type t =
+            { ranker : string option [@jsonaf.option]
+            ; score_threshold : float option [@jsonaf.option]
+            }
+          [@@deriving jsonaf, sexp, bin_io]
+        end
+
+        type t =
+          { type_ : string [@key "type"]
+          ; vector_store_ids : string list
+          ; filters : Filter.t list option [@jsonaf.option]
+          ; max_num_results : int option [@jsonaf.option]
+          ; ranking_options : Ranking_options.t option [@jsonaf.option]
+          }
+        [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, bin_io, sexp]
+      end
+
+      module Web_search = struct
+        module User_location = struct
+          type t =
+            { type_ : string [@key "type"]
+            ; city : string option [@jsonaf.option]
+            ; country : string option [@jsonaf.option]
+            ; region : string option [@jsonaf.option]
+            ; timezone : string option [@jsonaf.option]
+            }
+          [@@deriving jsonaf, sexp, bin_io]
+        end
+
+        type t =
+          { type_ : string [@key "type"]
+          ; search_context_size : string option [@jsonaf.option]
+          ; user_location : User_location.t option
+          }
+        [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+      end
       (* need to update to add file search, computer use, web search *)
+
+      module Function = struct
+        type t =
+          { name : string
+          ; description : string option
+          ; parameters : Jsonaf.t
+          ; strict : bool
+          ; type_ : string [@key "type"]
+          }
+        [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, bin_io, sexp]
+      end
+
       type t =
-        { name : string
-        ; description : string option
-        ; parameters : Jsonaf.t
-        ; strict : bool
-        ; type_ : string [@key "type"]
-        }
-      [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, bin_io, sexp]
+        | File_search of File_search.t
+        | Web_search of Web_search.t
+        | Function of Function.t
+      [@@deriving sexp, bin_io]
+
+      let jsonaf_of_t = function
+        | File_search file_search -> File_search.jsonaf_of_t file_search
+        | Web_search web_search -> Web_search.jsonaf_of_t web_search
+        | Function function_ -> Function.jsonaf_of_t function_
+      ;;
+
+      let t_of_jsonaf = function
+        | `Object obj ->
+          (match Jsonaf.member "type" (`Object obj) with
+           | Some (`String "file_search") ->
+             File_search (File_search.t_of_jsonaf (`Object obj))
+           | Some (`String "web_search_preview")
+           | Some (`String "web_search_preview_2025_03_11") ->
+             Web_search (Web_search.t_of_jsonaf (`Object obj))
+           | Some (`String "function") -> Function (Function.t_of_jsonaf (`Object obj))
+           | _ -> failwith "Invalid tool type")
+        | _ -> failwith "Invalid tool format"
+      ;;
     end
 
     type t =

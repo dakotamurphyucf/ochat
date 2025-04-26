@@ -180,7 +180,7 @@ and elements_to_items ~dir ~net ~cache (els : CM.top_level_elements list)
 (*──────────────────────── 4.  Tools conversion  ─────────────────────────*)
 and convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list =
   List.map ts ~f:(fun { type_; function_ = { name; description; parameters; strict } } ->
-    Res.Request.Tool.{ name; description; parameters; strict; type_ })
+    Res.Request.Tool.Function { name; description; parameters; strict; type_ })
 
 (*──────────────────────── 5.  Agent recursion using Responses API ───────*)
 and run_agent ~dir ~net ~cache (prompt_xml : string) (items : CM.content_item list)
