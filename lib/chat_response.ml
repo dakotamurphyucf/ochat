@@ -371,7 +371,9 @@ let run_completion
                "\n<msg role=\"tool\" call_id=\"%s\"><raw>%s</raw></msg>\n"
                fco.call_id
                fco.output)
-        | Res.Item.Input_message _ -> ());
+        | Res.Item.Input_message _
+        | Res.Item.Web_search_call _
+        | Res.Item.File_search_call _ -> ());
     (* stop if no new function calls were produced *)
     if
       List.exists all_items ~f:(function

@@ -529,6 +529,63 @@ module Responses = struct
     [@@deriving jsonaf, sexp, bin_io]
   end
 
+  module Annotation = struct
+    module File_citation = struct
+      type t =
+        { title : string
+        ; type_ : string [@key "type"]
+        ; start_index : int
+        ; end_index : int
+        ; file_id : string
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module Url_citation = struct
+      type t =
+        { type_ : string [@key "type"]
+        ; index : int
+        ; url : string
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    type t =
+      | File_citation of File_citation.t
+      | Url_citation of Url_citation.t
+    [@@deriving sexp, bin_io]
+
+    let jsonaf_of_t = function
+      | File_citation file_citation -> File_citation.jsonaf_of_t file_citation
+      | Url_citation url_citation -> Url_citation.jsonaf_of_t url_citation
+    ;;
+
+    let t_of_jsonaf json =
+      match json with
+      | `Object obj ->
+        (match Jsonaf.member "type" (`Object obj) with
+         | Some (`String "file_citation") ->
+           File_citation (File_citation.t_of_jsonaf (`Object obj))
+         | Some (`String "url_citation") ->
+           Url_citation (Url_citation.t_of_jsonaf (`Object obj))
+         | _ -> failwith "Invalid annotation type")
+      | _ -> failwith "Invalid annotation format"
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    ;;
+  end
+
+  module Annotation_added = struct
+    type t =
+      { type_ : string [@key "type"]
+      ; annotation : Annotation.t
+      ; content_index : int
+      ; item_id : string
+      ; output_index : int
+      ; annotation_index : int
+      }
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+  end
+
   module Output_message = struct
     type role = Assistant [@name "assistant"] [@@deriving sexp, bin_io]
 
@@ -543,7 +600,7 @@ module Responses = struct
 
     (* annotations is usually empty which works for our purposes but if provided will fail to parse because it is not array of strings *)
     type content =
-      { annotations : string list
+      { annotations : Annotation.t list
       ; text : string
       ; _type : string [@key "type"]
       }
@@ -582,6 +639,53 @@ module Responses = struct
     [@@deriving jsonaf, sexp, bin_io]
   end
 
+  module Web_search_call = struct
+    type t =
+      { _type : string [@key "type"]
+      ; id : string
+      ; status : string
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module File_search_call = struct
+    module Result = struct
+      module Attributes = struct
+        type t = (string * string) list [@@deriving sexp, bin_io]
+
+        let t_of_jsonaf = function
+          | `Object obj ->
+            List.map obj ~f:(fun (k, v) ->
+              match v with
+              | `String s -> k, s
+              | _ -> failwith "attributes expects string values")
+          | `Null -> []
+          | _ -> failwith "attributes_of_jsonaf"
+        ;;
+
+        let jsonaf_of_t lst = `Object (List.map lst ~f:(fun (k, v) -> k, `String v))
+      end
+
+      type t =
+        { attributes : Attributes.t
+        ; file_id : string
+        ; filename : string
+        ; score : int
+        ; text : string
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    type t =
+      { _type : string [@key "type"]
+      ; id : string
+      ; status : string
+      ; queries : string list
+      ; results : Result.t list option
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
   module Reasoning = struct
     type summary =
       { text : string
@@ -604,6 +708,8 @@ module Responses = struct
       | Output_message of Output_message.t
       | Function_call of Function_call.t
       | Function_call_output of Function_call_output.t
+      | Web_search_call of Web_search_call.t
+      | File_search_call of File_search_call.t
       | Reasoning of Reasoning.t
     [@@deriving sexp, bin_io]
 
@@ -613,6 +719,8 @@ module Responses = struct
       | Function_call function_too_call -> Function_call.jsonaf_of_t function_too_call
       | Function_call_output function_too_call_output ->
         Function_call_output.jsonaf_of_t function_too_call_output
+      | Web_search_call web_search_call -> Web_search_call.jsonaf_of_t web_search_call
+      | File_search_call file_search_call -> File_search_call.jsonaf_of_t file_search_call
       | Reasoning reasoning -> Reasoning.jsonaf_of_t reasoning
     ;;
 
@@ -629,6 +737,10 @@ module Responses = struct
            Function_call (Function_call.t_of_jsonaf (`Object obj))
          | Some (`String "function_call_output") ->
            Function_call_output (Function_call_output.t_of_jsonaf (`Object obj))
+         | Some (`String "web_search_call") ->
+           Web_search_call (Web_search_call.t_of_jsonaf (`Object obj))
+         | Some (`String "file_search_call") ->
+           File_search_call (File_search_call.t_of_jsonaf (`Object obj))
          | Some (`String "reasoning") -> Reasoning (Reasoning.t_of_jsonaf (`Object obj))
          | _ -> failwith "Invalid content type")
       | _ -> failwith "Invalid content format"
@@ -846,185 +958,177 @@ module Responses = struct
     ;;
   end
 
-  module Response = struct
+  (* ❶ Error object *)
+  module Error = struct
     type t =
-      { status : Status.t
-      ; output : Item.t list
+      { code : string option
+      ; message : string
+      ; param : string option
+      ; type_ : string [@key "type"]
       }
     [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
   end
 
-  module Response_stream = struct
-    (* ❶ Error object *)
-    module Error = struct
+  (* ❷ “incomplete_details” object *)
+  module Incomplete_details = struct
+    type t =
+      { reason : string option
+      ; model_output_start : int option
+      ; tokens : int option
+      }
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+  end
+
+  (* ❸ “text” configuration *)
+  module Text_cfg = struct
+    module Format = struct
+      module Text = struct
+        type t = { type_ : string [@key "type"] (* text | json_schema | json_object *) }
+        [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+      end
+
+      module Json_schema = struct
+        type t =
+          { type_ : string [@key "type"] (* text | json_schema | json_object *)
+          ; name : string
+          ; schema : Jsonaf.t
+          ; description : string
+          ; strict : bool option [@jsonaf.option]
+          }
+        [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+      end
+
+      module Json_Object = struct
+        type t = { type_ : string [@key "type"] (* text | json_schema | json_object *) }
+        [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+      end
+
       type t =
-        { code : string option
-        ; message : string
-        ; param : string option
+        | Text of Text.t
+        | Json_schema of Json_schema.t
+        | Json_Object of Json_Object.t
+      [@@deriving sexp, bin_io]
+
+      let jsonaf_of_t = function
+        | Text t -> Text.jsonaf_of_t t
+        | Json_schema t -> Json_schema.jsonaf_of_t t
+        | Json_Object t -> Json_Object.jsonaf_of_t t
+      ;;
+
+      let t_of_jsonaf = function
+        | `Object obj ->
+          (match Jsonaf.member "type" (`Object obj) with
+           | Some (`String "text") -> Text (Text.t_of_jsonaf (`Object obj))
+           | Some (`String "json_schema") ->
+             Json_schema (Json_schema.t_of_jsonaf (`Object obj))
+           | Some (`String "json_object") ->
+             Json_Object (Json_Object.t_of_jsonaf (`Object obj))
+           | _ -> failwith "Invalid format type")
+        | _ -> failwith "Invalid format"
+      ;;
+    end
+
+    type t = { format : Format.t }
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+  end
+
+  (* ❹ “tool_choice” – can be a simple mode or a full object            *)
+  module Tool_choice = struct
+    module Hosted_tool = struct
+      type t = { type_ : string [@key "type"] }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module Function_tool = struct
+      type t =
+        { name : string
         ; type_ : string [@key "type"]
         }
       [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
     end
 
-    (* ❷ “incomplete_details” object *)
-    module Incomplete_details = struct
-      type t =
-        { reason : string option
-        ; model_output_start : int option
-        ; tokens : int option
-        }
-      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
-    end
+    type t =
+      | Mode of string (* "none" | "auto" | "required" *)
+      | Hosted of Hosted_tool.t (* e.g. { "type":"file_search" } *)
+      | Function of Function_tool.t (* function forcing              *)
+    [@@deriving sexp, bin_io]
 
-    (* ❸ “text” configuration *)
-    module Text_cfg = struct
-      module Format = struct
-        module Text = struct
-          type t = { type_ : string [@key "type"] (* text | json_schema | json_object *) }
-          [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
-        end
+    let t_of_jsonaf = function
+      | `String s -> Mode s
+      | `Object _ as obj ->
+        (match Jsonaf.member "type" obj with
+         | Some (`String "function") -> Function (Function_tool.t_of_jsonaf obj)
+         | _ -> Hosted (Hosted_tool.t_of_jsonaf obj))
+      | _ -> failwith "tool_choice_of_jsonaf: unexpected JSON"
+    ;;
 
-        module Json_schema = struct
-          type t =
-            { type_ : string [@key "type"] (* text | json_schema | json_object *)
-            ; name : string
-            ; schema : Jsonaf.t
-            ; description : string
-            ; strict : bool option [@jsonaf.option]
-            }
-          [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
-        end
+    let jsonaf_of_t = function
+      | Mode s -> `String s
+      | Hosted h -> Hosted_tool.jsonaf_of_t h
+      | Function f -> Function_tool.jsonaf_of_t f
+    ;;
+  end
 
-        module Json_Object = struct
-          type t = { type_ : string [@key "type"] (* text | json_schema | json_object *) }
-          [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
-        end
+  (* ❺ Usage block *)
+  module Usage = struct
+    type t =
+      { input_tokens : int
+      ; input_tokens_details : Jsonaf.t
+      ; output_tokens : int
+      ; output_tokens_details : Jsonaf.t
+      ; total_tokens : int
+      }
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+  end
 
-        type t =
-          | Text of Text.t
-          | Json_schema of Json_schema.t
-          | Json_Object of Json_Object.t
-        [@@deriving sexp, bin_io]
+  (* ❻ User-metadata: stored as an assoc-list (string,string) *)
+  module Metadata = struct
+    type t = (string * string) list [@@deriving sexp, bin_io]
 
-        let jsonaf_of_t = function
-          | Text t -> Text.jsonaf_of_t t
-          | Json_schema t -> Json_schema.jsonaf_of_t t
-          | Json_Object t -> Json_Object.jsonaf_of_t t
-        ;;
+    let t_of_jsonaf = function
+      | `Object obj ->
+        List.map obj ~f:(fun (k, v) ->
+          match v with
+          | `String s -> k, s
+          | _ -> failwith "metadata expects string values")
+      | `Null -> []
+      | _ -> failwith "metadata_of_jsonaf"
+    ;;
 
-        let t_of_jsonaf = function
-          | `Object obj ->
-            (match Jsonaf.member "type" (`Object obj) with
-             | Some (`String "text") -> Text (Text.t_of_jsonaf (`Object obj))
-             | Some (`String "json_schema") ->
-               Json_schema (Json_schema.t_of_jsonaf (`Object obj))
-             | Some (`String "json_object") ->
-               Json_Object (Json_Object.t_of_jsonaf (`Object obj))
-             | _ -> failwith "Invalid format type")
-          | _ -> failwith "Invalid format"
-        ;;
-      end
+    let jsonaf_of_t lst = `Object (List.map lst ~f:(fun (k, v) -> k, `String v))
+  end
 
-      type t = { format : Format.t }
-      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
-    end
+  (* ─────────────── 1.  Updated response object ─────────────────────── *)
+  module Response = struct
+    type t =
+      { id : string
+      ; object_ : string [@key "object"]
+      ; created_at : int
+      ; status : Status.t
+      ; error : Error.t option
+      ; incomplete_details : Incomplete_details.t option
+      ; instructions : string option
+      ; max_output_tokens : int option
+      ; model : string
+      ; output : Item.t list
+      ; parallel_tool_calls : bool option
+      ; previous_response_id : string option
+      ; reasoning : Request.Reasoning.t option
+      ; store : bool option
+      ; temperature : float option
+      ; text : Text_cfg.t option
+      ; tool_choice : Tool_choice.t option
+      ; tools : Request.Tool.t list option
+      ; top_p : float option
+      ; truncation : string option
+      ; usage : Usage.t option
+      ; user : string option
+      ; metadata : Metadata.t option
+      }
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+  end
 
-    (* ❹ “tool_choice” – can be a simple mode or a full object            *)
-    module Tool_choice = struct
-      module Hosted_tool = struct
-        type t = { type_ : string [@key "type"] }
-        [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
-      end
-
-      module Function_tool = struct
-        type t =
-          { name : string
-          ; type_ : string [@key "type"]
-          }
-        [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
-      end
-
-      type t =
-        | Mode of string (* "none" | "auto" | "required" *)
-        | Hosted of Hosted_tool.t (* e.g. { "type":"file_search" } *)
-        | Function of Function_tool.t (* function forcing              *)
-      [@@deriving sexp, bin_io]
-
-      let t_of_jsonaf = function
-        | `String s -> Mode s
-        | `Object _ as obj ->
-          (match Jsonaf.member "type" obj with
-           | Some (`String "function") -> Function (Function_tool.t_of_jsonaf obj)
-           | _ -> Hosted (Hosted_tool.t_of_jsonaf obj))
-        | _ -> failwith "tool_choice_of_jsonaf: unexpected JSON"
-      ;;
-
-      let jsonaf_of_t = function
-        | Mode s -> `String s
-        | Hosted h -> Hosted_tool.jsonaf_of_t h
-        | Function f -> Function_tool.jsonaf_of_t f
-      ;;
-    end
-
-    (* ❺ Usage block *)
-    module Usage = struct
-      type t =
-        { input_tokens : int
-        ; input_tokens_details : Jsonaf.t
-        ; output_tokens : int
-        ; output_tokens_details : Jsonaf.t
-        ; total_tokens : int
-        }
-      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
-    end
-
-    (* ❻ User-metadata: stored as an assoc-list (string,string) *)
-    module Metadata = struct
-      type t = (string * string) list [@@deriving sexp, bin_io]
-
-      let t_of_jsonaf = function
-        | `Object obj ->
-          List.map obj ~f:(fun (k, v) ->
-            match v with
-            | `String s -> k, s
-            | _ -> failwith "metadata expects string values")
-        | `Null -> []
-        | _ -> failwith "metadata_of_jsonaf"
-      ;;
-
-      let jsonaf_of_t lst = `Object (List.map lst ~f:(fun (k, v) -> k, `String v))
-    end
-
-    (* ─────────────── 1.  Updated response object ─────────────────────── *)
-    module Response_obj = struct
-      type t =
-        { id : string
-        ; object_ : string [@key "object"]
-        ; created_at : int
-        ; status : Status.t
-        ; error : Error.t option
-        ; incomplete_details : Incomplete_details.t option
-        ; instructions : string option
-        ; max_output_tokens : int option
-        ; model : string
-        ; output : Item.t list
-        ; parallel_tool_calls : bool option
-        ; previous_response_id : string option
-        ; reasoning : Request.Reasoning.t option
-        ; store : bool option
-        ; temperature : float option
-        ; text : Text_cfg.t option
-        ; tool_choice : Tool_choice.t option
-        ; tools : Request.Tool.t list option
-        ; top_p : float option
-        ; truncation : string option
-        ; usage : Usage.t option
-        ; user : string option
-        ; metadata : Metadata.t option
-        }
-      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
-    end
-
+  module Response_stream = struct
     module Item = struct
       type t =
         | Input_message of Input_message.t
@@ -1131,7 +1235,7 @@ module Responses = struct
     module Response_created = struct
       type t =
         { type_ : string [@key "type"]
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
     end
@@ -1139,7 +1243,7 @@ module Responses = struct
     module Response_in_progress = struct
       type t =
         { type_ : string [@key "type"]
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
     end
@@ -1147,7 +1251,7 @@ module Responses = struct
     module Response_completed = struct
       type t =
         { type_ : string [@key "type"]
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
     end
@@ -1155,7 +1259,7 @@ module Responses = struct
     module Response_incomplete = struct
       type t =
         { type_ : string [@key "type"]
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
     end
@@ -1163,7 +1267,7 @@ module Responses = struct
     module Response_failed = struct
       type t =
         { type_ : string [@key "type"]
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
     end
@@ -1173,7 +1277,7 @@ module Responses = struct
         type t =
           { type_ : string [@key "type"]
           ; text : string
-          ; annotations : string list
+          ; annotations : Annotation.t list
           }
         [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
       end
@@ -1252,19 +1356,67 @@ module Responses = struct
       [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
     end
 
-    module Unknown = struct
-      type t = { type_ : string [@key "type"] }
+    module File_search_call_in_progress = struct
+      type t =
+        { type_ : string [@key "type"]
+        ; item_id : int
+        ; output_index : int
+        }
       [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
     end
 
-    (* todo: add 
-      response.output_text.annotation.added 
-      response.file_search_call.in_progress
-      response.file_search_call.searching
-      response.file_search_call.completed
-      response.web_search_call.in_progress
-      response.web_search_call.searching
-      response.web_search_call.completed
+    module File_search_call_searching = struct
+      type t =
+        { type_ : string [@key "type"]
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module File_search_call_completed = struct
+      type t =
+        { type_ : string [@key "type"]
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module Web_search_call_in_progress = struct
+      type t =
+        { type_ : string [@key "type"]
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module Web_search_call_searching = struct
+      type t =
+        { type_ : string [@key "type"]
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    module Web_search_call_completed = struct
+      type t =
+        { type_ : string [@key "type"]
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    (* ❼ Unknown object *)
+    (* This is a catch-all for any unknown object type. *)
+    module Unknown = struct
+      type t = Jsonaf.t [@@deriving sexp, bin_io] [@@jsonaf.allow_extra_fields]
+    end
+
+    (* todo: add
     *)
     type t =
       | Output_item_added of Output_item_added.t
@@ -1283,10 +1435,16 @@ module Responses = struct
       | Content_part_done of Content_part_done.t
       | Response_refusal_delta of Response_refusal_delta.t
       | Response_refusal_done of Response_refusal_done.t
+      | Annotation_added of Annotation_added.t
+      | File_search_call_in_progress of File_search_call_in_progress.t
+      | File_search_call_searching of File_search_call_searching.t
+      | File_search_call_completed of File_search_call_completed.t
+      | Web_search_call_in_progress of Web_search_call_in_progress.t
+      | Web_search_call_searching of Web_search_call_searching.t
+      | Web_search_call_completed of Web_search_call_completed.t
       | Error of Error.t
       (* ❼ Unknown object *)
       (* This is a catch-all for any unknown object type. *)
-      (* It should be used with caution, as it may not be valid JSON. *)
       | Unknown of Unknown.t
     [@@deriving sexp, bin_io]
 
@@ -1297,7 +1455,6 @@ module Responses = struct
       | Output_text_delta output_text_delta ->
         Output_text_delta.jsonaf_of_t output_text_delta
       | Output_text_done output_text_done -> Output_text_done.jsonaf_of_t output_text_done
-      (* ❸ Function call arguments delta *)
       | Function_call_arguments_delta function_call_arguments_delta ->
         Function_call_arguments_delta.jsonaf_of_t function_call_arguments_delta
       | Function_call_arguments_done function_call_arguments_done ->
@@ -1320,11 +1477,23 @@ module Responses = struct
         Response_refusal_delta.jsonaf_of_t response_refusal_delta
       | Response_refusal_done response_refusal_done ->
         Response_refusal_done.jsonaf_of_t response_refusal_done
+      | Annotation_added annotation_added -> Annotation_added.jsonaf_of_t annotation_added
+      | File_search_call_in_progress file_search_call_in_progress ->
+        File_search_call_in_progress.jsonaf_of_t file_search_call_in_progress
+      | File_search_call_searching file_search_call_searching ->
+        File_search_call_searching.jsonaf_of_t file_search_call_searching
+      | File_search_call_completed file_search_call_completed ->
+        File_search_call_completed.jsonaf_of_t file_search_call_completed
+      | Web_search_call_in_progress web_search_call_in_progress ->
+        Web_search_call_in_progress.jsonaf_of_t web_search_call_in_progress
+      | Web_search_call_searching web_search_call_searching ->
+        Web_search_call_searching.jsonaf_of_t web_search_call_searching
+      | Web_search_call_completed web_search_call_completed ->
+        Web_search_call_completed.jsonaf_of_t web_search_call_completed
       | Error error -> Error.jsonaf_of_t error
       (* ❼ Unknown object *)
       (* This is a catch-all for any unknown object type. *)
-      (* It should be used with caution, as it may not be valid JSON. *)
-      | Unknown unknown -> Unknown.jsonaf_of_t unknown
+      | Unknown unknown -> unknown
     ;;
 
     let t_of_jsonaf json =
@@ -1366,8 +1535,26 @@ module Responses = struct
            Response_refusal_delta (Response_refusal_delta.t_of_jsonaf (`Object obj))
          | Some (`String "response.refusal.done") ->
            Response_refusal_done (Response_refusal_done.t_of_jsonaf (`Object obj))
+         | Some (`String "response.output_text.annotation.added") ->
+           Annotation_added (Annotation_added.t_of_jsonaf (`Object obj))
+         | Some (`String "response.file_search_call.in_progress") ->
+           File_search_call_in_progress
+             (File_search_call_in_progress.t_of_jsonaf (`Object obj))
+         | Some (`String "response.file_search_call.searching") ->
+           File_search_call_searching
+             (File_search_call_searching.t_of_jsonaf (`Object obj))
+         | Some (`String "response.file_search_call.completed") ->
+           File_search_call_completed
+             (File_search_call_completed.t_of_jsonaf (`Object obj))
+         | Some (`String "response.web_search_call.in_progress") ->
+           Web_search_call_in_progress
+             (Web_search_call_in_progress.t_of_jsonaf (`Object obj))
+         | Some (`String "response.web_search_call.searching") ->
+           Web_search_call_searching (Web_search_call_searching.t_of_jsonaf (`Object obj))
+         | Some (`String "response.web_search_call.completed") ->
+           Web_search_call_completed (Web_search_call_completed.t_of_jsonaf (`Object obj))
          | Some (`String "error") -> Error (Error.t_of_jsonaf (`Object obj))
-         | _ -> Unknown (Unknown.t_of_jsonaf (`Object obj)))
+         | _ -> Unknown (`Object obj))
       | _ -> failwith "Invalid content format"
     ;;
   end

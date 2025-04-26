@@ -224,11 +224,50 @@ module Responses : sig
     [@@deriving jsonaf, sexp, bin_io]
   end
 
+  module Annotation : sig
+    module File_citation : sig
+      type t =
+        { title : string
+        ; type_ : string
+        ; start_index : int
+        ; end_index : int
+        ; file_id : string
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Url_citation : sig
+      type t =
+        { type_ : string
+        ; index : int
+        ; url : string
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    type t =
+      | File_citation of File_citation.t
+      | Url_citation of Url_citation.t
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Annotation_added : sig
+    type t =
+      { type_ : string
+      ; annotation : Annotation.t
+      ; content_index : int
+      ; item_id : string
+      ; output_index : int
+      ; annotation_index : int
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
   module Output_message : sig
     type role = Assistant [@@deriving jsonaf, sexp, bin_io]
 
     type content =
-      { annotations : string list
+      { annotations : Annotation.t list
       ; text : string
       ; _type : string
       }
@@ -267,6 +306,41 @@ module Responses : sig
     [@@deriving jsonaf, sexp, bin_io]
   end
 
+  module Web_search_call : sig
+    type t =
+      { _type : string [@key "type"]
+      ; id : string
+      ; status : string
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module File_search_call : sig
+    module Result : sig
+      module Attributes : sig
+        type t = (string * string) list [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      type t =
+        { attributes : Attributes.t
+        ; file_id : string
+        ; filename : string
+        ; score : int
+        ; text : string
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    type t =
+      { _type : string [@key "type"]
+      ; id : string
+      ; status : string
+      ; queries : string list
+      ; results : Result.t list option
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
   module Reasoning : sig
     type summary =
       { text : string
@@ -289,6 +363,8 @@ module Responses : sig
       | Output_message of Output_message.t
       | Function_call of Function_call.t
       | Function_call_output of Function_call_output.t
+      | Web_search_call of Web_search_call.t
+      | File_search_call of File_search_call.t
       | Reasoning of Reasoning.t
     [@@deriving jsonaf, sexp, bin_io]
   end
@@ -387,129 +463,121 @@ module Responses : sig
     val of_str_exn : string -> t
   end
 
+  module Error : sig
+    type t =
+      { code : string option
+      ; message : string
+      ; param : string option
+      ; type_ : string [@key "type"]
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Incomplete_details : sig
+    type t =
+      { reason : string option
+      ; model_output_start : int option
+      ; tokens : int option
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Text_cfg : sig
+    module Format : sig
+      module Text : sig
+        type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      module Json_schema : sig
+        type t =
+          { type_ : string
+          ; name : string
+          ; schema : Jsonaf.t
+          ; description : string
+          ; strict : bool option
+          }
+        [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      module Json_Object : sig
+        type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
+      end
+
+      type t =
+        | Text of Text.t
+        | Json_schema of Json_schema.t
+        | Json_Object of Json_Object.t
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    type t = { format : Format.t } [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Tool_choice : sig
+    module Hosted_tool : sig
+      type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Function_tool : sig
+      type t =
+        { name : string
+        ; type_ : string
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    type t =
+      | Mode of string
+      | Hosted of Hosted_tool.t
+      | Function of Function_tool.t
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Usage : sig
+    type t =
+      { input_tokens : int
+      ; input_tokens_details : Jsonaf.t
+      ; output_tokens : int
+      ; output_tokens_details : Jsonaf.t
+      ; total_tokens : int
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Metadata : sig
+    type t = (string * string) list [@@deriving jsonaf, sexp, bin_io]
+  end
+
   module Response : sig
     type t =
-      { status : Status.t
+      { id : string
+      ; object_ : string
+      ; created_at : int
+      ; status : Status.t
+      ; error : Error.t option
+      ; incomplete_details : Incomplete_details.t option
+      ; instructions : string option
+      ; max_output_tokens : int option
+      ; model : string
       ; output : Item.t list
+      ; parallel_tool_calls : bool option
+      ; previous_response_id : string option
+      ; reasoning : Request.Reasoning.t option
+      ; store : bool option
+      ; temperature : float option
+      ; text : Text_cfg.t option
+      ; tool_choice : Tool_choice.t option
+      ; tools : Request.Tool.t list option
+      ; top_p : float option
+      ; truncation : string option
+      ; usage : Usage.t option
+      ; user : string option
+      ; metadata : Metadata.t option
       }
     [@@deriving jsonaf, sexp, bin_io]
   end
 
   module Response_stream : sig
-    module Error : sig
-      type t =
-        { code : string option
-        ; message : string
-        ; param : string option
-        ; type_ : string [@key "type"]
-        }
-      [@@deriving jsonaf, sexp, bin_io]
-    end
-
-    module Incomplete_details : sig
-      type t =
-        { reason : string option
-        ; model_output_start : int option
-        ; tokens : int option
-        }
-      [@@deriving jsonaf, sexp, bin_io]
-    end
-
-    module Text_cfg : sig
-      module Format : sig
-        module Text : sig
-          type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
-        end
-
-        module Json_schema : sig
-          type t =
-            { type_ : string
-            ; name : string
-            ; schema : Jsonaf.t
-            ; description : string
-            ; strict : bool option
-            }
-          [@@deriving jsonaf, sexp, bin_io]
-        end
-
-        module Json_Object : sig
-          type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
-        end
-
-        type t =
-          | Text of Text.t
-          | Json_schema of Json_schema.t
-          | Json_Object of Json_Object.t
-        [@@deriving jsonaf, sexp, bin_io]
-      end
-
-      type t = { format : Format.t } [@@deriving jsonaf, sexp, bin_io]
-    end
-
-    module Tool_choice : sig
-      module Hosted_tool : sig
-        type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
-      end
-
-      module Function_tool : sig
-        type t =
-          { name : string
-          ; type_ : string
-          }
-        [@@deriving jsonaf, sexp, bin_io]
-      end
-
-      type t =
-        | Mode of string
-        | Hosted of Hosted_tool.t
-        | Function of Function_tool.t
-      [@@deriving jsonaf, sexp, bin_io]
-    end
-
-    module Usage : sig
-      type t =
-        { input_tokens : int
-        ; input_tokens_details : Jsonaf.t
-        ; output_tokens : int
-        ; output_tokens_details : Jsonaf.t
-        ; total_tokens : int
-        }
-      [@@deriving jsonaf, sexp, bin_io]
-    end
-
-    module Metadata : sig
-      type t = (string * string) list [@@deriving jsonaf, sexp, bin_io]
-    end
-
-    module Response_obj : sig
-      type t =
-        { id : string
-        ; object_ : string
-        ; created_at : int
-        ; status : Status.t
-        ; error : Error.t option
-        ; incomplete_details : Incomplete_details.t option
-        ; instructions : string option
-        ; max_output_tokens : int option
-        ; model : string
-        ; output : Item.t list
-        ; parallel_tool_calls : bool option
-        ; previous_response_id : string option
-        ; reasoning : Request.Reasoning.t option
-        ; store : bool option
-        ; temperature : float option
-        ; text : Text_cfg.t option
-        ; tool_choice : Tool_choice.t option
-        ; tools : Request.Tool.t list option
-        ; top_p : float option
-        ; truncation : string option
-        ; usage : Usage.t option
-        ; user : string option
-        ; metadata : Metadata.t option
-        }
-      [@@deriving jsonaf, sexp, bin_io]
-    end
-
     module Item : sig
       type t =
         | Input_message of Input_message.t
@@ -593,7 +661,7 @@ module Responses : sig
     module Response_created : sig
       type t =
         { type_ : string
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io]
     end
@@ -601,7 +669,7 @@ module Responses : sig
     module Response_in_progress : sig
       type t =
         { type_ : string
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io]
     end
@@ -609,7 +677,7 @@ module Responses : sig
     module Response_completed : sig
       type t =
         { type_ : string
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io]
     end
@@ -617,7 +685,7 @@ module Responses : sig
     module Response_incomplete : sig
       type t =
         { type_ : string
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io]
     end
@@ -625,7 +693,7 @@ module Responses : sig
     module Response_failed : sig
       type t =
         { type_ : string
-        ; response : Response_obj.t
+        ; response : Response.t
         }
       [@@deriving jsonaf, sexp, bin_io]
     end
@@ -635,7 +703,7 @@ module Responses : sig
         type t =
           { type_ : string
           ; text : string
-          ; annotations : string list
+          ; annotations : Annotation.t list
           }
         [@@deriving jsonaf, sexp, bin_io]
       end
@@ -698,8 +766,62 @@ module Responses : sig
       [@@deriving jsonaf, sexp, bin_io]
     end
 
+    module File_search_call_in_progress : sig
+      type t =
+        { type_ : string
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module File_search_call_searching : sig
+      type t =
+        { type_ : string
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module File_search_call_completed : sig
+      type t =
+        { type_ : string
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Web_search_call_in_progress : sig
+      type t =
+        { type_ : string
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Web_search_call_searching : sig
+      type t =
+        { type_ : string
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
+    module Web_search_call_completed : sig
+      type t =
+        { type_ : string
+        ; item_id : int
+        ; output_index : int
+        }
+      [@@deriving jsonaf, sexp, bin_io]
+    end
+
     module Unknown : sig
-      type t = { type_ : string } [@@deriving jsonaf, sexp, bin_io]
+      type t = Jsonaf.t [@@deriving sexp, bin_io]
     end
 
     type t =
@@ -719,6 +841,13 @@ module Responses : sig
       | Content_part_done of Content_part_done.t
       | Response_refusal_delta of Response_refusal_delta.t
       | Response_refusal_done of Response_refusal_done.t
+      | Annotation_added of Annotation_added.t
+      | File_search_call_in_progress of File_search_call_in_progress.t
+      | File_search_call_searching of File_search_call_searching.t
+      | File_search_call_completed of File_search_call_completed.t
+      | Web_search_call_in_progress of Web_search_call_in_progress.t
+      | Web_search_call_searching of Web_search_call_searching.t
+      | Web_search_call_completed of Web_search_call_completed.t
       | Error of Error.t
       | Unknown of Unknown.t
     [@@deriving jsonaf, sexp, bin_io]
