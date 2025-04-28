@@ -278,6 +278,14 @@
   (preprocess
   (pps ppx_jane)))
 
+(library
+  (name apply_patch)
+  (public_name chatgpt.apply_patch)
+  (modules apply_patch)
+  (libraries core uutf uunf)
+  (preprocess
+  (pps ppx_jane)))
+
 (menhir
   (modules chatml_parser)
   (flags --table --dump)

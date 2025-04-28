@@ -22,7 +22,8 @@
   prompt_template
   gpt_function
   chat_completion
-  chat_response)
+  chat_response
+  apply_patch)
  (preprocess
   (pps ppx_jane)))
 
