@@ -1,13 +1,7 @@
 (*---------------------------------------------------------------------------
 		  apply_patch.ml          –  OCaml port of OpenAI’s reference “apply-patch”
-		  ---------------------------------------------------------------------------
-		  Dependencies:
-		    - core          (Jane-Street)
-		    - core_unix
-		    - uutf          (UTF-8 streaming)
-		    - uunf          (Unicode normalisation)
-		  All filesystem access is abstracted behind user-supplied callbacks; the CLI
-		  at the bottom keeps stub implementations so the executable is pure.
+      Based on reference implementation from
+      https://cookbook.openai.com/examples/gpt4-1_prompting_guide#reference-implementation-apply_patchpy
 		  ---------------------------------------------------------------------------*)
 
 open Core

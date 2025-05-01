@@ -6,3 +6,9 @@
  (preprocess (pps ppx_jane ppx_expect))
 )
 
+(library
+		 (name apply_patch_test)
+		 (modules apply_patch_test)
+		 (libraries core expect_test_helpers_core apply_patch)
+		 (inline_tests)
+		 (preprocess (pps ppx_jane ppx_expect)))
