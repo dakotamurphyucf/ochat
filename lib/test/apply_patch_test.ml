@@ -13,6 +13,113 @@ let apply_patch_in_memory ~patch_text ~files =
 ;;
 
 (* ----------------------------------------------------------------------------- *)
+
+let%expect_test "rename file with update" =
+  let initial_fs = [ "src.txt", "line1\nline2\nline3" ] in
+  let patch =
+    {|*** Begin Patch
+*** Update File: src.txt
+*** Move to: dest.txt
+@@
+-line1
++first
+@@
+*** End Patch|}
+  in
+  let final_fs = apply_patch_in_memory ~patch_text:patch ~files:initial_fs in
+  print_s [%sexp (Map.to_alist final_fs : (string * string) list)];
+  [%expect
+    {|
+    ((dest.txt  "first\
+               \nline2\
+               \nline3\
+               \n"))
+    |}]
+;;
+
+(* ----------------------------------------------------------------------------- *)
+
+let%expect_test "multiple update chunks" =
+  let initial_fs = [ "multi.txt", "alpha\nbeta\ngamma\ndelta" ] in
+  let patch =
+    {|*** Begin Patch
+*** Update File: multi.txt
+@@
+-beta
++B
+@@
+@@
+-delta
++D
+@@
+*** End Patch|}
+  in
+  let final_fs = apply_patch_in_memory ~patch_text:patch ~files:initial_fs in
+  print_s [%sexp (Map.to_alist final_fs : (string * string) list)];
+  [%expect
+    {|
+    ((multi.txt  "alpha\
+                \nB\
+                \ngamma\
+                \nD\
+                \n"))
+    |}]
+;;
+
+(* ----------------------------------------------------------------------------- *)
+
+let%expect_test "add file only" =
+  let initial_fs = [] in
+  let patch =
+    {|*** Begin Patch
+*** Add File: new.txt
++hello
++world
+*** End Patch|}
+  in
+  let final_fs = apply_patch_in_memory ~patch_text:patch ~files:initial_fs in
+  print_s [%sexp (Map.to_alist final_fs : (string * string) list)];
+  [%expect {|
+    ((new.txt  "hello\
+              \nworld\
+              \n"))
+    |}]
+;;
+
+(* ----------------------------------------------------------------------------- *)
+
+let%expect_test "delete file only" =
+  let initial_fs = [ "del.txt", "something"; "keep.txt", "ok" ] in
+  let patch = {|*** Begin Patch
+*** Delete File: del.txt
+*** End Patch|} in
+  let final_fs = apply_patch_in_memory ~patch_text:patch ~files:initial_fs in
+  print_s [%sexp (Map.to_alist final_fs : (string * string) list)];
+  [%expect {| ((keep.txt ok)) |}]
+;;
+
+(* ----------------------------------------------------------------------------- *)
+
+let%expect_test "insert-only update" =
+  let initial_fs = [ "insert.txt", "a\nb\nc" ] in
+  let patch =
+    {|*** Begin Patch
+*** Update File: insert.txt
+@@
++intro
+@@
+*** End Patch|}
+  in
+  let final_fs = apply_patch_in_memory ~patch_text:patch ~files:initial_fs in
+  print_s [%sexp (Map.to_alist final_fs : (string * string) list)];
+  [%expect {|
+    ((insert.txt  "intro\
+                 \na\
+                 \nb\
+                 \nc\
+                 \n"))
+    |}]
+;;
 let%expect_test "add, update and delete files" =
   let initial_fs =
     [ "foo.txt", "apple\nworld\norange"; "bar.txt", "alpha\nbeta\ngamma" ]
@@ -44,3 +151,6 @@ let%expect_test "add, update and delete files" =
               \n"))
     |}]
 ;;
+
+(* ----------------------------------------------------------------------------- *)
+

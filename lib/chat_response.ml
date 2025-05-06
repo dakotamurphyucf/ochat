@@ -201,7 +201,8 @@ and elements_to_items ~dir ~net ~cache (els : CM.top_level_elements list)
   List.filter_map els ~f:(function
     | CM.Msg m -> Some (convert_msg ~dir ~net ~cache m)
     | CM.Reasoning r -> Some (convert_reasoning r)
-    | CM.Config _ -> None)
+    | CM.Config _ -> None
+    | CM.Tool _ -> None)
 
 (*──────────────────────── 4.  Tools conversion  ─────────────────────────*)
 and convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list =
@@ -412,6 +413,75 @@ let run_completion
   write_cache ~file:"./cache.bin" cache
 ;;
 
+let custom_fn ~env CM.{ name; description; command } =
+  let module M : Gpt_function.Def with type input = string list = struct
+    type input = string list
+
+    let name = name
+
+    let description =
+      match description with
+      | Some desc ->
+        Some
+          (String.concat
+             [ "Run a "
+             ; command
+             ; " shell command with arguments, and returns its output.\n"
+             ; desc
+             ])
+      | None ->
+        Some
+          (String.concat
+             [ "Run a "
+             ; command
+             ; " shell command with arguments, and returns its output"
+             ])
+    ;;
+
+    let parameters : Jsonaf.t =
+      `Object
+        [ "type", `String "object"
+        ; ( "properties"
+          , `Object
+              [ ( "arguments"
+                , `Object
+                    [ "type", `String "array"
+                    ; "items", `Object [ "type", `String "string" ]
+                    ] )
+              ] )
+        ; "required", `Array [ `String "arguments" ]
+        ; "additionalProperties", `False
+        ]
+    ;;
+
+    let input_of_string s =
+      let j = Jsonaf.of_string s in
+      List.map ~f:Jsonaf.string_exn @@ Jsonaf.list_exn @@ Jsonaf.member_exn "arguments" j
+    ;;
+  end
+  in
+  let gpt_fun : Gpt_function.t =
+    let fp params =
+      let proc_mgr = Eio.Stdenv.process_mgr env in
+      Eio.Switch.run
+      @@ fun sw ->
+      (* 1.  Make a pipe that we can read. *)
+      let r, w = Eio.Process.pipe ~sw proc_mgr in
+      (* 2.  Start the child, sending both stdout and stderr to [w]. *)
+      let _child =
+        Eio.Process.spawn ~sw proc_mgr ~stdout:w ~stderr:w (command :: params)
+      in
+      Eio.Flow.close w;
+      (* nobody else will write now *)
+      match Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all r with
+      | res -> res
+      | exception ex -> Fmt.str "error running %s command: %a" command Eio.Exn.pp ex
+    in
+    Gpt_function.create_function (module M) fp
+  in
+  gpt_fun
+;;
+
 let run_completion_stream
       ~env
       ?prompt_file (* optional template to prepend once          *)
@@ -459,14 +529,24 @@ let run_completion_stream
         Res.Request.Reasoning.
           { effort = Some (Effort.of_str_exn eff); summary = Some Summary.Detailed })
     in
-    (* 1‑C • tools / functions *)
-    let comp_tools, tool_tbl =
-      Gpt_function.functions
-        [ Functions.apply_patch ~dir:(Eio.Stdenv.cwd env)
-        ; Functions.read_dir ~dir:(Eio.Stdenv.cwd env)
-        ; Functions.get_contents ~dir:(Eio.Stdenv.cwd env)
-        ]
+    let tools =
+      List.filter_map elements ~f:(function
+        | CM.Tool t -> Some t
+        | _ -> None)
+      |> List.map ~f:(function
+        | CM.Builtin name ->
+          (* Process the built-in tool name here *)
+          (match name with
+           | "apply_patch" -> Functions.apply_patch ~dir:(Eio.Stdenv.cwd env)
+           | "read_dir" -> Functions.read_dir ~dir:(Eio.Stdenv.cwd env)
+           | "get_contents" -> Functions.get_contents ~dir:(Eio.Stdenv.cwd env)
+           | _ -> failwithf "Unknown built-in tool: %s" name ())
+        | CM.Custom c ->
+          (* Process the custom tool here *)
+          custom_fn ~env c)
     in
+    (* 1‑C • tools / functions *)
+    let comp_tools, tool_tbl = Gpt_function.functions tools in
     let tools = convert_tools comp_tools in
     (* 1‑D • initial request items *)
     let inputs = elements_to_items ~dir ~net ~cache elements in

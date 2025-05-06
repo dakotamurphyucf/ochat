@@ -1842,7 +1842,6 @@ module Responses = struct
         ()
     in
     let json = Jsonaf.to_string @@ Request.jsonaf_of_t input in
-    print_endline json;
     let post json f = post ~net ~host ~headers ~path:"/v1/responses" (Raw f) json in
     post json
     @@ fun res ->

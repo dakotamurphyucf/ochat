@@ -328,7 +328,11 @@ let apply_patch ~dir : Gpt_function.t =
     let open_fn path = Io.load_doc ~dir path in
     let write_fn path s =
       match split path with
-      | Some (dirname, _basename) ->
+      | Some (dirname, basename) ->
+        print_endline "dirname";
+        print_endline dirname;
+        print_endline path;
+        print_endline basename;
         (match Io.is_dir ~dir dirname with
          | true -> Io.save_doc ~dir path s
          | false ->

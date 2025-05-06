@@ -71,6 +71,18 @@ module Chat_markdown : sig
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type custom_tool =
+    { name : string
+    ; description : string option
+    ; command : string
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  type tool =
+    | Builtin of string
+    | Custom of custom_tool
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
   type config =
     { max_tokens : int option [@jsonaf.option]
     ; model : string option [@jsonaf.option]
@@ -83,6 +95,7 @@ module Chat_markdown : sig
     | Msg of msg
     | Config of config
     | Reasoning of reasoning
+    | Tool of tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   val parse_chat_inputs

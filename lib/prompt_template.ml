@@ -242,6 +242,19 @@ module Chat_content = struct
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type custom_tool =
+    { name : string
+    ; description : string option
+    ; command : string
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  type tool =
+    | Builtin of string
+    | Custom of custom_tool
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  (* The config element. *)
   type config =
     { max_tokens : int option [@jsonaf.option]
     ; model : string option [@jsonaf.option]
@@ -268,6 +281,7 @@ module Chat_content = struct
     | Msg of msg
     | Config of config
     | Reasoning of reasoning
+    | Tool of tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 end
 
@@ -279,6 +293,7 @@ module Chat_markdown = struct
   type chat_element =
     | Message of msg
     | Config of config
+    | Tool of tool
     | Reasoning of reasoning
     | Summary of reasoning_summary
     | Text of string
@@ -325,7 +340,7 @@ module Chat_markdown = struct
     | Agent (u, loc, ch) :: rest ->
       Agent { url = u; is_local = loc; items = content_items_of_elements ch }
       :: content_items_of_elements rest
-    | (Message _ | Config _ | Reasoning _ | Summary _) :: rest ->
+    | (Message _ | Config _ | Reasoning _ | Summary _ | Tool _) :: rest ->
       content_items_of_elements rest
   ;;
 
@@ -425,6 +440,16 @@ module Chat_markdown = struct
         if List.is_empty attrs then "" else " " ^ String.concat ~sep:" " attrs
       in
       Printf.sprintf "<config%s />" attrs_string
+    | Tool t ->
+      (match t with
+       | Builtin name -> Printf.sprintf "<tool name=\"%s\" />" name
+       | Custom { name; description; command } ->
+         let desc_attr =
+           match description with
+           | Some d -> Printf.sprintf " description=\"%s\"" d
+           | None -> ""
+         in
+         Printf.sprintf "<tool name=\"%s\"%s command=\"%s\" />" name desc_attr command)
     | Message m ->
       (match m.content with
        | Some (Text t) -> t
@@ -533,6 +558,30 @@ module Chat_markdown = struct
             List.exists attr ~f:(fun ((_, nm), _) -> String.(nm = "local"))
           in
           Agent (agent_url, agent_is_local, children)
+        | "tool" ->
+          let tbl = Hashtbl.create (module String) in
+          List.iter attr ~f:(fun ((_, nm), v) -> Hashtbl.set tbl ~key:nm ~data:v);
+          let name = Hashtbl.find_exn tbl "name" in
+          let command = Hashtbl.find tbl "command" in
+          let description = Hashtbl.find tbl "description" in
+          (match command with
+           | Some cmd ->
+             let command = String.strip cmd in
+             if String.is_empty command
+             then failwith "Tool command cannot be empty."
+             else (
+               let command = String.strip command in
+               let description =
+                 match description with
+                 | Some d -> Some (String.strip d)
+                 | None -> None
+               in
+               Tool (Custom { name; description; command }))
+           | None ->
+             let builtin = String.strip name in
+             if String.is_empty builtin
+             then failwith "Tool name cannot be empty."
+             else Tool (Builtin builtin))
         | _ ->
           let raw_content =
             match children with
@@ -552,7 +601,7 @@ module Chat_markdown = struct
   let chat_elements_stream =
     Markup.elements (fun (_, name) _ ->
       match name with
-      | "msg" | "config" | "reasoning" -> true
+      | "msg" | "config" | "reasoning" | "tool" -> true
       | _ -> false)
   ;;
 
@@ -563,6 +612,7 @@ module Chat_markdown = struct
     | Some (Message m) -> Some (Msg m)
     | Some (Config c) -> Some (Chat_content.Config c)
     | Some (Reasoning r) -> Some (Reasoning r)
+    | Some (Tool t) -> Some (Tool t) (* Added handling for Tool elements *)
     | Some _ -> None
   ;;
 
