@@ -47,7 +47,11 @@ let add_line_numbers str =
 ;;
 
 let get_contents ~dir : Gpt_function.t =
-  let f s = add_line_numbers @@ Io.load_doc ~dir s in
+  let f path =
+    match Io.load_doc ~dir path with
+    | res -> res
+    | exception ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
+  in
   Gpt_function.create_function (module Definitions.Get_contents) f
 ;;
 
@@ -313,4 +317,25 @@ let replace_lines_in_file ~dir : Gpt_function.t =
     sprintf "%s updated with new text from line %d to %d" file start_line end_line
   in
   Gpt_function.create_function (module Definitions.Replace_lines) f
+;;
+
+let apply_patch ~dir : Gpt_function.t =
+  let f patch =
+    let open_fn path = Io.load_doc ~dir path in
+    let write_fn path s = Io.save_doc ~dir path s in
+    let remove_fn path = Io.delete_doc ~dir path in
+    match Apply_patch.process_patch ~text:patch ~open_fn ~write_fn ~remove_fn with
+    | _ -> sprintf "git patch successful"
+    | exception ex -> Fmt.str "error running apply_patch: %a" Eio.Exn.pp ex
+  in
+  Gpt_function.create_function (module Definitions.Apply_patch) f
+;;
+
+let read_dir ~dir : Gpt_function.t =
+  let f path =
+    match Io.directory ~dir path with
+    | res -> String.concat ~sep:"\n" res
+    | exception ex -> Fmt.str "error running read_directory: %a" Eio.Exn.pp ex
+  in
+  Gpt_function.create_function (module Definitions.Read_directory) f
 ;;

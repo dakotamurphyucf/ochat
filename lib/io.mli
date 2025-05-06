@@ -24,6 +24,12 @@ val append_doc : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string -> unit
 (** [load_doc ~dir file] loads the content of the file [file] in directory [dir] and returns it. *)
 val load_doc : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string
 
+(** [delete_doc ~dir file] deletes the file [file] in directory [dir]. *)
+val delete_doc : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> unit
+
+(** [directory ~dir path] reads the directory at the given [path] and returns a string list of all the file and path names in the directory *)
+val directory : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string list
+
 (** [is_dir ~dir path] checks if the given [path] in directory [dir] is a directory and returns a boolean value. *)
 val is_dir : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> bool
 
@@ -113,6 +119,7 @@ module Run_server : sig
   val main : net:_ Eio.Net.t -> clock:_ Eio.Time.clock -> unit
   val run : unit -> unit
 end
- module Base64 : sig
+
+module Base64 : sig
   val file_to_data_uri : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string
 end

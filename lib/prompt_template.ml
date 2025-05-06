@@ -358,7 +358,7 @@ module Chat_markdown = struct
             failwith
               "Expected function_call to be raw text arguments; found structured content."
         in
-        Some { name; arguments }, None
+        Some { name; arguments }, content
     in
     let tool_call, content_opt =
       match function_call with
@@ -375,7 +375,7 @@ module Chat_markdown = struct
               failwith
                 "Expected tool_call to be raw text arguments; found structured content."
           in
-          Some { id; function_ = { name; arguments } }, None)
+          Some { id; function_ = { name; arguments } }, content_opt)
         else None, content_opt
     in
     { role = Hashtbl.find_exn hash_tbl "role"

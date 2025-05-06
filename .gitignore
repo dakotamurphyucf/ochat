@@ -12,3 +12,4 @@ prompts/
 chatgpt_history/
 raw-openai-streaming-response.txt
 cache.bin
+src/

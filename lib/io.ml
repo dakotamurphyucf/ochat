@@ -50,11 +50,20 @@ let append_doc ~dir file p =
   Path.save ~append:true ~create:(`If_missing 0o777) path p
 ;;
 
+(** [delete_doc ~dir file] deletes the file [file] in directory [dir]. *)
+let delete_doc ~dir file =
+  let path = dir / file in
+  Path.unlink path
+;;
+
 (** [load_doc ~dir file] loads the content of the file [file] in directory [dir] and returns it. *)
 let load_doc ~dir file =
   let path = dir / file in
   Path.load path
 ;;
+
+(** [directory ~dir path] reads the directory at the given [path] and returns a string list of all the file and path names in the directory *)
+let directory ~dir path = Eio.Path.read_dir Eio.Path.(dir / path)
 
 (** [is_dir ~dir path] checks if the given [path] in directory [dir] is a directory and returns a boolean value. *)
 let is_dir ~dir path =

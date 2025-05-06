@@ -131,6 +131,7 @@ and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
     | "user" -> `User
     | "system" -> `System
     | "developer" -> `Developer
+    | "tool" -> `Tool
     | other -> failwithf "unknown role %s" other ()
   in
   match role with
@@ -148,6 +149,31 @@ and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
       ; _type = "message"
       ; content = [ { annotations = []; text; _type = "output_text" } ]
       }
+  | `Tool ->
+    let tool_call_id = Option.value_exn m.tool_call_id in
+    (match m.content with
+     | Some (CM.Text t) ->
+       (match m.tool_call with
+        | Some { id; function_ = { name; arguments } } ->
+          Res.Item.Function_call
+            { name
+            ; arguments
+            ; call_id = id
+            ; _type = "function_call"
+            ; id = m.id
+            ; status = None
+            }
+        | None ->
+          Res.Item.Function_call_output
+            { call_id = tool_call_id
+            ; _type = "function_call_output"
+            ; id = None
+            ; status = None
+            ; output = t
+            })
+     | _ ->
+       failwith
+         "Expected function_call to be raw text arguments; found structured content.")
   | (`User | `System | `Developer) as r ->
     let role_val =
       match r with
@@ -359,8 +385,8 @@ let run_completion
           append
             (Printf.sprintf
                "\n\
-                <msg role=\"assistant\" function_call function_name=\"%s\" call_id=\"%s\">\n\
-                <raw>%s</raw>\n\
+                <msg role=\"tool\" function_call function_name=\"%s\" call_id=\"%s\">\n\
+                %s\n\
                 </msg>\n"
                fc.name
                fc.call_id
@@ -368,7 +394,7 @@ let run_completion
         | Res.Item.Function_call_output fco ->
           append
             (Printf.sprintf
-               "\n<msg role=\"tool\" call_id=\"%s\"><raw>%s</raw></msg>\n"
+               "\n<msg role=\"tool\" call_id=\"%s\">%s</msg>\n"
                fco.call_id
                fco.output)
         | Res.Item.Input_message _
@@ -434,7 +460,13 @@ let run_completion_stream
           { effort = Some (Effort.of_str_exn eff); summary = Some Summary.Detailed })
     in
     (* 1‑C • tools / functions *)
-    let comp_tools, tool_tbl = Gpt_function.functions [] in
+    let comp_tools, tool_tbl =
+      Gpt_function.functions
+        [ Functions.apply_patch ~dir:(Eio.Stdenv.cwd env)
+        ; Functions.read_dir ~dir:(Eio.Stdenv.cwd env)
+        ; Functions.get_contents ~dir:(Eio.Stdenv.cwd env)
+        ]
+    in
     let tools = convert_tools comp_tools in
     (* 1‑D • initial request items *)
     let inputs = elements_to_items ~dir ~net ~cache elements in
@@ -476,21 +508,25 @@ let run_completion_stream
         append_doc
           (Printf.sprintf
              "\n\
-              <msg role=\"assistant\" tool_call tool_call_id=\"%s\" function_name=\"%s\">\n\
-              <raw>\n\
+              <msg role=\"tool\" tool_call tool_call_id=\"%s\" function_name=\"%s\" \
+              id=\"%s\">\n\
               %s\n\
-              </raw>\n\
               </msg>\n\n"
              call_id
              name
+             item_id
              arguments);
         (* run the tool *)
         let fn = Hashtbl.find_exn tool_tbl name in
         let result = fn arguments in
         append_doc
           (Printf.sprintf
-             "\n<msg role=\"tool\" tool_call_id=\"%s\">\n<raw>\n%s\n</raw>\n</msg>\n\n"
+             "\n\
+              <msg role=\"tool\" tool_call_id=\"%s\" id=\"%s\"><raw>\n\
+              %s\n\
+              </raw></msg>\n\n"
              call_id
+             item_id
              result);
         run_again := true
     in
@@ -555,6 +591,10 @@ let run_completion_stream
       ~inputs;
     (* make sure any dangling assistant block is closed *)
     Hashtbl.iter_keys opened_msgs ~f:(fun id -> close_message id);
+    (match !run_again with
+     | true -> print_endline "run again"
+     | false -> print_endline "no run again");
+    (* 4 • If no function call just happened, append empty user message.   *)
     (* 4 • If a function call just happened, recurse for the next turn.   *)
     if !run_again then turn () else append_doc "\n<msg role=\"user\">\n\n</msg>"
   in

@@ -218,7 +218,8 @@
   gpt_function
   definitions
   vector_db
-  indexer)
+  indexer
+  apply_patch)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
