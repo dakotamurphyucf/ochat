@@ -27,6 +27,9 @@ val load_doc : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string
 (** [delete_doc ~dir file] deletes the file [file] in directory [dir]. *)
 val delete_doc : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> unit
 
+(** [mkdir ~dir path] creates a directory at the given [path] in directory [dir]. *)
+val mkdir : ?exists_ok:bool -> dir:Eio.Fs.dir_ty Eio.Path.t -> string -> unit
+
 (** [directory ~dir path] reads the directory at the given [path] and returns a string list of all the file and path names in the directory *)
 val directory : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string list
 

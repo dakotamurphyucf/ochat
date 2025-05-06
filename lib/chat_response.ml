@@ -509,9 +509,10 @@ let run_completion_stream
           (Printf.sprintf
              "\n\
               <msg role=\"tool\" tool_call tool_call_id=\"%s\" function_name=\"%s\" \
-              id=\"%s\">\n\
+              id=\"%s\"><raw>\n\
               %s\n\
-              </msg>\n\n"
+              </raw>\n\
+             \              </msg>\n\n"
              call_id
              name
              item_id

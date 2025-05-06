@@ -62,17 +62,17 @@ let load_doc ~dir file =
   Path.load path
 ;;
 
+(** [mkdir ~dir path] creates a directory at the given [path] in directory [dir]. *)
+let mkdir ?exists_ok ~dir path =
+  let path = dir / path in
+  Path.mkdirs ?exists_ok ~perm:0o700 path
+;;
+
 (** [directory ~dir path] reads the directory at the given [path] and returns a string list of all the file and path names in the directory *)
 let directory ~dir path = Eio.Path.read_dir Eio.Path.(dir / path)
 
 (** [is_dir ~dir path] checks if the given [path] in directory [dir] is a directory and returns a boolean value. *)
-let is_dir ~dir path =
-  Path.with_open_in (dir / path)
-  @@ fun file ->
-  match (File.stat file).kind with
-  | `Directory -> true
-  | _ -> false
-;;
+let is_dir ~dir path = Path.is_directory (dir / path)
 
 (** [with_dir ~dir f] opens the directory [dir] and applies the function [f] to it. *)
 let with_dir ~dir f = Path.with_open_dir dir @@ f

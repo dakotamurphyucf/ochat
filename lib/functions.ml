@@ -320,9 +320,22 @@ let replace_lines_in_file ~dir : Gpt_function.t =
 ;;
 
 let apply_patch ~dir : Gpt_function.t =
+  let split path =
+    Eio.Path.split (dir / path)
+    |> Option.map ~f:(fun ((_, dirname), basename) -> dirname, basename)
+  in
   let f patch =
     let open_fn path = Io.load_doc ~dir path in
-    let write_fn path s = Io.save_doc ~dir path s in
+    let write_fn path s =
+      match split path with
+      | Some (dirname, _basename) ->
+        (match Io.is_dir ~dir dirname with
+         | true -> Io.save_doc ~dir path s
+         | false ->
+           Io.mkdir ~exists_ok:true ~dir dirname;
+           Io.save_doc ~dir path s)
+      | None -> Io.save_doc ~dir path s
+    in
     let remove_fn path = Io.delete_doc ~dir path in
     match Apply_patch.process_patch ~text:patch ~open_fn ~write_fn ~remove_fn with
     | _ -> sprintf "git patch successful"
@@ -338,4 +351,13 @@ let read_dir ~dir : Gpt_function.t =
     | exception ex -> Fmt.str "error running read_directory: %a" Eio.Exn.pp ex
   in
   Gpt_function.create_function (module Definitions.Read_directory) f
+;;
+
+let mkdir ~dir : Gpt_function.t =
+  let f path =
+    match Io.mkdir ~exists_ok:true ~dir path with
+    | () -> sprintf "Directory %s created successfully." path
+    | exception ex -> Fmt.str "error running mkdir: %a" Eio.Exn.pp ex
+  in
+  Gpt_function.create_function (module Definitions.Make_dir) f
 ;;
