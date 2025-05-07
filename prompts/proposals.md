@@ -1,4 +1,4 @@
-1. make the response api more feature complete to adhear to the entire openai api spec
+1. make the response api more feature complete to adhear to the entire openai api spec ```done```
 2. make the chat markdown config more feature complete
 3. make the chat_response handle no reasoning by making msg ids optional
 4. add function tool imports to chat markdown configs ```done```

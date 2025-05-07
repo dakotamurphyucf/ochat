@@ -1872,7 +1872,7 @@ module Responses = struct
         match Seq.uncons seq with
         | None -> ()
         | Some (line, seq) ->
-          Io.log ~dir ~file:"./raw-openai-streaming-response.txt" (line ^ "\n");
+          Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n");
           let json_result =
             Jsonaf.parse line
             |> Result.bind ~f:(fun json ->

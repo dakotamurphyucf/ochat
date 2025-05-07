@@ -304,10 +304,12 @@ let run_completion
       ()
   =
   let dir = Eio.Stdenv.fs env in
+  let cwd = Eio.Stdenv.cwd env in
+  let datadir = Eio.Path.(cwd / ".chatmd") in
   let net = env#net in
   let cache =
-    if Eio.Path.is_file Eio.Path.(dir / "cache.bin")
-    then read_cache ~file:Eio.Path.(dir / "cache.bin")
+    if Eio.Path.is_file Eio.Path.(datadir / "cache.bin")
+    then read_cache ~file:Eio.Path.(datadir / "cache.bin")
     else Agent_LRU.create ~max_size:1000 ()
   in
   (* 1 • append initial prompt file if provided *)
@@ -345,7 +347,7 @@ let run_completion
     let init_items = elements_to_items ~dir ~net ~cache elements in
     let all_items =
       execute_response_loop
-        ~dir
+        ~dir:datadir
         ~net
         ~cache
         ?temperature
@@ -413,7 +415,7 @@ let run_completion
     else append "\n<msg role=\"user\">\n\n</msg>"
   in
   loop ();
-  write_cache ~file:Eio.Path.(dir / "cache.bin") cache
+  write_cache ~file:Eio.Path.(datadir / "cache.bin") cache
 ;;
 
 let custom_fn ~env CM.{ name; description; command } =
@@ -492,11 +494,13 @@ let run_completion_stream
       ()
   =
   (* ─────────────────────── 0.  setup & helpers ───────────────────────── *)
-  let dir = Eio.Stdenv.fs env
-  and net = env#net in
+  let dir = Eio.Stdenv.fs env in
+  let cwd = Eio.Stdenv.cwd env in
+  let datadir = Eio.Path.(cwd / ".chatmd") in
+  let net = env#net in
   let cache =
-    if Eio.Path.is_file Eio.Path.(dir / "cache.bin")
-    then read_cache ~file:Eio.Path.(dir / "cache.bin")
+    if Eio.Path.is_file Eio.Path.(datadir / "cache.bin")
+    then read_cache ~file:Eio.Path.(datadir / "cache.bin")
     else Agent_LRU.create ~max_size:1_000 ()
   in
   let append_doc = Io.append_doc ~dir output_file in
@@ -670,7 +674,7 @@ let run_completion_stream
       ~tools
       ?reasoning
       ~model
-      ~dir
+      ~dir:datadir
       net
       ~inputs;
     (* make sure any dangling assistant block is closed *)
@@ -683,5 +687,5 @@ let run_completion_stream
     if !run_again then turn () else append_doc "\n<msg role=\"user\">\n\n</msg>"
   in
   turn ();
-  write_cache ~file:Eio.Path.(dir / "cache.bin") cache
+  write_cache ~file:Eio.Path.(datadir / "cache.bin") cache
 ;;

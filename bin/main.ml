@@ -83,7 +83,8 @@ let query_command =
 let chat_completion_command =
   Command.basic
     ~summary:
-      "Call OpenAI API to provide chat completion based on the content of a prompt file ."
+      "Call OpenAI API to provide chat completion based on the content of a chatmd \
+       prompt file ."
     (let%map_open prompt_file =
        flag
          "-prompt-file"
@@ -104,90 +105,7 @@ let chat_completion_command =
      in
      fun () ->
        run_main
-       @@ fun env ->
-       (* let dir = Eio.Stdenv.fs env in *)
-       (* Prompt_template.run (); *)
-
-       (* log ~dir @@ sprintf "Saving chat completion output to: %s\n" output_file; *)
-       (* Chat_completion.run_completion ~env ~output_file ~prompt_file *)
-       Chat_response.run_completion_stream ~env ?prompt_file ~output_file ())
-;;
-
-let apply_patch_command =
-  Command.basic
-    ~summary:"Apply a patch to the codebase."
-    (let%map_open patch_file =
-       flag
-         "-patch-file"
-         (optional_with_default "patch.txt" string)
-         ~doc:"FILE Path to the patch file to apply"
-     in
-     fun () ->
-       run_main
-       @@ fun env ->
-       let dir = Eio.Stdenv.fs env in
-       log ~dir @@ sprintf "Applying patch from file: %s\n" patch_file;
-       let main =
-         {|#### Fix an issue
-
-\`\`\`sh
-# First, copy an error
-# Then, start codex with interactive mode
-codex
-
-# Or you can pass in via command line argument
-codex "Fix this issue: $(pbpaste)"
-
-# Or even as a task (it should use your current repo and branch)
-codex -t "Fix this issue: $(pbpaste)"
-\`\`\`|}
-       in
-       let files = Map.of_alist_exn (module String) [ "README.md", main ] in
-       let remove_fn str = print_endline str in
-       let write_fn path str =
-         print_endline "write: ";
-         print_endline path;
-         print_endline str
-       in
-       let open_fn str =
-         print_endline str;
-         Map.find_exn files str
-       in
-       let patch =
-         {|*** Begin Patch
-*** Update File: README.md
-@@
-  codex -t "Fix this issue: $(pbpaste)"
-  \`\`\`
-+
-+hello
-*** End Patch|}
-       in
-       let _res =
-         Apply_patch.process_patch
-           ~text:patch (* Placeholder for the patch text *)
-           ~open_fn
-           ~write_fn
-           ~remove_fn
-       in
-       ())
-;;
-
-let describe_command =
-  Command.basic
-    ~summary:"get dune describe output."
-    (let%map_open _ =
-       flag
-         "-file"
-         (optional_with_default "bin/main.ml" string)
-         ~doc:"FILE Path to the file to tokenize (default: bin/main.ml)"
-     in
-     fun () ->
-       run_main
-       @@ fun env ->
-       let output = Dune_describe.run env in
-       let json = Dune_describe.jsonaf_of_project_details output in
-       Io.console_log ~stdout:env#stdout @@ Jsonaf.to_string json)
+       @@ fun env -> Chat_response.run_completion_stream ~env ?prompt_file ~output_file ())
 ;;
 
 let tokenize_command =
@@ -216,14 +134,13 @@ let tokenize_command =
 let main_command =
   Command.group
     ~summary:
-      "A command-line app for indexing OCaml code and serving queries to a code vector \
-       search database using OpenAI embeddings."
-    [ "index", index_command
+      "A command-line app for using OpenAI Models for running chat completion on chatmd \
+       files. Also provides Ocaml specfic functionality for indexing files into a vector \
+       database, and natural language search of that ocaml code."
+    [ "chat-completion", chat_completion_command
+    ; "index", index_command
     ; "query", query_command
-    ; "chat-completion", chat_completion_command
     ; "tokenize", tokenize_command
-    ; "dune-describe", describe_command
-    ; "apply-patch", apply_patch_command
     ]
 ;;
 
