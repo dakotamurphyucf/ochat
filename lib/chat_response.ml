@@ -306,6 +306,9 @@ let run_completion
   let dir = Eio.Stdenv.fs env in
   let cwd = Eio.Stdenv.cwd env in
   let datadir = Eio.Path.(cwd / ".chatmd") in
+  (match Io.is_dir ~dir:cwd ".chatmd" with
+   | true -> ()
+   | false -> Io.mkdir ~exists_ok:true ~dir:cwd ".chatmd");
   let net = env#net in
   let cache =
     if Eio.Path.is_file Eio.Path.(datadir / "cache.bin")
@@ -497,6 +500,9 @@ let run_completion_stream
   let dir = Eio.Stdenv.fs env in
   let cwd = Eio.Stdenv.cwd env in
   let datadir = Eio.Path.(cwd / ".chatmd") in
+  (match Io.is_dir ~dir:cwd ".chatmd" with
+   | true -> ()
+   | false -> Io.mkdir ~exists_ok:true ~dir:cwd ".chatmd");
   let net = env#net in
   let cache =
     if Eio.Path.is_file Eio.Path.(datadir / "cache.bin")
