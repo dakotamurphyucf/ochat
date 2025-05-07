@@ -88,6 +88,6 @@ let index ~sw ~dir ~dm ~net ~vector_db_folder ~folder_to_index =
   in
   let mli_vec_file = String.concat [ vector_db_folder; "/"; "vectors.mli.binio" ] in
   let ml_vec_file = String.concat [ vector_db_folder; "/"; "vectors.ml.binio" ] in
-  Vector_db.Vec.write_vectors_to_disk mli_vecs mli_vec_file;
-  Vector_db.Vec.write_vectors_to_disk ml_vecs ml_vec_file
+  Vector_db.Vec.write_vectors_to_disk mli_vecs (dir / mli_vec_file);
+  Vector_db.Vec.write_vectors_to_disk ml_vecs (dir / ml_vec_file)
 ;;

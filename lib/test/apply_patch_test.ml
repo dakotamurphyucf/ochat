@@ -79,7 +79,8 @@ let%expect_test "add file only" =
   in
   let final_fs = apply_patch_in_memory ~patch_text:patch ~files:initial_fs in
   print_s [%sexp (Map.to_alist final_fs : (string * string) list)];
-  [%expect {|
+  [%expect
+    {|
     ((new.txt  "hello\
               \nworld\
               \n"))
@@ -90,9 +91,11 @@ let%expect_test "add file only" =
 
 let%expect_test "delete file only" =
   let initial_fs = [ "del.txt", "something"; "keep.txt", "ok" ] in
-  let patch = {|*** Begin Patch
+  let patch =
+    {|*** Begin Patch
 *** Delete File: del.txt
-*** End Patch|} in
+*** End Patch|}
+  in
   let final_fs = apply_patch_in_memory ~patch_text:patch ~files:initial_fs in
   print_s [%sexp (Map.to_alist final_fs : (string * string) list)];
   [%expect {| ((keep.txt ok)) |}]
@@ -112,7 +115,8 @@ let%expect_test "insert-only update" =
   in
   let final_fs = apply_patch_in_memory ~patch_text:patch ~files:initial_fs in
   print_s [%sexp (Map.to_alist final_fs : (string * string) list)];
-  [%expect {|
+  [%expect
+    {|
     ((insert.txt  "intro\
                  \na\
                  \nb\
@@ -120,6 +124,9 @@ let%expect_test "insert-only update" =
                  \n"))
     |}]
 ;;
+
+(* ----------------------------------------------------------------------------- *)
+
 let%expect_test "add, update and delete files" =
   let initial_fs =
     [ "foo.txt", "apple\nworld\norange"; "bar.txt", "alpha\nbeta\ngamma" ]
@@ -153,4 +160,3 @@ let%expect_test "add, update and delete files" =
 ;;
 
 (* ----------------------------------------------------------------------------- *)
-

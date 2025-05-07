@@ -28,11 +28,14 @@ let of_persistent pf =
 ;;
 
 let write_cache ~file cache =
-  Bin_prot_utils.write_bin_prot' file [%bin_writer: persistent_form] (to_persistent cache)
+  Bin_prot_utils_eio.write_bin_prot'
+    file
+    [%bin_writer: persistent_form]
+    (to_persistent cache)
 ;;
 
 let read_cache ~file =
-  of_persistent (Bin_prot_utils.read_bin_prot' file [%bin_reader: persistent_form])
+  of_persistent (Bin_prot_utils_eio.read_bin_prot' file [%bin_reader: persistent_form])
 ;;
 
 (*──────────────────────── 2.  Helpers ───────────────────────────────────*)
@@ -304,7 +307,7 @@ let run_completion
   let net = env#net in
   let cache =
     if Eio.Path.is_file Eio.Path.(dir / "cache.bin")
-    then read_cache ~file:"./cache.bin"
+    then read_cache ~file:Eio.Path.(dir / "cache.bin")
     else Agent_LRU.create ~max_size:1000 ()
   in
   (* 1 • append initial prompt file if provided *)
@@ -410,7 +413,7 @@ let run_completion
     else append "\n<msg role=\"user\">\n\n</msg>"
   in
   loop ();
-  write_cache ~file:"./cache.bin" cache
+  write_cache ~file:Eio.Path.(dir / "cache.bin") cache
 ;;
 
 let custom_fn ~env CM.{ name; description; command } =
@@ -493,7 +496,7 @@ let run_completion_stream
   and net = env#net in
   let cache =
     if Eio.Path.is_file Eio.Path.(dir / "cache.bin")
-    then read_cache ~file:"./cache.bin"
+    then read_cache ~file:Eio.Path.(dir / "cache.bin")
     else Agent_LRU.create ~max_size:1_000 ()
   in
   let append_doc = Io.append_doc ~dir output_file in
@@ -680,5 +683,5 @@ let run_completion_stream
     if !run_again then turn () else append_doc "\n<msg role=\"user\">\n\n</msg>"
   in
   turn ();
-  write_cache ~file:"./cache.bin" cache
+  write_cache ~file:Eio.Path.(dir / "cache.bin") cache
 ;;

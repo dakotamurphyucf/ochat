@@ -13,6 +13,8 @@ type t =
   ; index : (int, string) Core.Hashtbl.t
   }
 
+type path = Eio.Fs.dir_ty Eio.Path.t
+
 module Vec : sig
   module Float_array : sig
     type t = float array [@@deriving compare, bin_io, sexp]
@@ -28,19 +30,19 @@ module Vec : sig
     }
   [@@deriving compare, bin_io, sexp]
 
-  module Io : module type of Bin_prot_utils.With_file_methods (struct
+  module Io : module type of Bin_prot_utils_eio.With_file_methods (struct
       type nonrec t = t [@@deriving compare, bin_io, sexp]
     end)
 
   (** Writes an array of vectors to disk using the Io.File module
       @param vectors The array of vectors to be written to disk
       @param label The label used as the file name for the output file *)
-  val write_vectors_to_disk : t array -> string -> unit
+  val write_vectors_to_disk : t array -> path -> unit
 
   (** Reads an array of vectors from disk using the Io.File module
       @param label The label used as the file name for the input file
       @return The array of vectors read from the file *)
-  val read_vectors_from_disk : string -> t array
+  val read_vectors_from_disk : path -> t array
 end
 
 (** [create_corpus docs'] creates a vector database from an array of document vectors [docs'].
@@ -73,7 +75,7 @@ val add_doc : Owl.Mat.mat -> float array -> Owl.Mat.mat
     @param file is the file name used to read the array of document vectors from disk.
     @return
       a record of type [t] containing the matrix of vector representations [corpus] and the index mapping document indices to file paths. *)
-val initialize : string -> t
+val initialize : path -> t
 
 (** [get_docs dir t indexs] reads the documents corresponding to the given indices from disk and returns an array of their contents.
 

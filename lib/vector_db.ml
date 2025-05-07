@@ -9,6 +9,8 @@ type t =
   ; index : (int, string) Hashtbl.t
   }
 
+type path = Eio.Fs.dir_ty Eio.Path.t
+
 module Vec = struct
   module Float_array = struct
     type t = float array [@@deriving compare, bin_io, sexp]
@@ -33,7 +35,7 @@ module Vec = struct
   end
 
   include T
-  module Io = Bin_prot_utils.With_file_methods (T)
+  module Io = Bin_prot_utils_eio.With_file_methods (T)
 
   (** Writes an array of vectors to disk using the Io.File module
       @param vectors The array of vectors to be written to disk
@@ -113,8 +115,7 @@ let initialize file =
 let get_docs dir t indexs =
   Eio.Fiber.List.map
     (fun idx ->
-      let file_path = Hashtbl.find_exn t.index idx in
-      Io.load_doc ~dir file_path)
+       let file_path = Hashtbl.find_exn t.index idx in
+       Io.load_doc ~dir file_path)
     (Array.to_list indexs)
 ;;
-

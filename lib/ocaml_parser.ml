@@ -16,18 +16,18 @@ module Traverse = struct
   let extract_docs_from_attributes attrs =
     List.fold_left
       (fun acc attr ->
-        match attr.attr_name.txt with
-        | "ocaml.doc" | "ocaml.text" ->
-          (match attr.attr_payload with
-           | PStr
-               [ { pstr_desc =
-                     Pstr_eval
-                       ({ pexp_desc = Pexp_constant (Pconst_string (doc, _, _)); _ }, _)
-                 ; _
-                 }
-               ] -> doc :: acc
-           | _ -> acc)
-        | _ -> acc)
+         match attr.attr_name.txt with
+         | "ocaml.doc" | "ocaml.text" ->
+           (match attr.attr_payload with
+            | PStr
+                [ { pstr_desc =
+                      Pstr_eval
+                        ({ pexp_desc = Pexp_constant (Pconst_string (doc, _, _)); _ }, _)
+                  ; _
+                  }
+                ] -> doc :: acc
+            | _ -> acc)
+         | _ -> acc)
       []
       attrs
   ;;
@@ -87,17 +87,17 @@ module Traverse = struct
           let a =
             List.filter_map
               (fun item ->
-                match item.pstr_desc with
-                | Pstr_attribute _
-                | Pstr_extension _
-                | Pstr_open _
-                | Pstr_include _
-                | Pstr_eval _ -> None
-                | _ ->
-                  (* print_endline "yoyo"; *)
-                  (* let res = snd (self#structure_item item (path, [])) in *)
-                  (* Format.printf "%a\n" Astlib.Pprintast.structure_item  item; *)
-                  Some (snd (self#structure_item item (path, []))))
+                 match item.pstr_desc with
+                 | Pstr_attribute _
+                 | Pstr_extension _
+                 | Pstr_open _
+                 | Pstr_include _
+                 | Pstr_eval _ -> None
+                 | _ ->
+                   (* print_endline "yoyo"; *)
+                   (* let res = snd (self#structure_item item (path, [])) in *)
+                   (* Format.printf "%a\n" Astlib.Pprintast.structure_item  item; *)
+                   Some (snd (self#structure_item item (path, []))))
               items
           in
           path, loc @ List.flatten a
@@ -112,13 +112,13 @@ module Traverse = struct
           let a =
             List.filter_map
               (fun item ->
-                match item.psig_desc with
-                | Psig_open _ | Psig_include _ -> None
-                | _ ->
-                  (* print_endline "yoyo"; *)
-                  (* let res = snd (self#structure_item item (path, [])) in *)
-                  (* Format.printf "%a\n" Astlib.Pprintast.structure_item  item; *)
-                  Some (snd (self#signature_item item (path, []))))
+                 match item.psig_desc with
+                 | Psig_open _ | Psig_include _ -> None
+                 | _ ->
+                   (* print_endline "yoyo"; *)
+                   (* let res = snd (self#structure_item item (path, [])) in *)
+                   (* Format.printf "%a\n" Astlib.Pprintast.structure_item  item; *)
+                   Some (snd (self#signature_item item (path, []))))
               items
           in
           path, loc @ List.flatten a
@@ -157,6 +157,7 @@ type parse_result =
 
 open Core
 open Io
+
 type traverse_input =
   { doc : string
   ; payload : payload
@@ -165,7 +166,7 @@ type traverse_input =
   }
 
 let traverse traverse_input =
-  let {doc; payload; module_name; ocaml_source} = traverse_input in
+  let { doc; payload; module_name; ocaml_source } = traverse_input in
   let _, payload = Traverse.s payload (module_name, []) in
   List.map
     ~f:(fun (path, loc, docs) ->
@@ -215,10 +216,8 @@ let parse dir file ocaml_source module_name =
     | Interface -> PSig (Parse.interface lexbuf)
     | Implementation -> PStr (Parse.implementation lexbuf)
   in
-  { doc; payload; module_name; ocaml_source}
+  { doc; payload; module_name; ocaml_source }
 ;;
-
-
 
 (** [dir  path] reads the directoryZ at the given [path]
     
@@ -252,8 +251,6 @@ type module_info =
   ; ml_file : ml file_info option
   ; module_path : string
   }
-
-
 
 (** [separate_ocaml_files entries] separates OCaml source files into three categories: implementation files (.ml), interface files (.mli), and other files.
 
@@ -388,5 +385,5 @@ let format_parse_result (parse_result : parse_result) : string * string =
     then "(**\n" ^ String.concat ~sep:"\n" parse_result.comments ^ " *)"
     else ""
   in
-  metadata , comments ^ "\n" ^ parse_result.contents
+  metadata, comments ^ "\n" ^ parse_result.contents
 ;;

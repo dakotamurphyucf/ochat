@@ -62,7 +62,7 @@ let query_command =
        log ~dir @@ sprintf "Returning top **%d** results\n" num_results;
        let vf = Eio.Stdenv.fs env / vector_db_folder in
        let vec_file = String.concat [ vector_db_folder; "/"; "vectors.binio" ] in
-       let vecs = Vector_db.Vec.read_vectors_from_disk vec_file in
+       let vecs = Vector_db.Vec.read_vectors_from_disk (Eio.Stdenv.fs env / vec_file) in
        let corpus = Vector_db.create_corpus vecs in
        let response =
          Openai.Embeddings.post_openai_embeddings env#net ~input:[ query_text ]

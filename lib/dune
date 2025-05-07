@@ -2,7 +2,7 @@
  (name ocaml_parser)
  (modules ocaml_parser)
  (public_name chatgpt.ocaml_parser)
- (libraries io ppxlib core bin_prot_utils vector_db openai owl re pcre)
+ (libraries io ppxlib core vector_db openai owl re pcre)
  (preprocess
   (pps ppx_jane)))
 
@@ -26,7 +26,7 @@
  (name vector_db)
  (public_name chatgpt.vector_db)
  (modules vector_db)
- (libraries io ppxlib core bin_prot_utils openai owl doc)
+ (libraries io ppxlib core bin_prot_utils_eio openai owl doc)
  (preprocess
   (pps ppx_jane)))
 
@@ -34,7 +34,15 @@
  (name bin_prot_utils)
  (public_name chatgpt.bin_prot_utils)
  (modules bin_prot_utils)
- (libraries core core_unix.bigstring_unix core_unix)
+ (libraries core core_unix.bigstring_unix eio eio.unix core_unix)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name bin_prot_utils_eio)
+ (public_name chatgpt.bin_prot_utils_eio)
+ (modules bin_prot_utils_eio)
+ (libraries core core_unix.bigstring_unix eio eio.unix )
  (preprocess
   (pps ppx_jane)))
 
@@ -192,7 +200,7 @@
   prompt_template
   lru_cache
   ttl_lru_cache
-  bin_prot_utils)
+  bin_prot_utils_eio)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
