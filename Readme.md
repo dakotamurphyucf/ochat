@@ -170,10 +170,9 @@ Imagine we have a template called `pair_programmer.chatmd`:
 Then a concrete conversation file can simply do:
 
 ```xml
-<!-- conversation_1.chatmd -->
+<!-- the contents of pair_programmer.chatmd *replaces* this import decleration -->
 <import file="pair_programmer.chatmd"/>
 
-<!-- Anything below is *added* to the imported template -->
 <msg role="user">Rewrite this function so it’s tail-recursive.</msg>
 ```
 
