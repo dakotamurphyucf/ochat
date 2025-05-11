@@ -300,20 +300,20 @@ Need something else?  Declare a **custom tool** that wraps any shell command:
 
 ```xml
 <tool name="dune" command="dune" description="Run dune commands inside the repo" />
+```
 
 Want to expose a whole **agent prompt** as a reusable tool?  Use the `agent="…"`
 attribute instead of `command=`:
 
 ```xml
 <!-- The file summarise.chatmd lives locally inside ./prompts -->
-<tool name="summarise" agent="./prompts/summarise.chatmd" local />
+<tool name="summarise" agent="./prompts/summarise.chatmd" description="summarises the text given as input" local />
 ```
 
 When the assistant later calls the `summarise` function and passes a JSON body
 `{"input": "some text"}` the runtime executes `summarise.chatmd` as a
 sub-conversation with that text inserted as an extra user message and returns
 the agent’s final answer as the tool result.
-```
 
 ---
 
