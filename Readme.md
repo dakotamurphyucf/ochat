@@ -149,7 +149,7 @@ execution context**.  It is parsed by `Prompt_template.Chat_markdown` and execut
 | Element | Purpose | Important attributes |
 |---------|---------|----------------------|
 | `<config/>` | Current model and generation parameters. **Must be present once** near the top. | `model`, `max_tokens`, `temperature`, `reasoning_effort`, **`show_tool_call` (flag attribute)** – *when present* the runtime **embeds** tool-call arguments & outputs inline; when omitted they are written to files and referenced via `<doc/>` imports. |
-| `<tool/>` | Declare a tool that the model may call. | • `name` – tool/function name.<br>• *Built-ins* only need the name (e.g. `apply_patch`).<br>• For **custom** tools add `command="<shell-command>"` and optional `description="..."`. |
+| `<tool/>` | Declare a tool that the model may call. | • `name` – tool/function name.<br>• *Built-ins* only need the name (e.g. `apply_patch`).<br>• For **custom shell tools** add `command="<shell-command>"` and optional `description="..."`.<br>• For an **agent-backed tool** add `agent="<url-or-path>"` (plus optional `local` flag and `description`). |
 | `<msg>` | A chat message. | `role` (`system,user,assistant,developer,tool`), optional `name`, `id`, `status`.  Assistant messages that *call a tool* add the boolean `tool_call` attribute plus `function_name` & `tool_call_id`. |
 | `<reasoning>` | Internal scratchpad the model can populate when reasoning is enabled.  Not needed when authoring prompts. | `id`, `status`. Contains one or more `<summary>` blocks. |
 | `<import/>` | Include another file verbatim *at parse time*.  Mostly useful for templates. | `file` – relative path. |
@@ -300,6 +300,19 @@ Need something else?  Declare a **custom tool** that wraps any shell command:
 
 ```xml
 <tool name="dune" command="dune" description="Run dune commands inside the repo" />
+
+Want to expose a whole **agent prompt** as a reusable tool?  Use the `agent="…"`
+attribute instead of `command=`:
+
+```xml
+<!-- The file summarise.chatmd lives locally inside ./prompts -->
+<tool name="summarise" agent="./prompts/summarise.chatmd" local />
+```
+
+When the assistant later calls the `summarise` function and passes a JSON body
+`{"input": "some text"}` the runtime executes `summarise.chatmd` as a
+sub-conversation with that text inserted as an extra user message and returns
+the agent’s final answer as the tool result.
 ```
 
 ---

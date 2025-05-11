@@ -78,9 +78,18 @@ module Chat_markdown : sig
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type agent_tool =
+    { name : string
+    ; description : string option
+    ; agent : string
+    ; is_local : bool
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
   type tool =
     | Builtin of string
     | Custom of custom_tool
+    | Agent of agent_tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type config =

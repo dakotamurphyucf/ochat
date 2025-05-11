@@ -256,9 +256,19 @@ module Chat_content = struct
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  (* A tool that proxies its invocation to a secondary chatmd “agent” prompt. *)
+  type agent_tool =
+    { name : string
+    ; description : string option
+    ; agent : string (** URL or path to the agent chatmd file *)
+    ; is_local : bool (** whether the agent file lives on disk *)
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
   type tool =
     | Builtin of string
     | Custom of custom_tool
+    | Agent of agent_tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (* The config element. *)
@@ -461,7 +471,19 @@ module Chat_markdown = struct
            | Some d -> Printf.sprintf " description=\"%s\"" d
            | None -> ""
          in
-         Printf.sprintf "<tool name=\"%s\"%s command=\"%s\" />" name desc_attr command)
+         Printf.sprintf "<tool name=\"%s\"%s command=\"%s\" />" name desc_attr command
+       | Agent { name; description; agent; is_local } ->
+         let desc_attr =
+           Option.value_map description ~default:"" ~f:(fun d ->
+             Printf.sprintf " description=\"%s\"" d)
+         in
+         let local_attr = if is_local then " local" else "" in
+         Printf.sprintf
+           "<tool name=\"%s\"%s agent=\"%s\"%s />"
+           name
+           desc_attr
+           agent
+           local_attr)
     | Message m ->
       (match m.content with
        | Some (Text t) -> t
@@ -574,27 +596,32 @@ module Chat_markdown = struct
         | "tool" ->
           let tbl = Hashtbl.create (module String) in
           List.iter attr ~f:(fun ((_, nm), v) -> Hashtbl.set tbl ~key:nm ~data:v);
-          let name = Hashtbl.find_exn tbl "name" in
+          let name = Hashtbl.find_exn tbl "name" |> String.strip in
           let command = Hashtbl.find tbl "command" in
+          let agent = Hashtbl.find tbl "agent" in
           let description = Hashtbl.find tbl "description" in
-          (match command with
-           | Some cmd ->
-             let command = String.strip cmd in
-             if String.is_empty command
+          let is_local = Hashtbl.mem tbl "local" in
+          (match command, agent with
+           | Some _, Some _ ->
+             failwith "<tool> cannot have both 'command' and 'agent' attributes."
+           | Some cmd, None ->
+             let cmd = String.strip cmd in
+             if String.is_empty cmd
              then failwith "Tool command cannot be empty."
              else (
-               let command = String.strip command in
-               let description =
-                 match description with
-                 | Some d -> Some (String.strip d)
-                 | None -> None
-               in
-               Tool (Custom { name; description; command }))
-           | None ->
-             let builtin = String.strip name in
-             if String.is_empty builtin
+               let description = Option.map description ~f:String.strip in
+               Tool (Custom { name; description; command = cmd }))
+           | None, Some agent_url ->
+             let agent_url = String.strip agent_url in
+             if String.is_empty agent_url
+             then failwith "Tool agent URL cannot be empty."
+             else (
+               let description = Option.map description ~f:String.strip in
+               Tool (Agent { name; description; agent = agent_url; is_local }))
+           | None, None ->
+             if String.is_empty name
              then failwith "Tool name cannot be empty."
-             else Tool (Builtin builtin))
+             else Tool (Builtin name))
         | _ ->
           let raw_content =
             match children with

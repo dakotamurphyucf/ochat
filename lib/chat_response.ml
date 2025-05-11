@@ -528,6 +528,66 @@ let custom_fn ~env CM.{ name; description; command } =
   gpt_fun
 ;;
 
+(*──────────────────────── helper: agent tool → Gpt_function.t ──────────*)
+let agent_fn ~dir ~net ~cache CM.{ name; description; agent; is_local } : Gpt_function.t =
+  (* Module describing the function interface presented to the model. The
+     agent tool simply expects an object with a single `input` string that
+     will become the user message for the sub-agent. *)
+  let module M : Gpt_function.Def with type input = string = struct
+    type input = string
+
+    let name = name
+
+    let description =
+      Option.first_some
+        description
+        (Some
+           (Printf.sprintf
+              "Run agent prompt located at %s and return its final answer."
+              agent))
+    ;;
+
+    let parameters : Jsonaf.t =
+      `Object
+        [ "type", `String "object"
+        ; "properties", `Object [ "input", `Object [ "type", `String "string" ] ]
+        ; "required", `Array [ `String "input" ]
+        ; "additionalProperties", `False
+        ]
+    ;;
+
+    let input_of_string s =
+      let j = Jsonaf.of_string s in
+      match Jsonaf.member_exn "input" j with
+      | `String str -> str
+      | _ -> failwith "Expected {\"input\": string} for agent tool input"
+    ;;
+  end
+  in
+  let run (user_msg : string) : string =
+    let basic_item : CM.basic_content_item =
+      { type_ = "text"
+      ; text = Some user_msg
+      ; image_url = None
+      ; document_url = None
+      ; is_local = false
+      ; cleanup_html = false
+      }
+    in
+    let prompt_xml =
+      (* Re-use helper from above to fetch either local or remote prompt *)
+      let fetch =
+        (* get_content requires cleanup_html flag, which we set to false since
+           we want raw chatmd. *)
+        get_content ~dir ~net agent is_local ~cleanup_html:false
+      in
+      fetch
+    in
+    run_agent ~dir ~net ~cache prompt_xml [ CM.Basic basic_item ]
+  in
+  Gpt_function.create_function (module M) run
+;;
+
 let run_completion_stream
       ~env
       ?prompt_file (* optional template to prepend once          *)
@@ -591,15 +651,13 @@ let run_completion_stream
         | _ -> None)
       |> List.map ~f:(function
         | CM.Builtin name ->
-          (* Process the built-in tool name here *)
           (match name with
            | "apply_patch" -> Functions.apply_patch ~dir:(Eio.Stdenv.cwd env)
            | "read_dir" -> Functions.read_dir ~dir:(Eio.Stdenv.cwd env)
            | "get_contents" -> Functions.get_contents ~dir:(Eio.Stdenv.cwd env)
            | _ -> failwithf "Unknown built-in tool: %s" name ())
-        | CM.Custom c ->
-          (* Process the custom tool here *)
-          custom_fn ~env c)
+        | CM.Custom c -> custom_fn ~env c
+        | CM.Agent a -> agent_fn ~dir:(Eio.Stdenv.cwd env) ~net ~cache a)
     in
     (* 1‑C • tools / functions *)
     let comp_tools, tool_tbl = Gpt_function.functions tools in
