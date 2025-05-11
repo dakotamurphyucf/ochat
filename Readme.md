@@ -1,146 +1,318 @@
-## Description
+# ChatGPT OCaml Toolkit
 
-This OCaml project is a AI enhanced developer toolkit that integrates with OpenAI's API. Key features include code indexing and natural language search, prompt generation, and a markdown style ai chat interface that includes enhanced functionality using openai's function calling. This library contains alot of experimentation, and is intented to be more of a research project than a production ready app. Uses Effect based library Eio for concurrency and Owl for computing cosign similarity of openai embeddings. I recommmend installing in a local opam switch.
+An experimental command-line toolkit and OCaml library that lets you **chat with large language models through structured _chatmd_ documents**, index and search OCaml code with OpenAI embeddings, and automate edits to the source-tree via function-calling.  
+The project is highly experimental, but may serve as a reference for:
+
+• Integrating OpenAI’s API from OCaml (chat/completions, embeddings, function calling, streaming, etc.)  
+• Building small domain-specific languages on top of XML/Markdown (`chatmd`)  
+• Using Eio for concurrent IO and Owl for vector similarity search
+
+---
+
+## Table of contents
+
+1. [Installation](#installation)  
+2. [CLI reference](#cli-reference)  
+3. [Quick start](#quick-start)  
+4. [The chatmd language](#the-chatmd-language)  
+   1. [Top-level elements](#top-level-elements)  
+   2. [Message roles & function calling](#message-roles--function-calling)  
+   3. [Inline content helpers](#inline-content-helpers)  
+   4. [Raw text blocks](#raw-text-blocks)  
+5. [Built-in tools](#built-in-tools)  
+6. [Examples](#examples)  
+7. [Contributing & License](#contributing--license)
+
+---
 
 ## Installation
 
-To build this project, you can use OPAM:
+The project is published as a normal opam package.  We recommend working inside a local
+switch so that the experimental dependencies do not pollute your system installation.
 
 ```sh
-opam install . --deps-only
-# If owl has issues installing on new apple chips https://github.com/owlbarn/owl/issues/597#issuecomment-1119470934 
-#  try this 
-opam pin -n git+https://github.com/mseri/owl.git#arm64 --with-version=1.1.0
-PKG_CONFIG_PATH="/opt/homebrew/opt/openblas/lib/pkgconfig" opam install owl.1.1.0
-# if installing on ocaml 5.3 and you get an error installing core_unix version 17 on macOS ARM https://github.com/janestreet/core_unix/issues/14#issuecomment-2684149962
+# inside the project root
+opam switch create .  # creates a local switch (optional, but recommended)
+opam install . --deps-only  # install build-time dependencies
+
+# Owl on Apple Silicon sometimes needs an explicit pin:
+#   https://github.com/owlbarn/owl/issues/597#issuecomment-1119470934
+#
+# opam pin -n git+https://github.com/mseri/owl.git#arm64 --with-version=1.1.0
+# PKG_CONFIG_PATH="/opt/homebrew/opt/openblas/lib/pkgconfig" opam install owl.1.1.0
+
+# build everything
+dune build
 ```
 
-# Command Line Application Documentation
+---
 
-This command-line application is designed for indexing OCaml code, serving queries to a code vector search database using OpenAI embeddings, and interacting with gpt models through chat interface using OpenAI chat completion api. The application provides four main commands: `index`, `query`, `chat-completion`, and `tokenize`.
+## CLI reference
 
-## Index Command
+All commands live under the executable `chatgpt` (installed as `chatgpt.exe` or available
+via `dune exec` while developing).
 
-The `index` command indexes OCaml code in a specified folder for a code vector search database using OpenAI embeddings.
-
-### Usage
-
-```bash
-index -folder-to-index <folder_path> -vector-db-folder <db_folder_path>
+```sh
+dune exec ./bin/main.exe -- <command> [options]
+# or, after installation
+gpt <command> [options]
 ```
 
-### Parameters
+### `index`
 
-- `-folder-to-index`: Path to the folder containing OCaml code to index. Default is `./lib`.
-- `-vector-db-folder`: Path to the folder to store vector database data. Default is `./vector`.
+Create / update a vector database for a folder of OCaml files using OpenAI embeddings.
 
-## Query Command
-
-The `query` command queries the indexed OCaml code using natural language.
-
-### Usage
-
-```bash
-query -vector-db-folder <db_folder_path> -query-text <query_text> -num-results <num_results>
+```sh
+gpt index \
+  -folder-to-index <folder>    # default ./lib
+  -vector-db-folder <folder>   # default ./vector
 ```
 
-### Parameters
+### `query`
 
-- `-vector-db-folder`: Path to the folder containing vector database data. Default is `./vector`.
-- `-query-text`: Natural language query text to search the indexed OCaml code. This is a required parameter.
-- `-num-results`: Number of top results to return. Default is 5.
+Semantic search over previously indexed source code.
 
-## Chat Completion Command
-
-The `chat-completion` command calls the OpenAI API to provide chat completion based on the content of a prompt file.
-
-### Usage
-
-```bash
-chat-completion -prompt-file <prompt_file_path> -output-file <output_file_path> -max-tokens <max_tokens>
+```sh
+gpt query \
+  -vector-db-folder <folder>   # default ./vector
+  -query-text "why isn’t my Functor compiling?" \
+  -num-results 10              # default 5
 ```
 
-### Parameters
+### `chat-completion`
 
-- `-prompt-file`: Path to the file containing the initial prompt. This is optional. If provided, its content is loaded and appended to the output file. 
-- `-output-file`: Path to the file to save the chat completion output. Default is `./prompts/default.md`. Only include this parameter and not -prompt-file if you wan to continue with a previous conversation
-- `-max-tokens`: Maximum number of tokens to generate in the chat completion. Default is 600.
+Run a chat session described in a _chatmd_ file.  The command **streams** the model’s
+answer back into the same file and automatically appends a new empty `<msg role="user">`
+block so you can keep typing and re-run the command.
 
-### Markup syntax of prompt file
+```sh
+# start a new conversation from a template
+gpt chat-completion \
+  -prompt-file ./prompts/template.md \
+  -output-file ./conversations/my_chat.md
 
-The markup syntax used is designed to represent a conversation as a series of messages. Each message is represented as a `msg` element with attributes for the role of the message (e.g., "system", "user", "assistant", "function"), an optional name to represent messages from the user/assistant or name of the function called for results returned in a msg with role function, and an optional function_call when the assistant invokes a function_call. The content of the message is represented as the text content of the `msg` element. If a function call is present, it is represented as a `function_call` attribute with a `function_name` attribute and `arguments` set as the elements contents. Only msg elements with assistant role can have a function_call. The function name and arguments are used to call a function from the list of functions made availble to the prompt. You can view availible functions in lib/chat_completion.ml or just ask the model in the chat for a list of availble function. The results of a function call are put in a msg element with role function, name is the function used, and the contents of the element are the results. 
-
-here's an example of a conversation using the specialized markup:
-
-```html
-<msg role="system">You are a helpful assistant.</msg>
-<msg role="user" name="John">What's the weather like?</msg>
-<msg role="assistant">I'm not sure, would you like me to look it up for you?</msg>
-<msg role="user" name="John">Yes, please.</msg>
-<msg role="assistant" function_call function_name="get_url_content">{"url": "http://api.weatherapi.com/v1/current.json?key=YOUR_API_KEY&q=London"}</msg>
-<msg role="function" name="get_url_content">{"location":{"name":"London","region":"City of London, Greater London","country":"UK"},"current":{"temp_c":14.0,"condition":{"text":"Partly cloudy"}}}</msg>
-<msg role="assistant">The current weather in London is partly cloudy with a temperature of 14 degrees Celsius.</msg>
-<msg role="user" name="John">Thank you!</msg>
-<msg role="assistant">You're welcome!</msg>
+# continue an existing conversation
+gpt chat-completion -output-file ./conversations/my_chat.md
 ```
 
-## Tokenize Command
+`chat-completion` **no longer takes `-max-tokens` or model flags on the command line** –
+those are specified inside the `<config/>` element within the chatmd file (see below).
 
-The `tokenize` command tokenizes the provided file using the OpenAI Tikitoken spec.
+### `tokenize`
 
-### Usage
+Utility that tokenises a file using the TikToken `cl100k_base` codec (handy for debugging
+token budgets).
 
-```bash
-tokenize -file <file_path>
+```sh
+gpt tokenize -file src/file.ml       # default bin/main.ml
 ```
 
-### Parameters
+---
 
-- `-file`: Path to the file to tokenize. Default is `bin/main.ml`.
+## Quick start
+
+1.  Create a new markdown file `conversation.md` with the following content:
+
+    ```xml
+    <config model="o3" max_tokens="1024" reasoning_effort="high"/>
+
+    <!-- make the source tree available so the assistant can patch files -->
+    <tool name="apply_patch"/>
+
+    <msg role="system">You are a helpful OCaml pair-programmer.</msg>
+    <msg role="user">How can I make this function tail-recursive?</msg>
+    ```
+
+2.  Run the CLI:
+
+    ```sh
+    chatgpt chat-completion -output-file conversation.md
+    ```
+
+3.  The file will be updated in-place with the assistant’s answer.  Edit, re-run – enjoy!
+
+---
+
+## The chatmd language
+
+Chatmd is an XML-flavoured, line-oriented markup that represents a **conversation plus
+execution context**.  It is parsed by `Prompt_template.Chat_markdown` and executed by
+`Chat_response`.
+
+### Top-level elements
+
+| Element | Purpose | Important attributes |
+|---------|---------|----------------------|
+| `<config/>` | Current model and generation parameters. **Must be present once** near the top. | `model` (e.g. `o3`), `max_tokens`, `temperature`, `reasoning_effort` (`low\|medium\|high`). |
+| `<tool/>` | Declare a tool that the model may call. | • `name` – tool/function name.<br>• *Built-ins* only need the name (e.g. `apply_patch`).<br>• For **custom** tools add `command="<shell-command>"` and optional `description="..."`. |
+| `<msg>` | A chat message. | `role` (`system,user,assistant,developer,tool`), optional `name`, `id`, `status`.  Assistant messages that *call a tool* add the boolean `tool_call` attribute plus `function_name` & `tool_call_id`. |
+| `<reasoning>` | Internal scratchpad the model can populate when reasoning is enabled.  Not needed when authoring prompts. | `id`, `status`. Contains one or more `<summary>` blocks. |
+| `<import/>` | Include another file verbatim *at parse time*.  Mostly useful for templates. | `file` – relative path. |
+
+#### Importing templates / snippets
+
+Use `<import file="…" />` to **inline the contents of another chatmd (or plain text) file at
+parse-time**.  This is handy for separating prompt templates from the evolving
+conversation or for re-using boilerplate system messages.
+
+Imagine we have a template called `pair_programmer.chatmd`:
+
+```xml
+<config model="o3" reasoning_effort="high"/>
+
+<msg role="system">You are a knowledgeable OCaml pair-programmer.</msg>
+
+<!-- Tools that are always available in this scenario -->
+<tool name="apply_patch"/>
+<tool name="get_contents"/>
+```
+
+Then a concrete conversation file can simply do:
+
+```xml
+<!-- conversation_1.chatmd -->
+<import file="pair_programmer.chatmd"/>
+
+<!-- Anything below is *added* to the imported template -->
+<msg role="user">Rewrite this function so it’s tail-recursive.</msg>
+```
+
+When the CLI parses `conversation_1.chatmd` the `<import/>` is replaced with the full
+content of `pair_programmer.chatmd` before the request is sent to OpenAI – you do **not**
+need to worry about nesting configs or duplicated tool declarations.
+
+### Message roles & function calling
+
+```xml
+<!-- Assistant asks the runtime to call read_dir -->
+<msg role="assistant" tool_call tool_call_id="call_42" function_name="read_dir">
+RAW|{"path":"./lib"}|RAW
+</msg>
+
+<!-- The runtime executes the call and returns the result: -->
+<msg role="tool" tool_call_id="call_42">
+RAW|
+filter_file.ml
+chat_response.ml
+... etc ...
+|RAW
+</msg>
+```
+
+* The presence of the boolean `tool_call` attribute signals *“the assistant wants to run a
+  tool”*.
+* `tool_call_id` lets subsequent messages correlate the call and its output.
+
+### Inline content helpers
+
+Inside a `<msg>` body you can embed richer content that is expanded **before** the request
+is sent to OpenAI:
+
+| Tag | Effect |
+|-----|--------|
+| `<img src="path_or_url" [local] />` | Embeds an image. If `local` is present the file is encoded as a data-URI so the API sees it. |
+| `<doc src="path_or_url" [local] [strip] />` | Inlines the *text* of a document. <br>• `local` reads from disk.  <br>• Without it the file is fetched over HTTP.<br>• `strip` removes HTML tags (useful for web pages). |
+| `<agent src="prompt.chatmd" [local]> … </agent>` | Runs the referenced chatmd document as a *sub-agent* and substitutes its final answer.  Any nested content inside the tag is appended as extra user input before execution. |
+
+#### The `<agent/>` element – running sub-conversations
+
+An **agent** lets you embed *another* chatmd prompt as a sub-task and reuse its answer as
+inline text.  Think of it as a one-off function call powered by an LLM.
+
+• `src` is the file (local or remote URL) that defines the agent’s prompt.  
+• Add the `local` attribute to read the file from disk instead of fetching over HTTP.  
+• Any child items you place inside `<agent>` become *additional* user input that is appended
+  to the sub-conversation *before* it is executed.
+
+Example – call a documentation-summary agent and insert its answer inside the current
+message:
+
+```xml
+<msg role="assistant">
+  Here is a summary of the README:
+  <agent src="summarise.chatmd" local>
+     <doc src="README.md" local strip/>
+  </agent>
+</msg>
+```
+
+At runtime the inner prompt `summarise.chatmd` is executed with the stripped text of the
+local `README.md` as user input, and the resulting summary is injected in place of the
+`<agent>` tag.
+
+
+### Raw text blocks
+
+Occasionally you need to include text that would otherwise confuse the XML parser (code
+containing angle brackets, patches, JSON, …).  Surround it with a **pipe-delimited RAW
+block** – it is converted to an internal CDATA section and arrives at the model unchanged.
+
+```
+RAW|<html><body>Hello</body></html>|RAW
+
+# short alias
+raw|some <xml> without closing tags|raw
+```
+
+---
+
+## Built-in tools
+
+The toolkit ships with a handful of built-ins that can be enabled by simply declaring
+`<tool name="…" />` in the prompt.
+
+| Tool | Signature | Description |
+|------|-----------|-------------|
+| `apply_patch` | *string – git-style patch* | Applies the patch to the working tree.  Return value: success/failure message. |
+| `read_dir` | `{ "path": "…" }` | Returns a newline-separated listing of the directory. |
+| `get_contents` | `{ "path": "…" }` | Outputs the full contents of the file. |
+
+Need something else?  Declare a **custom tool** that wraps any shell command:
+
+```xml
+<tool name="dune" command="dune" description="Run dune commands inside the repo" />
+```
+
+---
 
 ## Examples
 
-Indexing a folder:
+See `prompts/` for larger examples.  A minimal interaction including a tool call could
+look like:
 
-```bash
-index -folder-to-index ./my_ocaml_code -vector-db-folder ./my_vector_db
+```xml
+<config model="o3" reasoning_effort="high"/>
+
+<!-- enable code editing capability -->
+<tool name="apply_patch" />
+
+<msg role="system">You are ChatGPT, a large language model trained by OpenAI.</msg>
+
+<msg role="user">Fix the typo in Readme.md please.</msg>
 ```
 
-Querying the indexed code:
+Run:
 
-```bash
-query -vector-db-folder ./my_vector_db -query-text "How to write a for loop in OCaml?" -num-results 10
+```sh
+gpt chat-completion -output-file fix_readme.md
 ```
 
-Running a chat completion:
+The assistant will respond with an `apply_patch` call and, if you confirm, the patch will
+be applied directly to the working tree.
 
-```bash
-chat-completion -prompt-file ./my_prompt.md -output-file ./my_chat.md -max-tokens 1000
-```
+---
 
-Tokenizing a file:
+## Contributing & License
 
-```bash
-tokenize -file ./my_ocaml_code/my_file.ml
-```
+This project is distributed under the MIT license – see `LICENSE.txt`.
 
-`note: If testing using dune prefix commands with`
-```sh 
-dune exe ./bin/main.exe --
-```
+Bug reports, ideas and pull requests are welcome!  Please bear in mind the *research /
+playground* nature of the codebase.
 
-
-## Contributing
-
-Any contributions you make are **greatly appreciated**.
-
-If you have a suggestion that would make this better, please fork the repo and create a pull request. You can also simply open an issue with the tag "enhancement".
-
-
-## License
-
-Distributed under the MIT License. See `LICENSE.txt` for more information.
+---
 
 ## Status
 
-This project is Highly Experimental
+🚧 **Highly experimental** – APIs and formats may break at any time.  Use at your own
+risk.
+

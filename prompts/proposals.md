@@ -39,6 +39,6 @@
         - this is the element that wraps user/assistant/system messages. System and and user messages can have nested doc/img/agnet elements that resolve to the final message input sent to the model
         - assistant messages can not have img elements nested, and typically have no use for doc/agent nested elements but it is technically possible but the use case may be niche such as editing the ouput of a model to try and steer it in a different direction, but this might be better done with a user mesage that trys to steer the model
 15. clean up the repo ```done```
-16. standardize where we put the cache files, standardize logging, add better error handling
+16. standardize where we put the cache files ```(done)```, standardize logging, add better error handling
 17. add better debugging facility for chatml and chatmd
 18. add better error handling around the openai api's, the chat_response, completions, ect. Add rollback to markdown files when failures occur

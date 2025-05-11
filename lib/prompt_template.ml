@@ -72,12 +72,12 @@ module Raw_blocks = struct
 
   (* Replace <raw>...</raw> with <![CDATA[...]...]]> blocks,
      automatically splitting “]]>” inside. *)
-  let replace_raw_with_splitting_cdata (input : string) : string =
+  let replace_raw_with_splitting_cdata ?(tag = "raw") (input : string) : string =
     let open Str in
     let cdata_open = "<![CDATA[" in
     let cdata_close = "]]>" in
-    let raw_open = "<raw>" in
-    let raw_close = "</raw>" in
+    let raw_open = String.concat [ tag; "|" ] in
+    let raw_close = String.concat [ "|"; tag ] in
     let len_open = String.length raw_open
     and len_close = String.length raw_close in
     let buff = Buffer.create (String.length input) in
@@ -148,7 +148,12 @@ module Import_expansion = struct
          | None -> []
          | Some filename ->
            let imported_text = Io.load_doc ~dir filename in
-           let replaced = Raw_blocks.replace_raw_with_splitting_cdata imported_text in
+           let replaced =
+             Raw_blocks.replace_raw_with_splitting_cdata ~tag:"RAW" imported_text
+           in
+           let replaced =
+             Raw_blocks.replace_raw_with_splitting_cdata ~tag:"raw" replaced
+           in
            let imported_dom = Dom.parse_xml_to_dom replaced in
            let imported_expanded = expand_imports ~dir imported_dom in
            imported_expanded)
@@ -236,7 +241,9 @@ module Chat_content = struct
     ; name : string option [@jsonaf.option]
     ; id : string option [@jsonaf.option] (* NEW *)
     ; status : string option [@jsonaf.option] (* NEW *)
-    ; function_call : function_call option [@jsonaf.option]
+    ; function_call : function_call option
+          [@jsonaf.option]
+          (* DEPRECATED AND NO LONGER USED> TO BE REMOVED USED tool_call for function calls *)
     ; tool_call : tool_call option [@jsonaf.option]
     ; tool_call_id : string option [@jsonaf.option]
     }
@@ -361,6 +368,7 @@ module Chat_markdown = struct
     let hash_tbl = Hashtbl.create (module String) in
     List.iter attr ~f:(fun ((_, attr_name), value) ->
       Hashtbl.set hash_tbl ~key:attr_name ~data:value);
+    (* deprecated and not used *)
     let function_call, content_opt =
       match Hashtbl.mem hash_tbl "function_call" with
       | false -> None, content
@@ -375,6 +383,7 @@ module Chat_markdown = struct
         in
         Some { name; arguments }, content
     in
+    (* new way to handle tool calls *)
     let tool_call, content_opt =
       match function_call with
       | Some _ -> None, content_opt
@@ -619,7 +628,8 @@ module Chat_markdown = struct
   (* Parse an entire file of chat markup into either <msg> or <config> elements,
      returning them in a list. *)
   let parse_chat_inputs ~dir (xml_content : string) : top_level_elements list =
-    let replaced = Raw_blocks.replace_raw_with_splitting_cdata xml_content in
+    let replaced = Raw_blocks.replace_raw_with_splitting_cdata ~tag:"RAW" xml_content in
+    let replaced = Raw_blocks.replace_raw_with_splitting_cdata ~tag:"raw" replaced in
     let with_imports = Import_expansion.parse_with_imports ~dir replaced in
     Markup.string with_imports
     |> Markup.parse_xml ~context:`Document

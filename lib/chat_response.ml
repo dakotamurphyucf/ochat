@@ -156,6 +156,7 @@ and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
     let tool_call_id = Option.value_exn m.tool_call_id in
     (match m.content with
      | Some (CM.Text t) ->
+       (* if tool_call is present, then this is the function_call requested by model *)
        (match m.tool_call with
         | Some { id; function_ = { name; arguments } } ->
           Res.Item.Function_call
@@ -167,6 +168,8 @@ and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
             ; status = None
             }
         | None ->
+          (* if tool_call is not present, then this is the function_call_output *)
+          (* that was returned by the function *)
           Res.Item.Function_call_output
             { call_id = tool_call_id
             ; _type = "function_call_output"
@@ -373,10 +376,12 @@ let run_completion
         | Res.Item.Output_message o ->
           append
             (Printf.sprintf
-               "<msg role=\"assistant\" id=\"%s\">\n\t<raw>\n\t\t%s\n\t</raw>\n</msg>\n"
+               "<msg role=\"assistant\" id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</msg>\n"
                o.id
+               "RAW"
                (tab_on_newline
-                  (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")))
+                  (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" "))
+               "RAW")
         | Res.Item.Reasoning r ->
           let summaries =
             List.map r.summary ~f:(fun s ->
@@ -574,14 +579,15 @@ let run_completion_stream
       if not (Hashtbl.mem opened_msgs id)
       then (
         append_doc
-          (Printf.sprintf "\n<msg role=\"assistant\" id=\"%s\">\n\t<raw>\n\t\t" id);
+          (Printf.sprintf "\n<msg role=\"assistant\" id=\"%s\">\n\t%s|\n\t\t" id "RAW");
         Hashtbl.set opened_msgs ~key:id ~data:());
       append_doc (tab_on_newline txt)
     in
     let close_message id =
       if Hashtbl.mem opened_msgs id
       then (
-        append_doc "\n\t</raw>\n</msg>\n";
+        append_doc (Printf.sprintf "\n\t|%s\n</msg>\n" "RAW");
+        (* remove the message from the opened list *)
         Hashtbl.remove opened_msgs id)
     in
     let lt, gt = "<", ">" in
@@ -602,26 +608,33 @@ let run_completion_stream
           (Printf.sprintf
              "\n\
               <msg role=\"tool\" tool_call tool_call_id=\"%s\" function_name=\"%s\" \
-              id=\"%s\"><raw>\n\
-              %s\n\
-              </raw>\n\
-             \              </msg>\n\n"
+              id=\"%s\">\n\
+              \t%s|\n\
+              \t\t%s\n\
+              \t|%s\n\
+              </msg>\n"
              call_id
              name
              item_id
-             arguments);
+             "RAW"
+             (tab_on_newline arguments)
+             "RAW");
         (* run the tool *)
         let fn = Hashtbl.find_exn tool_tbl name in
         let result = fn arguments in
         append_doc
           (Printf.sprintf
              "\n\
-              <msg role=\"tool\" tool_call_id=\"%s\" id=\"%s\"><raw>\n\
-              %s\n\
-              </raw></msg>\n\n"
+              <msg role=\"tool\" tool_call_id=\"%s\" id=\"%s\">\n\
+              \t%s|\n\
+              \t\t%s\n\
+              \t|%s\n\
+              </msg>\n"
              call_id
              item_id
-             result);
+             "RAW"
+             (tab_on_newline result)
+             "RAW");
         run_again := true
     in
     let callback (ev : Res.Response_stream.t) =
