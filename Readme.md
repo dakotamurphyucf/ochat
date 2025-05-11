@@ -177,8 +177,7 @@ Then a concrete conversation file can simply do:
 ```
 
 When the CLI parses `conversation_1.chatmd` the `<import/>` is replaced with the full
-content of `pair_programmer.chatmd` before the request is sent to OpenAI – you do **not**
-need to worry about nesting configs or duplicated tool declarations.
+content of `pair_programmer.chatmd` before the request is sent to OpenAI
 
 ### Message roles & function calling
 
