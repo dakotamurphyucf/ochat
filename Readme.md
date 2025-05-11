@@ -228,7 +228,7 @@ Example – call a documentation-summary agent and insert its answer inside the 
 message:
 
 ```xml
-<msg role="assistant">
+<msg role="user">
   Here is a summary of the README:
   <agent src="summarise.chatmd" local>
      <doc src="README.md" local strip/>
@@ -277,14 +277,16 @@ Need something else?  Declare a **custom tool** that wraps any shell command:
 
 ## Examples
 
-See `prompts/` for larger examples.  A minimal interaction including a tool call could
+See `prompt-examples/` for larger examples.  A minimal interaction including a tool call could
 look like:
 
 ```xml
 <config model="o3" reasoning_effort="high"/>
 
-<!-- enable code editing capability -->
+<!-- enable code editing, code reading, and folder content reading capability -->
 <tool name="apply_patch" />
+<tool name="read_dir" />
+<tool name="get_contents" />
 
 <msg role="system">You are ChatGPT, a large language model trained by OpenAI.</msg>
 
