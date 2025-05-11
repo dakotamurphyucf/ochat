@@ -131,7 +131,7 @@ gpt tokenize -file src/file.ml       # default bin/main.ml
 2.  Run the CLI:
 
     ```sh
-    chatgpt chat-completion -output-file conversation.md
+    gpt chat-completion -output-file conversation.md
     ```
 
 3.  The file will be updated in-place with the assistant’s answer.  Edit, re-run – enjoy!
