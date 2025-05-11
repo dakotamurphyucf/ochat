@@ -98,6 +98,11 @@ gpt chat-completion -output-file ./conversations/my_chat.md
 `chat-completion` **no longer takes `-max-tokens` or model flags on the command line** –
 those are specified inside the `<config/>` element within the chatmd file (see below).
 
+`chat-completion` uses the env variable `OPENAI_API_KEY` for the openai api key 
+```sh
+export OPENAI_API_KEY=<api-key>
+```
+
 ### `tokenize`
 
 Utility that tokenises a file using the TikToken `cl100k_base` codec (handy for debugging
