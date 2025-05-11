@@ -297,7 +297,7 @@ Run:
 gpt chat-completion -output-file fix_readme.md
 ```
 
-The assistant will respond with an `apply_patch` call and, if you confirm, the patch will
+The assistant will respond with an `apply_patch` call and the patch will
 be applied directly to the working tree.
 
 ---
