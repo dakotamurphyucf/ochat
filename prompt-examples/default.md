@@ -1,4 +1,4 @@
-<config model="o3"  max_tokens="100000" reasoning_effort="high"/>
+<config model="o3"  max_tokens="100000" reasoning_effort="high" show_tool_call />
 
 <tool name="apply_patch" />
 <tool name="read_dir" />

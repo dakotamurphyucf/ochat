@@ -119,7 +119,7 @@ gpt tokenize -file src/file.ml       # default bin/main.ml
 1.  Create a new markdown file `conversation.md` with the following content:
 
     ```xml
-    <config model="o3" max_tokens="1024" reasoning_effort="high"/>
+    <config model="o3" max_tokens="1024" reasoning_effort="high" show_tool_call />
 
     <!-- make the source tree available so the assistant can patch files -->
     <tool name="apply_patch"/>
@@ -148,7 +148,7 @@ execution context**.  It is parsed by `Prompt_template.Chat_markdown` and execut
 
 | Element | Purpose | Important attributes |
 |---------|---------|----------------------|
-| `<config/>` | Current model and generation parameters. **Must be present once** near the top. | `model` (e.g. `o3`), `max_tokens`, `temperature`, `reasoning_effort` (`low\|medium\|high`). |
+| `<config/>` | Current model and generation parameters. **Must be present once** near the top. | `model`, `max_tokens`, `temperature`, `reasoning_effort`, **`show_tool_call` (flag attribute)** – *when present* the runtime **embeds** tool-call arguments & outputs inline; when omitted they are written to files and referenced via `<doc/>` imports. |
 | `<tool/>` | Declare a tool that the model may call. | • `name` – tool/function name.<br>• *Built-ins* only need the name (e.g. `apply_patch`).<br>• For **custom** tools add `command="<shell-command>"` and optional `description="..."`. |
 | `<msg>` | A chat message. | `role` (`system,user,assistant,developer,tool`), optional `name`, `id`, `status`.  Assistant messages that *call a tool* add the boolean `tool_call` attribute plus `function_name` & `tool_call_id`. |
 | `<reasoning>` | Internal scratchpad the model can populate when reasoning is enabled.  Not needed when authoring prompts. | `id`, `status`. Contains one or more `<summary>` blocks. |
@@ -163,7 +163,7 @@ conversation or for re-using boilerplate system messages.
 Imagine we have a template called `pair_programmer.chatmd`:
 
 ```xml
-<config model="o3" reasoning_effort="high"/>
+<config model="o3" reasoning_effort="high" show_tool_call />
 
 <msg role="system">You are a knowledgeable OCaml pair-programmer.</msg>
 
@@ -205,6 +205,32 @@ chat_response.ml
 * The presence of the boolean `tool_call` attribute signals *“the assistant wants to run a
   tool”*.
 * `tool_call_id` lets subsequent messages correlate the call and its output.
+
+#### Hiding large tool payloads – *omit* `show_tool_call`
+
+When a tool deals with **very large inputs or outputs** it can clutter the main conversation
+buffer and make re-runs slower.  If the `show_tool_call` flag **is absent** from `<config/>`
+the runtime switches to *file-storage* mode:
+
+1.  The runtime writes the JSON arguments *and* the resulting output to separate files under
+    `.chatmd/`, using the pattern:
+
+    * `.chatmd/tool-call.<CALL_ID>.json`
+    * `.chatmd/tool-call-result.<CALL_ID>.json`
+
+2.  Instead of inlining a huge RAW block, the assistant inserts a lightweight reference:
+
+    ```xml
+    <msg role="tool" tool_call_id="call_99">
+      <doc src="./.chatmd/tool-call-result.call_99.json" local/>
+    </msg>
+    ```
+
+3.  On reload the `<doc …/>` tag is expanded so the model can still see the full data, while
+   the human prompt file stays compact.
+
+• Simply **remove** the `show_tool_call` attribute if you prefer this lean behaviour.  Add it
+  back at any time to revert to classic inline RAW blocks.
 
 ### Inline content helpers
 
@@ -284,7 +310,7 @@ See `prompt-examples/` for larger examples.  A minimal interaction including a t
 look like:
 
 ```xml
-<config model="o3" reasoning_effort="high"/>
+<config model="o3" reasoning_effort="high" show_tool_call />
 
 <!-- enable code editing, code reading, and folder content reading capability -->
 <tool name="apply_patch" />

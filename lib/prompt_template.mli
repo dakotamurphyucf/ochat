@@ -88,6 +88,7 @@ module Chat_markdown : sig
     ; model : string option [@jsonaf.option]
     ; reasoning_effort : string option [@jsonaf.option]
     ; temperature : float option [@jsonaf.option]
+    ; show_tool_call : bool
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 

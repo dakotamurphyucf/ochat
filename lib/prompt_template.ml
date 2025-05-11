@@ -267,6 +267,7 @@ module Chat_content = struct
     ; model : string option [@jsonaf.option]
     ; reasoning_effort : string option [@jsonaf.option]
     ; temperature : float option [@jsonaf.option]
+    ; show_tool_call : bool
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
@@ -395,9 +396,10 @@ module Chat_markdown = struct
           let arguments =
             match content_opt with
             | Some (Text t) -> t
+            | Some (Items _) -> ""
             | _ ->
               failwith
-                "Expected tool_call to be raw text arguments; found structured content."
+                "Expected tool_call to be raw text arguments or structured content."
           in
           Some { id; function_ = { name; arguments } }, content_opt)
         else None, content_opt
@@ -435,13 +437,14 @@ module Chat_markdown = struct
       let local_attr = if local then " local=\"true\"" else "" in
       let strip_attr = if cleanup then " strip=\"true\"" else "" in
       Printf.sprintf "<doc src=\"%s\"%s%s />" url local_attr strip_attr
-    | Config { max_tokens; model; reasoning_effort; temperature } ->
+    | Config { max_tokens; model; reasoning_effort; temperature; show_tool_call } ->
       let attrs =
         [ Option.map max_tokens ~f:(fun n -> Printf.sprintf "max_tokens=\"%d\"" n)
         ; Option.map model ~f:(fun m -> Printf.sprintf "model=\"%s\"" m)
         ; Option.map reasoning_effort ~f:(fun r ->
             Printf.sprintf "reasoning_effort=\"%s\"" r)
         ; Option.map temperature ~f:(fun t -> Printf.sprintf "temperature=\"%.3f\"" t)
+        ; Some (Printf.sprintf "show_tool_call=\"%b\"" show_tool_call)
         ]
         |> List.filter_map ~f:Fun.id
       in
@@ -531,7 +534,8 @@ module Chat_markdown = struct
           let temperature =
             Option.map (Hashtbl.find tbl "temperature") ~f:Float.of_string
           in
-          Config { max_tokens; model; reasoning_effort; temperature }
+          let show_tool_call = Hashtbl.mem tbl "show_tool_call" in
+          Config { max_tokens; model; reasoning_effort; temperature; show_tool_call }
         | "summary" ->
           let typ =
             List.find_map attr ~f:(fun ((_, n), v) ->

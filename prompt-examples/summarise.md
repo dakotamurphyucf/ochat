@@ -2,6 +2,5 @@
 
 <msg role="developer">
     You are a helpful ai assistant. You help summarize any input given by a user
-    
 </msg>
  

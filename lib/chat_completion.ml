@@ -259,7 +259,9 @@ and run_agent prompt items ~dir ~net ~cache =
   let prompt = prompt ^ "\n" ^ content in
   let elements = Prompt_template.Chat_markdown.parse_chat_inputs ~dir prompt in
   let config = get_config elements in
-  let Prompt_template.Chat_markdown.{ max_tokens; model; reasoning_effort; temperature } =
+  let Prompt_template.Chat_markdown.
+        { max_tokens; model; reasoning_effort; temperature; _ }
+    =
     config
   in
   (* print_endline
@@ -431,7 +433,8 @@ let run_completion ~env ~output_file ~prompt_file =
        print_endline prompt; *)
     let elements = Prompt_template.Chat_markdown.parse_chat_inputs ~dir prompt in
     let config = get_config elements in
-    let Prompt_template.Chat_markdown.{ max_tokens; model; reasoning_effort; temperature }
+    let Prompt_template.Chat_markdown.
+          { max_tokens; model; reasoning_effort; temperature; _ }
       =
       config
     in

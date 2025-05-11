@@ -177,6 +177,28 @@ and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
             ; status = None
             ; output = t
             })
+     | Some (CM.Items items) ->
+       (* if tool_call is present, then this is the function_call requested by model *)
+       (match m.tool_call with
+        | Some { id; function_ = { name; _ } } ->
+          Res.Item.Function_call
+            { name
+            ; arguments = string_of_items ~dir ~net ~cache items
+            ; call_id = id
+            ; _type = "function_call"
+            ; id = m.id
+            ; status = None
+            }
+        | None ->
+          (* if tool_call is not present, then this is the function_call_output *)
+          (* that was returned by the function *)
+          Res.Item.Function_call_output
+            { call_id = tool_call_id
+            ; _type = "function_call_output"
+            ; id = None
+            ; status = None
+            ; output = string_of_items ~dir ~net ~cache items
+            })
      | _ ->
        failwith
          "Expected function_call to be raw text arguments; found structured content.")
@@ -332,12 +354,23 @@ let run_completion
         | _ -> None)
       |> List.hd
     in
-    let CM.{ max_tokens = model_tokens; model = model_opt; reasoning_effort; temperature }
+    let CM.
+          { max_tokens = model_tokens
+          ; model = model_opt
+          ; reasoning_effort
+          ; temperature
+          ; _
+          }
       =
       Option.value
         cfg
         ~default:
-          { max_tokens = None; model = None; reasoning_effort = None; temperature = None }
+          { max_tokens = None
+          ; model = None
+          ; reasoning_effort = None
+          ; temperature = None
+          ; show_tool_call = false
+          }
     in
     let reasoning =
       Option.map reasoning_effort ~f:(fun eff ->
@@ -533,11 +566,16 @@ let run_completion_stream
         | _ -> None)
       |> List.hd
     in
-    let CM.{ max_tokens; model; reasoning_effort; temperature } =
+    let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call } =
       Option.value
         cfg
         ~default:
-          { max_tokens = None; model = None; reasoning_effort = None; temperature = None }
+          { max_tokens = None
+          ; model = None
+          ; reasoning_effort = None
+          ; temperature = None
+          ; show_tool_call = false
+          }
     in
     let model =
       Option.value_map model ~f:Res.Request.model_of_str_exn ~default:Res.Request.Gpt4
@@ -603,38 +641,76 @@ let run_completion_stream
       match Hashtbl.find func_info item_id with
       | None -> () (* should not happen *)
       | Some (name, call_id) ->
+        let tool_call_url id = Printf.sprintf "tool-call.%s.json" id in
         (* assistant’s tool‑call request *)
-        append_doc
-          (Printf.sprintf
-             "\n\
-              <msg role=\"tool\" tool_call tool_call_id=\"%s\" function_name=\"%s\" \
-              id=\"%s\">\n\
-              \t%s|\n\
-              \t\t%s\n\
-              \t|%s\n\
-              </msg>\n"
-             call_id
-             name
-             item_id
-             "RAW"
-             (tab_on_newline arguments)
-             "RAW");
+        (* if show_tool_call is true, then we will show the tool call in the output *)
+        (* otherwise, we will save the tool call to a file and not show it in the output *)
+        if show_tool_call
+        then
+          append_doc
+            (Printf.sprintf
+               "\n\
+                <msg role=\"tool\" tool_call tool_call_id=\"%s\" function_name=\"%s\" \
+                id=\"%s\">\n\
+                \t%s|\n\
+                \t\t%s\n\
+                \t|%s\n\
+                </msg>\n"
+               call_id
+               name
+               item_id
+               "RAW"
+               (tab_on_newline arguments)
+               "RAW")
+        else (
+          let content =
+            Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_url call_id)
+          in
+          append_doc
+            (Printf.sprintf
+               "\n\
+                <msg role=\"tool\" tool_call tool_call_id=\"%s\" function_name=\"%s\" \
+                id=\"%s\">\n\
+                \t%s\n\
+                </msg>\n"
+               call_id
+               name
+               item_id
+               (tab_on_newline content));
+          (* save the tool call to a file *)
+          Io.save_doc ~dir:datadir (tool_call_url call_id) arguments);
         (* run the tool *)
         let fn = Hashtbl.find_exn tool_tbl name in
         let result = fn arguments in
-        append_doc
-          (Printf.sprintf
-             "\n\
-              <msg role=\"tool\" tool_call_id=\"%s\" id=\"%s\">\n\
-              \t%s|\n\
-              \t\t%s\n\
-              \t|%s\n\
-              </msg>\n"
-             call_id
-             item_id
-             "RAW"
-             (tab_on_newline result)
-             "RAW");
+        let tool_call_result_url id = Printf.sprintf "tool-call-result.%s.json" id in
+        if show_tool_call
+        then
+          append_doc
+            (Printf.sprintf
+               "\n\
+                <msg role=\"tool\" tool_call_id=\"%s\" id=\"%s\">\n\
+                \t%s|\n\
+                \t\t%s\n\
+                \t|%s\n\
+                </msg>\n"
+               call_id
+               item_id
+               "RAW"
+               (tab_on_newline result)
+               "RAW")
+        else (
+          let content =
+            Printf.sprintf
+              "<doc src=\"./.chatmd/%s\" local>"
+              (tool_call_result_url call_id)
+          in
+          append_doc
+            (Printf.sprintf
+               "\n<msg role=\"tool\" tool_call_id=\"%s\" id=\"%s\">\n\t%s\n</msg>\n"
+               call_id
+               item_id
+               (tab_on_newline content));
+          Io.save_doc ~dir:datadir (tool_call_result_url call_id) result);
         run_again := true
     in
     let callback (ev : Res.Response_stream.t) =
