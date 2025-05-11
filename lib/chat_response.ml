@@ -84,7 +84,7 @@ let get_content ~dir ~net url is_local ~cleanup_html =
 ;;
 
 (*──────────────────────── 3.  Converting CM → Res.Item.t ────────────────*)
-let rec string_of_items ~dir ~net ~cache (items : CM.content_item list) : string =
+let rec string_of_items ~env ~dir ~net ~cache (items : CM.content_item list) : string =
   items
   |> List.map ~f:(function
     | CM.Basic b ->
@@ -99,7 +99,7 @@ let rec string_of_items ~dir ~net ~cache (items : CM.content_item list) : string
     | CM.Agent ({ url; is_local; items } as agent) ->
       Agent_LRU.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
         let prompt = get_content ~dir ~net url is_local ~cleanup_html:false in
-        run_agent ~dir ~net ~cache prompt items))
+        run_agent ~env ~dir ~net ~cache prompt items))
   |> String.concat ~sep:"\n"
 
 and convert_basic_item ~dir ~net ~cache:_ (b : CM.basic_content_item)
@@ -114,7 +114,7 @@ and convert_basic_item ~dir ~net ~cache:_ (b : CM.basic_content_item)
     Text { text = txt; _type = "input_text" }
   | _ -> Text { text = Option.value ~default:"" b.text; _type = "input_text" }
 
-and convert_content_item ~dir ~net ~cache (ci : CM.content_item)
+and convert_content_item ~env ~dir ~net ~cache (ci : CM.content_item)
   : Res.Input_message.content_item
   =
   match ci with
@@ -123,11 +123,11 @@ and convert_content_item ~dir ~net ~cache (ci : CM.content_item)
     let txt =
       Agent_LRU.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
         let prompt = get_content ~dir ~net url is_local ~cleanup_html:false in
-        run_agent ~dir ~net ~cache prompt items)
+        run_agent ~env ~dir ~net ~cache prompt items)
     in
     Text { text = txt; _type = "input_text" }
 
-and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
+and convert_msg ~env ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
   let role =
     match String.lowercase m.role with
     | "assistant" -> `Assistant
@@ -143,7 +143,7 @@ and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
       match m.content with
       | None -> ""
       | Some (CM.Text t) -> t
-      | Some (CM.Items items) -> string_of_items ~dir ~net ~cache items
+      | Some (CM.Items items) -> string_of_items ~env ~dir ~net ~cache items
     in
     Res.Item.Output_message
       { role = Assistant
@@ -183,7 +183,7 @@ and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
         | Some { id; function_ = { name; _ } } ->
           Res.Item.Function_call
             { name
-            ; arguments = string_of_items ~dir ~net ~cache items
+            ; arguments = string_of_items ~env ~dir ~net ~cache items
             ; call_id = id
             ; _type = "function_call"
             ; id = m.id
@@ -197,7 +197,7 @@ and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
             ; _type = "function_call_output"
             ; id = None
             ; status = None
-            ; output = string_of_items ~dir ~net ~cache items
+            ; output = string_of_items ~env ~dir ~net ~cache items
             })
      | _ ->
        failwith
@@ -213,7 +213,8 @@ and convert_msg ~dir ~net ~cache (m : CM.msg) : Res.Item.t =
       match m.content with
       | None -> []
       | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
-      | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~dir ~net ~cache)
+      | Some (CM.Items lst) ->
+        List.map lst ~f:(convert_content_item ~env ~dir ~net ~cache)
     in
     Res.Item.Input_message { role = role_val; content = content_items; _type = "message" }
 
@@ -223,11 +224,11 @@ and convert_reasoning (r : CM.reasoning) : Res.Item.t =
   in
   Res.Item.Reasoning { id = r.id; status = r.status; _type = "reasoning"; summary = summ }
 
-and elements_to_items ~dir ~net ~cache (els : CM.top_level_elements list)
+and elements_to_items ~env ~dir ~net ~cache (els : CM.top_level_elements list)
   : Res.Item.t list
   =
   List.filter_map els ~f:(function
-    | CM.Msg m -> Some (convert_msg ~dir ~net ~cache m)
+    | CM.Msg m -> Some (convert_msg ~env ~dir ~net ~cache m)
     | CM.Reasoning r -> Some (convert_reasoning r)
     | CM.Config _ -> None
     | CM.Tool _ -> None)
@@ -238,24 +239,240 @@ and convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
     Res.Request.Tool.Function { name; description; parameters; strict; type_ })
 
 (*──────────────────────── 5.  Agent recursion using Responses API ───────*)
-and run_agent ~dir ~net ~cache (prompt_xml : string) (items : CM.content_item list)
+and run_agent ~env ~dir ~net ~cache (prompt_xml : string) (items : CM.content_item list)
   : string
   =
+  (* 1.  Build the full agent XML by adding any inline user items. *)
   let user_suffix =
     if List.is_empty items
     then ""
-    else "<msg role=\"user\">\n" ^ string_of_items ~dir ~net ~cache items ^ "\n</msg>"
+    else
+      "<msg role=\"user\">\n" ^ string_of_items ~env ~dir ~net ~cache items ^ "\n</msg>"
   in
   let full_xml = prompt_xml ^ "\n" ^ user_suffix in
-  let parsed = CM.parse_chat_inputs ~dir full_xml in
-  let req_items = elements_to_items ~dir ~net ~cache parsed in
-  let resp = Res.post_response Res.Default ~dir net ~inputs:req_items in
-  resp.output
+  (* 2.  Parse the merged document into structured elements. *)
+  let elements = CM.parse_chat_inputs ~dir full_xml in
+  (* 3.  Extract the first <config/> element, if any. *)
+  let cfg_opt =
+    List.filter_map elements ~f:(function
+      | CM.Config c -> Some c
+      | _ -> None)
+    |> List.hd
+  in
+  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call = _ } =
+    Option.value
+      cfg_opt
+      ~default:
+        { max_tokens = None
+        ; model = None
+        ; reasoning_effort = None
+        ; temperature = None
+        ; show_tool_call = false
+        }
+  in
+  let model =
+    Option.value_map model ~default:Res.Request.Gpt4 ~f:Res.Request.model_of_str_exn
+  in
+  let reasoning =
+    Option.map reasoning_effort ~f:(fun eff ->
+      Res.Request.Reasoning.
+        { effort = Some (Effort.of_str_exn eff); summary = Some Summary.Detailed })
+  in
+  (* 4.  Collect tool declarations inside the agent prompt. *)
+  let declared_tools =
+    List.filter_map elements ~f:(function
+      | CM.Tool t -> Some t
+      | _ -> None)
+  in
+  let tools : Gpt_function.t list =
+    List.map declared_tools ~f:(function
+      | CM.Builtin name ->
+        (match name with
+         | "apply_patch" -> Functions.apply_patch ~dir
+         | "read_dir" -> Functions.read_dir ~dir
+         | "get_contents" -> Functions.get_contents ~dir
+         | other -> failwithf "Unknown built-in tool: %s" other ())
+      | CM.Agent agent_spec -> agent_fn ~env ~dir ~net ~cache agent_spec
+      | CM.Custom c -> custom_fn ~env c)
+  in
+  let comp_tools, tool_tbl = Gpt_function.functions tools in
+  let tools_req = convert_tools comp_tools in
+  (* 5.  Convert XML ‑> API items and enter the execute loop to handle function calls. *)
+  let init_items = elements_to_items ~env ~dir ~net ~cache elements in
+  (* 5-B.  Helper to execute the model, running function-calls until none remain. *)
+  let rec response_loop (history : Res.Item.t list) : Res.Item.t list =
+    let response =
+      Res.post_response
+        Res.Default
+        ~dir
+        ~model
+        ?temperature
+        ?max_output_tokens:max_tokens
+        ~tools:tools_req
+        ?reasoning
+        net
+        ~inputs:history
+    in
+    let new_items = response.output in
+    let function_calls =
+      List.filter_map new_items ~f:(function
+        | Res.Item.Function_call fc -> Some fc
+        | _ -> None)
+    in
+    if List.is_empty function_calls
+    then history @ new_items
+    else (
+      let outputs =
+        List.map function_calls ~f:(fun fc ->
+          let fn = Hashtbl.find_exn tool_tbl fc.name in
+          let res = fn fc.arguments in
+          Res.Item.Function_call_output
+            { output = res
+            ; call_id = fc.call_id
+            ; _type = "function_call_output"
+            ; id = None
+            ; status = None
+            })
+      in
+      response_loop (history @ new_items @ outputs))
+  in
+  let all_items = response_loop init_items in
+  (* 6.  Extract assistant messages and concatenate them. *)
+  List.drop all_items (List.length init_items)
   |> List.filter_map ~f:(function
     | Res.Item.Output_message o ->
       Some (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
     | _ -> None)
   |> String.concat ~sep:"\n"
+
+and custom_fn ~env CM.{ name; description; command } =
+  let module M : Gpt_function.Def with type input = string list = struct
+    type input = string list
+
+    let name = name
+
+    let description =
+      match description with
+      | Some desc ->
+        Some
+          (String.concat
+             [ "Run a "
+             ; command
+             ; " shell command with arguments, and returns its output.\n"
+             ; desc
+             ])
+      | None ->
+        Some
+          (String.concat
+             [ "Run a "
+             ; command
+             ; " shell command with arguments, and returns its output"
+             ])
+    ;;
+
+    let parameters : Jsonaf.t =
+      `Object
+        [ "type", `String "object"
+        ; ( "properties"
+          , `Object
+              [ ( "arguments"
+                , `Object
+                    [ "type", `String "array"
+                    ; "items", `Object [ "type", `String "string" ]
+                    ] )
+              ] )
+        ; "required", `Array [ `String "arguments" ]
+        ; "additionalProperties", `False
+        ]
+    ;;
+
+    let input_of_string s =
+      let j = Jsonaf.of_string s in
+      List.map ~f:Jsonaf.string_exn @@ Jsonaf.list_exn @@ Jsonaf.member_exn "arguments" j
+    ;;
+  end
+  in
+  let gpt_fun : Gpt_function.t =
+    let fp params =
+      let proc_mgr = Eio.Stdenv.process_mgr env in
+      Eio.Switch.run
+      @@ fun sw ->
+      (* 1.  Make a pipe that we can read. *)
+      let r, w = Eio.Process.pipe ~sw proc_mgr in
+      (* 2.  Start the child, sending both stdout and stderr to [w]. *)
+      let _child =
+        Eio.Process.spawn ~sw proc_mgr ~stdout:w ~stderr:w (command :: params)
+      in
+      Eio.Flow.close w;
+      (* nobody else will write now *)
+      match Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all r with
+      | res -> res
+      | exception ex -> Fmt.str "error running %s command: %a" command Eio.Exn.pp ex
+    in
+    Gpt_function.create_function (module M) fp
+  in
+  gpt_fun
+
+(*──────────────────────── helper: agent tool → Gpt_function.t ──────────*)
+and agent_fn ~env ~dir ~net ~cache CM.{ name; description; agent; is_local }
+  : Gpt_function.t
+  =
+  (* Module describing the function interface presented to the model. The
+     agent tool simply expects an object with a single `input` string that
+     will become the user message for the sub-agent. *)
+  let module M : Gpt_function.Def with type input = string = struct
+    type input = string
+
+    let name = name
+
+    let description =
+      Option.first_some
+        description
+        (Some
+           (Printf.sprintf
+              "Run agent prompt located at %s and return its final answer."
+              agent))
+    ;;
+
+    let parameters : Jsonaf.t =
+      `Object
+        [ "type", `String "object"
+        ; "properties", `Object [ "input", `Object [ "type", `String "string" ] ]
+        ; "required", `Array [ `String "input" ]
+        ; "additionalProperties", `False
+        ]
+    ;;
+
+    let input_of_string s =
+      let j = Jsonaf.of_string s in
+      match Jsonaf.member_exn "input" j with
+      | `String str -> str
+      | _ -> failwith "Expected {\"input\": string} for agent tool input"
+    ;;
+  end
+  in
+  let run (user_msg : string) : string =
+    let basic_item : CM.basic_content_item =
+      { type_ = "text"
+      ; text = Some user_msg
+      ; image_url = None
+      ; document_url = None
+      ; is_local = false
+      ; cleanup_html = false
+      }
+    in
+    let prompt_xml =
+      (* Re-use helper from above to fetch either local or remote prompt *)
+      let fetch =
+        (* get_content requires cleanup_html flag, which we set to false since
+           we want raw chatmd. *)
+        get_content ~dir ~net agent is_local ~cleanup_html:false
+      in
+      fetch
+    in
+    run_agent ~env ~dir ~net ~cache prompt_xml [ CM.Basic basic_item ]
+  in
+  Gpt_function.create_function (module M) run
 ;;
 
 (*──────────────────────── 6.  Main driver  ───────────────────────────────*)
@@ -383,7 +600,7 @@ let run_completion
     let comp_tools, tool_tbl = Gpt_function.functions [] in
     let tools = convert_tools comp_tools in
     (* convert xml → items and fire first request *)
-    let init_items = elements_to_items ~dir ~net ~cache elements in
+    let init_items = elements_to_items ~env ~dir ~net ~cache elements in
     let all_items =
       execute_response_loop
         ~dir:datadir
@@ -459,135 +676,6 @@ let run_completion
   write_cache ~file:Eio.Path.(datadir / "cache.bin") cache
 ;;
 
-let custom_fn ~env CM.{ name; description; command } =
-  let module M : Gpt_function.Def with type input = string list = struct
-    type input = string list
-
-    let name = name
-
-    let description =
-      match description with
-      | Some desc ->
-        Some
-          (String.concat
-             [ "Run a "
-             ; command
-             ; " shell command with arguments, and returns its output.\n"
-             ; desc
-             ])
-      | None ->
-        Some
-          (String.concat
-             [ "Run a "
-             ; command
-             ; " shell command with arguments, and returns its output"
-             ])
-    ;;
-
-    let parameters : Jsonaf.t =
-      `Object
-        [ "type", `String "object"
-        ; ( "properties"
-          , `Object
-              [ ( "arguments"
-                , `Object
-                    [ "type", `String "array"
-                    ; "items", `Object [ "type", `String "string" ]
-                    ] )
-              ] )
-        ; "required", `Array [ `String "arguments" ]
-        ; "additionalProperties", `False
-        ]
-    ;;
-
-    let input_of_string s =
-      let j = Jsonaf.of_string s in
-      List.map ~f:Jsonaf.string_exn @@ Jsonaf.list_exn @@ Jsonaf.member_exn "arguments" j
-    ;;
-  end
-  in
-  let gpt_fun : Gpt_function.t =
-    let fp params =
-      let proc_mgr = Eio.Stdenv.process_mgr env in
-      Eio.Switch.run
-      @@ fun sw ->
-      (* 1.  Make a pipe that we can read. *)
-      let r, w = Eio.Process.pipe ~sw proc_mgr in
-      (* 2.  Start the child, sending both stdout and stderr to [w]. *)
-      let _child =
-        Eio.Process.spawn ~sw proc_mgr ~stdout:w ~stderr:w (command :: params)
-      in
-      Eio.Flow.close w;
-      (* nobody else will write now *)
-      match Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all r with
-      | res -> res
-      | exception ex -> Fmt.str "error running %s command: %a" command Eio.Exn.pp ex
-    in
-    Gpt_function.create_function (module M) fp
-  in
-  gpt_fun
-;;
-
-(*──────────────────────── helper: agent tool → Gpt_function.t ──────────*)
-let agent_fn ~dir ~net ~cache CM.{ name; description; agent; is_local } : Gpt_function.t =
-  (* Module describing the function interface presented to the model. The
-     agent tool simply expects an object with a single `input` string that
-     will become the user message for the sub-agent. *)
-  let module M : Gpt_function.Def with type input = string = struct
-    type input = string
-
-    let name = name
-
-    let description =
-      Option.first_some
-        description
-        (Some
-           (Printf.sprintf
-              "Run agent prompt located at %s and return its final answer."
-              agent))
-    ;;
-
-    let parameters : Jsonaf.t =
-      `Object
-        [ "type", `String "object"
-        ; "properties", `Object [ "input", `Object [ "type", `String "string" ] ]
-        ; "required", `Array [ `String "input" ]
-        ; "additionalProperties", `False
-        ]
-    ;;
-
-    let input_of_string s =
-      let j = Jsonaf.of_string s in
-      match Jsonaf.member_exn "input" j with
-      | `String str -> str
-      | _ -> failwith "Expected {\"input\": string} for agent tool input"
-    ;;
-  end
-  in
-  let run (user_msg : string) : string =
-    let basic_item : CM.basic_content_item =
-      { type_ = "text"
-      ; text = Some user_msg
-      ; image_url = None
-      ; document_url = None
-      ; is_local = false
-      ; cleanup_html = false
-      }
-    in
-    let prompt_xml =
-      (* Re-use helper from above to fetch either local or remote prompt *)
-      let fetch =
-        (* get_content requires cleanup_html flag, which we set to false since
-           we want raw chatmd. *)
-        get_content ~dir ~net agent is_local ~cleanup_html:false
-      in
-      fetch
-    in
-    run_agent ~dir ~net ~cache prompt_xml [ CM.Basic basic_item ]
-  in
-  Gpt_function.create_function (module M) run
-;;
-
 let run_completion_stream
       ~env
       ?prompt_file (* optional template to prepend once          *)
@@ -657,13 +745,13 @@ let run_completion_stream
            | "get_contents" -> Functions.get_contents ~dir:(Eio.Stdenv.cwd env)
            | _ -> failwithf "Unknown built-in tool: %s" name ())
         | CM.Custom c -> custom_fn ~env c
-        | CM.Agent a -> agent_fn ~dir:(Eio.Stdenv.cwd env) ~net ~cache a)
+        | CM.Agent a -> agent_fn ~env ~dir:(Eio.Stdenv.cwd env) ~net ~cache a)
     in
     (* 1‑C • tools / functions *)
     let comp_tools, tool_tbl = Gpt_function.functions tools in
     let tools = convert_tools comp_tools in
     (* 1‑D • initial request items *)
-    let inputs = elements_to_items ~dir ~net ~cache elements in
+    let inputs = elements_to_items ~env ~dir ~net ~cache elements in
     (* ────────────────── 2.  streaming callback state ─────────────────── *)
     (* existing tables … *)
     let opened_msgs : (string, unit) Hashtbl.t = Hashtbl.create (module String)
