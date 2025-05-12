@@ -45,7 +45,7 @@ document.querySelector(".search-bar").addEventListener("focus", (ev) => {
         const base = "https://dakotamurphyucf.github.io/ocaml-gpt/"
         let search_result = document.createElement("a");
         search_result.classList.add("search-entry");
-        search_result.href = base + entry.url;
+        search_result.href = base + entry.url.replace("docs/", "");
         search_result.innerHTML = entry.html;
         search_results.appendChild(search_result);
       };
