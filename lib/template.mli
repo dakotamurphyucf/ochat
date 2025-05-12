@@ -69,7 +69,7 @@ module type RENDERABLE = sig
 end
 
 (** The Make functor creates a templating module for a given RENDERABLE type. 
-    Supports variable replacement with the syntax {{variable}} *)
+    Supports variable replacement with the syntax \{\{variable\}\} *)
 module Make_Template : functor (R : RENDERABLE) -> sig
   type t
 
