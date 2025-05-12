@@ -259,7 +259,7 @@ and run_agent ~env ~dir ~net ~cache (prompt_xml : string) (items : CM.content_it
       | _ -> None)
     |> List.hd
   in
-  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call = _ } =
+  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call = _; id = _ } =
     Option.value
       cfg_opt
       ~default:
@@ -268,6 +268,7 @@ and run_agent ~env ~dir ~net ~cache (prompt_xml : string) (items : CM.content_it
         ; reasoning_effort = None
         ; temperature = None
         ; show_tool_call = false
+        ; id = None
         }
   in
   let model =
@@ -587,6 +588,7 @@ let run_completion
           ; reasoning_effort = None
           ; temperature = None
           ; show_tool_call = false
+          ; id = None
           }
     in
     let reasoning =
@@ -714,7 +716,7 @@ let run_completion_stream
         | _ -> None)
       |> List.hd
     in
-    let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call } =
+    let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call; id = _ } =
       Option.value
         cfg
         ~default:
@@ -723,6 +725,7 @@ let run_completion_stream
           ; reasoning_effort = None
           ; temperature = None
           ; show_tool_call = false
+          ; id = None
           }
     in
     let model =

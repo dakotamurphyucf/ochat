@@ -373,7 +373,9 @@ module Responses : sig
     type model =
       | O3
       | Gpt4
+      | O4_mini
       | Gpt4o
+      | Gpt4_1
       | Gpt3
       | Gpt3_16k
     [@@deriving jsonaf, sexp, bin_io]

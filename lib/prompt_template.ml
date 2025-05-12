@@ -278,6 +278,7 @@ module Chat_content = struct
     ; reasoning_effort : string option [@jsonaf.option]
     ; temperature : float option [@jsonaf.option]
     ; show_tool_call : bool
+    ; id : string option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
@@ -447,7 +448,7 @@ module Chat_markdown = struct
       let local_attr = if local then " local=\"true\"" else "" in
       let strip_attr = if cleanup then " strip=\"true\"" else "" in
       Printf.sprintf "<doc src=\"%s\"%s%s />" url local_attr strip_attr
-    | Config { max_tokens; model; reasoning_effort; temperature; show_tool_call } ->
+    | Config { max_tokens; model; reasoning_effort; temperature; show_tool_call; id } ->
       let attrs =
         [ Option.map max_tokens ~f:(fun n -> Printf.sprintf "max_tokens=\"%d\"" n)
         ; Option.map model ~f:(fun m -> Printf.sprintf "model=\"%s\"" m)
@@ -455,6 +456,7 @@ module Chat_markdown = struct
             Printf.sprintf "reasoning_effort=\"%s\"" r)
         ; Option.map temperature ~f:(fun t -> Printf.sprintf "temperature=\"%.3f\"" t)
         ; Some (Printf.sprintf "show_tool_call=\"%b\"" show_tool_call)
+        ; Option.map id ~f:(fun id -> Printf.sprintf "id=\"%s\"" id)
         ]
         |> List.filter_map ~f:Fun.id
       in
@@ -557,7 +559,8 @@ module Chat_markdown = struct
             Option.map (Hashtbl.find tbl "temperature") ~f:Float.of_string
           in
           let show_tool_call = Hashtbl.mem tbl "show_tool_call" in
-          Config { max_tokens; model; reasoning_effort; temperature; show_tool_call }
+          let id = Hashtbl.find tbl "id" in
+          Config { max_tokens; model; reasoning_effort; temperature; show_tool_call; id }
         | "summary" ->
           let typ =
             List.find_map attr ~f:(fun ((_, n), v) ->

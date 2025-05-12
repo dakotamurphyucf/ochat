@@ -6,4 +6,3 @@ let hash_string_md5 s =
   let open Core.Md5 in
   digest_string s |> to_hex
 ;;
-

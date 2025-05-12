@@ -28,7 +28,7 @@ module Make (H : H) = struct
   type 'a t =
     { mutable max_size : int
     ; destruct_exn : ((key * 'a) Queue.t -> unit) option
-    (** make sure this is called after the internals are updated and in a good state *)
+      (** make sure this is called after the internals are updated and in a good state *)
     ; items : 'a Hq.t (** we evict from the front of the queue *)
     ; mutable num_queries : int
     ; mutable num_hits : int
@@ -76,9 +76,9 @@ module Make (H : H) = struct
       raise_s
         [%sexp
           "invalid Lru.max_size argument"
-          , { requested_max_size = (max_size : int)
-            ; smallest_value_allowed = (max_size_lower_bound : int)
-            }]
+        , { requested_max_size = (max_size : int)
+          ; smallest_value_allowed = (max_size_lower_bound : int)
+          }]
   ;;
 
   let create ?destruct:destruct_exn ~max_size () =

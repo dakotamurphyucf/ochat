@@ -1,6 +1,5 @@
 open Core
 
-
 let byte_pair_merge (piece : Bytes.t) (ranks : (Bytes.t, int) Hashtbl.t)
   : (int * int) array
   =
@@ -77,7 +76,6 @@ let encode_ordinary regex encoder text =
   |> List.rev
 ;;
 
-
 module Bytes_hashable : Hashtbl.Key with type t = bytes = struct
   include Bytes
 
@@ -135,7 +133,6 @@ let create_codec tiktoken_bpe =
   { encoder; decoder }
 ;;
 
-
 let decode ~codec ~encoded =
   let { decoder; _ } = codec in
   let decoded = decode_native decoder encoded in
@@ -151,6 +148,5 @@ let encode ~codec ~text =
   Printf.printf
   "Encoded: %s\n"
   (String.concat ~sep:", " (List.map ~f:string_of_int encoded)); *)
-  
   encoded
 ;;

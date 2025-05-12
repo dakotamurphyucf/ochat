@@ -36,16 +36,14 @@ let call env merlin command flags code =
 
 (** {2 Top-level merlin replies} *)
 
-type  merlin_reply_body =
+type merlin_reply_body =
   { klass : string [@key "class"]
   ; value : string
   ; notifications : string list
   }
 [@@deriving jsonaf] [@@jsonaf.allow_extra_fields]
 
-let parse_merlin_reply  str =
-  Jsonaf.of_string str |> [%of_jsonaf: merlin_reply_body] 
-;;
+let parse_merlin_reply str = Jsonaf.of_string str |> [%of_jsonaf: merlin_reply_body]
 
 (** {2 Detection of identifiers} *)
 
@@ -64,7 +62,7 @@ type ident_reply =
 let occurrences env ~pos merlin code =
   let args = [ "-identifier-at"; string_of_int pos ] in
   let s = call env merlin "occurrences" args code in
-  (parse_merlin_reply  s).value |> Jsonaf.of_string |> [%of_jsonaf: ident_reply list]
+  (parse_merlin_reply s).value |> Jsonaf.of_string |> [%of_jsonaf: ident_reply list]
 ;;
 
 let abs_position code pos =
@@ -152,8 +150,7 @@ let complete env ?(doc = false) ?(types = false) ~pos merlin code =
     ]
   in
   let s = call env merlin "complete-prefix" args code in
-  let reply = (parse_merlin_reply s ).value |> Jsonaf.of_string |> [%of_jsonaf: reply]in
-
+  let reply = (parse_merlin_reply s).value |> Jsonaf.of_string |> [%of_jsonaf: reply] in
   { reply with
     cmpl_start =
       (match String.rindex_from_exn prefix (prefix_length - 1) '.' with

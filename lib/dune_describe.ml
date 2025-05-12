@@ -165,8 +165,8 @@ type project_details =
 
 (* Function to get the names of all local libraries and their dependencies *)
 let get_local_libs_and_dependencies
-  (project_info : Item.project_info)
-  (deps_info : Deps.deps_project_info)
+      (project_info : Item.project_info)
+      (deps_info : Deps.deps_project_info)
   : local_lib_info list
   =
   let { Item.libraries; local_libraries; root; build_context; _ } = project_info in
@@ -208,8 +208,8 @@ let get_local_libs_and_dependencies
 
 (* Function to get the names of all executables and their dependencies *)
 let get_executables_and_dependencies
-  (project_info : Item.project_info)
-  (deps_info : Deps.deps_project_info)
+      (project_info : Item.project_info)
+      (deps_info : Deps.deps_project_info)
   : executable_info list
   =
   let { Item.libraries; executables; root; build_context; _ } = project_info in

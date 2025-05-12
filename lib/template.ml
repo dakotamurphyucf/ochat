@@ -65,9 +65,12 @@ module Person = struct
     ; items : string list
     }
 
-  let items_template = ItemsTemplate.create {|items
+  let items_template =
+    ItemsTemplate.create
+      {|items
 -----------
 {{items}}|}
+  ;;
 
   let to_key_value_pairs person =
     [ "name", person.name
@@ -180,9 +183,9 @@ let%expect_test "template_parser_test" =
        person.Person.age
        (String.concat ~sep:", " person.Person.items)
    | None -> printf "Failed to parse the template\n");
-  [%expect {|
+  [%expect
+    {|
     Name: John Doe
     Age: 30
     Items: milk, eggs, toast |}]
 ;;
-

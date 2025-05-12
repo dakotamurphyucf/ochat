@@ -3,12 +3,13 @@
  (modules filter_file_test)
  (libraries core expect_test_helpers_core filter_file)
  (inline_tests)
- (preprocess (pps ppx_jane ppx_expect))
-)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
 
 (library
-		 (name apply_patch_test)
-		 (modules apply_patch_test)
-		 (libraries core expect_test_helpers_core apply_patch)
-		 (inline_tests)
-		 (preprocess (pps ppx_jane ppx_expect)))
+ (name apply_patch_test)
+ (modules apply_patch_test)
+ (libraries core expect_test_helpers_core apply_patch)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

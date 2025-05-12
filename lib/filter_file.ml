@@ -11,3 +11,4 @@ let filter_lines ~input_file ~output_file ~condition =
   let lines = In_channel.read_lines input_file in
   let filtered_lines = List.filter lines ~f:condition in
   Out_channel.write_lines output_file filtered_lines
+;;

@@ -751,13 +751,17 @@ module Responses = struct
     type model =
       | O3 [@name "o3"]
       | Gpt4 [@name "gpt-4.5-preview"]
+      | O4_mini [@name "o4-mini"]
       | Gpt4o [@name "gpt-4o"]
+      | Gpt4_1 [@name "gpt-4.1"]
       | Gpt3 [@name "gpt-3.5-turbo"]
       | Gpt3_16k [@name "gpt-3.5-turbo-16k"]
     [@@deriving sexp, bin_io]
 
     let jsonaf_of_model = function
       | O3 -> `String "o3"
+      | O4_mini -> `String "o4-mini"
+      | Gpt4_1 -> `String "gpt-4.1"
       | Gpt4 -> `String "gpt-4.5-preview"
       | Gpt4o -> `String "gpt-4o"
       | Gpt3 -> `String "gpt-3.5-turbo"
@@ -766,6 +770,8 @@ module Responses = struct
 
     let model_of_jsonaf = function
       | `String "o3" -> O3
+      | `String "o4-mini" -> O4_mini
+      | `String "gpt-4.1" -> Gpt4_1
       | `String "gpt-4.5-preview" -> Gpt4
       | `String "gpt-4o" -> Gpt4o
       | `String "gpt-3.5-turbo" -> Gpt3
@@ -776,6 +782,8 @@ module Responses = struct
     let model_to_str = function
       | O3 -> "o3"
       | Gpt4o -> "gpt-4o"
+      | O4_mini -> "o4-mini"
+      | Gpt4_1 -> "gpt-4.1"
       | Gpt3 -> "gpt-3.5-turbo"
       | Gpt3_16k -> "gpt-3.5-turbo-16k"
       | Gpt4 -> "gpt-4.5-preview"
@@ -783,6 +791,8 @@ module Responses = struct
 
     let model_of_str_exn = function
       | "o3" -> O3
+      | "o4-mini" -> O4_mini
+      | "gpt-4.1" -> Gpt4_1
       | "gpt-3.5-turbo" -> Gpt3
       | "gpt-3.5-turbo-16k" -> Gpt3_16k
       | "gpt-4.5" -> Gpt4

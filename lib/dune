@@ -42,7 +42,7 @@
  (name bin_prot_utils_eio)
  (public_name chatgpt.bin_prot_utils_eio)
  (modules bin_prot_utils_eio)
- (libraries core core_unix.bigstring_unix eio eio.unix )
+ (libraries core core_unix.bigstring_unix eio eio.unix)
  (preprocess
   (pps ppx_jane)))
 
@@ -118,7 +118,16 @@
  (name prompt_template)
  (modules prompt_template)
  (public_name chatgpt.prompt_template)
- (libraries core str jsonaf expect_test_helpers_core re2 angstrom markup openai openai_chat_completion)
+ (libraries
+  core
+  str
+  jsonaf
+  expect_test_helpers_core
+  re2
+  angstrom
+  markup
+  openai
+  openai_chat_completion)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect ppx_jsonaf_conv)))
@@ -188,7 +197,7 @@
 (library
  (name chat_response)
  (public_name chatgpt.chat_response)
- (modules chat_response) 
+ (modules chat_response)
  (libraries
   core
   openai
@@ -256,49 +265,47 @@
   (pps ppx_jane -dont-apply=sexp_message)))
 
 (library
-  (name chatml)
-  (public_name chatgpt.chatml)
-  (modules chatml_lang chatml_lexer chatml_parser)
-  (libraries core menhirLib)
-  (preprocess
+ (name chatml)
+ (public_name chatgpt.chatml)
+ (modules chatml_lang chatml_lexer chatml_parser)
+ (libraries core menhirLib)
+ (preprocess
   (pps ppx_jane)))
 
 (library
-  (name chatml_typechecker)
-  (public_name chatgpt.chatml_typechecker)
-  (modules chatml_typechecker)
-  (libraries core chatml)
-  (preprocess
+ (name chatml_typechecker)
+ (public_name chatgpt.chatml_typechecker)
+ (modules chatml_typechecker)
+ (libraries core chatml)
+ (preprocess
   (pps ppx_jane)))
 
 (library
-  (name chatml_builtin_modules)
-  (public_name chatgpt.chatml_builtin_modules)
-  (modules chatml_builtin_modules)
-  (libraries chatml core)
-  (preprocess
+ (name chatml_builtin_modules)
+ (public_name chatgpt.chatml_builtin_modules)
+ (modules chatml_builtin_modules)
+ (libraries chatml core)
+ (preprocess
   (pps ppx_jane)))
 
 (library
-  (name jsonaf_ext)
-  (public_name chatgpt.jsonaf_ext)
-  (modules jsonaf_ext)
-  (libraries jsonaf core)
-  (preprocess
+ (name jsonaf_ext)
+ (public_name chatgpt.jsonaf_ext)
+ (modules jsonaf_ext)
+ (libraries jsonaf core)
+ (preprocess
   (pps ppx_jane)))
 
 (library
-  (name apply_patch)
-  (public_name chatgpt.apply_patch)
-  (modules apply_patch)
-  (libraries core uutf uunf)
-  (preprocess
+ (name apply_patch)
+ (public_name chatgpt.apply_patch)
+ (modules apply_patch)
+ (libraries core uutf uunf)
+ (preprocess
   (pps ppx_jane)))
 
 (menhir
-  (modules chatml_parser)
-  (flags --table --dump)
-  
-  )
+ (modules chatml_parser)
+ (flags --table --dump))
 
 (ocamllex chatml_lexer)

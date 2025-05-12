@@ -83,21 +83,17 @@ module Make_Template : functor (R : RENDERABLE) -> sig
   val to_string : t -> string
 end
 
-
 module type PARSABLE = sig
-    type t
-  
-    (** [parse_patterns] is a list of regex patterns and corresponding keys to extract key-value pairs from a rendered template. *)
-    val parse_patterns : (string * string) list
-  
-    (** [from_key_value_pairs kv_pairs] converts a list of key-value pairs [kv_pairs] to a value of type [t]. *)
-    val from_key_value_pairs : (string * string) list -> t
-  end
+  type t
 
-  module Make_parser : functor (P : PARSABLE)
-  -> sig
+  (** [parse_patterns] is a list of regex patterns and corresponding keys to extract key-value pairs from a rendered template. *)
+  val parse_patterns : (string * string) list
 
-    (** [parse s] extracts the data of type [P.t] from the rendered template string [s]. *)
-    val parse : string -> P.t option
+  (** [from_key_value_pairs kv_pairs] converts a list of key-value pairs [kv_pairs] to a value of type [t]. *)
+  val from_key_value_pairs : (string * string) list -> t
 end
 
+module Make_parser : functor (P : PARSABLE) -> sig
+  (** [parse s] extracts the data of type [P.t] from the rendered template string [s]. *)
+  val parse : string -> P.t option
+end
