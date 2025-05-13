@@ -426,20 +426,21 @@ let%expect_test "record extension update ok" =
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "record extension add new field ok" =
+let%expect_test "record extension add new field age" =
   let code =
     {|
       let p = {name = "Ann"}
       let q = { p with age = 18 }
-      print([q.age])
+      print(q.age + 1)
+      print(q.name)
     |}
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Row does not contain label 'age' |}]
+  [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "record extension wrong type" =
+let%expect_test "record extension override type" =
   let code =
     {|
       let p = {name = "Bob"; age = 20}
@@ -448,7 +449,7 @@ let%expect_test "record extension wrong type" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Cannot unify number with string |}]
+  [%expect {| Type checking succeeded! |}]
 ;;
 
 let%expect_test "record pattern subset ok" =

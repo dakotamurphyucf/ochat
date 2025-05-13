@@ -231,8 +231,8 @@ let rec unify lhs rhs =
     | Ref t1, Ref t2 | Array t1, Array t2 -> unify t1 t2
     | Record r1, Record r2 | Variant r1, Variant r2 -> unify r1 r2
     | Tuple ts1, Tuple ts2 ->
-      if List.length ts1 <> List.length ts2 then
-        raise (Type_error "Tuple arity mismatch")
+      if List.length ts1 <> List.length ts2
+      then raise (Type_error "Tuple arity mismatch")
       else List.iter2_exn ts1 ts2 ~f:unify
     | (Row _ as row1), (Row _ as row2) -> unify_rows row1 row2
     | Row (fs, _), Empty_row | Empty_row, Row (fs, _) ->
@@ -455,22 +455,21 @@ let rec infer_expr env = function
     unify (infer_expr env arr) (Array v_ty);
     Unit
   | ERef e -> Ref (infer_expr env e) (* simplified *)
-
   | ERecordExtend (base_expr, fields) ->
     (* Infer type of the base record. *)
     let base_ty = infer_expr env base_expr in
-    let tail_row = new_var !current_lvl in
     (* Infer types for the overriding / extending fields. *)
     let fields_env =
-      List.fold_left fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
-          let ty = infer_expr env expr in
-          Env.add lbl ty acc)
+      List.fold fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
+        let ty = infer_expr env expr in
+        Env.add lbl ty acc)
     in
-    let new_row = Row (fields_env, tail_row) in
-    (* The base record must at least contain the fields we are overriding/extending. *)
-    unify base_ty (Record new_row);
-    Record new_row
-
+    let new_row = Row (fields_env, base_ty) in
+    (* The base record must at least contain the fields we are overriding/extending.
+    unify base_ty (Record new_row); *)
+    let fields, tail = merge_fields (Record new_row) in
+    (* The new row must be a superset of the base record. *)
+    Record (Row (fields, tail))
   | EDeref e ->
     let ty = new_var !current_lvl in
     unify (Ref ty) (infer_expr env e);
@@ -497,7 +496,6 @@ let rec infer_expr env = function
     let scrut_ty = infer_expr env scrut in
     (* Type of the overall match expression. *)
     let result_ty = new_var !current_lvl in
-
     (* Helper: infer pattern, returns env extended with bindings. *)
     let rec infer_pattern env pat expected_ty : tenv =
       match pat with
@@ -521,9 +519,9 @@ let rec infer_expr env = function
         (* Create fresh type variables for each subpattern and build row. *)
         let env_after, fields_acc =
           List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
-              let ty = new_var !current_lvl in
-              let env_acc' = infer_pattern env_acc pat ty in
-              (env_acc', (lbl, ty) :: fields_acc))
+            let ty = new_var !current_lvl in
+            let env_acc' = infer_pattern env_acc pat ty in
+            env_acc', (lbl, ty) :: fields_acc)
         in
         let fields_env = Env.of_list (List.rev fields_acc) in
         let tail_row = if is_open then new_var !current_lvl else Empty_row in
@@ -551,7 +549,6 @@ let rec infer_expr env = function
         unify expected_ty variant_ty;
         env_after
     in
-
     (* Iterate over each case. *)
     List.iter cases ~f:(fun (pat, rhs) ->
       (* Work with a fresh copy of the environment for each arm so that
@@ -590,7 +587,6 @@ let rec infer_stmt env = function
        but whose subsequent mutations are local to the module. *)
     let outer_snapshot = !env in
     let mod_env = ref outer_snapshot in
-
     (* A placeholder type for the module itself, so that the module body can
        refer to [mname] recursively (e.g.  when defining mutually-recursive
        modules or values that reference the toplevel module).  We allocate it
@@ -600,10 +596,8 @@ let rec infer_stmt env = function
        before we start type-checking the module’s statements. *)
     env := Env.add mname module_placeholder !env;
     mod_env := Env.add mname module_placeholder !mod_env;
-
     (* Type-check all the statements inside the module using [mod_env]. *)
     List.iter stmts ~f:(infer_stmt mod_env);
-
     (* Collect all bindings that were introduced **inside** the module.  We do so
        by comparing the environment after the module body with the snapshot we
        took before entering the module.  Any key that is either new or has
@@ -611,20 +605,17 @@ let rec infer_stmt env = function
     let exports_list =
       Env.bindings !mod_env
       |> List.filter ~f:(fun (k, data) ->
-           if String.equal k mname
-           then false (* never export the module binding itself *)
-           else (
-             match Env.find outer_snapshot k with
-             | None -> true (* brand-new binding *)
-             | Some old -> not (phys_equal old data)))
+        if String.equal k mname
+        then false (* never export the module binding itself *)
+        else (
+          match Env.find outer_snapshot k with
+          | None -> true (* brand-new binding *)
+          | Some old -> not (phys_equal old data)))
     in
     let exports_map = Env.of_list exports_list in
-
     (* Turn the [exports_map] into a row type.  We *always* close the row when
        building a module type – modules expose a fixed set of fields. *)
-    let row =
-      Row (exports_map, Empty_row)
-    in
+    let row = Row (exports_map, Empty_row) in
     let module_typ = Record row in
     (* Unify the placeholder with the actual module type and update the
        binding in the outer environment with a *generalised* scheme. *)
@@ -639,7 +630,7 @@ let rec infer_stmt env = function
        let fields, tail = merge_fields row in
        (match tail with
         | Empty_row | Var { contents = Free _ } -> () (* ok *)
-        | _ -> () );
+        | _ -> ());
        Env.iter fields ~f:(fun field_name ty -> add env field_name ty)
      | _ -> raise (Type_error (Printf.sprintf "Cannot open non-module '%s'" mname)))
 ;;
