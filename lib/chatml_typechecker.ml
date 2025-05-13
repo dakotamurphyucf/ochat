@@ -602,7 +602,7 @@ let rec infer_stmt env = function
     env := Env.add mname module_placeholder !env;
     mod_env := Env.add mname module_placeholder !mod_env;
     (* Type-check all the statements inside the module using [mod_env]. *)
-    List.iter stmts ~f:(infer_stmt mod_env);
+    List.iter stmts ~f:(fun stmt -> infer_stmt mod_env stmt.value);
     (* Collect all bindings that were introduced **inside** the module.  We do so
        by comparing the environment after the module body with the snapshot we
        took before entering the module.  Any key that is either new or has

@@ -76,7 +76,7 @@ stmt:
 | LET REC rec_bindings IN expr_sequence  { mk_node $startpos $endpos (SExpr( mk_exprnode $startpos $endpos (ELetRec($3, $5)) )) }
 | LET LIDENT params EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda($3, ($5))))) }
 | LET LIDENT EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
-| MODULE UIDENT EQ STRUCT stmts END { mk_node $startpos $endpos (SModule($2, List.map (fun sn -> sn.value) $5)) }
+| MODULE UIDENT EQ STRUCT stmts END { mk_node $startpos $endpos (SModule($2, $5)) }
 | OPEN UIDENT               { mk_node $startpos $endpos (SOpen($2)) }
 | expr                      { mk_node $startpos $endpos (SExpr($1)) }
 

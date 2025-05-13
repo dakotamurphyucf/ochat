@@ -57,18 +57,17 @@ type expr =
    nevertheless exported so that other compilation passes can choose to
    wrap expressions and sub-expressions if they wish to. *)
 
-type expr_node = expr node
 (* A program is now a list of position-annotated statements.  This keeps the
    public interface identical to what external callers expect (they were
    already using [Chatml_lang.program]) while giving the parser a place to
    store location information. *)
 
 type stmt =
-  | SLet of string * expr_node
-  | SLetRec of (string * expr_node) list
-  | SModule of string * stmt list
+  | SLet of string * expr node
+  | SLetRec of (string * expr node) list
+  | SModule of string * stmt node list
   | SOpen of string
-  | SExpr of expr_node
+  | SExpr of expr node
 
 type stmt_node = stmt node
 type program = stmt_node list * string
@@ -359,8 +358,8 @@ and match_eval (env : env) (v : value) (cases : (pattern * expr node) list) : ev
 (* 7) Statement Evaluation                                                 *)
 (***************************************************************************)
 
-and eval_stmt (env : env) (s : stmt) : unit =
-  match s with
+and eval_stmt (env : env) (s : stmt node) : unit =
+  match s.value with
   | SLet (x, e1) ->
     let v1 = finish_eval (eval_expr env e1) in
     set_var env x v1
@@ -389,7 +388,7 @@ and eval_stmt (env : env) (s : stmt) : unit =
 (***************************************************************************)
 
 let eval_program (env : env) (prog : program) : unit =
-  List.iter (fst prog) ~f:(fun stmt_node -> eval_stmt env stmt_node.value)
+  List.iter (fst prog) ~f:(fun stmt_node -> eval_stmt env stmt_node)
 ;;
 
 module Chatml_alpha = struct
@@ -569,8 +568,8 @@ module Chatml_alpha = struct
   (* 4) Statements                                                           *)
   (***************************************************************************)
 
-  let rec alpha_convert_stmt (env : (string, string) Hashtbl.t) (s : stmt) : stmt =
-    match s with
+  let rec alpha_convert_stmt (env : (string, string) Hashtbl.t) (s : stmt node) : stmt =
+    match s.value with
     | SLet (x, rhs) ->
       (* no restore for top-level let *)
       let rhs' = alpha_convert_expr env rhs in
@@ -603,7 +602,9 @@ module Chatml_alpha = struct
       (* rename mname, but do NOT restore it at top level *)
       let new_m = fresh_name mname in
       Hashtbl.set env ~key:mname ~data:new_m;
-      let stmts' = List.map stmts ~f:(alpha_convert_stmt env) in
+      let stmts' =
+        List.map stmts ~f:(fun stmt -> { stmt with value = alpha_convert_stmt env stmt })
+      in
       SModule (new_m, stmts')
     | SOpen mname ->
       (* If you want to rename modules too, do so. Otherwise handle as you prefer. *)
@@ -634,7 +635,7 @@ module Chatml_alpha = struct
              stmt_node.span.left.line
              stmt_node.span.left.column
              stmt_node.span.left.offset;
-        let result_value = alpha_convert_stmt env stmt_node.value in
+        let result_value = alpha_convert_stmt env stmt_node in
         print_endline @@ Printf.sprintf "After stmt: environment =\n";
         Hashtbl.iteri env ~f:(fun ~key ~data ->
           print_endline @@ Printf.sprintf "  %s -> %s\n" key data);
