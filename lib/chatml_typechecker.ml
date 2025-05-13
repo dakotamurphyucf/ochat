@@ -455,6 +455,22 @@ let rec infer_expr env = function
     unify (infer_expr env arr) (Array v_ty);
     Unit
   | ERef e -> Ref (infer_expr env e) (* simplified *)
+
+  | ERecordExtend (base_expr, fields) ->
+    (* Infer type of the base record. *)
+    let base_ty = infer_expr env base_expr in
+    let tail_row = new_var !current_lvl in
+    (* Infer types for the overriding / extending fields. *)
+    let fields_env =
+      List.fold_left fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
+          let ty = infer_expr env expr in
+          Env.add lbl ty acc)
+    in
+    let new_row = Row (fields_env, tail_row) in
+    (* The base record must at least contain the fields we are overriding/extending. *)
+    unify base_ty (Record new_row);
+    Record new_row
+
   | EDeref e ->
     let ty = new_var !current_lvl in
     unify (Ref ty) (infer_expr env e);
@@ -501,6 +517,19 @@ let rec infer_expr env = function
       | PString _ ->
         unify expected_ty String;
         env
+      | PRecord (fields, is_open) ->
+        (* Create fresh type variables for each subpattern and build row. *)
+        let env_after, fields_acc =
+          List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
+              let ty = new_var !current_lvl in
+              let env_acc' = infer_pattern env_acc pat ty in
+              (env_acc', (lbl, ty) :: fields_acc))
+        in
+        let fields_env = Env.of_list (List.rev fields_acc) in
+        let tail_row = if is_open then new_var !current_lvl else Empty_row in
+        let record_ty = Record (Row (fields_env, tail_row)) in
+        unify expected_ty record_ty;
+        env_after
       | PVariant (tag, subpats) ->
         (* Create fresh types for each subpattern, bind them. *)
         (* We need to process subpatterns left-to-right, threading the env. *)

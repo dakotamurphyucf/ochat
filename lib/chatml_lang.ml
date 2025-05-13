@@ -12,6 +12,7 @@ type pattern =
   | PFloat of float
   | PString of string
   | PVariant of string * pattern list
+  | PRecord of (string * pattern) list * bool (* true = open row with _ *)
 
 type expr =
   | EInt of int
@@ -37,6 +38,7 @@ type expr =
   | ESetRef of expr * expr
   | ESequence of expr * expr (* e1 ; e2 *)
   | EDeref of expr
+  | ERecordExtend of expr * (string * expr) list
 
 type stmt =
   | SLet of string * expr
@@ -125,6 +127,29 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
       | _ -> None
     in
     combine ps vs (Some [])
+  | PRecord (fields, is_open), VRecord tbl ->
+    (* Ensure specified fields match; if closed pattern, ensure no extra fields exist. *)
+    let rec match_fields fl acc =
+      match fl with
+      | [] -> Some acc
+      | (lbl, pat) :: tl -> (
+          match Hashtbl.find tbl lbl with
+          | None -> None
+          | Some v_f -> (
+              match match_pattern v_f pat with
+              | None -> None
+              | Some binds -> match_fields tl (acc @ binds)))
+    in
+    (match match_fields fields [] with
+     | None -> None
+     | Some binds ->
+       if is_open
+       then Some binds
+       else (
+         (* closed: record must not have extra fields *)
+         if Hashtbl.length tbl = List.length fields
+         then Some binds
+         else None))
   | _ -> None
 ;;
 
@@ -279,6 +304,21 @@ and eval_expr (env : env) (e : expr) : eval_result =
     let _ = eval_expr env e1 in
     (* evaluate e1, discard its result *)
     eval_expr env e2 (* then evaluate and return e2 *)
+  | ERecordExtend (base_expr, fields) ->
+    (* Evaluate the base record *)
+    let base_val = finish_eval (eval_expr env base_expr) in
+    let base_tbl =
+      match base_val with
+      | VRecord tbl -> tbl
+      | _ -> failwith "Record extension base is not a record"
+    in
+    (* Copy existing fields to a new table *)
+    let new_tbl = Hashtbl.copy base_tbl in
+    (* Evaluate new field expressions and replace/insert. *)
+    List.iter fields ~f:(fun (fld, fe) ->
+        let fv = finish_eval (eval_expr env fe) in
+        Hashtbl.set new_tbl ~key:fld ~data:fv);
+    Value (VRecord new_tbl)
 
 and match_eval (env : env) (v : value) (cases : (pattern * expr) list) : eval_result =
   match cases with
@@ -368,6 +408,12 @@ module Chatml_alpha = struct
         List.map subpats ~f:(fun sp -> alpha_convert_pattern env sp saved_bindings)
       in
       PVariant (tag, subpats')
+    | PRecord (fields, opn) ->
+      let fields' =
+        List.map fields ~f:(fun (lbl, pat) ->
+            lbl, alpha_convert_pattern env pat saved_bindings)
+      in
+      PRecord (fields', opn)
   ;;
 
   (***************************************************************************)
@@ -499,6 +545,10 @@ module Chatml_alpha = struct
     | ERef e1 -> ERef (alpha_convert_expr env e1)
     | ESetRef (r, v) -> ESetRef (alpha_convert_expr env r, alpha_convert_expr env v)
     | EDeref e1 -> EDeref (alpha_convert_expr env e1)
+    | ERecordExtend (base, fields) ->
+      let base' = alpha_convert_expr env base in
+      let fields' = List.map fields ~f:(fun (lbl, ex) -> lbl, alpha_convert_expr env ex) in
+      ERecordExtend (base', fields')
   ;;
 
   (***************************************************************************)

@@ -106,6 +106,8 @@ expr:
     (* match with *)
     | MATCH expr_sequence WITH pattern_cases { EMatch($2, $4) }
 
+    (* record extension { base with a = expr; ... } *)
+    | LBRACE expr_sequence WITH field_decls RBRACE { ERecordExtend($2, $4) }
     (* record literal *)
     | LBRACE field_list RBRACE      { ERecord($2) }
 
@@ -156,11 +158,27 @@ pattern:
     | STRING          { PString $1 }
     | TICKIDENT       { PVariant($1, []) }
     | TICKIDENT LPAREN pattern_list RPAREN { PVariant($1, $3) }
+    | LBRACE pattern_field_list RBRACE { PRecord(fst $2, snd $2) }
     | LIDENT          { PVar $1 }
 
 pattern_list:
     pattern { [$1] }
 | pattern COMMA pattern_list { $1 :: $3 }
+
+pattern_field_list:
+    /* empty */ { [], false }
+  | pattern_field_decls { $1 }
+
+opt_row_tail:
+    /* nothing */ { false }
+  | SEMI UNDERSCORE { true }
+
+pattern_field_decls:
+    pattern_field_decl opt_row_tail { [$1], $2 }
+  | pattern_field_decl SEMI pattern_field_decls { $1 :: (fst $3), (snd $3) }
+
+pattern_field_decl:
+    LIDENT EQ pattern { ($1, $3) }
 
 expr_list:
     /* empty */ { [] }

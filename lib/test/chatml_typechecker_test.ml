@@ -411,3 +411,68 @@ let%expect_test "variant payload type error" =
   Chatml_typechecker.infer_program prog;
   [%expect {| Type error: Cannot unify number with string |}]
 ;;
+
+(* ------------------------------------------------------------------ *)
+let%expect_test "record extension update ok" =
+  let code =
+    {|
+      let p = {name = "Bob"; age = 20}
+      let p2 = { p with age = p.age + 1 }
+      print([p2.age])
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "record extension add new field ok" =
+  let code =
+    {|
+      let p = {name = "Ann"}
+      let q = { p with age = 18 }
+      print([q.age])
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type error: Row does not contain label 'age' |}]
+;;
+
+let%expect_test "record extension wrong type" =
+  let code =
+    {|
+      let p = {name = "Bob"; age = 20}
+      let p2 = { p with age = "old" }
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type error: Cannot unify number with string |}]
+;;
+
+let%expect_test "record pattern subset ok" =
+  let code =
+    {|
+      let r = {name = "Jim"; age = 35}
+      match r with
+      | {name = n; _} -> print([n])
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "record pattern missing field" =
+  let code =
+    {|
+      let r = {name = "Sue"}
+      match r with
+      | {age = a} -> a
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type error: Row does not contain label 'age' |}]
+;;
