@@ -704,6 +704,7 @@ let run_completion_stream
     print_endline "STREAM EVENT:";
     print_endline (Jsonaf.to_string_hum (Res.Response_stream.jsonaf_of_t ev))
   in
+  let fn_id = ref 0 in
   (* ─────────────────────── 1.  main recursive turn ────────────────────── *)
   let rec turn () =
     (* 1‑A • read current prompt XML and parse *)
@@ -790,7 +791,8 @@ let run_completion_stream
       match Hashtbl.find func_info item_id with
       | None -> () (* should not happen *)
       | Some (name, call_id) ->
-        let tool_call_url id = Printf.sprintf "tool-call.%s.json" id in
+        let i = !fn_id in
+        let tool_call_url id = Printf.sprintf "%i.tool-call.%s.json" i id in
         (* assistant’s tool‑call request *)
         (* if show_tool_call is true, then we will show the tool call in the output *)
         (* otherwise, we will save the tool call to a file and not show it in the output *)
@@ -831,7 +833,7 @@ let run_completion_stream
         (* run the tool *)
         let fn = Hashtbl.find_exn tool_tbl name in
         let result = fn arguments in
-        let tool_call_result_url id = Printf.sprintf "tool-call-result.%s.json" id in
+        let tool_call_result_url id = Printf.sprintf "%i.tool-call-result.%s.json" i id in
         if show_tool_call
         then
           append_doc
@@ -860,6 +862,7 @@ let run_completion_stream
                item_id
                (tab_on_newline content));
           Io.save_doc ~dir:datadir (tool_call_result_url call_id) result);
+        Int.incr fn_id;
         run_again := true
     in
     let callback (ev : Res.Response_stream.t) =

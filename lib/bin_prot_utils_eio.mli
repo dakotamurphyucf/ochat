@@ -1,4 +1,4 @@
-(** Eio-based alternatives to {!Bin_prot_utils}.  All functions that
+(** Eio-based alternatives to {!module-Bin_prot_utils}.  All functions that
     previously took a file name now take an {!Eio.Path.t} rooted at
     some directory capability (typically {!Eio.Stdenv.cwd} or
     {!Eio.Stdenv.fs}). *)

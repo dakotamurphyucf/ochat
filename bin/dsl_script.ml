@@ -16,12 +16,12 @@ let () =
     {|
     (* Type checking succeeded! Uncaught exception: (Failure "No field 'age' in record") *)
     (* --------------------------------------- *)
-    let p = {name = "Alice"}
+    let p = {name = "Alice"; age = 25}
     let f p =
         let inc_age person =
             person.age <- person.age + 1
         in
-        print([p.name]);
+        print(p.name);
         inc_age(p)
     
     f(p)

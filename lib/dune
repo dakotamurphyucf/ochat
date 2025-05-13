@@ -7,6 +7,13 @@
   (pps ppx_jane)))
 
 (library
+ (name environment)
+ (public_name chatgpt.environment)
+ (modules environment)
+ (libraries core)
+ (preprocess (pps ppx_jane)))
+
+(library
  (name tikitoken)
  (modules tikitoken)
  (public_name chatgpt.tikitoken)
