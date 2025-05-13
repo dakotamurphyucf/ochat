@@ -1,8 +1,12 @@
 open Core
-
 (***************************************************************************)
 (* 1) AST Types                                                            *)
 (***************************************************************************)
+
+type 'a node =
+  { value : 'a
+  ; span : Source.span
+  }
 
 type pattern =
   | PWildcard
@@ -20,34 +24,54 @@ type expr =
   | EFloat of float
   | EString of string
   | EVar of string
-  | ELambda of string list * expr
-  | EApp of expr * expr list
-  | EIf of expr * expr * expr
-  | EWhile of expr * expr
-  | ELetIn of string * expr * expr
-  | ELetRec of (string * expr) list * expr
-  | EMatch of expr * (pattern * expr) list
-  | ERecord of (string * expr) list
-  | EFieldGet of expr * string
-  | EFieldSet of expr * string * expr
-  | EVariant of string * expr list
-  | EArray of expr list
-  | EArrayGet of expr * expr
-  | EArraySet of expr * expr * expr
-  | ERef of expr
-  | ESetRef of expr * expr
-  | ESequence of expr * expr (* e1 ; e2 *)
-  | EDeref of expr
-  | ERecordExtend of expr * (string * expr) list
+  | ELambda of string list * expr node
+  | EApp of expr node * expr node list
+  | EIf of expr node * expr node * expr node
+  | EWhile of expr node * expr node
+  | ELetIn of string * expr node * expr node
+  | ELetRec of (string * expr node) list * expr node
+  | EMatch of expr node * (pattern * expr node) list
+  | ERecord of (string * expr node) list
+  | EFieldGet of expr node * string
+  | EFieldSet of expr node * string * expr node
+  | EVariant of string * expr node list
+  | EArray of expr node list
+  | EArrayGet of expr node * expr node
+  | EArraySet of expr node * expr node * expr node
+  | ERef of expr node
+  | ESetRef of expr node * expr node
+  | ESequence of expr node * expr node (* e1 ; e2 *)
+  | EDeref of expr node
+  | ERecordExtend of expr node * (string * expr node) list
+
+(***************************************************************************)
+(* Source position annotated nodes                                          *)
+
+(***************************************************************************)
+
+(* We model source positions à la Nox: every syntactic element that we care
+   about can be wrapped into a node that records its concrete span inside
+   the original source file.  For the time being we only use this wrapper
+   for top-level statements (so that we can attach a location to each piece
+   of the AST without having to refactor the whole evaluator).  The type is
+   nevertheless exported so that other compilation passes can choose to
+   wrap expressions and sub-expressions if they wish to. *)
+
+type expr_node = expr node
+(* A program is now a list of position-annotated statements.  This keeps the
+   public interface identical to what external callers expect (they were
+   already using [Chatml_lang.program]) while giving the parser a place to
+   store location information. *)
 
 type stmt =
-  | SLet of string * expr
-  | SLetRec of (string * expr) list
+  | SLet of string * expr_node
+  | SLetRec of (string * expr_node) list
   | SModule of string * stmt list
   | SOpen of string
-  | SExpr of expr
+  | SExpr of expr_node
 
-type program = stmt list
+type stmt_node = stmt node
+type program = stmt_node list * string
 
 (***************************************************************************)
 (* 2) Runtime Value Types                                                  *)
@@ -69,7 +93,7 @@ type value =
 
 and clos =
   { params : string list
-  ; body : expr
+  ; body : expr node
   ; env : env
   }
 
@@ -132,24 +156,24 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
     let rec match_fields fl acc =
       match fl with
       | [] -> Some acc
-      | (lbl, pat) :: tl -> (
-          match Hashtbl.find tbl lbl with
-          | None -> None
-          | Some v_f -> (
-              match match_pattern v_f pat with
-              | None -> None
-              | Some binds -> match_fields tl (acc @ binds)))
+      | (lbl, pat) :: tl ->
+        (match Hashtbl.find tbl lbl with
+         | None -> None
+         | Some v_f ->
+           (match match_pattern v_f pat with
+            | None -> None
+            | Some binds -> match_fields tl (acc @ binds)))
     in
     (match match_fields fields [] with
      | None -> None
      | Some binds ->
        if is_open
        then Some binds
-       else (
+       else if
          (* closed: record must not have extra fields *)
-         if Hashtbl.length tbl = List.length fields
-         then Some binds
-         else None))
+         Hashtbl.length tbl = List.length fields
+       then Some binds
+       else None)
   | _ -> None
 ;;
 
@@ -174,8 +198,8 @@ let rec finish_eval (r : eval_result) : value =
 (* 6) Expression Evaluation                                                *)
 (***************************************************************************)
 
-and eval_expr (env : env) (e : expr) : eval_result =
-  match e with
+and eval_expr (env : env) (e : expr node) : eval_result =
+  match e.value with
   | EInt i -> Value (VInt i)
   | EBool b -> Value (VBool b)
   | EFloat f -> Value (VFloat f)
@@ -316,11 +340,11 @@ and eval_expr (env : env) (e : expr) : eval_result =
     let new_tbl = Hashtbl.copy base_tbl in
     (* Evaluate new field expressions and replace/insert. *)
     List.iter fields ~f:(fun (fld, fe) ->
-        let fv = finish_eval (eval_expr env fe) in
-        Hashtbl.set new_tbl ~key:fld ~data:fv);
+      let fv = finish_eval (eval_expr env fe) in
+      Hashtbl.set new_tbl ~key:fld ~data:fv);
     Value (VRecord new_tbl)
 
-and match_eval (env : env) (v : value) (cases : (pattern * expr) list) : eval_result =
+and match_eval (env : env) (v : value) (cases : (pattern * expr node) list) : eval_result =
   match cases with
   | [] -> failwith "Non-exhaustive pattern match"
   | (pat, rhs) :: tl ->
@@ -364,7 +388,9 @@ and eval_stmt (env : env) (s : stmt) : unit =
 (* 8) Program Evaluation                                                   *)
 (***************************************************************************)
 
-let eval_program (env : env) (prog : program) : unit = List.iter prog ~f:(eval_stmt env)
+let eval_program (env : env) (prog : program) : unit =
+  List.iter (fst prog) ~f:(fun stmt_node -> eval_stmt env stmt_node.value)
+;;
 
 module Chatml_alpha = struct
   (***************************************************************************)
@@ -411,7 +437,7 @@ module Chatml_alpha = struct
     | PRecord (fields, opn) ->
       let fields' =
         List.map fields ~f:(fun (lbl, pat) ->
-            lbl, alpha_convert_pattern env pat saved_bindings)
+          lbl, alpha_convert_pattern env pat saved_bindings)
       in
       PRecord (fields', opn)
   ;;
@@ -420,10 +446,12 @@ module Chatml_alpha = struct
   (* 3) Expressions                                                          *)
   (***************************************************************************)
 
-  let rec alpha_convert_expr (env : (string, string) Hashtbl.t) (e : expr) : expr =
-    match e with
+  let rec alpha_convert_expr (env : (string, string) Hashtbl.t) (e : expr node) : expr =
+    let convert nexp = { nexp with value = alpha_convert_expr env nexp } in
+    (* We use f to ensure that we always return a node with the same span. *)
+    match e.value with
     (* Simple literals & constants: no renaming needed. *)
-    | EInt _ | EBool _ | EFloat _ | EString _ -> e
+    | EInt _ | EBool _ | EFloat _ | EString _ -> e.value
     (* Variable reference: EVar x -> EVar (env[x]) if present. *)
     | EVar x ->
       (match Hashtbl.find env x with
@@ -448,34 +476,31 @@ module Chatml_alpha = struct
         match old_opt with
         | None -> Hashtbl.remove env old_p
         | Some prev -> Hashtbl.set env ~key:old_p ~data:prev);
-      ELambda (new_params, new_body)
+      ELambda (new_params, { body with value = new_body })
     (* Function application: just rename subexpressions. *)
     | EApp (fn, args) ->
       let fn' = alpha_convert_expr env fn in
-      let args' = List.map args ~f:(alpha_convert_expr env) in
-      EApp (fn', args')
+      let args' =
+        List.map args ~f:(fun arg -> { arg with value = alpha_convert_expr env arg })
+      in
+      EApp ({ fn with value = fn' }, args')
     (* If-then-else. *)
-    | EIf (cond, t, f) ->
-      EIf (alpha_convert_expr env cond, alpha_convert_expr env t, alpha_convert_expr env f)
+    | EIf (cond, t, f) -> EIf (convert cond, convert t, convert f)
     (* While & do. *)
-    | EWhile (cond, body) ->
-      EWhile (alpha_convert_expr env cond, alpha_convert_expr env body)
+    | EWhile (cond, body) -> EWhile (convert cond, convert body)
     (* Sequence e1; e2 *)
-    | ESequence (e1, e2) ->
-      ESequence (alpha_convert_expr env e1, alpha_convert_expr env e2)
+    | ESequence (e1, e2) -> ESequence (convert e1, convert e2)
     (* Let-binding: rename the bound variable, rename rhs & body. *)
     | ELetIn (x, rhs, body) ->
-      let rhs' = alpha_convert_expr env rhs in
       (* rename x to new_x, update env. *)
       let saved = Hashtbl.find env x in
       let new_x = fresh_name x in
       Hashtbl.set env ~key:x ~data:new_x;
-      let body' = alpha_convert_expr env body in
       (* restore environment *)
       (match saved with
        | None -> Hashtbl.remove env x
        | Some old -> Hashtbl.set env ~key:x ~data:old);
-      ELetIn (new_x, rhs', body')
+      ELetIn (new_x, convert rhs, convert body)
     (* Let-rec: rename each bound variable, alpha-convert each RHS. *)
     | ELetRec (bindings, body) ->
       (* 1. Reserve fresh names for each binding so they can refer to each other. *)
@@ -494,60 +519,49 @@ module Chatml_alpha = struct
       (* 3. Now alpha-convert each RHS. *)
       let new_bindings =
         List.map2_exn bindings binding_names ~f:(fun (_, rhs_expr) (_old_nm, new_nm) ->
-          let rhs' = alpha_convert_expr env rhs_expr in
-          new_nm, rhs')
+          new_nm, convert rhs_expr)
       in
-      (* 4. alpha-convert the body. *)
-      let body' = alpha_convert_expr env body in
       (* 5. restore the environment. *)
       List.iter !saved ~f:(fun (old_nm, old_opt) ->
         match old_opt with
         | None -> Hashtbl.remove env old_nm
         | Some oldv -> Hashtbl.set env ~key:old_nm ~data:oldv);
-      ELetRec (new_bindings, body')
+      ELetRec (new_bindings, convert body)
     (* Match/cases: rename scrut, then each case pattern & RHS. *)
     | EMatch (scrut, cases) ->
-      let scrut' = alpha_convert_expr env scrut in
       let cases' =
         List.map cases ~f:(fun (pat, rhs) ->
           let saved_bindings = ref [] in
           let pat' = alpha_convert_pattern env pat saved_bindings in
-          let rhs' = alpha_convert_expr env rhs in
           (* restore environment after each pattern+rhs *)
           List.iter !saved_bindings ~f:(fun (old_nm, old_opt) ->
             match old_opt with
             | None -> Hashtbl.remove env old_nm
             | Some oldv -> Hashtbl.set env ~key:old_nm ~data:oldv);
-          pat', rhs')
+          pat', convert rhs)
       in
-      EMatch (scrut', cases')
+      EMatch (convert scrut, cases')
     (* Record creation, field get/set, arrays, etc. - rename subexpressions. *)
     | ERecord fields ->
-      let fields' =
-        List.map fields ~f:(fun (fld, fe) -> fld, alpha_convert_expr env fe)
-      in
+      let fields' = List.map fields ~f:(fun (fld, fe) -> fld, convert fe) in
       ERecord fields'
-    | EFieldGet (obj, field) -> EFieldGet (alpha_convert_expr env obj, field)
-    | EFieldSet (obj, field, new_val) ->
-      EFieldSet (alpha_convert_expr env obj, field, alpha_convert_expr env new_val)
+    | EFieldGet (obj, field) -> EFieldGet (convert obj, field)
+    | EFieldSet (obj, field, new_val) -> EFieldSet (convert obj, field, convert new_val)
     (* Polymorphic variant, rename subexprs. *)
     | EVariant (tag, vs) ->
-      let vs' = List.map vs ~f:(alpha_convert_expr env) in
+      let vs' = List.map vs ~f:convert in
       EVariant (tag, vs')
     (* Arrays & indexing. *)
-    | EArray elts -> EArray (List.map elts ~f:(alpha_convert_expr env))
-    | EArrayGet (arr, idx) ->
-      EArrayGet (alpha_convert_expr env arr, alpha_convert_expr env idx)
-    | EArraySet (arr, idx, v) ->
-      EArraySet
-        (alpha_convert_expr env arr, alpha_convert_expr env idx, alpha_convert_expr env v)
+    | EArray elts -> EArray (List.map elts ~f:convert)
+    | EArrayGet (arr, idx) -> EArrayGet (convert arr, convert idx)
+    | EArraySet (arr, idx, v) -> EArraySet (convert arr, convert idx, convert v)
     (* References, setref, deref just rename subexpressions. *)
-    | ERef e1 -> ERef (alpha_convert_expr env e1)
-    | ESetRef (r, v) -> ESetRef (alpha_convert_expr env r, alpha_convert_expr env v)
-    | EDeref e1 -> EDeref (alpha_convert_expr env e1)
+    | ERef e1 -> ERef (convert e1)
+    | ESetRef (r, v) -> ESetRef (convert r, convert v)
+    | EDeref e1 -> EDeref (convert e1)
     | ERecordExtend (base, fields) ->
-      let base' = alpha_convert_expr env base in
-      let fields' = List.map fields ~f:(fun (lbl, ex) -> lbl, alpha_convert_expr env ex) in
+      let base' = convert base in
+      let fields' = List.map fields ~f:(fun (lbl, ex) -> lbl, convert ex) in
       ERecordExtend (base', fields')
   ;;
 
@@ -562,7 +576,7 @@ module Chatml_alpha = struct
       let rhs' = alpha_convert_expr env rhs in
       let new_x = fresh_name x in
       Hashtbl.set env ~key:x ~data:new_x;
-      SLet (new_x, rhs')
+      SLet (new_x, { span = rhs.span; value = rhs' })
     | SLetRec bindings ->
       (* 1) First, create fresh names for each binding. *)
       let binding_names =
@@ -579,7 +593,7 @@ module Chatml_alpha = struct
       let new_binds =
         List.map2_exn bindings binding_names ~f:(fun (_, rhs_expr) (_old_nm, new_nm) ->
           let rhs' = alpha_convert_expr env rhs_expr in
-          new_nm, rhs')
+          new_nm, { span = rhs_expr.span; value = rhs' })
       in
       (* 4) Do NOT restore the old environment here, because it’s top-level.
 		     We want “f -> f_1” (for example) to stay in the env so that later
@@ -598,7 +612,7 @@ module Chatml_alpha = struct
        | None -> SOpen mname)
     | SExpr e ->
       let e' = alpha_convert_expr env e in
-      SExpr e'
+      SExpr { span = e.span; value = e' }
   ;;
 
   (***************************************************************************)
@@ -607,11 +621,24 @@ module Chatml_alpha = struct
 
   let alpha_convert_program (prog : program) : program =
     let env = Hashtbl.create (module String) in
-    List.map prog ~f:(fun stmt ->
-      let result = alpha_convert_stmt env stmt in
-      print_endline @@ Printf.sprintf "After stmt: environment =\n";
-      Hashtbl.iteri env ~f:(fun ~key ~data ->
-        print_endline @@ Printf.sprintf "  %s -> %s\n" key data);
-      result)
+    ( List.map (fst prog) ~f:(fun stmt_node ->
+        print_endline
+        @@ Printf.sprintf
+             "stmt_node.span.right: %d, %d, %d"
+             stmt_node.span.right.line
+             stmt_node.span.right.column
+             stmt_node.span.right.offset;
+        print_endline
+        @@ Printf.sprintf
+             "stmt_node.span.left: %d, %d, %d"
+             stmt_node.span.left.line
+             stmt_node.span.left.column
+             stmt_node.span.left.offset;
+        let result_value = alpha_convert_stmt env stmt_node.value in
+        print_endline @@ Printf.sprintf "After stmt: environment =\n";
+        Hashtbl.iteri env ~f:(fun ~key ~data ->
+          print_endline @@ Printf.sprintf "  %s -> %s\n" key data);
+        { stmt_node with value = result_value })
+    , prog |> snd )
   ;;
 end

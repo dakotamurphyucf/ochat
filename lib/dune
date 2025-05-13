@@ -112,6 +112,13 @@
  (modules filter_file)
  (libraries core))
 
+
+(library
+ (name source)
+ (public_name chatgpt.source)
+ (modules source)
+ (libraries core))
+
 (library
  (name template)
  (modules template)
@@ -275,7 +282,7 @@
  (name chatml)
  (public_name chatgpt.chatml)
  (modules chatml_lang chatml_lexer chatml_parser)
- (libraries core menhirLib)
+ (libraries core menhirLib source)
  (preprocess
   (pps ppx_jane)))
 

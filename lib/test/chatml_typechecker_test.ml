@@ -4,7 +4,7 @@ module L = Chatml_lang
 
 let parse (str : string) : L.program =
   let lexbuf = Lexing.from_string str in
-  try Chatml_parser.program Chatml_lexer.token lexbuf with
+  try Chatml_parser.program Chatml_lexer.token lexbuf, str with
   | Chatml_parser.Error -> failwith "Parse error"
 ;;
 
@@ -88,7 +88,13 @@ let%expect_test "ill-typed (missing field)" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Row does not contain label 'age' |}]
+  [%expect {|
+    line 3, characters 13-18:
+    3|    p.age
+          ^^^^^
+
+    Type error: Row does not contain label 'age'
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -113,7 +119,13 @@ let%expect_test "record field set wrong type" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Cannot unify number with string |}]
+  [%expect {|
+    line 3, characters 6-20:
+    3|    p.age <- "old"
+          ^^^^^^^^^^^^^^
+
+    Type error: Cannot unify number with string
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -126,7 +138,13 @@ let%expect_test "function arity mismatch" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Function arity mismatch |}]
+  [%expect {|
+    line 3, characters 6-14:
+    3|    id(1, 2)
+          ^^^^^^^^
+
+    Type error: Function arity mismatch
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -138,7 +156,13 @@ let%expect_test "array heterogeneous types" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Cannot unify string with number |}]
+  [%expect {|
+    line 2, characters 12-22:
+    2|    [1, "two"]
+          ^^^^^^^^^^
+
+    Type error: Cannot unify string with number
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -177,7 +201,13 @@ let%expect_test "if condition not bool" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Cannot unify number with bool |}]
+  [%expect {|
+    line 2, characters 6-24:
+    2|    if 1 then 2 else 3
+          ^^^^^^^^^^^^^^^^^^
+
+    Type error: Cannot unify number with bool
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -189,7 +219,13 @@ let%expect_test "unknown variable" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Unknown variable 'x' |}]
+  [%expect {|
+    line 2, characters 14-15:
+    2|    x
+          ^
+
+    Type error: Unknown variable 'x'
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -201,7 +237,13 @@ let%expect_test "array index not number" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Cannot unify string with number |}]
+  [%expect {|
+    line 2, characters 27-35:
+    2|    arr["a"]
+          ^^^^^^^^
+
+    Type error: Cannot unify string with number
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -241,7 +283,13 @@ let%expect_test "calling non-function value" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Cannot unify number with (number -> 'a) |}]
+  [%expect {|
+    line 3, characters 6-10:
+    3|    v(1)
+          ^^^^
+
+    Type error: Cannot unify number with (number -> 'a)
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -253,7 +301,13 @@ let%expect_test "while condition not bool" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Cannot unify number with bool |}]
+  [%expect {|
+    line 2, characters 6-32:
+    2|    while 1 do print([1]) done
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Type error: Cannot unify number with bool
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -266,7 +320,13 @@ let%expect_test "array set wrong element type" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Cannot unify number with string |}]
+  [%expect {|
+    line 3, characters 6-21:
+    3|    a[0] <- "hello"
+          ^^^^^^^^^^^^^^^
+
+    Type error: Cannot unify number with string
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -344,7 +404,13 @@ let%expect_test "module missing field error" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Row does not contain label 'bar' |}]
+  [%expect {|
+    line 6, characters 13-18:
+    6|    A.bar
+          ^^^^^
+
+    Type error: Row does not contain label 'bar'
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -409,7 +475,13 @@ let%expect_test "variant payload type error" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Cannot unify number with string |}]
+  [%expect {|
+    line 4, characters 20-25:
+    4|    x + 1
+          ^^^^^
+
+    Type error: Cannot unify number with string
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -468,12 +540,17 @@ let%expect_test "record pattern subset ok" =
 let%expect_test "record pattern missing field" =
   let code =
     {|
-      let r = {name = "Sue"}
-      match r with
-      | {age = a} -> a
+    let r = {name = "Sue"}
+    match r with | {age = a} -> a
     |}
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {| Type error: Row does not contain label 'age' |}]
+  [%expect {|
+    line 3, characters 4-33:
+    3|    match r with | {age = a} -> a
+          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
+
+    Type error: Row does not contain label 'age'
+    |}]
 ;;

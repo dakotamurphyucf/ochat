@@ -9,11 +9,15 @@
 
 {
     open Chatml_parser
+    open Lexing
 }
 
+let white = [' ' '\t'] +
+let newline = '\n' | '\r' | "\r\n"
 rule token = parse
     (* Whitespace and comments *)
-| [' ' '\t' '\r' '\n']+   { token lexbuf }
+| white  { token lexbuf }
+| newline { new_line lexbuf; token lexbuf }
 | "(*"                     { comment lexbuf }
 
     (* Keywords *)

@@ -19,10 +19,12 @@ let () =
     let p = {name = "Alice"; age = 25}
     let f p =
         let inc_age person =
-            person.age <- person.age + 1
+            person.age <- person.age + 1;
+            person
         in
         print(p.name);
-        inc_age(p)
+        print(inc_age({p with age = 30 + p.age}))
+
     
     f(p)
 
@@ -60,7 +62,6 @@ let () =
   |}
   in
   let ast = parse code in
-  let alpha_prog = Chatml_alpha.alpha_convert_program ast in
-  Chatml_typechecker.infer_program alpha_prog;
-  eval_program env alpha_prog
+  Chatml_typechecker.infer_program (ast, code);
+  eval_program env (ast, code)
 ;;

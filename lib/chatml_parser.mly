@@ -9,7 +9,28 @@
 (***************************************************************************)
 
 %{
+
 open Chatml_lang
+open Source
+
+(* ------------------------------------------------------------------- *)
+(* Helper functions for location tracking                               *)
+(* ------------------------------------------------------------------- *)
+
+let position_of_lex (pos : Lexing.position) : Source.position =
+  { line = pos.pos_lnum
+  ; column = pos.pos_cnum - pos.pos_bol
+  ; offset = pos.pos_cnum
+  }
+
+let span_of_lex (startp : Lexing.position) (endp : Lexing.position) : Source.span =
+  { left = position_of_lex startp; right = position_of_lex endp }
+
+let mk_node startp endp value =
+  { value; span = span_of_lex startp endp }
+
+  let mk_exprnode startp endp value =
+  { value; span = span_of_lex startp endp }
 %}
 
 (***************************************************************************)
@@ -29,7 +50,7 @@ open Chatml_lang
 %token EOF
 
 %start program
-%type <Chatml_lang.program> program
+%type <Chatml_lang.stmt_node list> program
 
 %left ELSE
 %left EQ EQEQ BANGEQ LT GT
@@ -51,95 +72,95 @@ stmts:
 | /* empty */ { [] }
 
 stmt:
-| LET REC rec_bindings          { SLetRec($3) }
-| LET REC rec_bindings IN expr_sequence  { SExpr( ELetRec($3, $5) ) }  
-| LET LIDENT params EQ expr_sequence { SLet($2, ELambda($3, $5)) }
-| LET LIDENT EQ expr_sequence        { SLet($2, $4) }
-| MODULE UIDENT EQ STRUCT stmts END { SModule($2, $5) }
-| OPEN UIDENT               { SOpen($2) }
-| expr                      { SExpr($1) }
+  LET REC rec_bindings          { mk_node $startpos $endpos (SLetRec( $3)) }
+| LET REC rec_bindings IN expr_sequence  { mk_node $startpos $endpos (SExpr( mk_exprnode $startpos $endpos (ELetRec($3, $5)) )) }
+| LET LIDENT params EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda($3, ($5))))) }
+| LET LIDENT EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
+| MODULE UIDENT EQ STRUCT stmts END { mk_node $startpos $endpos (SModule($2, List.map (fun sn -> sn.value) $5)) }
+| OPEN UIDENT               { mk_node $startpos $endpos (SOpen($2)) }
+| expr                      { mk_node $startpos $endpos (SExpr($1)) }
 
 expr:
     (* basic literals *)
-    | INT                     { EInt $1 }
-    | FLOAT                   { EFloat $1 }
-    | BOOL                    { EBool $1 }
-    | STRING                  { EString $1 }
+    | INT                     { mk_exprnode $startpos $endpos (EInt $1) }
+    | FLOAT                   { mk_exprnode $startpos $endpos (EFloat $1) }
+    | BOOL                    { mk_exprnode $startpos $endpos (EBool $1) }
+    | STRING                  { mk_exprnode $startpos $endpos (EString $1) }
 
-    | expr PLUS expr       { EApp(EVar "+", [$1; $3]) }
-    | expr MINUS expr      { EApp(EVar "-", [$1; $3]) }
-    | expr STAR expr       { EApp(EVar "*", [$1; $3]) }
-    | expr SLASH expr      { EApp(EVar "/", [$1; $3]) }
+    | expr PLUS expr       { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "+"), [$1; $3])) }
+    | expr MINUS expr      { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "-"), [$1; $3])) }
+    | expr STAR expr       { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "*"), [$1; $3])) }
+    | expr SLASH expr      { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "/"), [$1; $3])) }
 
-    | expr LT expr { EApp(EVar "<", [$1; $3]) }
-    | expr GT expr { EApp(EVar ">", [$1; $3]) }
-    | expr LTEQ expr { EApp(EVar "<=", [$1; $3]) }
-    | expr GTEQ expr { EApp(EVar ">=", [$1; $3]) }
-    | expr EQEQ expr { EApp(EVar "==", [$1; $3]) }
-    | expr BANGEQ expr { EApp(EVar "!=", [$1; $3]) }
+    | expr LT expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "<"), [$1; $3])) }
+    | expr GT expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar ">"), [$1; $3])) }
+    | expr LTEQ expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "<="), [$1; $3])) }
+    | expr GTEQ expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar ">="), [$1; $3])) }
+    | expr EQEQ expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "=="), [$1; $3])) }
+    | expr BANGEQ expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "!="), [$1; $3])) }
 
     (* variable / identifier *)
-    | ident { $1 }
+    | ident { mk_exprnode $startpos $endpos ($1) }
 
     (* function definition *)
-    | FUN params ARROW expr_sequence   { ELambda($2, $4) }
+    | FUN params ARROW expr_sequence   { mk_exprnode $startpos $endpos (ELambda($2, $4)) }
 
     (* function application: e.g. id(expr, expr) *)
-    | LIDENT LPAREN expr_list RPAREN { EApp(EVar $1, $3) }
+    | LIDENT LPAREN expr_list RPAREN { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar $1), List.map (fun sn -> sn) $3)) }
 
     (* Polymorphic variant: `Variant or `Variant(expr1, expr2) *)
-    | TICKIDENT               { EVariant($1, []) }
-    | TICKIDENT LPAREN expr_list RPAREN { EVariant($1, $3) }
+    | TICKIDENT               { mk_exprnode $startpos $endpos (EVariant($1, [])) }
+    | TICKIDENT LPAREN expr_list RPAREN { mk_exprnode $startpos $endpos (EVariant($1, List.map (fun sn -> sn) $3)) }
 
     (* If expression *)
-    | IF expr_sequence THEN expr_sequence ELSE expr_sequence  { EIf($2, $4, $6) }
+    | IF expr_sequence THEN expr_sequence ELSE expr_sequence  { mk_exprnode $startpos $endpos (EIf($2, $4, $6)) }
 
     (* While expression *)
-    | WHILE expr_sequence DO expr_sequence DONE      { EWhile($2, $4) }
+    | WHILE expr_sequence DO expr_sequence DONE      { mk_exprnode $startpos $endpos (EWhile($2, $4)) }
 
-    | LET REC rec_bindings IN expr_sequence  { ELetRec($3, $5) }
+    | LET REC rec_bindings IN expr_sequence  { mk_exprnode $startpos $endpos (ELetRec($3, $5)) }
 
     (* Let-in expression *)
-    | LET LIDENT EQ expr_sequence IN expr_sequence { ELetIn($2, $4, $6) }
-	| LET LIDENT params EQ expr_sequence IN expr_sequence { ELetIn($2, ELambda($3, $5), $7) }
+    | LET LIDENT EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, $4, $6)) }
+	| LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
 
     (* match with *)
-    | MATCH expr_sequence WITH pattern_cases { EMatch($2, $4) }
+    | MATCH expr_sequence WITH pattern_cases { mk_exprnode $startpos $endpos (EMatch($2, List.map (fun (s,sn) -> s,sn) $4)) }
 
     (* record extension { base with a = expr; ... } *)
-    | LBRACE expr_sequence WITH field_decls RBRACE { ERecordExtend($2, $4) }
+    | LBRACE expr_sequence WITH field_decls RBRACE { mk_exprnode $startpos $endpos (ERecordExtend($2, List.map (fun (s,sn) -> s,sn) $4)) }
     (* record literal *)
-    | LBRACE field_list RBRACE      { ERecord($2) }
+    | LBRACE field_list RBRACE      { mk_exprnode $startpos $endpos (ERecord( List.map (fun (s,sn) -> s,sn) $2)) }
 
     (* record field access, e.g. expr.field *)
-    | expr DOT LIDENT              { EFieldGet($1, $3) }
+    | expr DOT LIDENT              { mk_exprnode $startpos $endpos (EFieldGet($1, $3)) }
 
     | expr DOT LIDENT LPAREN expr_list RPAREN
-		    { EApp(EFieldGet($1, $3), $5) }
+		    { mk_exprnode $startpos $endpos (EApp( mk_exprnode $startpos $endpos (EFieldGet($1, $3)),  $5)) }
 
     (* record field set, e.g. expr.field <- expr *)
-    | expr DOT LIDENT LEFTARROW expr { EFieldSet($1, $3, $5) }
+    | expr DOT LIDENT LEFTARROW expr { mk_exprnode $startpos $endpos (EFieldSet($1, $3, $5)) }
 
     (* array literal *)
-    | LBRACKET expr_list RBRACKET  { EArray($2) }
+    | LBRACKET expr_list RBRACKET  { mk_exprnode $startpos $endpos (EArray(List.map (fun sn -> sn) $2)) }
 
     (* array get, e.g. arr[expr] *)
-    | expr LBRACKET expr RBRACKET  { EArrayGet($1, $3) }
+    | expr LBRACKET expr RBRACKET  { mk_exprnode $startpos $endpos (EArrayGet($1, $3)) }
 
     (* array set, e.g. arr[expr] <- expr *)
-    | expr LBRACKET expr RBRACKET LEFTARROW expr { EArraySet($1, $3, $6) }
+    | expr LBRACKET expr RBRACKET LEFTARROW expr { mk_exprnode $startpos $endpos (EArraySet($1, $3, $6)) }
 
     (* parentheses *)
     | LPAREN expr_sequence RPAREN           { $2 }
 
     (* references *)
-    | REF expr                     { ERef($2) }
-    | expr COLONEQ expr            { ESetRef($1, $3) }
-    | BANG expr                    { EDeref($2) }
+    | REF expr                     { mk_exprnode $startpos $endpos (ERef($2)) }
+    | expr COLONEQ expr            { mk_exprnode $startpos $endpos (ESetRef($1, $3)) }
+    | BANG expr                    { mk_exprnode $startpos $endpos (EDeref($2)) }
 
     (* sequence of expressions *)
     | BANGEQ expr                  { failwith "Unsupported: != as a pattern" }
-    | MINUS expr                   %prec MINUS { (* unary minus if needed *) EApp(EVar "-", [$2]) }
+    | MINUS expr                   %prec MINUS { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "-"), [$2]) ) }
     | DOT expr                     { failwith "Unexpected '.' expression" }
     /* fallback to handle conflicts if any. */
 
@@ -213,8 +234,8 @@ rec_bindings:
 | rec_binding AND rec_bindings { $1 :: $3 }
 
 rec_binding:
-| LIDENT params EQ expr_sequence { ($1, ELambda($2, $4)) }
+| LIDENT params EQ expr_sequence { ($1, mk_exprnode $startpos $endpos (ELambda($2, $4)) ) }
 
 expr_sequence:
 | expr  { $1 }                        
-| expr SEMI expr_sequence { ESequence($1, $3) }
+| expr SEMI expr_sequence { mk_exprnode $startpos $endpos (ESequence($1, $3)) }
