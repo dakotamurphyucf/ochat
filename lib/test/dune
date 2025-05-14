@@ -7,9 +7,17 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name chatml_runtime_test)
+ (modules chatml_runtime_test)
+ (libraries core chatml chatml_resolver chatml_builtin_modules)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
  (name chatml_typechecker_test)
  (modules chatml_typechecker_test)
- (libraries core chatml chatml_typechecker)
+ (libraries core chatml chatml_typechecker chatml_resolver chatml_builtin_modules)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

@@ -27,6 +27,11 @@ let () =
 
     
     f(p)
+    let a = `Some(1, 2)
+     let b = `None
+     match a with
+     | `Some(x, y) -> print([x, y])
+     | `None -> print([0])
 
 
   |}
@@ -56,12 +61,15 @@ let () =
 		  in
       print([p.age]);
       inc_age(p)
-		  
+		 let a = `Some(1, 2)
+     let b = `None
+     match a with
+     | `Some(x, y) -> print([x; y])
+     | `None -> print([0])
       
     f("")
   |}
   in
   let ast = parse code in
-  Chatml_typechecker.infer_program (ast, code);
-  eval_program env (ast, code)
+  Chatml_resolver.eval_program env (ast, code)
 ;;

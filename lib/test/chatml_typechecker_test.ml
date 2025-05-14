@@ -1,6 +1,7 @@
 open Core
 open Chatml
 module L = Chatml_lang
+open Chatml_builtin_modules
 
 let parse (str : string) : L.program =
   let lexbuf = Lexing.from_string str in
@@ -88,7 +89,8 @@ let%expect_test "ill-typed (missing field)" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 3, characters 13-18:
     3|    p.age
           ^^^^^
@@ -119,7 +121,8 @@ let%expect_test "record field set wrong type" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 3, characters 6-20:
     3|    p.age <- "old"
           ^^^^^^^^^^^^^^
@@ -138,7 +141,8 @@ let%expect_test "function arity mismatch" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 3, characters 6-14:
     3|    id(1, 2)
           ^^^^^^^^
@@ -156,7 +160,8 @@ let%expect_test "array heterogeneous types" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 2, characters 12-22:
     2|    [1, "two"]
           ^^^^^^^^^^
@@ -201,7 +206,8 @@ let%expect_test "if condition not bool" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 2, characters 6-24:
     2|    if 1 then 2 else 3
           ^^^^^^^^^^^^^^^^^^
@@ -219,7 +225,8 @@ let%expect_test "unknown variable" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 2, characters 14-15:
     2|    x
           ^
@@ -237,7 +244,8 @@ let%expect_test "array index not number" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 2, characters 27-35:
     2|    arr["a"]
           ^^^^^^^^
@@ -283,7 +291,8 @@ let%expect_test "calling non-function value" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 3, characters 6-10:
     3|    v(1)
           ^^^^
@@ -301,7 +310,8 @@ let%expect_test "while condition not bool" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 2, characters 6-32:
     2|    while 1 do print([1]) done
           ^^^^^^^^^^^^^^^^^^^^^^^^^^
@@ -320,7 +330,8 @@ let%expect_test "array set wrong element type" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 3, characters 6-21:
     3|    a[0] <- "hello"
           ^^^^^^^^^^^^^^^
@@ -404,7 +415,8 @@ let%expect_test "module missing field error" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 6, characters 13-18:
     6|    A.bar
           ^^^^^
@@ -475,7 +487,8 @@ let%expect_test "variant payload type error" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 4, characters 20-25:
     4|    x + 1
           ^^^^^
@@ -546,11 +559,50 @@ let%expect_test "record pattern missing field" =
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect {|
+  [%expect
+    {|
     line 3, characters 4-33:
     3|    match r with | {age = a} -> a
           ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
 
     Type error: Row does not contain label 'age'
+    |}]
+;;
+
+let%expect_test "record pattern missing field" =
+  let env = Chatml_lang.create_env () in
+  BuiltinModules.add_global_builtins env;
+  let code =
+    {|
+    (* Type checking succeeded! Uncaught exception: (Failure "No field 'age' in record") *)
+    (* --------------------------------------- *)
+    let p = {name = "Alice"; age = 25}
+    let f p =
+        let inc_age person =
+            person.age <- person.age + 1;
+            person
+        in
+        print(p.name);
+        print(inc_age({p with age = 30 + p.age}))
+
+    
+    f(p)
+    let a = `Some(1, 2)
+     let b = `None
+     match a with
+     | `Some(x, y) -> print([x, y])
+     | `None -> print([0])
+
+
+  |}
+  in
+  let ast = parse code in
+  Chatml_resolver.eval_program env ast;
+  [%expect
+    {|
+    Type checking succeeded!            
+    Alice 
+    { age = 56; name = Alice } 
+    [|1, 2|]
     |}]
 ;;

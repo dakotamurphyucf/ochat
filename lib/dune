@@ -278,13 +278,20 @@
  (preprocess
   (pps ppx_jane -dont-apply=sexp_message)))
 
+
 (library
  (name chatml)
  (public_name chatgpt.chatml)
- (modules chatml_lang chatml_lexer chatml_parser)
+ (modules chatml_lang chatml_lexer chatml_parser frame_env)
  (libraries core menhirLib source)
- (preprocess
-  (pps ppx_jane)))
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name chatml_resolver)
+ (public_name chatgpt.chatml_resolver)
+ (modules chatml_resolver)
+ (libraries core chatml chatml_typechecker)
+ (preprocess (pps ppx_jane)))
 
 (library
  (name chatml_typechecker)
