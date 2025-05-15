@@ -401,14 +401,17 @@ and custom_fn ~env CM.{ name; description; command } =
       (* 1.  Make a pipe that we can read. *)
       let r, w = Eio.Process.pipe ~sw proc_mgr in
       (* 2.  Start the child, sending both stdout and stderr to [w]. *)
-      let _child =
-        Eio.Process.spawn ~sw proc_mgr ~stdout:w ~stderr:w (command :: params)
-      in
-      Eio.Flow.close w;
-      (* nobody else will write now *)
-      match Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all r with
-      | res -> res
-      | exception ex -> Fmt.str "error running %s command: %a" command Eio.Exn.pp ex
+      match Eio.Process.spawn ~sw proc_mgr ~stdout:w ~stderr:w (command :: params) with
+      | exception ex ->
+        let err_msg = Fmt.str "error running %s command: %a" command Eio.Exn.pp ex in
+        Eio.Flow.close w;
+        err_msg
+      | _child ->
+        Eio.Flow.close w;
+        (* nobody else will write now *)
+        (match Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all r with
+         | res -> res
+         | exception ex -> Fmt.str "error running %s command: %a" command Eio.Exn.pp ex)
     in
     Gpt_function.create_function (module M) fp
   in

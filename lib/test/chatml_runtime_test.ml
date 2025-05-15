@@ -251,7 +251,7 @@ let%expect_test "module definition and open" =
         let square x = x * x
         let two = 2
       end
-
+     
       open M
       print(square(two))
     |}
