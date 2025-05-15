@@ -105,8 +105,10 @@ expr:
     (* function definition *)
     | FUN params ARROW expr_sequence   { mk_exprnode $startpos $endpos (ELambda($2, $4)) }
 
-    (* function application: e.g. id(expr, expr) *)
-    | LIDENT LPAREN expr_list RPAREN { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar $1), List.map (fun sn -> sn) $3)) }
+    (* function application: expr(expr, ...) – now allows any *expression* in
+       function position, not just an identifier.  This generalisation
+       enables higher-order patterns such as (f x) y and (fun z -> z) 42. *)
+    | expr LPAREN expr_list RPAREN { mk_exprnode $startpos $endpos (EApp($1, List.map (fun sn -> sn) $3)) }
 
     (* Polymorphic variant: `Variant or `Variant(expr1, expr2) *)
     | TICKIDENT               { mk_exprnode $startpos $endpos (EVariant($1, [])) }

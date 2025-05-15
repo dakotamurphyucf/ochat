@@ -1,15 +1,26 @@
-(***************************************************************************)
+
 (*
     chatml_lexer.mll
 
     A minimal lexer for our DSL. 
     Produces: chatml_lexer.ml
 *)
-(***************************************************************************)
+
 
 {
-    open Chatml_parser
-    open Lexing
+  open Chatml_parser
+  open Lexing
+
+  (** ocamllex does not allow us to peek arbitrarily far, so we implement
+     a second rule [string_lit] that consumes characters until it reaches
+     the closing quote, interpreting a *very small* subset of OCaml
+     escapes (/n, /t, /\, /'"').  Anything else after a backslash is
+     kept verbatim so that we do not accidentally reject valid inputs
+     that the interpreter might still handle. *)
+
+  let buffer_add_escaped buf c =
+    Buffer.add_char buf c
+
 }
 
 let white = [' ' '\t'] +
@@ -78,8 +89,9 @@ rule token = parse
     (* Float literal (simple) *)
 | ['0'-'9']+ "." ['0'-'9']+ as flt { FLOAT (float_of_string flt) }
 
-    (* String literal (very naive, no escaping) *)
-| '"' ([^ '"' '\n']* as s) '"'   { STRING s }
+    (* String literal – supports basic OCaml-style escapes (\n, \t, \'"', \\)
+       and can span multiple lines. *)
+| '"' { STRING (string_lit (Buffer.create 32) lexbuf) }
 
     (* Polymorphic variant: starts with backtick, followed by letters, digits, underscores. *)
 | '`' ['A'-'Z''a'-'z''0'-'9' '_']+ as tickid {
@@ -105,3 +117,16 @@ and comment = parse
 | "*)" { token lexbuf }
 | eof  { failwith "Unterminated comment" }
 | _    { comment lexbuf }
+
+and string_lit buf = parse
+| '"'                           { Buffer.contents buf }
+| "\\n"                         { Buffer.add_char buf '\n'; string_lit buf lexbuf }
+| "\\t"                         { Buffer.add_char buf '\t'; string_lit buf lexbuf }
+| "\\\\"                       { Buffer.add_char buf '\\'; string_lit buf lexbuf }
+| "\\\""                         { Buffer.add_char buf '"'; string_lit buf lexbuf }
+| newline                     {
+    Buffer.add_char buf '\n';
+    new_line lexbuf;
+    string_lit buf lexbuf }
+| eof                          { failwith "Unterminated string literal" }
+| _                            { Buffer.add_char buf (Lexing.lexeme_char lexbuf 0); string_lit buf lexbuf }

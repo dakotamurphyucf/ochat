@@ -117,7 +117,9 @@
  (name source)
  (public_name chatgpt.source)
  (modules source)
- (libraries core))
+ (libraries core)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
 
 (library
  (name template)

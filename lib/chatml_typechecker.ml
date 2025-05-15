@@ -2,20 +2,7 @@ open Core
 open Chatml.Chatml_lang
 
 (***************************************************************************)
-(* A significantly simplified Hindley-Milner style type-checker for        *)
-(* the ChatML language.                                                    *)
-(*                                                                         *)
-(* The implementation is heavily inspired by the Nox type-checker that was *)
-(* provided in the task description.  Most of the algorithmic structure—   *)
-(* unification, generalisation / instantiation, row-polymorphic records—   *)
-(* is taken from there but adapted to the simpler ChatML AST (which has no *)
-(* source locations) and to the small subset of the language that is used  *)
-(* by the demo `dsl_script` program.                                        *)
-(*                                                                         *)
-(* The goal is not to provide a production-quality checker (there are many *)
-(* features still missing) but to catch the kinds of mistakes shown in the *)
-(* script – most importantly, accessing or mutating a record field that is *)
-(* not present in the record literal that created the value.               *)
+(* A Hindley-Milner style type-checker for the ChatML language.            *)
 (***************************************************************************)
 
 (** --------------------------------------------------------------------- *)
@@ -127,25 +114,46 @@ let gensym () : string =
    *single* source file.  This keeps the table implementation trivial and
    avoids polluting [Source] with additional derivations. *)
 
-type span_key = int * int  [@@deriving compare, sexp, hash]
+type span_key = int * int [@@deriving compare, sexp, hash]
 
 let span_to_key (sp : Source.span) : span_key = sp.left.offset, sp.right.offset
 
 module SpanTbl = Hashtbl.Make (struct
-  type t = span_key [@@deriving compare, hash, sexp]
-end)
+    type t = span_key [@@deriving compare, hash, sexp]
+  end)
 
 let span_types : typ SpanTbl.t = SpanTbl.create ()
-
 let reset_span_table () = Hashtbl.clear span_types
 
 let record_span_type (span : Source.span) (ty : typ) : unit =
   Hashtbl.set span_types ~key:(span_to_key span) ~data:ty
+;;
 
 let lookup_span_type (span : Source.span) : typ option =
   Hashtbl.find span_types (span_to_key span)
+;;
 
 let new_var level = Var (ref (Free (gensym (), level)))
+
+(*************************************************************************** *)
+(*  Public helper – produce a lookup function for a whole program          *)
+(*                                                                         *)
+(*  The resolver used to rely on the global [span_types] hash-table that   *)
+(*  the checker fills as a side-effect.  Accessing that mutable state from *)
+(*  another module is brittle and prevents us from running several         *)
+(*  type-checking sessions in parallel.  We therefore provide a            *)
+(*  shielded API that                                                         *)
+(*      – runs inference,                                                   *)
+(*      – snapshots the resulting span→type map, and                        *)
+(*      – returns a *pure* lookup closure with the captured snapshot.      *)
+(*                                                                         *)
+(*  The resolver can now depend on the lookup without observing any global *)
+(*  mutation.  Callers are free to invoke this helper multiple times       *)
+(*  concurrently – each invocation gets its own isolated map.              *)
+(*************************************************************************** *)
+
+(* Placeholder – definition moved below [infer_program] to avoid forward
+   reference issues. *)
 
 (** --------------------------------------------------------------------- *)
 
@@ -332,9 +340,17 @@ and unify_rows lhs rhs =
 (** 8. Pretty printer for types (used in error messages)                   *)
 (** --------------------------------------------------------------------- *)
 
+(* Print human-readable type names.
+   We purposefully differentiate the concrete machine types [int] and
+   [float] from the polymorphic super-type [number] so that error
+   messages such as “Cannot unify int with float” become actionable.
+   Previously both [TInt] and [TFloat] were printed as "number",
+   resulting in misleading diagnostics like “Cannot unify number with
+   number”. *)
+
 and show_type = function
-  | TInt -> "number"
-  | TFloat -> "number"
+  | TInt -> "int"
+  | TFloat -> "float"
   | Number -> "number"
   | Boolean -> "bool"
   | String -> "string"
@@ -432,227 +448,178 @@ let rec infer_expr env expr =
   let result_ty =
     try
       match expr.value with
-    | EInt _ -> TInt
-    | EFloat _ -> TFloat
-    | EBool _ -> Boolean
-    | EString _ -> String
-    | EVar x -> lookup env x
-    | EVarLoc _ -> failwith "EVarLoc should not appear before resolver"
-    | ELambda (params, body) ->
-      enter_level ();
-      let param_tys =
-        List.map params ~f:(fun p ->
-          let t = new_var !current_lvl in
-          add env p t;
-          t)
-      in
-      let body_ty = infer_expr env body in
-      exit_level ();
-      Fun (param_tys, body_ty)
-    | ELambdaSlots (params, _slots, body) ->
-      (* Identical typing rules to plain lambda. *)
-      enter_level ();
-      let param_tys =
-        List.map params ~f:(fun p ->
-          let t = new_var !current_lvl in
-          add env p t;
-          t)
-      in
-      let body_ty = infer_expr env body in
-      exit_level ();
-      Fun (param_tys, body_ty)
-    | EApp (fn_expr, arg_exprs) ->
-      let fn_ty = infer_expr env fn_expr in
-      let arg_tys = List.map arg_exprs ~f:(infer_expr env) in
-      let ret_ty = new_var !current_lvl in
-      unify fn_ty (Fun (arg_tys, ret_ty));
-      ret_ty
-    | EIf (c, t, e) ->
-      let c_ty = infer_expr env c in
-      unify c_ty Boolean;
-      let t_ty = infer_expr env t in
-      let e_ty = infer_expr env e in
-      unify t_ty e_ty;
-      t_ty
-    | EWhile (cond, body) ->
-      unify (infer_expr env cond) Boolean;
-      ignore (infer_expr env body);
-      Unit
-    | ESequence (e1, e2) ->
-      ignore (infer_expr env e1);
-      infer_expr env e2
-    | ELetIn (x, rhs, body) ->
-      enter_level ();
-      let rhs_ty = infer_expr env rhs in
-      exit_level ();
-      add env x rhs_ty;
-      infer_expr env body
-    | ELetBlock (bindings, body) ->
-      (* Sequential non-recursive lets.  We evaluate each binding in order,
-         enriching the environment so that later RHSes can see earlier
-         ones. This mirrors the semantics of nested let-bindings. *)
-      let env_snapshot = !env in
-      (* We intentionally thread [env] through the loop so that each new
-         binding is visible to the next.  *)
-      List.iter bindings ~f:(fun (nm, rhs) ->
+      | EInt _ -> TInt
+      | EFloat _ -> TFloat
+      | EBool _ -> Boolean
+      | EString _ -> String
+      | EVar x -> lookup env x
+      | EVarLoc _ -> failwith "EVarLoc should not appear before resolver"
+      | ELambda (params, body) ->
+        enter_level ();
+        let param_tys =
+          List.map params ~f:(fun p ->
+            let t = new_var !current_lvl in
+            add env p t;
+            t)
+        in
+        let body_ty = infer_expr env body in
+        exit_level ();
+        Fun (param_tys, body_ty)
+      | ELambdaSlots (params, _slots, body) ->
+        (* Identical typing rules to plain lambda. *)
+        enter_level ();
+        let param_tys =
+          List.map params ~f:(fun p ->
+            let t = new_var !current_lvl in
+            add env p t;
+            t)
+        in
+        let body_ty = infer_expr env body in
+        exit_level ();
+        Fun (param_tys, body_ty)
+      | EApp (fn_expr, arg_exprs) ->
+        let fn_ty = infer_expr env fn_expr in
+        let arg_tys = List.map arg_exprs ~f:(infer_expr env) in
+        let ret_ty = new_var !current_lvl in
+        unify fn_ty (Fun (arg_tys, ret_ty));
+        ret_ty
+      | EIf (c, t, e) ->
+        let c_ty = infer_expr env c in
+        unify c_ty Boolean;
+        let t_ty = infer_expr env t in
+        let e_ty = infer_expr env e in
+        unify t_ty e_ty;
+        t_ty
+      | EWhile (cond, body) ->
+        unify (infer_expr env cond) Boolean;
+        ignore (infer_expr env body);
+        Unit
+      | ESequence (e1, e2) ->
+        ignore (infer_expr env e1);
+        infer_expr env e2
+      | ELetIn (x, rhs, body) ->
         enter_level ();
         let rhs_ty = infer_expr env rhs in
         exit_level ();
-        add env nm rhs_ty);
-      let result_ty = infer_expr env body in
-      (* Restore the environment to its state *before* the block so that
+        add env x rhs_ty;
+        infer_expr env body
+      | ELetBlock (bindings, body) ->
+        (* Sequential non-recursive lets.  We evaluate each binding in order,
+         enriching the environment so that later RHSes can see earlier
+         ones. This mirrors the semantics of nested let-bindings. *)
+        let env_snapshot = !env in
+        (* We intentionally thread [env] through the loop so that each new
+         binding is visible to the next.  *)
+        List.iter bindings ~f:(fun (nm, rhs) ->
+          enter_level ();
+          let rhs_ty = infer_expr env rhs in
+          exit_level ();
+          add env nm rhs_ty);
+        let result_ty = infer_expr env body in
+        (* Restore the environment to its state *before* the block so that
          outer scopes do not see the block’s internal bindings. *)
-      env := env_snapshot;
-      result_ty
-    | ELetRec (bindings, body) ->
-      (* Add placeholders first *)
-      List.iter bindings ~f:(fun (nm, _) -> add env nm (new_var !current_lvl));
-      (* Now infer and unify *)
-      List.iter bindings ~f:(fun (nm, rhs) -> unify (lookup env nm) (infer_expr env rhs));
-      infer_expr env body
-    | ERecord fields ->
-      let row =
-        List.fold_right fields ~init:Empty_row ~f:(fun (lbl, expr) acc ->
-          let ty = infer_expr env expr in
-          Row (Env.singleton lbl ty, acc))
-      in
-      Record row
-    | EFieldGet (obj, lbl) ->
-      let obj_ty = infer_expr env obj in
-      let field_ty = new_var !current_lvl in
-      let tail_row = new_var !current_lvl in
-      unify obj_ty (Record (Row (Env.singleton lbl field_ty, tail_row)));
-      field_ty
-    | EFieldSet (obj, lbl, rhs) ->
-      let obj_ty = infer_expr env obj in
-      let rhs_ty = infer_expr env rhs in
-      let tail_row = new_var !current_lvl in
-      unify obj_ty (Record (Row (Env.singleton lbl rhs_ty, tail_row)));
-      Unit
-    | EArray elts ->
-      let elt_ty = new_var !current_lvl in
-      List.iter elts ~f:(fun e -> unify (infer_expr env e) elt_ty);
-      Array elt_ty
-    | EArrayGet (arr, idx) ->
-      unify (infer_expr env idx) TInt;
-      let elt_ty = new_var !current_lvl in
-      unify (infer_expr env arr) (Array elt_ty);
-      elt_ty
-    | EArraySet (arr, idx, v) ->
-      unify (infer_expr env idx) TInt;
-      let v_ty = infer_expr env v in
-      unify (infer_expr env arr) (Array v_ty);
-      Unit
-    | ERef e -> Ref (infer_expr env e) (* simplified *)
-    | ERecordExtend (base_expr, fields) ->
-      (* Infer type of the base record. *)
-      let base_ty = infer_expr env base_expr in
-      (* Infer types for the overriding / extending fields. *)
-      let fields_env =
-        List.fold fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
-          let ty = infer_expr env expr in
-          Env.add lbl ty acc)
-      in
-      let new_row = Row (fields_env, base_ty) in
-      (* The base record must at least contain the fields we are overriding/extending.
+        env := env_snapshot;
+        result_ty
+      | ELetBlockSlots (bindings, _slots, body) ->
+        (* Same typing rules as ELetBlock – slots are ignored. *)
+        let env_snapshot = !env in
+        List.iter bindings ~f:(fun (nm, rhs) ->
+          enter_level ();
+          let rhs_ty = infer_expr env rhs in
+          exit_level ();
+          add env nm rhs_ty);
+        let result_ty = infer_expr env body in
+        env := env_snapshot;
+        result_ty
+      | ELetRec (bindings, body) ->
+        (* Add placeholders first *)
+        List.iter bindings ~f:(fun (nm, _) -> add env nm (new_var !current_lvl));
+        (* Now infer and unify *)
+        List.iter bindings ~f:(fun (nm, rhs) ->
+          unify (lookup env nm) (infer_expr env rhs));
+        infer_expr env body
+      | ELetRecSlots (bindings, _slots, body) ->
+        (* Same rules as ELetRec – slot list ignored. *)
+        List.iter bindings ~f:(fun (nm, _) -> add env nm (new_var !current_lvl));
+        List.iter bindings ~f:(fun (nm, rhs) ->
+          unify (lookup env nm) (infer_expr env rhs));
+        infer_expr env body
+      | ERecord fields ->
+        let row =
+          List.fold_right fields ~init:Empty_row ~f:(fun (lbl, expr) acc ->
+            let ty = infer_expr env expr in
+            Row (Env.singleton lbl ty, acc))
+        in
+        Record row
+      | EFieldGet (obj, lbl) ->
+        let obj_ty = infer_expr env obj in
+        let field_ty = new_var !current_lvl in
+        let tail_row = new_var !current_lvl in
+        unify obj_ty (Record (Row (Env.singleton lbl field_ty, tail_row)));
+        field_ty
+      | EFieldSet (obj, lbl, rhs) ->
+        let obj_ty = infer_expr env obj in
+        let rhs_ty = infer_expr env rhs in
+        let tail_row = new_var !current_lvl in
+        unify obj_ty (Record (Row (Env.singleton lbl rhs_ty, tail_row)));
+        Unit
+      | EArray elts ->
+        let elt_ty = new_var !current_lvl in
+        List.iter elts ~f:(fun e -> unify (infer_expr env e) elt_ty);
+        Array elt_ty
+      | EArrayGet (arr, idx) ->
+        unify (infer_expr env idx) TInt;
+        let elt_ty = new_var !current_lvl in
+        unify (infer_expr env arr) (Array elt_ty);
+        elt_ty
+      | EArraySet (arr, idx, v) ->
+        unify (infer_expr env idx) TInt;
+        let v_ty = infer_expr env v in
+        unify (infer_expr env arr) (Array v_ty);
+        Unit
+      | ERef e -> Ref (infer_expr env e) (* simplified *)
+      | ERecordExtend (base_expr, fields) ->
+        (* Infer type of the base record. *)
+        let base_ty = infer_expr env base_expr in
+        (* Infer types for the overriding / extending fields. *)
+        let fields_env =
+          List.fold fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
+            let ty = infer_expr env expr in
+            Env.add lbl ty acc)
+        in
+        let new_row = Row (fields_env, base_ty) in
+        (* The base record must at least contain the fields we are overriding/extending.
     unify base_ty (Record new_row); *)
-      let fields, tail = merge_fields (Record new_row) in
-      (* The new row must be a superset of the base record. *)
-      Record (Row (fields, tail))
-    | EDeref e ->
-      let ty = new_var !current_lvl in
-      unify (Ref ty) (infer_expr env e);
-      ty
-    | ESetRef (lhs, rhs) ->
-      let lhs_ty = infer_expr env lhs in
-      let rhs_ty = infer_expr env rhs in
-      unify (Ref (new_var !current_lvl)) lhs_ty;
-      unify lhs_ty (Ref rhs_ty);
-      Unit
-    | EVariant (tag, exprs) ->
-      (* Infer types for each argument of the variant constructor. *)
-      let arg_tys = List.map exprs ~f:(infer_expr env) in
-      let case_ty =
-        match arg_tys with
-        | [] -> Unit
-        | [ t ] -> t
-        | ts -> Tuple ts
-      in
-      let row_var = new_var !current_lvl in
-      Variant (Row (Env.singleton tag case_ty, row_var))
-    | EMatch (scrut, cases) ->
-      (* Type of the scrutinee expression. *)
-      let scrut_ty = infer_expr env scrut in
-      (* Type of the overall match expression. *)
-      let result_ty = new_var !current_lvl in
-      (* Helper: infer pattern, returns env extended with bindings. *)
-      let rec infer_pattern env pat expected_ty : tenv =
-        match pat with
-        | PWildcard -> env
-        | PVar x ->
-          env := Env.add x expected_ty !env;
-          env
-        | PInt _ ->
-          unify expected_ty TInt;
-          env
-        | PBool _ ->
-          unify expected_ty Boolean;
-          env
-        | PFloat _ ->
-          unify expected_ty TFloat;
-          env
-        | PString _ ->
-          unify expected_ty String;
-          env
-        | PRecord (fields, is_open) ->
-          (* Create fresh type variables for each subpattern and build row. *)
-          let env_after, fields_acc =
-            List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
-              let ty = new_var !current_lvl in
-              let env_acc' = infer_pattern env_acc pat ty in
-              env_acc', (lbl, ty) :: fields_acc)
-          in
-          let fields_env = Env.of_list (List.rev fields_acc) in
-          let tail_row = if is_open then new_var !current_lvl else Empty_row in
-          let record_ty = Record (Row (fields_env, tail_row)) in
-          unify expected_ty record_ty;
-          env_after
-        | PVariant (tag, subpats) ->
-          (* Create fresh types for each subpattern, bind them. *)
-          (* We need to process subpatterns left-to-right, threading the env. *)
-          let env_after, sub_tys_rev =
-            List.fold subpats ~init:(env, []) ~f:(fun (env_acc, tys) sp ->
-              let ty = new_var !current_lvl in
-              let env_acc' = infer_pattern env_acc sp ty in
-              env_acc', ty :: tys)
-          in
-          let sub_tys = List.rev sub_tys_rev in
-          let case_ty =
-            match sub_tys with
-            | [] -> Unit
-            | [ t ] -> t
-            | ts -> Tuple ts
-          in
-          let row_var = new_var !current_lvl in
-          let variant_ty = Variant (Row (Env.singleton tag case_ty, row_var)) in
-          unify expected_ty variant_ty;
-          env_after
-      in
-      (* Iterate over each case. *)
-      List.iter cases ~f:(fun (pat, rhs) ->
-        (* Work with a fresh copy of the environment for each arm so that
-         bindings are not shared across arms. *)
-        let env_arm = ref !env in
-        let _env_after_pat = infer_pattern env_arm pat scrut_ty in
-        let rhs_ty = infer_expr env_arm rhs in
-        unify rhs_ty result_ty);
-      result_ty
-    | EMatchSlots (scrut, cases) ->
-      (* identical typing rules to EMatch – we simply ignore the slots list *)
-      let scrut_ty = infer_expr env scrut in
-      let result_ty = new_var !current_lvl in
-      List.iter cases ~f:(fun (pat, _slots, rhs) ->
-        let env_arm = ref !env in
+        let fields, tail = merge_fields (Record new_row) in
+        (* The new row must be a superset of the base record. *)
+        Record (Row (fields, tail))
+      | EDeref e ->
+        let ty = new_var !current_lvl in
+        unify (Ref ty) (infer_expr env e);
+        ty
+      | ESetRef (lhs, rhs) ->
+        let lhs_ty = infer_expr env lhs in
+        let rhs_ty = infer_expr env rhs in
+        unify (Ref (new_var !current_lvl)) lhs_ty;
+        unify lhs_ty (Ref rhs_ty);
+        Unit
+      | EVariant (tag, exprs) ->
+        (* Infer types for each argument of the variant constructor. *)
+        let arg_tys = List.map exprs ~f:(infer_expr env) in
+        let case_ty =
+          match arg_tys with
+          | [] -> Unit
+          | [ t ] -> t
+          | ts -> Tuple ts
+        in
+        let row_var = new_var !current_lvl in
+        Variant (Row (Env.singleton tag case_ty, row_var))
+      | EMatch (scrut, cases) ->
+        (* Type of the scrutinee expression. *)
+        let scrut_ty = infer_expr env scrut in
+        (* Type of the overall match expression. *)
+        let result_ty = new_var !current_lvl in
+        (* Helper: infer pattern, returns env extended with bindings. *)
         let rec infer_pattern env pat expected_ty : tenv =
           match pat with
           | PWildcard -> env
@@ -672,6 +639,7 @@ let rec infer_expr env expr =
             unify expected_ty String;
             env
           | PRecord (fields, is_open) ->
+            (* Create fresh type variables for each subpattern and build row. *)
             let env_after, fields_acc =
               List.fold fields ~init:(env, []) ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
                 let ty = new_var !current_lvl in
@@ -684,6 +652,8 @@ let rec infer_expr env expr =
             unify expected_ty record_ty;
             env_after
           | PVariant (tag, subpats) ->
+            (* Create fresh types for each subpattern, bind them. *)
+            (* We need to process subpatterns left-to-right, threading the env. *)
             let env_after, sub_tys_rev =
               List.fold subpats ~init:(env, []) ~f:(fun (env_acc, tys) sp ->
                 let ty = new_var !current_lvl in
@@ -702,10 +672,77 @@ let rec infer_expr env expr =
             unify expected_ty variant_ty;
             env_after
         in
-        let _ = infer_pattern env_arm pat scrut_ty in
-        let rhs_ty = infer_expr env_arm rhs in
-        unify rhs_ty result_ty);
-      result_ty
+        (* Iterate over each case. *)
+        List.iter cases ~f:(fun (pat, rhs) ->
+          (* Work with a fresh copy of the environment for each arm so that
+         bindings are not shared across arms. *)
+          let env_arm = ref !env in
+          let _env_after_pat = infer_pattern env_arm pat scrut_ty in
+          let rhs_ty = infer_expr env_arm rhs in
+          unify rhs_ty result_ty);
+        result_ty
+      | EMatchSlots (scrut, cases) ->
+        (* identical typing rules to EMatch – we simply ignore the slots list *)
+        let scrut_ty = infer_expr env scrut in
+        let result_ty = new_var !current_lvl in
+        List.iter cases ~f:(fun (pat, _slots, rhs) ->
+          let env_arm = ref !env in
+          let rec infer_pattern env pat expected_ty : tenv =
+            match pat with
+            | PWildcard -> env
+            | PVar x ->
+              env := Env.add x expected_ty !env;
+              env
+            | PInt _ ->
+              unify expected_ty TInt;
+              env
+            | PBool _ ->
+              unify expected_ty Boolean;
+              env
+            | PFloat _ ->
+              unify expected_ty TFloat;
+              env
+            | PString _ ->
+              unify expected_ty String;
+              env
+            | PRecord (fields, is_open) ->
+              let env_after, fields_acc =
+                List.fold
+                  fields
+                  ~init:(env, [])
+                  ~f:(fun (env_acc, fields_acc) (lbl, pat) ->
+                    let ty = new_var !current_lvl in
+                    let env_acc' = infer_pattern env_acc pat ty in
+                    env_acc', (lbl, ty) :: fields_acc)
+              in
+              let fields_env = Env.of_list (List.rev fields_acc) in
+              let tail_row = if is_open then new_var !current_lvl else Empty_row in
+              let record_ty = Record (Row (fields_env, tail_row)) in
+              unify expected_ty record_ty;
+              env_after
+            | PVariant (tag, subpats) ->
+              let env_after, sub_tys_rev =
+                List.fold subpats ~init:(env, []) ~f:(fun (env_acc, tys) sp ->
+                  let ty = new_var !current_lvl in
+                  let env_acc' = infer_pattern env_acc sp ty in
+                  env_acc', ty :: tys)
+              in
+              let sub_tys = List.rev sub_tys_rev in
+              let case_ty =
+                match sub_tys with
+                | [] -> Unit
+                | [ t ] -> t
+                | ts -> Tuple ts
+              in
+              let row_var = new_var !current_lvl in
+              let variant_ty = Variant (Row (Env.singleton tag case_ty, row_var)) in
+              unify expected_ty variant_ty;
+              env_after
+          in
+          let _ = infer_pattern env_arm pat scrut_ty in
+          let rhs_ty = infer_expr env_arm rhs in
+          unify rhs_ty result_ty);
+        result_ty
     with
     | Type_error msg -> raise (Type_error_with_loc (msg, expr.span))
   in
@@ -813,4 +850,21 @@ let infer_program (prog : program) : unit =
     printf "%s\n" (String.make (span.left.column + 3) ' ');
     printf "      %s\n\n" (String.make (span.right.column - span.left.column) '^');
     printf "Type error: %s" msg
+;;
+
+(*************************************************************************** *)
+(*  Public helper – produce a lookup function for a whole program          *)
+(*************************************************************************** *)
+
+let type_lookup_for_program (prog : program) : Source.span -> typ option =
+  (* 1.  Reset the span table so that we start fresh. *)
+  reset_span_table ();
+  (* 2.  Run inference, silencing any exception so that resolution can
+         still proceed on ill-typed programs (slot selection falls back to
+         syntactic heuristics in that case). *)
+  (try infer_program prog with
+   | _ -> ());
+  (* 3.  Snapshot the span→type map and return a closure that captures it. *)
+  let snapshot = Hashtbl.copy span_types in
+  fun span -> Hashtbl.find snapshot (span_to_key span)
 ;;

@@ -127,7 +127,7 @@ let%expect_test "record field set wrong type" =
     3|    p.age <- "old"
           ^^^^^^^^^^^^^^
 
-    Type error: Cannot unify number with string
+    Type error: Cannot unify int with string
     |}]
 ;;
 
@@ -166,7 +166,7 @@ let%expect_test "array heterogeneous types" =
     2|    [1, "two"]
           ^^^^^^^^^^
 
-    Type error: Cannot unify string with number
+    Type error: Cannot unify string with int
     |}]
 ;;
 
@@ -212,7 +212,7 @@ let%expect_test "if condition not bool" =
     2|    if 1 then 2 else 3
           ^^^^^^^^^^^^^^^^^^
 
-    Type error: Cannot unify number with bool
+    Type error: Cannot unify int with bool
     |}]
 ;;
 
@@ -250,7 +250,7 @@ let%expect_test "array index not number" =
     2|    arr["a"]
           ^^^^^^^^
 
-    Type error: Cannot unify string with number
+    Type error: Cannot unify string with int
     |}]
 ;;
 
@@ -297,7 +297,7 @@ let%expect_test "calling non-function value" =
     3|    v(1)
           ^^^^
 
-    Type error: Cannot unify number with (number -> 'a)
+    Type error: Cannot unify int with (int -> 'a)
     |}]
 ;;
 
@@ -316,7 +316,7 @@ let%expect_test "while condition not bool" =
     2|    while 1 do print([1]) done
           ^^^^^^^^^^^^^^^^^^^^^^^^^^
 
-    Type error: Cannot unify number with bool
+    Type error: Cannot unify int with bool
     |}]
 ;;
 
@@ -336,7 +336,7 @@ let%expect_test "array set wrong element type" =
     3|    a[0] <- "hello"
           ^^^^^^^^^^^^^^^
 
-    Type error: Cannot unify number with string
+    Type error: Cannot unify int with string
     |}]
 ;;
 

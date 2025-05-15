@@ -26,6 +26,20 @@ let pop_frame (stack : frame_map list ref) : unit =
   | [] -> failwith "Resolver: attempt to pop empty frame stack"
 ;;
 
+(* Safe wrapper: push a frame, execute [f], then pop in an ensure-clause so
+   that the stack remains well-balanced even if [f] raises. *)
+let with_frame (stack : frame_map list ref) (fm : frame_map) ~(f : unit -> 'a) : 'a =
+  push_frame stack fm;
+  try
+    let res = f () in
+    pop_frame stack;
+    res
+  with
+  | exn ->
+    pop_frame stack;
+    raise exn
+;;
+
 let lookup (stack : frame_map list) (name : string) : L.var_loc option =
   let rec aux depth = function
     | [] -> None
@@ -45,10 +59,13 @@ let lookup (stack : frame_map list) (name : string) : L.var_loc option =
 (*  Integration with the static type-checker                             *)
 (* -------------------------------------------------------------------- *)
 
-(* The type-checker records the principal type of every expression in a
-   global table keyed by [Source.span].  We keep a mutable reference to a
-   lookup function so that we can initialise it *after* we have invoked
-   the type-checker, but before we start descending the AST. *)
+(* The resolver needs to query the principal type of sub-expressions in
+   order to choose an efficient slot descriptor.  Instead of peeking into
+   the type-checker’s *global* hash-table we now capture a *pure lookup
+   closure* produced by [Chatml_typechecker.type_lookup_for_program].
+   Keeping it in an [option ref] allows us to thread the function through
+   the mutually-recursive [resolve_*] helpers without changing every
+   signature. *)
 
 let type_lookup_ref : (Source.span -> Chatml_typechecker.typ option) option ref = ref None
 
@@ -187,27 +204,38 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     let body' = resolve_expr stack tail_body in
     (* 5. Pop the frame when leaving the block scope. *)
     pop_frame stack;
-    L.ELetBlock (resolved_bindings, wrap body')
+    let slots =
+      List.map bindings ~f:(fun (nm, _rhs) ->
+        (* fetch slot from fm *)
+        (Hashtbl.find_exn fm nm).slot)
+    in
+    L.ELetBlockSlots (resolved_bindings, slots, wrap body')
   | L.ELetRec (binds, body) ->
     (* Mutually-recursive let-resolution, unchanged from earlier code but
        repositioned after the new [ELetBlock] arm. *)
     let fm = Hashtbl.create (module String) in
-    List.iteri binds ~f:(fun idx (nm, rhs_expr) ->
-      let slot = choose_slot rhs_expr in
-      Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
+    let slots =
+      List.mapi binds ~f:(fun idx (nm, rhs_expr) ->
+        let slot = choose_slot rhs_expr in
+        Hashtbl.set fm ~key:nm ~data:{ index = idx; slot };
+        slot)
+    in
     push_frame stack fm;
     let binds' =
       List.map binds ~f:(fun (nm, rhs) -> nm, { rhs with value = resolve_expr stack rhs })
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetRec (binds', wrap body')
+    L.ELetRecSlots (binds', slots, wrap body')
   | L.ELetBlock (binds, body) ->
-    (* Ensure idempotence when the resolver is re-run on an AST that already
-       contains a block – simply traverse children. *)
+    (* Convert to [ELetBlockSlots] and traverse children. *)
     let fm = Hashtbl.create (module String) in
-    List.iteri binds ~f:(fun idx (nm, rhs_node) ->
-      Hashtbl.set fm ~key:nm ~data:{ index = idx; slot = choose_slot rhs_node });
+    let slots =
+      List.mapi binds ~f:(fun idx (nm, rhs_node) ->
+        let slot = choose_slot rhs_node in
+        Hashtbl.set fm ~key:nm ~data:{ index = idx; slot };
+        slot)
+    in
     push_frame stack fm;
     let binds' =
       List.mapi binds ~f:(fun _idx (nm, rhs_node) ->
@@ -215,7 +243,34 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetBlock (binds', wrap body')
+    L.ELetBlockSlots (binds', slots, wrap body')
+  | L.ELetBlockSlots (binds, slots, body) ->
+    (* Already resolved; traverse children preserving slot info. *)
+    let fm = Hashtbl.create (module String) in
+    List.iteri binds ~f:(fun idx (nm, _rhs) ->
+      let slot = List.nth_exn slots idx in
+      Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
+    push_frame stack fm;
+    let binds' =
+      List.mapi binds ~f:(fun _ (nm, rhs_node) ->
+        nm, { rhs_node with value = resolve_expr stack rhs_node })
+    in
+    let body' = resolve_expr stack body in
+    pop_frame stack;
+    L.ELetBlockSlots (binds', slots, wrap body')
+  | L.ELetRecSlots (binds, slots, body) ->
+    let fm = Hashtbl.create (module String) in
+    List.iteri binds ~f:(fun idx (nm, _rhs) ->
+      let slot = List.nth_exn slots idx in
+      Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
+    push_frame stack fm;
+    let binds' =
+      List.mapi binds ~f:(fun _ (nm, rhs_node) ->
+        nm, { rhs_node with value = resolve_expr stack rhs_node })
+    in
+    let body' = resolve_expr stack body in
+    pop_frame stack;
+    L.ELetRecSlots (binds', slots, wrap body')
   | L.EIf (c, t, f) ->
     let c' = resolve_expr stack c in
     let t' = resolve_expr stack t in
@@ -381,31 +436,24 @@ let rec resolve_stmt (stack : frame_map list ref) (snode : L.stmt L.node) : L.st
 (* -------------------------------------------------------------------- *)
 
 let resolve_program (prog : L.program) : L.program =
-  (* 1. Run the type-checker so that [Chatml_typechecker.span_types] is
-        populated before we start the resolver pass.  We run the checker in
-        “quiet” mode by temporarily disabling stdout.  For the purpose of
-        slot selection we do not care about its diagnostics here; the user
-        will typically invoke the checker separately anyway. *)
-  Chatml_typechecker.reset_span_table ();
-  (* We invoke the checker primarily for its *side-effect* of populating the
-     [span_types] table.  Whether the program is well-typed or not is the
-     responsibility of the front-end; here we swallow any exception so that
-     resolution can continue. *)
-  (try Chatml_typechecker.infer_program prog with
-   | _ -> ());
-  (* 2. Install the lookup function for quick access during traversal. *)
-  type_lookup_ref := Some Chatml_typechecker.lookup_span_type;
-  (* 3. Proceed with the original resolution. *)
+  (* 1.  Obtain a *pure* span→type lookup closure for this very program. *)
+  let lookup_fun = Chatml_typechecker.type_lookup_for_program prog in
+  (* 2.  Expose it to the recursive helpers. *)
+  type_lookup_ref := Some lookup_fun;
+  (* 3.  Proceed with the original resolution. *)
   let stack = ref [] in
   let stmts' =
     fst prog |> List.map ~f:(fun sn -> { sn with value = resolve_stmt stack sn })
   in
-  (* 4. Clear the lookup ref to avoid accidental reuse across programs. *)
+  (* 4.  Clear the lookup ref to avoid accidental reuse across programs. *)
   type_lookup_ref := None;
   stmts', snd prog
 ;;
 
 let eval_program (env : L.env) (prog : L.program) : unit =
   let program = resolve_program prog in
+  (* print_s [%message "Resolved program" (program : L.program)]; *)
+  (* 1.  Resolve the program. *)
+  (* 2.  Execute it in the given environment. *)
   L.eval_program env program
 ;;

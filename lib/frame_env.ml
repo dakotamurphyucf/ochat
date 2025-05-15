@@ -15,13 +15,20 @@ type _ slot =
   | SFloat : float slot
   | SString : string slot
   | SObj : Obj.t slot
+[@@deriving sexp_of]
 
+(*  The GADT constructor is used to *tag* the slot with its concrete ML   *)
+(*  type.  This allows us to safely coerce the [Obj.t] pointer back into  *)
+(*  the correct type when reading from the frame.                        *)
+
+(*  The [Obj.t] representation of each slot kind is identical, so we can  *)
+(*  safely use a single [Obj.t] pointer to store all of them.            *)
 (* When we need to store a slot value whose concrete ML type is not
    statically known we use this *existential* wrapper so that we can
    pass around a heterogeneous list of slots while still retaining the
    ability to pattern-match on the underlying constructor. *)
 
-type packed_slot = Slot : 'a slot -> packed_slot
+type packed_slot = Slot : 'a slot -> packed_slot [@@deriving sexp_of]
 
 (*  When necessary you can extend the slot list with, say, [SArray] or    *)
 (*  [SRecord].  Because the users *must* pattern-match on the slot when   *)

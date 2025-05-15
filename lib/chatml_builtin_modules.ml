@@ -1,81 +1,61 @@
 open Core
 open Chatml.Chatml_lang (* This is where “value”, “env”, “set_var” etc. are defined. *)
 
+(* -------------------------------------------------------------------------- *)
+(* Shared helpers                                                              *)
+(* -------------------------------------------------------------------------- *)
+
+let rec value_to_string (v : value) : string =
+  match v with
+  | VInt i -> Int.to_string i
+  | VFloat f -> Float.to_string f
+  | VBool b -> Bool.to_string b
+  | VString s -> s
+  | VArray arr ->
+    let contents = Array.to_list arr |> List.map ~f:value_to_string in
+    "[|" ^ String.concat ~sep:", " contents ^ "|]"
+  | VRecord tbl ->
+    let fields =
+      Hashtbl.to_alist tbl
+      |> List.map ~f:(fun (k, v') -> k ^ " = " ^ value_to_string v')
+    in
+    "{ " ^ String.concat ~sep:"; " fields ^ " }"
+  | VRef r -> "ref(" ^ value_to_string !r ^ ")"
+  | VModule _ -> "<module>"
+  | VClosure _ -> "<closure>"
+  | VUnit -> "()"
+  | VBuiltin _ -> "<builtin>"
+  | VVariant (slug, vals) ->
+    if List.is_empty vals
+    then Printf.sprintf "`%s" slug
+    else (
+      let inside = vals |> List.map ~f:value_to_string |> String.concat ~sep:", " in
+      Printf.sprintf "`%s(%s)" slug inside)
+;;
+
 module BuiltinModules = struct
   let add_global_builtins (env : env) =
-    (* 1) A “print” function that simply prints ints, floats, bools, and strings *)
+    (* 1) Shared printers --------------------------------------------------- *)
     let fn_print =
       VBuiltin
         (fun args ->
-          let rec value_to_string v =
-            match v with
-            | VInt i -> Int.to_string i
-            | VFloat f -> Float.to_string f
-            | VBool b -> Bool.to_string b
-            | VString s -> s
-            | VArray arr ->
-              let contents = Array.to_list arr |> List.map ~f:value_to_string in
-              "[|" ^ String.concat ~sep:", " contents ^ "|]"
-            | VRecord tbl ->
-              let fields =
-                Hashtbl.to_alist tbl
-                |> List.map ~f:(fun (k, v') -> k ^ " = " ^ value_to_string v')
-              in
-              "{ " ^ String.concat ~sep:"; " fields ^ " }"
-            | VRef r -> "ref(" ^ value_to_string !r ^ ")"
-            | VModule _ -> "<module>"
-            | VClosure _ -> "<closure>"
-            | VUnit -> "()"
-            | VBuiltin _ -> "<builtin>"
-            | VVariant (slug, vals) ->
-              if List.is_empty vals
-              then Printf.sprintf "`%s" slug
-              else (
-                let inside =
-                  vals |> List.map ~f:value_to_string |> String.concat ~sep:", "
-                in
-                Printf.sprintf "`%s(%s)" slug inside)
-          in
+          (match args with
+           | [] -> failwith "print: expected at least one argument"
+           | _ -> ());
           List.iter args ~f:(fun v -> Printf.printf "%s " (value_to_string v));
           Printf.printf "\n";
           VUnit)
     in
     set_var env "print" fn_print;
-    let fn_print =
+
+    let fn_to_string =
       VBuiltin
         (fun args ->
-          let rec value_to_string v =
-            match v with
-            | VInt i -> Int.to_string i
-            | VFloat f -> Float.to_string f
-            | VBool b -> Bool.to_string b
-            | VString s -> s
-            | VArray arr ->
-              let contents = Array.to_list arr |> List.map ~f:value_to_string in
-              "[|" ^ String.concat ~sep:", " contents ^ "|]"
-            | VRecord tbl ->
-              let fields =
-                Hashtbl.to_alist tbl
-                |> List.map ~f:(fun (k, v') -> k ^ " = " ^ value_to_string v')
-              in
-              "{ " ^ String.concat ~sep:"; " fields ^ " }"
-            | VRef r -> "ref(" ^ value_to_string !r ^ ")"
-            | VModule _ -> "<module>"
-            | VClosure _ -> "<closure>"
-            | VUnit -> "()"
-            | VBuiltin _ -> "<builtin>"
-            | VVariant (slug, vals) ->
-              if List.is_empty vals
-              then Printf.sprintf "`%s" slug
-              else (
-                let inside =
-                  vals |> List.map ~f:value_to_string |> String.concat ~sep:", "
-                in
-                Printf.sprintf "`%s(%s)" slug inside)
-          in
-          VString (value_to_string @@ List.hd_exn args))
+          match args with
+          | [ v ] -> VString (value_to_string v)
+          | _ -> failwith "to_string: expected exactly one argument")
     in
-    set_var env "to_string" fn_print;
+    set_var env "to_string" fn_to_string;
     (* 2) A “sum” function that sums a list of integers. *)
     let fn_sum =
       VBuiltin

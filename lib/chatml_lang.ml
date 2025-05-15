@@ -8,6 +8,7 @@ type 'a node =
   { value : 'a
   ; span : Source.span
   }
+[@@deriving sexp]
 
 type pattern =
   | PWildcard
@@ -18,6 +19,7 @@ type pattern =
   | PString of string
   | PVariant of string * pattern list
   | PRecord of (string * pattern) list * bool (* true = open row with _ *)
+[@@deriving sexp, compare]
 
 (** Represents the lexical address of a variable after the resolver pass.
    [depth] = how many frames to pop (0 = current frame),
@@ -29,6 +31,7 @@ type var_loc =
   ; index : int
   ; slot : Frame_env.packed_slot
   }
+[@@deriving sexp_of]
 
 type expr =
   | EInt of int
@@ -50,6 +53,16 @@ type expr =
      allocate *one* frame whose layout hosts all the bound variables,
      thereby avoiding one frame allocation & push/pop per binding.      *)
   | ELetBlock of (string * expr node) list * expr node
+  (* Same as [ELetBlock] but carries *explicit* slot descriptors chosen
+     by the resolver.  The list of [packed_slot] is in one-to-one
+     correspondence with the [bindings] list so that the evaluator can
+     allocate a frame whose layout exactly matches the static
+     selection. *)
+  | ELetBlockSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
+  (* Mutually recursive let-bindings with their slot layout.  Mirrors
+     [ELetRec] but lifts the slot list so that the runtime does not
+     need to recompute it. *)
+  | ELetRecSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
   | EMatch of expr node * (pattern * expr node) list
   | EMatchSlots of expr node * (pattern * Frame_env.packed_slot list * expr node) list
   | ERecord of (string * expr node) list
@@ -64,6 +77,7 @@ type expr =
   | ESequence of expr node * expr node (* e1 ; e2 *)
   | EDeref of expr node
   | ERecordExtend of expr node * (string * expr node) list
+[@@deriving sexp_of]
 
 type stmt =
   | SLet of string * expr node
@@ -71,9 +85,17 @@ type stmt =
   | SModule of string * stmt node list
   | SOpen of string
   | SExpr of expr node
+[@@deriving sexp_of]
 
-type stmt_node = stmt node
-type program = stmt_node list * string
+(* The [stmt] type is used to represent the top-level statements in a
+   module.  The [program] type is a list of statements, followed by the
+   module name.  This is used to represent the entire program. *)
+
+type stmt_node = stmt node [@@deriving sexp_of]
+
+(* The [program] type is a list of statements, followed by the module name.
+   This is used to represent the entire program. *)
+type program = stmt_node list * string [@@deriving sexp_of]
 
 (***************************************************************************)
 (* 2) Runtime Value Types                                                  *)
@@ -223,8 +245,24 @@ let slot_of_value (v : value) : Frame_env.packed_slot =
 
 (* Store a [value] into the [frame] at [idx] using the setter that matches
    the given slot descriptor.  If the value kind does not match the slot we
-   silently fall back to the generic [SObj] setter – this keeps evaluation
-   total while we progressively migrate the runtime. *)
+   assert at run-time that the slot descriptor chosen by the static
+   resolver matches the *actual* value kind we are storing.  A mismatch is
+   symptomatic of a bug in the resolver / interpreter agreement and would
+   otherwise lead to silent corruption (for instance reading back an int
+   through [get_obj]).
+
+   The assertion raises a clear exception in debug builds; in production it
+   can be compiled away by defining [ocamlopt -assert false]. *)
+
+let slot_matches_value (slot : Frame_env.packed_slot) (v : value) : bool =
+  match slot, v with
+  | Frame_env.Slot Frame_env.SInt, VInt _ -> true
+  | Frame_env.Slot Frame_env.SBool, VBool _ -> true
+  | Frame_env.Slot Frame_env.SFloat, VFloat _ -> true
+  | Frame_env.Slot Frame_env.SString, VString _ -> true
+  | Frame_env.Slot Frame_env.SObj, _ -> true
+  | _ -> false
+;;
 
 let store_with_slot
       (fr : Frame_env.frame)
@@ -233,6 +271,9 @@ let store_with_slot
       (v : value)
   : unit
   =
+  (* Debug-time safety check – fail fast on inconsistent slot/value pair. *)
+  if not (slot_matches_value slot v)
+  then failwith "internal: slot/value mismatch between resolver slot and runtime value";
   match slot with
   | Frame_env.Slot Frame_env.SInt ->
     (match v with
@@ -284,24 +325,36 @@ let load_from_frames (frames : Frame_env.env) (loc : var_loc) : value =
 (*  Tail-call trampoline – now threads [frames] as an explicit parameter.    *)
 (* ------------------------------------------------------------------------- *)
 
-let rec finish_eval (_frames : Frame_env.env) (r : eval_result) : value =
-  match r with
-  | Value v -> v
-  | TailCall (cl, args) ->
-    (* Decide slot for each argument using static layout when available. *)
-    let slots =
-      if List.length cl.param_slots = List.length args
-      then cl.param_slots
-      else List.map args ~f:slot_of_value
-    in
-    let param_frame = Frame_env.alloc_packed slots in
-    List.iteri args ~f:(fun idx v ->
-      let slot = List.nth_exn slots idx in
-      store_with_slot param_frame idx slot v);
-    (* Prepare environment & frame stack for the call. *)
-    let child_env = copy_env cl.env in
-    let child_frames = param_frame :: cl.frames in
-    finish_eval child_frames (eval_expr child_env child_frames cl.body)
+let rec finish_eval (initial_frames : Frame_env.env) (initial_res : eval_result) : value =
+  (* [loop] is an explicit tail-recursive trampoline that rolls through the
+     chain of [TailCall] results produced by the evaluator without growing
+     the OCaml call-stack. *)
+  let rec loop (_frames : Frame_env.env) (res : eval_result) : value =
+    match res with
+    | Value v -> v
+    | TailCall (cl, args) ->
+      (* 1. The resolver now guarantees that [param_slots] is populated and
+         has the same arity as the argument list.  Any discrepancy is a bug
+         in the compiler pipeline so we turn it into a hard failure. *)
+      if List.length cl.param_slots <> List.length args
+      then failwith "internal: closure param_slots length mismatch with call-site";
+      let slots = cl.param_slots in
+      (* 2. Allocate the frame and store arguments. *)
+      let param_frame = Frame_env.alloc_packed slots in
+      List.iteri args ~f:(fun idx v ->
+        let slot = List.nth_exn slots idx in
+        store_with_slot param_frame idx slot v);
+      (* 3. Build the environment and updated frame stack for the callee.  We
+         reuse the captured environment directly – function bodies do not
+         mutate it, so no copy is necessary – avoiding an O(n) hash-table
+         clone on every call. *)
+      let child_env = cl.env in
+      let child_frames = param_frame :: cl.frames in
+      (* 4. Evaluate the function body one step; iterate. *)
+      let next_res = eval_expr child_env child_frames cl.body in
+      loop child_frames next_res
+  in
+  loop initial_frames initial_res
 
 (***************************************************************************)
 (* 6) Expression Evaluation                                                *)
@@ -346,6 +399,19 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
       let slot = List.nth_exn slots idx in
       store_with_slot block_frame idx slot v);
     (* 4. Evaluate the body with the populated frame stack. *)
+    eval_expr env child_frames body
+  | ELetBlockSlots (bindings, slots, body) ->
+    if List.length bindings <> List.length slots
+    then failwith "internal: slot list length mismatch in ELetBlockSlots";
+    (* 1. Allocate frame with the provided, *typed* slot layout. *)
+    let block_frame = Frame_env.alloc_packed slots in
+    let child_frames = block_frame :: frames in
+    (* 2. Evaluate each RHS sequentially and store using the precise setter. *)
+    List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
+      let v = finish_eval child_frames (eval_expr env child_frames rhs_expr) in
+      let slot = List.nth_exn slots idx in
+      store_with_slot block_frame idx slot v);
+    (* 3. Evaluate the body with the populated frame. *)
     eval_expr env child_frames body
   | EApp (fn_expr, arg_exprs) ->
     (* Evaluate fn first (fully, so no nested tailcall escapes). *)
@@ -411,6 +477,21 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
       let slot = List.nth_exn slots idx in
       store_with_slot rec_frame idx slot v);
     (* 5.  Evaluate the body with the populated frame. *)
+    eval_expr env child_frames body
+  | ELetRecSlots (bindings, slots, body) ->
+    if List.length bindings <> List.length slots
+    then failwith "internal: slot list length mismatch in ELetRecSlots";
+    (* 1. Allocate frame with exact slot layout. *)
+    let rec_frame = Frame_env.alloc_packed slots in
+    (* 2. Insert temporary placeholders so that recursive RHSs can see each other. *)
+    List.iteri bindings ~f:(fun idx _ -> Frame_env.set_obj rec_frame idx (Obj.repr VUnit));
+    let child_frames = rec_frame :: frames in
+    (* 3. Evaluate RHSs and overwrite placeholders with real values. *)
+    List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
+      let v = finish_eval child_frames (eval_expr env child_frames rhs_expr) in
+      let slot = List.nth_exn slots idx in
+      store_with_slot rec_frame idx slot v);
+    (* 4. Evaluate body. *)
     eval_expr env child_frames body
   | EMatch (scrut_expr, cases) ->
     let sv = finish_eval frames (eval_expr env frames scrut_expr) in
@@ -524,10 +605,7 @@ and match_eval
     (match match_pattern v pat with
      | None -> match_eval env frames v tl
      | Some binds ->
-       (* 1. Hash-table mirror for yet-unresolved identifiers *)
-       let child_env = copy_env env in
-       List.iter binds ~f:(fun (nm, vl) -> set_var child_env nm vl);
-       (* 2. Slot frame for fast-path variables *)
+       (* 1. Allocate a slot frame for the variables bound by the pattern *)
        let vars = collect_pattern_vars pat in
        (* Choose slot for each bound variable based on the actual runtime
           value now that we have evaluated the scrutinee. *)
@@ -548,7 +626,7 @@ and match_eval
            store_with_slot pat_frame idx slot vl
          | None -> ());
        let child_frames = pat_frame :: frames in
-       eval_expr child_env child_frames rhs)
+       eval_expr env child_frames rhs)
 
 and match_eval_slots
       (env : env)
@@ -566,14 +644,14 @@ and match_eval_slots
        let vars = collect_pattern_vars pat in
        if List.length vars <> List.length slots
        then failwith "Resolver/internal error: slot/var length mismatch in EMatchSlots";
-       (* 1. Hash-table mirror for string env *)
-       let child_env = copy_env env in
-       List.iter binds ~f:(fun (nm, vl) -> set_var child_env nm vl);
+       (* All pattern-bound identifiers are resolved to [EVarLoc] whose
+          addresses point into the freshly allocated [pat_frame].  We do
+          not need to touch the string-keyed environment. *)
+       let child_env = env in
        (* 2. Allocate frame using provided slots *)
        let pat_frame = Frame_env.alloc_packed slots in
        (* Map var name to index *)
        List.iteri vars ~f:(fun idx vnm ->
-         (* find runtime value *)
          match List.Assoc.find binds ~equal:String.equal vnm with
          | Some vl ->
            let slot = List.nth_exn slots idx in
