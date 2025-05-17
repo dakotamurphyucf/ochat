@@ -39,6 +39,12 @@ val is_dir : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> bool
 (** [with_dir ~dir f] opens the directory [dir] and applies the function [f] to it. *)
 val with_dir : dir:[> Fs.dir_ty ] Path.t -> ([ `Close | `Dir ] Path.t -> 'a) -> 'a
 
+(*────────────────────────  Data-dir helpers  ──────────────────────────*)
+
+(** [ensure_chatmd_dir ~cwd] returns the path [cwd/.chatmd], creating the
+    directory with permissions 700 if it doesn’t already exist. *)
+val ensure_chatmd_dir : cwd:([> Fs.dir_ty ] as 'a) Path.t -> 'a Path.t
+
 module Net : sig
   (** [get_host url] extracts the host from the given [url] and returns it. *)
   val get_host : string -> string

@@ -77,6 +77,31 @@ let is_dir ~dir path = Path.is_directory (dir / path)
 (** [with_dir ~dir f] opens the directory [dir] and applies the function [f] to it. *)
 let with_dir ~dir f = Path.with_open_dir dir @@ f
 
+(*────────────────────────  Data-dir helpers  ──────────────────────────*)
+
+(* A trivial helper to manage the hidden “.chatmd” directory that stores
+   conversation buffers, cache files, and temporary artefacts created by
+   tools.  Several high-level entry points (run_completion, streaming
+   driver, etc.) used to duplicate the same 7 lines: figure out the cwd,
+   create .chatmd if missing, and return its path.  We expose a single
+   function so callers can simply do:
+
+     let datadir = Io.ensure_chatmd_dir ~cwd in
+
+   which guarantees the directory exists and returns its [Eio.Path.t].
+*)
+
+let chatmd_dir_name = ".chatmd"
+
+let ensure_chatmd_dir ~cwd : _ Eio.Path.t =
+  let datadir = Path.(cwd / chatmd_dir_name) in
+  (* [Path.exists] doesn’t exist directly; we check for directory status. *)
+  (match Path.is_directory datadir with
+   | true -> ()
+   | false -> Path.mkdirs ~perm:0o700 datadir);
+  datadir
+
+
 module Net = struct
   (** [get_host url] extracts the host from the given [url] and returns it. *)
   let get_host url =

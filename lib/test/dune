@@ -7,6 +7,20 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name chat_response_cache_test)
+ (modules chat_response_cache_test)
+ (libraries core expect_test_helpers_core chat_response)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_response_converter_test)
+ (modules chat_response_converter_test)
+ (libraries core expect_test_helpers_core chat_response eio eio_main eio.mock eio.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
  (name chatml_runtime_test)
  (modules chatml_runtime_test)
  (libraries core chatml chatml_resolver chatml_builtin_modules)
