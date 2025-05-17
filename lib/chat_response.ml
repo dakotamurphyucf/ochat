@@ -177,9 +177,9 @@ module Fetch = struct
   let get_html ~ctx url ~is_local = get_impl ~ctx url ~is_local ~cleanup_html:true
 end
 
-(*──────────────────────── 4.  Agent runner  ───────────────────────────*)
+(*──────────────────────── 4.  Response loop  ───────────────────────────*)
 
-module Agent_runner = struct
+module Response_loop = struct
   (*********************************************************************
      Generic response-loop used by both the public helper
      [execute_response_loop] (used by CLI / driver code) and the
@@ -655,7 +655,7 @@ let rec run_agent ~(ctx : _ Ctx.t) (prompt_xml : string) (items : CM.content_ite
   (* 5.  Convert XML ‑> API items and enter the execute loop to handle function calls. *)
   let init_items = Converter.to_items ~ctx ~run_agent elements in
   let all_items =
-    Agent_runner.run
+    Response_loop.run
       ~ctx
       ?temperature
       ?max_output_tokens:max_tokens
@@ -725,7 +725,7 @@ let run_completion
        that any tool-generated artefacts land in that directory. *)
     let ctx_loop = Ctx.create ~env ~dir:datadir ~cache in
     let all_items =
-      Agent_runner.run
+      Response_loop.run
         ~ctx:ctx_loop
         ?temperature
         ?max_output_tokens:model_tokens
