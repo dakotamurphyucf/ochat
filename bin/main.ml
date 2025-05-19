@@ -105,7 +105,8 @@ let chat_completion_command =
      in
      fun () ->
        run_main
-       @@ fun env -> Chat_response.run_completion_stream ~env ?prompt_file ~output_file ())
+       @@ fun env ->
+       Chat_response.Driver.run_completion_stream ~env ?prompt_file ~output_file ())
 ;;
 
 let tokenize_command =

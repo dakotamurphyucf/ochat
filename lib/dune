@@ -210,24 +210,24 @@
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
-(library
- (name chat_response)
- (public_name chatgpt.chat_response)
- (modules chat_response)
- (libraries
-  core
-  openai
-  jsonaf
-  io
-  gpt_function
-  definitions
-  functions
-  prompt_template
-  lru_cache
-  ttl_lru_cache
-  bin_prot_utils_eio)
- (preprocess
-  (pps ppx_jane ppx_jsonaf_conv)))
+; (library
+;  (name chat_response)
+;  (public_name chatgpt.chat_response)
+;  (modules chat_response)
+;  (libraries
+;   core
+;   openai
+;   jsonaf
+;   io
+;   gpt_function
+;   definitions
+;   functions
+;   prompt_template
+;   lru_cache
+;   ttl_lru_cache
+;   bin_prot_utils_eio)
+;  (preprocess
+;   (pps ppx_jane ppx_jsonaf_conv)))
 
 (library
  (name definitions)
@@ -326,6 +326,13 @@
  (libraries core uutf uunf)
  (preprocess
   (pps ppx_jane)))
+
+(library
+ (name notty_scroll_box)
+ (public_name chatgpt.notty_scroll_box)
+ (modules notty_scroll_box)
+ (libraries core notty)
+ (preprocess (pps ppx_jane)))
 
 (menhir
  (modules chatml_parser)

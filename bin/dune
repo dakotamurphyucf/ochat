@@ -23,9 +23,28 @@
   gpt_function
   chat_completion
   chat_response
-  apply_patch)
+  apply_patch
+  nottui)
  (preprocess
   (pps ppx_jane)))
+
+(executable
+ (public_name chat-tui)
+ (name chat_tui)
+ (modules chat_tui)
+ (libraries
+  core
+  eio_main
+  notty.unix
+  chatgpt.notty_eio
+  chatgpt.notty_scroll_box
+  chat_response
+  io
+  prompt_template
+  openai
+  core_unix.command_unix
+  )
+ (preprocess (pps ppx_jane)))
 
 (executable
  (public_name dsl_script)
