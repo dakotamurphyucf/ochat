@@ -223,44 +223,46 @@ let run_completion_stream
     ()
   in
   let fn_id = ref 0 in
+  (* 1‑A • read current prompt XML and parse *)
+  let xml = Io.load_doc ~dir output_file in
+  let elements = CM.parse_chat_inputs ~dir xml in
+  (* 1‑B • current config (max_tokens, model, …) *)
+  let cfg = Config.of_elements elements in
+  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call; id = _ } =
+    cfg
+  in
+  let model =
+    Option.value_map model ~f:Res.Request.model_of_str_exn ~default:Res.Request.Gpt4
+  in
+  let reasoning =
+    Option.map reasoning_effort ~f:(fun eff ->
+      Res.Request.Reasoning.
+        { effort = Some (Effort.of_str_exn eff); summary = Some Summary.Detailed })
+  in
+  let tools =
+    List.filter_map elements ~f:(function
+      | CM.Tool t -> Some t
+      | _ -> None)
+    |> List.map ~f:(fun decl ->
+      let ctx_for_tool =
+        match decl with
+        | CM.Agent _ -> Ctx.create ~env ~dir:(Eio.Stdenv.cwd env) ~cache
+        | _ -> Ctx.create ~env ~dir:(Eio.Stdenv.cwd env) ~cache
+      in
+      Tool.of_declaration ~ctx:ctx_for_tool ~run_agent decl)
+  in
+  (* 1‑C • tools / functions *)
+  let comp_tools, tool_tbl = Gpt_function.functions tools in
+  let tools = Tool.convert_tools comp_tools in
+  (* 1‑D • initial request items *)
+  let ctx = Ctx.create ~env ~dir ~cache in
+  let inputs = Converter.to_items ~ctx ~run_agent elements in
   (* ─────────────────────── 1.  main recursive turn ────────────────────── *)
-  let rec turn () =
-    (* 1‑A • read current prompt XML and parse *)
-    let xml = Io.load_doc ~dir output_file in
-    let elements = CM.parse_chat_inputs ~dir xml in
-    (* 1‑B • current config (max_tokens, model, …) *)
-    let cfg = Config.of_elements elements in
-    let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call; id = _ } =
-      cfg
-    in
-    let model =
-      Option.value_map model ~f:Res.Request.model_of_str_exn ~default:Res.Request.Gpt4
-    in
-    let reasoning =
-      Option.map reasoning_effort ~f:(fun eff ->
-        Res.Request.Reasoning.
-          { effort = Some (Effort.of_str_exn eff); summary = Some Summary.Detailed })
-    in
-    let tools =
-      List.filter_map elements ~f:(function
-        | CM.Tool t -> Some t
-        | _ -> None)
-      |> List.map ~f:(fun decl ->
-        let ctx_for_tool =
-          match decl with
-          | CM.Agent _ -> Ctx.create ~env ~dir:(Eio.Stdenv.cwd env) ~cache
-          | _ -> Ctx.create ~env ~dir:(Eio.Stdenv.cwd env) ~cache
-        in
-        Tool.of_declaration ~ctx:ctx_for_tool ~run_agent decl)
-    in
-    (* 1‑C • tools / functions *)
-    let comp_tools, tool_tbl = Gpt_function.functions tools in
-    let tools = Tool.convert_tools comp_tools in
-    (* 1‑D • initial request items *)
-    let ctx = Ctx.create ~env ~dir ~cache in
-    let inputs = Converter.to_items ~ctx ~run_agent elements in
+  let rec turn inputs =
     (* ────────────────── 2.  streaming callback state ─────────────────── *)
     (* existing tables … *)
+    let new_items : Res.Item.t list ref = ref [] in
+    let add_item item = new_items := item :: !new_items in
     let opened_msgs : (string, unit) Hashtbl.t = Hashtbl.create (module String)
     and func_info : (string, string * string) Hashtbl.t = Hashtbl.create (module String)
     (* NEW – track currently open reasoning‑blocks, mapping id → current summary_index *)
@@ -333,6 +335,18 @@ let run_completion_stream
                (Fetch.tab_on_newline content));
           (* save the tool call to a file *)
           Io.save_doc ~dir:datadir (tool_call_url call_id) arguments);
+        let fn_call =
+          Res.Item.Function_call
+            { name
+            ; arguments
+            ; call_id
+            ; _type = "function_call"
+            ; id = Some item_id
+            ; status = None
+            }
+        in
+        (* add the function call to the new items list *)
+        add_item fn_call;
         (* run the tool *)
         let fn = Hashtbl.find_exn tool_tbl name in
         let result = fn arguments in
@@ -365,6 +379,17 @@ let run_completion_stream
                item_id
                (Fetch.tab_on_newline content));
           Io.save_doc ~dir:datadir (tool_call_result_url call_id) result);
+        let fn_out =
+          Res.Item.Function_call_output
+            { call_id
+            ; _type = "function_call_output"
+            ; id = None
+            ; status = None
+            ; output = result
+            }
+        in
+        (* add the function call output to the new items list *)
+        add_item fn_out;
         Int.incr fn_id;
         run_again := true
     in
@@ -379,8 +404,12 @@ let run_completion_stream
          output_text_delta ~id:item_id delta
        | Res.Response_stream.Output_item_done { item; _ } ->
          (match item with
-          | Res.Response_stream.Item.Output_message om -> close_message om.id
+          | Res.Response_stream.Item.Output_message om ->
+            add_item (Output_message om);
+            (* close an open message block, if any *)
+            close_message om.id
           | Res.Response_stream.Item.Reasoning r ->
+            add_item (Reasoning r);
             (* close an open reasoning block, if any *)
             (match Hashtbl.find reasoning_state r.id with
              | Some _ ->
@@ -438,8 +467,10 @@ let run_completion_stream
      | false -> print_endline "no run again");
     (* 4 • If no function call just happened, append empty user message.   *)
     (* 4 • If a function call just happened, recurse for the next turn.   *)
-    if !run_again then turn () else append_doc "\n<msg role=\"user\">\n\n</msg>"
+    if !run_again
+    then turn (List.append inputs (List.rev !new_items))
+    else append_doc "\n<msg role=\"user\">\n\n</msg>"
   in
-  turn ();
+  turn inputs;
   Cache.save ~file:cache_file cache
 ;;

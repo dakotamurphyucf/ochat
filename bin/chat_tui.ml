@@ -42,7 +42,7 @@ let attr_of_role = function
   | "tool" -> Notty.A.(fg lightmagenta)
   | "reasoning" -> Notty.A.(fg lightblue)
   | _ -> Notty.A.empty
-
+;;
 
 (* -------------------------------------------------------------------------- *)
 (*  Types shared across the module                                           *)
@@ -103,7 +103,6 @@ let rec string_of_item (ci : CM.content_item) : string =
     if is_local
     then Printf.sprintf "<agent src=\"%s\" local=\"true\">%s</agent>" url inner
     else Printf.sprintf "<agent src=\"%s\">%s</agent>" url inner
-[@@warning "-32"]
 ;;
 
 let string_of_msg ?(render = false) ~ctx (m : CM.msg) : string =
