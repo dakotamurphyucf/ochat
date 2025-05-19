@@ -26,8 +26,36 @@ module CM = Prompt_template.Chat_markdown
 module Scroll_box = Notty_scroll_box
 module Res_stream = Openai.Responses.Response_stream
 module Item = Openai.Responses.Response_stream.Item
+module Converter = Chat_response.Converter
+module Ctx = Chat_response.Ctx
+module Cache = Chat_response.Cache
 
 exception Cancelled
+(* -------------------------------------------------------------------------- *)
+(*  Styling helpers                                                           *)
+(* -------------------------------------------------------------------------- *)
+
+let attr_of_role = function
+  | "assistant" -> Notty.A.(fg lightcyan)
+  | "user" -> Notty.A.(fg yellow)
+  | "developer" -> Notty.A.(fg red)
+  | "tool" -> Notty.A.(fg lightmagenta)
+  | "reasoning" -> Notty.A.(fg lightblue)
+  | _ -> Notty.A.empty
+
+
+(* -------------------------------------------------------------------------- *)
+(*  Types shared across the module                                           *)
+(* -------------------------------------------------------------------------- *)
+
+(* Buffer used while streaming: we accumulate partial content in [text] and
+   remember the [role] (for colouring) as well as the position in the
+   rendered [messages] list. *)
+
+type msg_buffer =
+  { text : string ref
+  ; index : int
+  }
 
 (* -------------------------------------------------------------------------- *)
 (*  Helpers                                                                   *)
@@ -37,29 +65,82 @@ exception Cancelled
    of basic items is converted to a printable string; everything else is
    replaced with a short placeholder.                                           *)
 
-let messages_of_xml ~dir xml : (string * string) list =
-  let is_ctrl_non_nl c =
-    let code = Char.to_int c in
-    (code < 32 || code = 127) && not (Char.equal c '\n')
-  in
-  let sanitize s =
-    String.map s ~f:(fun c -> if is_ctrl_non_nl c then ' ' else c) |> String.strip
-  in
+(*──────────────────────────────────────────────────────────────────────────┐
+  Helper: convert Chat_markdown content items to printable strings.         │
+  We purposefully keep this very light-weight:                              │
+  •  <img> becomes an inline “<img src=…/>” tag (no attempt to display)     │
+  •  <doc> becomes “<doc src=…/>”.                                          │
+  •  <agent> is shown as its original tag with the expanded inner items.    │
+  For everything else we fall back to raw text, after sanitising control    │
+  characters so the terminal is not upset.                                  │
+ ──────────────────────────────────────────────────────────────────────────*)
+
+let is_ctrl_non_nl c =
+  let code = Char.to_int c in
+  (code < 32 || code = 127) && not (Char.equal c '\n')
+;;
+
+let sanitize s =
+  String.map s ~f:(fun c -> if is_ctrl_non_nl c then ' ' else c) |> String.strip
+;;
+
+let rec string_of_item (ci : CM.content_item) : string =
+  let open CM in
+  match ci with
+  | Basic { text; image_url; document_url; is_local; _ } ->
+    (match image_url, document_url with
+     | Some { url }, _ ->
+       if is_local
+       then Printf.sprintf "<img src=\"%s\" local=\"true\"/>" url
+       else Printf.sprintf "<img src=\"%s\"/>" url
+     | _, Some src ->
+       if is_local
+       then Printf.sprintf "<doc src=\"%s\" local=\"true\"/>" src
+       else Printf.sprintf "<doc src=\"%s\"/>" src
+     | _ -> Option.value ~default:"" text)
+  | Agent { url; is_local; items } ->
+    let inner = List.map items ~f:string_of_item |> String.concat ~sep:" " in
+    if is_local
+    then Printf.sprintf "<agent src=\"%s\" local=\"true\">%s</agent>" url inner
+    else Printf.sprintf "<agent src=\"%s\">%s</agent>" url inner
+[@@warning "-32"]
+;;
+
+let string_of_msg ?(render = false) ~ctx (m : CM.msg) : string =
+  match m.content with
+  | None -> ""
+  | Some (CM.Text t) -> sanitize t
+  | Some (CM.Items items) ->
+    (match render with
+     | false ->
+       let items = List.map items ~f:(fun i -> string_of_item i) in
+       String.concat ~sep:"" items |> sanitize
+     | true ->
+       Converter.string_of_items ~ctx ~run_agent:Chat_response.Driver.run_agent items
+       |> sanitize)
+;;
+
+let messages_of_xml ~env ~dir ~cache xml : (string * string) list =
+  let ctx = Ctx.create ~env ~dir ~cache in
   let elements = CM.parse_chat_inputs ~dir xml in
   List.filter_map elements ~f:(function
     | CM.Msg m ->
-      let raw =
-        match m.CM.content with
-        | None -> ""
-        | Some (CM.Text t) -> t
-        | Some (CM.Items items) ->
-          List.filter_map items ~f:(function
-            | CM.Basic { text = Some t; _ } -> Some t
-            | _ -> None)
-          |> String.concat ~sep:" "
+      let body =
+        (* Special-case tool calls to make them more readable. *)
+        if String.equal (String.lowercase m.role) "tool"
+        then (
+          match m.tool_call with
+          | Some { function_ = { name; _ }; _ } ->
+            Printf.sprintf "%s(%s)" name (string_of_msg ~render:true ~ctx m)
+          | None -> string_of_msg ~ctx m)
+        else string_of_msg ~ctx m
       in
-      let txt = sanitize raw in
-      Some (m.role, txt)
+      Some (String.lowercase m.role, body)
+    | CM.Reasoning r ->
+      let txt =
+        List.map r.summary ~f:(fun s -> s.text) |> String.concat ~sep:" " |> sanitize
+      in
+      Some ("reasoning", txt)
     | _ -> None)
 ;;
 
@@ -73,12 +154,7 @@ let render ~term ~input_line msgs =
   (* Build the chat history. *)
   let history_img =
     let msg_to_image (role, text) =
-      let role_attr =
-        match role with
-        | "assistant" -> Notty.A.(fg lightcyan)
-        | "user" -> Notty.A.(fg yellow)
-        | _ -> Notty.A.empty
-      in
+      let role_attr = attr_of_role role in
       let lines = String.split_lines text in
       match lines with
       | [] -> Notty.I.empty
@@ -168,10 +244,15 @@ let run_chat ~env ~conversation_file () =
     =
     Eio.Stream.create 0
   in
+  (* Prepare shared cache loaded like Driver does *)
+  let cwd = Eio.Stdenv.cwd env in
+  let datadir = Io.ensure_chatmd_dir ~cwd in
+  let cache_file = Eio.Path.(datadir / "cache.bin") in
+  let cache = Cache.load ~file:cache_file ~max_size:1000 () in
   (* A helper to reload the conversation and rebuild the message list. *)
   let load_messages () =
     let xml = Io.load_doc ~dir conversation_file in
-    messages_of_xml ~dir xml
+    messages_of_xml ~env ~dir ~cache xml
   in
   (* Mutable state. *)
   let input_line = ref "" in
@@ -179,9 +260,40 @@ let run_chat ~env ~conversation_file () =
   (* When true, viewport auto-scrolls to bottom on redraw; disabled as soon as user
      manually scrolls. *)
   let auto_follow = ref true in
-  (* Buffers for currently streaming assistant messages: id -> buffer ref and index *)
-  let assistant_buffers : (string, string ref) Hashtbl.t =
+  (* -------------------------------------------------------------------------- *)
+  (*  Streaming state                                                          *)
+  (* -------------------------------------------------------------------------- *)
+
+  (* For every streaming item (identified by [item_id]) we keep a buffer that
+     accumulates the text we have received so far together with meta data that
+     allows us to update the UI incrementally. *)
+
+  (* item_id -> msg_buffer *)
+  let msg_buffers : (string, msg_buffer) Hashtbl.t = Hashtbl.create (module String) in
+  (* item_id -> function name (populated via [Output_item_added (Function_call …)]) *)
+  let function_name_by_id : (string, string) Hashtbl.t = Hashtbl.create (module String) in
+  (* item_id -> last seen summary_index (for reasoning deltas) *)
+  let reasoning_idx_by_id : (string, int ref) Hashtbl.t =
     Hashtbl.create (module String)
+  in
+  (* Helper functions for the streaming UI state.                            *)
+  let rec update_message_text index new_txt =
+    messages
+    := List.mapi !messages ~f:(fun idx (role, txt) ->
+         if idx = index then role, new_txt else role, txt)
+  and ensure_buffer ~id ~role : msg_buffer =
+    match Hashtbl.find msg_buffers id with
+    | Some b -> b
+    | None ->
+      let index = List.length !messages in
+      let b = { text = ref ""; index } in
+      Hashtbl.set msg_buffers ~key:id ~data:b;
+      messages := !messages @ [ role, "" ];
+      b
+  and append_text ~id ~role ~delta =
+    let buf = ensure_buffer ~id ~role in
+    buf.text := !(buf.text) ^ delta;
+    update_message_text buf.index !(buf.text)
   in
   (* Switch for the currently running OpenAI streaming request (if any). *)
   let fetch_sw : Switch.t option ref = ref None in
@@ -195,39 +307,53 @@ let run_chat ~env ~conversation_file () =
   @@ fun term ->
   let redraw () =
     let w, h = Notty_eio.Term.size term in
-    (* Height available for the history (leave 1 line for prompt). *)
-    let history_height = h - 1 in
+    (* Determine input editor height (#lines). *)
+    let input_lines =
+      match String.split ~on:'\n' !input_line with
+      | [] -> [ "" ]
+      | ls -> ls
+    in
+    let input_height = List.length input_lines in
+    let history_height = Int.max 1 (h - input_height) in
     (* Rebuild the history image and update the scroll box. *)
     let history_image =
       (* Build the chat history image with wrapping and prefix alignment. *)
       let msg_to_image (role, text) =
-        let attr =
-          match role with
-          | "assistant" -> Notty.A.(fg lightcyan)
-          | "user" -> Notty.A.(fg yellow)
-          | _ -> Notty.A.empty
-        in
+        let attr = attr_of_role role in
         let prefix = role ^ ": " in
         let indent = String.make (String.length prefix) ' ' in
         let max_width = w in
-        (* Utility: wrap a list of words into lines with given limit *)
+        (*---------------------------------------------------------------------------
+          Word-wrap a list of words so that no produced line (except possibly lines
+          containing a single over-long word) exceeds [limit] characters.
+
+          The previous implementation could loop forever when the first word of a
+          fresh line was already longer than [limit]: it would repeatedly start a
+          "new line" with the same word without consuming it.
+        ---------------------------------------------------------------------------*)
         let wrap_words words limit =
-          let rec loop acc current_line_len current_line words =
-            match words with
-            | [] -> List.rev (current_line :: acc)
+          let flush acc current_line =
+            match List.rev current_line with
+            | [] -> acc
+            | xs -> String.concat ~sep:" " xs :: acc
+          in
+          let rec loop acc current_line current_len = function
+            | [] -> List.rev (flush acc current_line)
             | w :: ws ->
               let wlen = String.length w in
-              if current_line_len = 0
-              then loop acc wlen w ws
-              else if current_line_len + 1 + wlen <= limit
-              then (
-                let new_len = current_line_len + 1 + wlen in
-                loop acc new_len (current_line ^ " " ^ w) ws)
-              else loop (current_line :: acc) 0 "" words (* start new line *)
+              if current_len = 0
+              then
+                (* Start of a new line: accept [w] even if it exceeds [limit]. *)
+                loop acc [ w ] wlen ws
+              else if current_len + 1 + wlen <= limit
+              then
+                (* Word fits on the current line. *)
+                loop acc (w :: current_line) (current_len + 1 + wlen) ws
+              else
+                (* Word doesn’t fit – flush current line and start a new one. *)
+                loop (flush acc current_line) [] 0 (w :: ws)
           in
-          match words with
-          | [] -> [ "" ]
-          | _ -> loop [] 0 "" words
+          loop [] [] 0 words
         in
         let paragraphs = String.split_lines text in
         let first_limit = Int.max 1 (max_width - String.length prefix) in
@@ -267,57 +393,95 @@ let run_chat ~env ~conversation_file () =
     if !auto_follow then Scroll_box.scroll_to_bottom scroll_box ~height:history_height;
     (* Render history through scroll box. *)
     let history_view = Scroll_box.render scroll_box ~width:w ~height:history_height in
-    (* Input prompt line. *)
+    (* Multi-line input prompt. *)
     let input_img =
-      let open Notty in
+      let open Notty.I in
       let prefix = "> " in
-      let txt = prefix ^ !input_line in
-      I.string A.empty txt |> I.hsnap ~align:`Left w
+      let indent = String.make (String.length prefix) ' ' in
+      let imgs =
+        List.mapi input_lines ~f:(fun idx line ->
+          let txt = if idx = 0 then prefix ^ line else indent ^ line in
+          string Notty.A.empty txt |> hsnap ~align:`Left w)
+      in
+      vcat imgs
     in
     let full_img = Notty.Infix.(history_view <-> input_img) in
     Notty_eio.Term.image term full_img;
+    (* Position cursor at logical end of the current input. We derive the
+       coordinates from the length of [input_line] – no separate mutable
+       [cursor_pos] is required. *)
+    let total_index = String.length !input_line in
+    let rec row_col lines offset row =
+      match lines with
+      | [] -> row, 0
+      | l :: ls ->
+        let len = String.length l in
+        if total_index <= offset + len
+        then row, total_index - offset
+        else row_col ls (offset + len + 1) (row + 1)
+    in
+    let row, col_in_line = row_col input_lines 0 0 in
+    let prefix_len =
+      2
+      (* length of " > " prefix *)
+    in
+    let cursor_x = prefix_len + col_in_line in
+    let cursor_y = history_height + row in
+    Notty_eio.Term.cursor term (Some (cursor_x, cursor_y));
     first_draw := false
   in
   redraw ();
-  (* Update in-memory conversation based on streaming events *)
-  let append_assistant_text ~id ~delta =
-    let buf_ref =
-      match Hashtbl.find assistant_buffers id with
-      | Some r -> r
-      | None ->
-        let r = ref "" in
-        Hashtbl.set assistant_buffers ~key:id ~data:r;
-        (* create new assistant entry with empty content *)
-        messages := !messages @ [ "assistant", "" ];
-        r
-    in
-    buf_ref := !buf_ref ^ delta;
-    (* Update the scroll box content with the new assistant message *)
-    (* Update last message in list *)
-    messages
-    := match List.rev !messages with
-       | (role, _) :: rest_rev -> List.rev ((role, !buf_ref) :: rest_rev)
-       | [] -> []
-  in
+  (* ---------------------------------------------------------------------- *)
+  (*  Streaming event handling                                              *)
+  (* ---------------------------------------------------------------------- *)
   let handle_stream_event (ev : Res_stream.t) =
     match ev with
+    (* Assistant text *)
     | Res_stream.Output_text_delta { item_id; delta; _ } ->
-      append_assistant_text ~id:item_id ~delta
-    (* | Res_stream.Output_item_added { item = Item.Output_message om; _ } ->
-      let txt = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:""
-      in
-      append_assistant_text ~id:om.id ~delta:txt
-    | Res_stream.Output_text_done { item_id; text; _ } ->
-      append_assistant_text ~id:item_id ~delta:text
-    | Res_stream.Content_part_added { item_id; part; _ } ->
-      (match part with
-       | Res_stream.Part.Output_text p -> append_assistant_text ~id:item_id ~delta:p.text
+      append_text ~id:item_id ~role:"assistant" ~delta
+    (* Assistant triggers a function / tool call.  We remember the mapping
+       item_id → function-name so that subsequent argument deltas can start
+       with the proper prefix. *)
+    | Res_stream.Output_item_added { item; _ } ->
+      (match item with
+       | Item.Function_call fc ->
+         let idx = Option.value fc.id ~default:fc.call_id in
+         Hashtbl.set function_name_by_id ~key:idx ~data:fc.name
+       | Item.Reasoning r -> ignore (ensure_buffer ~id:r.id ~role:"reasoning")
        | _ -> ())
-    | Res_stream.Content_part_done { item_id; part; _ } ->
-      (match part with
-       | Res_stream.Part.Output_text p -> append_assistant_text ~id:item_id ~delta:p.text
-       | _ -> ())
-    | Res_stream.Output_item_done { item = Item.Output_message _om; _ } -> () *)
+    (* Reasoning summaries *)
+    | Res_stream.Reasoning_summary_text_delta { item_id; delta; summary_index; _ } ->
+      let buf = ensure_buffer ~id:item_id ~role:"reasoning" in
+      (match Hashtbl.find reasoning_idx_by_id item_id with
+       | Some idx_ref when !idx_ref = summary_index -> ()
+       | Some idx_ref ->
+         idx_ref := summary_index;
+         if not (String.is_empty !(buf.text)) then buf.text := !(buf.text) ^ "\n"
+       | None -> Hashtbl.set reasoning_idx_by_id ~key:item_id ~data:(ref summary_index));
+      buf.text := !(buf.text) ^ delta;
+      update_message_text buf.index !(buf.text)
+    (* Function call argument streaming *)
+    | Res_stream.Function_call_arguments_delta { item_id; delta; _ } ->
+      let buf = ensure_buffer ~id:item_id ~role:"tool" in
+      if String.is_empty !(buf.text)
+      then (
+        let fn_name =
+          Option.value (Hashtbl.find function_name_by_id item_id) ~default:"tool"
+        in
+        buf.text := fn_name ^ "(");
+      buf.text := !(buf.text) ^ delta;
+      update_message_text buf.index !(buf.text)
+    | Res_stream.Function_call_arguments_done { item_id; arguments; _ } ->
+      let buf = ensure_buffer ~id:item_id ~role:"tool" in
+      if String.is_empty !(buf.text)
+      then (
+        let fn_name =
+          Option.value (Hashtbl.find function_name_by_id item_id) ~default:"tool"
+        in
+        buf.text := fn_name ^ "(");
+      buf.text := !(buf.text) ^ arguments ^ ")";
+      update_message_text buf.index !(buf.text);
+      messages := load_messages ()
     | _ -> ()
   in
   let rec main_loop () =
@@ -345,31 +509,56 @@ let run_chat ~env ~conversation_file () =
       redraw ();
       main_loop ()
     | `Key (`Backspace, _) ->
-      if String.length !input_line > 0 then input_line := String.drop_suffix !input_line 1;
+      if String.length !input_line > 0
+      then (
+        (* drop last scalar value *)
+        let len = String.length !input_line in
+        input_line := String.sub !input_line ~pos:0 ~len:(len - 1));
       redraw ();
       main_loop ()
     | `Key (`Arrow `Up, _) ->
       auto_follow := false;
       let _, h = Notty_eio.Term.size term in
-      Scroll_box.scroll_by scroll_box ~height:(h - 1) (-1);
+      (* Approximate current input height as number of lines in input_line *)
+      let input_h =
+        match String.split_lines !input_line with
+        | [] -> 1
+        | ls -> List.length ls
+      in
+      Scroll_box.scroll_by scroll_box ~height:(h - input_h) (-1);
       redraw ();
       main_loop ()
     | `Key (`Arrow `Down, _) ->
       auto_follow := false;
       let _, h = Notty_eio.Term.size term in
-      Scroll_box.scroll_by scroll_box ~height:(h - 1) 1;
+      let input_h =
+        match String.split_lines !input_line with
+        | [] -> 1
+        | ls -> List.length ls
+      in
+      Scroll_box.scroll_by scroll_box ~height:(h - input_h) 1;
       redraw ();
       main_loop ()
     | `Key (`Page `Up, _) ->
       auto_follow := false;
       let _, h = Notty_eio.Term.size term in
-      Scroll_box.scroll_by scroll_box ~height:(h - 1) (-(h - 1));
+      let input_h =
+        match String.split_lines !input_line with
+        | [] -> 1
+        | ls -> List.length ls
+      in
+      Scroll_box.scroll_by scroll_box ~height:(h - input_h) (-(h - input_h));
       redraw ();
       main_loop ()
     | `Key (`Page `Down, _) ->
       auto_follow := false;
       let _, h = Notty_eio.Term.size term in
-      Scroll_box.scroll_by scroll_box ~height:(h - 1) (h - 1);
+      let input_h =
+        match String.split_lines !input_line with
+        | [] -> 1
+        | ls -> List.length ls
+      in
+      Scroll_box.scroll_by scroll_box ~height:(h - input_h) (h - input_h);
       redraw ();
       main_loop ()
     | `Key (`Home, _) ->
@@ -380,10 +569,16 @@ let run_chat ~env ~conversation_file () =
     | `Key (`End, _) ->
       auto_follow := true;
       let _, h = Notty_eio.Term.size term in
-      Scroll_box.scroll_to_bottom scroll_box ~height:(h - 1);
+      let input_h = 1 in
+      Scroll_box.scroll_to_bottom scroll_box ~height:(h - input_h);
       redraw ();
       main_loop ()
-    | `Key (`Enter, _) ->
+    | `Key (`Enter, []) ->
+      (* Insert literal newline *)
+      input_line := !input_line ^ "\n";
+      redraw ();
+      main_loop ()
+    | `Key (`Enter, [ `Meta ]) ->
       let user_msg = String.strip !input_line in
       input_line := "";
       if String.is_empty user_msg
@@ -396,7 +591,12 @@ let run_chat ~env ~conversation_file () =
         messages := load_messages ();
         auto_follow := true;
         let _, h = Notty_eio.Term.size term in
-        Scroll_box.scroll_to_bottom scroll_box ~height:(h - 1);
+        let input_h =
+          match String.split_lines !input_line with
+          | [] -> 1
+          | ls -> List.length ls
+        in
+        Scroll_box.scroll_to_bottom scroll_box ~height:(h - input_h);
         redraw ();
         (* 2. Display a temporary thinking marker. *)
         Notty_eio.Term.image

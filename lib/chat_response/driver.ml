@@ -42,8 +42,14 @@ let rec run_agent ~(ctx : _ Ctx.t) (prompt_xml : string) (items : CM.content_ite
     List.map declared_tools ~f:(fun decl ->
       (* For nested agent tools we want them to run with a filesystem
          root identical to the one used by the current agent – hence we
+         ~ctx:{ ctx with dir = Eio.Stdenv.cwd (Ctx.env ctx) }
          reuse [ctx] directly. *)
-      Tool.of_declaration ~ctx ~run_agent decl)
+      let ctx_for_tool =
+        match decl with
+        | CM.Agent _ -> { ctx with dir = Eio.Stdenv.cwd (Ctx.env ctx) }
+        | _ -> { ctx with dir = Eio.Stdenv.cwd (Ctx.env ctx) }
+      in
+      Tool.of_declaration ~ctx:ctx_for_tool ~run_agent decl)
   in
   let comp_tools, tool_tbl = Gpt_function.functions tools in
   let tools_req = Tool.convert_tools comp_tools in
@@ -243,7 +249,7 @@ let run_completion_stream
         let ctx_for_tool =
           match decl with
           | CM.Agent _ -> Ctx.create ~env ~dir:(Eio.Stdenv.cwd env) ~cache
-          | _ -> Ctx.create ~env ~dir:(Eio.Stdenv.fs env) ~cache
+          | _ -> Ctx.create ~env ~dir:(Eio.Stdenv.cwd env) ~cache
         in
         Tool.of_declaration ~ctx:ctx_for_tool ~run_agent decl)
     in
@@ -363,59 +369,56 @@ let run_completion_stream
         run_again := true
     in
     let callback (ev : Res.Response_stream.t) =
-      (* Always forward the raw event to the caller first, so that the UI can
-         react to *every* update (e.g. text deltas) without being affected by
-         the internal handling below. *)
-      on_event ev;
       (* For debugging purposes we still log every event. *)
       log_event ev;
       (* Internal book-keeping for writing the streamed response back into the
          conversation buffer and executing tool calls. *)
-      match ev with
-      (* ───────────────────────── assistant text ────────────────────── *)
-      | Res.Response_stream.Output_text_delta { item_id; delta; _ } ->
-        output_text_delta ~id:item_id delta
-      | Res.Response_stream.Output_item_done { item; _ } ->
-        (match item with
-         | Res.Response_stream.Item.Output_message om -> close_message om.id
-         | Res.Response_stream.Item.Reasoning r ->
-           (* close an open reasoning block, if any *)
-           (match Hashtbl.find reasoning_state r.id with
-            | Some _ ->
-              close_summary ();
-              close_reasoning ();
-              Hashtbl.remove reasoning_state r.id
-            | None -> ())
-         | _ -> ())
-      (* ─────────────────────── reasoning deltas ────────────────────── *)
-      | Res.Response_stream.Reasoning_summary_text_delta
-          { item_id; delta; summary_index; _ } ->
-        (match Hashtbl.find reasoning_state item_id with
-         | None ->
-           (* first chunk for this reasoning item *)
-           open_reasoning item_id;
-           Hashtbl.set reasoning_state ~key:item_id ~data:summary_index
-         | Some current when current = summary_index -> () (* same summary → continue *)
-         | Some _ ->
-           (* moved to the next summary *)
-           close_summary ();
-           open_new_summary ();
-           Hashtbl.set reasoning_state ~key:item_id ~data:summary_index);
-        append_doc (Fetch.tab_on_newline delta)
-      (* ────────────────────── function calls etc. ──────────────────── *)
-      | Res.Response_stream.Output_item_added { item; _ } ->
-        (match item with
-         | Res.Response_stream.Item.Function_call fc ->
-           let idx = Option.value fc.id ~default:fc.call_id in
-           Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
-         | Res.Response_stream.Item.Reasoning r ->
-           (* first chunk for this reasoning item *)
-           open_reasoning r.id;
-           Hashtbl.set reasoning_state ~key:r.id ~data:0
-         | _ -> ())
-      | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
-        handle_function_done ~item_id ~arguments
-      | _ -> ()
+      (match ev with
+       (* ───────────────────────── assistant text ────────────────────── *)
+       | Res.Response_stream.Output_text_delta { item_id; delta; _ } ->
+         output_text_delta ~id:item_id delta
+       | Res.Response_stream.Output_item_done { item; _ } ->
+         (match item with
+          | Res.Response_stream.Item.Output_message om -> close_message om.id
+          | Res.Response_stream.Item.Reasoning r ->
+            (* close an open reasoning block, if any *)
+            (match Hashtbl.find reasoning_state r.id with
+             | Some _ ->
+               close_summary ();
+               close_reasoning ();
+               Hashtbl.remove reasoning_state r.id
+             | None -> ())
+          | _ -> ())
+       (* ─────────────────────── reasoning deltas ────────────────────── *)
+       | Res.Response_stream.Reasoning_summary_text_delta
+           { item_id; delta; summary_index; _ } ->
+         (match Hashtbl.find reasoning_state item_id with
+          | None ->
+            (* first chunk for this reasoning item *)
+            open_reasoning item_id;
+            Hashtbl.set reasoning_state ~key:item_id ~data:summary_index
+          | Some current when current = summary_index -> () (* same summary → continue *)
+          | Some _ ->
+            (* moved to the next summary *)
+            close_summary ();
+            open_new_summary ();
+            Hashtbl.set reasoning_state ~key:item_id ~data:summary_index);
+         append_doc (Fetch.tab_on_newline delta)
+       (* ────────────────────── function calls etc. ──────────────────── *)
+       | Res.Response_stream.Output_item_added { item; _ } ->
+         (match item with
+          | Res.Response_stream.Item.Function_call fc ->
+            let idx = Option.value fc.id ~default:fc.call_id in
+            Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
+          | Res.Response_stream.Item.Reasoning r ->
+            (* first chunk for this reasoning item *)
+            open_reasoning r.id;
+            Hashtbl.set reasoning_state ~key:r.id ~data:0
+          | _ -> ())
+       | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
+         handle_function_done ~item_id ~arguments
+       | _ -> ());
+      on_event ev
     in
     (* ────────────────── 3.  fire request in stream mode ──────────────── *)
     Res.post_response
