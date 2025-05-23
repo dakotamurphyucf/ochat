@@ -474,3 +474,154 @@ let run_completion_stream
   turn inputs;
   Cache.save ~file:cache_file cache
 ;;
+
+(*──────────────────────────────────────────────────────────────────────────*
+  New variant for interactive TUI usage
+  -------------------------------------------------------------------------
+  [run_completion_stream_in_memory] behaves like [run_completion_stream] but
+  operates purely in-memory.  It
+
+  •  takes the current conversation history explicitly as a list of
+     [Openai.Responses.Item.t]
+  •  streams updates through [on_event] just like the original version so the
+     caller can update the UI in real-time;
+  •  resolves function-calls by consulting the provided [tool_tbl] and loops
+     until no further tool-calls are emitted; and
+  •  returns the full extended history (initial inputs + newly received
+     items).
+
+  No file-system interaction (reading templates, writing XML, …) is performed.
+  This makes the function suitable for an interactive application that keeps
+  the conversation buffer in memory and only persists it once on exit.
+*──────────────────────────────────────────────────────────────────────────*)
+
+let run_completion_stream_in_memory_v1
+      ~env
+      ~(history : Openai.Responses.Item.t list)
+      ?(on_event : Openai.Responses.Response_stream.t -> unit = fun _ -> ())
+      ?(on_fn_out : Openai.Responses.Function_call_output.t -> unit = fun _ -> ())
+      ~tools
+      ?tool_tbl
+      ?temperature
+      ?max_output_tokens
+      ?reasoning
+      ?(model = Openai.Responses.Request.O3)
+      ()
+  : Openai.Responses.Item.t list
+  =
+  let net = env#net in
+  let cwd = Eio.Stdenv.cwd env in
+  let datadir = Io.ensure_chatmd_dir ~cwd in
+  (* A tiny cache is fine for interactive use. *)
+  let cache_file = Eio.Path.(datadir / "cache.bin") in
+  let cache = Cache.load ~file:cache_file ~max_size:1_000 () in
+  (* Derive default [tools] / [tool_tbl] from the supplied argument, falling
+     back to the empty set if none provided. *)
+  let tools, tool_tbl =
+    match tools, tool_tbl with
+    | Some t, Some tbl -> t, tbl
+    | _ ->
+      let comp_tools, tbl = Gpt_function.functions [] in
+      Tool.convert_tools comp_tools, tbl
+  in
+  (*──────────────────────── Internal recursive turn ───────────────────────*)
+  let rec turn (hist : Openai.Responses.Item.t list) : Openai.Responses.Item.t list =
+    (* State for this streaming request. *)
+    let func_info : (string, string * string) Hashtbl.t =
+      Hashtbl.create (module String)
+    in
+    let reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
+    let new_items : Openai.Responses.Item.t list ref = ref [] in
+    let add_item it = new_items := it :: !new_items in
+    let run_again = ref false in
+    (* Execute tool and queue follow-up items. *)
+    let handle_function_done ~item_id ~arguments =
+      match Hashtbl.find func_info item_id with
+      | None ->
+        Openai.Responses.Function_call_output.
+          { output = ""
+          ; call_id = ""
+          ; _type = "function_call_output"
+          ; id = None
+          ; status = None
+          }
+      | Some (name, call_id) ->
+        let fn = Hashtbl.find_exn tool_tbl name in
+        let result = fn arguments in
+        (* Queue helper items to the history so that the model sees the call
+           and the result. *)
+        let fn_call : Openai.Responses.Function_call.t =
+          { name
+          ; arguments
+          ; call_id
+          ; _type = "function_call"
+          ; id = Some item_id
+          ; status = None
+          }
+        in
+        let fn_call_item = Openai.Responses.Item.Function_call fn_call in
+        let fn_out : Openai.Responses.Function_call_output.t =
+          { output = result
+          ; call_id
+          ; _type = "function_call_output"
+          ; id = None
+          ; status = None
+          }
+        in
+        let fn_out_item = Openai.Responses.Item.Function_call_output fn_out in
+        new_items := fn_out_item :: fn_call_item :: !new_items;
+        run_again := true;
+        fn_out
+    in
+    (* Streaming callback – keep minimal book-keeping for tool-calls while
+       forwarding every event to [on_event] so the caller can update the UI. *)
+    let stream_cb (ev : Openai.Responses.Response_stream.t) =
+      match ev with
+      | Openai.Responses.Response_stream.Output_item_added { item; _ } ->
+        (match item with
+         | Openai.Responses.Response_stream.Item.Function_call fc ->
+           let idx = Option.value fc.id ~default:fc.call_id in
+           Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
+         | Openai.Responses.Response_stream.Item.Reasoning r ->
+           Hashtbl.set reasoning_state ~key:r.id ~data:0
+         | _ -> ());
+        on_event ev
+      | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
+        (match item with
+         | Openai.Responses.Response_stream.Item.Output_message om ->
+           add_item (Openai.Responses.Item.Output_message om)
+         | Openai.Responses.Response_stream.Item.Reasoning r ->
+           add_item (Openai.Responses.Item.Reasoning r)
+         | _ -> ());
+        on_event ev
+      | Openai.Responses.Response_stream.Function_call_arguments_done
+          { item_id; arguments; _ } ->
+        let fn_out = handle_function_done ~item_id ~arguments in
+        on_event ev;
+        on_fn_out fn_out
+      | ev ->
+        (* Forward any other event (e.g. Output_text_delta, Reasoning_summary_text_delta)
+           so that interactive clients can render the assistant output truly
+           in real-time.  Previously these delta events were discarded, which
+           meant the Chat-TUI only received item-level updates and therefore
+           appeared to delay output until the end of the assistant turn. *)
+        on_event ev
+    in
+    (* Fire the request. *)
+    Openai.Responses.post_response
+      (Openai.Responses.Stream stream_cb)
+      ?max_output_tokens
+      ?temperature
+      ~tools
+      ~model
+      ?reasoning
+      ~dir:datadir
+      net
+      ~inputs:hist;
+    let hist = List.append hist (List.rev !new_items) in
+    if !run_again then turn hist else hist
+  in
+  let full_history = turn history in
+  Cache.save ~file:cache_file cache;
+  full_history
+;;

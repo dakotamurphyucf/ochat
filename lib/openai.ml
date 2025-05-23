@@ -1079,9 +1079,9 @@ module Responses = struct
 
       module Function = struct
         type t =
-          { name : string
+          { name : string [@default "function"]
           ; description : string option
-          ; parameters : Jsonaf.t
+          ; parameters : Jsonaf.t [@default `Object []]
           ; strict : bool
           ; type_ : string [@key "type"]
           }

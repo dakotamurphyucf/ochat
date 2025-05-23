@@ -43,6 +43,7 @@
   prompt_template
   openai
   core_unix.command_unix
+  chatgpt.chat_tui
   )
  (preprocess (pps ppx_jane)))
 
