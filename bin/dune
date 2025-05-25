@@ -29,6 +29,16 @@
   (pps ppx_jane)))
 
 (executable
+ (public_name key-dump)
+ (name key_dump)
+ (modules key_dump)
+ (libraries
+  core
+  eio_main
+  chatgpt.notty_eio
+  ))
+
+(executable
  (public_name chat-tui)
  (name chat_tui)
  (modules chat_tui)

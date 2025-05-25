@@ -12,6 +12,9 @@ type t =
   ; fetch_sw : Eio.Switch.t option ref
   ; scroll_box : Notty_scroll_box.t
   ; cursor_pos : int ref
+  ; draft_history : string list ref
+  ; draft_history_pos : int ref
+  ; selection_anchor : int option ref
   }
 
 let create
@@ -25,6 +28,9 @@ let create
       ~fetch_sw
       ~scroll_box
       ~cursor_pos
+  ~draft_history
+  ~draft_history_pos
+      ~selection_anchor
   =
   { history_items
   ; messages
@@ -36,11 +42,25 @@ let create
   ; fetch_sw
   ; scroll_box
   ; cursor_pos
+  ; draft_history
+  ; draft_history_pos
+  ; selection_anchor
   }
 ;;
 
 let input_line t = t.input_line
 let cursor_pos t = t.cursor_pos
+
+let draft_history t = t.draft_history
+let draft_history_pos t = t.draft_history_pos
+
+let selection_anchor t = t.selection_anchor
+
+let clear_selection t = t.selection_anchor := None
+
+let set_selection_anchor t idx = t.selection_anchor := Some idx
+
+let selection_active t = Option.is_some !(t.selection_anchor)
 let messages t = t.messages
 let auto_follow t = t.auto_follow
 

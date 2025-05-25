@@ -137,24 +137,89 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
     | [] -> [ "" ]
     | ls -> ls
   in
-  let input_height = List.length input_lines in
-  let history_height = Int.max 1 (h - input_height) in
+  (* ---------------------------- Dimensions ---------------------------- *)
+  let input_content_height = List.length input_lines in
+  let border_rows = 2 (* top & bottom of input box *) in
+  let history_height = Int.max 1 (h - input_content_height - border_rows) in
   if !(Model.auto_follow model)
   then Notty_scroll_box.scroll_to_bottom model.scroll_box ~height:history_height;
   let history_view =
     Notty_scroll_box.render model.scroll_box ~width:w ~height:history_height
   in
-  (* Build the multi-line input editor (prefix on first row only). *)
+
+  (* ------------------------ Input box & BG --------------------------- *)
+  let border_attr = A.(fg lightblue) in
+  let bg_attr = A.(bg (rgb ~r:1 ~g:1 ~b:2)) in
+
+  (* ---------------- Selection attributes --------------------------- *)
+  let selection_attr base = A.(base ++ st reverse) in
+
   let input_img =
     let open I in
     let prefix = "> " in
     let indent = String.make (String.length prefix) ' ' in
+    let sel_active = Model.selection_active model in
+    (* We'll iterate lines keeping track of absolute offset *)
     let rows =
-      List.mapi input_lines ~f:(fun idx line ->
-        let txt = if idx = 0 then prefix ^ line else indent ^ line in
-        string A.empty txt |> hsnap ~align:`Left w)
+      let text_attr = bg_attr in
+      let sel_attr = selection_attr text_attr in
+      let rec build_rows lines idx abs_off acc =
+        match lines with
+        | [] -> List.rev acc
+        | line :: rest ->
+          let line_prefix = if idx = 0 then prefix else indent in
+          let line_len = String.length line in
+          let line_start = abs_off in
+          let line_end = abs_off + line_len in
+          (* Determine selection overlap in input coordinates *)
+          let overlap_start, overlap_end =
+            if not sel_active then None, None
+            else (
+              match !(Model.selection_anchor model) with
+              | None -> None, None
+              | Some anchor ->
+                let cur = !(Model.cursor_pos model) in
+                let sel_start = Int.min anchor cur in
+                let sel_end = Int.max anchor cur in
+                let ov_start = Int.max sel_start line_start in
+                let ov_end = Int.min sel_end line_end in
+                if ov_start < ov_end then Some ov_start, Some ov_end else None, None)
+          in
+          (* Build content segments *)
+          let content_img =
+            match overlap_start, overlap_end with
+            | (None, _) | (_, None) -> I.string text_attr (line_prefix ^ line)
+            | Some ov_s, Some ov_e ->
+              let local_start = ov_s - line_start in
+              let local_end = ov_e - line_start in
+              let before = String.sub line ~pos:0 ~len:local_start in
+              let selected = String.sub line ~pos:local_start ~len:(local_end - local_start) in
+              let after =
+                String.sub line ~pos:local_end ~len:(line_len - local_end)
+              in
+              I.hcat
+                [ I.string text_attr line_prefix
+                ; I.string text_attr before
+                ; I.string sel_attr selected
+                ; I.string text_attr after
+                ]
+          in
+          let row_text_img = content_img |> I.hsnap ~align:`Left (w - 2) in
+          let bg = I.char bg_attr ' ' (w - 2) 1 in
+          let inside = Notty.Infix.(row_text_img </> bg) in
+          let row_img = Notty.Infix.(I.string border_attr "│" <|> inside <|> I.string border_attr "│") in
+          let next_abs = line_end + 1 (* newline *) in
+          build_rows rest (idx + 1) next_abs (row_img :: acc)
+      in
+      build_rows input_lines 0 0 []
     in
-    I.vcat rows
+    let hline len =
+      let seg = "─" in
+      String.concat ~sep:"" (List.init len ~f:(fun _ -> seg)) |> string border_attr
+    in
+    let top_border = Notty.Infix.(string border_attr "┌" <|> hline (w - 2) <|> string border_attr "┐") in
+    let bottom_border = Notty.Infix.(string border_attr "└" <|> hline (w - 2) <|> string border_attr "┘") in
+    I.vcat (top_border :: rows @ [ bottom_border ])
   in
   let full_img = Notty.Infix.(history_view <-> input_img) in
   (* Compute cursor position. *)
@@ -170,9 +235,8 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
   in
   let row, col_in_line = row_col input_lines 0 0 in
   let cursor_x =
-    2 + col_in_line
-    (* length of "> " prefix *)
+    3 + col_in_line
   in
-  let cursor_y = history_height + row in
+  let cursor_y = history_height + 1 + row (* +1 for top border *) in
   full_img, (cursor_x, cursor_y)
 ;;

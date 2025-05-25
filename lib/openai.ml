@@ -1862,8 +1862,8 @@ module Responses = struct
         Eio.Buf_read.(parse_exn take_all) flow ~max_size:Int.max_value
       in
       let data = read_all reader in
-      print_endline "Received data:";
-      print_endline data;
+      (* print_endline "Received data:";
+      print_endline data; *)
       let json_result =
         Jsonaf.parse data
         |> Result.bind ~f:(fun json ->

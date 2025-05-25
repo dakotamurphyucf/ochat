@@ -16,6 +16,9 @@ type t =
   ; fetch_sw : Eio.Switch.t option ref
   ; scroll_box : Notty_scroll_box.t
   ; cursor_pos : int ref (** Current position inside [input_line] (bytes). *)
+  ; draft_history : string list ref (** History of previously submitted user drafts. *)
+  ; draft_history_pos : int ref (** Current index into [draft_history] when navigating. *)
+  ; selection_anchor : int option ref (** Anchor position for active selection. *)
   }
 
 (** [create ~history_items ~messages …] packs pre-existing references into a
@@ -32,11 +35,21 @@ val create
   -> fetch_sw:Eio.Switch.t option ref
   -> scroll_box:Notty_scroll_box.t
   -> cursor_pos:int ref
+  -> draft_history:string list ref
+  -> draft_history_pos:int ref
+  -> selection_anchor:int option ref
   -> t
 
 (** Convenience accessors – added on demand. *)
 val input_line : t -> string ref
 val cursor_pos : t -> int ref
+val draft_history : t -> string list ref
+val draft_history_pos : t -> int ref
+
+val selection_anchor : t -> int option ref
+val clear_selection : t -> unit
+val set_selection_anchor : t -> int -> unit
+val selection_active : t -> bool
 
 val messages : t -> message list ref
 val auto_follow : t -> bool ref
