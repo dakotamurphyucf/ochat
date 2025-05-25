@@ -8,10 +8,15 @@ open Types
 
 let attr_of_role = function
   | "assistant" -> A.(fg lightcyan)
+  (* User messages are highlighted in yellow to distinguish them from assistant responses. *)
   | "user" -> A.(fg yellow)
   | "developer" -> A.(fg red)
   | "tool" -> A.(fg lightmagenta)
   | "reasoning" -> A.(fg lightblue)
+  (* System messages (model instructions, meta information, …) are rendered
+     in a dimmed grey so that they stand out from regular assistant output
+     without being too prominent. *)
+  | "system" -> A.(fg lightblack)
   | "tool_output" -> A.(fg lightgreen)
   | _ -> A.empty
 ;;
@@ -20,23 +25,94 @@ let attr_of_role = function
 (*  Word-wrapping & layout                                                   *)
 (* ------------------------------------------------------------------------- *)
 
+(* Render a single chat [message] into a boxed [Notty] image.  We mimic the
+   "box" helper from [prompts/example_notty_eio.ml]: the textual content is
+   word-wrapped, then displayed on top of a coloured background with a one
+  -column/row margin on every side.  This yields a cleaner look than the old
+   ASCII/Unicode line drawing frame while still keeping messages visually
+   separate. *)
+
 let message_to_image ~max_width ((role, text) : message) : I.t =
-  let attr = attr_of_role role in
-  let prefix = role ^ ": " in
-  let indent = String.make (String.length prefix) ' ' in
-  let make_lines body pref indent limit =
-    match Util.wrap_line ~limit body with
-    | [] -> [ pref ]
-    | first :: rest -> (pref ^ first) :: List.map rest ~f:(fun l -> indent ^ l)
-  in
-  let paragraphs = String.split_lines text in
-  let lines =
-    List.concat_mapi paragraphs ~f:(fun idx para ->
-      let pref = if idx = 0 then prefix else indent in
-      let limit = Int.max 1 (max_width - String.length pref) in
-      make_lines para pref indent limit)
-  in
-  I.vcat (List.map lines ~f:(fun l -> I.string attr l))
+  (* Skip entirely blank messages (after trimming whitespace). *)
+  let trimmed = String.strip text in
+  if String.is_empty trimmed then I.empty
+  else (
+    (* ------------------------------------------------------------------- *)
+    (*  Colours                                                            *)
+    (* ------------------------------------------------------------------- *)
+    let content_attr = attr_of_role role in
+
+    (* ------------------------------------------------------------------- *)
+    (*  Word-wrapping                                                     *)
+    (* ------------------------------------------------------------------- *)
+    (* We leave two columns for interior padding (a single space on each
+       side), plus the border itself.  Therefore the usable width for the
+       actual content is [max_width - 4]. *)
+    let content_width = Int.max 1 (max_width - 4) in
+
+    let prefix = role ^ ": " in
+    let indent = String.make (String.length prefix) ' ' in
+
+    let make_lines body pref =
+      let limit = Int.max 1 (content_width - String.length pref) in
+      match Util.wrap_line ~limit body with
+      | [] -> [ pref ]
+      | first :: rest -> (pref ^ first) :: List.map rest ~f:(fun l -> indent ^ l)
+    in
+
+    let lines =
+      String.split_lines text
+      |> List.concat_mapi ~f:(fun idx para ->
+           let pref = if idx = 0 then prefix else indent in
+           make_lines para pref)
+    in
+
+    (* Pre-create image per line to get display width. *)
+    let line_imgs = List.map lines ~f:(fun l -> I.string content_attr l) in
+
+    let line_widths = List.map line_imgs ~f:I.width in
+    let max_line_w = List.fold line_widths ~init:0 ~f:Int.max in
+
+    (* Borders reuse content colour. *)
+    let border_attr = content_attr in
+
+    (* Helper: horizontal rule of box-drawing chars, sized by cells. *)
+    let hline len =
+      let seg = "─" in
+      let line = String.concat ~sep:"" (List.init len ~f:(fun _ -> seg)) in
+      I.string border_attr line
+    in
+
+    let top_border =
+      let left = I.string border_attr "┌" in
+      let mid = hline (max_line_w + 2) in
+      let right = I.string border_attr "┐" in
+      Notty.Infix.(left <|> mid <|> right)
+    in
+
+    let bottom_border =
+      let left = I.string border_attr "└" in
+      let mid = hline (max_line_w + 2) in
+      let right = I.string border_attr "┘" in
+      Notty.Infix.(left <|> mid <|> right)
+    in
+
+    (* Build each interior row: │ <space><text><padding><space> │ *)
+    let build_row (img, w) =
+      let pad_w = max_line_w - w in
+      let padding = if pad_w = 0 then I.empty else I.char A.empty ' ' pad_w 1 in
+      Notty.Infix.(
+        I.string border_attr "│ "
+        <|> img
+        <|> padding
+        <|> I.string border_attr " │")
+    in
+
+    let content_rows =
+      List.map (List.zip_exn line_imgs line_widths) ~f:build_row |> I.vcat
+    in
+
+    Notty.I.vcat [ top_border; content_rows; bottom_border ])
 ;;
 
 let history_image ~width ~(messages : message list) : I.t =

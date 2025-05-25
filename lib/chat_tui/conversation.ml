@@ -14,7 +14,7 @@ let pair_of_item (it : Res_item.t) : message option =
     List.filter_map content_items ~f:(function
       | Openai.Responses.Input_message.Text { text; _ } -> Some (sanitize text)
       | _ -> None)
-    |> String.concat ~sep:" "
+    |> String.concat ~sep:"\n"
   in
   match it with
   | Res_item.Input_message im ->
