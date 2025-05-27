@@ -254,7 +254,7 @@ and run_agent prompt items ~dir ~net ~cache =
     | [] -> ""
     | items ->
       let c = get_user_msg ~dir ~net ~cache items in
-      sprintf "<msg role=\"user\">\n%s\n</msg>" c
+      sprintf "<user>\n%s\n</user>" c
   in
   let prompt = prompt ^ "\n" ^ content in
   let elements = Prompt_template.Chat_markdown.parse_chat_inputs ~dir prompt in

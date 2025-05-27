@@ -1,16 +1,10 @@
 open Core
 
-(* Suppress «unused value» warnings in this helper module – several low-level
-   predicates are kept around because they are useful elsewhere but may remain
-   unused depending on the call-site. *)
-[@@@warning "-32"]
-
 (* ------------------------------------------------------------------------- *)
 (*  Control-character helpers                                                *)
 (* ------------------------------------------------------------------------- *)
 
 let is_C0 x = x < 0x20 || x = 0x7f
-let is_C1 x = 0x80 <= x && x < 0xa0
 
 let is_ctrl_non_nl c =
   let code = Char.to_int c in
@@ -96,11 +90,11 @@ let wrap_line ~limit s =
       let cut = Int.min cut len in
       let slice =
         if cut > pos
-        then
+        then (
           (* Do NOT assume [cut - pos] is valid – clamp once more to be extra
              safe. *)
           let slice_len = Int.min (cut - pos) (len - pos) in
-          if slice_len > 0 then String.sub s ~pos ~len:slice_len else ""
+          if slice_len > 0 then String.sub s ~pos ~len:slice_len else "")
         else ""
       in
       let acc = if String.is_empty slice then acc else slice :: acc in

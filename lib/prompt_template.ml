@@ -128,17 +128,23 @@ module Import_expansion = struct
 
   let rec expand_imports ~dir (nodes : node list) : node list =
     List.concat_map nodes ~f:(function
+      (* Preserve legacy <msg role="assistant"> handling as well as the new shorthand
+         <assistant> … </assistant> and <tool_call>.  Whenever we encounter an assistant
+         authored node we skip import-expansion inside it. *)
       | Element (((_, "msg") as name), attrs, children) ->
         let role =
           List.find_map attrs ~f:(fun ((_, attr_name), value) ->
             if String.equal attr_name "role" then Some value else None)
         in
-        (* If <msg role="assistant">, we ignore nested <import>. *)
         (match role with
          | Some "assistant" -> [ Element (name, attrs, children) ]
          | _ ->
            let expanded = expand_imports ~dir children in
            [ Element (name, attrs, expanded) ])
+      | Element (((_, "assistant") as name), attrs, children) ->
+        (* The whole element is already an assistant message – don't expand nested
+           imports. *)
+        [ Element (name, attrs, children) ]
       | Element ((_, "import"), attrs, _children) ->
         let maybe_file =
           List.find_map attrs ~f:(fun ((_, attr_name), value) ->
@@ -249,6 +255,15 @@ module Chat_content = struct
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  (* Alias types for the new shorthand message variants.  We deliberately
+     make them plain aliases so that they share the serialisation helpers
+     with [msg] and we do not need to duplicate conversion logic. *)
+
+  type user_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type assistant_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type tool_call_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type tool_response_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
   type custom_tool =
     { name : string
     ; description : string option
@@ -298,6 +313,10 @@ module Chat_content = struct
 
   type top_level_elements =
     | Msg of msg
+    | User of user_msg
+    | Assistant of assistant_msg
+    | Tool_call of tool_call_msg
+    | Tool_response of tool_response_msg
     | Config of config
     | Reasoning of reasoning
     | Tool of tool
@@ -311,6 +330,10 @@ module Chat_markdown = struct
   (* The internal chat_element used while building the final messages. *)
   type chat_element =
     | Message of msg
+    | User_msg of user_msg
+    | Assistant_msg of assistant_msg
+    | Tool_call_msg of tool_call_msg
+    | Tool_response_msg of tool_response_msg
     | Config of config
     | Tool of tool
     | Reasoning of reasoning
@@ -359,8 +382,16 @@ module Chat_markdown = struct
     | Agent (u, loc, ch) :: rest ->
       Agent { url = u; is_local = loc; items = content_items_of_elements ch }
       :: content_items_of_elements rest
-    | (Message _ | Config _ | Reasoning _ | Summary _ | Tool _) :: rest ->
-      content_items_of_elements rest
+    | ( Message _
+      | User_msg _
+      | Assistant_msg _
+      | Tool_call_msg _
+      | Tool_response_msg _
+      | Config _
+      | Reasoning _
+      | Summary _
+      | Tool _ )
+      :: rest -> content_items_of_elements rest
   ;;
 
   (* Actually parse the child elements to produce a (Text ...) or (Items ...). *)
@@ -486,7 +517,7 @@ module Chat_markdown = struct
            desc_attr
            agent
            local_attr)
-    | Message m ->
+    | Message m | User_msg m | Assistant_msg m | Tool_call_msg m | Tool_response_msg m ->
       (match m.content with
        | Some (Text t) -> t
        | Some (Items items) ->
@@ -536,6 +567,32 @@ module Chat_markdown = struct
              Message (attr_to_msg attr content_opt)) *)
           let content_opt = parse_msg_children children in
           Message (attr_to_msg attr content_opt)
+        | "user" ->
+          (* Shorthand for <user/> – internally we still fill in the [role]
+             attribute so existing helpers like [attr_to_msg] work unchanged. *)
+          let content_opt = parse_msg_children children in
+          let role_attr : Markup.name * string = ("", "role"), "user" in
+          let attrs = role_attr :: attr in
+          User_msg (attr_to_msg attrs content_opt)
+        | "assistant" ->
+          (* Shorthand for <assistant/> *)
+          let content_opt = parse_msg_children children in
+          let role_attr : Markup.name * string = ("", "role"), "assistant" in
+          let attrs = role_attr :: attr in
+          Assistant_msg (attr_to_msg attrs content_opt)
+        | "tool_call" ->
+          (* Shorthand for <tool_call/> – an assistant message that invokes a tool. *)
+          let content_opt = parse_msg_children children in
+          let role_attr : Markup.name * string = ("", "role"), "assistant" in
+          let tool_call_attr : Markup.name * string = ("", "tool_call"), "true" in
+          let attrs = role_attr :: tool_call_attr :: attr in
+          Tool_call_msg (attr_to_msg attrs content_opt)
+        | "tool_response" ->
+          (* Shorthand for <tool_response/> – a tool reply. *)
+          let content_opt = parse_msg_children children in
+          let role_attr : Markup.name * string = ("", "role"), "tool" in
+          let attrs = role_attr :: attr in
+          Tool_response_msg (attr_to_msg attrs content_opt)
         | "img" ->
           let tbl = Hashtbl.create (module String) in
           List.iter attr ~f:(fun ((_, nm), v) -> Hashtbl.set tbl ~key:nm ~data:v);
@@ -644,7 +701,14 @@ module Chat_markdown = struct
   let chat_elements_stream =
     Markup.elements (fun (_, name) _ ->
       match name with
-      | "msg" | "config" | "reasoning" | "tool" -> true
+      | "msg"
+      | "user"
+      | "assistant"
+      | "tool_call"
+      | "tool_response"
+      | "config"
+      | "reasoning"
+      | "tool" -> true
       | _ -> false)
   ;;
 
@@ -653,7 +717,11 @@ module Chat_markdown = struct
   let to_top_level = function
     | None -> None
     | Some (Message m) -> Some (Msg m)
-    | Some (Config c) -> Some (Chat_content.Config c)
+    | Some (User_msg m) -> Some (User m)
+    | Some (Assistant_msg m) -> Some (Assistant m)
+    | Some (Tool_call_msg m) -> Some (Tool_call m)
+    | Some (Tool_response_msg m) -> Some (Tool_response m)
+    | Some (Config c) -> Some (Config c)
     | Some (Reasoning r) -> Some (Reasoning r)
     | Some (Tool t) -> Some (Tool t) (* Added handling for Tool elements *)
     | Some _ -> None

@@ -13,6 +13,29 @@
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 
+;; ---------------------------------------------------------------------------
+;; MCP stub server (executable used by client tests)
+;; ---------------------------------------------------------------------------
+
+; (executable
+;  (name mcp_stub_server)
+;  (modules mcp_stub_server)
+;  (libraries core jsonaf chatgpt.mcp_types))
+
+;; ---------------------------------------------------------------------------
+;; MCP client high-level tests (uses stub server)
+;; ---------------------------------------------------------------------------
+
+; (library
+;  (name mcp_client_test)
+;  (modules mcp_client_test)
+;  (libraries
+;   core expect_test_helpers_core
+;   eio eio_main eio.mock eio.unix
+;   chatgpt.mcp_client)
+;  (inline_tests)
+;  (preprocess (pps ppx_jane ppx_expect)))
+
 (library
  (name chat_response_converter_test)
  (modules chat_response_converter_test)
@@ -43,3 +66,19 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; MCP transport – stdio implementation tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_transport_stdio_test)
+ (modules mcp_transport_stdio_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio eio_main eio.mock eio.unix
+  chatgpt.mcp_transport)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+

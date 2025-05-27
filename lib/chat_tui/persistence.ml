@@ -6,8 +6,8 @@ module Config = Chat_response.Config
 let write_user_message ~dir ~file message =
   let xml = Io.load_doc ~dir file in
   let xml = String.rstrip xml in
-  let user_open = "<msg role=\"user\">" in
-  let user_close = "</msg>" in
+  let user_open = "<user>" in
+  let user_close = "</user>" in
   let new_msg = Printf.sprintf "%s\n%s\n%s\n" user_open message user_close in
   let updated_xml =
     if String.is_suffix xml ~suffix:(user_open ^ "\n\n" ^ user_close)
@@ -43,12 +43,16 @@ let persist_session
           | _ -> None)
         |> String.concat ~sep:""
       in
-      append (Printf.sprintf "<msg role=\"%s\">\n%s\n</msg>\n" role content)
+      (match role with
+       | "user" -> append (Printf.sprintf "<user>\n%s\n</user>\n" content)
+       | "assistant" -> append (Printf.sprintf "<assistant>\n%s\n</assistant>\n" content)
+       | "tool" -> append (Printf.sprintf "<tool_response>\n%s\n</tool_response>\n" content)
+       | _ -> append (Printf.sprintf "<msg role=\"%s\">\n%s\n</msg>\n" role content))
     | Res_item.Output_message om ->
       let text = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" " in
       append
         (Printf.sprintf
-           "\n<msg role=\"assistant\" id=\"%s\">\nRAW|\n%s\n|RAW\n</msg>\n"
+           "\n<assistant id=\"%s\">\nRAW|\n%s\n|RAW\n</assistant>\n"
            om.id
            text)
     | Res_item.Function_call fc ->
@@ -65,15 +69,9 @@ let persist_session
       then
         append
           (Printf.sprintf
-             "\n\
-              <msg role=\"tool\" tool_call tool_call_id=\"%s\" function_name=\"%s\" \
-              id=\"%s\">\n\
-              %s|\n\
-              %s\n\
-              |%s\n\
-              </msg>\n"
-             fc.name
+             "\n<tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n%s|\n%s\n|%s\n</tool_call>\n"
              fc.call_id
+             fc.name
              (Option.value fc.id ~default:fc.call_id)
              "RAW"
              fc.arguments
@@ -83,8 +81,7 @@ let persist_session
         Io.save_doc ~dir:datadir filename fc.arguments;
         append
           (Printf.sprintf
-             "<msg role=\"tool\" tool_call function_name=\"%s\" tool_call_id=\"%s\" \
-              id=\"%s\"><doc src=\"./.chatmd/%s\" local/></msg>\n"
+             "<tool_call function_name=\"%s\" tool_call_id=\"%s\" id=\"%s\"><doc src=\"./.chatmd/%s\" local/></tool_call>\n"
              fc.name
              fc.call_id
              (Option.value fc.id ~default:fc.call_id)
@@ -97,7 +94,7 @@ let persist_session
          then
            append
              (Printf.sprintf
-                "<msg role=\"tool\" tool_call_id=\"%s\">\nRAW|\n%s\n|RAW\n</msg>\n"
+                "<tool_response tool_call_id=\"%s\">\nRAW|\n%s\n|RAW\n</tool_response>\n"
                 fco.call_id
                 fco.output)
          else (
@@ -105,8 +102,7 @@ let persist_session
            Io.save_doc ~dir:datadir filename fco.output;
            append
              (Printf.sprintf
-                "<msg role=\"tool\" tool_call_id=\"%s\"><doc src=\"./.chatmd/%s\" \
-                 local/></msg>\n"
+                "<tool_response tool_call_id=\"%s\"><doc src=\"./.chatmd/%s\" local/></tool_response>\n"
                 fco.call_id
                 filename)))
     | Res_item.Reasoning r ->

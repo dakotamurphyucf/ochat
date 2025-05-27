@@ -13,7 +13,6 @@ A fast, keyboard-driven terminal interface for conversing with OpenAI’s ChatGP
 * **Session persistence** – conversation is written back to the original Markdown file when you quit, drafts are autosaved on every keystroke.
 * **Extensible** – the UI logic lives in `lib/chat_tui/`, making it easy to embed Chat-TUI inside tests or other front-ends.
 
-![screenshot](dependency-docs/README-images/chat-tui-screenshot.png)
 
 ---
 

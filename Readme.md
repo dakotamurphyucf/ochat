@@ -151,6 +151,9 @@ execution context**.  It is parsed by `Prompt_template.Chat_markdown` and execut
 | `<config/>` | Current model and generation parameters. **Must be present once** near the top. | `model`, `max_tokens`, `temperature`, `reasoning_effort`, **`show_tool_call` (flag attribute)** – *when present* the runtime **embeds** tool-call arguments & outputs inline; when omitted they are written to files and referenced via `<doc/>` imports. |
 | `<tool/>` | Declare a tool that the model may call. | • `name` – tool/function name.<br>• *Built-ins* only need the name (e.g. `apply_patch`).<br>• For **custom shell tools** add `command="<shell-command>"` and optional `description="..."`.<br>• For an **agent-backed tool** add `agent="<url-or-path>"` (plus optional `local` flag and `description`). |
 | `<msg>` | A chat message. | `role` (`system,user,assistant,developer,tool`), optional `name`, `id`, `status`.  Assistant messages that *call a tool* add the boolean `tool_call` attribute plus `function_name` & `tool_call_id`. |
+| `<user/>`, `<assistant/>` | **Shorthand** for `<msg role="user"> … </msg>` / `<msg role="assistant"> … </msg>` | Accept the same optional attributes (`name`,`id`,`status`). |
+| `<tool_call/>` | **Shorthand** for an assistant *tool-invocation* message – equivalent to `<msg role="assistant" tool_call …>` | Must include `function_name` & `tool_call_id` attributes.  Body carries the JSON arguments (usually wrapped in `RAW| … |RAW`). |
+| `<tool_response/>` | **Shorthand** for the tool’s reply – equivalent to `<msg role="tool" …>` | Must include `tool_call_id`.  Body contains the tool output. |
 | `<reasoning>` | Internal scratchpad the model can populate when reasoning is enabled.  Not needed when authoring prompts. | `id`, `status`. Contains one or more `<summary>` blocks. |
 | `<import/>` | Include another file verbatim *at parse time*.  Mostly useful for templates. | `file` – relative path. |
 
@@ -188,18 +191,18 @@ content of `pair_programmer.chatmd` before the request is sent to OpenAI
 
 ```xml
 <!-- Assistant asks the runtime to call read_dir -->
-<msg role="assistant" tool_call tool_call_id="call_42" function_name="read_dir">
+<tool_call tool_call_id="call_42" function_name="read_dir">
 RAW|{"path":"./lib"}|RAW
-</msg>
+</tool_call>
 
 <!-- The runtime executes the call and returns the result: -->
-<msg role="tool" tool_call_id="call_42">
+<tool_response tool_call_id="call_42">
 RAW|
 filter_file.ml
 chat_response.ml
 ... etc ...
 |RAW
-</msg>
+</tool_response>
 ```
 
 * The presence of the boolean `tool_call` attribute signals *“the assistant wants to run a

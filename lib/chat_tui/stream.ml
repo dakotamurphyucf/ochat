@@ -98,7 +98,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
          { id = item_id; role = "tool"; text = Util.sanitize ~strip:false delta }
        :: !patches;
     List.rev !patches
-  | Res_stream.Function_call_arguments_done { item_id; arguments; _ } ->
+  | Res_stream.Function_call_arguments_done { item_id; _ } ->
     let buf_empty =
       match Hashtbl.find model.msg_buffers item_id with
       | Some b -> String.is_empty !(b.text)
@@ -115,11 +115,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
       patches
       := Append_text { id = item_id; role = "tool"; text = fn_name ^ "(" } :: !patches;
     patches
-    := Append_text
-         { id = item_id
-         ; role = "tool"
-         ; text = Util.sanitize ~strip:false arguments ^ ")"
-         }
+    := Append_text { id = item_id; role = "tool"; text = Util.sanitize ~strip:false ")" }
        :: !patches;
     List.rev !patches
   (* --------------------------------------------------------------------- *)

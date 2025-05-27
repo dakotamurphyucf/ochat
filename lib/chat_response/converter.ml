@@ -154,6 +154,90 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
     in
     Res.Item.Input_message { role = role_val; content = content_items; _type = "message" }
 
+(* ------------------------------------------------------------------ *)
+(* Wrapper helpers for the explicit shorthand message aliases.  We keep
+   them extremely small for now – simply delegate to [convert_msg] as
+   the alias types [user_msg], [assistant_msg] … are all equal to
+   [msg].  This makes future refactors easier: when the variants start
+   diverging we only need to update the implementation here without
+   touching every call-site. *)
+
+and convert_user_msg ~ctx ~run_agent (m : CM.user_msg) : Res.Item.t =
+  (* [user_msg] is an alias of [msg] but we *know* its [role] is "user" and
+     that it never carries tool-call metadata.  Therefore we can shortcut
+     straight to an [Input_message] constructor without any defensive
+     pattern-matching on the role field. *)
+  let content_items : Res.Input_message.content_item list =
+    match m.content with
+    | None -> []
+    | Some (CM.Text t) ->
+      [ Res.Input_message.Text { text = t; _type = "input_text" } ]
+    | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~ctx ~run_agent)
+  in
+  Res.Item.Input_message
+    { role = Res.Input_message.User; content = content_items; _type = "message" }
+
+and convert_assistant_msg ~ctx ~run_agent (m : CM.assistant_msg) : Res.Item.t =
+  (* Plain assistant reply (no tool-call). *)
+  let text =
+    match m.content with
+    | None -> ""
+    | Some (CM.Text t) -> t
+    | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
+  in
+  Res.Item.Output_message
+    { role = Assistant
+    ; id = Option.value ~default:"" m.id
+    ; status = Option.value m.status ~default:"completed"
+    ; _type = "message"
+    ; content = [ { annotations = []; text; _type = "output_text" } ]
+    }
+
+and convert_tool_call_msg ~ctx ~run_agent (m : CM.tool_call_msg) : Res.Item.t =
+  (* Shorthand <tool_call/> – assistant *invoking* a tool.  The parser
+     guarantees the presence of [tool_call] with [function_] details. *)
+  let { CM.id = call_id; function_ = { name; arguments = raw_args } } =
+    Option.value_exn m.tool_call
+  in
+  (* If the arguments were provided via structured content (Items) we need to
+     serialise them back to a string; otherwise fall back to the raw_args
+     captured from the attribute. *)
+  let arguments =
+    if String.is_empty raw_args
+    then (
+      match m.content with
+      | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
+      | Some (CM.Text t) -> t
+      | None -> "")
+    else raw_args
+  in
+  Res.Item.Function_call
+    { name
+    ; arguments
+    ; call_id
+    ; _type = "function_call"
+    ; id = m.id
+    ; status = None
+    }
+
+and convert_tool_response_msg ~ctx ~run_agent (m : CM.tool_response_msg)
+    : Res.Item.t =
+  (* Shorthand <tool_response/> – the *output* of a previously invoked tool. *)
+  let call_id = Option.value_exn m.tool_call_id in
+  let output =
+    match m.content with
+    | None -> ""
+    | Some (CM.Text t) -> t
+    | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
+  in
+  Res.Item.Function_call_output
+    { call_id
+    ; _type = "function_call_output"
+    ; id = None
+    ; status = None
+    ; output
+    }
+
 and convert_reasoning (r : CM.reasoning) : Res.Item.t =
   let summ =
     List.map r.summary ~f:(fun s -> { Res.Reasoning.text = s.text; _type = s._type })
@@ -164,6 +248,11 @@ and convert_reasoning (r : CM.reasoning) : Res.Item.t =
 let to_items ~ctx ~run_agent (els : CM.top_level_elements list) : Res.Item.t list =
   List.filter_map els ~f:(function
     | CM.Msg m -> Some (convert_msg ~ctx ~run_agent m)
+    | CM.User m -> Some (convert_user_msg ~ctx ~run_agent m)
+    | CM.Assistant m -> Some (convert_assistant_msg ~ctx ~run_agent m)
+    | CM.Tool_call m -> Some (convert_tool_call_msg ~ctx ~run_agent m)
+    | CM.Tool_response m ->
+      Some (convert_tool_response_msg ~ctx ~run_agent m)
     | CM.Reasoning r -> Some (convert_reasoning r)
     | CM.Config _ -> None
     | CM.Tool _ -> None)

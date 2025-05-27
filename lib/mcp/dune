@@ -1,0 +1,44 @@
+;; ---------------------------------------------------------------------------
+;; MCP – Core types (client + server shared)
+;; ---------------------------------------------------------------------------
+(library
+ (name mcp_types)
+ (public_name chatgpt.mcp_types)
+ (modules mcp_types)
+ (libraries core jsonaf_ext)
+ (preprocess (pps ppx_jane ppx_jsonaf_conv)))
+
+
+
+;; ---------------------------------------------------------------------------
+;; MCP – low-level transports (stdio, later http)
+;; ---------------------------------------------------------------------------
+(library
+ (name mcp_transport)
+ (public_name chatgpt.mcp_transport)
+ (modules mcp_transport mcp_transport_interface mcp_transport_stdio)
+ (modules_without_implementation mcp_transport mcp_transport_interface)
+ (libraries
+  core
+  jsonaf_ext
+  eio
+  eio.unix)
+ (wrapped false)
+ (preprocess (pps ppx_jane ppx_jsonaf_conv)))
+
+;; ---------------------------------------------------------------------------
+;; MCP – high-level synchronous client (stdio phase-1)
+;; ---------------------------------------------------------------------------
+(library
+ (name mcp_client)
+ (public_name chatgpt.mcp_client)
+ (modules mcp_client)
+ (libraries
+  core
+  jsonaf_ext
+  eio
+  eio.unix
+  chatgpt.mcp_types
+  chatgpt.mcp_transport)
+ (wrapped false)
+ (preprocess (pps ppx_jane ppx_jsonaf_conv)))

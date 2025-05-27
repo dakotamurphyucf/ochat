@@ -58,18 +58,34 @@ module Chat_markdown : sig
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
-  (* msg gets id / status so we can round‑trip assistant output              *)
+  (* A generic <msg role="…"> element.  Still used for legacy messages
+     (e.g. roles other than the four specialised shorthands).
+     NOTE:  The newer shorthand tags (<user/>, <assistant/>, <tool_call/>,
+     <tool_response/>) are mapped to dedicated OCaml record types that are
+     aliases of [msg].  This removes the need to inspect the [role] string
+     when traversing the parse-tree, while keeping the underlying shape
+     identical so existing logic can be reused. *)
+
   type msg =
     { role : string
     ; content : chat_message_content option [@jsonaf.option]
     ; name : string option [@jsonaf.option]
-    ; id : string option [@jsonaf.option] (** NEW *)
-    ; status : string option [@jsonaf.option] (** NEW *)
+    ; id : string option [@jsonaf.option]
+    ; status : string option [@jsonaf.option]
     ; function_call : function_call option [@jsonaf.option]
     ; tool_call : tool_call option [@jsonaf.option]
     ; tool_call_id : string option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  (* Dedicated message records for the new shorthand tags.  They are simple
+     aliases so that the JSON / serialisation helpers generated for [msg]
+     can be re-used without code duplication. *)
+
+  type user_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type assistant_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type tool_call_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type tool_response_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type custom_tool =
     { name : string
@@ -103,7 +119,11 @@ module Chat_markdown : sig
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type top_level_elements =
-    | Msg of msg
+    | Msg of msg                (** Legacy <msg/> element (system, developer…) *)
+    | User of user_msg          (** <user/> *)
+    | Assistant of assistant_msg (** <assistant/> *)
+    | Tool_call of tool_call_msg (** <tool_call/> *)
+    | Tool_response of tool_response_msg (** <tool_response/> *)
     | Config of config
     | Reasoning of reasoning
     | Tool of tool

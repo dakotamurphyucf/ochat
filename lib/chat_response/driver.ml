@@ -13,7 +13,7 @@ let rec run_agent ~(ctx : _ Ctx.t) (prompt_xml : string) (items : CM.content_ite
     then ""
     else
       Printf.sprintf
-        "<msg role=\"user\">\n%s\n</msg>"
+        "<user>\n%s\n</user>"
         (Converter.string_of_items ~ctx ~run_agent items)
   in
   let full_xml = prompt_xml ^ "\n" ^ user_suffix in
@@ -148,7 +148,7 @@ let run_completion
         | Res.Item.Output_message o ->
           append
             (Printf.sprintf
-               "<msg role=\"assistant\" id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</msg>\n"
+               "<assistant id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</assistant>\n"
                o.id
                "RAW"
                (Fetch.tab_on_newline
@@ -172,17 +172,14 @@ let run_completion
         | Res.Item.Function_call fc ->
           append
             (Printf.sprintf
-               "\n\
-                <msg role=\"tool\" function_call function_name=\"%s\" call_id=\"%s\">\n\
-                %s\n\
-                </msg>\n"
+               "\n<tool_call function_name=\"%s\" tool_call_id=\"%s\">\n%s\n</tool_call>\n"
                fc.name
                fc.call_id
                fc.arguments)
         | Res.Item.Function_call_output fco ->
           append
             (Printf.sprintf
-               "\n<msg role=\"tool\" call_id=\"%s\">%s</msg>\n"
+               "\n<tool_response tool_call_id=\"%s\">%s</tool_response>\n"
                fco.call_id
                fco.output)
         | Res.Item.Input_message _
@@ -194,7 +191,7 @@ let run_completion
         | Res.Item.Function_call _ -> true
         | _ -> false)
     then loop ()
-    else append "\n<msg role=\"user\">\n\n</msg>"
+    else append "\n<user>\n\n</user>"
   in
   loop ();
   Cache.save ~file:cache_file cache
@@ -272,14 +269,14 @@ let run_completion_stream
       if not (Hashtbl.mem opened_msgs id)
       then (
         append_doc
-          (Printf.sprintf "\n<msg role=\"assistant\" id=\"%s\">\n\t%s|\n\t\t" id "RAW");
+          (Printf.sprintf "\n<assistant id=\"%s\">\n\t%s|\n\t\t" id "RAW");
         Hashtbl.set opened_msgs ~key:id ~data:());
       append_doc (Fetch.tab_on_newline txt)
     in
     let close_message id =
       if Hashtbl.mem opened_msgs id
       then (
-        append_doc (Printf.sprintf "\n\t|%s\n</msg>\n" "RAW");
+        append_doc (Printf.sprintf "\n\t|%s\n</assistant>\n" "RAW");
         (* remove the message from the opened list *)
         Hashtbl.remove opened_msgs id)
     in
@@ -305,13 +302,7 @@ let run_completion_stream
         then
           append_doc
             (Printf.sprintf
-               "\n\
-                <msg role=\"tool\" tool_call tool_call_id=\"%s\" function_name=\"%s\" \
-                id=\"%s\">\n\
-                \t%s|\n\
-                \t\t%s\n\
-                \t|%s\n\
-                </msg>\n"
+               "\n<tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</tool_call>\n"
                call_id
                name
                item_id
@@ -324,11 +315,7 @@ let run_completion_stream
           in
           append_doc
             (Printf.sprintf
-               "\n\
-                <msg role=\"tool\" tool_call tool_call_id=\"%s\" function_name=\"%s\" \
-                id=\"%s\">\n\
-                \t%s\n\
-                </msg>\n"
+               "\n<tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\t%s\n</tool_call>\n"
                call_id
                name
                item_id
@@ -355,12 +342,7 @@ let run_completion_stream
         then
           append_doc
             (Printf.sprintf
-               "\n\
-                <msg role=\"tool\" tool_call_id=\"%s\" id=\"%s\">\n\
-                \t%s|\n\
-                \t\t%s\n\
-                \t|%s\n\
-                </msg>\n"
+               "\n<tool_response tool_call_id=\"%s\" id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</tool_response>\n"
                call_id
                item_id
                "RAW"
@@ -374,7 +356,7 @@ let run_completion_stream
           in
           append_doc
             (Printf.sprintf
-               "\n<msg role=\"tool\" tool_call_id=\"%s\" id=\"%s\">\n\t%s\n</msg>\n"
+               "\n<tool_response tool_call_id=\"%s\" id=\"%s\">\n\t%s\n</tool_response>\n"
                call_id
                item_id
                (Fetch.tab_on_newline content));
@@ -469,7 +451,7 @@ let run_completion_stream
     (* 4 • If a function call just happened, recurse for the next turn.   *)
     if !run_again
     then turn (List.append inputs (List.rev !new_items))
-    else append_doc "\n<msg role=\"user\">\n\n</msg>"
+    else append_doc "\n<user>\n\n</user>"
   in
   turn inputs;
   Cache.save ~file:cache_file cache

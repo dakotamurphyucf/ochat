@@ -140,6 +140,9 @@ let run_chat ~env ~prompt_file () =
   let fetch_sw : Switch.t option ref = ref None in
   let scroll_box = Scroll_box.create Notty.I.empty in
   let cursor_pos = ref 0 in
+  (* Flag indicating whether the session ended via the ESC key (idle state).
+     We use this to decide whether to prompt for exporting the conversation.*)
+  let quit_via_esc = ref false in
   (* Load persisted draft, if exists, now that [cursor_pos] is available *)
   (match Io.load_doc ~dir:datadir draft_filename with
    | s when not (String.is_empty s) ->
@@ -494,7 +497,10 @@ let run_chat ~env ~prompt_file () =
       let cancel () = Switch.fail sw Cancelled in
       Cmd.run (Cancel_streaming cancel);
       main_loop ()
-    | None -> ()
+    | None ->
+      (* No streaming in flight – quit requested via ESC.  Remember this so
+         we can prompt for export once the UI has shut down. *)
+      quit_via_esc := true
   (* Main event loop – single recursive function so local recursive calls are
      possible without a [ref]. *)
   and main_loop () =
@@ -529,19 +535,45 @@ let run_chat ~env ~prompt_file () =
     | Controller.Unhandled -> main_loop ()
   in
   main_loop ();
-  (* On shutdown, persist new messages added during the session. *)
-  let cmd : Types.cmd =
-    Persist_session
-      (fun () ->
-        Persistence.persist_session
-          ~dir
-          ~prompt_file
-          ~datadir
-          ~cfg
-          ~initial_msg_count
-          ~history_items:!history_items)
+  (* On shutdown, decide whether to persist the session.  We ask for
+     confirmation when the user pressed ESC to quit, otherwise keep the
+     previous auto-export behaviour. *)
+
+  (* Helper – run the actual export. *)
+  let export_session () =
+    let cmd : Types.cmd =
+      Persist_session
+        (fun () ->
+          Persistence.persist_session
+            ~dir
+            ~prompt_file
+            ~datadir
+            ~cfg
+            ~initial_msg_count
+            ~history_items:!history_items)
+    in
+    Cmd.run cmd
   in
-  Cmd.run cmd
+
+  (* [quit_via_esc] is set in [handle_cancel_or_quit] when the user hits
+     ESC while no request is in flight.  In that case we interactively ask
+     whether the conversation should be exported to the prompt-markdown
+     file.  Any answer other than an explicit “y”/“yes” skips the export. *)
+  (match !quit_via_esc with
+   | false ->
+     (* Quit triggered via other means (Ctrl-C / q) – preserve previous
+        behaviour and export automatically. *)
+     export_session ()
+   | true ->
+     (* Ask the user.  The terminal has been restored to normal mode once
+        we reach this point so standard I/O works as usual. *)
+     Out_channel.(output_string stdout "Export conversation to promptmd file? [y/N] ");
+     Out_channel.flush stdout;
+     (match In_channel.input_line In_channel.stdin with
+      | Some ans ->
+        let ans = String.lowercase (String.strip ans) in
+        if List.mem ["y"; "yes"] ans ~equal:String.equal then export_session ()
+      | None -> ()))
 ;;
 
 (* [run_chat] *)
