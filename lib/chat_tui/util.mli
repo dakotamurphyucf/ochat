@@ -18,4 +18,3 @@ val truncate : ?max_len:int -> string -> string
     performed in the middle of a multi-byte UTF-8 scalar value, guaranteeing
     that every item in the returned list is valid UTF-8. *)
 val wrap_line : limit:int -> string -> string list
-

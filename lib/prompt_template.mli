@@ -119,8 +119,8 @@ module Chat_markdown : sig
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type top_level_elements =
-    | Msg of msg                (** Legacy <msg/> element (system, developer…) *)
-    | User of user_msg          (** <user/> *)
+    | Msg of msg (** Legacy <msg/> element (system, developer…) *)
+    | User of user_msg (** <user/> *)
     | Assistant of assistant_msg (** <assistant/> *)
     | Tool_call of tool_call_msg (** <tool_call/> *)
     | Tool_response of tool_response_msg (** <tool_response/> *)

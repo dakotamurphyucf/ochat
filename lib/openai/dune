@@ -1,0 +1,16 @@
+(library
+ (name openai)
+ (public_name chatgpt.openai)
+ (modules completions embeddings responses)
+ (libraries
+  io
+  jsonaf_ext
+  tls-eio
+  core
+  eio
+  eio_main
+  eio.unix
+  cohttp-eio
+  mirage-crypto-rng-eio)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))

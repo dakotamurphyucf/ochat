@@ -11,7 +11,8 @@
  (public_name chatgpt.environment)
  (modules environment)
  (libraries core)
- (preprocess (pps ppx_jane)))
+ (preprocess
+  (pps ppx_jane)))
 
 (library
  (name tikitoken)
@@ -54,40 +55,6 @@
   (pps ppx_jane)))
 
 (library
- (name openai_chat_completion)
- (public_name chatgpt.openai_chat_completion)
- (modules openai_chat_completion)
- (libraries
-  io
-  jsonaf
-  tls-eio
-  core
-  eio
-  eio_main
-  eio.unix
-  cohttp-eio
-  mirage-crypto-rng-eio)
- (preprocess
-  (pps ppx_jane ppx_jsonaf_conv)))
-
-(library
- (name openai)
- (public_name chatgpt.openai)
- (modules openai)
- (libraries
-  io
-  jsonaf_ext
-  tls-eio
-  core
-  eio
-  eio_main
-  eio.unix
-  cohttp-eio
-  mirage-crypto-rng-eio)
- (preprocess
-  (pps ppx_jane ppx_jsonaf_conv)))
-
-(library
  (name github)
  (modules github)
  (public_name chatgpt.github)
@@ -111,7 +78,6 @@
  (public_name chatgpt.filter_file)
  (modules filter_file)
  (libraries core))
-
 
 (library
  (name source)
@@ -142,8 +108,7 @@
   re2
   angstrom
   markup
-  openai
-  openai_chat_completion)
+  openai)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect ppx_jsonaf_conv)))
@@ -210,25 +175,6 @@
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
-; (library
-;  (name chat_response)
-;  (public_name chatgpt.chat_response)
-;  (modules chat_response)
-;  (libraries
-;   core
-;   openai
-;   jsonaf
-;   io
-;   gpt_function
-;   definitions
-;   functions
-;   prompt_template
-;   lru_cache
-;   ttl_lru_cache
-;   bin_prot_utils_eio)
-;  (preprocess
-;   (pps ppx_jane ppx_jsonaf_conv)))
-
 (library
  (name definitions)
  (public_name chatgpt.definitions)
@@ -280,20 +226,21 @@
  (preprocess
   (pps ppx_jane -dont-apply=sexp_message)))
 
-
 (library
  (name chatml)
  (public_name chatgpt.chatml)
  (modules chatml_lang chatml_lexer chatml_parser frame_env)
  (libraries core menhirLib source)
- (preprocess (pps ppx_jane)))
+ (preprocess
+  (pps ppx_jane)))
 
 (library
  (name chatml_resolver)
  (public_name chatgpt.chatml_resolver)
  (modules chatml_resolver)
  (libraries core chatml chatml_typechecker)
- (preprocess (pps ppx_jane)))
+ (preprocess
+  (pps ppx_jane)))
 
 (library
  (name chatml_typechecker)
@@ -319,9 +266,6 @@
  (preprocess
   (pps ppx_jane)))
 
-
-
-
 (library
  (name apply_patch)
  (public_name chatgpt.apply_patch)
@@ -335,7 +279,8 @@
  (public_name chatgpt.notty_scroll_box)
  (modules notty_scroll_box)
  (libraries core notty)
- (preprocess (pps ppx_jane)))
+ (preprocess
+  (pps ppx_jane)))
 
 (menhir
  (modules chatml_parser)

@@ -100,7 +100,7 @@ let ensure_chatmd_dir ~cwd : _ Eio.Path.t =
    | true -> ()
    | false -> Path.mkdirs ~perm:0o700 datadir);
   datadir
-
+;;
 
 module Net = struct
   (** [get_host url] extracts the host from the given [url] and returns it. *)

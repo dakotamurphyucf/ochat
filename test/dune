@@ -11,7 +11,8 @@
  (modules chat_response_cache_test)
  (libraries core expect_test_helpers_core chat_response)
  (inline_tests)
- (preprocess (pps ppx_jane ppx_expect)))
+ (preprocess
+  (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
 ;; MCP stub server (executable used by client tests)
@@ -39,9 +40,17 @@
 (library
  (name chat_response_converter_test)
  (modules chat_response_converter_test)
- (libraries core expect_test_helpers_core chat_response eio eio_main eio.mock eio.unix)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_response
+  eio
+  eio_main
+  eio.mock
+  eio.unix)
  (inline_tests)
- (preprocess (pps ppx_jane ppx_expect)))
+ (preprocess
+  (pps ppx_jane ppx_expect)))
 
 (library
  (name chatml_runtime_test)
@@ -54,7 +63,12 @@
 (library
  (name chatml_typechecker_test)
  (modules chatml_typechecker_test)
- (libraries core chatml chatml_typechecker chatml_resolver chatml_builtin_modules)
+ (libraries
+  core
+  chatml
+  chatml_typechecker
+  chatml_resolver
+  chatml_builtin_modules)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -77,8 +91,11 @@
  (libraries
   core
   expect_test_helpers_core
-  eio eio_main eio.mock eio.unix
+  eio
+  eio_main
+  eio.mock
+  eio.unix
   chatgpt.mcp_transport)
  (inline_tests)
- (preprocess (pps ppx_jane ppx_expect)))
-
+ (preprocess
+  (pps ppx_jane ppx_expect)))

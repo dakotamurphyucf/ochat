@@ -16,8 +16,7 @@ let rec value_to_string (v : value) : string =
     "[|" ^ String.concat ~sep:", " contents ^ "|]"
   | VRecord tbl ->
     let fields =
-      Hashtbl.to_alist tbl
-      |> List.map ~f:(fun (k, v') -> k ^ " = " ^ value_to_string v')
+      Hashtbl.to_alist tbl |> List.map ~f:(fun (k, v') -> k ^ " = " ^ value_to_string v')
     in
     "{ " ^ String.concat ~sep:"; " fields ^ " }"
   | VRef r -> "ref(" ^ value_to_string !r ^ ")"
@@ -47,7 +46,6 @@ module BuiltinModules = struct
           VUnit)
     in
     set_var env "print" fn_print;
-
     let fn_to_string =
       VBuiltin
         (fun args ->

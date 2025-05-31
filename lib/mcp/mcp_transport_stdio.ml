@@ -74,8 +74,8 @@ let spawn_child ~sw ~(env : < process_mgr : _ ; .. >) cmd_line : t =
   let send_fn (json : Jsonaf.t) : unit =
     let line = Jsonaf.to_string json ^ "\n" in
     Eio.Mutex.use_rw write_mutex ~protect:true (fun () ->
-        try Eio.Flow.copy_string line stdin_w with
-        | End_of_file | _ -> raise Connection_closed)
+      try Eio.Flow.copy_string line stdin_w with
+      | End_of_file | _ -> raise Connection_closed)
   in
   let rec recv_fn () : Jsonaf.t =
     try
@@ -130,11 +130,11 @@ let connect : sw:Eio.Switch.t -> env:< process_mgr : _ ; .. > -> string -> t =
 
 let send t (json : Jsonaf.t) : unit =
   if t.closed then raise Connection_closed;
-  (try t.send_fn json with
-   | Connection_closed as ex ->
-     (* Mark closed so that subsequent calls are fast-fail *)
-     t.closed <- true;
-     raise ex)
+  try t.send_fn json with
+  | Connection_closed as ex ->
+    (* Mark closed so that subsequent calls are fast-fail *)
+    t.closed <- true;
+    raise ex
 ;;
 
 let recv t : Jsonaf.t =

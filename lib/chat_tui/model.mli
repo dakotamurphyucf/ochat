@@ -42,15 +42,14 @@ val create
 
 (** Convenience accessors – added on demand. *)
 val input_line : t -> string ref
+
 val cursor_pos : t -> int ref
 val draft_history : t -> string list ref
 val draft_history_pos : t -> int ref
-
 val selection_anchor : t -> int option ref
 val clear_selection : t -> unit
 val set_selection_anchor : t -> int -> unit
 val selection_active : t -> bool
-
 val messages : t -> message list ref
 val auto_follow : t -> bool ref
 

@@ -8,6 +8,7 @@ open Core
 
 let run ~prompt_file () =
   Io.run_main (fun env -> Chat_tui.App.run_chat ~env ~prompt_file ())
+;;
 
 let () =
   let open Command.Let_syntax in
@@ -24,4 +25,4 @@ let () =
         fun () -> run ~prompt_file:conversation_file ()]
   in
   Command_unix.run command
-
+;;

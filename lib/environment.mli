@@ -16,4 +16,3 @@ val of_list : (string * 'a) list -> 'a t
     [rhs].   When a key is present in both maps, the binding from [lhs] is
     kept, i.e. [lhs] “wins”. *)
 val merge : 'a t -> 'a t -> 'a t
-

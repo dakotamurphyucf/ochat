@@ -1,6 +1,5 @@
 open Core
 open Jsonaf.Export
-module C = Openai_chat_completion
 
 module Dom = struct
   open Markup

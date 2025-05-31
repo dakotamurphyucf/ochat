@@ -5,8 +5,7 @@ open Core
 module Cache = Chat_response.Cache
 module CM = Prompt_template.Chat_markdown
 
-let make_key url : CM.agent_content =
-  { url; is_local = false; items = [] }
+let make_key url : CM.agent_content = { url; is_local = false; items = [] }
 
 let%expect_test "find_or_add returns cached value while still fresh" =
   let cache = Cache.create ~max_size:10 () in
@@ -22,6 +21,7 @@ let%expect_test "find_or_add returns cached value while still fresh" =
   (* The [default] callback should have been executed exactly once. *)
   print_s [%sexp (!calls : int)];
   [%expect {| 1 |}]
+;;
 
 let%expect_test "find_or_add recomputes after ttl expiry" =
   let cache = Cache.create ~max_size:10 () in
@@ -38,4 +38,4 @@ let%expect_test "find_or_add recomputes after ttl expiry" =
   let _v2 = Cache.find_or_add cache key ~ttl:ttl_zero ~default in
   print_s [%sexp (!calls : int)];
   [%expect {| 2 |}]
-
+;;

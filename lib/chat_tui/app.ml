@@ -80,7 +80,6 @@ let run_chat ~env ~prompt_file () =
   let datadir = Io.ensure_chatmd_dir ~cwd in
   let cache_file = Eio.Path.(datadir / "cache.bin") in
   let cache = Cache.load ~file:cache_file ~max_size:1000 () in
-
   (* ───────────────────── Draft autosave / restore ────────────────────── *)
   let draft_filename = "draft.txt" in
   let last_saved_draft : string option ref = ref None in
@@ -130,7 +129,6 @@ let run_chat ~env ~prompt_file () =
   let initial_msg_count = List.length !messages in
   (* Mutable pieces that form the [Model.t]. *)
   let input_line = ref "" in
-
   let auto_follow = ref true in
   let msg_buffers : (string, msg_buffer) Hashtbl.t = Hashtbl.create (module String) in
   let function_name_by_id : (string, string) Hashtbl.t = Hashtbl.create (module String) in
@@ -195,7 +193,8 @@ let run_chat ~env ~prompt_file () =
       | Some prev when String.equal prev current_draft -> false
       | _ -> true
     in
-    if needs_save then (
+    if needs_save
+    then (
       Io.save_doc ~dir:datadir draft_filename current_draft;
       last_saved_draft := Some current_draft)
   in
@@ -375,10 +374,10 @@ let run_chat ~env ~prompt_file () =
           let txt = "Unsupported /format language. Only 'ocaml' is supported." in
           let patch = Add_placeholder_message { role = "system"; text = txt } in
           ignore (Model.apply_patch model patch);
-          true)
-      (* -------------------------------------------------------------- *)
-      (*  /expand NAME – insert predefined snippet                      *)
-      (* -------------------------------------------------------------- *)
+          true
+        (* -------------------------------------------------------------- *)
+        (*  /expand NAME – insert predefined snippet                      *)
+        (* -------------------------------------------------------------- *))
       else if String.is_prefix user_msg ~prefix:"/expand "
       then (
         let name = String.strip (String.drop_prefix user_msg 8) |> String.lowercase in
@@ -386,10 +385,7 @@ let run_chat ~env ~prompt_file () =
         | None ->
           let available = String.concat ~sep:", " (Snippet.available ()) in
           let txt =
-            Printf.sprintf
-              "Unknown snippet '%s'.  Available snippets: %s"
-              name
-              available
+            Printf.sprintf "Unknown snippet '%s'.  Available snippets: %s" name available
           in
           let patch = Add_placeholder_message { role = "system"; text = txt } in
           ignore (Model.apply_patch model patch);
@@ -406,17 +402,16 @@ let run_chat ~env ~prompt_file () =
           in
           let before_lines, has_cmd = drop_last_if_cmd [] all_lines in
           if not has_cmd
-          then (
+          then
             (* Command not on its own line – don't expand, treat as normal submit. *)
-            false)
+            false
           else (
             let new_lines = before_lines @ [ snippet_text ] in
             let new_text = String.concat ~sep:"\n" new_lines in
             input_line := new_text;
             cursor_pos := String.length new_text;
             Model.clear_selection model;
-            true)
-      )
+            true))
       else false
     in
     if command_handled
@@ -429,7 +424,8 @@ let run_chat ~env ~prompt_file () =
       (* Reset draft *)
       input_line := "";
       cursor_pos := 0;
-      (try Io.delete_doc ~dir:datadir draft_filename with _ -> ());
+      (try Io.delete_doc ~dir:datadir draft_filename with
+       | _ -> ());
       last_saved_draft := Some "";
       if not (String.is_empty user_msg)
       then (
@@ -554,26 +550,25 @@ let run_chat ~env ~prompt_file () =
     in
     Cmd.run cmd
   in
-
   (* [quit_via_esc] is set in [handle_cancel_or_quit] when the user hits
      ESC while no request is in flight.  In that case we interactively ask
      whether the conversation should be exported to the prompt-markdown
      file.  Any answer other than an explicit “y”/“yes” skips the export. *)
-  (match !quit_via_esc with
-   | false ->
-     (* Quit triggered via other means (Ctrl-C / q) – preserve previous
+  match !quit_via_esc with
+  | false ->
+    (* Quit triggered via other means (Ctrl-C / q) – preserve previous
         behaviour and export automatically. *)
-     export_session ()
-   | true ->
-     (* Ask the user.  The terminal has been restored to normal mode once
+    export_session ()
+  | true ->
+    (* Ask the user.  The terminal has been restored to normal mode once
         we reach this point so standard I/O works as usual. *)
-     Out_channel.(output_string stdout "Export conversation to promptmd file? [y/N] ");
-     Out_channel.flush stdout;
-     (match In_channel.input_line In_channel.stdin with
-      | Some ans ->
-        let ans = String.lowercase (String.strip ans) in
-        if List.mem ["y"; "yes"] ans ~equal:String.equal then export_session ()
-      | None -> ()))
+    Out_channel.(output_string stdout "Export conversation to promptmd file? [y/N] ");
+    Out_channel.flush stdout;
+    (match In_channel.input_line In_channel.stdin with
+     | Some ans ->
+       let ans = String.lowercase (String.strip ans) in
+       if List.mem [ "y"; "yes" ] ans ~equal:String.equal then export_session ()
+     | None -> ())
 ;;
 
 (* [run_chat] *)

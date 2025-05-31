@@ -17,7 +17,6 @@
 
 type t
 
-
 (** Establish a new client connection and start the internal receiver
     fibre.  The MCP *initialize*/*initialized* handshake is performed
     automatically. *)
@@ -32,23 +31,15 @@ val is_closed : t -> bool
 
 (** Low-level JSON-RPC helper: send an arbitrary request and obtain a
     promise that will resolve once the *matching* response arrives. *)
-val rpc_async
-  :  t
-  -> Mcp_types.Jsonrpc.request
-  -> (Jsonaf.t, string) result Eio.Promise.t
+val rpc_async : t -> Mcp_types.Jsonrpc.request -> (Jsonaf.t, string) result Eio.Promise.t
 
 (** Synchronous wrapper around [rpc_async]. *)
-val rpc
-  :  t
-  -> Mcp_types.Jsonrpc.request
-  -> (Jsonaf.t, string) result
+val rpc : t -> Mcp_types.Jsonrpc.request -> (Jsonaf.t, string) result
 
 (** Tool discovery – async + blocking versions *)
-val list_tools_async
-  :  t -> (Mcp_types.Tool.t list, string) result Eio.Promise.t
+val list_tools_async : t -> (Mcp_types.Tool.t list, string) result Eio.Promise.t
 
-val list_tools
-  :  t -> (Mcp_types.Tool.t list, string) result
+val list_tools : t -> (Mcp_types.Tool.t list, string) result
 
 (** Tool invocation – async + blocking versions *)
 val call_tool_async
@@ -66,4 +57,3 @@ val call_tool
 (** Access to a stream of *raw* server notifications (if needed by
     callers).  Each element is the decoded Jsonaf value. *)
 val notifications : t -> Jsonaf.t Eio.Stream.t
-

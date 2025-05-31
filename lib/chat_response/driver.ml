@@ -172,7 +172,10 @@ let run_completion
         | Res.Item.Function_call fc ->
           append
             (Printf.sprintf
-               "\n<tool_call function_name=\"%s\" tool_call_id=\"%s\">\n%s\n</tool_call>\n"
+               "\n\
+                <tool_call function_name=\"%s\" tool_call_id=\"%s\">\n\
+                %s\n\
+                </tool_call>\n"
                fc.name
                fc.call_id
                fc.arguments)
@@ -268,8 +271,7 @@ let run_completion_stream
     let output_text_delta ~id txt =
       if not (Hashtbl.mem opened_msgs id)
       then (
-        append_doc
-          (Printf.sprintf "\n<assistant id=\"%s\">\n\t%s|\n\t\t" id "RAW");
+        append_doc (Printf.sprintf "\n<assistant id=\"%s\">\n\t%s|\n\t\t" id "RAW");
         Hashtbl.set opened_msgs ~key:id ~data:());
       append_doc (Fetch.tab_on_newline txt)
     in
@@ -302,7 +304,12 @@ let run_completion_stream
         then
           append_doc
             (Printf.sprintf
-               "\n<tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</tool_call>\n"
+               "\n\
+                <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
+                \t%s|\n\
+                \t\t%s\n\
+                \t|%s\n\
+                </tool_call>\n"
                call_id
                name
                item_id
@@ -315,7 +322,10 @@ let run_completion_stream
           in
           append_doc
             (Printf.sprintf
-               "\n<tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\t%s\n</tool_call>\n"
+               "\n\
+                <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
+                \t%s\n\
+                </tool_call>\n"
                call_id
                name
                item_id
@@ -342,7 +352,12 @@ let run_completion_stream
         then
           append_doc
             (Printf.sprintf
-               "\n<tool_response tool_call_id=\"%s\" id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</tool_response>\n"
+               "\n\
+                <tool_response tool_call_id=\"%s\" id=\"%s\">\n\
+                \t%s|\n\
+                \t\t%s\n\
+                \t|%s\n\
+                </tool_response>\n"
                call_id
                item_id
                "RAW"

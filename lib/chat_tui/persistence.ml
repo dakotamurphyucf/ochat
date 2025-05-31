@@ -46,7 +46,8 @@ let persist_session
       (match role with
        | "user" -> append (Printf.sprintf "<user>\n%s\n</user>\n" content)
        | "assistant" -> append (Printf.sprintf "<assistant>\n%s\n</assistant>\n" content)
-       | "tool" -> append (Printf.sprintf "<tool_response>\n%s\n</tool_response>\n" content)
+       | "tool" ->
+         append (Printf.sprintf "<tool_response>\n%s\n</tool_response>\n" content)
        | _ -> append (Printf.sprintf "<msg role=\"%s\">\n%s\n</msg>\n" role content))
     | Res_item.Output_message om ->
       let text = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" " in
@@ -69,7 +70,12 @@ let persist_session
       then
         append
           (Printf.sprintf
-             "\n<tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n%s|\n%s\n|%s\n</tool_call>\n"
+             "\n\
+              <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
+              %s|\n\
+              %s\n\
+              |%s\n\
+              </tool_call>\n"
              fc.call_id
              fc.name
              (Option.value fc.id ~default:fc.call_id)
@@ -81,7 +87,8 @@ let persist_session
         Io.save_doc ~dir:datadir filename fc.arguments;
         append
           (Printf.sprintf
-             "<tool_call function_name=\"%s\" tool_call_id=\"%s\" id=\"%s\"><doc src=\"./.chatmd/%s\" local/></tool_call>\n"
+             "<tool_call function_name=\"%s\" tool_call_id=\"%s\" id=\"%s\"><doc \
+              src=\"./.chatmd/%s\" local/></tool_call>\n"
              fc.name
              fc.call_id
              (Option.value fc.id ~default:fc.call_id)
@@ -102,7 +109,8 @@ let persist_session
            Io.save_doc ~dir:datadir filename fco.output;
            append
              (Printf.sprintf
-                "<tool_response tool_call_id=\"%s\"><doc src=\"./.chatmd/%s\" local/></tool_response>\n"
+                "<tool_response tool_call_id=\"%s\"><doc src=\"./.chatmd/%s\" \
+                 local/></tool_response>\n"
                 fco.call_id
                 filename)))
     | Res_item.Reasoning r ->

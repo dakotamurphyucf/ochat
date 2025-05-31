@@ -170,8 +170,7 @@ and convert_user_msg ~ctx ~run_agent (m : CM.user_msg) : Res.Item.t =
   let content_items : Res.Input_message.content_item list =
     match m.content with
     | None -> []
-    | Some (CM.Text t) ->
-      [ Res.Input_message.Text { text = t; _type = "input_text" } ]
+    | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
     | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~ctx ~run_agent)
   in
   Res.Item.Input_message
@@ -212,16 +211,9 @@ and convert_tool_call_msg ~ctx ~run_agent (m : CM.tool_call_msg) : Res.Item.t =
     else raw_args
   in
   Res.Item.Function_call
-    { name
-    ; arguments
-    ; call_id
-    ; _type = "function_call"
-    ; id = m.id
-    ; status = None
-    }
+    { name; arguments; call_id; _type = "function_call"; id = m.id; status = None }
 
-and convert_tool_response_msg ~ctx ~run_agent (m : CM.tool_response_msg)
-    : Res.Item.t =
+and convert_tool_response_msg ~ctx ~run_agent (m : CM.tool_response_msg) : Res.Item.t =
   (* Shorthand <tool_response/> – the *output* of a previously invoked tool. *)
   let call_id = Option.value_exn m.tool_call_id in
   let output =
@@ -231,12 +223,7 @@ and convert_tool_response_msg ~ctx ~run_agent (m : CM.tool_response_msg)
     | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
   in
   Res.Item.Function_call_output
-    { call_id
-    ; _type = "function_call_output"
-    ; id = None
-    ; status = None
-    ; output
-    }
+    { call_id; _type = "function_call_output"; id = None; status = None; output }
 
 and convert_reasoning (r : CM.reasoning) : Res.Item.t =
   let summ =
@@ -251,8 +238,7 @@ let to_items ~ctx ~run_agent (els : CM.top_level_elements list) : Res.Item.t lis
     | CM.User m -> Some (convert_user_msg ~ctx ~run_agent m)
     | CM.Assistant m -> Some (convert_assistant_msg ~ctx ~run_agent m)
     | CM.Tool_call m -> Some (convert_tool_call_msg ~ctx ~run_agent m)
-    | CM.Tool_response m ->
-      Some (convert_tool_response_msg ~ctx ~run_agent m)
+    | CM.Tool_response m -> Some (convert_tool_response_msg ~ctx ~run_agent m)
     | CM.Reasoning r -> Some (convert_reasoning r)
     | CM.Config _ -> None
     | CM.Tool _ -> None)

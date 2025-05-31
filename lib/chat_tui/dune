@@ -1,7 +1,27 @@
 (library
  (name chat_tui)
  (public_name chatgpt.chat_tui)
-(modules util types model renderer persistence stream cmd controller conversation snippet app)
- (libraries core openai eio notty notty_eio notty_scroll_box io chat_response chatgpt.notty_scroll_box)
- (preprocess (pps ppx_jane)))
-
+ (modules
+  util
+  types
+  model
+  renderer
+  persistence
+  stream
+  cmd
+  controller
+  conversation
+  snippet
+  app)
+ (libraries
+  core
+  openai
+  eio
+  notty
+  notty_eio
+  notty_scroll_box
+  io
+  chat_response
+  chatgpt.notty_scroll_box)
+ (preprocess
+  (pps ppx_jane)))
