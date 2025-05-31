@@ -12,7 +12,6 @@
     which applies the necessary updates to the provided model.
 *)
 
-open! Core
 module Res = Openai.Responses
 module Res_stream = Openai.Responses.Response_stream
 

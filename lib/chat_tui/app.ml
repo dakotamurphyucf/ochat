@@ -82,7 +82,7 @@ let run_chat ~env ~prompt_file () =
   let cache = Cache.load ~file:cache_file ~max_size:1000 () in
   (* ───────────────────── Draft autosave / restore ────────────────────── *)
   let draft_filename = "draft.txt" in
-  let last_saved_draft : string option ref = ref None in
+  let last_saved_draft : string option = None in
   (* ──────────────────────── Initial prompt parsing ─────────────────────── *)
   let dir = Eio.Stdenv.fs env in
   let prompt_xml =
@@ -116,39 +116,36 @@ let run_chat ~env ~prompt_file () =
   (* Convert prompt → initial history items. *)
   let ctx_prompt = Ctx.create ~env ~dir ~cache in
   let history_items =
-    ref
-      (Converter.to_items
-         ~ctx:ctx_prompt
-         ~run_agent:Chat_response.Driver.run_agent
-         prompt_elements)
+    Converter.to_items
+      ~ctx:ctx_prompt
+      ~run_agent:Chat_response.Driver.run_agent
+      prompt_elements
   in
   let messages =
-    let initial = Conversation.of_history !history_items in
-    ref initial
+    let initial = Conversation.of_history history_items in
+    initial
   in
-  let initial_msg_count = List.length !messages in
+  let initial_msg_count = List.length messages in
   (* Mutable pieces that form the [Model.t]. *)
-  let input_line = ref "" in
-  let auto_follow = ref true in
+  let input_line = "" in
+  let auto_follow = true in
   let msg_buffers : (string, msg_buffer) Hashtbl.t = Hashtbl.create (module String) in
   let function_name_by_id : (string, string) Hashtbl.t = Hashtbl.create (module String) in
   let reasoning_idx_by_id : (string, int ref) Hashtbl.t =
     Hashtbl.create (module String)
   in
-  let fetch_sw : Switch.t option ref = ref None in
+  let fetch_sw : Switch.t option = None in
   let scroll_box = Scroll_box.create Notty.I.empty in
-  let cursor_pos = ref 0 in
+  let cursor_pos = 0 in
   (* Flag indicating whether the session ended via the ESC key (idle state).
      We use this to decide whether to prompt for exporting the conversation.*)
   let quit_via_esc = ref false in
   (* Load persisted draft, if exists, now that [cursor_pos] is available *)
-  (match Io.load_doc ~dir:datadir draft_filename with
-   | s when not (String.is_empty s) ->
-     input_line := s;
-     cursor_pos := String.length s;
-     last_saved_draft := Some s
-   | exception _ -> ()
-   | _ -> ());
+  let input_line, cursor_pos, last_saved_draft =
+    match Io.load_doc ~dir:datadir draft_filename with
+    | s when not (String.is_empty s) -> s, String.length s, Some s
+    | (exception _) | _ -> input_line, cursor_pos, last_saved_draft
+  in
   let first_draw = ref true in
   let model : Model.t =
     Model.create
@@ -162,9 +159,10 @@ let run_chat ~env ~prompt_file () =
       ~fetch_sw
       ~scroll_box
       ~cursor_pos
-      ~draft_history:(ref [])
-      ~draft_history_pos:(ref 0)
-      ~selection_anchor:(ref None)
+      ~draft_history:[]
+      ~draft_history_pos:0
+      ~selection_anchor:None
+      ~last_saved_draft
   in
   (* Start the Notty terminal – its [on_event] callback just pushes events
      into [ev_stream] so the UI stays single-threaded. *)
@@ -187,16 +185,16 @@ let run_chat ~env ~prompt_file () =
     Notty_eio.Term.cursor term (Some (cx, cy));
     first_draw := false;
     (* Autosave draft if modified *)
-    let current_draft = !input_line in
+    let current_draft = Model.input_line model in
     let needs_save =
-      match !last_saved_draft with
+      match Model.last_saved_draft model with
       | Some prev when String.equal prev current_draft -> false
       | _ -> true
     in
     if needs_save
     then (
       Io.save_doc ~dir:datadir draft_filename current_draft;
-      last_saved_draft := Some current_draft)
+      Model.set_last_saved_draft model (Some current_draft))
   in
   redraw ();
   (* --------------------------------------------------------------------- *)
@@ -205,7 +203,7 @@ let run_chat ~env ~prompt_file () =
 
   (* Submitting the current input buffer to the assistant. *)
   let rec handle_submit () =
-    let user_msg = String.strip !input_line in
+    let user_msg = String.strip (Model.input_line model) in
     (* ------------------------------------------------------------------ *)
     (*  Inline helper commands ("/wrap", "/count", …)                  *)
     (* ------------------------------------------------------------------ *)
@@ -230,7 +228,7 @@ let run_chat ~env ~prompt_file () =
           (* Split the *current* draft into lines, remove the /wrap command
              itself, then re-flow every paragraph (separated by blank lines).
              Definition of paragraph: consecutive non-empty lines. *)
-          let all_lines = String.split_lines !input_line in
+          let all_lines = String.split_lines (Model.input_line model) in
           let body_lines, has_command_line =
             match List.last all_lines with
             | Some last when String.is_prefix (String.strip last) ~prefix:"/wrap " ->
@@ -268,8 +266,8 @@ let run_chat ~env ~prompt_file () =
             let new_body_lines = List.concat rewrapped_paras in
             let new_text = String.concat ~sep:"\n" new_body_lines in
             (* Update draft (input_line) & cursor position. *)
-            input_line := new_text;
-            cursor_pos := String.length new_text;
+            Model.set_input_line model new_text;
+            Model.set_cursor_pos model (String.length new_text);
             (* Clear selection & auto-follow irrelevant here. *)
             Model.clear_selection model;
             true)
@@ -278,7 +276,7 @@ let run_chat ~env ~prompt_file () =
           (* -------------------------------------------------------------- *))
       else if String.equal user_msg "/count"
       then (
-        let draft = String.strip !input_line in
+        let draft = String.strip (Model.input_line model) in
         let char_count = String.length draft in
         let line_count =
           match String.split_lines draft with
@@ -306,7 +304,7 @@ let run_chat ~env ~prompt_file () =
         match lang with
         | "ocaml" ->
           (* Extract the draft minus the /format command line *)
-          let all_lines = String.split_lines !input_line in
+          let all_lines = String.split_lines (Model.input_line model) in
           let body_lines, has_command_line =
             match List.last all_lines with
             | Some last when String.is_prefix (String.strip last) ~prefix:"/format" ->
@@ -361,8 +359,8 @@ let run_chat ~env ~prompt_file () =
             in
             match formatted_or_error with
             | Ok formatted ->
-              input_line := formatted;
-              cursor_pos := String.length formatted;
+              Model.set_input_line model formatted;
+              Model.set_cursor_pos model (String.length formatted);
               Model.clear_selection model;
               true
             | Error msg ->
@@ -392,7 +390,7 @@ let run_chat ~env ~prompt_file () =
           true
         | Some snippet_text ->
           (* Replace the '/expand NAME' command line with the snippet. *)
-          let all_lines = String.split_lines !input_line in
+          let all_lines = String.split_lines (Model.input_line model) in
           let rec drop_last_if_cmd acc = function
             | [] -> List.rev acc, false
             | [ last ] ->
@@ -408,8 +406,8 @@ let run_chat ~env ~prompt_file () =
           else (
             let new_lines = before_lines @ [ snippet_text ] in
             let new_text = String.concat ~sep:"\n" new_lines in
-            input_line := new_text;
-            cursor_pos := String.length new_text;
+            Model.set_input_line model new_text;
+            Model.set_cursor_pos model (String.length new_text);
             Model.clear_selection model;
             true))
       else false
@@ -422,11 +420,12 @@ let run_chat ~env ~prompt_file () =
     else (
       (* ---------------- Submit to assistant ------------------------ *)
       (* Reset draft *)
-      input_line := "";
-      cursor_pos := 0;
+      Model.set_input_line model "";
+      (* Clear selection anchor, if any. *)
+      Model.set_cursor_pos model 0;
       (try Io.delete_doc ~dir:datadir draft_filename with
        | _ -> ());
-      last_saved_draft := Some "";
+      Model.set_last_saved_draft model (Some "");
       if not (String.is_empty user_msg)
       then (
         (* Add to visible conversation and canonical history *)
@@ -434,13 +433,12 @@ let run_chat ~env ~prompt_file () =
         ignore (Model.apply_patch model patch);
         (* Append to draft history for later reuse *)
         let dh = Model.draft_history model in
-        dh := !dh @ [ user_msg ];
-        let dh_pos = Model.draft_history_pos model in
-        dh_pos := List.length !dh);
-      auto_follow := true;
+        Model.set_draft_history model (dh @ [ user_msg ]);
+        Model.set_draft_history_pos model (List.length dh));
+      Model.set_auto_follow model true;
       let _, h = Notty_eio.Term.size term in
       let input_h =
-        match String.split_lines !input_line with
+        match String.split_lines (Model.input_line model) with
         | [] -> 1
         | ls -> List.length ls
       in
@@ -454,33 +452,35 @@ let run_chat ~env ~prompt_file () =
           try
             Switch.run
             @@ fun streaming_sw ->
-            fetch_sw := Some streaming_sw;
+            Model.set_fetch_sw model (Some streaming_sw);
             let on_event ev = Eio.Stream.add ev_stream (`Stream ev) in
             let on_fn_out ev = Eio.Stream.add ev_stream (`Function_output ev) in
-            history_items
-            := Chat_response.Driver.run_completion_stream_in_memory_v1
-                 ~env
-                 ~history:!history_items
-                 ~tools:(Some tools)
-                 ~tool_tbl
-                 ?temperature:cfg.temperature
-                 ?max_output_tokens:cfg.max_tokens
-                 ?reasoning:
-                   (Option.map cfg.reasoning_effort ~f:(fun eff ->
-                      Req.Reasoning.
-                        { effort = Some (Req.Reasoning.Effort.of_str_exn eff)
-                        ; summary = Some Req.Reasoning.Summary.Detailed
-                        }))
-                 ?model:(Option.map cfg.model ~f:Req.model_of_str_exn)
-                 ~on_event
-                 ~on_fn_out
-                 ();
-            messages := Conversation.of_history !history_items;
+            let items =
+              Chat_response.Driver.run_completion_stream_in_memory_v1
+                ~env
+                ~history:(Model.history_items model)
+                ~tools:(Some tools)
+                ~tool_tbl
+                ?temperature:cfg.temperature
+                ?max_output_tokens:cfg.max_tokens
+                ?reasoning:
+                  (Option.map cfg.reasoning_effort ~f:(fun eff ->
+                     Req.Reasoning.
+                       { effort = Some (Req.Reasoning.Effort.of_str_exn eff)
+                       ; summary = Some Req.Reasoning.Summary.Detailed
+                       }))
+                ?model:(Option.map cfg.model ~f:Req.model_of_str_exn)
+                ~on_event
+                ~on_fn_out
+                ()
+            in
+            Model.set_history_items model items;
+            Model.set_messages model (Conversation.of_history (Model.history_items model));
             Eio.Stream.add ev_stream `Redraw;
-            fetch_sw := None
+            Model.set_fetch_sw model None
           with
           | ex ->
-            fetch_sw := None;
+            Model.set_fetch_sw model None;
             prerr_endline (Printf.sprintf "Error during streaming: %s" (Exn.to_string ex));
             Eio.Stream.add ev_stream `Redraw)
       in
@@ -488,7 +488,7 @@ let run_chat ~env ~prompt_file () =
       main_loop ())
   (* ESC – cancel running request if any, otherwise quit. *)
   and handle_cancel_or_quit () =
-    match !fetch_sw with
+    match Model.fetch_sw model with
     | Some sw ->
       let cancel () = Switch.fail sw Cancelled in
       Cmd.run (Cancel_streaming cancel);
@@ -546,7 +546,7 @@ let run_chat ~env ~prompt_file () =
             ~datadir
             ~cfg
             ~initial_msg_count
-            ~history_items:!history_items)
+            ~history_items:(Model.history_items model))
     in
     Cmd.run cmd
   in

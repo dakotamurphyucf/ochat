@@ -33,6 +33,7 @@
   base64
   jsonaf
   tls-eio
+  notty
   mirage-crypto-rng-eio
   ppx_jsonaf_conv
   ppx_expect

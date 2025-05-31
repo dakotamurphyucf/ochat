@@ -112,13 +112,13 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
   let open Notty in
   let w, h = size in
   (* Prepare / update history image inside the scroll box. *)
-  let history_img = history_image ~width:w ~messages:!(Model.messages model) in
-  Notty_scroll_box.set_content model.scroll_box history_img;
+  let history_img = history_image ~width:w ~messages:(Model.messages model) in
+  Notty_scroll_box.set_content (Model.scroll_box model) history_img;
   (* Keep bottom aligned if [auto_follow] is enabled.  The scroll helpers are
      effect-free apart from mutating the scroll box’s internal offset, which
      is an intended side effect that belongs to the model. *)
   let input_lines =
-    match String.split ~on:'\n' !(Model.input_line model) with
+    match String.split ~on:'\n' (Model.input_line model) with
     | [] -> [ "" ]
     | ls -> ls
   in
@@ -129,10 +129,10 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
     (* top & bottom of input box *)
   in
   let history_height = Int.max 1 (h - input_content_height - border_rows) in
-  if !(Model.auto_follow model)
-  then Notty_scroll_box.scroll_to_bottom model.scroll_box ~height:history_height;
+  if Model.auto_follow model
+  then Notty_scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:history_height;
   let history_view =
-    Notty_scroll_box.render model.scroll_box ~width:w ~height:history_height
+    Notty_scroll_box.render (Model.scroll_box model) ~width:w ~height:history_height
   in
   (* ------------------------ Input box & BG --------------------------- *)
   let border_attr = A.(fg lightblue) in
@@ -161,10 +161,10 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
             if not sel_active
             then None, None
             else (
-              match !(Model.selection_anchor model) with
+              match Model.selection_anchor model with
               | None -> None, None
               | Some anchor ->
-                let cur = !(Model.cursor_pos model) in
+                let cur = Model.cursor_pos model in
                 let sel_start = Int.min anchor cur in
                 let sel_end = Int.max anchor cur in
                 let ov_start = Int.max sel_start line_start in
@@ -218,7 +218,7 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
   in
   let full_img = Notty.Infix.(history_view <-> input_img) in
   (* Compute cursor position. *)
-  let total_index = !(Model.cursor_pos model) in
+  let total_index = Model.cursor_pos model in
   let rec row_col lines offset row =
     match lines with
     | [] -> row, 0

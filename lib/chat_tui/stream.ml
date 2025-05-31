@@ -20,7 +20,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
   (* --------------------------------------------------------------------- *)
   | Res_stream.Output_text_delta { item_id; delta; _ } ->
     let patches = ref [] in
-    if not (Hashtbl.mem model.msg_buffers item_id)
+    if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role = "assistant" } :: !patches;
     patches
     := Append_text
@@ -35,12 +35,12 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
      | Item_stream.Function_call fc ->
        let patches = ref [] in
        let idx = Option.value fc.id ~default:fc.call_id in
-       if not (Hashtbl.mem model.msg_buffers idx)
+       if not (Hashtbl.mem (Model.msg_buffers model) idx)
        then patches := Ensure_buffer { id = idx; role = "tool" } :: !patches;
        patches := Set_function_name { id = idx; name = fc.name } :: !patches;
        List.rev !patches
      | Item_stream.Reasoning r ->
-       if Hashtbl.mem model.msg_buffers r.id
+       if Hashtbl.mem (Model.msg_buffers model) r.id
        then []
        else [ Ensure_buffer { id = r.id; role = "reasoning" } ]
      | Item_stream.Output_message om ->
@@ -50,7 +50,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
          |> String.concat ~sep:" "
        in
        let patches =
-         if Hashtbl.mem model.msg_buffers om.id
+         if Hashtbl.mem (Model.msg_buffers model) om.id
          then []
          else [ Ensure_buffer { id = om.id; role = "assistant" } ]
        in
@@ -61,14 +61,14 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
   (* --------------------------------------------------------------------- *)
   | Res_stream.Reasoning_summary_text_delta { item_id; delta; summary_index; _ } ->
     let prefix_newline =
-      match Hashtbl.find model.reasoning_idx_by_id item_id with
+      match Hashtbl.find (Model.reasoning_idx_by_id model) item_id with
       | Some idx_ref when !idx_ref = summary_index -> ""
       | Some _ -> "\n"
       | None -> ""
     in
     (* We'll also update the remembered summary index. *)
     let patches = ref [] in
-    if not (Hashtbl.mem model.msg_buffers item_id)
+    if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role = "reasoning" } :: !patches;
     patches := Update_reasoning_idx { id = item_id; idx = summary_index } :: !patches;
     let txt = prefix_newline ^ Util.sanitize ~strip:false delta in
@@ -79,15 +79,17 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
   (* --------------------------------------------------------------------- *)
   | Res_stream.Function_call_arguments_delta { item_id; delta; _ } ->
     let buf_empty =
-      match Hashtbl.find model.msg_buffers item_id with
+      match Hashtbl.find (Model.msg_buffers model) item_id with
       | Some b -> String.is_empty !(b.text)
       | None -> true
     in
     let fn_name =
-      Option.value (Hashtbl.find model.function_name_by_id item_id) ~default:"tool"
+      Option.value
+        (Hashtbl.find (Model.function_name_by_id model) item_id)
+        ~default:"tool"
     in
     let patches = ref [] in
-    if not (Hashtbl.mem model.msg_buffers item_id)
+    if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role = "tool" } :: !patches;
     if buf_empty
     then
@@ -100,15 +102,17 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
     List.rev !patches
   | Res_stream.Function_call_arguments_done { item_id; _ } ->
     let buf_empty =
-      match Hashtbl.find model.msg_buffers item_id with
+      match Hashtbl.find (Model.msg_buffers model) item_id with
       | Some b -> String.is_empty !(b.text)
       | None -> true
     in
     let fn_name =
-      Option.value (Hashtbl.find model.function_name_by_id item_id) ~default:"tool"
+      Option.value
+        (Hashtbl.find (Model.function_name_by_id model) item_id)
+        ~default:"tool"
     in
     let patches = ref [] in
-    if not (Hashtbl.mem model.msg_buffers item_id)
+    if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role = "tool" } :: !patches;
     if buf_empty
     then

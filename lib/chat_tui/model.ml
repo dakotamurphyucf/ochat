@@ -2,20 +2,22 @@ open Core
 open Types
 
 type t =
-  { history_items : Openai.Responses.Item.t list ref
-  ; messages : message list ref
-  ; input_line : string ref
-  ; auto_follow : bool ref
+  { mutable history_items : Openai.Responses.Item.t list
+  ; mutable messages : message list
+  ; mutable input_line : string
+  ; mutable auto_follow : bool
   ; msg_buffers : (string, Types.msg_buffer) Base.Hashtbl.t
   ; function_name_by_id : (string, string) Base.Hashtbl.t
   ; reasoning_idx_by_id : (string, int ref) Base.Hashtbl.t
-  ; fetch_sw : Eio.Switch.t option ref
+  ; mutable fetch_sw : Eio.Switch.t option
   ; scroll_box : Notty_scroll_box.t
-  ; cursor_pos : int ref
-  ; draft_history : string list ref
-  ; draft_history_pos : int ref
-  ; selection_anchor : int option ref
+  ; mutable cursor_pos : int
+  ; mutable draft_history : string list
+  ; mutable draft_history_pos : int
+  ; mutable selection_anchor : int option
+  ; mutable last_saved_draft : string option
   }
+[@@deriving fields ~getters ~setters]
 
 let create
       ~history_items
@@ -31,6 +33,7 @@ let create
       ~draft_history
       ~draft_history_pos
       ~selection_anchor
+      ~last_saved_draft
   =
   { history_items
   ; messages
@@ -45,6 +48,7 @@ let create
   ; draft_history
   ; draft_history_pos
   ; selection_anchor
+  ; last_saved_draft
   }
 ;;
 
@@ -53,9 +57,9 @@ let cursor_pos t = t.cursor_pos
 let draft_history t = t.draft_history
 let draft_history_pos t = t.draft_history_pos
 let selection_anchor t = t.selection_anchor
-let clear_selection t = t.selection_anchor := None
-let set_selection_anchor t idx = t.selection_anchor := Some idx
-let selection_active t = Option.is_some !(t.selection_anchor)
+let clear_selection t = t.selection_anchor <- None
+let set_selection_anchor t idx = t.selection_anchor <- Some idx
+let selection_active t = Option.is_some t.selection_anchor
 let messages t = t.messages
 let auto_follow t = t.auto_follow
 
@@ -66,7 +70,7 @@ let auto_follow t = t.auto_follow
 
 let update_message_text (model : t) index new_txt =
   model.messages
-  := List.mapi !(model.messages) ~f:(fun idx (role, txt) ->
+  <- List.mapi model.messages ~f:(fun idx (role, txt) ->
        if idx = index then role, new_txt else role, txt)
 ;;
 
@@ -74,11 +78,11 @@ let ensure_buffer (model : t) ~(id : string) ~(role : string) : Types.msg_buffer
   match Hashtbl.find model.msg_buffers id with
   | Some b -> b
   | None ->
-    let index = List.length !(model.messages) in
+    let index = List.length model.messages in
     let b = { Types.text = ref ""; index } in
     Hashtbl.set model.msg_buffers ~key:id ~data:b;
     (* add empty placeholder so the UI can render incrementally *)
-    model.messages := !(model.messages) @ [ role, "" ];
+    model.messages <- model.messages @ [ role, "" ];
     b
 ;;
 
@@ -109,7 +113,7 @@ let apply_patch (model : t) (p : Types.patch) : t =
       then String.sub txt ~pos:0 ~len:max_len ^ "\n…truncated…"
       else txt
     in
-    model.messages := !(model.messages) @ [ role, txt ];
+    model.messages <- model.messages @ [ role, txt ];
     model
   | Types.Update_reasoning_idx { id; idx } ->
     (match Hashtbl.find model.reasoning_idx_by_id id with
@@ -134,13 +138,13 @@ let apply_patch (model : t) (p : Types.patch) : t =
         }
     in
     (* Update underlying refs *)
-    model.history_items := !(model.history_items) @ [ user_item ];
-    model.messages := !(model.messages) @ [ "user", text ];
+    model.history_items <- model.history_items @ [ user_item ];
+    model.messages <- model.messages @ [ "user", text ];
     model
   | Types.Add_placeholder_message { role; text } ->
     (* Only modify the visible message list – placeholders should never end
        up in the canonical conversation history. *)
-    model.messages := !(model.messages) @ [ role, text ];
+    model.messages <- model.messages @ [ role, text ];
     model
 ;;
 

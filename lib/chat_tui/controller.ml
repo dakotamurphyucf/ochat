@@ -17,34 +17,33 @@ type reaction =
 (* -------------------------------------------------------------------- *)
 
 let append_char (model : Model.t) c =
-  let input_ref = Model.input_line model in
   let pos_ref = Model.cursor_pos model in
   (* Reset history browsing pointer when user edits *)
-  let dh_len = List.length !(Model.draft_history model) in
+  let dh_len = List.length (Model.draft_history model) in
   let ptr_ref = Model.draft_history_pos model in
-  if !ptr_ref <> dh_len then ptr_ref := dh_len;
-  let s = !input_ref in
-  let pos = !pos_ref in
+  if ptr_ref <> dh_len then Model.set_draft_history_pos model dh_len;
+  let s = Model.input_line model in
+  let pos = pos_ref in
   let before = String.sub s ~pos:0 ~len:pos in
   let after = String.sub s ~pos ~len:(String.length s - pos) in
-  input_ref := before ^ String.of_char c ^ after;
-  pos_ref := pos + 1
+  Model.set_input_line model (before ^ String.of_char c ^ after);
+  Model.set_cursor_pos model (pos + 1)
 ;;
 
 let backspace (model : Model.t) =
   let input_ref = Model.input_line model in
   let pos_ref = Model.cursor_pos model in
-  let dh_len = List.length !(Model.draft_history model) in
+  let dh_len = List.length (Model.draft_history model) in
   let ptr_ref = Model.draft_history_pos model in
-  if !ptr_ref <> dh_len then ptr_ref := dh_len;
-  let pos = !pos_ref in
-  let s = !input_ref in
+  if ptr_ref <> dh_len then Model.set_draft_history_pos model dh_len;
+  let pos = pos_ref in
+  let s = input_ref in
   if pos > 0
   then (
     let before = String.sub s ~pos:0 ~len:(pos - 1) in
     let after = String.sub s ~pos ~len:(String.length s - pos) in
-    input_ref := before ^ after;
-    pos_ref := pos - 1)
+    Model.set_input_line model (before ^ after);
+    Model.set_cursor_pos model (pos - 1))
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -58,14 +57,12 @@ let yank (model : Model.t) =
   if String.is_empty !kill_buffer
   then ()
   else (
-    let input_ref = Model.input_line model in
-    let pos_ref = Model.cursor_pos model in
-    let s = !input_ref in
-    let pos = !pos_ref in
+    let s = Model.input_line model in
+    let pos = Model.cursor_pos model in
     let before = String.sub s ~pos:0 ~len:pos in
     let after = String.sub s ~pos ~len:(String.length s - pos) in
-    input_ref := before ^ !kill_buffer ^ after;
-    pos_ref := pos + String.length !kill_buffer)
+    Model.set_input_line model (before ^ !kill_buffer ^ after);
+    Model.set_cursor_pos model (pos + String.length !kill_buffer))
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -100,14 +97,12 @@ let delete_range (model : Model.t) ~first ~last =
   if first >= last
   then ()
   else (
-    let input_ref = Model.input_line model in
-    let pos_ref = Model.cursor_pos model in
-    let s = !input_ref in
+    let s = Model.input_line model in
     let before = String.sub s ~pos:0 ~len:first in
     let after = String.sub s ~pos:last ~len:(String.length s - last) in
-    input_ref := before ^ after;
+    Model.set_input_line model (before ^ after);
     (* cursor moves to [first] *)
-    pos_ref := first)
+    Model.set_cursor_pos model first)
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -117,14 +112,14 @@ let delete_range (model : Model.t) ~first ~last =
 let selection_active (model : Model.t) = Model.selection_active model
 
 let copy_selection (model : Model.t) =
-  match !(Model.selection_anchor model) with
+  match Model.selection_anchor model with
   | None -> ()
   | Some anchor ->
-    let pos = !(Model.cursor_pos model) in
+    let pos = Model.cursor_pos model in
     let start_idx, end_idx = if anchor <= pos then anchor, pos else pos, anchor in
     if start_idx <> end_idx
     then (
-      let input = !(Model.input_line model) in
+      let input = Model.input_line model in
       let len = end_idx - start_idx in
       if start_idx >= 0 && start_idx + len <= String.length input
       then (
@@ -134,14 +129,14 @@ let copy_selection (model : Model.t) =
 ;;
 
 let cut_selection (model : Model.t) =
-  match !(Model.selection_anchor model) with
+  match Model.selection_anchor model with
   | None -> ()
   | Some anchor ->
-    let pos = !(Model.cursor_pos model) in
+    let pos = Model.cursor_pos model in
     let start_idx, end_idx = if anchor <= pos then anchor, pos else pos, anchor in
     if start_idx <> end_idx
     then (
-      let input = !(Model.input_line model) in
+      let input = Model.input_line model in
       let len = end_idx - start_idx in
       if start_idx >= 0 && start_idx + len <= String.length input
       then (
@@ -152,10 +147,8 @@ let cut_selection (model : Model.t) =
 ;;
 
 let kill_to_eol (model : Model.t) =
-  let input_ref = Model.input_line model in
-  let pos_ref = Model.cursor_pos model in
-  let s = !input_ref in
-  let pos = !pos_ref in
+  let s = Model.input_line model in
+  let pos = Model.cursor_pos model in
   let _, line_end = line_bounds s pos in
   (* Include newline char, if any *)
   let line_end =
@@ -169,10 +162,8 @@ let kill_to_eol (model : Model.t) =
 ;;
 
 let kill_to_bol (model : Model.t) =
-  let input_ref = Model.input_line model in
-  let pos_ref = Model.cursor_pos model in
-  let s = !input_ref in
-  let pos = !pos_ref in
+  let s = Model.input_line model in
+  let pos = Model.cursor_pos model in
   let line_start, _ = line_bounds s pos in
   let killed = String.sub s ~pos:line_start ~len:(pos - line_start) in
   kill killed;
@@ -180,16 +171,14 @@ let kill_to_bol (model : Model.t) =
 ;;
 
 let kill_prev_word (model : Model.t) =
-  let input_ref = Model.input_line model in
-  let pos_ref = Model.cursor_pos model in
-  let s = !input_ref in
-  let pos = !pos_ref in
+  let s = Model.input_line model in
+  let pos = Model.cursor_pos model in
   if pos = 0
   then ()
   else (
-    let dh_len = List.length !(Model.draft_history model) in
+    let dh_len = List.length (Model.draft_history model) in
     let ptr_ref = Model.draft_history_pos model in
-    if !ptr_ref <> dh_len then ptr_ref := dh_len;
+    if ptr_ref <> dh_len then Model.set_draft_history_pos model dh_len;
     let rec skip_space i =
       if i > 0 && Char.is_whitespace (String.get s (i - 1)) then skip_space (i - 1) else i
     in
@@ -211,11 +200,9 @@ let kill_prev_word (model : Model.t) =
 
 let move_cursor_vertically (model : Model.t) ~dir =
   (* dir = -1 for up, +1 for down *)
-  let input_ref = Model.input_line model in
-  let pos_ref = Model.cursor_pos model in
-  let s = !input_ref in
+  let s = Model.input_line model in
+  let pos = Model.cursor_pos model in
   let len = String.length s in
-  let pos = !pos_ref in
   let line_start, line_end = line_bounds s pos in
   (* Determine current column (in bytes) *)
   let col = pos - line_start in
@@ -259,7 +246,7 @@ let move_cursor_vertically (model : Model.t) ~dir =
   then () (* can't move *)
   else (
     let new_col = Int.min col (target_line_end - target_line_start) in
-    pos_ref := target_line_start + new_col)
+    Model.set_cursor_pos model (target_line_start + new_col))
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -267,10 +254,8 @@ let move_cursor_vertically (model : Model.t) ~dir =
 (* -------------------------------------------------------------------- *)
 
 let duplicate_line (model : Model.t) ~below =
-  let input_ref = Model.input_line model in
-  let pos_ref = Model.cursor_pos model in
-  let s = !input_ref in
-  let pos = !pos_ref in
+  let s = Model.input_line model in
+  let pos = Model.cursor_pos model in
   let line_start, line_end = line_bounds s pos in
   let line_str = String.sub s ~pos:line_start ~len:(line_end - line_start) in
   let with_newline =
@@ -286,16 +271,16 @@ let duplicate_line (model : Model.t) ~below =
     in
     let before = String.sub s ~pos:0 ~len:insert_pos in
     let after = String.sub s ~pos:insert_pos ~len:(String.length s - insert_pos) in
-    input_ref := before ^ with_newline ^ after;
+    Model.set_input_line model (before ^ with_newline ^ after);
     (* keep cursor on original line *)
-    pos_ref := pos)
+    Model.set_cursor_pos model pos)
   else (
     (* insert before current line *)
     let before = String.sub s ~pos:0 ~len:line_start in
     let after = String.sub s ~pos:line_start ~len:(String.length s - line_start) in
-    input_ref := before ^ with_newline ^ after;
+    Model.set_input_line model (before ^ with_newline ^ after);
     (* cursor shifts by line length + newline *)
-    pos_ref := pos + String.length with_newline)
+    Model.set_cursor_pos model (pos + String.length with_newline))
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -303,18 +288,16 @@ let duplicate_line (model : Model.t) ~below =
 (* -------------------------------------------------------------------- *)
 
 let indent_line (model : Model.t) ~amount =
-  let input_ref = Model.input_line model in
-  let pos_ref = Model.cursor_pos model in
-  let s = !input_ref in
-  let pos = !pos_ref in
+  let s = Model.input_line model in
+  let pos = Model.cursor_pos model in
   let line_start, _ = line_bounds s pos in
   if amount > 0
   then (
     let before = String.sub s ~pos:0 ~len:line_start in
     let after = String.sub s ~pos:line_start ~len:(String.length s - line_start) in
     let indent = String.make amount ' ' in
-    input_ref := before ^ indent ^ after;
-    pos_ref := pos + amount)
+    Model.set_input_line model (before ^ indent ^ after);
+    Model.set_cursor_pos model (pos + amount))
   else (
     let max_remove = Int.min (-amount) (String.length s - line_start) in
     (* Count up to [max_remove] consecutive spaces starting at [line_start]. *)
@@ -333,7 +316,7 @@ let indent_line (model : Model.t) ~amount =
     else (
       delete_range model ~first:line_start ~last:(line_start + remove);
       (* adjust cursor: cannot move before line_start *)
-      pos_ref := Int.max line_start (pos - remove)))
+      Model.set_cursor_pos model (Int.max line_start (pos - remove))))
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -344,18 +327,18 @@ let scroll_by_lines (model : Model.t) ~term delta =
   let _, screen_h = Notty_eio.Term.size term in
   (* Number of lines occupied by the multiline input editor. *)
   let input_height =
-    match String.split_lines !(Model.input_line model) with
+    match String.split_lines (Model.input_line model) with
     | [] -> 1
     | ls -> List.length ls
   in
   let history_h = Int.max 1 (screen_h - input_height) in
-  Scroll_box.scroll_by model.scroll_box ~height:history_h delta
+  Scroll_box.scroll_by (Model.scroll_box model) ~height:history_h delta
 ;;
 
 let page_size ~term (model : Model.t) =
   let _, screen_h = Notty_eio.Term.size term in
   let input_height =
-    match String.split_lines !(Model.input_line model) with
+    match String.split_lines (Model.input_line model) with
     | [] -> 1
     | ls -> List.length ls
   in
@@ -406,9 +389,8 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   (*  Ctrl-A / Ctrl-E fallback (terminals that don't set [`Ctrl] flag)  *)
   | `Key (`ASCII '\001', _) ->
     (* Ctrl-A fallback: beginning of line *)
-    let input_ref = Model.input_line model in
-    let pos_ref = Model.cursor_pos model in
-    let s = !input_ref in
+    let s = Model.input_line model in
+    let pos = Model.cursor_pos model in
     let rec find_bol i =
       if i <= 0
       then 0
@@ -416,14 +398,13 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
       then i
       else find_bol (i - 1)
     in
-    pos_ref := find_bol !pos_ref;
+    Model.set_cursor_pos model (find_bol pos);
     Redraw
   (* Uchar Ctrl-A fallback omitted to reduce dependency issues. *)
   | `Key (`ASCII '\005', _) ->
     (* Ctrl-E fallback: end of line *)
-    let input_ref = Model.input_line model in
-    let pos_ref = Model.cursor_pos model in
-    let s = !input_ref in
+    let s = Model.input_line model in
+    let pos = Model.cursor_pos model in
     let len = String.length s in
     let rec find_eol i =
       if i >= len
@@ -432,7 +413,7 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
       then i
       else find_eol (i + 1)
     in
-    pos_ref := find_eol !pos_ref;
+    Model.set_cursor_pos model (find_eol pos);
     Redraw
     (* Uchar Ctrl-E fallback omitted. *)
   | `Key (`ASCII c, mods) when List.is_empty mods && Char.to_int c >= 0x20 ->
@@ -463,19 +444,19 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   (* ----------------------------------------------------------------- *)
   (* Selection toggle (Meta-v)                                          *)
   | `Key (`ASCII ('v' | 'V'), mods) when List.mem mods `Meta ~equal:Poly.equal ->
-    (match !(Model.selection_anchor model) with
-     | None -> Model.set_selection_anchor model !(Model.cursor_pos model)
+    (match Model.selection_anchor model with
+     | None -> Model.set_selection_anchor model (Model.cursor_pos model)
      | Some _ -> Model.clear_selection model);
     Redraw
   (* Alternate toggle key: Meta-S or U+00DF (ß) often sent for Alt-s *)
   | `Key (`ASCII ('s' | 'S'), mods) when List.mem mods `Meta ~equal:Poly.equal ->
-    (match !(Model.selection_anchor model) with
-     | None -> Model.set_selection_anchor model !(Model.cursor_pos model)
+    (match Model.selection_anchor model with
+     | None -> Model.set_selection_anchor model (Model.cursor_pos model)
      | Some _ -> Model.clear_selection model);
     Redraw
   | `Key (`Uchar u, _) when UC.to_int u = 0x00DF ->
-    (match !(Model.selection_anchor model) with
-     | None -> Model.set_selection_anchor model !(Model.cursor_pos model)
+    (match Model.selection_anchor model with
+     | None -> Model.set_selection_anchor model (Model.cursor_pos model)
      | Some _ -> Model.clear_selection model);
     Redraw
   | `Key (`ASCII ('l' | 'L'), [ `Ctrl ]) ->
@@ -504,7 +485,7 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
       model.auto_follow := false;
       scroll_by_lines model ~term (-1);
       Redraw) *)
-    model.auto_follow := false;
+    Model.set_auto_follow model false;
     scroll_by_lines model ~term (-1);
     Redraw
   (* ----------------------------------------------------------------- *)
@@ -520,13 +501,13 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   (*  NOTE:  These cases must come after the more specific word-move    *)
   (*  cases (Ctrl/Meta + Arrow) so that they don't shadow them.         *)
   | `Key (`Arrow `Left, mods) when List.is_empty mods ->
-    let pos_ref = Model.cursor_pos model in
-    if !pos_ref > 0 then pos_ref := !pos_ref - 1;
+    let pos = Model.cursor_pos model in
+    if pos > 0 then Model.set_cursor_pos model (pos - 1);
     Redraw
   | `Key (`Arrow `Right, mods) when List.is_empty mods ->
-    let pos_ref = Model.cursor_pos model in
-    let input_ref = Model.input_line model in
-    if !pos_ref < String.length !input_ref then pos_ref := !pos_ref + 1;
+    let pos = Model.cursor_pos model in
+    let input = Model.input_line model in
+    if pos < String.length input then Model.set_cursor_pos model (pos + 1);
     Redraw
   (* ----------------------------------------------------------------- *)
   (* Copy / Cut when selection active                                   *)
@@ -544,44 +525,39 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   | `Key (`Arrow `Left, mods)
     when List.exists mods ~f:(fun m -> Poly.equal m `Ctrl || Poly.equal m `Meta)
          && not (List.mem mods `Shift ~equal:Poly.equal) ->
-    let pos_ref = Model.cursor_pos model in
-    let input_ref = Model.input_line model in
-    let s = !input_ref in
+    let pos = Model.cursor_pos model in
+    let s = Model.input_line model in
     let len = String.length s in
-    let new_pos = if len = 0 then 0 else skip_space s !pos_ref in
-    pos_ref := new_pos;
+    let new_pos = if len = 0 then 0 else skip_space s pos in
+    Model.set_cursor_pos model new_pos;
     Redraw
   (* Meta-b / Meta-f word-wise navigation (common on macOS terminals)    *)
   | `Key (`ASCII 'b', mods) when List.mem mods `Meta ~equal:Poly.equal ->
-    let pos_ref = Model.cursor_pos model in
-    let input_ref = Model.input_line model in
-    let s = !input_ref in
-    pos_ref := skip_space s !pos_ref;
+    let pos = Model.cursor_pos model in
+    let s = Model.input_line model in
+    Model.set_cursor_pos model (skip_space s pos);
     Redraw
   | `Key (`ASCII 'f', mods) when List.mem mods `Meta ~equal:Poly.equal ->
-    let pos_ref = Model.cursor_pos model in
-    let input_ref = Model.input_line model in
-    let s = !input_ref in
+    let pos = Model.cursor_pos model in
+    let s = Model.input_line model in
     let len = String.length s in
-    pos_ref := skip_word s len !pos_ref;
+    Model.set_cursor_pos model (skip_word s len pos);
     Redraw
   | `Key (`Arrow `Right, mods)
     when List.exists mods ~f:(fun m -> Poly.equal m `Ctrl || Poly.equal m `Meta)
          && not (List.mem mods `Shift ~equal:Poly.equal) ->
-    let pos_ref = Model.cursor_pos model in
-    let input_ref = Model.input_line model in
-    let s = !input_ref in
+    let pos = Model.cursor_pos model in
+    let s = Model.input_line model in
     let len = String.length s in
-    let new_pos = if len = 0 then 0 else skip_word s len !pos_ref in
-    pos_ref := new_pos;
+    let new_pos = if len = 0 then 0 else skip_word s len pos in
+    Model.set_cursor_pos model new_pos;
     Redraw
     (* ────────────────────────────────────────────────────────────────── *)
     (*  Beginning / end of line (Ctrl-A / Ctrl-E)                         *)
   | `Key (`ASCII ('a' | 'A'), [ `Ctrl ]) ->
     (* Start of line *)
-    let input_ref = Model.input_line model in
-    let pos_ref = Model.cursor_pos model in
-    let s = !input_ref in
+    let s = Model.input_line model in
+    let pos = Model.cursor_pos model in
     let rec find_bol i =
       if i <= 0
       then 0
@@ -589,13 +565,12 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
       then i
       else find_bol (i - 1)
     in
-    pos_ref := find_bol !pos_ref;
+    Model.set_cursor_pos model (find_bol pos);
     Redraw
   | `Key (`ASCII ('e' | 'E'), [ `Ctrl ]) ->
     (* End of line *)
-    let input_ref = Model.input_line model in
-    let pos_ref = Model.cursor_pos model in
-    let s = !input_ref in
+    let s = Model.input_line model in
+    let pos = Model.cursor_pos model in
     let len = String.length s in
     let rec find_eol i =
       if i >= len
@@ -604,18 +579,16 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
       then i
       else find_eol (i + 1)
     in
-    pos_ref := find_eol !pos_ref;
+    Model.set_cursor_pos model (find_eol pos);
     Redraw
   (* ────────────────────────────────────────────────────────────────── *)
   (*  Beginning / end of entire message (Ctrl+Home / Ctrl+End)         *)
   | `Key (`Home, mods) when List.exists mods ~f:(Poly.equal `Ctrl) ->
-    let pos_ref = Model.cursor_pos model in
-    pos_ref := 0;
+    Model.set_cursor_pos model 0;
     Redraw
   | `Key (`End, mods) when List.exists mods ~f:(Poly.equal `Ctrl) ->
-    let input_ref = Model.input_line model in
-    let pos_ref = Model.cursor_pos model in
-    pos_ref := String.length !input_ref;
+    let input = Model.input_line model in
+    Model.set_cursor_pos model (String.length input);
     Redraw
   | `Key (`Arrow `Down, mods) when List.is_empty mods ->
     (* let dh = Model.draft_history model in
@@ -642,7 +615,7 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
       model.auto_follow := false;
       scroll_by_lines model ~term 1;
       Redraw) *)
-    model.auto_follow := false;
+    Model.set_auto_follow model false;
     scroll_by_lines model ~term 1;
     Redraw
   (* ----------------------------------------------------------------- *)
@@ -669,28 +642,28 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
     indent_line model ~amount:(-2);
     Redraw
   | `Key (`Page `Up, _) ->
-    model.auto_follow := false;
+    Model.set_auto_follow model false;
     let ps = page_size ~term model in
     scroll_by_lines model ~term (-ps);
     Redraw
   | `Key (`Page `Down, _) ->
-    model.auto_follow := false;
+    Model.set_auto_follow model false;
     let ps = page_size ~term model in
     scroll_by_lines model ~term ps;
     Redraw
   | `Key (`Home, _) ->
-    model.auto_follow := false;
-    Scroll_box.scroll_to_top model.scroll_box;
+    Model.set_auto_follow model false;
+    Scroll_box.scroll_to_top (Model.scroll_box model);
     Redraw
   | `Key (`End, _) ->
-    model.auto_follow := true;
+    Model.set_auto_follow model true;
     let _, screen_h = Notty_eio.Term.size term in
     let input_h =
-      match String.split_lines !(Model.input_line model) with
+      match String.split_lines (Model.input_line model) with
       | [] -> 1
       | ls -> List.length ls
     in
-    Scroll_box.scroll_to_bottom model.scroll_box ~height:(screen_h - input_h);
+    Scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:(screen_h - input_h);
     Redraw
   | `Key (`Enter, []) ->
     (* Literal newline inside the input buffer *)
