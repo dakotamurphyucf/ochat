@@ -262,6 +262,8 @@ module Chat_content = struct
   type assistant_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
   type tool_call_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
   type tool_response_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type developer_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type system_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type custom_tool =
     { name : string
@@ -283,6 +285,15 @@ module Chat_content = struct
     | Builtin of string
     | Custom of custom_tool
     | Agent of agent_tool
+    (* A tool exposed by a remote MCP server. *)
+    | Mcp of mcp_tool
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  and mcp_tool =
+    { name : string
+    ; description : string option
+    ; mcp_server : string (** URI of the MCP server hosting the tool *)
+    }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (* The config element. *)
@@ -312,6 +323,8 @@ module Chat_content = struct
 
   type top_level_elements =
     | Msg of msg
+    | Developer of developer_msg
+    | System of system_msg
     | User of user_msg
     | Assistant of assistant_msg
     | Tool_call of tool_call_msg
@@ -329,6 +342,8 @@ module Chat_markdown = struct
   (* The internal chat_element used while building the final messages. *)
   type chat_element =
     | Message of msg
+    | Developer_msg of developer_msg
+    | System_msg of system_msg
     | User_msg of user_msg
     | Assistant_msg of assistant_msg
     | Tool_call_msg of tool_call_msg
@@ -382,6 +397,8 @@ module Chat_markdown = struct
       Agent { url = u; is_local = loc; items = content_items_of_elements ch }
       :: content_items_of_elements rest
     | ( Message _
+      | Developer_msg _
+      | System_msg _
       | User_msg _
       | Assistant_msg _
       | Tool_call_msg _
@@ -515,8 +532,20 @@ module Chat_markdown = struct
            name
            desc_attr
            agent
-           local_attr)
-    | Message m | User_msg m | Assistant_msg m | Tool_call_msg m | Tool_response_msg m ->
+           local_attr
+       | Mcp { name; description; mcp_server } ->
+         let desc_attr =
+           Option.value_map description ~default:"" ~f:(fun d ->
+             Printf.sprintf " description=\"%s\"" d)
+         in
+         Printf.sprintf "<tool name=\"%s\"%s mcp_server=\"%s\" />" name desc_attr mcp_server)
+    | Developer_msg m
+    | System_msg m
+    | Message m
+    | User_msg m
+    | Assistant_msg m
+    | Tool_call_msg m
+    | Tool_response_msg m ->
       (match m.content with
        | Some (Text t) -> t
        | Some (Items items) ->
@@ -566,6 +595,20 @@ module Chat_markdown = struct
              Message (attr_to_msg attr content_opt)) *)
           let content_opt = parse_msg_children children in
           Message (attr_to_msg attr content_opt)
+        | "developer" ->
+          (* Shorthand for <msg role="assistant"> – we still fill in the [role]
+             attribute so existing helpers like [attr_to_msg] work unchanged. *)
+          let content_opt = parse_msg_children children in
+          let role_attr : Markup.name * string = ("", "role"), "developer" in
+          let attrs = role_attr :: attr in
+          Developer_msg (attr_to_msg attrs content_opt)
+        | "system" ->
+          (* Shorthand for <msg role="system"> – we still fill in the [role]
+             attribute so existing helpers like [attr_to_msg] work unchanged. *)
+          let content_opt = parse_msg_children children in
+          let role_attr : Markup.name * string = ("", "role"), "system" in
+          let attrs = role_attr :: attr in
+          System_msg (attr_to_msg attrs content_opt)
         | "user" ->
           (* Shorthand for <user/> – internally we still fill in the [role]
              attribute so existing helpers like [attr_to_msg] work unchanged. *)
@@ -658,26 +701,37 @@ module Chat_markdown = struct
           let name = Hashtbl.find_exn tbl "name" |> String.strip in
           let command = Hashtbl.find tbl "command" in
           let agent = Hashtbl.find tbl "agent" in
+          let mcp_server = Hashtbl.find tbl "mcp_server" in
           let description = Hashtbl.find tbl "description" in
           let is_local = Hashtbl.mem tbl "local" in
-          (match command, agent with
-           | Some _, Some _ ->
-             failwith "<tool> cannot have both 'command' and 'agent' attributes."
-           | Some cmd, None ->
+          (match command, agent, mcp_server with
+           | Some _, Some _, _
+           | Some _, _, Some _
+           | _, Some _, Some _ ->
+             failwith
+               "<tool> cannot combine 'command', 'agent' and 'mcp_server' attributes."
+           | Some cmd, None, None ->
              let cmd = String.strip cmd in
              if String.is_empty cmd
              then failwith "Tool command cannot be empty."
              else (
                let description = Option.map description ~f:String.strip in
                Tool (Custom { name; description; command = cmd }))
-           | None, Some agent_url ->
+           | None, Some agent_url, None ->
              let agent_url = String.strip agent_url in
              if String.is_empty agent_url
              then failwith "Tool agent URL cannot be empty."
              else (
                let description = Option.map description ~f:String.strip in
                Tool (Agent { name; description; agent = agent_url; is_local }))
-           | None, None ->
+           | None, None, Some mcp_uri ->
+             let mcp_uri = String.strip mcp_uri in
+             if String.is_empty mcp_uri
+             then failwith "Tool mcp_server URI cannot be empty."
+             else (
+               let description = Option.map description ~f:String.strip in
+               Tool (Mcp { name; description; mcp_server = mcp_uri }))
+           | None, None, None ->
              if String.is_empty name
              then failwith "Tool name cannot be empty."
              else Tool (Builtin name))
@@ -701,6 +755,8 @@ module Chat_markdown = struct
     Markup.elements (fun (_, name) _ ->
       match name with
       | "msg"
+      | "developer"
+      | "system"
       | "user"
       | "assistant"
       | "tool_call"
@@ -722,7 +778,9 @@ module Chat_markdown = struct
     | Some (Tool_response_msg m) -> Some (Tool_response m)
     | Some (Config c) -> Some (Config c)
     | Some (Reasoning r) -> Some (Reasoning r)
-    | Some (Tool t) -> Some (Tool t) (* Added handling for Tool elements *)
+    | Some (Tool t) -> Some (Tool t)
+    | Some (Developer_msg m) -> Some (Developer m)
+    | Some (System_msg m) -> Some (System m) (* System is a legacy alias for Developer *)
     | Some _ -> None
   ;;
 

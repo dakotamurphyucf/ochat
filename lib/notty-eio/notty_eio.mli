@@ -15,4 +15,5 @@ module Term : sig
   val refresh : t -> unit
   val cursor : t -> (int * int) option -> unit
   val size : t -> int * int
+  val release : t -> unit
 end

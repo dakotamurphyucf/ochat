@@ -16,6 +16,11 @@
   bin_prot_utils_eio
   nottui
   lwd
-  nottui-pretty)
+  nottui-pretty
+  eio
+  eio.unix
+  chatgpt.mcp_tool
+  chatgpt.mcp_client
+  chatgpt.mcp_types)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

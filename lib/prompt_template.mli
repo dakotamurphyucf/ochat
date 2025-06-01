@@ -86,6 +86,8 @@ module Chat_markdown : sig
   type assistant_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
   type tool_call_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
   type tool_response_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type developer_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
+  type system_msg = msg [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type custom_tool =
     { name : string
@@ -102,10 +104,18 @@ module Chat_markdown : sig
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type mcp_tool =
+    { name : string
+    ; description : string option
+    ; mcp_server : string
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
   type tool =
     | Builtin of string
     | Custom of custom_tool
     | Agent of agent_tool
+    | Mcp of mcp_tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type config =
@@ -120,6 +130,8 @@ module Chat_markdown : sig
 
   type top_level_elements =
     | Msg of msg (** Legacy <msg/> element (system, developer…) *)
+    | Developer of developer_msg
+    | System of system_msg
     | User of user_msg (** <user/> *)
     | Assistant of assistant_msg (** <assistant/> *)
     | Tool_call of tool_call_msg (** <tool_call/> *)

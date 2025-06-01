@@ -5,7 +5,8 @@
     to the [prompt_file]. *)
 val run_chat
   :  env:
-       < cwd : Eio.Fs.dir_ty Eio.Path.t
+       < clock : [> float Eio.Time.clock_ty ] Eio.Resource.t
+       ; cwd : Eio.Fs.dir_ty Eio.Path.t
        ; fs : Eio.Fs.dir_ty Eio.Path.t
        ; net : [> [> `Generic ] Eio.Net.ty ] Eio.Resource.t
        ; process_mgr : [> [> `Generic ] Eio.Process.mgr_ty ] Eio.Resource.t

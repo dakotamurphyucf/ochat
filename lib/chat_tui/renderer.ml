@@ -64,7 +64,13 @@ let message_to_image ~max_width ((role, text) : message) : I.t =
         make_lines para pref)
     in
     (* Pre-create image per line to get display width. *)
-    let line_imgs = List.map lines ~f:(fun l -> I.string content_attr l) in
+    let line_imgs =
+      List.map lines ~f:(fun l ->
+        match I.string content_attr l with
+        | s -> s
+        | exception e ->
+          I.string content_attr (Printf.sprintf "[error: %s]" (Exn.to_string e)))
+    in
     let line_widths = List.map line_imgs ~f:I.width in
     let max_line_w = List.fold line_widths ~init:0 ~f:Int.max in
     (* Borders reuse content colour. *)

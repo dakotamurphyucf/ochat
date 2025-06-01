@@ -19,9 +19,6 @@ type reaction =
 let append_char (model : Model.t) c =
   let pos_ref = Model.cursor_pos model in
   (* Reset history browsing pointer when user edits *)
-  let dh_len = List.length (Model.draft_history model) in
-  let ptr_ref = Model.draft_history_pos model in
-  if ptr_ref <> dh_len then Model.set_draft_history_pos model dh_len;
   let s = Model.input_line model in
   let pos = pos_ref in
   let before = String.sub s ~pos:0 ~len:pos in
@@ -33,9 +30,6 @@ let append_char (model : Model.t) c =
 let backspace (model : Model.t) =
   let input_ref = Model.input_line model in
   let pos_ref = Model.cursor_pos model in
-  let dh_len = List.length (Model.draft_history model) in
-  let ptr_ref = Model.draft_history_pos model in
-  if ptr_ref <> dh_len then Model.set_draft_history_pos model dh_len;
   let pos = pos_ref in
   let s = input_ref in
   if pos > 0
@@ -176,9 +170,6 @@ let kill_prev_word (model : Model.t) =
   if pos = 0
   then ()
   else (
-    let dh_len = List.length (Model.draft_history model) in
-    let ptr_ref = Model.draft_history_pos model in
-    if ptr_ref <> dh_len then Model.set_draft_history_pos model dh_len;
     let rec skip_space i =
       if i > 0 && Char.is_whitespace (String.get s (i - 1)) then skip_space (i - 1) else i
     in
@@ -331,7 +322,7 @@ let scroll_by_lines (model : Model.t) ~term delta =
     | [] -> 1
     | ls -> List.length ls
   in
-  let history_h = Int.max 1 (screen_h - input_height) in
+  let history_h = Int.max 1 (screen_h - input_height - 2) in
   Scroll_box.scroll_by (Model.scroll_box model) ~height:history_h delta
 ;;
 

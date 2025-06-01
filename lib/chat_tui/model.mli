@@ -16,12 +16,7 @@ type t =
   ; mutable fetch_sw : Eio.Switch.t option
   ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int (** Current position inside [input_line] (bytes). *)
-  ; mutable draft_history : string list
-    (** History of previously submitted user drafts. *)
-  ; mutable draft_history_pos : int
-    (** Current index into [draft_history] when navigating. *)
   ; mutable selection_anchor : int option (** Anchor position for active selection. *)
-  ; mutable last_saved_draft : string option
   }
 [@@deriving fields ~getters ~setters]
 
@@ -39,18 +34,13 @@ val create
   -> fetch_sw:Eio.Switch.t option
   -> scroll_box:Notty_scroll_box.t
   -> cursor_pos:int
-  -> draft_history:string list
-  -> draft_history_pos:int
   -> selection_anchor:int option
-  -> last_saved_draft:string option
   -> t
 
 (** Convenience accessors – added on demand. *)
 val input_line : t -> string
 
 val cursor_pos : t -> int
-val draft_history : t -> string list
-val draft_history_pos : t -> int
 val selection_anchor : t -> int option
 val clear_selection : t -> unit
 val set_selection_anchor : t -> int -> unit

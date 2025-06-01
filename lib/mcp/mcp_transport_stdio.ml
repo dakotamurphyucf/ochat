@@ -70,25 +70,42 @@ let spawn_child ~sw ~(env : < process_mgr : _ ; .. >) cmd_line : t =
   let reader = Eio.Buf_read.of_flow stdout_r ~max_size:10_000_000 in
   (* Ensure that only one fibre writes at a time.  Reads are already
        serialised because [recv] is blocking. *)
+  let read_mutex = Eio.Mutex.create () in
   let write_mutex = Eio.Mutex.create () in
+  (* ----------------------------------------------------------------
+       4. Build the transport interface.
+    ---------------------------------------------------------------- *)
+  (* The [send_fn] writes a JSON value to the child process' stdin.
+     It blocks until the write is complete or the child closes its
+     stdin. *)
   let send_fn (json : Jsonaf.t) : unit =
     let line = Jsonaf.to_string json ^ "\n" in
-    Eio.Mutex.use_rw write_mutex ~protect:true (fun () ->
-      try Eio.Flow.copy_string line stdin_w with
-      | End_of_file | _ -> raise Connection_closed)
-  in
-  let rec recv_fn () : Jsonaf.t =
     try
+      Eio.Mutex.lock write_mutex;
+      Eio.Flow.copy_string line stdin_w;
+      Eio.Mutex.unlock write_mutex
+    with
+    | End_of_file | _ -> raise Connection_closed
+  in
+  let recv_fn () : Jsonaf.t =
+    try
+      Eio.Mutex.lock read_mutex;
+      (* Read a line from the child.  This will block until the child
+         sends a message or closes its stdout. *)
       let line = Eio.Buf_read.line reader in
+      Eio.Mutex.unlock read_mutex;
       Jsonaf.of_string line
     with
     | End_of_file ->
       (* Child closed its stdout → no further messages. *)
       raise Connection_closed
     | ex ->
-      (* Malformed line – log and continue. *)
-      Format.eprintf "@[<v>(mcp-stdio) ignoring unparsable line (%a)@]@." Eio.Exn.pp ex;
-      recv_fn ()
+      (* Malformed line – failing for now may update to logging. *)
+      failwith
+        (Format.asprintf
+           "@[<v>(mcp-stdio) ignoring unparsable line (%a)@]@."
+           Eio.Exn.pp
+           ex)
   in
   let close_fn () =
     (* Close our pipe ends first – this should trigger graceful
@@ -139,6 +156,8 @@ let send t (json : Jsonaf.t) : unit =
 
 let recv t : Jsonaf.t =
   if t.closed then raise Connection_closed;
+  (* Blocking read – this will wait until the child sends a message. *)
+  (* If the child closed its stdout, this will raise [Connection_closed]. *)
   try t.recv_fn () with
   | Connection_closed as ex ->
     t.closed <- true;

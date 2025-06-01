@@ -84,8 +84,8 @@ module Jsonrpc = struct
   type response =
     { jsonrpc : string [@key "jsonrpc"]
     ; id : Id.t
-    ; result : Jsonaf.t option [@default None] [@jsonaf_drop_if Option.is_none]
-    ; error : error_obj option [@default None] [@jsonaf_drop_if Option.is_none]
+    ; result : Jsonaf.t option [@jsonaf.option]
+    ; error : error_obj option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
 
@@ -192,7 +192,7 @@ module Tool_result = struct
 
   type t =
     { content : content list
-    ; is_error : bool [@key "isError"]
+    ; is_error : bool [@key "isError"] [@default false]
     }
   [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
 end

@@ -162,11 +162,31 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
    diverging we only need to update the implementation here without
    touching every call-site. *)
 
+and convert_system_msg ~ctx ~run_agent (m : CM.system_msg) : Res.Item.t =
+  (* [system_msg] is an alias of [msg] but we *know* its [role] is "system"
+     and that it never carries tool-call metadata.  Therefore we can
+     shortcut straight to an [Input_message] constructor without any
+     defensive pattern-matching on the role field. *)
+  let content_items : Res.Input_message.content_item list =
+    match m.content with
+    | None -> []
+    | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
+    | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~ctx ~run_agent)
+  in
+  Res.Item.Input_message
+    { role = Res.Input_message.System; content = content_items; _type = "message" }
+
+and convert_developer_msg ~ctx ~run_agent (m : CM.developer_msg) : Res.Item.t =
+  let content_items : Res.Input_message.content_item list =
+    match m.content with
+    | None -> []
+    | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
+    | Some (CM.Items lst) -> List.map lst ~f:(convert_content_item ~ctx ~run_agent)
+  in
+  Res.Item.Input_message
+    { role = Res.Input_message.Developer; content = content_items; _type = "message" }
+
 and convert_user_msg ~ctx ~run_agent (m : CM.user_msg) : Res.Item.t =
-  (* [user_msg] is an alias of [msg] but we *know* its [role] is "user" and
-     that it never carries tool-call metadata.  Therefore we can shortcut
-     straight to an [Input_message] constructor without any defensive
-     pattern-matching on the role field. *)
   let content_items : Res.Input_message.content_item list =
     match m.content with
     | None -> []
@@ -177,20 +197,38 @@ and convert_user_msg ~ctx ~run_agent (m : CM.user_msg) : Res.Item.t =
     { role = Res.Input_message.User; content = content_items; _type = "message" }
 
 and convert_assistant_msg ~ctx ~run_agent (m : CM.assistant_msg) : Res.Item.t =
-  (* Plain assistant reply (no tool-call). *)
-  let text =
-    match m.content with
-    | None -> ""
-    | Some (CM.Text t) -> t
-    | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
-  in
-  Res.Item.Output_message
-    { role = Assistant
-    ; id = Option.value ~default:"" m.id
-    ; status = Option.value m.status ~default:"completed"
-    ; _type = "message"
-    ; content = [ { annotations = []; text; _type = "output_text" } ]
-    }
+  match m.id, m.status with
+  | Some id, status ->
+    let text =
+      match m.content with
+      | None -> ""
+      | Some (CM.Text t) -> t
+      | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
+    in
+    Res.Item.Output_message
+      { role = Assistant
+      ; id
+      ; status = Option.value status ~default:"completed"
+      ; _type = "message"
+      ; content = [ { annotations = []; text; _type = "output_text" } ]
+      }
+  | None, None ->
+    let content_items : Res.Input_message.content_item list =
+      match m.content with
+      | None -> []
+      | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
+      | Some (CM.Items items) ->
+        [ Res.Input_message.Text
+            { text = string_of_items ~ctx ~run_agent items; _type = "input_text" }
+        ]
+    in
+    Res.Item.Input_message
+      { role = Res.Input_message.Assistant; content = content_items; _type = "message" }
+  | None, Some _ ->
+    raise
+      (Failure
+         "Assistant message must have both ID and status, or neither.  Found status \
+          without ID.")
 
 and convert_tool_call_msg ~ctx ~run_agent (m : CM.tool_call_msg) : Res.Item.t =
   (* Shorthand <tool_call/> – assistant *invoking* a tool.  The parser
@@ -235,6 +273,8 @@ and convert_reasoning (r : CM.reasoning) : Res.Item.t =
 let to_items ~ctx ~run_agent (els : CM.top_level_elements list) : Res.Item.t list =
   List.filter_map els ~f:(function
     | CM.Msg m -> Some (convert_msg ~ctx ~run_agent m)
+    | CM.System m -> Some (convert_system_msg ~ctx ~run_agent m)
+    | CM.Developer m -> Some (convert_developer_msg ~ctx ~run_agent m)
     | CM.User m -> Some (convert_user_msg ~ctx ~run_agent m)
     | CM.Assistant m -> Some (convert_assistant_msg ~ctx ~run_agent m)
     | CM.Tool_call m -> Some (convert_tool_call_msg ~ctx ~run_agent m)

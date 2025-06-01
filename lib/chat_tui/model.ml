@@ -12,10 +12,7 @@ type t =
   ; mutable fetch_sw : Eio.Switch.t option
   ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int
-  ; mutable draft_history : string list
-  ; mutable draft_history_pos : int
   ; mutable selection_anchor : int option
-  ; mutable last_saved_draft : string option
   }
 [@@deriving fields ~getters ~setters]
 
@@ -30,10 +27,7 @@ let create
       ~fetch_sw
       ~scroll_box
       ~cursor_pos
-      ~draft_history
-      ~draft_history_pos
       ~selection_anchor
-      ~last_saved_draft
   =
   { history_items
   ; messages
@@ -45,17 +39,12 @@ let create
   ; fetch_sw
   ; scroll_box
   ; cursor_pos
-  ; draft_history
-  ; draft_history_pos
   ; selection_anchor
-  ; last_saved_draft
   }
 ;;
 
 let input_line t = t.input_line
 let cursor_pos t = t.cursor_pos
-let draft_history t = t.draft_history
-let draft_history_pos t = t.draft_history_pos
 let selection_anchor t = t.selection_anchor
 let clear_selection t = t.selection_anchor <- None
 let set_selection_anchor t idx = t.selection_anchor <- Some idx

@@ -25,6 +25,24 @@
   (pps ppx_jane ppx_jsonaf_conv)))
 
 ;; ---------------------------------------------------------------------------
+;; MCP – tool wrapper (client-side helper)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_tool)
+ (public_name chatgpt.mcp_tool)
+ (modules mcp_tool)
+ (libraries
+  core
+  chatgpt.mcp_types
+  chatgpt.mcp_client
+  gpt_function
+  jsonaf_ext)
+ (wrapped false)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+;; ---------------------------------------------------------------------------
 ;; MCP – high-level synchronous client (stdio phase-1)
 ;; ---------------------------------------------------------------------------
 

@@ -105,14 +105,14 @@ let connect ~sw ~env ~uri =
   (* We need [client] inside the receiver fibre and the fibre handle
      inside [client] – use [let rec] to tie the knot. *)
   let client : t = { transport; sw; next_id = 1; pending; notif_stream } in
+  (* Perform blocking initialize before returning. *)
+  perform_initialize client;
   (* Start receiver fibre now that [client] is ready *)
   let _ =
     Eio.Fiber.fork_daemon ~sw (fun () ->
       receiver_loop client;
       `Stop_daemon)
   in
-  (* Perform blocking initialize before returning. *)
-  perform_initialize client;
   client
 ;;
 
