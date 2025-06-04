@@ -31,6 +31,8 @@ depends: [
   "cohttp"
   "expect_test_helpers_core"
   "re2"
+  "bimage"
+  "bimage-unix"
   "odoc" {with-doc}
 ]
 build: [

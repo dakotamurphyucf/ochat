@@ -124,8 +124,8 @@ gpt tokenize -file src/file.ml       # default bin/main.ml
     <!-- make the source tree available so the assistant can patch files -->
     <tool name="apply_patch"/>
 
-    <msg role="system">You are a helpful OCaml pair-programmer.</msg>
-    <msg role="user">How can I make this function tail-recursive?</msg>
+    <system>You are a helpful OCaml pair-programmer.</system>
+    <user>How can I make this function tail-recursive?</user>
     ```
 
 2.  Run the CLI:
@@ -151,7 +151,7 @@ execution context**.  It is parsed by `Prompt_template.Chat_markdown` and execut
 | `<config/>` | Current model and generation parameters. **Must be present once** near the top. | `model`, `max_tokens`, `temperature`, `reasoning_effort`, **`show_tool_call` (flag attribute)** – *when present* the runtime **embeds** tool-call arguments & outputs inline; when omitted they are written to files and referenced via `<doc/>` imports. |
 | `<tool/>` | Declare a tool that the model may call. | • `name` – tool/function name.<br>• *Built-ins* only need the name (e.g. `apply_patch`).<br>• For **custom shell tools** add `command="<shell-command>"` and optional `description="..."`.<br>• For an **agent-backed tool** add `agent="<url-or-path>"` (plus optional `local` flag and `description`). |
 | `<msg>` | A chat message. | `role` (`system,user,assistant,developer,tool`), optional `name`, `id`, `status`.  Assistant messages that *call a tool* add the boolean `tool_call` attribute plus `function_name` & `tool_call_id`. |
-| `<user/>`, `<assistant/>` | **Shorthand** for `<msg role="user"> … </msg>` / `<msg role="assistant"> … </msg>` | Accept the same optional attributes (`name`,`id`,`status`). |
+| `<user/>`, `<assistant/>`, `<developer/>`, `<system>` | **Shorthand** for `<msg role="user"> … </msg>` / `<msg role="assistant"> … </msg>` / `<msg role="developer"> … </msg>` / `<msg role="system"> … </msg>` | Accept the same optional attributes (`name`,`id`,`status`). |
 | `<tool_call/>` | **Shorthand** for an assistant *tool-invocation* message – equivalent to `<msg role="assistant" tool_call …>` | Must include `function_name` & `tool_call_id` attributes.  Body carries the JSON arguments (usually wrapped in `RAW| … |RAW`). |
 | `<tool_response/>` | **Shorthand** for the tool’s reply – equivalent to `<msg role="tool" …>` | Must include `tool_call_id`.  Body contains the tool output. |
 | `<reasoning>` | Internal scratchpad the model can populate when reasoning is enabled.  Not needed when authoring prompts. | `id`, `status`. Contains one or more `<summary>` blocks. |

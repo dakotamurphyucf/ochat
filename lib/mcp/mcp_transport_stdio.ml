@@ -1,4 +1,4 @@
-(*--------------------------------------------------------------------------
+(**
    Model Context Protocol – stdio TRANSPORT implementation
 
    This module provides a concrete implementation of the
@@ -20,14 +20,13 @@
      as JSON are ignored (but still forwarded to the debug logger).
 
    All messages are newline-delimited UTF-8 encoded JSON values (the
-   line-delimiter is mandated by the spec for the stdio transport).
----------------------------------------------------------------------------*)
+   line-delimiter is mandated by the spec for the stdio transport). *)
 
 open Core
 
-(*--------------------------------------------------------------------*
+(**
     Record describing a *live* stdio connection
-  *--------------------------------------------------------------------*)
+  *)
 type t =
   { send_fn : Jsonaf.t -> unit
   ; recv_fn : unit -> Jsonaf.t

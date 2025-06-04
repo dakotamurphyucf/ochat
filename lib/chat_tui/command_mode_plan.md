@@ -442,3 +442,7 @@ Implementing these scaffolds first will make all roadmap features slot in
 cleanly without monolithic diffs later.
 
 
+### 9.13  Add syntax highlighting
+* Use `Notty` to render `code` blocks in conversation.
+* For syntax highlighting, we can use the [`hilite`](https://github.com/patricoferris/hilite) library and [`ocaml-textmate-language`](https://github.com/alan-j-hu/ocaml-textmate-language/) library as inspiration to parse and render code blocks in the conversation.\
+* This will involve creating a function that transform a Jsonaf.t to a Yojson.t since `ocaml-textmate-language` works with Yojson.t variants. Luckily it is not a dependency of ocaml-textmate-language, and that they just do object coersion instead.

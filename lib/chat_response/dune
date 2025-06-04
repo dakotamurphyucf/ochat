@@ -19,8 +19,8 @@
   nottui-pretty
   eio
   eio.unix
-  chatgpt.mcp_tool
-  chatgpt.mcp_client
-  chatgpt.mcp_types)
+  mcp_tool
+  mcp_client
+  mcp_types)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

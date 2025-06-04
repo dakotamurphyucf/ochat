@@ -110,6 +110,3 @@ module Tool_result : sig
     }
   [@@deriving jsonaf, sexp, bin_io]
 end
-
-(* (-- removed duplicate simplified decls below; the richer versions with
-   conversion helpers are defined further above --) *)

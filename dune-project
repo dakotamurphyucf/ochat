@@ -39,7 +39,9 @@
   ppx_expect
   cohttp
   expect_test_helpers_core
-  re2)
+  re2
+  bimage 
+  bimage-unix)
   
  (tags
   (topics "to describe" your project)))

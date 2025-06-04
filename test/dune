@@ -7,6 +7,14 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name chatmd_parser_test)
+ (modules chatmd_parser_test)
+ (libraries core expect_test_helpers_core chatmd)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
  (name chat_response_cache_test)
  (modules chat_response_cache_test)
  (libraries core expect_test_helpers_core chat_response)
@@ -33,7 +41,7 @@
 ;  (libraries
 ;   core expect_test_helpers_core
 ;   eio eio_main eio.mock eio.unix
-;   chatgpt.mcp_client)
+;   chatgpt.mcp_client) 
 ;  (inline_tests)
 ;  (preprocess (pps ppx_jane ppx_expect)))
 

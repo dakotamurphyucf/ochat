@@ -41,6 +41,19 @@ let fulfil_resolver resolver (v : (Jsonaf.t, string) result) =
 ;;
 
 (*------------------------------------------------------------------*)
+(* RPC helper                                                        *)
+(*------------------------------------------------------------------*)
+
+let rpc_async (c : t) (req : JT.request) =
+  let promise, resolver = Eio.Promise.create () in
+  Id_table.add_exn c.pending ~key:req.id ~data:resolver;
+  Transport.send c.transport (JT.jsonaf_of_request req);
+  promise
+;;
+
+let rpc c req = Eio.Promise.await (rpc_async c req)
+
+(*------------------------------------------------------------------*)
 (* Receiver loop                                                     *)
 (*------------------------------------------------------------------*)
 
@@ -105,7 +118,7 @@ let connect ~sw ~env ~uri =
   (* We need [client] inside the receiver fibre and the fibre handle
      inside [client] – use [let rec] to tie the knot. *)
   let client : t = { transport; sw; next_id = 1; pending; notif_stream } in
-  (* Perform blocking initialize before returning. *)
+  (* Perform blocking initialize before running the daemon and returning because the receiver loop  *)
   perform_initialize client;
   (* Start receiver fibre now that [client] is ready *)
   let _ =
@@ -119,19 +132,6 @@ let connect ~sw ~env ~uri =
 let close c = Transport.close c.transport
 let is_closed c = Transport.is_closed c.transport
 let notifications c = c.notif_stream
-
-(*------------------------------------------------------------------*)
-(* RPC helper                                                        *)
-(*------------------------------------------------------------------*)
-
-let rpc_async (c : t) (req : JT.request) =
-  let promise, resolver = Eio.Promise.create () in
-  Id_table.add_exn c.pending ~key:req.id ~data:resolver;
-  Transport.send c.transport (JT.jsonaf_of_request req);
-  promise
-;;
-
-let rpc c req = Eio.Promise.await (rpc_async c req)
 
 (*------------------------------------------------------------------*)
 (* High-level helpers                                                *)

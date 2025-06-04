@@ -1,0 +1,37 @@
+(library
+ (name chatml)
+ (public_name chatgpt.chatml)
+ (modules chatml_lang chatml_lexer chatml_parser frame_env)
+ (libraries core menhirLib source)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name chatml_resolver)
+ (public_name chatgpt.chatml_resolver)
+ (modules chatml_resolver)
+ (libraries core chatml chatml_typechecker)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name chatml_typechecker)
+ (public_name chatgpt.chatml_typechecker)
+ (modules chatml_typechecker)
+ (libraries core chatml)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name chatml_builtin_modules)
+ (public_name chatgpt.chatml_builtin_modules)
+ (modules chatml_builtin_modules)
+ (libraries chatml core)
+ (preprocess
+  (pps ppx_jane)))
+
+(menhir
+ (modules chatml_parser)
+ (flags --table --dump))
+
+(ocamllex chatml_lexer)
