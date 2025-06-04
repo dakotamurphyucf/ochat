@@ -168,16 +168,13 @@ let of_declaration ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t
     (* Retrieve tool metadata via a short-lived MCP client *)
     let tool_meta =
       Eio.Switch.run (fun sw ->
-          let client =
-            Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server
-          in
-          match Mcp_client.list_tools client with
-          | Ok tools -> (
-              match List.find tools ~f:(fun t -> String.equal t.name name) with
-              | Some t -> t
-              | None ->
-                failwithf "MCP server %s does not expose tool %s" mcp_server name ())
-          | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
+        let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server in
+        match Mcp_client.list_tools client with
+        | Ok tools ->
+          (match List.find tools ~f:(fun t -> String.equal t.name name) with
+           | Some t -> t
+           | None -> failwithf "MCP server %s does not expose tool %s" mcp_server name ())
+        | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
     in
     Mcp_tool.gpt_function_of_remote_tool ~env:(Ctx.env ctx) ~uri:mcp_server tool_meta
 ;;

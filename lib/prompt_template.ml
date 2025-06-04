@@ -538,7 +538,11 @@ module Chat_markdown = struct
            Option.value_map description ~default:"" ~f:(fun d ->
              Printf.sprintf " description=\"%s\"" d)
          in
-         Printf.sprintf "<tool name=\"%s\"%s mcp_server=\"%s\" />" name desc_attr mcp_server)
+         Printf.sprintf
+           "<tool name=\"%s\"%s mcp_server=\"%s\" />"
+           name
+           desc_attr
+           mcp_server)
     | Developer_msg m
     | System_msg m
     | Message m
@@ -705,9 +709,7 @@ module Chat_markdown = struct
           let description = Hashtbl.find tbl "description" in
           let is_local = Hashtbl.mem tbl "local" in
           (match command, agent, mcp_server with
-           | Some _, Some _, _
-           | Some _, _, Some _
-           | _, Some _, Some _ ->
+           | Some _, Some _, _ | Some _, _, Some _ | _, Some _, Some _ ->
              failwith
                "<tool> cannot combine 'command', 'agent' and 'mcp_server' attributes."
            | Some cmd, None, None ->

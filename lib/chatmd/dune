@@ -4,11 +4,11 @@
  (wrapped false)
  (modules chatmd_ast chatmd_lexer chatmd_parser)
  (libraries core str menhirLib)
- (preprocess (pps ppx_jane)))
+ (preprocess
+  (pps ppx_jane)))
 
 (menhir
  (modules chatmd_parser)
  (flags --table))
 
 (ocamllex chatmd_lexer)
-
