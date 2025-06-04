@@ -26,24 +26,32 @@
 ;; MCP stub server (executable used by client tests)
 ;; ---------------------------------------------------------------------------
 
-; (executable
-;  (name mcp_stub_server)
-;  (modules mcp_stub_server)
-;  (libraries core jsonaf chatgpt.mcp_types))
+(executable
+ (name mcp_stub_server)
+ (public_name mcp_stub_server)
+ (modules mcp_stub_server)
+ (libraries core jsonaf jsonaf_ext chatgpt.mcp_types))
 
 ;; ---------------------------------------------------------------------------
 ;; MCP client high-level tests (uses stub server)
 ;; ---------------------------------------------------------------------------
 
-; (library
-;  (name mcp_client_test)
-;  (modules mcp_client_test)
-;  (libraries
-;   core expect_test_helpers_core
-;   eio eio_main eio.mock eio.unix
-;   chatgpt.mcp_client) 
-;  (inline_tests)
-;  (preprocess (pps ppx_jane ppx_expect)))
+(library
+ (name mcp_client_test)
+ (modules mcp_client_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.mock
+  eio.unix
+  chatgpt.mcp_client
+  chatgpt.mcp_types)
+ (inline_tests
+  (deps %{bin:mcp_stub_server}))
+ (preprocess
+  (pps ppx_jane ppx_expect)))
 
 (library
  (name chat_response_converter_test)

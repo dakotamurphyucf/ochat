@@ -69,7 +69,8 @@ let message_to_image ~max_width ((role, text) : message) : I.t =
         match I.string content_attr l with
         | s -> s
         | exception e ->
-          I.string content_attr (Printf.sprintf "[error: %s]" (Exn.to_string e)))
+          Printf.eprintf "Error rendering line: %s" (Exn.to_string e);
+          I.string content_attr (Printf.sprintf "[error: invalid input]"))
     in
     let line_widths = List.map line_imgs ~f:I.width in
     let max_line_w = List.fold line_widths ~init:0 ~f:Int.max in
