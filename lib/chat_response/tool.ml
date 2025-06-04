@@ -11,6 +11,29 @@ open Core
 module CM = Prompt_template.Chat_markdown
 module Res = Openai.Responses
 
+(*------------------------------------------------------------------*)
+(* 5. Remote MCP tool metadata cache                                *)
+(*------------------------------------------------------------------*)
+
+(* We keep a small TTL-based LRU that maps an MCP server URI to the
+   list of tools it exposes. This avoids re-running the expensive
+   `tools/list` handshake for every `<tool mcp_server=...>`
+   declaration inside a prompt. *)
+
+module String_key = struct
+  type t = string [@@deriving sexp, compare, hash]
+
+  (* The cache key is just the server URI – no internal invariants. *)
+  let invariant (_ : t) = ()
+end
+
+module Tool_cache = Ttl_lru_cache.Make (String_key)
+
+let tool_cache : Mcp_types.Tool.t list Tool_cache.t =
+  Tool_cache.create ~max_size:32 ()
+
+let cache_ttl = Time_ns.Span.of_int_sec 300
+
 (*--- 4-a.  OpenAI → Responses tool conversion ----------------------*)
 
 let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list =
@@ -161,20 +184,44 @@ let of_declaration ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t
   | CM.Custom c -> custom_fn ~env:(Ctx.env ctx) c
   | CM.Agent agent_spec -> agent_fn ~ctx ~run_agent agent_spec
   | CM.Mcp { name; description = _; mcp_server } ->
-    (* Establish a temporary MCP client to discover the tool metadata. We
-       keep the client around for subsequent invocations to avoid
-       repeating the handshake.  For now a simple global cache keyed by
-       the server URI is sufficient. *)
-    (* Retrieve tool metadata via a short-lived MCP client *)
+    (* Retrieve (and cache) the list of tools for this server. *)
+    let tools_for_server =
+      Tool_cache.find_or_add tool_cache mcp_server ~ttl:cache_ttl ~default:(fun () ->
+        Eio.Switch.run (fun sw ->
+            let client =
+              Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server
+            in
+            match Mcp_client.list_tools client with
+            | Ok lst -> lst
+            | Error msg ->
+              failwithf "Failed to list tools from %s: %s" mcp_server msg ()))
+    in
     let tool_meta =
-      Eio.Switch.run (fun sw ->
-        let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server in
-        match Mcp_client.list_tools client with
-        | Ok tools ->
-          (match List.find tools ~f:(fun t -> String.equal t.name name) with
-           | Some t -> t
-           | None -> failwithf "MCP server %s does not expose tool %s" mcp_server name ())
-        | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
+      match List.find tools_for_server ~f:(fun t -> String.equal t.name name) with
+      | Some t -> t
+      | None ->
+        (* Cache might be stale – refresh once before giving up. *)
+        let tools =
+          Eio.Switch.run (fun sw ->
+              let client =
+                Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server
+              in
+              match Mcp_client.list_tools client with
+              | Ok lst ->
+                (* Update cache and continue. *)
+                Tool_cache.set_with_ttl tool_cache ~key:mcp_server ~data:lst ~ttl:cache_ttl;
+                lst
+              | Error msg ->
+                failwithf "Failed to list tools from %s: %s" mcp_server msg ())
+        in
+        (match List.find tools ~f:(fun t -> String.equal t.name name) with
+         | Some t -> t
+         | None ->
+           failwithf
+             "MCP server %s does not expose tool %s (after refresh)"
+             mcp_server
+             name
+             ())
     in
     Mcp_tool.gpt_function_of_remote_tool ~env:(Ctx.env ctx) ~uri:mcp_server tool_meta
 ;;
