@@ -1,5 +1,5 @@
 open Core
-module CM = Prompt_template.Chat_markdown
+module CM = Prompt.Chat_markdown
 
 (*--- 0-a. Key + underlying LRU implementation -----------------------*)
 module Key = struct

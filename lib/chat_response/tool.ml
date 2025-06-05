@@ -8,7 +8,7 @@
   *********************************************************************)
 
 open Core
-module CM = Prompt_template.Chat_markdown
+module CM = Prompt.Chat_markdown
 module Res = Openai.Responses
 
 (*------------------------------------------------------------------*)
@@ -29,9 +29,7 @@ end
 
 module Tool_cache = Ttl_lru_cache.Make (String_key)
 
-let tool_cache : Mcp_types.Tool.t list Tool_cache.t =
-  Tool_cache.create ~max_size:32 ()
-
+let tool_cache : Mcp_types.Tool.t list Tool_cache.t = Tool_cache.create ~max_size:32 ()
 let cache_ttl = Time_ns.Span.of_int_sec 300
 
 (*--- 4-a.  OpenAI → Responses tool conversion ----------------------*)
@@ -188,13 +186,10 @@ let of_declaration ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t
     let tools_for_server =
       Tool_cache.find_or_add tool_cache mcp_server ~ttl:cache_ttl ~default:(fun () ->
         Eio.Switch.run (fun sw ->
-            let client =
-              Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server
-            in
-            match Mcp_client.list_tools client with
-            | Ok lst -> lst
-            | Error msg ->
-              failwithf "Failed to list tools from %s: %s" mcp_server msg ()))
+          let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server in
+          match Mcp_client.list_tools client with
+          | Ok lst -> lst
+          | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ()))
     in
     let tool_meta =
       match List.find tools_for_server ~f:(fun t -> String.equal t.name name) with
@@ -203,16 +198,13 @@ let of_declaration ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t
         (* Cache might be stale – refresh once before giving up. *)
         let tools =
           Eio.Switch.run (fun sw ->
-              let client =
-                Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server
-              in
-              match Mcp_client.list_tools client with
-              | Ok lst ->
-                (* Update cache and continue. *)
-                Tool_cache.set_with_ttl tool_cache ~key:mcp_server ~data:lst ~ttl:cache_ttl;
-                lst
-              | Error msg ->
-                failwithf "Failed to list tools from %s: %s" mcp_server msg ())
+            let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server in
+            match Mcp_client.list_tools client with
+            | Ok lst ->
+              (* Update cache and continue. *)
+              Tool_cache.set_with_ttl tool_cache ~key:mcp_server ~data:lst ~ttl:cache_ttl;
+              lst
+            | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
         in
         (match List.find tools ~f:(fun t -> String.equal t.name name) with
          | Some t -> t

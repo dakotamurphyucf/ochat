@@ -19,7 +19,6 @@
   indexer
   github
   template
-  prompt_template
   gpt_function
   chat_completion
   chat_response
@@ -46,7 +45,6 @@
   chatgpt.notty_scroll_box
   chat_response
   io
-  prompt_template
   openai
   core_unix.command_unix
   chatgpt.chat_tui)

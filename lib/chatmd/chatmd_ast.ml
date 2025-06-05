@@ -17,6 +17,7 @@ type tag =
   | Developer
   | Doc
   | Img
+  | Import
   | Config
   | Reasoning
   | Summary
@@ -34,6 +35,7 @@ let tag_equal (a : tag) (b : tag) : bool =
   | System, System
   | Developer, Developer
   | Doc, Doc
+  | Import, Import
   | Img, Img
   | Reasoning, Reasoning
   | Summary, Summary
@@ -52,6 +54,7 @@ let tag_of_string_opt : string -> tag option = function
   | "system" -> Some System
   | "developer" -> Some Developer
   | "doc" -> Some Doc
+  | "import" -> Some Import
   | "img" -> Some Img
   | "config" -> Some Config
   | "reasoning" -> Some Reasoning

@@ -9,7 +9,7 @@
   *********************************************************************)
 
 open Core
-module CM = Prompt_template.Chat_markdown
+module CM = Prompt.Chat_markdown
 module Res = Openai.Responses
 
 type 'env ctx = 'env Ctx.t

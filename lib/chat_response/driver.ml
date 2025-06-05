@@ -1,5 +1,5 @@
 open Core
-module CM = Prompt_template.Chat_markdown
+module CM = Prompt.Chat_markdown
 module Res = Openai.Responses
 
 let rec run_agent ~(ctx : _ Ctx.t) (prompt_xml : string) (items : CM.content_item list)
@@ -265,7 +265,6 @@ let run_completion_stream
     let add_item item = new_items := item :: !new_items in
     let opened_msgs : (string, unit) Hashtbl.t = Hashtbl.create (module String)
     and func_info : (string, string * string) Hashtbl.t = Hashtbl.create (module String)
-    (* NEW – track currently open reasoning‑blocks, mapping id → current summary_index *)
     and reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
     let run_again = ref false in
     let output_text_delta ~id txt =

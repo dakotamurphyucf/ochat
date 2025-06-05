@@ -10,7 +10,7 @@
   *********************************************************************)
 
 open Core
-module CM = Prompt_template.Chat_markdown
+module CM = Prompt.Chat_markdown
 
 type t = CM.config
 

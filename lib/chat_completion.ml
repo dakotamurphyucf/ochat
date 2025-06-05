@@ -1,8 +1,7 @@
 open Core
 
 module Agent_key = struct
-  type t = Prompt_template.Chat_markdown.agent_content
-  [@@deriving sexp, bin_io, hash, compare]
+  type t = Prompt.Chat_markdown.agent_content [@@deriving sexp, bin_io, hash, compare]
 
   let invariant (_ : t) = ()
 end
@@ -11,8 +10,7 @@ module Agent_res_LRU = Ttl_lru_cache.Make (Agent_key)
 
 type persistent_form =
   { max_size : int
-  ; items :
-      (Prompt_template.Chat_markdown.agent_content * string Agent_res_LRU.entry) list
+  ; items : (Prompt.Chat_markdown.agent_content * string Agent_res_LRU.entry) list
     (* in LRU order *)
   }
 [@@deriving bin_io]
@@ -69,13 +67,13 @@ let tab_on_newline (input : string) : string =
 
 let get_messages top_elements =
   List.filter_map top_elements ~f:(function
-    | Prompt_template.Chat_markdown.Msg s -> Some s
+    | Prompt.Chat_markdown.Msg s -> Some s
     | _ -> None)
 ;;
 
 let get_config top_elements =
   List.filter_map top_elements ~f:(function
-    | Prompt_template.Chat_markdown.Config s -> Some s
+    | Prompt.Chat_markdown.Config s -> Some s
     | _ -> None)
   |> List.hd_exn
 ;;
@@ -95,7 +93,7 @@ let rec get_user_msg ~dir ~net ~cache items =
   List.map
     ~f:(fun item ->
       match item with
-      | Prompt_template.Chat_markdown.Basic item ->
+      | Prompt.Chat_markdown.Basic item ->
         (match item.image_url with
          | Some url ->
            (match item.is_local with
@@ -131,7 +129,7 @@ let rec get_user_msg ~dir ~net ~cache items =
   |> String.concat ~sep:"\n"
 
 and convert ~dir ~net ~cache msg =
-  let { Prompt_template.Chat_markdown.role
+  let { Prompt.Chat_markdown.role
       ; content
       ; name
       ; function_call
@@ -164,7 +162,7 @@ and convert ~dir ~net ~cache msg =
   let content =
     Option.map content ~f:(fun s ->
       match s with
-      | Prompt_template.Chat_markdown.Text t -> Openai.Completions.Text t
+      | Prompt.Chat_markdown.Text t -> Openai.Completions.Text t
       | Items items ->
         Openai.Completions.Items
           (List.map items ~f:(fun item ->
@@ -257,16 +255,14 @@ and run_agent prompt items ~dir ~net ~cache =
       sprintf "<user>\n%s\n</user>" c
   in
   let prompt = prompt ^ "\n" ^ content in
-  let elements = Prompt_template.Chat_markdown.parse_chat_inputs ~dir prompt in
+  let elements = Prompt.Chat_markdown.parse_chat_inputs ~dir prompt in
   let config = get_config elements in
-  let Prompt_template.Chat_markdown.
-        { max_tokens; model; reasoning_effort; temperature; _ }
-    =
+  let Prompt.Chat_markdown.{ max_tokens; model; reasoning_effort; temperature; _ } =
     config
   in
   (* print_endline
     @@ Jsonaf.to_string_hum
-    @@ Prompt_template.Chat_markdown.jsonaf_of_config config; *)
+    @@ Prompt.Chat_markdown.jsonaf_of_config config; *)
   let model =
     match model with
     | Some m ->
@@ -276,7 +272,7 @@ and run_agent prompt items ~dir ~net ~cache =
   in
   let messages = get_messages @@ elements in
   List.iter messages ~f:(fun m ->
-    print_endline @@ Jsonaf.to_string_hum @@ Prompt_template.Chat_markdown.jsonaf_of_msg m);
+    print_endline @@ Jsonaf.to_string_hum @@ Prompt.Chat_markdown.jsonaf_of_msg m);
   let inputs = List.map ~f:(convert ~dir ~net ~cache) @@ get_messages @@ elements in
   print_endline "inputs";
   List.iter inputs ~f:(fun i ->
@@ -431,16 +427,14 @@ let run_completion ~env ~output_file ~prompt_file =
     in
     (* print_endline "prompt";
        print_endline prompt; *)
-    let elements = Prompt_template.Chat_markdown.parse_chat_inputs ~dir prompt in
+    let elements = Prompt.Chat_markdown.parse_chat_inputs ~dir prompt in
     let config = get_config elements in
-    let Prompt_template.Chat_markdown.
-          { max_tokens; model; reasoning_effort; temperature; _ }
-      =
+    let Prompt.Chat_markdown.{ max_tokens; model; reasoning_effort; temperature; _ } =
       config
     in
     (* print_endline
     @@ Jsonaf.to_string_hum
-    @@ Prompt_template.Chat_markdown.jsonaf_of_config config; *)
+    @@ Prompt.Chat_markdown.jsonaf_of_config config; *)
     let model =
       match model with
       | Some m ->
@@ -451,9 +445,7 @@ let run_completion ~env ~output_file ~prompt_file =
     let messages = get_messages @@ elements in
     print_endline "messages";
     List.iter messages ~f:(fun m ->
-      print_endline
-      @@ Jsonaf.to_string_hum
-      @@ Prompt_template.Chat_markdown.jsonaf_of_msg m);
+      print_endline @@ Jsonaf.to_string_hum @@ Prompt.Chat_markdown.jsonaf_of_msg m);
     let text =
       {|
     Before performing any tool calls ask the user for permission.

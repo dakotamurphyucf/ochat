@@ -3,7 +3,7 @@ open Core
 (* Ensure we can reference the nested [Cache] module inside
    [Chat_response]. *)
 module Cache = Chat_response.Cache
-module CM = Prompt_template.Chat_markdown
+module CM = Prompt.Chat_markdown
 
 let make_key url : CM.agent_content = { url; is_local = false; items = [] }
 

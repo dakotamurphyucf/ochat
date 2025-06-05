@@ -1,7 +1,7 @@
 open Core
 module Converter = Chat_response.Converter
 module Ctx = Chat_response.Ctx
-module CM = Prompt_template.Chat_markdown
+module CM = Prompt.Chat_markdown
 
 (* A dummy [run_agent] implementation for unit-testing. *)
 let stub_run_agent ~ctx:_ _prompt _items = "DUMMY"

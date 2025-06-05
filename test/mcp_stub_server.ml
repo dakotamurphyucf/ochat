@@ -13,26 +13,36 @@ let tool_schema : Jsonaf.t =
 ;;
 
 let echo_tool : Tool.t =
-  { name = "echo"; description = Some "Return the input value unchanged"; input_schema = tool_schema }
+  { name = "echo"
+  ; description = Some "Return the input value unchanged"
+  ; input_schema = tool_schema
+  }
+;;
 
 let reverse_tool : Tool.t =
-  { name = "reverse"; description = Some "Return the reversed string"; input_schema = tool_schema }
+  { name = "reverse"
+  ; description = Some "Return the reversed string"
+  ; input_schema = tool_schema
+  }
+;;
 
 let add_schema : Jsonaf.t =
   `Object
     [ "type", `String "object"
-    ; "properties"
+    ; ( "properties"
       , `Object
-          [ ( "a", `Object [ "type", `String "number" ] )
-          ; ( "b", `Object [ "type", `String "number" ] )
-          ]
+          [ "a", `Object [ "type", `String "number" ]
+          ; "b", `Object [ "type", `String "number" ]
+          ] )
     ; "required", `Array [ `String "a"; `String "b" ]
     ]
+;;
 
 let add_tool : Tool.t = { name = "add"; description = None; input_schema = add_schema }
 
 let tools_list_json () =
-  Tools_list_result.(jsonaf_of_t { tools = [ echo_tool; reverse_tool; add_tool ]; next_cursor = None })
+  Tools_list_result.(
+    jsonaf_of_t { tools = [ echo_tool; reverse_tool; add_tool ]; next_cursor = None })
 ;;
 
 let write_json oc (json : Jsonaf.t) =
@@ -71,20 +81,20 @@ let handle_request req_json : Jsonaf.t option =
            | "echo" ->
              let value =
                match arguments with
-               | Some (`Object a_kvs) -> (
-                   match List.Assoc.find a_kvs ~equal:String.equal "value" with
-                   | Some (`String s) -> s
-                   | _ -> "")
+               | Some (`Object a_kvs) ->
+                 (match List.Assoc.find a_kvs ~equal:String.equal "value" with
+                  | Some (`String s) -> s
+                  | _ -> "")
                | _ -> ""
              in
              respond_text value
            | "reverse" ->
              let value =
                match arguments with
-               | Some (`Object a_kvs) -> (
-                   match List.Assoc.find a_kvs ~equal:String.equal "value" with
-                   | Some (`String s) -> String.rev s
-                   | _ -> "")
+               | Some (`Object a_kvs) ->
+                 (match List.Assoc.find a_kvs ~equal:String.equal "value" with
+                  | Some (`String s) -> String.rev s
+                  | _ -> "")
                | _ -> ""
              in
              respond_text value

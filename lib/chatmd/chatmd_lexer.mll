@@ -19,6 +19,14 @@ open Chatmd_ast
 open Chatmd_parser
 
 (*--------------------------------------------------------------------------*)
+(* Token queue – allows a lexer rule to emit *two* tokens without forcing    *)
+(* callers to be aware of any buffering.  We push the secondary token onto   *)
+(* [pending_token] and serve it on the very next invocation.                *)
+(*--------------------------------------------------------------------------*)
+
+let pending_token : Chatmd_parser.token option ref = ref None
+
+(*--------------------------------------------------------------------------*)
 (* Helpers                                                                  *)
 (*--------------------------------------------------------------------------*)
 
@@ -170,33 +178,10 @@ let dissect (raw : string) : string * attribute list * bool =
   | Some (name, attrs_str) -> name, parse_attrs attrs_str, self_closing
   | None -> body, [] , self_closing
 
-(* ------------------------------------------------------------------ *)
-(* Unknown tag collapsing                                             *)
-(* ------------------------------------------------------------------ *)
-
-(* Collapse an entire *unknown* element – including any nested tags –
-   into a single raw string so that the parser only sees one TEXT token.
-   This eliminates the previous behaviour where unknown tags were split
-   into several TEXT tokens and nested recognised tags leaked through.
-
-   [name]         – the tag name (without <> or /).
-   [init_depth]   – usually 1 (called right after the opening tag has
-                    been consumed).
-   [lexbuf]       – the source buffer.
-
-   The algorithm keeps a simple [depth] counter that is incremented when
-   we see another start tag with *the same* name and decremented on the
-   matching end tag.  All input is copied verbatim into an internal
-   buffer which is finally returned as a string. *)
-
 (* The buffer into which we accumulate the raw text of an unknown tag *)
 let scratch_buf = Buffer.create 256
 
-(* Recursive rule that skips over *unknown* elements (and anything nested
-   inside them) so that we can emit a single consolidated TEXT token. *)
 
-(* [skip_unknown] lives outside the OCaml code block so that it can use
-   the normal ocamllex [parse] syntax. *)
 
 (*--------------------------------------------------------------------------*)
 (* Lexer rules                                                              *)
@@ -205,8 +190,47 @@ let scratch_buf = Buffer.create 256
 
 let ws = [' ' '\t' '\r' '\n']+
 
-rule token = parse
-  | "<!--"                     { comment lexbuf; token lexbuf }
+rule token_inner = parse
+  (*--------------------------------------------------------------------*)
+  (* Raw text block – everything between RAW| and |RAW is returned verbatim as
+     a single TEXT token, with *no* lexical analysis of the enclosed
+     content.  This allows authors to embed arbitrary XML / chatmd tags
+     without the lexer treating them specially.
+
+     Historically the lexer required the opening delimiter to be
+     preceded only by whitespace.  That restriction meant that a
+     sequence such as "intro RAW| ... |RAW" was tokenised into the
+     *text* "intro RAW" followed by a stray pipe character rather than
+     entering the dedicated [raw_block] rule.  By relaxing the pattern
+     to detect the delimiter regardless of leading content we ensure
+     that the RAW markers themselves never leak into the token stream –
+     exactly what callers expect. *)
+
+  (* Opening RAW delimiter – optional leading horizontal or vertical
+     whitespace is permitted, but we also accept the delimiter directly
+     after arbitrary text. *)
+  | [' ' '\t' '\r' '\n']* "RAW|" { Buffer.clear scratch_buf; raw_block lexbuf }
+  | "RAW|"                            { Buffer.clear scratch_buf; raw_block lexbuf }
+
+  (* RAW opener preceded by in-line text – we split the token stream into two   *)
+  (* events: the leading text as a TEXT token (returned now) and the token      *)
+  (* produced by [raw_block] on the *next* invocation.  We achieve this by      *)
+  (* placing the latter into [pending_token].                                   *)
+  | [^'<' '|']+ "RAW|" as raw_prefix_delim {
+      (* [raw_prefix_delim] contains the user text immediately followed by the
+         RAW‐block opener.  Split the two pieces: everything *except* the
+         trailing "RAW|" forms the leading TEXT token. *)
+      let txt_len = String.length raw_prefix_delim - 4 (* len "RAW|" *) in
+      let prefix = String.sub raw_prefix_delim ~pos:0 ~len:txt_len in
+      Buffer.clear scratch_buf;
+      let next_tok = raw_block lexbuf in
+      pending_token := Some next_tok;
+      TEXT prefix
+    }
+
+ 
+
+  | "<!--"                     { comment lexbuf; token_inner lexbuf }
 
   (* self‐closing recognised tag, e.g. <img .../>                     *)
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* "/>" as raw_tag {
@@ -259,8 +283,14 @@ rule token = parse
   (*--------------------------------------------------------------------*)
   | '<'+ as lt_run { TEXT lt_run }
 
-  (* raw text – sequence of characters that does *not* contain '<'.      *)
-  | [^'<']+                      { TEXT (Lexing.lexeme lexbuf) }
+  (* raw text – sequence of characters that does *not* contain '<' or the pipe
+     character.  We *exclude* `|` so that the RAW| / |RAW delimiters are
+     detected by their dedicated rules above instead of being swallowed by
+     this catch-all clause due to the longest-match heuristic of ocamllex. *)
+  | [^'<' '|']+                  { TEXT (Lexing.lexeme lexbuf) }
+
+  (* lone pipe – emitted verbatim as text *)
+  | '|'                          { TEXT (Lexing.lexeme lexbuf) }
 
   | eof                          { EOF }
 
@@ -305,8 +335,44 @@ and skip_unknown name depth = parse
 
   | eof { failwithf "Unterminated unknown tag <%s>" name () }
 
+and raw_block = parse
+  (* Terminating delimiter *)
+  | "|RAW" {
+      let txt = Buffer.contents scratch_buf in
+      Buffer.clear scratch_buf;
+      TEXT txt
+    }
+
+  (* Any character – accumulate and continue *)
+  | _ as c {
+      Buffer.add_char scratch_buf c;
+      raw_block lexbuf
+    }
+
+  | eof { failwith "Unterminated raw block RAW| ... |RAW" }
+
 and comment = parse
   | "-->" { () }
   | eof    { failwith "Unterminated <!-- comment-->" }
   | _      { comment lexbuf }
 
+
+(* 
+ public entry point – obeys the original [token] signature expected by   
+ callers.  If a token has been stashed in [pending_token] we serve it     
+ immediately; otherwise we delegate to the real lexer [token_inner].     
+                                                                        
+ This indirection allows rules such as the RAW-block opener to return    
+ a *prefix* TEXT token first and defer the token produced after the      
+ delimiter to the following call – thereby emitting both tokens without  
+ violating the OCamlLex contract that each rule returns exactly one. *)
+
+{
+let  token lexbuf =
+  match !pending_token with
+  | Some tok ->
+      pending_token := None;
+      tok
+  | None -> token_inner lexbuf
+
+}

@@ -27,12 +27,17 @@ let%expect_test "ast output" =
     ; "<system>hello</system>"
     ; "<developer>hello</developer>"
     ; "<system><doc src=\"./a.txt\" /></system>"
+    ; "<import src=\"./a.txt\" />"
     ; "<img src=\"https://example.com/image.png\" alt=\"wide \n icon\" local/>"
     ; {|<img src="https://example.com/image.png" alt="wide \" \"
      icon" local/>|}
     ; "<img src=\"https://example.com/image.png\" alt=\"wide \n icon />"
+    ; "<system>RAW|<doc src=\"./a.txt\" />|RAW</system>"
+    ; "<msg>RAW|Hello|RAW</msg>"
     ; "plain" (* should now fail – top-level TEXT is forbidden *)
     ; "<yo/>" (* should fail – unknown tag at top level *)
+    ; "<user> the one issues is that it does not respect white space or new lines. So: \
+       RAW| <doc/> |RAW will still output the the  tags </user>"
     ]
     ~f:parse_and_report;
   [%expect
@@ -53,6 +58,7 @@ let%expect_test "ast output" =
     ((Element System () ((Text hello))))
     ((Element Developer () ((Text hello))))
     ((Element System () ((Element Doc ((src (./a.txt))) ()))))
+    ((Element Import ((src (./a.txt))) ()))
     ((Element Img
       ((src (https://example.com/image.png)) (alt ( "wide \
                                                    \n icon")) (local ()))
@@ -65,7 +71,12 @@ let%expect_test "ast output" =
       ()))
     ERR: (Failure
       "Unterminated quoted attribute value for alt starting at offset 41 (expected \")")
+    ((Element System () ((Text "<doc src=\"./a.txt\" />"))))
+    ((Element Msg () ((Text Hello))))
     ERR: (Failure "Unexpected text at top level: \"plain\"")
     ERR: (Failure "Unexpected text at top level: \"<yo/>\"")
+    ((Element User ()
+      ((Text
+        " the one issues is that it does not respect white space or new lines. So:  <doc/>  will still output the the  tags "))))
     |}]
 ;;

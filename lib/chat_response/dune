@@ -10,7 +10,7 @@
   gpt_function
   definitions
   functions
-  prompt_template
+  chatmd
   lru_cache
   ttl_lru_cache
   bin_prot_utils_eio

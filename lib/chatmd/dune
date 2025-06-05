@@ -2,10 +2,10 @@
  (name chatmd)
  (public_name chatgpt.chatmd)
  (wrapped false)
- (modules chatmd_ast chatmd_lexer chatmd_parser)
- (libraries core str menhirLib)
+ (modules chatmd_ast chatmd_lexer chatmd_parser prompt)
+ (libraries core str menhirLib jsonaf io)
  (preprocess
-  (pps ppx_jane)))
+  (pps ppx_jane ppx_jsonaf_conv)))
 
 (menhir
  (modules chatmd_parser)

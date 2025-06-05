@@ -19,6 +19,7 @@ let string_of_tag : tag -> string = function
   | System -> "system"
   | Developer -> "developer"
   | Doc -> "doc"
+  | Import -> "import"
   | Img -> "img"
   | Config -> "config"
   | Reasoning -> "reasoning"
