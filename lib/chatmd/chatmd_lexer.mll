@@ -3,7 +3,8 @@
 
    Lexer for ChatMarkdown.  It recognises only the *official* chatmd tags
 
-       msg user agent system developer doc img config
+   msg user agent system developer doc img config import reasoning summary tool 
+   tool_call tool_response agent
 
    and converts them into specialised tokens.  Any other XML‐like tag that
    appears *inside* a recognised element is returned verbatim as TEXT so
@@ -197,7 +198,7 @@ rule token_inner = parse
      content.  This allows authors to embed arbitrary XML / chatmd tags
      without the lexer treating them specially.
 
-     Historically the lexer required the opening delimiter to be
+     the lexer required the opening delimiter to be
      preceded only by whitespace.  That restriction meant that a
      sequence such as "intro RAW| ... |RAW" was tokenised into the
      *text* "intro RAW" followed by a stray pipe character rather than
@@ -368,11 +369,10 @@ and comment = parse
  violating the OCamlLex contract that each rule returns exactly one. *)
 
 {
-let  token lexbuf =
+let token lexbuf =
   match !pending_token with
   | Some tok ->
       pending_token := None;
       tok
   | None -> token_inner lexbuf
-
 }
