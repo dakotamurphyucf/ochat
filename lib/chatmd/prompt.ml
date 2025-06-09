@@ -157,9 +157,10 @@ module Chat_content = struct
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   and mcp_tool =
-    { name : string
+    { names : string list option
     ; description : string option
     ; mcp_server : string (** URI of the MCP server hosting the tool *)
+    ; strict : bool (** whether to enforce strict parameter matching *)
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
@@ -399,16 +400,25 @@ module Chat_markdown = struct
            desc_attr
            agent
            local_attr
-       | Mcp { name; description; mcp_server } ->
+       | Mcp { names; description; mcp_server; strict } ->
+         let strict_attr = if strict then " strict" else "" in
+         (* If the description is present, add it as an attribute. *)
          let desc_attr =
            Option.value_map description ~default:"" ~f:(fun d ->
              Printf.sprintf " description=\"%s\"" d)
          in
+         let names_str =
+           match names with
+           | Some names ->
+             "includes=\"" ^ (String.concat ~sep:", " names |> String.escaped) ^ "\""
+           | None -> ""
+         in
          Printf.sprintf
-           "<tool name=\"%s\"%s mcp_server=\"%s\" />"
-           name
+           "<tool %s%s mcp_server=\"%s\"%s />"
+           names_str
            desc_attr
-           mcp_server)
+           mcp_server
+           strict_attr)
     | Developer_msg m
     | System_msg m
     | Message m
@@ -579,7 +589,7 @@ module Chat_markdown = struct
         let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
         let tbl = Hashtbl.create (module String) in
         List.iter attr ~f:(fun (nm, v) -> Hashtbl.set tbl ~key:nm ~data:v);
-        let name = Hashtbl.find_exn tbl "name" |> String.strip in
+        let name = Hashtbl.find tbl "name" |> Option.value ~default:"" |> String.strip in
         let command = Hashtbl.find tbl "command" in
         let agent = Hashtbl.find tbl "agent" in
         let mcp_server = Hashtbl.find tbl "mcp_server" in
@@ -590,26 +600,39 @@ module Chat_markdown = struct
            failwith
              "<tool> cannot combine 'command', 'agent' and 'mcp_server' attributes."
          | Some cmd, None, None ->
+           if String.is_empty name then failwith "Tool name cannot be empty.";
            let cmd = String.strip cmd in
-           if String.is_empty cmd
-           then failwith "Tool command cannot be empty."
-           else (
-             let description = Option.map description ~f:String.strip in
-             Tool (Custom { name; description; command = cmd }))
+           if String.is_empty cmd then failwith "Tool command cannot be empty.";
+           let description = Option.map description ~f:String.strip in
+           Tool (Custom { name; description; command = cmd })
          | None, Some agent_url, None ->
+           if String.is_empty name then failwith "Tool name cannot be empty.";
            let agent_url = String.strip agent_url in
-           if String.is_empty agent_url
-           then failwith "Tool agent URL cannot be empty."
-           else (
-             let description = Option.map description ~f:String.strip in
-             Tool (Agent { name; description; agent = agent_url; is_local }))
+           if String.is_empty agent_url then failwith "Tool agent URL cannot be empty.";
+           let description = Option.map description ~f:String.strip in
+           Tool (Agent { name; description; agent = agent_url; is_local })
          | None, None, Some mcp_uri ->
            let mcp_uri = String.strip mcp_uri in
-           if String.is_empty mcp_uri
-           then failwith "Tool mcp_server URI cannot be empty."
-           else (
-             let description = Option.map description ~f:String.strip in
-             Tool (Mcp { name; description; mcp_server = mcp_uri }))
+           if String.is_empty mcp_uri then failwith "Tool mcp_server URI cannot be empty.";
+           let description = Option.map description ~f:String.strip in
+           let strict = Hashtbl.mem tbl "strict" in
+           (* Accept both [include] and [includes] as attribute names to avoid
+              confusion.  If both are present we prefer the more specific
+              [include] spelling. *)
+           let include_ =
+             match Hashtbl.find tbl "include" with
+             | Some v -> String.strip v
+             | None ->
+               Hashtbl.find tbl "includes" |> Option.value ~default:"" |> String.strip
+           in
+           let names =
+             if not @@ String.is_empty name
+             then Some [ name ]
+             else if not @@ String.is_empty include_
+             then Some (String.split ~on:',' include_ |> List.map ~f:String.strip)
+             else None
+           in
+           Tool (Mcp { names; description; mcp_server = mcp_uri; strict })
          | None, None, None ->
            if String.is_empty name
            then failwith "Tool name cannot be empty."

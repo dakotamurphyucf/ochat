@@ -18,6 +18,8 @@ let attr_of_role = function
      without being too prominent. *)
   | "system" -> A.(fg lightblack)
   | "tool_output" -> A.(fg lightgreen)
+  | "error" -> A.(fg red ++ st reverse)
+  (* Default case for any unknown role, we use a neutral empty attribute. *)
   | _ -> A.empty
 ;;
 

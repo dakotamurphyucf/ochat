@@ -6,6 +6,49 @@
  (preprocess
   (pps ppx_jane ppx_expect)))
 
+;; ---------------------------------------------------------------------------
+;; MCP transport – HTTP implementation tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_transport_http_test)
+ (modules mcp_transport_http_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.mock
+  eio.unix
+  piaf
+  uri
+  chatgpt.mcp_transport)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; MCP client tests over HTTP transport
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_client_http_test)
+ (modules mcp_client_http_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.mock
+  eio.unix
+  piaf
+  uri
+  chatgpt.mcp_client
+  chatgpt.mcp_types)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
 (library
  (name chatmd_parser_test)
  (modules chatmd_parser_test)

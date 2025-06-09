@@ -105,9 +105,10 @@ module Chat_markdown : sig
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type mcp_tool =
-    { name : string
+    { names : string list option
     ; description : string option
     ; mcp_server : string
+    ; strict : bool
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 

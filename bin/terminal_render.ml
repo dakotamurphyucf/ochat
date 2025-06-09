@@ -4,9 +4,14 @@
 (*      can recognise the file extension)                               *)
 (* ───────────────────────────────────────────────────────────────────── *)
 
+open Bimage_unix
+open Bimage
+open Notty
+open Notty_unix
+
 let bimage_of_file path =
-  Bimage_unix.Magick.convert_command := "magick";
-  match Bimage_unix.Magick.read Bimage.u8 Bimage.rgb path with
+  Magick.convert_command := "magick";
+  match Magick.read u8 rgb path with
   | Error (`Msg m) -> failwith m
   | Error (`Invalid_shape | `Invalid_kernel_shape _ | `Invalid_input _ | `Invalid_color)
     -> failwith "Invalid image"
@@ -14,7 +19,6 @@ let bimage_of_file path =
 ;;
 
 let resize_to_width rgb8 ~max_w =
-  let open Bimage in
   let open Image in
   let w = rgb8.width in
   if w <= max_w
@@ -38,9 +42,6 @@ let resize_to_width rgb8 ~max_w =
 (* ───────────────────────────────────────────────────────────────────── *)
 
 let notty_of_rgb8 rgb8 =
-  let module I = Notty.I in
-  let module A = Notty.A in
-  let open Bimage in
   let open Image in
   let w, h = rgb8.width, rgb8.height in
   let get_pixel x y =
@@ -74,7 +75,7 @@ let () =
   let file = Sys.argv.(1) in
   (* Determine target width: 2nd CLI arg or current terminal columns *)
   let term_cols =
-    match Notty_unix.winsize Unix.stdout with
+    match winsize Unix.stdout with
     | Some (c, _) -> c
     | None -> 80
   in
@@ -84,5 +85,5 @@ let () =
   (* pipeline *)
   let rgb8 = bimage_of_file file |> resize_to_width ~max_w in
   let img = notty_of_rgb8 rgb8 in
-  Notty_unix.output_image img
+  output_image img
 ;;

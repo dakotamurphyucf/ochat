@@ -32,6 +32,34 @@ module Tool_cache = Ttl_lru_cache.Make (String_key)
 let tool_cache : Mcp_types.Tool.t list Tool_cache.t = Tool_cache.create ~max_size:32 ()
 let cache_ttl = Time_ns.Span.of_int_sec 300
 
+(* When a given MCP server notifies that its tool list has changed we
+   simply drop the cached entry for that URI so that the next lookup
+   forces a fresh `tools/list` request.  The helper below registers a
+   lightweight daemon (at most one per client/URI pair) that listens
+   for such notifications and performs the invalidation.            *)
+
+let register_invalidation_listener ~sw ~mcp_server ~client =
+  (* We attach the listener on a background fibre so it does not block the
+     normal execution flow.  The fibre terminates automatically when the
+     underlying stream closes (e.g. connection lost) or the switch is
+     torn down. *)
+  Eio.Fiber.fork_daemon ~sw (fun () ->
+    let rec loop () =
+      match
+        try Some (Eio.Stream.take (Mcp_client.notifications client)) with
+        | End_of_file -> None
+      with
+      | None -> `Stop_daemon
+      | Some notification ->
+        (match notification.method_ with
+         | "notifications/tools/list_changed" ->
+           ignore (Tool_cache.remove tool_cache mcp_server : _)
+         | _ -> ());
+        loop ()
+    in
+    loop ())
+;;
+
 (*--- 4-a.  OpenAI → Responses tool conversion ----------------------*)
 
 let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list =
@@ -169,27 +197,20 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Gpt_func
   Gpt_function.create_function (module M) run
 ;;
 
-(*--- 4-d.  Unified declaration → function mapping ------------------*)
-
-let of_declaration ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t =
-  match decl with
-  | CM.Builtin name ->
-    (match name with
-     | "apply_patch" -> Functions.apply_patch ~dir:(Ctx.dir ctx)
-     | "read_dir" -> Functions.read_dir ~dir:(Ctx.dir ctx)
-     | "get_contents" -> Functions.get_contents ~dir:(Ctx.dir ctx)
-     | other -> failwithf "Unknown built-in tool: %s" other ())
-  | CM.Custom c -> custom_fn ~env:(Ctx.env ctx) c
-  | CM.Agent agent_spec -> agent_fn ~ctx ~run_agent agent_spec
-  | CM.Mcp { name; description = _; mcp_server } ->
-    (* Retrieve (and cache) the list of tools for this server. *)
+let mcp_tool ~sw ~ctx CM.{ names; description = _; mcp_server; strict } =
+  (* Retrieve (and cache) the list of tools for this server. *)
+  let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server in
+  (* Ensure cache invalidation for this server is wired up exactly
+     once.  We conservatively register a listener each time – the
+     underlying [Tool_cache.remove] operation is idempotent and cheap,
+     so occasional duplicates are harmless. *)
+  register_invalidation_listener ~sw ~mcp_server ~client;
+  let get_tool name =
     let tools_for_server =
       Tool_cache.find_or_add tool_cache mcp_server ~ttl:cache_ttl ~default:(fun () ->
-        Eio.Switch.run (fun sw ->
-          let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server in
-          match Mcp_client.list_tools client with
-          | Ok lst -> lst
-          | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ()))
+        match Mcp_client.list_tools client with
+        | Ok lst -> lst
+        | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
     in
     let tool_meta =
       match List.find tools_for_server ~f:(fun t -> String.equal t.name name) with
@@ -197,14 +218,12 @@ let of_declaration ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t
       | None ->
         (* Cache might be stale – refresh once before giving up. *)
         let tools =
-          Eio.Switch.run (fun sw ->
-            let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server in
-            match Mcp_client.list_tools client with
-            | Ok lst ->
-              (* Update cache and continue. *)
-              Tool_cache.set_with_ttl tool_cache ~key:mcp_server ~data:lst ~ttl:cache_ttl;
-              lst
-            | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
+          match Mcp_client.list_tools client with
+          | Ok lst ->
+            (* Update cache and continue. *)
+            Tool_cache.set_with_ttl tool_cache ~key:mcp_server ~data:lst ~ttl:cache_ttl;
+            lst
+          | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ()
         in
         (match List.find tools ~f:(fun t -> String.equal t.name name) with
          | Some t -> t
@@ -215,5 +234,32 @@ let of_declaration ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t
              name
              ())
     in
-    Mcp_tool.gpt_function_of_remote_tool ~env:(Ctx.env ctx) ~uri:mcp_server tool_meta
+    Mcp_tool.gpt_function_of_remote_tool ~sw ~client ~strict tool_meta
+  in
+  match names with
+  | Some names -> List.map names ~f:get_tool
+  | None ->
+    let tools_for_server =
+      Tool_cache.find_or_add tool_cache mcp_server ~ttl:cache_ttl ~default:(fun () ->
+        match Mcp_client.list_tools client with
+        | Ok lst -> lst
+        | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
+    in
+    List.map tools_for_server ~f:(fun t ->
+      Mcp_tool.gpt_function_of_remote_tool ~sw ~client ~strict t)
+;;
+
+(*--- 4-d.  Unified declaration → function mapping ------------------*)
+
+let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t list =
+  match decl with
+  | CM.Builtin name ->
+    (match name with
+     | "apply_patch" -> [ Functions.apply_patch ~dir:(Ctx.dir ctx) ]
+     | "read_dir" -> [ Functions.read_dir ~dir:(Ctx.dir ctx) ]
+     | "get_contents" -> [ Functions.get_contents ~dir:(Ctx.dir ctx) ]
+     | other -> failwithf "Unknown built-in tool: %s" other ())
+  | CM.Custom c -> [ custom_fn ~env:(Ctx.env ctx) c ]
+  | CM.Agent agent_spec -> [ agent_fn ~ctx ~run_agent agent_spec ]
+  | CM.Mcp mcp -> mcp_tool ~sw ~ctx mcp
 ;;

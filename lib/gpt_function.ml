@@ -22,7 +22,7 @@ type t =
   }
 
 (* takes a module of type Def and a function Def.input -> string and returns type t. Use to create a gpt function implementation for the given the  gpt function definition and implementation function *)
-let create_function (type a) (module M : Def with type input = a) f =
+let create_function (type a) (module M : Def with type input = a) ?(strict = true) f =
   let run s = f @@ M.input_of_string s in
   let info =
     Openai.Completions.
@@ -31,7 +31,7 @@ let create_function (type a) (module M : Def with type input = a) f =
           { name = M.name
           ; description = M.description
           ; parameters = M.parameters
-          ; strict = true
+          ; strict
           }
       }
   in

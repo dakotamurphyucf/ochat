@@ -100,7 +100,7 @@ let gensym () : string =
 ;;
 
 (***************************************************************************)
-(* 0.5  –  Simple public recording of the principal type for each AST span *)
+(*  Simple public recording of the principal type for each AST span *)
 (***************************************************************************)
 
 (* The resolver will consult this table to decide which [Frame_env.slot]
@@ -134,26 +134,6 @@ let lookup_span_type (span : Source.span) : typ option =
 ;;
 
 let new_var level = Var (ref (Free (gensym (), level)))
-
-(*************************************************************************** *)
-(*  Public helper – produce a lookup function for a whole program          *)
-(*                                                                         *)
-(*  The resolver used to rely on the global [span_types] hash-table that   *)
-(*  the checker fills as a side-effect.  Accessing that mutable state from *)
-(*  another module is brittle and prevents us from running several         *)
-(*  type-checking sessions in parallel.  We therefore provide a            *)
-(*  shielded API that                                                         *)
-(*      – runs inference,                                                   *)
-(*      – snapshots the resulting span→type map, and                        *)
-(*      – returns a *pure* lookup closure with the captured snapshot.      *)
-(*                                                                         *)
-(*  The resolver can now depend on the lookup without observing any global *)
-(*  mutation.  Callers are free to invoke this helper multiple times       *)
-(*  concurrently – each invocation gets its own isolated map.              *)
-(*************************************************************************** *)
-
-(* Placeholder – definition moved below [infer_program] to avoid forward
-   reference issues. *)
 
 (** --------------------------------------------------------------------- *)
 

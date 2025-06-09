@@ -24,11 +24,7 @@ module type TRANSPORT = sig
       
             The returned handle is valid until [close] is called *or* the
             enclosing switch [sw] finishes. *)
-  val connect
-    :  sw:Eio.Switch.t
-    -> env:< process_mgr : [> [> `Generic ] Eio.Process.mgr_ty ] Eio.Resource.t ; .. >
-    -> string
-    -> t
+  val connect : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> string -> t
 
   (** [send t msg] serialises [msg] to JSON and writes it to the
             underlying stream.  The function is *blocking* until all bytes

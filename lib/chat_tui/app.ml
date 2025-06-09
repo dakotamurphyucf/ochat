@@ -52,146 +52,10 @@ let add_placeholder_thinking_message (model : Model.t) : unit =
   ignore (Model.apply_patch model patch)
 ;;
 
-(* let run_command ~env ~model () =
-  let user_msg = String.strip (Model.input_line model) in
-  (* -------------------------------------------------------------- *)
-  (*  /format [lang] – run external formatter on draft               *)
-  (*     Currently supports only "ocaml" via ocamlformat.           *)
-  (* -------------------------------------------------------------- *)
-  if String.is_prefix user_msg ~prefix:"/format"
-  then (
-    let lang =
-      match String.split (String.strip user_msg) ~on:' ' with
-      | [ _ ] -> "ocaml" (* default *)
-      | _ :: l :: _ -> String.lowercase l
-      | _ -> "ocaml"
-    in
-    match lang with
-    | "ocaml" ->
-      (* Extract the draft minus the /format command line *)
-      let all_lines = String.split_lines (Model.input_line model) in
-      let body_lines, has_command_line =
-        match List.last all_lines with
-        | Some last when String.is_prefix (String.strip last) ~prefix:"/format" ->
-          List.drop_last_exn (List.tl_exn all_lines), true
-        | _ -> all_lines, false
-      in
-      if not has_command_line
-      then (
-        let txt = "Place '/format' on its own line at the end of the draft." in
-        let patch = Add_placeholder_message { role = "system"; text = txt } in
-        ignore (Model.apply_patch model patch);
-        true)
-      else (
-        let code = String.concat ~sep:"\n" body_lines in
-        (* ----------------------------------------------------------- *)
-        (*  Helper – run ocamlformat with a watchdog timeout           *)
-        (* ----------------------------------------------------------- *)
-        let run_ocamlformat ~env code : (string, string) result =
-          (* We wrap the invocation in [Eio.Time.with_timeout] so a
-               wedged formatter process cannot block the UI forever. *)
-          let clock = Eio.Stdenv.clock env in
-          match
-            Eio.Time.with_timeout clock 5.0 (fun () ->
-              (* Run the formatter in its own switch so that a timeout
-                     cancels the whole subtree – this cleans up the child
-                     process and any open fds automatically. *)
-              Eio.Switch.run
-              @@ fun sw ->
-              let proc_mgr = Eio.Stdenv.process_mgr env in
-              let stdin_r, stdin_w = Eio.Process.pipe ~sw proc_mgr in
-              let stdout_r, stdout_w = Eio.Process.pipe ~sw proc_mgr in
-              let stderr_r, stderr_w = Eio.Process.pipe ~sw proc_mgr in
-              (* Spawn ocamlformat, reading from [stdin_r]. *)
-              let _child =
-                Eio.Process.spawn
-                  ~sw
-                  proc_mgr
-                  ~stdin:stdin_r
-                  ~stdout:stdout_w
-                  ~stderr:stderr_w
-                  [ "ocamlformat"; "--impl"; "-" ]
-              in
-              (* Parent writes code to child's stdin and closes it so the
-                     formatter sees EOF. *)
-              Eio.Flow.copy_string code stdin_w;
-              Eio.Flow.close stdin_w;
-              (* Close our copies of the write ends to avoid leaks. *)
-              Eio.Flow.close stdout_w;
-              Eio.Flow.close stderr_w;
-              (* Read stdout and stderr completely. *)
-              let read_all r =
-                try
-                  Eio.Buf_read.parse_exn ~max_size:5_000_000 Eio.Buf_read.take_all r
-                with
-                | ex -> Fmt.str "(error reading formatter output: %a)" Eio.Exn.pp ex
-              in
-              let stdout_str = read_all stdout_r in
-              let stderr_str = read_all stderr_r in
-              if String.is_empty stderr_str then Ok stdout_str else failwith stderr_str)
-          with
-          | Ok formatted -> Ok formatted
-          | Error `Timeout -> Error "ocamlformat timed out after 5s"
-        in
-        let formatted_or_error =
-          try run_ocamlformat ~env code with
-          | ex -> Error (Fmt.str "Failed to run ocamlformat: %a" Eio.Exn.pp ex)
-        in
-        match formatted_or_error with
-        | Ok formatted ->
-          Model.set_input_line model formatted;
-          Model.set_cursor_pos model (String.length formatted);
-          Model.clear_selection model;
-          true
-        | Error msg ->
-          let txt = "ocamlformat error:\n" ^ msg in
-          let patch = Add_placeholder_message { role = "system"; text = txt } in
-          ignore (Model.apply_patch model patch);
-          true)
-    | _ ->
-      let txt = "Unsupported /format language. Only 'ocaml' is supported." in
-      let patch = Add_placeholder_message { role = "system"; text = txt } in
-      ignore (Model.apply_patch model patch);
-      true
-    (* -------------------------------------------------------------- *)
-    (*  /expand NAME – insert predefined snippet                      *)
-    (* -------------------------------------------------------------- *))
-  else if String.is_prefix user_msg ~prefix:"/expand "
-  then (
-    let name = String.strip (String.drop_prefix user_msg 8) |> String.lowercase in
-    match Snippet.find name with
-    | None ->
-      let available = String.concat ~sep:", " (Snippet.available ()) in
-      let txt =
-        Printf.sprintf "Unknown snippet '%s'.  Available snippets: %s" name available
-      in
-      let patch = Add_placeholder_message { role = "system"; text = txt } in
-      ignore (Model.apply_patch model patch);
-      true
-    | Some snippet_text ->
-      (* Replace the '/expand NAME' command line with the snippet. *)
-      let all_lines = String.split_lines (Model.input_line model) in
-      let rec drop_last_if_cmd acc = function
-        | [] -> List.rev acc, false
-        | [ last ] ->
-          let is_cmd = String.is_prefix (String.strip last) ~prefix:"/expand " in
-          if is_cmd then List.rev acc, true else List.rev (last :: acc), false
-        | hd :: tl -> drop_last_if_cmd (hd :: acc) tl
-      in
-      let before_lines, has_cmd = drop_last_if_cmd [] all_lines in
-      if not has_cmd
-      then
-        (* Command not on its own line – don't expand, treat as normal submit. *)
-        false
-      else (
-        let new_lines = before_lines @ [ snippet_text ] in
-        let new_text = String.concat ~sep:"\n" new_lines in
-        Model.set_input_line model new_text;
-        Model.set_cursor_pos model (String.length new_text);
-        Model.clear_selection model;
-        true))
-  else false
-;; *)
+let add_placeholder_stream_error (model : Model.t) text : unit =
+  let patch = Add_placeholder_message { role = "error"; text } in
+  ignore (Model.apply_patch model patch)
+;;
 
 let apply_local_submit_effects ~model ~ev_stream ~term =
   let user_msg = String.strip (Model.input_line model) in
@@ -235,46 +99,100 @@ type prompt_context =
       It handles inline commands, submits the draft to the assistant, and
       manages the UI updates accordingly. *)
 
-let handle_submit ~env ~ui_sw ~model ~ev_stream ~prompt_ctx =
+(* let debounce_duration = 0.016 *)
+
+(* [throttle] is a debounced version of a function that processes user input.
+   It ensures that the function is called at most once every [debounce_duration]
+   seconds, even if it is called multiple times in quick succession. *)
+(* Note: This implementation uses a mutex to ensure thread-safety when accessing
+   the buffer and last call time. *)
+(* let throttle sw env f f_batch =
+  let buffer = ref [] in
+  let mutex = Eio.Mutex.create () in
+  (* Use a mutex to ensure that only one fiber can access the buffer at a time. *)
+  let clock = Eio.Stdenv.mono_clock env in
+  let last_call = ref (Mtime.of_uint64_ns Int64.zero) in
+  fun a ->
+    let now = Eio.Time.Mono.now clock in
+    let diff = Mtime.span now !last_call |> Mtime.Span.to_float_ns in
+    let open Float in
+    (* If the time since the last call is greater than the debounce duration,
+       call the function and update the last call time. Otherwise, do nothing. *)
+    Eio.Mutex.lock mutex;
+    if diff >= debounce_duration
+    then (
+      last_call := now;
+      let items = !buffer in
+      buffer := [];
+      match items with
+      | [] -> f a
+      | _ -> f_batch (List.rev (a :: items)))
+    else (
+      match !buffer with
+      | [] ->
+        buffer := [ a ];
+        let timeout = Eio.Time.Timeout.seconds clock debounce_duration in
+        Fiber.fork ~sw (fun () ->
+          (* Wait for the debounce duration before calling the function. *)
+          Eio.Time.Timeout.sleep timeout;
+          (* Call the function with the buffered items. *)
+          (* Note: This assumes that [f] can handle a list of items. *)
+          Eio.Mutex.lock mutex;
+          (* Only call the function if the buffer is not empty. *)
+          let items = !buffer in
+          buffer := [];
+          f_batch (List.rev items);
+          Eio.Mutex.unlock mutex
+          (* Unlock the mutex after processing the buffer. *))
+      | _ -> buffer := a :: !buffer);
+    Eio.Mutex.unlock mutex;
+    ()
+;; *)
+
+(* [handle_submit] is the main entry-point for processing user input.
+      It handles inline commands, submits the draft to the assistant, and
+      manages the UI updates accordingly. *)
+let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
   (* Kick off the OpenAI streaming request via the [Cmd] interpreter. *)
-  let start_streaming () =
-    Fiber.fork ~sw:ui_sw (fun () ->
-      try
-        Switch.run
-        @@ fun streaming_sw ->
-        Model.set_fetch_sw model (Some streaming_sw);
-        let on_event ev = Eio.Stream.add ev_stream (`Stream ev) in
-        let on_fn_out ev = Eio.Stream.add ev_stream (`Function_output ev) in
-        let items =
-          Chat_response.Driver.run_completion_stream_in_memory_v1
-            ~env
-            ~history:(Model.history_items model)
-            ~tools:(Some prompt_ctx.tools)
-            ~tool_tbl:prompt_ctx.tool_tbl
-            ?temperature:prompt_ctx.cfg.temperature
-            ?max_output_tokens:prompt_ctx.cfg.max_tokens
-            ?reasoning:
-              (Option.map prompt_ctx.cfg.reasoning_effort ~f:(fun eff ->
-                 Req.Reasoning.
-                   { effort = Some (Req.Reasoning.Effort.of_str_exn eff)
-                   ; summary = Some Req.Reasoning.Summary.Detailed
-                   }))
-            ?model:(Option.map prompt_ctx.cfg.model ~f:Req.model_of_str_exn)
-            ~on_event
-            ~on_fn_out
-            ()
-        in
-        Model.set_history_items model items;
-        Model.set_messages model (Conversation.of_history (Model.history_items model));
-        Eio.Stream.add ev_stream `Redraw;
-        Model.set_fetch_sw model None
-      with
-      | ex ->
-        Model.set_fetch_sw model None;
-        prerr_endline (Printf.sprintf "Error during streaming: %s" (Exn.to_string ex));
-        Eio.Stream.add ev_stream `Redraw)
-  in
-  Cmd.run (Start_streaming start_streaming)
+  try
+    Switch.run
+    @@ fun streaming_sw ->
+    Model.set_fetch_sw model (Some streaming_sw);
+    let on_event ev = Eio.Stream.add ev_stream (`Stream ev) in
+    (* let on_event_batch evs = Eio.Stream.add ev_stream (`Stream_batch evs) in
+    let on_event = throttle streaming_sw env on_event on_event_batch in *)
+    let on_fn_out ev = Eio.Stream.add ev_stream (`Function_output ev) in
+    let items =
+      Chat_response.Driver.run_completion_stream_in_memory_v1
+        ~env
+        ~history:(Model.history_items model)
+        ~tools:(Some prompt_ctx.tools)
+        ~tool_tbl:prompt_ctx.tool_tbl
+        ?temperature:prompt_ctx.cfg.temperature
+        ?max_output_tokens:prompt_ctx.cfg.max_tokens
+        ?reasoning:
+          (Option.map prompt_ctx.cfg.reasoning_effort ~f:(fun eff ->
+             Req.Reasoning.
+               { effort = Some (Req.Reasoning.Effort.of_str_exn eff)
+               ; summary = Some Req.Reasoning.Summary.Detailed
+               }))
+        ?model:(Option.map prompt_ctx.cfg.model ~f:Req.model_of_str_exn)
+        ~on_event
+        ~on_fn_out
+        ()
+    in
+    Model.set_history_items model items;
+    Model.set_messages model (Conversation.of_history (Model.history_items model));
+    Model.set_fetch_sw model None;
+    Eio.Stream.add ev_stream `Redraw
+  with
+  | ex ->
+    Model.set_fetch_sw model None;
+    let error_msg = Printf.sprintf "Error during streaming: %s" (Exn.to_string ex) in
+    print_endline error_msg;
+    (* Add an error message to the model so the UI can display it. *)
+    add_placeholder_stream_error model error_msg;
+    Eio.Stream.add ev_stream `Redraw
 ;;
 
 (* ------------------------------------------------------------------------ *)
@@ -290,13 +208,15 @@ let run_chat ~env ~prompt_file () =
        | `Redraw
        | Notty.Unescape.event
        | `Stream of Res.Response_stream.t
-       | `Function_output of Res.Function_call_output.t
+       | `Stream_batch of Res.Response_stream.t list
+       | (* Function call output events are sent to the UI for rendering. *)
+         `Function_output of Res.Function_call_output.t
        ]
        as
        'ev)
         Eio.Stream.t
     =
-    Eio.Stream.create 64
+    Eio.Stream.create 10
   in
   let cwd = Eio.Stdenv.cwd env in
   let datadir = Io.ensure_chatmd_dir ~cwd in
@@ -323,9 +243,13 @@ let run_chat ~env ~prompt_file () =
       | _ -> Ctx.create ~env ~dir ~cache
     in
     let fns =
-      List.map declared_tools ~f:(fun decl ->
+      List.concat_map declared_tools ~f:(fun decl ->
         let ctx_tool = ctx_for_tool decl in
-        Tool.of_declaration ~ctx:ctx_tool ~run_agent:Chat_response.Driver.run_agent decl)
+        Tool.of_declaration
+          ~sw:ui_sw
+          ~ctx:ctx_tool
+          ~run_agent:Chat_response.Driver.run_agent
+          decl)
     in
     let comp_tools, tbl = Gpt_function.functions fns in
     Tool.convert_tools comp_tools, tbl
@@ -369,6 +293,7 @@ let run_chat ~env ~prompt_file () =
            | `Redraw
            | Notty.Unescape.event
            | `Stream of Res_stream.t
+           | `Stream_batch of Res.Response_stream.t list
            | `Function_output of Res.Function_call_output.t
            ]))
   @@ fun term ->
@@ -404,11 +329,45 @@ let run_chat ~env ~prompt_file () =
     | `Stream ev ->
       let patches = Stream_handler.handle_event ~model ev in
       ignore (Model.apply_patches model patches);
+      (match ev with
+       | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
+         (match item with
+          | Openai.Responses.Response_stream.Item.Output_message om ->
+            ignore
+            @@ Model.add_history_item model (Openai.Responses.Item.Output_message om)
+          | Openai.Responses.Response_stream.Item.Reasoning r ->
+            ignore @@ Model.add_history_item model (Openai.Responses.Item.Reasoning r)
+          | Openai.Responses.Response_stream.Item.Function_call fc ->
+            ignore
+            @@ Model.add_history_item model (Openai.Responses.Item.Function_call fc)
+          | _ -> ())
+       | _ -> ());
+      redraw ();
+      main_loop ()
+    | `Stream_batch items ->
+      List.iter items ~f:(fun item ->
+        let patches = Stream_handler.handle_event ~model item in
+        ignore (Model.apply_patches model patches);
+        match item with
+        | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
+          (match item with
+           | Openai.Responses.Response_stream.Item.Output_message om ->
+             ignore
+             @@ Model.add_history_item model (Openai.Responses.Item.Output_message om)
+           | Openai.Responses.Response_stream.Item.Reasoning r ->
+             ignore @@ Model.add_history_item model (Openai.Responses.Item.Reasoning r)
+           | Openai.Responses.Response_stream.Item.Function_call fc ->
+             ignore
+             @@ Model.add_history_item model (Openai.Responses.Item.Function_call fc)
+           | _ -> ())
+        | _ -> ());
       redraw ();
       main_loop ()
     | `Function_output out ->
       let patches = Stream_handler.handle_fn_out ~model out in
       ignore (Model.apply_patches model patches);
+      ignore (Model.add_history_item model (Res_item.Function_call_output out));
+      (* Update the UI to reflect the new function output. *)
       redraw ();
       main_loop ()
   (* Defer to controller for local key handling first. *)
@@ -423,12 +382,7 @@ let run_chat ~env ~prompt_file () =
        | None ->
          apply_local_submit_effects ~model ~ev_stream ~term;
          Fiber.fork ~sw:ui_sw (fun () ->
-           handle_submit
-             ~env
-             ~ui_sw
-             ~model
-             ~ev_stream
-             ~prompt_ctx:{ cfg; tools; tool_tbl });
+           handle_submit ~env ~model ~ev_stream ~prompt_ctx:{ cfg; tools; tool_tbl });
          main_loop ())
     | Controller.Cancel_or_quit -> handle_cancel_or_quit ()
     | Controller.Quit -> ()

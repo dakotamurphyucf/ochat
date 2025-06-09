@@ -9,6 +9,7 @@
 ------------------------------------------------------------------------*)
 
 open Core
+open Eio
 module Client = Mcp_client
 module Tool = Mcp_types.Tool
 module Result_ = Mcp_types.Tool_result
@@ -28,12 +29,7 @@ let string_of_result (r : Result_.t) : string =
 (* Given a live [Mcp_client.t] (kept around by the caller for the
    lifetime of the wrapped function) and a [Tool.t] descriptor, produce
    a [Gpt_function.t]. *)
-let gpt_function_of_remote_tool
-      ~(env : < process_mgr : [> [> `Generic ] Eio.Process.mgr_ty ] Eio.Resource.t ; .. >)
-      ~(uri : string)
-      (tool : Tool.t)
-  : Gpt_function.t
-  =
+let gpt_function_of_remote_tool ~sw ~client ~strict (tool : Tool.t) : Gpt_function.t =
   let module Def = struct
     type input = Jsonaf.t
 
@@ -47,15 +43,30 @@ let gpt_function_of_remote_tool
     let input_of_string s = Jsonaf.of_string s
   end
   in
+  (* Set up a daemon that listens for notifications from the MCP server
+     and prints them to stdout. This is useful for debugging and
+     monitoring tool calls. *)
+  (* Note: This is a simple example; in production, you might want to
+     handle notifications more robustly, e.g., by logging them or
+     processing them in some way. *)
+  let notifications = Client.notifications client in
+  Fiber.fork_daemon ~sw (fun () ->
+    let rec loop () =
+      let json = Eio.Stream.take notifications in
+      print_endline (Jsonaf.to_string @@ Mcp_types.Jsonrpc.jsonaf_of_notification json);
+      loop ()
+    in
+    let _ = loop () in
+    `Stop_daemon);
+  (* The function that will be called by the chat runtime. *)
+  (* It takes a JSON object as input, calls the MCP server, and returns
+     a string result. *)
   let run (args : Jsonaf.t) : string =
-    (* Connect on-demand, run the tool, then close. *)
-    Eio.Switch.run (fun sw ->
-      let client = Client.connect ~sw ~env ~uri in
-      match Client.call_tool client ~name:tool.name ~arguments:args with
-      | Ok res -> string_of_result res
-      | Error msg -> msg)
+    match Client.call_tool client ~name:tool.name ~arguments:args with
+    | Ok res -> string_of_result res
+    | Error msg -> msg
   in
-  Gpt_function.create_function (module Def) run
+  Gpt_function.create_function (module Def) ~strict run
 ;;
 
 (*---------------------------------------------------------------------*)

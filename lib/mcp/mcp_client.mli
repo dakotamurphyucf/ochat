@@ -20,11 +20,7 @@ type t
 (** Establish a new client connection and start the internal receiver
     fibre.  The MCP *initialize*/*initialized* handshake is performed
     automatically. *)
-val connect
-  :  sw:Eio.Switch.t
-  -> env:< process_mgr : [> [> `Generic ] Eio.Process.mgr_ty ] Eio.Resource.t ; .. >
-  -> uri:string
-  -> t
+val connect : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> uri:string -> t
 
 val close : t -> unit
 val is_closed : t -> bool
@@ -56,4 +52,4 @@ val call_tool
 
 (** Access to a stream of *raw* server notifications (if needed by
     callers).  Each element is the decoded Jsonaf value. *)
-val notifications : t -> Jsonaf.t Eio.Stream.t
+val notifications : t -> Mcp_types.Jsonrpc.notification Eio.Stream.t

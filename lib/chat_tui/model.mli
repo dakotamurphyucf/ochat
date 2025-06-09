@@ -58,3 +58,4 @@ val auto_follow : t -> bool
 
 val apply_patch : t -> Types.patch -> t
 val apply_patches : t -> Types.patch list -> t
+val add_history_item : t -> Openai.Responses.Item.t -> t

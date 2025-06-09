@@ -138,3 +138,8 @@ let apply_patch (model : t) (p : Types.patch) : t =
 ;;
 
 let apply_patches model patches = List.fold patches ~init:model ~f:apply_patch
+
+let add_history_item (model : t) (item : Openai.Responses.Item.t) =
+  model.history_items <- model.history_items @ [ item ];
+  model
+;;

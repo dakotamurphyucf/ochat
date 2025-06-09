@@ -33,6 +33,7 @@ depends: [
   "re2"
   "bimage"
   "bimage-unix"
+  "piaf"
   "odoc" {with-doc}
 ]
 build: [

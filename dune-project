@@ -1,34 +1,38 @@
 (lang dune 3.14)
+
 (name chatgpt)
-
-
 
 (generate_opam_files true)
 
 (using menhir 3.0)
 
+(pin
+ (url "git+https://github.com/anmonteiro/piaf.git")
+ (package
+  (name piaf)))
+
 (package
  (name chatgpt)
  (synopsis "A short synopsis")
  (description "A longer description")
- (depends 
+ (depends
   (ocaml
    (>= 5.1.0))
-  eio 
-  dune 
-  omd 
-  lambdasoup 
-  core 
+  eio
+  dune
+  omd
+  lambdasoup
+  core
   core_unix
-  ppx_jane 
-  ppxlib 
-  pcre 
-  re 
+  ppx_jane
+  ppxlib
+  pcre
+  re
   owl
   eio
   eio_main
   cohttp-eio
-  ezgzip 
+  ezgzip
   lwt_eio
   base64
   jsonaf
@@ -40,9 +44,9 @@
   cohttp
   expect_test_helpers_core
   re2
-  bimage 
-  bimage-unix)
-  
+  bimage
+  bimage-unix
+  piaf)
  (tags
   (topics "to describe" your project)))
 

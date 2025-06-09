@@ -5,6 +5,8 @@ module Res = Openai.Responses
 let rec run_agent ~(ctx : _ Ctx.t) (prompt_xml : string) (items : CM.content_item list)
   : string
   =
+  Eio.Switch.run
+  @@ fun sw ->
   (* 1.  Extract individual components from the shared context *)
   let dir = Ctx.dir ctx in
   (* 1.  Build the full agent XML by adding any inline user items. *)
@@ -39,7 +41,7 @@ let rec run_agent ~(ctx : _ Ctx.t) (prompt_xml : string) (items : CM.content_ite
       | _ -> None)
   in
   let tools : Gpt_function.t list =
-    List.map declared_tools ~f:(fun decl ->
+    List.concat_map declared_tools ~f:(fun decl ->
       (* For nested agent tools we want them to run with a filesystem
          root identical to the one used by the current agent – hence we
          ~ctx:{ ctx with dir = Eio.Stdenv.cwd (Ctx.env ctx) }
@@ -49,7 +51,7 @@ let rec run_agent ~(ctx : _ Ctx.t) (prompt_xml : string) (items : CM.content_ite
         | CM.Agent _ -> { ctx with dir = Eio.Stdenv.cwd (Ctx.env ctx) }
         | _ -> { ctx with dir = Eio.Stdenv.cwd (Ctx.env ctx) }
       in
-      Tool.of_declaration ~ctx:ctx_for_tool ~run_agent decl)
+      Tool.of_declaration ~sw ~ctx:ctx_for_tool ~run_agent decl)
   in
   let comp_tools, tool_tbl = Gpt_function.functions tools in
   let tools_req = Tool.convert_tools comp_tools in
@@ -207,6 +209,8 @@ let run_completion_stream
       ~output_file (* evolving conversation buffer               *)
       ()
   =
+  Eio.Switch.run
+  @@ fun sw ->
   (* ─────────────────────── 0.  setup & helpers ───────────────────────── *)
   let dir = Eio.Stdenv.fs env in
   let cwd = Eio.Stdenv.cwd env in
@@ -243,13 +247,13 @@ let run_completion_stream
     List.filter_map elements ~f:(function
       | CM.Tool t -> Some t
       | _ -> None)
-    |> List.map ~f:(fun decl ->
+    |> List.concat_map ~f:(fun decl ->
       let ctx_for_tool =
         match decl with
         | CM.Agent _ -> Ctx.create ~env ~dir:(Eio.Stdenv.cwd env) ~cache
         | _ -> Ctx.create ~env ~dir:(Eio.Stdenv.cwd env) ~cache
       in
-      Tool.of_declaration ~ctx:ctx_for_tool ~run_agent decl)
+      Tool.of_declaration ~sw ~ctx:ctx_for_tool ~run_agent decl)
   in
   (* 1‑C • tools / functions *)
   let comp_tools, tool_tbl = Gpt_function.functions tools in
