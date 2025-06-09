@@ -181,10 +181,8 @@ let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
         ~on_fn_out
         ()
     in
-    Model.set_history_items model items;
-    Model.set_messages model (Conversation.of_history (Model.history_items model));
     Model.set_fetch_sw model None;
-    Eio.Stream.add ev_stream `Redraw
+    Eio.Stream.add ev_stream (`Replace_history items)
   with
   | ex ->
     Model.set_fetch_sw model None;
@@ -209,6 +207,8 @@ let run_chat ~env ~prompt_file () =
        | Notty.Unescape.event
        | `Stream of Res.Response_stream.t
        | `Stream_batch of Res.Response_stream.t list
+       | `Replace_history of Res_item.t list
+         (* Update history events are used to update the model's history items. *)
        | (* Function call output events are sent to the UI for rendering. *)
          `Function_output of Res.Function_call_output.t
        ]
@@ -294,6 +294,7 @@ let run_chat ~env ~prompt_file () =
            | Notty.Unescape.event
            | `Stream of Res_stream.t
            | `Stream_batch of Res.Response_stream.t list
+           | `Replace_history of Res_item.t list
            | `Function_output of Res.Function_call_output.t
            ]))
   @@ fun term ->
@@ -367,6 +368,13 @@ let run_chat ~env ~prompt_file () =
       let patches = Stream_handler.handle_fn_out ~model out in
       ignore (Model.apply_patches model patches);
       ignore (Model.add_history_item model (Res_item.Function_call_output out));
+      (* Update the UI to reflect the new function output. *)
+      redraw ();
+      main_loop ()
+    | `Replace_history items ->
+      (* Replace the model's history items with the new ones. *)
+      Model.set_history_items model items;
+      Model.set_messages model (Conversation.of_history (Model.history_items model));
       (* Update the UI to reflect the new function output. *)
       redraw ();
       main_loop ()

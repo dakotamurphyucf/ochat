@@ -11,6 +11,47 @@
   (pps ppx_jane ppx_jsonaf_conv)))
 
 ;; ---------------------------------------------------------------------------
+;; MCP – Streamable HTTP server (Phase-2)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_server_http)
+ (public_name chatgpt.mcp_server_http)
+ (modules mcp_server_http)
+ (libraries
+  core
+  eio
+  piaf
+  jsonaf_ext
+  chatgpt.mcp_types
+  chatgpt.mcp_server_core
+  chatgpt.mcp_server_router)
+ (wrapped false)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+;; ---------------------------------------------------------------------------
+;; MCP – helper that turns *.chatmd files into prompts + agent tools
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_prompt_agent)
+ (public_name chatgpt.mcp_prompt_agent)
+ (modules mcp_prompt_agent)
+ (libraries
+  core
+  jsonaf_ext
+  chatgpt.mcp_types
+  chatgpt.mcp_server_core
+  chat_response   ; need driver + ctx
+  chatmd          ; chatmd parser
+  eio
+  eio.unix)
+ (wrapped false)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+;; ---------------------------------------------------------------------------
 ;; MCP – low-level transports (stdio, later http)
 ;; ---------------------------------------------------------------------------
 
@@ -57,6 +98,39 @@
   eio.unix
   chatgpt.mcp_types
   chatgpt.mcp_transport)
+ (wrapped false)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+;; ---------------------------------------------------------------------------
+;; MCP – server core registry (Phase-1)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_server_core)
+ (public_name chatgpt.mcp_server_core)
+ (modules mcp_server_core)
+ (libraries
+  core
+  jsonaf_ext
+  chatgpt.mcp_types)
+ (wrapped false)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))
+
+;; ---------------------------------------------------------------------------
+;; MCP – server router (Phase-1)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_server_router)
+ (public_name chatgpt.mcp_server_router)
+ (modules mcp_server_router)
+ (libraries
+  core
+  jsonaf_ext
+  chatgpt.mcp_types
+  chatgpt.mcp_server_core)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

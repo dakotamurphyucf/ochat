@@ -462,8 +462,8 @@ module Usage : sig
     { input_tokens : int
     ; input_tokens_details : Jsonaf.t
     ; output_tokens : int
-    ; output_tokens_details : Jsonaf.t
-    ; total_tokens : int
+    ; output_tokens_details : Jsonaf.t option
+    ; total_tokens : int option
     }
   [@@deriving jsonaf, sexp, bin_io]
 end

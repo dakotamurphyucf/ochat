@@ -905,8 +905,8 @@ module Usage = struct
     { input_tokens : int
     ; input_tokens_details : Jsonaf.t
     ; output_tokens : int
-    ; output_tokens_details : Jsonaf.t
-    ; total_tokens : int
+    ; output_tokens_details : Jsonaf.t option [@jsonaf.option]
+    ; total_tokens : int option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
 end
@@ -950,7 +950,7 @@ module Response = struct
     ; tool_choice : Tool_choice.t option
     ; tools : Request.Tool.t list option
     ; top_p : float option
-    ; truncation : string option
+    ; truncation : string option [@jsonaf.option]
     ; usage : Usage.t option
     ; user : string option
     ; metadata : Metadata.t option

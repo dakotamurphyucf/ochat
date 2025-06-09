@@ -87,3 +87,25 @@
   eio_main
   jsonaf
   logs.threaded))
+
+;; ---------------------------------------------------------------------------
+;; MCP stdio server executable (Phase-1)
+;; ---------------------------------------------------------------------------
+
+(executable
+ (public_name mcp_server)
+ (name mcp_server)
+ (modules mcp_server)
+ (libraries
+  core
+  eio_main
+  chatgpt.mcp_types
+  chatgpt.mcp_server_core
+  chatgpt.mcp_server_router
+  jsonaf_ext
+  definitions
+  functions
+  chatgpt.mcp_prompt_agent
+  chatgpt.mcp_server_http
+  chatgpt.chat_response
+  chatgpt.chatmd))
