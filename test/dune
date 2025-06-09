@@ -7,6 +7,27 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; MCP transport – HTTP SSE & Session-ID tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_transport_http_sse_test)
+ (modules mcp_transport_http_sse_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.mock
+  eio.unix
+  piaf
+  uri
+  chatgpt.mcp_transport)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; MCP transport – HTTP implementation tests
 ;; ---------------------------------------------------------------------------
 
