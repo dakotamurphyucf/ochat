@@ -7,6 +7,29 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; MCP server integration test (real HTTP server)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name mcp_server_integration_test)
+ (modules mcp_server_integration_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.mock
+  eio.unix
+  chatgpt.mcp_server_core
+  chatgpt.mcp_server_http
+  chatgpt.mcp_client
+  chatgpt.mcp_types
+  piaf)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; MCP transport – HTTP SSE & Session-ID tests
 ;; ---------------------------------------------------------------------------
 

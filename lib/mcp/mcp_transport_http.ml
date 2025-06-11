@@ -19,6 +19,7 @@ type t =
   ; incoming : Jsonaf.t Eio.Stream.t (** queue of server messages *)
   ; sw : Eio.Switch.t
   ; mutable session_id : string option (** negotiated via MCP-Session-Id header *)
+  ; auth_token : string option (** OAuth bearer token, if any *)
   ; mutable closed : bool
   }
 
@@ -124,14 +125,20 @@ let parse_sse_stream t (body : Body.t) : unit =
 let perform_post (t : t) (payload : string) : unit =
   (* We run the HTTP call in the current fibre; callers of [send] run
      it in a separate fork so that [send] can return immediately. *)
-  let headers_list =
+  let headers_base =
     [ "content-type", "application/json"
     ; "accept", "application/json, text/event-stream"
     ]
+  in
+  let headers_list =
+    headers_base
+    @ (match t.session_id with
+       | None -> []
+       | Some sid -> [ "Mcp-Session-Id", sid ])
     @
-    match t.session_id with
+    match t.auth_token with
     | None -> []
-    | Some sid -> [ "Mcp-Session-Id", sid ]
+    | Some tok -> [ "Authorization", "Bearer " ^ tok ]
   in
   let body = Body.of_string payload in
   match Piaf.Client.post t.client ~headers:headers_list ~body t.endpoint_path with
@@ -181,6 +188,31 @@ let connect ~(sw : Eio.Switch.t) ~env (uri_str : string) : t =
   (* Create a base URI without the path component for the Piaf client
      (Piaf connects to authority – path is given per request).        *)
   let base_uri = Uri.with_path uri "" in
+  (* Attempt OAuth token retrieval – we look at env vars as documented in
+     [oauth.md].  This is best-effort: if anything fails we fall back to
+     anonymous access. *)
+  let issuer =
+    (* issuer = scheme://authority (no path) *)
+    let base_no_path = Uri.with_path uri "" in
+    Uri.to_string base_no_path
+  in
+  let creds_opt : Oauth2_manager.creds option =
+    match Sys.getenv "MCP_CLIENT_ID", Sys.getenv "MCP_CLIENT_SECRET" with
+    | Some id, Some secret ->
+      Some (Oauth2_manager.Client_secret { id; secret; scope = None })
+    | _ -> None
+  in
+  let auth_token_result : string option =
+    match creds_opt with
+    | None -> None
+    | Some creds ->
+      (match Oauth2_manager.get ~env ~sw ~issuer creds with
+       | Ok tok -> Some tok.access_token
+       | Error e ->
+         (try Logs.warn (fun f -> f "OAuth token fetch failed: %s" e) with
+          | _ -> ());
+         None)
+  in
   match Piaf.Client.create ~sw env base_uri with
   | Error err ->
     invalid_arg
@@ -194,6 +226,7 @@ let connect ~(sw : Eio.Switch.t) ~env (uri_str : string) : t =
     ; incoming
     ; sw
     ; session_id = None
+    ; auth_token = auth_token_result
     ; closed = false
     }
 ;;

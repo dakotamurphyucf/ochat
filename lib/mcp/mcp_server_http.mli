@@ -2,22 +2,27 @@ open! Core
 
 (** [run ~env ~core ~port] starts a Streamable HTTP MCP server listening on
     [127.0.0.1:port].  The call blocks the current fibre forever.  One fibre
-    is spawned per incoming connection / request.  Only the subset of the MCP
-    specification required by the client implementation is supported: the
-    server understands HTTP POST requests to the single endpoint [/mcp].  The
-    POST body must contain either a single JSON-RPC message or a batch (JSON
-    array).  The response is returned synchronously as [application/json].
+    is spawned per incoming connection / request.
 
-    GET requests as well as Server-Sent Events streaming are **not** supported
-    in this MVP and result in HTTP 405.
+    Implemented HTTP endpoints:
 
-    Error handling:
-    – Malformed JSON yields HTTP 400 with a JSON-RPC error response.
-    – All other internal failures return HTTP 500 with a plain-text body. *)
+    • `POST /mcp` – accepts a single JSON-RPC message *or* a
+      JSON-RPC batch (array).  The reply is returned either as
+      `application/json` (default) *or* as a compact
+      Server-Sent-Events (SSE) stream when the client sends an
+      `Accept: text/event-stream` header.
 
-val run
-  :  env:Eio_unix.Stdenv.base
-  -> core:Mcp_server_core.t
-  -> port:int
-  -> unit
+    • `GET /mcp` – opens a long-lived SSE channel that the server
+      uses for **notifications** (e.g. `list_changed`, structured
+      logging).  A valid `Mcp-Session-Id` request header is
+      required – the identifier is issued in the response to the
+      initial `initialize` request.
 
+    Error handling rules:
+    – malformed JSON ⇒ HTTP 400 with a minimal JSON error payload;
+    – unknown / missing session id ⇒ HTTP 404;
+    – unsupported HTTP methods ⇒ HTTP 405.
+
+    The function does not return. *)
+
+val run : env:Eio_unix.Stdenv.base -> core:Mcp_server_core.t -> port:int -> unit

@@ -198,5 +198,38 @@ module Tool_result = struct
 end
 
 (*--------------------------------------------------------------------
+  Resource metadata & contents – very small subset so that the server can
+  produce valid `resources/list` and `resources/read` payloads.  We only
+  include the fields that are actually used by the current implementation.
+--------------------------------------------------------------------*)
+
+module Resource = struct
+  type t =
+    { uri : string
+    ; name : string
+    ; description : string option [@default None] [@jsonaf_drop_if Option.is_none]
+    ; mime_type : string option [@key "mimeType"]
+        [@default None] [@jsonaf_drop_if Option.is_none]
+    ; size : int option [@default None] [@jsonaf_drop_if Option.is_none]
+    }
+  [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+
+  module Contents_text = struct
+    type t =
+      { uri : string
+      ; mime_type : string option [@key "mimeType"]
+          [@default None] [@jsonaf_drop_if Option.is_none]
+      ; text : string
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  (* The more structured wrapper types used in the official MCP schema are
+     omitted for now – the current server implementation hand-constructs the
+     JSON objects directly.  They can be added back once higher-level
+     resource helpers are required by the client code. *)
+end
+
+(*--------------------------------------------------------------------
   End of mcp_types.ml
 --------------------------------------------------------------------*)

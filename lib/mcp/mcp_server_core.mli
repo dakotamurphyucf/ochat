@@ -17,7 +17,66 @@ type prompt =
   ; messages : Jsonaf.t
   }
 
+(* ------------------------------------------------------------------ *)
+(* Logging – servers can emit structured log messages via hooks so that the
+   HTTP transport can forward them to connected clients.                *)
+
 type t
+
+type log_level =
+  [ `Debug
+  | `Info
+  | `Notice
+  | `Warning
+  | `Error
+  | `Critical
+  | `Alert
+  | `Emergency
+  ]
+
+(** [log t ~level ?logger data] emits a structured log entry that is forwarded
+    to every registered logging hook.  [data] should be an arbitrary JSON
+    object/value describing the event. *)
+val log :
+  t -> level:log_level -> ?logger:string -> Jsonaf.t -> unit
+
+(** Register a callback that is invoked for each log event.  The HTTP server
+    uses this to broadcast [notifications/message] SSE events to clients. *)
+val add_logging_hook :
+  t -> (level:log_level -> logger:string option -> Jsonaf.t -> unit) -> unit
+
+(* ------------------------------------------------------------------ *)
+(* Progress notifications *)
+(* ------------------------------------------------------------------ *)
+
+(** Structured payload for progress updates as per MCP
+    [notifications/progress].  The [progress] field is a monotonically
+    increasing value (typically 0–1 when [total] is omitted).  When a
+    concrete [total] is known the sender SHOULD supply it so that UIs can
+    derive a percentage.  The [message] is intended for human readable
+    status updates (e.g. "Reticulating splines…"). *)
+type progress_payload =
+  { progress_token : string
+  ; progress : float
+  ; total : float option
+  ; message : string option
+  }
+
+val add_progress_hook : t -> (progress_payload -> unit) -> unit
+
+val notify_progress : t -> progress_payload -> unit
+
+(* ------------------------------------------------------------------ *)
+(* Cancellation                                                        *)
+(* ------------------------------------------------------------------ *)
+
+val cancel_request : t -> id:Mcp_types.Jsonrpc.Id.t -> unit
+(** Mark a request as cancelled.  Servers invoke this from the router when a
+    [notifications/cancelled] message is received. *)
+
+val is_cancelled : t -> id:Mcp_types.Jsonrpc.Id.t -> bool
+(** Test whether a request has been cancelled.  Long-running handlers can
+    poll this cooperatively and abort early to free resources. *)
 
 (** [create ()] yields a fresh, empty registry.  All operations are
     thread-safe – internally a mutex protects the two registries so that the
@@ -30,6 +89,13 @@ val create : unit -> t
 val add_tools_changed_hook : t -> (unit -> unit) -> unit
 
 val add_prompts_changed_hook : t -> (unit -> unit) -> unit
+
+(* Hooks for server-driven resource list updates (e.g. when new files appear
+   on disk).  Transport layers can register a callback that will be invoked
+   whenever [notify_resources_changed] is called. *)
+val add_resources_changed_hook : t -> (unit -> unit) -> unit
+
+val notify_resources_changed : t -> unit
 
 (** [register_tool t spec handler] registers a new tool with metadata [spec]
     and an OCaml [handler] implementation.  If another tool with the same name

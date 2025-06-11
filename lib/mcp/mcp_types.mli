@@ -60,6 +60,9 @@ module Jsonrpc : sig
   ------------------------------------------------------------------*)
 end
 
+  (* Placeholder – detailed resource content wrappers can be added when
+     needed by client code.*)
+
 (* removed earlier misplaced definitions; actual ones appear later *)
 
 module Capability : sig
@@ -109,4 +112,22 @@ module Tool_result : sig
     ; is_error : bool
     }
   [@@deriving jsonaf, sexp, bin_io]
+end
+
+(*--------------------------------------------------------------------
+  Resource metadata and related result payloads – limited subset needed by
+  the current server implementation (resources/list & resources/read).
+--------------------------------------------------------------------*)
+
+module Resource : sig
+  type t =
+    { uri : string
+    ; name : string
+    ; description : string option
+    ; mime_type : string option [@key "mimeType"]
+    ; size : int option
+    }
+  [@@deriving jsonaf]
+
+  val jsonaf_of_t : t -> Jsonaf.t
 end

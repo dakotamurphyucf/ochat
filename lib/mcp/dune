@@ -20,6 +20,7 @@
  (modules mcp_server_http)
  (libraries
   core
+  core_unix
   eio
   piaf
   jsonaf_ext
@@ -40,6 +41,7 @@
  (modules mcp_prompt_agent)
  (libraries
   core
+  core_unix
   jsonaf_ext
   chatgpt.mcp_types
   chatgpt.mcp_server_core
@@ -60,7 +62,7 @@
  (public_name chatgpt.mcp_transport)
 (modules mcp_transport mcp_transport_interface mcp_transport_stdio mcp_transport_http)
  (modules_without_implementation mcp_transport mcp_transport_interface)
-(libraries core jsonaf_ext eio eio.unix piaf uri cstruct)
+(libraries core jsonaf_ext eio eio.unix piaf uri cstruct chatgpt.oauth2)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
@@ -93,6 +95,7 @@
  (modules mcp_client)
  (libraries
   core
+  core_unix
   jsonaf_ext
   eio
   eio.unix
@@ -112,6 +115,7 @@
  (modules mcp_server_core)
  (libraries
   core
+  core_unix
   jsonaf_ext
   chatgpt.mcp_types)
  (wrapped false)
@@ -129,8 +133,12 @@
  (libraries
   core
   jsonaf_ext
+  eio
+  eio.unix
+  base64
   chatgpt.mcp_types
-  chatgpt.mcp_server_core)
+  chatgpt.mcp_server_core
+  chatgpt.mime)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

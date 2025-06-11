@@ -26,6 +26,7 @@ let content_item_of_input (text : string) : CM.content_item =
 
 let of_chatmd_file
     ~(env : Eio_unix.Stdenv.base)
+    ~(core : Mcp_server_core.t)
     ~(path : _ Eio.Path.t)
   : JT.Tool.t * Mcp_server_core.tool_handler * Mcp_server_core.prompt
   =
@@ -55,19 +56,35 @@ let of_chatmd_file
 
   (* Handler that executes the prompt via Chat_response.Driver.run_agent. *)
   let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
+    (* Generate a short random progress token so that clients can correlate
+       progress updates. *)
+    let progress_token =
+      let hex = "0123456789abcdef" in
+      String.init 8 ~f:(fun _ -> hex.[Random.int 16])
+    in
+    (* Helper to send a progress update. *)
+    let send_progress ~progress ?total ?message () =
+      let payload : Mcp_server_core.progress_payload =
+        { progress_token; progress; total; message }
+      in
+      Mcp_server_core.notify_progress core payload
+    in
     match args with
     | `Object kvs -> (
         match List.Assoc.find kvs ~equal:String.equal "input" with
         | Some (`String user_input) -> (
             try
-              Eio.Switch.run @@ fun _sw ->
-              let cache = Chat_response.Cache.create ~max_size:256 () in
-              let ctx = Chat_response.Ctx.create ~env ~dir:env#cwd ~cache in
-              let answer =
+              send_progress ~progress:0.0 ?total:None ?message:(Some "Starting agent") ();
+              let result =
+                Eio.Switch.run @@ fun _sw ->
+                let cache = Chat_response.Cache.create ~max_size:256 () in
+                let ctx = Chat_response.Ctx.create ~env ~dir:env#cwd ~cache in
                 Chat_response.Driver.run_agent ~ctx prompt_xml [ content_item_of_input user_input ]
               in
-              Ok (`String answer)
+              send_progress ~progress:1.0 ?total:None ?message:(Some "Completed") ();
+              Ok (`String result)
             with exn ->
+              send_progress ~progress:1.0 ?total:None ?message:(Some "Failed") ();
               Error (Printf.sprintf "Agent execution failed: %s" (Exn.to_string exn)))
         | _ -> Error "Missing field 'input' (string)")
     | _ -> Error "arguments must be object"
