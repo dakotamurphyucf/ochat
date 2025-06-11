@@ -37,5 +37,5 @@ module Token = struct
     let now = Caml_unix.gettimeofday () in
     let expiry = t.obtained_at +. Float.of_int (t.expires_in - 60) in
     Float.(now >= expiry)
+  ;;
 end
-

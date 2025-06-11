@@ -1,5 +1,4 @@
 open! Core
-
 module JT = Mcp_types
 
 (** [handle ~core json] consumes one incoming JSON-RPC payload [json] and
@@ -8,5 +7,8 @@ module JT = Mcp_types
     notifications do not yield a response and therefore produce an empty
     list.  All errors are converted into proper JSON-RPC error responses so
     that the caller never needs to catch exceptions. *)
-val handle : core:Mcp_server_core.t -> env:Eio_unix.Stdenv.base -> Jsonaf.t -> Jsonaf.t list
-
+val handle
+  :  core:Mcp_server_core.t
+  -> env:Eio_unix.Stdenv.base
+  -> Jsonaf.t
+  -> Jsonaf.t list

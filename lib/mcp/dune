@@ -45,8 +45,8 @@
   jsonaf_ext
   chatgpt.mcp_types
   chatgpt.mcp_server_core
-  chat_response   ; need driver + ctx
-  chatmd          ; chatmd parser
+  chat_response ; need driver + ctx
+  chatmd ; chatmd parser
   eio
   eio.unix)
  (wrapped false)
@@ -60,9 +60,13 @@
 (library
  (name mcp_transport)
  (public_name chatgpt.mcp_transport)
-(modules mcp_transport mcp_transport_interface mcp_transport_stdio mcp_transport_http)
+ (modules
+  mcp_transport
+  mcp_transport_interface
+  mcp_transport_stdio
+  mcp_transport_http)
  (modules_without_implementation mcp_transport mcp_transport_interface)
-(libraries core jsonaf_ext eio eio.unix piaf uri cstruct chatgpt.oauth2)
+ (libraries core jsonaf_ext eio eio.unix piaf uri cstruct chatgpt.oauth2)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
@@ -113,11 +117,7 @@
  (name mcp_server_core)
  (public_name chatgpt.mcp_server_core)
  (modules mcp_server_core)
- (libraries
-  core
-  core_unix
-  jsonaf_ext
-  chatgpt.mcp_types)
+ (libraries core core_unix jsonaf_ext chatgpt.mcp_types)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

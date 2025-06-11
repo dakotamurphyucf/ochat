@@ -208,8 +208,8 @@ module Resource = struct
     { uri : string
     ; name : string
     ; description : string option [@default None] [@jsonaf_drop_if Option.is_none]
-    ; mime_type : string option [@key "mimeType"]
-        [@default None] [@jsonaf_drop_if Option.is_none]
+    ; mime_type : string option
+          [@key "mimeType"] [@default None] [@jsonaf_drop_if Option.is_none]
     ; size : int option [@default None] [@jsonaf_drop_if Option.is_none]
     }
   [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
@@ -217,8 +217,8 @@ module Resource = struct
   module Contents_text = struct
     type t =
       { uri : string
-      ; mime_type : string option [@key "mimeType"]
-          [@default None] [@jsonaf_drop_if Option.is_none]
+      ; mime_type : string option
+            [@key "mimeType"] [@default None] [@jsonaf_drop_if Option.is_none]
       ; text : string
       }
     [@@deriving jsonaf, sexp, bin_io]

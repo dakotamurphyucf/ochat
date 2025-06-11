@@ -91,40 +91,41 @@ let tool_call_response ~core ~id ~params =
     | None -> Or_error.errorf "Unknown tool %s" name
   in
   let log_success data = Mcp_server_core.log core ~level:`Info ~logger:"tool" data in
-  if Mcp_server_core.is_cancelled core ~id then
+  if Mcp_server_core.is_cancelled core ~id
+  then (
     let result : JT.Tool_result.t =
       { content = [ JT.Tool_result.Text "Request cancelled" ]; is_error = true }
     in
     let body = JT.Tool_result.jsonaf_of_t result in
-    Ok (JR.ok ~id body |> JR.jsonaf_of_response)
-  else (
-  match handler args_json with
-  | Ok json_result ->
-    let () =
-      log_success (`Object [ "event", `String "tool_success"; "tool", `String name ])
-    in
-    let result : JT.Tool_result.t =
-      { content = [ JT.Tool_result.Json json_result ]; is_error = false }
-    in
-    let body = JT.Tool_result.jsonaf_of_t result in
-    Ok (JR.ok ~id body |> JR.jsonaf_of_response)
-  | Error msg ->
-    let () =
-      Mcp_server_core.log
-        core
-        ~level:`Error
-        ~logger:"tool"
-        (`Object
-            [ "event", `String "tool_error"
-            ; "tool", `String name
-            ; "message", `String msg
-            ])
-    in
-    let result : JT.Tool_result.t =
-      { content = [ JT.Tool_result.Text msg ]; is_error = true }
-    in
-    let body = JT.Tool_result.jsonaf_of_t result in
     Ok (JR.ok ~id body |> JR.jsonaf_of_response))
+  else (
+    match handler args_json with
+    | Ok json_result ->
+      let () =
+        log_success (`Object [ "event", `String "tool_success"; "tool", `String name ])
+      in
+      let result : JT.Tool_result.t =
+        { content = [ JT.Tool_result.Json json_result ]; is_error = false }
+      in
+      let body = JT.Tool_result.jsonaf_of_t result in
+      Ok (JR.ok ~id body |> JR.jsonaf_of_response)
+    | Error msg ->
+      let () =
+        Mcp_server_core.log
+          core
+          ~level:`Error
+          ~logger:"tool"
+          (`Object
+              [ "event", `String "tool_error"
+              ; "tool", `String name
+              ; "message", `String msg
+              ])
+      in
+      let result : JT.Tool_result.t =
+        { content = [ JT.Tool_result.Text msg ]; is_error = true }
+      in
+      let body = JT.Tool_result.jsonaf_of_t result in
+      Ok (JR.ok ~id body |> JR.jsonaf_of_response))
 ;;
 
 let prompts_list_response ~core ~id =
@@ -323,26 +324,25 @@ let handle_single ~core ~env json : Jsonaf.t list =
         | "notifications/cancelled" ->
           let () =
             match notif.params with
-            | Some (`Object kvs) -> (
-                match List.Assoc.find kvs ~equal:String.equal "requestId" with
-                | Some id_json -> (
-                    let open Mcp_types.Jsonrpc.Id in
-                    let id_opt : t option =
-                      match id_json with
-                      | `String s -> Some (String s)
-                      | `Number num_str -> (
-                          match Int.of_string_opt num_str with
-                          | Some i -> Some (Int i)
-                          | None -> None)
-                      | _ -> None
-                    in
-                    Option.iter id_opt ~f:(fun id ->
-                        Mcp_server_core.cancel_request core ~id))
-                | _ -> ())
+            | Some (`Object kvs) ->
+              (match List.Assoc.find kvs ~equal:String.equal "requestId" with
+               | Some id_json ->
+                 let open Mcp_types.Jsonrpc.Id in
+                 let id_opt : t option =
+                   match id_json with
+                   | `String s -> Some (String s)
+                   | `Number num_str ->
+                     (match Int.of_string_opt num_str with
+                      | Some i -> Some (Int i)
+                      | None -> None)
+                   | _ -> None
+                 in
+                 Option.iter id_opt ~f:(fun id -> Mcp_server_core.cancel_request core ~id)
+               | _ -> ())
             | _ -> ()
           in
           []
-        | _ -> [] )
+        | _ -> [])
      | Error _ ->
        (* Malformed JSON – emit parse error *)
        let id = JR.Id.of_int 0 in

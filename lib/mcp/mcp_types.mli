@@ -60,7 +60,7 @@ module Jsonrpc : sig
   ------------------------------------------------------------------*)
 end
 
-  (* Placeholder – detailed resource content wrappers can be added when
+(* Placeholder – detailed resource content wrappers can be added when
      needed by client code.*)
 
 (* removed earlier misplaced definitions; actual ones appear later *)

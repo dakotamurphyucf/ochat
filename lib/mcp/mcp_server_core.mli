@@ -1,5 +1,4 @@
 open! Core
-
 module JT = Mcp_types
 
 (** Handler type for executing a tool.  Takes the JSON arguments sent in the
@@ -37,13 +36,14 @@ type log_level =
 (** [log t ~level ?logger data] emits a structured log entry that is forwarded
     to every registered logging hook.  [data] should be an arbitrary JSON
     object/value describing the event. *)
-val log :
-  t -> level:log_level -> ?logger:string -> Jsonaf.t -> unit
+val log : t -> level:log_level -> ?logger:string -> Jsonaf.t -> unit
 
 (** Register a callback that is invoked for each log event.  The HTTP server
     uses this to broadcast [notifications/message] SSE events to clients. *)
-val add_logging_hook :
-  t -> (level:log_level -> logger:string option -> Jsonaf.t -> unit) -> unit
+val add_logging_hook
+  :  t
+  -> (level:log_level -> logger:string option -> Jsonaf.t -> unit)
+  -> unit
 
 (* ------------------------------------------------------------------ *)
 (* Progress notifications *)
@@ -63,20 +63,19 @@ type progress_payload =
   }
 
 val add_progress_hook : t -> (progress_payload -> unit) -> unit
-
 val notify_progress : t -> progress_payload -> unit
 
 (* ------------------------------------------------------------------ *)
 (* Cancellation                                                        *)
 (* ------------------------------------------------------------------ *)
 
-val cancel_request : t -> id:Mcp_types.Jsonrpc.Id.t -> unit
 (** Mark a request as cancelled.  Servers invoke this from the router when a
     [notifications/cancelled] message is received. *)
+val cancel_request : t -> id:Mcp_types.Jsonrpc.Id.t -> unit
 
-val is_cancelled : t -> id:Mcp_types.Jsonrpc.Id.t -> bool
 (** Test whether a request has been cancelled.  Long-running handlers can
     poll this cooperatively and abort early to free resources. *)
+val is_cancelled : t -> id:Mcp_types.Jsonrpc.Id.t -> bool
 
 (** [create ()] yields a fresh, empty registry.  All operations are
     thread-safe – internally a mutex protects the two registries so that the
@@ -94,7 +93,6 @@ val add_prompts_changed_hook : t -> (unit -> unit) -> unit
    on disk).  Transport layers can register a callback that will be invoked
    whenever [notify_resources_changed] is called. *)
 val add_resources_changed_hook : t -> (unit -> unit) -> unit
-
 val notify_resources_changed : t -> unit
 
 (** [register_tool t spec handler] registers a new tool with metadata [spec]
@@ -119,4 +117,3 @@ val list_prompts : t -> (string * prompt) list
 
 (** [get_prompt t name] fetches a single prompt by [name]. *)
 val get_prompt : t -> string -> prompt option
-

@@ -15,15 +15,17 @@ let piaf_cfg = { Piaf.Config.default with allow_insecure = true }
 let get_json ~env ~sw (url : string) : (Jsonaf.t, string) Result.t =
   let open Result.Let_syntax in
   let uri = Uri.of_string url in
-  let* resp = Piaf.Client.Oneshot.get ~config:piaf_cfg env ~sw uri
+  let* resp =
+    Piaf.Client.Oneshot.get ~config:piaf_cfg env ~sw uri
     |> Result.map_error ~f:Piaf.Error.to_string
   in
-  let* body =
-    Piaf.Body.to_string resp.body |> Result.map_error ~f:Piaf.Error.to_string
-  in
+  let* body = Piaf.Body.to_string resp.body |> Result.map_error ~f:Piaf.Error.to_string in
   Ok (Jsonaf.of_string body)
+;;
 
-let post_form ~env ~sw (url : string) (params : (string * string) list) : (Jsonaf.t, string) Result.t =
+let post_form ~env ~sw (url : string) (params : (string * string) list)
+  : (Jsonaf.t, string) Result.t
+  =
   let open Result.Let_syntax in
   let body_str =
     params
@@ -42,8 +44,6 @@ let post_form ~env ~sw (url : string) (params : (string * string) list) : (Jsona
       uri
     |> Result.map_error ~f:Piaf.Error.to_string
   in
-  let* body =
-    Piaf.Body.to_string resp.body |> Result.map_error ~f:Piaf.Error.to_string
-  in
+  let* body = Piaf.Body.to_string resp.body |> Result.map_error ~f:Piaf.Error.to_string in
   Ok (Jsonaf.of_string body)
-
+;;

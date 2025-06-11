@@ -24,4 +24,3 @@
     2 of the client roadmap. *)
 
 include Mcp_transport_interface.TRANSPORT
-

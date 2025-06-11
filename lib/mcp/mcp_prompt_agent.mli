@@ -19,4 +19,3 @@ val of_chatmd_file
   -> core:Mcp_server_core.t
   -> path:_ Eio.Path.t
   -> Mcp_types.Tool.t * Mcp_server_core.tool_handler * Mcp_server_core.prompt
-
