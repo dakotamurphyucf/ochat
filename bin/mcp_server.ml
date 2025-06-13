@@ -1,4 +1,4 @@
-open! Core
+open Core
 
 (* Seed the global PRNG once at start-up so that session identifiers and other
    random values are not predictable across server restarts.  We perform the
@@ -267,7 +267,7 @@ let () =
         start_polling_prompts ~sw ();
         start_polling_resources ~sw ();
         (* Launch Streamable HTTP server and block forever *)
-        Mcp_server_http.run ~env ~core ~port)
+        Mcp_server_http.run ~require_auth:true ~env ~core ~port)
     | None ->
       (* stdio mode – we still spawn the polling fibre so that long-lived
               sessions also benefit from newly added prompts.  Since the stdio

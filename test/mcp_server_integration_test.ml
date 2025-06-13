@@ -51,10 +51,13 @@ let%expect_test "MCP HTTP server end-to-end" =
     let spec, handler = make_echo_tool () in
     Mcp_server_core.register_tool core spec handler;
     (* Launch the HTTP server in a background fibre. *)
-    Eio.Fiber.fork ~sw (fun () -> Mcp_server_http.run ~env ~core ~port);
+    Eio.Fiber.fork ~sw (fun () ->
+      Mcp_server_http.run ~require_auth:false ~env ~core ~port);
     (* Connect the client. *)
+    (* Provide dev credentials via environment variables so the HTTP
+       transport can obtain an access token through the /token endpoint. *)
     let uri = sprintf "http://127.0.0.1:%d/mcp" port in
-    let client = Mcp_client.connect ~sw ~env ~uri in
+    let client = Mcp_client.connect ~auth:false ~sw ~env uri in
     (* 1) list tools *)
     let tools =
       match Mcp_client.list_tools client with

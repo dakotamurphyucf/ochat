@@ -161,6 +161,9 @@ module Chat_content = struct
     ; description : string option
     ; mcp_server : string (** URI of the MCP server hosting the tool *)
     ; strict : bool (** whether to enforce strict parameter matching *)
+    ; client_id_env : string option [@jsonaf.option] (** env var holding client_id *)
+    ; client_secret_env : string option [@jsonaf.option]
+      (** env var holding client_secret *)
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
@@ -400,7 +403,7 @@ module Chat_markdown = struct
            desc_attr
            agent
            local_attr
-       | Mcp { names; description; mcp_server; strict } ->
+       | Mcp { names; description; mcp_server; strict; _ } ->
          let strict_attr = if strict then " strict" else "" in
          (* If the description is present, add it as an attribute. *)
          let desc_attr =
@@ -616,6 +619,8 @@ module Chat_markdown = struct
            if String.is_empty mcp_uri then failwith "Tool mcp_server URI cannot be empty.";
            let description = Option.map description ~f:String.strip in
            let strict = Hashtbl.mem tbl "strict" in
+           let client_id_env = Hashtbl.find tbl "client_id_env" in
+           let client_secret_env = Hashtbl.find tbl "client_secret_env" in
            (* Accept both [include] and [includes] as attribute names to avoid
               confusion.  If both are present we prefer the more specific
               [include] spelling. *)
@@ -632,7 +637,15 @@ module Chat_markdown = struct
              then Some (String.split ~on:',' include_ |> List.map ~f:String.strip)
              else None
            in
-           Tool (Mcp { names; description; mcp_server = mcp_uri; strict })
+           Tool
+             (Mcp
+                { names
+                ; description
+                ; mcp_server = mcp_uri
+                ; strict
+                ; client_id_env
+                ; client_secret_env
+                })
          | None, None, None ->
            if String.is_empty name
            then failwith "Tool name cannot be empty."

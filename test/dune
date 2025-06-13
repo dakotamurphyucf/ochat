@@ -7,6 +7,30 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; OAuth dynamic client registration tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name oauth_dynamic_registration_test)
+ (modules oauth_dynamic_registration_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.mock
+  eio.unix
+  piaf
+  uri
+  chatgpt.mcp_client
+  chatgpt.mcp_server_core
+  chatgpt.mcp_server_http
+  chatgpt.mcp_types)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; MCP server integration test (real HTTP server)
 ;; ---------------------------------------------------------------------------
 

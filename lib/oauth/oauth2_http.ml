@@ -20,7 +20,8 @@ let get_json ~env ~sw (url : string) : (Jsonaf.t, string) Result.t =
     |> Result.map_error ~f:Piaf.Error.to_string
   in
   let* body = Piaf.Body.to_string resp.body |> Result.map_error ~f:Piaf.Error.to_string in
-  Ok (Jsonaf.of_string body)
+  try Ok (Jsonaf.of_string body) with
+  | exn -> Error (Exn.to_string exn)
 ;;
 
 let post_form ~env ~sw (url : string) (params : (string * string) list)
@@ -45,5 +46,25 @@ let post_form ~env ~sw (url : string) (params : (string * string) list)
     |> Result.map_error ~f:Piaf.Error.to_string
   in
   let* body = Piaf.Body.to_string resp.body |> Result.map_error ~f:Piaf.Error.to_string in
+  (* If the body is not valid JSON, this will raise an exception. *)
   Ok (Jsonaf.of_string body)
+;;
+
+let post_json ~env ~sw (url : string) (json : Jsonaf.t) : (Jsonaf.t, string) Result.t =
+  let open Result.Let_syntax in
+  let headers = [ "content-type", "application/json" ] in
+  let uri = Uri.of_string url in
+  let* resp =
+    Piaf.Client.Oneshot.post
+      ~config:piaf_cfg
+      ~headers
+      ~body:(Piaf.Body.of_string (Jsonaf.to_string json))
+      env
+      ~sw
+      uri
+    |> Result.map_error ~f:Piaf.Error.to_string
+  in
+  let* body = Piaf.Body.to_string resp.body |> Result.map_error ~f:Piaf.Error.to_string in
+  try Ok (Jsonaf.of_string body) with
+  | exn -> Error (Exn.to_string exn)
 ;;

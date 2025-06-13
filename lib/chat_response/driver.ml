@@ -608,18 +608,24 @@ let run_completion_stream_in_memory_v1
         on_event ev
     in
     (* Fire the request. *)
-    Openai.Responses.post_response
-      (Openai.Responses.Stream stream_cb)
-      ?max_output_tokens
-      ?temperature
-      ~tools
-      ~model
-      ?reasoning
-      ~dir:datadir
-      net
-      ~inputs:hist;
-    let hist = List.append hist (List.rev !new_items) in
-    if !run_again then turn hist else hist
+    try
+      Openai.Responses.post_response
+        (Openai.Responses.Stream stream_cb)
+        ?max_output_tokens
+        ?temperature
+        ~tools
+        ~model
+        ?reasoning
+        ~dir:datadir
+        net
+        ~inputs:hist;
+      let hist = List.append hist (List.rev !new_items) in
+      if !run_again then turn hist else hist
+    with
+    | Openai.Responses.Response_stream_parsing_error json ->
+      print_endline
+        (Printf.sprintf "Error parsing JSON from line: %s" (Jsonaf.to_string json));
+      turn hist
   in
   let full_history = turn history in
   Cache.save ~file:cache_file cache;

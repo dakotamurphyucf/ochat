@@ -109,6 +109,8 @@ module Chat_markdown : sig
     ; description : string option
     ; mcp_server : string
     ; strict : bool
+    ; client_id_env : string option
+    ; client_secret_env : string option
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 

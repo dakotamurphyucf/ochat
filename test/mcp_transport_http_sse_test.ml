@@ -96,7 +96,7 @@ let%expect_test "SSE streaming + session id propagation" =
     (* Launch stub server *)
     Eio.Fiber.fork ~sw (fun () -> start_stub_server ~sw env);
     let uri = Printf.sprintf "http://127.0.0.1:%d/mcp" port in
-    let transport = Http.connect ~sw ~env uri in
+    let transport = Http.connect ~auth:false ~sw ~env uri in
     (* 1st request: initialize – expect 2 SSE messages. *)
     let init_req = Jsonaf.of_string {|{"jsonrpc":"2.0","id":1,"method":"initialize"}|} in
     Http.send transport init_req;

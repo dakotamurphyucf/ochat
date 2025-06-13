@@ -4,7 +4,7 @@ let with_client f =
   Eio_main.run (fun env ->
     Eio.Switch.run (fun sw ->
       let uri = "stdio:mcp_stub_server" in
-      let client = Mcp_client.connect ~sw ~env ~uri in
+      let client = Mcp_client.connect ~auth:false ~sw ~env uri in
       Fun.protect ~finally:(fun () -> Mcp_client.close client) (fun () -> f client)))
 ;;
 

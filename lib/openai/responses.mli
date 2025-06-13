@@ -781,6 +781,8 @@ type _ response_type =
   | Stream : (Response_stream.t -> unit) -> unit response_type
   | Default : Response.t response_type
 
+exception Response_stream_parsing_error of Jsonaf.t
+
 val post_response
   :  'a response_type
   -> ?max_output_tokens:int

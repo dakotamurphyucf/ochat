@@ -3,7 +3,6 @@ module Jsonaf = Jsonaf_ext
 open Jsonaf.Export
 
 (* Compatibility helper required by the generated code from [ppx_jsonaf_conv]. *)
-let string_of_jsonaf = Jsonaf.to_string
 
 module Metadata = struct
   type t =
@@ -11,7 +10,7 @@ module Metadata = struct
     ; token_endpoint : string [@key "token_endpoint"]
     ; registration_endpoint : string option [@key "registration_endpoint"]
     }
-  [@@deriving jsonaf]
+  [@@deriving jsonaf] [@@jsonaf.allow_extra_fields]
 end
 
 module Client_registration = struct
@@ -19,7 +18,7 @@ module Client_registration = struct
     { client_id : string [@key "client_id"]
     ; client_secret : string option [@key "client_secret"]
     }
-  [@@deriving jsonaf, sexp]
+  [@@deriving jsonaf, sexp] [@@jsonaf.allow_extra_fields]
 end
 
 module Token = struct
@@ -27,14 +26,14 @@ module Token = struct
     { access_token : string [@key "access_token"]
     ; token_type : string [@key "token_type"]
     ; expires_in : int [@key "expires_in"]
-    ; refresh_token : string option [@key "refresh_token"]
-    ; scope : string option [@key "scope"]
+    ; refresh_token : string option [@key "refresh_token"] [@jsonaf.option]
+    ; scope : string option [@key "scope"] [@jsonaf.option]
     ; obtained_at : float [@key "obtained_at"]
     }
   [@@deriving jsonaf]
 
   let is_expired t =
-    let now = Caml_unix.gettimeofday () in
+    let now = Core_unix.gettimeofday () in
     let expiry = t.obtained_at +. Float.of_int (t.expires_in - 60) in
     Float.(now >= expiry)
   ;;

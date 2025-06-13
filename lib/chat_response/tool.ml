@@ -197,9 +197,28 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Gpt_func
   Gpt_function.create_function (module M) run
 ;;
 
-let mcp_tool ~sw ~ctx CM.{ names; description = _; mcp_server; strict } =
-  (* Retrieve (and cache) the list of tools for this server. *)
-  let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) ~uri:mcp_server in
+let mcp_tool
+      ~sw
+      ~ctx
+      CM.{ names; description = _; mcp_server; strict; client_id_env; client_secret_env }
+  =
+  (* Inject per-server credentials via URI query params if attribute specifies
+     environment variable names and the variables are present. *)
+  let mcp_server_uri =
+    let uri = Uri.of_string mcp_server in
+    let add_param_if_some uri (name, opt_var) =
+      match opt_var with
+      | None -> uri
+      | Some env_var ->
+        (match Sys.getenv env_var with
+         | Some v when not (String.is_empty v) -> Uri.add_query_param' uri (name, v)
+         | _ -> uri)
+    in
+    let uri = add_param_if_some uri ("client_id", client_id_env) in
+    let uri = add_param_if_some uri ("client_secret", client_secret_env) in
+    Uri.to_string uri
+  in
+  let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) mcp_server_uri in
   (* Ensure cache invalidation for this server is wired up exactly
      once.  We conservatively register a listener each time – the
      underlying [Tool_cache.remove] operation is idempotent and cheap,

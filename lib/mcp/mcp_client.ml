@@ -167,7 +167,7 @@ let perform_initialize c =
   ()
 ;;
 
-let connect ~sw ~env ~uri =
+let connect ?(auth = true) ~sw ~env uri =
   let transport : transport =
     (* Decide transport based on URI scheme.  For historical reasons we
        allow plain strings starting with "stdio:" as well. *)
@@ -178,12 +178,12 @@ let connect ~sw ~env ~uri =
       | _ -> false
     in
     if String.is_prefix uri ~prefix:"stdio:"
-    then Stdio (T_stdio.connect ~sw ~env uri)
+    then Stdio (T_stdio.connect ~auth ~sw ~env uri)
     else if choose_http uri
-    then Http (T_http.connect ~sw ~env uri)
+    then Http (T_http.connect ~auth ~sw ~env uri)
     else
       (* Fallback to stdio for unknown scheme (keeps backwards compat) *)
-      Stdio (T_stdio.connect ~sw ~env uri)
+      Stdio (T_stdio.connect ~auth ~sw ~env uri)
   in
   let pending = Id_table.create () in
   let notif_stream = Eio.Stream.create 64 in

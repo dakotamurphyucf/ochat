@@ -145,7 +145,8 @@ let run ~env ~sw ~meta ~client_id =
      | _ -> ());
     ignore (Eio.Flow.write flow [ Cstruct.of_string "HTTP/1.1 200 OK\r\n\r\nYou may close this tab" ]);
     Eio.Flow.close flow;
-  ;
+
+  
 
   let auth_uri =
     Uri.add_query_params'
@@ -258,5 +259,115 @@ Security
 
 ---
 
-© 2025 ocamlgpt – complete OAuth reference implementation.
+
+## 8  Compliance audit & improvement backlo
+
+The helper stack above covers the happy-path flows, but an audit against the MCP
+**2025-03-26** Authorization specification exposes several gaps.  The table
+below lists the current status and concrete actions required.
+
+| Area | Status | Spec ref. | Action items |
+|------|--------|-----------|--------------|
+| Metadata discovery | ✅ | § 2.3 | add default-endpoint fallback on 404 |
+| Dynamic client registration | ❌ | § 2.4 | implement `/register` on server and client POST |
+| 401-triggered auth | ⚠️ eager | § 2.6 | retry request after first 401 |
+| Refresh-token rotation | ❌ | § 2.6.2 | support `grant_type=refresh_token` |
+| Bearer validation (server) | ❌ | § 2.6.2 | reject bad/missing token; return 401/403 |
+| Fallback URLs | ❌ | § 2.3.3 | build `/authorize` & `/token` paths when metadata absent |
+| PKCE autodetect | ⚠️ env-only | § 2.1.1 | expose env/CLI, auto-select when secret absent |
+| RNG quality | ⚠️ pseudo | § 2.7 | use `Mirage_crypto_rng.generate` in PKCE |
+| Token cache security | ⚠️ 0644 | § 2.7 | write cache `chmod 600`; consider key-chain |
+| Server auth endpoints | ❌ | § 2 | minimal `/authorize`, `/token`, validation |
+| Error surfacing | ⚠️ warn | § 2.8 | propagate OAuth failures, not just Logs.warn |
+| Origin header check | ❌ | transport sec. | validate `Origin` on HTTP requests |
+| Third-party delegated auth | ❌ | § 2.10 | out of scope for MVP – document |
+
+### Short-term priorities
+
+1. Add **refresh token** path in `oauth2_manager`.
+2. Default endpoint fallback after metadata 404.
+3. Middleware in `mcp_server_http` that enforces Bearer and emits
+   `WWW-Authenticate` header.
+4. Replace PRNG in PKCE with `Mirage_crypto_rng`.
+5. Harden token cache permissions and atomic write.
+6. Retry original JSON-RPC batch after automatic auth on 401.
+7. Provide stub `/token` endpoint (client-credentials) for local CI.
+
+Completing these tasks will bring the OAuth layer to full compliance with the
+MCP spec while keeping the dependency footprint minimal.
+
+---
+
+## 9  Current OAuth 2.1 implementation – status & gaps (detailed analysis)
+
+The following section provides a narrative assessment written on **2025-06-11**
+and is retained for engineering reference.  It lists what is present in the
+code-base, what is missing, and a richer explanation of why those gaps matter
+for strict conformance with the Model Context Protocol.
+
+### Helper stack already present
+
+The repository contains a complete, self-contained OAuth client helper stack in
+`lib/oauth/`:
+
+* `oauth2_types.ml`           – token / metadata records
+* `oauth2_http.ml`            – light HTTP util (Piaf one-shots)
+* `oauth2_client_credentials.ml` – client-credentials grant
+* `oauth2_pkce.ml` / `oauth2_pkce_flow.ml` – PKCE utilities & local redirect listener
+* `oauth2_manager.ml`         – cache, refresh, single entry-point
+
+`mcp_transport_http.ml` plugs this manager in, adding a *Bearer* header to all
+requests when `MCP_CLIENT_ID` / `MCP_CLIENT_SECRET` are provided.
+
+### Spec-compliant pieces already implemented
+
+1. **Metadata discovery** (`/.well-known/oauth-authorization-server`)
+2. **PKCE** (S256 challenge, local callback, interactive browser)
+3. **Client-credentials grant**
+4. **Token caching** with expiry check (`expires_in – 60 s` guard)
+5. **Bearer header** applied to **every** HTTP request
+6. Correctly skipped for **stdio** transport (per spec § 2.1)
+
+### Missing / partial elements
+
+1. **Server-side enforcement** – MCP server never checks `Authorization`, never
+   responds 401/403, and provides no `/token` or `/authorize` endpoints.
+2. **Dynamic client registration** (RFC 7591) – completely absent.
+3. **Fallback endpoints** – client aborts when metadata gives 404; spec demands
+   default `/authorize`, `/token`, `/register` paths.
+4. **401-triggered flow** – client fetches token eagerly instead of after
+   receiving 401 and does not retry the failed request.
+5. **Refresh-token use** – `refresh_token` is stored but never exchanged.
+6. **Scope propagation** – accepted in client-credentials path only; ignored elsewhere.
+7. **Secure RNG** – PKCE uses `Random.self_init`, not cryptographically secure.
+8. **open_browser portability** – shells out via `xdg-open`, brittle quoting.
+9. **Token cache security** – plain-text, default `0644` permissions.
+10. **Origin header validation** – HTTP server ignores `Origin`, risk of DNS-rebind.
+11. **Error propagation** – transport hides OAuth failures behind a warn log.
+12. **PKCE port collision** – listener picks random port but does not retry if busy.
+13. **Third-party delegated flow** (§ 2.10) – not implemented.
+
+### Concrete improvement checklist
+
+Server-side
+* Validate Bearer and return `WWW-Authenticate` with proper error JSON.
+* Expose minimal `/token` & `/authorize` endpoints accepting `client_credentials` grant.
+* Serve metadata (`/.well-known/oauth-authorization-server`).
+
+Client-side
+* Retry logic: on first 401 start auth dance, then resend JSON-RPC batch.
+* Add dynamic registration (`POST /register`) when metadata advertises it.
+* Implement refresh-token path in `oauth2_manager`.
+* Build default endpoints when metadata missing.
+* Use `Mirage_crypto_rng.generate` for PKCE verifier.
+* Secure cache file `chmod 600`, atomic writes.
+* Supply environment / CLI flags to switch between PKCE and secret flow.
+
+Tests & docs
+* Stub auth server in CI, verify 401 path, refresh path.
+* Document required env-vars.
+
+Addressing these items will move both client and server to full MCP 2025-03-26
+compliance and harden the implementation for production use.
+
 

@@ -25,4 +25,16 @@ open! Core
 
     The function does not return. *)
 
-val run : env:Eio_unix.Stdenv.base -> core:Mcp_server_core.t -> port:int -> unit
+(** [run ~require_auth ~env ~core ~port] starts the HTTP server.  When
+    [require_auth] is [false] the server behaves exactly the same but skips
+    OAuth bearer validation, effectively running in *anonymous* mode.  This
+    is handy for local development and for unit-tests that don’t want to deal
+    with the OAuth handshake.  The default in the CLI wrapper is to pass
+    [~require_auth:true]. *)
+
+val run
+  :  ?require_auth:bool
+  -> env:Eio_unix.Stdenv.base
+  -> core:Mcp_server_core.t
+  -> port:int
+  -> unit

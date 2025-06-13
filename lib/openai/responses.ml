@@ -1391,6 +1391,8 @@ type _ response_type =
   | Stream : (Response_stream.t -> unit) -> unit response_type
   | Default : Response.t response_type
 
+exception Response_stream_parsing_error of Jsonaf.t
+
 let post_response
   : type a.
     a response_type
@@ -1503,8 +1505,17 @@ let post_response
                   |> Result.bind ~f:(fun json -> Ok json)
                 with
                 | Ok json ->
-                  let event = Response_stream.t_of_jsonaf @@ json in
-                  Some event
+                  (try
+                     let event = Response_stream.t_of_jsonaf @@ json in
+                     Some event
+                   with
+                   | ex ->
+                     print_endline
+                       (Printf.sprintf
+                          "Error parsing JSON from line: %s"
+                          (Core.Exn.to_string ex));
+                     print_endline line;
+                     raise (Response_stream_parsing_error json))
                 | Error _ -> None)
            in
            (match choice with

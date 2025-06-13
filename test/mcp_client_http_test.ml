@@ -168,7 +168,7 @@ let with_client_http f =
           | _ -> ());
         (* connect client to the server *)
         let uri = sprintf "http://127.0.0.1:%d/mcp" port in
-        let client = Mcp_client.connect ~sw ~env ~uri in
+        let client = Mcp_client.connect ~auth:false ~sw ~env uri in
         Fun.protect
           ~finally:(fun () ->
             Mcp_client.close client;

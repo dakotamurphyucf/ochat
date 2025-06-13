@@ -123,8 +123,10 @@ let spawn_child ~sw ~(env : < process_mgr : _ ; .. >) cmd_line : t =
 
 (*---------------------  public API  ---------------------------------*)
 
-let connect : sw:Eio.Switch.t -> env:< process_mgr : _ ; .. > -> string -> t =
-  fun ~sw ~env uri ->
+let connect : ?auth:bool -> sw:Eio.Switch.t -> env:< process_mgr : _ ; .. > -> string -> t
+  =
+  fun ?(auth = true) ~sw ~env uri ->
+  let _auth = auth in
   (* Expected URI format: "stdio:<command line>" *)
   let prefix = "stdio:" in
   if not (String.is_prefix uri ~prefix)

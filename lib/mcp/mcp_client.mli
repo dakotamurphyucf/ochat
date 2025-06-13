@@ -20,7 +20,7 @@ type t
 (** Establish a new client connection and start the internal receiver
     fibre.  The MCP *initialize*/*initialized* handshake is performed
     automatically. *)
-val connect : sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> uri:string -> t
+val connect : ?auth:bool -> sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> string -> t
 
 val close : t -> unit
 val is_closed : t -> bool

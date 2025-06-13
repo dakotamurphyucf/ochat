@@ -73,10 +73,6 @@
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
-;; ---------------------------------------------------------------------------
-;; MIME helper – shared utility
-;; ---------------------------------------------------------------------------
-
 (library
  (name mime)
  (public_name chatgpt.mime)
@@ -84,25 +80,6 @@
  (libraries core)
  (preprocess
   (pps ppx_jane)))
-
-;; ---------------------------------------------------------------------------
-;; OAuth2 helper stack (client side)
-;; ---------------------------------------------------------------------------
-
-(library
- (name oauth2)
- (public_name chatgpt.oauth2)
- (modules
-  oauth2_types
-  oauth2_http
-  oauth2_client_credentials
-  oauth2_manager
-  oauth2_pkce
-  oauth2_pkce_flow)
- (libraries core core_unix eio eio.unix piaf uri base64 digestif jsonaf_ext)
- (wrapped false)
- (preprocess
-  (pps ppx_jane ppx_jsonaf_conv)))
 
 (library
  (name filter_file)
@@ -126,23 +103,6 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
-
-; (library
-;  (name prompt_template)
-;  (modules prompt_template)
-;  (public_name chatgpt.prompt_template)
-;  (libraries
-;   core
-;   str
-;   jsonaf
-;   expect_test_helpers_core
-;   re2
-;   angstrom
-;   markup
-;   openai)
-;  (inline_tests)
-;  (preprocess
-;   (pps ppx_jane ppx_expect ppx_jsonaf_conv)))
 
 (library
  (name io)

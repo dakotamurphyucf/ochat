@@ -1,12 +1,50 @@
+[@@@ocaml.warning "-16"]
+
 open! Core
 module P = Piaf
 module JT = Mcp_types
+module Auth_routes = Oauth2_server_routes
+module Auth_storage = Oauth2_server_storage
 
 (* ----------------------------------------------------------------- *)
 
 (* Simple in-memory session table for HTTP transport. *)
 let sessions : unit String.Table.t = String.Table.create ()
 let session_header = "Mcp-Session-Id"
+
+(* ------------------------------------------------------------------ *)
+(* OAuth2 Bearer validation                                             *)
+(* ------------------------------------------------------------------ *)
+
+let bearer_token_of_request (req : P.Request.t) : string option =
+  match P.Headers.get (P.Request.headers req) "authorization" with
+  | None -> None
+  | Some v ->
+    let prefix = "Bearer " in
+    if String.is_prefix v ~prefix
+    then Some (String.drop_prefix v (String.length prefix))
+    else None
+;;
+
+let create_auth_checker ~require_auth () : P.Request.t -> bool =
+  if not require_auth
+  then fun _ -> true
+  else
+    fun req ->
+      match bearer_token_of_request req with
+      | None -> false
+      | Some tok -> Auth_storage.find_valid tok
+;;
+
+let unauthorized_response () =
+  let hdrs =
+    P.Headers.of_list [ "www-authenticate", "Bearer"; "content-type", "application/json" ]
+  in
+  P.Response.create
+    ~headers:hdrs
+    ~body:(P.Body.of_string "{\"error\":\"unauthorized\"}")
+    `Unauthorized
+;;
 
 (* IMPORTANT: In inline tests the Base test runner forbids [Random.self_init]
    because it would introduce nondeterminism.  We therefore avoid calling it
@@ -163,122 +201,128 @@ let broadcast_progress (payload : Mcp_server_core.progress_payload) =
 
 (* ------------------------------------------------------------------ *)
 
-let handle_get ~env ~sw ~core:_ (request : P.Request.t) : P.Response.t =
-  (* A GET request must include a valid session id. *)
-  match require_valid_session request with
-  | Error `Missing | Error `Unknown ->
-    respond_json ~status:`Not_found {|{"error":"Missing or unknown session id"}|}
-  | Ok _sid ->
-    (* Build a chunked SSE stream. *)
-    let stream, push = P.Stream.create 32 in
-    (* Register stream for future broadcasts. *)
-    add_stream push;
-    (* Keep-alive fibre – every 20 s we send a comment line so that proxies
+let handle_get ~env ~sw ~core:_ ~check_auth (request : P.Request.t) : P.Response.t =
+  if not (check_auth request)
+  then unauthorized_response ()
+  else (
+    (* A GET request must include a valid session id. *)
+    match require_valid_session request with
+    | Error `Missing | Error `Unknown ->
+      respond_json ~status:`Not_found {|{"error":"Missing or unknown session id"}|}
+    | Ok _sid ->
+      (* Build a chunked SSE stream. *)
+      let stream, push = P.Stream.create 32 in
+      (* Register stream for future broadcasts. *)
+      add_stream push;
+      (* Keep-alive fibre – every 20 s we send a comment line so that proxies
          know the connection is alive.  We detach the fibre; when the client
          disconnects Piaf will close the stream which will raise [Closed]
          inside the fibre – we catch and terminate silently. *)
-    let keepalive () =
-      let clock = env#clock in
-      let rec loop () =
-        Eio.Time.sleep clock 20.0;
-        (try push (Some ": keep-alive\n\n") with
-         | _ -> ());
-        loop ()
+      let keepalive () =
+        let clock = env#clock in
+        let rec loop () =
+          Eio.Time.sleep clock 20.0;
+          (try push (Some ": keep-alive\n\n") with
+           | _ -> ());
+          loop ()
+        in
+        try loop () with
+        | _ -> ()
       in
-      try loop () with
-      | _ -> ()
-    in
-    Eio.Fiber.fork ~sw keepalive;
-    (* When the response body gets closed remove the push function so we no
+      Eio.Fiber.fork ~sw keepalive;
+      (* When the response body gets closed remove the push function so we no
          longer broadcast to a dead connection. *)
-    let body = P.Body.of_string_stream ~length:`Chunked stream in
-    P.Body.when_closed ~f:(fun _ -> remove_stream push) body;
-    let headers = P.Headers.of_list [ "content-type", "text/event-stream" ] in
-    P.Response.create ~headers ~body `OK
+      let body = P.Body.of_string_stream ~length:`Chunked stream in
+      P.Body.when_closed ~f:(fun _ -> remove_stream push) body;
+      let headers = P.Headers.of_list [ "content-type", "text/event-stream" ] in
+      P.Response.create ~headers ~body `OK)
 ;;
 
-let handle_post ~core ~env (request : P.Request.t) : P.Response.t =
+let handle_post ~core ~env ~check_auth (request : P.Request.t) : P.Response.t =
   (* Helper to produce a simple error response *)
   let error_json code msg =
     respond_json ~status:code (Printf.sprintf {|{"error":"%s"}|} msg)
   in
-  (* Validate or create session *)
-  let session_status = require_valid_session request in
-  (* Parse body first to maybe detect initialize *)
-  match P.Body.to_string (P.Request.body request) with
-  | Error e -> error_json `Bad_request (P.Error.to_string e)
-  | Ok body_string ->
-    (* Try parse JSON *)
-    (match Or_error.try_with (fun () -> Jsonaf.of_string body_string) with
-     | Error _err -> error_json `Bad_request "Invalid JSON"
-     | Ok json_in ->
-       (* Determine if this is an initialize request *)
-       let is_initialize msg_json =
-         match Or_error.try_with (fun () -> JT.Jsonrpc.request_of_jsonaf msg_json) with
-         | Ok req when String.equal req.method_ "initialize" -> true
-         | _ -> false
-       in
-       let contains_initialize =
-         match json_in with
-         | `Array arr -> List.exists arr ~f:is_initialize
-         | _ -> is_initialize json_in
-       in
-       (* Session gatekeeping *)
-       let gate_result : P.Response.t option =
-         match contains_initialize, session_status with
-         | true, _ -> None (* allowed even without session, will create *)
-         | false, Ok _sid -> None
-         | false, Error `Missing -> Some (error_json `Not_found "Missing session id")
-         | false, Error `Unknown -> Some (error_json `Not_found "Unknown session id")
-       in
-       (match gate_result with
-        | Some resp -> resp
-        | None ->
-          (* Delegate to router *)
-          let responses = Mcp_server_router.handle ~core ~env json_in in
-          (* Decide on media type – if the client explicitly accepts
+  if not (check_auth request)
+  then unauthorized_response ()
+  else (
+    (* Validate or create session *)
+    let session_status = require_valid_session request in
+    (* Parse body first to maybe detect initialize *)
+    match P.Body.to_string (P.Request.body request) with
+    | Error e -> error_json `Bad_request (P.Error.to_string e)
+    | Ok body_string ->
+      (* Try parse JSON *)
+      (match Or_error.try_with (fun () -> Jsonaf.of_string body_string) with
+       | Error _err -> error_json `Bad_request "Invalid JSON"
+       | Ok json_in ->
+         (* Determine if this is an initialize request *)
+         let is_initialize msg_json =
+           match Or_error.try_with (fun () -> JT.Jsonrpc.request_of_jsonaf msg_json) with
+           | Ok req when String.equal req.method_ "initialize" -> true
+           | _ -> false
+         in
+         let contains_initialize =
+           match json_in with
+           | `Array arr -> List.exists arr ~f:is_initialize
+           | _ -> is_initialize json_in
+         in
+         (* Session gatekeeping *)
+         let gate_result : P.Response.t option =
+           match contains_initialize, session_status with
+           | true, _ -> None (* allowed even without session, will create *)
+           | false, Ok _sid -> None
+           | false, Error `Missing -> Some (error_json `Not_found "Missing session id")
+           | false, Error `Unknown -> Some (error_json `Not_found "Unknown session id")
+         in
+         (match gate_result with
+          | Some resp -> resp
+          | None ->
+            (* Delegate to router *)
+            let responses = Mcp_server_router.handle ~core ~env json_in in
+            (* Decide on media type – if the client explicitly accepts
                  [text/event-stream] we stream each JSON-RPC response as a
                  separate SSE event, otherwise fall back to a regular
                  application/json payload. *)
-          let accepts_sse =
-            match P.Headers.get (P.Request.headers request) "accept" with
-            | None -> false
-            | Some v -> String.is_substring v ~substring:"text/event-stream"
-          in
-          let status_headers, body =
-            if accepts_sse
-            then (
-              (* Build one SSE event per response.  We currently generate
+            let accepts_sse =
+              match P.Headers.get (P.Request.headers request) "accept" with
+              | None -> false
+              | Some v -> String.is_substring v ~substring:"text/event-stream"
+            in
+            let status_headers, body =
+              if accepts_sse
+              then (
+                (* Build one SSE event per response.  We currently generate
                      all at once; a future iteration could stream them using
                      [P.Stream] for large result sets. *)
-              let event_of_json j =
-                let payload = Jsonaf.to_string j in
-                "data: " ^ payload ^ "\n\n"
-              in
-              let sse_body =
-                String.concat ~sep:"" (List.map responses ~f:event_of_json)
-              in
-              let headers = P.Headers.of_list [ "content-type", "text/event-stream" ] in
-              headers, P.Body.of_string sse_body)
-            else (
-              let json_out : Jsonaf.t =
-                match responses with
-                | [] -> `Object []
-                | [ single ] -> single
-                | lst -> `Array lst
-              in
-              json_headers, P.Body.of_string (Jsonaf.to_string json_out))
-          in
-          let extra_headers =
-            match contains_initialize with
-            | true ->
-              let sid = new_session_id () in
-              Hashtbl.set sessions ~key:sid ~data:();
-              [ session_header, sid ]
-            | false -> []
-          in
-          let headers = P.Headers.add_list status_headers extra_headers in
-          P.Response.create ~headers ~body `OK))
+                let event_of_json j =
+                  let payload = Jsonaf.to_string j in
+                  "data: " ^ payload ^ "\n\n"
+                in
+                let sse_body =
+                  String.concat ~sep:"" (List.map responses ~f:event_of_json)
+                in
+                let headers = P.Headers.of_list [ "content-type", "text/event-stream" ] in
+                headers, P.Body.of_string sse_body)
+              else (
+                let json_out : Jsonaf.t =
+                  match responses with
+                  | [] -> `Object []
+                  | [ single ] -> single
+                  | lst -> `Array lst
+                in
+                json_headers, P.Body.of_string (Jsonaf.to_string json_out))
+            in
+            let extra_headers =
+              match contains_initialize with
+              | true ->
+                let sid = new_session_id () in
+                Hashtbl.set sessions ~key:sid ~data:();
+                [ session_header, sid ]
+              | false -> []
+            in
+            let headers = P.Headers.add_list status_headers extra_headers in
+            P.Response.create ~headers ~body `OK)))
 ;;
 
 let not_allowed () =
@@ -291,17 +335,31 @@ let not_allowed () =
 let handler
       ~env
       ~core
+      ~port
+      ~check_auth
       ({ P.Server.request; ctx = req_info } : P.Request_info.t P.Server.ctx)
   : P.Response.t
   =
   let sw = req_info.sw in
-  match P.Request.meth request, P.Request.target request with
-  | `POST, "/mcp" -> handle_post ~core ~env request
-  | `GET, "/mcp" -> handle_get ~env ~sw ~core request
+  match P.Request.meth request, Uri.path @@ P.Request.uri request with
+  | `GET, "/.well-known/oauth-authorization-server" ->
+    Auth_routes.handle_metadata request port
+  | `POST, target when String.is_substring target ~substring:"/token" ->
+    Auth_routes.handle_token ~env request
+  | `GET, "/authorize" -> Auth_routes.handle_authorize request
+  | `POST, "/register" -> Auth_routes.handle_register request
+  | `POST, "/mcp" -> handle_post ~core ~env ~check_auth request
+  | `GET, "/mcp" -> handle_get ~env ~sw ~core ~check_auth request
   | _ -> not_allowed ()
 ;;
 
-let run ~(env : Eio_unix.Stdenv.base) ~(core : Mcp_server_core.t) ~(port : int) : unit =
+let run
+      ?(require_auth = true)
+      ~(env : Eio_unix.Stdenv.base)
+      ~(core : Mcp_server_core.t)
+      ~(port : int)
+  : unit
+  =
   (* Register hooks so that any modification to tools or prompts gets sent to
      all listening clients via an SSE notification.  We register before the
      server starts so late additions (e.g. dynamic prompt folder watching)
@@ -312,11 +370,19 @@ let run ~(env : Eio_unix.Stdenv.base) ~(core : Mcp_server_core.t) ~(port : int) 
   Mcp_server_core.add_progress_hook core broadcast_progress;
   (* Logging hook – send every log entry as SSE notification to clients. *)
   Mcp_server_core.add_logging_hook core broadcast_log;
+  let check_auth = create_auth_checker ~require_auth () in
   Eio.Switch.run (fun sw ->
     let address = `Tcp (Eio.Net.Ipaddr.V4.loopback, port) in
     let config = P.Server.Config.create address in
-    let srv = P.Server.create ~config (handler ~env ~core) in
+    let srv = P.Server.create ~config (handler ~env ~core ~port ~check_auth) in
     let _cmd = P.Server.Command.start ~sw env srv in
-    (* Block forever *)
-    Eio.Promise.await (Eio.Promise.create_resolved ()))
+    (* Block the current fiber forever – the surrounding [Switch] will
+       cancel this fiber when the test or calling application terminates.
+       We deliberately await on a promise that is never fulfilled rather
+       than on an already–resolved one (as done previously).  Awaiting an
+       already-resolved promise returns immediately, which caused the HTTP
+       server fiber to exit straight away and left clients hanging while
+       attempting to connect. *)
+    let forever, _resolve = Eio.Promise.create () in
+    Eio.Promise.await forever)
 ;;

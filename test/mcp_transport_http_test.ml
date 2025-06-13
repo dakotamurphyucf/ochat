@@ -42,7 +42,7 @@ let%expect_test "HTTP transport round-trip" =
       | _ -> ());
     (* Connect to the echo server using the HTTP transport. *)
     let uri = Printf.sprintf "http://127.0.0.1:%d/mcp" port in
-    let transport = Http.connect ~sw ~env uri in
+    let transport = Http.connect ~auth:false ~sw ~env uri in
     let messages =
       [ Jsonaf.of_string "{\"jsonrpc\":\"2.0\",\"id\":1,\"method\":\"initialize\"}"
       ; Jsonaf.of_string "{\"jsonrpc\":\"2.0\",\"id\":2,\"method\":\"tools/list\"}"

@@ -15,11 +15,14 @@ exception Connection_closed
 
 type t =
   { client : Piaf.Client.t
-  ; endpoint_path : string (** path component we POST/GET against *)
-  ; incoming : Jsonaf.t Eio.Stream.t (** queue of server messages *)
+  ; endpoint_path : string
+  ; incoming : Jsonaf.t Eio.Stream.t
   ; sw : Eio.Switch.t
-  ; mutable session_id : string option (** negotiated via MCP-Session-Id header *)
-  ; auth_token : string option (** OAuth bearer token, if any *)
+  ; env : Eio_unix.Stdenv.base
+  ; mutable session_id : string option
+  ; mutable auth_token : string option
+  ; creds_opt : Oauth2_manager.creds option
+  ; issuer : string
   ; mutable closed : bool
   }
 
@@ -122,9 +125,7 @@ let parse_sse_stream t (body : Body.t) : unit =
     Eio.Flow.close r)
 ;;
 
-let perform_post (t : t) (payload : string) : unit =
-  (* We run the HTTP call in the current fibre; callers of [send] run
-     it in a separate fork so that [send] can return immediately. *)
+let rec perform_post ?(retry = false) (t : t) (payload : string) : unit =
   let headers_base =
     [ "content-type", "application/json"
     ; "accept", "application/json, text/event-stream"
@@ -146,37 +147,205 @@ let perform_post (t : t) (payload : string) : unit =
     t.closed <- true;
     Printf.eprintf "(mcp-http) POST error: %s\n" (Piaf.Error.to_string err)
   | Ok response ->
-    (* capture session id if provided *)
-    update_session_id t response.headers;
-    let content_type =
-      match Headers.get response.headers "content-type" with
-      | None -> "application/json"
-      | Some v -> v
-    in
-    if String.is_prefix ~prefix:"text/event-stream" content_type
-    then
-      (* Stream SSE events *)
-      parse_sse_stream t response.body
+    (* 401 handling *)
+    if Piaf.Status.to_code response.status = 401 && not retry
+    then (
+      match t.creds_opt with
+      | None -> () (* no creds – we cannot retry *)
+      | Some creds ->
+        (match t.auth_token with
+         | Some _ when not retry -> ()
+         | None when retry -> ()
+         | _ ->
+           (match Oauth2_manager.get ~env:t.env ~sw:t.sw ~issuer:t.issuer creds with
+            | Ok tok -> t.auth_token <- Some tok.access_token
+            | Error e -> Printf.eprintf "(mcp-http) OAuth flow failed: %s\n" e));
+        (* retry once *)
+        perform_post ~retry:true t payload)
     else (
-      (* Expecting single JSON object/array *)
-      match Piaf.Body.to_string response.body with
-      | Error e ->
-        t.closed <- true;
-        Printf.eprintf
-          "(mcp-http) failed to read response body: %s\n"
-          (Piaf.Error.to_string e)
-      | Ok body_str ->
-        (match parse_json body_str with
-         | None -> Printf.eprintf "(mcp-http) ignoring non-JSON response body\n"
-         | Some (`Array arr) -> List.iter arr ~f:(push_json_queue t)
-         | Some json -> push_json_queue t json))
+      (* capture session id if provided *)
+      update_session_id t response.headers;
+      let content_type =
+        match Headers.get response.headers "content-type" with
+        | None -> "application/json"
+        | Some v -> v
+      in
+      if String.is_prefix ~prefix:"text/event-stream" content_type
+      then parse_sse_stream t response.body
+      else (
+        match Piaf.Body.to_string response.body with
+        | Error e ->
+          t.closed <- true;
+          Printf.eprintf
+            "(mcp-http) failed to read response body: %s\n"
+            (Piaf.Error.to_string e)
+        | Ok body_str ->
+          (match parse_json body_str with
+           | None -> Printf.eprintf "(mcp-http) ignoring non-JSON response body\n"
+           | Some (`Array arr) -> List.iter arr ~f:(push_json_queue t)
+           | Some json -> push_json_queue t json)))
+;;
+
+let set_up_auth ~env ~sw ~issuer uri =
+  (*--------------------------------------------------------------*)
+  (* Credentials selection – precedence                           *)
+  (* 1. explicit URI query parameters (?client_id=…&client_secret=…)  *)
+  (* 2. environment variables (global fallback)                    *)
+  (*--------------------------------------------------------------*)
+  let creds_from_uri () : Oauth2_manager.creds option =
+    (* We do not support credentials in the URI query parameters – use
+       environment variables or store credentials in the file system. *)
+    match
+      Uri.get_query_param uri "client_id", Uri.get_query_param uri "client_secret"
+    with
+    | Some id, Some secret when (not (String.is_empty id)) && not (String.is_empty secret)
+      -> Some (Oauth2_manager.Client_secret { id; secret; scope = None })
+    | _ -> None
+  in
+  let creds_from_env () : Oauth2_manager.creds option =
+    (* We do not support environment variables for credentials – use
+       explicit query parameters or store credentials in the file system. *)
+    match Sys.getenv "MCP_CLIENT_ID", Sys.getenv "MCP_CLIENT_SECRET" with
+    | Some id, Some secret ->
+      Some (Oauth2_manager.Client_secret { id; secret; scope = None })
+    | _ -> None
+  in
+  let creds_from_store () : Oauth2_manager.creds option =
+    (* We do not support credentials from the store – use explicit query
+       parameters or environment variables. *)
+    (* Look up issuer in the credential store. *)
+
+    (* We do not support credentials from the store – use explicit query
+       parameters or environment variables. *)
+    (* Look up issuer in the credential store. *)
+    match Oauth2_client_store.lookup ~env ~issuer with
+    | None -> None
+    | Some cred ->
+      (match cred.client_secret with
+       | Some secret ->
+         if true then failwith "Mcp_transport_http.connect: secret";
+         Some (Oauth2_manager.Client_secret { id = cred.client_id; secret; scope = None })
+       | None -> Some (Oauth2_manager.Pkce { client_id = cred.client_id }))
+  in
+  (* Attempt dynamic registration when allowed by server metadata and we have
+     no pre-existing credentials. *)
+  let creds_from_registration () : Oauth2_manager.creds option =
+    match creds_from_uri () with
+    | Some _ -> None (* explicit creds – no registration *)
+    | None ->
+      (match creds_from_env () with
+       | Some _ ->
+         (* We do not support environment variables for registration – use
+            explicit query parameters or store credentials in the file system. *)
+         None
+       | None ->
+         (match creds_from_store () with
+          | Some _ ->
+            (* We have stored credentials – no need to register again. *)
+            None
+          | None ->
+            (* Fetch metadata; fall back to default paths on failure *)
+            let meta_res =
+              let path = issuer ^ "/.well-known/oauth-authorization-server" in
+              match Oauth2_http.get_json ~env ~sw path with
+              | Ok json ->
+                (try Some (Oauth2_types.Metadata.t_of_jsonaf json) with
+                 | _ -> None)
+              | Error _ -> None
+            in
+            let registration_endpoint =
+              match meta_res with
+              | Some meta ->
+                (match meta.registration_endpoint with
+                 | Some url -> url
+                 | None -> issuer ^ "/register")
+              | None -> issuer ^ "/register"
+            in
+            (* Build minimal registration payload (anonymous public client) *)
+            let payload = `Object [] in
+            let registration_result : Oauth2_manager.creds option =
+              match Oauth2_http.post_json ~env ~sw registration_endpoint payload with
+              | Ok json ->
+                (try
+                   let reg = Oauth2_types.Client_registration.t_of_jsonaf json in
+                   let cred : Oauth2_client_store.Credential.t =
+                     { client_id = reg.client_id; client_secret = reg.client_secret }
+                   in
+                   (* Persist credentials so future runs skip registration. *)
+                   Oauth2_client_store.store ~env ~issuer cred;
+                   Some
+                     (match reg.client_secret with
+                      | Some secret ->
+                        Oauth2_manager.Client_secret
+                          { id = reg.client_id; secret; scope = None }
+                      | None -> Oauth2_manager.Pkce { client_id = reg.client_id })
+                 with
+                 | _ -> None)
+              | Error _ -> None
+            in
+            (* ------------------------------------------------------------------ *)
+            (* C-4: Fallback when server doesn’t support registration                *)
+            (* ------------------------------------------------------------------ *)
+            let fallback_pkce_creds () : Oauth2_manager.creds =
+              (* Ensure RNG is initialised before generating random bytes. *)
+              (try Mirage_crypto_rng_unix.use_default () with
+               | _ -> ());
+              (* Generate a short, URL-safe identifier. *)
+              let rand_str = Mirage_crypto_rng.generate 6 in
+              let b64 =
+                Base64.encode_string
+                  ~pad:false
+                  ~alphabet:Base64.uri_safe_alphabet
+                  rand_str
+              in
+              let client_id = "ocamlgpt-" ^ b64 in
+              let cred_rec : Oauth2_client_store.Credential.t =
+                { client_id; client_secret = None }
+              in
+              (* Persist so subsequent sessions reuse the same ID. *)
+              Oauth2_client_store.store ~env ~issuer cred_rec;
+              Oauth2_manager.Pkce { client_id }
+            in
+            (match registration_result with
+             | Some c -> Some c
+             | None -> Some (fallback_pkce_creds ()))))
+  in
+  let creds_opt : Oauth2_manager.creds option =
+    match creds_from_uri () with
+    | Some _ as c ->
+      print_endline "Using credentials from URI query parameters";
+      c
+    | None ->
+      (match creds_from_env () with
+       | Some _ as c ->
+         prerr_endline "Using credentials from environment variables";
+         c
+       | None ->
+         (match creds_from_store () with
+          | Some _ as c ->
+            print_endline "Using credentials from client store";
+            c
+          | None -> creds_from_registration ()))
+  in
+  let auth_token_result : string option =
+    match creds_opt with
+    | None -> None
+    | Some creds ->
+      (match Oauth2_manager.get ~env ~sw ~issuer creds with
+       | Ok tok -> Some tok.access_token
+       | Error e ->
+         (try Logs.warn (fun f -> f "OAuth token fetch failed: %s" e) with
+          | _ -> ());
+         None)
+  in
+  creds_opt, auth_token_result
 ;;
 
 (*------------------------------------------------------------------*)
 (* TRANSPORT implementation                                          *)
 (*------------------------------------------------------------------*)
 
-let connect ~(sw : Eio.Switch.t) ~env (uri_str : string) : t =
+let connect ?(auth = true) ~(sw : Eio.Switch.t) ~env (uri_str : string) : t =
   (*------------------------------------------------------------------*)
   (* Parse URI and create persistent Piaf client                      *)
   (*------------------------------------------------------------------*)
@@ -196,22 +365,12 @@ let connect ~(sw : Eio.Switch.t) ~env (uri_str : string) : t =
     let base_no_path = Uri.with_path uri "" in
     Uri.to_string base_no_path
   in
-  let creds_opt : Oauth2_manager.creds option =
-    match Sys.getenv "MCP_CLIENT_ID", Sys.getenv "MCP_CLIENT_SECRET" with
-    | Some id, Some secret ->
-      Some (Oauth2_manager.Client_secret { id; secret; scope = None })
-    | _ -> None
-  in
-  let auth_token_result : string option =
-    match creds_opt with
-    | None -> None
-    | Some creds ->
-      (match Oauth2_manager.get ~env ~sw ~issuer creds with
-       | Ok tok -> Some tok.access_token
-       | Error e ->
-         (try Logs.warn (fun f -> f "OAuth token fetch failed: %s" e) with
-          | _ -> ());
-         None)
+  let creds_opt, auth_token_result =
+    match auth with
+    | true -> set_up_auth ~env ~sw ~issuer uri
+    | false ->
+      (* No auth – we do not attempt to fetch credentials or tokens *)
+      None, None
   in
   match Piaf.Client.create ~sw env base_uri with
   | Error err ->
@@ -225,8 +384,11 @@ let connect ~(sw : Eio.Switch.t) ~env (uri_str : string) : t =
     ; endpoint_path = Uri.path uri
     ; incoming
     ; sw
+    ; env
     ; session_id = None
     ; auth_token = auth_token_result
+    ; creds_opt
+    ; issuer
     ; closed = false
     }
 ;;
