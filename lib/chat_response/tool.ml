@@ -135,10 +135,6 @@ let custom_fn ~env (c : CM.custom_tool) : Gpt_function.t =
         String.split_on_chars ~on:[ ' '; Char.of_int_exn 32 ] cmdline
         |> List.filter ~f:(fun s -> not (String.is_empty s))
     in
-    let commands = List.append cmd_list params in
-    print_s [%sexp "Running custom command", (commands : string list)];
-    let old_command = command :: params in
-    print_s [%sexp "Running custom command old", (old_command : string list)];
     (* 2.  Check that the command is not empty. *)
     (* 2.  Spawn the child process with the provided command and parameters. *)
     (* Note: we use [Eio.Process.spawn] to run the command, which captures
@@ -154,9 +150,25 @@ let custom_fn ~env (c : CM.custom_tool) : Gpt_function.t =
     | _child ->
       Eio.Flow.close w;
       (match Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all r with
-       | res -> res
+       | res ->
+         let max_len = 100000 in
+         let res =
+           if String.length res > max_len
+           then String.append (String.sub res ~pos:0 ~len:max_len) " ...truncated"
+           else res
+         in
+         res
        | exception ex -> Fmt.str "error running %s command: %a" command Eio.Exn.pp ex)
   in
+  (* timeout functioin eio *)
+  let fp x =
+    try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 60.0 (fun () -> fp x) with
+    | Eio.Time.Timeout ->
+      Printf.sprintf "timeout running command %s" (String.concat ~sep:" " x)
+  in
+  (* Create the Gpt_function.t using the module M and the function fp. *)
+  (* Note: we use [Gpt_function.create_function] to create the function. *)
+  (* Note: we use [module M] to specify the module type for the function. *)
   Gpt_function.create_function (module M) fp
 ;;
 
