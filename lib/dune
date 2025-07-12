@@ -39,14 +39,6 @@
   (pps ppx_jane)))
 
 (library
- (name bin_prot_utils)
- (public_name chatgpt.bin_prot_utils)
- (modules bin_prot_utils)
- (libraries core core_unix.bigstring_unix eio eio.unix core_unix)
- (preprocess
-  (pps ppx_jane)))
-
-(library
  (name bin_prot_utils_eio)
  (public_name chatgpt.bin_prot_utils_eio)
  (modules bin_prot_utils_eio)
@@ -161,8 +153,7 @@
   functions
   chatmd
   lru_cache
-  ttl_lru_cache
-  bin_prot_utils)
+  ttl_lru_cache)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
@@ -188,6 +179,7 @@
   gpt_function
   definitions
   vector_db
+  webpage_markdown
   indexer
   apply_patch)
  (preprocess

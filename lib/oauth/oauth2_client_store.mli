@@ -18,6 +18,4 @@ val lookup : env:Eio_unix.Stdenv.base -> issuer:string -> Credential.t option
 
 (** [store ~issuer cred] persistently stores [cred] as the credentials to use
     for [issuer], overwriting any previously saved value. *)
-val store :
-  env:Eio_unix.Stdenv.base -> issuer:string -> Credential.t -> unit
-
+val store : env:Eio_unix.Stdenv.base -> issuer:string -> Credential.t -> unit

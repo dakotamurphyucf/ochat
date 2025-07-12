@@ -189,7 +189,7 @@ module Output_message = struct
     ; text : string
     ; _type : string [@key "type"]
     }
-  [@@deriving jsonaf, sexp, bin_io]
+  [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
 
   type t =
     { role : role
@@ -345,6 +345,7 @@ module Request = struct
     | O3_mini [@name "o3-mini"]
     | Gpt4 [@name "gpt-4.5-preview"]
     | O4_mini [@name "o4-mini"]
+    | Gpt_4_1_mini [@name "gpt-4.1-nano"]
     | Gpt4o [@name "gpt-4o"]
     | Gpt4_1 [@name "gpt-4.1"]
     | Gpt3 [@name "gpt-3.5-turbo"]
@@ -355,6 +356,7 @@ module Request = struct
     | O3 -> `String "o3"
     | O3_mini -> `String "o3-mini"
     | O4_mini -> `String "o4-mini"
+    | Gpt_4_1_mini -> `String "gpt-4.1-nano"
     | Gpt4_1 -> `String "gpt-4.1"
     | Gpt4 -> `String "gpt-4.5-preview"
     | Gpt4o -> `String "gpt-4o"
@@ -367,6 +369,7 @@ module Request = struct
     | `String "o3-mini" -> O3_mini
     | `String "o4-mini" -> O4_mini
     | `String "gpt-4.1" -> Gpt4_1
+    | `String "gpt-4.1-nano" -> Gpt_4_1_mini
     | `String "gpt-4.5-preview" -> Gpt4
     | `String "gpt-4o" -> Gpt4o
     | `String "gpt-3.5-turbo" -> Gpt3
@@ -380,6 +383,7 @@ module Request = struct
     | Gpt4o -> "gpt-4o"
     | O4_mini -> "o4-mini"
     | Gpt4_1 -> "gpt-4.1"
+    | Gpt_4_1_mini -> "gpt-4.1-nano"
     | Gpt3 -> "gpt-3.5-turbo"
     | Gpt3_16k -> "gpt-3.5-turbo-16k"
     | Gpt4 -> "gpt-4.5-preview"
@@ -390,6 +394,7 @@ module Request = struct
     | "o3-mini" -> O3_mini
     | "o4-mini" -> O4_mini
     | "gpt-4.1" -> Gpt4_1
+    | "gpt-4.1-nano" -> Gpt_4_1_mini
     | "gpt-3.5-turbo" -> Gpt3
     | "gpt-3.5-turbo-16k" -> Gpt3_16k
     | "gpt-4.5" -> Gpt4
@@ -467,8 +472,8 @@ module Request = struct
     end
 
     type t =
-      { effort : Effort.t option [@jsonaf.option]
-      ; summary : Summary.t option [@jsonaf.option]
+      { effort : Effort.t option
+      ; summary : Summary.t option
       }
     [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
   end
@@ -1391,7 +1396,7 @@ type _ response_type =
   | Stream : (Response_stream.t -> unit) -> unit response_type
   | Default : Response.t response_type
 
-exception Response_stream_parsing_error of Jsonaf.t
+exception Response_stream_parsing_error of Jsonaf.t * exn
 
 let post_response
   : type a.
@@ -1470,10 +1475,15 @@ let post_response
   | Stream cb ->
     let reader = Eio.Buf_read.of_flow reader ~max_size:Int.max_value in
     let lines = Buf_read.lines reader in
+    Switch.run
+    @@ fun sw ->
     let rec loop seq =
       match Seq.uncons seq with
       | None -> ()
       | Some (line, seq) ->
+        Fiber.fork ~sw
+        @@ fun () ->
+        (* Log the raw response line to a file for debugging purposes *)
         Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n");
         let json_result =
           Jsonaf.parse line
@@ -1515,7 +1525,7 @@ let post_response
                           "Error parsing JSON from line: %s"
                           (Core.Exn.to_string ex));
                      print_endline line;
-                     raise (Response_stream_parsing_error json))
+                     raise (Response_stream_parsing_error (json, ex)))
                 | Error _ -> None)
            in
            (match choice with

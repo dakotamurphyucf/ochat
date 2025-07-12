@@ -126,7 +126,27 @@ let custom_fn ~env (c : CM.custom_tool) : Gpt_function.t =
     @@ fun sw ->
     (* 1.  Pipe for capturing stdout & stderr. *)
     let r, w = Eio.Process.pipe ~sw proc_mgr in
-    match Eio.Process.spawn ~sw proc_mgr ~stdout:w ~stderr:w (command :: params) with
+    let cmdline = command |> String.substr_replace_all ~pattern:"%20" ~with_:" " in
+    (* Split on whitespace – rudimentary, but sufficient for Phase-1. *)
+    let cmd_list =
+      if String.is_empty cmdline
+      then invalid_arg "custom_fn: empty command line"
+      else
+        String.split_on_chars ~on:[ ' '; Char.of_int_exn 32 ] cmdline
+        |> List.filter ~f:(fun s -> not (String.is_empty s))
+    in
+    let commands = List.append cmd_list params in
+    print_s [%sexp "Running custom command", (commands : string list)];
+    let old_command = command :: params in
+    print_s [%sexp "Running custom command old", (old_command : string list)];
+    (* 2.  Check that the command is not empty. *)
+    (* 2.  Spawn the child process with the provided command and parameters. *)
+    (* Note: we use [Eio.Process.spawn] to run the command, which captures
+       stdout and stderr into the pipe [w]. *)
+    (* Note: we use [Eio.Buf_read.parse_exn] to read the output from the pipe. *)
+    match
+      Eio.Process.spawn ~sw proc_mgr ~stdout:w ~stderr:w (List.append cmd_list params)
+    with
     | exception ex ->
       let err_msg = Fmt.str "error running %s command: %a" command Eio.Exn.pp ex in
       Eio.Flow.close w;
@@ -277,6 +297,9 @@ let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_functi
      | "apply_patch" -> [ Functions.apply_patch ~dir:(Ctx.dir ctx) ]
      | "read_dir" -> [ Functions.read_dir ~dir:(Ctx.dir ctx) ]
      | "get_contents" -> [ Functions.get_contents ~dir:(Ctx.dir ctx) ]
+     | "webpage_to_markdown" ->
+       [ Functions.webpage_to_markdown ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
+     | "fork" -> [ Functions.fork ]
      | other -> failwithf "Unknown built-in tool: %s" other ())
   | CM.Custom c -> [ custom_fn ~env:(Ctx.env ctx) c ]
   | CM.Agent agent_spec -> [ agent_fn ~ctx ~run_agent agent_spec ]

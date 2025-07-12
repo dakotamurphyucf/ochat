@@ -216,10 +216,10 @@ and convert_assistant_msg ~ctx ~run_agent (m : CM.assistant_msg) : Res.Item.t =
     let content_items : Res.Input_message.content_item list =
       match m.content with
       | None -> []
-      | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "input_text" } ]
+      | Some (CM.Text t) -> [ Res.Input_message.Text { text = t; _type = "output_text" } ]
       | Some (CM.Items items) ->
         [ Res.Input_message.Text
-            { text = string_of_items ~ctx ~run_agent items; _type = "input_text" }
+            { text = string_of_items ~ctx ~run_agent items; _type = "output_text" }
         ]
     in
     Res.Item.Input_message

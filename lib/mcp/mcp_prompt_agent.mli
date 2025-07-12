@@ -13,7 +13,6 @@
         [prompts/list] & [prompts/get].  For the moment we simply embed the
         raw XML string under the [messages] field so that clients can render
         or post-process it as they wish. *)
-
 val of_chatmd_file
   :  env:Eio_unix.Stdenv.base
   -> core:Mcp_server_core.t

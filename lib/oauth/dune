@@ -17,7 +17,7 @@
   oauth2_server_client_storage
   oauth2_server_routes
   oauth2_client_store)
-(libraries
+ (libraries
   io
   core
   core_unix

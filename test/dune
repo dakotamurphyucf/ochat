@@ -7,6 +7,66 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Webpage → Markdown conversion (MVP)                                         
+;; ---------------------------------------------------------------------------
+
+(library
+ (name webpage_markdown_test)
+ (modules webpage_markdown_test)
+ (libraries core expect_test_helpers_core chatgpt.webpage_markdown)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Cmdline mode tests (Phase 3)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_cmdline_mode_test)
+ (modules chat_tui_cmdline_mode_test)
+ (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Undo / Redo tests (Phase 2)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_undo_test)
+ (modules chat_tui_undo_test)
+ (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – command-mode Phase 0 smoke test
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_command_mode_test)
+ (modules chat_tui_command_mode_test)
+ (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Normal mode cursor motion tests (Phase 1)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_normal_mode_cursor_test)
+ (modules chat_tui_normal_mode_cursor_test)
+ (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; OAuth dynamic client registration tests
 ;; ---------------------------------------------------------------------------
 

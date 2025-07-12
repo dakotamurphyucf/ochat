@@ -117,3 +117,22 @@ let mkdir ~dir : Gpt_function.t =
   in
   Gpt_function.create_function (module Definitions.Make_dir) f
 ;;
+
+(* -------------------------------------------------------------------------- *)
+(* Webpage → Markdown tool                                                     *)
+(* -------------------------------------------------------------------------- *)
+
+let webpage_to_markdown ~dir ~net : Gpt_function.t =
+  Webpage_markdown.Tool.register ~dir ~net
+;;
+
+(* -------------------------------------------------------------------------- *)
+(*  Fork stub – placeholder implementation                                     *)
+(* -------------------------------------------------------------------------- *)
+
+let fork : Gpt_function.t =
+  let impl (_ : Definitions.Fork.input) =
+    "[fork-tool placeholder – should never be called directly]"
+  in
+  Gpt_function.create_function (module Definitions.Fork) impl
+;;

@@ -194,6 +194,7 @@ module Request : sig
     | O3_mini
     | Gpt4
     | O4_mini
+    | Gpt_4_1_mini
     | Gpt4o
     | Gpt4_1
     | Gpt3
@@ -781,7 +782,7 @@ type _ response_type =
   | Stream : (Response_stream.t -> unit) -> unit response_type
   | Default : Response.t response_type
 
-exception Response_stream_parsing_error of Jsonaf.t
+exception Response_stream_parsing_error of Jsonaf.t * exn
 
 val post_response
   :  'a response_type

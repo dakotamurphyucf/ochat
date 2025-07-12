@@ -27,9 +27,6 @@ module CM = Prompt.Chat_markdown
 module Scroll_box = Notty_scroll_box
 module Res = Openai.Responses
 module Res_stream = Res.Response_stream
-
-(* Removed unused alias [Item_stream].  [Res_item] and [Converter] are still
-      required further below. *)
 module Res_item = Res.Item
 module Converter = Chat_response.Converter
 module Ctx = Chat_response.Ctx
@@ -57,7 +54,7 @@ let add_placeholder_stream_error (model : Model.t) text : unit =
   ignore (Model.apply_patch model patch)
 ;;
 
-let apply_local_submit_effects ~model ~ev_stream ~term =
+let apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term =
   let user_msg = String.strip (Model.input_line model) in
   (* ------------------------------------------------------------------ *)
   (*  Inline helper commands ("/wrap", "/count", …)                  *)
@@ -69,9 +66,52 @@ let apply_local_submit_effects ~model ~ev_stream ~term =
   Model.set_cursor_pos model 0;
   if not (String.is_empty user_msg)
   then (
-    (* Add to visible conversation and canonical history *)
-    let patch = Add_user_message { text = user_msg } in
-    ignore (Model.apply_patch model patch));
+    (* Decide between plain-text and raw-XML submission based on draft mode. *)
+    match Model.draft_mode model with
+    | Model.Plain ->
+      ignore (Model.apply_patch model (Add_user_message { text = user_msg }))
+    | Model.Raw_xml ->
+      let module CM = Prompt.Chat_markdown in
+      let xml =
+        if String.is_prefix ~prefix:"<" user_msg
+        then user_msg
+        else Printf.sprintf "<user>\n%s\n</user>" user_msg
+      in
+      let elements =
+        try CM.parse_chat_inputs ~dir xml with
+        | _ -> []
+      in
+      let user_msg =
+        List.find_map_exn elements ~f:(function
+          | CM.User m ->
+            let ctx = Ctx.create ~env ~dir ~cache in
+            Some
+              (Converter.convert_user_msg
+                 ~ctx
+                 ~run_agent:Chat_response.Driver.run_agent
+                 m)
+          | _ -> None)
+      in
+      let user_msg_txt =
+        match user_msg with
+        | Input_message msg ->
+          List.fold msg.content ~init:None ~f:(fun acc user_msg ->
+            match acc with
+            | Some txt ->
+              (match user_msg with
+               | Text t -> Some (txt ^ "\n" ^ t.text)
+               | Image img ->
+                 Some (txt ^ "\n" ^ Printf.sprintf "<image src=\"%s\"/>" img.image_url))
+            | None -> None)
+        | _ ->
+          failwith
+          @@ Printf.sprintf
+               "Expected user message, got: %s"
+               (Res_item.jsonaf_of_t user_msg |> Jsonaf.to_string)
+      in
+      let txt = Option.value user_msg_txt ~default:(Util.sanitize xml) in
+      ignore (Model.apply_patch model (Add_user_message { text = txt }));
+      Model.set_draft_mode model Model.Plain);
   Model.set_auto_follow model true;
   let _, h = Notty_eio.Term.size term in
   let input_h =
@@ -138,7 +178,7 @@ type prompt_context =
           (* Call the function with the buffered items. *)
           (* Note: This assumes that [f] can handle a list of items. *)
           Eio.Mutex.lock mutex;
-          (* Only call the function if the buffer is not empty. *)
+          (* Only call the unction if the buffer is not empty. *)
           let items = !buffer in
           buffer := [];
           f_batch (List.rev items);
@@ -158,10 +198,58 @@ let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
     Switch.run
     @@ fun streaming_sw ->
     Model.set_fetch_sw model (Some streaming_sw);
+    let stream = Eio.Stream.create Int.max_value in
+    (* Add a placeholder stream event to the model so the UI can display it. *)
     let on_event ev = Eio.Stream.add ev_stream (`Stream ev) in
+    let on_event_batch evs = Eio.Stream.add ev_stream (`Stream_batch evs) in
     (* let on_event_batch evs = Eio.Stream.add ev_stream (`Stream_batch evs) in
     let on_event = throttle streaming_sw env on_event on_event_batch in *)
     let on_fn_out ev = Eio.Stream.add ev_stream (`Function_output ev) in
+    (* Fork a daemon fiber to batch events that  *)
+    Eio.Fiber.fork_daemon ~sw:streaming_sw (fun () ->
+      let rec loop () =
+        match Eio.Stream.take stream with
+        | `Stream ev ->
+          let rec inner_loop acc =
+            match Eio.Stream.take_nonblocking stream with
+            | None ->
+              (match acc with
+               | [] -> ()
+               | [ ev ] -> on_event ev
+               | _ ->
+                 Io.log
+                   ~dir:(Eio.Stdenv.cwd env)
+                   ~file:"batch.txt"
+                   (Sexp.to_string [%sexp "Batching events", (acc : Res_stream.t list)]
+                    ^ "\n");
+                 (* If we have accumulated events, send them as a batch. *)
+                 on_event_batch (List.rev acc))
+            | Some (`Stream ev) -> inner_loop (ev :: acc)
+            | Some (`Function_output ev) ->
+              if List.is_empty acc
+              then on_fn_out ev
+              else (
+                (* If we have accumulated events, send them as a batch. *)
+                on_event_batch (List.rev acc);
+                on_fn_out ev);
+              inner_loop []
+          in
+          inner_loop [ ev ];
+          loop ()
+        | `Function_output ev ->
+          on_fn_out ev;
+          loop ()
+      in
+      loop ());
+    (* openapi stream events -------->  *)
+    let on_fn_out ev =
+      (* Function call output events are sent to the UI for rendering. *)
+      Eio.Stream.add stream (`Function_output ev)
+    in
+    let on_event ev =
+      (* OpenAI stream events are sent to the UI for rendering. *)
+      Eio.Stream.add stream (`Stream ev)
+    in
     let items =
       Chat_response.Driver.run_completion_stream_in_memory_v1
         ~env
@@ -186,6 +274,44 @@ let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
   with
   | ex ->
     Model.set_fetch_sw model None;
+    (* ---------------- Cleanup on streaming error ---------------- *)
+    (match Model.fork_start_index model with
+     | Some idx ->
+       let hist_prefix = List.take (Model.history_items model) idx in
+       Model.set_history_items model hist_prefix;
+       Model.set_messages model (Conversation.of_history hist_prefix);
+       Model.set_active_fork model None;
+       Model.set_fork_start_index model None
+     | None -> ());
+    (* Remove dangling reasoning or incomplete function calls at the tail *)
+    let prune_trailing history =
+      let module Item = Openai.Responses.Item in
+      let rec loop rev_items acc state =
+        match rev_items with
+        | [] -> List.rev acc
+        | item :: rest -> (
+          match state with
+          | `Keep -> loop rest (item :: acc) `Keep
+          | `Looking -> (
+              match item with
+              | Item.Output_message _ -> loop rest (item :: acc) `Keep
+              | Item.Function_call_output fo ->
+                loop rest (item :: acc) (`Await_call fo.call_id)
+              | Item.Reasoning _ -> loop rest acc `Looking
+              | _ -> loop rest (item :: acc) `Looking)
+          | `Await_call cid -> (
+              match item with
+              | Item.Function_call fc when String.equal fc.call_id cid ->
+                loop rest (item :: acc) `Keep
+              | Item.Reasoning _ -> loop rest acc (`Await_call cid)
+              | _ -> loop rest (item :: acc) (`Await_call cid)))
+      in
+      loop (List.rev history) [] `Looking
+    in
+    let pruned = prune_trailing (Model.history_items model) in
+    Model.set_history_items model pruned;
+    Model.set_messages model (Conversation.of_history pruned);
+
     let error_msg = Printf.sprintf "Error during streaming: %s" (Exn.to_string ex) in
     print_endline error_msg;
     (* Add an error message to the model so the UI can display it. *)
@@ -242,7 +368,7 @@ let run_chat ~env ~prompt_file () =
       | CM.Agent _ -> Ctx.create ~env ~dir ~cache
       | _ -> Ctx.create ~env ~dir ~cache
     in
-    let fns =
+    let user_fns =
       List.concat_map declared_tools ~f:(fun decl ->
         let ctx_tool = ctx_for_tool decl in
         Tool.of_declaration
@@ -251,7 +377,7 @@ let run_chat ~env ~prompt_file () =
           ~run_agent:Chat_response.Driver.run_agent
           decl)
     in
-    let comp_tools, tbl = Gpt_function.functions fns in
+    let comp_tools, tbl = Gpt_function.functions user_fns in
     Tool.convert_tools comp_tools, tbl
   in
   (* Convert prompt → initial history items. *)
@@ -282,6 +408,13 @@ let run_chat ~env ~prompt_file () =
       ~scroll_box:(Scroll_box.create Notty.I.empty)
       ~cursor_pos:0
       ~selection_anchor:None
+      ~mode:Insert
+      ~draft_mode:Plain
+      ~selected_msg:None
+      ~undo_stack:[]
+      ~redo_stack:[]
+      ~cmdline:""
+      ~cmdline_cursor:0
   in
   (* Start the Notty terminal – its [on_event] callback just pushes events
         into [ev_stream] so the UI stays single-threaded. *)
@@ -388,7 +521,7 @@ let run_chat ~env ~prompt_file () =
       (match Model.fetch_sw model with
        | Some _ -> main_loop ()
        | None ->
-         apply_local_submit_effects ~model ~ev_stream ~term;
+         apply_local_submit_effects ~dir:cwd ~env ~cache ~model ~ev_stream ~term;
          Fiber.fork ~sw:ui_sw (fun () ->
            handle_submit ~env ~model ~ev_stream ~prompt_ctx:{ cfg; tools; tool_tbl });
          main_loop ())

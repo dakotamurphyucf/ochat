@@ -12,6 +12,7 @@ let attr_of_role = function
   | "user" -> A.(fg yellow)
   | "developer" -> A.(fg red)
   | "tool" -> A.(fg lightmagenta)
+  | "fork" -> A.(fg lightyellow)
   | "reasoning" -> A.(fg lightblue)
   (* System messages (model instructions, meta information, …) are rendered
      in a dimmed grey so that they stand out from regular assistant output
@@ -34,7 +35,7 @@ let attr_of_role = function
    ASCII/Unicode line drawing frame while still keeping messages visually
    separate. *)
 
-let message_to_image ~max_width ((role, text) : message) : I.t =
+let message_to_image ~max_width ?(selected = false) ((role, text) : message) : I.t =
   (* Skip entirely blank messages (after trimming whitespace). *)
   let trimmed = String.strip text in
   if String.is_empty trimmed
@@ -43,7 +44,8 @@ let message_to_image ~max_width ((role, text) : message) : I.t =
     (* ------------------------------------------------------------------- *)
     (*  Colours                                                            *)
     (* ------------------------------------------------------------------- *)
-    let content_attr = attr_of_role role in
+    let base_attr = attr_of_role role in
+    let content_attr = if selected then A.(base_attr ++ st reverse) else base_attr in
     (* ------------------------------------------------------------------- *)
     (*  Word-wrapping                                                     *)
     (* ------------------------------------------------------------------- *)
@@ -109,8 +111,12 @@ let message_to_image ~max_width ((role, text) : message) : I.t =
     Notty.I.vcat [ top_border; content_rows; bottom_border ])
 ;;
 
-let history_image ~width ~(messages : message list) : I.t =
-  messages |> List.map ~f:(message_to_image ~max_width:width) |> I.vcat
+let history_image ~width ~(messages : message list) ~(selected_idx : int option) : I.t =
+  messages
+  |> List.mapi ~f:(fun idx msg ->
+    let sel = Option.value_map selected_idx ~default:false ~f:(Int.equal idx) in
+    message_to_image ~max_width:width ~selected:sel msg)
+  |> I.vcat
 ;;
 
 (* ------------------------------------------------------------------------- *)
@@ -121,15 +127,23 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
   let open Notty in
   let w, h = size in
   (* Prepare / update history image inside the scroll box. *)
-  let history_img = history_image ~width:w ~messages:(Model.messages model) in
+  let history_img =
+    history_image
+      ~width:w
+      ~messages:(Model.messages model)
+      ~selected_idx:(Model.selected_msg model)
+  in
   Notty_scroll_box.set_content (Model.scroll_box model) history_img;
   (* Keep bottom aligned if [auto_follow] is enabled.  The scroll helpers are
      effect-free apart from mutating the scroll box’s internal offset, which
      is an intended side effect that belongs to the model. *)
   let input_lines =
-    match String.split ~on:'\n' (Model.input_line model) with
-    | [] -> [ "" ]
-    | ls -> ls
+    match Model.mode model with
+    | Cmdline -> [ Model.cmdline model ]
+    | _ ->
+      (match String.split ~on:'\n' (Model.input_line model) with
+       | [] -> [ "" ]
+       | ls -> ls)
   in
   (* ---------------------------- Dimensions ---------------------------- *)
   let input_content_height = List.length input_lines in
@@ -137,12 +151,31 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
     2
     (* top & bottom of input box *)
   in
-  let history_height = Int.max 1 (h - input_content_height - border_rows) in
+  let history_height =
+    let base = Int.max 1 (h - input_content_height - border_rows) in
+    max 1 (base - 1)
+  in
   if Model.auto_follow model
   then Notty_scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:history_height;
   let history_view =
     Notty_scroll_box.render (Model.scroll_box model) ~width:w ~height:history_height
   in
+  (* ------------------------------------------------------------------- *)
+  (*  Status bar – shows current editor mode                              *)
+  (* ------------------------------------------------------------------- *)
+  let status_attr = A.(bg lightblack ++ fg lightwhite) in
+  let mode_txt =
+    match Model.mode model with
+    | Insert -> "-- INSERT --"
+    | Normal -> "-- NORMAL --"
+    | Cmdline -> "-- CMD --"
+  in
+  let raw_txt =
+    match Model.draft_mode model with
+    | Model.Raw_xml -> " -- RAW --"
+    | Model.Plain -> ""
+  in
+  let mode_tag = I.string status_attr (mode_txt ^ raw_txt) |> I.hsnap ~align:`Left w in
   (* ------------------------ Input box & BG --------------------------- *)
   let border_attr = A.(fg lightblue) in
   let bg_attr = A.(bg (rgb ~r:1 ~g:1 ~b:2)) in
@@ -150,8 +183,13 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
   let selection_attr base = A.(base ++ st reverse) in
   let input_img =
     let open I in
-    let prefix = "> " in
-    let indent = String.make (String.length prefix) ' ' in
+    let prefix, indent =
+      match Model.mode model with
+      | Cmdline -> ":", "" (* command line has single ':' and no indent *)
+      | _ ->
+        let p = "> " in
+        p, String.make (String.length p) ' '
+    in
     let sel_active = Model.selection_active model in
     (* We'll iterate lines keeping track of absolute offset *)
     let rows =
@@ -225,7 +263,7 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
     in
     I.vcat ((top_border :: rows) @ [ bottom_border ])
   in
-  let full_img = Notty.Infix.(history_view <-> input_img) in
+  let full_img = Notty.Infix.(history_view <-> mode_tag <-> input_img) in
   (* Compute cursor position. *)
   let total_index = Model.cursor_pos model in
   let rec row_col lines offset row =
@@ -238,9 +276,13 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
       else row_col ls (offset + len + 1) (row + 1)
   in
   let row, col_in_line = row_col input_lines 0 0 in
-  let cursor_x = 3 + col_in_line in
+  let cursor_x =
+    match Model.mode model with
+    | Cmdline -> 2 + col_in_line (* border + ':' *)
+    | _ -> 3 + col_in_line
+  in
   let cursor_y =
-    history_height + 1 + row
+    history_height + 1 (* status bar *) + 1 + row
     (* +1 for top border *)
   in
   full_img, (cursor_x, cursor_y)

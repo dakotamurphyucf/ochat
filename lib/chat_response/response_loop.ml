@@ -60,7 +60,29 @@ let rec run
     let outputs =
       List.map function_calls ~f:(fun fc ->
         let fn = Hashtbl.find_exn tool_tbl fc.name in
-        let res = fn fc.arguments in
+        let res =
+          if String.equal fc.name "fork"
+          then (
+            (* We do not have streaming callbacks in this synchronous path;
+               pass in dummies.  History so far is [history @ new_items]
+               (but we are still computing [outputs] so the current history
+               is adequate). *)
+            let env = Ctx.env ctx in
+            Fork.execute
+              ~env
+              ~history:(history @ new_items)
+              ~call_id:fc.call_id
+              ~arguments:fc.arguments
+              ~tools:(Option.value tools ~default:[])
+              ~tool_tbl
+              ~on_event:(fun _ -> ())
+              ~on_fn_out:(fun _ -> ())
+              ?temperature
+              ?max_output_tokens
+              ?reasoning
+              ())
+          else fn fc.arguments
+        in
         Res.Item.Function_call_output
           { output = res
           ; call_id = fc.call_id

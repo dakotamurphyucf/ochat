@@ -12,9 +12,27 @@ type t =
   ; mutable fetch_sw : Eio.Switch.t option
   ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int
-  ; mutable selection_anchor : int option
+  ; mutable selection_anchor : int option (* Command-mode scaffolding *)
+  ; mutable mode : editor_mode
+  ; mutable draft_mode : draft_mode
+  ; mutable selected_msg : int option
+  ; mutable undo_stack : (string * int) list
+  ; mutable redo_stack : (string * int) list
+  ; mutable cmdline : string
+  ; mutable cmdline_cursor : int
+  ; mutable active_fork : string option
+  ; mutable fork_start_index : int option
   }
 [@@deriving fields ~getters ~setters]
+
+and editor_mode =
+  | Insert
+  | Normal
+  | Cmdline
+
+and draft_mode =
+  | Plain
+  | Raw_xml
 
 let create
       ~history_items
@@ -28,6 +46,13 @@ let create
       ~scroll_box
       ~cursor_pos
       ~selection_anchor
+      ~mode
+      ~draft_mode
+      ~selected_msg
+      ~undo_stack
+      ~redo_stack
+      ~cmdline
+      ~cmdline_cursor
   =
   { history_items
   ; messages
@@ -40,6 +65,15 @@ let create
   ; scroll_box
   ; cursor_pos
   ; selection_anchor
+  ; mode
+  ; draft_mode
+  ; selected_msg
+  ; undo_stack
+  ; redo_stack
+  ; cmdline
+  ; cmdline_cursor
+  ; active_fork = None
+  ; fork_start_index = None
   }
 ;;
 
@@ -51,6 +85,67 @@ let set_selection_anchor t idx = t.selection_anchor <- Some idx
 let selection_active t = Option.is_some t.selection_anchor
 let messages t = t.messages
 let auto_follow t = t.auto_follow
+let cmdline t = t.cmdline
+let cmdline_cursor t = t.cmdline_cursor
+let set_cmdline t s = t.cmdline <- s
+let set_cmdline_cursor t n = t.cmdline_cursor <- n
+
+(* ------------------------------------------------------------------------- *)
+(*  Fork helpers                                                              *)
+(* ------------------------------------------------------------------------- *)
+
+let active_fork t = t.active_fork
+let set_active_fork t v = t.active_fork <- v
+
+let fork_start_index t = t.fork_start_index
+let set_fork_start_index t v = t.fork_start_index <- v
+
+(* ------------------------------------------------------------------------- *)
+(*  Command-mode helpers                                                     *)
+(* ------------------------------------------------------------------------- *)
+
+let toggle_mode (t : t) : unit =
+  t.mode
+  <- (match t.mode with
+      | Insert -> Normal
+      | Normal -> Insert
+      | Cmdline -> Insert)
+;;
+
+let set_draft_mode (t : t) (m : draft_mode) = t.draft_mode <- m
+let select_message (t : t) (idx : int option) = t.selected_msg <- idx
+
+(* ------------------------------------------------------------------------- *)
+(*  Undo / Redo helpers                                                       *)
+(* ------------------------------------------------------------------------- *)
+
+let push_undo (t : t) : unit =
+  t.undo_stack <- (t.input_line, t.cursor_pos) :: t.undo_stack;
+  (* any new edit invalidates the redo ring *)
+  t.redo_stack <- []
+;;
+
+let undo (t : t) : bool =
+  match t.undo_stack with
+  | (txt, pos) :: rest ->
+    t.redo_stack <- (t.input_line, t.cursor_pos) :: t.redo_stack;
+    t.input_line <- txt;
+    t.cursor_pos <- Int.min (String.length txt) pos;
+    t.undo_stack <- rest;
+    true
+  | [] -> false
+;;
+
+let redo (t : t) : bool =
+  match t.redo_stack with
+  | (txt, pos) :: rest ->
+    t.undo_stack <- (t.input_line, t.cursor_pos) :: t.undo_stack;
+    t.input_line <- txt;
+    t.cursor_pos <- Int.min (String.length txt) pos;
+    t.redo_stack <- rest;
+    true
+  | [] -> false
+;;
 
 (* ------------------------------------------------------------------------- *)
 (*  Internal helpers – these are largely a direct carry-over from the mutable
@@ -93,8 +188,15 @@ let apply_patch (model : t) (p : Types.patch) : t =
   | Types.Set_function_name { id; name } ->
     Hashtbl.set model.function_name_by_id ~key:id ~data:name;
     model
-  | Types.Set_function_output { id = _; output } ->
-    let role = "tool_output" in
+  | Types.Set_function_output { id; output } ->
+    let role =
+      if Option.is_some model.active_fork then "fork" else "tool_output"
+    in
+    let buf =
+      match Hashtbl.find model.msg_buffers id with
+      | Some b -> b
+      | None -> ensure_buffer model ~id ~role
+    in
     let max_len = 2_000 in
     let txt = Util.sanitize output in
     let txt =
@@ -102,7 +204,9 @@ let apply_patch (model : t) (p : Types.patch) : t =
       then String.sub txt ~pos:0 ~len:max_len ^ "\n…truncated…"
       else txt
     in
-    model.messages <- model.messages @ [ role, txt ];
+    (* Overwrite buffer text *)
+    buf.text := txt;
+    update_message_text model buf.index txt;
     model
   | Types.Update_reasoning_idx { id; idx } ->
     (match Hashtbl.find model.reasoning_idx_by_id id with

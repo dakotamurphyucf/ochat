@@ -15,14 +15,14 @@ type persistent_form =
   }
 [@@deriving bin_io]
 
-let to_persistent_form (t : string Agent_res_LRU.t) : persistent_form =
+let to_persistent (t : string Agent_res_LRU.t) : persistent_form =
   { max_size = Agent_res_LRU.max_size t
   ; items = Agent_res_LRU.to_alist t (* least -> most recently used *)
   }
 ;;
 
 (* Rebuild a new LRU in the original order. *)
-let of_persistent_form (pf : persistent_form) : string Agent_res_LRU.t =
+let of_persistent (pf : persistent_form) : string Agent_res_LRU.t =
   let t = Agent_res_LRU.create ~max_size:pf.max_size () in
   (* Insert pairs from least- to most-recently used order. *)
   List.iter pf.items ~f:(fun (key, data) -> Agent_res_LRU.set t ~key ~data);
@@ -30,14 +30,15 @@ let of_persistent_form (pf : persistent_form) : string Agent_res_LRU.t =
 ;;
 
 (* Cstruct.of_bigarray  to convet bigarray to cstruct and then we can use eio to write using Path.with_open_out to get flow then we can use Writer to write the cstruct *)
-let write_lru_to_file ~filename (lru : string Agent_res_LRU.t) =
-  let pf = to_persistent_form lru in
-  Bin_prot_utils.write_bin_prot' filename [%bin_writer: persistent_form] pf
+let write_file ~file cache =
+  Bin_prot_utils_eio.write_bin_prot'
+    file
+    [%bin_writer: persistent_form]
+    (to_persistent cache)
 ;;
 
-let read_lru_from_file ~filename : string Agent_res_LRU.t =
-  let pf = Bin_prot_utils.read_bin_prot' filename [%bin_reader: persistent_form] in
-  of_persistent_form pf
+let read_file ~file =
+  of_persistent (Bin_prot_utils_eio.read_bin_prot' file [%bin_reader: persistent_form])
 ;;
 
 let clean_html raw_html =
@@ -274,7 +275,6 @@ and run_agent prompt items ~dir ~net ~cache =
   List.iter messages ~f:(fun m ->
     print_endline @@ Jsonaf.to_string_hum @@ Prompt.Chat_markdown.jsonaf_of_msg m);
   let inputs = List.map ~f:(convert ~dir ~net ~cache) @@ get_messages @@ elements in
-  print_endline "inputs";
   List.iter inputs ~f:(fun i ->
     print_endline @@ Jsonaf.to_string_hum @@ Openai.Completions.jsonaf_of_chat_message i);
   let choice =
@@ -323,7 +323,7 @@ let run_completion ~env ~output_file ~prompt_file =
   let dir = Eio.Stdenv.fs env in
   let cache =
     match Eio.Path.is_file Eio.Path.(dir / "./cache.bin") with
-    | true -> read_lru_from_file ~filename:"./cache.bin"
+    | true -> read_file ~file:Eio.Path.(dir / "./cache.bin")
     | false -> Agent_res_LRU.create ~max_size:1000 ()
   in
   (* let dm = Eio.Stdenv.domain_mgr env in *)
@@ -479,5 +479,8 @@ let run_completion ~env ~output_file ~prompt_file =
     if !run then start () else ()
   in
   start ();
-  write_lru_to_file ~filename:"./cache.bin" cache
+  let cwd = Eio.Stdenv.cwd env in
+  let datadir = Io.ensure_chatmd_dir ~cwd in
+  let cache_file = Eio.Path.(datadir / "cache.bin") in
+  write_file ~file:cache_file cache
 ;;

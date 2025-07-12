@@ -21,6 +21,109 @@ module Get_contents : Gpt_function.Def with type input = string = struct
   ;;
 end
 
+(* ---------------------------------------------------------------------- *)
+(*  Fork – clone the current agent and run a command in the clone          *)
+(* ---------------------------------------------------------------------- *)
+
+type fork_input =
+  { command : string
+  ; arguments : string list
+  }
+
+module Fork : Gpt_function.Def with type input = fork_input = struct
+  [@@@warning "-69"]
+
+  type input = fork_input
+
+  let name = "fork"
+
+  let description =
+    Some
+      {|Spawn an auxiliary **forked agent** that inherits your *entire* context and solves a focussed sub-task **without polluting the parent conversation**.
+
+When to call
+• Long or detail-heavy work (deep debugging, large code generation, extensive data exploration).
+• Experiments that may generate irrelevant intermediate chatter.
+
+Invocation
+• `command` – command or task.
+• `arguments` – optional arguments to pass to the command.
+
+Prompting essentials for GPT-4.1 / O3 reasoning models
+1. **Be explicit, be clear** – state goals and required output structure precisely.
+2. **Structured output** – delimit sections so they’re machine-parsable.
+3. **Expose reasoning** – include your full chain-of-thought in RESULT; it is valuable for audit.
+4. **Self-verify** – re-check answers; note any open issues in PERSIST.
+5. **Avoid redundant tokens** – no need for phrases like “let’s think step-by-step”; just think and write.
+
+The fork Agent Returns exactly one assistant message, using this template:
+
+```
+===RESULT===
+<Extremely detailed narrative of everything you did: reasoning, obstacles & fixes, code patches, logs, validation steps, etc.>
+
+===PERSIST===
+<Concise (≤20 items) bullet list of facts, artefacts, or next actions that the parent agent must remember. Bullets can be as detailed as needed, but should be succinct.>
+```
+
+• Use Markdown; wrap code or patches in fenced blocks.
+• RESULT should be exhaustive; PERSIST should be succinct.
+|}
+  ;;
+
+  let parameters : Jsonaf.t =
+    `Object
+      [ "type", `String "object"
+      ; ( "properties"
+        , `Object
+            [ "command", `Object [ "type", `String "string" ]
+            ; ( "arguments"
+              , `Object
+                  [ "type", `String "array"
+                  ; "items", `Object [ "type", `String "string" ]
+                  ] )
+            ] )
+      ; "required", `Array [ `String "command"; `String "arguments" ]
+      ; "additionalProperties", `False
+      ]
+  ;;
+
+  let input_of_string s =
+    let j = Jsonaf.of_string s in
+    let command = Jsonaf.string_exn @@ Jsonaf.member_exn "command" j in
+    let arguments =
+      match Jsonaf.member "arguments" j with
+      | Some (`Array arr) -> List.map arr ~f:Jsonaf.string_exn
+      | _ -> []
+    in
+    { command; arguments }
+  ;;
+end
+
+module Webpage_to_markdown : Gpt_function.Def with type input = string = struct
+  type input = string
+
+  let name = "webpage_to_markdown"
+
+  let description =
+    Some "Download a web page and return its contents converted to Markdown"
+  ;;
+
+  let parameters : Jsonaf.t =
+    `Object
+      [ "type", `String "object"
+      ; "properties", `Object [ "url", `Object [ "type", `String "string" ] ]
+      ; "required", `Array [ `String "url" ]
+      ; "additionalProperties", `False
+      ]
+  ;;
+
+  let input_of_string s =
+    let j = Jsonaf.of_string s in
+    Jsonaf.string_exn @@ Jsonaf.member_exn "url" j
+  ;;
+end
+
 module Add_line_numbers : Gpt_function.Def with type input = string = struct
   type input = string
 

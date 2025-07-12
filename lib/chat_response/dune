@@ -1,7 +1,7 @@
 (library
  (name chat_response)
  (public_name chatgpt.chat_response)
- (modules cache config converter ctx driver fetch response_loop tool)
+ (modules cache config converter ctx driver fetch response_loop tool fork)
  (libraries
   core
   openai

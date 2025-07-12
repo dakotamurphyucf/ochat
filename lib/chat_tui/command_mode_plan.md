@@ -70,10 +70,8 @@ Implementation notes
 
    ```xml
    <user>
-   RAW|
    Here is a picture:
    <img src="./diagram.png" local/>
-   |RAW
    </user>
    ```
 
@@ -82,7 +80,7 @@ Implementation notes
 
    * Toggle with `Ctrl-r` in Insert mode or `r` in Normal mode.
    * Status bar shows `-- RAW --`.
-   * While active, the draft buffer is wrapped into the `<user> … RAW| … |RAW
+   * While active, the draft buffer is wrapped into the `<user> …
      </user>` scaffold automatically on submission.
 
    Implementation work:
@@ -154,20 +152,48 @@ Behaviour
 ---------
 * `Tab` cycles through matches; `Shift-Tab` cycles backwards.
 * `Ctrl-Space` shows an overlay list (Notty popup) of up to *10* matches.
-* Matches come from a recursive search **rooted at the project folder** with
-  `rg --files` (already vendored via our `Rg` helper) filtered by the current
-  prefix.
-* If the prefix starts with `./` we resolve relative to the folder that
-  contains the *current* prompt file; otherwise relative to repo root.
+* Suggestions are produced by the **Path_completion** engine (see
+  `path_completion.md`).
+* The engine interprets what the user has typed so far as an ordinary shell
+  path: everything up to the *last* slash is the **directory part**; the rest
+  is the **fragment** that should be completed.
+* Completion therefore only ever looks at *one* directory at a time.  This
+  keeps the data set tiny (≤ a few thousand entries) and allows rebuilding it
+  on every request without noticeable latency.
+* If the fragment starts with `./`, `../` or no slash at all, the directory
+  part is resolved **relative to the folder that contains the current prompt
+  file**.  Absolute paths (`/…` or `~/…`) are respected verbatim.
+* Directory suggestions get a trailing `/` so the user can immediately dive
+  deeper by typing the next fragment.
 
 Implementation sketch
 ---------------------
 1. **Parser** – during draft editing keep track of the cursor position; a small
    regex like `\bsrc="([^"]*)"` determines whether we are inside a `src`.
-2. **Completion engine**
-   * Use the existing `functions.rg` tool (`rg -g "*<prefix>*" --files`) to
-     gather candidates lazily when the prefix changes.
-   * Maintain an LRU cache so repeated presses of `Tab` are instant.
+2. **Completion engine (`Path_completion`)**
+   * Keeps one *TTL-based*, per-directory cache that stores the **sorted** list
+     of entry names.  Rebuilds the cache with `Eio.Path.read_dir` (non-blocking)
+     when it expires or
+     when the directory changes (mtime mismatch / inotify event).
+   * For every keystroke it uses **two binary searches** (`lower_bound`) to
+     locate the contiguous slice that shares the current fragment.  The first
+     *K* (≤10) items from that slice become the suggestion list.
+   * Remember the `(lo, hi)` slice of the *previous* keystroke so that typing
+     one more character restricts the next search to that much smaller
+     sub-range – practically O(K) time once the user starts typing.
+   * Public API (see `path_completion.ml`) – the module is **effect-free** and
+     therefore unit-testable; it receives the surrounding `Eio.Path.t` *sandbox*
+     from the caller so tests can inject a ramdisk.
+
+     ```ocaml
+     type t
+     val create      : unit -> t
+     val suggestions : t -> cwd:string -> prefix:string -> string list
+     val next        : t -> dir:[ `Fwd | `Back ] -> string option
+     ```
+   * The `next` function rotates through the cached suggestion list and is
+     driven by `Tab` / `Shift-Tab` while `suggestions` is called on every text
+     change to refresh the list.
 3. **Controller hooks**
    * In Raw mode intercept `Tab` / `Shift-Tab` / `Ctrl-Space` and ask the
      completion engine for `next / prev / list`.
@@ -178,7 +204,8 @@ Implementation sketch
      (simpler: bottom).
    * Highlight current selection.
 
-Fallback: if `rg` returns >10 results, show first 10 plus “(+ N more …)” line.
+If there are more than *K* matches, show the first *K* followed by a greyed out
+line “(+ N more …)” so the user knows there are further possibilities.
 
 ## 5  Implementation Phases
 

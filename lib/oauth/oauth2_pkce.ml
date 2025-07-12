@@ -10,7 +10,8 @@ open Core
 
 let gen_code_verifier () : string =
   (* Ensure default RNG active. *)
-  (try Mirage_crypto_rng_unix.use_default () with _ -> ());
+  (try Mirage_crypto_rng_unix.use_default () with
+   | _ -> ());
   (* 32 random bytes, URL-safe base64-encoded without padding *)
   let raw = Mirage_crypto_rng.generate 32 in
   let b64 = Base64.encode_exn raw in

@@ -7,7 +7,7 @@
     {!Chat_tui.Cmd}; the controller focuses on purely local editing and
     scrolling interactions. *)
 
-type reaction =
+type reaction = Controller_types.reaction =
   | Redraw (** The event modified the visible state – caller should refresh. *)
   | Submit_input (** User pressed Meta+Enter to submit the prompt. *)
   | Cancel_or_quit (** ESC – cancel running request or quit. *)

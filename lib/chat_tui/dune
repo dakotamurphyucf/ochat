@@ -10,6 +10,11 @@
   stream
   cmd
   controller
+  controller_types
+  controller_normal
+  controller_shared
+  controller_cmdline
+  path_completion
   conversation
   snippet
   app)

@@ -2,13 +2,18 @@ open Core
 module UC = Stdlib.Uchar
 module Scroll_box = Notty_scroll_box
 
-(** Outcome of handling a keyboard event. *)
-type reaction =
-  | Redraw (** Model was modified – caller should redraw.      *)
-  | Submit_input (** User pressed Meta+Enter – send current input.   *)
-  | Cancel_or_quit (** ESC – cancel request if running, else quit.     *)
-  | Quit (** Immediate quit (Ctrl-C / q).                    *)
-  | Unhandled (** Event not recognised by this layer.            *)
+(* Re-expose the constructors locally so that the remainder of this file can
+   stay unchanged.  The alias keeps them identical to the single source of
+   truth in [Controller_types]. *)
+(* Re-expose the constructors locally so that the remainder of this file can
+   stay unchanged.  The alias keeps them identical to the single source of
+   truth in [Controller_types]. *)
+type reaction = Controller_types.reaction =
+  | Redraw
+  | Submit_input
+  | Cancel_or_quit
+  | Quit
+  | Unhandled
 
 (* -------------------------------------------------------------------- *)
 (* Helper – update the input_line ref while keeping it UTF-8 safe.       *)
@@ -62,29 +67,6 @@ let yank (model : Model.t) =
 (* -------------------------------------------------------------------- *)
 (* Line helpers                                                          *)
 (* -------------------------------------------------------------------- *)
-
-let line_bounds s pos =
-  (* returns (start_index, end_index_exclusive) of the current line that
-     contains [pos].  Works on byte indices. *)
-  let len = String.length s in
-  let rec find_start i =
-    if i <= 0
-    then 0
-    else if Char.equal (String.get s (i - 1)) '\n'
-    then i
-    else find_start (i - 1)
-  in
-  let rec find_end i =
-    if i >= len
-    then len
-    else if Char.equal (String.get s i) '\n'
-    then i
-    else find_end (i + 1)
-  in
-  let start_idx = find_start pos in
-  let end_idx = find_end pos in
-  start_idx, end_idx
-;;
 
 let delete_range (model : Model.t) ~first ~last =
   (* Remove [first,last) from input line. Assumes indices are valid. *)
@@ -143,7 +125,7 @@ let cut_selection (model : Model.t) =
 let kill_to_eol (model : Model.t) =
   let s = Model.input_line model in
   let pos = Model.cursor_pos model in
-  let _, line_end = line_bounds s pos in
+  let _, line_end = Controller_shared.line_bounds s pos in
   (* Include newline char, if any *)
   let line_end =
     if line_end < String.length s && Char.equal (String.get s line_end) '\n'
@@ -158,7 +140,7 @@ let kill_to_eol (model : Model.t) =
 let kill_to_bol (model : Model.t) =
   let s = Model.input_line model in
   let pos = Model.cursor_pos model in
-  let line_start, _ = line_bounds s pos in
+  let line_start, _ = Controller_shared.line_bounds s pos in
   let killed = String.sub s ~pos:line_start ~len:(pos - line_start) in
   kill killed;
   delete_range model ~first:line_start ~last:pos
@@ -194,7 +176,7 @@ let move_cursor_vertically (model : Model.t) ~dir =
   let s = Model.input_line model in
   let pos = Model.cursor_pos model in
   let len = String.length s in
-  let line_start, line_end = line_bounds s pos in
+  let line_start, line_end = Controller_shared.line_bounds s pos in
   (* Determine current column (in bytes) *)
   let col = pos - line_start in
   let target_line_start, target_line_end =
@@ -247,7 +229,7 @@ let move_cursor_vertically (model : Model.t) ~dir =
 let duplicate_line (model : Model.t) ~below =
   let s = Model.input_line model in
   let pos = Model.cursor_pos model in
-  let line_start, line_end = line_bounds s pos in
+  let line_start, line_end = Controller_shared.line_bounds s pos in
   let line_str = String.sub s ~pos:line_start ~len:(line_end - line_start) in
   let with_newline =
     if line_end >= String.length s || Char.equal (String.get s line_end) '\n'
@@ -281,7 +263,7 @@ let duplicate_line (model : Model.t) ~below =
 let indent_line (model : Model.t) ~amount =
   let s = Model.input_line model in
   let pos = Model.cursor_pos model in
-  let line_start, _ = line_bounds s pos in
+  let line_start, _ = Controller_shared.line_bounds s pos in
   if amount > 0
   then (
     let before = String.sub s ~pos:0 ~len:line_start in
@@ -371,10 +353,10 @@ let skip_space s j =
 ;;
 
 (* -------------------------------------------------------------------- *)
-(* Main dispatcher                                                      *)
+(* Main dispatcher – Insert-mode implementation                              *)
 (* -------------------------------------------------------------------- *)
 
-let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
+let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   match ev with
   (* ----------------------------------------------------------------- *)
   (*  Ctrl-A / Ctrl-E fallback (terminals that don't set [`Ctrl] flag)  *)
@@ -667,4 +649,36 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   | `Key (`Escape, _) -> Cancel_or_quit
   | `Key (`ASCII 'C', [ `Ctrl ]) | `Key (`ASCII 'q', _) -> Quit
   | _ -> Unhandled
+;;
+
+(* -------------------------------------------------------------------- *)
+(*  Top-level dispatcher that selects the keymap by [Model.mode].         *)
+(* -------------------------------------------------------------------- *)
+
+let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
+  match Model.mode model with
+  | Insert ->
+    (match ev with
+     (* Switch to Normal mode on bare ESC. *)
+     | `Key (`Escape, mods) when List.is_empty mods ->
+       Model.set_mode model Normal;
+       Redraw
+     | `Key (`ASCII 'r', mods) when List.equal Poly.( = ) mods [ `Ctrl ] ->
+       (* Toggle Raw-XML draft mode in Insert state. *)
+       let new_mode =
+         match Model.draft_mode model with
+         | Model.Plain -> Model.Raw_xml
+         | Model.Raw_xml -> Model.Plain
+       in
+       Model.set_draft_mode model new_mode;
+       Redraw
+     | _ -> handle_key_insert ~model ~term ev)
+  | Normal ->
+    (match ev with
+     | `Key (`ASCII 'i', mods) when List.is_empty mods ->
+       Model.set_mode model Insert;
+       Redraw
+     | `Key (`Escape, _) -> Cancel_or_quit
+     | _ -> Controller_normal.handle_key_normal ~model ~term ev)
+  | Cmdline -> Controller_cmdline.handle_key_cmdline ~model ~term ev
 ;;

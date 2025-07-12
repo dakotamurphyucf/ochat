@@ -16,9 +16,34 @@ type t =
   ; mutable fetch_sw : Eio.Switch.t option
   ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int (** Current position inside [input_line] (bytes). *)
-  ; mutable selection_anchor : int option (** Anchor position for active selection. *)
+  ; mutable selection_anchor : int option
+    (* --------------------------------------------------------------------------- *)
+    (* Command-mode scaffolding (Phase 0)                                           *)
+    (* --------------------------------------------------------------------------- *)
+    (** Anchor position for active selection. *)
+  ; mutable mode : editor_mode (** Current editor mode (Insert/Normal). *)
+  ; mutable draft_mode : draft_mode
+    (** Whether the draft buffer is plain text or raw XML. *)
+  ; mutable selected_msg : int option
+    (** Currently selected message (Normal mode), if any. *)
+  ; mutable undo_stack : (string * int) list
+    (** Undo ring – previous states (line, cursor) *)
+  ; mutable redo_stack : (string * int) list
+  ; mutable cmdline : string (** Current command-line buffer (":"-prefix excluded). *)
+  ; mutable cmdline_cursor : int (** Cursor position inside [cmdline]. *)
+  ; mutable active_fork : string option (** Currently running fork tool call-id, if any. *)
+  ; mutable fork_start_index : int option (** History length when fork started. *)
   }
 [@@deriving fields ~getters ~setters]
+
+and editor_mode =
+  | Insert
+  | Normal
+  | Cmdline
+
+and draft_mode =
+  | Plain
+  | Raw_xml
 
 (** [create ~history_items ~messages …] packs pre-existing references into a
     model record.  This is intentionally shallow – the references keep their
@@ -35,6 +60,13 @@ val create
   -> scroll_box:Notty_scroll_box.t
   -> cursor_pos:int
   -> selection_anchor:int option
+  -> mode:editor_mode
+  -> draft_mode:draft_mode
+  -> selected_msg:int option
+  -> undo_stack:(string * int) list
+  -> redo_stack:(string * int) list
+  -> cmdline:string
+  -> cmdline_cursor:int
   -> t
 
 (** Convenience accessors – added on demand. *)
@@ -47,6 +79,37 @@ val set_selection_anchor : t -> int -> unit
 val selection_active : t -> bool
 val messages : t -> message list
 val auto_follow : t -> bool
+
+(** {1 Command-mode helpers} *)
+
+val toggle_mode : t -> unit
+val set_draft_mode : t -> draft_mode -> unit
+val select_message : t -> int option -> unit
+
+(** {1 Command-line helpers} *)
+
+val cmdline : t -> string
+val cmdline_cursor : t -> int
+val set_cmdline : t -> string -> unit
+val set_cmdline_cursor : t -> int -> unit
+
+(** {1 Fork helpers} *)
+
+val active_fork : t -> string option
+val set_active_fork : t -> string option -> unit
+
+val fork_start_index : t -> int option
+val set_fork_start_index : t -> int option -> unit
+
+(** {1 Undo / Redo helpers} *)
+
+val push_undo : t -> unit
+
+(** returns [true] if something was undone *)
+val undo : t -> bool
+
+(** returns [true] if something was redone *)
+val redo : t -> bool
 
 (** {1 Applying patches}
 

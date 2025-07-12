@@ -21,5 +21,10 @@ val handle_fn_out : model:Model.t -> Res.Function_call_output.t -> Types.patch l
     returns the list of {!Types.patch} values required to update [model]
     accordingly.  The function itself performs {b no} mutations – callers
     are expected to pass the resulting patches to [Model.apply_patches]. *)
-
 val handle_event : model:Model.t -> Res_stream.t -> Types.patch list
+
+(** [handle_events ~model evs] is a convenience wrapper around
+    [List.map (handle_event ~model) evs] that returns a single list of
+    patches.  The function is useful for processing multiple events in
+    one go, e.g. when the caller has already collected them into a list. *)
+val handle_events : model:Model.t -> Res_stream.t list -> Types.patch list

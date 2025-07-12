@@ -136,13 +136,18 @@ let connect : ?auth:bool -> sw:Eio.Switch.t -> env:< process_mgr : _ ; .. > -> s
       uri
       ~pos:(String.length prefix)
       ~len:(String.length uri - String.length prefix)
+    |> String.substr_replace_all ~pattern:"%20" ~with_:" "
   in
   (* Split on whitespace – rudimentary, but sufficient for Phase-1. *)
   let cmd_list =
     if String.is_empty cmdline
     then invalid_arg "Mcp_transport_stdio.connect: empty command line"
-    else String.split ~on:' ' cmdline |> List.filter ~f:(fun s -> not (String.is_empty s))
+    else
+      String.split_on_chars ~on:[ ' '; Char.of_int_exn 32 ] cmdline
+      |> List.filter ~f:(fun s -> not (String.is_empty s))
   in
+  (* Check that we have a command to run. *)
+  (* Spawn the child process and return the transport interface. *)
   spawn_child ~sw ~env cmd_list
 ;;
 

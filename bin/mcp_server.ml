@@ -157,6 +157,23 @@ let () =
     register_builtin_apply_patch core ~dir;
     register_builtin_read_dir core ~dir;
     register_builtin_get_contents core ~dir;
+    (* Webpage → Markdown tool --------------------------------------- *)
+    let module Def = Definitions.Webpage_to_markdown in
+    let spec : JT.Tool.t =
+      { name = Def.name; description = Def.description; input_schema = Def.parameters }
+    in
+    let gpt_fn = Functions.webpage_to_markdown ~dir ~net:(Eio.Stdenv.net env) in
+    let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
+      match args with
+      | `Object kvs ->
+        (match List.Assoc.find kvs ~equal:String.equal "url" with
+         | Some (`String url) ->
+           let input_json = `Object [ "url", `String url ] in
+           Ok (`String (gpt_fn.run (Jsonaf.to_string input_json)))
+         | _ -> Error "webpage_to_markdown expects field 'url' (string)")
+      | _ -> Error "arguments must be object"
+    in
+    Mcp_server_core.register_tool core spec handler;
     (* -----------------------------------------------------------------
          Prompt folder scanning – every *.chatmd file is registered as both a
          prompt and an agent-backed tool.  The folder can be specified via the

@@ -22,6 +22,7 @@
   dune
   omd
   lambdasoup
+  markup
   core
   core_unix
   ppx_jane
