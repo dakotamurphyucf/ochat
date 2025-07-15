@@ -61,7 +61,7 @@ let query_command =
        @@ sprintf "Using vector database data from folder: **%s**\n" vector_db_folder;
        log ~dir @@ sprintf "Returning top **%d** results\n" num_results;
        let vf = Eio.Stdenv.fs env / vector_db_folder in
-       let vec_file = String.concat [ vector_db_folder; "/"; "vectors.binio" ] in
+       let vec_file = String.concat [ vector_db_folder; "/"; "vectors.ml.binio" ] in
        let vecs = Vector_db.Vec.read_vectors_from_disk (Eio.Stdenv.fs env / vec_file) in
        let corpus = Vector_db.create_corpus vecs in
        let response =
@@ -75,8 +75,8 @@ let query_command =
        let docs = Vector_db.get_docs vf corpus top_indices in
        List.iteri
          ~f:(fun i doc ->
-           log ~dir @@ sprintf "\n**Result %d:**\n" (i + 1);
-           log ~dir @@ sprintf "```ocaml\n%s\n```\n" doc)
+           print_endline @@ sprintf "\n**Result %d:**\n" (i + 1);
+           print_endline @@ sprintf "```ocaml\n%s\n```\n" doc)
          docs)
 ;;
 

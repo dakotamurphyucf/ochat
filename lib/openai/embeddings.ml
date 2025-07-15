@@ -14,7 +14,8 @@ type embeddings_input =
 [@@deriving jsonaf, sexp, bin_io]
 
 (** Type definition for the response from the embeddings API. *)
-type response = { data : embedding list } [@@jsonaf.allow_extra_fields]
+type response = { data : embedding list }
+[@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp, bin_io]
 
 (** Type definition for an individual embedding in the response. *)
 and embedding =
@@ -32,7 +33,7 @@ let post_openai_embeddings net ~input =
     Http.Header.of_list
       [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
   in
-  let input = { input; model = "text-embedding-ada-002" } in
+  let input = { input; model = "text-embedding-3-large" } in
   let json = Jsonaf.to_string @@ jsonaf_of_embeddings_input input in
   let res = post Default ~net ~host ~headers ~path:"/v1/embeddings" json in
   let json = Jsonaf.of_string res in

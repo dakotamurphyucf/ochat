@@ -149,9 +149,7 @@ let rec inline_of_node : _ Soup.node -> attr inline list =
            | Html _ -> true
            | _ -> false)
        in
-       if
-         (String.is_prefix href ~prefix:"#" || String.is_substring href ~substring:"#")
-         && is_empty_inline label_children
+       if String.is_prefix href ~prefix:"#" && is_empty_inline label_children
        then label_children
        else if is_empty_inline label_children
        then label_children
@@ -206,8 +204,73 @@ and block_of_node (node : _ Soup.node) : attr block list =
        let inner = children_blocks el in
        [ Blockquote ([], inner) ]
      | "pre" ->
+       (* Attempt to infer a language identifier for syntax highlighting.  We
+          check the [class] attribute of the <pre> element itself as well as
+          the first nested <code> tag (a common pattern in many HTML
+          renderers).  When a known language cannot be detected we fall back
+          to ["ocaml"].  The heuristic purposefully stays lightweight: only
+          a handful of language substrings are matched to avoid an
+          over-complicated or brittle implementation. *)
        let code = Soup.texts el |> String.concat ~sep:"" |> String.rstrip in
-       [ Code_block ([], "", code) ]
+
+       let normalise s = String.lowercase (String.strip s) in
+
+       let extract_class_attr node =
+         match Soup.element node with
+         | None -> []
+         | Some el ->
+           let cls = Soup.attribute "class" el |> Option.value ~default:"" in
+           String.split cls ~on:' ' |> List.map ~f:normalise
+       in
+
+       let class_names = extract_class_attr el in
+       (* also inspect a nested <code> child if present *)
+       let class_names =
+         let code_child_opt =
+           Soup.descendants el
+           |> Soup.to_list
+           |> List.find ~f:(fun n ->
+                match Soup.element n with
+                | Some el' -> String.equal (Soup.name el') "code"
+                | None -> false)
+         in
+         match code_child_opt with
+         | None -> class_names
+         | Some code_child -> class_names @ extract_class_attr code_child
+       in
+
+       let lang_of_class names : string option =
+         let table : (string * string list) list =
+           [ "ocaml", [ "ocaml"; "reason"; "ml"; "ocamlrepl" ]
+           ; "sh", [ "shell"; "bash"; "sh" ]
+           ; "c", [ "c" ]
+           ; "cpp", [ "cpp"; "c++"; "cxx" ]
+           ; "python", [ "python"; "py" ]
+           ; "javascript", [ "javascript"; "js" ]
+           ; "json", [ "json" ]
+           ; "yaml", [ "yaml"; "yml" ]
+           ; "html", [ "html" ]
+           ]
+         in
+         List.find_map table ~f:(fun (lang, variants) ->
+           if List.exists names ~f:(fun cls -> List.mem variants cls ~equal:String.equal)
+           then Some lang
+           else None)
+       in
+
+       let lang = Option.value (lang_of_class class_names) ~default:"ocaml" in
+       (* Additional heuristic: if the block starts with a shell prompt '$ '
+          and no explicit language was detected from class attributes, tag it
+          as ["sh"].  This is useful for README snippets. *)
+       let lang =
+         match lang with
+         | "ocaml" ->
+           (match String.lstrip code |> String.split_lines |> List.find ~f:(fun l -> not (String.is_empty (String.strip l))) with
+            | Some first when String.is_prefix (String.strip first) ~prefix:"$ " -> "sh"
+            | _ -> "ocaml")
+         | other -> other
+       in
+       [ Code_block ([], lang, code) ]
      | "code" ->
        (* Stand-alone <code> outside <pre>: render as an inline-code paragraph so
              API signatures keep their monospace formatting. *)
