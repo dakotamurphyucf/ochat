@@ -258,17 +258,31 @@ and block_of_node (node : _ Soup.node) : attr block list =
            else None)
        in
 
-       let lang = Option.value (lang_of_class class_names) ~default:"ocaml" in
-       (* Additional heuristic: if the block starts with a shell prompt '$ '
-          and no explicit language was detected from class attributes, tag it
-          as ["sh"].  This is useful for README snippets. *)
+       let lang_class_opt = lang_of_class class_names in
+
+       (* Heuristic 2: look at code content if no class-based hint. *)
+       let guess_lang_from_content str : string option =
+         let open String in
+         let first_non_empty =
+           lstrip str |> split_lines |> List.find ~f:(fun l -> not (String.is_empty (String.strip l)))
+         in
+         match first_non_empty with
+         | None -> None
+         | Some line ->
+           let line_trim = strip line in
+           if is_prefix line_trim ~prefix:"$ " || is_prefix line_trim ~prefix:"#!/bin/sh" then Some "sh"
+           else if is_prefix line_trim ~prefix:"let " || is_prefix line_trim ~prefix:"module " then Some "ocaml"
+           else if is_prefix line_trim ~prefix:"#include" || is_substring line_trim ~substring:"::" then Some "cpp"
+           else if is_prefix line_trim ~prefix:"def " || is_prefix line_trim ~prefix:"import " then Some "python"
+           else if is_prefix line_trim ~prefix:"function " || is_substring line_trim ~substring:"=>" then Some "javascript"
+           else if is_prefix line_trim ~prefix:"{" then Some "json"
+           else None
+       in
+
        let lang =
-         match lang with
-         | "ocaml" ->
-           (match String.lstrip code |> String.split_lines |> List.find ~f:(fun l -> not (String.is_empty (String.strip l))) with
-            | Some first when String.is_prefix (String.strip first) ~prefix:"$ " -> "sh"
-            | _ -> "ocaml")
-         | other -> other
+         match lang_class_opt with
+         | Some l -> l
+         | None -> Option.value (guess_lang_from_content code) ~default:"ocaml"
        in
        [ Code_block ([], lang, code) ]
      | "code" ->
