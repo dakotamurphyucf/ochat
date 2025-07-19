@@ -145,7 +145,7 @@ let odoc_search ~dir ~net : Gpt_function.t =
     end
 
     let embed_tbl : (string, float array) Hashtbl.t = Hashtbl.create (module S)
-    let vec_tbl   : (string, Vector_db.Vec.t array) Hashtbl.t = Hashtbl.create (module S)
+    let vec_tbl : (string, Vector_db.Vec.t array) Hashtbl.t = Hashtbl.create (module S)
     let mu = Eio.Mutex.create ()
 
     let get_embed ~net query =
@@ -161,6 +161,7 @@ let odoc_search ~dir ~net : Gpt_function.t =
         Hashtbl.set embed_tbl ~key:query ~data:vec;
         Eio.Mutex.unlock mu;
         vec
+    ;;
 
     let get_vectors vec_file_path path_t =
       Eio.Mutex.lock mu;
@@ -170,14 +171,16 @@ let odoc_search ~dir ~net : Gpt_function.t =
       | Some v -> v
       | None ->
         let vecs =
-          try Vector_db.Vec.read_vectors_from_disk path_t with _ -> [||]
+          try Vector_db.Vec.read_vectors_from_disk path_t with
+          | _ -> [||]
         in
         Eio.Mutex.lock mu;
         Hashtbl.set vec_tbl ~key:vec_file_path ~data:vecs;
         Eio.Mutex.unlock mu;
         vecs
-  end in
-
+    ;;
+  end
+  in
   let f (query, k_opt, index_opt, package) =
     let open Eio.Path in
     let k = Option.value k_opt ~default:5 in
@@ -259,8 +262,8 @@ let odoc_search ~dir ~net : Gpt_function.t =
 (* Webpage → Markdown tool                                                     *)
 (* -------------------------------------------------------------------------- *)
 
-let webpage_to_markdown ~dir ~net : Gpt_function.t =
-  Webpage_markdown.Tool.register ~dir ~net
+let webpage_to_markdown ~env ~dir ~net : Gpt_function.t =
+  Webpage_markdown.Tool.register ~env ~dir ~net
 ;;
 
 (* -------------------------------------------------------------------------- *)

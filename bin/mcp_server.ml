@@ -169,7 +169,7 @@ let () =
         (match List.Assoc.find kvs ~equal:String.equal "url" with
          | Some (`String url) ->
            let input_json = `Object [ "url", `String url ] in
-           Ok (`String (gpt_fn.run (Jsonaf.to_string input_json)))
+           Ok (`String ((gpt_fn ~env).run (Jsonaf.to_string input_json)))
          | _ -> Error "webpage_to_markdown expects field 'url' (string)")
       | _ -> Error "arguments must be object"
     in

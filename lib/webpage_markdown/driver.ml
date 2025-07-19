@@ -121,7 +121,7 @@ let html_to_markdown_string html =
   | None -> Printf.sprintf "```html\n%s\n```" html
 ;;
 
-let fetch_and_convert ~net url =
+let fetch_and_convert ~env ~net url =
   (* 1. GitHub-optimised path *)
   match try_github_fast_path ~net url with
   | Some md -> md
@@ -129,7 +129,63 @@ let fetch_and_convert ~net url =
     (* 2. Generic HTML → Markdown path (existing) *)
     (match Fetch.get ~net url with
      | Error msg -> msg
-     | Ok html -> html_to_markdown_string html)
+     | Ok html ->
+       (match html_to_markdown_string html with
+        | "" ->
+          (* Attempt to fetch the page using a headless Chrome browser for progressive web apps *)
+          let try_chrome_headless (url : string) : string =
+            let proc_mgr = Eio.Stdenv.process_mgr env in
+            Eio.Switch.run
+            @@ fun sw ->
+            (* 1.  Pipe for capturing stdout. *)
+            let r, w = Eio.Process.pipe ~sw proc_mgr in
+            (* 2. Pipe for capturing stderr. *)
+            let _, w_err = Eio.Process.pipe ~sw proc_mgr in
+            match
+              Eio.Process.spawn
+                ~sw
+                proc_mgr
+                ~stdout:w
+                ~stderr:w_err
+                [ "chrome-dump"; url ]
+            with
+            | exception ex ->
+              let err_msg = Fmt.str "error running %s fetch: %a" url Eio.Exn.pp ex in
+              Eio.Flow.close w;
+              Eio.Flow.close w_err;
+              err_msg
+            | _child ->
+              Eio.Flow.close w;
+              Eio.Flow.close w_err;
+              (match
+                 Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all r
+               with
+               | res ->
+                 let max_len = 1000000 in
+                 let res =
+                   if String.length res > max_len
+                   then String.append (String.sub res ~pos:0 ~len:max_len) " ...truncated"
+                   else res
+                 in
+                 res
+               | exception ex -> Fmt.str "error running %s fetch: %a" url Eio.Exn.pp ex)
+          in
+          (* timeout functioin eio *)
+          let try_chrome_headless_wto x =
+            try
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 60.0 (fun () ->
+                try_chrome_headless x)
+            with
+            | Eio.Time.Timeout ->
+              Printf.sprintf "timeout running chrome_dump command %s" x
+            | ex ->
+              Printf.sprintf
+                "error running chrome_dump command %s: %ss"
+                x
+                (Exn.to_string ex)
+          in
+          html_to_markdown_string (try_chrome_headless_wto url)
+        | md -> md))
 ;;
 
 let convert_html_file path =
