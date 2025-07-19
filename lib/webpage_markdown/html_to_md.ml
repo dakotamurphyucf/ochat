@@ -149,9 +149,7 @@ let rec inline_of_node : _ Soup.node -> attr inline list =
            | Html _ -> true
            | _ -> false)
        in
-       if
-         (String.is_prefix href ~prefix:"#" || String.is_substring href ~substring:"#")
-         && is_empty_inline label_children
+       if String.is_prefix href ~prefix:"#" && is_empty_inline label_children
        then label_children
        else if is_empty_inline label_children
        then label_children
@@ -206,8 +204,87 @@ and block_of_node (node : _ Soup.node) : attr block list =
        let inner = children_blocks el in
        [ Blockquote ([], inner) ]
      | "pre" ->
+       (* Attempt to infer a language identifier for syntax highlighting.  We
+          check the [class] attribute of the <pre> element itself as well as
+          the first nested <code> tag (a common pattern in many HTML
+          renderers).  When a known language cannot be detected we fall back
+          to ["ocaml"].  The heuristic purposefully stays lightweight: only
+          a handful of language substrings are matched to avoid an
+          over-complicated or brittle implementation. *)
        let code = Soup.texts el |> String.concat ~sep:"" |> String.rstrip in
-       [ Code_block ([], "", code) ]
+
+       let normalise s = String.lowercase (String.strip s) in
+
+       let extract_class_attr node =
+         match Soup.element node with
+         | None -> []
+         | Some el ->
+           let cls = Soup.attribute "class" el |> Option.value ~default:"" in
+           String.split cls ~on:' ' |> List.map ~f:normalise
+       in
+
+       let class_names = extract_class_attr el in
+       (* also inspect a nested <code> child if present *)
+       let class_names =
+         let code_child_opt =
+           Soup.descendants el
+           |> Soup.to_list
+           |> List.find ~f:(fun n ->
+                match Soup.element n with
+                | Some el' -> String.equal (Soup.name el') "code"
+                | None -> false)
+         in
+         match code_child_opt with
+         | None -> class_names
+         | Some code_child -> class_names @ extract_class_attr code_child
+       in
+
+       let lang_of_class names : string option =
+         let table : (string * string list) list =
+           [ "ocaml", [ "ocaml"; "reason"; "ml"; "ocamlrepl" ]
+           ; "sh", [ "shell"; "bash"; "sh" ]
+           ; "c", [ "c" ]
+           ; "cpp", [ "cpp"; "c++"; "cxx" ]
+           ; "python", [ "python"; "py" ]
+           ; "javascript", [ "javascript"; "js" ]
+           ; "json", [ "json" ]
+           ; "yaml", [ "yaml"; "yml" ]
+           ; "html", [ "html" ]
+           ]
+         in
+         List.find_map table ~f:(fun (lang, variants) ->
+           if List.exists names ~f:(fun cls -> List.mem variants cls ~equal:String.equal)
+           then Some lang
+           else None)
+       in
+
+       let lang_class_opt = lang_of_class class_names in
+
+       (* Heuristic 2: look at code content if no class-based hint. *)
+       let guess_lang_from_content str : string option =
+         let open String in
+         let first_non_empty =
+           lstrip str |> split_lines |> List.find ~f:(fun l -> not (String.is_empty (String.strip l)))
+         in
+         match first_non_empty with
+         | None -> None
+         | Some line ->
+           let line_trim = strip line in
+           if is_prefix line_trim ~prefix:"$ " || is_prefix line_trim ~prefix:"#!/bin/sh" then Some "sh"
+           else if is_prefix line_trim ~prefix:"let " || is_prefix line_trim ~prefix:"module " then Some "ocaml"
+           else if is_prefix line_trim ~prefix:"#include" || is_substring line_trim ~substring:"::" then Some "cpp"
+           else if is_prefix line_trim ~prefix:"def " || is_prefix line_trim ~prefix:"import " then Some "python"
+           else if is_prefix line_trim ~prefix:"function " || is_substring line_trim ~substring:"=>" then Some "javascript"
+           else if is_prefix line_trim ~prefix:"{" then Some "json"
+           else None
+       in
+
+       let lang =
+         match lang_class_opt with
+         | Some l -> l
+         | None -> Option.value (guess_lang_from_content code) ~default:"ocaml"
+       in
+       [ Code_block ([], lang, code) ]
      | "code" ->
        (* Stand-alone <code> outside <pre>: render as an inline-code paragraph so
              API signatures keep their monospace formatting. *)

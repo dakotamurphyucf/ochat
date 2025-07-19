@@ -22,6 +22,85 @@ module Get_contents : Gpt_function.Def with type input = string = struct
 end
 
 (* ---------------------------------------------------------------------- *)
+(*  ODoc search tool                                                       *)
+(* ---------------------------------------------------------------------- *)
+
+module Odoc_search :
+  Gpt_function.Def with type input = string * int option * string option * string = struct
+  type input = string * int option * string option * string
+
+  let name = "odoc_search"
+
+  let description =
+    Some
+      {|
+ODoc semantic-search utility.
+
+When to use
+✓ The agent needs authoritative explanations, type signatures, or usage examples from OCaml libraries that are *already* installed and indexed locally.
+✓ While planning a refactor, code generation, or bug-fix and concrete documentation snippets would accelerate reasoning.
+✓ Quick recall of a package README or module docs without opening a browser.
+
+When *not* to use
+✗ You only need an exact substring / regex lookup in the user’s source code – prefer `grep_search` or similar tools.
+✗ You require up-to-date *web* information about packages that are not present in the local index.
+✗ You are scanning huge source files rather than documentation.
+
+Guidelines for callers
+1. Provide `query` in natural language or code fragments; rewriting user text is optional – optimise for precision.
+2. Set `package` to the target opam package when the task is scoped; otherwise use "all" (default) to search every package via the package-level index.
+3. Keep `k` small (≤10) unless more results are truly required; larger values add latency and noise.
+4. Returned value is a Markdown list:
+   `[rank] [package] <snippet-id>` followed by the first 8000 characters of each snippet.
+5. Change `index` only when working with a non-standard documentation snapshot.
+6. If the results are not satisfactory, consider refining the query or using a different package.
+
+Query-crafting best practices
+• Keep it concise and meaningful – avoid filler like “could you maybe…”.
+• Use the corpus’ own vocabulary: module names (`Eio.Switch`), function names (`List.mapi`) or OCaml type signatures.
+• Include a disambiguating keyword (package, type, module) in the same sentence when needed.
+• Drop boiler-plate stop-words; they add noise to the embedding.
+• Type-signature queries work well for API look-ups (`'a list -> f:(int -> 'a -> 'b) -> 'b list`).
+• Iterate: if top-k looks generic, trim noise or add a specific term seen in a near-miss snippet, then re-query.
+
+JSON input schema
+```
+{
+  "query"   : "string",              // required
+  "package" : "all" | "eio" | …,    // required
+  "k"       : 5?,                     // optional, default 5
+  "index"   : ".odoc_index"?         // optional, default
+}
+```
+|}
+  ;;
+
+  let parameters : Jsonaf.t =
+    `Object
+      [ "type", `String "object"
+      ; ( "properties"
+        , `Object
+            [ "query", `Object [ "type", `String "string" ]
+            ; "k", `Object [ "type", `String "integer" ]
+            ; "index", `Object [ "type", `String "string" ]
+            ; "package", `Object [ "type", `String "string" ]
+            ] )
+      ; "required", `Array [ `String "query"; `String "package" ]
+      ; "additionalProperties", `False
+      ]
+  ;;
+
+  let input_of_string s =
+    let j = Jsonaf.of_string s in
+    let query = Jsonaf.string_exn @@ Jsonaf.member_exn "query" j in
+    let k = Option.map ~f:Jsonaf.int_exn @@ Jsonaf.member "k" j in
+    let index = Option.map ~f:Jsonaf.string_exn @@ Jsonaf.member "index" j in
+    let package = Jsonaf.string_exn @@ Jsonaf.member_exn "package" j in
+    query, k, index, package
+  ;;
+end
+
+(* ---------------------------------------------------------------------- *)
 (*  Fork – clone the current agent and run a command in the clone          *)
 (* ---------------------------------------------------------------------- *)
 

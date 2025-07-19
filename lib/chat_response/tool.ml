@@ -312,6 +312,7 @@ let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_functi
      | "webpage_to_markdown" ->
        [ Functions.webpage_to_markdown ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
      | "fork" -> [ Functions.fork ]
+     | "odoc_search" -> [ Functions.odoc_search ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
      | other -> failwithf "Unknown built-in tool: %s" other ())
   | CM.Custom c -> [ custom_fn ~env:(Ctx.env ctx) c ]
   | CM.Agent agent_spec -> [ agent_fn ~ctx ~run_agent agent_spec ]

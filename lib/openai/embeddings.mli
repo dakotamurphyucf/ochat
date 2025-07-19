@@ -5,7 +5,7 @@ type embeddings_input =
 [@@deriving jsonaf, sexp, bin_io]
 
 (** Type definition for the response from the embeddings API. *)
-type response = { data : embedding list }
+type response = { data : embedding list } [@@deriving jsonaf, sexp, bin_io]
 
 (** Type definition for an individual embedding in the response. *)
 and embedding =

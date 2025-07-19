@@ -10,7 +10,7 @@
     the index is a hash table that maps the index of a doc in the matrix to the file path of the doc *)
 type t =
   { corpus : Owl.Mat.mat
-  ; index : (int, string) Core.Hashtbl.t
+  ; index : (int, string * int) Core.Hashtbl.t
   }
 
 type path = Eio.Fs.dir_ty Eio.Path.t
@@ -26,6 +26,7 @@ module Vec : sig
       and the id field is the file path location for the doc that the vecctor represents *)
   type t =
     { id : string
+    ; len : int
     ; vector : vector
     }
   [@@deriving compare, bin_io, sexp]
@@ -64,6 +65,16 @@ val create_corpus : Vec.t array -> t
     @return
       an array of indices corresponding to the top [k] most similar documents in the database. *)
 val query : t -> Owl.Mat.mat -> int -> int array
+
+(** Hybrid retrieval: fuse cosine similarity with BM25.  [beta] ∈ [0,1]
+    controls how much weight is given to BM25 (0 = vector only, 1 = bm25 only). *)
+val query_hybrid :
+  t ->
+  bm25:Bm25.t ->
+  beta:float ->
+  embedding:Owl.Mat.mat ->
+  text:string ->
+  k:int -> int array
 
 val add_doc : Owl.Mat.mat -> float array -> Owl.Mat.mat
 

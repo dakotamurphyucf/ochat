@@ -149,10 +149,15 @@ type ocaml_source =
 
 type parse_result =
   { location : string
+  ; file : string
   ; module_path : string
   ; comments : string list
   ; contents : string
   ; ocaml_source : ocaml_source
+  ; line_start : int
+  ; char_start : int
+  ; line_end : int
+  ; char_end : int
   }
 
 open Core
@@ -185,10 +190,15 @@ let traverse traverse_input =
           (t.loc_end.pos_cnum - t.loc_start.pos_bol)
       in
       { location = location loc
+      ; file = loc.loc_start.pos_fname
       ; module_path = path
       ; comments = docs
       ; contents
       ; ocaml_source
+      ; line_start = loc.loc_start.pos_lnum
+      ; char_start = loc.loc_start.pos_cnum - loc.loc_start.pos_bol
+      ; line_end = loc.loc_end.pos_lnum
+      ; char_end = loc.loc_end.pos_cnum - loc.loc_end.pos_bol
       })
     payload
 ;;
