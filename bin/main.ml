@@ -61,9 +61,14 @@ let query_command =
        @@ sprintf "Using vector database data from folder: **%s**\n" vector_db_folder;
        log ~dir @@ sprintf "Returning top **%d** results\n" num_results;
        let vf = Eio.Stdenv.fs env / vector_db_folder in
-       let vec_file = String.concat [ vector_db_folder; "/"; "vectors.ml.binio" ] in
+       let vec_file = String.concat [ vector_db_folder; "/vectors.ml.binio" ] in
+       let bm25_file = String.concat [ vector_db_folder; "/bm25.ml.binio" ] in
        let vecs = Vector_db.Vec.read_vectors_from_disk (Eio.Stdenv.fs env / vec_file) in
        let corpus = Vector_db.create_corpus vecs in
+       let bm25 =
+         try Bm25.read_from_disk (Eio.Stdenv.fs env / bm25_file) with
+         | _ -> Bm25.create []
+       in
        let response =
          Openai.Embeddings.post_openai_embeddings env#net ~input:[ query_text ]
        in
@@ -71,7 +76,15 @@ let query_command =
          Owl.Mat.of_arrays [| Array.of_list (List.hd_exn response.data).embedding |]
          |> Owl.Mat.transpose
        in
-       let top_indices = Vector_db.query corpus query_vector num_results in
+       let top_indices =
+         Vector_db.query_hybrid
+           corpus
+           ~bm25
+           ~beta:0.1
+           ~embedding:query_vector
+           ~text:query_text
+           ~k:num_results
+       in
        let docs = Vector_db.get_docs vf corpus top_indices in
        List.iteri
          ~f:(fun i doc ->
@@ -132,6 +145,45 @@ let tokenize_command =
        Io.console_log ~stdout:env#stdout @@ sprintf "tokens: %i\n" (List.length encoded))
 ;;
 
+let html_to_markdown_command =
+  Command.basic
+    ~summary:"Convert HTML file to Markdown"
+    (let%map_open file =
+       flag
+         "-file"
+         (optional_with_default "bin/main.ml" string)
+         ~doc:"FILE Path to the HTML file to convert (default: bin/main.ml)"
+     in
+     fun () ->
+       run_main
+       @@ fun env ->
+       let dir = Eio.Stdenv.fs env in
+       let path = Eio.Path.(dir / file) in
+       let markdown =
+         Webpage_markdown.Driver.(convert_html_file path |> Markdown.to_string)
+       in
+       let block_strings =
+         markdown |> String.split_lines |> Odoc_snippet.Chunker.chunk_by_heading_or_blank
+       in
+       let slice =
+         Odoc_snippet.slice
+           ~pkg:"html_to_markdown"
+           ~doc_path:file
+           ~markdown
+           ~tiki_token_bpe:(load_doc ~dir "./out-cl100k_base.tikitoken.txt")
+           ()
+       in
+       let s =
+         Sexp.to_string_hum ~indent:2 [%sexp (slice : (Odoc_snippet.meta * string) list)]
+       in
+       Io.console_log ~stdout:env#stdout
+       @@ sprintf
+            "Markdown:\n%s\nChunks:\n%s\nSlice:\n%s"
+            markdown
+            (String.concat ~sep:"\n-----------------------\n\n\n" block_strings)
+            s)
+;;
+
 let main_command =
   Command.group
     ~summary:
@@ -142,6 +194,8 @@ let main_command =
     ; "index", index_command
     ; "query", query_command
     ; "tokenize", tokenize_command
+    ; "html-to-markdown", html_to_markdown_command
+    ; "h2md", html_to_markdown_command
     ]
 ;;
 

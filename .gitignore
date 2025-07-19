@@ -19,3 +19,5 @@ notes.txt
 tools/
 gmail
 sherlodoc.marshal
+.odoc_index/
+run.log

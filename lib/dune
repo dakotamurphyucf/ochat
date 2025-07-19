@@ -6,6 +6,25 @@
  (preprocess
   (pps ppx_jane)))
 
+;; ---------------------------------------------------------------------------
+;; Logging library
+;; ---------------------------------------------------------------------------
+
+(library
+ (name log)
+ (public_name chatgpt.log)
+ (modules log)
+ (libraries core core_unix eio jsonaf)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name bm25)
+ (public_name chatgpt.bm25)
+ (modules bm25)
+ (libraries core eio eio.unix bin_prot_utils_eio)
+ (preprocess
+  (pps ppx_jane)))
+
 (library
  (name environment)
  (public_name chatgpt.environment)
@@ -34,7 +53,7 @@
  (name vector_db)
  (public_name chatgpt.vector_db)
  (modules vector_db)
- (libraries io ppxlib core bin_prot_utils_eio openai owl doc)
+ (libraries io ppxlib core bin_prot_utils_eio openai owl doc bm25)
  (preprocess
   (pps ppx_jane)))
 
@@ -179,8 +198,10 @@
   gpt_function
   definitions
   vector_db
+  bm25
   webpage_markdown
   indexer
+  package_index
   apply_patch)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
@@ -230,5 +251,53 @@
  (public_name chatgpt.notty_scroll_box)
  (modules notty_scroll_box)
  (libraries core notty)
+ (preprocess
+  (pps ppx_jane)))
+
+;; ---------------------------------------------------------------------------
+;; ODoc indexing libraries
+;; ---------------------------------------------------------------------------
+
+(library
+ (name odoc_crawler)
+ (public_name chatgpt.odoc_crawler)
+ (modules odoc_crawler)
+(libraries core eio eio.unix webpage_markdown log jsonaf)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name odoc_snippet)
+ (public_name chatgpt.odoc_snippet)
+ (modules odoc_snippet)
+ (libraries core doc tikitoken lru_cache)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name odoc_indexer)
+ (public_name chatgpt.odoc_indexer)
+ (modules odoc_indexer)
+;; merged libraries
+(libraries log
+  core
+  eio
+  eio.unix
+  odoc_crawler
+  odoc_snippet
+  vector_db
+  bm25
+  io
+  openai
+  package_index
+  doc)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name package_index)
+ (public_name chatgpt.package_index)
+ (modules package_index)
+ (libraries core io openai owl bin_prot_utils_eio)
  (preprocess
   (pps ppx_jane)))

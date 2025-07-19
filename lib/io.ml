@@ -214,7 +214,7 @@ end = struct
   (** [run_worker id stream] runs a worker with the given [id] and processes tasks from the [stream]. *)
   let rec run_worker id stream =
     let request, reply = Stream.take stream in
-    traceln "Worker %s processing request" id;
+    (* traceln "Worker %s processing request" id; *)
     Promise.resolve reply (C.handler request);
     run_worker id stream
   ;;
@@ -223,7 +223,7 @@ end = struct
   let spawn name =
     Fiber.fork_daemon ~sw:C.sw (fun () ->
       Domain_manager.run C.dm (fun () ->
-        traceln "Worker %s ready" name;
+        (* traceln "Worker %s ready" name; *)
         run_worker name C.stream))
   ;;
 

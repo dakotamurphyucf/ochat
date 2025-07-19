@@ -8,10 +8,15 @@ type ocaml_source =
 
 type parse_result =
   { location : string
+  ; file : string
   ; module_path : string
   ; comments : string list
   ; contents : string
   ; ocaml_source : ocaml_source
+  ; line_start : int
+  ; char_start : int
+  ; line_end : int
+  ; char_end : int
   }
 
 type traverse_input

@@ -6,7 +6,7 @@ open Owl
 *)
 type t =
   { corpus : Mat.mat
-  ; index : (int, string) Hashtbl.t
+  ; index : (int, string * int) Hashtbl.t (** idx -> (doc_id, token_len) *)
   }
 
 type path = Eio.Fs.dir_ty Eio.Path.t
@@ -28,7 +28,8 @@ module Vec = struct
     (** this data type holds the vector representation of the underlying document 
       and the id field is the file path location for the doc that the vecctor represents *)
     type t =
-      { id : string
+      { id : string (** hashed filename *)
+      ; len : int (** token length of the snippet *)
       ; vector : vector
       }
     [@@deriving compare, hash, sexp, bin_io]
@@ -68,8 +69,21 @@ let create_corpus docs' =
   let docs = Array.map ~f:(fun doc -> normalize doc.Vec.vector) docs' in
   let corpus = Mat.of_cols docs in
   let index = Hashtbl.create (module Int) ~size:(Array.length docs) in
-  Array.iteri ~f:(fun i doc -> Hashtbl.add_exn index ~key:i ~data:doc.Vec.id) docs';
+  Array.iteri ~f:(fun i doc -> Hashtbl.add_exn index ~key:i ~data:(doc.id, doc.len)) docs';
   { corpus; index }
+;;
+
+(* Applies a simple length-penalty so that vectors representing chunks far
+   from the target window (≈ 192 tokens) are slightly down-weighted. The
+   penalty factor is linear with slope [alpha]. *)
+let apply_length_penalty ~target ~alpha original_score chunk_len =
+  let penalty =
+    1.0
+    -. (alpha
+        *. (Float.abs (Float.of_int chunk_len -. Float.of_int target)
+            /. Float.of_int target))
+  in
+  original_score *. Float.max 0.0 penalty
 ;;
 
 (** [query t doc k] returns the top [k] most similar documents to the given [doc] in the vector database [t].
@@ -80,14 +94,68 @@ let create_corpus docs' =
     @param k is the number of top similar documents to be returned.
     @return an array of indices corresponding to the top [k] most similar documents in the database. *)
 let query t doc k =
-  let get_indexs arr = Array.map ~f:(fun t -> Array.get t 1) arr in
+  (* Compute cosine similarities *)
   let vec = Mat.transpose doc in
-  let l = Mat.(vec *@ t.corpus) in
-  get_indexs @@ Mat.top l k
+  let sims = Mat.(vec *@ t.corpus) in
+  (* Convert to (idx, score) list *)
+  let n_cols = Mat.col_num t.corpus in
+  let scores =
+    List.init n_cols ~f:(fun i ->
+      let s = Mat.get sims 0 i in
+      let chunk_len =
+        match Hashtbl.find t.index i with
+        | Some (_id, len) -> len
+        | None -> 0
+      in
+      let _s' = apply_length_penalty ~target:192 ~alpha:0.3 s chunk_len in
+      i, s)
+  in
+  let top =
+    scores
+    |> List.sort ~compare:(fun (_, a) (_, b) -> Float.compare b a)
+    |> fun l -> List.take l (Int.min k n_cols) |> List.map ~f:fst |> Array.of_list
+  in
+  top
 ;;
 
 let add_doc corpus doc =
   Mat.of_cols @@ Array.concat [ Mat.to_cols corpus; Mat.to_cols (normalize doc) ]
+;;
+
+(*────────────────────────  Hybrid retrieval  ─────────────────────────*)
+
+let query_hybrid t ~bm25 ~beta ~embedding ~text ~k =
+  (* 1. cosine similarities for all docs *)
+  let sims = Mat.(Mat.transpose embedding *@ t.corpus) in
+  let n_cols = Mat.col_num t.corpus in
+  let cos_ranked =
+    List.init n_cols ~f:(fun i -> i, Mat.get sims 0 i)
+    |> List.sort ~compare:(fun (_, a) (_, b) -> Float.compare b a)
+  in
+  let shortlist_n = Int.min n_cols (k * 20) in
+  let shortlist = List.take cos_ranked shortlist_n in
+  (* 2. BM25 scores (only need doc_ids) *)
+  let bm25_scores = Bm25.query bm25 ~text ~k:shortlist_n in
+  let bm25_tbl = Hashtbl.of_alist_exn (module Int) bm25_scores in
+  let bm25_max =
+    List.fold shortlist ~init:0.0 ~f:(fun acc (idx, _) ->
+      match Hashtbl.find bm25_tbl idx with
+      | Some s -> Float.max acc s
+      | None -> acc)
+  in
+  let merged =
+    List.map shortlist ~f:(fun (idx, cos) ->
+      let bm25_raw = Hashtbl.find bm25_tbl idx |> Option.value ~default:0.0 in
+      let bm25_norm =
+        if Float.equal bm25_max 0.0 then 0.0 else Float.(bm25_raw / bm25_max)
+      in
+      let score = ((1. -. beta) *. cos) +. (beta *. bm25_norm) in
+      idx, score)
+  in
+  let final_ranked =
+    merged |> List.sort ~compare:(fun (_, a) (_, b) -> Float.compare b a)
+  in
+  List.take final_ranked k |> List.map ~f:fst |> Array.of_list
 ;;
 
 (** [initialize file] initializes a vector database by reading in an array of [Vec.t] from disk and creating a corpus.
@@ -115,7 +183,7 @@ let initialize file =
 let get_docs dir t indexs =
   Eio.Fiber.List.map
     (fun idx ->
-       let file_path = Hashtbl.find_exn t.index idx in
+       let file_path, _len = Hashtbl.find_exn t.index idx in
        Io.load_doc ~dir file_path)
     (Array.to_list indexs)
 ;;

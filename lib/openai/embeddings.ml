@@ -39,8 +39,8 @@ let post_openai_embeddings net ~input =
   let json = Jsonaf.of_string res in
   try response_of_jsonaf json with
   | _ as exe ->
-    print_endline @@ Fmt.str "%a" Eio.Exn.pp exe;
+    (* print_endline @@ Fmt.str "%a" Eio.Exn.pp exe;
     print_endline @@ String.concat ~sep:"\n" input.input;
-    print_endline @@ Jsonaf.to_string json;
+    print_endline @@ Jsonaf.to_string json; *)
     raise exe
 ;;

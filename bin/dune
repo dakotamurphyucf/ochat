@@ -11,6 +11,8 @@
   ocaml_parser
   lambdasoup
   vector_db
+  webpage_markdown
+  odoc_snippet
   doc
   core
   core_unix.command_unix
@@ -23,9 +25,34 @@
   chat_completion
   chat_response
   apply_patch
+  bm25
   nottui)
  (preprocess
   (pps ppx_jane)))
+
+;; ---------------------------------------------------------------------------
+;; ODoc index executables
+;; ---------------------------------------------------------------------------
+
+(executable
+ (public_name odoc-index)
+ (name odoc_index)
+ (modules odoc_index)
+ (libraries core eio_main odoc_indexer))
+
+(executable
+ (public_name odoc-search)
+ (name odoc_search)
+ (modules odoc_search)
+ (libraries
+  core
+  eio_main
+  vector_db
+  bm25
+  openai
+  io
+  package_index
+  odoc_indexer))
 
 (executable
  (public_name key-dump)
