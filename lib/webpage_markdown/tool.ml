@@ -15,11 +15,11 @@ module Cache = Ttl_lru_cache.Make (Url_key)
 let cache : string Cache.t = Cache.create ~max_size:128 ()
 let ttl = Time_ns.Span.of_int_sec 300 (* 5 minutes *)
 
-let register ~dir:_ ~net : Gpt_function.t =
+let register ~env ~dir:_ ~net : Gpt_function.t =
   let run url =
     try
       Cache.find_or_add cache url ~ttl ~default:(fun () ->
-        Driver.(fetch_and_convert ~net url |> Markdown.to_string))
+        Driver.(fetch_and_convert ~env ~net url |> Markdown.to_string))
     with
     | exn -> Printf.sprintf "Error fetching %s: %s\n" url (Exn.to_string exn)
   in

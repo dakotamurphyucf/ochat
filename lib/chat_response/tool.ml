@@ -310,7 +310,11 @@ let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_functi
      | "read_dir" -> [ Functions.read_dir ~dir:(Ctx.dir ctx) ]
      | "get_contents" -> [ Functions.get_contents ~dir:(Ctx.dir ctx) ]
      | "webpage_to_markdown" ->
-       [ Functions.webpage_to_markdown ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
+       [ Functions.webpage_to_markdown
+           ~env:(Ctx.env ctx)
+           ~dir:(Ctx.dir ctx)
+           ~net:(Ctx.net ctx)
+       ]
      | "fork" -> [ Functions.fork ]
      | "odoc_search" -> [ Functions.odoc_search ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
      | other -> failwithf "Unknown built-in tool: %s" other ())

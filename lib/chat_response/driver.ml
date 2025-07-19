@@ -122,7 +122,10 @@ let run_completion
     let ctx = Ctx.create ~env ~dir ~cache in
     (* tools / function mapping *)
     let builtin_fns =
-      [ Functions.webpage_to_markdown ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx)
+      [ Functions.webpage_to_markdown
+          ~env:(Ctx.env ctx)
+          ~dir:(Ctx.dir ctx)
+          ~net:(Ctx.net ctx)
       ; Functions.fork
       ]
     in
