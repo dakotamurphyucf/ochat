@@ -1,0 +1,8 @@
+{0 OAuth2 helper walk-through}
+
+This page demonstrates how a standalone Markdown document that lives elsewhere
+in the repository ( *lib/oauth/oauth.md* ) can be surfaced in the generated
+documentation using odoc’s **include** directive:
+
+{{!include ../lib/oauth/oauth.md}}
+

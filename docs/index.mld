@@ -26,6 +26,10 @@ Below is a quick link list to some frequently used modules:
   Vector_db
 }
 
+{1 Extra guides & examples}
+
+• {!page-oauth_guide} – step-by-step explanation of the OAuth helpers.
+
 ---
 
 Have a look at the sidebar for the full table of contents.
