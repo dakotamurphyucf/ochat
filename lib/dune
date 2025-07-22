@@ -7,10 +7,6 @@
   (pps ppx_jane)))
 
 ;; ---------------------------------------------------------------------------
-;; Puppeteer-like CDP bindings live in lib/puppeteer/ (own dune file)
-;; ---------------------------------------------------------------------------
-
-;; ---------------------------------------------------------------------------
 ;; Logging library
 ;; ---------------------------------------------------------------------------
 
@@ -19,7 +15,8 @@
  (public_name chatgpt.log)
  (modules log)
  (libraries core core_unix eio jsonaf)
- (preprocess (pps ppx_jane)))
+ (preprocess
+  (pps ppx_jane)))
 
 (library
  (name bm25)
@@ -57,7 +54,7 @@
  (name vector_db)
  (public_name chatgpt.vector_db)
  (modules vector_db)
- (libraries io ppxlib core bin_prot_utils_eio openai owl doc bm25)
+ (libraries ppxlib core bin_prot_utils_eio owl doc bm25)
  (preprocess
   (pps ppx_jane)))
 
@@ -132,9 +129,7 @@
   eio_main
   eio.unix
   cohttp-eio
-  mirage-crypto-rng.unix
-  lwt
-  lwt.unix)
+  mirage-crypto-rng.unix)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
@@ -267,7 +262,46 @@
  (name odoc_crawler)
  (public_name chatgpt.odoc_crawler)
  (modules odoc_crawler)
-(libraries core eio eio.unix webpage_markdown log jsonaf)
+ (libraries core eio eio.unix webpage_markdown log jsonaf pcre)
+ (preprocess
+  (pps ppx_jane)))
+
+;; ---------------------------------------------------------------------------
+;; Markdown indexing libraries (scaffolding)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name markdown_crawler)
+ (public_name chatgpt.markdown_crawler)
+ (modules markdown_crawler)
+(libraries core eio eio.unix webpage_markdown log jsonaf pcre)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name markdown_snippet)
+ (public_name chatgpt.markdown_snippet)
+ (modules markdown_snippet)
+ (libraries core doc tikitoken lru_cache)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name markdown_indexer)
+ (public_name chatgpt.markdown_indexer)
+ (modules markdown_indexer)
+ (libraries
+  log
+  core
+  eio
+  eio.unix
+  markdown_crawler
+  markdown_snippet
+  vector_db
+  bm25
+  io
+  openai
+  doc)
  (preprocess
   (pps ppx_jane)))
 
@@ -283,8 +317,9 @@
  (name odoc_indexer)
  (public_name chatgpt.odoc_indexer)
  (modules odoc_indexer)
-;; merged libraries
-(libraries log
+ ;; merged libraries
+ (libraries
+  log
   core
   eio
   eio.unix
