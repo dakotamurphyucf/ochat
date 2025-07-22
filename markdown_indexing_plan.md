@@ -224,6 +224,8 @@ End of plan – ready for implementation.
 | Add optional `ocaml-gitignore` dependency and fallback matcher | pending |
 | Unit tests: `chunking`, `index_roundtrip`, `catalogue_lookup` | pending |
 | Developer documentation (`markdown_indexer.doc.md`) | pending |
+| Expect tests for `markdown_crawler` and other new modules | pending |
+| Developer documentation (`markdown_crawler.doc.md`) and for other new modules | pending |
 
 > Follow the Task States & Management rules when updating this table during implementation.
 
