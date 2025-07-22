@@ -14,9 +14,9 @@ Key points
 * The folder mirrors the library layout (e.g. `oauth/`, `openai/`, etc.) so you
   can locate the prose for a module quickly.
 
-* Dune/odoc picks these pages up via the `(documentation (mld_dir lib/docs-src))`
-  stanza defined elsewhere (see `docs/dune`).  At build time the pages are
-  rendered and appear in the generated HTML alongside the API reference.
+* These files are **not** fed to odoc – they’re for human eyes only.  We keep
+  them outside the published documentation to avoid confusing end-users and to
+  keep the public docs lean.
 
 Authoring conventions
 ---------------------
