@@ -18,6 +18,26 @@
  (package chatgpt)
  (libraries unix))
 
+;; README skeleton continuous validation
+(executable
+ (name readme_validation)
+ (public_name readme_validation)
+ (package chatgpt)
+ (libraries core core_unix))
+
+;; ChatMD → JSON converter (research helper)
+(executable
+ (name chatmd_to_json)
+ (public_name chatmd_to_json)
+ (package chatgpt)
+ (libraries
+  core
+  eio_main
+  chatmd
+  chat_response
+  jsonaf
+  io))
+
 ;; Binary list extractor
 (executable
  (name binary_list)
