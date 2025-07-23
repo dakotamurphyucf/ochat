@@ -1,3 +1,45 @@
+
+(**
+    End-to-end indexing of documentation produced by the
+    {{:https://ocaml.org/p/odoc/latest}odoc} tool-chain.
+
+    The function {!index_packages} turns the HTML pages located under
+    the [_doc/_html] directory created by
+    {[ dune build @doc ]} into a multi-modal search corpus made up of:
+
+    • dense vector embeddings suitable for nearest-neighbour search
+      (saved via {!Vector_db.Vec.write_vectors_to_disk});
+    • lexical BM-25 indices (saved via {!Bm25.write_to_disk});
+    • the raw Markdown snippets, one file per chunk, so that the caller
+      can display the full context of a hit.
+
+    The pipeline executed for each *opam package* folder is:
+
+    {ol
+    {- traverse the directory tree with {!Odoc_crawler.crawl};}
+    {- slice every HTML / README into 64–320-token windows with
+       {!Odoc_snippet.slice};}
+    {- batch the chunks in groups of ≤ 300 and obtain embeddings from
+       the OpenAI *Embedding* API; requests are funneled through a
+       single fibre that enforces a per-second cap (see
+       {!module-Embed_service});}
+    {- write the embeddings, BM25 index and Markdown files to
+       [output/pkg/];}
+    {- gather a short blurb (first non-empty line) for each package and
+       store it in {!Package_index}.}}
+
+    Concurrency model:
+
+    • CPU-bound slicing runs in a {!Io.Task_pool} backed by one domain
+      per physical core.
+    • IO-bound embedding calls are executed by the main fibre but
+      throttled to respect provider quotas.
+
+    Cancellation: the whole operation is enclosed in a {!Switch};
+    aborting the switch propagates to every child fibre and ensures no
+    partial files are left behind.
+*)
+
 open Core
 open Eio
 module I = Io
@@ -9,6 +51,12 @@ module Log = Log
 (**************************************************************************)
 
 let token_count ~codec text =
+  (** [token_count ~codec text] returns the approximate number of BPE
+      tokens in [text].  If [Tikitoken.encode] raises (e.g. because the
+      text contains invalid UTF-8) or if the fallback heuristic is
+      considered quicker, the function falls back to whitespace
+      splitting.  This helper is *internal* and its behaviour is not
+      stable – do not rely on it from outside the module. *)
   match Tikitoken.encode ~codec ~text with
   | tokens -> List.length tokens
   | exception _ ->
@@ -19,6 +67,11 @@ let token_count ~codec text =
 ;;
 
 let meta_to_string (m : Odoc_snippet.meta) : string =
+  (** [meta_to_string m] renders [m] in the *legacy* pseudo-ocamldoc
+      header format used by early experiments.  New code should rely on
+      the serialised {!Odoc_snippet.meta} record and avoid parsing this
+      textual representation.  The function is kept only because some
+      historical corpora still expect it. *)
   let title = Option.value ~default:"" m.title in
   Printf.sprintf
     "(**\nPackage: %s\nPath: %s\nLines: %d-%d\nTitle: %s\n*)\n"
@@ -39,6 +92,16 @@ let rec get_vectors
           ~codec
           (snippets : (Odoc_snippet.meta * string) list)
   =
+  (** [get_vectors ~net ~codec snippets] calls the OpenAI Embeddings
+      endpoint and returns a triple of [(meta, text, vec)] for every
+      snippet in [snippets].
+
+      The function retries up to three times on transient network
+      failures.  Each retry attempts to re-encode the *whole* batch –
+      partial success is not currently supported.
+
+      Returned vectors are **not** L2-normalised; that is done by
+      {!Vector_db.create_corpus} during loading. *)
   let inputs = List.map snippets ~f:(fun (_meta, text) -> text) in
   match Openai.Embeddings.post_openai_embeddings net ~input:inputs with
   | exception ex ->
@@ -68,66 +131,9 @@ let rec get_vectors
     rate limits.  We funnel every request through a single fibre that
     throttles calls so that no more than [rate_per_sec] are executed.       *)
 
-module Embed_service = struct
-  open Eio
-
-  type request =
-    { snippets : (Odoc_snippet.meta * string) list
-    ; resolver :
-        ((Odoc_snippet.meta * string * Vector_db.Vec.t) list, exn) result Promise.u
-    }
-
-  let create ~sw ~clock ~net ~codec ~rate_per_sec ()
-    :  (Odoc_snippet.meta * string) list
-    -> (Odoc_snippet.meta * string * Vector_db.Vec.t) list
-    =
-    let stream : request Stream.t = Stream.create 100 in
-    (* Helper: run OpenAI call with up to 3 retries *)
-    let rec fetch_with_retries attempts snippets
-      : (Odoc_snippet.meta * string * Vector_db.Vec.t) list
-      =
-      try get_vectors ~net ~codec snippets with
-      | exn when attempts < 3 ->
-        traceln "embed retry %d/3 due to %a" (attempts + 1) Eio.Exn.pp exn;
-        (* back-off a little before retrying *)
-        Time.sleep clock 1.0;
-        fetch_with_retries (attempts + 1) snippets
-      | exn -> raise exn
-    in
-    (* Daemon fibre that enforces the rate limit *)
-    Fiber.fork_daemon ~sw (fun () ->
-      let last_call = ref 0.0 in
-      let min_interval = 1.0 /. Float.of_int rate_per_sec in
-      let rec loop () =
-        let { snippets; resolver } = Stream.take stream in
-        let now = Time.now clock in
-        (*   If the last call was less than [min_interval] seconds ago, sleep
-             so that we honour the rate cap.                                *)
-        let elapsed = now -. !last_call in
-        if Float.(elapsed < min_interval)
-        then (
-          let to_sleep = min_interval -. elapsed in
-          if Float.(to_sleep > 0.0) then Time.sleep clock to_sleep);
-        last_call := Time.now clock;
-        Fiber.fork ~sw (fun () ->
-          (* 1. Fetch embeddings with retries *)
-          let result =
-            try Ok (fetch_with_retries 0 snippets) with
-            | ex -> Error ex
-          in
-          Promise.resolve resolver result);
-        loop ()
-      in
-      loop ());
-    (* Returned [embed] function: enqueue and wait for the promise. *)
-    fun snippets ->
-      let promise, resolver = Promise.create () in
-      Stream.add stream { snippets; resolver };
-      match Promise.await promise with
-      | Ok res -> res
-      | Error ex -> raise ex
-  ;;
-end
+(* ───────────────────────────────────────────────────────────────────────── *
+   Embedding service – now provided by the shared [Embed_service] module.  *
+   The local implementation has been removed to avoid duplication.        *)
 
 (**************************************************************************)
 (* Public API: package indexing                                            *)
@@ -142,6 +148,49 @@ let index_packages
       ()
   : unit
   =
+  (** [index_packages ?skip_pkgs ~env ~root ~output ~net ()] builds a
+      vector & BM-25 search corpus for every package folder under
+      [root] and stores the artefacts under [output].
+
+      Parameters:
+
+      • [?skip_pkgs] – opam package names that should be ignored (e.g.
+        because they are huge or irrelevant to the downstream
+        application).
+
+      • [env] – capability bundle provided by {!Eio_main.run}; its
+        [clock], [net] and [fs] fields are used for, respectively,
+        time-outs, HTTP calls and file IO.
+
+      • [root] – directory produced by {[ dune build @doc ]}.  Each
+        first-level directory beneath [root] is treated as an opam
+        package.
+
+      • [output] – destination folder.  For every package *foo* the
+        function creates:
+
+        {ul
+        {- *foo*/vectors.binio – array of {!Vector_db.Vec.t};}
+        {- *foo*/bm25.binio    – {!Bm25.t};}
+        {- *foo*/<id>.md       – raw Markdown snippet for each chunk.}}
+
+      • [net] – network capability used by {!Openai.Embeddings}.
+
+      Behaviour & guarantees:
+
+      • Slicing and embedding happen concurrently – CPU-bound work is
+        offloaded to a pool of domains, HTTP calls are batched and
+        throttled.
+
+      • Progress is logged via {!Log.emit} and spanned so that a
+        Jaeger/OpenTelemetry backend can visualise the trace.
+
+      • The function is synchronous; it returns only after *all*
+        artefacts have been flushed to disk.
+
+      @raise exn on unrecoverable filesystem or network errors.  All
+      transient failures (OpenAI 5xx, time-outs) are retried up to 3
+      times before escalating. *)
   Log.with_span
     ~ctx:[ "path", jsonaf_of_string @@ Fmt.str "%a" Path.pp output ]
     "odoc_indexer"
@@ -171,7 +220,13 @@ let index_packages
   (*  the switch finishes.                                               *)
   (* ------------------------------------------------------------------ *)
   let embed_batch =
-    Embed_service.create ~sw ~clock:env#clock ~net ~codec ~rate_per_sec:1000 ()
+    Embed_service.create
+      ~sw
+      ~clock:env#clock
+      ~net
+      ~codec
+      ~rate_per_sec:1000
+      ~get_id:(fun (m : Odoc_snippet.meta) -> m.id)
   in
   let dm = Eio.Stdenv.domain_mgr env in
   let module Pool =

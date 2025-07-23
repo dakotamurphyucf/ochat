@@ -309,6 +309,8 @@
   bm25
   io
   openai
+  embed_service
+  owl
   doc)
  (preprocess
   (pps ppx_jane)))
@@ -337,6 +339,7 @@
   bm25
   io
   openai
+  embed_service
   package_index
   doc)
  (preprocess
