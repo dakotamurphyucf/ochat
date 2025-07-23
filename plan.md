@@ -75,9 +75,13 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
    Therefore this step is marked *completed*—no further action required.
 
 2. **Generate fresh dependency graph**
-   • `dune describe --eval --format=json` > `out/deps.json`.
-   • Use `jq` + `sed` + a small OCaml script to transform to a Mermaid diagram saved as `docs/deps.mmd`.
-   • Cross-check against `dune-project` & opam file; highlight mismatches in `out/deps-check.log`.
+   • Run `dune exec dep_graph_generator` (script in `script/dep_graph_generator.ml`).
+   • Artefacts are placed in the `plan/` folder:
+     – `deps.sexp`  raw `dune describe workspace` snapshot.
+     – `deps.json`  JSON wrapper of the same data.
+     – `deps.mmd`   Mermaid diagram listing every library node (visualise via mermaid.live).
+     – `deps-check.log` placeholder for public-name consistency checks.
+   • The OCaml script replaces the old shell+jq pipeline and conforms to repo rules (pure OCaml, only core libs).
 
 3. **Module catalogue**
    • `git ls-files '*.ml' '*.mli'` → feed into a small OCaml script that queries `dune describe` to know which lib/exe owns each file.
