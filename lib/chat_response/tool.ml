@@ -402,6 +402,34 @@ let mcp_tool
 ;;
 
 (*--- 4-d.  Unified declaration → function mapping ------------------*)
+(** [of_declaration ~sw ~ctx ~run_agent decl] dispatches a single
+    ChatMarkdown [`<tool …/>`] declaration to its runtime
+    implementation.
+
+    The helper inspects the variant constructor of [decl] and returns
+    a list of {!type:Gpt_function.t}.  A single declaration can map to
+    several functions – for example an [`<tool mcp_server=…/>`]
+    element expands to the complete set of remote tools exposed by the
+    referenced MCP server.  The resulting list is therefore suitable
+    for direct consumption by {!Gpt_function.functions}.
+
+    Input invariants
+    • [sw] – parent {!Eio.Switch.t}.  Child fibres (e.g. MCP cache
+      listeners) are attached to this switch so that they terminate
+      cleanly when the caller’s scope ends.
+    • [ctx] – shared execution context.  Directory paths, network and
+      environment handles are forwarded to the lower-level helpers.
+    • [run_agent] – callback used to start a nested ChatMarkdown agent
+      when handling [`CM.Agent _`] declarations.  Passing the function
+      as an argument avoids a circular dependency with
+      {!module:Chat_response.Driver}.
+
+    Complexity: O(1) except for the MCP branch which may perform a
+    network round-trip when the server metadata is not cached.
+
+    @raise Failure if the declaration references an unknown built-in
+           tool name.
+*)
 let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t list =
   match decl with
   | CM.Builtin name ->

@@ -161,7 +161,6 @@ let markdown_of_html (html : string) : string =
       {2 Example}
 
       See the module-level example above for a complete program.  *)
-
 let crawl
       ~(root : _ Eio.Path.t)
       ?(filter : string -> bool = fun _ -> true)

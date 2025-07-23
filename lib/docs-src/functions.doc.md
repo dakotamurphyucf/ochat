@@ -54,6 +54,8 @@ capabilities (e.g. sandboxed directories).
 | `get_url_content`                  | `get_url_content`| web         | Fetch a URL, strip HTML, return plain text. |
 | `index_ocaml_code`                 | `index_ocaml_code`| indexing   | Crawl a folder and build a hybrid vector + BM25 index. |
 | `query_vector_db`                  | `query_vector_db`| search      | Query the index built by *index_ocaml_code*. |
+| `index_markdown_docs`              | `index_markdown_docs` | indexing   | Build a semantic index over a folder of Markdown files. |
+| `markdown_search`                  | `markdown_search`| search      | Query a Markdown index created with *index_markdown_docs*. |
 | `apply_patch`                      | `apply_patch`    | filesystem  | Apply a ChatGPT diff to the workspace. |
 | `read_dir`                         | `read_directory` | filesystem  | List immediate children of a directory. |
 | `mkdir`                            | `make_dir`       | filesystem  | Create a sub-directory (idempotent). |
@@ -103,6 +105,38 @@ Embeds the natural-language query with OpenAI and runs a vector search over
 the pre-computed snippet embeddings stored in `.odoc_index/`.  Results are
 rendered as a Markdown list identical to the command-line utility shipped with
 this repository.
+
+### 7 . `index_markdown_docs`
+
+Chunks a directory tree of Markdown files into token-bounded snippets, embeds
+them with OpenAI, and writes the resulting vectors under
+`vector_db_root/<index_name>/`.  The helper is a thin wrapper around
+[`Markdown_indexer.index_directory`] and therefore inherits the same
+heuristics (extension filter, `.gitignore` support, context window sizing).
+
+```ocaml
+let register =
+  Functions.index_markdown_docs
+    ~env                     (* capability: network & clock *)
+    ~dir                     (* capability: workspace root *)
+
+(* JSON expected from the model *)
+{"root": "docs", "index_name": "project_docs", "description": "Project documentation"}
+```
+
+### 8 . `markdown_search`
+
+Semantic retrieval over one – or several – Markdown indices generated with
+`index_markdown_docs`.  Candidate indices are shortlisted using cosine
+similarity on catalogue vectors before the selected stores are queried for the
+top-`k` snippets.
+
+```ocaml
+let search = Functions.markdown_search ~dir ~net in
+
+(* JSON arguments *)
+{"query": "how to configure dune for js_of_ocaml", "k": 3, "index_name": "project_docs"}
+```
 
 ---
 

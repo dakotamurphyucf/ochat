@@ -21,15 +21,87 @@ Internally the helper recognises {b four} back-ends:
 
 
 ## API cheatsheet
-Function summary (see in-code docs for details):
+High-level summary (refer to the in-code odoc comments for the
+canonical specification):
 
-| Function | Purpose |
-|----------|---------|
-| `convert_tools` | Thin copy between `Openai.Completions` and `Openai.Responses`. |
-| `custom_fn` | Wrap an arbitrary shell command (timeout + output cap). |
-| `agent_fn` | Execute a nested ChatMarkdown agent prompt. |
-| `mcp_tool` | Discover remote tools and apply a TTL-LRU cache. |
-| `of_declaration` | Front-door dispatcher used by `Driver` & `Converter`. |
+| Function | Role | Key parameters |
+|----------|------|---------------|
+| `convert_tools` | Convert the minimal `Openai.Completions.tool` records into the richer `Openai.Responses.Request.Tool.t` form expected by the *chat/completions* endpoint. | – |
+| `custom_fn` | Wrap an arbitrary shell command so that it can be invoked through the function-calling API. | `env` – Eio standard environment; `command` – binary to execute; `name`/`description` – exposed to the model. |
+| `agent_fn` | Run a nested ChatMarkdown agent prompt from within the current conversation. | `ctx` – shared execution context; `run_agent` – callback that starts a fresh driver. |
+| `mcp_tool` | Convert an `<tool mcp_server="…"/>` declaration into one `Gpt_function.t` per remote tool, using a 5-minute TTL-LRU cache and passive invalidation via server notifications. | `sw` – parent switch; `ctx` – execution context; `mcp_server` – URI of the MCP endpoint. |
+| `of_declaration` | Single front-door dispatcher that maps any `<tool …/>` element to its runtime implementation (may return several functions). | `sw`, `ctx`, `run_agent`, `decl`. |
+
+The next section drills deeper into signatures, invariants, and
+example invocations.
+
+## Function reference
+
+### `convert_tools`
+
+```ocaml
+val convert_tools : Openai.Completions.tool list -> Res.Request.Tool.t list
+```
+
+Pure field-by-field copy. Complexity O(n).
+
+### `custom_fn`
+
+```ocaml
+val custom_fn : env:Eio.Stdenv.t -> CM.custom_tool -> Gpt_function.t
+```
+
+- Accepts JSON input `{ "arguments": string array }`.
+- Hard timeout: **60 s** (configurable only via code change).
+- Output capped at **100 KiB** – long output is truncated with `…truncated`.
+
+Example:
+
+```ocaml
+let grep = custom_fn ~env { name="grep"; description=None; command="grep" } in
+Gpt_function.call grep ["-n"; "pattern"; "file.txt"]
+```
+
+### `agent_fn`
+
+```ocaml
+val agent_fn :
+  ctx:_ Ctx.t ->
+  run_agent:(ctx:_ Ctx.t -> string -> CM.content list -> string) ->
+  CM.agent_tool ->
+  Gpt_function.t
+```
+
+Input schema `{ "input": string }`. The call spawns a new driver
+instance, forwarding only the final answer back to the parent model.
+
+### `mcp_tool`
+
+```ocaml
+val mcp_tool :
+  sw:Eio.Switch.t ->
+  ctx:_ Ctx.t ->
+  CM.mcp_tool ->
+  Gpt_function.t list
+```
+
+Queries the remote `/tools/list` endpoint (or reads from cache) and
+converts the advertised metadata into `Gpt_function.t` values. Each
+remote tool becomes an individual function.
+
+### `of_declaration`
+
+```ocaml
+val of_declaration :
+  sw:Eio.Switch.t ->
+  ctx:_ Ctx.t ->
+  run_agent:(ctx:_ Ctx.t -> string -> CM.content list -> string) ->
+  CM.tool ->
+  Gpt_function.t list
+```
+
+Central dispatcher used by {!module:chat_response.driver} and
+{!module:chat_response.converter}.  See in-code docs for full details.
 
 
 ## Usage example

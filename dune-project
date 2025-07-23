@@ -46,7 +46,6 @@
   expect_test_helpers_core
   re2
   path_glob
-  ; gitignore optional dependency deliberately omitted until library matured
   bimage
   bimage-unix
   piaf)
