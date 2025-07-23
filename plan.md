@@ -171,13 +171,12 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 | Catalogue modules | completed | Script generated `out/modules.csv` via new `module_catalogue` executable. | Environment ready | Run `dune exec module_catalogue` to refresh. |
 | Documentation mining | completed | Aggregated docs using new `doc_mining` script – outputs in `out/mined_docs/`; missing docs list generated. | Catalogue modules | Run `dune exec doc_mining` to refresh. |
 |  └─ Doc coverage report | completed | Implement `script/doc_coverage.ml` to generate `out/docs_coverage.csv` listing modules with/without docs. | Documentation mining | Scans `out/modules.csv` & `docs-src`. |
-| Executable survey | in_progress | Run each public binary with `--help`, record usage & examples. | Environment ready | Attach captured output as artefacts. |
+| Executable survey | completed | Run each public binary with `--help`, record usage & examples. | Environment ready | Artefacts committed. |
 |  ├─ List binaries | completed | Enumerate all (public_name ...) stanzas under `bin/` and similar. Produce `out/binaries.csv`. | Executable survey | |
 |  ├─ Implement `script/exe_survey.ml` | completed | OCaml script `script/exe_survey.ml` captures `--help` output for each binary into `out/help/`, utilises Eio.Process. | List binaries | `dune exec exe_survey` to refresh. |
 |  ├─ Capture minimal run examples | completed | Extend script to run sample invocations for selected binaries (`md-search "hello"`, etc.). Logs in `out/examples/<exe>.txt`. | Implement `script/exe_survey.ml` | |
 |  ├─ Commit artefacts | completed | Stage and commit generated help and example transcripts. | Capture minimal run examples | |
-|  ├─ Commit artefacts | pending | Stage and commit generated help and example transcripts. | Capture minimal run examples | |
-|  └─ Close task | pending | Review outputs, update TODO statuses (`completed`). | Commit artefacts | |
+|  └─ Close task | completed | Review outputs, update TODO statuses (`completed`). | Commit artefacts | |
 | ChatMD spec (EBNF) | pending | Extract grammar from `chatmd_parser.mly`, render to markdown & embed diagrams. | ChatMD deep-dive | Use Menhir `--list-errors` to help. |
 | Embedding flow diagram | pending | Create Mermaid sequence diagram for embedding pipeline. | Vector DB & indexing notes |  |
 | OAuth2 overview doc | pending | Write `docs/oauth2_overview.md` summarising flows. | OAuth2 stack notes |  |
