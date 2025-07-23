@@ -1,9 +1,12 @@
 open Core
 open Owl
 
-(** This represents the vector db. corpus is the matrix of vector representations of the underlying docs. 
-  the index is a hash table that maps the index of a doc in the matrix to the file path of the doc   
-*)
+(** In-memory dense vector index.
+
+    The corpus is a {e column-major} Owl matrix holding one L2-normalised
+    embedding per document.  The auxiliary [index] table maps the column
+    number back to the (hashed) on-disk document id and its token
+    length.  See [vector_db.doc.md] for a narrative overview. *)
 type t =
   { corpus : Mat.mat
   ; index : (int, string * int) Hashtbl.t (** idx -> (doc_id, token_len) *)
@@ -25,8 +28,10 @@ module Vec = struct
   type vector = Float_array.t [@@deriving hash, compare, bin_io, sexp]
 
   module T = struct
-    (** this data type holds the vector representation of the underlying document 
-      and the id field is the file path location for the doc that the vecctor represents *)
+    (** Serialisable on-disk representation – mirrors
+        {!module-vector_db.Vec} in the interface.  [vector] is the raw
+        {i unnormalised} embedding.  Normalisation happens when building
+        the corpus. *)
     type t =
       { id : string (** hashed filename *)
       ; len : int (** token length of the snippet *)
@@ -38,16 +43,14 @@ module Vec = struct
   include T
   module Io = Bin_prot_utils_eio.With_file_methods (T)
 
-  (** Writes an array of vectors to disk using the Io.File module
-      @param vectors The array of vectors to be written to disk
-      @param label The label used as the file name for the output file *)
+  (** [write_vectors_to_disk vecs path] serialises [vecs] to [path]
+      using {!Bin_prot_utils_eio}. *)
   let write_vectors_to_disk vectors label =
     Io.File.write_all label @@ Array.to_list vectors
   ;;
 
-  (** Reads an array of vectors from disk using the Io.File module
-  @param label The label used as the file name for the input file
-  @return The array of vectors read from the file *)
+  (** [read_vectors_from_disk path] deserialises the array previously
+      written by {!write_vectors_to_disk}. *)
   let read_vectors_from_disk label = Array.of_list (Io.File.read_all label)
 end
 
@@ -57,14 +60,12 @@ let normalize doc =
   Mat.map (fun x -> x /. l2norm) vec
 ;;
 
-(** [create_corpus docs'] creates a vector database from an array of document vectors [docs'].
+(** [create_corpus docs] builds a snapshot from raw embeddings.
 
-  The function normalizes each document vector and constructs a matrix [corpus] where each column represents a normalized document vector.
-  It also creates an index, which is a hash table that maps the index of a document in the matrix to the file path of the document.
+    Guarantees:
 
-  @param docs' is an array of document vectors with their associated file paths.
-  @return a record of type [t] containing the matrix of vector representations [corpus] and the index mapping document indices to file paths.
-*)
+    • every column of the resulting matrix has unit L2-norm;
+    • [Hashtbl.length index = Array.length docs]. *)
 let create_corpus docs' =
   let docs = Array.map ~f:(fun doc -> normalize doc.Vec.vector) docs' in
   let corpus = Mat.of_cols docs in
@@ -86,13 +87,12 @@ let apply_length_penalty ~target ~alpha original_score chunk_len =
   original_score *. Float.max 0.0 penalty
 ;;
 
-(** [query t doc k] returns the top [k] most similar documents to the given [doc] in the vector database [t].
-    The function computes the cosine similarity between the input [doc] and the documents in the database [t.corpus],
-    and returns the indices of the top [k] most similar documents.
-    @param t is the vector database containing the corpus and index.
-    @param doc is the document vector to be compared with the documents in the database.
-    @param k is the number of top similar documents to be returned.
-    @return an array of indices corresponding to the top [k] most similar documents in the database. *)
+(** [query t embedding k] returns the indices of the [k] nearest
+    neighbours (cosine similarity).
+
+    [embedding] must be L2-normalised (`d × 1`) and share the same
+    dimensionality as the corpus.  If [k] exceeds `Mat.col_num t.corpus`
+    the output is truncated. *)
 let query t doc k =
   (* Compute cosine similarities *)
   let vec = Mat.transpose doc in
@@ -158,28 +158,16 @@ let query_hybrid t ~bm25 ~beta ~embedding ~text ~k =
   List.take final_ranked k |> List.map ~f:fst |> Array.of_list
 ;;
 
-(** [initialize file] initializes a vector database by reading in an array of [Vec.t] from disk and creating a corpus.
-
-  The function reads an array of document vectors with their associated file paths from disk using the [Vec.read_vectors_from_disk] function.
-  It then creates a corpus and index using the [create_corpus] function.
-
-  @param file is the file name used to read the array of document vectors from disk.
-  @return a record of type [t] containing the matrix of vector representations [corpus] and the index mapping document indices to file paths.
-*)
+(** [initialize path] reads a previously serialised array of {!Vec.t}
+    from [path] and calls {!create_corpus}. *)
 let initialize file =
   let docs' = Vec.read_vectors_from_disk file in
   create_corpus docs'
 ;;
 
-(** [get_docs dir t indexs] reads the documents corresponding to the given indices from disk and returns an array of their contents.
-
-  The function retrieves the file paths of the documents using the index hash table in [t] and reads the contents of the documents from disk using the [Doc.load_prompt] function.
-
-  @param dir is the environment used for loading the documents.
-  @param t is the vector database containing the corpus and index.
-  @param indexs is an array of indices corresponding to the documents to be read from disk.
-  @return an array of strings containing the contents of the documents read from disk.
-*)
+(** [get_docs dir t idxs] synchronously loads the raw text of the
+    documents referenced by [idxs].  The result order matches the input
+    indices. *)
 let get_docs dir t indexs =
   Eio.Fiber.List.map
     (fun idx ->

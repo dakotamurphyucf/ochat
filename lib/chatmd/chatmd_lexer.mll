@@ -1,18 +1,53 @@
-(**************************************************************************
-   chatmd_lexer.mll
+(** Chatmd lexer.
 
-   Lexer for ChatMarkdown.  It recognises only the *official* chatmd tags
+    This module turns a ChatMarkdown input string into a stream of
+    {!module:Chatmd_parser} tokens.  Only the set of *official* chatmd
+    elements is recognised:
 
-   msg user agent system developer doc img config import reasoning summary tool 
-   tool_call tool_response agent
+    {[
+      <msg> <user> <assistant> <agent> <system> <developer>
+      <doc> <img> <import> <config>
+      <reasoning> <summary>
+      <tool_call> <tool_response> <tool>
+    ]}
 
-   and converts them into specialised tokens.  Any other XML‐like tag that
-   appears *inside* a recognised element is returned verbatim as TEXT so
-   that the parser can treat it as raw content.
+    Everything else is treated as raw text – either as a verbatim [`TEXT`]
+    token or, when the unknown structure is properly balanced, collapsed
+    into a single [`TEXT`] node by {!val:skip_unknown}.
 
-   The lexer is intentionally simple – it relies on regular expressions
-   rather than attempting full XML validation.
-**************************************************************************)
+    The lexer is intentionally *shallow*: it does not try to perform full
+    XML/HTML validation.  Its job is merely to deliver a clean, *loss-free*
+    token stream to the parser while keeping the implementation small,
+    fast and predictable.
+
+    {1 Public entry point}
+
+    - {!val:token} – fetches the next token from a [`Lexing.lexbuf`].
+
+    {1 Examples}
+
+    Tokenising a snippet that mixes recognised and unknown tags:
+    {[
+      let input = "<msg role=\"user\">hello <b>world</b></msg>" in
+      let lexbuf = Lexing.from_string input in
+      let rec dump () =
+        match Chatmd_lexer.token lexbuf with
+        | Chatmd_parser.EOF -> print_endline "EOF"
+        | tok              -> Format.printf "%a\n" Chatmd_parser.pp_token tok; dump ()
+      in
+      dump ()
+    ]}
+
+    produces the stream
+    {[
+      START (Msg, [("role", Some "user")])
+      TEXT "hello "
+      TEXT "<b>"
+      TEXT "world"
+      TEXT "</b>"
+      END Msg
+      EOF
+    ]} *)
 
 {
 open Core
@@ -74,6 +109,22 @@ let decode_entities (s : string) : string =
   loop 0; Buffer.contents buf
 
 let parse_attrs (s : string) : attribute list =
+  (** [parse_attrs raw] converts the attribute fragment of an opening tag
+      – everything that follows the element name up to, but excluding, the
+      closing [`>`] or [`/>`] – into an association list.
+
+      Behaviour and invariants:
+      • The order of attributes is preserved.  
+      • Flag attributes such as [disabled] are represented by a tuple
+        [("disabled", None)].  
+      • Quoted values can use either single or double quotes; the function
+        accepts backslash-escaped quote characters inside the literal.  
+      • A small subset of HTML entities – [&amp;] [&lt;] [&gt;] [&quot;]
+        [&apos;] – is decoded.  All other entities are left intact.
+
+      @raise Failure if the attribute string contains an unterminated
+             quoted literal or other structural error. *)
+
   (* Imperative scan to handle quoted values that may contain spaces and to
      detect single / double quotes as well as unterminated strings. *)
   let len = String.length s in
@@ -366,8 +417,14 @@ and comment = parse
  This indirection allows rules such as the RAW-block opener to return    
  a *prefix* TEXT token first and defer the token produced after the      
  delimiter to the following call – thereby emitting both tokens without  
- violating the OCamlLex contract that each rule returns exactly one. *)
+  violating the OCamlLex contract that each rule returns exactly one. *)
 
+(** [token lexbuf] returns the next {!module:Chatmd_parser} token.
+
+    The lexer maintains an internal single-token look-ahead buffer
+    ([pending_token]) so that rules that need to output two logical
+    tokens in succession can do so transparently.  Apart from this tiny
+    buffer, the function is stateless and re-entrant. *)
 {
 let token lexbuf =
   match !pending_token with

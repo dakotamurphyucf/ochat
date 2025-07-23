@@ -9,6 +9,7 @@ let role_for_event (model : Model.t) ~(default : string) : string =
   match Model.active_fork model with
   | Some _ -> "fork"
   | None -> default
+;;
 
 module Res = Openai.Responses
 module Res_stream = Openai.Responses.Response_stream
@@ -22,7 +23,8 @@ let handle_fn_out ~(model : Model.t) (out : Res.Function_call_output.t) : Types.
   let _mod = model in
   (match Model.active_fork model with
    | Some call_id when String.equal call_id out.call_id ->
-     (Model.set_active_fork model None; Model.set_fork_start_index model None)
+     Model.set_active_fork model None;
+     Model.set_fork_start_index model None
    | _ -> ());
   [ Set_function_output { id = out.call_id; output = out.output } ]
 ;;
@@ -115,12 +117,9 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
     if buf_empty
-    then
-      patches
-      := Append_text { id = item_id; role; text = fn_name ^ "(" } :: !patches;
+    then patches := Append_text { id = item_id; role; text = fn_name ^ "(" } :: !patches;
     patches
-    := Append_text
-         { id = item_id; role; text = Util.sanitize ~strip:false delta }
+    := Append_text { id = item_id; role; text = Util.sanitize ~strip:false delta }
        :: !patches;
     List.rev !patches
   | Res_stream.Function_call_arguments_done { item_id; _ } ->
@@ -139,9 +138,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
     if buf_empty
-    then
-      patches
-      := Append_text { id = item_id; role; text = fn_name ^ "(" } :: !patches;
+    then patches := Append_text { id = item_id; role; text = fn_name ^ "(" } :: !patches;
     patches
     := Append_text { id = item_id; role; text = Util.sanitize ~strip:false ")" }
        :: !patches;

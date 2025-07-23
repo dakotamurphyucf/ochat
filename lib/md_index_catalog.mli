@@ -28,6 +28,9 @@ val save : dir:path -> t -> unit
 (** [add_or_update ~dir ~name ~description ~vector] adds a new entry or
     replaces an existing one with [name].  Vectors are L2-normalised
     before persistence. *)
-val add_or_update :
-  dir:path -> name:string -> description:string -> vector:float array -> unit
-
+val add_or_update
+  :  dir:path
+  -> name:string
+  -> description:string
+  -> vector:float array
+  -> unit

@@ -1,5 +1,20 @@
 open Core
 
+(** Time-to-live (TTL) enhancement for {!module:Lru_cache}.
+
+    The implementation stores an *expiration timestamp* alongside every piece
+    of data and ensures that stale bindings are:
+
+    • never returned by read operations;
+    • removed lazily (on access) or eagerly via {!remove_expired}.
+
+    All public functions delegate to the underlying LRU cache and therefore
+    run in amortised O(1) time, except {!remove_expired}, which is O(length
+    t).
+
+    See {!module-type:Ttl_lru_cache.Make} for the full interface and
+    semantics. *)
+
 module Make (H : Lru_cache.H) = struct
   let time_now () = Time_ns.Span.since_unix_epoch ()
 

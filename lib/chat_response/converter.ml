@@ -1,12 +1,45 @@
-(*********************************************************************
-     Conversion of parsed ChatMarkdown (CM) structures into the          
-     OpenAI Responses (Res) typed representation.  All helpers share a   
-     single immutable context record [Ctx.t] so that long parameter      
-     lists disappear, and accept an explicit [~run_agent] callback to    
-     resolve nested <agent/> inclusions without creating a circular      
-     compile-time dependency between this module and the [run_agent]     
-     function that in turn relies on [Converter].                        
-  *********************************************************************)
+(** ChatMarkdown → OpenAI JSON conversion.
+
+    The module translates the *Abstract-Syntax Tree* produced by
+    {!Prompt.Chat_markdown} into the value types exposed by
+    {!module:Openai.Responses}.  The generated OCaml structures serialise to
+    the exact JSON shape expected by the OpenAI Assistant and Chat
+    Completions endpoints.
+
+    {1 Side-effects}
+
+    The conversion itself is pure with two explicit exceptions:
+
+    • {!Fetch.get}/ {!Fetch.get_html} may be invoked when a content item
+      references an external document or image.
+    • `{!Cache.find_or_add}` is used to memoise nested `<agent/>` calls so
+      that identical prompts are only executed once per session.
+
+    Both operations depend on the immutable execution context {!Ctx.t}
+    passed to every helper.
+
+    {1 Design choices}
+
+    • The public interface is intentionally tiny: {!to_items} is the single
+      entry-point.  Internal helpers are kept hidden to allow for future
+      refactors without breaking callers.
+
+    • A first-class callback [~run_agent] is threaded through the call-graph
+      to avoid a static dependency on {!module:Driver}.  This keeps the
+      compilation unit free of cycles.
+
+    {1 Example}
+
+    {[
+      let ctx = Ctx.create ~env ~dir ~cache in
+      (* Delegate actual assistant invocation to Driver.run_agent *)
+      let run_agent ~ctx prompt_xml inline_items =
+        Driver.run_agent ~ctx prompt_xml inline_items
+      in
+      let items : Openai.Responses.Item.t list =
+        Converter.to_items ~ctx ~run_agent parsed_elements
+    ]}
+*)
 
 open Core
 module CM = Prompt.Chat_markdown
@@ -16,6 +49,23 @@ type 'env ctx = 'env Ctx.t
 
 (* Forward declarations *)
 
+(** [string_of_items ~ctx ~run_agent items] concatenates [items] into a plain
+    UTF-8 string.
+
+    Each element of [items] is rendered according to the following rules:
+
+    • Inline images – converted to `<img src="…"/>` tags so that the
+      assistant can reason about them.
+    • Local references – resolved relative to [Ctx.dir ctx] and inlined
+      into the prompt when possible.
+    • Nested [`<agent/>`](https://github.com/benchlab/chatmarkdown#agent) –
+      executed through the user-supplied [~run_agent] callback and cached
+      (see {!Cache}).
+
+    The helper is private but centralised here so that both *input* message
+    construction and *function-call* argument serialisation share the exact
+    same rendering logic.
+*)
 let rec string_of_items ~ctx ~run_agent (items : CM.content_item list) : string =
   let cache = Ctx.cache ctx in
   items
@@ -38,7 +88,21 @@ let rec string_of_items ~ctx ~run_agent (items : CM.content_item list) : string 
         run_agent ~ctx prompt items))
   |> String.concat ~sep:"\n"
 
-(** Convert a basic_content_item to an OpenAI input content item. *)
+(** [convert_basic_item ~ctx b] converts a
+    {!type:Prompt.Chat_markdown.basic_content_item} into a
+    {!Openai.Responses.Input_message.content_item}.
+
+    Behaviour matrix:
+
+    | ChatMarkdown attributes                              | OpenAI output |
+    |------------------------------------------------------|---------------|
+    | `image_url` present                                  | `Image` with   `detail = "auto"` |
+    | `document_url` present and [`cleanup_html`] is `true` | `Text` where the HTML has been stripped with {!Fetch.get_html}. |
+    | `document_url` present and [`cleanup_html`]=`false`   | `Text` containing the raw document fetched with {!Fetch.get}. |
+    | No URL attributes                                    | `Text` built from [`text`] (defaults to the empty string). |
+
+    Local paths are converted to data-URIs through {!Io.Base64.file_to_data_uri} so that the resulting JSON can be sent verbatim to OpenAI without further processing.
+*)
 and convert_basic_item ~ctx (b : CM.basic_content_item) : Res.Input_message.content_item =
   let dir = Ctx.dir ctx in
   match b.image_url, b.document_url with
@@ -270,7 +334,37 @@ and convert_reasoning (r : CM.reasoning) : Res.Item.t =
   Res.Item.Reasoning { id = r.id; status = r.status; _type = "reasoning"; summary = summ }
 ;;
 
+(** [to_items ~ctx ~run_agent els] walks the ChatMarkdown document and
+    produces the list of {!Openai.Responses.Item.t} that forms the request
+    history.
+
+    The traversal is *total*: every constructor of
+    {!type:Prompt.Chat_markdown.top_level_elements} is handled.  Elements that
+    are processed elsewhere in the pipeline – namely [`<config/>`] and
+    [`<tool/>`] declarations – are silently ignored.
+
+    Invariants:
+    • The output list preserves the order of appearance.
+    • No item is mutated after creation; the resulting value can therefore
+      be shared between fibres.
+
+    Example – converting a small prompt:
+    {[
+      let open Prompt.Chat_markdown in
+      let doc =
+        [ Msg { role = "user"; content = Some (Text "Hello!"); id = None
+               ; status = None; tool_call_id = None; tool_call = None }
+        ; Assistant { role = "assistant"; content = Some (Text "Hi!")
+                     ; id = None; status = None; tool_call_id = None }
+        ]
+      in
+      let ctx = Ctx.create ~env ~dir ~cache in
+      let items = Converter.to_items ~ctx ~run_agent doc in
+      assert (List.length items = 2)
+    ]}
+*)
 let to_items ~ctx ~run_agent (els : CM.top_level_elements list) : Res.Item.t list =
+  (* implementation unchanged below *)
   List.filter_map els ~f:(function
     | CM.Msg m -> Some (convert_msg ~ctx ~run_agent m)
     | CM.System m -> Some (convert_system_msg ~ctx ~run_agent m)

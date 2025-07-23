@@ -1,3 +1,30 @@
+(** OAuth 2.0 {e Authorization Code} flow with
+    {b Proof-Key for Code Exchange (PKCE)} helper.
+
+    This module is tailored for {i native} or command-line applications
+    that cannot listen on public ports.  It automates the common
+    pattern:
+
+    1.  Spins up a {b one-shot HTTP listener} on
+        [http://127.0.0.1:8876/cb].
+    2.  Generates a fresh PKCE [code_verifier] / [code_challenge] pair
+        using {!Oauth2_pkce.gen_code_verifier}.
+    3.  Launches the user’s browser at the authorisation endpoint with
+        all required query parameters.
+    4.  Waits for the authorisation server to redirect back with the
+        [code] and returns it to the caller together with the
+        [code_verifier] and [redirect_uri].
+
+    A second helper {!exchange_token} subsequently exchanges the
+    returned code for an access / refresh token.
+
+    The implementation relies solely on {!module:Eio} for
+    concurrency and networking; no web-framework is pulled in.
+
+    @see <https://datatracker.ietf.org/doc/html/rfc7636> RFC&nbsp;7636 – Proof-Key for Code Exchange
+    @see <https://datatracker.ietf.org/doc/html/rfc6749#section-4.1> RFC&nbsp;6749 §4.1 – Authorisation Code grant
+*)
+
 open Core
 open Eio
 module T = Oauth2_types
@@ -10,6 +37,22 @@ module Result = struct
   end
 end
 
+(** [open_browser ~env url] opens [url] in the user’s default browser.
+
+    The helper is {b best-effort}: on Unix it tries {e xdg-open},
+    falling back to macOS’ [open] command; on Windows it uses
+    [start].  All failures are silently ignored because they are
+    non-critical – the user can always copy&paste the URL.
+
+    Browser spawning is {b skipped automatically} when either the
+    [CI] or [OAUTH_NO_BROWSER] environment variable is present.  This
+    avoids hanging continuous-integration jobs and permits headless
+    testing.
+
+    The function is intended for interactive use and therefore lives
+    in this module’s implementation only; applications should not rely
+    on it directly.
+*)
 let open_browser ~env (url : string) : unit =
   (* best-effort – on macOS/Linux try xdg-open/open, ignore failures *)
   (* In CI or test environments we must not launch an external browser – it
@@ -36,6 +79,55 @@ let open_browser ~env (url : string) : unit =
        | false -> raise e))
 ;;
 
+(** [run ~env ~sw ~meta ~client_id] initiates the interactive PKCE flow.
+
+    It blocks until the resource owner completes authentication and
+    consent in the browser and the authorisation server redirects back
+    to [http://127.0.0.1:8876/cb?code=…].
+
+    Returned triple:
+    {ul
+      {- [code] – the single-use authorisation code (RFC&nbsp;6749 §4.1.2).}
+      {- [verifier] – the PKCE *code_verifier* generated for the
+         request; pass it verbatim to {!exchange_token}.}
+      {- [redirect_uri] – the exact redirect URI used (constant
+         [`http://127.0.0.1:8876/cb`] at the moment).}}
+
+    Notes & invariants
+    {ul
+      {- A dedicated TCP listener is created with
+         [Eio.Net.listen ~reuse_addr:true ~reuse_port:true] and limited
+         backlog [1].  Only the first successful callback is handled.}
+      {- The port is currently fixed at [8876] to keep the registered
+         redirect URI stable.  Future revisions may randomise it.}
+      {- The helper runs inside the supplied switch [sw]; callers must
+         ensure [sw] remains alive until the function returns.}}
+
+    @param env  The standard environment obtained from
+           [Eio_main.run].
+    @param sw   Switch delimiting the lifetime of spawned fibers and
+           socket listener.
+    @param meta Service discovery metadata (see {!Oauth2_types.Metadata}).
+    @param client_id Public OAuth 2.0 client identifier.
+
+    @raise Eio.Io   on network errors while opening the browser or
+                    binding the TCP listener.
+    @raise Failure  if JSON parsing of the redirect payload fails
+                    (should never happen under compliant servers).
+
+    Example – obtain an authorisation code
+    {[
+      Eio_main.run @@ fun env ->
+        Eio.Switch.run @@ fun sw ->
+          let code, verifier, redirect_uri =
+            Oauth2_pkce_flow.run
+              ~env ~sw
+              ~meta
+              ~client_id:"my-native-app"
+          in
+          Format.printf "Auth code = %s@." code
+    ]}
+*)
 let run ~env ~sw ~(meta : T.Metadata.t) ~(client_id : string) =
   let verifier = Oauth2_pkce.gen_code_verifier () in
   let challenge = Oauth2_pkce.challenge_of_verifier verifier in
@@ -94,6 +186,43 @@ let run ~env ~sw ~(meta : T.Metadata.t) ~(client_id : string) =
   code, verifier, redirect
 ;;
 
+(** [exchange_token ~env ~sw ~meta ~client_id ~code ~code_verifier ~redirect_uri]
+    swaps the single-use [code] obtained from {!run} for an access token.
+
+    The helper performs a `POST` with a
+    `application/x-www-form-urlencoded` body (grant =
+    `authorization_code`) against the [meta.token_endpoint] and decodes
+    the JSON response into an {!Oauth2_types.Token.t} record.
+
+    The [`obtained_at`] field is stamped with the current
+    [`Eio.Time.now`] so that {!Oauth2_types.Token.is_expired} works
+    reliably.
+
+    Returns [`Ok tok`] on success or [`Error msg`] describing the
+    failure (network/TLS error, HTTP ≠ 2xx, JSON decoding problem).
+
+    {b Performance}: the function delegates to {!Oauth2_http.post_form}
+    which uses a {i one-shot} connection – each call establishes and
+    tears down a fresh TLS session.  This is perfectly adequate for the
+    sporadic traffic produced by OAuth clients.
+
+    @raise Jsonaf.Parse_error  Transparently propagated if the server
+            returns invalid JSON (mirrors {!Oauth2_http.post_form}
+            semantics).
+
+    Example – fully automated code exchange
+    {[
+      match
+        Oauth2_pkce_flow.exchange_token
+          ~env ~sw ~meta ~client_id
+          ~code
+          ~code_verifier:verifier
+          ~redirect_uri
+      with
+      | Error msg -> Format.eprintf "Token error: %s@." msg
+      | Ok tok    -> Format.printf "Access token = %s@." tok.access_token
+    ]}
+*)
 let exchange_token
       ~env
       ~sw

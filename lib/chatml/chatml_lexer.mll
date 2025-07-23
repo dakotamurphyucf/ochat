@@ -1,9 +1,39 @@
 
-(*
-    chatml_lexer.mll
 
-    A minimal lexer for our DSL. 
-    Produces: chatml_lexer.ml
+(** ChatML lexical analyser.
+
+    This module is fed to {!ocamllex} which generates the concrete
+    implementation [chatml_lexer.ml].  At runtime it is in charge of
+    transforming the character stream contained in a {!Lexing.lexbuf}
+    into the token stream consumed by {!module:Chatml_parser}.
+
+    The recognised language is a small ML‐flavoured DSL whose concrete
+    syntax is shared with the rest of the compiler in this
+    repository.  The lexer therefore keeps track of the following
+    categories:
+
+    - keywords such as [let], [in] or [module]
+    - identifiers (lower/upper-case and polymorphic variants)
+    - literals — integers, floats, booleans and strings
+    - operators and punctuation ([+], [->], [:=] …)
+    - nested comments delimited by [( \* ... \* )] just like OCaml
+
+    Location tracking is delegated to {!Lexing}.  Every time the lexer
+    consumes a newline it calls {!Lexing.new_line} so that subsequent
+    positions are reported correctly by Menhir when the parser builds
+    spans.
+
+    {1 Entry points}
+
+    The interface exposed to the rest of the compiler is minimal; most
+    users will only need {!val:token}.
+
+    {1 Error handling}
+
+    Malformed inputs are reported through [Failure] exceptions raised
+    with a descriptive message.  The lexer never returns a special
+    error token because Menhir’s incremental API makes exception based
+    reporting simpler in this context.
 *)
 
 
@@ -18,7 +48,7 @@
      kept verbatim so that we do not accidentally reject valid inputs
      that the interpreter might still handle. *)
 
-  let buffer_add_escaped buf c =
+  let _buffer_add_escaped buf c =
     Buffer.add_char buf c
 
 }

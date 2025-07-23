@@ -62,10 +62,7 @@
  (public_name md-index)
  (name md_index)
  (modules md_index)
- (libraries
-  core
-  eio_main
-  markdown_indexer))
+ (libraries core eio_main markdown_indexer))
 
 (executable
  (public_name md-search)

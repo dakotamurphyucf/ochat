@@ -27,8 +27,16 @@ let main env =
    | true -> ()
    | false -> Path.mkdirs ~perm:0o700 out_path);
   Odoc_indexer.index_packages
-    ~skip_pkgs:
-      [ "ocaml"; "ocaml_intrinsics_kernel"; "ocaml-compiler-libs"; "ocamlgraph"; "tls" ]
+    ~filter:
+      (Odoc_indexer.Update
+         ( Exclude
+             [ "ocaml"
+             ; "ocaml_intrinsics_kernel"
+             ; "ocaml-compiler-libs"
+             ; "ocamlgraph"
+             ; "tls"
+             ]
+         , [ "path_glob" ] ))
     ~env
     ~root:root_path
     ~output:out_path

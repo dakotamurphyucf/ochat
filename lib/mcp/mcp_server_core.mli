@@ -1,6 +1,36 @@
 open! Core
 module JT = Mcp_types
 
+(** In-memory registry shared by every runtime component of the MCP server.
+
+    The module is *transport-agnostic*: it contains no I/O, spawns no fibres
+    and depends only on {!module:Core}.  HTTP and stdio transports interact
+    with it exclusively through the functions below and by registering hook
+    callbacks.
+
+    Responsibilities:
+
+    • **Tools** – store an OCaml handler together with the tool metadata
+      ({!JT.Tool.t}).  Re-registering the same [name] replaces the handler
+      and fires the [tools-changed] hook so that transports can broadcast a
+      {b notifications/tools/list_changed} event.
+
+    • **Prompts** – store named chat templates, represented as opaque JSON
+      so transports can round-trip them losslessly.
+
+    • **Structured logging** – forward arbitrary JSON log payloads to zero
+      or more registered sinks.
+
+    • **Progress streaming** – let long-running handlers report incremental
+      status updates.
+
+    • **Cancellation** – honour {b notifications/cancelled} messages sent by
+      clients.
+
+    All data lives in mutable hash tables that are safe under the standard
+    single-domain OCaml runtime.  If you compile the server for multiple
+    domains, protect every mutating operation with a mutex. *)
+
 (** Handler type for executing a tool.  Takes the JSON arguments sent in the
     [tools/call] request and returns either a JSON result (on success) or an
     error message string. *)
@@ -77,9 +107,11 @@ val cancel_request : t -> id:Mcp_types.Jsonrpc.Id.t -> unit
     poll this cooperatively and abort early to free resources. *)
 val is_cancelled : t -> id:Mcp_types.Jsonrpc.Id.t -> bool
 
-(** [create ()] yields a fresh, empty registry.  All operations are
-    thread-safe – internally a mutex protects the two registries so that the
-    server can register new artefacts concurrently with running requests.  *)
+(** [create ()] returns a brand-new registry with no registered artefacts.
+
+    Under the current single-domain runtime the function is thread-safe –
+    all state is protected by the OCaml runtime lock.  When running under a
+    multi-domain runtime you {b must} introduce external synchronisation. *)
 val create : unit -> t
 
 (** Hooks let the transport layer (e.g. the HTTP server) be informed when the

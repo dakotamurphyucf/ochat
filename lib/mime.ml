@@ -2,9 +2,10 @@ open Core
 
 (* MIME type helper ------------------------------------------------------- *)
 
-(** [guess_mime_type filename] returns a best-effort MIME type based on the
-    filename extension.  Only a handful of common types are recognised.  When
-    the extension is unknown the function returns [None]. *)
+(** [guess_mime_type filename] performs a very small extension→MIME mapping.
+    If [filename] has no extension the function returns [None].  Otherwise it
+    returns [Some mime_type], falling back to
+    ["application/octet-stream"] for unrecognised extensions. *)
 let guess_mime_type (filename : string) : string option =
   let _, ext_opt = Filename.split_extension filename in
   match ext_opt with
@@ -24,6 +25,7 @@ let guess_mime_type (filename : string) : string option =
     Some (table ext)
 ;;
 
-(** Predicate telling whether the supplied mime-type is textual and can be
-    inlined into JSON without Base64 encoding. *)
+(** [is_text_mime mime] is a simple prefix check: it returns [true] when
+    [mime] starts with ["text/"].  Handy when deciding whether to Base64-encode
+    binary data for JSON transport. *)
 let is_text_mime (mime : string) : bool = String.is_prefix mime ~prefix:"text/"

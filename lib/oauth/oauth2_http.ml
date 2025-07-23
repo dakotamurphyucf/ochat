@@ -1,3 +1,25 @@
+(** One-shot HTTP helpers tailored to OAuth&nbsp;2.0 flows.
+
+    The module wraps {!Piaf.Client.Oneshot} so that callers can exchange or
+    retrieve JSON documents in just a few lines.  All functions run inside an
+    {!Eio} fibre and therefore take an explicit [`env`] and [`sw`] argument –
+    the standard pattern for network code in Eio-based applications.
+
+    {1 API at a glance}
+
+    • {!val:get_json}   – `GET` a JSON resource (discovery document, user-info …)
+    • {!val:post_form}  – `POST` an
+      [application/x-www-form-urlencoded] body (token exchange / refresh)
+    • {!val:post_json}  – `POST` a JSON body (dynamic client registration)
+
+    Each helper returns a [(Jsonaf.t, string) Result.t] where the [Error]
+    variant is a human-readable description produced by
+    {!Piaf.Error.to_string} (transport-layer issues) or {!Exn.to_string}
+    (JSON decoding failures).  The only exception is {!val:post_form}, which
+    keeps the historical behaviour of **re-raising** the JSON parse error if
+    the response is not valid.
+*)
+
 open Core
 
 module Result = struct
@@ -5,7 +27,7 @@ module Result = struct
 
   module Let_syntax = struct
     let ( let* ) res f = bind res ~f
-    let ( let+ ) res f = map res ~f
+    let ( let+ ) res f = map res ~f [@@warning "-32"]
   end
 end
 

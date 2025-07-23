@@ -6,7 +6,7 @@ tags: ["topics" "to describe" "your" "project"]
 depends: [
   "ocaml" {>= "5.1.0"}
   "eio"
-  "dune" {>= "3.14"}
+  "dune" {>= "3.18"}
   "omd"
   "lambdasoup"
   "markup"
@@ -32,6 +32,7 @@ depends: [
   "cohttp"
   "expect_test_helpers_core"
   "re2"
+  "path_glob"
   "bimage"
   "bimage-unix"
   "piaf"
@@ -51,3 +52,4 @@ build: [
     "@doc" {with-doc}
   ]
 ]
+x-maintenance-intent: ["(latest)"]

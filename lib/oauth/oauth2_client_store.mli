@@ -1,9 +1,27 @@
 open! Core
 
-(** Persistent storage of OAuth client credentials that have been obtained
-    via Dynamic Client Registration (RFC 7591).  The file is stored under
-    the XDG config directory so that multiple invocations of the CLI can
-    reuse the same client identifier when talking to the same issuer.  *)
+(** Cache OAuth 2.0 dynamic-registration credentials on disk.
+
+    A successful Dynamic Client Registration (RFC 7591) returns a
+    [client_id] – and sometimes a [client_secret] – that should be
+    re-used on subsequent exchanges with the same issuer.  Creating a new
+    client for every invocation is wasteful and often rate-limited.  This
+    module persistently stores the credentials so that independent CLI
+    runs share a single identifier.
+
+    {1 Storage layout}
+
+    • Location   : [$XDG_CONFIG_HOME/ocamlgpt/registered.json]
+      (or [$HOME/.config/ocamlgpt/registered.json] as a fallback).
+
+    • Structure  : a JSON object mapping issuer URLs → credential – e.g.
+
+    {[
+      "https://auth.example" : {
+        "client_id"     : "abc",
+        "client_secret" : "s3cr3t"
+      }
+    ]}  *)
 
 module Credential : sig
   type t =
@@ -13,9 +31,21 @@ module Credential : sig
   [@@deriving sexp, bin_io, jsonaf]
 end
 
-(** [lookup ~issuer] returns the stored credentials for [issuer] if any. *)
-val lookup : env:Eio_unix.Stdenv.base -> issuer:string -> Credential.t option
+(** [lookup ~env ~issuer] returns the cached credentials for [issuer] or
+    [None] when the issuer is unknown.
 
-(** [store ~issuer cred] persistently stores [cred] as the credentials to use
-    for [issuer], overwriting any previously saved value. *)
+    The function never raises – malformed, unreadable, or missing files
+    are treated as an empty cache. *)
+val lookup
+  :  env:Eio_unix.Stdenv.base
+       (** Capability bundle obtained from
+                                   [Eio_main.run]. *)
+  -> issuer:string (** Issuer’s discovery URL (case-sensitive). *)
+  -> Credential.t option
+
+(** [store ~env ~issuer cred] writes [cred] as the credentials for
+    [issuer], replacing any previous value.
+
+    The operation is atomic: it writes to a [*.tmp] file first and then
+    {!Eio.Path.rename}s the result.  The final file mode is [0o600]. *)
 val store : env:Eio_unix.Stdenv.base -> issuer:string -> Credential.t -> unit

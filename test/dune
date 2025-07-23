@@ -20,6 +20,25 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Markdown crawler tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name markdown_crawler_test)
+ (modules markdown_crawler_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.unix
+  markdown_crawler)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+
+;; ---------------------------------------------------------------------------
 ;; Chat-TUI – Cmdline mode tests (Phase 3)
 ;; ---------------------------------------------------------------------------
 

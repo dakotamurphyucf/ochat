@@ -1,3 +1,16 @@
+(** Notty ⟷ Eio integration (implementation).
+
+    See {!module:Notty_eio} for the public API and usage examples.  The
+    code below is an almost verbatim translation of
+    {!Notty_unix.Term}’s pure-*Unix* implementation into Eio terms –
+    notably replacing blocking [Unix.read]/[Unix.write] calls with
+    non-blocking {!Eio.Flow} operations and managing resources via
+    {!Eio.Switch} hooks.
+
+    The implementation details are {e deliberately} kept out of the
+    interface documentation; only invariants that matter to clients are
+    mentioned there. *)
+
 open Eio.Std
 open Notty
 

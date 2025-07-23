@@ -1,3 +1,6 @@
+(** Runtime-shared server registry – implementation.  See
+    {!module:Mcp_server_core} for the interface and high-level semantics. *)
+
 open! Core
 module JT = Mcp_types
 

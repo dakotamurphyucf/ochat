@@ -1,4 +1,3 @@
-
 (**
     End-to-end indexing of documentation produced by the
     {{:https://ocaml.org/p/odoc/latest}odoc} tool-chain.
@@ -50,13 +49,13 @@ module Log = Log
 (* Helper utilities                                                        *)
 (**************************************************************************)
 
-let token_count ~codec text =
-  (** [token_count ~codec text] returns the approximate number of BPE
+(** [token_count ~codec text] returns the approximate number of BPE
       tokens in [text].  If [Tikitoken.encode] raises (e.g. because the
       text contains invalid UTF-8) or if the fallback heuristic is
       considered quicker, the function falls back to whitespace
       splitting.  This helper is *internal* and its behaviour is not
       stable – do not rely on it from outside the module. *)
+let token_count ~codec text =
   match Tikitoken.encode ~codec ~text with
   | tokens -> List.length tokens
   | exception _ ->
@@ -66,12 +65,12 @@ let token_count ~codec text =
     |> List.length
 ;;
 
-let meta_to_string (m : Odoc_snippet.meta) : string =
-  (** [meta_to_string m] renders [m] in the *legacy* pseudo-ocamldoc
+(** [meta_to_string m] renders [m] in the *legacy* pseudo-ocamldoc
       header format used by early experiments.  New code should rely on
       the serialised {!Odoc_snippet.meta} record and avoid parsing this
       textual representation.  The function is kept only because some
       historical corpora still expect it. *)
+let meta_to_string (m : Odoc_snippet.meta) : string =
   let title = Option.value ~default:"" m.title in
   Printf.sprintf
     "(**\nPackage: %s\nPath: %s\nLines: %d-%d\nTitle: %s\n*)\n"
@@ -86,13 +85,7 @@ let meta_to_string (m : Odoc_snippet.meta) : string =
 (* Vector embedding helper (adapted from lib/indexer.ml)                   *)
 (**************************************************************************)
 
-let rec get_vectors
-          ?(attempts = 0)
-          ~net
-          ~codec
-          (snippets : (Odoc_snippet.meta * string) list)
-  =
-  (** [get_vectors ~net ~codec snippets] calls the OpenAI Embeddings
+(** [get_vectors ~net ~codec snippets] calls the OpenAI Embeddings
       endpoint and returns a triple of [(meta, text, vec)] for every
       snippet in [snippets].
 
@@ -102,6 +95,12 @@ let rec get_vectors
 
       Returned vectors are **not** L2-normalised; that is done by
       {!Vector_db.create_corpus} during loading. *)
+let rec get_vectors
+          ?(attempts = 0)
+          ~net
+          ~codec
+          (snippets : (Odoc_snippet.meta * string) list)
+  =
   let inputs = List.map snippets ~f:(fun (_meta, text) -> text) in
   match Openai.Embeddings.post_openai_embeddings net ~input:inputs with
   | exception ex ->
@@ -139,16 +138,13 @@ let rec get_vectors
 (* Public API: package indexing                                            *)
 (**************************************************************************)
 
-let index_packages
-      ?(skip_pkgs = [])
-      ~(env : Eio_unix.Stdenv.base)
-      ~(root : _ Path.t)
-      ~(output : _ Path.t)
-      ~(net : _ Eio.Net.t)
-      ()
-  : unit
-  =
-  (** [index_packages ?skip_pkgs ~env ~root ~output ~net ()] builds a
+type package_filter =
+  | Include of string list
+  | Exclude of string list
+  | Update of package_filter * string list
+  | All
+
+(** [index_packages ?skip_pkgs ~env ~root ~output ~net ()] builds a
       vector & BM-25 search corpus for every package folder under
       [root] and stores the artefacts under [output].
 
@@ -191,6 +187,15 @@ let index_packages
       @raise exn on unrecoverable filesystem or network errors.  All
       transient failures (OpenAI 5xx, time-outs) are retried up to 3
       times before escalating. *)
+let index_packages
+      ?(filter = All)
+      ~(env : Eio_unix.Stdenv.base)
+      ~(root : _ Path.t)
+      ~(output : _ Path.t)
+      ~(net : _ Eio.Net.t)
+      ()
+  : unit
+  =
   Log.with_span
     ~ctx:[ "path", jsonaf_of_string @@ Fmt.str "%a" Path.pp output ]
     "odoc_indexer"
@@ -201,12 +206,35 @@ let index_packages
   let tiki_token_bpe =
     Io.load_doc ~dir:(Eio.Stdenv.fs env) "./out-cl100k_base.tikitoken.txt"
   in
-  let codec = Tikitoken.create_codec tiki_token_bpe in
-  let skip_tbl =
-    Hashtbl.of_alist_exn (module String) (List.map skip_pkgs ~f:(fun p -> p, ()))
+  let should_crawl =
+    let rec fn filter =
+      match filter with
+      | Include pkgs -> fun pkg -> List.mem pkgs pkg ~equal:String.equal
+      | Exclude pkgs -> fun pkg -> not (List.mem pkgs pkg ~equal:String.equal)
+      | All -> fun _ -> true
+      | Update (prev_filter, pkgs) ->
+        let prev_fn = fn prev_filter in
+        fun pkg ->
+          (match prev_filter with
+           | Include _ -> prev_fn pkg || List.mem pkgs pkg ~equal:String.equal
+           | Exclude _ -> prev_fn pkg
+           | All -> true
+           | Update _ -> failwith "Update filter cannot be nested")
+    in
+    fn filter
   in
-  Odoc_crawler.crawl ~root ~f:(fun ~pkg ~doc_path ~markdown ->
-    if not (Hashtbl.mem skip_tbl pkg)
+  let should_index pkg =
+    match filter with
+    | Include pkgs -> List.mem pkgs pkg ~equal:String.equal
+    | Exclude pkgs -> not (List.mem pkgs pkg ~equal:String.equal)
+    | All -> true
+    | Update (_, pkgs) -> List.mem pkgs pkg ~equal:String.equal
+  in
+  (* 2. Crawl the directory tree and slice Markdown files into snippets. *)
+  (* Ensure output folder exists. *)
+  let codec = Tikitoken.create_codec tiki_token_bpe in
+  Odoc_crawler.crawl ~root (fun ~pkg ~doc_path ~markdown ->
+    if should_crawl pkg
     then (
       let lst = Hashtbl.find_or_add pkg_docs pkg ~default:(fun () -> []) in
       Hashtbl.set pkg_docs ~key:pkg ~data:((doc_path, markdown) :: lst)));
@@ -314,11 +342,10 @@ let index_packages
       Bm25.write_to_disk Path.(pkg_dir / "bm25.binio") bm25)
   in
   Hashtbl.to_alist pkg_docs
-  |> Eio.Fiber.List.iter (fun (pkg, docs) -> handler (pkg, docs));
+  |> Eio.Fiber.List.iter (fun (pkg, docs) -> if should_index pkg then handler (pkg, docs));
   (* 3. Build & save package index with blurbs (serial, lightweight) *)
   let descriptions =
     Hashtbl.to_alist pkg_docs
-    |> List.filter ~f:(fun (pkg, _) -> not (Hashtbl.mem skip_tbl pkg))
     |> List.map ~f:(fun (pkg, docs) ->
       let blurb =
         match

@@ -276,3 +276,168 @@ let fork : Gpt_function.t =
   in
   Gpt_function.create_function (module Definitions.Fork) impl
 ;;
+
+(* -------------------------------------------------------------------------- *)
+(* Markdown indexing – build vector store                                      *)
+(* -------------------------------------------------------------------------- *)
+
+let index_markdown_docs ~env ~dir : Gpt_function.t =
+  let f (root, index_name, description, vector_db_root_opt) =
+    let root_path = Eio.Path.(dir / root) in
+    let vector_db_root = Option.value vector_db_root_opt ~default:".md_index" in
+    try
+      Markdown_indexer.index_directory
+        ~vector_db_root
+        ~env
+        ~index_name
+        ~description
+        ~root:root_path;
+      "Markdown documents have been indexed successfully."
+    with
+    | ex -> Fmt.str "error indexing markdown docs: %a" Eio.Exn.pp ex
+  in
+  Gpt_function.create_function (module Definitions.Index_markdown_docs) f
+;;
+
+(* -------------------------------------------------------------------------- *)
+(* Markdown search – semantic retrieval                                        *)
+(* -------------------------------------------------------------------------- *)
+
+let markdown_search ~dir ~net : Gpt_function.t =
+  (*────────────────────────  Simple in-memory caches  ───────────────────────*)
+  let module Md_cache = struct
+    open Core
+
+    module S = struct
+      type t = string [@@deriving compare, hash, sexp]
+    end
+
+    let embed_tbl : (string, float array) Hashtbl.t = Hashtbl.create (module S)
+    let vec_tbl : (string, Vector_db.Vec.t array) Hashtbl.t = Hashtbl.create (module S)
+    let mu = Eio.Mutex.create ()
+
+    let get_embed ~net query =
+      Eio.Mutex.lock mu;
+      let found = Hashtbl.find embed_tbl query in
+      Eio.Mutex.unlock mu;
+      match found with
+      | Some v -> v
+      | None ->
+        let resp = Openai.Embeddings.post_openai_embeddings net ~input:[ query ] in
+        let vec = Array.of_list (List.hd_exn resp.data).embedding in
+        Eio.Mutex.lock mu;
+        Hashtbl.set embed_tbl ~key:query ~data:vec;
+        Eio.Mutex.unlock mu;
+        vec
+    ;;
+
+    let get_vectors vec_file_path path_t =
+      Eio.Mutex.lock mu;
+      let found = Hashtbl.find vec_tbl vec_file_path in
+      Eio.Mutex.unlock mu;
+      match found with
+      | Some v -> v
+      | None ->
+        let vecs =
+          try Vector_db.Vec.read_vectors_from_disk path_t with
+          | _ -> [||]
+        in
+        Eio.Mutex.lock mu;
+        Hashtbl.set vec_tbl ~key:vec_file_path ~data:vecs;
+        Eio.Mutex.unlock mu;
+        vecs
+    ;;
+  end
+  in
+  let f (query, k_opt, index_name_opt, vector_db_root_opt) =
+    let open Eio.Path in
+    let k = Option.value k_opt ~default:5 in
+    let vector_db_root = Option.value vector_db_root_opt ~default:".md_index" in
+    let index_dir = dir / vector_db_root in
+    (* 1. Embed query *)
+    let query_vec = Md_cache.get_embed ~net query in
+    let query_mat = Owl.Mat.of_array query_vec (Array.length query_vec) 1 in
+    (* 2. Determine candidate indexes *)
+    let indexes =
+      match index_name_opt with
+      | Some name when not (String.equal name "all") -> [ name ]
+      | _ ->
+        (match Md_index_catalog.load ~dir:index_dir with
+         | Some catalog ->
+           (* Compute similarity and sort *)
+           let scores =
+             Array.map catalog ~f:(fun { Md_index_catalog.Entry.name; vector; _ } ->
+               let score =
+                 Array.fold2_exn query_vec vector ~init:0.0 ~f:(fun acc q v ->
+                   acc +. (q *. v))
+               in
+               score, name)
+           in
+           scores
+           |> Array.to_list
+           |> List.sort ~compare:(fun (s1, _) (s2, _) -> Float.compare s2 s1)
+           |> (fun l -> List.take l 5)
+           |> List.map ~f:snd
+         | None ->
+           (* fallback list all dirs *)
+           List.filter (Eio.Path.read_dir index_dir) ~f:(fun entry ->
+             Eio.Path.is_directory (index_dir / entry)))
+    in
+    if List.is_empty indexes
+    then Printf.sprintf "No Markdown indices found under %s" vector_db_root
+    else (
+      (* 3. Aggregate vectors from selected indexes *)
+      let vecs_with_index =
+        List.concat_map indexes ~f:(fun idx_name ->
+          let idx_dir = index_dir / idx_name in
+          if is_directory idx_dir
+          then (
+            let vec_path = idx_dir / "vectors.binio" in
+            let vec_key = native_exn vec_path in
+            let vecs = Md_cache.get_vectors vec_key vec_path in
+            Array.to_list vecs |> List.map ~f:(fun v -> idx_name, v))
+          else [])
+      in
+      if List.is_empty vecs_with_index
+      then Printf.sprintf "No vectors found in selected indices"
+      else (
+        let only_vecs = Array.of_list (List.map vecs_with_index ~f:snd) in
+        let db = Vector_db.create_corpus only_vecs in
+        let idxs = Vector_db.query db query_mat k in
+        let results =
+          Array.to_list idxs
+          |> List.mapi ~f:(fun rank idx ->
+            let id, _len = Hashtbl.find_exn db.Vector_db.index idx in
+            (* which index has this id *)
+            let idx_opt =
+              List.find_map vecs_with_index ~f:(fun (idx_name, v) ->
+                if String.equal v.Vector_db.Vec.id id then Some idx_name else None)
+            in
+            match idx_opt with
+            | None -> None
+            | Some idx_name ->
+              (match
+                 Or_error.try_with (fun () ->
+                   Io.load_doc ~dir:index_dir (idx_name ^ "/snippets/" ^ id ^ ".md"))
+               with
+               | Ok text ->
+                 let preview_len = 8000 in
+                 let preview =
+                   if String.length text > preview_len
+                   then String.sub text ~pos:0 ~len:preview_len ^ " …"
+                   else text
+                 in
+                 Some (rank + 1, idx_name, id, preview)
+               | Error _ -> None))
+          |> List.filter_map ~f:Fn.id
+        in
+        if List.is_empty results
+        then "No matching snippets found"
+        else
+          results
+          |> List.map ~f:(fun (rank, idx_name, id, preview) ->
+            Printf.sprintf "[%d] [%s] %s\n%s" rank idx_name id preview)
+          |> String.concat ~sep:"\n\n---\n\n"))
+  in
+  Gpt_function.create_function (module Definitions.Markdown_search) ~strict:false f
+;;

@@ -1,3 +1,8 @@
+(** Implementation of {!Package_index}.  Most of the user-facing
+    documentation lives in the interface and in
+    [package_index.doc.md]; the comments below focus on internal helper
+    functions. *)
+
 open Core
 open Eio
 open Owl
@@ -81,7 +86,8 @@ let%expect_test "package index query" =
   let idx =
     (* fake embeddings: identity *)
     [| Entry.{ pkg = "eio"; vector = [| 1.0; 0. |] }
-     ; Entry.{ pkg = "core"; vector = [| 0.; 1.0 |] } |]
+     ; Entry.{ pkg = "core"; vector = [| 0.; 1.0 |] }
+    |]
   in
   let res = query idx ~embedding:[| 1.; 0. |] ~k:5 in
   print_s [%sexp (res : string list)];

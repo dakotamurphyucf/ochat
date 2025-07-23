@@ -1,36 +1,77 @@
+(** Streamable HTTP transport for the MCP server.
+
+    This module exposes the registry in {!Mcp_server_core} over HTTP.  It
+    speaks JSON-RPC 2.0 on the request / response level and uses
+    Server-Sent Events (SSE) for bidirectional streaming:
+
+    - **Client → Server** – a `POST /mcp` request carries either a single
+      JSON-RPC envelope or a batch (JSON array).  If the client advertises
+      `Accept: text/event-stream` every response is streamed as its own SSE
+      event.  Otherwise a regular `application/json` body is returned.
+
+    - **Server → Client** – a long-lived `GET /mcp` request establishes an
+      SSE channel used by the server to push asynchronous notifications such
+      as `notifications/*/list_changed`, progress updates and structured log
+      messages.
+
+    {1 Endpoints}
+
+    • `POST /mcp` – JSON-RPC request batch, optional SSE response.
+
+    • `GET  /mcp` – SSE channel for server-initiated notifications (requires a
+      valid `Mcp-Session-Id` request header).
+
+    • Standard OAuth2 helper endpoints exposed by {!module:Oauth2_server_routes}
+      are also registered when [require_auth] is [true].
+
+    {1 Sessions}
+
+    A successful [`initialize`] request creates a fresh, cryptographically
+    random session identifier.  The value is returned in the
+    `Mcp-Session-Id` response header and must be echoed by subsequent
+    requests in the same header.
+
+    {1 Authentication}
+
+    Bearer-token validation is enforced by default.  Pass
+    [~require_auth:false] to [run] to turn the check off during local
+    development or automated tests.
+
+    {1 Failure mapping}
+
+    | Problem                          | HTTP | Body                                   |
+    |----------------------------------|------|----------------------------------------|
+    | Malformed JSON                   | 400  | {"error":"Invalid JSON"}               |
+    | Missing / unknown session id     | 404  | {"error":"Missing or unknown session id"} |
+    | Authentication failure           | 401  | {"error":"unauthorized"}               |
+    | Unsupported HTTP method / path   | 405  | "Method Not Allowed" (plain-text)      |
+
+    {1 Concurrency model}
+
+    The HTTP server runs inside a single Eio domain.  Piaf spawns one fibre
+    per incoming connection so state is protected by the OCaml runtime lock
+    and no explicit synchronisation is required.
+*)
+
 open! Core
 
-(** [run ~env ~core ~port] starts a Streamable HTTP MCP server listening on
-    [127.0.0.1:port].  The call blocks the current fibre forever.  One fibre
-    is spawned per incoming connection / request.
+(** [run ?require_auth ~env ~core ~port] starts the HTTP listener on
+    [127.0.0.1:port] and never returns.
 
-    Implemented HTTP endpoints:
+    Parameters:
+    - [env] – current Eio standard environment (obtained from
+      [Eio_main.run]).
+    - [core] – shared registry created via {!Mcp_server_core.create}.
+    - [port] – TCP port to listen on (IPv4 loopback).
+    - [?require_auth] – enforce bearer-token validation (default [true]).
 
-    • `POST /mcp` – accepts a single JSON-RPC message *or* a
-      JSON-RPC batch (array).  The reply is returned either as
-      `application/json` (default) *or* as a compact
-      Server-Sent-Events (SSE) stream when the client sends an
-      `Accept: text/event-stream` header.
+    One fibre is forked for each incoming request.
 
-    • `GET /mcp` – opens a long-lived SSE channel that the server
-      uses for **notifications** (e.g. `list_changed`, structured
-      logging).  A valid `Mcp-Session-Id` request header is
-      required – the identifier is issued in the response to the
-      initial `initialize` request.
-
-    Error handling rules:
-    – malformed JSON ⇒ HTTP 400 with a minimal JSON error payload;
-    – unknown / missing session id ⇒ HTTP 404;
-    – unsupported HTTP methods ⇒ HTTP 405.
-
-    The function does not return. *)
-
-(** [run ~require_auth ~env ~core ~port] starts the HTTP server.  When
-    [require_auth] is [false] the server behaves exactly the same but skips
-    OAuth bearer validation, effectively running in *anonymous* mode.  This
-    is handy for local development and for unit-tests that don’t want to deal
-    with the OAuth handshake.  The default in the CLI wrapper is to pass
-    [~require_auth:true]. *)
+    Example running a development server on port 8080 without authentication:
+    {[ Eio_main.run @@ fun env ->
+       let registry = Mcp_server_core.create () in
+       Mcp_server_http.run ~require_auth:false ~env ~core:registry ~port:8080 ]}
+*)
 
 val run
   :  ?require_auth:bool

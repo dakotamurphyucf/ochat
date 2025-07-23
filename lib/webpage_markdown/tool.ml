@@ -1,8 +1,21 @@
-open Core
+(** Webpage-to-Markdown tool implementation.
 
-(* -------------------------------------------------------------------------- *)
-(* Small in-memory TTL cache to avoid refetching the same URL repeatedly       *)
-(* -------------------------------------------------------------------------- *)
+    {1 Synopsis}
+
+    The module exports a single helper {!register} that turns the declarative
+    description {!Definitions.Webpage_to_markdown} into a runnable
+    {!Gpt_function.t}.  The implementation:
+
+    • Uses {!Webpage_markdown.Driver.fetch_and_convert} to download a web page
+      (or raw GitHub blob) and convert it to Markdown.
+    • Stores up to 128 recent results in a TTL-augmented LRU cache
+      ({!Ttl_lru_cache}) so that repeated calls for the same URL within
+      5 minutes are answered instantly.
+    • Reports exceptions as a human-readable string so the calling model can
+      surface the error to the user.
+*)
+
+open Core
 
 module Url_key = struct
   type t = string [@@deriving sexp, bin_io, hash, compare]

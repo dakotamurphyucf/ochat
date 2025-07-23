@@ -1,4 +1,5 @@
-(* Compiler environment implementation *)
+(** Internal implementation for {!module:Environment}.  End-users should refer
+    to the interface file for API documentation. *)
 
 module M = Map.Make (String)
 include M

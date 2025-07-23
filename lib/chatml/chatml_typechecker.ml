@@ -1,3 +1,32 @@
+(** Hindley–Milner type-checker for the ChatML language.
+
+    {1 Overview}
+
+    This module provides a self-contained Hindley–Milner (HM) type-checker
+    for the {!module:Chatml.Chatml_lang} abstract syntax tree.  It performs
+    full type inference with:
+
+    • classical `let`-polymorphism,
+    • row-polymorphic records and variants,
+    • first-class functions, arrays and references,
+    • built-in support for a small prelude of primitives (see {!init_env}).
+
+    The checker is optional at runtime—the ChatML interpreter works fine
+    without it—but running it gives early feedback to users and enables
+    richer editor tooling.
+
+    The public surface is intentionally tiny:
+
+    {ul
+    {- {!infer_program} validates a parsed program and prints diagnostics.}
+    {- {!type_lookup_for_program} returns a lookup function that maps an
+       arbitrary {!Source.span} back to the principal type inferred for that
+       AST node.}}
+
+    Everything else in this file exists to implement the inference engine
+    itself and is **not** part of the stable API.
+*)
+
 open Core
 open Chatml.Chatml_lang
 
@@ -811,6 +840,21 @@ let rec infer_stmt env = function
 
 (** --------------------------------------------------------------------- *)
 
+(** [infer_program prog] runs the HM type-checker on [prog].
+
+    All mutable checker state (identifier counters, levels and the span
+    table) is reset before starting so the function can be called
+    repeatedly on independent programs.
+
+    Successful runs print ["Type checking succeeded!"] to standard output.
+    When a type error is detected the function catches the internal
+    exception, produces a human-readable diagnostic that includes a source
+    excerpt, and prints it; the exception does *not* escape the function
+    boundary.
+
+    The global {!span_types} table is populated during the traversal; it can
+    later be queried through {!type_lookup_for_program}.
+*)
 let infer_program (prog : program) : unit =
   reset_levels ();
   let env = init_env () in
@@ -836,6 +880,19 @@ let infer_program (prog : program) : unit =
 (*  Public helper – produce a lookup function for a whole program          *)
 (*************************************************************************** *)
 
+(** [type_lookup_for_program prog] returns a lookup closure for [prog].
+
+    Internally the function first clears the span table, runs
+    {!infer_program} (silencing any error so that lookup still works on
+    ill-typed programs) and takes a snapshot of the resulting mapping.
+
+    The returned function takes a {!Source.span} and returns [Some ty] when
+    a principal type could be inferred for the node spanning [span], or
+    [None] otherwise.
+
+    The snapshot is immutable—subsequent calls to {!infer_program} will not
+    affect the closure.
+*)
 let type_lookup_for_program (prog : program) : Source.span -> typ option =
   (* 1.  Reset the span table so that we start fresh. *)
   reset_span_table ();

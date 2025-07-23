@@ -2,6 +2,119 @@ open Core
 module CM = Prompt.Chat_markdown
 module Res = Openai.Responses
 
+(*********************************************************************
+  Driver – high-level entry points exposed to CLI & tools
+  -------------------------------------------------------
+
+  The **Driver** is the orchestration layer that turns a ChatMarkdown
+  document (on disk) into successive calls to the OpenAI API.  It
+  exposes two families of helpers:
+
+  • Blocking completions – {!run_completion} (single request) and
+    {!run_agent} (nested agent usage).
+  • Streaming completions – {!run_completion_stream} which allows TUIs
+    and web front-ends to render partial deltas in real time.
+
+  The implementation is necessarily long because it wires together:
+
+  * Prompt preprocessing (append template, ensure `<user>` skeleton…)
+  * Configuration extraction (model, temperature, reasoning…)
+  * Tool discovery – built-ins, user declared, MCP remote
+  * Response loop (streaming vs blocking)
+  * Rendering of assistant answers back into the `.chatmd` buffer
+
+  Nevertheless the public API remains small and should stay backward
+  compatible: customise behaviour by tweaking optional labelled
+  arguments rather than editing the implementation.
+**********************************************************************)
+
+(*********************************************************************
+  Driver – public API for ChatMarkdown completion
+  ------------------------------------------------
+
+  The **Driver** exposes two convenience wrappers that behave similarly
+  to the OpenAI *chat completions* endpoint but accept ChatMarkdown as
+  input.  They bundle parsing, tool wiring, caching and the recursive
+  response loop into a single call so that CLI utilities and the TUI do
+  not have to care about the underlying plumbing.
+
+  • {!run_completion} – synchronous, single-turn helper; good for unit
+    tests or scripts that only need the final assistant answer.
+  • {!run_completion_stream} – streaming flavour; yields
+    [`Response_stream.t`] events as they arrive and exposes incremental
+    updates to the caller via the [on_event] callback.
+
+  Both functions maintain an *output buffer* on disk (a `.chatmd` file)
+  so that long-running conversations survive restarts and can be edited
+  manually between turns.
+**********************************************************************)
+
+(*********************************************************************
+  Driver – end-to-end helpers used by the CLI
+  -------------------------------------------
+
+  The driver is the *glue* that takes a user-editable ChatMarkdown file
+  on disk (e.g. `conversation.chatmd`), feeds it to the converter, loops
+  until the model has delivered its answer and finally appends the
+  assistant reply back into the same file.
+
+  There are two entry points:
+
+  • {!run_completion} – blocking variant, returns only when the final
+    assistant message has been produced.
+  • {!run_completion_stream} – streaming version used by the TUI; emits
+    incremental events via an `on_event` callback.
+
+  The rest of the module is pure plumbing: reading/writing files,
+  resolving configuration blocks, preparing tool tables and delegating
+  to {!Response_loop.run}.
+**********************************************************************)
+
+(** Driver – interactive and batch helpers
+
+    The *driver* is the glue between filesystem documents ( `.chatmd`
+    files edited by users) and the backend components (Converter,
+    Response_loop, Fork, …).  Two high-level entry points are exposed:
+
+    • {!run_completion} – synchronous loop suitable for scripting or
+      tests.
+    • {!run_completion_stream} – streaming variant that produces
+      incremental events consumed by the TUI.
+
+    Both helpers keep the following invariants:
+
+    * A persistent cache lives under `~/.chatmd/cache.bin` so that agent
+      prompts and MCP metadata survive across runs.
+    * All tool-generated artefacts are written next to the working
+      document to make manual inspection easy.
+*)
+
+(** [run_agent ~ctx prompt_xml items] evaluates a *nested agent* inside
+    the currently running conversation.
+
+    The function treats [prompt_xml] as a standalone ChatMarkdown
+    document representing the agent’s system prompt and optional
+    configuration blocks.  The additional [items] (typically
+    user-supplied content inserted at runtime) are appended before the
+    request is sent to OpenAI.
+
+    Workflow:
+
+    1. Merge [prompt_xml] and [items] into a single XML buffer and
+       re-parse it using {!Prompt.Chat_markdown.parse_chat_inputs}.
+    2. Derive configuration (model, temperature, reasoning, …) from the
+       embedded `<config/>` block; defaults mirror {!run_completion}.
+    3. Discover and instantiate tools declared inside the agent prompt
+       (via {!Tool.of_declaration}).
+    4. Convert the prompt to [`Item.t`] values with {!Converter.to_items}
+       and delegate execution to {!Response_loop.run}, which resolves
+       function calls recursively.
+    5. Concatenate *assistant* messages produced after the initial
+       request and return them as a single string.
+
+    This helper is primarily used by the *fork* tool to let the model
+    spawn sub-agents without leaving the main conversation context. *)
+
 let rec run_agent ~(ctx : _ Ctx.t) (prompt_xml : string) (items : CM.content_item list)
   : string
   =
@@ -80,12 +193,52 @@ let rec run_agent ~(ctx : _ Ctx.t) (prompt_xml : string) (items : CM.content_ite
 (*──────────────────────── 6.  Main driver  ───────────────────────────────*)
 
 (*──────────────────────── 7.  Public helper  ─────────────────────────────*)
+(** [run_completion ~env ?prompt_file ~output_file ()] runs a complete
+    ChatMarkdown turn in **blocking** mode.
+
+    The helper:
+
+    • Optionally prepends [prompt_file] – typically a template – to the
+      ongoing conversation stored in [output_file].
+    • Parses the resulting XML buffer, extracts configuration, declared
+      tools and user messages.
+    • Submits the conversation to OpenAI and recursively resolves any
+      tool calls until the model produces a purely textual answer.
+    • Appends assistant messages, reasoning blocks and tool-call
+      artefacts back into [output_file], making the document
+      self-contained.
+    • Inserts an empty `<user>` block at the end so that the next human
+      edit has a placeholder.
+
+    Persistent state:
+
+    • A cache is stored in `~/.chatmd/cache.bin` (created with
+      {!Io.ensure_chatmd_dir}).
+    • Tool-generated artefacts (JSON arguments, scraped web pages, …)
+      are written next to [output_file] for easy inspection.
+
+    Example – minimal CLI-style invocation:
+    {[
+      Eio_main.run @@ fun env ->
+        Driver.run_completion
+          ~env
+          ~output_file:"conversation.chatmd"
+          ()
+    ]} *)
 let run_completion
       ~env
       ?prompt_file (* optional template to prepend *)
       ~output_file (* evolving conversation buffer *)
       ()
   =
+  (* [run_completion ~env ?prompt_file ~output_file ()] enters a
+     read-eval-append loop on [output_file].  Each iteration:
+
+     1. Parses the XML buffer into ChatMarkdown elements.
+     2. Converts them to OpenAI items via {!Converter}.
+     3. Runs {!Response_loop.run} until no pending function calls.
+     4. Appends the assistant answer (and reasoning) back to
+        [output_file].  *)
   let dir = Eio.Stdenv.fs env in
   let cwd = Eio.Stdenv.cwd env in
   (* Ensure the hidden data directory exists and get its path. *)
@@ -212,6 +365,36 @@ let run_completion
   Cache.save ~file:cache_file cache
 ;;
 
+(** [run_completion_stream ~env ?prompt_file ?on_event ~output_file ()]
+    streams assistant deltas and high-level events **as they arrive**.
+
+    Compared to {!run_completion} this variant:
+
+    • Uses the streaming OpenAI API to obtain partial tokens.
+    • Invokes [?on_event] for every chunk, letting callers update a TUI
+      or web UI in real time.  The default callback ignores events so
+      existing scripts remain unchanged.
+    • Executes tool calls as soon as they are fully parsed, then
+      continues streaming the response.
+
+    Side-effects mirror {!run_completion}: partial messages and
+    reasoning summaries are appended to [output_file] immediately so
+    the buffer is crash-resistant.
+
+    Example – live rendering in the terminal:
+    {[
+      let on_event = function
+        | Responses.Response_stream.Output_text_delta d ->
+            Out_channel.output_string stdout d.delta
+        | _ -> ()
+
+      Eio_main.run @@ fun env ->
+        Driver.run_completion_stream
+          ~env
+          ~output_file:"conversation.chatmd"
+          ~on_event
+          ()
+    ]} *)
 let run_completion_stream
       ~env
       ?prompt_file (* optional template to prepend once          *)
@@ -510,35 +693,44 @@ let run_completion_stream
   Cache.save ~file:cache_file cache
 ;;
 
-(*──────────────────────────────────────────────────────────────────────────*
-  New variant for interactive TUI usage
-  -------------------------------------------------------------------------
-  [run_completion_stream_in_memory] behaves like [run_completion_stream] but
-  operates purely in-memory.  It
+(** [run_completion_stream_in_memory_v1 ~env ~history ~tools ()] streams a
+    ChatMarkdown conversation **held entirely in memory**.
 
-  •  takes the current conversation history explicitly as a list of
-     [Openai.Responses.Item.t]
-  •  streams updates through [on_event] just like the original version so the
-     caller can update the UI in real-time;
-  •  resolves function-calls by consulting the provided [tool_tbl] and loops
-     until no further tool-calls are emitted; and
-  •  returns the full extended history (initial inputs + newly received
-     items).
+    Compared to {!run_completion_stream} this helper:
 
-  No file-system interaction (reading templates, writing XML, …) is performed.
-  This makes the function suitable for an interactive application that keeps
-  the conversation buffer in memory and only persists it once on exit.
-*──────────────────────────────────────────────────────────────────────────*)
-(* 
-type event = 
-| Stream  of Openai.Responses.Response_stream.t
-| Function_call_output of Openai.Responses.Function_call_output.t
-| Complete of Openai.Responses.Item.t list
- *)
+    • Accepts an explicit [history] (list of {!Openai.Responses.Item.t})
+      instead of reading a `.chatmd` file from disk.
+    • Returns the *complete* history after all assistant turns and tool
+      calls have been resolved.
+    • Never touches the filesystem except for the persistent cache under
+      `[~/.chatmd]`, making it suitable for unit-tests or server back-ends
+      where direct file IO is undesirable.
 
-(* [run_completion_stream_in_memory_v1] is a variant of [run_completion_stream]
-   that operates purely in-memory, taking the conversation history as an
-   argument and returning the full history after processing. *)
+    Optional callbacks mirror the streaming variant:
+
+    • [?on_event] – invoked for each streaming event received from the
+      OpenAI API (token deltas, item completions, …). Defaults to a no-op.
+    • [?on_fn_out] – executed after each tool call completes, allowing the
+      caller to react to side-effects without waiting for the final
+      assistant answer.
+
+    @param env      Standard Eio runtime environment.
+    @param history  Initial conversation state.
+    @param tools    Compile-time list of tool definitions visible to the
+                    model.  Pass [[]] for none.
+    @param tool_tbl Optional lookup table generated from [tools].  The
+                    default builds a fresh table via
+                    {!Gpt_function.functions} when omitted.
+    @param temperature Temperature override forwarded the OpenAI request.
+    @param max_output_tokens Hard cap on the number of tokens generated by
+           the model per request.
+    @param reasoning Optional reasoning settings forwarded to the API.
+
+    @return The updated [history], i.e. the concatenation of the original
+            [history] and every item produced during the streaming loop.
+
+    @raise Any exception bubbled-up by the OpenAI client or user-supplied
+           tool functions.  The function does **not** swallow errors. *)
 let run_completion_stream_in_memory_v1
       ~env
       ~(history : Openai.Responses.Item.t list)

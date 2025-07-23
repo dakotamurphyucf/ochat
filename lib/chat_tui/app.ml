@@ -1,17 +1,29 @@
-(* The full implementation of the interactive Chat-TUI application.
+(** Terminal chat application – event-loop, streaming, persistence.
 
-   This module was extracted from the former [bin/chat_tui.ml] monolith as
-   part of the ongoing refactor.  It contains the entire orchestration logic
-   that wires together
+    {1 Overview}
 
-   • Notty_eio for terminal IO,
-   • Chat_tui.{Model,Renderer,Controller,Stream,Cmd}, and
-   • Chat_response.Driver for OpenAI streaming.
+    `Chat_tui.App` glues together all building blocks of the TUI and runs the
+    main event-loop.  In concrete terms it
 
-   Having all of this code inside [lib/] means that other entry-points (e.g.
-   tests or future GUI variants) can launch the TUI without duplicating the
-   logic.  The executable in [bin/] now merely parses command-line flags and
-   delegates to [run_chat]. *)
+    • initialises `Notty_eio.Term` and renders frames via
+      {!Chat_tui.Renderer},
+    • interprets keystrokes with {!Chat_tui.Controller},
+    • maintains a mutable {!Chat_tui.Model.t} value that represents the
+      current UI state,
+    • streams assistant replies from the OpenAI API using
+      {!Chat_response.Driver.run_completion_stream_in_memory_v1}, and
+    • persists finished conversations to disk on exit.
+
+    Placing the code in a library module (instead of the old monolithic
+    [`bin/chat_tui.ml`] executable) allows
+
+    - reuse in tests (headless integration, golden image rendering), and
+    - alternative front-ends that still want to piggy-back on the same
+      orchestration logic.
+
+    The lone public entry-point is {!run_chat}; all other helpers are local
+    but kept in the interface so they can be unit-tested.
+*)
 
 open Core
 open Eio.Std
@@ -35,6 +47,8 @@ module Tool = Chat_response.Tool
 module Config = Chat_response.Config
 module Req = Res.Request
 
+(** Propagated when the user presses *Esc* to cancel an ongoing streaming
+    request.  The exception is caught locally and never leaves the module. *)
 exception Cancelled
 
 (* ────────────────────────────────────────────────────────────────────────── *)
@@ -44,16 +58,38 @@ exception Cancelled
 (* Emit a transient “(thinking…)” placeholder so the user sees immediate
       feedback after hitting submit.  The placeholder is appended via a patch so
       the mutation goes through the centralised [Model.apply_patch] function. *)
+
+(** [add_placeholder_thinking_message model] appends a transient
+    "(thinking…)" assistant message to [model] so the user gets immediate
+    visual feedback after hitting ⏎.  The placeholder is replaced by the
+    first streaming token once {!handle_submit} starts receiving events. *)
 let add_placeholder_thinking_message (model : Model.t) : unit =
   let patch = Add_placeholder_message { role = "assistant"; text = "(thinking…)" } in
   ignore (Model.apply_patch model patch)
 ;;
 
+(** [add_placeholder_stream_error model msg] inserts a system message with
+    role "error" so that fatal conditions during streaming are surfaced to
+    the user instead of being silently logged. *)
 let add_placeholder_stream_error (model : Model.t) text : unit =
   let patch = Add_placeholder_message { role = "error"; text } in
   ignore (Model.apply_patch model patch)
 ;;
 
+(** [apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term]
+    performs {b synchronous} updates that take effect immediately after the
+    user submits the draft but {i before} the OpenAI request is sent.  In
+    particular it
+
+    - copies the prompt into the history as a user message, handling both
+      plain text and the *Raw XML* tool-invocation dialect,
+    - resets the draft buffer and caret position,
+    - scrolls the viewport so the newest message is visible, and
+    - pushes a redraw request onto [ev_stream] so the renderer can refresh
+      the screen.
+
+    The heavy lifting (network call, token streaming) is delegated to
+    {!handle_submit}. *)
 let apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term =
   let user_msg = String.strip (Model.input_line model) in
   (* ------------------------------------------------------------------ *)
@@ -125,10 +161,13 @@ let apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term =
   Eio.Stream.add ev_stream `Redraw
 ;;
 
+(** Runtime artefacts derived from the chat prompt. *)
 type prompt_context =
-  { cfg : Config.t (* Configuration parsed from the prompt file. *)
-  ; tools : Req.Tool.t list (* List of tools declared in the prompt file. *)
-  ; tool_tbl : (string, string -> string) Hashtbl.t (* Lookup table for tools by name. *)
+  { cfg : Config.t (** Behavioural settings such as temperature, model, … *)
+  ; tools : Req.Tool.t list (** Tools exposed to the assistant at runtime. *)
+  ; tool_tbl : (string, string -> string) Hashtbl.t
+    (** Mapping *tool-name → implementation*.  The assistant returns a
+            JSON payload that is looked-up here and executed. *)
   }
 
 (* ────────────────────────────────────────────────────────────────────────── *)
@@ -189,9 +228,16 @@ type prompt_context =
     ()
 ;; *)
 
-(* [handle_submit] is the main entry-point for processing user input.
-      It handles inline commands, submits the draft to the assistant, and
-      manages the UI updates accordingly. *)
+(** [handle_submit ~env ~model ~ev_stream ~prompt_ctx] launches the
+    *asynchronous* OpenAI completion request in a fresh switch and wires the
+    streaming callbacks back into the UI.  The function never blocks the UI
+    thread – it schedules fibres that push events into [ev_stream], which
+    are then folded into the model by the main loop.
+
+    On success the returned tokens replace the temporary "thinking…"
+    placeholder and are persisted in {!Model.history_items}.  On failure the
+    conversation is {i rolled-back} to the state before the request started
+    and an error message is shown. *)
 let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
   (* Kick off the OpenAI streaming request via the [Cmd] interpreter. *)
   try
@@ -289,18 +335,18 @@ let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
       let rec loop rev_items acc state =
         match rev_items with
         | [] -> List.rev acc
-        | item :: rest -> (
-          match state with
-          | `Keep -> loop rest (item :: acc) `Keep
-          | `Looking -> (
-              match item with
+        | item :: rest ->
+          (match state with
+           | `Keep -> loop rest (item :: acc) `Keep
+           | `Looking ->
+             (match item with
               | Item.Output_message _ -> loop rest (item :: acc) `Keep
               | Item.Function_call_output fo ->
                 loop rest (item :: acc) (`Await_call fo.call_id)
               | Item.Reasoning _ -> loop rest acc `Looking
               | _ -> loop rest (item :: acc) `Looking)
-          | `Await_call cid -> (
-              match item with
+           | `Await_call cid ->
+             (match item with
               | Item.Function_call fc when String.equal fc.call_id cid ->
                 loop rest (item :: acc) `Keep
               | Item.Reasoning _ -> loop rest acc (`Await_call cid)
@@ -311,7 +357,6 @@ let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
     let pruned = prune_trailing (Model.history_items model) in
     Model.set_history_items model pruned;
     Model.set_messages model (Conversation.of_history pruned);
-
     let error_msg = Printf.sprintf "Error during streaming: %s" (Exn.to_string ex) in
     print_endline error_msg;
     (* Add an error message to the model so the UI can display it. *)
@@ -323,6 +368,23 @@ let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
 (*  Main entry-point                                                         *)
 (* ------------------------------------------------------------------------ *)
 
+(** [run_chat ~env ~prompt_file ()] is the {b only} public entry-point of
+    the module.  Call it from your executable to start an interactive chat
+    session.  The function never returns – it blocks until the user quits
+    the TUI.
+
+    Parameters:
+    {ul
+    {- [env] – the standard environment passed by {!Eio_main.run}.}
+    {- [prompt_file] – path to a *.chatmd* document that seeds the history,
+       declares tools and provides default settings.}}
+
+    Typical usage:
+    {[
+      let () =
+        Eio_main.run @@ fun env ->
+        Chat_tui.App.run_chat ~env ~prompt_file:"prompt.chatmd" ()
+    ]} *)
 let run_chat ~env ~prompt_file () =
   Switch.run
   @@ fun ui_sw ->

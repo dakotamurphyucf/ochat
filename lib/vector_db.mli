@@ -1,13 +1,45 @@
-(** Vector Database
+(** Dense vector search utilities.
 
-    This module provides functionality for creating and querying a vector database, which is a collection of document vectors and their associated file paths. The database is represented as a matrix of vector representations and an index that maps the index of a document in the matrix to the file path of the document.
+    A {b vector database} maps small pieces of text (code snippets, README
+    paragraphs, commit messages, …) to dense float embeddings and offers
+    fast similarity search.  This implementation keeps the whole corpus
+    in memory – every document embedding is stored as a {e column} of an
+    Owl matrix – and therefore targets small-to-medium corpora (up to a
+    few hundred thousand fragments on a typical developer machine).
 
-    The main data type is [t], which represents the vector database. The module also provides functions for creating a corpus, querying the database, and managing document vectors.
+    {1 Data model}
 
-    The [Vec] module defines the vector representation of documents and provides functions for reading and writing vectors to and from disk. *)
+    •  [t] – immutable snapshot: a normalised embedding matrix
+       {!field:corpus} together with the reverse lookup table
+       {!field:index} that maps matrix columns back to the on-disk
+       document id and its token length.
 
-(** This represents the vector db. corpus is the matrix of vector representations of the underlying docs.
-    the index is a hash table that maps the index of a doc in the matrix to the file path of the doc *)
+    •  {!module:Vec} – serialisable record bundling a document’s
+       identifier, token length and raw float-array embedding.
+
+    {1 Supported operations}
+
+    •  Build a snapshot from an array of {!Vec.t}
+      ({!val:create_corpus}).
+
+    •  Retrieve the [k] most similar documents for a given embedding via
+      cosine similarity ({!val:query}).
+
+    •  Hybrid retrieval that linearly interpolates BM25 with vector
+      similarity ({!val:query_hybrid}).
+
+    •  Lazy loading: read an existing snapshot from disk ({!val:initialize})
+      and resolve the matching document bodies ({!val:get_docs}).
+
+    All public functions execute in the caller’s fibre; blocking I/O is
+    performed through Eio’s non-blocking API. *)
+
+(** In-memory snapshot of an embedding corpus.
+
+    [corpus] is an `n × m` Owl matrix whose columns are length-1 (L2
+    normalised) embeddings.  [index] maps a column number back to the
+    original document identifier and its token length (used for length
+    penalties and for fetching the document from disk). *)
 type t =
   { corpus : Owl.Mat.mat
   ; index : (int, string * int) Core.Hashtbl.t
@@ -22,8 +54,14 @@ module Vec : sig
 
   type vector = Float_array.t [@@deriving compare, bin_io, sexp]
 
-  (** this data type holds the vector representation of the underlying document
-      and the id field is the file path location for the doc that the vecctor represents *)
+  (** Serialisable embedding record.
+
+      •  [id]   – hashed file path (used as stable identifier on disk)
+      •  [len]  – token length of the text snippet (used for length
+        penalties)
+      •  [vector] – raw, {b unnormalised} float embedding obtained from
+        the encoder.  The caller {e need not} normalise – it is done by
+        {!create_corpus}. *)
   type t =
     { id : string
     ; len : int
@@ -35,65 +73,81 @@ module Vec : sig
       type nonrec t = t [@@deriving compare, bin_io, sexp]
     end)
 
-  (** Writes an array of vectors to disk using the Io.File module
-      @param vectors The array of vectors to be written to disk
-      @param label The label used as the file name for the output file *)
+  (** [write_vectors_to_disk vecs path] writes [vecs] to [path] using
+      {!Bin_prot}.  The file is created (or truncated) with mode
+      `0o600`.
+
+      The function runs in the calling fibre and therefore must not be
+      used inside a preemptively blocking context. *)
   val write_vectors_to_disk : t array -> path -> unit
 
-  (** Reads an array of vectors from disk using the Io.File module
-      @param label The label used as the file name for the input file
-      @return The array of vectors read from the file *)
+  (** [read_vectors_from_disk path] deserialises an array previously
+      written by {!write_vectors_to_disk}. *)
   val read_vectors_from_disk : path -> t array
 end
 
-(** [create_corpus docs'] creates a vector database from an array of document vectors [docs'].
+(** [create_corpus docs] builds a new snapshot from raw embeddings.
 
-    The function normalizes each document vector and constructs a matrix [corpus] where each column represents a normalized document vector.
-    It also creates an index, which is a hash table that maps the index of a document in the matrix to the file path of the document.
+    Each element of [docs] is L2-normalised and appended as a column of
+    the resulting matrix; the original float array is not mutated.  The
+    function guarantees:
 
-    @param docs' is an array of document vectors with their associated file paths.
-    @return
-      a record of type [t] containing the matrix of vector representations [corpus] and the index mapping document indices to file paths. *)
+    •  every column of the returned [corpus] has unit L2-norm;
+    •  [Hashtbl.length index = Array.length docs].
+
+    The operation is O(n·d) where n is the number of documents and d is
+    the embedding dimension. *)
 val create_corpus : Vec.t array -> t
 
-(** [query t doc k] returns the top [k] most similar documents to the given [doc] in the vector database [t].
-    The function computes the cosine similarity between the input [doc] and the documents in the database [t.corpus],
-    and returns the indices of the top [k] most similar documents.
-    @param t is the vector database containing the corpus and index.
-    @param doc is the document vector to be compared with the documents in the database.
-    @param k is the number of top similar documents to be returned.
-    @return
-      an array of indices corresponding to the top [k] most similar documents in the database. *)
+(** [query t embedding k] returns the indices of the [k] neighbours that
+    maximise cosine similarity to [embedding].
+
+    [embedding] must already be L2-normalised and shaped as an
+    n&nbsp;×&nbsp;1 Owl matrix where n equals the embedding dimension of
+    the corpus.  If [k] exceeds the corpus size the result is clamped.
+
+    The function allocates O(m) where m = corpus size.  It performs no
+    heap allocations proportional to the embedding dimension. *)
 val query : t -> Owl.Mat.mat -> int -> int array
 
-(** Hybrid retrieval: fuse cosine similarity with BM25.  [beta] ∈ [0,1]
-    controls how much weight is given to BM25 (0 = vector only, 1 = bm25 only). *)
-val query_hybrid :
-  t ->
-  bm25:Bm25.t ->
-  beta:float ->
-  embedding:Owl.Mat.mat ->
-  text:string ->
-  k:int -> int array
+(** [query_hybrid t ~bm25 ~beta ~embedding ~text ~k] combines dense and
+    lexical search.
 
+    1.   Cosine similarities between [embedding] and the whole corpus
+         are computed.
+    2.   The top 20·k candidates form a shortlist.
+    3.   BM25 scores for [text] are evaluated on the same shortlist.
+    4.   Final score = (1&nbsp;−&nbsp;β)·cos  +  β·normalised&nbsp;BM25
+         and the best [k] hits are returned.
+
+    [beta] ∈ [0, 1] controls the trade-off (0 = vector-only,
+    1 = BM25-only). *)
+val query_hybrid
+  :  t
+  -> bm25:Bm25.t
+  -> beta:float
+  -> embedding:Owl.Mat.mat
+  -> text:string
+  -> k:int
+  -> int array
+
+(** [add_doc corpus vec] returns [corpus] with [vec] appended as the
+    last column.
+
+    [vec] is L2-normalised on the fly; the original array is not
+    modified.  The function is a convenience helper for incremental
+    updates – it does {b not} update any {!field:index} mapping.  Callers
+    are responsible for persisting the extended mapping themselves. *)
 val add_doc : Owl.Mat.mat -> float array -> Owl.Mat.mat
 
-(** [initialize file] initializes a vector database by reading in an array of [Vec.t] from disk and creating a corpus.
-
-    The function reads an array of document vectors with their associated file paths from disk using the [Vec.read_vectors_from_disk] function.
-    It then creates a corpus and index using the [create_corpus] function.
-
-    @param file is the file name used to read the array of document vectors from disk.
-    @return
-      a record of type [t] containing the matrix of vector representations [corpus] and the index mapping document indices to file paths. *)
+(** [initialize path] reads a previously serialised array of {!Vec.t}
+    from [path] and builds a snapshot via {!create_corpus}. *)
 val initialize : path -> t
 
-(** [get_docs dir t indexs] reads the documents corresponding to the given indices from disk and returns an array of their contents.
+(** [get_docs dir t idxs] loads the bodies of the documents with indices
+    [idxs].
 
-    The function retrieves the file paths of the documents using the index hash table in [t] and reads the contents of the documents from disk using the [Doc.load_prompt] function.
-    @param [dir] is the directory for loading the documents.
-    @param t is the vector database containing the corpus and index.
-    @param indexs
-      is an array of indices corresponding to the documents to be read from disk.
-    @return an list of strings containing the contents of the documents read from disk. *)
+    For every index the associated file path is looked up in
+    [t.index] and the file is read with {!Io.load_doc}.  The result list
+    preserves the order of [idxs]. *)
 val get_docs : Eio.Fs.dir_ty Eio.Path.t -> t -> int array -> string list

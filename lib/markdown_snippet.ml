@@ -43,10 +43,12 @@ module Chunker = struct
 
   let is_thematic_break line =
     let trimmed = String.strip line in
-    if String.length trimmed < 3 then false
+    if String.length trimmed < 3
+    then false
     else (
       let rec loop i =
-        if i >= String.length trimmed then true
+        if i >= String.length trimmed
+        then true
         else (
           match trimmed.[i] with
           | '-' | '*' | '_' -> loop (i + 1)
@@ -66,15 +68,20 @@ module Chunker = struct
       | line :: rest ->
         let opening_fence = String.is_prefix (String.strip line) ~prefix:"```" in
         (match in_code, opening_fence with
-         | true, true -> (* close code block *)
+         | true, true ->
+           (* close code block *)
            loop (flush (line :: buf) acc) [] false rest
-         | false, true -> (* open code block *)
+         | false, true ->
+           (* open code block *)
            loop acc (line :: buf) true rest
          | _ ->
            let blank = String.equal (String.strip line) "" in
            let thematic = (not in_code) && is_thematic_break line in
-           let is_table_row = (not in_code) && String.is_prefix (String.strip line) ~prefix:"|" in
-           if is_table_row then (
+           let is_table_row =
+             (not in_code) && String.is_prefix (String.strip line) ~prefix:"|"
+           in
+           if is_table_row
+           then (
              let rec gather rows rem =
                match rem with
                | next :: tl when String.is_prefix (String.strip next) ~prefix:"|" ->
@@ -85,7 +92,8 @@ module Chunker = struct
              let acc = flush buf acc in
              let buf' = [ String.concat ~sep:"\n" table_rows ] in
              loop acc buf' false rest')
-           else if (not in_code) && (blank || thematic || is_heading line) then (
+           else if (not in_code) && (blank || thematic || is_heading line)
+           then (
              let acc = flush buf acc in
              let buf' = if blank || thematic then [] else [ line ] in
              loop acc buf' false rest)
@@ -101,6 +109,7 @@ end
 
 module Str_key = struct
   type t = string [@@deriving hash, sexp, compare]
+
   let invariant _ = ()
 end
 
@@ -129,10 +138,13 @@ let token_count ~codec text =
       Eio.Mutex.unlock cache_mu;
       let n =
         match codec with
-        | Some c -> (try List.length (Tikitoken.encode ~codec:c ~text) with _ -> heuristic_token_count text)
+        | Some c ->
+          (try List.length (Tikitoken.encode ~codec:c ~text) with
+           | _ -> heuristic_token_count text)
         | None -> heuristic_token_count text
       in
-      if String.length text < 10_000 then (
+      if String.length text < 10_000
+      then (
         Eio.Mutex.lock cache_mu;
         Cache.set tok_cache ~key:text ~data:n;
         Eio.Mutex.unlock cache_mu);
@@ -159,35 +171,44 @@ let find_title lines =
 
 let slice ~index_name ~doc_path ~markdown ~tiki_token_bpe () : (Meta.t * string) list =
   let codec =
-    try Some (Tikitoken.create_codec tiki_token_bpe) with _ -> None
+    try Some (Tikitoken.create_codec tiki_token_bpe) with
+    | _ -> None
   in
   let min_tokens = 64 in
   let max_tokens = 320 in
   let overlap_tokens = 64 in
-
-  let block_strings = markdown |> String.split_lines |> Chunker.chunk_by_heading_or_blank in
-
+  let block_strings =
+    markdown |> String.split_lines |> Chunker.chunk_by_heading_or_blank
+  in
   let blocks =
     List.map block_strings ~f:(fun b ->
       let byte_len = String.length b in
       let t = if byte_len > 8_000 then max_tokens + 1 else token_count ~codec b in
       b, t)
   in
-
   let title = find_title block_strings in
-
   let lower_path = String.lowercase doc_path in
   let is_readme =
-    (String.is_suffix lower_path ~suffix:".md" || String.is_suffix lower_path ~suffix:".markdown")
+    (String.is_suffix lower_path ~suffix:".md"
+     || String.is_suffix lower_path ~suffix:".markdown")
     && String.is_substring lower_path ~substring:"readme"
   in
-
   let make_header line_start line_end =
     if is_readme
-    then Printf.sprintf "(** Package:%s Doc:README Lines:%d-%d *)\n\n" index_name line_start line_end
-    else Printf.sprintf "(** Package:%s Doc:%s Lines:%d-%d *)\n\n" index_name doc_path line_start line_end
+    then
+      Printf.sprintf
+        "(** Package:%s Doc:README Lines:%d-%d *)\n\n"
+        index_name
+        line_start
+        line_end
+    else
+      Printf.sprintf
+        "(** Package:%s Doc:%s Lines:%d-%d *)\n\n"
+        index_name
+        doc_path
+        line_start
+        line_end
   in
-
   let flush (blocks_rev : string list) start_idx end_idx acc =
     let body = String.concat ~sep:"\n" (List.rev blocks_rev) in
     let header = make_header start_idx end_idx in
@@ -205,16 +226,14 @@ let slice ~index_name ~doc_path ~markdown ~tiki_token_bpe () : (Meta.t * string)
     in
     (meta, text) :: acc
   in
-
   let rec take_overlap rev_blocks token_budget acc_tokens acc_blocks =
     match rev_blocks with
     | [] -> acc_blocks
-    | (_, tok) as blk :: rest ->
+    | ((_, tok) as blk) :: rest ->
       if acc_tokens + tok >= token_budget
       then acc_blocks
       else take_overlap rest token_budget (acc_tokens + tok) (blk :: acc_blocks)
   in
-
   let rec loop idx blocks_rev tok_acc start_idx acc remaining =
     match remaining with
     | [] ->
@@ -227,15 +246,28 @@ let slice ~index_name ~doc_path ~markdown ~tiki_token_bpe () : (Meta.t * string)
         let acc' = flush (List.map blocks_rev ~f:fst) start_idx (idx - 1) acc in
         let overlap_blocks = take_overlap blocks_rev overlap_tokens 0 [] in
         let overlap_rev = List.rev overlap_blocks in
-        let overlap_tokens_cnt = List.fold overlap_blocks ~init:0 ~f:(fun n (_, t) -> n + t) in
-        loop (idx + 1) overlap_rev overlap_tokens_cnt (idx - List.length overlap_blocks) acc' ((blk_str, blk_tok) :: rest))
-      else loop (idx + 1) ((blk_str, blk_tok) :: blocks_rev) (tok_acc + blk_tok) start_idx acc rest
+        let overlap_tokens_cnt =
+          List.fold overlap_blocks ~init:0 ~f:(fun n (_, t) -> n + t)
+        in
+        loop
+          (idx + 1)
+          overlap_rev
+          overlap_tokens_cnt
+          (idx - List.length overlap_blocks)
+          acc'
+          ((blk_str, blk_tok) :: rest))
+      else
+        loop
+          (idx + 1)
+          ((blk_str, blk_tok) :: blocks_rev)
+          (tok_acc + blk_tok)
+          start_idx
+          acc
+          rest
   in
-
   loop 1 [] 0 1 [] blocks
 ;;
 
 (*-----------------------------------------------------------------------*)
 (* End of file                                                            *)
 (*-----------------------------------------------------------------------*)
-

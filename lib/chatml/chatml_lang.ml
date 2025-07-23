@@ -1,9 +1,36 @@
+(** ChatML evaluator runtime.
+
+    This module implements the small, dynamically-typed {e ChatML} language
+    used by the rest of the code-base to describe lightweight scripts in
+    prompts and test-scenarios.
+
+    The code is organised in eight conceptual layers, each introduced by a
+    numbered banner in the source:
+
+    {ol
+    {- Abstract syntax tree description (section 1).}
+    {- Runtime value representation (section 2).}
+    {- Helpers for environments and variable lookup (section 3).}
+    {- Pattern-matching engine (section 4).}
+    {- Tail-call trampoline and frame helpers (sections 5 & 6).}
+    {- Statement evaluation (section 7).}
+    {- Program evaluation entry-point (section 8).}}
+
+    Each public type and function is documented individually below.  Only
+    the high-level entry point [eval_program] is intended for external
+    consumers; everything else is provided to make the implementation
+    testable.
+*)
+
 open Core
 
 (***************************************************************************)
 (* 1) AST Types                                                            *)
 (***************************************************************************)
 
+(** A syntax node annotated with its source code span.  The parser wraps
+    every AST fragment in this record so that the evaluator and error
+    reporter can recover position information. *)
 type 'a node =
   { value : 'a
   ; span : Source.span
@@ -20,6 +47,12 @@ type pattern =
   | PVariant of string * pattern list
   | PRecord of (string * pattern) list * bool (* true = open row with _ *)
 [@@deriving sexp, compare]
+
+(** Abstract patterns used in the surface syntax and by the runtime
+    matcher.  The constructors mirror the value space of the language.  A
+    record pattern carries a flag indicating whether a trailing [_]
+    wildcard ("open row") is present – [true] means additional fields are
+    allowed. *)
 
 (** Represents the lexical address of a variable after the resolver pass.
    [depth] = how many frames to pop (0 = current frame),
@@ -79,6 +112,12 @@ type expr =
   | ERecordExtend of expr node * (string * expr node) list
 [@@deriving sexp_of]
 
+(** Untyped core language expressions.  Variants whose names end with
+    [*Slots] are produced by the resolver pass and contain pre-computed
+    slot descriptors that guide frame allocation in the evaluator.  A
+    regular consumer of the module should never manufacture these
+    directly – use {!Chatml_resolver.resolve} instead. *)
+
 type stmt =
   | SLet of string * expr node
   | SLetRec of (string * expr node) list
@@ -86,6 +125,10 @@ type stmt =
   | SOpen of string
   | SExpr of expr node
 [@@deriving sexp_of]
+
+(** Top–level statements accepted by the interpreter.  The concrete
+    syntax provides syntactic sugar that is desugared into this
+    representation by the parser. *)
 
 (* The [stmt] type is used to represent the top-level statements in a
    module.  The [program] type is a list of statements, followed by the
@@ -114,6 +157,11 @@ type value =
   | VModule of env
   | VUnit
   | VBuiltin of (value list -> value)
+
+(** Runtime values.  Except for [VBuiltin], every constructor is produced
+    by executing ChatML code.  [VBuiltin] wraps a host‐implemented OCaml
+    function and is used to expose primitive operations and the standard
+    library to user programs. *)
 
 and clos =
   { params : string list
@@ -693,6 +741,39 @@ and eval_stmt (env : env) (frames : Frame_env.env) (s : stmt node) : unit =
 (* 8) Program Evaluation                                                   *)
 (***************************************************************************)
 
+(** [eval_program env (stmts, module_name)] interprets a ChatML module.
+
+    The function mutates [env] in-place, inserting every value declared in
+    the module at top-level.  Evaluation proceeds in declaration order and
+    uses an empty frame stack – the interpreter never pushes frames for
+    the toplevel, therefore side-effects visible outside the call happen
+    solely through [env].
+
+    Example executing a minimal program that prints {e 42} using a
+    builtin [{!Chatml_builtin_modules.print_int}]:
+    {[
+      let open Chatgpt.Chatml in
+      let env = Chatml_lang.create_env () in
+      (* Register primitives *)
+      Hashtbl.set env ~key:"print_int" ~data:(VBuiltin (function
+        | [ VInt n ] -> print_endline (Int.to_string n); VUnit
+        | _ -> failwith "invalid call"));
+
+      let prog : Chatml_lang.program =
+        ( [ { Chatml_lang.value = Chatml_lang.SExpr
+                ( { value = Chatml_lang.EApp
+                    ( { value = Chatml_lang.EVar "print_int"; span = Source.dummy }
+                    , [ { value = Chatml_lang.EInt 42; span = Source.dummy } ] )
+                ; span = Source.dummy } )
+            ; span = Source.dummy }
+          ]
+        , "Main" )
+      in
+      Chatml_lang.eval_program env prog
+    ]}
+    After the call, the program has printed [42] and [env] contains the
+    bindings introduced by the program (none in this example).
+*)
 let eval_program (env : env) (prog : program) : unit =
   let initial_frames : Frame_env.env = [] in
   List.iter (fst prog) ~f:(fun stmt_node -> eval_stmt env initial_frames stmt_node)

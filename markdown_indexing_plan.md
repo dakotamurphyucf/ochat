@@ -169,7 +169,7 @@ Algorithm:
    * `chunking` – ensure a 1 000-token sample produces ≥ 4 snippets all within the token bounds.
    * `index_roundtrip` – index the bundled fixture docs, then query with a unique phrase; assert the top hit covers that phrase.
    * `catalogue_lookup` – create two dummy indexes with orthogonal descriptions; assert the catalogue shortlist picks the correct one.
-9. Documentation in `lib/docs-src/markdown_indexer.doc.md` explaining usage &  design.
+9. Documentation in `lib/docs-src/markdown_indexer.doc.md` explaining usage &  design. Use the `document` tool
 
 ---
 
@@ -222,10 +222,9 @@ End of plan – ready for implementation.
 | Register tools in `lib/chat_response/tool.ml` | completed |
 | Provide CLI wrappers `bin/md_index.ml` & `bin/md_search.ml` | completed |
 | Add `path_glob` dependency and fallback matcher | completed |
-| Unit tests: `chunking`, `index_roundtrip`, `catalogue_lookup` | pending |
-| Developer documentation (`markdown_indexer.doc.md`) | pending |
-| Expect tests for `markdown_crawler` and other new modules | pending |
-| Developer documentation (`markdown_crawler.doc.md`) and for other new modules | pending |
+| Unit tests: `chunking`, `index_roundtrip`, `catalogue_lookup` | completed |
+| Expect tests for `markdown_crawler` and other new modules | completed |
+| Developer documentation for (`markdown_crawler.doc.md`), (`markdown_indexer.doc.md`), and all the other modules we have edited/added | completed |
 
 > Follow the Task States & Management rules when updating this table during implementation.
 

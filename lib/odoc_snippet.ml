@@ -1,3 +1,13 @@
+(** Token-bounded slicing of Markdown documentation.
+
+    This implementation is a building block of {!Odoc_indexer}.  It
+    takes a single Markdown document – produced from the HTML emitted
+    by *odoc* – and chops it into **64-320 token** windows with
+    64-token overlap.  The heavy lifting lives in {!val:slice}; the
+    rest of the file is private helper code and a small LRU cache for
+    token counts.  See {!file:odoc_snippet.mli} for a full overview
+    and public API. *)
+
 open Core
 
 (**************************************************************************)

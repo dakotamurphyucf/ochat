@@ -12,7 +12,6 @@ val create
   -> codec:Tikitoken.codec
   -> rate_per_sec:int
   -> get_id:('meta -> string)
-  -> (('meta * string) list -> ('meta * string * Vector_db.Vec.t) list)
-
+  -> ('meta * string) list
+  -> ('meta * string * Vector_db.Vec.t) list
 [@@ocaml.warning "-32"]
-

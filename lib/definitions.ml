@@ -1,4 +1,29 @@
+(** Internal catalogue of GPT function definitions.
+
+    Each sub-module in this file implements {!Gpt_function.Def}.  The
+    definitions are *pure metadata* – they do **not** perform any
+    side-effects or I/O.  A caller must pair them with an
+    implementation via {!Gpt_function.create_function} before the tool
+    can be executed.
+
+    See {!file:definitions.mli} for a high-level overview of the
+    available tools.
+*)
+
 open Core
+
+(** {1 Get_contents}
+
+    Definition of the "read_file" tool.  The tool expects a JSON
+    object with a single field [file] containing a path, and forwards
+    the path unchanged as a string.
+
+    Example payload accepted by {!input_of_string}:
+
+    {[
+      "{ \"file\": \"/tmp/example.txt\" }"
+    ]}
+*)
 
 module Get_contents : Gpt_function.Def with type input = string = struct
   type input = string
@@ -22,8 +47,134 @@ module Get_contents : Gpt_function.Def with type input = string = struct
 end
 
 (* ---------------------------------------------------------------------- *)
+(*  Markdown indexing & search                                             *)
+(* ---------------------------------------------------------------------- *)
+
+(** {1 Index_markdown_docs}
+
+    Registers (or updates) a vector database built from a directory of
+    Markdown files.  The tool takes the following JSON payload:
+
+    {v
+    {
+      "root"           : "string",   // directory to crawl recursively
+      "index_name"     : "string",   // logical identifier, e.g. "docs"
+      "description"    : "string",   // one-line blurb for catalogue
+      "vector_db_root" : "string"?   // where to store the index (optional)
+    }
+    v}
+
+    It forwards the data as a 4-tuple [(root, index_name, description,
+    vector_db_root)].  The implementation is responsible for running
+    {!Markdown_indexer.index_directory}. *)
+
+module Index_markdown_docs :
+  Gpt_function.Def with type input = string * string * string * string option = struct
+  type input = string * string * string * string option
+
+  let name = "index_markdown_docs"
+
+  let description =
+    Some "Index a directory of Markdown files into a vector database for semantic search"
+  ;;
+
+  let parameters : Jsonaf.t =
+    `Object
+      [ "type", `String "object"
+      ; ( "properties"
+        , `Object
+            [ "root", `Object [ "type", `String "string" ]
+            ; "index_name", `Object [ "type", `String "string" ]
+            ; "description", `Object [ "type", `String "string" ]
+            ; "vector_db_root", `Object [ "type", `String "string" ]
+            ] )
+      ; "required", `Array [ `String "root"; `String "index_name"; `String "description" ]
+      ; "additionalProperties", `False
+      ]
+  ;;
+
+  let input_of_string s : input =
+    let j = Jsonaf.of_string s in
+    let root = Jsonaf.string_exn @@ Jsonaf.member_exn "root" j in
+    let index_name = Jsonaf.string_exn @@ Jsonaf.member_exn "index_name" j in
+    let description = Jsonaf.string_exn @@ Jsonaf.member_exn "description" j in
+    let vector_db_root =
+      Option.map ~f:Jsonaf.string_exn @@ Jsonaf.member "vector_db_root" j
+    in
+    root, index_name, description, vector_db_root
+  ;;
+end
+
+(** {1 Markdown_search}
+
+    Semantic search tool for Markdown indices previously created with
+    {!Index_markdown_docs}.  Expected JSON schema:
+
+    {v
+    {
+      "query"          : "string",         // search string (required)
+      "k"              : 5?,                // max hits (optional)
+      "index_name"     : "string"?,        // index to query or "all"
+      "vector_db_root" : "string"?         // root directory holding indices
+    }
+    v}
+  *)
+
+module Markdown_search :
+  Gpt_function.Def with type input = string * int option * string option * string option =
+struct
+  type input = string * int option * string option * string option
+
+  let name = "markdown_search"
+
+  let description =
+    Some
+      "Perform a semantic search over one or more Markdown indices previously built with \
+       `index_markdown_docs`."
+  ;;
+
+  let parameters : Jsonaf.t =
+    `Object
+      [ "type", `String "object"
+      ; ( "properties"
+        , `Object
+            [ "query", `Object [ "type", `String "string" ]
+            ; "k", `Object [ "type", `String "integer" ]
+            ; "index_name", `Object [ "type", `String "string" ]
+            ; "vector_db_root", `Object [ "type", `String "string" ]
+            ] )
+      ; "required", `Array [ `String "query" ]
+      ; "additionalProperties", `False
+      ]
+  ;;
+
+  let input_of_string s : input =
+    let j = Jsonaf.of_string s in
+    let query = Jsonaf.string_exn @@ Jsonaf.member_exn "query" j in
+    let k = Option.map ~f:Jsonaf.int_exn @@ Jsonaf.member "k" j in
+    let index_name = Option.map ~f:Jsonaf.string_exn @@ Jsonaf.member "index_name" j in
+    let vector_db_root =
+      Option.map ~f:Jsonaf.string_exn @@ Jsonaf.member "vector_db_root" j
+    in
+    query, k, index_name, vector_db_root
+  ;;
+end
+
+(* ---------------------------------------------------------------------- *)
 (*  ODoc search tool                                                       *)
 (* ---------------------------------------------------------------------- *)
+
+(** {1 Odoc_search}
+
+    Definition of an OCaml–specific documentation search tool that
+    queries a locally-indexed `.odoc` corpus.  The [input] is a
+    quadruplet [(query, k, index, package)]:
+
+    • [query]   – free-form text or code snippet used for semantic search.
+    • [k]       – optional upper bound on the number of hits (defaults to 5).
+    • [index]   – optional path to a custom odoc search index.
+    • [package] – the opam package name to scope the search or "all".
+*)
 
 module Odoc_search :
   Gpt_function.Def with type input = string * int option * string option * string = struct
@@ -109,6 +260,14 @@ type fork_input =
   ; arguments : string list
   }
 
+(** {1 Fork}
+
+    Definition of a tool that spawns an auxiliary agent operating on
+    the same workspace.  The [input] record specifies the [command]
+    executed by the fork and an optional list of CLI-style
+    [arguments].
+*)
+
 module Fork : Gpt_function.Def with type input = fork_input = struct
   [@@@warning "-69"]
 
@@ -179,6 +338,14 @@ The fork Agent Returns exactly one assistant message, using this template:
   ;;
 end
 
+(** {1 Webpage_to_markdown}
+
+    Definition of the "webpage_to_markdown" tool.  Accepts a single
+    [url] string and asks the implementation to download the document
+    and convert it to Markdown.  The [input] type is therefore a plain
+    string.
+*)
+
 module Webpage_to_markdown : Gpt_function.Def with type input = string = struct
   type input = string
 
@@ -203,6 +370,13 @@ module Webpage_to_markdown : Gpt_function.Def with type input = string = struct
   ;;
 end
 
+(** {1 Add_line_numbers}
+
+    Metadata for a trivial utility that prefixes every line of a text
+    block with its 1-based index.  Receives the raw [text] as input
+    and returns the annotated version.
+*)
+
 module Add_line_numbers : Gpt_function.Def with type input = string = struct
   type input = string
 
@@ -224,6 +398,12 @@ module Add_line_numbers : Gpt_function.Def with type input = string = struct
   ;;
 end
 
+(** {1 Get_url_content}
+
+    Tool definition that retrieves the raw body of the resource
+    located at the given [url].  The [input] is that URL as a string.
+*)
+
 module Get_url_content : Gpt_function.Def with type input = string = struct
   type input = string
 
@@ -244,6 +424,14 @@ module Get_url_content : Gpt_function.Def with type input = string = struct
     Jsonaf.string_exn @@ Jsonaf.member_exn "url" j
   ;;
 end
+
+(** {1 Index_ocaml_code}
+
+    Registers all OCaml sources found under [folder_to_index] in a
+    vector search database located at [vector_db_folder].  The
+    function later allows semantic code search via
+    {!Query_vector_db}.
+*)
 
 module Index_ocaml_code : Gpt_function.Def with type input = string * string = struct
   type input = string * string
@@ -275,6 +463,17 @@ module Index_ocaml_code : Gpt_function.Def with type input = string * string = s
     , Jsonaf.string_exn @@ Jsonaf.member_exn "vector_db_folder" j )
   ;;
 end
+
+(** {1 Query_vector_db}
+
+    Performs a semantic search over a previously built vector
+    database.  The 4-tuple carried in [input] is
+
+    • [vector_db_folder] – path to the database on disk
+    • [query]            – natural-language search query
+    • [num_results]      – maximum number of hits to return
+    • [index]            – optional secondary index name
+*)
 
 module Query_vector_db :
   Gpt_function.Def with type input = string * string * int * string option = struct
@@ -312,6 +511,22 @@ module Query_vector_db :
     , Option.map ~f:Jsonaf.string_exn @@ Jsonaf.member "index" j )
   ;;
 end
+
+(** {1 Apply_patch}
+
+    Specification of the *workspace mutation* tool.  The sole string
+    input must contain a patch expressed in the project-specific V4A
+    format delimited by
+
+    {v
+    *** Begin Patch
+    ...
+    *** End Patch
+    v}
+
+    The implementation is responsible for validating and applying the
+    patch to the local git repository.
+*)
 
 module Apply_patch : Gpt_function.Def with type input = string = struct
   type input = string
@@ -394,6 +609,13 @@ Note, then, that we do not use line numbers in this diff format, as the context 
   ;;
 end
 
+(** {1 Read_directory}
+
+    Presents a thin wrapper around [Sys.readdir].  Given a [path]
+    string, returns (via the implementation) the list of entries in
+    that directory.
+*)
+
 module Read_directory : Gpt_function.Def with type input = string = struct
   type input = string
 
@@ -424,6 +646,12 @@ module Read_directory : Gpt_function.Def with type input = string = struct
     Jsonaf.string_exn @@ Jsonaf.member_exn "path" j
   ;;
 end
+
+(** {1 Make_dir}
+
+    Tool definition used to create a new directory on the filesystem.
+    The [input] is the destination [path] supplied as a string.
+*)
 
 module Make_dir : Gpt_function.Def with type input = string = struct
   type input = string
