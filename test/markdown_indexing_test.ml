@@ -8,7 +8,9 @@ let dot a b = Array.fold2_exn a b ~init:0.0 ~f:(fun acc x y -> acc +. (x *. y))
 (* -------------------------------------------------------------------------- *)
 
 let%expect_test "markdown_snippet.chunking" =
-  let tiki_path = "./out-cl100k_base.tikitoken.txt" in
+  (* Embed BPE file contents at compile-time. [%blob] provided by
+     ppx_blob and file declared in preprocessor_deps in dune. *)
+  let tiki_bpe = [%blob "../out-cl100k_base.tikitoken.txt"] in
   (* Build a markdown document with many paragraphs to trigger multiple
      slices. 20 paragraphs × 100 tokens ≈ 2 000 tokens. *)
   let para = String.concat ~sep:" " (List.init 100 ~f:(fun _ -> "token")) in
@@ -19,14 +21,13 @@ let%expect_test "markdown_snippet.chunking" =
       ~index_name:"test"
       ~doc_path:"doc.md"
       ~markdown
-      ~tiki_token_bpe:tiki_path
+      ~tiki_token_bpe:tiki_bpe
       ()
   in
   let num = List.length slices in
   (* Expect at least 4 snippets within token bounds (64-320) *)
-  assert (num >= 4);
-  print_endline "ok";
-  [%expect {| ok |}]
+  print_endline (Int.to_string num);
+  [%expect {| 7 |}]
 ;;
 
 (* -------------------------------------------------------------------------- *)
