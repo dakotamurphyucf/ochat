@@ -1,0 +1,142 @@
+[1] [containers-data] 69703613968bd58e022a991140f3aca6:
+(** Package:containers-data Doc:README Lines:119-121 *)
+
+```ocaml
+(* an extension of Map.Make, compatible with Map.Make(CCInt) *)
+module IntMap = CCMap.Make(CCInt);;
+```
+```ocaml
+# (* conversions using the "iter" type, fast iterators that are
+   pervasively used in containers. Combinators can be found
+   in the opam library "iter". *)
+  let map : string IntMap.t =
+    l2
+    |> List.map (fun x -> x, string_of_int x)
+    |> CCList.to_iter
+    |> IntMap.of_iter;;
+val map : string IntMap.t = <abstr>
+
+# CCList.to_iter (* check the type *);;
+- : 'a list -> 'a CCList.iter = <fun>
+# IntMap.of_iter ;;
+- : (int * 'a) CCMap.iter -> 'a IntMap.t = <fun>
+
+# (* we can print, too *)
+  Format.printf "@[<2>map =@ @[<hov>%a@]@]@."
+    (IntMap.pp CCFormat.int CCFormat.string_quoted)
+    map;;
+map =
+  1 -> "1", 2 -> "2", 3 -> "3", 4 -> "4", 5
+  -> "5", 6 -> "6", 7 -> "7", 8 -> "8", 9 -> "9"
+- : unit = ()
+
+# (* options are good *)
+  IntMap.get 3 map |> CCOption.map (fun s->s ^ s);;
+- : string option = Some "33"
+```
+
+
+---
+
+
+[2] [gmap] dd96808ba3ab2314ee314f3d1a64ad29:
+(** Package:gmap Module:gmap Lines:1-16 *)
+
+# Package gmap 0\.3\.0[`Gmap`](Gmap/index.html)Heterogenous maps over a GADT\.
+## Package info
+| Col1 | Col2 |
+| --- | --- |
+| authors | Hannes Mehnert <hannes@mehnert\.org\> |
+| changes\-files | [CHANGES\.md](_doc-dir/CHANGES.md) |
+| depends | [alcotest](../alcotest/index.html)[dune](../dune/index.html)[fmt](../fmt/index.html)[ocaml](../ocaml/index.html) |
+| homepage | [https://github\.com/hannesm/gmap](https://github.com/hannesm/gmap) |
+| issues | [https://github\.com/hannesm/gmap/issues](https://github.com/hannesm/gmap/issues) |
+| license | ISC |
+| license\-files | [LICENSE\.md](_doc-dir/LICENSE.md) |
+| maintainers | Hannes Mehnert <hannes@mehnert\.org\> |
+| online\-doc | [https://hannesm\.github\.io/gmap/doc](https://hannesm.github.io/gmap/doc) |
+| readme\-files | [README\.md](_doc-dir/README.md) |
+| repo | git\+https://github\.com/hannesm/gmap\.git |
+| version | 0\.3\.0 |
+
+
+---
+
+
+[3] [containers-data] e0ae81881732cb1daf996607b46ba719:
+(** Package:containers-data Module:containers-data.CCRAL Lines:79-100 *)
+
+`val rev_map : f:('a -> 'b) -> 'a t -> 'b t`
+`rev_map f l` is the same as `map f (rev l)`\.
+`val rev : 'a t -> 'a t`
+Reverse the list\.
+`val equal : eq:('a -> 'a -> bool) -> 'a t -> 'a t -> bool`
+`val compare : cmp:('a -> 'a -> int) -> 'a t -> 'a t -> int`
+Lexicographic comparison\.
+### Utils
+`val make : int -> 'a -> 'a t`
+`val repeat : int -> 'a t -> 'a t`
+`repeat n l` is `append l (append l ... l)``n` times\.
+`val range : int -> int -> int t`
+`range i j` is `i; i+1; ... ; j` or `j; j-1; ...; i`\.
+### Conversions
+`type 'a iter = ('a -> unit) -> unit`
+`type 'a gen = unit -> 'a option`
+`val add_list : 'a t -> 'a list -> 'a t`
+`val of_list : 'a list -> 'a t`
+Convert a list to a RAL\. **Caution**: non tail\-rec\.
+`val to_list : 'a t -> 'a list`
+`val of_list_map : f:('a -> 'b) -> 'a list -> 'b t`
+
+
+---
+
+
+[4] [gmap] 60672ff9b49053fb3876d918302b8588:
+(** Package:gmap Module:gmap.Gmap.Make Lines:56-72 *)
+
+### Higher\-order functions
+`type eq = {`
+1. `f : 'a. 'a key -> 'a -> 'a -> bool;`
+`}`
+The function type for the equal operation, using a record type for "first\-class" semi\-explicit polymorphism\.
+`val equal : eq -> t -> t -> bool`
+`equal p m m'` tests whether the maps `m` and `m'` are equal, that is contain equal keys and associate them with equal data\. `p` is the equality predicate used to compare the data associated with the keys\.
+`type mapper = {`
+1. `f : 'a. 'a key -> 'a -> 'a;`
+`}`
+The function type for the map operation, using a record type for "first\-class" semi\-explicit polymorphism\.
+`val map : mapper -> t -> t`
+`map f m` returns a map with the same domain as `m`, where the associated binding `b` has been replaced by the result of the application of `f` to `b`\. The bindings are passed to `f` in increasing order with respect to the ordering over the type of the keys\.
+`val iter : (b -> unit) -> t -> unit`
+`iter f m` applies `f` to all bindings in `m`\. The bindings are passed in increasing order with respect to the ordering over the type of keys\.
+`val fold : (b -> 'a -> 'a) -> t -> 'a -> 'a`
+
+
+---
+
+
+[5] [gmap] 99a9605e5aa4a9341200de2211bb42a1:
+(** Package:gmap Module:gmap.Gmap.module-type-S Lines:52-68 *)
+
+### Higher\-order functions
+`type eq = {`
+1. `f : 'a. 'a key -> 'a -> 'a -> bool;`
+`}`
+The function type for the equal operation, using a record type for "first\-class" semi\-explicit polymorphism\.
+`val equal : eq -> t -> t -> bool`
+`equal p m m'` tests whether the maps `m` and `m'` are equal, that is contain equal keys and associate them with equal data\. `p` is the equality predicate used to compare the data associated with the keys\.
+`type mapper = {`
+1. `f : 'a. 'a key -> 'a -> 'a;`
+`}`
+The function type for the map operation, using a record type for "first\-class" semi\-explicit polymorphism\.
+`val map : mapper -> t -> t`
+`map f m` returns a map with the same domain as `m`, where the associated binding `b` has been replaced by the result of the application of `f` to `b`\. The bindings are passed to `f` in increasing order with respect to the ordering over the type of the keys\.
+`val iter : (b -> unit) -> t -> unit`
+`iter f m` applies `f` to all bindings in `m`\. The bindings are passed in increasing order with respect to the ordering over the type of keys\.
+`val fold : (b -> 'a -> 'a) -> t -> 'a -> 'a`
+
+
+---
+
+

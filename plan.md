@@ -174,7 +174,8 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 | Executable survey | in_progress | Run each public binary with `--help`, record usage & examples. | Environment ready | Attach captured output as artefacts. |
 |  ├─ List binaries | completed | Enumerate all (public_name ...) stanzas under `bin/` and similar. Produce `out/binaries.csv`. | Executable survey | |
 |  ├─ Implement `script/exe_survey.ml` | completed | OCaml script `script/exe_survey.ml` captures `--help` output for each binary into `out/help/`, utilises Eio.Process. | List binaries | `dune exec exe_survey` to refresh. |
-|  ├─ Capture minimal run examples | in_progress | Extend script to run sample invocations for selected binaries (`md-search "hello"`, etc.). Logs in `out/examples/<exe>.txt`. | Implement `script/exe_survey.ml` | |
+|  ├─ Capture minimal run examples | completed | Extend script to run sample invocations for selected binaries (`md-search "hello"`, etc.). Logs in `out/examples/<exe>.txt`. | Implement `script/exe_survey.ml` | |
+|  ├─ Commit artefacts | in_progress | Stage and commit generated help and example transcripts. | Capture minimal run examples | |
 |  ├─ Commit artefacts | pending | Stage and commit generated help and example transcripts. | Capture minimal run examples | |
 |  └─ Close task | pending | Review outputs, update TODO statuses (`completed`). | Commit artefacts | |
 | ChatMD spec (EBNF) | pending | Extract grammar from `chatmd_parser.mly`, render to markdown & embed diagrams. | ChatMD deep-dive | Use Menhir `--list-errors` to help. |

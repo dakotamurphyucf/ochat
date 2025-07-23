@@ -1,0 +1,4 @@
+Type checking succeeded!
+Alice 
+{ age = 56; name = Alice } 
+[|1, 2|] 

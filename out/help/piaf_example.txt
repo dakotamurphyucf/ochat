@@ -1,0 +1,1 @@
+<error> Does not support --help

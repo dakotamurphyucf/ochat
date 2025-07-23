@@ -1,0 +1,12 @@
+Interactive ChatGPT TUI
+
+  chat-tui 
+
+=== flags ===
+
+  [-file FILE]               . Conversation buffer path (default:
+                               ./prompts/interactive.md)
+  [-build-info]              . print info about this build and exit
+  [-version]                 . print the version of this build and exit
+  [-help], -?                . print this help text and exit
+

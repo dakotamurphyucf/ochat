@@ -1,0 +1,152 @@
+[1] [docs-src/lib] d20c87bb41a6add1c8c156619e7330f1
+(** Package:docs-src/lib Doc:template.doc.md Lines:24-35 *)
+
+Prints:
+```text
+Hello, John!
+Your age is 30.
+Shopping:
+items
+-----------
+- milk
+- bread
+```
+## 4. Design decisions & limitations
+* **Performance** — substitution relies on a single `Re2.replace_exn`
+  call; for small templates this is negligible.  No streaming
+  interface is provided.
+* **Escaping / conditionals** — out-of-scope on purpose.  Use a full
+  feature-rich engine (e.g. *mustache.ml*) if you require loops or
+  conditionals.
+* **Missing keys** — silently replaced by the empty string.  Wrap
+  `render` if you need stricter behaviour.
+## 5. Related work
+* [`mustache`](https://github.com/rgrinberg/ocaml-mustache) — full
+  Mustache implementation; heavier but more powerful.
+* [`fmt`](https://erratique.ch/software/fmt) — combinator library for
+  pretty-printing; not template-string based but worth a look for
+  complex formatting tasks.
+## 6. Changelog
+* **v0.1.0** – initial release (render, parse, nested templates).
+Happy templating! ✨
+
+---
+
+[2] [docs-src/bin] 21ca228576fda02cb0a45d2d78c01fb1
+(** Package:docs-src/bin Doc:eio_get.doc.md Lines:3-6 *)
+
+```text
+$ gpt eio-get http://localhost:8080
+{"role":"assistant","message":"hello"}
+{"role":"assistant","message":"how can I help?"}
+```
+## High-level overview
+1. **Logging** – [`setup_log`](#val-setup_log) configures coloured log
+   output via `Logs` and `Fmt`.
+2. **Connection** – [`request`](#val-request) creates a
+   `Piaf.Client.t`, enabling redirect following and allowing insecure
+   TLS certificates so the executable can be used against local dev
+   servers.
+3. **Streaming** – once the `GET /mcp` request is issued, the response
+   body is copied into an [`Eio`](https://eio.trustedlogic.net/) pipe.
+   A helper fibre feeds the pipe so the main fibre can run an
+   [`Eio.Buf_read`](https://eio.trustedlogic.net/api/Eio/Buf_read/)
+   parser.
+4. **Parsing events** – events are separated by an empty line
+   (standard SSE framing).  Within each event only lines that start
+   with `data: ` are kept.  Payloads equal to `data: [DONE]` mark the
+   end of the stream and are ignored.
+5. **Output** – every JSON payload is parsed with
+   [`Jsonaf.parse`](https://ocaml.janestreet.com/ocaml-core/latest/doc/jsonaf/) and
+   pretty-printed to stdout.
+
+---
+
+[3] [docs-src/lib] 2bb1e7ae7b4313bf44be75ae9e0a1537
+(** Package:docs-src/lib Doc:mcp/mcp_prompt_agent.doc.md Lines:31-39 *)
+
+## Usage Example
+Assume the following `hello_world.chatmd` file:
+```xml
+<system>You are a very polite assistant.</system>
+<assistant>Hello!  How can I help you today?</assistant>
+```
+Registering the agent during server start-up:
+```ocaml
+open Eio
+
+let () =
+  Eio_main.run @@ fun env ->
+  let core = Mcp_server_core.create () in
+  let path = Stdenv.cwd env / "hello_world.chatmd" in
+
+  let tool, handler, prompt =
+    Mcp_prompt_agent.of_chatmd_file ~env ~core ~path
+  in
+
+  Mcp_server_core.register_tool core tool ~handler;
+  Mcp_server_core.register_prompt core tool.name prompt;
+
+  Mcp_server_http.serve ~env ~core ~port:8080
+```
+At runtime a client can call the tool via JSON-RPC:
+```jsonc
+// request
+{
+  "id"     : 42,
+  "method" : "tools/call",
+  "params" : {
+    "name" : "hello_world",
+    "args" : { "input": "What is the weather?" }
+  }
+}
+
+// response (simplified)
+{
+  "id"     : 42,
+  "result" : "I'm afraid I don't have real-time weather data, but …"
+}
+```
+## Limitations / Future work
+
+---
+
+[4] [docs-src/lib] 5f5ccc8ef32cb849cee837d99cf372a5
+(** Package:docs-src/lib Doc:chatmd/prompt.doc.md Lines:5-9 *)
+
+Why that matters: you can pattern-match and transform the prompt safely
+instead of juggling `((string * string) list) option` blobs.
+## 2. Quick start
+```ocaml
+open Chatmd_prompt   (* public name: Chat_markdown inside prompt.ml *)
+
+let env        = Eio.Stdenv.cwd env    (* anywhere in your app *)
+let prompt_dir = Io.ensure_chatmd_dir ~cwd:env in
+
+let raw        = Io.load_doc ~dir:prompt_dir "hello.chatmd" in
+let messages   = Chat_markdown.parse_chat_inputs ~dir:prompt_dir raw in
+
+List.iter messages ~f:(function
+  | Chat_markdown.User      m -> printf "User: %s\n"  (Option.value ~default:"" m.content)
+  | Chat_markdown.Assistant m -> printf "Assistant: ..."                (* etc. *)
+  | _ -> ())
+```
+## 3. Selected type cheatsheet
+
+---
+
+[5] [docs-src/lib] 6173fe70b104f085916f953bd8195365
+(** Package:docs-src/lib Doc:mcp/mcp_server_http.doc.md Lines:3-4 *)
+
+````text
+┌──────────┐  HTTP POST    ┌────────────────┐
+│          │  JSON-RPC     │                │   SSE push
+│ Browser  │ ────────────►│   MCP Router   │────────────► stdout
+│ or CLI   │              │  / Core        │◄────────────
+│          │  HTTP GET    │                │   keep-alive
+└──────────┘◄─────────────└────────────────┘
+           SSE channel
+````
+
+---
+

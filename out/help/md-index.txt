@@ -1,0 +1,7 @@
+md-index --root <path> [--name docs] [--desc text] [--out .md_index]
+  --root Root directory to crawl recursively
+  --name Logical index name (default: docs)
+  --desc One-line description (default: Markdown documentation index)
+  --out Output directory for vector DB (default: .md_index)
+  -help  Display this list of options
+  --help  Display this list of options
