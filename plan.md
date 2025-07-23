@@ -196,5 +196,10 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 | MCP protocol write-up | completed | Diagram of message flow, transport variants, sample JSON. | Vector DB & indexing notes |  |
 | Draft README skeleton | completed | Produce outline with placeholders for each section. | All research tasks | Align with existing style-guides. |
 | Continuous validation | completed | Keep README skeleton up-to-date as tasks complete. Validation script `readme_validation` added. | Draft README skeleton | Prevent scope creep. |
+| Populate README – Introduction & Quick-start | completed | Fill sections 1 & 2 of the README using gathered research artefacts. | Draft README skeleton | Ensure commands verified via `dune exec`. |
+| Populate README – Architecture & CLI tools | pending | Complete sections 3 & 4 incl. architecture diagram link and auto-generated CLI table. | Populate README – Introduction & Quick-start | Use `out/help/*.txt` for table content. |
+| Populate README – Domain languages | pending | Finalise ChatMD (sec 5) and ChatML (sec 6) sections with links to detailed docs and examples. | Populate README – Architecture & CLI tools |  |
+| Populate README – Subsystems | pending | Write embedding/search, OAuth2, MCP sections (7-9) referencing dedicated docs. | Populate README – Domain languages |  |
+| Populate README – Contributing & polish | pending | Fill contributing guidelines, badges, license section and perform final proofreading. | Populate README – Subsystems | Run `readme_validation` script. |
 
 > Follow the Task States & Management rules when updating this table during implementation.
