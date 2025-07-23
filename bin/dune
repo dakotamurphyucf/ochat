@@ -54,6 +54,32 @@
   package_index
   odoc_indexer))
 
+;; ---------------------------------------------------------------------------
+;; Markdown index executables
+;; ---------------------------------------------------------------------------
+
+(executable
+ (public_name md-index)
+ (name md_index)
+ (modules md_index)
+ (libraries
+  core
+  eio_main
+  markdown_indexer))
+
+(executable
+ (public_name md-search)
+ (name md_search)
+ (modules md_search)
+ (libraries
+  core
+  eio_main
+  vector_db
+  openai
+  io
+  md_index_catalog
+  markdown_indexer))
+
 (executable
  (public_name key-dump)
  (name key_dump)

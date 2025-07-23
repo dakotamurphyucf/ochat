@@ -217,10 +217,10 @@ End of plan – ready for implementation.
 | Refactor shared embedding logic into `embed_service.ml`  | completed |
 | Implement `Markdown_indexer` pipeline incl. centroid computation & persistence | completed |
 | Build index catalogue (`md_index_catalog.binio`) writer/loader | completed |
-| Add `Definitions.Index_markdown_docs` & `Definitions.Markdown_search` | pending |
-| Wire wrappers in `functions.ml` | pending |
-| Register tools in `lib/chat_response/tool.ml` | pending |
-| Provide CLI wrappers `bin/md_index.ml` & `bin/md_search.ml` | pending |
+| Add `Definitions.Index_markdown_docs` & `Definitions.Markdown_search` | completed |
+| Wire wrappers in `functions.ml` | completed |
+| Register tools in `lib/chat_response/tool.ml` | completed |
+| Provide CLI wrappers `bin/md_index.ml` & `bin/md_search.ml` | completed |
 | Add optional `ocaml-gitignore` dependency and fallback matcher | pending |
 | Unit tests: `chunking`, `index_roundtrip`, `catalogue_lookup` | pending |
 | Developer documentation (`markdown_indexer.doc.md`) | pending |
