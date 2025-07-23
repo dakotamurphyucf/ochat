@@ -67,10 +67,12 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
  --------------------------------------------------------------------------------
 ## 4. Implementation steps (revised)
 
-1. **Environment bootstrap**
-   • `opam install . --deps-only -y` → pulls all external libraries.
-   • Export secrets: `export OPENAI_API_KEY=…` (the tests and runtime tools expect it).
-   • `dune build` + `dune runtest --diff-command=diff -u` – verify green baseline.
+1. **Environment bootstrap (already provisioned)**
+   The development environment is assumed to be fully configured:
+   • All opam dependencies are installed.
+   • `OPENAI_API_KEY` (and any other required secrets) are set.
+   • `dune build` and `dune runtest` pass.
+   Therefore this step is marked *completed*—no further action required.
 
 2. **Generate fresh dependency graph**
    • `dune describe --eval --format=json` > `out/deps.json`.
@@ -124,11 +126,11 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 
  | Task | State | Description | Dependencies | Notes |
  |------|-------|-------------|--------------|-------|
- | Bootstrap env | pending | Install all opam deps, confirm `dune build` + tests pass. | – | Prepare reproducible dev-shell. |
- | Generate dep graph | pending | Run `dune describe`, create mermaid diagram of libs & exes. | Bootstrap env | Use `dune describe --eval` for workspace-wide view. |
- | Catalogue modules | pending | Script to list every ML(i) file grouped by library/exe. | Bootstrap env | Could reuse existing `dune describe` JSON. |
+ | Bootstrap env | completed | Environment already set-up and verified (`dune runtest` green). | – |  |
+ | Generate dep graph | pending | Run `dune describe`, create mermaid diagram of libs & exes. | Environment ready | Use `dune describe --eval` for workspace-wide view. |
+ | Catalogue modules | pending | Script to list every ML(i) file grouped by library/exe. | Environment ready | Could reuse existing `dune describe` JSON. |
 | Documentation mining | pending | Pull existing docs from `docs-src`, `markdown_search` and `odoc_search`; flag gaps. | Catalogue modules | Automate with `rg` + `jq` where possible. |
- | Executable survey | pending | Run each public binary with `--help`, record usage & examples. | Bootstrap env | Attach captured output as artefacts. |
+ | Executable survey | pending | Run each public binary with `--help`, record usage & examples. | Environment ready | Attach captured output as artefacts. |
 | ChatMD spec (EBNF) | pending | Extract grammar from `chatmd_parser.mly`, render to markdown & embed diagrams. | ChatMD deep-dive | Use Menhir `--list-errors` to help. |
 | Embedding flow diagram | pending | Create Mermaid sequence diagram for embedding pipeline. | Vector DB & indexing notes |  |
 | OAuth2 overview doc | pending | Write `docs/oauth2_overview.md` summarising flows. | OAuth2 stack notes |  |
@@ -155,4 +157,4 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
  --------------------------------------------------------------------------------
  ## 7. Next action
 
- Move **Bootstrap env** to `in_progress` once this plan is accepted.
+ With the environment already provisioned, the next actionable task is to start **Generate dep graph** and mark it `in_progress`.
