@@ -183,7 +183,7 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 |  ├─ Add Mermaid diagram | completed | Embed a simple state diagram illustrating element nesting. | Write markdown section |  |
 |  └─ Update last-updated timestamp | completed | Insert current date in markdown footer. | Write markdown section |  |
 | Embedding flow diagram | completed | Create Mermaid sequence diagram for embedding pipeline. | Vector DB & indexing notes |  |
-| OAuth2 overview doc | pending | Write `docs/oauth2_overview.md` summarising flows. | OAuth2 stack notes |  |
+| OAuth2 overview doc | completed | Write `docs/oauth2_overview.md` summarising flows. | OAuth2 stack notes |  |
 | ChatMD deep-dive | completed | Analyse lexer/parser, produce syntax reference & examples. | Catalogue modules | Also inspect docs-src snippets. |
 |  ├─ Inspect lexer & parser | completed | Reviewed chatmd_lexer.mll & chatmd_parser.mly, wrote summary in `docs/chatmd_lexer_parser_notes.md`. | ChatMD deep-dive |  |
 |  ├─ Draft syntax reference | completed | Draft syntax reference outline in `docs/chatmd_syntax_reference.md`. | Inspect lexer & parser |  |
