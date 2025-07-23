@@ -122,12 +122,20 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
     • After each major research task, update the README skeleton to ensure coverage (prevent last-minute surprises).
 
  --------------------------------------------------------------------------------
- ## 5. TODO Table
+ ## 5. Risk & Mitigation
+
+ *Large surface area* → strictly enforce small tasks & frequent commits.
+
+ *Stale information* → automate extraction where possible (e.g. introspect `dune` rather than manual lists).
+
+--------------------------------------------------------------------------------
+
+ ## 6. TODO Table
 
  | Task | State | Description | Dependencies | Notes |
  |------|-------|-------------|--------------|-------|
  | Bootstrap env | completed | Environment already set-up and verified (`dune runtest` green). | – |  |
- | Generate dep graph | pending | Run `dune describe`, create mermaid diagram of libs & exes. | Environment ready | Use `dune describe --eval` for workspace-wide view. |
+| Generate dep graph | completed | Raw deps stored at `out/deps.sexp`, JSON at `out/deps.json`, Mermaid diagram at `docs/deps.mmd`, cross-check log at `out/deps-check.log`. | Environment ready | Automated via `tools/gen_dep_graph.sh`. |
  | Catalogue modules | pending | Script to list every ML(i) file grouped by library/exe. | Environment ready | Could reuse existing `dune describe` JSON. |
 | Documentation mining | pending | Pull existing docs from `docs-src`, `markdown_search` and `odoc_search`; flag gaps. | Catalogue modules | Automate with `rg` + `jq` where possible. |
  | Executable survey | pending | Run each public binary with `--help`, record usage & examples. | Environment ready | Attach captured output as artefacts. |
@@ -142,19 +150,4 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
  | Draft README skeleton | pending | Produce outline with placeholders for each section. | All research tasks | Align with existing style-guides. |
 | Continuous validation | pending | Keep README skeleton up-to-date as tasks complete. | Draft README skeleton | Prevent scope creep. |
 
- --------------------------------------------------------------------------------
- ## 6. Risk & Mitigation
-
- *Large surface area* → strictly enforce small tasks & frequent commits.
-
- *Stale information* → automate extraction where possible (e.g. introspect `dune` rather than manual lists).
-
-
-*Tooling drift* → pin opam switch in `.ocaml-env` file.
-
-*External API quota / cost* → default to `--dry-run` modes, mock OpenAI responses when possible, limit embedding calls to small corpora unless `ALLOW_OPENAI_SPEND=true`.
-
- --------------------------------------------------------------------------------
- ## 7. Next action
-
- With the environment already provisioned, the next actionable task is to start **Generate dep graph** and mark it `in_progress`.
+> Follow the Task States & Management rules when updating this table during implementation.
