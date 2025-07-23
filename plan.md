@@ -38,6 +38,34 @@
  *Infrastructure helpers*
  • `apply_patch`, `template`, `dune_describe`, `git`, … – developer tooling.
 
+--------------------------------------------------------------------------------
+### 2.a Tooling conventions for OCaml helpers
+
+When writing **new OCaml automation scripts** (e.g., research utilities under
+`script/`):
+
+1. **Start with semantic search**
+   • Use `markdown_search` to query the repository’s Markdown docs in natural
+     language.
+   • Use `odoc_search` for APIs in both *opam* libraries and in-repo modules.
+
+   Example: `odoc_search {query = ": Eio.Switch.t"; package = "all"}` quickly
+   surfaces constructors/consumers of `Eio.Switch.t` without browsing the web.
+
+2. **Complement with Sherlodoc** when you need fuzzy type or name matching
+   across *all* opam packages (`sherlodoc search "List concat"`).
+
+3. **Always add a dune stanza** for each script so that `dune exec
+   <script_name>` works in CI.  Place the file in `script/`.
+
+4. **Prefer Base & Eio**  – follow Jane-Street conventions and default to Eio
+   for non-blocking IO or subprocess management.
+
+5. **Update the TODO table live** – mark the current task `in_progress` →
+   `completed` *immediately* when the script is functional and committed.
+
+These points are now treated as **hard requirements** for future tasks.
+
  The architecture can be visualised as three concentric rings:
  1. **Core runtime** – OpenAI bindings, embeddings, search, OAuth.
  2. **Domain layer** – ChatMD / ChatML languages + prompt tooling.
