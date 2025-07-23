@@ -3,3 +3,10 @@
  (public_name dep_graph_generator)
  (package chatgpt)
 (libraries unix yojson str))
+
+;; Module catalogue generator
+(executable
+ (name module_catalogue)
+ (public_name module_catalogue)
+ (package chatgpt)
+ (libraries unix sexplib0 sexplib str))
