@@ -1,0 +1,18 @@
+
+<user>
+Hello!  Could you explain what ChatMD is and why it exists?
+</user>
+
+<assistant>
+Certainly – ChatMD (Chat Markdown) is a small XML-like language used in this
+repository to write prompts for large language models.  It provides:
+
+* **Explicit roles** – `<user>`, `<assistant>`, `<system>` …
+* **Embedded tools** – `<tool_call>`, `<tool_response>`
+* **Rich snippets** – `<doc>` for code / odoc extracts, `<img>` for pictures.
+
+Because roles and boundaries are explicit, our runtime can shuffle messages,
+stream tool responses, and render pretty UIs while still achieving
+loss-less round-tripping of the original text.
+</assistant>
+
