@@ -213,8 +213,8 @@ End of plan – ready for implementation.
 |------|-------|
 | Scaffold new modules (`markdown_crawler.ml`, `markdown_snippet.ml`, `markdown_indexer.ml`) & update `dune` | completed |
 | Implement `Markdown_crawler` with `.gitignore` support & 10 MiB cap | completed |
-| Implement `Markdown_snippet` (chunker reuse + token logic) | pending |
-| Refactor shared embedding logic into `embed_service.ml` (optional) | pending |
+| Implement `Markdown_snippet` (chunker reuse + token logic) | completed |
+| Refactor shared embedding logic into `embed_service.ml` (optional) | completed |
 | Implement `Markdown_indexer` pipeline incl. centroid computation & persistence | pending |
 | Build index catalogue (`md_index_catalog.binio`) writer/loader | pending |
 | Add `Definitions.Index_markdown_docs` & `Definitions.Markdown_search` | pending |

@@ -150,6 +150,14 @@
   (pps ppx_jane)))
 
 (library
+ (name embed_service)
+ (public_name chatgpt.embed_service)
+ (modules embed_service)
+ (libraries core eio eio.unix openai tikitoken vector_db)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
  (name gpt_function)
  (public_name chatgpt.gpt_function)
  (modules gpt_function)
