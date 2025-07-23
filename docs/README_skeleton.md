@@ -67,20 +67,59 @@ make tour
 
 ## 3  Architecture overview
 
-![Architecture diagram](docs/architecture.svg)
+> *If you prefer pictures:* see `docs/architecture.mmd` for an interactive
+> Mermaid diagram or the pre-rendered `docs/architecture.svg`.
 
-High-level description:
+```
+graph LR
+  subgraph Front-ends
+    CLI[gpt / chat-tui]
+    HTTP[MCP HTTP server]
+  end
 
-* Core runtime – embeddings, OAuth, MCP, search.
-* Domain layer – ChatMD & ChatML.
-* Front-ends – CLI, TUI, HTTP server.
+  subgraph Domain-layer
+    ChatMD[ChatMD parser & runtime]
+    ChatML[ChatML interpreter]
+  end
+
+  subgraph Core Runtime
+    OpenAI[OpenAI bindings]
+    Search[(Vector DB + BM25)]
+    OAuth[OAuth2 stack]
+  end
+
+  CLI --> ChatMD
+  HTTP --> ChatMD
+  ChatMD -->|tool calls| Search
+  ChatMD -->|stream| OpenAI
+  ChatML --> ChatMD
+  OpenAI -.-> OAuth
+```
+
+At a glance the system is organised in three concentric rings:
+
+1. **Core runtime** – handles external side-effects: OpenAI REST calls, dense & sparse search, token caching and OAuth2 credentials.
+2. **Domain layer** – defines the prompt DSLs (*ChatMD*, *ChatML*) and their dialogue/runtime helpers.
+3. **Front-ends** – expose the features via command-line, terminal UI and HTTP/MCP transports.
+
+Each layer only depends *inwards* which keeps the build graph simple and allows
+you to embed just the lower rings inside your own code when you don’t need the
+full CLI.
 
 ## 4  CLI Tools
 
 | Command | Purpose | Help output |
 |---------|---------|-------------|
-| `gpt chat-completion` | Run a chatmd session | `out/help/chat-completion.txt` |
-| … | … | … |
+| `gpt` | Swiss-army knife CLI (~10 sub-commands) for chat completions, embedding index management and misc utilities. | [`out/help/gpt.txt`](../../out/help/gpt.txt) |
+| `chat-tui` | Full-screen TUI client for ChatMD conversations. | [`out/help/chat-tui.txt`](../../out/help/chat-tui.txt) |
+| `md-index` | Crawl Markdown trees and build a vector/BM25 index. | [`out/help/md-index.txt`](../../out/help/md-index.txt) |
+| `md-search` | Query one or more Markdown indices. | [`out/help/md-search.txt`](../../out/help/md-search.txt) |
+| `odoc-index` | Index compiled `.odoc` documentation. | [`out/help/odoc-index.txt`](../../out/help/odoc-index.txt) |
+| `odoc-search` | Semantic search over odoc indices. | [`out/help/odoc-search.txt`](../../out/help/odoc-search.txt) |
+| `mcp_server` | Machine-Control-Protocol JSON/STDIO bridge (HTTP & pipes). | [`out/help/mcp_server.txt`](../../out/help/mcp_server.txt) |
+| `dsl_script` | Execute ChatML `.cml` scripts from disk or stdin. | [`out/help/dsl_script.txt`](../../out/help/dsl_script.txt) |
+| `key-dump` | Inspect OpenAI API key & model quotas. | [`out/help/key-dump.txt`](../../out/help/key-dump.txt) |
+| `terminal_render` | Render markdown+ANSI blobs to a terminal buffer (demo). | [`out/help/terminal_render.txt`](../../out/help/terminal_render.txt) |
 
 ## 5  ChatMD language
 
