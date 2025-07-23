@@ -30,10 +30,10 @@
  • Utility binaries: `md-index`, `md-search`, `odoc-index`, `odoc-search`, `dsl_script`, `key-dump`, `terminal_render`, sample HTTP clients (`eio_get`, `piaf_example`).
 
  *Core libraries*
- • `chat_response`, `chat_completion`, `openai`, `io` – thin wrappers over the OpenAI REST API with streaming support (Eio).
- • `vector_db`, `bm25`, `embed_service` – local semantic-search engine backed by Owl, BM25 and binary-prot persistence.
- • `markdown_indexer`, `odoc_indexer` – crawl docs and populate `vector_db`.
- • `oauth2` – self-contained OAuth2 helper stack used by MCP HTTP transport.
+ • `chat_response`, `chat_completion`, **`functions`**, **`definitions`**, `openai`, `io` – layers that transform ChatMD prompts into OpenAI REST requests, stream responses, and post-process tool calls.
+ • `vector_db`, `bm25`, `embed_service` – local semantic-search engine (Owl backed dense vectors + BM25 sparse index) with bin_prot persistence and Eio streaming helpers.
+ • `markdown_indexer`, `odoc_indexer`, **`package_index`**, **`webpage_markdown`** – ingestion pipelines that feed content into `vector_db`.
+ • `oauth2` – self-contained OAuth2 helper stack (client credentials & PKCE, plus in-memory/lightweight server stubs) used by the MCP HTTP transport.
 
  *Infrastructure helpers*
  • `apply_patch`, `template`, `dune_describe`, `git`, … – developer tooling.
@@ -61,48 +61,51 @@
  F. *README Skeleton* – outline sections, decide ordering, cross-link strategy and style-guide alignment.
 
  --------------------------------------------------------------------------------
- ## 4. Implementation steps
+## 4. Implementation steps (revised)
 
- 1. **Environment bootstrap**
-    • Ensure `opam install . --deps-only` succeeds.
-    • `dune build` + `dune runtest --diff-command=diff -u` – green baseline.
+1. **Environment bootstrap**
+   • `opam install . --deps-only -y` → ensures all external libraries are available.
+   • `dune build` + `dune runtest --diff-command=diff -u` – confirm the workspace compiles & the test-suite is green.
 
- 2. **Generate fresh dependency graph**
+2. **Generate fresh dependency graph**
     • `dune describe` JSON → convert to mermaid diagram.
     • Cross-check against `dune-project` declared libraries.
 
- 3. **Module catalogue**
+3. **Module catalogue**
     • Auto-extract `*.ml` & `*.mli` paths via `git ls-files`.
     • Group by library/exe; export CSV for later table importing.
 
- 4. **Executable survey**
+4. **Executable survey**
     • Run each public exe with `--help` or equivalent.
     • Capture output and jot down primary use-cases & flags.
 
- 5. **ChatMD research**
+5. **ChatMD research**
     • Study `chatmd_lexer`, `chatmd_parser`, `prompt.ml`.
     • Build minimal prompt, run via `bin/main.ml` or TUI to inspect flow.
     • Document lifecycle: parsing → `chat_response` → OpenAI streaming.
 
- 6. **ChatML research** (lighter weight – still experimental)
+6. **ChatML research** (lighter weight – still experimental)
     • Inspect type-checker and built-ins.
     • Showcase sample program executed via `dsl_script`.
 
- 7. **Vector DB & indexing**
+7. **Vector DB & indexing**
     • Read `vector_db.ml`, `embed_service.ml`, `bm25.ml`.
     • Trace code-path in `markdown_indexer` & `odoc_indexer`.
 
- 8. **OAuth2 stack**
+8. **OAuth2 & Authentication stack**
     • Catalogue modules under `lib/oauth`.
     • Record supported grant types and flows.
 
- 9. **MCP protocol**
+9. **MCP protocol**
     • Detail message schema (`mcp_types`) & transport options.
 
  10. **Draft README outline**
      • Intro, quick-start, architecture, CLI tools, ChatMD tutorial, advanced topics, contribution guide.
 
  11. **Populate sections with gathered material** (to be done in a later ticket).
+
+12. **Continuous validation**
+    • After each major research task, update the README skeleton to ensure coverage (prevent last-minute surprises).
 
  --------------------------------------------------------------------------------
  ## 5. TODO Table
@@ -112,6 +115,7 @@
  | Bootstrap env | pending | Install all opam deps, confirm `dune build` + tests pass. | – | Prepare reproducible dev-shell. |
  | Generate dep graph | pending | Run `dune describe`, create mermaid diagram of libs & exes. | Bootstrap env | Use `dune describe --eval` for workspace-wide view. |
  | Catalogue modules | pending | Script to list every ML(i) file grouped by library/exe. | Bootstrap env | Could reuse existing `dune describe` JSON. |
+| Documentation mining | pending | Pull existing docs from `docs-src`, `markdown_search` and `odoc_search`; flag gaps. | Catalogue modules | Automate with `rg` + `jq` where possible. |
  | Executable survey | pending | Run each public binary with `--help`, record usage & examples. | Bootstrap env | Attach captured output as artefacts. |
  | ChatMD deep-dive | pending | Analyse lexer/parser, produce syntax reference & examples. | Catalogue modules | Also inspect docs-src snippets. |
  | ChatML deep-dive | pending | Summarise language, type system, built-ins, future plans. | Catalogue modules | Less critical but valuable. |
@@ -119,6 +123,7 @@
  | OAuth2 stack notes | pending | Document grant types, storage abstractions, client/server helpers. | Catalogue modules | Cross-reference MCP HTTP transport. |
  | MCP protocol write-up | pending | Diagram of message flow, transport variants, sample JSON. | Vector DB & indexing notes |  |
  | Draft README skeleton | pending | Produce outline with placeholders for each section. | All research tasks | Align with existing style-guides. |
+| Continuous validation | pending | Keep README skeleton up-to-date as tasks complete. | Draft README skeleton | Prevent scope creep. |
 
  --------------------------------------------------------------------------------
  ## 6. Risk & Mitigation
