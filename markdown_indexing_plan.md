@@ -189,7 +189,7 @@ Algorithm:
 
 * **`omd`** – lightweight CommonMark parser (used only for heading extraction if we want structural accuracy; current heuristic splitter already works without it so keep as optional compile-time dependency).
 * **`tikitoken`**, `owl`, `core`, `eio`, `soup` – already in tree.
-* **`ocaml-gitignore`** – optional, for Gitignore parsing (fallback to heuristic if absent).
+* **`path_glob`** – optional, for Gitignore parsing (fallback to heuristic if absent).
 
 No additional system dependencies are required.
 
@@ -221,8 +221,7 @@ End of plan – ready for implementation.
 | Wire wrappers in `functions.ml` | completed |
 | Register tools in `lib/chat_response/tool.ml` | completed |
 | Provide CLI wrappers `bin/md_index.ml` & `bin/md_search.ml` | completed |
-| Add optional `ocaml-gitignore` dependency and fallback matcher | completed |
-| Investigate packaging of `ocaml-gitignore` on opam & integrate via dune `select` | pending |
+| Add `path_glob` dependency and fallback matcher | completed |
 | Unit tests: `chunking`, `index_roundtrip`, `catalogue_lookup` | pending |
 | Developer documentation (`markdown_indexer.doc.md`) | pending |
 | Expect tests for `markdown_crawler` and other new modules | pending |

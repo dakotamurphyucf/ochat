@@ -208,6 +208,8 @@
   bm25
   webpage_markdown
   indexer
+  markdown_indexer
+  md_index_catalog
   piaf
   package_index
   apply_patch)
@@ -270,7 +272,7 @@
  (name odoc_crawler)
  (public_name chatgpt.odoc_crawler)
  (modules odoc_crawler)
- (libraries core eio eio.unix webpage_markdown log jsonaf pcre)
+ (libraries core eio eio.unix webpage_markdown log jsonaf pcre path_glob)
  (preprocess
   (pps ppx_jane)))
 
@@ -282,7 +284,7 @@
  (name markdown_crawler)
  (public_name chatgpt.markdown_crawler)
  (modules markdown_crawler)
-(libraries core eio eio.unix webpage_markdown log jsonaf pcre)
+ (libraries core eio eio.unix webpage_markdown log jsonaf pcre path_glob)
  (preprocess
   (pps ppx_jane)))
 
