@@ -99,17 +99,61 @@ RAW|
 
 ---
 
-## 6. Grammar (informal)
+## 6. Grammar (formal EBNF)
 
-A ChatMD document is a **list of element nodes**, each being either:
+The following Extended-BNF is a faithful transcription of the Menhir grammar
+(`lib/chatmd/chatmd_parser.mly`).  Non-terminals are in **bold**, terminals are
+in *italics*.
 
-* A *self-closing* element;
-* An *opening tag* followed by nested **children** and a matching *closing
-  tag*;  children are elements or character data.
+```ebnf
+document          =  rec_elems , *EOF* ;
 
-The Menhir grammar can be consulted in
-`lib/chatmd/chatmd_parser.mly`.  Section 2 of
-`docs/chatmd_lexer_parser_notes.md` reproduces it verbatim.
+rec_elems         =  { whitespace | rec_elem } ;
+
+whitespace        =  *TEXT_WS* ;            (* a TEXT token containing only U+0020 / U+0009 / U+000A / U+000D *)
+
+rec_elem          =  *SELF*
+                 |  *START* , children , *END* ;
+
+children          =  { child } ;
+
+child             =  text_block
+                 |  *SELF*
+                 |  *START* , children , *END* ;
+
+text_block        =  *TEXT* , { *TEXT* } ; (* one or more consecutive TEXT tokens *)
+```
+
+### 6.1 Token glossary
+
+| Token | Shape | Notes |
+|-------|-------|-------|
+| *START* | `<tag …>` | Opening tag.  Carries the parsed *tag* enum and the attribute list. |
+| *SELF*  | `<tag … />` | Self-closing element.  Semantically equivalent to `START … END` with empty children. |
+| *END*   | `</tag>` | Closing tag – the lexer guarantees the name has been resolved to a known `tag` constructor. |
+| *TEXT*  | character data | Arbitrary UTF-8 text (entities already decoded).  Multiple contiguous tokens are merged by the grammar. |
+| *TEXT_WS* | whitespace | Specialisation of *TEXT* whose payload is **only** whitespace.  Filters top-level spacing. |
+| *EOF*   | – | End-of-file marker inserted by the lexer. |
+
+### 6.2 Mermaid diagram
+
+```mermaid
+flowchart TD
+    document --> rec_elems
+    rec_elems --> whitespace
+    rec_elems --> rec_elem
+    rec_elem --> SELF
+    rec_elem --> start_block
+    start_block["START … END"] --> children
+    children --> child
+    child --> text_block
+    child --> SELF
+    child --> start_block
+    text_block --> TEXT
+```
+
+The diagram highlights the tail-recursive structure that allows any element to
+nest arbitrarily deep.
 
 ---
 
@@ -154,5 +198,5 @@ my_list[::-1]
 
 ---
 
-_Last updated: <!--DATE-->_
+_Last updated: 2025-07-23_
 

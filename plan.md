@@ -177,7 +177,11 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 |  ├─ Capture minimal run examples | completed | Extend script to run sample invocations for selected binaries (`md-search "hello"`, etc.). Logs in `out/examples/<exe>.txt`. | Implement `script/exe_survey.ml` | |
 |  ├─ Commit artefacts | completed | Stage and commit generated help and example transcripts. | Capture minimal run examples | |
 |  └─ Close task | completed | Review outputs, update TODO statuses (`completed`). | Commit artefacts | |
-| ChatMD spec (EBNF) | pending | Extract grammar from `chatmd_parser.mly`, render to markdown & embed diagrams. | ChatMD deep-dive | Use Menhir `--list-errors` to help. |
+| ChatMD spec (EBNF) | completed | Extract grammar from `chatmd_parser.mly`, render to markdown & embed diagrams. | ChatMD deep-dive | Use Menhir `--list-errors` to help. |
+|  ├─ Extract grammar rules | completed | Review `chatmd_parser.mly` & transpose to concise EBNF notation. | ChatMD spec (EBNF) |  |
+|  ├─ Write markdown section | completed | Replace section 6 of `docs/chatmd_syntax_reference.md` with formal EBNF & description. | Extract grammar rules |  |
+|  ├─ Add Mermaid diagram | completed | Embed a simple state diagram illustrating element nesting. | Write markdown section |  |
+|  └─ Update last-updated timestamp | completed | Insert current date in markdown footer. | Write markdown section |  |
 | Embedding flow diagram | pending | Create Mermaid sequence diagram for embedding pipeline. | Vector DB & indexing notes |  |
 | OAuth2 overview doc | pending | Write `docs/oauth2_overview.md` summarising flows. | OAuth2 stack notes |  |
 | ChatMD deep-dive | completed | Analyse lexer/parser, produce syntax reference & examples. | Catalogue modules | Also inspect docs-src snippets. |
