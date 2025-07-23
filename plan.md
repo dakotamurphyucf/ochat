@@ -190,7 +190,7 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 |  ├─ Create sample prompts | completed | Sample prompts added under `examples/chatmd/`. | Inspect lexer & parser |  |
 |  ├─ Capture dry-run JSON | completed | Generated JSON using `chatmd_to_json` script; saved to `out/chatmd/hello.json`. | Create sample prompts |  |
 |  └─ Pipeline trace notes | completed | Document AST-to-OpenAI request pipeline in docs/chatmd_pipeline.md. | Capture dry-run JSON |  |
- | ChatML deep-dive | pending | Summarise language, type system, built-ins, future plans. | Catalogue modules | Less critical but valuable. |
+| ChatML deep-dive | completed | Summarise language, type system, built-ins, future plans. | Catalogue modules | Less critical but valuable. |
 | Vector DB & indexing notes | completed | Explain embedding flow, BM25 scoring, markdown & odoc crawlers. | Catalogue modules | Completed in docs/vector_db_indexing.md with throughput table. |
 | OAuth2 stack notes | completed | Document grant types, storage abstractions, client/server helpers. | Catalogue modules | Cross-reference MCP HTTP transport. |
  | MCP protocol write-up | pending | Diagram of message flow, transport variants, sample JSON. | Vector DB & indexing notes |  |
