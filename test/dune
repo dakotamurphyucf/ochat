@@ -197,6 +197,22 @@
 ;; MCP stub server (executable used by client tests)
 ;; ---------------------------------------------------------------------------
 
+(library
+ (name markdown_indexing_test)
+ (modules markdown_indexing_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  markdown_snippet
+  vector_db
+  md_index_catalog
+  owl
+  eio
+  eio_main
+  eio.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
 (executable
  (name mcp_stub_server)
  (public_name mcp_stub_server)
