@@ -10,3 +10,10 @@
  (public_name module_catalogue)
  (package chatgpt)
  (libraries unix sexplib0 sexplib str))
+
+;; Documentation coverage generator
+(executable
+ (name doc_coverage)
+ (public_name doc_coverage)
+ (package chatgpt)
+ (libraries unix))
