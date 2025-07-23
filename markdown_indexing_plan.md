@@ -225,8 +225,8 @@ End of plan – ready for implementation.
 | Unit tests: `chunking`, `index_roundtrip`, `catalogue_lookup` | completed |
 | Expect tests for `markdown_crawler` and other new modules | completed |
 | Developer documentation for (`markdown_crawler.doc.md`), (`markdown_indexer.doc.md`), and all the other modules we have edited/added | completed |
-| Add executable for performing markdown indexing similar to `bin/odoc_index.ml` | pending |
-| Add executable for performing markdown search similar to `bin/odoc_search.ml` | pending |
+| Add executable for performing markdown indexing similar to `bin/odoc_index.ml` | completed |
+| Add executable for performing markdown search similar to `bin/odoc_search.ml` | completed |
 
 > Follow the Task States & Management rules when updating this table during implementation.
 
