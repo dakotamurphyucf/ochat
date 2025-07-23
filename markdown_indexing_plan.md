@@ -221,7 +221,8 @@ End of plan – ready for implementation.
 | Wire wrappers in `functions.ml` | completed |
 | Register tools in `lib/chat_response/tool.ml` | completed |
 | Provide CLI wrappers `bin/md_index.ml` & `bin/md_search.ml` | completed |
-| Add optional `ocaml-gitignore` dependency and fallback matcher | pending |
+| Add optional `ocaml-gitignore` dependency and fallback matcher | completed |
+| Investigate packaging of `ocaml-gitignore` on opam & integrate via dune `select` | pending |
 | Unit tests: `chunking`, `index_roundtrip`, `catalogue_lookup` | pending |
 | Developer documentation (`markdown_indexer.doc.md`) | pending |
 | Expect tests for `markdown_crawler` and other new modules | pending |
