@@ -180,7 +180,12 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 | ChatMD spec (EBNF) | pending | Extract grammar from `chatmd_parser.mly`, render to markdown & embed diagrams. | ChatMD deep-dive | Use Menhir `--list-errors` to help. |
 | Embedding flow diagram | pending | Create Mermaid sequence diagram for embedding pipeline. | Vector DB & indexing notes |  |
 | OAuth2 overview doc | pending | Write `docs/oauth2_overview.md` summarising flows. | OAuth2 stack notes |  |
- | ChatMD deep-dive | pending | Analyse lexer/parser, produce syntax reference & examples. | Catalogue modules | Also inspect docs-src snippets. |
+| ChatMD deep-dive | pending | Analyse lexer/parser, produce syntax reference & examples. | Catalogue modules | Also inspect docs-src snippets. |
+|  ├─ Inspect lexer & parser | completed | Reviewed chatmd_lexer.mll & chatmd_parser.mly, wrote summary in `docs/chatmd_lexer_parser_notes.md`. | ChatMD deep-dive |  |
+|  ├─ Draft syntax reference | pending | Produce markdown document outline summarising elements (sections, code blocks, tool calls). | Inspect lexer & parser |  |
+|  ├─ Create sample prompts | pending | Add examples/chatmd/{hello,tools}.chatmd demonstrating language features. | Inspect lexer & parser |  |
+|  ├─ Capture dry-run JSON | pending | Run gpt CLI with --prompt-file and --dry-run and save output under out/chatmd/hello.json. | Create sample prompts |  |
+|  └─ Pipeline trace notes | pending | Document AST-to-OpenAI request pipeline in docs/chatmd_pipeline.md. | Capture dry-run JSON |  |
  | ChatML deep-dive | pending | Summarise language, type system, built-ins, future plans. | Catalogue modules | Less critical but valuable. |
  | Vector DB & indexing notes | pending | Explain embedding flow, BM25 scoring, markdown & odoc crawlers. | Catalogue modules | May include performance numbers. |
  | OAuth2 stack notes | pending | Document grant types, storage abstractions, client/server helpers. | Catalogue modules | Cross-reference MCP HTTP transport. |
