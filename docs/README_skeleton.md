@@ -8,7 +8,9 @@
 
 ## 0  Badge strip
 
-TODO: CI / coverage / version badges
+[![CI](https://github.com/your-org/chatgpt-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/chatgpt-toolkit/actions/workflows/ci.yml)
+[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.txt)
+[![opam](https://img.shields.io/opam/v/chatgpt_toolkit)](https://opam.ocaml.org/packages/chatgpt_toolkit/)
 
 ---
 
@@ -108,18 +110,20 @@ full CLI.
 
 ## 4  CLI Tools
 
-| Command | Purpose | Help output |
+| Command | Purpose | … |
 |---------|---------|-------------|
-| `gpt` | Swiss-army knife CLI (~10 sub-commands) for chat completions, embedding index management and misc utilities. | [`out/help/gpt.txt`](../../out/help/gpt.txt) |
-| `chat-tui` | Full-screen TUI client for ChatMD conversations. | [`out/help/chat-tui.txt`](../../out/help/chat-tui.txt) |
-| `md-index` | Crawl Markdown trees and build a vector/BM25 index. | [`out/help/md-index.txt`](../../out/help/md-index.txt) |
-| `md-search` | Query one or more Markdown indices. | [`out/help/md-search.txt`](../../out/help/md-search.txt) |
-| `odoc-index` | Index compiled `.odoc` documentation. | [`out/help/odoc-index.txt`](../../out/help/odoc-index.txt) |
-| `odoc-search` | Semantic search over odoc indices. | [`out/help/odoc-search.txt`](../../out/help/odoc-search.txt) |
-| `mcp_server` | Machine-Control-Protocol JSON/STDIO bridge (HTTP & pipes). | [`out/help/mcp_server.txt`](../../out/help/mcp_server.txt) |
-| `dsl_script` | Execute ChatML `.cml` scripts from disk or stdin. | [`out/help/dsl_script.txt`](../../out/help/dsl_script.txt) |
-| `key-dump` | Inspect OpenAI API key & model quotas. | [`out/help/key-dump.txt`](../../out/help/key-dump.txt) |
-| `terminal_render` | Render markdown+ANSI blobs to a terminal buffer (demo). | [`out/help/terminal_render.txt`](../../out/help/terminal_render.txt) |
+| `gpt` | Swiss-army knife CLI (~10 sub-commands) for chat completions, embedding index management and misc utilities. | out/help/gpt.txt |
+| `chat-tui` | Full-screen TUI client for ChatMD conversations. | out/help/chat-tui.txt |
+| `md-index` | Crawl Markdown trees and build a vector/BM25 index. | out/help/md-index.txt |
+| `md-search` | Query one or more Markdown indices. | out/help/md-search.txt |
+| `odoc-index` | Index compiled `.odoc` documentation. | out/help/odoc-index.txt |
+| `odoc-search` | Semantic search over odoc indices. | out/help/odoc-search.txt |
+| `mcp_server` | Machine-Control-Protocol JSON/STDIO bridge (HTTP & pipes). | out/help/mcp_server.txt |
+| `dsl_script` | Execute ChatML `.cml` scripts from disk or stdin. | out/help/dsl_script.txt |
+| `key-dump` | Inspect OpenAI API key & model quotas. | out/help/key-dump.txt |
+| `terminal_render` | Render markdown+ANSI blobs to a terminal buffer (demo). | out/help/terminal_render.txt |
+| `eio_get` | Minimal HTTP GET example using Eio + Piaf. | out/help/eio_get.txt |
+| `piaf_example` | Piaf request/response showcase. | out/help/piaf_example.txt |
 
 ## 5  ChatMD language
 
@@ -235,7 +239,22 @@ captured from `test/mcp_server_integration_test.ml`.
 
 ## 10  Contributing
 
-TODO: coding style, how to run tests, generate docs.
+We happily welcome bug-reports, feature requests and pull-requests.  A few
+guidelines to make the review process smooth:
+
+1. **Fork + Feature branch** – keep the `main` branch clean.
+2. **Coding style** – the repo is formatted with `ocamlformat` *profile=janestreet*;
+   run `dune build @fmt` before committing.
+3. **Tests** – add a unit-test under `test/` whenever it makes sense and run
+   `dune runtest --diff-command=diff -u` locally.
+4. **Docs** – public modules must carry `(** ... *)` odoc headers; run
+   `dune build @doc` to make sure they render.
+5. **Commit messages** – follow *Conventional Commits* (`feat:`, `fix:`,
+   `docs:` …).  Squash-merges are okay.
+
+If your contribution touches the ChatMD grammar or the embedding pipeline,
+please also update the relevant markdown docs and include a short *“Why”*
+section in the PR description.
 
 ## 11  License
 
