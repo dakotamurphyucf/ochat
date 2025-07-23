@@ -2,9 +2,10 @@
  (name filter_file_test)
  (modules filter_file_test)
  (libraries core expect_test_helpers_core filter_file)
- (inline_tests)
+ (inline_tests
+  (deps ../out-cl100k_base.tikitoken.txt))
  (preprocess
-  (pps ppx_jane ppx_expect)))
+  (pps ppx_jane ppx_blob ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
 ;; Webpage → Markdown conversion (MVP)                                         
@@ -209,9 +210,13 @@
   owl
   eio
   eio_main
-  eio.unix)
- (inline_tests)
- (preprocess (pps ppx_jane ppx_expect)))
+  eio.unix
+  stdio)
+ (inline_tests
+  (deps ../out-cl100k_base.tikitoken.txt))
+ (preprocessor_deps (file ../out-cl100k_base.tikitoken.txt))
+ (preprocess
+  (pps ppx_jane ppx_blob ppx_expect)))
 
 (executable
  (name mcp_stub_server)

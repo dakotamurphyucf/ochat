@@ -1,8 +1,7 @@
 open Core
 
 (* Utility: simple vector dot product *)
-let dot a b =
-  Array.fold2_exn a b ~init:0.0 ~f:(fun acc x y -> acc +. (x *. y))
+let dot a b = Array.fold2_exn a b ~init:0.0 ~f:(fun acc x y -> acc +. (x *. y))
 
 (* -------------------------------------------------------------------------- *)
 (* 1. Chunking test                                                          *)
@@ -40,7 +39,9 @@ let%expect_test "vector_db.roundtrip" =
   let v1 = [| 1.0; 0.0; 0.0 |] in
   let v2 = [| 0.0; 1.0; 0.0 |] in
   let vecs =
-    [| Vec.{ id = "doc1"; len = 10; vector = v1 }; Vec.{ id = "doc2"; len = 10; vector = v2 } |]
+    [| Vec.{ id = "doc1"; len = 10; vector = v1 }
+     ; Vec.{ id = "doc2"; len = 10; vector = v2 }
+    |]
   in
   let db = Vector_db.create_corpus vecs in
   let query = Owl.Mat.of_array v1 3 1 in
@@ -85,5 +86,5 @@ let%expect_test "md_index_catalog.lookup" =
       |> Option.value_exn
     in
     print_endline (fst best);
-  [%expect {| beta |}]
+    [%expect {| beta |}]
 ;;
