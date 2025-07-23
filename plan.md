@@ -202,6 +202,6 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 | Populate README – Subsystems | completed | Write embedding/search, OAuth2, MCP sections (7-9) referencing dedicated docs. | Populate README – Domain languages |  |
 | Populate README – Contributing & polish | completed | Fill contributing guidelines, badges, license section and perform final proofreading. | Populate README – Subsystems | Ran `readme_validation` – OK. |
 | Publish README | completed | Copied `docs/README_skeleton.md` to the repository root as `README.md`; removed empty placeholder. | Populate README – Contributing & polish |  |
-| README refinement – section review | pending | Iterate across each README section, cross-check against codebase & docs, and refine the text for accuracy and depth. | Publish README |  |
+| README refinement – section review | completed | Iterate across each README section, cross-check against codebase & docs, and refine the text for accuracy and depth. | Publish README |  |
 
 > Follow the Task States & Management rules when updating this table during implementation.

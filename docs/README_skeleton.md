@@ -60,17 +60,25 @@ The project defaults to **offline / dry-run mode** when the `OPENAI_API_KEY` env
 export OPENAI_API_KEY="sk-..."
 ```
 
-For a guided tour run:
+#
+# NOTE: A full interactive tour script is not yet part of the public
+# repository.  Until that lands you can explore the toolkit hands-on by running
+# the following (all commands are safe in offline mode):
 
 ```sh
-# reproduces the examples used in the docs
-make tour
+# Explore ChatMD — opens the TUI with the bundled hello-world prompt
+dune exec chat-tui -- examples/chatmd/hello.chatmd
+
+# Smoke-test the search stack on a tiny corpus
+dune exec md-index -- examples
+dune exec md-search -- "hello world"
 ```
 
 ## 3  Architecture overview
 
-> *If you prefer pictures:* see `docs/architecture.mmd` for an interactive
-> Mermaid diagram or the pre-rendered `docs/architecture.svg`.
+> *Prefer diagrams?*  Open `docs/architecture.mmd` in your editor or render it
+> with the Mermaid CLI (`mmdc`) to obtain `docs/architecture.svg`.  The source
+> is kept in sync with the textual description below.
 
 ```
 graph LR
@@ -262,5 +270,5 @@ MIT – see `LICENSE.txt`.
 
 ---
 
-*Last updated: 2025-07-23*
+*Last updated: 2025-07-23 (section review refinement)*
 
