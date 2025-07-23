@@ -119,7 +119,7 @@ let markdown_of_html (html : string) : string =
 (* Main public API                                                           *)
 (*--------------------------------------------------------------------------*)
 
-(** [crawl root ~f] recursively scans the documentation tree rooted at
+(** [crawl root ?filter f] recursively scans the documentation tree rooted at
       [root] and calls [f] for every document discovered.
 
       It treats every *sub-directory* of [root] as a separate opam package
@@ -148,11 +148,15 @@ let markdown_of_html (html : string) : string =
         but all other failures (e.g. HTML parsing) are logged with
         {!Log.emit} and ignored.
 
-      @param root  Filesystem location of the directory produced by
-                   [dune build @doc] or [odoc compile-pkg].
-      @param f     User callback receiving the package name, the path of the
-                   document relative to [root], and the converted Markdown
-                   string.
+      @param root    Filesystem location of the directory produced by
+                     [dune build @doc] or [odoc compile-pkg].
+      @param filter  Optional predicate applied to directory names at the
+                     *package* level.  A package whose basename fails the
+                     predicate is skipped entirely.  Defaults to a function
+                     that always returns [true].
+      @param f       User callback receiving the package name, the path of the
+                     document relative to [root], and the converted Markdown
+                     string.
 
       {2 Example}
 

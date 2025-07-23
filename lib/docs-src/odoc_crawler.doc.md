@@ -52,6 +52,7 @@ files are processed in parallel inside each directory.
 ```ocaml
 val crawl :
   root:_ Eio.Path.t ->
+  ?filter:(string -> bool) ->
   f:(pkg:string -> doc_path:string -> markdown:string -> unit) ->
   unit
 ```
@@ -60,6 +61,10 @@ val crawl :
 
 * `root` – directory produced by `dune build @doc` (the one that contains the
   individual package folders).
+
+* `filter` – optional predicate to restrict the crawl to a subset of opam
+  packages.  It receives the directory basename and should return `true` for
+  packages that must be traversed.  Defaults to `fun _ -> true`.
 
 * `f` – callback to receive each document (see above).
 
