@@ -17,3 +17,10 @@
  (public_name doc_coverage)
  (package chatgpt)
  (libraries unix))
+
+;; Documentation content mining aggregator
+(executable
+ (name doc_mining)
+ (public_name doc_mining)
+ (package chatgpt)
+ (libraries unix))
