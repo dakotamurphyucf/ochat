@@ -123,12 +123,57 @@ full CLI.
 
 ## 5  ChatMD language
 
-See `docs/chatmd_syntax_reference.md` and examples under
-`examples/chatmd/`.
+*ChatMD* (`*.chatmd`) is a **Markdown-flavoured, XML-light wrapper** around the
+OpenAI *chat-completions* JSON format.  It provides:
+
+* **Declarative roles** – `<system>`, `<user>`, `<assistant>` tags become
+  messages; no more `\n\nUser:` delimiters.
+* **Structured tool-calls** – `<tool_call name="md-search">...</tool_call>` and
+  `<tool_response>` encode the function-calling API in a copy-pasta-safe way.
+* **Rich embeds** – `<doc module="Eio.Switch" />` injects odoc snippets at
+  runtime; `<img src="..."/>` renders in the TUI.
+
+Below is a minimal *hello-world* example (see
+[`examples/chatmd/hello.chatmd`](../../examples/chatmd/hello.chatmd)):
+
+```chatmd
+<user>
+Hello! Could you explain what ChatMD is and why it exists?
+</user>
+
+<assistant>
+Sure – ChatMD is a small XML-like language designed to write LLM prompts …
+</assistant>
+```
+
+For the full grammar head to `docs/chatmd_syntax_reference.md`; the file
+contains the formal EBNF, element catalogue and common patterns.
 
 ## 6  ChatML language (experimental)
 
-See `docs/chatml_overview.md`.
+*ChatML* is an **embedded, dynamically-typed scripting language** that can be
+mixed inside ChatMD or run standalone via the `dsl_script` binary.  Its goal is
+to provide **control-flow, variables and modularity** without leaving the prompt
+context.
+
+Key features:
+
+* OCaml-style arithmetic & boolean expressions.
+* `let` bindings and function definitions.
+* Minimal standard library (string / list helpers) – can be extended at compile
+  time.
+* Seamless FFI to call ChatMD tool functions.
+
+Example (simplified):
+
+```chatml
+let rec fib n = if n < 2 then n else fib (n-1) + fib (n-2)
+
+print (fib 10)
+```
+
+See `docs/chatml_overview.md` for a deep dive and
+`examples/chatml/` for runnable samples.
 
 ## 7  Embedding & search stack
 
