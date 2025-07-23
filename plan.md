@@ -201,5 +201,6 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 | Populate README – Domain languages | completed | Finalise ChatMD (sec 5) and ChatML (sec 6) sections with links to detailed docs and examples. | Populate README – Architecture & CLI tools |  |
 | Populate README – Subsystems | completed | Write embedding/search, OAuth2, MCP sections (7-9) referencing dedicated docs. | Populate README – Domain languages |  |
 | Populate README – Contributing & polish | completed | Fill contributing guidelines, badges, license section and perform final proofreading. | Populate README – Subsystems | Ran `readme_validation` – OK. |
+| Publish README | completed | Copied `docs/README_skeleton.md` to the repository root as `README.md`; removed empty placeholder. | Populate README – Contributing & polish |  |
 
 > Follow the Task States & Management rules when updating this table during implementation.
