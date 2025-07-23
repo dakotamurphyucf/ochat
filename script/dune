@@ -1,0 +1,5 @@
+(executable
+ (name dep_graph_generator)
+ (public_name dep_graph_generator)
+ (package chatgpt)
+ (libraries unix))
