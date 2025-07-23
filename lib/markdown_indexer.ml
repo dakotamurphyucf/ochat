@@ -22,7 +22,7 @@ module M = struct
   let token_bpe_path = "./out-cl100k_base.tikitoken.txt"
 
   (* Compute centroid – simple arithmetic mean across all vectors. *)
-  let centroid (vecs : Vec.t array) : Owl.Dense.Ndarray.S.arr =
+  let centroid (vecs : Vec.t array) : float array =
     match vecs with
     | [||] -> failwith "centroid: empty array"
     | _ ->
@@ -30,8 +30,7 @@ module M = struct
       let sum = Array.create ~len:dims 0.0 in
       Array.iter vecs ~f:(fun v ->
           Array.iteri v.vector ~f:(fun i x -> sum.(i) <- sum.(i) +. x));
-      let arr = Array.map sum ~f:(fun x -> x /. Float.of_int (Array.length vecs)) in
-      Owl.Dense.Ndarray.S.of_array arr [| dims |]
+      Array.map sum ~f:(fun x -> x /. Float.of_int (Array.length vecs))
 
   (*──────────────────  Public entry-point  ───────────────────────*)
 
@@ -111,9 +110,14 @@ module M = struct
       List.iter !vecs_acc ~f:(fun (meta, text, _vec) ->
           Io.save_doc ~dir:snip_dir (meta.id ^ ".md") text);
 
-      (* 4. Update index catalogue – for now just write a single file
-         [md_index_catalog.binio] with one entry. *)
-      (* Catalogue update is handled by a later pipeline step. *)
+      (* 4. Update index catalogue *)
+      let centroid_vec = centroid vecs in
+      let catalog_dir = Path.(env#fs / vector_db_root) in
+      Md_index_catalog.add_or_update
+        ~dir:catalog_dir
+        ~name:index_name
+        ~description
+        ~vector:centroid_vec;
 end
 
 include M

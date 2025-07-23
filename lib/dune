@@ -311,7 +311,16 @@
   openai
   embed_service
   owl
+  md_index_catalog
   doc)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name md_index_catalog)
+ (public_name chatgpt.md_index_catalog)
+ (modules md_index_catalog)
+ (libraries core owl bin_prot_utils_eio)
  (preprocess
   (pps ppx_jane)))
 

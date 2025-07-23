@@ -216,7 +216,7 @@ End of plan – ready for implementation.
 | Implement `Markdown_snippet` (chunker reuse + token logic) | completed |
 | Refactor shared embedding logic into `embed_service.ml`  | completed |
 | Implement `Markdown_indexer` pipeline incl. centroid computation & persistence | completed |
-| Build index catalogue (`md_index_catalog.binio`) writer/loader | pending |
+| Build index catalogue (`md_index_catalog.binio`) writer/loader | completed |
 | Add `Definitions.Index_markdown_docs` & `Definitions.Markdown_search` | pending |
 | Wire wrappers in `functions.ml` | pending |
 | Register tools in `lib/chat_response/tool.ml` | pending |
