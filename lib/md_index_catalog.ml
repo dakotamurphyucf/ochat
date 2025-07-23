@@ -2,10 +2,14 @@ open Core
 open Eio
 open Owl
 
-(** Catalogue mapping Markdown index names to their centroid embeddings.
-    Stored as a bin-prot serialised array under
-    [md_index_catalog.binio] at the root of the markdown index
-    directory (the parent of individual index folders). *)
+(** Persistent catalogue that maps Markdown index folders to the
+    L2-normalised centroid embeddings of their snippets.
+
+    The catalogue is stored as a [`Bin_prot`]-serialised array under
+    {!file:md_index_catalog.binio} inside the directory that contains
+    the individual indexes (defaults to {!".md_index"}).  All
+    functions are non-blocking Eio operations and therefore must run
+    within a fibre. *)
 
 module Entry = struct
   type t =

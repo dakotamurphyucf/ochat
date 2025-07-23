@@ -63,7 +63,7 @@ let vecs = Vector_db.Vec.read_vectors_from_disk Path.(cwd / "_doc_index/pkg/vect
 
 ```ocaml
 val index_packages :
-  ?skip_pkgs:string list ->
+  ?filter:package_filter ->
   env:Eio_unix.Stdenv.base ->
   root:_ Eio.Path.t ->          (* _build/default/_doc/_html           *)
   output:_ Eio.Path.t ->        (* destination directory               *)
@@ -109,7 +109,7 @@ The call is synchronous – it returns only when **all** artefacts have been flu
 
 | Parameter | Purpose |
 |-----------|---------|
-| `skip_pkgs` | Ignore certain packages (e.g. `js_of_ocaml`) to save time and money |
+| `filter` | Controls which packages are processed. Accepts the variants: `All` (default), `Include [pkgs]`, `Exclude [pkgs]`, or `Update (prev, pkgs)` for incremental updates |
 | `rate_per_sec` | Hard-coded to *1000* requests/s; change in `Embed_service.create` |
 | `min_tokens / max_tokens` | Chunk size boundaries, live in `Odoc_snippet.slice` |
 

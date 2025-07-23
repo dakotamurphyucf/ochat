@@ -43,7 +43,7 @@ open Core
 open Eio
 module I = Io
 open Jsonaf.Export
-module Log = Log
+
 
 (**************************************************************************)
 (* Helper utilities                                                        *)
@@ -138,21 +138,36 @@ let rec get_vectors
 (* Public API: package indexing                                            *)
 (**************************************************************************)
 
+(** Strategy for selecting which opam packages are crawled and
+    (re-)indexed.  The default {!All} indexes every directory under
+    [root].  {!Include} and {!Exclude} allow whitelisting /
+    blacklisting, while {!Update} is geared towards incremental
+    maintenance of an already-built corpus. *)
+
 type package_filter =
   | Include of string list
   | Exclude of string list
   | Update of package_filter * string list
   | All
 
-(** [index_packages ?skip_pkgs ~env ~root ~output ~net ()] builds a
+(** [index_packages ?filter ~env ~root ~output ~net ()] builds a
       vector & BM-25 search corpus for every package folder under
       [root] and stores the artefacts under [output].
 
       Parameters:
 
-      • [?skip_pkgs] – opam package names that should be ignored (e.g.
-        because they are huge or irrelevant to the downstream
-        application).
+      • [?filter] – fine-grained selection of the packages to process.
+        The value is of type {!package_filter} and supports several
+        modes:
+
+        {ul
+        {- {!All} – (default) index every first-level directory under
+           [root];}
+        {- {!Include} [pkgs] – only the packages in [pkgs];}
+        {- {!Exclude} [pkgs] – all except the packages in [pkgs];}
+        {- {!Update} (prev, pkgs) – treat [pkgs] as a delta on top of
+           [prev].  This is handy to perform incremental updates on an
+           existing corpus without a full rebuild.}}
 
       • [env] – capability bundle provided by {!Eio_main.run}; its
         [clock], [net] and [fs] fields are used for, respectively,
@@ -175,7 +190,7 @@ type package_filter =
       Behaviour & guarantees:
 
       • Slicing and embedding happen concurrently – CPU-bound work is
-        offloaded to a pool of domains, HTTP calls are batched and
+        off-loaded to a pool of domains, HTTP calls are batched and
         throttled.
 
       • Progress is logged via {!Log.emit} and spanned so that a

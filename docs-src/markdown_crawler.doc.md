@@ -1,8 +1,8 @@
 # `Markdown_crawler`
 
-Walk a regular directory tree, pick up hand-written Markdown files and feed
-them to user-supplied code.  The module is the *source* component of the
-Markdown indexing pipeline described in `markdown_indexing_plan.md`.
+Walk a directory tree, pick out hand-written Markdown files, and stream them
+to user code.  The module is the *source* component of the Markdown indexing
+pipeline described in `markdown_indexing_plan.md`.
 
 ```
 root/

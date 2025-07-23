@@ -1,4 +1,4 @@
-(** Crawl a directory tree and feed Markdown files to a callback.
+(** Discover Markdown documents under a directory tree.
 
     The implementation is intentionally similar to {!Odoc_crawler} but
     simplified for plain hand-written documentation:

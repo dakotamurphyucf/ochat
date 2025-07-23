@@ -3,15 +3,25 @@ open Eio
 
 [@@@ocaml.warning "-32-27-16"]
 
-(** High-level orchestrator for indexing a directory of Markdown files.
+(** {1 Overview}
 
-    The public API [index_directory] mirrors the shape of
-    {!Odoc_indexer.index_packages} but is simplified for the Markdown
-    use-case: there is only a *single* logical index identified by
-    [index_name].  All [*.md] (and variants) files underneath [root]
-    are crawled, sliced into token-bounded snippets, embedded via the
-    OpenAI *Embeddings* endpoint and persisted to disk in the
-    directory layout described in [markdown_indexing_plan.md]. *)
+    High-level pipeline that turns a directory tree of Markdown documents
+    into a vector database that can be queried with semantic similarity
+    search.  The entry-point {!index_directory} is intentionally
+    single-purpose – you pass it the {e root} directory and get an on-disk
+    index at [vector_db_root/index_name].  All heavy-lifting is delegated to
+    specialised helper modules and external services:
+
+    • {!Markdown_crawler} – bounded-concurrency file traversal.          
+    • {!Markdown_snippet} – cut documents into ~64-320 token windows.    
+    • {!Embed_service} – batched, rate-limited calls to OpenAI embeddings.
+    • {!Vector_db} – binary serialisation of float vectors.              
+    • {!Md_index_catalog} – global registry of indexes + centroid vectors.
+
+    The implementation follows Eio’s structured-concurrency model and is
+    cancel-safe.  All I/O happens through the supplied [env] argument.  The
+    function is idempotent: snippets are identified by a stable hash so
+    re-running the indexer only uploads new or changed fragments. *)
 
 module M = struct
   module MS = Markdown_snippet
