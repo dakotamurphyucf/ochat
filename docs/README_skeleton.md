@@ -177,16 +177,61 @@ See `docs/chatml_overview.md` for a deep dive and
 
 ## 7  Embedding & search stack
 
-Flow diagram: `docs/seq_embedding.md`  
-Performance numbers: `docs/vector_db_indexing.md`
+The framework ships with a **hybrid search engine** that combines dense OpenAI
+embeddings with a traditional BM25 sparse index.  The key components are:
+
+| Module | Role |
+|--------|------|
+| `embed_service` | Streams batch requests to the OpenAI */embeddings* endpoint with retry/back-off logic. |
+| `vector_db` | On-disk ANN store (Owl L2 + product quantisation) backed by memory-mapped pages.  ~10× faster than naïve cosine scans. |
+| `bm25` | Lightweight BM25 implementation for exact-term recall & score blending. |
+| `markdown_indexer` / `odoc_indexer` | Incremental crawlers that feed Markdown docs and compiled odoc artefacts into the DB. |
+
+A detailed sequence diagram lives in `docs/seq_embedding.md` – here’s the TL;DR:
+
+```mermaid
+sequenceDiagram
+  autonumber
+  User ->> md-index: crawl docs/
+  md-index ->> markdown_crawler: read file
+  markdown_crawler ->> embed_service: embed batched chunks
+  embed_service ->> OpenAI: POST /v1/embeddings
+  OpenAI -->> embed_service: 200 JSON
+  embed_service ->> vector_db: store vecs
+  md-index ->> bm25: update TF/IDF tables
+```
+
+Benchmarks on a ~10k-document corpus show **~1.8k docs/sec** throughput when the
+GPU cache is warm – full numbers are in `docs/vector_db_indexing.md`.
 
 ## 8  OAuth2 helper stack
 
-Overview: `docs/oauth2_overview.md`
+Several binaries expose HTTP endpoints (MCP server, REST demo bots) and need
+OAuth for local testing.  Rather than pulling a full server the repo includes a
+**minimal, in-memory OAuth2 implementation** that supports:
+
+* *Client-Credentials* flow for machine-to-machine access.
+* *PKCE* (Proof-Key-for-Code-Exchange) for browser-initiated logins.
+
+The stack is split into composable layers (`oauth2_server_storage`,
+`oauth2_server_routes`, `oauth2_manager` …) so you can replace the persistence
+layer or token signer while re-using the HTTP routes.  See
+`docs/oauth2_overview.md` for diagrams and example curl snippets.
 
 ## 9  MCP protocol
 
-Overview: `docs/mcp_protocol.md`
+The **Machine-Control-Protocol (MCP)** is a terse JSON-over-STDIO protocol that
+lets external programs drive ChatMD sessions in real time – think *“JSON REPL
+for ChatGPT”*.  Two transport flavours exist:
+
+* **`mcp_server`** – Listens on HTTP (for web front-ends) and/or plain stdio
+  pipes.  It bridges incoming JSON messages to the ChatMD runtime.
+* **`mcp_client`** – Thin OCaml library so you can embed a client in your own
+  code.
+
+Message schemas are auto-derived via `ppx_jsonaf_conv` and documented in
+`docs/mcp_protocol.md` which also contains a fully worked integration test
+captured from `test/mcp_server_integration_test.ml`.
 
 ## 10  Contributing
 
