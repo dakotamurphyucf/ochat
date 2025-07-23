@@ -48,56 +48,68 @@
 
  We break the work into 6 parallel but inter-dependent streams:
 
- A. *Inventory & Mapping* – scrape every `dune` file, build a canonical list of libraries, modules, executable names, public CLI commands and opam deps.
+A. *Inventory & Mapping* – crawl every `dune` stanza, produce machine-readable catalogues of:
+   • libraries (public & private),
+   • modules within each library / executable,
+   • public executables and their install-names,
+   • opam dependency graph.
 
- B. *Code-level Documentation Mining* – reuse existing generated docs in `docs-src` and odoc/markdown indices, highlight missing areas.
+B. *Code-level Documentation Mining* – aggregate existing docs using `markdown_search` & `odoc_search`; tag uncovered areas.
 
- C. *Runtime Exploration* – run the main binaries with `--help` (or equivalent) and capture CLI usage; run smoke test sessions in ChatMD/TUI.
+C. *Runtime Exploration* – run main binaries with `--help` (or equivalent) **under Eio test harness** to avoid blocking; record usage, options, sample sessions.
 
- D. *ChatMD Deep-dive* – document syntax, lexer/parser pipeline, AST, runtime execution path; prepare runnable examples.
+D. *ChatMD Deep-dive* – reverse-engineer language spec from lexer, parser, AST + unit-tests.  Produce runnable `examples/*.chatmd` scripts.
 
- E. *Subsystem Walkthroughs* – vector DB, indexers, OAuth2 stack, MCP protocol.
+E. *Subsystem Walkthroughs* – vector DB (dense + sparse), indexing pipelines, OAuth2 flows, MCP protocol, OpenAI streaming path.
 
- F. *README Skeleton* – outline sections, decide ordering, cross-link strategy and style-guide alignment.
+F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in sync with completed research.
 
  --------------------------------------------------------------------------------
 ## 4. Implementation steps (revised)
 
 1. **Environment bootstrap**
-   • `opam install . --deps-only -y` → ensures all external libraries are available.
-   • `dune build` + `dune runtest --diff-command=diff -u` – confirm the workspace compiles & the test-suite is green.
+   • `opam install . --deps-only -y` → pulls all external libraries.
+   • Export secrets: `export OPENAI_API_KEY=…` (the tests and runtime tools expect it).
+   • `dune build` + `dune runtest --diff-command=diff -u` – verify green baseline.
 
 2. **Generate fresh dependency graph**
-    • `dune describe` JSON → convert to mermaid diagram.
-    • Cross-check against `dune-project` declared libraries.
+   • `dune describe --eval --format=json` > `out/deps.json`.
+   • Use `jq` + `sed` + a small OCaml script to transform to a Mermaid diagram saved as `docs/deps.mmd`.
+   • Cross-check against `dune-project` & opam file; highlight mismatches in `out/deps-check.log`.
 
 3. **Module catalogue**
-    • Auto-extract `*.ml` & `*.mli` paths via `git ls-files`.
-    • Group by library/exe; export CSV for later table importing.
+   • `git ls-files '*.ml' '*.mli'` → feed into a small OCaml script that queries `dune describe` to know which lib/exe owns each file.
+   • Emit `out/modules.csv` with columns: file, module, library, public_name?, interface?, path.
 
 4. **Executable survey**
-    • Run each public exe with `--help` or equivalent.
-    • Capture output and jot down primary use-cases & flags.
+   • Iterate over `bin/dune` `(public_name ...)` stanzas; for each generated exe run `<exe> --help || true` inside an Eio_subprocess capturing stdout/stderr.
+   • Store captured help text in `out/help/<exe>.txt`.
+   • Attempt minimal run examples (e.g., `odoc-index --help`, `md-search "hello"`). Store transcripts.
 
 5. **ChatMD research**
-    • Study `chatmd_lexer`, `chatmd_parser`, `prompt.ml`.
-    • Build minimal prompt, run via `bin/main.ml` or TUI to inspect flow.
-    • Document lifecycle: parsing → `chat_response` → OpenAI streaming.
+    • Use `odoc_search` for `Chatmd_*` modules and `markdown_search` for docs.
+    • Extract grammar from `chatmd_parser.mly` comments; render EBNF table in `docs/chatmd_spec.md`.
+    • Build sample prompts in `examples/chatmd/{hello,tools}.chatmd`.
+    • Run: `dune exec bin/main.exe -- --prompt-file examples/chatmd/hello.chatmd --dry-run` to inspect generated OpenAI JSON (no network).
+    • Trace runtime pipeline: AST → Prompt.t → Chat_response request → streaming loop.
 
-6. **ChatML research** (lighter weight – still experimental)
-    • Inspect type-checker and built-ins.
-    • Showcase sample program executed via `dsl_script`.
+6. **ChatML research** (experimental)
+    • Read `chatml_typechecker_test.ml` for coverage.
+    • Compile sample `examples/chatml/fibonacci.cml` & run via `dune exec bin/dsl_script.exe -- examples/chatml/fibonacci.cml`.
+    • Summarise core language features and future roadmap in `docs/chatml_overview.md`.
 
-7. **Vector DB & indexing**
-    • Read `vector_db.ml`, `embed_service.ml`, `bm25.ml`.
-    • Trace code-path in `markdown_indexer` & `odoc_indexer`.
+7. **Embedding & search layer**
+    • Inspect `embed_service` for batching & caching logic; note OpenAI requests.
+    • Create sequence diagram (`docs/seq_embedding.svg`) with Mermaid showing flow from crawler → embed_service → vector_db.
+    • Measure indexing throughput using `time dune exec bin/md_index.exe -- examples`. Log results.
 
 8. **OAuth2 & Authentication stack**
-    • Catalogue modules under `lib/oauth`.
-    • Record supported grant types and flows.
+    • Build table of flows (Client Credentials, PKCE) with involved modules (`oauth2_manager`, `oauth2_pkce_flow`).
+    • Produce `docs/oauth2_overview.md` outlining how the minimal server stub is composed.
 
 9. **MCP protocol**
-    • Detail message schema (`mcp_types`) & transport options.
+    • Summarise JSON schemas from `mcp_types.ml` using `ppx_jsonaf_conv` generated conv functions.
+    • Record example session (`test/mcp_server_integration_test.ml`).
 
  10. **Draft README outline**
      • Intro, quick-start, architecture, CLI tools, ChatMD tutorial, advanced topics, contribution guide.
@@ -117,6 +129,9 @@
  | Catalogue modules | pending | Script to list every ML(i) file grouped by library/exe. | Bootstrap env | Could reuse existing `dune describe` JSON. |
 | Documentation mining | pending | Pull existing docs from `docs-src`, `markdown_search` and `odoc_search`; flag gaps. | Catalogue modules | Automate with `rg` + `jq` where possible. |
  | Executable survey | pending | Run each public binary with `--help`, record usage & examples. | Bootstrap env | Attach captured output as artefacts. |
+| ChatMD spec (EBNF) | pending | Extract grammar from `chatmd_parser.mly`, render to markdown & embed diagrams. | ChatMD deep-dive | Use Menhir `--list-errors` to help. |
+| Embedding flow diagram | pending | Create Mermaid sequence diagram for embedding pipeline. | Vector DB & indexing notes |  |
+| OAuth2 overview doc | pending | Write `docs/oauth2_overview.md` summarising flows. | OAuth2 stack notes |  |
  | ChatMD deep-dive | pending | Analyse lexer/parser, produce syntax reference & examples. | Catalogue modules | Also inspect docs-src snippets. |
  | ChatML deep-dive | pending | Summarise language, type system, built-ins, future plans. | Catalogue modules | Less critical but valuable. |
  | Vector DB & indexing notes | pending | Explain embedding flow, BM25 scoring, markdown & odoc crawlers. | Catalogue modules | May include performance numbers. |
@@ -132,7 +147,10 @@
 
  *Stale information* → automate extraction where possible (e.g. introspect `dune` rather than manual lists).
 
- *Tooling drift* → pin opam switch in `.ocaml-env` file.
+
+*Tooling drift* → pin opam switch in `.ocaml-env` file.
+
+*External API quota / cost* → default to `--dry-run` modes, mock OpenAI responses when possible, limit embedding calls to small corpora unless `ALLOW_OPENAI_SPEND=true`.
 
  --------------------------------------------------------------------------------
  ## 7. Next action
