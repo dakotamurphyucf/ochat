@@ -18,6 +18,13 @@
  (package chatgpt)
  (libraries unix))
 
+;; Binary list extractor
+(executable
+ (name binary_list)
+ (public_name binary_list)
+ (package chatgpt)
+ (libraries core))
+
 ;; Documentation content mining aggregator
 (executable
  (name doc_mining)
