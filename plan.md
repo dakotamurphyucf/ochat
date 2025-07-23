@@ -194,7 +194,7 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 | Vector DB & indexing notes | completed | Explain embedding flow, BM25 scoring, markdown & odoc crawlers. | Catalogue modules | Completed in docs/vector_db_indexing.md with throughput table. |
 | OAuth2 stack notes | completed | Document grant types, storage abstractions, client/server helpers. | Catalogue modules | Cross-reference MCP HTTP transport. |
 | MCP protocol write-up | completed | Diagram of message flow, transport variants, sample JSON. | Vector DB & indexing notes |  |
- | Draft README skeleton | pending | Produce outline with placeholders for each section. | All research tasks | Align with existing style-guides. |
+| Draft README skeleton | completed | Produce outline with placeholders for each section. | All research tasks | Align with existing style-guides. |
 | Continuous validation | pending | Keep README skeleton up-to-date as tasks complete. | Draft README skeleton | Prevent scope creep. |
 
 > Follow the Task States & Management rules when updating this table during implementation.
