@@ -23,7 +23,15 @@
  (name binary_list)
  (public_name binary_list)
  (package chatgpt)
- (libraries core))
+(libraries core))
+
+;; Executable survey helper – captures `--help` for each public binary
+(executable
+ (name exe_survey)
+ (public_name exe_survey)
+ (package chatgpt)
+ (libraries core core_unix eio_main eio unix))
+
 
 ;; Documentation content mining aggregator
 (executable

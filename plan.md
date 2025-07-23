@@ -173,7 +173,7 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 |  └─ Doc coverage report | completed | Implement `script/doc_coverage.ml` to generate `out/docs_coverage.csv` listing modules with/without docs. | Documentation mining | Scans `out/modules.csv` & `docs-src`. |
 | Executable survey | in_progress | Run each public binary with `--help`, record usage & examples. | Environment ready | Attach captured output as artefacts. |
 |  ├─ List binaries | completed | Enumerate all (public_name ...) stanzas under `bin/` and similar. Produce `out/binaries.csv`. | Executable survey | |
-|  ├─ Implement `script/exe_survey.ml` | in_progress | OCaml script using Eio_subprocess to run each binary with `--help`, capture stdout/stderr in `out/help/<exe>.txt`. | List binaries | |
+|  ├─ Implement `script/exe_survey.ml` | completed | OCaml script `script/exe_survey.ml` captures `--help` output for each binary into `out/help/`, utilises Eio.Process. | List binaries | `dune exec exe_survey` to refresh. |
 |  ├─ Capture minimal run examples | pending | Extend script to run sample invocations for selected binaries (`md-search "hello"`, etc.). Logs in `out/examples/<exe>.txt`. | Implement `script/exe_survey.ml` | |
 |  ├─ Commit artefacts | pending | Stage and commit generated help and example transcripts. | Capture minimal run examples | |
 |  └─ Close task | pending | Review outputs, update TODO statuses (`completed`). | Commit artefacts | |
