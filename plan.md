@@ -20,11 +20,11 @@
  Below is a first orienting map derived from an initial scan of `dune` stanzas and existing docs. It will be refined during the research tasks.
 
  *Languages & DSLs*
- • **ChatMD** (Markdown-flavoured prompt language)  ↔  parsed by `lib/chatmd`  ↔  executed by ChatGPT via `chat_response`.
+ • **ChatMD** (Markdown-flavoured prompt language)  ↔  parsed by `lib/chatmd`  ↔  executed by Ochat via `chat_response`.
  • **ChatML** (embedded scripting)  ↔  front-end in `lib/chatml`, resolver & type-checker compile to an interpreter (`chatml_lang`).
 
  *End-user interfaces*
- • **CLI `gpt`** (`bin/main.ml`) – Swiss-army knife wrapper around all services.
+ • **CLI `ochat`** (`bin/main.ml`) – Swiss-army knife wrapper around all services.
  • **TUI `chat-tui`** – full-screen Notty UI for Chat sessions powered by ChatMD.
  • **`mcp_server` / `mcp_client`** – *Machine Control Protocol* JSON/STDIO bridge enabling external tools to drive chat agents.
  • Utility binaries: `md-index`, `md-search`, `odoc-index`, `odoc-search`, `dsl_script`, `key-dump`, `terminal_render`, sample HTTP clients (`eio_get`, `piaf_example`).
@@ -203,5 +203,6 @@ F. *README Skeleton* – draft structure, call-outs, cross-links; always kept in
 | Populate README – Contributing & polish | completed | Fill contributing guidelines, badges, license section and perform final proofreading. | Populate README – Subsystems | Ran `readme_validation` – OK. |
 | Publish README | completed | Copied `docs/README_skeleton.md` to the repository root as `README.md`; removed empty placeholder. | Populate README – Contributing & polish |  |
 | README refinement – section review | completed | Iterate across each README section, cross-check against codebase & docs, and refine the text for accuracy and depth. | Publish README |  |
+| Concatenate ochat docs | completed | Script `concat_ochat_docs` aggregates markdown/ochat/*.md into `out/ochat_docs/ALL_OCHAT_DOCS.md`. | – |  |
 
 > Follow the Task States & Management rules when updating this table during implementation.

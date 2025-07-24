@@ -1,61 +1,69 @@
 (executable
  (name dep_graph_generator)
  (public_name dep_graph_generator)
- (package chatgpt)
-(libraries unix yojson str))
+ (package ochat)
+ (libraries unix yojson str))
 
 ;; Module catalogue generator
+
 (executable
  (name module_catalogue)
  (public_name module_catalogue)
- (package chatgpt)
+ (package ochat)
  (libraries unix sexplib0 sexplib str))
 
 ;; Documentation coverage generator
+
 (executable
  (name doc_coverage)
  (public_name doc_coverage)
- (package chatgpt)
+ (package ochat)
  (libraries unix))
 
 ;; README skeleton continuous validation
+
 (executable
  (name readme_validation)
  (public_name readme_validation)
- (package chatgpt)
+ (package ochat)
  (libraries core core_unix))
 
 ;; ChatMD → JSON converter (research helper)
+
 (executable
  (name chatmd_to_json)
  (public_name chatmd_to_json)
- (package chatgpt)
- (libraries
-  core
-  eio_main
-  chatmd
-  chat_response
-  jsonaf
-  io))
+ (package ochat)
+ (libraries core eio_main chatmd chat_response jsonaf io))
 
 ;; Binary list extractor
+
 (executable
  (name binary_list)
  (public_name binary_list)
- (package chatgpt)
-(libraries core))
+ (package ochat)
+ (libraries core))
 
 ;; Executable survey helper – captures `--help` for each public binary
+
 (executable
  (name exe_survey)
  (public_name exe_survey)
- (package chatgpt)
+ (package ochat)
  (libraries core core_unix eio_main eio unix))
 
-
 ;; Documentation content mining aggregator
+
 (executable
  (name doc_mining)
  (public_name doc_mining)
- (package chatgpt)
+ (package ochat)
+ (libraries unix))
+
+;; OChat markdown concatenator
+
+(executable
+ (name concat_ochat_docs)
+ (public_name concat_ochat_docs)
+ (package ochat)
  (libraries unix))
