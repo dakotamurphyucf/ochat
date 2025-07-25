@@ -5,8 +5,8 @@
     This module couples the declarative specification
     {!Definitions.Webpage_to_markdown} with a concrete implementation that
     fetches the page, converts it to Markdown, and caches the result.  The
-    single entry-point {!register} produces a {!Gpt_function.t} value ready to
-    be passed to {!Gpt_function.functions} (and ultimately to
+    single entry-point {!register} produces a {!Ochat_function.t} value ready to
+    be passed to {!Ochat_function.functions} (and ultimately to
     [Openai.Completions.post_chat_completion]).
 
     {1 Behaviour}
@@ -28,7 +28,7 @@
         let tool = Webpage_markdown.Tool.register ~env ~dir ~net in
 
         (* integrate the tool with other functions *)
-        let tools_json, dispatch = Gpt_function.functions [ tool ] in
+        let tools_json, dispatch = Ochat_function.functions [ tool ] in
         (* send [tools_json] to OpenAI and later use [dispatch] to satisfy the
            callback *)
     ]}
@@ -54,4 +54,4 @@ val register
   :  env:Eio_unix.Stdenv.base
   -> dir:_ Eio.Path.t
   -> net:_ Eio.Net.t
-  -> Gpt_function.t
+  -> Ochat_function.t

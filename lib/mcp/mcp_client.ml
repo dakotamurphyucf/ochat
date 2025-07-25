@@ -147,7 +147,7 @@ let perform_initialize c =
     `Object
       [ "protocolVersion", `String "2025-03-26"
       ; "capabilities", `Object []
-      ; "clientInfo", `Object [ "name", `String "ocamlgpt"; "version", `String "dev" ]
+      ; "clientInfo", `Object [ "name", `String "ocamlochat"; "version", `String "dev" ]
       ]
   in
   let req = JT.make_request ~id ~method_:"initialize" ~params () in

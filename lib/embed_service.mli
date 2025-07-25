@@ -30,15 +30,6 @@
 ]}
 *)
 
-val create
-  :  sw:Eio.Switch.t
-  -> clock:'a Eio.Time.clock
-  -> net:'b Eio.Net.t
-  -> codec:Tikitoken.codec
-  -> rate_per_sec:int
-  -> get_id:('meta -> string)
-  -> ('meta * string) list
-  -> ('meta * string * Vector_db.Vec.t) list
 (** [create ~sw ~clock ~net ~codec ~rate_per_sec ~get_id] returns an
     embedding function.
 
@@ -64,4 +55,12 @@ val create
 
     @raise Failure if [rate_per_sec] ≤ 0
 *)
-[@@ocaml.warning "-32"]
+val create
+  :  sw:Eio.Switch.t
+  -> clock:'a Eio.Time.clock
+  -> net:'b Eio.Net.t
+  -> codec:Tikitoken.codec
+  -> rate_per_sec:int
+  -> get_id:('meta -> string)
+  -> ('meta * string) list
+  -> ('meta * string * Vector_db.Vec.t) list

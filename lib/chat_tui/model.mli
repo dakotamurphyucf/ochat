@@ -1,7 +1,7 @@
 (** Mutable snapshot of the TUI state.
 
     The {!Chat_tui.Model} module concentrates every piece of information
-    that the Chat-GPT terminal UI needs to render the current session and to
+    that the Ochat terminal UI needs to render the current session and to
     react to user input.  The record is still {b mutable} because the
     refactor towards a pure Elm-style architecture (immutable model +
     explicit patches) is carried out incrementally.  A future change will

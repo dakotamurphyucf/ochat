@@ -9,16 +9,16 @@ let add_line_numbers str =
   String.concat ~sep:"\n" numbered_lines
 ;;
 
-let get_contents ~dir : Gpt_function.t =
+let get_contents ~dir : Ochat_function.t =
   let f path =
     match Io.load_doc ~dir path with
     | res -> res
     | exception ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
   in
-  Gpt_function.create_function (module Definitions.Get_contents) f
+  Ochat_function.create_function (module Definitions.Get_contents) f
 ;;
 
-let get_url_content ~net : Gpt_function.t =
+let get_url_content ~net : Ochat_function.t =
   let f url =
     let host = Net.get_host url in
     let path = Net.get_path url in
@@ -33,20 +33,20 @@ let get_url_content ~net : Gpt_function.t =
     @@ List.map ~f:(fun s -> String.strip s)
     @@ Soup.texts soup
   in
-  Gpt_function.create_function (module Definitions.Get_url_content) f
+  Ochat_function.create_function (module Definitions.Get_url_content) f
 ;;
 
-let index_ocaml_code ~dir ~dm ~net : Gpt_function.t =
+let index_ocaml_code ~dir ~dm ~net : Ochat_function.t =
   let f (folder_to_index, vector_db_folder) =
     Eio.Switch.run
     @@ fun sw ->
     Indexer.index ~sw ~dir ~dm ~net ~vector_db_folder ~folder_to_index;
     "code has been indexed"
   in
-  Gpt_function.create_function (module Definitions.Index_ocaml_code) f
+  Ochat_function.create_function (module Definitions.Index_ocaml_code) f
 ;;
 
-let query_vector_db ~dir ~net : Gpt_function.t =
+let query_vector_db ~dir ~net : Ochat_function.t =
   let f (vector_db_folder, query, num_results, index) =
     let vf = dir / vector_db_folder in
     let index =
@@ -81,10 +81,10 @@ let query_vector_db ~dir ~net : Gpt_function.t =
     in
     String.concat ~sep:"\n" results
   in
-  Gpt_function.create_function (module Definitions.Query_vector_db) f
+  Ochat_function.create_function (module Definitions.Query_vector_db) f
 ;;
 
-let apply_patch ~dir : Gpt_function.t =
+let apply_patch ~dir : Ochat_function.t =
   let split path =
     Eio.Path.split (dir / path)
     |> Option.map ~f:(fun ((_, dirname), basename) -> dirname, basename)
@@ -110,32 +110,32 @@ let apply_patch ~dir : Gpt_function.t =
     | _ -> sprintf "git patch successful"
     | exception ex -> Fmt.str "error running apply_patch: %a" Eio.Exn.pp ex
   in
-  Gpt_function.create_function (module Definitions.Apply_patch) f
+  Ochat_function.create_function (module Definitions.Apply_patch) f
 ;;
 
-let read_dir ~dir : Gpt_function.t =
+let read_dir ~dir : Ochat_function.t =
   let f path =
     match Io.directory ~dir path with
     | res -> String.concat ~sep:"\n" res
     | exception ex -> Fmt.str "error running read_directory: %a" Eio.Exn.pp ex
   in
-  Gpt_function.create_function (module Definitions.Read_directory) f
+  Ochat_function.create_function (module Definitions.Read_directory) f
 ;;
 
-let mkdir ~dir : Gpt_function.t =
+let mkdir ~dir : Ochat_function.t =
   let f path =
     match Io.mkdir ~exists_ok:true ~dir path with
     | () -> sprintf "Directory %s created successfully." path
     | exception ex -> Fmt.str "error running mkdir: %a" Eio.Exn.pp ex
   in
-  Gpt_function.create_function (module Definitions.Make_dir) f
+  Ochat_function.create_function (module Definitions.Make_dir) f
 ;;
 
 (* -------------------------------------------------------------------------- *)
 (* ODoc search – vector-based snippet retrieval                                 *)
 (* -------------------------------------------------------------------------- *)
 
-let odoc_search ~dir ~net : Gpt_function.t =
+let odoc_search ~dir ~net : Ochat_function.t =
   (*────────────────────────  Simple in-memory caches  ───────────────────────*)
   let module Odoc_cache = struct
     open Core
@@ -255,14 +255,14 @@ let odoc_search ~dir ~net : Gpt_function.t =
           Printf.sprintf "[%d] [%s] %s\n%s" rank pkg id preview)
         |> String.concat ~sep:"\n\n---\n\n")
   in
-  Gpt_function.create_function (module Definitions.Odoc_search) ~strict:false f
+  Ochat_function.create_function (module Definitions.Odoc_search) ~strict:false f
 ;;
 
 (* -------------------------------------------------------------------------- *)
 (* Webpage → Markdown tool                                                     *)
 (* -------------------------------------------------------------------------- *)
 
-let webpage_to_markdown ~env ~dir ~net : Gpt_function.t =
+let webpage_to_markdown ~env ~dir ~net : Ochat_function.t =
   Webpage_markdown.Tool.register ~env ~dir ~net
 ;;
 
@@ -270,18 +270,18 @@ let webpage_to_markdown ~env ~dir ~net : Gpt_function.t =
 (*  Fork stub – placeholder implementation                                     *)
 (* -------------------------------------------------------------------------- *)
 
-let fork : Gpt_function.t =
+let fork : Ochat_function.t =
   let impl (_ : Definitions.Fork.input) =
     "[fork-tool placeholder – should never be called directly]"
   in
-  Gpt_function.create_function (module Definitions.Fork) impl
+  Ochat_function.create_function (module Definitions.Fork) impl
 ;;
 
 (* -------------------------------------------------------------------------- *)
 (* Markdown indexing – build vector store                                      *)
 (* -------------------------------------------------------------------------- *)
 
-let index_markdown_docs ~env ~dir : Gpt_function.t =
+let index_markdown_docs ~env ~dir : Ochat_function.t =
   let f (root, index_name, description, vector_db_root_opt) =
     let root_path = Eio.Path.(dir / root) in
     let vector_db_root = Option.value vector_db_root_opt ~default:".md_index" in
@@ -296,14 +296,14 @@ let index_markdown_docs ~env ~dir : Gpt_function.t =
     with
     | ex -> Fmt.str "error indexing markdown docs: %a" Eio.Exn.pp ex
   in
-  Gpt_function.create_function (module Definitions.Index_markdown_docs) f
+  Ochat_function.create_function (module Definitions.Index_markdown_docs) f
 ;;
 
 (* -------------------------------------------------------------------------- *)
 (* Markdown search – semantic retrieval                                        *)
 (* -------------------------------------------------------------------------- *)
 
-let markdown_search ~dir ~net : Gpt_function.t =
+let markdown_search ~dir ~net : Ochat_function.t =
   (*────────────────────────  Simple in-memory caches  ───────────────────────*)
   let module Md_cache = struct
     open Core
@@ -439,5 +439,5 @@ let markdown_search ~dir ~net : Gpt_function.t =
             Printf.sprintf "[%d] [%s] %s\n%s" rank idx_name id preview)
           |> String.concat ~sep:"\n\n---\n\n"))
   in
-  Gpt_function.create_function (module Definitions.Markdown_search) ~strict:false f
+  Ochat_function.create_function (module Definitions.Markdown_search) ~strict:false f
 ;;

@@ -111,7 +111,9 @@ let glob_matcher_of_gitignore_line (line : string) : matcher option =
     let pat = if dir_pattern then String.rstrip ~drop:(Char.equal '/') line else line in
     (* Try [path_glob] first *)
     let using_path_glob =
-      match Or_error.try_with (fun () -> Path_glob.Glob.parse (Printf.sprintf "<%s>" pat)) with
+      match
+        Or_error.try_with (fun () -> Path_glob.Glob.parse (Printf.sprintf "<%s>" pat))
+      with
       | Ok glob -> Some (fun rel -> Path_glob.Glob.eval glob rel)
       | Error _ -> None
     in

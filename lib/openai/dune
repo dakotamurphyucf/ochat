@@ -1,6 +1,6 @@
 (library
  (name openai)
- (public_name chatgpt.openai)
+ (public_name ochat.openai)
  (modules completions embeddings responses)
  (libraries
   io

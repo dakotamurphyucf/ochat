@@ -14,7 +14,7 @@
 (library
  (name webpage_markdown_test)
  (modules webpage_markdown_test)
- (libraries core expect_test_helpers_core chatgpt.webpage_markdown)
+ (libraries core expect_test_helpers_core ochat.webpage_markdown)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -36,7 +36,6 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
-
 
 ;; ---------------------------------------------------------------------------
 ;; Chat-TUI – Cmdline mode tests (Phase 3)
@@ -102,10 +101,10 @@
   eio.unix
   piaf
   uri
-  chatgpt.mcp_client
-  chatgpt.mcp_server_core
-  chatgpt.mcp_server_http
-  chatgpt.mcp_types)
+  ochat.mcp_client
+  ochat.mcp_server_core
+  ochat.mcp_server_http
+  ochat.mcp_types)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -124,10 +123,10 @@
   eio_main
   eio.mock
   eio.unix
-  chatgpt.mcp_server_core
-  chatgpt.mcp_server_http
-  chatgpt.mcp_client
-  chatgpt.mcp_types
+  ochat.mcp_server_core
+  ochat.mcp_server_http
+  ochat.mcp_client
+  ochat.mcp_types
   piaf)
  (inline_tests)
  (preprocess
@@ -149,7 +148,7 @@
   eio.unix
   piaf
   uri
-  chatgpt.mcp_transport)
+  ochat.mcp_transport)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -170,7 +169,7 @@
   eio.unix
   piaf
   uri
-  chatgpt.mcp_transport)
+  ochat.mcp_transport)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -191,8 +190,8 @@
   eio.unix
   piaf
   uri
-  chatgpt.mcp_client
-  chatgpt.mcp_types)
+  ochat.mcp_client
+  ochat.mcp_types)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -233,7 +232,8 @@
   stdio)
  (inline_tests
   (deps ../out-cl100k_base.tikitoken.txt))
- (preprocessor_deps (file ../out-cl100k_base.tikitoken.txt))
+ (preprocessor_deps
+  (file ../out-cl100k_base.tikitoken.txt))
  (preprocess
   (pps ppx_jane ppx_blob ppx_expect)))
 
@@ -241,7 +241,7 @@
  (name mcp_stub_server)
  (public_name mcp_stub_server)
  (modules mcp_stub_server)
- (libraries core jsonaf jsonaf_ext chatgpt.mcp_types))
+ (libraries core jsonaf jsonaf_ext ochat.mcp_types))
 
 ;; ---------------------------------------------------------------------------
 ;; MCP client high-level tests (uses stub server)
@@ -257,8 +257,8 @@
   eio_main
   eio.mock
   eio.unix
-  chatgpt.mcp_client
-  chatgpt.mcp_types)
+  ochat.mcp_client
+  ochat.mcp_types)
  (inline_tests
   (deps %{bin:mcp_stub_server}))
  (preprocess
@@ -322,7 +322,7 @@
   eio_main
   eio.mock
   eio.unix
-  chatgpt.mcp_transport)
+  ochat.mcp_transport)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

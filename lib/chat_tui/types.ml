@@ -1,4 +1,4 @@
-(* Shared data types for the Chat-GPT terminal UI.  The {!Types} module
+(* Shared data types for the Ochat terminal UI.  The {!Types} module
    holds only minimal, foundational definitions and therefore has no
    dependencies on heavier libraries such as Eio or Notty.  This design
    decision prevents circular build dependencies and keeps compilation

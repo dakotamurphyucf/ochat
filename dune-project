@@ -1,6 +1,6 @@
 (lang dune 3.18)
 
-(name chatgpt)
+(name ochat)
 
 (generate_opam_files true)
 
@@ -12,7 +12,7 @@
   (name piaf)))
 
 (package
- (name chatgpt)
+ (name ochat)
  (synopsis "A short synopsis")
  (description "A longer description")
  (depends

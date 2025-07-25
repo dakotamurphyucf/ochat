@@ -1,5 +1,0 @@
-odoc-index --root <path> [--out <dir>]
-  --root Root directory ($ODOC_ROOT/default/var/cache/odig/html)
-  --out Output directory for index (default .odoc_index)
-  -help  Display this list of options
-  --help  Display this list of options

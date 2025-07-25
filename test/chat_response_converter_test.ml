@@ -22,6 +22,7 @@ let%expect_test "string_of_items handles text and image" =
       ; document_url = None
       ; is_local = false
       ; cleanup_html = false
+      ; markdown = false
       }
   in
   let image_item : CM.content_item =
@@ -32,6 +33,7 @@ let%expect_test "string_of_items handles text and image" =
       ; document_url = None
       ; is_local = false
       ; cleanup_html = false
+      ; markdown = false
       }
   in
   let items = [ basic "hello"; image_item ] in
@@ -59,6 +61,7 @@ let%expect_test "to_items converts user message with basic text" =
       ; document_url = None
       ; is_local = false
       ; cleanup_html = false
+      ; markdown = false
       }
   in
   let msg : CM.msg =

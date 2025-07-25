@@ -1,8 +1,8 @@
-(** GPT function *definitions* exposed by the ChatGPT agent.
+(** GPT function *definitions* exposed by the Ochat agent.
 
     This module is **data-only** – it bundles a catalogue of tool
     specifications that can be offered to the OpenAI function-calling
-    API.  Each sub-module implements {!Gpt_function.Def} and therefore
+    API.  Each sub-module implements {!Ochat_function.Def} and therefore
     provides four values that describe a tool but do *not* implement
     its runtime behaviour:
 
@@ -13,7 +13,7 @@
       API into a strongly-typed OCaml value.
 
     To obtain an *executable* tool you must pair the definition with an
-    implementation using {!Gpt_function.create_function}.
+    implementation using {!Ochat_function.create_function}.
 
     Nothing in this module performs I/O; all operations are pure and
     total.
@@ -35,28 +35,28 @@
     • {!Make_dir}            – create a directory on the filesystem
 *)
 
-module Get_contents : Gpt_function.Def with type input = string
+module Get_contents : Ochat_function.Def with type input = string
 
 module Odoc_search :
-  Gpt_function.Def with type input = string * int option * string option * string
+  Ochat_function.Def with type input = string * int option * string option * string
 
 type fork_input =
   { command : string
   ; arguments : string list
   }
 
-module Fork : Gpt_function.Def with type input = fork_input
-module Webpage_to_markdown : Gpt_function.Def with type input = string
-module Add_line_numbers : Gpt_function.Def with type input = string
-module Get_url_content : Gpt_function.Def with type input = string
-module Index_ocaml_code : Gpt_function.Def with type input = string * string
+module Fork : Ochat_function.Def with type input = fork_input
+module Webpage_to_markdown : Ochat_function.Def with type input = string
+module Add_line_numbers : Ochat_function.Def with type input = string
+module Get_url_content : Ochat_function.Def with type input = string
+module Index_ocaml_code : Ochat_function.Def with type input = string * string
 
 module Query_vector_db :
-  Gpt_function.Def with type input = string * string * int * string option
+  Ochat_function.Def with type input = string * string * int * string option
 
-module Apply_patch : Gpt_function.Def with type input = string
-module Read_directory : Gpt_function.Def with type input = string
-module Make_dir : Gpt_function.Def with type input = string
+module Apply_patch : Ochat_function.Def with type input = string
+module Read_directory : Ochat_function.Def with type input = string
+module Make_dir : Ochat_function.Def with type input = string
 
 (* ---------------------------------------------------------------------- *)
 (*  Markdown indexing & search                                              *)
@@ -76,7 +76,7 @@ module Make_dir : Gpt_function.Def with type input = string
       vector database; defaults to ".md_index" when [None]. *)
 
 module Index_markdown_docs :
-  Gpt_function.Def with type input = string * string * string * string option
+  Ochat_function.Def with type input = string * string * string * string option
 
 (** {1 Markdown_search}
 
@@ -92,4 +92,4 @@ module Index_markdown_docs :
       to ".md_index" when [None]. *)
 
 module Markdown_search :
-  Gpt_function.Def with type input = string * int option * string option * string option
+  Ochat_function.Def with type input = string * int option * string option * string option

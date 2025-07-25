@@ -55,6 +55,7 @@ module Chat_content = struct
     ; document_url : string option [@jsonaf.option]
     ; is_local : bool [@default false]
     ; cleanup_html : bool [@default false]
+    ; markdown : bool [@default false] (* whether to convert HTML to Markdown *)
     }
   [@@deriving sexp, jsonaf, hash, bin_io, compare]
 
@@ -224,7 +225,7 @@ module Chat_markdown = struct
     | Summary of reasoning_summary
     | Text of string
     | Image of string * bool
-    | Document of string * bool * bool
+    | Document of string * bool * bool * bool (* url, is_local, cleanup_html, markdown *)
     | Agent of string (* url *) * bool (* is_local *) * chat_element list
   (* Convert a <msg> element’s children into an Items or a single Text. *)
 
@@ -241,6 +242,7 @@ module Chat_markdown = struct
         ; document_url = None
         ; is_local = false
         ; cleanup_html = false
+        ; markdown = false
         }
       :: content_items_of_elements rest
     | Image (u, loc) :: rest ->
@@ -251,9 +253,10 @@ module Chat_markdown = struct
         ; document_url = None
         ; is_local = loc
         ; cleanup_html = false
+        ; markdown = false
         }
       :: content_items_of_elements rest
-    | Document (u, loc, cln) :: rest ->
+    | Document (u, loc, cln, md) :: rest ->
       Basic
         { type_ = "text"
         ; text = None
@@ -261,6 +264,7 @@ module Chat_markdown = struct
         ; document_url = Some u
         ; is_local = loc
         ; cleanup_html = cln
+        ; markdown = md
         }
       :: content_items_of_elements rest
     | Agent (u, loc, ch) :: rest ->
@@ -361,10 +365,11 @@ module Chat_markdown = struct
       if is_local
       then Printf.sprintf "<img src=\"%s\" local=\"true\" />" url
       else Printf.sprintf "<img src=\"%s\" />" url
-    | Document (url, local, cleanup) ->
+    | Document (url, local, cleanup, markdown) ->
       let local_attr = if local then " local=\"true\"" else "" in
       let strip_attr = if cleanup then " strip=\"true\"" else "" in
-      Printf.sprintf "<doc src=\"%s\"%s%s />" url local_attr strip_attr
+      let md_attr = if markdown then " markdown=\"true\"" else "" in
+      Printf.sprintf "<doc src=\"%s\"%s%s%s />" url local_attr strip_attr md_attr
     | Config { max_tokens; model; reasoning_effort; temperature; show_tool_call; id } ->
       let attrs =
         [ Option.map max_tokens ~f:(fun n -> Printf.sprintf "max_tokens=\"%d\"" n)
@@ -538,7 +543,8 @@ module Chat_markdown = struct
         let url = Option.value (Hashtbl.find tbl "src") ~default:"" in
         let local = Hashtbl.mem tbl "local" in
         let strip = Hashtbl.mem tbl "strip" in
-        Document (url, local, strip)
+        let md = Hashtbl.mem tbl "markdown" in
+        Document (url, local, strip, md)
       | Element (Config, attrs, _) ->
         let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
         let tbl = Hashtbl.create (module String) in

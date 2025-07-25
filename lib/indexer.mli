@@ -6,7 +6,7 @@
     snippet, and persists both the dense vectors and a BM-25 paragraph
     index to disk.  The resulting artefacts can later be loaded by
     {!module:Vector_db} and {!module:Bm25} for fast similarity search
-    inside ChatGPT-style assistants or code-navigation tools.
+    inside Ochat-style assistants or code-navigation tools.
 
     Internally the work is split into a producer/consumer pipeline:
 

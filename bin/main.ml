@@ -1,8 +1,67 @@
+(** {1 𝚐𝚙𝚝 – multi-purpose CLI for Ochat, embeddings and code search}
+
+    This executable is installed under the {!val:main_command} {!Command.group}
+    and exposed as the [ochat] binary by [dune].  It bundles several loosely
+    related developer-oriented utilities that build on the libraries living in
+    the *ochat* code-base:
+
+    • {{!val:index_command} index}      – crawl an OCaml project and write a
+      hybrid semantic / lexical search corpus (see {!module:Indexer}).
+
+    • {{!val:query_command} query}      – run natural-language retrieval over a
+      previously created corpus using {!module:Vector_db.query_hybrid}.
+
+    • {{!val:chat_completion_command} chat-completion} – convenience wrapper
+      around {!Chat_response.Driver.run_completion_stream} for chatmd prompt
+      files.
+
+    • {{!val:tokenize_command} tokenize} – count {e Tikitoken} tokens of an
+      arbitrary file; useful for prompt budgeting.
+
+    • {{!val:html_to_markdown_command} html-to-markdown} / {b h2md} – convert
+      static HTML to Markdown and preview the chunking heuristics used by
+      {!module:Odoc_snippet}.
+
+    A maintainer-oriented walk-through of the source file can be found in
+    {b docs-src/bin/main.doc.md} (generated together with this comment).
+
+    Invoke [ochat help SUBCOMMAND] for the fine-grained flag reference rendered
+    by {!module:Core.Command}.  The sections below document each helper in
+    more depth than the auto-generated usage strings.
+
+    @author Ochat
+*)
+
 open Core
 open Eio
 open Command.Let_syntax
 open Io
 
+(** [index_command] builds a dense-vector + BM25 corpus from a directory tree.
+
+    The command is exposed as:
+
+{[ ochat index -folder-to-index ./lib -vector-db-folder ./vector ]}
+
+    Flags:
+    • [-folder-to-index] — root of the source tree to scan (defaults to
+      [./lib]).  Both [*.ml] and [*.mli] files are parsed with
+      {!module:Ocaml_parser} and their ocamldoc comments are chunked into
+      token-bounded snippets.
+
+    • [-vector-db-folder] — destination directory for the generated
+      [vectors.{ml,mli}.binio] and [bm25.{ml,mli}.binio] artefacts.
+
+    The heavy-lifting is delegated to {!Indexer.index}.  Concurrency is managed
+    by a fresh {!Eio.Switch.t}, while HTTP calls to the OpenAI *Embeddings* API
+    reuse the network capability from [env].  The function blocks until all
+    files are written to disk.
+
+    Example:
+    {[
+      $ ochat index -folder-to-index ./lib -vector-db-folder ./_index
+    ]}
+*)
 let index_command =
   Command.basic
     ~summary:
@@ -32,6 +91,24 @@ let index_command =
        Indexer.index ~sw ~dir ~dm ~net:env#net ~vector_db_folder ~folder_to_index)
 ;;
 
+(** [query_command] performs hybrid semantic × lexical retrieval over a corpus.
+
+    Usage example:
+    {[ ochat query -vector-db-folder ./_index -query-text "tail-recursive map" ]}
+
+    * [-vector-db-folder] must point at the directory that holds the artefacts
+      produced by {{!val:index_command} index_command}.
+
+    * [-query-text] is the natural-language prompt.  A single embedding is
+      requested from the OpenAI API and compared against every column of the
+      corpus matrix.
+
+    * [-num-results] upper-bounds the number of lines printed to stdout.
+
+    The ranking function is {!Vector_db.query_hybrid}.  A fallback empty
+    {!module:Bm25} index is created if the BM25 file cannot be found so that
+    cosine similarity still works in isolation.
+*)
 let query_command =
   Command.basic
     ~summary:"Query the indexed OCaml code using natural language."
@@ -93,6 +170,23 @@ let query_command =
          docs)
 ;;
 
+(** [chat_completion_command] feeds a *chatmd* conversation to the OpenAI
+    Chat Completion endpoint and streams the assistant’s reply to a Markdown
+    file.
+
+    Flags:
+    • [-prompt-file] – optional template prepended exactly once at the start of
+      the output file.  If omitted the conversation continues from the
+      existing [output-file] only.
+
+    • [-output-file] – path where the running transcript is stored (default:
+      {b ./prompts/default.md}).  The file is created on first run so you can
+      resume later.
+
+    Implementation note: the heavy lifting is done by
+    {!Chat_response.Driver.run_completion_stream} which handles tool calling
+    and incremental rendering.
+*)
 let chat_completion_command =
   Command.basic
     ~summary:
@@ -122,6 +216,15 @@ let chat_completion_command =
        Chat_response.Driver.run_completion_stream ~env ?prompt_file ~output_file ())
 ;;
 
+(** [tokenize_command] prints the number of {e Tikitoken} tokens in a file.
+
+    This is a thin wrapper around {!Tikitoken.encode}.  It loads the
+    {e cl100k_base} Byte Pair Encoding rules once (~500 KB), encodes the file
+    and outputs a single integer.
+
+    Typical usage:
+    {[ ochat tokenize -file bin/main.ml ]}
+*)
 let tokenize_command =
   Command.basic
     ~summary:"Tokenize the provided file using the OpenAI Tikitoken spec"
@@ -145,6 +248,20 @@ let tokenize_command =
        Io.console_log ~stdout:env#stdout @@ sprintf "tokens: %i\n" (List.length encoded))
 ;;
 
+(** [html_to_markdown_command] converts static HTML to Markdown and shows the
+    internal chunking performed by {!Odoc_snippet}.
+
+    It is primarily a debugging helper used when tweaking the snippet
+    extraction heuristics.  The command prints:
+
+    1. The full Markdown rendering.
+    2. A delimiter line followed by every block returned by
+       {!Odoc_snippet.Chunker.chunk_by_heading_or_blank}.
+    3. The final slice passed to the embedding pipeline (sexp-encoded).
+
+    Example:
+    {[ ochat html-to-markdown -file docs/tutorial.html ]}
+*)
 let html_to_markdown_command =
   Command.basic
     ~summary:"Convert HTML file to Markdown"
@@ -184,10 +301,16 @@ let html_to_markdown_command =
             s)
 ;;
 
+(** [main_command] is the top-level {!Command.group} executed by the [ochat]
+    binary.  It merely delegates to the sub-commands documented above.
+
+    Run {b ochat help} or {b ochat help SUBCOMMAND} for the auto-generated manual
+    pages provided by {!module:Command_unix}.
+*)
 let main_command =
   Command.group
     ~summary:
-      "A command-line app for using OpenAI Models for running chat completion on chatmd \
+      "A command-line apps for using OpenAI Models for running chat completion on chatmd \
        files. Also provides Ocaml specfic functionality for indexing files into a vector \
        database, and natural language search of that ocaml code."
     [ "chat-completion", chat_completion_command

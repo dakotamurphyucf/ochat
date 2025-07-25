@@ -13,7 +13,7 @@
 
     All operations are single-threaded and allocate only standard OCaml
     data structures.  For very large datasets use a dedicated search
-    engine (e.g. Tantivy, MeiliSearch) instead. *)
+    engine (e.g. Tantivy, MeiliSearch) isnstead. *)
 
 type doc =
   { id : int

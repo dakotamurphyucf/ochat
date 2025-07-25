@@ -1,8 +1,8 @@
 (** OCaml port of OpenAI’s reference *apply_patch* helper.
 
-    This implementation understands the “ChatGPT diff” patch syntax
+    This implementation understands the “Ochat diff” patch syntax
     discussed in the
-    {{:https://cookbook.openai.com/examples/gpt4-1_prompting_guide#reference-implementation-apply_patchpy}
+    {{:https://cookbook.openai.com/examples/ochat4-1_prompting_guide#reference-implementation-apply_patchpy}
     prompting-guide} and can apply multi-file edits against an
     arbitrary workspace.  The module is intentionally IO-free – all
     reads and writes happen through the callback functions supplied to

@@ -1,13 +1,13 @@
-(** Ready-made ChatGPT **tools** implemented on top of {{!module:Gpt_function}Gpt_function}.
+(** Ready-made Ochat **tools** implemented on top of {{!module:Ochat_function}Ochat_function}.
 
     The values exposed by this module are *registrations* – each one is the
-    result of a call to {!Gpt_function.create_function}.  They can be mixed and
+    result of a call to {!Ochat_function.create_function}.  They can be mixed and
     matched freely when building the tool-list for
     {!Openai.Completions.post_chat_completion}:
 
     {[
       let tools, dispatch_tbl =
-        Gpt_function.functions
+        Ochat_function.functions
           [ Functions.get_contents ~dir:cwd
           ; Functions.apply_patch  ~dir:cwd
           ; Functions.odoc_search  ~dir:cwd ~net
@@ -54,7 +54,7 @@ val add_line_numbers : string -> string
     • **Behaviour** – returns the UTF-8 contents of [`file`], read via
       {!Io.load_doc}.  Errors are rendered with {!Eio.Exn.pp} and propagated as
       plain strings so that the model can inspect the failure reason. *)
-val get_contents : dir:Eio.Fs.dir_ty Eio.Path.t -> Gpt_function.t
+val get_contents : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
 (** Register the [`get_url_content`] tool.
 
@@ -62,7 +62,7 @@ val get_contents : dir:Eio.Fs.dir_ty Eio.Path.t -> Gpt_function.t
     tags with [LambdaSoup], and returns the visible text.  Content larger than
     the current chat context window is not truncated automatically – callers
     should post-process the string if necessary. *)
-val get_url_content : net:_ Eio.Net.t -> Gpt_function.t
+val get_url_content : net:_ Eio.Net.t -> Ochat_function.t
 
 (** Register the [`index_ocaml_code`] tool.
 
@@ -74,7 +74,7 @@ val index_ocaml_code
   :  dir:Eio.Fs.dir_ty Eio.Path.t
   -> dm:Eio.Domain_manager.ty Eio.Resource.t
   -> net:_ Eio.Net.t
-  -> Gpt_function.t
+  -> Ochat_function.t
 
 (** Register the [`query_vector_db`] tool.
 
@@ -82,7 +82,7 @@ val index_ocaml_code
     search a pre-built index.  The result is a Markdown list of code snippets
     wrapped in [```ocaml] fences.  See {!Vector_db.query_hybrid} for the
     scoring details. *)
-val query_vector_db : dir:Eio.Fs.dir_ty Eio.Path.t -> net:_ Eio.Net.t -> Gpt_function.t
+val query_vector_db : dir:Eio.Fs.dir_ty Eio.Path.t -> net:_ Eio.Net.t -> Ochat_function.t
 
 (** Register the [`index_markdown_docs`] tool.
     Crawls a directory of Markdown files, chunks them into token–bounded
@@ -92,25 +92,25 @@ val query_vector_db : dir:Eio.Fs.dir_ty Eio.Path.t -> net:_ Eio.Net.t -> Gpt_fun
 val index_markdown_docs
   :  env:Eio_unix.Stdenv.base
   -> dir:Eio.Fs.dir_ty Eio.Path.t
-  -> Gpt_function.t
+  -> Ochat_function.t
 
 (** Register the [`markdown_search`] tool – semantic search across Markdown
     indices previously created with {!index_markdown_docs}. *)
-val markdown_search : dir:Eio.Fs.dir_ty Eio.Path.t -> net:_ Eio.Net.t -> Gpt_function.t
+val markdown_search : dir:Eio.Fs.dir_ty Eio.Path.t -> net:_ Eio.Net.t -> Ochat_function.t
 
-(** Register the [`apply_patch`] tool that applies a *ChatGPT diff* to the
+(** Register the [`apply_patch`] tool that applies a *Ochat diff* to the
     workspace rooted at [dir].  The helper is a thin wrapper around
     {!Apply_patch.process_patch}.  It supports additions, deletions, in-place
     modifications, and file moves. *)
-val apply_patch : dir:Eio.Fs.dir_ty Eio.Path.t -> Gpt_function.t
+val apply_patch : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
 (** Register the [`read_directory`] tool.  Returns the entry list of the given
     sub-directory without recursion. *)
-val read_dir : dir:Eio.Fs.dir_ty Eio.Path.t -> Gpt_function.t
+val read_dir : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
 (** Register the [`mkdir`] tool.  Creates the specified sub-directory with mode
     0o700.  The action is idempotent when the folder already exists. *)
-val mkdir : dir:Eio.Fs.dir_ty Eio.Path.t -> Gpt_function.t
+val mkdir : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
 (** {1 Search helpers} *)
 
@@ -119,7 +119,7 @@ val mkdir : dir:Eio.Fs.dir_ty Eio.Path.t -> Gpt_function.t
     performs cosine similarity against an [Owl] matrix of pre-computed snippet
     embeddings.  Results are rendered in the same Markdown format as the
     original command-line utility bundled in this repository. *)
-val odoc_search : dir:Eio.Fs.dir_ty Eio.Path.t -> net:_ Eio.Net.t -> Gpt_function.t
+val odoc_search : dir:Eio.Fs.dir_ty Eio.Path.t -> net:_ Eio.Net.t -> Ochat_function.t
 
 (** {1 Web helper} *)
 
@@ -131,11 +131,11 @@ val webpage_to_markdown
   :  env:Eio_unix.Stdenv.base
   -> dir:_ Eio.Path.t
   -> net:_ Eio.Net.t
-  -> Gpt_function.t
+  -> Ochat_function.t
 
 (** {1 Miscellaneous} *)
 
 (** Placeholder registration for the [`fork`] tool.  Its implementation is a
     stub and should never be called directly; it exists only so that the JSON
     schema can be advertised to the model. *)
-val fork : Gpt_function.t
+val fork : Ochat_function.t

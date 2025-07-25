@@ -234,7 +234,7 @@ and convert ~dir ~net ~cache msg =
 and run_agent prompt items ~dir ~net ~cache =
   let funcs, tbl =
     (* add replace_in_file *)
-    Gpt_function.functions
+    Ochat_function.functions
       [ (* Functions.create_file ~dir *)
         Functions.get_contents ~dir
         (* ; Functions.insert_code ~dir *)
@@ -342,7 +342,7 @@ let run_completion ~env ~output_file ~prompt_file =
     let content = Option.value ~default:"" in
     let _funcs, tbl =
       (* add replace_in_file *)
-      Gpt_function.functions
+      Ochat_function.functions
         [ (* Functions.create_file ~dir *)
           Functions.get_contents ~dir
           (* ; Functions.insert_code ~dir *)

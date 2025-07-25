@@ -1,7 +1,0 @@
-mcp_server [--http PORT]
-  --http Run Streamable HTTP server on the given port (instead of stdio)
-  --require-auth Enable minimal OAuth 2.1 auth (client-credentials)
-  --client-id Static OAuth client_id accepted by the token endpoint
-  --client-secret Static OAuth client_secret accepted by the token endpoint
-  -help  Display this list of options
-  --help  Display this list of options

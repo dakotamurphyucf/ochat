@@ -1,10 +1,43 @@
+(** Semantic search over Markdown snippet indexes (CLI).
+
+    The [md-search] executable queries one or more vector indexes
+    produced by {!md-index}.  For a natural-language input it:
+
+    1. Creates an OpenAI *embedding* for the query string.
+    2. Selects candidate snippet indexes (either the one passed with
+       {!--index} or – when the special value {!all} is used – the
+       five indexes whose *centroid* is closest to the query).
+    3. Loads the vectors of every snippet contained in the selected
+       indexes and builds an in-memory {!Vector_db} corpus.
+    4. Performs cosine-similarity search and prints up to [k] Markdown
+       previews to [stdout].
+
+    The program is Unix-only (depends on {!Eio_main}).  All blocking
+    effects – network access, filesystem reads – run inside an Eio
+    fibre so the binary remains responsive even on slow I/O.
+
+    {1  Command-line interface}
+
+    Usage: [md-search --query TEXT [--index NAME|all] [--index-dir DIR] [-k INT]]
+
+    The executable accepts the following flags:
+
+    {v
+      --query <text>     Natural-language search query (mandatory)
+      --index <name|all> Index to search.  Use [all] to auto-select the
+                         five closest ones (default: all).
+      --index-dir <dir>  Directory that contains the Markdown indexes
+                         as sub-folders (default: .md_index)
+      -k <int>           Maximum number of snippets to display (default: 5)
+    v}
+
+    Exit code is [0] on success, non-zero on errors (invalid arguments,
+    missing indexes, network failures, …).
+*)
+
 open Core
 open Eio
 open Owl
-
-(* -------------------------------------------------------------------------- *)
-(* CLI for semantic search over Markdown indices                                *)
-(* -------------------------------------------------------------------------- *)
 
 let query = ref ""
 let index_name = ref "all"
@@ -22,8 +55,16 @@ let speclist =
 ;;
 
 let usage = "md-search --query <text> [--index name|all] [--index-dir dir] [-k 5]"
+
+(** [mat_of_array arr] returns a column matrix view of the one-dimensional
+    float array [arr].  The resulting value has shape *n x 1* where
+    *n* is [Array.length arr].  No copy is performed – the matrix shares
+    memory with the array. *)
 let mat_of_array arr = Mat.of_array arr (Array.length arr) 1
 
+(** [dot_product a b] computes the Euclidean dot product of two float arrays
+    assumed to have identical length.  Complexity is O(n) where [n] is the
+    vector dimension. *)
 let dot_product a b =
   let acc = ref 0. in
   for i = 0 to Array.length a - 1 do
@@ -32,6 +73,11 @@ let dot_product a b =
   !acc
 ;;
 
+(** Program entry-point – do **not** call directly.
+
+    [main env] runs the CLI inside an {!Eio_main.run} context and exits
+    the process when finished.  All side-effects live inside the given
+    Eio environment [env]. *)
 let main env =
   Mirage_crypto_rng_unix.use_default ();
   Arg.parse speclist (fun _ -> ()) usage;

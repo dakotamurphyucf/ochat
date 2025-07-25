@@ -10,7 +10,7 @@ let string_of_bool b = if b then "y" else "n"
     stdin/stdout and converts JSON replies into typed OCaml values with
     `ppx_jsonaf_conv`.
 
-    It is geared towards {b interactive tooling}: code editors, ChatGPT
+    It is geared towards {b interactive tooling}: code editors, Ochat
     plugins, REPL helpers …  The implementation covers two high-level
     Merlin commands that are most useful in such scenarios:
 

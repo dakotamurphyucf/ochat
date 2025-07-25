@@ -77,9 +77,24 @@ let rec string_of_items ~ctx ~run_agent (items : CM.content_item list) : string 
          then Printf.sprintf "<img src=\"%s\" local=\"true\"/>" url
          else Printf.sprintf "<img src=\"%s\"/>" url
        | _, Some doc_url ->
-         if b.cleanup_html
-         then Fetch.get_html ~ctx doc_url ~is_local:b.is_local
-         else Fetch.get ~ctx doc_url ~is_local:b.is_local
+         (match b.cleanup_html, b.markdown, b.is_local with
+          | true, _, _ -> Fetch.get_html ~ctx doc_url ~is_local:b.is_local
+          | _, true, true ->
+            (* If the document is local, and markdown is requested, we read it from disk and convert to Markdown. *)
+            let env = Ctx.env ctx in
+            Webpage_markdown.Driver.(
+              convert_html_file Eio.Path.(Eio.Stdenv.fs env / doc_url)
+              |> Markdown.to_string)
+          | _, true, false ->
+            (* If the document is not local, and markdown is requested, we fetch it over HTTP and convert to Markdown. *)
+            let net = Ctx.net ctx in
+            let env = Ctx.env ctx in
+            (* Use the Webpage_markdown driver to fetch and convert the page to Markdown. *)
+            Webpage_markdown.Driver.(
+              fetch_and_convert ~env ~net doc_url |> Markdown.to_string)
+          | false, false, _ ->
+            (* If the document is local and no cleanup is requested, we read it from disk. *)
+            Fetch.get ~ctx doc_url ~is_local:b.is_local)
        | _, _ -> Option.value ~default:"" b.text)
     | CM.Agent ({ url; is_local; items } as agent) ->
       Cache.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
@@ -111,9 +126,22 @@ and convert_basic_item ~ctx (b : CM.basic_content_item) : Res.Input_message.cont
     Image { image_url = final; detail = "auto"; _type = "input_image" }
   | _, Some doc ->
     let txt =
-      if b.cleanup_html
-      then Fetch.get_html ~ctx doc ~is_local:b.is_local
-      else Fetch.get ~ctx doc ~is_local:b.is_local
+      match b.cleanup_html, b.markdown, b.is_local with
+      | true, _, _ -> Fetch.get_html ~ctx doc ~is_local:b.is_local
+      | _, true, true ->
+        (* If the document is local, and markdown is requested, we read it from disk and convert to Markdown. *)
+        let env = Ctx.env ctx in
+        Webpage_markdown.Driver.(
+          convert_html_file Eio.Path.(Eio.Stdenv.fs env / doc) |> Markdown.to_string)
+      | _, true, false ->
+        (* If the document is not local, and markdown is requested, we fetch it over HTTP and convert to Markdown. *)
+        let net = Ctx.net ctx in
+        let env = Ctx.env ctx in
+        (* Use the Webpage_markdown driver to fetch and convert the page to Markdown. *)
+        Webpage_markdown.Driver.(fetch_and_convert ~env ~net doc |> Markdown.to_string)
+      | false, false, _ ->
+        (* If the document is local and no cleanup is requested, we read it from disk. *)
+        Fetch.get ~ctx doc ~is_local:b.is_local
     in
     Text { text = txt; _type = "input_text" }
   | _ -> Text { text = Option.value ~default:"" b.text; _type = "input_text" }

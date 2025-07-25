@@ -1,9 +1,38 @@
+(** ChatML script interpreter.
+
+    This module implements the public executable
+    [`dsl_script`].  The binary embeds a *hard-coded* snippet of
+    ChatML source code, parses it, registers the standard built-in
+    library and evaluates the program.
+
+    The file is mostly intended as a smoke-test and demonstration of
+    how the ChatML compiler pipeline can be driven from OCaml.
+
+    {1 Pipeline}
+
+    – {!val:parse} converts a raw source to an untyped AST \
+      ({!type:Chatml_lang.stmt_node}) using the generated Menhir parser
+      {!module:Chatml_parser}.
+    – A fresh interpreter environment is allocated with
+      {!Chatml_lang.create_env}.
+    – {!Chatml_builtin_modules.add_global_builtins} injects the default
+      standard library modules.
+    – The program is then type-checked, resolved and executed by
+      {!Chatml_resolver.eval_program}.
+
+    The executable exits with the result of evaluating the last
+    top-level expression or raises an exception if compilation fails. *)
+
 open Core
 open Chatml
 open Chatml_builtin_modules
 
-let parse str =
-  let lexbuf = Lexing.from_string str in
+(** [parse src] returns the AST corresponding to the ChatML program
+      contained in [src].
+
+      @raise Failure if the parser encounters a syntax error *)
+let parse (src : string) : Chatml_lang.stmt_node list =
+  let lexbuf = Lexing.from_string src in
   try Chatml_parser.program Chatml_lexer.token lexbuf with
   | Chatml_parser.Error -> failwith "Parse error"
 ;;

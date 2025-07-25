@@ -1,7 +1,0 @@
-md-search --query <text> [--index name|all] [--index-dir dir] [-k 5]
-  --query Natural-language search query (required)
-  --index Index name to query (default: all)
-  --index-dir Directory holding indices (default: .md_index)
-  -k Maximum number of results (default: 5)
-  -help  Display this list of options
-  --help  Display this list of options

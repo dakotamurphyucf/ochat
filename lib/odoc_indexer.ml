@@ -44,7 +44,6 @@ open Eio
 module I = Io
 open Jsonaf.Export
 
-
 (**************************************************************************)
 (* Helper utilities                                                        *)
 (**************************************************************************)
@@ -249,6 +248,22 @@ let index_packages
   (* Ensure output folder exists. *)
   let codec = Tikitoken.create_codec tiki_token_bpe in
   Odoc_crawler.crawl ~root (fun ~pkg ~doc_path ~markdown ->
+    if String.equal pkg "ochat"
+    then (
+      let pkg_dir = Path.(Eio.Stdenv.cwd env / "markdown" / pkg) in
+      (match Path.is_directory pkg_dir with
+       | true -> ()
+       | false -> Path.mkdirs ~perm:0o700 pkg_dir);
+      let module_path =
+        doc_path
+        |> Filename.chop_extension
+        |> String.split ~on:'/'
+        |> List.filter ~f:(fun s -> not (String.equal s ""))
+        |> List.drop_last
+        |> Option.value ~default:[]
+        |> String.concat ~sep:"."
+      in
+      Io.save_doc ~dir:pkg_dir (module_path ^ ".md") markdown);
     if should_crawl pkg
     then (
       let lst = Hashtbl.find_or_add pkg_docs pkg ~default:(fun () -> []) in

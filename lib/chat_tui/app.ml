@@ -439,7 +439,7 @@ let run_chat ~env ~prompt_file () =
           ~run_agent:Chat_response.Driver.run_agent
           decl)
     in
-    let comp_tools, tbl = Gpt_function.functions user_fns in
+    let comp_tools, tbl = Ochat_function.functions user_fns in
     Tool.convert_tools comp_tools, tbl
   in
   (* Convert prompt → initial history items. *)

@@ -4,7 +4,7 @@
 
 (library
  (name mcp_types)
- (public_name chatgpt.mcp_types)
+ (public_name ochat.mcp_types)
  (modules mcp_types)
  (libraries core jsonaf_ext)
  (preprocess
@@ -16,7 +16,7 @@
 
 (library
  (name mcp_server_http)
- (public_name chatgpt.mcp_server_http)
+ (public_name ochat.mcp_server_http)
  (modules mcp_server_http)
  (libraries
   core
@@ -24,10 +24,10 @@
   eio
   piaf
   jsonaf_ext
-  chatgpt.mcp_types
-  chatgpt.mcp_server_core
-  chatgpt.mcp_server_router
-  chatgpt.oauth2)
+  ochat.mcp_types
+  ochat.mcp_server_core
+  ochat.mcp_server_router
+  ochat.oauth2)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
@@ -38,14 +38,14 @@
 
 (library
  (name mcp_prompt_agent)
- (public_name chatgpt.mcp_prompt_agent)
+ (public_name ochat.mcp_prompt_agent)
  (modules mcp_prompt_agent)
  (libraries
   core
   core_unix
   jsonaf_ext
-  chatgpt.mcp_types
-  chatgpt.mcp_server_core
+  ochat.mcp_types
+  ochat.mcp_server_core
   chat_response ; need driver + ctx
   chatmd ; chatmd parser
   eio
@@ -60,7 +60,7 @@
 
 (library
  (name mcp_transport)
- (public_name chatgpt.mcp_transport)
+ (public_name ochat.mcp_transport)
  (modules
   mcp_transport
   mcp_transport_interface
@@ -75,7 +75,7 @@
   piaf
   uri
   cstruct
-  chatgpt.oauth2
+  ochat.oauth2
   base64
   mirage-crypto-rng
   mirage-crypto-rng.unix)
@@ -89,14 +89,9 @@
 
 (library
  (name mcp_tool)
- (public_name chatgpt.mcp_tool)
+ (public_name ochat.mcp_tool)
  (modules mcp_tool)
- (libraries
-  core
-  chatgpt.mcp_types
-  chatgpt.mcp_client
-  gpt_function
-  jsonaf_ext)
+ (libraries core ochat.mcp_types ochat.mcp_client ochat_function jsonaf_ext)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
@@ -107,7 +102,7 @@
 
 (library
  (name mcp_client)
- (public_name chatgpt.mcp_client)
+ (public_name ochat.mcp_client)
  (modules mcp_client)
  (libraries
   core
@@ -115,8 +110,8 @@
   jsonaf_ext
   eio
   eio.unix
-  chatgpt.mcp_types
-  chatgpt.mcp_transport)
+  ochat.mcp_types
+  ochat.mcp_transport)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
@@ -127,9 +122,9 @@
 
 (library
  (name mcp_server_core)
- (public_name chatgpt.mcp_server_core)
+ (public_name ochat.mcp_server_core)
  (modules mcp_server_core)
- (libraries core core_unix jsonaf_ext chatgpt.mcp_types)
+ (libraries core core_unix jsonaf_ext ochat.mcp_types)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
@@ -140,7 +135,7 @@
 
 (library
  (name mcp_server_router)
- (public_name chatgpt.mcp_server_router)
+ (public_name ochat.mcp_server_router)
  (modules mcp_server_router)
  (libraries
   core
@@ -148,9 +143,9 @@
   eio
   eio.unix
   base64
-  chatgpt.mcp_types
-  chatgpt.mcp_server_core
-  chatgpt.mime)
+  ochat.mcp_types
+  ochat.mcp_server_core
+  ochat.mime)
  (wrapped false)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

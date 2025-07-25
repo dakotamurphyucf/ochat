@@ -1,5 +1,5 @@
 (* ———————————————————————————————————————————————————————————————— *)
-(** Chat completions (a.k.a. “ChatGPT”) client.
+(** Chat completions (a.k.a. “Ochat”) client.
 
     This module exposes a minimal yet expressive wrapper around the
     OpenAI [v1/chat/completions] endpoint.  It is designed for advanced

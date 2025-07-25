@@ -1,6 +1,6 @@
 (library
  (name notty_eio)
- (public_name chatgpt.notty_eio)
+ (public_name ochat.notty_eio)
  (modules notty_eio)
  (libraries core notty.unix eio_main)
  (preprocess

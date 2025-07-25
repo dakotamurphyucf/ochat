@@ -94,7 +94,7 @@ val run_completion_stream
     • [tools] – list of tool descriptions to advertise to the model.  When
       omitted, no tool is available.
     • [tool_tbl] – dispatch table mapping function names to OCaml
-      implementations as created by {!Gpt_function.functions}.  When absent, a
+      implementations as created by {!Ochat_function.functions}.  When absent, a
       dummy empty table is used which effectively disables tool calls.
     • [on_event] / [on_fn_out] – streaming callbacks.
 

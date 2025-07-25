@@ -39,6 +39,7 @@ module Chat_markdown : sig
     ; document_url : string option [@jsonaf.option]
     ; is_local : bool [@default false]
     ; cleanup_html : bool [@default false]
+    ; markdown : bool [@default false] (* whether to convert HTML to Markdown *)
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 

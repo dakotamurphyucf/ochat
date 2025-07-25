@@ -752,7 +752,7 @@ and eval_stmt (env : env) (frames : Frame_env.env) (s : stmt node) : unit =
     Example executing a minimal program that prints {e 42} using a
     builtin [{!Chatml_builtin_modules.print_int}]:
     {[
-      let open Chatgpt.Chatml in
+      let open Chatochat.Chatml in
       let env = Chatml_lang.create_env () in
       (* Register primitives *)
       Hashtbl.set env ~key:"print_int" ~data:(VBuiltin (function

@@ -73,11 +73,11 @@ module Tok = Oauth2_types.Token
       directory (e.g. via {!Io.mkdir}) before writing files within it. *)
 let cache_dir () : string =
   match Sys.getenv "XDG_CACHE_HOME" with
-  | Some d -> Filename.concat d "ocamlgpt/tokens"
+  | Some d -> Filename.concat d "ocamlochat/tokens"
   | None ->
     (match Sys.getenv "HOME" with
-     | Some home -> Filename.concat home ".cache/ocamlgpt/tokens"
-     | None -> Filename.concat "." ".cache/ocamlgpt/tokens")
+     | Some home -> Filename.concat home ".cache/ocamlochat/tokens"
+     | None -> Filename.concat "." ".cache/ocamlochat/tokens")
 ;;
 
 (** [cache_file issuer] maps an [issuer] base URL to the absolute path of

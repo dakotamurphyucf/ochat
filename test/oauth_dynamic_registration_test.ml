@@ -17,7 +17,7 @@ exception Done
     3. After the handshake the client can list tools successfully, proving
        that the bearer token flowed.
     4. The dynamic credentials are persisted to
-       [$XDG_CONFIG_HOME/ocamlgpt/registered.json].  The test asserts the file
+       [$XDG_CONFIG_HOME/ocamlochat/registered.json].  The test asserts the file
        exists and contains an entry for the server issuer URL.
 *)
 
@@ -27,7 +27,7 @@ let random_port () = 9100 + Random.int 400 (* keep out of the range used in othe
 
 let with_temp_config_dir f =
   let dir =
-    let suffix = Printf.sprintf "ocamlgpt-test-%06x" (Random.int 0xFFFFFF) in
+    let suffix = Printf.sprintf "ocamlochat-test-%06x" (Random.int 0xFFFFFF) in
     Filename.concat (Stdlib.Filename.get_temp_dir_name ()) suffix
   in
   Core_unix.mkdir_p dir;
@@ -72,7 +72,7 @@ let%expect_test "dynamic client registration flow" =
   let result =
     with_temp_config_dir (fun cfg_dir ->
       (* Sanity: the credential file should NOT exist yet. *)
-      let cred_file = Filename.concat cfg_dir "ocamlgpt/registered.json" in
+      let cred_file = Filename.concat cfg_dir "ocamlochat/registered.json" in
       let file_exists p = Stdlib.Sys.file_exists p in
       assert (not (file_exists cred_file));
       let port = random_port () in

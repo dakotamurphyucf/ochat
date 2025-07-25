@@ -1,4 +1,4 @@
-(** Shared data types for the Chat-GPT terminal UI.
+(** Shared data types for the Ochat terminal UI.
 
     This module centralises the few fundamental types that every
     sub-module of {!Chat_tui} needs.  Moving them into their own

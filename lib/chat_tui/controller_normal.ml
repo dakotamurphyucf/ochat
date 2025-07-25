@@ -1,4 +1,4 @@
-(** Normal-mode key handling for the Chat-GPT terminal UI.
+(** Normal-mode key handling for the Ochat terminal UI.
 
     The {!Controller_normal} module implements the subset of the Vim-inspired
     key bindings that operate while the input area is in {e Normal} editor

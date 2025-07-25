@@ -2,7 +2,7 @@
 
 This document provides a compact yet precise overview of the **Chat-TUI**
 sub-library that lives in `lib/chat_tui/`.  It mirrors the style of the
-top-level *ocamlgpt* project context file so that developers can very
+top-level *ocamlochat* project context file so that developers can very
 quickly understand how the interactive terminal UI is organised and how the
 individual modules collaborate.
 

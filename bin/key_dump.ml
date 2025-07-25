@@ -1,11 +1,26 @@
-(* key_dump.ml --- Print raw Notty input events.
+(** Print raw terminal input events as decoded by Notty.
 
-   Run this helper in the terminal where you experience shortcut problems
-   to see the exact [`Notty.Unescape.event] values produced by your
-   terminal/OS for each keypress.  This makes it easy to extend the
-   controller’s pattern-matching with the right variants.
+    This executable is a tiny diagnostic utility for inspecting the exact
+    {!Notty.Unescape.event} values produced by your terminal (and operating
+    system) for every key-press, mouse action, paste or window resize.  It is
+    useful when you need to extend key bindings in a {!Notty}-based TUI and
+    are unsure which constructor or modifier combination to match on.
 
-   Quit with either   q   or   Ctrl-C. *)
+    Run the program in the problematic terminal and press the keys you are
+    interested in – each event is printed on its own line in a human-readable
+    form.  Exit with either {!kbd:q} or {!kbd:Ctrl-C}.
+
+    Example session (pressing **Ctrl-A** followed by the *Up* arrow):
+
+    {[
+      $ key-dump
+      Key   ASCII 'A' (0x41)          mods=[Ctrl]
+      Key   Arrow Up                  mods=[]
+    ]}
+
+    @see <https://pqwy.github.io/notty/doc/Notty.Unescape.html> Notty.Unescape
+    for the full definition of the event type.
+*)
 
 open Core
 open Eio.Std
@@ -55,6 +70,11 @@ let string_of_mods mods =
     |> sprintf "[%s]"
 ;;
 
+(** [event_to_string ev] converts a {!Notty.Unescape.event} (or [`Resize]) into
+    a single human-readable line suitable for logging.  The output is wide
+    enough to align the most common variants, making it easy to visually scan
+    the stream while pressing keys. *)
+
 let event_to_string : [ Notty.Unescape.event | `Resize ] -> string = function
   | `Key (k, mods) ->
     sprintf "Key   %-25s mods=%s" (string_of_key k) (string_of_mods mods)
@@ -78,6 +98,10 @@ let event_to_string : [ Notty.Unescape.event | `Resize ] -> string = function
   | `Paste `End -> "Paste End"
   | `Resize -> sprintf "Resize "
 ;;
+
+(** [main env] starts a fullscreen Notty session and pretty-prints every
+    decoded input event obtained from [env#stdin].  The function blocks until
+    the user presses either {b q} or {b Ctrl-C}. *)
 
 let main env =
   Switch.run

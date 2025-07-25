@@ -4,11 +4,13 @@ open Core
 let write_file path contents =
   Core_unix.mkdir_p (Filename.dirname path);
   Out_channel.write_all path ~data:contents
+;;
 
 let%expect_test "markdown_crawler.basic_ignore_and_extension" =
   (* Create a temporary working directory *)
   let tmp_root =
-    Filename.concat Filename.temp_dir_name
+    Filename.concat
+      Filename.temp_dir_name
       ("md_crawler_" ^ Int.to_string (Random.int 1_000_000))
   in
   Core_unix.mkdir_p tmp_root;
@@ -29,7 +31,6 @@ let%expect_test "markdown_crawler.basic_ignore_and_extension" =
   (* 6. File excluded by .gitignore *)
   write_file (Filename.concat tmp_root ".gitignore") "ignored.md\n";
   write_file (Filename.concat tmp_root "ignored.md") "# Should be ignored";
-
   (* Run crawler -------------------------------------------------------- *)
   let collected = ref [] in
   Eio_main.run
@@ -40,8 +41,9 @@ let%expect_test "markdown_crawler.basic_ignore_and_extension" =
   (* Verify ------------------------------------------------------------- *)
   let files = List.sort ~compare:String.compare !collected in
   List.iter files ~f:print_endline;
-  [%expect {|
+  [%expect
+    {|
 README.md
 doc/Doc1.md
 |}]
-
+;;

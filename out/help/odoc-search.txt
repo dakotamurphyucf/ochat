@@ -1,8 +1,0 @@
-odoc-search --query <text> [--package pkg] [--index dir] [-k 5] [--beta 0.25]
-  --query Query string
-  --package Package to search (optional)
-  --index Index directory (default .odoc_index)
-  -k Number of results per package (default 5)
-  --beta Hybrid weight 0-1 (default 0.25)
-  -help  Display this list of options
-  --help  Display this list of options

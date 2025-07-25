@@ -1,9 +1,9 @@
 (** Internal catalogue of GPT function definitions.
 
-    Each sub-module in this file implements {!Gpt_function.Def}.  The
+    Each sub-module in this file implements {!Ochat_function.Def}.  The
     definitions are *pure metadata* – they do **not** perform any
     side-effects or I/O.  A caller must pair them with an
-    implementation via {!Gpt_function.create_function} before the tool
+    implementation via {!Ochat_function.create_function} before the tool
     can be executed.
 
     See {!file:definitions.mli} for a high-level overview of the
@@ -25,7 +25,7 @@ open Core
     ]}
 *)
 
-module Get_contents : Gpt_function.Def with type input = string = struct
+module Get_contents : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "read_file"
@@ -69,7 +69,7 @@ end
     {!Markdown_indexer.index_directory}. *)
 
 module Index_markdown_docs :
-  Gpt_function.Def with type input = string * string * string * string option = struct
+  Ochat_function.Def with type input = string * string * string * string option = struct
   type input = string * string * string * string option
 
   let name = "index_markdown_docs"
@@ -121,7 +121,7 @@ end
   *)
 
 module Markdown_search :
-  Gpt_function.Def with type input = string * int option * string option * string option =
+  Ochat_function.Def with type input = string * int option * string option * string option =
 struct
   type input = string * int option * string option * string option
 
@@ -177,7 +177,8 @@ end
 *)
 
 module Odoc_search :
-  Gpt_function.Def with type input = string * int option * string option * string = struct
+  Ochat_function.Def with type input = string * int option * string option * string =
+struct
   type input = string * int option * string option * string
 
   let name = "odoc_search"
@@ -268,7 +269,7 @@ type fork_input =
     [arguments].
 *)
 
-module Fork : Gpt_function.Def with type input = fork_input = struct
+module Fork : Ochat_function.Def with type input = fork_input = struct
   [@@@warning "-69"]
 
   type input = fork_input
@@ -346,7 +347,7 @@ end
     string.
 *)
 
-module Webpage_to_markdown : Gpt_function.Def with type input = string = struct
+module Webpage_to_markdown : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "webpage_to_markdown"
@@ -377,7 +378,7 @@ end
     and returns the annotated version.
 *)
 
-module Add_line_numbers : Gpt_function.Def with type input = string = struct
+module Add_line_numbers : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "add_line_numbers"
@@ -404,7 +405,7 @@ end
     located at the given [url].  The [input] is that URL as a string.
 *)
 
-module Get_url_content : Gpt_function.Def with type input = string = struct
+module Get_url_content : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "get_url_content"
@@ -433,7 +434,7 @@ end
     {!Query_vector_db}.
 *)
 
-module Index_ocaml_code : Gpt_function.Def with type input = string * string = struct
+module Index_ocaml_code : Ochat_function.Def with type input = string * string = struct
   type input = string * string
 
   let name = "index_ocaml_code"
@@ -476,7 +477,7 @@ end
 *)
 
 module Query_vector_db :
-  Gpt_function.Def with type input = string * string * int * string option = struct
+  Ochat_function.Def with type input = string * string * int * string option = struct
   type input = string * string * int * string option
 
   let name = "query_vector_db"
@@ -528,7 +529,7 @@ end
     patch to the local git repository.
 *)
 
-module Apply_patch : Gpt_function.Def with type input = string = struct
+module Apply_patch : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "apply_patch"
@@ -616,7 +617,7 @@ end
     that directory.
 *)
 
-module Read_directory : Gpt_function.Def with type input = string = struct
+module Read_directory : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "read_directory"
@@ -653,7 +654,7 @@ end
     The [input] is the destination [path] supplied as a string.
 *)
 
-module Make_dir : Gpt_function.Def with type input = string = struct
+module Make_dir : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "mkdir"

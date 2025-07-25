@@ -1,7 +1,7 @@
 (** Tool helper utilities.
 
     This module turns a ChatMarkdown [`<tool …/>`] declaration into a
-    runtime {!Gpt_function.t} that can be submitted to the *OpenAI
+    runtime {!Ochat_function.t} that can be submitted to the *OpenAI
     function-calling API*.  The helper covers **four** independent
     back-ends:
 
@@ -25,10 +25,10 @@
     payload expected by {!Openai.Responses}:
 
     {[
-      let gpt_functions =
+      let ochat_functions =
         List.concat_map declarations ~f:(Tool.of_declaration ~sw ~ctx ~run_agent)
 
-      let comp_tools, _tbl = Gpt_function.functions gpt_functions in
+      let comp_tools, _tbl = Ochat_function.functions ochat_functions in
       let request_tools  = Tool.convert_tools comp_tools in
       (* … pass [request_tools] to [Openai.Responses.post_response] … *)
     ]}
@@ -120,7 +120,7 @@ let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
 (*--- 4-b.  Custom shell command tool --------------------------------*)
 
 (** [custom_fn ~env decl] wraps a `{<tool command="…"/>}` element into a
-    callable {!Gpt_function.t}.
+    callable {!Ochat_function.t}.
 
     Input schema
     {[
@@ -140,9 +140,9 @@ let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
 
     Use this backend only for {e quick experiments}.  Prefer dedicated
     OCaml helpers or remote MCP tools in production. *)
-let custom_fn ~env (c : CM.custom_tool) : Gpt_function.t =
+let custom_fn ~env (c : CM.custom_tool) : Ochat_function.t =
   let CM.{ name; description; command } = c in
-  let module M : Gpt_function.Def with type input = string list = struct
+  let module M : Ochat_function.Def with type input = string list = struct
     type input = string list
 
     let name = name
@@ -237,16 +237,16 @@ let custom_fn ~env (c : CM.custom_tool) : Gpt_function.t =
     | Eio.Time.Timeout ->
       Printf.sprintf "timeout running command %s" (String.concat ~sep:" " x)
   in
-  (* Create the Gpt_function.t using the module M and the function fp. *)
-  (* Note: we use [Gpt_function.create_function] to create the function. *)
+  (* Create the Ochat_function.t using the module M and the function fp. *)
+  (* Note: we use [Ochat_function.create_function] to create the function. *)
   (* Note: we use [module M] to specify the module type for the function. *)
-  Gpt_function.create_function (module M) fp
+  Ochat_function.create_function (module M) fp
 ;;
 
-(*--- 4-c.  Agent tool → Gpt_function.t ------------------------------*)
+(*--- 4-c.  Agent tool → Ochat_function.t ------------------------------*)
 
 (** [agent_fn ~ctx ~run_agent spec] wraps a nested ChatMarkdown
-    {e agent} into a {!Gpt_function.t}.  Calling the resulting function
+    {e agent} into a {!Ochat_function.t}.  Calling the resulting function
     is equivalent to starting a brand-new ChatMarkdown driver on the
     referenced `*.chatmd` file.
 
@@ -262,13 +262,13 @@ let custom_fn ~env (c : CM.custom_tool) : Gpt_function.t =
 
     Typical use-case: breaking down a complex user request into
     multiple self-contained sub-tasks handled by specialised prompts. *)
-let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Gpt_function.t =
+let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_function.t =
   let CM.{ name; description; agent; is_local } = agent_spec in
   (* pull components from the shared context *)
   let _net_unused = Ctx.net ctx in
   (* Interface definition for the agent tool – expects an object with a
        single string field "input". *)
-  let module M : Gpt_function.Def with type input = string = struct
+  let module M : Ochat_function.Def with type input = string = struct
     type input = string
 
     let name = name
@@ -307,6 +307,7 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Gpt_func
       ; document_url = None
       ; is_local = false
       ; cleanup_html = false
+      ; markdown = false
       }
     in
     (* Fetch the agent prompt (local or remote) *)
@@ -314,11 +315,11 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Gpt_func
     (* Delegate the heavy lifting to the provided [run_agent] callback. *)
     run_agent ~ctx prompt_xml [ CM.Basic basic_item ]
   in
-  Gpt_function.create_function (module M) run
+  Ochat_function.create_function (module M) run
 ;;
 
 (** [mcp_tool ~sw ~ctx decl] resolves a `{<tool mcp_server="…"/>}`
-      declaration.  It returns one {!Gpt_function.t} per advertised
+      declaration.  It returns one {!Ochat_function.t} per advertised
       remote function.
 
       Implementation details:
@@ -386,7 +387,7 @@ let mcp_tool
              name
              ())
     in
-    Mcp_tool.gpt_function_of_remote_tool ~sw ~client ~strict tool_meta
+    Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict tool_meta
   in
   match names with
   | Some names -> List.map names ~f:get_tool
@@ -398,7 +399,7 @@ let mcp_tool
         | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
     in
     List.map tools_for_server ~f:(fun t ->
-      Mcp_tool.gpt_function_of_remote_tool ~sw ~client ~strict t)
+      Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict t)
 ;;
 
 (*--- 4-d.  Unified declaration → function mapping ------------------*)
@@ -407,11 +408,11 @@ let mcp_tool
     implementation.
 
     The helper inspects the variant constructor of [decl] and returns
-    a list of {!type:Gpt_function.t}.  A single declaration can map to
+    a list of {!type:Ochat_function.t}.  A single declaration can map to
     several functions – for example an [`<tool mcp_server=…/>`]
     element expands to the complete set of remote tools exposed by the
     referenced MCP server.  The resulting list is therefore suitable
-    for direct consumption by {!Gpt_function.functions}.
+    for direct consumption by {!Ochat_function.functions}.
 
     Input invariants
     • [sw] – parent {!Eio.Switch.t}.  Child fibres (e.g. MCP cache
@@ -430,7 +431,9 @@ let mcp_tool
     @raise Failure if the declaration references an unknown built-in
            tool name.
 *)
-let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t list =
+let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
+  : Ochat_function.t list
+  =
   match decl with
   | CM.Builtin name ->
     (match name with

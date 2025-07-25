@@ -1,6 +1,6 @@
 (library
  (name chatmd)
- (public_name chatgpt.chatmd)
+ (public_name ochat.chatmd)
  (wrapped false)
  (modules chatmd_ast chatmd_lexer chatmd_parser prompt)
  (libraries core str menhirLib jsonaf io)

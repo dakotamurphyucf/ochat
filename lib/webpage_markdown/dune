@@ -1,6 +1,6 @@
 (library
  (name webpage_markdown)
- (public_name chatgpt.webpage_markdown)
+ (public_name ochat.webpage_markdown)
  (libraries
   core
   io
@@ -9,9 +9,10 @@
   lambdasoup
   omd
   jsonaf_ext
-  gpt_function
+  ochat_function
   definitions
   ttl_lru_cache
+  re2
   uri)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

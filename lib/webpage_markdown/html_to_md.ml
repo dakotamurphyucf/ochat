@@ -5,6 +5,190 @@ open Omd
 (* Helpers                                                                    *)
 (******************************************************************************)
 
+let ocaml_regexs =
+  [ (* let <name> = <expr> *)
+    Re2.create "let\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)"
+  ; (* let rec <name> = <expr> *)
+    Re2.create "let\\s+rec\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)"
+  ; (* module <name> = struct ... end *)
+    Re2.create "module\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*struct.*end"
+  ; (* type <name> = <expr> *)
+    Re2.create "type\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)"
+  ; (* exception <name> ( <args> ) -> <result> *)
+    Re2.create "exception\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\)\\s*->"
+  ; Re2.create "type\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)"
+  ; (* let <name> = <expr> in *)
+    Re2.create "let\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)\\s*in"
+  ; (* let <name> = <expr> and <name2> = <expr2> *)
+    Re2.create
+      "let\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)\\s*and\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)"
+  ; (* let <name> = <expr> in <expr2> *)
+    Re2.create "let\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)\\s*in\\s*\\(.*\\)"
+  ; (* match <pattern> with <cases> *)
+    Re2.create "match\\s+\\(.*\\)\\s+with\\s+\\(.*\\)"
+  ; (* if <condition> then <expr> else <expr2> *)
+    Re2.create "if\\s+\\(.*\\)\\s+then\\s+\\(.*\\)\\s+else\\s+\\(.*\\)"
+  ; (* let <name> = fun <args> -> <expr> *)
+    Re2.create "let\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*fun\\s+\\(.*\\)\\s*->\\s*\\(.*\\)"
+  ; (* let <name> = fun <args> -> <expr> in *)
+    Re2.create
+      "let\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*fun\\s+\\(.*\\)\\s*->\\s*\\(.*\\)\\s*in"
+  ; (* let <name> = fun <args> -> <expr> and <name2> = fun <args2> -> <expr2> *)
+    Re2.create
+      "let\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*fun\\s+\\(.*\\)\\s*->\\s*\\(.*\\)\\s*and\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*fun\\s+\\(.*\\)\\s*->\\s*\\(.*\\)"
+  ; (* let rec <name> = fun <args> -> <expr> in *)
+    Re2.create
+      "let\\s+rec\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*fun\\s+\\(.*\\)\\s*->\\s*\\(.*\\)\\s*in"
+  ; (* let rec <name> = fun <args> -> <expr> and <name2> = fun <args2> -> <expr2> *)
+    Re2.create
+      "let\\s+rec\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*fun\\s+\\(.*\\)\\s*->\\s*\\(.*\\)\\s*and\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*fun\\s+\\(.*\\)\\s*->\\s*\\(.*\\)"
+  ; (* let rec <name> = function | <pattern> -> <expr> *)
+    Re2.create
+      "let\\s+rec\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*function\\s+|\\s+\\(.*\\)\\s+->\\s+\\(.*\\)"
+  ; (* type <name> = | <case> | <case2>  *)
+    Re2.create "type\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*|\\s+\\(.*\\)\\s+|\\s+\\(.*\\)"
+  ; (* type <name> = 
+              | <case> 
+              | <case2>
+              | ... *)
+    Re2.create
+      "type\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*|\\s+\\(.*\\)\\s+|\\s+\\(.*\\)\\s+|\\s+\\(.*\\)"
+  ; (* module <name> = struct ... end *)
+    Re2.create "module\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*struct.*end"
+  ; (* module <name> = struct ... end *)
+    Re2.create "module\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*struct.*end"
+  ; (* open <module> *)
+    Re2.create "open\\s+[a-zA-Z_][a-zA-Z0-9_.']*"
+  ; (* include <module> *)
+    Re2.create "include\\s+[a-zA-Z_][a-zA-Z0-9_.']*"
+  ; (* let open <module> in *)
+    Re2.create "let\\s+open\\s+[a-zA-Z_][a-zA-Z0-9_.']*\\s+in"
+  ]
+;;
+
+let python_regexs =
+  [ (* def <name>(<args>): *)
+    Re2.create "def\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\):"
+  ; (* class <name>: *)
+    Re2.create "class\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*:\\s*"
+  ; (* class <name>(): *)
+    Re2.create "class\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\):"
+  ; (* class <name>(<params>): *)
+    Re2.create "class\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\):"
+  ; (* class <name>(<params>): *)
+    Re2.create "class\\s+[A-Z][a-zA-Z0-9_']*\\s*\\(.*\\):"
+  ; (* import <module> *)
+    Re2.create "import\\s+[a-zA-Z_][a-zA-Z0-9_.]*"
+  ; (* from <module> import <name> *)
+    Re2.create "from\\s+[a-zA-Z_][a-zA-Z0-9_.]*\\s+import\\s+[a-zA-Z_][a-zA-Z0-9_.]*"
+  ; (* if <condition>: *)
+    Re2.create "if\\s+\\(.*\\):"
+  ; (* for <var> in <iterable>: *)
+    Re2.create "for\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s+in\\s+\\(.*\\):"
+  ; (* while <condition>: *)
+    Re2.create "while\\s+\\(.*\\):"
+  ; (* try: *)
+    Re2.create "try:\\s*"
+  ; (* except <exception>: *)
+    Re2.create "except\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*:\\s*"
+  ; (* finally: *)
+    Re2.create "finally:\\s*"
+  ; (* with <exception> as <var>: *)
+    Re2.create "with\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s+as\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*:\\s*"
+  ; (* with <Class> as <var>: *)
+    Re2.create "with\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s+as\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*:\\s*"
+  ; (* with <Class> as <var>: *)
+    Re2.create "with\\s+[A-Z][a-zA-Z0-9_']*\\s+as\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*:\\s*"
+  ; (* lambda <args>: *)
+    Re2.create "lambda\\s+\\(.*\\)\\s*:\\s*"
+  ; (* async def <name>(<args>): *)
+    Re2.create "async\\s+def\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\):"
+  ; (* with <class>() as <var>: *)
+    Re2.create
+      "with\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\)\\s+as\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*:\\s*"
+  ; (* <var> = <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)"
+  ; (* <var> += <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*+=\\s*\\(.*\\)"
+  ; (* <var> -= <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*-=\\s*\\(.*\\)"
+  ; (* <var> *= <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)"
+  ; (* <var> /= <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*/=\\s*\\(.*\\)"
+  ; (* return <expr> *)
+    Re2.create "return\\s+\\(.*\\)"
+  ; (* for <var> in <iterable> *)
+    Re2.create "for\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s+in\\s+\\(.*\\)\\s*:"
+  ; (* for <var> in <name>(params): *)
+    Re2.create
+      "for\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s+in\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\)\\s*:"
+  ; (* for <var> in <name>.<method>(params): *)
+    Re2.create
+      "for\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s+in\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\)\\s*:"
+  ; (* <var> = <name>(params) *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\)"
+  ; (* <var> = <name>.<method>(params) *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\)"
+  ; (* <var> = <name>.<method>....<expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\)"
+  ; (* <var> = [{key: val}, ...]  || <var> = <name>([..] | {...})*)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(\\[.*\\]\\|{.*}\\)"
+  ; (* [{key: val}, ...] |  <name>([..] | {...}) | {...} *)
+    Re2.create "\\(\\[.*\\]\\|{.*}\\)\\|[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(\\[.*\\]\\|{.*}\\)"
+  ]
+;;
+
+let javascript_regexs =
+  [ (* function <name>(<args>) { ... } *)
+    Re2.create "function\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\)\\s*{"
+  ; (* const <name> = <expr>; *)
+    Re2.create "const\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\);"
+  ; (* let <name> = <expr>; *)
+    Re2.create "let\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\);"
+  ; (* var <name> = <expr>; *)
+    Re2.create "var\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\);"
+  ; (* if (<condition>) { ... } *)
+    Re2.create "if\\s+\\(.*\\)\\s+{"
+  ; (* for (<init>; <condition>; <increment>) { ... } *)
+    Re2.create "for\\s+\\(.*;.*;.*\\)\\s+{"
+  ; (* while (<condition>) { ... } *)
+    Re2.create "while\\s+\\(.*\\)\\s+{"
+  ; (* switch (<expr>) { ... } *)
+    Re2.create "switch\\s+\\(.*\\)\\s+{"
+  ; (* try { ... } catch (<exception>) { ... } *)
+    Re2.create "try\\s+{.*}\\s+catch\\s+\\(.*\\)\\s+{"
+  ; (* async function <name>(<args>) { ... } *)
+    Re2.create "async\\s+function\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*\\(.*\\)\\s*{"
+  ; (* arrow function <name> = (<args>) => { ... } *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)\\s*=>\\s*{"
+  ; (* <var> = <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)"
+  ; (* <var> += <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*+=\\s*\\(.*\\)"
+  ; (* <var> -= <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*-=\\s*\\(.*\\)"
+  ; (* <var> *= <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*\\(.*\\)"
+  ; (* <var> /= <expr> *)
+    Re2.create "[a-zA-Z_][a-zA-Z0-9_']*\\s*/=\\s*\\(.*\\)"
+  ; (* return <expr> *)
+    Re2.create "return\\s+\\(.*\\)"
+  ; (* var <name> = { <key>: <value>, ... }; *)
+    Re2.create "var\\s+[a-zA-Z_][a-zA-Z0-9_']*\\s*=\\s*{.*};"
+  ]
+;;
+
+let json_regex =
+  [ (* JSON key-value pair *)
+    Re2.create "\"[^\"]*\"\\s*:\\s*"
+  ; (* json object with key-value pairs *)
+    Re2.create "{\\s*(\"[^\"]*\"\\s*:\\s*.*?\\s*,?\\s*)*}"
+  ; (* json array with values *)
+    Re2.create "\\[\\s*(\"[^\"]*\"\\s*,?\\s*)*\\]"
+  ]
+;;
+
 type attr = (string * string) list
 
 (* Short aliases for constructors to keep code readable *)
@@ -264,32 +448,73 @@ and block_of_node (node : _ Soup.node) : attr block list =
          in
          match first_non_empty with
          | None -> None
-         | Some line ->
-           let line_trim = strip line in
+         | Some _ ->
+           let line_trim = strip str in
+           let ocaml_matches =
+             List.count ocaml_regexs ~f:(fun re ->
+               Option.value_map (Result.ok re) ~default:false ~f:(fun re ->
+                 Re2.matches re line_trim))
+           in
+           let python_matches =
+             List.count python_regexs ~f:(fun re ->
+               Option.value_map (Result.ok re) ~default:false ~f:(fun re ->
+                 Re2.matches re line_trim))
+           in
+           let javascript_matches =
+             List.count javascript_regexs ~f:(fun re ->
+               Option.value_map (Result.ok re) ~default:false ~f:(fun re ->
+                 Re2.matches re line_trim))
+           in
+           let json_regex_matches =
+             List.count json_regex ~f:(fun re ->
+               Option.value_map (Result.ok re) ~default:false ~f:(fun re ->
+                 Re2.matches re line_trim))
+           in
            if is_prefix line_trim ~prefix:"$ " || is_prefix line_trim ~prefix:"#!/bin/sh"
            then Some "sh"
            else if
-             is_prefix line_trim ~prefix:"let " || is_prefix line_trim ~prefix:"module "
+             let open Int in
+             ocaml_matches > 0
+             && (python_matches = 0 || ocaml_matches >= python_matches)
+             && (javascript_matches = 0 || ocaml_matches >= javascript_matches)
+             && (json_regex_matches = 0 || ocaml_matches >= json_regex_matches)
            then Some "ocaml"
            else if
-             is_prefix line_trim ~prefix:"#include"
-             || is_substring line_trim ~substring:"::"
-           then Some "cpp"
-           else if
-             is_prefix line_trim ~prefix:"def " || is_prefix line_trim ~prefix:"import "
+             let open Int in
+             python_matches > 0
+             && (javascript_matches = 0 || python_matches >= javascript_matches)
+             && (json_regex_matches = 0 || python_matches >= json_regex_matches)
            then Some "python"
            else if
-             is_prefix line_trim ~prefix:"function "
-             || is_substring line_trim ~substring:"=>"
+             let open Int in
+             javascript_matches > 0
+             && (json_regex_matches = 0 || javascript_matches >= json_regex_matches)
            then Some "javascript"
-           else if is_prefix line_trim ~prefix:"{"
+           else if
+             is_prefix line_trim ~prefix:"<!--"
+             || is_prefix line_trim ~prefix:"<!DOCTYPE html>"
+           then Some "html"
+           else if is_prefix line_trim ~prefix:"<!" || is_prefix line_trim ~prefix:"<?xml"
+           then Some "xml"
+           else if
+             is_prefix line_trim ~prefix:"#include <"
+             || is_prefix line_trim ~prefix:"#define "
+           then Some "c"
+           else if
+             is_prefix line_trim ~prefix:"#include \""
+             || is_prefix line_trim ~prefix:"#include <"
+             || is_prefix line_trim ~prefix:"#define "
+           then Some "cpp"
+           else if
+             let open Int in
+             json_regex_matches > 0
            then Some "json"
            else None
        in
        let lang =
          match lang_class_opt with
          | Some l -> l
-         | None -> Option.value (guess_lang_from_content code) ~default:"ocaml"
+         | None -> Option.value (guess_lang_from_content code) ~default:""
        in
        [ Code_block ([], lang, code) ]
      | "code" ->

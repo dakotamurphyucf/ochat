@@ -1,236 +1,1470 @@
-# Project README – ChatGPT Toolkit
-#
-# **NOTE** This README is generated from `docs/README_skeleton.md` by the research workflow tracked in `plan.md`.  Please edit the source template instead of this file and re-run `dune exec readme_validation`.
-#
----
+# Ochat – OCaml toolkit for conversational AI, scripted LLM pipelines & code-aware search
 
-## 0  Badge strip
-
-[![CI](https://github.com/your-org/chatgpt-toolkit/actions/workflows/ci.yml/badge.svg)](https://github.com/your-org/chatgpt-toolkit/actions/workflows/ci.yml)
-[![license: MIT](https://img.shields.io/badge/license-MIT-blue.svg)](LICENSE.txt)
-[![opam](https://img.shields.io/opam/v/chatgpt_toolkit)](https://opam.ocaml.org/packages/chatgpt_toolkit/)
+*Everything you need to prototype, run and embed modern LLM workflows without leaving the OCaml ecosystem.*
 
 ---
 
-## 1  Introduction
+## Table of contents
 
-**ChatGPT Toolkit** is a comprehensive OCaml framework that allows you to **script, automate and embed ChatGPT-class agents** inside your own applications.  It ships with:
+1. [Why Ochat?](#why-ochat)
+2. [Quick Start](#quick-start)
+3. [Hands-on tutorial – your first ChatMD workflow](#hands-on-tutorial--your-first-chatmd-workflow)
+4. [ChatMarkdown ( ChatMD ) language](#chatmarkdown--chatmd--language)
+5. [Tools](#tools)
+   * [Built-in toolbox](#built-in-toolbox)
+   * [Declaring & calling tools in ChatMD](#declaring--calling-tools-in-chatmd)
+   * [Authoring custom OCaml tools](#authoring-custom-ocaml-tools)
+   * [End-to-end example – add and call *your* tool](#end-to-end-example--add-and-call-your-tool)
+   * [Consuming remote MCP tools](#consuming-remote-mcp-tools)
+6. [chat_tui – interactive terminal client](#chat_tui--interactive-terminal-client)
+7. [MCP server – turn prompts into remote tools](#mcp-server--turn-prompts-into-remote-tools)
+8. [Search, indexing & code-intelligence](#search-indexing--code-intelligence)
+9. [Binaries cheat-sheet](#binaries-cheat-sheet)
+10. [Embedding the libraries](#embedding-the-libraries)
+11. [Composing full workflows](#composing-full-workflows)
+12. [Key concepts & glossary](#key-concepts--glossary)
+13. [Project layout](#project-layout)
+14. [License](#license)
 
-* **Domain-specific languages** – ✨ *ChatMD* for Markdown-flavoured prompt flows and 🧩 *ChatML* for embedded scripting and control-flow.
-* **Turn-key binaries** – a one-stop `gpt` CLI, a full-screen `chat-tui`, HTTP & STDIO bridges (MCP) and an extensible set of indexers and search helpers.
-* **Self-contained infrastructure** – local vector database (dense + BM25), incremental indexers for Markdown / odoc / web pages, an OAuth2 helper stack and resilient OpenAI streaming bindings.
 
-The project was born to scratch an internal itch: **drastically lower the barrier to experiment with prompt-engineering, agent orchestration and semantic search** from the comfort of OCaml.  It targets power-users who want reproducible chat sessions, rich tool-calling and first-class integration with the OCaml build ecosystem.
+---
 
-Typical use-cases include:
+## Why Ochat?
 
-* Automating code-reviews or refactors via ChatMD scripts checked into the repo.
-* Building knowledge-base chatbots that run fully offline by leveraging the vector DB + BM25 hybrid search.
-* Driving ChatGPT from CI pipelines (quality gates, changelog generation, release notes, …).
-* Hacking interactive tools and demos without leaving the OCaml universe.
+LLM APIs mature rapidly; wiring them by hand soon turns into a tangle of JSON
+snippets, retry loops and ad-hoc scripts. Ochat eliminates that boiler-plate
+in pure OCaml:
 
-## 2  Quick-start
+* **ChatMarkdown ( ChatMD )** – a Markdown + XML dialect that stores *the full
+  conversation* together with model parameters, tool declarations and
+  persisted artefacts.
+* **chat_tui** – a Notty-powered, Vim-inspired UI that edits ChatMD files,
+  executes tools and streams assistant output in real time.
+* **Zero-boiler-plate tools** – promote any OCaml value, shell command or
+  remote MCP endpoint to an OpenAI *function* with a single helper.
+* **Built-in code intelligence** – index OCaml API docs, Markdown pages or
+  source snippets and query them from prompts via `odoc_search`, `md_search`,
+  `vector_db` …
+* **Prompt-as-tool** – every `chatmd` file can be exported as a remote tool
+  through the MCP server, turning prompt engineering into composable
+  building blocks. Or as tool in another prompt.
+
+  ```xml
+  <!-- The “document” agent is itself a ChatMD prompt -->
+  <tool name="document"
+        agent="./prompts/tools/document.md"
+        description="Document the given OCaml module"
+        local/>
+  ```
+
+  The declaration above mounts *prompts/tools/document.md* as a **nested
+  agent** that can be invoked like any other function call.  When the parent
+  prompt emits `<tool_call name="document">{"module":"Vector_db"}</tool_call>`
+  Ochat spawns a fresh assistant, runs the *document.md* workflow in-process,
+  captures the Markdown it generates and streams it back to the main chat as
+  a `<tool_response>` block.  This is recursive and fully composable – agents
+  can mount other agents, enabling true LEGO-style workflow engineering.
+
+> **OCaml-first, domain-agnostic.**  Ochat is *written* in OCaml and therefore
+> integrates deeply with the ecosystem – `odoc_search`, `dune` helpers,
+> Merlin-powered code navigation, etc.  We dog-food the stack every day to
+> evolve the project itself.  **But nothing in the runtime cares about the
+> target language**: the same ChatMD workflow can grep a Python repo, query a
+> PostgreSQL database or orchestrate a Kubernetes cluster.  The magic lies in
+> *crafting the right prompts and exposing the right tools* – Ochat just makes
+> that process reproducible and git-committable.
+
+---
+
+## Quick Start
 
 ```sh
-# 0.  Prerequisites — OCaml ≥ 5.1  +  latest opam
-
-# 1.  Clone & initialise the local switch (≈ first-time only)
-git clone https://github.com/your-org/chatgpt-toolkit.git && cd chatgpt-toolkit
-opam switch create .  # picks up the repo-local `chatgpt.opam`
-
-# 2.  Build everything
+# Clone & build (creates a local opam switch under ./.opam)
+opam switch create .
+opam install . --deps-only
+# Owl on Apple Silicon sometimes needs an explicit pin:
+#   https://github.com/owlbarn/owl/issues/597#issuecomment-1119470934
+#
+# opam pin -n git+https://github.com/mseri/owl.git#arm64 --with-version=1.1.0
+# PKG_CONFIG_PATH="/opt/homebrew/opt/openblas/lib/pkgconfig" opam install owl.1.1.0
 dune build
 
-# 3.  Run the CLI – you should see the global help
-dune exec gpt -- --help
+# Run unit tests & docs
+dune runtest
+dune build @doc
 
-# 4.  (Optional) run the text-UI
-dune exec chat-tui
-
-# 5.  (Optional) index the docs folder and perform a search
-dune exec md-index -- docs
-dune exec md-search -- "vector db"
+# Fire up the interactive TUI on a sample prompt
+dune exec chat_tui -- -file prompts/interactive.chatmd
 ```
 
-The project defaults to **offline / dry-run mode** when the `OPENAI_API_KEY` environment variable is missing, so you can safely explore the commands without network access.  Export the variable when you are ready to talk to the OpenAI API:
+### 🔍 30-second smoke-test — *ochat* chat-completion CLI
+
+Run a single command that verifies *ChatMD parsing → tool-calling → OpenAI round-trip* **before** you start hacking:
+
+```console
+$ ochat chat-completion \
+    -prompt-file prompts/hello.chatmd \
+    -output-file .chatmd/smoke.chatmd
+```
+
+Open `.chatmd/smoke.chatmd` and you should see something along the lines of:
+
+```xml
+<tool_call id="1" name="echo">{"text":"Hello ChatMD"}</tool_call>
+<tool_response id="1">{"reply":"Hello ChatMD"}</tool_response>
+```
+
+If you do **not** get a reply check that `OPENAI_API_KEY` is set and reachable from the shell session.
+
+---
+
+## `ochat chat-completion` – script-friendly cousin of **chat_tui**
+
+`chat_tui` is unbeatable for exploratory work, but when you need a
+**fire-and-forget** assistant turn inside a shell script or CI job the
+`chat-completion` sub-command shines.
+
+```console
+$ ochat chat-completion [flags]
+```
+
+### Frequently-used flags
+
+| Flag | Purpose | Default |
+|------|---------|---------|
+| `-prompt-file` | File prepended **once** at the *start* of the transcript (usually a template with `<system>` / `<developer>` rules). | *(none)* |
+| `-output-file` | Chat log that *persists* across invocations (created if absent, **appended** otherwise).  Use `$(mktemp)` or `/dev/stdout` when you want an *ephemeral* transcript. | `prompts/default.md` |
+
+
+### State lives in a **file**
+
+The file supplied to `-output-file` is the *single* source of truth for the
+conversation: tool-calls, reasoning deltas, assistant messages – everything
+is captured in ChatMarkdown.  Re-run the command with the *same* output file
+to extend the chat history:
+
+```console
+# Turn 1
+$ ochat chat-completion -prompt-file prompts/hello.chatmd \
+    -output-file .chatmd/tech_support.chatmd
+
+# Turn 2 (assistant sees full history)
+$ echo '<user>My computer is on fire!</user>' >> .chatmd/tech_support.chatmd
+$ ochat chat-completion -output-file .chatmd/tech_support.chatmd
+```
+
+Open the result at any time in the interactive UI:
+
+```console
+$ dune exec chat_tui -- -file .chatmd/tech_support.chatmd
+```
+
+`chat_tui` lets you keep chatting as if the session
+had always been interactive.
+
+**Need an ephemeral run?**  Nothing prevents you from pointing `-output-file`
+to a *tempfile* and piping the assistant’s markdown straight to standard
+output:
+
+```console
+# Linux / macOS
+$ tmp=$(mktemp /tmp/ochat.XXXX) \
+  && ochat chat-completion -prompt-file prompts/hello.chatmd \
+       -output-file "$tmp" \
+  && cat "$tmp" \
+  && rm "$tmp"
+
+# Portable one-liner (store under /dev/shm when available)
+$ ochat chat-completion -prompt-file ask_weather.chatmd \
+       -output-file /dev/stdout
+```
+
+The first variant leaves **zero** artifacts after the run; the second streams
+the final ChatMD document directly to the console while still giving the
+runtime a valid *file descriptor* to append to — a requirement of the current
+implementation.
+
+
+### Exit codes
+
+| Code | Meaning |
+|------|---------|
+| 0 | assistant replied successfully |
+| 1 | prompt malformed or missing OpenAI key |
+| 2 | at least one tool call failed |
+| ≥3 | unexpected OCaml exception |
+
+Run `ochat --help` for an exhaustive list of sub-commands and defaults.
+
+---
+
+## Hands-on tutorial – your first ChatMD workflow
+
+This short walkthrough shows the *full* tool-chain end to end – from an empty folder to a running MCP server that publishes your prompt as a reusable remote tool.
+
+> Time required: < 5 minutes  · No prior OCaml experience needed
+
+### 1 Create and activate a project folder
 
 ```sh
-export OPENAI_API_KEY="sk-..."
+$ mkdir ~/ochat-demo && cd ~/ochat-demo
+$ git clone https://github.com/your-repo/ochat.git .
+$ opam switch create . 5.1.1       # or any supported version ≥5.0
+$ opam install . --deps-only    # fetches all transitive deps once
+
+$ dune build                        # compile everything
 ```
 
-# NOTE: A full interactive tour script is not yet part of the public repository.
-# Until that lands you can explore the toolkit hands-on by running the
-# following (all commands are safe in offline mode):
+### 2 Author a minimal prompt
+
+Save the following *hello.chatmd* file next to your *dune-project* (**not** inside *_build/*):
+
+```xml
+<config model="gpt-4o" temperature="0"/>
+
+<tool name="odoc_search" description="Search OCaml docs"/>
+
+<system>You are the OCaml documentation oracle.</system>
+
+<user>Find an example of Eio.Switch usage.</user>
+```
+
+Key take-aways:
+
+1. One declarative `<tool …/>` line is enough – no JSON schema boiler-plate.
+2. History lives *inside* the file, 100 % reproducible.
+
+### 3 Open the prompt in *chat_tui*
 
 ```sh
-# Explore ChatMD — opens the TUI with the bundled hello-world prompt
-dune exec chat-tui -- examples/chatmd/hello.chatmd
-
-# Smoke-test the search stack on a tiny corpus
-dune exec md-index -- examples
-dune exec md-search -- "hello world"
+dune exec chat_tui -- -file hello.chatmd
 ```
 
-## 3  Architecture overview
+Useful shortcuts (Insert mode):  
+• <kbd>Meta + Enter</kbd> send the draft  
+• <kbd>Esc</kbd>     switch to Normal mode  
+• <kbd>:w</kbd>     save the file  
+• <kbd>:q</kbd>     quit
 
-> *Prefer diagrams?*  Open `docs/architecture.mmd` in your editor or render it with the Mermaid CLI (`mmdc`) to obtain a fresh `docs/architecture.svg`.
+While the assistant is reasoning you will see live streaming deltas, tool-call placeholders and (when enabled) chain-of-thought blocks dimmed in grey.
 
-```mermaid
-graph LR
-  subgraph Front-ends
-    CLI[gpt / chat-tui]
-    HTTP[MCP HTTP server]
-  end
+### 4 Turn the prompt into a **remote tool**
 
-  subgraph Domain-layer
-    ChatMD[ChatMD parser & runtime]
-    ChatML[ChatML interpreter]
-  end
+Start an MCP server that watches the current directory:
 
-  subgraph Core Runtime
-    OpenAI[OpenAI bindings]
-    Search[(Vector DB + BM25)]
-    OAuth[OAuth2 stack]
-  end
-
-  CLI --> ChatMD
-  HTTP --> ChatMD
-  ChatMD -->|tool calls| Search
-  ChatMD -->|stream| OpenAI
-  ChatML --> ChatMD
-  OpenAI -.-> OAuth
+```sh
+dune exec mcp_server -- --http 8080 --prompts .
 ```
 
-At a glance the system is organised in three concentric rings:
+At this point:
 
-1. **Core runtime** – handles external side-effects: OpenAI REST calls, dense & sparse search, token caching and OAuth2 credentials.
-2. **Domain layer** – defines the prompt DSLs (*ChatMD*, *ChatML*) and their dialogue/runtime helpers.
-3. **Front-ends** – expose the features via command-line, terminal UI and HTTP/MCP transports.
+* `GET http://localhost:8080/mcp` → Server-Sent-Events stream of notifications.  
+* `POST /mcp {"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}`  
+  returns a registry that **includes _hello_**.
 
-Each layer only depends *inwards* which keeps the build graph simple and allows you to embed just the lower rings inside your own code when you don’t need the full CLI.
+You have just published a new function-callable endpoint without writing a single line of server code ✨.
 
-## 4  CLI Tools
+### 5 Consume the tool from another prompt
 
-| Command | Purpose | … |
-|---------|---------|-------------|
-| `gpt` | Swiss-army knife CLI (~10 sub-commands) for chat completions, embedding index management and misc utilities. | out/help/gpt.txt |
-| `chat-tui` | Full-screen TUI client for ChatMD conversations. | out/help/chat-tui.txt |
-| `md-index` | Crawl Markdown trees and build a vector/BM25 index. | out/help/md-index.txt |
-| `md-search` | Query one or more Markdown indices. | out/help/md-search.txt |
-| `odoc-index` | Index compiled `.odoc` documentation. | out/help/odoc-index.txt |
-| `odoc-search` | Semantic search over odoc indices. | out/help/odoc-search.txt |
-| `mcp_server` | Machine-Control-Protocol JSON/STDIO bridge (HTTP & pipes). | out/help/mcp_server.txt |
-| `dsl_script` | Execute ChatML `.cml` scripts from disk or stdin. | out/help/dsl_script.txt |
-| `key-dump` | Inspect OpenAI API key & model quotas. | out/help/key-dump.txt |
-| `terminal_render` | Render markdown+ANSI blobs to a terminal buffer (demo). | out/help/terminal_render.txt |
-| `eio_get` | Minimal HTTP GET example using Eio + Piaf. | out/help/eio_get.txt |
-| `piaf_example` | Piaf request/response showcase. | out/help/piaf_example.txt |
+```xml
+<tool mcp_server="https://localhost:8080" name="hello"/>
 
-## 5  ChatMD language
+<user>Ask remote oracle for Eio.Switch example.</user>
+```
 
-*ChatMD* (`*.chatmd`) is a **Markdown-flavoured, XML-light wrapper** around the OpenAI *chat-completions* JSON format.  It provides:
+Run this second prompt in *chat_tui* (or embed it in your own OCaml program) – the assistant will pick the *hello* tool, the MCP client will tunnel the call over JSON-RPC/SSE, and the oracle prompt you created in step 2 will answer.
 
-* **Declarative roles** – `<system>`, `<user>`, `<assistant>` tags become messages; no more `\n\nUser:` delimiters.
-* **Structured tool-calls** – `<tool_call name="md-search">...</tool_call>` and `<tool_response>` encode the function-calling API in a copy-pasta-safe way.
-* **Rich embeds** – `<doc module="Eio.Switch" />` injects odoc snippets at runtime; `<img src="..."/>` renders in the TUI.
+---
 
-Below is a minimal *hello-world* example (see `examples/chatmd/hello.chatmd`):
+Environment variables:
 
-```chatmd
+| Variable            | Purpose                                        |
+|---------------------|------------------------------------------------|
+| `OPENAI_API_KEY`    | Required for completions / embeddings          |
+| `MCP_PROMPTS_DIR`   | Extra folder scanned by `mcp_server`           |
+| `PATH`              | `google-chrome`/`chromium` for `webpage_to_markdown` |
+
+---
+
+## ChatMarkdown ( ChatMD ) language
+
+ChatMD combines the readability of Markdown with a minimal XML vocabulary.
+The model sees **exactly** what you write – no hidden pre-processing.
+
+| Element | Purpose | Important attributes |
+|---------|---------|----------------------|
+| `<config/>` | Current model and generation parameters. **Must appear once** near the top. | `model`, `max_tokens`, `temperature`, `reasoning_effort`, **`show_tool_call`** (flag).  When the flag is present the runtime embeds tool-call **arguments & results inline**; when absent they are written to disk and referenced via `<doc/>`. |
+| `<tool/>` | Declare a tool that the assistant may call. | • `name` – function name.<br>• Built-ins only need `name` (`apply_patch`, …).<br>• **Shell wrappers** add `command="rg"` + optional `description`.<br>• **Agent-backed** tools add `agent="./file.chatmd"` (plus `local` if the agent lives on disk). |
+| `<msg>` | Generic chat message. | `role` one of `system,user,assistant,developer,tool`; optional `name`, `id`, `status`.  Assistant messages that *call a tool* additionally set `tool_call="true"` and provide `function_name` + `tool_call_id`. |
+| `<user/>` / `<assistant/>` / `<developer/>` / `<system>` | **Shorthand** wrappers around `<msg …>` for the common roles. | Accept the same optional attributes (`name`, `id`, `status`). |
+| `<tool_call/>` | Assistant *function invocation* shorthand – equivalent to `<msg role="assistant" tool_call …>` | Must include `function_name` & `tool_call_id`.  Body carries the JSON argument object (often wrapped in `RAW|…|RAW`). |
+| `<tool_response/>` | Tool reply shorthand – equivalent to `<msg role="tool" …>` | Must include the matching `tool_call_id`. Body contains the return value (or error) of the tool. |
+| `<reasoning>` | Chain-of-thought scratchpad emitted by reasoning models.  Normal prompts rarely use it directly. | `id`, `status`.  Contains one or more nested `<summary>` blocks. |
+| `<import/>` | Include another file *at parse time*.  Keeps prompts small while re-using large policy docs. | `src` – relative path of the file to include. |
+
+
+`<config>` supports *all* OpenAI chat parameters.  Example:
+
+```xml
+<config model="gpt-4o" temperature="0.2" max_tokens="1024" reasoning_effort="detailed"/>
+```
+
+When using a reasoning model, if `reasoning_effort` is not `none` the assistant may stream `<reasoning>`
+blocks; Ochat renders them inline with dimmed colours so you can watch the
+*chain-of-thought* develop while tools execute.
+
+
+### Inline content helpers
+
+Inside various element bodies you can embed richer content that is expanded **before** the request
+is sent to OpenAI:
+
+| Tag | Effect |
+|-----|--------|
+| `<img src="path_or_url" [local] />` | Embeds an image. If `local` is present the file is encoded as a data-URI so the API sees it. |
+| `<doc src="path_or_url" [local] [strip] [markdown]/>` | Inlines the *text* of a document. <br>• `local` reads from disk.  <br>• Without it the file is fetched over HTTP.<br>• `strip` removes HTML tags (useful for web pages). <br>• `markdown` converts the document to Markdown format. |
+| `<agent src="prompt.chatmd" [local]> … </agent>` | Runs the referenced chatmd document as a *sub-agent* and substitutes its final answer.  Any nested content inside the tag is appended as extra user input before execution. |
+
+#### The `<agent/>` element – running sub-conversations
+
+An **agent** lets you embed *another* chatmd prompt as a sub-task and reuse its answer as
+inline text.  Think of it as a one-off function call powered by an LLM.
+
+• `src` is the file (local or remote URL) that defines the agent’s prompt.  
+• Add the `local` attribute to read the file from disk instead of fetching over HTTP.  
+• Any child items you place inside `<agent>` become *additional* user input that is appended
+  to the sub-conversation *before* it is executed.
+
+Example – call a documentation-summary agent and insert its answer inside the current
+message:
+
+```xml
+<msg role="user">
+  Here is a summary of the README:
+  <agent src="summarise.chatmd" local>
+     <doc src="README.md" local strip/>
+  </agent>
+</msg>
+```
+
+At runtime the inner prompt `summarise.chatmd` is executed with the stripped text of the
+local `README.md` as user input, and the resulting summary is injected in place of the
+`<agent>` tag.
+
+---
+
+### End-to-end example
+
+```xml
+<config model="gpt-4o" temperature="0.1" max_tokens="512"/>
+
+<tool name="odoc_search" description="Search local OCaml docs"/>
+
+<system>Answer strictly in JSON.</system>
+
+<user>Find an example of Eio.Switch usage</user>
+```
+
+When the assistant chooses to call the tool Ochat inserts a `<tool_call>`
+element, streams the live output, appends a `<tool_response>` block with the
+result and finally resumes the assistant stream – **all captured in the same
+file**.
+
+---
+
+### Writing effective ChatMD prompts
+
+Below is a condensed checklist distilled from months of day-to-day usage.  All tips are *optional* – ChatMD never hides or rewrites your words – but following them keeps both **tokens and frustration** low.
+
+1. **Single authoritative `<config/>`.** Keep _all_ OpenAI parameters in one place near the top; avoid scattering overrides that compete for attention.  `chat_response.Config.of_elements` only reads the first occurrence anyway.
+2. **System / developer message choice matters.** For GPT-series stick to one `<system>` message; for *reasoning* models such as **o3‐mini** place the rules in a `<developer>` message because these models follow the _chain-of-command_ spec more literally.
+3. **System content = scope + constraints, _nothing else_.** One or two sentences suffice.  Large policy docs should be `<import>`-ed to keep the round-trip diff small.
+4. **Declare tools _once_ (via `<tool …/>`) and never duplicate the schema in plain text.** The API already provides the JSON schema to the model and repeating it wastes tokens or introduces mismatches.
+5. **Enable JSON-mode (`response_format="json_object"`) for machine-readable replies.** GPT-4o-mini and reasoning models respect the constraint and will return *parsable* objects.
+6. **“Show, don’t tell” — provide a single, minimal example.** Instead of lengthy prose like “Return valid JSON”, embed one assistant message that contains a canonical response shape:
+
+   ```xml
+   <assistant>
+   {"reply":"<content>","sources":[]}
+   </assistant>
+   ```
+
+   The model will pattern-match and follow the schema more reliably than with verbal instructions.
+7. **Chain-of-thought: _on for GPT, off for reasoning_.** GPT models often benefit from an explicit “think step-by-step”; o-series models **already** plan internally – asking them to reveal the chain may hurt quality and cost.
+8. **Zero-shot first, few-shot only if needed (reasoning models).** Most o-series prompts work with no examples; add them only when absolutely necessary and keep them perfectly aligned with the instructions.
+9. **Leverage tools instead of giant context windows.** When a sub-task can be solved via search (`md_search`, `odoc_search`) or a remote micro-service, call the tool rather than pasting 100 k tokens of data.
+10. **Reusable workflows = agents.** Encapsulate a sequence of steps into `my_flow.chatmd`, and mount it through `<agent src="my_flow.chatmd"/>` for LEGO-style composition.
+12. **Mind the token budget.** GPT-4o can handle ~1 M tokens, but both latency and price grow linearly.  Check with `ochat tokenize -file foo.chatmd` before you hit *Send*.
+
+### reasoning vs GPT quick‐reference
+
+| Situation | Recommended model | Prompting style |
+|-----------|------------------|-----------------|
+| Complex, multi-step planning | **o3-mini / o3** | Concise goal + constraints, *no* step-by-step request; use `reasoning_effort` when you need depth. |
+| Latency-sensitive UI chats | **GPT-4o/GPT-4.1** | Explicit, detailed instructions; CoT or *think step-by-step* when logic matters. |
+| Giant context (≥ 200k tokens) | **GPT-4o/GPT-4.1** | Repeat key constraints at *top & bottom* of the prompt. |
+
+Additional reminders for reasoning models:
+
+1. Put non-negotiable rules in a `<developer>` message.
+2. Prefer **zero-shot**; add examples only for rigid output formats.
+3. `reasoning_effort="high"` often beats chain-of-thought at lower cost.
+
+
+Below are **extra heuristics** that pay dividends in practice:
+* **First-sentence anchoring.**  Make sure the very first 80 characters identify the *task*, otherwise the model may mis-detect the domain and pick a less efficient compression strategy.
+* **Declarative personas, imperative goals.**  Instead of *“You are a world-class OCaml tutor”* try *“Explain each OCaml snippet in clear English suitable for a junior engineer.”*
+* **Rapid error recovery.**  Wrap every non-idempotent tool invocation in a sub-agent: if the call fails, the agent can decide whether to retry, back-off or fallback to a degraded answer without polluting the main conversation history.
+
+---
+
+End-to-end example demonstrating *everything at once*:
+
+```xml
+<config model="gpt-4o" temperature="0.1" max_tokens="512" />
+
+<tool name="markdown_search" description="Search docs" />
+<tool mcp_server="https://api.mycorp.dev" name="weather" />
+
+<system>
+  You are a strict JSON API. Always respond with an object {reply, sources}.
+</system>
+
 <user>
-Hello! Could you explain what ChatMD is and why it exists?
+  Create a one-paragraph summary of the MCP spec.
 </user>
 
+<!-- The assistant may now decide to call markdown_search or weather – or answer directly. -->
+```
+
+---
+
+## Tools
+
+### Built-in toolbox
+
+| Name | Category | Description |
+|------|----------|-------------|
+| `apply_patch`         | repo      | Apply an *Ochat diff* (V4A) to the working tree |
+| `read_dir`            | fs        | Recursively list directory contents as JSON |
+| `get_contents`        | fs        | Read a file (UTF-8) |
+| `get_url_content`     | web       | Download a raw resource and strip HTML to text |
+| `webpage_to_markdown` | web       | Download a page & convert it to Markdown |
+| `index_ocaml_code`    | index     | Build a vector index from a source tree |
+| `index_markdown_docs` | index     | Vector-index a folder of Markdown files |
+| `odoc_search`         | docs      | Semantic search over installed OCaml API docs |
+| `md_search` / `markdown_search` | search | Query Markdown indexes created by `index_markdown_docs` |
+| `query_vector_db`     | search    | Hybrid dense + BM25 search over source indices |
+| `fork`                | misc      | Spawn a forked assistant with the exact same context to perform a task and return the results to the original assistant |
+| `make_dir`            | fs        | Create a directory (idempotent) |
+
+<details>
+<summary><strong>Deep-dive: 7 helpers that turn ChatMD into a Swiss-Army knife</strong></summary>
+
+1. **`apply_patch`** – The bread-and-butter of autonomous coding sessions.  The assistant can literally rewrite the repository while you watch.  The command understands *move*, *add*, *delete* and multi-hunk updates in one atomic transaction.
+2. **`webpage_to_markdown`** – Turns *any* public web page (incl. GitHub *blob* URLs) into clean Markdown ready for embedding or in-prompt reading.  JS-heavy sites fall back to a head-less Chromium dump.
+3. **`odoc_search`** – Semantic search over your **installed** opam packages.  Because results are fetched locally there is zero network latency – ideal for day-to-day coding.
+4. **`markdown_search`** – Complement to `odoc_search`.  Index your design docs and Wiki once; query them from ChatMD forever.
+5. **`query_vector_db`** – When you need proper hybrid retrieval (dense + BM25) over a code base.  Works hand-in-hand with `index_ocaml_code`.
+6. **`fork`** –  Spawn a *clone* of the assistant inside the same prompt.  Perfect for speculative tasks: let the clone draft a changelog while the main thread keeps chatting.
+7. **`make_dir`** – Sounds trivial but enables one-shot project scaffolding flows where the LLM both creates folders *and* patches files.
+
+</details>
+
+### Importing remote MCP tools – one line, zero friction
+
+```xml
+<!-- Mount the public Brave Search toolbox exposed by *npx brave-search-mcp* -->
+<tool mcp_server="stdio:npx -y brave-search-mcp"/>
+
+<!-- Or cherry-pick just two helpers from a self-hosted endpoint -->
+<tool mcp_server="https://tools.acme.dev" includes="weather,stock_ticker"/>
+```
+
+Ochat converts every entry returned by the server’s `tools/list` call into a
+local OCaml closure and forwards the **exact** JSON schema to OpenAI.  From the
+model’s perspective there is no difference between `weather` (remote) and
+`apply_patch` (local) – both are normal function calls.
+
+
+> **Tip 💡** – All built-ins are **normal ChatMD tools** under the hood.  That means you can mount them remotely via MCP:
+
+```xml
+<!-- Consume read-only helpers from a sandboxed container on the CI runner -->
+<tool mcp_server="https://ci-tools.acme.dev" includes="read_dir,get_contents"/>
+```
+
+or hide them from the model entirely in production by simply omitting the `<tool>` declaration.  No code changes required.
+
+
+### Rolling your own OCaml tool – 20 lines round-trip
+
+```ocaml
+open Ochat_function
+
+module Hello = struct
+  type input = string
+
+  let def =
+    create_function
+      (module struct
+        type nonrec input = input
+        let name        = "say_hello"
+        let description = Some "Return a greeting for the supplied name"
+        let parameters  = Jsonaf.of_string
+          {|{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}|}
+        let input_of_string s =
+          Jsonaf.of_string s |> Jsonaf.member_exn "name" |> Jsonaf.string_exn
+      end)
+      (fun name -> "Hello " ^ name ^ "! 👋")
+end
+
+let tools_json, dispatch =
+  Ochat_function.functions [ Hello.def ]
+```
+
+Declare it once in ChatMD:
+
+```xml
+<tool name="say_hello"/>
+```
+
+That is **all** – the assistant can now greet users in 40+ languages without
+touching an HTTP stack.
+
+---
+
+## Shell-command wrappers – *the 30-second custom tool*
+
+Not every helper deserves a fully-blown OCaml module.  Often you just want to
+gate a **single shell command** behind a friendly JSON schema so the model can
+call it safely.  ChatMD does this out-of-the-box via the `command="…"`
+
+```xml
+<!-- Pure viewer: let model know do use for write access → safe in read-only environments. (note: this is just a hint to the model. It could still call this with write ops. You need to implement proper access controls in your tool) -->
+<tool name="sed"
+      command="sed"
+      description="read-only file viewer"/>
+
+<!-- Pre-pinned arguments – the model cannot escape the pattern.          -->
+<tool name="git_ls_files"
+      command="git ls-files --exclude=docs/"
+      description="show files tracked by git except docs/"/>
+
+<!-- Mutation allowed, therefore keep it explicit and auditable →        -->
+<tool name="git_pull"
+      command="git pull"
+      description="fetch from and integrate with a remote repository"/>
+```
+
+Behaviour in a nutshell
+
+1. The JSON schema is inferred automatically: an *array of strings* called
+   `arguments`.
+2. At run-time Ochat executes
+
+   ```sh
+   <command> <arguments…>   # under the current working directory
+   ```
+
+3. Standard output and stderr is captured and
+   appended to the `<tool_response>` block and sent back to the assistant;.
+
+### Why wrapper tools beat *generic shell*
+
+| Aspect | Generic `sh -c` | Targeted wrapper |
+|--------|-----------------|-------------------|
+| Search space @ inference | enormous | tiny – the model only sees *git_pull* / *sed* |
+| Security                 | needs manual sandboxing | limited to pre-approved binaries |
+| Reliability              | model must remember *all* flags | happy-path baked into `command` |
+
+In practice:
+
+* **Generalist agents** benefit from one broad hammer such as `bash`, but may
+  waste tokens debating which flag to use or which command to run.
+* **Specialist agents** (e.g. *CI fixer*, *release-bot*) shine when equipped
+  with *exactly* the verbs they need — nothing more, nothing less.
+
+#### Design guidelines
+
+1. **Prefer idempotent actions**.  Read or list before you write or delete.
+2. **Embed flags** that should never change directly in `command="…"`.
+3. Add a verb-based **prefix** (`git_`, `docker_`, `kubectl_`) so the
+   language model can reason via pattern matching.
+
+
+
+
+#### Quick REPL tour
+
+Fire up *chat_tui* on an empty prompt and experiment interactively:
+
+```xml
+<config model="gpt-4o" temperature="0"/>
+
+<tool name="read_dir"/>
+<tool name="get_contents"/>
+<tool name="apply_patch"/>
+
+<user>List every file under ./lib that contains “vector”.  Then show me the first 6 lines of the most relevant one.</user>
+```
+
+While the assistant reasons you will see:
+
+1. A `<tool_call>` block appear with arguments that mirror the OCaml record schema.
+2. Live streaming of the command output (thanks to Server-Sent Events).
+3. A `<tool_response>` block once the helper terminates.
+4. The assistant resuming its stream – now aware of the file contents.
+
+Everything — calls, responses, thought process — ends up in the same `.chatmd` file so your colleagues can replay the analysis *byte-for-byte* months later.
+
+
+
+<details>
+<summary>Signal → act recipes</summary>
+
+*Index your library then query it from ChatMD*
+
+```xml
+<tool name="index_ocaml_code"/>
+<tool name="query_vector_db"/>
+
+<user>
+  1. Index ./lib and store vectors under .vector_db
+  2. Search the DB for "tail-rec map" and display the first 3 hits as markdown list.
+</user>
+```
+
+The assistant will first call `index_ocaml_code`, wait for completion, then feed the *call-id* of the created index into `query_vector_db` – no glue code required.
+
+</details>
+
+---
+
+## Composing full workflows
+
+One of ChatMD’s super-powers is that **every tool is just normal Markdown** –
+there is *no* difference between calling an OpenAI function, a shell command
+or a remote MCP micro-service.  This section shows how to chain a handful of
+built-ins into a **self-contained research-→-edit-→-commit loop** that you can
+paste straight into your editor.
+
+> Scenario You are reading a blog post, notice that the README has grown out
+> of date and want the assistant to fetch the latest article, summarise it and
+> update *README.md* – all without leaving the terminal.
+
+```xml
+<config model="gpt-4o" temperature="0" />
+
+<!-- 1️⃣  Helpers we need -->
+<tool name="webpage_to_markdown" />           <!-- remote research -->
+<tool name="apply_patch"        />            <!-- edit the repo   -->
+
+<!-- 2️⃣  High-level task -->
+<user>
+  Read https://blog.example.com/2025/07/ai-git.md and inject a concise
+  one-paragraph summary under the "Motivation" heading of README.md.
+</user>
+```
+
+The assistant will:
+
+1. **Call** `webpage_to_markdown`, receiving Markdown of the article.
+2. **Generate** an `apply_patch` diff that inserts the summary.
+3. **Invoke** `apply_patch` – Ochat applies the patch and persists the change.
+4. **Confirm** success, all recorded in the same `.chatmd` file.
+
+### Why it matters
+
+* Works identically with **local** (`apply_patch`) and **remote**
+  (`webpage_to_markdown`) helpers – the LLM does not care.
+* The whole transaction is **auditable & replayable** – reviewers can inspect
+  the patch, the external source, and the chain-of-thought in one diff.
+* Encourages a *research-then-act* workflow that keeps prompts short and
+  leverages tools instead of giant context windows. Though sometimes giant context windows are unavoidable, this pattern helps keep them manageable.
+
+The same pattern scales to multi-step refactors, changelog generation, data
+munging and beyond.
+
+---
+
+## Prompt blueprint – *Discovery bot*
+Treat the snippet below as
+a **blueprint** you can paste into your own repository and commit alongside
+code. 
+
+The prompt turns the assistant into a fully autonomous *research → summarise →
+patch* agent.  You will recognise many of the concepts explained earlier: MCP
+tools, built-ins, chain-of-thought, GPT-4o vs o3 models and, most
+importantly, incremental file updates via `apply_patch`.
+
+```xml
+<config model="o3" max_tokens="100000" reasoning_effort="high" />
+
+<!-- Built-ins -->
+<tool name="webpage_to_markdown" />
+<tool name="apply_patch" />
+
+<!-- Remote MCP server for web search -->
+<tool mcp_server="stdio:npx -y brave-search-mcp" />
+
+<!-- Read-only helper so the LLM can *peek* at existing research files -->
+<tool name="sed" command="sed" description="read-only file viewer" local />
+
+<system>
+You are a meticulous web-research agent.  Your job is to fully resolve the
+user’s query, writing detailed findings to <research_results.md> as you go.
+
+Workflow (strict order):
+1. Create or open the target markdown file using `apply_patch`.
+2. Run **at least** 3 brave_web_search queries.
+3. For each result:
+   a. Fetch the page with `webpage_to_markdown`.
+   b. Extract relevant facts, examples, citations.
+   c. Immediately append a structured summary to the results file via
+      `apply_patch`.
+4. Continue until you cannot find new useful sources.
+5. Reply with a JSON object `{reply, sources}` and **nothing else**.
+</system>
+
+<user>
+store results in prompting_research_results.md
+  Research best practices for prompting OpenAI’s latest models
+  – include o3 reasoning models
+  – include GPT-4.1 models
+  – prompting in general
+  – include any relevant academic literature
+</user>
+```
+
+Why it’s interesting:
+
+* Shows **MCP tool integration** – the runtime uses `tools/list` from the Brave MCP
+  wrapper to discover *which* search endpoints the model can call and makes them availible.
+* Demonstrates a **self-mutating** workflow: after each web request the LLM
+  edits *prompting_research_results.md* so progress is never lost.
+* Combines *local* (`apply_patch`, `sed`) and *remote* tools (Brave search)
+  seamlessly.
+
+Clone the snippet, tweak the `<config>` model, change the tool list and you
+have an advanced research agent tailored to your environment.
+
+
+### Inspiration – `prompt-examples/discovery.md`
+
+The repository ships an *industrial-strength* research agent in
+`prompt-examples/discovery.md`.  It demonstrates – in fewer than 120 lines – how
+to chain **Brave web search (remote MCP tool)**, `webpage_to_markdown`, and
+`apply_patch` into a self-healing loop that:
+
+1. Executes three diverse search queries.
+2. Converts every candidate web page to Markdown.
+3. Summarises the findings in a dedicated notes file.
+4. Appends new sources until diminishing returns kick in.
+
+Fork the file, change the `<user>` goal, and you have a bespoke research bot in
+seconds.
+
+---
+
+## OCaml ⚑ vs Language-Agnostic Design
+
+Ochat’s code-base is pure **OCaml** which unlocks deep, first-class hooks into
+the ecosystem: Merlin for code navigation, odoc for documentation search,
+`dune describe` for build introspection and a parser that speaks `.ml`/`.mli`
+fluently. Ocaml is a powerful tool for building robust applications and its type system really shines in projects like ChatMD.
+I have also found that OCaml's strong type system and powerful compiler are a perfect match for llm code generation. They
+make it easier to catch errors early in the development process and give the llm a powerful feedback loop with the compiler, which helps improve the quality of the generated code because the llm is forced to ensure its code is at least type-checked. With a combination of dune build, and dune runtest you can quickly have the model iterate on the code and test it and make it much more reliable.  This is a key part of the development workflow.
+The project is written in OCaml, and we use it to help develop the project itself.
+
+Yet nothing in the *runtime* cares about OCaml.  ChatMD is plain Markdown +
+XML; tools exchange JSON; the MCP transport is language-agnostic.  Point at a Rust project, 
+mount a Python-based micro-service via MCP, or let the assistant
+drive `docker` – the workflow stays unchanged because **the power comes from
+choosing the right prompts and exposing the right set of tools, not from the
+host language**.
+
+All artefacts are files.  They can be code-reviewed, linted, versioned and
+replayed by CI.  If an LLM interaction matters you commit it alongside the
+code it touches – *infrastructure-as-prompt*.
+
+---
+
+### Declaring & calling tools in ChatMD
+
+```xml
+<tool name="grep" command="rg" description="ripgrep search"/>
+
+<user>Search every *.ml for TODO and list file + line numbers.</user>
+```
+
+The declaration alone is enough – Ochat builds the JSON schema, validates
+arguments and runs the command under an Eio switch.  The assistant only has
+to emit a normal function call.
+
+#### Anatomy of a function call (end-to-end)
+
+```xml
+<tool name="grep" command="rg" description="ripgrep search"/>
+
+<user>List every .ml file that contains the word `todo`.</user>
+
+<!-- What happens under the hood → simplified trace -->
+<tool_call id="1" name="grep">{"arguments":["-n","todo","*.ml"]}</tool_call>
+<tool_response id="1">
+src/foo.ml:14: (* TODO: remove allocation *)
+...
+</tool_response>
 <assistant>
-Sure – ChatMD is a small XML-like language designed to write LLM prompts …
+Found 7 TODO markers – see annotated listing above.
 </assistant>
 ```
 
-For the full grammar head to `docs/chatmd_syntax_reference.md`; the file contains the formal EBNF, element catalogue and common patterns.
+The entire lifecycle is captured in **one** durable `.chatmd` file – ideal for audit, diffing and reproducibility.
 
-## 6  ChatML language (experimental)
+### Authoring custom OCaml tools
 
-*ChatML* is an **embedded, dynamically-typed scripting language** that can be mixed inside ChatMD or run standalone via the `dsl_script` binary.  Its goal is to provide **control-flow, variables and modularity** without leaving the prompt context.
+```ocaml
+module Echo = struct
+  type input = string
 
-Key features:
+  let def =
+    Ochat_function.create_function
+      (module struct
+         type nonrec input = input
+         let name        = "echo"
+         let description = Some "Return the input verbatim"
+         let parameters  =
+           Jsonaf.of_string
+             "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}"
+         let input_of_string s =
+           Jsonaf.of_string s |> Jsonaf.member_exn "text" |> Jsonaf.string_exn
+       end)
+      (fun s -> s)
+end
 
-* OCaml-style arithmetic & boolean expressions.
-* `let` bindings and function definitions.
-* Minimal standard library (string / list helpers) – can be extended at compile time.
-* Seamless FFI to call ChatMD tool functions.
-
-Example (simplified):
-
-```chatml
-let rec fib n = if n < 2 then n else fib (n-1) + fib (n-2)
-
-print (fib 10)
+let tools_json, dispatch_tbl =
+  Ochat_function.functions [ Echo.def ]
 ```
 
-See `docs/chatml_overview.md` for a deep dive and `examples/chatml/` for runnable samples.
+### End-to-end example – add and call *your* tool
 
-## 7  Embedding & search stack
+Below is a **full cut-and-paste scenario** that shows *all* moving parts – OCaml side **and** prompt side – in under 30 lines.  You will end up with a prompt that calls a freshly compiled function **without** extra JSON glue.
 
-The framework ships with a **hybrid search engine** that combines dense OpenAI embeddings with a traditional BM25 sparse index.  The key components are:
+1.  Drop the following module into `lib/my_echo.ml`:
 
-| Module | Role |
-|--------|------|
-| `embed_service` | Streams batch requests to the OpenAI */embeddings* endpoint with_retry/back-off logic. |
-| `vector_db` | On-disk ANN store (Owl L2 + product quantisation) backed by memory-mapped pages.  ~10× faster than naïve cosine scans. |
-| `bm25` | Lightweight BM25 implementation for exact-term recall & score blending. |
-| `markdown_indexer` / `odoc_indexer` | Incremental crawlers that feed Markdown docs and compiled odoc artefacts into the DB. |
+   ```ocaml
+   open Ochat_function
 
-A detailed sequence diagram lives in `docs/seq_embedding.md` – here’s the TL;DR:
+   module Echo = struct
+     type input = string
 
-```mermaid
-sequenceDiagram
-  autonumber
-  User ->> md-index: crawl docs/
-  md-index ->> markdown_crawler: read file
-  markdown_crawler ->> embed_service: embed batched chunks
-  embed_service ->> OpenAI: POST /v1/embeddings
-  OpenAI -->> embed_service: 200 JSON
-  embed_service ->> vector_db: store vecs
-  md-index ->> bm25: update TF/IDF tables
+     let def =
+       create_function
+         (module struct
+           type nonrec input = input
+           let name        = "echo"
+           let description = Some "Return the input verbatim"
+           let parameters  = Jsonaf.of_string
+             {|{"type":"object","properties":{"text":{"type":"string"}},"required":["text"]}|}
+           let input_of_string s = Jsonaf.of_string s |> Jsonaf.member_exn "text" |> Jsonaf.string_exn
+         end)
+         (fun s -> s)
+   end
+   ```
+
+2.  Add the module to your `dune` file and run `dune build`.  The helper is now part of your workspace.
+
+3.  Declare the tool once at the top of a prompt `echo_demo.chatmd`:
+
+   ```xml
+   <config model="gpt-4o" temperature="0"/>
+
+   <!-- Made available by the OCaml code we just compiled -->
+   <tool name="echo"/>
+
+   <user>Repeat "ChatMD rocks" three times separated by commas.</user>
+   ```
+
+4.  Run it in the terminal UI:
+
+   ```console
+   $ dune exec chat_tui -- -file echo_demo.chatmd
+   ```
+
+The assistant will decide to call the tool, Ochat will route the call into the in-process OCaml function, capture the return value and dump everything back into `echo_demo.chatmd` as a `<tool_call>` / `<tool_response>` pair. **No HTTP, no YAML, no wrapper script.**
+
+
+```xml
+<!-- ➡ ChatMD declaration – *nothing* else required -->
+<tool name="echo"/>
+
+<user>Repeat "Hello" three times.</user>
+```
+The assistant calls `echo` internally; your `.ml` file handles the logic.  **No HTTP, no boiler-plate**, only a strongly-typed OCaml function.
+
+
+`tools_json` is forwarded to OpenAI, while `dispatch_tbl` lets the driver
+execute calls locally.
+
+### Consuming remote MCP tools
+
+```xml
+<tool mcp_server="http://localhost:8080" name="weather"/>
 ```
 
-Benchmarks on a ~10k-document corpus show **~1.8k docs/sec** throughput when the GPU cache is warm – full numbers are in `docs/vector_db_indexing.md`.
+`Mcp_tool.ochat_function_of_remote_tool` consumes the **standard** MCP
+`tools/list` response and converts the JSON-schema of each selected tool into
+a local `Ochat_function`.  As long as the endpoint speaks *vanilla MCP* the
+origin does not matter – GitHub Codespaces, Cursor IDE plugins, your own
+Rust-based micro-service, all integrate the same way.  Ochat does **not**
+expect the server to run OCaml or to use the `ochat` code-base.
 
-## 8  OAuth2 helper stack
+#### Selecting which remote tools are exposed
 
-Several binaries expose HTTP endpoints (MCP server, REST demo bots) and need OAuth for local testing.  Rather than pulling a full server the repo includes a **minimal, in-memory OAuth2 implementation** that supports:
+The `<tool>` tag gives you **three mutually‐exclusive attributes** to control
+what is imported from the remote registry:
 
-* *Client-Credentials* flow for machine-to-machine access.
-* *PKCE* (Proof-Key-for-Code-Exchange) for browser-initiated logins.
+| Attribute | Example | Effect |
+|-----------|---------|--------|
+| `name`    | `name="weather"` | Expose *exactly* the tool called `weather`.  Fails during handshake if the server does not provide it. |
+| `includes`| `includes="grep,apply_patch"` | Import the comma-separated subset.  Handy when you need more than one tool but do **not** want the entire registry (avoids token bloat). |
+| *(absent)*| *no attribute* | Import **all** tools advertised by the server.  This is convenient during exploration but increases the schema size sent to OpenAI. |
 
-The stack is split into composable layers (`oauth2_server_storage`, `oauth2_server_routes`, `oauth2_manager` …) so you can replace the persistence layer or token signer while re-using the HTTP routes.  See `docs/oauth2_overview.md` for diagrams and example curl snippets.
+```xml
+<!-- Single tool -->
+<tool mcp_server="https://tools.acme.dev" name="weather"/>
 
-## 9  MCP protocol
+<!-- Selected subset -->
+<tool mcp_server="https://tools.acme.dev" includes="grep,apply_patch"/>
 
-The **Machine-Control-Protocol (MCP)** is a terse JSON-over-STDIO protocol that lets external programs drive ChatMD sessions in real time – think *“JSON REPL for ChatGPT”*.  Two transport flavours exist:
+<!-- Wild-card: every tool the server offers -->
+<tool mcp_server="https://tools.acme.dev"/>
+```
 
-* **`mcp_server`** – Listens on HTTP (for web front-ends) and/or plain stdio pipes.  It bridges incoming JSON messages to the ChatMD runtime.
-* **`mcp_client`** – Thin OCaml library so you can embed a client in your own code.
+If both `name` and `includes` are supplied, **`name` wins** and `includes` is
+ignored.  An `excludes` attribute is intentionally not provided – keep the
+list small instead of black-listing.
 
-Message schemas are auto-derived via `ppx_jsonaf_conv` and documented in `docs/mcp_protocol.md` which also contains a fully worked integration test captured from `test/mcp_server_integration_test.ml`.
+#### Two-liner smoke test
 
-## 10  Contributing
+```xml
+<tool mcp_server="stdio:mcp_server --prompts ./prompts" name="echo"/>
 
-We happily welcome bug-reports, feature requests and pull-requests.  A few guidelines to make the review process smooth:
+<user>Ask the echo tool to repeat “hello world”.</user>
+```
 
-1. **Fork + Feature branch** – keep the `main` branch clean.
-2. **Coding style** – the repo is formatted with `ocamlformat` *profile=janestreet*; run `dune build @fmt` before committing.
-3. **Tests** – add a unit-test under `test/` whenever it makes sense and run `dune runtest --diff-command=diff -u` locally.
-4. **Docs** – public modules must carry `(** ... *)` odoc headers; run `dune build @doc` to make sure they render.
-5. **Commit messages** – follow *Conventional Commits* (`feat:`, `fix:`, `docs:` …).  Squash-merges are okay.
+Run it in *chat_tui*: the client boots an in-process MCP registry, publishes the `echo` prompt found under `./prompts`, the assistant calls the remote function and you see the round-trip payload scroll by in the TUI — **all on localhost, zero config**.
 
-If your contribution touches the ChatMD grammar or the embedding pipeline, please also update the relevant markdown docs and include a short *“Why”* section in the PR description.
 
-## 11  License
+### Consuming *local* MCP tools (any implementation)
 
-MIT – see `LICENSE.txt`.
+When the MCP server lives *inside* the same workstation ‑ no TLS required ‑ the
+fastest option is the **stdio transport** supported by *every* conforming
+server:
+
+```xml
+<tool mcp_server="stdio:mcp_server --prompts ./ops-prompts" name="deploy"/>
+```
+
+How it works:
+
+1. Ochat spawns the command after the `stdio:` part under an Eio switch.
+2. It performs the JSON-RPC handshake (`initialize`).
+3. It discovers the tool called `deploy` via `tools/list` and builds a
+   matching JSON schema.
+
+The tool is now callable exactly like a normal built-in function.  This is the
+easiest way to embed **operations scripts, smoke-test prompts or data-science
+experiments** living in a separate folder.
+
+#### Controlling which MCP tools are exposed
+
+`mcp_server` decides the registry.  You have several knobs:
+
+| Knob | Default | What it does |
+|------|---------|--------------|
+| `--prompts DIR` (cli flag) | `./prompts` | Directory scanned for `.chatmd` files |
+| `MCP_PROMPTS_DIR` (env)    | *(unset)*   | Extra folder added on top of `--prompts` |
+| `--allow-shell-tools`      | *disabled*  | Also register `<tool command="…"/>` blocks found in prompts |
+| `--require-auth`           | `false`     | Only list tools after successful OAuth token validation |
+
+On the **client** side you can filter further by leaving out the `<tool …/>`
+declaration in the ChatMD file – the model cannot call what it doesn’t know.
+
+> Tip: run two servers – one started with `--prompts ./prod/` and another with
+> `--prompts ./dev/` – and choose which one to mount in the ChatMD tool
+> declaration.
+
+### MCP in 60 seconds – the super-connector
+
+Sometimes you just want the *TL;DR* for wiring an existing micro-service into
+ChatMD:
+
+```xml
+<config model="gpt-4o" temperature="0"/>
+
+<!-- Discover *and* register every tool exposed by the remote registry. -->
+<tool mcp_server="https://tools.acme.dev"/>
+
+<user>Convert README.md to PDF using the **export_pdf** tool.</user>
+```
+
+Behind the curtain:
+
+1. Ochat performs the JSON-RPC handshake (`initialize` + `tools/list`).
+2. Every advertised JSON schema is turned into a *local* OCaml closure via
+   `Mcp_tool.ochat_function_of_remote_tool`.
+3. When the assistant decides to call `export_pdf` the closure relays the
+   invocation with `tools/call`, streams incremental progress events over
+   SSE, and finally hands the result back to the model – **indistinguishable
+   from a built-in tool**.
+
+That’s it.  *MCP is the USB-C port of Ochat – plug in anything, it just
+works.*
 
 ---
 
-*Last updated: 2025-07-23 (section review refinement)*
+## chat_tui – interactive terminal client
+
+```console
+$ chat_tui -file prompts/interactive.chatmd
+```
+
+Think of **chat_tui** as the *interactive face* of your prompt-as-code
+workflow: each `.chatmd` file becomes a **self-contained agent** once you
+declare a handful of tools.  Need a refactoring bot?  Draft
+`prompts/refactor.chatmd`, mount `apply_patch`, `odoc_search` and a custom
+`shell_check` wrapper, then open the file in the TUI:
+
+```console
+$ chat_tui -file prompts/refactor.chatmd
+```
+
+No servers to deploy, no runtime config – the static files plus your shell or
+OCaml tool implementations *are* the application.  The same technique scales
+from a quick one-off helper up to a fleet of purpose-built agents (release
+manager, design-doc auditor, knowledge-base explainer) – each living in its
+own `.chatmd` and selectable via `chat_tui`.
+
+Below is a one-page *muscle-memory* cheat-sheet distilled from the daily
+usage of the maintainers.  Print it, tape it to the wall, thank us later.
+
+| Mode | Keys | Action |
+|------|------|--------|
+| **Insert** | `⌥ ↵` (Meta + Enter) | run the draft prompt |
+|            | `Esc`               | switch to **Normal** mode |
+|            | `Ctrl-k / Ctrl-u / Ctrl-w` | delete to *EOL* / *BOL* / previous word |
+| **Normal** | `j / k`, `gg / G`  | navigate history |
+|            | `o / O`             | insert line below / above and jump into Insert |
+|            | `v`                 | start visual selection (useful for `apply_patch`) |
+| **Cmd (:)** | `:w`, `:q`, `:wq` | write / quit |
+
+Pro tip — while a request is streaming you can hit `v` to select the last
+assistant code block, press `!apply_patch` + <kbd>Enter</kbd>, and watch the
+repository mutate *while the model is still thinking*.
+
+
+| Mode | Keys (subset) | Action |
+|------|---------------|--------|
+| **Insert** | *free typing* | edit the draft prompt |
+| | `Meta+Enter` | submit draft |
+| **Normal** | `j`/`k`, `gg`/`G` | navigate history |
+| | `dd`, `u`, `Ctrl-r` | delete / undo / redo |
+| **Cmd (`:`)** | `:w`, `:q`, `:wq` | save prompt, quit |
+
+Features
+
+* Live streaming of tool output, reasoning deltas & assistant text
+* Auto-follow & scroll-history with Notty
+* Persists conversation under `.chatmd/` so you can resume later
+
+**Self-serve checklist – 10 seconds to first answer**
+
+1. `dune exec chat_tui -- -file prompts/blank.chatmd` – starts in *Insert* mode with an empty history.
+2. Type *“2+2?”*, hit **⌥ ↵** → GPT-4o replies *“4”*.
+3. Press **`:` w q** – the session is written to `prompts/blank.chatmd` for future audit.
+
+### Power-user workflow – *code-edit-test* in one window
+
+The TUI shines brightest when you combine it with the built-in `apply_patch` tool and your editor muscle memory:
+
+| Keystroke | Mode | What happens |
+|-----------|------|--------------|
+| `v`          | *Normal* | Visually select the last assistant code block |
+| `!apply_patch` + <kbd>Enter</kbd> | *Command-line* | Patch is applied to the local repo & saved |
+| `:w`         | — | Prompt is persisted so CI picks it up |
+| `Meta+Enter` | *Insert* | Run the updated prompt against the LLM |
+
+Less than five seconds later you have modified a module, re-executed the prompt and captured the diff – all without leaving the terminal.
+
+
+That’s it – *no* OpenAI dashboard visit, *no* shell scripts.  Everything, including model name and temperature, is stored in the document you can now commit to Git.
+
+
+Programmatic embedding:
+
+```ocaml
+Io.run_main @@ fun env ->
+  Chat_tui.App.run_chat ~env ~prompt_file:"prompts/interactive.chatmd" ()
+```
+
+---
+
+## MCP server – turn prompts into remote tools
+
+> **Background – What is MCP?**  The *Model-Context-Protocol* is an
+> **open JSON-RPC 2.0 based standard** for exchanging *Resources* (data),
+> *Tools* (function-calls) and *Prompts* between any AI application and any
+> external provider.  The official spec lives at
+> <https://modelcontextprotocol.io/> and is implemented by many public
+> services – from IDE extensions to cloud APIs.  Ochat is *just one*
+> implementation; the client stack in `lib/mcp/` works with **any** MCP
+> server that follows the spec.
+
+Ochat ships two transport flavours:
+
+1. **Stdio (default)** – line-delimited JSON over the server’s
+   `stdin`/`stdout`.  Perfect for shell pipelines, CI jobs and
+   scripting.
+2. **HTTP + SSE** – request/response via JSON-RPC 2.0 `POST` and push
+   notifications over Server-Sent-Events.  Enabled with `--http <PORT>`.
+
+### Stdio mode
+
+```console
+# Start the server – it now waits for one JSON object per line on stdin
+$ dune exec mcp_server -- &
+
+# In another shell (or from any program) send a request:
+echo '{"jsonrpc":"2.0","id":1,"method":"tools/list","params":{}}' \
+  | socat - UNIX-CONNECT:/proc/$(pgrep mcp_server)/fd/0
+
+# The server replies on its stdout (one line, shown here pretty-printed):
+{"jsonrpc":"2.0","id":1,"result":{"tools":[{"name":"interactive", …}]}}
+```
+
+Because stdio is purely local no authentication is required – ideal for
+**embedding mcp_server as a child process** and communicating with it from
+another OCaml program:
+
+```ocaml
+let conn = Mcp_transport_stdio.connect ~env ~sw "stdio:mcp_server" in
+Mcp_client.list_tools conn |> Result.ok_or_failwith |> ...
+```
+
+### HTTP / SSE mode
+
+```console
+$ dune exec mcp_server -- --http 8080 &
+
+# Call a prompt remotely via HTTP
+$ curl -s http://localhost:8080/mcp \
+  -d '{"jsonrpc":"2.0","id":42,"method":"tools/call","params":{"name":"interactive","args":{"input":"42"}}}'
+```
+
+Every `.chatmd` under `prompts/` becomes:
+
+* A **prompt** (`prompts/get::<name>`)
+* A **tool**  (`tools/call::<name>`)
+
+The server hot-reloads new files and emits `tools/list_changed`
+notifications over SSE.
+
+### Authentication & sessions
+
+`mcp_server` can protect the HTTP endpoint with OAuth 2 *client-credentials*
+flow:
+
+```console
+$ mcp_server --http 8080 --require-auth \
+             --client-id my-bot --client-secret $SECRET
+```
+
+Clients must send a `Bearer` token (obtained via the discovery metadata
+exposed by the server) **and** the `Mcp-Session-Id` header returned by the
+initial `initialize` call.  SSE notifications are scoped to that session so
+multiple IDE tabs do not leak messages to each other.
+
+Transport matrix (works with **any** MCP server that advertises the transport):
+
+| Transport | URI scheme | Strengths |
+|-----------|------------|-----------|
+| **stdio** | `stdio:<cmd>` | zero-config, lowest latency, easy to embed |
+| **HTTP/2**| `https://`    | network transparency, browser-friendly SSE |
+
+> See `lib/mcp/mcp_transport_http.doc.md` for protocol details and
+> authentication hints.
+
+### MCP in a nutshell – why should you care?
+
+The *Model-Context-Protocol* is often described as the **USB-C port for AI applications** — plug any LLM-powered host (an IDE, Claude Desktop, `chat_tui`, …) into any data or tool provider by speaking one tiny JSON-RPC vocabulary.  The official site <https://modelcontextprotocol.io/> defines three first-class entities:
+
+1. **Resources** – immutable blobs such as code files, PDFs or database rows.
+2. **Prompts** – reusable templates (ChatMD in Ochat) that can be fetched and executed remotely.
+3. **Tools** – side-effecting functions with arbitrary JSON arguments and results.
+
+Every conforming server exposes at least the following RPC surface:
+
+| Method          | Purpose                                          |
+|-----------------|---------------------------------------------------|
+| `tools/list`    | Return the tool registry (names + JSON schema)    |
+| `tools/call`    | Invoke a tool and stream progress events          |
+| `prompts/list`  | List registered prompt templates                  |
+| `prompts/get`   | Fetch the raw prompt body                         |
+| `resources/list`| *(optional)* Directory-like listing of resources  |
+| `resources/read`| *(optional)* Fetch raw bytes / UTF-8 text         |
+
+The **exact same envelope** can travel over local *stdio* **or** over HTTP/2 + Server-Sent-Events:
+
+| Transport | URI scheme      | Framing                                |
+|-----------|-----------------|----------------------------------------|
+| stdio     | `stdio:<cmd>`   | One JSON object per line               |
+| HTTP/2    | `https://`      | `POST /mcp` + SSE for push notifications|
+
+Because Ochat wraps both transports behind a single `Mcp_client.t`, switching from a
+local integration test to a cloud-hosted endpoint is as simple as editing **one attribute** in your ChatMD file:
+
+```xml
+<!-- Local smoke-tests during CI → spawn the server as a child process -->
+<tool mcp_server="stdio:bin/mcp_server --prompts ./prompts" includes="apply_patch"/>
+
+<!-- Production deployment over TLS → talk to a managed service -->
+<tool mcp_server="https://mcp.acme.cloud" name="deploy"/>
+```
+
+#### End-to-end example – call a *weather* micro-service from ChatMD
+
+```xml
+<config model="gpt-4o" temperature="0.0" response_format="json_object"/>
+
+<!-- The remote server exposes a single JSON-schema {"city":string} → {"temp":float} -->
+<tool mcp_server="https://wx.example.net" name="weather"/>
+
+<user>
+Ask the weather tool for Berlin.
+</user>
+
+<!-- At run time chat_tui streams something like:
+
+<tool_call id="1" name="weather">{"city":"Berlin"}</tool_call>
+
+
+<tool_response id="1">
+{"temp": 17.3}
+</tool_response>
+
+<assistant>
+{"reply":"17.3 °C"}
+</assistant>
+-->
+```
+
+The same prompt works locally with the stdio transport by flipping one attribute:
+
+```xml
+<tool mcp_server="stdio:bin/mcp_server --prompts ./prompts" name="weather"/>
+```
+
+---
+
+### Where does Ochat fit?
+
+Ochat ships **both ends** of the wire:
+
+1. **MCP *client*** – the `lib/mcp_client` library used by *chat_tui* and the ChatMD runtime.  It speaks stdio **and** HTTP transports out-of-the-box.
+2. **MCP *server*** – `bin/mcp_server` turns every `.chatmd` file into a remote tool *and* exposes built-in helpers like `apply_patch`, `webpage_to_markdown`, … .
+
+That means you can:
+
+* Mount a self-contained workflow in your prompt via
+
+  ```xml
+  <tool mcp_server="https://deploy.acme.dev" name="deploy"/>
+  ```
+
+  – and run CI/CD operations from the comfort of *chat_tui*.
+
+* Expose **your** prompt to *other* clients by running
+
+  ```console
+  $ dune exec mcp_server -- --http 8080 --prompts ./prompts
+  ```
+
+  Colleagues can now call `tools/call::your_prompt` from Python, Node, Java … 100 % language-agnostic.
+
+### Lifecycle of a tool call (HTTP transport)
+
+1. `chat_tui` sends a JSON-RPC envelope to `/mcp`:
+
+   ```jsonc
+   { "jsonrpc":"2.0", "id":42,
+     "method":"tools/call",
+     "params":{ "name":"grep", "args":{"pattern":"todo"} } }
+   ```
+2. The server acknowledges and streams progress events over *Server-Sent Events* (`event: function_call_output`).
+3. When the tool finishes the final result is pushed, the HTTP stream closes and *chat_tui* appends a `<tool_response>` block to the `.chatmd` file.
+
+### Security model recap
+
+* **Local transports inherit the parent UID/GID.**  If you can spawn `mcp_server` you already have file access.
+* **Remote HTTP transports default to OAuth 2 “client-credentials”.**  Run the server with `--require-auth` to enforce tokens.
+* **Prompts are immutable resources.**  Once fetched they can be verified via SHA-256; supply `digest` in the `prompts/get` params to request an integrity check.
+
+### Minimal troubleshooting flow
+
+```console
+$ curl -s http://localhost:8080/mcp -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+{"jsonrpc":"2.0","id":1,"result":{"session_id":"2fb4b6…"}}
+
+$ curl -s http://localhost:8080/mcp -H 'Mcp-Session-Id: 2fb4b6…' -d '{"jsonrpc":"2.0","id":2,"method":"tools/list","params":{}}'
+{"jsonrpc":"2.0","id":2,"result":{"tools":[{"name":"interactive", …}]}}
+
+# Tool not listed?  Check the server log – prompts with XML errors are skipped.
+```
+
+
+The **Model-Context-Protocol** (MCP) is the vendor-neutral JSON-RPC 2.0
+standard that lets *any* AI application exchange **Resources**, **Tools** and
+**Prompts** with *any* provider – over TCP, HTTP/2 or plain stdio.
+
+Official spec  <https://modelcontextprotocol.io/>  (CC-BY-4.0)
+
+| Transport | URI scheme | Framing | Streamed? | Auth |
+|-----------|------------|---------|-----------|------|
+| stdio      | `stdio:cmd …` | One JSON per line | yes | inherits parent |
+| HTTP/2     | `https://…`   | `POST /mcp` + SSE  | yes | Bearer / OAuth 2 |
+
+### Must-know RPC surface (Phase-1)
+
+| Method             | What it does | Key params |
+|--------------------|--------------|------------|
+| `initialize`       | negotiate capabilities, returns `session_id` |
+| `tools/list`       | list tool registry (paginated) | `cursor` |
+| `tools/call`       | invoke a tool, server streams progress events | `name`, `args` |
+| `prompts/list`     | discover prompt templates | – |
+| `prompts/get`      | fetch raw `.chatmd` body | `name` |
+| `resources/list`   | *(opt.)* directory-like listing | `path` |
+| `resources/read`   | *(opt.)* download a blob | `uri` |
+
+
+---
+
+See `docs-src/bin/mcp_server.doc.md` for server flags and operational advice.  For a deep dive into the wire-format head over to <https://spec.modelcontextprotocol.io/>.
+
+---
+
+## Search, indexing & code-intelligence
+
+| Corpus | Indexer | Searcher | Notes |
+|--------|---------|----------|-------|
+| OCaml docs (odoc HTML) | `odoc_index` | `odoc_search` | vector + BM25 per package |
+| Markdown docs | `md_index` | `md_search` | overlapping 64-320 token windows |
+| OCaml source | `ochat index` | `ochat query` | parses docstrings & embeds with OpenAI |
+
+Use them directly in prompts via the built-in tools (`odoc_search`,
+`md_search`, `query_vector_db`).
+
+---
+
+## Binaries cheat-sheet
+
+| Binary | Purpose | Example |
+|--------|---------|---------|
+| `chat_tui` | interactive TUI | `chat_tui -file notes.chatmd` |
+| `ochat`    | misc CLI (index, query, tokenise …) | `ochat query -vector-db-folder _index -query-text "tail-rec map"` |
+| `mcp_server` | serve prompts & tools over JSON-RPC / SSE | `mcp_server --http 8080` |
+| `md_index` / `md_search` | Markdown → index / search | `md-index --root docs`; `md-search --query "streams"` |
+| `odoc_index` / `odoc_search` | ODoc HTML → index / search | `odoc-index --root _doc/_html` |
+
+Run any binary with `-help` for details.
+
+---
+
+## Embedding the libraries
+
+Every public binary is a thin wrapper over libraries available under `lib/`.
+Re-use them in your own code:
+
+```ocaml
+let send ~env messages =
+  Chat_response.Driver.run_completion_stream_in_memory_v1
+    ~ctx:(Ctx.of_env ~env ~cache:(Cache.create ~max_size:256 ()))
+    ~model:`Gpt4o
+    ~messages ()
+```
+
+Need a TTL-LRU?  Use `Ttl_lru_cache`.
+
+### Caching in practice
+
+Most heavy helpers (`Embed_service`, `Converter`, `Fetch`) accept an explicit
+`Cache.t` and look up remote calls through
+
+```ocaml
+Cache.find_or_add cache key ~ttl:(Time_ns.Span.min `Hour)` ~default
+```
+
+so you can tune memory footprint and freshness centrally.  The default TUI
+instance persists the cache under `~/.chatmd/cache.bin`.
+
+Need to embed docs?  `Odoc_indexer.index_packages` has you covered.
+
+---
+
+## Key concepts & glossary
+
+| Concept | Module / binary | TL;DR |
+|---------|-----------------|-------|
+| **ChatMD** | `lib/chatmd` | Markdown + XML dialect that drives everything |
+| **Tool / Ochat_function** | `lib/ochat_function`, `lib/functions` | Couples JSON-schema with a runtime OCaml function |
+| **Prompt-agent** | `lib/mcp/mcp_prompt_agent` | Any `.chatmd` exported as a callable remote tool |
+| **Vector DB** | `lib/vector_db` | Dense + BM25 hybrid retrieval, Owl matrices under the hood |
+| **Bm25** | `lib/bm25` | Lightweight lexical scorer for up to ~50k snippets |
+| **Cache** | `Ttl_lru_cache` | TTL-based LRU used all over the stack (OpenAI, agents …) |
+| **MCP** | `bin/mcp_server`, `lib/mcp/*` | JSON-RPC + SSE transport so tools live anywhere (stdio, HTTP) |
+| **Embed service** | `lib/embed_service` | Rate-limited, concurrent OpenAI embeddings pipeline |
+
+> Refer to the generated odoc docs (`_doc/_html/index.html`) for full API references.
+
+---
+
+## Project layout
+
+```
+bin/         – chat_tui, mcp_server, ochat …
+lib/         – re-usable libraries (chatmd, functions, vector_db …)
+docs-src/    – Markdown docs rendered by odoc & included here
+prompts/     – sample ChatMD prompts served by the MCP server
+dune-project – dune metadata
+```
+
+---
+
+## License
+
+All original source code is licensed under the terms stated in
+`LICENSE.txt`.
+
+---
+
+## ⚠️ Project status – expect rapid change
+
+Ochat is a **research-grade** project that evolves nearly every day.  APIs,
+tool schemas, file formats and even high-level design choices may shift
+without prior notice while we explore what works and what does not.  If you
+intend to build something on top of Ochat be prepared to
+
+* pin a specific commit or tag,
+* re-run the tests after every `git pull`, and
+* embrace breaking changes as part of the fun.
+
+Despite the experimental label, **nothing stops you from building real
+value today** – the repository already enables powerful custom agent workflows.
+I use it daily with custom agents for everything from developing and documentation generation, to writing emails and automating mundane tasks.
+
+But please budget time for occasional refactors and breaking changes.
+Bug reports and PRs are welcome – just keep in mind the ground may still be
+moving beneath your feet. 🚧
+
 

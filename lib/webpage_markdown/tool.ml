@@ -4,7 +4,7 @@
 
     The module exports a single helper {!register} that turns the declarative
     description {!Definitions.Webpage_to_markdown} into a runnable
-    {!Gpt_function.t}.  The implementation:
+    {!Ochat_function.t}.  The implementation:
 
     • Uses {!Webpage_markdown.Driver.fetch_and_convert} to download a web page
       (or raw GitHub blob) and convert it to Markdown.
@@ -28,7 +28,7 @@ module Cache = Ttl_lru_cache.Make (Url_key)
 let cache : string Cache.t = Cache.create ~max_size:128 ()
 let ttl = Time_ns.Span.of_int_sec 300 (* 5 minutes *)
 
-let register ~env ~dir:_ ~net : Gpt_function.t =
+let register ~env ~dir:_ ~net : Ochat_function.t =
   let run url =
     try
       Cache.find_or_add cache url ~ttl ~default:(fun () ->
@@ -36,5 +36,5 @@ let register ~env ~dir:_ ~net : Gpt_function.t =
     with
     | exn -> Printf.sprintf "Error fetching %s: %s\n" url (Exn.to_string exn)
   in
-  Gpt_function.create_function (module Definitions.Webpage_to_markdown) run
+  Ochat_function.create_function (module Definitions.Webpage_to_markdown) run
 ;;

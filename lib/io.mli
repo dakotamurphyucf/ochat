@@ -1,7 +1,7 @@
 (** IO convenience helpers built on top of {{!module:Eio}Eio}.
 
     This module gathers a set of small but often-needed utilities that
-    are scattered throughout the ChatGPT code-base:
+    are scattered throughout the Ochat code-base:
 
     • Filesystem helpers ([save_doc], [append_doc], etc.) to treat paths as
       first-class capabilities, in the spirit of Eio.

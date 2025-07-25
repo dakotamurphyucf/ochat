@@ -1,4 +1,3 @@
-
 open! Core
 
 (** Token-bounded slicing of arbitrary Markdown documents.
@@ -106,7 +105,7 @@ val slice
     {2 Example}
 
     {[
-      let tiki_bpe = In_channel.read_all "gpt4.tiktoken" in
+      let tiki_bpe = In_channel.read_all "ochat4.tiktoken" in
       let markdown = In_channel.read_all "README.md" in
       let slices = Markdown_snippet.slice
         ~index_name:"my-project"

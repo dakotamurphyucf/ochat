@@ -31,11 +31,11 @@ end
 
 let config_dir () : string =
   match Sys.getenv "XDG_CONFIG_HOME" with
-  | Some d -> Filename.concat d "ocamlgpt"
+  | Some d -> Filename.concat d "ocamlochat"
   | None ->
     (match Sys.getenv "HOME" with
-     | Some home -> Filename.concat home ".config/ocamlgpt"
-     | None -> Filename.concat "." ".config/ocamlgpt")
+     | Some home -> Filename.concat home ".config/ocamlochat"
+     | None -> Filename.concat "." ".config/ocamlochat")
 ;;
 
 let file_path () = Filename.concat (config_dir ()) "registered.json"

@@ -19,10 +19,6 @@
 
 open! Core
 
-val crawl :
-  root:_ Eio.Path.t ->
-  f:(doc_path:string -> markdown:string -> unit) ->
-  unit
 (** [crawl ~root ~f] traverses [root] recursively and invokes [f] for each
     Markdown document found.
 
@@ -43,3 +39,4 @@ val crawl :
     Only exceptions raised from within [f] propagate to the caller; all other
     recoverable I/O problems are logged through {!Log.emit} and silently
     skipped. *)
+val crawl : root:_ Eio.Path.t -> f:(doc_path:string -> markdown:string -> unit) -> unit

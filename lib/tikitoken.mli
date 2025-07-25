@@ -1,8 +1,8 @@
 (** Byte-pair encoder/decoder compatible with OpenAI's *tiktoken*.
 
     The module offers a minimal OCaml implementation of the byte-pair
-    encoding (BPE) vocabulary used by OpenAI models such as *gpt-3.5-turbo*
-    and *gpt-4*.  After initialising a {!type:codec} with the contents of a
+    encoding (BPE) vocabulary used by OpenAI models such as *ochat-3.5-turbo*
+    and *ochat-4*.  After initialising a {!type:codec} with the contents of a
     `*.tiktoken` vocabulary file you can:
 
     •  convert UTF-8 text to the list of integer token identifiers

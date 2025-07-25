@@ -11,8 +11,8 @@ open! Core
 
     {1 Storage layout}
 
-    • Location   : [$XDG_CONFIG_HOME/ocamlgpt/registered.json]
-      (or [$HOME/.config/ocamlgpt/registered.json] as a fallback).
+    • Location   : [$XDG_CONFIG_HOME/ocamlochat/registered.json]
+      (or [$HOME/.config/ocamlochat/registered.json] as a fallback).
 
     • Structure  : a JSON object mapping issuer URLs → credential – e.g.
 

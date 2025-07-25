@@ -31,7 +31,7 @@ let capability_json : Jsonaf.t =
 ;;
 
 let server_info_json : Jsonaf.t =
-  Jsonaf.of_string "{\"name\":\"ocamlgpt-mcp-server\",\"version\":\"dev\"}"
+  Jsonaf.of_string "{\"name\":\"ocamlochat-mcp-server\",\"version\":\"dev\"}"
 ;;
 
 (*------------------------------------------------------------------*)

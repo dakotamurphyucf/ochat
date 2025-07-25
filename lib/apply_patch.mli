@@ -1,7 +1,7 @@
 (** Multi-file patch application (OCaml port of OpenAI’s reference
     «apply_patch» helper).
 
-    This module parses patch descriptions in the “ChatGPT diff”
+    This module parses patch descriptions in the “Ochat diff”
     flavour and applies them to an arbitrary workspace via
     user-provided callback functions.  The implementation is a
     near-literal rewrite of the reference Python/TypeScript code into

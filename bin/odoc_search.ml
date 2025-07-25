@@ -1,3 +1,63 @@
+(** Semantic search over an on-disk ODoc vector index.
+
+    {b odoc-search} is a small command-line tool shipping with the Ochat
+    tooling.  It turns a free-form natural-language query into relevant OCaml
+    API fragments by combining dense vector search with a classical lexical
+    BM25 score.
+
+    The executable expects the documentation of each OPAM package to be
+    pre-processed by {{!page:Odoc_index odoc-index}} into a directory layout
+    such as:
+
+    {v
+    .odoc_index/
+      ├─ core/
+      │   ├─ vectors.binio       (* dense embeddings *)
+      │   ├─ bm25.binio          (* BM25 inverted index *)
+      │   └─ <doc-id>.md         (* rendered snippet bodies *)
+      ├─ eio/
+      └─ ...
+    v}
+
+    Each call to [odoc-search] performs the following high-level steps:
+
+    1. The query string is embedded through the OpenAI embeddings API and
+       L₂-normalised (via the {{!module:Owl}Owl} linear-algebra library).
+    2. A coarse package filter is applied: if [--package] is not supplied the
+       {!module:Package_index} coarse index is queried to keep the most
+       similar packages, reducing the amount of data loaded in step&nbsp;3.
+    3. For every selected package the dense document embeddings are loaded
+       from [vectors.binio] and concatenated into one big in-memory corpus.
+    4. {!Vector_db.query} or, when BM25 data is present,
+       {!Vector_db.query_hybrid} is run to retrieve the top-[k] candidates
+       (cosine similarity linearly interpolated with BM25; see [--beta]).
+    5. Results are printed to stdout in a simple Markdown format consisting of
+       the package name, document identifier and full snippet body.
+
+    A typical invocation searches the entire index for the best 10 matches:
+
+    {[
+      odoc-search --query "generate random uuid" -k 10
+    ]}
+
+    {1 Command-line flags}
+
+    • [--query STRING] – mandatory search text.
+    • [--package PKG]  – restrict search to a single OPAM package.
+    • [--index DIR]    – root directory of the index (default [.odoc_index]).
+    • [-k INT]         – maximum number of hits to return (default 5).
+    • [--beta FLOAT]   – interpolation factor between cosine and BM25
+                         (0 ⇒ dense only; 1 ⇒ lexical only; default 0.25).
+
+    {1 Limitations}
+
+    * The process keeps the whole embedding matrix in RAM; huge corpora may
+      exceed typical workstation memory.
+    * A valid [OPENAI_API_KEY] must be present in the environment so that
+      embeddings can be generated.
+    * The tool does not build the index itself – run [odoc-index] first.
+*)
+
 open Core
 open Eio
 open Owl
@@ -21,7 +81,15 @@ let usage =
   "odoc-search --query <text> [--package pkg] [--index dir] [-k 5] [--beta 0.25]"
 ;;
 
+(** [mat_of_array arr] converts a float [arr] to a column matrix whose number
+    of rows equals [Array.length arr].  The resulting matrix is compatible
+    with {!Vector_db.query} which expects an [n × 1] embedding. *)
 let mat_of_array arr = Mat.of_array arr (Array.length arr) 1
+
+(** Internal helper kept for backwards-compatibility with an older
+    implementation.  It loaded a single package on demand and performed query
+    time hybrid retrieval directly.  Currently unused but retained because
+    external scripts may still link against it. *)
 
 let _load_package pkg_dir pkg query_mat =
   let vec_file = Path.(pkg_dir / "vectors.binio") in
@@ -44,12 +112,23 @@ let _load_package pkg_dir pkg query_mat =
   | _ -> []
 ;;
 
+(** Load the dense document embeddings stored in [pkg_dir/vectors.binio].
+    
+    Returns [[].] when the file is missing or cannot be deserialised. *)
+
 let load_package_vectors pkg_dir =
   let vec_file = Path.(pkg_dir / "vectors.binio") in
   match Result.try_with (fun () -> Vector_db.Vec.read_vectors_from_disk vec_file) with
   | Ok vecs -> Array.to_list vecs
   | _ -> []
 ;;
+
+(** [get_results vecs query_mat index_path pkgs] runs a pure dense retrieval
+    against the concatenated [vecs] corpus and resolves each document id to
+    its snippet markdown, returning [(package, id, body)] triples.
+    
+    The function relies on the fact that document identifiers are globally
+    unique across packages – a property guaranteed by {!odoc_index}. *)
 
 let get_results vecs query_mat index_path pkgs =
   let db = Vector_db.create_corpus vecs in
@@ -70,6 +149,12 @@ let get_results vecs query_mat index_path pkgs =
     in
     pkg, id, text)
 ;;
+
+(** Entrypoint wired into {!Eio_main.run}.
+    
+    [env] is the root Eio environment in which the event-loop is running.  The
+    function never returns – it terminates the process via {!Stdlib.exit} when
+    argument parsing fails. *)
 
 let main env =
   Mirage_crypto_rng_unix.use_default ();

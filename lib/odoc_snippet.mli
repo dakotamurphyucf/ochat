@@ -32,7 +32,7 @@
         ~pkg:"eio"
         ~doc_path:"Eio/Switch/index.html"
         ~markdown
-        ~tiki_token_bpe:"gpt-4"
+        ~tiki_token_bpe:"ochat-4"
         ()
     in
     List.iter snippets ~f:(fun (meta, body) ->
@@ -85,7 +85,7 @@ type meta =
       derived from;
     • [markdown] — UTF-8 markdown body to slice;
     • [tiki_token_bpe] — JSON BPE definition passed to
-      {!Tikitoken.create_codec} (e.g. ["gpt-4"]).
+      {!Tikitoken.create_codec} (e.g. ["ochat-4"]).
 
     Returns: a list of [(meta, text)] pairs in the same order as the
     source document.  No guarantees are made about the exact number of

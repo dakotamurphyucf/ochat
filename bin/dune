@@ -1,6 +1,6 @@
 (executable
- (package chatgpt)
- (public_name gpt)
+ (package ochat)
+ (public_name ochat)
  (name main)
  (modules main)
  (libraries
@@ -21,7 +21,7 @@
   indexer
   github
   template
-  gpt_function
+  ochat_function
   chat_completion
   chat_response
   apply_patch
@@ -81,7 +81,7 @@
  (public_name key-dump)
  (name key_dump)
  (modules key_dump)
- (libraries core eio_main chatgpt.notty_eio))
+ (libraries core eio_main ochat.notty_eio))
 
 (executable
  (public_name chat-tui)
@@ -91,13 +91,13 @@
   core
   eio_main
   notty.unix
-  chatgpt.notty_eio
-  chatgpt.notty_scroll_box
+  ochat.notty_eio
+  ochat.notty_scroll_box
   chat_response
   io
   openai
   core_unix.command_unix
-  chatgpt.chat_tui)
+  ochat.chat_tui)
  (preprocess
   (pps ppx_jane)))
 
@@ -151,13 +151,13 @@
  (libraries
   core
   eio_main
-  chatgpt.mcp_types
-  chatgpt.mcp_server_core
-  chatgpt.mcp_server_router
+  ochat.mcp_types
+  ochat.mcp_server_core
+  ochat.mcp_server_router
   jsonaf_ext
   definitions
   functions
-  chatgpt.mcp_prompt_agent
-  chatgpt.mcp_server_http
-  chatgpt.chat_response
-  chatgpt.chatmd))
+  ochat.mcp_prompt_agent
+  ochat.mcp_server_http
+  ochat.chat_response
+  ochat.chatmd))
