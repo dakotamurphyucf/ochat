@@ -1,3 +1,22 @@
+(** Persistent credential cache for OAuth 2.0 Dynamic Client Registration.
+
+    The implementation is intentionally minimalist:
+
+    • The cache lives in a single JSON file under the user’s XDG config
+      directory.  Each top-level key is an issuer URL and the value is a
+      {!Credential.t} record.
+
+    • Reads are best-effort — any IO or decoding error degrades to an
+      empty map so that callers do not have to handle exceptions.
+
+    • Writes are atomic — data is first written to [registered.json.tmp]
+      and then renamed into place.
+
+    The helpers never synchronise accesses from multiple processes at the
+    OS level.  Concurrent writers may lose updates, although the atomic
+    rename minimises the window for partial writes.  External locking is
+    required in such scenarios. *)
+
 open Core
 module Jsonaf = Jsonaf_ext
 open Jsonaf.Export
@@ -12,11 +31,11 @@ end
 
 let config_dir () : string =
   match Sys.getenv "XDG_CONFIG_HOME" with
-  | Some d -> Filename.concat d "ocamlgpt"
+  | Some d -> Filename.concat d "ocamlochat"
   | None ->
     (match Sys.getenv "HOME" with
-     | Some home -> Filename.concat home ".config/ocamlgpt"
-     | None -> Filename.concat "." ".config/ocamlgpt")
+     | Some home -> Filename.concat home ".config/ocamlochat"
+     | None -> Filename.concat "." ".config/ocamlochat")
 ;;
 
 let file_path () = Filename.concat (config_dir ()) "registered.json"

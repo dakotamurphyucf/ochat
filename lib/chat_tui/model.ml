@@ -96,7 +96,6 @@ let set_cmdline_cursor t n = t.cmdline_cursor <- n
 
 let active_fork t = t.active_fork
 let set_active_fork t v = t.active_fork <- v
-
 let fork_start_index t = t.fork_start_index
 let set_fork_start_index t v = t.fork_start_index <- v
 
@@ -189,9 +188,7 @@ let apply_patch (model : t) (p : Types.patch) : t =
     Hashtbl.set model.function_name_by_id ~key:id ~data:name;
     model
   | Types.Set_function_output { id; output } ->
-    let role =
-      if Option.is_some model.active_fork then "fork" else "tool_output"
-    in
+    let role = if Option.is_some model.active_fork then "fork" else "tool_output" in
     let buf =
       match Hashtbl.find model.msg_buffers id with
       | Some b -> b

@@ -1,10 +1,23 @@
-(*---------------------------------------------------------------------------
-		  apply_patch.ml          –  OCaml port of OpenAI’s reference “apply-patch”
-      Based on reference implementation from
-      https://cookbook.openai.com/examples/gpt4-1_prompting_guide#reference-implementation-apply_patchpy
-		  ---------------------------------------------------------------------------*)
+(** OCaml port of OpenAI’s reference *apply_patch* helper.
+
+    This implementation understands the “Ochat diff” patch syntax
+    discussed in the
+    {{:https://cookbook.openai.com/examples/ochat4-1_prompting_guide#reference-implementation-apply_patchpy}
+    prompting-guide} and can apply multi-file edits against an
+    arbitrary workspace.  The module is intentionally IO-free – all
+    reads and writes happen through the callback functions supplied to
+    {!val:process_patch}.  See {!file:apply_patch.mli} for the public
+    interface and {!file:apply_patch.doc.md} for an extended
+    discussion and examples.
+
+    The rest of this file contains the mechanics: Unicode
+    canonisation, fuzzy context matching, and a small patch/commit
+    DSL.  These helpers stay undocumented on purpose – they are
+    implementation details and may change without notice. *)
 
 open Core
+
+[@@@warning "-32-69"]
 
 (* ──────────────────────────────────────────────────────────────────────────
 		   Constants (same strings as in the TypeScript reference)
@@ -532,6 +545,25 @@ let apply_commit (c : commit) ~write_fn ~remove_fn =
          remove_fn path
        | None -> write_fn path (Option.value_exn data.new_text)))
 ;;
+
+(** [process_patch ~text ~open_fn ~write_fn ~remove_fn] interprets and
+    applies the patch [text].  All file-system interactions are
+    delegated to the three callbacks:
+
+    – [open_fn path]   must return the current contents of [path] when
+      the patch references the file.
+
+    – [write_fn path contents] receives the complete new contents for
+      every added or updated file as well as the destination of a
+      rename.
+
+    – [remove_fn path] is invoked for deleted files and for the source
+      of a rename.
+
+    The function validates that [text] starts with {!val:patch_prefix}
+    and ends with {!val:patch_suffix}.  On success it returns
+    {['Done!']}.  If the patch is malformed or inconsistent with the
+    workspace a {!exception:Diff_error} is raised. *)
 
 let process_patch
       ~(text : string)

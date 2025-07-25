@@ -1,3 +1,8 @@
+(** In-memory OAuth 2.0 access-token store – implementation.
+
+    See {!module:Oauth2_server_storage} for the public interface and
+    discussion. *)
+
 open! Core
 module Token = Oauth2_server_types.Token
 

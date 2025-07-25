@@ -1,63 +1,97 @@
-(** Example use of this module
+(** Lightweight string templating with typed substitutions.
+
+    This module provides a simple, *zero-dependency* (other than
+    {!Re2}) mechanism for substituting variables of the form
+    {[ {{variable}} ]} inside a string.  The public API is exposed
+    through two functors:
+
+    • {!Make_Template} — renders a template using values supplied by a
+      user-defined module that satisfies {!RENDERABLE}.
+
+    • {!Make_parser} — performs the inverse operation: given the
+      rendered text, recover a structured value whose shape is defined
+      by a module that satisfies {!PARSABLE}.
+
+    The snippet below shows a *round-trip* — render a value, parse it
+    back, and inspect the result:
+
     {[
-        module Items = struct
-            type t = string list
+      open Core
 
-            let to_key_value_pairs items =
-            let items =
-                List.map ~f:(fun item -> Printf.sprintf "- %s" item) items
-                |> String.concat ~sep:"\n"
-            in
-            [ "items", items ]
-            ;;
-        end
-        
-        module ItemsTemplate = Make (Items) 
-        module Person = struct
-            type t =
-            { name : string
-            ; age : int
-            ; items : string list
-            }
+      module Items = struct
+        type t = string list
 
-            let items_template = ItemsTemplate.create {|items
-        -----------
-        {{items}}|}
+        let to_key_value_pairs items =
+          let items =
+            List.map items ~f:(Printf.sprintf "- %s")
+            |> String.concat ~sep:"\n"
+          in
+          [ "items", items ]
+      end
 
-            let to_key_value_pairs person =
-            [ "name", person.name
-            ; "age", Int.to_string person.age
-            ; "items", ItemsTemplate.render items_template person.items
-            ]
-            ;;
-        end
-        
-        module PersonTemplate = Make (Person) 
-        let template =
-            PersonTemplate.create
-            {|
-        Hello, {{ name }}! 
-        Your age is {{ age }}.
-        What do You need from this list 
-        {{items}}
-        |}
-        
+      module Items_template = Make_Template (Items)
+
+      module Person = struct
+        type t =
+          { name  : string
+          ; age   : int
+          ; items : string list
+          }
+
+        let items_template =
+          Items_template.create {|items
+-----------
+{{items}}|}
+
+        let to_key_value_pairs p =
+          [ "name", p.name
+          ; "age", Int.to_string p.age
+          ; "items", Items_template.render items_template p.items
+          ]
+      end
+
+      module Person_template   = Make_Template (Person)
+      module Person_parser     = struct
+        include Person
+
+        let parse_patterns =
+          [ "Hello,\\s+(\\w+\\s+\\w+)!", "name"
+          ; "Your age is\\s+(\\d+)\\.", "age"
+          ; ( "What do You need from this list\\s+items\\n-----------\\n((?:-\\s+\\w+\\n?)+)",
+              "items" )
+          ]
+
+        let from_key_value_pairs kv =
+          let find k = List.Assoc.find_exn kv ~equal:String.equal k in
+          { name  = find "name"
+          ; age   = Int.of_string (find "age")
+          ; items =
+              String.split_lines (find "items")
+              |> List.map ~f:String.strip
+              |> List.map ~f:(String.chop_prefix_exn ~prefix:"- ")
+          }
+      end
+
+      module P = Make_parser (Person_parser)
+
+      let () =
+        let t = Person_template.create {|Hello, {{ name }}!\nYour age is {{ age }}.\nWhat do You need from this list\n{{items}}|} in
         let person =
-            { Person.name = "John Doe"; age = 30; items = [ "milk"; "eggs"; "toast" ] }
-        
-        let rendered = PersonTemplate.render template person
-        let () = printf "%s\n" rendered;
-        
-       "Hello, John Doe!
-        Your age is 30.
-        What do You need from this list
-        items
-        -----------
-        - milk
-        - eggs
-        - toast"
-   
-    ]} *)
+          { Person.name = "John Doe"; age = 30; items = [ "milk"; "eggs"; "toast" ] }
+        in
+        let rendered   = Person_template.render t person in
+        match P.parse rendered with
+        | Some p ->
+          printf "%%s (%%d) → %%s\n" p.name p.age (String.concat p.items ~sep:", ")
+        | None -> printf "Failed to parse\n"
+    ]}
+
+    Expected output:
+
+    {[
+      John Doe (30) → milk, eggs, toast
+    ]}
+*)
 
 (** The RENDERABLE module type defines an interface for types that can be
     converted to key-value pairs for use in templating. *)
@@ -68,18 +102,35 @@ module type RENDERABLE = sig
   val to_key_value_pairs : t -> (string * string) list
 end
 
-(** The Make functor creates a templating module for a given RENDERABLE type. 
-    Supports variable replacement with the syntax \{\{variable\}\} *)
+(** The [Make_Template] functor instantiates a templating module for a
+    given {!RENDERABLE}.  Placeholders follow the `{{variable}}`
+    convention. *)
 module Make_Template : functor (R : RENDERABLE) -> sig
   type t
 
-  (** [create s] creates a new template with the given string [s]. *)
+  (** [create s] returns a template whose literal content is [s].
+
+      The string may contain placeholders such as {[ {{user}} ]} that
+      correspond to keys produced by {!R.to_key_value_pairs}. *)
   val create : string -> t
 
-  (** [render t r] renders the template [t] with the RENDERABLE data [r]. *)
+  (** [render tmpl v] substitutes every placeholder in [tmpl] with the
+      value associated with the same key in [v].  Placeholders that do
+      not have a corresponding key are replaced by the empty string.
+
+      Example:
+      {[
+        let module T = Make_Template (struct
+          type t = unit
+          let to_key_value_pairs () = [ "x", "42" ]
+        end) in
+        T.render (T.create "value = {{x}}") () = "value = 42"
+      ]} *)
   val render : t -> R.t -> string
 
-  (** [to_string t] converts the template [t] to a string. *)
+  (** [to_string tmpl] returns the literal representation of [tmpl]
+      without performing any substitution.  This is equivalent to the
+      argument passed to {!create}. *)
   val to_string : t -> string
 end
 
@@ -94,6 +145,13 @@ module type PARSABLE = sig
 end
 
 module Make_parser : functor (P : PARSABLE) -> sig
-  (** [parse s] extracts the data of type [P.t] from the rendered template string [s]. *)
+  (** [parse s] attempts to recover a value of type [P.t] from the
+      fully-rendered template [s].  It applies each `(pattern, key)`
+      entry in {!P.parse_patterns} sequentially, collects all captured
+      substrings, and finally delegates to {!P.from_key_value_pairs}.
+
+      The function returns [None] if *any* of the patterns fail to
+      match.  This conservative strategy avoids silently dropping
+      information.  *)
   val parse : string -> P.t option
 end

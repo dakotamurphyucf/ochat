@@ -1,0 +1,39 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Ochat_function (ochat.Ochat_function)</title><meta charset="utf-8"/><link rel="stylesheet" href="../../odoc.support/odoc.css"/><meta name="generator" content="odoc 3.0.0"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><script src="../../odoc.support/highlight.pack.js"></script><script>hljs.initHighlightingOnLoad();</script><script>let base_url = '../../';
+let search_urls = ['../db.js','../../sherlodoc.js'];
+</script><script src="../../odoc.support/odoc_search.js" defer="defer"></script></head><body class="odoc"><nav class="odoc-nav"><a href="../index.html">Up</a> – <a href="../../index.html">Index</a> &#x00BB; <a href="../index.html">ochat</a> &#x00BB; Ochat_function</nav><div class="odoc-search"><div class="search-inner"><input class="search-bar" placeholder="🔎 Type '/' to search..."/><div class="search-snake"></div><div class="search-result"></div></div></div><header class="odoc-preamble"><h1>Module <code><span>Ochat_function</span></code></h1><p>GPT function helpers for the OpenAI Chat Completions API.</p><p>OpenAI models can invoke so-called <code>tools</code> (also called <code>functions</code>) when the user or the assistant requests a structured action. Each tool is described by a JSON schema and identified by a unique <code>name</code>. At runtime the model responds with a *function-call request* – a record containing the tool name and a JSON blob with the arguments. The host application then looks up the implementation, executes it, and supplies the textual result back to the model.</p><p>This module provides a minimal abstraction to register such tools and to bridge between their declarative description (schema) and their concrete OCaml implementation.</p><p>Typical workflow:</p><pre class="language-ocaml"><code>  open Core
+
+  (* 1.  Declare the tool *)
+  module Echo : Ochat_function.Def with type input = string = struct
+    type input = string
+
+    let name = &quot;echo&quot;
+    let description = Some &quot;Return the given string unchanged&quot;
+
+    let parameters : Jsonaf.t =
+      `Object
+        [ &quot;type&quot;, `String &quot;object&quot;
+        ; &quot;properties&quot;, `Object [ &quot;text&quot;, `Object [ &quot;type&quot;, `String &quot;string&quot; ] ]
+        ; &quot;required&quot;, `Array [ `String &quot;text&quot; ]
+        ; &quot;additionalProperties&quot;, `False
+        ]
+
+    let input_of_string s =
+      Jsonaf.of_string s |&gt; Jsonaf.member_exn &quot;text&quot; |&gt; Jsonaf.string_exn
+  end
+
+  (* 2.  Provide the implementation *)
+  let echo_impl (text : string) = text
+
+  (* 3.  Register *)
+  let echo_tool : Ochat_function.t =
+    Ochat_function.create_function (module Echo) echo_impl
+
+  (* 4.  Bundle several tools for the API call *)
+  let tools, dispatch_tbl = Ochat_function.functions [ echo_tool ]</code></pre></header><div class="odoc-content"><div class="odoc-spec"><div class="spec module-type anchored" id="module-type-Def"><a href="#module-type-Def" class="anchor"></a><code><span><span class="keyword">module</span> <span class="keyword">type</span> <a href="module-type-Def/index.html">Def</a></span><span> = <span class="keyword">sig</span> ... <span class="keyword">end</span></span></code></div><div class="spec-doc"><p>Declarative description of a tool. The module is never instantiated – its values act as a compile-time record.</p></div></div><div class="odoc-spec"><div class="spec type anchored" id="type-t"><a href="#type-t" class="anchor"></a><code><span><span class="keyword">type</span> t</span><span> = </span><span>{</span></code><ol><li id="type-t.info" class="def record field anchored"><a href="#type-t.info" class="anchor"></a><code><span>info : <a href="../Openai/Completions/index.html#type-tool">Openai.Completions.tool</a>;</span></code></li><li id="type-t.run" class="def record field anchored"><a href="#type-t.run" class="anchor"></a><code><span>run : <span>string <span class="arrow">&#45;&gt;</span></span> string;</span></code></li></ol><code><span>}</span></code></div><div class="spec-doc"><p>Concrete handle to a registered tool. <code>info</code> – JSON description passed to OpenAI. <code>run</code> – OCaml implementation executed when the tool is invoked.</p><p>The record is exposed – downstream code frequently needs direct access to <code>run</code>, e.g. to dispatch the model’s callback. Feel free to treat the type as mutable if necessary, but do **not** modify <code>info</code> fields after the value has been passed to OpenAI.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-create_function"><a href="#val-create_function" class="anchor"></a><code><span><span class="keyword">val</span> create_function : 
+  <span><span>(<span class="keyword">module</span> <a href="module-type-Def/index.html">Def</a> <span class="keyword">with</span> <span class="keyword">type</span> <a href="module-type-Def/index.html#type-input">input</a> = <span class="type-var">'a</span>)</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?strict</span>:bool <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<span><span class="type-var">'a</span> <span class="arrow">&#45;&gt;</span></span> string)</span> <span class="arrow">&#45;&gt;</span></span>
+  <a href="#type-t">t</a></span></code></div><div class="spec-doc"><p><code>create_function (module D) ?strict impl</code> couples the declarative module <code>D</code> with the OCaml implementation <code>impl</code>. The resulting <code>t</code> can be included in the tool list passed to <a href="../Openai/Completions/index.html#val-post_chat_completion"><code>Openai.Completions.post_chat_completion</code></a>.</p><p><code>strict</code> mirrors the field described in OpenAI docs: when <code>true</code> (the default) the model must supply exactly the schema; when <code>false</code> additional properties are permitted.</p></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-functions"><a href="#val-functions" class="anchor"></a><code><span><span class="keyword">val</span> functions : 
+  <span><span><a href="#type-t">t</a> list</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><a href="../Openai/Completions/index.html#type-tool">Openai.Completions.tool</a> list</span> * <span><span>(string, <span>string <span class="arrow">&#45;&gt;</span></span> string)</span> <span class="xref-unresolved">Core</span>.Hashtbl.t</span></span></code></div><div class="spec-doc"><p><code>functions ts</code> converts a list of registered tools <code>ts</code> into: • the JSON metadata required by the API call; and • a lookup table mapping <code>name</code> → <code>implementation</code>, convenient for serving the subsequent call.</p></div></div></div></body></html>

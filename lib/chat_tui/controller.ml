@@ -1,3 +1,24 @@
+(** Insert-mode implementation and mode dispatcher for {!Chat_tui.Controller}.
+
+    The file consists of two conceptual parts:
+
+     1. {b Insert-mode key map}.  A self-contained handler that translates raw
+       {!Notty.Unescape.event}s into in-place mutations of {!Chat_tui.Model.t}
+       while the editor is in [Insert] mode.  The supported shortcut set is a
+       pragmatic union of readline, Vim and typical GUI-editor bindings.  All
+       mutations are pure OCaml data changes – rendering and network IO are
+       handled elsewhere.
+
+     2. {b Dispatcher}.  [handle_key] examines [Model.mode] and forwards the
+       event to the correct handler: the local Insert map, or the Normal /
+       Cmdline controllers living in their own compilation units.  The
+       function therefore represents the single public entry-point for the
+       caller.
+
+    Implementation details (kill-ring, scrolling maths, etc.) are kept
+    private to avoid polluting the interface.  Refer to [controller.doc.md]
+    for a high-level usage guide and key table. *)
+
 open Core
 module UC = Stdlib.Uchar
 module Scroll_box = Notty_scroll_box

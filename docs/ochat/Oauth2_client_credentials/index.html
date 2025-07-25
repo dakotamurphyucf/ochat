@@ -1,0 +1,45 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Oauth2_client_credentials (ochat.Oauth2_client_credentials)</title><meta charset="utf-8"/><link rel="stylesheet" href="../../odoc.support/odoc.css"/><meta name="generator" content="odoc 3.0.0"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><script src="../../odoc.support/highlight.pack.js"></script><script>hljs.initHighlightingOnLoad();</script><script>let base_url = '../../';
+let search_urls = ['../db.js','../../sherlodoc.js'];
+</script><script src="../../odoc.support/odoc_search.js" defer="defer"></script></head><body class="odoc"><nav class="odoc-nav"><a href="../index.html">Up</a> – <a href="../../index.html">Index</a> &#x00BB; <a href="../index.html">ochat</a> &#x00BB; Oauth2_client_credentials</nav><div class="odoc-search"><div class="search-inner"><input class="search-bar" placeholder="🔎 Type '/' to search..."/><div class="search-snake"></div><div class="search-result"></div></div></div><header class="odoc-preamble"><h1>Module <code><span>Oauth2_client_credentials</span></code></h1></header><div class="odoc-tocs"><nav class="odoc-toc odoc-local-toc"><ul><li><a href="#example">Example</a></li></ul></nav></div><div class="odoc-content"><p><a href="https://datatracker.ietf.org/doc/html/rfc6749#section-4.4">OAuth&amp;nbsp;2.0 Client&amp;nbsp;Credentials Grant</a> helpers.</p><p>The *client&amp;nbsp;credentials* grant type is suited for **machine-to-machine** access where the application (&quot;client&quot;) acts on its own behalf and therefore does <i>not</i> require any end-user interaction. The flow is straightforward:</p><p>1. The client authenticates with its <code>client_id</code> / <code>client_secret</code> against the authorisation server’s <code>token_uri</code>. 2. The server responds with an *access token* that can subsequently be attached to HTTP requests (typically in an <code>Authorization: Bearer …</code> header).</p><p>This module offers a single convenience function – <a href="#val-fetch_token"><code>fetch_token</code></a> – which wraps the HTTP exchange, JSON decoding and timestamp handling in a single call designed for use from <code>Eio</code> fibres.</p><h2 id="example"><a href="#example" class="anchor"></a>Example</h2><p>Retrieving a token and adding it to an HTTP request made with <span class="xref-unresolved" title="Piaf">Piaf</span>:</p><pre class="language-ocaml"><code>  Eio_main.run @@ fun env -&gt;
+    Eio.Switch.run @@ fun sw -&gt;
+      let token_res =
+        Oauth2_client_credentials.fetch_token
+          ~env ~sw
+          ~token_uri:&quot;https://auth.server/token&quot;
+          ~client_id:&quot;my-cli&quot;
+          ~client_secret:(Sys.getenv_exn &quot;CLIENT_SECRET&quot;)
+          ()
+      in
+      match token_res with
+      | Error e -&gt; failwith e
+      | Ok token -&gt;
+          let headers =
+            [ &quot;authorization&quot;, &quot;Bearer &quot; ^ token.access_token ]
+          in
+          let uri = Uri.of_string &quot;https://api.example/resource&quot; in
+          match Piaf.Client.Oneshot.get ~headers env ~sw uri with
+          | Ok resp -&gt; Format.printf &quot;Status: %d@.&quot; resp.status
+          | Error err -&gt;
+              Format.eprintf &quot;HTTP error: %s@.&quot; (Piaf.Error.to_string err)</code></pre><div class="odoc-spec"><div class="spec module anchored" id="module-Result"><a href="#module-Result" class="anchor"></a><code><span><span class="keyword">module</span> <a href="Result/index.html">Result</a></span><span> : <span class="keyword">sig</span> ... <span class="keyword">end</span></span></code></div></div><div class="odoc-spec"><div class="spec module anchored" id="module-Tok"><a href="#module-Tok" class="anchor"></a><code><span><span class="keyword">module</span> Tok</span><span> = <a href="../Oauth2_types/Token/index.html">Oauth2_types.Token</a></span></code></div></div><div class="odoc-spec"><div class="spec value anchored" id="val-fetch_token"><a href="#val-fetch_token" class="anchor"></a><code><span><span class="keyword">val</span> fetch_token : 
+  <span><span class="label">env</span>:<span class="xref-unresolved">Eio_unix</span>.Stdenv.base <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">sw</span>:<span class="xref-unresolved">Eio</span>.Switch.t <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">token_uri</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">client_id</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="label">client_secret</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?scope</span>:string <span class="arrow">&#45;&gt;</span></span>
+  <span>unit <span class="arrow">&#45;&gt;</span></span>
+  <span><span>(<a href="../Oauth2_types/Token/index.html#type-t">Tok.t</a>, string)</span> <a href="Result/index.html#type-t">Result.t</a></span></span></code></div><div class="spec-doc"><p><code>fetch_token ~env ~sw ~token_uri ~client_id ~client_secret ?scope ()</code> exchanges the *client credentials* for a fresh access token.</p><p>The call performs an HTTP `POST` to <code>token_uri</code> with body `grant_type=client_credentials&amp;client_id=…&amp;client_secret=…` and an optional <code>scope</code> parameter when provided. The response must follow the <em>JSON shape</em> defined in RFC&amp;nbsp;6749 §5.1; the helper decodes it into <a href="../Oauth2_types/Token/index.html#type-t"><code>Oauth2_types.Token.t</code></a> via the automatically generated <code>t_of_jsonaf</code> converter.</p><p>On success the returned record’s <a href="../Oauth2_types/Token/index.html#type-t.obtained_at"><code>Oauth2_types.Token.t.obtained_at</code></a> field is overwritten with the current POSIX time obtained from <code>Eio.Time.now</code> – callers can therefore feed the token to <a href="../Oauth2_types/Token/index.html#val-is_expired"><code>Oauth2_types.Token.is_expired</code></a> without having to perform the timestamp bookkeeping themselves.</p><p>Parameters:</p><ul><li><code>env</code> – the standard <code>Eio_unix.Stdenv.base</code> environment of the running fibre.</li><li><code>sw</code> – a switch used to scope the network sockets created by Piaf.</li><li><code>token_uri</code> – full HTTPS URL of the authorisation server’s <code>token</code> endpoint.</li><li><code>client_id</code> – public identifier issued during (dynamic) client registration.</li><li><code>client_secret</code> – confidential secret tied to the client ID.</li><li><code>?scope</code> – optional space-separated list restricting the access rights requested.</li></ul><p><b>Errors</b>. Network issues, non-2xx HTTP responses, or invalid JSON bodies are folded into the <code>Error _</code> variant with a human-readable description. No exceptions are leaked: the helper is fully exception-safe.</p><p>Example – request a token scoped to <code>&quot;profile openid&quot;</code>:</p><pre class="language-ocaml"><code>  let token =
+    match
+      fetch_token
+        ~env ~sw
+        ~token_uri:&quot;https://auth.server/token&quot;
+        ~client_id:&quot;svc&quot;
+        ~client_secret:&quot;s3cr3t&quot;
+        ~scope:&quot;profile openid&quot;
+        ()
+    with
+    | Ok t -&gt; t
+    | Error e -&gt; failwith e
+  in
+  assert (not (Oauth2_types.Token.is_expired token))</code></pre><ul class="at-tags"><li class="returns"><span class="at-tag">returns</span> <p><code>`Ok token`</code> on success, <code>`Error msg`</code> otherwise.</p></li></ul></div></div></div></body></html>

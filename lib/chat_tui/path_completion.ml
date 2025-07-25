@@ -1,10 +1,25 @@
 open Core
 
-(** Very small – and intentionally blocking – path completion helper used by
-    command-mode *Phase 4*.  The implementation is a simplified stub that is
-    good enough for development and unit-testing purposes.  It will be
-    replaced by a fully asynchronous, cache-backed version in a later
-    refactor (see [path_completion.md]). *)
+(** Path autocompletion engine – **blocking prototype**.
+
+    This implementation is intentionally minimal so that command-mode can be
+    developed and unit-tested before the fully-asynchronous refactor lands.
+    The core idea is explained in {!file:lib/chat_tui/path_completion.md}: keep
+    one cached, alphabetically *sorted* array per directory and perform two
+    binary searches per keystroke to locate the slice that shares the current
+    prefix.
+
+    Key points:
+    • Uses {!Eio.Path.read_dir} for non-blocking I/O but otherwise blocks the
+      caller while reading the directory once every TTL (2 s).
+    • Keeps **zero** per-prefix state – the only mutable state is a tiny
+      per-directory cache and the last result stored in the [t] context so the
+      user can cycle through matches.
+    • Suitable for directories containing a few tens-of-thousands of entries
+      (worst-case cost: *O(N log N)* on cache miss, *O(log N + K)* on cache
+      hit).
+
+    See the interface file {!Path_completion} for the public API. *)
 
 module Dir_cache = struct
   type entry =

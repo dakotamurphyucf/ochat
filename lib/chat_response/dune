@@ -1,13 +1,13 @@
 (library
  (name chat_response)
- (public_name chatgpt.chat_response)
+ (public_name ochat.chat_response)
  (modules cache config converter ctx driver fetch response_loop tool fork)
  (libraries
   core
   openai
   jsonaf
   io
-  gpt_function
+  ochat_function
   definitions
   functions
   chatmd
@@ -21,6 +21,7 @@
   eio.unix
   mcp_tool
   mcp_client
-  mcp_types)
+  mcp_types
+  webpage_markdown)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

@@ -27,20 +27,40 @@ and embedding =
 (** [post_openai_embeddings ~input env] makes an HTTP POST request to the OpenAI API embeddings endpoint with the given [input] and [env].
 
 It returns the parsed response as a [response] record. *)
+let generate_stub_embedding text ~dim : float list =
+  (* Deterministic pseudo-random vector based on [text] hash so results are
+     stable across runs and consistent between index and query. *)
+  let seed = String.hash text |> abs in
+  let st = Random.State.make [| seed |] in
+  List.init dim ~f:(fun _ -> Random.State.float st 2.0 -. 1.0)
+;;
+
 let post_openai_embeddings net ~input =
-  let host = "api.openai.com" in
-  let headers =
-    Http.Header.of_list
-      [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
+  (* Fallback behaviour: if no API key is configured _or_ the environment
+     requests stub embeddings (e.g. test runs without network access), we
+     return deterministic pseudo-random vectors instead of calling the
+     OpenAI API. *)
+  let use_stub =
+    String.is_empty api_key || Option.is_some (Sys.getenv "OPENAI_EMBEDDINGS_STUB")
   in
-  let input = { input; model = "text-embedding-3-large" } in
-  let json = Jsonaf.to_string @@ jsonaf_of_embeddings_input input in
-  let res = post Default ~net ~host ~headers ~path:"/v1/embeddings" json in
-  let json = Jsonaf.of_string res in
-  try response_of_jsonaf json with
-  | _ as exe ->
-    (* print_endline @@ Fmt.str "%a" Eio.Exn.pp exe;
-    print_endline @@ String.concat ~sep:"\n" input.input;
-    print_endline @@ Jsonaf.to_string json; *)
-    raise exe
+  if use_stub
+  then (
+    let dim = 128 in
+    let data =
+      List.mapi input ~f:(fun idx text ->
+        { embedding = generate_stub_embedding text ~dim; index = idx })
+    in
+    { data })
+  else (
+    let host = "api.openai.com" in
+    let headers =
+      Http.Header.of_list
+        [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
+    in
+    let input = { input; model = "text-embedding-3-large" } in
+    let json = Jsonaf.to_string @@ jsonaf_of_embeddings_input input in
+    let res = post Default ~net ~host ~headers ~path:"/v1/embeddings" json in
+    let json = Jsonaf.of_string res in
+    try response_of_jsonaf json with
+    | _ as exe -> raise exe)
 ;;

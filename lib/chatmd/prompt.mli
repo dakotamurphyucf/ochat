@@ -1,3 +1,21 @@
+(** Typed representation and parser for {e ChatMarkdown} prompts.
+
+    {b ChatMarkdown} is a lightweight XML dialect used in this code-base to
+    describe conversations for Large Language Models (LLMs).  The purpose of
+    {!module:Chat_markdown} is twofold:
+
+    • expose a zero-cost {e strongly-typed} view of the language so that
+      downstream modules can pattern-match on variants instead of inspecting
+      raw strings;
+    • offer a single helper – {!val:parse_chat_inputs} – to parse, resolve
+      imports, and convert a complete document into a list of OCaml records
+      ready to be serialised to the OpenAI chat API.
+
+    All public types derive [@@deriving jsonaf] as well as [sexp], [compare],
+    [hash] and [bin_io] for seamless debugging and persistence.  Unknown or
+    future ChatMarkdown tags are preserved verbatim inside [`Text`]
+    placeholders, guaranteeing forward-compatibility. *)
+
 module Chat_markdown : sig
   type function_call =
     { name : string
@@ -21,6 +39,7 @@ module Chat_markdown : sig
     ; document_url : string option [@jsonaf.option]
     ; is_local : bool [@default false]
     ; cleanup_html : bool [@default false]
+    ; markdown : bool [@default false] (* whether to convert HTML to Markdown *)
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
@@ -144,6 +163,22 @@ module Chat_markdown : sig
     | Tool of tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  (** [parse_chat_inputs ~dir src] tokenises, parses and normalises the
+      ChatMarkdown document contained in [src].  The result is the ordered
+      sequence of {!type:top_level_elements} that should be sent to the LLM.
+
+      – [dir] is the base directory used to resolve relative paths appearing
+        in [`<import src="…"/>`], [`<img local="true"/>`] or
+        [`<agent local="true"/>`] tags.  The function relies on
+        {!Io.load_doc} under the hood and therefore performs read-only I/O.
+
+      The helper expands imports recursively, translates shorthand tags
+      (`<user/>`, `<assistant/>`, `<tool_call/>`, `<tool_response/>`) into
+      dedicated record aliases, and discards elements that are irrelevant for
+      the conversation buffer (e.g. whitespace between top-level nodes).
+
+      @raise Failure if the document is malformed or if an imported file
+             cannot be read. *)
   val parse_chat_inputs
     :  dir:Eio.Fs.dir_ty Eio.Path.t
     -> string

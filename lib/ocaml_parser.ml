@@ -211,12 +211,15 @@ let ( / ) p1 p2 =
   | p1, p2 -> Filename.concat p1 p2
 ;;
 
-(** [parse file file_type module_name] parses the given [file] with the specified [file_type] (either [Interface] or [Implementation]) and [module_name]. It returns a list of [parse_result] records containing the location, module path, comments, contents, and file type for each parsed item.
+(** [parse dir file kind module_name] reads [file] (relative to [dir]),
+    lexes it with {!module:Ppxlib.Parse}, and returns a
+    {!type:traverse_input}.  The resulting value is cheap to duplicate
+    and can later be fed to {!val:traverse} to materialise
+    {!type:parse_result} records.
 
-    @param file The file to be parsed.
-    @param ocaml_source The type of the file, either [Interface] or [Implementation].
-    @param module_name The name of the module being parsed.
-    @return A list of [parse_result] records containing information about the parsed items. *)
+    Only a single pass over [file] is performed – the whole contents are
+    loaded in memory.  Callers are expected to restrict themselves to
+    normal OCaml source files (< a few megabytes). *)
 let parse dir file ocaml_source module_name =
   let doc = load_doc ~dir file in
   let lexbuf = Lexing.from_string doc in
@@ -229,9 +232,8 @@ let parse dir file ocaml_source module_name =
   { doc; payload; module_name; ocaml_source }
 ;;
 
-(** [dir  path] reads the directoryZ at the given [path]
-    
-  @returns a string list of all the file and path names in the directory*)
+(** [directory dir path] returns the list of entries in [path] relative
+    to [dir].  Convenience wrapper around {!Eio.Path.read_dir}. *)
 let directory dir path = Eio.Path.read_dir Eio.Path.(dir / path)
 
 type _ file_type =
@@ -241,21 +243,21 @@ type _ file_type =
 and mli = MLI
 and ml = ML
 
-(** [file_info] is a record type that contains the file_type and file_name. *)
+(** Record bundling a filename together with a phantom witness of its
+    kind (interface or implementation). *)
 type 'a file_info =
   { file_type : 'a file_type
   ; file_name : string
   }
-(** Now, the file_type is encoded in the type system, and you can create file_info values with specific file types:
+(** Example creating typed values:
 
     {[
-      let mli_file = mli file_info { file_type = Mli; file_name = "example.mli" }
-      let ml_file : ml file_info = { file_type = Ml; file_name = "example.ml" }
-    ]}
-*)
+      let intf : mli file_info = { file_type = Mli; file_name = "foo.mli" }
+      let impl : ml  file_info = { file_type = Ml ; file_name = "foo.ml"  }
+    ]} *)
 
-(** [module_info] is a record type representing the metadata of an OCaml module,
-    combining the interface (mli) and implementation (ml) files. *)
+(** Metadata for a compilation unit – i.e. the pair [foo.mli] / [foo.ml]
+    that share the same basename. *)
 type module_info =
   { mli_file : mli file_info option
   ; ml_file : ml file_info option
@@ -334,12 +336,9 @@ let collect_ocaml_files dir path =
   collect_files [ path ] []
 ;;
 
-(** [parse_file_info env file_info] parses the given [file_info] in the environment [env]. It returns a list of [parse_result] records containing the location, module path, comments, contents, and file type for each parsed item.
-
-    @param env The environment in which the function is executed.
-    @param file_info The file information to be parsed.
-    @param unit
-    @return A list of [parse_result] records containing information about the parsed items. *)
+(** [parse_file_info dir file_info] parses the file described by
+    [file_info] and returns a {!type:traverse_input}.  The caller is
+    responsible for later invoking {!val:traverse}. *)
 let parse_file_info (type a) env (file_info : a file_info) =
   let module_name =
     let name_without_ext, _ = Filename.split_extension file_info.file_name in
@@ -351,10 +350,10 @@ let parse_file_info (type a) env (file_info : a file_info) =
   | Ml -> parse env file_info.file_name Implementation module_name
 ;;
 
-(** [parse_module_info module_info] parses the given [module_info]. It returns a list of [parse_result] records containing the location, module path, comments, contents, and file type for each parsed item.
-
-    @param module_info The module information to be parsed.
-    @return A pair of (unit -> parse_result list) option * (unit -> parse_result list) option thunks containing information about the parsed items. This is done to seperate use of the non thread safe lexer code with the thread safe traverse function*)
+(** [parse_module_info dir t] parses the interface and/or implementation
+    files referenced by [t] and returns a pair of [mli] / [ml]
+    {!type:traverse_input}.  Any of the components may be [None] when
+    the corresponding file is missing. *)
 let parse_module_info dir module_info =
   let mli_results =
     match module_info.mli_file with

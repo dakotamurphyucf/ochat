@@ -1,6 +1,27 @@
 open Core
 module Res = Openai.Responses
 
+(** Nested *fork* execution
+
+    The fork tool allows a conversation to spawn an **auxiliary agent**
+    that runs in isolation and eventually reports back using a special
+    `PERSIST` block.  This OCaml module contains the runtime support to
+    drive that nested conversation without depending on {!Driver} – a
+    lighter subset is required to keep recursion small.
+
+    There are two entry points:
+
+    {ul
+    {- {!run_stream} – streaming version used when the parent
+       conversation itself is streamed.}
+    {- {!execute}     – synchronous helper used by the non-streaming
+       response loop.}}
+
+    Both functions guarantee that the *outer* assistant receives a
+    function-call output as soon as text becomes available so that user
+    interfaces can render fork progress in real time.
+*)
+
 (* -------------------------------------------------------------------- *)
 (*  Helper: build a system/input message instructing the forked agent.   *)
 (* -------------------------------------------------------------------- *)
@@ -166,6 +187,22 @@ let rec run_stream
 (*  Implementation of [execute] – relies on [run_stream].               *)
 (* ------------------------------------------------------------------ *)
 
+(** [execute ~env ~history ~call_id ~arguments ~tools ~tool_tbl …] runs a
+    *fork* session to completion and returns the assistant’s final text
+    reply.
+
+    Under the hood the helper:
+
+    1. Adds a synthetic [`Function_call_output`] that explains the fork
+       protocol to the clone.
+    2. Delegates the actual conversation to {!run_stream} so that nested
+       function calls keep working.
+    3. Concatenates the assistant messages produced after the initial
+       history and returns the merged string to the parent loop.
+
+    The function is synchronous – callers will block until the forked
+    agent finishes or the outer OpenAI request reaches its token limit.
+  *)
 and execute
       ~(env : Eio_unix.Stdenv.base)
       ~(history : Res.Item.t list)
@@ -196,7 +233,7 @@ Primary task inside the fork
   command - `%s`  
   arguments - `%s`
 
-You may leverage every available tool, read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.
+You may leverage every available tool (except the [fork] tool), read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.
 
 Return exactly **one** assistant message in this template:
 
@@ -277,7 +314,7 @@ Primary task inside the fork
   command - `%s`  
   arguments - `%s`
 
-You may leverage every available tool, read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.
+You may leverage every available tool (except the [fork] tool), read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.
 
 Return exactly **one** assistant message in this template:
 

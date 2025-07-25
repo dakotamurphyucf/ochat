@@ -1,13 +1,59 @@
+(**
+    End-to-end indexing of documentation produced by the
+    {{:https://ocaml.org/p/odoc/latest}odoc} tool-chain.
+
+    The function {!index_packages} turns the HTML pages located under
+    the [_doc/_html] directory created by
+    {[ dune build @doc ]} into a multi-modal search corpus made up of:
+
+    • dense vector embeddings suitable for nearest-neighbour search
+      (saved via {!Vector_db.Vec.write_vectors_to_disk});
+    • lexical BM-25 indices (saved via {!Bm25.write_to_disk});
+    • the raw Markdown snippets, one file per chunk, so that the caller
+      can display the full context of a hit.
+
+    The pipeline executed for each *opam package* folder is:
+
+    {ol
+    {- traverse the directory tree with {!Odoc_crawler.crawl};}
+    {- slice every HTML / README into 64–320-token windows with
+       {!Odoc_snippet.slice};}
+    {- batch the chunks in groups of ≤ 300 and obtain embeddings from
+       the OpenAI *Embedding* API; requests are funneled through a
+       single fibre that enforces a per-second cap (see
+       {!module-Embed_service});}
+    {- write the embeddings, BM25 index and Markdown files to
+       [output/pkg/];}
+    {- gather a short blurb (first non-empty line) for each package and
+       store it in {!Package_index}.}}
+
+    Concurrency model:
+
+    • CPU-bound slicing runs in a {!Io.Task_pool} backed by one domain
+      per physical core.
+    • IO-bound embedding calls are executed by the main fibre but
+      throttled to respect provider quotas.
+
+    Cancellation: the whole operation is enclosed in a {!Switch};
+    aborting the switch propagates to every child fibre and ensures no
+    partial files are left behind.
+*)
+
 open Core
 open Eio
 module I = Io
 open Jsonaf.Export
-module Log = Log
 
 (**************************************************************************)
 (* Helper utilities                                                        *)
 (**************************************************************************)
 
+(** [token_count ~codec text] returns the approximate number of BPE
+      tokens in [text].  If [Tikitoken.encode] raises (e.g. because the
+      text contains invalid UTF-8) or if the fallback heuristic is
+      considered quicker, the function falls back to whitespace
+      splitting.  This helper is *internal* and its behaviour is not
+      stable – do not rely on it from outside the module. *)
 let token_count ~codec text =
   match Tikitoken.encode ~codec ~text with
   | tokens -> List.length tokens
@@ -18,6 +64,11 @@ let token_count ~codec text =
     |> List.length
 ;;
 
+(** [meta_to_string m] renders [m] in the *legacy* pseudo-ocamldoc
+      header format used by early experiments.  New code should rely on
+      the serialised {!Odoc_snippet.meta} record and avoid parsing this
+      textual representation.  The function is kept only because some
+      historical corpora still expect it. *)
 let meta_to_string (m : Odoc_snippet.meta) : string =
   let title = Option.value ~default:"" m.title in
   Printf.sprintf
@@ -33,6 +84,16 @@ let meta_to_string (m : Odoc_snippet.meta) : string =
 (* Vector embedding helper (adapted from lib/indexer.ml)                   *)
 (**************************************************************************)
 
+(** [get_vectors ~net ~codec snippets] calls the OpenAI Embeddings
+      endpoint and returns a triple of [(meta, text, vec)] for every
+      snippet in [snippets].
+
+      The function retries up to three times on transient network
+      failures.  Each retry attempts to re-encode the *whole* batch –
+      partial success is not currently supported.
+
+      Returned vectors are **not** L2-normalised; that is done by
+      {!Vector_db.create_corpus} during loading. *)
 let rec get_vectors
           ?(attempts = 0)
           ~net
@@ -68,73 +129,80 @@ let rec get_vectors
     rate limits.  We funnel every request through a single fibre that
     throttles calls so that no more than [rate_per_sec] are executed.       *)
 
-module Embed_service = struct
-  open Eio
-
-  type request =
-    { snippets : (Odoc_snippet.meta * string) list
-    ; resolver :
-        ((Odoc_snippet.meta * string * Vector_db.Vec.t) list, exn) result Promise.u
-    }
-
-  let create ~sw ~clock ~net ~codec ~rate_per_sec ()
-    :  (Odoc_snippet.meta * string) list
-    -> (Odoc_snippet.meta * string * Vector_db.Vec.t) list
-    =
-    let stream : request Stream.t = Stream.create 100 in
-    (* Helper: run OpenAI call with up to 3 retries *)
-    let rec fetch_with_retries attempts snippets
-      : (Odoc_snippet.meta * string * Vector_db.Vec.t) list
-      =
-      try get_vectors ~net ~codec snippets with
-      | exn when attempts < 3 ->
-        traceln "embed retry %d/3 due to %a" (attempts + 1) Eio.Exn.pp exn;
-        (* back-off a little before retrying *)
-        Time.sleep clock 1.0;
-        fetch_with_retries (attempts + 1) snippets
-      | exn -> raise exn
-    in
-    (* Daemon fibre that enforces the rate limit *)
-    Fiber.fork_daemon ~sw (fun () ->
-      let last_call = ref 0.0 in
-      let min_interval = 1.0 /. Float.of_int rate_per_sec in
-      let rec loop () =
-        let { snippets; resolver } = Stream.take stream in
-        let now = Time.now clock in
-        (*   If the last call was less than [min_interval] seconds ago, sleep
-             so that we honour the rate cap.                                *)
-        let elapsed = now -. !last_call in
-        if Float.(elapsed < min_interval)
-        then (
-          let to_sleep = min_interval -. elapsed in
-          if Float.(to_sleep > 0.0) then Time.sleep clock to_sleep);
-        last_call := Time.now clock;
-        Fiber.fork ~sw (fun () ->
-          (* 1. Fetch embeddings with retries *)
-          let result =
-            try Ok (fetch_with_retries 0 snippets) with
-            | ex -> Error ex
-          in
-          Promise.resolve resolver result);
-        loop ()
-      in
-      loop ());
-    (* Returned [embed] function: enqueue and wait for the promise. *)
-    fun snippets ->
-      let promise, resolver = Promise.create () in
-      Stream.add stream { snippets; resolver };
-      match Promise.await promise with
-      | Ok res -> res
-      | Error ex -> raise ex
-  ;;
-end
+(* ───────────────────────────────────────────────────────────────────────── *
+   Embedding service – now provided by the shared [Embed_service] module.  *
+   The local implementation has been removed to avoid duplication.        *)
 
 (**************************************************************************)
 (* Public API: package indexing                                            *)
 (**************************************************************************)
 
+(** Strategy for selecting which opam packages are crawled and
+    (re-)indexed.  The default {!All} indexes every directory under
+    [root].  {!Include} and {!Exclude} allow whitelisting /
+    blacklisting, while {!Update} is geared towards incremental
+    maintenance of an already-built corpus. *)
+
+type package_filter =
+  | Include of string list
+  | Exclude of string list
+  | Update of package_filter * string list
+  | All
+
+(** [index_packages ?filter ~env ~root ~output ~net ()] builds a
+      vector & BM-25 search corpus for every package folder under
+      [root] and stores the artefacts under [output].
+
+      Parameters:
+
+      • [?filter] – fine-grained selection of the packages to process.
+        The value is of type {!package_filter} and supports several
+        modes:
+
+        {ul
+        {- {!All} – (default) index every first-level directory under
+           [root];}
+        {- {!Include} [pkgs] – only the packages in [pkgs];}
+        {- {!Exclude} [pkgs] – all except the packages in [pkgs];}
+        {- {!Update} (prev, pkgs) – treat [pkgs] as a delta on top of
+           [prev].  This is handy to perform incremental updates on an
+           existing corpus without a full rebuild.}}
+
+      • [env] – capability bundle provided by {!Eio_main.run}; its
+        [clock], [net] and [fs] fields are used for, respectively,
+        time-outs, HTTP calls and file IO.
+
+      • [root] – directory produced by {[ dune build @doc ]}.  Each
+        first-level directory beneath [root] is treated as an opam
+        package.
+
+      • [output] – destination folder.  For every package *foo* the
+        function creates:
+
+        {ul
+        {- *foo*/vectors.binio – array of {!Vector_db.Vec.t};}
+        {- *foo*/bm25.binio    – {!Bm25.t};}
+        {- *foo*/<id>.md       – raw Markdown snippet for each chunk.}}
+
+      • [net] – network capability used by {!Openai.Embeddings}.
+
+      Behaviour & guarantees:
+
+      • Slicing and embedding happen concurrently – CPU-bound work is
+        off-loaded to a pool of domains, HTTP calls are batched and
+        throttled.
+
+      • Progress is logged via {!Log.emit} and spanned so that a
+        Jaeger/OpenTelemetry backend can visualise the trace.
+
+      • The function is synchronous; it returns only after *all*
+        artefacts have been flushed to disk.
+
+      @raise exn on unrecoverable filesystem or network errors.  All
+      transient failures (OpenAI 5xx, time-outs) are retried up to 3
+      times before escalating. *)
 let index_packages
-      ?(skip_pkgs = [])
+      ?(filter = All)
       ~(env : Eio_unix.Stdenv.base)
       ~(root : _ Path.t)
       ~(output : _ Path.t)
@@ -152,12 +220,51 @@ let index_packages
   let tiki_token_bpe =
     Io.load_doc ~dir:(Eio.Stdenv.fs env) "./out-cl100k_base.tikitoken.txt"
   in
-  let codec = Tikitoken.create_codec tiki_token_bpe in
-  let skip_tbl =
-    Hashtbl.of_alist_exn (module String) (List.map skip_pkgs ~f:(fun p -> p, ()))
+  let should_crawl =
+    let rec fn filter =
+      match filter with
+      | Include pkgs -> fun pkg -> List.mem pkgs pkg ~equal:String.equal
+      | Exclude pkgs -> fun pkg -> not (List.mem pkgs pkg ~equal:String.equal)
+      | All -> fun _ -> true
+      | Update (prev_filter, pkgs) ->
+        let prev_fn = fn prev_filter in
+        fun pkg ->
+          (match prev_filter with
+           | Include _ -> prev_fn pkg || List.mem pkgs pkg ~equal:String.equal
+           | Exclude _ -> prev_fn pkg
+           | All -> true
+           | Update _ -> failwith "Update filter cannot be nested")
+    in
+    fn filter
   in
-  Odoc_crawler.crawl ~root ~f:(fun ~pkg ~doc_path ~markdown ->
-    if not (Hashtbl.mem skip_tbl pkg)
+  let should_index pkg =
+    match filter with
+    | Include pkgs -> List.mem pkgs pkg ~equal:String.equal
+    | Exclude pkgs -> not (List.mem pkgs pkg ~equal:String.equal)
+    | All -> true
+    | Update (_, pkgs) -> List.mem pkgs pkg ~equal:String.equal
+  in
+  (* 2. Crawl the directory tree and slice Markdown files into snippets. *)
+  (* Ensure output folder exists. *)
+  let codec = Tikitoken.create_codec tiki_token_bpe in
+  Odoc_crawler.crawl ~root (fun ~pkg ~doc_path ~markdown ->
+    if String.equal pkg "ochat"
+    then (
+      let pkg_dir = Path.(Eio.Stdenv.cwd env / "markdown" / pkg) in
+      (match Path.is_directory pkg_dir with
+       | true -> ()
+       | false -> Path.mkdirs ~perm:0o700 pkg_dir);
+      let module_path =
+        doc_path
+        |> Filename.chop_extension
+        |> String.split ~on:'/'
+        |> List.filter ~f:(fun s -> not (String.equal s ""))
+        |> List.drop_last
+        |> Option.value ~default:[]
+        |> String.concat ~sep:"."
+      in
+      Io.save_doc ~dir:pkg_dir (module_path ^ ".md") markdown);
+    if should_crawl pkg
     then (
       let lst = Hashtbl.find_or_add pkg_docs pkg ~default:(fun () -> []) in
       Hashtbl.set pkg_docs ~key:pkg ~data:((doc_path, markdown) :: lst)));
@@ -171,7 +278,13 @@ let index_packages
   (*  the switch finishes.                                               *)
   (* ------------------------------------------------------------------ *)
   let embed_batch =
-    Embed_service.create ~sw ~clock:env#clock ~net ~codec ~rate_per_sec:1000 ()
+    Embed_service.create
+      ~sw
+      ~clock:env#clock
+      ~net
+      ~codec
+      ~rate_per_sec:1000
+      ~get_id:(fun (m : Odoc_snippet.meta) -> m.id)
   in
   let dm = Eio.Stdenv.domain_mgr env in
   let module Pool =
@@ -259,11 +372,10 @@ let index_packages
       Bm25.write_to_disk Path.(pkg_dir / "bm25.binio") bm25)
   in
   Hashtbl.to_alist pkg_docs
-  |> Eio.Fiber.List.iter (fun (pkg, docs) -> handler (pkg, docs));
+  |> Eio.Fiber.List.iter (fun (pkg, docs) -> if should_index pkg then handler (pkg, docs));
   (* 3. Build & save package index with blurbs (serial, lightweight) *)
   let descriptions =
     Hashtbl.to_alist pkg_docs
-    |> List.filter ~f:(fun (pkg, _) -> not (Hashtbl.mem skip_tbl pkg))
     |> List.map ~f:(fun (pkg, docs) ->
       let blurb =
         match

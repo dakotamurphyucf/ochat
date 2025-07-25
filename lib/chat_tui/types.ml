@@ -1,6 +1,9 @@
-(* Shared data types used throughout the Chat-TUI implementation.  Keeping
-   them in a tiny standalone module avoids circular dependencies once the
-   code base is split into many small compilation units. *)
+(* Shared data types for the Ochat terminal UI.  The {!Types} module
+   holds only minimal, foundational definitions and therefore has no
+   dependencies on heavier libraries such as Eio or Notty.  This design
+   decision prevents circular build dependencies and keeps compilation
+   times down.  All authoritative documentation lives in
+   [types.mli]. *)
 
 type role = string
 type message = role * string

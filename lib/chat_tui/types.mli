@@ -1,14 +1,42 @@
-(** Shared data types used across the refactored Chat-TUI code. *)
+(** Shared data types for the Ochat terminal UI.
 
+    This module centralises the few fundamental types that every
+    sub-module of {!Chat_tui} needs.  Moving them into their own
+    compilation unit avoids cyclic dependencies between the renderer,
+    controller and model layers.
+
+    {1 Groups}
+
+    • {b Chat transcript} – {!role} and {!message} model the OpenAI chat
+      schema.
+
+    • {b Streaming support} – {!msg_buffer} accumulates partial assistant
+      output while the HTTP connection is still open.
+
+    • {b Elm-style orchestration} – controllers emit {!cmd} values to
+      request impure work (persistence, network calls, cancellation).  The
+      pure part of the app applies {!patch} records to transform the
+      immutable {!Chat_tui.Model.t}.  This mirrors the
+      {i Model-View-Update} architecture.
+
+    @canonical Chat_tui.Types *)
+
+(** Role of a chat message.  Expected values are the strings mandated by
+    the OpenAI API: ["system"], ["user"], ["assistant"], ["function"].
+    The module does not validate the value. *)
 type role = string
+
+(** One chat message represented as [(role, content)]. *)
 type message = role * string
 
 (** Streaming-time buffer.  While we receive deltas from the OpenAI API we
     accumulate partial output in [text] and remember the target index into
     the [messages] list so the UI can update incrementally. *)
 type msg_buffer =
-  { text : string ref
+  { text : string ref (** Mutable accumulator for the streaming text. *)
   ; index : int
+    (** Index into {!Chat_tui.Model.messages} that will
+                           hold the final message once streaming completes. *)
   }
 
 (* ––– forward declarations for upcoming steps ––– *)
@@ -19,17 +47,10 @@ type msg_buffer =
 
 type cmd =
   | Persist_session of (unit -> unit)
-  (** [Persist_session f] encapsulates a side-effecting persistence
-          operation (normally writing the current conversation buffer back
-          to disk).  The thunk [f] will be executed by [Cmd.run] in a
-          suitable fibre so that IO stays outside the pure update logic.
-
-          Deferring the effect behind a thunk means the variant can stay
-          completely independent of concrete types such as [Eio.Path.t] or
-          [Chat_tui.Persistence.config], preventing circular dependencies at
-          the type-level. *)
+  (** Persist the current conversation by running [f] in a separate fibre. *)
   | Start_streaming of (unit -> unit)
-  | Cancel_streaming of (unit -> unit)
+  (** Kick off an OpenAI streaming request by executing the thunk. *)
+  | Cancel_streaming of (unit -> unit) (** Abort the in-flight streaming request. *)
 
 (* ------------------------------------------------------------------------ *)
 (*  Patch constructors introduced in refactoring step 6                      *)
@@ -46,42 +67,32 @@ type patch =
       { id : string
       ; role : string
       }
-  (** Make sure a streaming buffer ([id] → accumulated text) exists.  If
-          absent a new entry is created and an empty message with the
-          specified [role] is appended to the visible history. *)
+  (** Ensure the buffer [id] exists, creating an empty entry with the
+      supplied [role] and adding a placeholder message when necessary. *)
   | Append_text of
       { id : string
       ; role : string
       ; text : string
       }
-  (** Append [text] to the buffer identified by [id].  If the buffer does
-          not exist it is first created (using [role]).  The corresponding
-          entry in the visible [messages] list is updated as well. *)
+  (** Append [text] to the buffer [id], allocating it on first use and
+      updating the corresponding entry in {!Chat_tui.Model.messages}. *)
   | Set_function_name of
       { id : string
       ; name : string
-      }
+      } (** Record the function [name] associated with streaming buffer [id]. *)
   | Set_function_output of
       { id : string
       ; output : string
-      }
-  (** Remember the mapping between a streaming [item_id] and the tool / 
-          function [name] that was invoked.  Used later when streaming the
-          arguments so we can emit a friendly “name(…args…)” representation
-          in the UI. *)
+      } (** Store the JSON [output] returned by the function call for [id]. *)
   | Update_reasoning_idx of
       { id : string
       ; idx : int
-      }
+      } (** Update the last-seen reasoning summary index for buffer [id]. *)
   | Add_user_message of { text : string }
-  (** Track the most recently seen [summary_index] for reasoning deltas so
-          that the UI can insert line breaks between subsequent summaries. *)
+  (** Insert the user's prompt [text] into the chat history. *)
   | Add_placeholder_message of
       { role : string
       ; text : string
       }
-  (** Append a transient placeholder message (e.g. "(thinking…)" while the
-            assistant has not yet started streaming).  Unlike
-            [Add_user_message] this does {b not} touch [history_items] because
-            the placeholder is only a UI affordance and should not be
-            persisted. *)
+  (** Append the transient placeholder [(role, text)].  The message is
+      rendered only in the UI and is {b not} persisted. *)

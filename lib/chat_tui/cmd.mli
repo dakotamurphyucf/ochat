@@ -1,25 +1,34 @@
-(** Effectful commands executed by the Chat-TUI runtime.
+(** Elm-style command interpreter.
 
-    The pure controller / stream logic emits values of [Types.cmd].  This
-    module is responsible for interpreting those commands and performing the
-    actual side-effects (file IO, network requests, spawning background
-    fibres, …).
+    {!Chat_tui} separates pure state transitions from impure effects.  The
+    controller layer produces values of {!Chat_tui.Types.cmd} which describe
+    {e what} needs to happen (persist the transcript, start a network
+    request, …) without performing the effect.  This module is the single
+    implementation point that turns those descriptions into real IO by
+    executing the closures carried by each constructor.
 
-    In refactoring step 7 we introduce a first, minimal command –
-    [Persist_session] – which persists the current conversation transcript to
-    disk.  Future steps will extend the open variant in {!Chat_tui.Types} with
-    further constructors (e.g. [Send_request], [Abort_request], …).
-*)
+    At the time of writing the command set is still small – we only persist
+    the current session and manage the lifetime of a single streaming
+    request – but additional constructors will be added as the UI grows.  No
+    other module should perform side-effects directly. *)
 
 open Types
 
-(** Execute a single command.
+(** [run c] executes the effect encoded by command [c].
 
-    The function is deliberately generic – every constructor is free to carry
-    the data it needs, including closures.  This keeps the API minimal and
-    avoids layering violations.
-*)
+    Each constructor is interpreted as follows:
+    {ul
+      {- [Persist_session f] – spawn [f] in the background fibre pool so the
+         UI stays responsive while the transcript is written to disk;}
+      {- [Start_streaming f] – start a new fibre that performs the OpenAI
+         streaming request driven by [f];}
+      {- [Cancel_streaming f] – cancel the running request by invoking [f].}}
+
+    The exact implementation of each thunk is opaque to this module and may
+    evolve independently. *)
 val run : cmd -> unit
 
-(** Convenience wrapper to execute a list of commands sequentially. *)
+(** [run_all cmds] executes every command in [cmds] from left to right using
+    {!run}.  It is a thin wrapper around [List.iter] and provides symmetry
+    with the controller functions that return lists of commands. *)
 val run_all : cmd list -> unit

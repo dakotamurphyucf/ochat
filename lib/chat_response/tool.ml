@@ -1,11 +1,44 @@
-(*********************************************************************
-     Helpers for tool creation and conversion.
+(** Tool helper utilities.
 
-     This gathers the previously scattered [convert_tools], [custom_fn]
-     and [agent_fn] helpers into one cohesive namespace.  The module is
-     intentionally kept local to this file for now; future work will
-     move it to its own compilation unit.
-  *********************************************************************)
+    This module turns a ChatMarkdown [`<tool …/>`] declaration into a
+    runtime {!Ochat_function.t} that can be submitted to the *OpenAI
+    function-calling API*.  The helper covers **four** independent
+    back-ends:
+
+    1. {b Built-ins} – OCaml functions hard-coded in {!Functions}
+       (e.g. ["apply_patch"], ["fork"], …).
+    2. {b Custom shell commands} – `{<tool command="grep" …/>}` wrappers
+       that spawn an arbitrary process inside the Eio sandbox.
+    3. {b Agent prompts} – nested ChatMarkdown agents executed through
+       the same driver stack.
+    4. {b Remote MCP tools} – functions discovered dynamically over the
+       Model-Context-Protocol network.
+
+    The public surface is intentionally small – only the dispatcher
+    {!of_declaration} and a (de)serialisation helper {!convert_tools}
+    are meant to be consumed by other modules.  Everything else is
+    private glue code.
+
+    {1 Example}
+
+    Converting a list of ChatMarkdown declarations into the request
+    payload expected by {!Openai.Responses}:
+
+    {[
+      let ochat_functions =
+        List.concat_map declarations ~f:(Tool.of_declaration ~sw ~ctx ~run_agent)
+
+      let comp_tools, _tbl = Ochat_function.functions ochat_functions in
+      let request_tools  = Tool.convert_tools comp_tools in
+      (* … pass [request_tools] to [Openai.Responses.post_response] … *)
+    ]}
+
+    {1 Warning}
+
+    The {e custom shell} backend executes arbitrary commands provided by
+    the prompt author.  Enable it only in a {b trusted} environment and
+    consider using dedicated OCaml helpers or remote MCP tools for
+    production workloads. *)
 
 open Core
 module CM = Prompt.Chat_markdown
@@ -39,6 +72,13 @@ let cache_ttl = Time_ns.Span.of_int_sec 300
    for such notifications and performs the invalidation.            *)
 
 let register_invalidation_listener ~sw ~mcp_server ~client =
+  (* Register a background fibre that listens for
+     `notifications/tools/list_changed` messages published by the MCP
+     server.  Upon reception the local *TTL-LRU* entry for that server
+     is evicted so that the next call to {!mcp_tool} forces a fresh
+     `tools/list` round-trip.
+
+     The operation is idempotent and cheap – duplicates are acceptable. *)
   (* We attach the listener on a background fibre so it does not block the
      normal execution flow.  The fibre terminates automatically when the
      underlying stream closes (e.g. connection lost) or the switch is
@@ -62,6 +102,16 @@ let register_invalidation_listener ~sw ~mcp_server ~client =
 
 (*--- 4-a.  OpenAI → Responses tool conversion ----------------------*)
 
+(** [convert_tools ts] converts a list of [`Openai.Completions.tool`]
+    descriptors – the minimal structure returned by the [openai] SDK –
+    into the richer {!Openai.Responses.Request.Tool.t} representation
+    expected by the *chat/completions* endpoint.
+
+    The transformation is a {i pure}, field-by-field copy.  It exists
+    only to prevent callers from having to depend on both modules at
+    once.
+
+    Complexity: O(n) where [n = List.length ts]. *)
 let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list =
   List.map ts ~f:(fun { type_; function_ = { name; description; parameters; strict } } ->
     Res.Request.Tool.Function { name; description; parameters; strict; type_ })
@@ -69,9 +119,30 @@ let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
 
 (*--- 4-b.  Custom shell command tool --------------------------------*)
 
-let custom_fn ~env (c : CM.custom_tool) : Gpt_function.t =
+(** [custom_fn ~env decl] wraps a `{<tool command="…"/>}` element into a
+    callable {!Ochat_function.t}.
+
+    Input schema
+    {[
+      {
+        "arguments": string array   (* Command-line arguments *)
+      }
+    ]}
+
+    The function spawns the declared command inside the Eio sandbox,
+    feeds it the provided arguments, then returns the concatenated
+    *stdout* and *stderr* streams.
+
+    Invariants & safeguards
+    • Hard timeout of {b 60 s}.  The process is killed afterwards.
+    • Output is truncated to at most {b 100 KiB} to avoid flooding the
+      model context.
+
+    Use this backend only for {e quick experiments}.  Prefer dedicated
+    OCaml helpers or remote MCP tools in production. *)
+let custom_fn ~env (c : CM.custom_tool) : Ochat_function.t =
   let CM.{ name; description; command } = c in
-  let module M : Gpt_function.Def with type input = string list = struct
+  let module M : Ochat_function.Def with type input = string list = struct
     type input = string list
 
     let name = name
@@ -166,21 +237,38 @@ let custom_fn ~env (c : CM.custom_tool) : Gpt_function.t =
     | Eio.Time.Timeout ->
       Printf.sprintf "timeout running command %s" (String.concat ~sep:" " x)
   in
-  (* Create the Gpt_function.t using the module M and the function fp. *)
-  (* Note: we use [Gpt_function.create_function] to create the function. *)
+  (* Create the Ochat_function.t using the module M and the function fp. *)
+  (* Note: we use [Ochat_function.create_function] to create the function. *)
   (* Note: we use [module M] to specify the module type for the function. *)
-  Gpt_function.create_function (module M) fp
+  Ochat_function.create_function (module M) fp
 ;;
 
-(*--- 4-c.  Agent tool → Gpt_function.t ------------------------------*)
+(*--- 4-c.  Agent tool → Ochat_function.t ------------------------------*)
 
-let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Gpt_function.t =
+(** [agent_fn ~ctx ~run_agent spec] wraps a nested ChatMarkdown
+    {e agent} into a {!Ochat_function.t}.  Calling the resulting function
+    is equivalent to starting a brand-new ChatMarkdown driver on the
+    referenced `*.chatmd` file.
+
+    Expected input
+    {[
+      { "input" : string }   (* Message forwarded to the agent *)
+    ]}
+
+    The helper runs [run_agent] – a higher-order callback supplied by
+    the caller – to avoid creating a circular dependency with
+    {!Chat_response.Driver}.  The child conversation inherits the
+    parent context [ctx] but not its message history.
+
+    Typical use-case: breaking down a complex user request into
+    multiple self-contained sub-tasks handled by specialised prompts. *)
+let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_function.t =
   let CM.{ name; description; agent; is_local } = agent_spec in
   (* pull components from the shared context *)
   let _net_unused = Ctx.net ctx in
   (* Interface definition for the agent tool – expects an object with a
        single string field "input". *)
-  let module M : Gpt_function.Def with type input = string = struct
+  let module M : Ochat_function.Def with type input = string = struct
     type input = string
 
     let name = name
@@ -219,6 +307,7 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Gpt_func
       ; document_url = None
       ; is_local = false
       ; cleanup_html = false
+      ; markdown = false
       }
     in
     (* Fetch the agent prompt (local or remote) *)
@@ -226,9 +315,22 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Gpt_func
     (* Delegate the heavy lifting to the provided [run_agent] callback. *)
     run_agent ~ctx prompt_xml [ CM.Basic basic_item ]
   in
-  Gpt_function.create_function (module M) run
+  Ochat_function.create_function (module M) run
 ;;
 
+(** [mcp_tool ~sw ~ctx decl] resolves a `{<tool mcp_server="…"/>}`
+      declaration.  It returns one {!Ochat_function.t} per advertised
+      remote function.
+
+      Implementation details:
+      – Remote metadata are fetched through {!Mcp_client.list_tools}.
+      – A TTL-LRU (5 min / 32 entries) caches the result per server.
+      – The helper registers a background fibre listening for
+        `notifications/tools/list_changed` and invalidates the cache on
+        demand.
+
+      When [decl.names] is [`Some list`] only the named tools are wrapped;
+      otherwise the full catalog is exposed. *)
 let mcp_tool
       ~sw
       ~ctx
@@ -285,7 +387,7 @@ let mcp_tool
              name
              ())
     in
-    Mcp_tool.gpt_function_of_remote_tool ~sw ~client ~strict tool_meta
+    Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict tool_meta
   in
   match names with
   | Some names -> List.map names ~f:get_tool
@@ -297,12 +399,41 @@ let mcp_tool
         | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
     in
     List.map tools_for_server ~f:(fun t ->
-      Mcp_tool.gpt_function_of_remote_tool ~sw ~client ~strict t)
+      Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict t)
 ;;
 
 (*--- 4-d.  Unified declaration → function mapping ------------------*)
+(** [of_declaration ~sw ~ctx ~run_agent decl] dispatches a single
+    ChatMarkdown [`<tool …/>`] declaration to its runtime
+    implementation.
 
-let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_function.t list =
+    The helper inspects the variant constructor of [decl] and returns
+    a list of {!type:Ochat_function.t}.  A single declaration can map to
+    several functions – for example an [`<tool mcp_server=…/>`]
+    element expands to the complete set of remote tools exposed by the
+    referenced MCP server.  The resulting list is therefore suitable
+    for direct consumption by {!Ochat_function.functions}.
+
+    Input invariants
+    • [sw] – parent {!Eio.Switch.t}.  Child fibres (e.g. MCP cache
+      listeners) are attached to this switch so that they terminate
+      cleanly when the caller’s scope ends.
+    • [ctx] – shared execution context.  Directory paths, network and
+      environment handles are forwarded to the lower-level helpers.
+    • [run_agent] – callback used to start a nested ChatMarkdown agent
+      when handling [`CM.Agent _`] declarations.  Passing the function
+      as an argument avoids a circular dependency with
+      {!module:Chat_response.Driver}.
+
+    Complexity: O(1) except for the MCP branch which may perform a
+    network round-trip when the server metadata is not cached.
+
+    @raise Failure if the declaration references an unknown built-in
+           tool name.
+*)
+let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
+  : Ochat_function.t list
+  =
   match decl with
   | CM.Builtin name ->
     (match name with
@@ -317,6 +448,10 @@ let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool) : Gpt_functi
        ]
      | "fork" -> [ Functions.fork ]
      | "odoc_search" -> [ Functions.odoc_search ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
+     | "index_markdown_docs" ->
+       [ Functions.index_markdown_docs ~env:(Ctx.env ctx) ~dir:(Ctx.dir ctx) ]
+     | "markdown_search" ->
+       [ Functions.markdown_search ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
      | other -> failwithf "Unknown built-in tool: %s" other ())
   | CM.Custom c -> [ custom_fn ~env:(Ctx.env ctx) c ]
   | CM.Agent agent_spec -> [ agent_fn ~ctx ~run_agent agent_spec ]

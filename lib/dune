@@ -1,14 +1,10 @@
 (library
  (name ocaml_parser)
  (modules ocaml_parser)
- (public_name chatgpt.ocaml_parser)
+ (public_name ochat.ocaml_parser)
  (libraries io ppxlib core vector_db openai owl re pcre)
  (preprocess
   (pps ppx_jane)))
-
-;; ---------------------------------------------------------------------------
-;; Puppeteer-like CDP bindings live in lib/puppeteer/ (own dune file)
-;; ---------------------------------------------------------------------------
 
 ;; ---------------------------------------------------------------------------
 ;; Logging library
@@ -16,14 +12,15 @@
 
 (library
  (name log)
- (public_name chatgpt.log)
+ (public_name ochat.log)
  (modules log)
  (libraries core core_unix eio jsonaf)
- (preprocess (pps ppx_jane)))
+ (preprocess
+  (pps ppx_jane)))
 
 (library
  (name bm25)
- (public_name chatgpt.bm25)
+ (public_name ochat.bm25)
  (modules bm25)
  (libraries core eio eio.unix bin_prot_utils_eio)
  (preprocess
@@ -31,7 +28,7 @@
 
 (library
  (name environment)
- (public_name chatgpt.environment)
+ (public_name ochat.environment)
  (modules environment)
  (libraries core)
  (preprocess
@@ -40,7 +37,7 @@
 (library
  (name tikitoken)
  (modules tikitoken)
- (public_name chatgpt.tikitoken)
+ (public_name ochat.tikitoken)
  (libraries io ppxlib core pcre eio eio_main eio.unix base64)
  (preprocess
   (pps ppx_jane)))
@@ -48,22 +45,22 @@
 (library
  (name doc)
  (modules doc)
- (public_name chatgpt.doc)
+ (public_name ochat.doc)
  (libraries io ppxlib core eio eio_main eio.unix)
  (preprocess
   (pps ppx_jane)))
 
 (library
  (name vector_db)
- (public_name chatgpt.vector_db)
+ (public_name ochat.vector_db)
  (modules vector_db)
- (libraries io ppxlib core bin_prot_utils_eio openai owl doc bm25)
+ (libraries ppxlib core bin_prot_utils_eio owl doc bm25)
  (preprocess
   (pps ppx_jane)))
 
 (library
  (name bin_prot_utils_eio)
- (public_name chatgpt.bin_prot_utils_eio)
+ (public_name ochat.bin_prot_utils_eio)
  (modules bin_prot_utils_eio)
  (libraries core core_unix.bigstring_unix eio eio.unix)
  (preprocess
@@ -72,7 +69,7 @@
 (library
  (name github)
  (modules github)
- (public_name chatgpt.github)
+ (public_name ochat.github)
  (libraries
   doc
   io
@@ -90,7 +87,7 @@
 
 (library
  (name mime)
- (public_name chatgpt.mime)
+ (public_name ochat.mime)
  (modules mime)
  (libraries core)
  (preprocess
@@ -98,13 +95,13 @@
 
 (library
  (name filter_file)
- (public_name chatgpt.filter_file)
+ (public_name ochat.filter_file)
  (modules filter_file)
  (libraries core))
 
 (library
  (name source)
- (public_name chatgpt.source)
+ (public_name ochat.source)
  (modules source)
  (libraries core)
  (preprocess
@@ -113,7 +110,7 @@
 (library
  (name template)
  (modules template)
- (public_name chatgpt.template)
+ (public_name ochat.template)
  (libraries core expect_test_helpers_core re2 angstrom)
  (inline_tests)
  (preprocess
@@ -121,7 +118,7 @@
 
 (library
  (name io)
- (public_name chatgpt.io)
+ (public_name ochat.io)
  (modules io)
  (libraries
   jsonaf
@@ -132,15 +129,13 @@
   eio_main
   eio.unix
   cohttp-eio
-  mirage-crypto-rng.unix
-  lwt
-  lwt.unix)
+  mirage-crypto-rng.unix)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
 (library
  (name merlin)
- (public_name chatgpt.merlin)
+ (public_name ochat.merlin)
  (modules merlin)
  (libraries jsonaf core eio eio.unix)
  (preprocess
@@ -148,30 +143,38 @@
 
 (library
  (name indexer)
- (public_name chatgpt.indexer)
+ (public_name ochat.indexer)
  (modules indexer)
  (libraries vector_db doc core openai tikitoken ocaml_parser)
  (preprocess
   (pps ppx_jane)))
 
 (library
- (name gpt_function)
- (public_name chatgpt.gpt_function)
- (modules gpt_function)
+ (name embed_service)
+ (public_name ochat.embed_service)
+ (modules embed_service)
+ (libraries core eio eio.unix openai tikitoken vector_db)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name ochat_function)
+ (public_name ochat.ochat_function)
+ (modules ochat_function)
  (libraries core openai jsonaf io)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
 (library
  (name chat_completion)
- (public_name chatgpt.chat_completion)
+ (public_name ochat.chat_completion)
  (modules chat_completion)
  (libraries
   core
   openai
   jsonaf
   io
-  gpt_function
+  ochat_function
   definitions
   functions
   chatmd
@@ -182,15 +185,15 @@
 
 (library
  (name definitions)
- (public_name chatgpt.definitions)
+ (public_name ochat.definitions)
  (modules definitions)
- (libraries core openai jsonaf io gpt_function)
+ (libraries core openai jsonaf io ochat_function)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
 (library
  (name functions)
- (public_name chatgpt.functions)
+ (public_name ochat.functions)
  (modules functions)
  (libraries
   core
@@ -199,12 +202,14 @@
   openai
   jsonaf
   io
-  gpt_function
+  ochat_function
   definitions
   vector_db
   bm25
   webpage_markdown
   indexer
+  markdown_indexer
+  md_index_catalog
   piaf
   package_index
   apply_patch)
@@ -214,7 +219,7 @@
 (library
  (name dune_describe)
  (modules dune_describe)
- (public_name chatgpt.dune_describe)
+ (public_name ochat.dune_describe)
  (libraries io jsonaf ppxlib csexp core eio eio_main eio.unix)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
@@ -222,7 +227,7 @@
 (library
  (name ttl_lru_cache)
  (modules ttl_lru_cache)
- (public_name chatgpt.ttl_lru_cache)
+ (public_name ochat.ttl_lru_cache)
  (libraries core lru_cache)
  (preprocess
   (pps ppx_jane -dont-apply=sexp_message)))
@@ -230,14 +235,14 @@
 (library
  (name lru_cache)
  (modules lru_cache Lru_cache_intf)
- (public_name chatgpt.lru_cache)
+ (public_name ochat.lru_cache)
  (libraries core)
  (preprocess
   (pps ppx_jane -dont-apply=sexp_message)))
 
 (library
  (name jsonaf_ext)
- (public_name chatgpt.jsonaf_ext)
+ (public_name ochat.jsonaf_ext)
  (modules jsonaf_ext)
  (libraries jsonaf core)
  (preprocess
@@ -245,7 +250,7 @@
 
 (library
  (name apply_patch)
- (public_name chatgpt.apply_patch)
+ (public_name ochat.apply_patch)
  (modules apply_patch)
  (libraries core uutf uunf)
  (preprocess
@@ -253,7 +258,7 @@
 
 (library
  (name notty_scroll_box)
- (public_name chatgpt.notty_scroll_box)
+ (public_name ochat.notty_scroll_box)
  (modules notty_scroll_box)
  (libraries core notty)
  (preprocess
@@ -265,15 +270,65 @@
 
 (library
  (name odoc_crawler)
- (public_name chatgpt.odoc_crawler)
+ (public_name ochat.odoc_crawler)
  (modules odoc_crawler)
-(libraries core eio eio.unix webpage_markdown log jsonaf)
+ (libraries core eio eio.unix webpage_markdown log jsonaf pcre path_glob)
+ (preprocess
+  (pps ppx_jane)))
+
+;; ---------------------------------------------------------------------------
+;; Markdown indexing libraries (scaffolding)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name markdown_crawler)
+ (public_name ochat.markdown_crawler)
+ (modules markdown_crawler)
+ (libraries core eio eio.unix webpage_markdown log jsonaf pcre path_glob)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name markdown_snippet)
+ (public_name ochat.markdown_snippet)
+ (modules markdown_snippet)
+ (libraries core doc tikitoken lru_cache)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name markdown_indexer)
+ (public_name ochat.markdown_indexer)
+ (modules markdown_indexer)
+ (libraries
+  log
+  core
+  eio
+  eio.unix
+  markdown_crawler
+  markdown_snippet
+  vector_db
+  bm25
+  io
+  openai
+  embed_service
+  owl
+  md_index_catalog
+  doc)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name md_index_catalog)
+ (public_name ochat.md_index_catalog)
+ (modules md_index_catalog)
+ (libraries core owl bin_prot_utils_eio)
  (preprocess
   (pps ppx_jane)))
 
 (library
  (name odoc_snippet)
- (public_name chatgpt.odoc_snippet)
+ (public_name ochat.odoc_snippet)
  (modules odoc_snippet)
  (libraries core doc tikitoken lru_cache)
  (preprocess
@@ -281,10 +336,11 @@
 
 (library
  (name odoc_indexer)
- (public_name chatgpt.odoc_indexer)
+ (public_name ochat.odoc_indexer)
  (modules odoc_indexer)
-;; merged libraries
-(libraries log
+ ;; merged libraries
+ (libraries
+  log
   core
   eio
   eio.unix
@@ -294,6 +350,7 @@
   bm25
   io
   openai
+  embed_service
   package_index
   doc)
  (preprocess
@@ -301,7 +358,7 @@
 
 (library
  (name package_index)
- (public_name chatgpt.package_index)
+ (public_name ochat.package_index)
  (modules package_index)
  (libraries core io openai owl bin_prot_utils_eio)
  (preprocess

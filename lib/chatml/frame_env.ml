@@ -1,5 +1,57 @@
 open Core
 
+(** Runtime environment for the ChatML interpreter/compiler.
+
+    A [frame] is a fixed-size array of [Obj.t] slots that stores the
+    run-time values of variables that are in scope simultaneously.
+    A stack of such frames – the [env] – represents nested scopes
+    produced by `let`, function calls and module boundaries while
+    executing ChatML programs.
+
+    The design goals are:
+    {ul
+    {- Constant-time random access by index (arrays).}
+    {- Compact, GC-friendly representation (uniform [Obj.t]).}
+    {- Extensibility – adding a new primitive type should be a
+       compile-time change (GADT ensures exhaustiveness).}}
+
+    The module exposes three layers of API:
+    {1 Slot descriptor}
+    A GADT [('a slot)] tags each position with the concrete OCaml type
+    stored there (e.g. [SInt] for [int]).  This information is erased at
+    run-time but retained at the type level so that reads/writes remain
+    type-safe without dynamic checks.
+
+    {1 Frame allocation}
+    {!alloc} and {!alloc_packed} create fresh frames from a layout
+    description.
+
+    {1 Slot access}
+    {!set} and {!get} are the *only* functions that use [Obj.magic].
+    Every other helper (e.g. {!get_int}) is a thin wrapper that
+    specialises the slot type.
+
+    {1 Variable descriptors}
+    [('a location)] describes where a variable lives at run-time: how
+    many frames to pop ([depth]), the index inside that frame, and the
+    slot kind.  {!load} and {!store} follow the chain of frames to read
+    or write a value.
+
+    {1 Example}
+    {[
+      open Chatml.Frame_env
+
+      let () =
+        (* Build a frame layout *)
+        let layout : _ slot list = [ SInt; SFloat ] in
+        let fr = alloc layout in
+        set_int fr 0 42;
+        set_float fr 1 3.14;
+        assert (get_int fr 0 = 42);
+        assert (Float.equal (get_float fr 1) 3.14)
+    ]}
+*)
+
 (**************************************************************************)
 (*  frame_env.ml – (GADT-based) environment implementation      *)
 (**************************************************************************)
@@ -9,6 +61,10 @@ open Core
 (*      of one location inside a frame.                                   *)
 (* --------------------------------------------------------------------- *)
 
+(** Slot descriptor – compile-time tag of the OCaml type stored in a
+    cell.  The constructor name also doubles as the *run-time layout*
+    information of the frame hence it must stay in sync with the way we
+    serialise/deserialise values in {!set} and {!get}. *)
 type _ slot =
   | SInt : int slot
   | SBool : bool slot
@@ -28,6 +84,10 @@ type _ slot =
    pass around a heterogeneous list of slots while still retaining the
    ability to pattern-match on the underlying constructor. *)
 
+(** Existential wrapper used when the precise type of the slot is not
+    known statically (e.g. when assembling heterogeneous lists).
+    All constructors have the same run-time representation so the
+    wrapper merely hides the type parameter. *)
 type packed_slot = Slot : 'a slot -> packed_slot [@@deriving sexp_of]
 
 (*  When necessary you can extend the slot list with, say, [SArray] or    *)
@@ -44,19 +104,33 @@ type packed_slot = Slot : 'a slot -> packed_slot [@@deriving sexp_of]
     booleans) and heap-allocated pointers inside the same structure
     while remaining fully compatible with the GC. *)
 
+(** Mutable block of storage for one scope.  Indexing is O(1).
+    The representation uses a uniform [Obj.t] array so that immediates
+    and heap pointers coexist. *)
 type frame = Obj.t array
 
-(** innermost frame is at the head of the list *)
+(** A stack of frames – innermost scope at the head. *)
 type env = frame list
 
 (* --------------------------------------------------------------------- *)
 (*  3.  Frame allocation                                                  *)
 (* --------------------------------------------------------------------- *)
 
+(** [alloc layout] returns a fresh frame whose size equals
+    [List.length layout].  All cells are initialised to the immediate
+    [0] which is a valid bit-pattern for every slot constructor.  The
+    caller is expected to populate each cell before reading it.
+
+    @param layout ordered list describing the *physical* layout of the
+           frame.  The order must match the indexing decisions taken by
+           the resolver.
+
+    Example allocating a 3-slot frame:
+    {[
+      let fr = alloc [ SInt; SBool; SString ] in
+      assert (Array.length fr = 3)
+    ]} *)
 let alloc (layout : _ slot list) : frame =
-  (* All cells are initialised to the immediate [0].  This is fine for    *)
-  (* any slot kind because we expect the compiler/resolver to write a     *)
-  (* value before it is ever read.                                        *)
   Array.create ~len:(List.length layout) (Obj.repr 0)
 ;;
 
@@ -74,6 +148,15 @@ let alloc (layout : _ slot list) : frame =
     (e.g. using custom C blocks or unboxed float arrays) this helper will
     need to be revisited – its implementation, not its interface. *)
 
+(** [alloc_packed layout] is the existentially-typed variant of {!alloc}
+    whose [layout] comes as a heterogeneous list of [packed_slot].  The
+    current implementation ignores the precise slot type because every
+    constructor maps to the same run-time representation.  This may
+    change in future versions once frames become more strongly typed.
+
+    It exists purely for ergonomic reasons in passes where the layout is
+    discovered dynamically (e.g. the resolver).
+*)
 let alloc_packed (layout : packed_slot list) : frame =
   Array.create ~len:(List.length layout) (Obj.repr 0)
 ;;
@@ -83,6 +166,11 @@ let alloc_packed (layout : packed_slot list) : frame =
 (* --------------------------------------------------------------------- *)
 
 (*  [set frame slot index v] writes [v] into the given frame.             *)
+(** [set frame slot idx v] writes [v] into [frame.(idx)].  The caller
+    must supply the same [slot] tag that was used during layout
+    construction; otherwise undefined behaviour may follow.  No bounds
+    checks are performed – the resolver is responsible for generating
+    valid indices. *)
 let set : type a. frame -> a slot -> int -> a -> unit =
   fun fr slot idx v ->
   match slot with
@@ -94,6 +182,10 @@ let set : type a. frame -> a slot -> int -> a -> unit =
 ;;
 
 (*  [get frame slot index] retrieves a value of the correct ML type.      *)
+(** [get frame slot idx] returns the value stored at [frame.(idx)] cast
+    back to the appropriate ML type as indicated by [slot].  The
+    function uses [Obj.magic] internally but remains type-safe at the
+    call-site thanks to the GADT witness. *)
 let get : type a. frame -> a slot -> int -> a =
   fun fr slot idx ->
   match slot with
@@ -115,7 +207,11 @@ let get : type a. frame -> a slot -> int -> a =
 (*  The following functions are *purely* convenience wrappers that make   *)
 (*  client code a little nicer to read.                                   *)
 
+(** Convenience wrappers that specialise {!get}/{!set} for each slot
+    constructor.  They remove the need to repeat the slot witness at
+    every call-site. *)
 let get_int fr idx = get fr SInt idx
+
 let set_int fr idx = set fr SInt idx
 let get_bool fr idx = get fr SBool idx
 let set_bool fr idx = set fr SBool idx
@@ -135,10 +231,11 @@ let set_obj fr idx = set fr SObj idx
 (*  type parameter ['a] is the value’s ML *representation* after type     *)
 (*  specialisation.                                                       *)
 
+(** Descriptor that pinpoints a variable's storage location at run-time. *)
 type 'a location =
-  { depth : int (** how many frames to pop *)
-  ; index : int (** position inside that frame *)
-  ; slot : 'a slot
+  { depth : int (** How many frames to pop before the variable's frame. *)
+  ; index : int (** Zero-based offset inside that frame. *)
+  ; slot : 'a slot (** Slot descriptor used to cast the value safely. *)
   }
 
 (*  The GADT slot already carries enough information to safely coerce     *)
@@ -149,17 +246,23 @@ type 'a location =
 (*  7.  Variable access along a chain of frames                            *)
 (* --------------------------------------------------------------------- *)
 
+(** [load loc env] traverses [env] by popping [loc.depth] frames and
+    returns the value stored at [loc.index] in that frame.
+
+    @raise Failure if the environment is shallower than [loc.depth]
+           (internal invariant violation). *)
 let rec load : type a. a location -> env -> a =
   fun loc env ->
   match env, loc.depth with
   | frame :: _, 0 -> get frame loc.slot loc.index
   | _ :: outer, d when d > 0 -> load { loc with depth = d - 1 } outer
-  | _ ->
-    (* An out-of-bounds access indicates a bug in the resolver – not a   *)
-    (* user program – so we raise immediately.                            *)
-    failwith "Frame stack underflow in Frame_env.load"
+  | _ -> failwith "Frame stack underflow in Frame_env.load"
 ;;
 
+(** [store loc env v] writes [v] to the slot referenced by [loc] inside
+    [env].  The traversal logic mirrors {!load}.
+
+    @raise Failure if the environment is shallower than [loc.depth]. *)
 let rec store : type a. a location -> env -> a -> unit =
   fun loc env v ->
   match env, loc.depth with

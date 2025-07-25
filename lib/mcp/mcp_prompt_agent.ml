@@ -20,6 +20,7 @@ let content_item_of_input (text : string) : CM.content_item =
     ; document_url = None
     ; is_local = false
     ; cleanup_html = false
+    ; markdown = false
     }
   in
   CM.Basic basic

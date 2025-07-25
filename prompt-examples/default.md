@@ -12,10 +12,10 @@
 
 <msg role="user">
 RAW|<context>|RAW
-Here is an overview of the important folders and files in the Ocaml Repo, called chatgpt, we are working on you should ignore everything else:
+Here is an overview of the important folders and files in the Ocaml Repo, called ochat, we are working on you should ignore everything else:
 
     /:
-    chatgpt.opam - opam file
+    ochat.opam - opam file
     dune-project - dune project file
     lib - folder where all the library modules are
     bin - folder where the project executable files are.
@@ -42,7 +42,7 @@ Here is an overview of the important folders and files in the Ocaml Repo, called
     functions.ml
     github.ml
     github.mli
-    gpt_function.ml
+    ochat_function.ml
     indexer.ml
     indexer.mli
     io.ml

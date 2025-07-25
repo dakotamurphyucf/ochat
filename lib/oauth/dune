@@ -4,7 +4,7 @@
 
 (library
  (name oauth2)
- (public_name chatgpt.oauth2)
+ (public_name ochat.oauth2)
  (modules
   oauth2_types
   oauth2_http

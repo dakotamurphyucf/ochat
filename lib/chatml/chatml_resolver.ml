@@ -1,6 +1,40 @@
-(* chatml_resolver.ml
-   -------------------
-   Lightweight lexical-address resolver for ChatML.
+(** {1 ChatML resolver — lexical-address resolution & slot selection}
+
+    This module performs the {e resolver} pass of the ChatML pipeline.
+    It walks the typed abstract syntax tree and rewrites it so that:
+
+    {ol
+    {- every source-level variable [`EVar "x"`] is replaced by a
+       concrete lexical address [`EVarLoc`] that names the frame depth
+       and slot index where the value will live at run-time;}
+    {- each binding site (lambda parameters, [let]-bindings, pattern
+       variables) receives a pre-computed [`Frame_env.slot`] witness.
+       The choice uses the principal type inferred by
+       {!Chatml_typechecker} when available and falls back to a simple
+       literal-based heuristic.  Specialising slots early allows the
+       evaluator to avoid run-time tag checks;}
+    {- consecutive non-recursive [let]s that belong to the same lexical
+       block are merged into a single [ELetBlockSlots] node so that the
+       evaluator only allocates {e one} frame for the whole block.}}
+
+    The transformation is purely structural – it does **not** change
+    the meaning of the program – but it equips subsequent passes with
+    enough information to allocate frames once and to access them in
+    O(1).
+
+    {2 High-level API}
+
+    • {!resolve_program} – turn a parsed & type-checked program into its
+      resolved form.  The function is idempotent: applying it twice is a
+      no-op.
+
+    • {!eval_program} – convenience helper that calls
+      {!resolve_program} and immediately interprets the result with
+      {!Chatml_lang.eval_program}.
+
+    Every other definition is an implementation detail and may change
+    without notice.  External callers should stick to the two functions
+    above.
 *)
 
 open Core
@@ -26,18 +60,15 @@ let pop_frame (stack : frame_map list ref) : unit =
   | [] -> failwith "Resolver: attempt to pop empty frame stack"
 ;;
 
-(* Safe wrapper: push a frame, execute [f], then pop in an ensure-clause so
-   that the stack remains well-balanced even if [f] raises. *)
-let with_frame (stack : frame_map list ref) (fm : frame_map) ~(f : unit -> 'a) : 'a =
-  push_frame stack fm;
-  try
-    let res = f () in
-    pop_frame stack;
-    res
-  with
-  | exn ->
-    pop_frame stack;
-    raise exn
+let _lookup (stack : frame_map list) (name : string) : slot_info option =
+  let rec aux depth = function
+    | [] -> None
+    | fm :: tl ->
+      (match Hashtbl.find fm name with
+       | Some info -> Some { info with index = info.index + depth }
+       | None -> aux (depth + 1) tl)
+  in
+  aux 0 stack
 ;;
 
 let lookup (stack : frame_map list) (name : string) : L.var_loc option =
@@ -432,8 +463,31 @@ let rec resolve_stmt (stack : frame_map list ref) (snode : L.stmt L.node) : L.st
 ;;
 
 (* -------------------------------------------------------------------- *)
-(*  Public entry-point                                                   *)
+(*  Public entry-points                                                  *)
 (* -------------------------------------------------------------------- *)
+
+(** [resolve_program prog] returns a new program where every variable
+    reference and binding is annotated with its precise run-time
+    location.
+
+    Pre-conditions:
+    {ul
+    {- [prog] {b must} have been accepted by
+       {!Chatml_typechecker.type_check_program} so that the principal
+       type table is populated;}
+    {- the span information carried by each node is intact.}}
+
+    Post-conditions:
+    {ul
+    {- All occurrences of [`EVar] are replaced by [`EVarLoc];}
+    {- Every lambda, let-block, let-rec and match-case carries a list of
+       [`Frame_env.packed_slot] that mirrors its physical layout;}
+    {- The returned value is alpha-equivalent to the input and shares no
+       mutable state with it.}}
+
+    The transformation is idempotent.  Applying it on an already
+    resolved program yields the exact same AST.
+  *)
 
 let resolve_program (prog : L.program) : L.program =
   (* 1.  Obtain a *pure* span→type lookup closure for this very program. *)
@@ -450,10 +504,17 @@ let resolve_program (prog : L.program) : L.program =
   stmts', snd prog
 ;;
 
+(** [eval_program env prog] resolves [prog] with {!resolve_program} and
+    immediately interprets it in [env] using
+    {!Chatml_lang.eval_program}.  It is equivalent to
+
+    {[ Chatml_lang.eval_program env (resolve_program prog) ]}
+
+    but avoids constructing the intermediate value at the call-site.
+    Use this helper when you do not need to inspect the resolved AST. *)
+
 let eval_program (env : L.env) (prog : L.program) : unit =
   let program = resolve_program prog in
-  (* print_s [%message "Resolved program" (program : L.program)]; *)
-  (* 1.  Resolve the program. *)
-  (* 2.  Execute it in the given environment. *)
+  (* 1) Resolve the program; 2) Execute it in the given environment. *)
   L.eval_program env program
 ;;

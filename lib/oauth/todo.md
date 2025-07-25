@@ -136,7 +136,7 @@ PHASE 1 Client-side completeness (2 PRs)
 
 2-A  Cryptographically strong RNG
 ---------------------------------
-2. Add *mirage-crypto-rng* to chatgpt.opam (no C-stubs).  
+2. Add *mirage-crypto-rng* to ochat.opam (no C-stubs).  
 3. oauth2_pkce.ml – swap `Random` with `Mirage_crypto_rng.generate` (32 bytes).
 
 3-A  Default endpoint fallback
@@ -186,7 +186,7 @@ PHASE 3 Dynamic client registration (client & server) (1 PR)
 2. oauth2_manager.obtain for PKCE path:  
    • If metadata.registration_endpoint present AND we have no cached client_id,
      POST software statement → persist client_id in
-     `~/.config/ocamlgpt/registered.json`.  
+     `~/.config/ocamlochat/registered.json`.  
 3. oauth2_server.ml – unprotected `/register` that returns fresh
    `{client_id, client_secret:null}`.
 

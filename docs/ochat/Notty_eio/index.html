@@ -1,0 +1,18 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Notty_eio (ochat.Notty_eio)</title><meta charset="utf-8"/><link rel="stylesheet" href="../../odoc.support/odoc.css"/><meta name="generator" content="odoc 3.0.0"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><script src="../../odoc.support/highlight.pack.js"></script><script>hljs.initHighlightingOnLoad();</script><script>let base_url = '../../';
+let search_urls = ['../db.js','../../sherlodoc.js'];
+</script><script src="../../odoc.support/odoc_search.js" defer="defer"></script></head><body class="odoc"><nav class="odoc-nav"><a href="../index.html">Up</a> – <a href="../../index.html">Index</a> &#x00BB; <a href="../index.html">ochat</a> &#x00BB; Notty_eio</nav><div class="odoc-search"><div class="search-inner"><input class="search-bar" placeholder="🔎 Type '/' to search..."/><div class="search-snake"></div><div class="search-result"></div></div></div><header class="odoc-preamble"><h1>Module <code><span>Notty_eio</span></code></h1><p>Notty ⟷ Eio glue code.</p><p>This module provides a thin wrapper around <code>Notty_unix.Term</code> that plugs it into Eio’s structured-concurrency runtime. It eliminates the need for explicit `Unix` file-descriptor handling and signal management when writing interactive text-user-interface (TUI) programs in Eio.</p><p>The API mirrors <code>Notty_unix.Term</code> closely but exposes it as a single abstract type <a href="Term/index.html#type-t"><code>Term.t</code></a> plus a handful of imperative helpers that operate on a running terminal session.</p></header><div class="odoc-tocs"><nav class="odoc-toc odoc-local-toc"><ul><li><a href="#quick-start">Quick start</a></li></ul></nav></div><div class="odoc-content"><h2 id="quick-start"><a href="#quick-start" class="anchor"></a>Quick start</h2><pre class="language-ocaml"><code>  open Eio_main
+
+  let () =
+    Eio_main.run @@ fun env -&gt;
+    let stdin  = Eio.Stdenv.stdin  env in
+    let stdout = Eio.Stdenv.stdout env in
+
+    Notty_eio.Term.run
+      ~input:stdin ~output:stdout
+      ~on_event:(function
+        | `Key (`ASCII 'q', _) | `End -&gt; raise Exit
+        | `Resize | `Key _ | `Mouse _ -&gt; ())
+      (fun term -&gt;
+         Term.image term (Notty.I.string Notty.A.empty &quot;Hello world&quot;);
+         Eio.Fiber.await_cancel ())</code></pre><p>Press <b>q</b> to exit. Window resizes are handled automatically.</p><div class="odoc-spec"><div class="spec module anchored" id="module-Term"><a href="#module-Term" class="anchor"></a><code><span><span class="keyword">module</span> <a href="Term/index.html">Term</a></span><span> : <span class="keyword">sig</span> ... <span class="keyword">end</span></span></code></div><div class="spec-doc"><p>Full-screen terminal session bound to an Eio <code>Eio.Switch.t</code>.</p></div></div></div></body></html>

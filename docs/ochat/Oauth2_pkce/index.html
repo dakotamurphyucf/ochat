@@ -1,0 +1,29 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Oauth2_pkce (ochat.Oauth2_pkce)</title><meta charset="utf-8"/><link rel="stylesheet" href="../../odoc.support/odoc.css"/><meta name="generator" content="odoc 3.0.0"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><script src="../../odoc.support/highlight.pack.js"></script><script>hljs.initHighlightingOnLoad();</script><script>let base_url = '../../';
+let search_urls = ['../db.js','../../sherlodoc.js'];
+</script><script src="../../odoc.support/odoc_search.js" defer="defer"></script></head><body class="odoc"><nav class="odoc-nav"><a href="../index.html">Up</a> – <a href="../../index.html">Index</a> &#x00BB; <a href="../index.html">ochat</a> &#x00BB; Oauth2_pkce</nav><div class="odoc-search"><div class="search-inner"><input class="search-bar" placeholder="🔎 Type '/' to search..."/><div class="search-snake"></div><div class="search-result"></div></div></div><header class="odoc-preamble"><h1>Module <code><span>Oauth2_pkce</span></code></h1></header><div class="odoc-content"><p>Proof Key for Code Exchange (PKCE) helper utilities.</p><p>This module generates the *code-verifier* / *code-challenge* pair used by the <em>OAuth 2.0 Authorization Code flow with PKCE</em> (<a href="https://datatracker.ietf.org/doc/html/rfc7636">RFC&amp;nbsp;7636</a>). All outputs are <b>base64url-encoded</b> (URL-safe alphabet) without trailing <code>=</code> padding, ready for use in HTTP query parameters or JSON request bodies.</p><p>Typical usage – public client authenticating a user in a browser:</p><pre class="language-ocaml"><code>  let verifier  = Oauth2_pkce.gen_code_verifier () in
+  let challenge = Oauth2_pkce.challenge_of_verifier verifier in
+
+  (* 1. Redirect the user-agent to the authorisation endpoint *)
+  let auth_uri =
+    Uri.add_query_params'
+      (Uri.of_string authorization_endpoint)
+      [ &quot;response_type&quot;, &quot;code&quot;;
+        &quot;client_id&quot;,      client_id;
+        &quot;code_challenge&quot;, challenge;
+        &quot;code_challenge_method&quot;, &quot;S256&quot; ]
+  in
+  Browser.open_uri auth_uri;
+
+  (* 2. After the user grants consent, the server redirects back with
+     &quot;code=&lt;auth_code&gt;&quot;.  Exchange it for a token: *)
+  let params =
+    [ &quot;grant_type&quot;,    &quot;authorization_code&quot;;
+      &quot;code&quot;,          auth_code;
+      &quot;client_id&quot;,     client_id;
+      &quot;code_verifier&quot;, verifier ]
+  in
+  Oauth2_http.post_form ~env ~sw token_endpoint params
+  |&gt; Result.map ~f:Oauth2_types.Token.t_of_jsonaf</code></pre><div class="odoc-spec"><div class="spec value anchored" id="val-gen_code_verifier"><a href="#val-gen_code_verifier" class="anchor"></a><code><span><span class="keyword">val</span> gen_code_verifier : <span>unit <span class="arrow">&#45;&gt;</span></span> string</span></code></div></div><p><code>gen_code_verifier ()</code> creates a fresh, cryptographically-random *code-verifier*.</p><p>Invariants:</p><ul><li><p>The verifier follows RFC&amp;nbsp;7636 §4.1 – it is base64url-encoded with no <code>=</code> padding, using the URI-safe alphabet </p><p>_</p></li></ul><p>}</p><p>.</p><ul><li>Length is 43 or 44 characters, satisfying the mandated <code>43&amp;nbsp;≤&amp;nbsp;length&amp;nbsp;≤&amp;nbsp;128</code> interval.</li></ul><p>The function relies on <code>Mirage_crypto_rng_unix.use_default</code> to ensure a properly seeded CSPRNG and generates <em>32 bytes</em> of entropy, which is more than sufficient for the maximum entropy allowed by the standard.</p><ul class="at-tags"><li class="raises"><span class="at-tag">raises</span> <code>Mirage_crypto_rng.Unseeded_generator</code> <p>if the RNG has not been initialised and cannot be seeded automatically.</p></li></ul><div class="odoc-spec"><div class="spec value anchored" id="val-challenge_of_verifier"><a href="#val-challenge_of_verifier" class="anchor"></a><code><span><span class="keyword">val</span> challenge_of_verifier : <span>string <span class="arrow">&#45;&gt;</span></span> string</span></code></div></div><p><code>challenge_of_verifier v</code> computes the S256 *code-challenge* corresponding to the *code-verifier* <code>v</code>.</p><p>The function applies SHA-256 over <code>v</code> and base64url-encodes the raw digest without padding. It therefore implements the &quot;S256&quot; method defined in RFC&amp;nbsp;7636 §4.2.</p><ul class="at-tags"><li class="parameter"><span class="at-tag">parameter</span> <span class="value">verifier</span> <p>The output of <a href="#val-gen_code_verifier"><code>gen_code_verifier</code></a> or an externally supplied string that already satisfies the PKCE verifier requirements.</p></li></ul><ul class="at-tags"><li class="returns"><span class="at-tag">returns</span> <p>A 43-character base64url string suitable for the <code>code_challenge</code> request parameter.</p></li></ul><p>Example: creating a verifier / challenge pair</p><pre class="language-ocaml"><code>  let v = Oauth2_pkce.gen_code_verifier () in
+  let c = Oauth2_pkce.challenge_of_verifier v in
+  (* pass [c] as &quot;code_challenge&quot;, later send [v] as &quot;code_verifier&quot; *)</code></pre></div></body></html>

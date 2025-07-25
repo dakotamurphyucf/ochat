@@ -1,11 +1,57 @@
+(** Normal-mode key handling for the Ochat terminal UI.
+
+    The {!Controller_normal} module implements the subset of the Vim-inspired
+    key bindings that operate while the input area is in {e Normal} editor
+    mode.  It receives raw {!Notty.Unescape.event} values, mutates the
+    in-memory {!Chat_tui.Model.t} accordingly, and returns a
+    {!Controller_types.reaction} telling the caller whether a screen refresh
+    is required or additional action (e.g.
+    {!Controller_types.Submit_input}) should be triggered.
+
+    The module has {b no side-effects} besides changing the fields inside the
+    mutable model – network requests, file IO, or long-running function calls
+    are all handled elsewhere.  Keeping the logic pure makes unit testing
+    easier and ensures that the controller focuses exclusively on
+    user-interaction concerns such as cursor movement, scrolling and text
+    editing.
+
+    {1 Implementation overview}
+
+    • High-level public API consists of a single entry point
+      {!handle_key_normal} – every other value is an implementation detail.
+
+    • Helpers like {!move_cursor_vertically}, {!skip_space_backward} and
+      {!skip_word_forward} encapsulate reusable cursor-navigation logic.
+
+    • Two reference cells, {!val:pending_g} and {!val:pending_dd}, keep track
+      of multi-keystroke commands ("gg" and "dd").
+
+    All byte indices refer to the UTF-8 encoded {!Model.input_line}.  The
+    controller therefore treats the string as a raw byte sequence – full
+    Unicode support is postponed until a later milestone (see issue #142).
+*)
+
 open Core
 module UC = Stdlib.Uchar
 module Scroll_box = Notty_scroll_box
 open Controller_types
 (* -------------------------------------------------------------------- *)
-(* Utility helpers – shared line_bounds moved to Controller_shared.          *)
+(* Utility helpers – shared [line_bounds] lives in {!Controller_shared}.   *)
 (* -------------------------------------------------------------------- *)
 
+(** [move_cursor_vertically model ~dir] moves the caret [dir] visual lines
+      up (`dir = -1`) or down (`dir = 1`).  The function keeps the {i visual
+      column} constant where possible, i.e.
+
+      - It first determines the current column by subtracting the byte index
+        of the line start from {!Model.cursor_pos}.
+      - It then seeks the first byte of the target line in the requested
+        direction using {!Controller_shared.line_bounds}.
+      - Finally the caret is placed at the original column or, if the target
+        line is shorter, at its end‐of‐line.
+
+      The operation is no-op when the cursor is already on the first or last
+      line of the input. *)
 let move_cursor_vertically model ~dir =
   let input = Model.input_line model in
   let pos = Model.cursor_pos model in
@@ -51,6 +97,10 @@ let move_cursor_vertically model ~dir =
 
 (* Word navigation helpers (adapted from Insert-mode implementation) *)
 
+(** [skip_space_backward s j] returns the index of the first non-blank
+    character to the {b left} of [j].  Consecutive runs of whitespace are
+    skipped first, followed by the preceding word.  The helper mimics the
+    behaviour of Vim's "b" command and is used by {!handle_key_normal}. *)
 let skip_space_backward s j =
   let rec skip_space i =
     if i <= 0
@@ -70,6 +120,11 @@ let skip_space_backward s j =
   skip_word i
 ;;
 
+(** [skip_word_forward s len j] returns the index after the next word to
+      the {b right} of [j] in [s].  Whitespace after the word is consumed as
+      well so that the returned position corresponds to the first printable
+      character of the following word (or [len] if at the end of the
+      string).  Implements the semantics of Vim's "w" motion. *)
 let skip_word_forward s len j =
   let rec skip_non_space i =
     if i >= len
@@ -93,9 +148,32 @@ let skip_word_forward s len j =
 (* Main Normal-mode key-handler                                           *)
 (* -------------------------------------------------------------------- *)
 
+(** State flags for multi-key commands.
+
+    • [pending_g] – set after receiving a solitary 'g'.  A subsequent 'g'
+      within the same [handle_key_normal] invocation triggers the "gg" motion
+      (scroll to top).  Any other key clears the flag.
+
+    • [pending_dd] – set after a single 'd'.  A second 'd' performs a line
+      deletion; anything else resets the flag. *)
+
 let pending_g = ref false
 let pending_dd = ref false
 
+(** [handle_key_normal ~model ~term ev] processes the Normal-mode key event
+      [ev] and mutates [model] accordingly.
+
+      The function recognises a small subset of common Vim commands that are
+      useful inside a chat prompt – cursor motions, word navigation, line
+      editing commands, and scrolling.  Whenever the resulting state change
+      affects what is displayed on screen, the function returns {!Redraw} so
+      that the caller can re-render the UI.  Some events need to propagate
+      further to the main application (e.g. ':' opens command-line mode),
+      which is signalled via other variants of {!reaction}.
+
+      The exact mapping is intentionally kept minimal and intuitive rather
+      than striving for full Vim parity – more specialised or rarely used
+      motions are left to future extensions. *)
 let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   match ev with
   (* -------------------------------------------------------------- *)

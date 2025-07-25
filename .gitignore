@@ -9,7 +9,7 @@ out.txt
 raw-openai-chat-streaming-response.txt
 .vscode/
 prompts/
-chatgpt_history/
+ochat_history/
 raw-openai-streaming-response.txt
 cache.bin
 src/
@@ -21,3 +21,8 @@ gmail
 sherlodoc.marshal
 .odoc_index/
 run.log
+raw-openai-response.txt
+docs_
+.md_index/
+script/
+out/

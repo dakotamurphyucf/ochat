@@ -1,26 +1,70 @@
-(** Model Context Protocol – HTTP transport implementation
+(** HTTP/​HTTPS transport for the *Model-Context-Protocol*.
 
-    This module provides a concrete implementation of the
+    Implements {!module-type:Mcp_transport_interface.TRANSPORT} on top of
+    [Piaf], [Eio] and the “Streamable-HTTP” flavour of the MCP wire
+    protocol (revision&nbsp;2025-03-26).
 
-      [Mcp_transport_interface.TRANSPORT]
+    {1 Supported content-types}
 
-    signature using the Streamable-HTTP transport defined by the MCP
-    specification (2025-03-26).
+    • [application/json] – the response body is parsed once and all JSON
+      values are enqueued immediately.  This is used for *single-shot*
+      requests such as ["model.list"].
 
-    The implementation supports both classic JSON HTTP responses and
-    Server-Sent Events (SSE) streams per the 2025-03-26 Streamable-HTTP
-    transport:
+    • [text/event-stream] – the body is treated as a **Server-Sent
+      Events (SSE)** stream.  A dedicated fibre decodes events line-by-line
+      and enqueues each JSON payload as soon as it arrives.  The
+      transport drops the special “[DONE]” message used by some servers
+      to mark the end of a stream.
 
-    • If the response is `Content-Type: application/json` we parse the
-      body once and enqueue the resulting JSON value(s).
+    {1  Authentication workflow}
 
-    • If the response is `Content-Type: text/event-stream` we spin up a
-      background fibre that decodes SSE events and enqueues each JSON
-      payload as it arrives.
+    When [?auth] (default) is enabled, [connect] performs a best-effort
+    OAuth&nbsp;2 flow:
 
-    Session handling – when the server returns the `Mcp-Session-Id`
-    header it is stored and automatically included in all subsequent
-    requests. This fulfils the remaining requirements for Phase-2 step
-    2 of the client roadmap. *)
+    {ol
+    {- Credentials are located in the following order of precedence:
+       explicit URI query parameters –
+       environment variables –
+       client-store –
+       dynamic client registration.}
+    {- Once credentials are obtained, the transport fetches an access
+       token from the issuer (= scheme + authority of the endpoint
+       URI) and adds “Authorization: Bearer  …” headers to every
+       request.}}
+
+    The helper functions live in {!module:Oauth2_manager} and
+    {!module:Oauth2_http}.  Failures are logged to [stderr] and the
+    connection falls back to anonymous mode.
+
+    {1  Session persistence}
+
+    The server can return an *Mcp-Session-Id* header.  The transport stores
+    the first value it sees and includes it in all subsequent requests so
+    that the server can associate a series of HTTP requests with the same
+    logical session.
+
+    {1  URI schemes}
+
+    • “http:” / “mcp+http:”  —  clear-text HTTP
+    • “https:” / “mcp+https:” —  TLS-encrypted HTTP/2 or HTTP/1.1 (as
+      negotiated by Piaf)
+
+    Any other scheme triggers [Invalid_argument] in [connect].
+
+    {1  Concurrency semantics}
+
+    The implementation is **fully concurrent**:
+    • [send] is non-blocking – the JSON payload is handed to a background
+      fibre that performs the actual POST so that callers do not stall.
+    • [recv] blocks until a value is available.  Multiple fibres can call
+      [recv] concurrently; they will dequeue in FIFO order.
+
+    {1  Exception   [Connection_closed]}
+
+    Raised by any operation once the remote peer closed the TCP
+    connection or after [close] has been called.  In that state
+    [is_closed] is [true] and further [send]/[recv] invocations re-raise
+    the exception.
+    *)
 
 include Mcp_transport_interface.TRANSPORT

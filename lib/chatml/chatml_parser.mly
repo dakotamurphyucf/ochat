@@ -8,6 +8,70 @@
 *)
 (***************************************************************************)
 
+(** ChatML syntax parser.
+
+    This Menhir grammar turns the token stream produced by
+    {!module:Chatml_lexer} into the *abstract syntax tree* (AST)
+    defined in {!module:Chatml_lang}.  The syntax is deliberately
+    ML-flavoured so that anyone familiar with OCaml can skim through
+    ChatML without feeling lost.
+
+    {1 Entry points}
+
+    Unless you pass [`--infer`] to Menhir, the generator exposes two
+    families of entry points:
+
+    • **Monolithic** API – [program]
+
+      {[ val program
+           : (Lexing.lexbuf -> token)  (** lexer function               *)
+          -> Lexing.lexbuf              (** mutable input buffer         *)
+          -> Chatml_lang.stmt_node list (** resulting top-level AST      *) ]}
+
+      This is the traditional, non-incremental interface: it lexes and
+      parses the whole file in one go, raising {!MenhirLib.Error} when
+      it encounters a syntax error.
+
+    • **Incremental** API – the sub-module {!module:Incremental}
+      generated thanks to the [`--table`] flag (see the [dune]
+      stanza).  It exposes persistent LR automaton checkpoints that
+      can be fed tokens one by one, which is invaluable for editors
+      and REPLs needing fine-grained error recovery.  Example:
+
+      {[
+        let supplier = MenhirLib.LexerUtil.make_supplier Chatml_lexer.token lexbuf in
+        let checkpoint = Chatml_parser.Incremental.program lexbuf.lex_curr_p in
+        MenhirLib.Engine.stream_checkpoint checkpoint supplier
+      ]}
+
+    {1 Grammar highlights}
+
+    * Arithmetic and comparison operators are desugared into
+      applications of the corresponding *variable* (e.g. [a + b] ↦
+      `EApp (EVar "+", [a; b])`).  This facilitates overloading at
+      the *resolver* phase.
+
+    * Record and array operations (`{ a = 1 }`, `arr[i] <- x`, …) are
+      encoded explicitly into the AST instead of via sugar so that the
+      evaluator can pattern-match directly on dedicated constructors.
+
+    {1 Error handling}
+
+    The grammar relies on Menhir's default error strategy which raises
+    [Failure _] (wrapping [MenhirLib.Error]) as soon as it cannot shift
+    or reduce.  Downstream code should either:
+
+    1. Catch the exception when using the monolithic API; or
+    2. Use the incremental API that returns checkpoints you can inspect
+       and resume after inserting *synthetic* tokens.
+
+    {1 Limitations}
+
+    • Unicode identifiers are not supported yet – this is inherited
+      from the lexer.
+    • No layout-sensitive syntax: everything has to be delimited by
+      keywords or punctuation.
+*)
 %{
 
 open Chatml_lang

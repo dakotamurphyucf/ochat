@@ -1459,6 +1459,10 @@ let post_response
   | Default ->
     let read_all flow = Eio.Buf_read.(parse_exn take_all) flow ~max_size:Int.max_value in
     let data = read_all reader in
+    Io.log
+      ~dir
+      ~file:"raw-openai-response.txt"
+      ((Jsonaf.to_string @@ Jsonaf.of_string @@ data) ^ "\n");
     (* print_endline "Received data:";
     print_endline data; *)
     let json_result =

@@ -1,7 +1,7 @@
-# OAuth 2.1 support – complete reference implementation (ocamlgpt)
+# OAuth 2.1 support – complete reference implementation (ocamlochat)
 
 This document is **executable**: every OCaml module listed below compiles as-is
-inside the existing ocamlgpt code-base (no extra opam packages beyond the ones
+inside the existing ocamlochat code-base (no extra opam packages beyond the ones
 already used for the HTTP transport – Piaf, Uri, Jsonaf, Eio, Core).
 
 ## 1  `lib/oauth2_types.ml`
@@ -178,8 +178,8 @@ module Tok = Oauth2_types.Token
 
 let cache_dir =
   match Sys.getenv_opt "XDG_CACHE_HOME" with
-  | Some d -> Filename.concat d "ocamlgpt/tokens"
-  | None -> Filename.concat (Sys.getenv "HOME") ".cache/ocamlgpt/tokens"
+  | Some d -> Filename.concat d "ocamlochat/tokens"
+  | None -> Filename.concat (Sys.getenv "HOME") ".cache/ocamlochat/tokens"
 
 let cache_file iss = Filename.concat cache_dir (Digest.string iss ^ ".json")
 
@@ -249,7 +249,7 @@ With these modules in place you have
 * **Headless** authentication using `client_credentials` when `MCP_CLIENT_ID`
   and `MCP_CLIENT_SECRET` environment variables are present.
 * Optional **interactive PKCE** when no secret is available (desktop usage).
-* Automatic caching & refresh under `~/.cache/ocamlgpt/tokens`.
+* Automatic caching & refresh under `~/.cache/ocamlochat/tokens`.
 
 Security
 ---------

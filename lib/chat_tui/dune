@@ -1,6 +1,6 @@
 (library
  (name chat_tui)
- (public_name chatgpt.chat_tui)
+ (public_name ochat.chat_tui)
  (modules
   util
   types
@@ -28,6 +28,6 @@
   io
   chat_response
   chatmd
-  chatgpt.notty_scroll_box)
+  ochat.notty_scroll_box)
  (preprocess
   (pps ppx_jane)))

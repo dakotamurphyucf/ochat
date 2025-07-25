@@ -298,7 +298,7 @@ let set_up_auth ~env ~sw ~issuer uri =
                   ~alphabet:Base64.uri_safe_alphabet
                   rand_str
               in
-              let client_id = "ocamlgpt-" ^ b64 in
+              let client_id = "ocamlochat-" ^ b64 in
               let cred_rec : Oauth2_client_store.Credential.t =
                 { client_id; client_secret = None }
               in

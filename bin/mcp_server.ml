@@ -1,3 +1,40 @@
+(** MCP server – command-line wrapper around {!module:Mcp_server_core}.
+
+    The binary initialises a fresh in-memory registry, registers a handful
+    of *built-in* tools (such as {!val:setup_tool_echo} and the wrappers
+    around {!module:Definitions.Apply_patch}, {!module:Definitions.Read_directory}
+    and friends) and then exposes the registry either over **stdio** (default)
+    or **HTTP** when the [--http] flag is supplied.
+
+    Additional *.chatmd* files located in the prompts directory are scanned
+    at start-up and on a lightweight polling loop, turning each prompt into
+    both a user-visible entry and an agent-backed tool.
+
+    {1 CLI flags}
+
+    • [--http PORT] – bind a Streamable HTTP endpoint on [PORT] instead of
+      stdio.  The service supports JSON-RPC 2.0 over HTTP POST and
+      Server-Sent Events for push notifications.  See
+      {!module:Mcp_server_http} for details.
+
+    • [--require-auth] – enable OAuth 2.1 Bearer-token validation.  When the
+      flag is omitted the server skips authentication (useful during local
+      development and automated tests).
+
+    • [--client-id], [--client-secret] – static client credentials accepted
+      by the token endpoint when [--require-auth] is active.
+
+    {1 Usage}
+
+    {[
+      # run in stdio mode (useful when the parent process communicates over pipes)
+      dune exec bin/mcp_server.exe
+
+      # expose an HTTP API on port 8080
+      dune exec bin/mcp_server.exe --http 8080
+    ]}
+*)
+
 open Core
 
 (* Seed the global PRNG once at start-up so that session identifiers and other
@@ -36,6 +73,13 @@ let () =
   Arg.parse speclist (fun _ -> ()) "mcp_server [--http PORT]"
 ;;
 
+(** [setup_tool_echo core] registers a trivial tool named ["echo"].
+
+    The tool specification declares a single required parameter
+    {[ {"text" : string} ]}.  At runtime the handler returns the same
+    string wrapped in a JSON value.  The helper is intended purely as a
+    smoke-test for the request/response plumbing and as a reference
+    implementation when writing new tools.  *)
 let setup_tool_echo (core : Mcp_server_core.t) : unit =
   let input_schema =
     Jsonaf.of_string
@@ -56,9 +100,16 @@ let setup_tool_echo (core : Mcp_server_core.t) : unit =
 ;;
 
 (* --------------------------------------------------------------------- *)
-(* Built-in ocamlgpt tools exposed over MCP                                *)
+(* Built-in ocamlochat tools exposed over MCP                                *)
 (* --------------------------------------------------------------------- *)
 
+(** [register_builtin_apply_patch core ~dir] exposes the
+    {!module:Definitions.Apply_patch} helper as an MCP tool named
+    ["apply_patch"].  The heavy lifting is delegated to
+    {!module:Functions.apply_patch}; this wrapper only converts between the
+    structured argument object and the plain text expected by the library
+    function.  [dir] represents the process working directory so that
+    relative paths are resolved correctly. *)
 let register_builtin_apply_patch (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t) : unit =
   (* Pull metadata from the existing [Definitions] module so that we keep a
      single source of truth. *)
@@ -67,44 +118,49 @@ let register_builtin_apply_patch (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t
     { name = "apply_patch"; description = Def.description; input_schema = Def.parameters }
   in
   (* Re-use the already implemented helper residing in [Functions]. *)
-  let gpt_fn = Functions.apply_patch ~dir in
+  let ochat_fn = Functions.apply_patch ~dir in
   let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
     match args with
     | `Object kvs ->
       (match List.Assoc.find kvs ~equal:String.equal "input" with
        | Some (`String patch_text) ->
          let input_json = `Object [ "input", `String patch_text ] in
-         Ok (`String (gpt_fn.run (Jsonaf.to_string input_json)))
+         Ok (`String (ochat_fn.run (Jsonaf.to_string input_json)))
        | _ -> Error "apply_patch expects field 'input' (string)")
     | _ -> Error "apply_patch arguments must be object"
   in
   Mcp_server_core.register_tool core spec handler
 ;;
 
+(** [register_builtin_read_dir core ~dir] installs the ["read_dir"] tool
+    backed by {!module:Functions.read_dir}.  The tool expects a single field
+    [path] and returns a JSON array with the directory listing.  I/O errors
+    are surfaced as [`Error _`] results which the router translates to a
+    JSON-RPC exception. *)
 let register_builtin_read_dir (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t) : unit =
   let module Def = Definitions.Read_directory in
   let spec : JT.Tool.t =
     { name = "read_dir"; description = Def.description; input_schema = Def.parameters }
   in
-  let gpt_fn = Functions.read_dir ~dir in
+  let ochat_fn = Functions.read_dir ~dir in
   let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
     match args with
     | `Object kvs ->
       (match List.Assoc.find kvs ~equal:String.equal "path" with
        | Some (`String path) ->
          let input_json = `Object [ "path", `String path ] in
-         Ok (`String (gpt_fn.run (Jsonaf.to_string input_json)))
+         Ok (`String (ochat_fn.run (Jsonaf.to_string input_json)))
        | _ -> Error "read_dir expects field 'path' (string)")
     | _ -> Error "read_dir arguments must be object"
   in
   Mcp_server_core.register_tool core spec handler
 ;;
 
+(** [register_builtin_get_contents core ~dir] registers the
+    ["get_contents"] tool (kept for backward-compatibility with the older
+    name ["read_file"]).  The handler reads the file specified by the `file`
+    parameter and returns its contents verbatim. *)
 let register_builtin_get_contents (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t) : unit =
-  (* The existing definition is named [Get_contents] and its [name] is
-     "read_file", but on the chatmd side the built-in is exposed under the
-     friendlier name [get_contents].  We keep that external name for
-     consistency while still re-using the JSON schema from the definition. *)
   let module Def = Definitions.Get_contents in
   let spec : JT.Tool.t =
     { name = "get_contents"
@@ -112,20 +168,25 @@ let register_builtin_get_contents (core : Mcp_server_core.t) ~(dir : _ Eio.Path.
     ; input_schema = Def.parameters
     }
   in
-  let gpt_fn = Functions.get_contents ~dir in
+  let ochat_fn = Functions.get_contents ~dir in
   let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
     match args with
     | `Object kvs ->
       (match List.Assoc.find kvs ~equal:String.equal "file" with
        | Some (`String file_path) ->
          let input_json = `Object [ "file", `String file_path ] in
-         Ok (`String (gpt_fn.run (Jsonaf.to_string input_json)))
+         Ok (`String (ochat_fn.run (Jsonaf.to_string input_json)))
        | _ -> Error "get_contents expects field 'file' (string)")
     | _ -> Error "get_contents arguments must be object"
   in
   Mcp_server_core.register_tool core spec handler
 ;;
 
+(** [run_stdio ~core ~env] starts a blocking loop that reads one JSON value
+    per line from [stdin], forwards it to {!module:Mcp_server_router} and
+    writes each response on its own line to [stdout].  The function never
+    returns and therefore blocks the calling fibre.  Used when no [--http]
+    flag was supplied. *)
 let run_stdio ~core ~env : unit =
   let stdin = Eio.Stdenv.stdin env in
   let stdout = Eio.Stdenv.stdout env in
@@ -162,14 +223,14 @@ let () =
     let spec : JT.Tool.t =
       { name = Def.name; description = Def.description; input_schema = Def.parameters }
     in
-    let gpt_fn = Functions.webpage_to_markdown ~dir ~net:(Eio.Stdenv.net env) in
+    let ochat_fn = Functions.webpage_to_markdown ~dir ~net:(Eio.Stdenv.net env) in
     let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
       match args with
       | `Object kvs ->
         (match List.Assoc.find kvs ~equal:String.equal "url" with
          | Some (`String url) ->
            let input_json = `Object [ "url", `String url ] in
-           Ok (`String ((gpt_fn ~env).run (Jsonaf.to_string input_json)))
+           Ok (`String ((ochat_fn ~env).run (Jsonaf.to_string input_json)))
          | _ -> Error "webpage_to_markdown expects field 'url' (string)")
       | _ -> Error "arguments must be object"
     in

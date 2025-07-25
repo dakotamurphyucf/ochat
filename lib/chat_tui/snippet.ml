@@ -1,28 +1,51 @@
-(* Simple snippet expansion table used by the Chat-TUI.
+(** Snippet expansion table for the Chat-TUI.
 
-   A "snippet" is identified by a short, lowercase name and expands to a
-   multi-line string that is inserted verbatim into the current draft when
-   the user invokes
+    A *snippet* is a short mnemonic (lower-case) that expands to a template –
+    potentially multiple lines – which is pasted verbatim into the composer
+    when the user types:
 
-     /expand <name>
+    {v
+      /expand <name>
+    v}
 
-   inside the composer.  The snippets below are intentionally minimal – they
-   merely serve as examples and can be extended freely without touching the
-   rest of the code-base.  To add or modify snippets, edit the [snippets]
-   association list below. *)
+    The table is intentionally minimal; extend it by editing the internal
+    {!val:snippets} association list and rebuilding the project.
+
+    {1 API overview}
+
+    • {!val:find}  – resolve a snippet by name.
+    • {!val:available} – list all defined snippet names.
+
+    Names are case-sensitive; the convention is to keep them lower-case. *)
 
 open Core
 
-(* Association table [name, template].  Keep [name] all-lowercase to avoid
-   surprising case-sensitivity issues. *)
+(** Association table [name ✦ template].
+
+    Keep [name] lower-case to avoid surprising case-sensitivity issues. *)
 let snippets : (string * string) list =
   [ "sig", "module type S = sig\n  (** TODO: contents *)\nend"
   ; "code", "```ocaml\n(* Write your code here *)\n```"
   ]
 ;;
 
+(** [find name] returns the template associated with [name] or [None] if
+    the snippet is unknown.
+
+    Example using the default table:
+    {[
+      match Snippet.find "sig" with
+      | Some t -> Stdio.print_endline t
+      | None   -> Stdio.eprintf "unknown snippet\n"
+    ]} *)
 let find (name : string) : string option =
   List.Assoc.find snippets ~equal:String.equal name
 ;;
 
+(** [available ()] lists all snippet names in declaration order.  Useful for
+    auto-completion menus.
+
+    {[
+      Snippet.available () = ["sig"; "code"]
+    ]} *)
 let available () = List.map snippets ~f:fst

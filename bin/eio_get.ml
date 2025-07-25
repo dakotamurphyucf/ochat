@@ -1,27 +1,33 @@
-(** 
-  This is a simple Eio-based HTTP client that connects to a server
-  and streams events from the `/mcp` endpoint. It processes the events
-  and prints them to stdout.
-  It uses the Piaf library for HTTP requests and Eio for concurrency.
-  It shows an example of how to stream SSE (Server-Sent Events) from
-  a server and handle them in a structured way. Piaf determines if a connection should
-    be made over HTTP or HTTPS based on the URI scheme.
-  The client reads the events until it encounters a double newline,
-  which indicates the end of an event. Each event is processed to extract
-  the data, which is expected to be in JSON format. The client prints
-  the data to stdout, and it handles errors gracefully.
-  It also sets up logging for debugging purposes.
-  To run this client, you need to provide the server's hostname as a command-line argument.
-  Usage: `eio_get.exe HOST`
-  where `HOST` is the server's hostname (e.g., `http://localhost:8080`).
-  The client uses Eio's concurrency model to handle the request and response
-  in a non-blocking way, allowing it to process incoming events as they arrive.
-  It also demonstrates how to handle errors and clean up resources properly.
-  The client is designed to be simple and illustrative, focusing on the
-  mechanics of streaming events and processing them in a structured way.
-  It can be extended or modified to suit more complex use cases, such as
-  handling different types of events, integrating with other systems, or
-  processing the events in a more sophisticated manner.
+(** Streaming HTTP client for the [/mcp] Server-Sent-Events endpoint.
+
+    The executable opens a long-lived HTTP connection to [HOST]/mcp
+    using {!Piaf.Client} and prints every JSON payload it receives –
+    one line per event.
+
+    {1 Behaviour}
+
+    • Creates a {!Piaf.Client.t} bound to the supplied [HOST].
+    • Issues a [GET /mcp] request with automatic redirect following and
+      insecure-TLS allowance for local testing.
+    • Treats the response body as a stream of Server-Sent Events
+      (RFC 8955): events are separated by a blank line.
+    • Extracts the [data:] fields, parses them with {!Jsonaf.parse},
+      pretty-prints them, and writes the result to [stdout].
+
+    The program shuts down when the server closes the stream or an
+    I/O error is raised.
+
+    {1 Example}
+
+    Connecting to a server running on [localhost:8080]:
+
+    {[  $ ochat eio-get http://localhost:8080 ]}
+
+    {1 Limitations}
+
+    • Only the first [data:] field of each event is considered.
+    • Lines equal to [data: [DONE]] are ignored.
+    • The program assumes that [data:] contains valid JSON.
 *)
 
 open Core
@@ -33,6 +39,13 @@ module Result = struct
   let ( let* ) result f = bind ~f result
 end
 
+(** [setup_log ?style_renderer level] initialises {!Logs} so that log
+    messages are printed to stderr and colours are enabled when
+    supported.
+
+    @param style_renderer Selects the colour renderer (see
+           {!Fmt_tty.style_renderer}).
+    @param level Minimum log level to report. *)
 let setup_log ?style_renderer level =
   Fmt_tty.setup_std_outputs ?style_renderer ();
   Logs.set_level level;
@@ -40,6 +53,29 @@ let setup_log ?style_renderer level =
   ()
 ;;
 
+(** [request ~env ~sw host] connects to [host]/mcp and consumes the
+    resulting SSE stream.
+
+    The function returns [Ok ()] when the remote peer closes the
+    connection normally.  Returns [Error e] if {!Piaf} reports an
+    error while issuing the request or streaming the response.
+
+    Implementation details:
+
+    1. Build a {!Piaf.Client.t} with redirect following and relaxed
+       TLS checks (suitable for local development).
+    2. Perform a [GET] request to [/mcp].
+    3. Copy the response body into an {!Eio_unix.pipe}, so that we can
+       run {!Eio.Buf_read} parsers over it without blocking the client
+       fibre.
+    4. Parse events with a small hand-rolled parser that accumulates
+       lines until a blank line is encountered.
+    5. For each event, extract the [data:] lines, ignore "[DONE]",
+       parse the JSON with {!Jsonaf.parse}, and print it.
+
+    @param env Runtime environment supplied by {!Eio_main.run}.
+    @param sw  Switch controlling the lifetime of the connection and
+               helper fibre. *)
 let request ~env ~sw host =
   let open Piaf in
   let open Result in

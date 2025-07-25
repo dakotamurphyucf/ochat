@@ -1,0 +1,26 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Mcp_transport (ochat.Mcp_transport)</title><meta charset="utf-8"/><link rel="stylesheet" href="../../odoc.support/odoc.css"/><meta name="generator" content="odoc 3.0.0"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><script src="../../odoc.support/highlight.pack.js"></script><script>hljs.initHighlightingOnLoad();</script><script>let base_url = '../../';
+let search_urls = ['../db.js','../../sherlodoc.js'];
+</script><script src="../../odoc.support/odoc_search.js" defer="defer"></script></head><body class="odoc"><nav class="odoc-nav"><a href="../index.html">Up</a> – <a href="../../index.html">Index</a> &#x00BB; <a href="../index.html">ochat</a> &#x00BB; Mcp_transport</nav><div class="odoc-search"><div class="search-inner"><input class="search-bar" placeholder="🔎 Type '/' to search..."/><div class="search-snake"></div><div class="search-result"></div></div></div><header class="odoc-preamble"><h1>Module <code><span>Mcp_transport</span></code></h1><p>Transport pack that re-exports the common <a href="../Mcp_transport_interface/module-type-TRANSPORT/index.html"><code>Mcp_transport_interface.TRANSPORT</code></a> signature and provides the two concrete implementations shipped with this repository:</p><p>• <a href="../Mcp_transport_stdio/index.html"><code>Mcp_transport_stdio</code></a> – spawns the server binary and exchanges newline-delimited JSON messages over the child process’ *stdin*/*stdout* pipes. This is the reference implementation used by the Phase-1 CLI client.</p><p>• <a href="../Mcp_transport_http/index.html"><code>Mcp_transport_http</code></a> – talks to an MCP server over plain HTTP/S. The module understands both classic JSON bodies and streaming Server-Sent Events (SSE) and supports optional OAuth 2 bearer-token authentication.</p><p>Developers typically write their code against the <a href="../Mcp_transport_interface/module-type-TRANSPORT/index.html"><code>Mcp_transport_interface.TRANSPORT</code></a> signature and decide at runtime which concrete transport to instantiate:</p><pre class="language-ocaml"><code>  let (module T : Mcp_transport_interface.TRANSPORT) =
+    match Uri.scheme uri with
+    | Some &quot;stdio&quot; | None -&gt; (module Mcp_transport_stdio)
+    | Some (&quot;http&quot; | &quot;https&quot; | &quot;mcp+http&quot; | &quot;mcp+https&quot;) -&gt;
+      (module Mcp_transport_http)
+    | Some scheme -&gt;
+      invalid_arg
+        (Printf.sprintf &quot;Unsupported MCP transport scheme: %s&quot; scheme)
+  in
+  let conn = T.connect ~sw ~env uri_str in
+  (* ... *)</code></pre><p>The indirection keeps the public API stable while new transports are added.</p></header><div class="odoc-content"><div class="odoc-include"><details open="open"><summary class="spec include"><code><span><span class="keyword">include</span> <span class="keyword">module</span> <span class="keyword">type</span> <span class="keyword">of</span> <a href="../Mcp_transport_interface/index.html">Mcp_transport_interface</a></span></code></summary><h2 id="usage"><a href="#usage" class="anchor"></a>Usage</h2><p>Connecting to a server over stdio:</p><pre class="language-ocaml"><code>  Eio_main.run @@ fun env -&gt;
+  Eio.Switch.run @@ fun sw -&gt;
+    let t =
+      Mcp_transport_stdio.connect
+        ~sw
+        ~env
+        &quot;stdio:python3 mcp_server.py&quot;
+    in
+    Mcp_transport_stdio.send t (`String &quot;ping&quot;);
+    match Mcp_transport_stdio.recv t with
+    | `String &quot;pong&quot; -&gt; print_endline &quot;got pong&quot;
+    | _ -&gt; print_endline &quot;unexpected response&quot;;
+    Mcp_transport_stdio.close t</code></pre><p>The example compiles as-is and demonstrates the life-cycle: connect → send → recv → close.</p><div class="odoc-spec"><div class="spec module-type anchored" id="module-type-TRANSPORT"><a href="#module-type-TRANSPORT" class="anchor"></a><code><span><span class="keyword">module</span> <span class="keyword">type</span> <a href="module-type-TRANSPORT/index.html">TRANSPORT</a></span><span> = <span class="keyword">sig</span> ... <span class="keyword">end</span></span></code></div><div class="spec-doc"><p>Opaque handle representing a *live* connection to exactly one MCP server. The concrete representation depends on the transport implementation and must not leak outside the module.</p></div></div></details></div></div></body></html>

@@ -1,3 +1,9 @@
+(** Convenience helpers built on top of {{!module:Eio}Eio}.
+
+    This implementation backs the {!module:Io} public interface.  See
+    [io.mli] for detailed documentation.  Only implementation notes that
+    are helpful for maintainers live here. *)
+
 module U = Unix
 open Core
 open Cohttp_eio

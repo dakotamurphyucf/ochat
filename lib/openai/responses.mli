@@ -1,3 +1,49 @@
+(** OpenAI [/v1/responses] client.
+
+    This interface provides a faithful OCaml representation of the
+    request and response payloads used by OpenAI’s experimental
+    “responses” endpoint (a superset of the Chat Completions API that
+    adds sophisticated tool-calling and streaming semantics).
+
+    Only one high-level helper is exposed – {!post_response}.  All other
+    sub-modules are thin, auto-generated mirrors of the JSON schema and
+    are useful when you need to construct a request by hand or inspect a
+    streaming reply in a type-safe manner.
+
+    {1 Environment}
+
+    The function {!post_response} expects the environment variable
+    [OPENAI_API_KEY] to hold a valid secret key.  A missing or empty key
+    will lead to HTTP 401 responses from the server.
+
+    {1 Quick-start}
+
+    {[
+      Eio_main.run @@ fun env ->
+        let net = Eio.Stdenv.net env in
+        let dir = Eio.Stdenv.cwd env in
+
+        (* Build a minimal user message *)
+        let open Responses in
+        let open Responses.Input_message in
+        let user : Input_message.t =
+          { role = User
+          ; content = [ Text { text = "Hello"; _type = "input_text" } ]
+          ; _type = "message"
+          }
+        in
+
+        (* Blocking, non-streaming call *)
+        let ({ Response.output; _ } : Response.t) =
+          post_response Default ~dir net ~inputs:[ Item.Input_message user ]
+        in
+        match output with
+        | [ Output_message { content = [ { text; _ } ]; _ } ] ->
+          Format.printf "Assistant said: %s@." text
+        | _ -> Format.printf "Unexpected reply@."
+    ]}
+*)
+
 module Input_message : sig
   type role =
     | User
@@ -784,6 +830,68 @@ type _ response_type =
 
 exception Response_stream_parsing_error of Jsonaf.t * exn
 
+(** [post_response response_type ?max_output_tokens ?temperature ?tools ?model
+    ?reasoning ~dir net ~inputs] sends [inputs] to the
+    [/v1/responses] endpoint using the capability-safe network handle
+    [net].
+
+    The behaviour depends on [response_type]:
+
+    • {!Default} blocks until the server returns the final JSON object
+      and then parses it as {!Response.t}.
+
+    • [Stream cb] establishes a Server-Sent Events connection and
+      invokes [cb] for every incremental {!Response_stream.t} event.
+      The function returns [()] once the stream terminates normally or
+      raises an exception on the first error.
+
+    {2 Parameters}
+
+    [max_output_tokens] – hard upper-bound on tokens in the assistant
+    reply (default = 600).
+
+    [temperature] – higher values yield more random completions (same
+    semantics as the Chat Completions API).
+
+    [tools] – optional list of tool definitions that the model is
+    allowed to invoke via function calls, file search, or web search.
+
+    [model] – one of {!Request.model} (default = [Gpt4]).
+
+    [reasoning] – hints influencing how detailed the model’s chain-of-thought will be.
+
+    [dir] – directory capability used to write diagnostic logs (the
+    file [raw-openai-streaming-response.txt]).
+
+    [net] – capability granting outbound HTTPS access.
+
+    [inputs] – heterogeneous list of request items (messages,
+    function calls, …).
+
+    {2 Exceptions}
+
+    • {!Response_stream_parsing_error} when the incremental JSON event
+      cannot be decoded; the constructor carries the offending JSON
+      value and the underlying error.
+    • Any network or TLS exception thrown by [cohttp-eio].
+
+    {2 Example}
+
+    {[
+      (* Stream the assistant’s answer token-by-token *)
+      let print_stream = function
+        | Responses.Response_stream.Output_text_delta { delta; _ } ->
+          Format.printf "%s%!" delta
+        | _ -> ()
+      in
+
+      Responses.post_response
+        (Responses.Stream print_stream)
+        ~temperature:0.7
+        ~dir:(Eio.Stdenv.cwd env)
+        net
+        ~inputs:[ my_message ]
+    ]} *)
 val post_response
   :  'a response_type
   -> ?max_output_tokens:int

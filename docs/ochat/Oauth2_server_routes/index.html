@@ -1,0 +1,76 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Oauth2_server_routes (ochat.Oauth2_server_routes)</title><meta charset="utf-8"/><link rel="stylesheet" href="../../odoc.support/odoc.css"/><meta name="generator" content="odoc 3.0.0"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><script src="../../odoc.support/highlight.pack.js"></script><script>hljs.initHighlightingOnLoad();</script><script>let base_url = '../../';
+let search_urls = ['../db.js','../../sherlodoc.js'];
+</script><script src="../../odoc.support/odoc_search.js" defer="defer"></script></head><body class="odoc"><nav class="odoc-nav"><a href="../index.html">Up</a> – <a href="../../index.html">Index</a> &#x00BB; <a href="../index.html">ochat</a> &#x00BB; Oauth2_server_routes</nav><div class="odoc-search"><div class="search-inner"><input class="search-bar" placeholder="🔎 Type '/' to search..."/><div class="search-snake"></div><div class="search-result"></div></div></div><header class="odoc-preamble"><h1>Module <code><span>Oauth2_server_routes</span></code></h1><p>HTTP route handlers for a *minimal* OAuth&amp;nbsp;2.0 Authorisation Server.</p><p>The module wires together the in-memory tables provided by <a href="../Oauth2_server_storage/index.html"><code>Oauth2_server_storage</code></a> and <a href="../Oauth2_server_client_storage/index.html"><code>Oauth2_server_client_storage</code></a> and exposes four thin HTTP endpoints that cover the *happy path* required by the rest of the code base.</p></header><div class="odoc-tocs"><nav class="odoc-toc odoc-local-toc"><ul><li><a href="#dispatch-table">Dispatch table</a></li><li><a href="#example-–-mounting-the-routes-with-piaf-/-eio">Example – mounting the routes with Piaf / Eio</a></li><li><a href="#metadata-endpoint">Metadata endpoint</a></li><li><a href="#token-endpoint">Token endpoint</a></li><li><a href="#authorise-endpoint">Authorise endpoint</a></li><li><a href="#dynamic-client-registration">Dynamic Client Registration</a></li></ul></nav></div><div class="odoc-content"><h3 id="dispatch-table"><a href="#dispatch-table" class="anchor"></a>Dispatch table</h3><ul><li>`/.well-known/oauth-authorization-server` ⟶ <a href="#val-handle_metadata"><code>handle_metadata</code></a></li><li>`/token` ⟶ <a href="#val-handle_token"><code>handle_token</code></a></li><li>`/authorize` ⟶ <a href="#val-handle_authorize"><code>handle_authorize</code></a></li><li>`/register` ⟶ <a href="#val-handle_register"><code>handle_register</code></a></li></ul><p>All helpers are *exception-free*: internal errors are mapped to an appropriate HTTP status code and a short problem JSON in the body.</p><p>The implementation is intentionally **state-of-the-art but not production-ready** – all state lives in the current OCaml process, with no persistence, replication or concurrency guarantees.</p><h2 id="example-–-mounting-the-routes-with-piaf-/-eio"><a href="#example-–-mounting-the-routes-with-piaf-/-eio" class="anchor"></a>Example – mounting the routes with Piaf / Eio</h2><p>The snippet below starts a tiny HTTP server on port 8080 that exposes all four endpoints under the root URI space (no URL prefix):</p><pre class="language-ocaml"><code>  open Piaf
+
+  let () =
+    Eio_main.run @@ fun env -&gt;
+    let callback (_client : Client.t) req =
+      match Request.path req with
+      | [ &quot;.well-known&quot;; &quot;oauth-authorization-server&quot; ] -&gt;
+          Oauth2_server_routes.handle_metadata req 8080
+      | [ &quot;token&quot; ] -&gt;
+          Oauth2_server_routes.handle_token ~env req
+      | [ &quot;authorize&quot; ] -&gt;
+          Oauth2_server_routes.handle_authorize req
+      | [ &quot;register&quot; ] -&gt;
+          Oauth2_server_routes.handle_register req
+      | _ -&gt; Response.create `Not_found
+    in
+    let server_cfg = Server.Config.create ~port:8080 () in
+    Server.start ~config:server_cfg env callback</code></pre><p>Interact with the token endpoint:</p><pre class="language-ocaml"><code>  # curl -s \
+      -d 'grant_type=client_credentials' \
+      -d 'client_id=my-client' \
+      -d 'client_secret=my-secret' \
+      http://localhost:8080/token | jq
+  {
+    &quot;access_token&quot;: &quot;xg0C9t…&quot;,
+    &quot;token_type&quot;: &quot;Bearer&quot;,
+    &quot;expires_in&quot;: 3600,
+    &quot;obtained_at&quot;: 1.694e9
+  }</code></pre><h2 id="metadata-endpoint"><a href="#metadata-endpoint" class="anchor"></a>Metadata endpoint</h2><div class="odoc-spec"><div class="spec value anchored" id="val-handle_metadata"><a href="#val-handle_metadata" class="anchor"></a><code><span><span class="keyword">val</span> handle_metadata : <span><span class="xref-unresolved">Piaf</span>.Request.t <span class="arrow">&#45;&gt;</span></span> <span>int <span class="arrow">&#45;&gt;</span></span> <span class="xref-unresolved">Piaf</span>.Response.t</span></code></div><div class="spec-doc"><p><code>handle_metadata req port</code> returns an *Authorization-Server Metadata* document (RFC&amp;nbsp;8414) as a JSON response.</p><p>The function derives the absolute base URL from <code>req</code> (scheme and <code>`Host`</code> header) and forces the supplied <code>port</code> so that test environments behind a reverse proxy still receive self-contained links.</p><p>The response serialises an <a href="../Oauth2_server_types/Metadata/index.html#type-t"><code>Oauth2_server_types.Metadata.t</code></a> record and carries the media-type <code>&quot;application/json&quot;</code>. Always replies with status&amp;nbsp;200.</p><p>Example – fetch metadata:</p><pre class="language-ocaml"><code>  (* inside an Eio fiber *)
+  let open Piaf.Client.Oneshot in
+  match
+    get ~sw env (Uri.of_string &quot;http://localhost:8080/.well-known/oauth-authorization-server&quot;)
+  with
+  | Ok resp -&gt;
+      Piaf.Body.to_string resp.body |&gt; Result.ok_or_failwith |&gt; print_endline
+  | Error _ -&gt; failwith &quot;request failed&quot;</code></pre></div></div><h2 id="token-endpoint"><a href="#token-endpoint" class="anchor"></a>Token endpoint</h2><div class="odoc-spec"><div class="spec value anchored" id="val-handle_token"><a href="#val-handle_token" class="anchor"></a><code><span><span class="keyword">val</span> handle_token : 
+  <span><span class="label">env</span>:<span class="xref-unresolved">Eio_unix</span>.Stdenv.base <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="xref-unresolved">Piaf</span>.Request.t <span class="arrow">&#45;&gt;</span></span>
+  <span class="xref-unresolved">Piaf</span>.Response.t</span></code></div><div class="spec-doc"><p><code>handle_token ~env req</code> implements the `/token` endpoint (RFC&amp;nbsp;6749 §4.4) for the *Client Credentials* grant.</p><p>Expected <code>`application/x-www-form-urlencoded`</code> body parameters:</p><ul><li><code>grant_type</code> = <code>&quot;client_credentials&quot;</code></li><li><code>client_id</code> – identifier issued during registration</li><li><code>client_secret</code> – secret bound to <code>client_id</code> (confidential clients only)</li></ul><p>Successful flow:</p><ol><li>Validate credentials via <a href="../Oauth2_server_client_storage/index.html#val-validate_secret"><code>Oauth2_server_client_storage.validate_secret</code></a>.</li><li>Generate a fresh <a href="../Oauth2_server_types/Token/index.html#type-t"><code>Oauth2_server_types.Token.t</code></a> whose <code>access_token</code> is a 32-byte URL-safe Base64 string.</li><li>Persist the token with <a href="../Oauth2_server_storage/index.html#val-insert"><code>Oauth2_server_storage.insert</code></a>.</li><li>Respond with status&amp;nbsp;200 and the token encoded as JSON.</li></ol><p>Failure modes:</p><ul><li>malformed or missing parameters → 400</li><li>unsupported <code>grant_type</code> → 400</li><li>invalid credentials → 401</li></ul><p>The system clock from <code>env</code> stamps the token’s <code>obtained_at</code> field. No exceptions escape the function.</p><p>Example – obtain an access token from a confidential client:</p><pre class="language-ocaml"><code>  let body =
+    [ &quot;grant_type&quot;, &quot;client_credentials&quot; ;
+      &quot;client_id&quot;, &quot;my-client&quot; ;
+      &quot;client_secret&quot;, &quot;my-secret&quot; ]
+    |&gt; Uri.encoded_of_query
+    |&gt; Piaf.Body.of_string
+  in
+  match
+    Piaf.Client.Oneshot.post
+      ~sw env
+      ~headers:[ &quot;content-type&quot;, &quot;application/x-www-form-urlencoded&quot; ]
+      ~body
+      (Uri.of_string &quot;http://localhost:8080/token&quot;)
+  with
+  | Ok resp -&gt;
+      Result.ok_or_failwith (Piaf.Body.to_string resp.body)
+  | Error _ -&gt; failwith &quot;request failed&quot;</code></pre></div></div><h2 id="authorise-endpoint"><a href="#authorise-endpoint" class="anchor"></a>Authorise endpoint</h2><div class="odoc-spec"><div class="spec value anchored" id="val-handle_authorize"><a href="#val-handle_authorize" class="anchor"></a><code><span><span class="keyword">val</span> handle_authorize : <span><span class="xref-unresolved">Piaf</span>.Request.t <span class="arrow">&#45;&gt;</span></span> <span class="xref-unresolved">Piaf</span>.Response.t</span></code></div><div class="spec-doc"><p><code>handle_authorize _</code> is a placeholder for the *Authorisation Code* / PKCE flow. It always returns status 501 (`Not_implemented`) and the JSON body <code>js|{&quot;error&quot;:&quot;not_implemented&quot;</code>|js</p><p>}</p><p>.</p><p>Example – request authorisation code (currently placeholder):</p><pre class="language-ocaml"><code>  match Piaf.Client.Oneshot.get ~sw env (Uri.of_string &quot;http://localhost:8080/authorize&quot;) with
+  | Ok resp -&gt; assert (resp.status = `Not_implemented)
+  | Error _ -&gt; assert false</code></pre></div></div><h2 id="dynamic-client-registration"><a href="#dynamic-client-registration" class="anchor"></a>Dynamic Client Registration</h2><div class="odoc-spec"><div class="spec value anchored" id="val-handle_register"><a href="#val-handle_register" class="anchor"></a><code><span><span class="keyword">val</span> handle_register : <span><span class="xref-unresolved">Piaf</span>.Request.t <span class="arrow">&#45;&gt;</span></span> <span class="xref-unresolved">Piaf</span>.Response.t</span></code></div><div class="spec-doc"><p><code>handle_register req</code> creates a new OAuth&amp;nbsp;2.0 client as described in RFC&amp;nbsp;7591 and returns the credentials as JSON.</p><p>The request body must be `application/json`. Only a subset of the standard is implemented – all that the wider application stack needs:</p><p>• <code>client_name</code> – optional string label shown in consent pages. • <code>redirect_uris</code> – optional array of permitted redirect URIs. • <code>token_endpoint_auth_method</code> – ignored; every client is currently registered as **confidential** with a random secret to avoid the PKCE public-client flow during automated test runs.</p><p>The returned value is an <a href="../Oauth2_server_types/Client/index.html#type-t"><code>Oauth2_server_types.Client.t</code></a> record. The handler replies with status 201 on success and stores the new entry in <a href="../Oauth2_server_client_storage/index.html"><code>Oauth2_server_client_storage</code></a> so that subsequent `/token` requests can authenticate.</p><p>Example – dynamic client registration:</p><pre class="language-ocaml"><code>  let json_body =
+    Jsonaf.to_string
+      (`Object
+         [ &quot;client_name&quot;, `String &quot;My test app&quot; ;
+           &quot;redirect_uris&quot;, `Array [ `String &quot;https://example.org/cb&quot; ] ])
+    |&gt; Piaf.Body.of_string
+  in
+  match
+    Piaf.Client.Oneshot.post
+      ~sw env
+      ~headers:[ &quot;content-type&quot;, &quot;application/json&quot; ]
+      ~body:json_body
+      (Uri.of_string &quot;http://localhost:8080/register&quot;)
+  with
+  | Ok resp -&gt;
+      let body = Result.ok_or_failwith (Piaf.Body.to_string resp.body) in
+      print_endline body
+  | Error _ -&gt; failwith &quot;registration failed&quot;</code></pre></div></div></div></body></html>
