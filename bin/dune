@@ -128,8 +128,6 @@
   core
   logs
   bimage
-  roof_schedule_engine
-  roof_schedule_printer
   bimage-unix
   notty
   notty.unix
