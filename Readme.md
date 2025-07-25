@@ -519,8 +519,14 @@ module Hello = struct
       (fun name -> "Hello " ^ name ^ "! 👋")
 end
 
+
+(* Gets the tools JSON and dispatch table *)
 let tools_json, dispatch =
   Ochat_function.functions [ Hello.def ]
+
+(* If you want to add to the current drivers (Chat_tui and the chat-completion command)
+ then add tool to of_declaration in lib/chat_response/tool.ml example *)
+ 
 ```
 
 Declare it once in ChatMD:
@@ -822,30 +828,6 @@ Found 7 TODO markers – see annotated listing above.
 
 The entire lifecycle is captured in **one** durable `.chatmd` file – ideal for audit, diffing and reproducibility.
 
-### Authoring custom OCaml tools
-
-```ocaml
-module Echo = struct
-  type input = string
-
-  let def =
-    Ochat_function.create_function
-      (module struct
-         type nonrec input = input
-         let name        = "echo"
-         let description = Some "Return the input verbatim"
-         let parameters  =
-           Jsonaf.of_string
-             "{\"type\":\"object\",\"properties\":{\"text\":{\"type\":\"string\"}},\"required\":[\"text\"]}"
-         let input_of_string s =
-           Jsonaf.of_string s |> Jsonaf.member_exn "text" |> Jsonaf.string_exn
-       end)
-      (fun s -> s)
-end
-
-let tools_json, dispatch_tbl =
-  Ochat_function.functions [ Echo.def ]
-```
 
 ### End-to-end example – add and call *your* tool
 
@@ -874,6 +856,38 @@ Below is a **full cut-and-paste scenario** that shows *all* moving parts – OCa
    ```
 
 2.  Add the module to your `dune` file and run `dune build`.  The helper is now part of your workspace.
+
+3. Add the following to the of_declaration function in `lib/chat_response/tool.ml`:
+
+```ocaml
+   let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
+  : Ochat_function.t list
+  =
+  match decl with
+  | CM.Builtin name ->
+    (match name with
+     | "apply_patch" -> [ Functions.apply_patch ~dir:(Ctx.dir ctx) ]
+     | "read_dir" -> [ Functions.read_dir ~dir:(Ctx.dir ctx) ]
+     | "get_contents" -> [ Functions.get_contents ~dir:(Ctx.dir ctx) ]
+     | "webpage_to_markdown" ->
+       [ Functions.webpage_to_markdown
+           ~env:(Ctx.env ctx)
+           ~dir:(Ctx.dir ctx)
+           ~net:(Ctx.net ctx)
+       ]
+     | "fork" -> [ Functions.fork ]
+     | "odoc_search" -> [ Functions.odoc_search ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
+     | "index_markdown_docs" ->
+       [ Functions.index_markdown_docs ~env:(Ctx.env ctx) ~dir:(Ctx.dir ctx) ]
+     | "markdown_search" ->
+       [ Functions.markdown_search ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
+     | other -> failwithf "Unknown built-in tool: %s" other ()
+     | "echo" -> [ Echo.def ] (* Our custom function *)
+  | CM.Custom c -> [ custom_fn ~env:(Ctx.env ctx) c ]
+  | CM.Agent agent_spec -> [ agent_fn ~ctx ~run_agent agent_spec ]
+  | CM.Mcp mcp -> mcp_tool ~sw ~ctx mcp
+;;
+```
 
 3.  Declare the tool once at the top of a prompt `echo_demo.chatmd`:
 
