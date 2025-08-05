@@ -21,6 +21,7 @@
     │ `q`, `quit` │ Quit the application immediately                │
     │ `w`         │ "Write" – submit the current input buffer        │
     │ `wq`        │ Submit the buffer and then quit                 │
+    │ `c`, `cmp`, compact │ Summarise conversation context (compact) │
     │ `d`, delete │ Delete the currently selected message           │
     │ `e`, edit   │ Yank the selected message into the prompt       │
     └─────────────┴───────────────────────────────────────────────────┘
@@ -82,6 +83,7 @@ let backspace model =
       {!Redraw}
     • `e`, `edit`       → Copy the selected message into the insert buffer
       and return {!Redraw}
+    • `c`, `cmp`, `compact` → Summarise conversation context via {!Compact_context}
 
     Any other input results in {!Redraw} to signal that a screen update is
     needed to hide the prompt again. *)
@@ -97,6 +99,7 @@ let execute_command model line : reaction =
   | "q" | "quit" -> Quit
   | "w" -> Submit_input
   | "wq" -> Quit
+  | "c" | "cmp" | "compact" -> Compact_context
   | "delete" | "d" ->
     (match Model.selected_msg model with
      | None -> Redraw

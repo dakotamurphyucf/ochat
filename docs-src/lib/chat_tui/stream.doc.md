@@ -15,7 +15,10 @@ The module analyses every incoming
 value and emits one or more [`Types.patch`](../types.doc.md) commands.  A
 patch is a tiny, *side-effect free* instruction that describes how the
 model — and consequently the UI — needs to change.  The patches are later
-applied by `Model.apply_patches`; `Stream` itself never mutates the model.
+applied by `Model.apply_patches`.  A small amount of book-keeping (the
+`active_fork` flag and its associated index) is still performed directly on
+the [`Model.t`](./model.doc.md) value, but the message history itself is
+modified exclusively through patches.
 
 ---
 
@@ -58,7 +61,7 @@ applied by `Model.apply_patches`; `Stream` itself never mutates the model.
 
 ```ocaml
 handle_fn_out
-  ~model         (* current UI model – inspected, never mutated *)
+  ~model         (* current UI model – may be updated in fork book-keeping *)
   (out : Openai.Responses.Function_call_output.t)
   : Types.patch list
 ```
@@ -83,11 +86,11 @@ function currently knows about the following event classes:
 
 | Event variant | Emitted patches |
 | ------------- | -------------- |
-| `Output_text_delta` | `Ensure_buffer` + `Append_text` |
-| `Output_item_added` | `Ensure_buffer`, `Set_function_name`, … |
-| `Reasoning_summary_text_delta` | `Ensure_buffer`, `Update_reasoning_idx`, `Append_text` |
-| `Function_call_arguments_delta` | `Ensure_buffer`, `Append_text` |
-| `Function_call_arguments_done`  | `Ensure_buffer`, `Append_text` (closing paren) |
+| `Output_text_delta` | `Ensure_buffer` · `Append_text` |
+| `Output_item_added` | `Ensure_buffer` · `Set_function_name` · *(optional)* book-keeping |
+| `Reasoning_summary_text_delta` | `Ensure_buffer` · `Update_reasoning_idx` · `Append_text` |
+| `Function_call_arguments_delta` | `Ensure_buffer` · `Append_text` |
+| `Function_call_arguments_done`  | `Ensure_buffer` · `Append_text` *(closing paren)* |
 
 All other variants are ignored for now and therefore yield an empty list.
 
@@ -98,7 +101,9 @@ handle_events ~model evs =
   List.concat_map evs ~f:(handle_event ~model)
 ```
 
-Pure convenience wrapper when a caller already buffered multiple events.
+Pure convenience wrapper when a caller already buffered multiple events.  It
+does not introduce additional side-effects beyond those already performed
+inside `handle_event`.
 
 ---
 

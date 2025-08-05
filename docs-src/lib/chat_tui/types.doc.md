@@ -105,13 +105,39 @@ let apply (model : Model.t) = function
 
 ---
 
-## 5 Known Limitations
+## 5 Runtime Settings
 
-* `role` is a plain `string`, therefore invalid values are not prevented at compile-time.
-* `msg_buffer.text` mutates in-place; callers must take care when sharing references across threads.
-* `cmd` closures are opaque ‑ error handling must be implemented by the interpreter.
+```ocaml
+type settings = {
+  parallel_tool_calls : bool;
+}
+
+val default_settings : unit -> settings
+```
+
+`settings` groups user-togglable flags that influence runtime behaviour.  At
+present the record contains a single field:
+
+| Field | Effect |
+|-------|--------|
+| `parallel_tool_calls` | When `true` the assistant may ask for multiple tool/function calls in one turn.  Each call is executed concurrently using `Eio.Switch`.  Disable the flag while debugging or when using a model that does not yet support OpenAI's *parallel tool calls* feature. |
+
+Retrieve the defaults:
+
+```ocaml
+let cfg = Chat_tui.Types.default_settings ()
+(* val cfg : Chat_tui.Types.settings = { parallel_tool_calls = true } *)
+```
 
 ---
 
-© 2024 – Internal documentation for the Chat-TUI project.
+## 6 Known Limitations
+
+* `role` is a plain `string`, therefore invalid values are not enforced at compile-time.
+* `msg_buffer.text` mutates in-place; callers must be cautious when sharing the reference across fibres.
+* `cmd` carries raw `(unit -> unit)` thunks — error handling and resource management must be implemented by the interpreter.
+
+---
+
+
 

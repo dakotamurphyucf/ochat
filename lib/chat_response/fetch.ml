@@ -89,7 +89,44 @@ let get_remote ?(gzip = false) ~net url =
     (X)HTML and sanitises the document with {!clean_html}. *)
 let get_impl ~(ctx : _ Ctx.t) url ~is_local ~cleanup_html =
   if is_local
-  then Io.load_doc ~dir:(Ctx.dir ctx) url
+  then (
+    (* Resolve [url] against the context directory first.  If that fails and the
+       path is relative (common when the user inserted the tag at runtime from a
+       different working directory), fall back to the caller’s current working
+       directory.  This two-step resolution means:
+
+       1.  Static references inside the original prompt – which lives in its
+           own directory – keep working even when the user launches the binary
+           from elsewhere.
+       2.  Ad-hoc paths added interactively (e.g. via TUI command mode) behave
+           just like a regular shell: they are interpreted relative to the
+           process’ CWD.
+    *)
+    let try_load ~dir =
+      try Some (Io.load_doc ~dir url) with
+      | _ -> None
+    in
+    match try_load ~dir:(Ctx.dir ctx) with
+    | Some s -> s
+    | None ->
+      (* Second chance: resolve against the real CWD. *)
+      let cwd = Eio.Stdenv.cwd (Ctx.env ctx) in
+      (match try_load ~dir:cwd with
+       | Some s -> s
+       | None ->
+         if Filename.is_relative url
+         then
+           (* If the path is relative, we can’t resolve it at all.  This is a
+              user error that should be reported. *)
+           failwithf "Could not resolve local document path %s" url ()
+         else (
+           (* If the path is absolute, we assume it exists and load it.  This
+              allows users to refer to files outside of the current working
+              directory. *)
+           try Io.load_doc ~dir:(Eio.Stdenv.fs (Ctx.env ctx)) url with
+           | _ ->
+             (* File does not exist or is inaccessible. *)
+             failwithf "Could not resolve local document path %s" url ())))
   else (
     let net = Ctx.net ctx in
     let raw = get_remote ~net url in

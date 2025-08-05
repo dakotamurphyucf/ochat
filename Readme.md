@@ -1,4 +1,117 @@
-# Ochat – OCaml toolkit for conversational AI, scripted LLM pipelines & code-aware search
+# Ochat – OCaml toolkit for building custom AI Agents, scripted LLM pipelines & vector search
+
+### 📑 Persistent sessions – pause, resume & branch your chats
+
+`chat_tui` (installed as `chat-tui` when you `opam install ochat`) now **persists the full conversation state automatically** under
+`$HOME/.ochat/sessions/<id>` so you can close the terminal, pull the latest
+commit and pick up the thread days later – tool cache and all.
+
+Key facts at a glance:
+
+* A *session* captures:  
+  • the prompt that seeded the run (a copy is stored as `prompt.chatmd`)  
+  • the complete message history (assistant, tool calls, reasoning deltas…)  
+  • the per-session tool cache (`.chatmd/cache.bin`)  
+  • misc metadata (task list, virtual-FS root, user-defined key/value pairs)
+
+* Snapshots live in a single binary file `snapshot.bin` alongside the prompt
+  copy – easy to back-up, copy or sync.
+
+* When you open a prompt without explicit flags `chat_tui` hashes the prompt
+  path and resumes the matching snapshot if present – **zero-config resume**.
+
+CLI flags (all mutually-exclusive where it makes sense):
+
+| Flag | Action |
+|------|--------|
+| `--list-sessions` | enumerate `(id\t<prompt_file>)` of every stored snapshot |
+| `--session <ID>` | resume the given session (fails if it doesn’t exist) |
+| `--new-session`  | ignore any existing snapshot for that prompt and start fresh |
+| `--session-info <ID>` | print metadata (history length, timestamps, prompt path) |
+| `--reset-session <ID>` | archive the current snapshot (timestamped) and restart; combine with `--keep-history` or change `--prompt-file` |
+| `--rebuild-from-prompt <ID>` | delete history & cache, rebuild snapshot from the stored prompt copy – perfect after editing `prompt.chatmd` manually |
+| `--export-session <ID> --out FILE` | convert a snapshot plus attachments to a standalone `.chatmd` document |
+
+Interactive workflow examples:
+
+```console
+# 1️⃣  Enumeration
+$ chat_tui --list-sessions
+6f9ab3d5  prompts/interactive.md
+a821c9f0  prompts/refactor.chatmd
+
+# 2️⃣  Resume last week’s debugging chat
+$ chat_tui --session 6f9ab3d5
+
+# 3️⃣  Branch off a clean slate (keeps the old snapshot untouched)
+$ chat_tui --session 6f9ab3d5 --new-session
+
+# 4️⃣  Export a finished session to share with teammates
+$ chat_tui --export-session a821c9f0 --out docs/refactor_walkthrough.chatmd
+
+# 5️⃣  Reset but keep the conversation history and switch prompt
+$ chat_tui --reset-session a821c9f0 --keep-history --prompt-file prompts/new_spec.md
+```
+
+`--auto-persist` saves on exit without confirmation; `--no-persist` drops
+changes – useful in CI or when you want a quick throw-away run.
+
+Under the hood **Session_store** migrates old snapshots transparently,
+maintains advisory locks to prevent concurrent writes, and provides helpers
+surfaced by the flags above.  Snapshot writes happen inside an Eio fiber so
+the UI never blocks.
+
+➡️  See `lib/session_store.mli` for the authoritative API contract.
+
+### 🔁 Recursive meta-prompting – automate **prompt refinement**
+
+Ochat now ships a **first-class prompt-improvement loop** powered by
+_recursive meta-prompting_ and exposed via the `mp_refine_run` helper.  Give it
+
+1. a **task** (what the prompt should accomplish) and
+2. an optional **draft prompt**,
+
+and it will iterate:
+
+• generate *k* candidate prompts with an **O-series model** (e.g., `o3`),  
+• score them via an OpenAI reward-model,  
+• select the best using a Thompson bandit, and  
+• stop when the score plateaus or the iteration budget is exhausted.
+
+The refined prompt is printed to *stdout* or appended to a file – perfect for
+CI pipelines where prompts live under version control.
+
+CLI flags at a glance:
+
+| Flag | Purpose |
+|------|---------|
+| `-task-file FILE` *(required)* | Markdown file describing the task |
+| `-input-file FILE` | Existing prompt to refine (omit to start from scratch) |
+| `-output-file FILE` | Append the result instead of printing to *stdout* |
+| `-action generate\|update` | Create a new prompt or mutate an existing one |
+| `-prompt-type general\|tool` | Assistant prompt vs tool description |
+
+Quick examples:
+
+```console
+# 1️⃣  Draft a brand-new assistant prompt
+$ mp_refine_run -task-file tasks/summarise.md
+
+# 2️⃣  Improve an existing tool schema and persist the update
+$ mp_refine_run \
+    -task-file tasks/translate_task.md \
+    -input-file  prompts/translate_draft.md \
+    -output-file prompts/translate_refined.md \
+    -action      update \
+    -prompt-type tool
+```
+
+All heavy-lifting lives under `lib/meta_prompting` – functors, evaluators,
+bandit logic and convergence checks.  The CLI is a thin wrapper around
+`Mp_flow.first_flow`/`Mp_flow.tool_flow`; have a look at
+`bin/mp_refine_run.ml` or the annotated API docs in
+`lib/meta_prompting/mp_flow.mli` for the full story.
+
 
 *Everything you need to prototype, run and embed modern LLM workflows without leaving the OCaml ecosystem.*
 
@@ -23,8 +136,9 @@
 10. [Embedding the libraries](#embedding-the-libraries)
 11. [Composing full workflows](#composing-full-workflows)
 12. [Key concepts & glossary](#key-concepts--glossary)
-13. [Project layout](#project-layout)
-14. [License](#license)
+13. [Meta-prompting & self-improvement](#meta-prompting--self-improvement)
+14. [Project layout](#project-layout)
+15. [License](#license)
 
 
 ---
@@ -38,6 +152,9 @@ in pure OCaml:
 * **ChatMarkdown ( ChatMD )** – a Markdown + XML dialect that stores *the full
   conversation* together with model parameters, tool declarations and
   persisted artefacts.
+* **Context compaction** – one keystroke (`:compact`) summarises long
+  transcripts in-place, shrinking token usage by 10-100× while preserving
+  the essential dialogue. Perfect for marathon coding or research sessions.
 * **chat_tui** – a Notty-powered, Vim-inspired UI that edits ChatMD files,
   executes tools and streams assistant output in real time.
 * **Zero-boiler-plate tools** – promote any OCaml value, shell command or
@@ -93,8 +210,12 @@ dune build
 dune runtest
 dune build @doc
 
+# The `@doc` alias is generated only when the project’s `dune-project`
+# file contains a `(documentation ...)` stanza.  If the command above
+# fails simply add the stanza or omit the step.
+
 # Fire up the interactive TUI on a sample prompt
-dune exec chat_tui -- -file prompts/interactive.chatmd
+dune exec chat_tui -- -file prompts/interactive.md
 ```
 
 ### 🔍 30-second smoke-test — *ochat* chat-completion CLI
@@ -133,7 +254,7 @@ $ ochat chat-completion [flags]
 | Flag | Purpose | Default |
 |------|---------|---------|
 | `-prompt-file` | File prepended **once** at the *start* of the transcript (usually a template with `<system>` / `<developer>` rules). | *(none)* |
-| `-output-file` | Chat log that *persists* across invocations (created if absent, **appended** otherwise).  Use `$(mktemp)` or `/dev/stdout` when you want an *ephemeral* transcript. | `prompts/default.md` |
+| `-output-file` | Chat log that *persists* across invocations (created if absent, **appended** otherwise).  Use `$(mktemp)` or `/dev/stdout` when you want an *ephemeral* transcript. | `./prompts/default.md` |
 
 
 ### State lives in a **file**
@@ -282,7 +403,10 @@ Environment variables:
 |---------------------|------------------------------------------------|
 | `OPENAI_API_KEY`    | Required for completions / embeddings          |
 | `MCP_PROMPTS_DIR`   | Extra folder scanned by `mcp_server`           |
-| `PATH`              | `google-chrome`/`chromium` for `webpage_to_markdown` |
+| `PATH`              | `google-chrome`/`chromium` / `path/to/chrome` for `webpage_to_markdown` |
+
+`webpage_to_markdown` uses the `google-chrome` binary as a backup to fetch web pages where most of the content is dynamic and javascript needs to be run for the content to render. Ensure that the path to the Chrome executable is included in your `PATH` environment variable or set it explicitly. The project will install a [`chrome-dump`](scripts/chrome_dump.sh)
+executable on the system that will look for your Chrome binary. It detects the platform and uses the correct binary for your system.
 
 ---
 
@@ -380,7 +504,7 @@ Below is a condensed checklist distilled from months of day-to-day usage.  All t
 2. **System / developer message choice matters.** For GPT-series stick to one `<system>` message; for *reasoning* models such as **o3‐mini** place the rules in a `<developer>` message because these models follow the _chain-of-command_ spec more literally.
 3. **System content = scope + constraints, _nothing else_.** One or two sentences suffice.  Large policy docs should be `<import>`-ed to keep the round-trip diff small.
 4. **Declare tools _once_ (via `<tool …/>`) and never duplicate the schema in plain text.** The API already provides the JSON schema to the model and repeating it wastes tokens or introduces mismatches.
-5. **Enable JSON-mode (`response_format="json_object"`) for machine-readable replies.** GPT-4o-mini and reasoning models respect the constraint and will return *parsable* objects.
+5. **Enable JSON-mode (`response_format="json_object"`) for machine-readable replies.** `o3-mini` and other reasoning models respect the constraint and will return *parsable* objects.
 6. **“Show, don’t tell” — provide a single, minimal example.** Instead of lengthy prose like “Return valid JSON”, embed one assistant message that contains a canonical response shape:
 
    ```xml
@@ -394,15 +518,15 @@ Below is a condensed checklist distilled from months of day-to-day usage.  All t
 8. **Zero-shot first, few-shot only if needed (reasoning models).** Most o-series prompts work with no examples; add them only when absolutely necessary and keep them perfectly aligned with the instructions.
 9. **Leverage tools instead of giant context windows.** When a sub-task can be solved via search (`md_search`, `odoc_search`) or a remote micro-service, call the tool rather than pasting 100 k tokens of data.
 10. **Reusable workflows = agents.** Encapsulate a sequence of steps into `my_flow.chatmd`, and mount it through `<agent src="my_flow.chatmd"/>` for LEGO-style composition.
-12. **Mind the token budget.** GPT-4o can handle ~1 M tokens, but both latency and price grow linearly.  Check with `ochat tokenize -file foo.chatmd` before you hit *Send*.
+12. **Mind the token budget.** O-series models (e.g., `o3`) can handle ~1 M tokens, but both latency and price grow linearly.  Check with `ochat tokenize -file foo.chatmd` before you hit *Send*.
 
 ### reasoning vs GPT quick‐reference
 
 | Situation | Recommended model | Prompting style |
 |-----------|------------------|-----------------|
 | Complex, multi-step planning | **o3-mini / o3** | Concise goal + constraints, *no* step-by-step request; use `reasoning_effort` when you need depth. |
-| Latency-sensitive UI chats | **GPT-4o/GPT-4.1** | Explicit, detailed instructions; CoT or *think step-by-step* when logic matters. |
-| Giant context (≥ 200k tokens) | **GPT-4o/GPT-4.1** | Repeat key constraints at *top & bottom* of the prompt. |
+| Latency-sensitive UI chats | **O-series / GPT-4.1** | Explicit, detailed instructions; CoT or *think step-by-step* when logic matters. |
+| Giant context (≥ 200k tokens) | **O-series / GPT-4.1** | Repeat key constraints at *top & bottom* of the prompt. |
 
 Additional reminders for reasoning models:
 
@@ -446,9 +570,9 @@ End-to-end example demonstrating *everything at once*:
 | Name | Category | Description |
 |------|----------|-------------|
 | `apply_patch`         | repo      | Apply an *Ochat diff* (V4A) to the working tree |
-| `read_dir`            | fs        | Recursively list directory contents as JSON |
+| `read_dir`            | fs        | List entries (non-recursive) in a directory; returns plain-text lines |
 | `get_contents`        | fs        | Read a file (UTF-8) |
-| `get_url_content`     | web       | Download a raw resource and strip HTML to text |
+| `get_url_content` *(experimental)* | web       | Download a raw resource and strip HTML to text |
 | `webpage_to_markdown` | web       | Download a page & convert it to Markdown |
 | `index_ocaml_code`    | index     | Build a vector index from a source tree |
 | `index_markdown_docs` | index     | Vector-index a folder of Markdown files |
@@ -456,7 +580,10 @@ End-to-end example demonstrating *everything at once*:
 | `md_search` / `markdown_search` | search | Query Markdown indexes created by `index_markdown_docs` |
 | `query_vector_db`     | search    | Hybrid dense + BM25 search over source indices |
 | `fork`                | misc      | Spawn a forked assistant with the exact same context to perform a task and return the results to the original assistant |
-| `make_dir`            | fs        | Create a directory (idempotent) |
+| `mkdir` *(experimental)*               | fs        | Create a directory (idempotent) |
+| `append_to_file`      | fs        | Append text to a file, creating it if absent |
+| `find_and_replace`    | fs        | Replace occurrences of a string in a file (single or all) |
+| `meta_refine`         | meta      | Recursive prompt refinement utility |
 
 <details>
 <summary><strong>Deep-dive: 7 helpers that turn ChatMD into a Swiss-Army knife</strong></summary>
@@ -467,7 +594,7 @@ End-to-end example demonstrating *everything at once*:
 4. **`markdown_search`** – Complement to `odoc_search`.  Index your design docs and Wiki once; query them from ChatMD forever.
 5. **`query_vector_db`** – When you need proper hybrid retrieval (dense + BM25) over a code base.  Works hand-in-hand with `index_ocaml_code`.
 6. **`fork`** –  Spawn a *clone* of the assistant inside the same prompt.  Perfect for speculative tasks: let the clone draft a changelog while the main thread keeps chatting.
-7. **`make_dir`** – Sounds trivial but enables one-shot project scaffolding flows where the LLM both creates folders *and* patches files.
+7. **`mkdir`** *(experimental)* – Sounds trivial but enables one-shot project scaffolding flows where the LLM both creates folders *and* patches files.
 
 </details>
 
@@ -541,6 +668,12 @@ touching an HTTP stack.
 ---
 
 ## Shell-command wrappers – *the 30-second custom tool*
+
+> ⚠️ **Security note** – A `<tool command="…"/>` wrapper runs the specified
+> binary with the *full privileges of the current user*.  Only mount such tools
+> in **trusted environments** or inside a container / sandbox.  Never expose
+> unrestricted shell helpers to untrusted prompts – limit the command and
+> validate the arguments instead.
 
 Not every helper deserves a fully-blown OCaml module.  Often you just want to
 gate a **single shell command** behind a friendly JSON schema so the model can
@@ -701,7 +834,7 @@ code.
 
 The prompt turns the assistant into a fully autonomous *research → summarise →
 patch* agent.  You will recognise many of the concepts explained earlier: MCP
-tools, built-ins, chain-of-thought, GPT-4o vs o3 models and, most
+tools, built-ins, chain-of-thought, O-series vs reasoning models and, most
 importantly, incremental file updates via `apply_patch`.
 
 ```xml
@@ -715,7 +848,7 @@ importantly, incremental file updates via `apply_patch`.
 <tool mcp_server="stdio:npx -y brave-search-mcp" />
 
 <!-- Read-only helper so the LLM can *peek* at existing research files -->
-<tool name="sed" command="sed" description="read-only file viewer" local />
+<tool name="sed" command="sed" description="read-only file viewer" />
 
 <system>
 You are a meticulous web-research agent.  Your job is to fully resolve the
@@ -756,10 +889,10 @@ Clone the snippet, tweak the `<config>` model, change the tool list and you
 have an advanced research agent tailored to your environment.
 
 
-### Inspiration – `prompt-examples/discovery.md`
+### Inspiration – `prompt_examples/discovery.md`
 
 The repository ships an *industrial-strength* research agent in
-`prompt-examples/discovery.md`.  It demonstrates – in fewer than 120 lines – how
+`prompt_examples/discovery.md`.  It demonstrates – in fewer than 120 lines – how
 to chain **Brave web search (remote MCP tool)**, `webpage_to_markdown`, and
 `apply_patch` into a self-healing loop that:
 
@@ -881,8 +1014,8 @@ Below is a **full cut-and-paste scenario** that shows *all* moving parts – OCa
        [ Functions.index_markdown_docs ~env:(Ctx.env ctx) ~dir:(Ctx.dir ctx) ]
      | "markdown_search" ->
        [ Functions.markdown_search ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
-     | other -> failwithf "Unknown built-in tool: %s" other ()
      | "echo" -> [ Echo.def ] (* Our custom function *)
+     | other -> failwithf "Unknown built-in tool: %s" other ()
   | CM.Custom c -> [ custom_fn ~env:(Ctx.env ctx) c ]
   | CM.Agent agent_spec -> [ agent_fn ~ctx ~run_agent agent_spec ]
   | CM.Mcp mcp -> mcp_tool ~sw ~ctx mcp
@@ -1042,7 +1175,7 @@ works.*
 ## chat_tui – interactive terminal client
 
 ```console
-$ chat_tui -file prompts/interactive.chatmd
+$ chat_tui -file prompts/interactive.md
 ```
 
 Think of **chat_tui** as the *interactive face* of your prompt-as-code
@@ -1072,7 +1205,7 @@ usage of the maintainers.  Print it, tape it to the wall, thank us later.
 | **Normal** | `j / k`, `gg / G`  | navigate history |
 |            | `o / O`             | insert line below / above and jump into Insert |
 |            | `v`                 | start visual selection (useful for `apply_patch`) |
-| **Cmd (:)** | `:w`, `:q`, `:wq` | write / quit |
+| **Cmd (:)** | `:w`, `:q`, `:wq`, `:compact` | write / quit / compact context |
 
 Pro tip — while a request is streaming you can hit `v` to select the last
 assistant code block, press `!apply_patch` + <kbd>Enter</kbd>, and watch the
@@ -1085,33 +1218,78 @@ repository mutate *while the model is still thinking*.
 | | `Meta+Enter` | submit draft |
 | **Normal** | `j`/`k`, `gg`/`G` | navigate history |
 | | `dd`, `u`, `Ctrl-r` | delete / undo / redo |
-| **Cmd (`:`)** | `:w`, `:q`, `:wq` | save prompt, quit |
+| **Cmd (`:`)** | `:w`, `:q`, `:wq`, `:compact` | save prompt, quit, compact context |
 
 Features
 
 * Live streaming of tool output, reasoning deltas & assistant text
 * Auto-follow & scroll-history with Notty
+* Manual **context compaction** via `:compact` (`:c`, `:cmp`) – summarises older messages when the history grows too large and replaces it with a concise summary, saving tokens and latency.
 * Persists conversation under `.chatmd/` so you can resume later
+
+#### Context compaction (`:compact`)
+
+When a session grows beyond a comfortable token budget you can shrink it
+on demand:
+
+```text
+:compact          # alias :c or :cmp
+```
+
+Ochat will:
+
+1. Take a *snapshot* of the current history.
+2. Score messages based on relevance to the current context via the relevance judge.
+3. Pass the most-relevant messages to the summariser which produces a
+   compacted version of the conversation. 
+4. Replace the original messages *in-place* and update the viewport.
+5. Archive the original history in a `<session>/archive` folder
+
+
+> Tip Run `:w` immediately after `:compact` to persist the shrunken
+> history before generating new messages.
+
+##### Under the hood – how the compaction pipeline works
+
+Calling `:compact` triggers a **four-stage pipeline** implemented in
+`lib/context_compaction/`:
+
+| Stage | Module | What happens |
+|-------|--------|--------------|
+| ① Load config | `Context_compaction.Config` | Reads `~/.config/ochat/context_compaction.json` (or XDG-override).  Missing file → hard-coded defaults `{ context_limit = 20_000 ; relevance_threshold = 0.5 }`. |
+| ② Score relevance | `Context_compaction.Relevance_judge` | For **every** message the *Importance judge* asks a small reward-model to rate how indispensable the line is on a scale **0–1**.  No `OPENAI_API_KEY` or network?  It returns the deterministic stub `0.5`, keeping semantics reproducible in CI. |
+| ③ Summarise keepers | `Context_compaction.Summarizer` | The messages whose score is ≥ `relevance_threshold` are passed to GPT-4.1 (or an offline stub) together with a purpose-built system prompt.  The model then writes a rich summary |
+| ④ Rewrite history | `Context_compaction.Compactor` | The function returns a **new transcript** that contains the original *first* item (usually the `<system>` prompt) **plus** *at most one* extra `<system-reminder>` message that embeds the summary.  If anything blows up along the way the original history is returned verbatim – the feature can never brick the session. |
+
+Configuration snippet
+
+```jsonc
+// ~/.config/ochat/context_compaction.json
+{
+  "context_limit": 10000,          // tighten character budget
+  "relevance_threshold": 0.7       // be more aggressive when pruning
+}
+```
+
+Programmatic use
+
+```ocaml
+let compacted =
+  Context_compaction.Compactor.compact_history
+    ~env:(Some stdenv)   (* pass Eio capabilities when network access is OK *)
+    ~history:full_history
+in
+send_to_llm (compacted @ new_user_turn)
+```
+
 
 **Self-serve checklist – 10 seconds to first answer**
 
 1. `dune exec chat_tui -- -file prompts/blank.chatmd` – starts in *Insert* mode with an empty history.
-2. Type *“2+2?”*, hit **⌥ ↵** → GPT-4o replies *“4”*.
+2. Type *“2+2?”*, hit **⌥ ↵** → an O-series model replies *“4”*.
 3. Press **`:` w q** – the session is written to `prompts/blank.chatmd` for future audit.
 
 ### Power-user workflow – *code-edit-test* in one window
-
-The TUI shines brightest when you combine it with the built-in `apply_patch` tool and your editor muscle memory:
-
-| Keystroke | Mode | What happens |
-|-----------|------|--------------|
-| `v`          | *Normal* | Visually select the last assistant code block |
-| `!apply_patch` + <kbd>Enter</kbd> | *Command-line* | Patch is applied to the local repo & saved |
-| `:w`         | — | Prompt is persisted so CI picks it up |
-| `Meta+Enter` | *Insert* | Run the updated prompt against the LLM |
-
-Less than five seconds later you have modified a module, re-executed the prompt and captured the diff – all without leaving the terminal.
-
 
 That’s it – *no* OpenAI dashboard visit, *no* shell scripts.  Everything, including model name and temperature, is stored in the document you can now commit to Git.
 
@@ -1120,7 +1298,7 @@ Programmatic embedding:
 
 ```ocaml
 Io.run_main @@ fun env ->
-  Chat_tui.App.run_chat ~env ~prompt_file:"prompts/interactive.chatmd" ()
+  Chat_tui.App.run_chat ~env ~prompt_file:"prompts/interactive.md" ()
 ```
 
 ---
@@ -1385,10 +1563,11 @@ Use them directly in prompts via the built-in tools (`odoc_search`,
 
 | Binary | Purpose | Example |
 |--------|---------|---------|
-| `chat_tui` | interactive TUI | `chat_tui -file notes.chatmd` |
+| `chat_tui` (`chat-tui`) | interactive TUI | `chat_tui -file notes.chatmd` |
 | `ochat`    | misc CLI (index, query, tokenise …) | `ochat query -vector-db-folder _index -query-text "tail-rec map"` |
 | `mcp_server` | serve prompts & tools over JSON-RPC / SSE | `mcp_server --http 8080` |
-| `md_index` / `md_search` | Markdown → index / search | `md-index --root docs`; `md-search --query "streams"` |
+| `mp_refine_run` | refine prompts via *recursive meta-prompting* | `mp_refine_run -task-file task.md -input-file draft.md` |
+| `md_index` / `md_search` | Markdown → index / search | `md_index --root docs`; `md_search --query "streams"` |
 | `odoc_index` / `odoc_search` | ODoc HTML → index / search | `odoc-index --root _doc/_html` |
 
 Run any binary with `-help` for details.
@@ -1439,7 +1618,39 @@ Need to embed docs?  `Odoc_indexer.index_packages` has you covered.
 | **MCP** | `bin/mcp_server`, `lib/mcp/*` | JSON-RPC + SSE transport so tools live anywhere (stdio, HTTP) |
 | **Embed service** | `lib/embed_service` | Rate-limited, concurrent OpenAI embeddings pipeline |
 
+
 > Refer to the generated odoc docs (`_doc/_html/index.html`) for full API references.
+
+---
+
+## Meta-prompting & self-improvement
+
+`Meta_prompting` brings **prompt generators, evaluators and a recursive
+self-improvement monad** under one roof.  It allows you to *treat prompt
+engineering itself as a first-class program*:
+
+```ocaml
+module Mp = Meta_prompting.Make (My_task) (My_prompt)
+let better_prompt = Mp.generate my_task |> Recursive_mp.refine
+```
+
+* **Generators** – `Meta_prompting.Make` maps a *task record* to a
+  [`Chatmd.Prompt.t`].
+* **Evaluators** – combine arbitrary *judges* into a single score.
+* **Recursive refinement** – `Recursive_mp` loops until the score plateaus.
+
+See the dedicated documentation page [`meta_prompting.doc.md`](docs-src/lib/meta_prompting.doc.md),
+the runnable example under [`examples/meta_prompting_quickstart.ml`](examples/meta_prompting_quickstart.ml)
+**or** try the zero-setup CLI helper:
+
+```console
+$ mp_refine_run -task-file tasks/my_task.md \
+               -input-file prompts/draft.md \
+               -output-file prompts/refined.md
+```
+
+The command maps *exactly* to `Mp_flow.first_flow` / `Mp_flow.tool_flow`
+depending on the `-prompt-type` flag.
 
 ---
 

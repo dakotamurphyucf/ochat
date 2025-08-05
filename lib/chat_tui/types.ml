@@ -61,3 +61,11 @@ type patch =
       { role : string
       ; text : string
       }
+
+(* ------------------------------------------------------------------------ *)
+(*  Runtime settings                                                         *)
+(* ------------------------------------------------------------------------ *)
+
+type settings = { parallel_tool_calls : bool }
+
+let default_settings () : settings = { parallel_tool_calls = true }

@@ -163,24 +163,64 @@ module Chat_markdown : sig
     | Tool of tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
-  (** [parse_chat_inputs ~dir src] tokenises, parses and normalises the
-      ChatMarkdown document contained in [src].  The result is the ordered
-      sequence of {!type:top_level_elements} that should be sent to the LLM.
+  (** [parse_chat_inputs ~dir raw] tokenises, parses and normalises the
+      ChatMarkdown snippet contained in [raw].
 
-      – [dir] is the base directory used to resolve relative paths appearing
-        in [`<import src="…"/>`], [`<img local="true"/>`] or
-        [`<agent local="true"/>`] tags.  The function relies on
-        {!Io.load_doc} under the hood and therefore performs read-only I/O.
+      The result preserves the original order of logical messages and is
+      ready to feed into the OpenAI chat API or any compatible backend.
 
-      The helper expands imports recursively, translates shorthand tags
-      (`<user/>`, `<assistant/>`, `<tool_call/>`, `<tool_response/>`) into
-      dedicated record aliases, and discards elements that are irrelevant for
-      the conversation buffer (e.g. whitespace between top-level nodes).
+      Parameters:
+      • [dir] – base directory against which relative paths are resolved
+        (imports, local images, nested agent prompts).  The directory is a
+        standard Eio capability, making the function safe with respect to
+        the ambient file-system.
+      • [raw] – the UTF-8 text to parse.  It can be a whole document or a
+        fragment; leading BOM and surrounding whitespace are ignored.
 
-      @raise Failure if the document is malformed or if an imported file
-             cannot be read. *)
+      Behaviour:
+      1. Preprocesses the input via {!Preprocessor.preprocess} to strip
+         comments and handle conditional compilation markers.
+      2. Parses the cleaned source with the Menhir grammar from
+         {!module:Chatmd_parser}.
+      3. Expands [`<import>`] directives recursively.
+      4. Converts AST nodes into strongly-typed
+         {!type:Chat_markdown.top_level_elements} values, mapping shorthand
+         tags (`<user>`, `<assistant>` & co.) to dedicated aliases.
+      5. Filters out nodes that are irrelevant to the conversation
+         (e.g. stray whitespace between top-level blocks).
+
+      @raise Failure  If the source is not valid ChatMarkdown or if an
+                      imported resource cannot be read. *)
   val parse_chat_inputs
     :  dir:Eio.Fs.dir_ty Eio.Path.t
     -> string
     -> top_level_elements list
+end
+
+(** {1 Metadata helpers}
+    Attach key/value metadata to any top-level element without changing
+    existing record definitions.  The data lives in an external
+    registry so serialisation of prompts is unaffected. *)
+
+module Metadata : sig
+  (** [add elt ~key ~value] attaches the metadata pair [(key, value)] to
+      [elt].  If the same [key] already exists it is appended 
+      (i.e. multiple values per key are allowed).  The call mutates a
+      global in-memory table; it has no effect on serialisation. *)
+  val add : Chat_markdown.top_level_elements -> key:string -> value:string -> unit
+
+  (** [get elt] returns all key/value metadata associated with [elt] or
+      [None] if no entry is present.  The list preserves the insertion
+      order, most-recent first.  Mutating the returned list does **not**
+      update the registry. *)
+  val get : Chat_markdown.top_level_elements -> (string * string) list option
+
+  (** [set elt kvs] replaces the whole metadata list of [elt] with [kvs].
+      Use {!val:add} if you only need to add a single pair. *)
+  val set : Chat_markdown.top_level_elements -> (string * string) list -> unit
+
+  (** [clear ()] removes **all** stored metadata for **every** element.
+      Call it at the end of a request to avoid memory leaks in long-running
+      processes. *)
+  val clear : unit -> unit
 end

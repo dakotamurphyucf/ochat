@@ -13,7 +13,7 @@ let%expect_test "string_of_items handles text and image" =
   @@ fun env ->
   let dir = Eio.Stdenv.fs env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir ~cache in
+  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
   let basic txt : CM.content_item =
     CM.Basic
       { type_ = "text"
@@ -51,7 +51,7 @@ let%expect_test "to_items converts user message with basic text" =
   @@ fun env ->
   let dir = Eio.Stdenv.fs env in
   let cache = Chat_response.Cache.create ~max_size:5 () in
-  let ctx = Ctx.create ~env ~dir ~cache in
+  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
   (* Build a CM.msg representing: <msg role="user">hello</msg> *)
   let basic_item : CM.content_item =
     CM.Basic

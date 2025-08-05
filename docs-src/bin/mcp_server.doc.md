@@ -37,6 +37,7 @@ implements the transport described in [`Mcp_server_http`](../lib/mcp/mcp_server_
 | `read_dir` | List the contents of a directory. | [`Functions.read_dir`](../lib/functions/functions.doc.md) |
 | `get_contents` | Read a file and return its contents. | [`Functions.get_contents`](../lib/functions/functions.doc.md) |
 | `webpage_to_markdown` | Download a web page and convert it to Markdown. | [`Functions.webpage_to_markdown`](../lib/functions/functions.doc.md) |
+| `meta_refine` | Refine a *meta-prompt* using LLM-backed heuristics. | [`Functions.meta_refine`](../lib/functions/functions.doc.md) |
 
 Every prompt file discovered under the directory referenced by
 `$MCP_PROMPTS_DIR` (or `./prompts` when the variable is unset) is also
@@ -60,6 +61,77 @@ stdin        stdout
 ```
 
 The loop runs in the main Eio fibre and blocks indefinitely.
+
+## 9 Internal helper functions
+
+The executable defines several helper functions that, while not exported
+by any public library, are useful to understand when extending the
+server.  All of them reside in `bin/mcp_server.ml` and mutate the
+in-memory registry passed as their first argument.
+
+| Function | Purpose |
+|----------|---------|
+| `setup_tool_echo` | Register the trivial `echo` tool that returns the supplied text verbatim. |
+| `register_builtin_apply_patch` | Expose the `apply_patch` tool backed by `Functions.apply_patch`. |
+| `register_builtin_read_dir` | Register the `read_dir` tool backed by `Functions.read_dir`. |
+| `register_builtin_get_contents` | Register the `get_contents` tool backed by `Functions.get_contents`. |
+| `run_stdio` | Launch the line-delimited JSON stdio transport when `--http` is absent. |
+
+Below is a condensed API reference.
+
+### `setup_tool_echo`
+
+```ocaml
+val setup_tool_echo : Mcp_server_core.t -> unit
+```
+
+Registers the *echo* tool whose handler simply returns the `text` argument
+unchanged.
+
+### `register_builtin_apply_patch`
+
+```ocaml
+val register_builtin_apply_patch :
+  Mcp_server_core.t -> dir:_ Eio.Path.t -> unit
+```
+
+Adds the `apply_patch` tool that expects a single `input` field holding a
+Unified-V4A patch.  The return value is the patched text.
+
+### `register_builtin_read_dir`
+
+```ocaml
+val register_builtin_read_dir :
+  Mcp_server_core.t -> dir:_ Eio.Path.t -> unit
+```
+
+Registers the `read_dir` tool.  Arguments:
+
+* `path` – file-system path; may be relative to the server’s working directory.
+
+The response is a JSON array listing the directory contents.
+
+### `register_builtin_get_contents`
+
+```ocaml
+val register_builtin_get_contents :
+  Mcp_server_core.t -> dir:_ Eio.Path.t -> unit
+```
+
+Registers the `get_contents` tool.  Arguments:
+
+* `file` – path to the text file.
+
+The entire file contents are returned as a JSON string.
+
+### `run_stdio`
+
+```ocaml
+val run_stdio : core:Mcp_server_core.t -> env:Eio.Stdenv.t -> unit
+```
+
+Starts the LD-JSON stdio transport.  The function never returns.  It is
+only used when the `--http` flag is **not** supplied at start-up.
 
 ## 5 HTTP transport
 

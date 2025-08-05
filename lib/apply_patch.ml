@@ -2,7 +2,7 @@
 
     This implementation understands the “Ochat diff” patch syntax
     discussed in the
-    {{:https://cookbook.openai.com/examples/ochat4-1_prompting_guide#reference-implementation-apply_patchpy}
+    {{:https://cookbook.openai.com/examples/gpt4-1_prompting_guide#reference-implementation-apply_patchpy}
     prompting-guide} and can apply multi-file edits against an
     arbitrary workspace.  The module is intentionally IO-free – all
     reads and writes happen through the callback functions supplied to
@@ -17,7 +17,14 @@
 
 open Core
 
-[@@@warning "-32-69"]
+(* Re-export structured error module for external consumers who open
+   [Apply_patch].  This avoids the need to depend on the internal
+   wrapper details of the library. *)
+module Apply_patch_error = Apply_patch_error
+
+let error_to_string = Apply_patch_error.to_string
+
+[@@@warning "-20-26-32-69"]
 
 (* ──────────────────────────────────────────────────────────────────────────
 		   Constants (same strings as in the TypeScript reference)
@@ -64,7 +71,8 @@ type patch_action =
 
 type patch = { actions : patch_action String.Map.t }
 
-exception Diff_error of string
+(* Use the new structured error type *)
+exception Diff_error = Apply_patch_error.Diff_error
 
 (* ──────────────────────────────────────────────────────────────────────────
 		   1.  Unicode canonicalisation helpers
@@ -193,7 +201,8 @@ let peek_next_section (lines : string array) ~(idx0 : int)
   in
   while !idx < Array.length lines && not (boundary lines.(!idx)) do
     let s = lines.(!idx) in
-    if String.is_prefix s ~prefix:"***" then raise (Diff_error ("Invalid Line: " ^ s));
+    if String.is_prefix s ~prefix:"***"
+    then raise (Diff_error (Apply_patch_error.Syntax_error { line = !idx; text = s }));
     incr idx;
     let prev = !mode in
     let s, m =
@@ -222,6 +231,11 @@ let peek_next_section (lines : string array) ~(idx0 : int)
     | `Keep -> old := line :: !old
   done;
   push_chunk ();
+  (* If we're positioned on a chunk delimiter "@@" advance the index so that
+     callers always observe forward progress.  This also treats the trailing
+     "@@" that closes a chunk as belonging to that chunk rather than the next
+     one. *)
+  if !idx < Array.length lines && String.equal lines.(!idx) "@@" then incr idx;
   let eof = !idx < Array.length lines && String.equal lines.(!idx) end_of_file_prefix in
   if eof then incr idx;
   List.rev !old, List.rev !chunks, !idx, eof
@@ -266,7 +280,7 @@ module Parser = struct
   ;;
 
   (* -- UPDATE file ----------------------------------------------------- *)
-  let parse_update_file t ~(orig_text : string) : patch_action =
+  let parse_update_file t ~(path : string) ~(orig_text : string) : patch_action =
     let file_lines = String.split_lines orig_text in
     let idx = ref 0 in
     let chunks_acc = ref [] in
@@ -291,7 +305,10 @@ module Parser = struct
         else false
       in
       if String.(is_empty def_str) && (not section) && !idx <> 0
-      then raise (Diff_error ("Invalid Line: " ^ t.lines.(t.i)));
+      then
+        raise
+          (Diff_error
+             (Apply_patch_error.Syntax_error { line = t.i; text = t.lines.(t.i) }));
       (* --- search for def_str in original (canonical) ---------------- *)
       if not (String.is_empty (String.strip def_str))
       then (
@@ -312,7 +329,18 @@ module Parser = struct
              t.fuzz <- t.fuzz + 1
            | None -> ()));
       let ctx, chunks, next_i, eof = peek_next_section t.lines ~idx0:t.i in
-      let new_idx, fuzz = find_context ~lines:file_lines ~context:ctx ~start:!idx ~eof in
+      (* [peek_next_section] must always advance; otherwise we would loop
+         forever.  The helper now guarantees this property, so hitting this
+         branch indicates a logic bug or a malformed patch. *)
+      if Int.(next_i <= t.i)
+      then
+        raise
+          (Diff_error
+             (Apply_patch_error.Syntax_error
+                { line = t.i; text = "Empty or malformed section in patch" }));
+      let new_idx, fuzz_score =
+        find_context ~lines:file_lines ~context:ctx ~start:!idx ~eof
+      in
       if new_idx = -1
       then (
         let ctx_txt = join ctx in
@@ -321,8 +349,25 @@ module Parser = struct
           then sprintf "Invalid EOF Context %d:\n%s" !idx ctx_txt
           else sprintf "Invalid Context %d:\n%s" !idx ctx_txt
         in
-        raise (Diff_error msg));
-      t.fuzz <- t.fuzz + fuzz;
+        let expected_ctx = ctx in
+        (* Build a small snippet (±3 lines) around the position where the
+           context was expected.  The reference index is [!idx]. *)
+        let snippet =
+          let before = 3 in
+          let after = 3 in
+          let ctx_len = List.length ctx in
+          let start_line = Int.max 0 !idx in
+          let window_start = Int.max 0 (start_line - before) in
+          let window_end =
+            Int.min (List.length file_lines) (start_line + ctx_len + after)
+          in
+          slc file_lines window_start (window_end - window_start)
+        in
+        raise
+          (Diff_error
+             (Apply_patch_error.Context_mismatch
+                { path; expected = expected_ctx; fuzz = fuzz_score; snippet })));
+      t.fuzz <- t.fuzz + fuzz_score;
       List.iter chunks ~f:(fun ch -> ch.orig_index <- ch.orig_index + new_idx);
       chunks_acc := !chunks_acc @ chunks;
       idx := new_idx + List.length ctx;
@@ -343,7 +388,7 @@ module Parser = struct
       else (
         let s = read t in
         if Char.(s.[0] <> hunk_add_line_prefix)
-        then raise (Diff_error ("Invalid Add File Line: " ^ s))
+        then raise (Diff_error (Apply_patch_error.Syntax_error { line = t.i; text = s }))
         else collect (String.drop_prefix s 1 :: acc))
     in
     let lines = collect [] in
@@ -360,9 +405,10 @@ module Parser = struct
       match read ~pref:update_file_prefix t with
       | path when not (String.is_empty path) ->
         if not (Map.mem t.current path)
-        then raise (Diff_error ("Update File missing: " ^ path));
+        then
+          raise (Diff_error (Apply_patch_error.Missing_file { path; action = `Update }));
         let move_to = read ~pref:move_file_to_prefix t in
-        let upd = parse_update_file t ~orig_text:(Map.find_exn t.current path) in
+        let upd = parse_update_file t ~path ~orig_text:(Map.find_exn t.current path) in
         let upd =
           { upd with
             move_path = (if String.is_empty move_to then None else Some move_to)
@@ -373,7 +419,9 @@ module Parser = struct
         (match read ~pref:delete_file_prefix t with
          | path when not (String.is_empty path) ->
            if not (Map.mem t.current path)
-           then raise (Diff_error ("Delete File missing: " ^ path));
+           then
+             raise
+               (Diff_error (Apply_patch_error.Missing_file { path; action = `Delete }));
            t.patch
            <- { actions =
                   Map.set
@@ -386,13 +434,19 @@ module Parser = struct
            (match read ~pref:add_file_prefix t with
             | path when not (String.is_empty path) ->
               if Map.mem t.current path
-              then raise (Diff_error ("Add File already exists: " ^ path));
+              then raise (Diff_error (Apply_patch_error.File_exists { path }));
               let add = parse_add_file t in
               t.patch <- { actions = Map.set t.patch.actions ~key:path ~data:add }
-            | _ -> raise (Diff_error ("Unknown line: " ^ t.lines.(t.i)))))
+            | _ ->
+              raise
+                (Diff_error
+                   (Apply_patch_error.Syntax_error { line = t.i; text = t.lines.(t.i) }))))
     done;
     if not (String.is_prefix t.lines.(t.i) ~prefix:(String.strip patch_suffix))
-    then raise (Diff_error "Missing End Patch");
+    then
+      raise
+        (Diff_error
+           (Apply_patch_error.Syntax_error { line = t.i; text = "Missing End Patch" }));
     t.i <- t.i + 1
   ;;
 end
@@ -406,7 +460,11 @@ let text_to_patch (text : string) (orig : string String.Map.t) : patch * int =
     Array.length lines < 2
     || (not (String.is_prefix lines.(0) ~prefix:(String.strip patch_prefix)))
     || not (String.equal lines.(Array.length lines - 1) (String.strip patch_suffix))
-  then raise (Diff_error "Invalid patch text");
+  then
+    raise
+      (Diff_error
+         (Apply_patch_error.Syntax_error { line = 0; text = "Invalid patch text" }));
+  (* sequence separator *)
   let p = Parser.make ~current:orig ~lines in
   p.i <- 1;
   Parser.parse p;
@@ -437,54 +495,21 @@ let identify_files_added text =
 
 let list_slice xs ~pos ~len = if len <= 0 then [] else List.sub xs ~pos ~len
 
-let updated_file_old ~orig_text (action : patch_action) ~path =
-  let orig_lines = String.split_lines orig_text in
-  let dest_lines = ref [] in
-  (* grow in the proper order *)
-  let orig_index = ref 0 in
-  (* helper: append a list to the accumulator *)
-  let append ls = dest_lines := !dest_lines @ ls in
-  List.iter action.chunks ~f:(fun ch ->
-    (* --- same guard checks as the reference implementation -------- *)
-    if ch.orig_index > List.length orig_lines
-    then
-      raise
-        (Diff_error
-           (sprintf
-              "%s: chunk.orig_index %d > len(lines) %d"
-              path
-              ch.orig_index
-              (List.length orig_lines)));
-    if !orig_index > ch.orig_index
-    then
-      raise
-        (Diff_error
-           (sprintf
-              "%s: orig_index %d > chunk.orig_index %d"
-              path
-              !orig_index
-              ch.orig_index));
-    (* 1. copy the untouched slice that precedes this chunk *)
-    append (list_slice orig_lines ~pos:!orig_index ~len:(ch.orig_index - !orig_index));
-    orig_index := ch.orig_index;
-    (* 2. insert new lines (may start with an empty string) *)
-    append ch.ins_lines;
-    (* 3. skip the deleted part in the original file *)
-    orig_index := !orig_index + List.length ch.del_lines);
-  (* 4. copy whatever tail of the original file is left *)
-  append
-    (list_slice orig_lines ~pos:!orig_index ~len:(List.length orig_lines - !orig_index));
-  String.concat_lines !dest_lines
-;;
-
 let updated_file ~orig_text (act : patch_action) ~path =
   let orig = String.split_lines orig_text in
   let dest, idx =
     List.fold act.chunks ~init:([], 0) ~f:(fun (acc, i0) ch ->
       if ch.orig_index > List.length orig
-      then raise (Diff_error (sprintf "%s: chunk index out of range" path));
+      then
+        raise
+          (Diff_error
+             (Apply_patch_error.Bounds_error
+                { path; index = ch.orig_index; len = List.length orig }));
       if i0 > ch.orig_index
-      then raise (Diff_error (sprintf "%s: overlapping chunks" path));
+      then
+        raise
+          (Diff_error
+             (Apply_patch_error.Bounds_error { path; index = i0; len = ch.orig_index }));
       let keep = slc orig i0 (ch.orig_index - i0) in
       acc @ keep @ ch.ins_lines, ch.orig_index + List.length ch.del_lines)
   in
@@ -530,7 +555,8 @@ let patch_to_commit (p : patch) (orig : string String.Map.t) : commit =
 let load_files paths ~open_fn =
   List.fold paths ~init:String.Map.empty ~f:(fun acc p ->
     try Map.set acc ~key:p ~data:(open_fn p) with
-    | _ -> raise (Diff_error ("File not found: " ^ p)))
+    | _ ->
+      raise (Diff_error (Apply_patch_error.Missing_file { path = p; action = `Update })))
 ;;
 
 let apply_commit (c : commit) ~write_fn ~remove_fn =
@@ -544,6 +570,68 @@ let apply_commit (c : commit) ~write_fn ~remove_fn =
          write_fn dst (Option.value_exn data.new_text);
          remove_fn path
        | None -> write_fn path (Option.value_exn data.new_text)))
+;;
+
+(* Success snippet generation *)
+
+let rec common_prefix_len l1 l2 idx =
+  match l1, l2 with
+  | h1 :: t1, h2 :: t2 when String.equal h1 h2 -> common_prefix_len t1 t2 (idx + 1)
+  | _ -> idx
+;;
+
+let rec common_suffix_len l1 l2 count =
+  match l1, l2 with
+  | [], _ | _, [] -> count
+  | _ ->
+    (match List.last l1, List.last l2 with
+     | Some h1, Some h2 when String.equal h1 h2 ->
+       common_suffix_len (List.drop_last_exn l1) (List.drop_last_exn l2) (count + 1)
+     | _ -> count)
+;;
+
+let generate_snippets (commit : commit) ~(_orig : string String.Map.t)
+  : (string * string) list
+  =
+  let context = 0 in
+  Map.fold commit.changes ~init:[] ~f:(fun ~key:path ~data acc ->
+    let snippet =
+      match data.kind with
+      | Add ->
+        let lines = Option.value_exn data.new_text |> String.split_lines in
+        lines
+        |> List.mapi ~f:(fun idx line -> Printf.sprintf "%4d | +%s" (idx + 1) line)
+        |> String.concat ~sep:"\n"
+      | Delete ->
+        let lines = Option.value_exn data.old_text |> String.split_lines in
+        lines
+        |> List.mapi ~f:(fun idx line -> Printf.sprintf "%4d | -%s" (idx + 1) line)
+        |> String.concat ~sep:"\n"
+      | Update ->
+        let old_lines = Option.value_exn data.old_text |> String.split_lines in
+        let new_lines = Option.value_exn data.new_text |> String.split_lines in
+        let prefix_len = common_prefix_len old_lines new_lines 0 in
+        let suffix_len =
+          common_suffix_len
+            (List.drop old_lines prefix_len)
+            (List.drop new_lines prefix_len)
+            0
+        in
+        let first_changed = prefix_len in
+        let last_changed_new = List.length new_lines - suffix_len - 1 in
+        let start_line = Int.max 0 (first_changed - context) in
+        let end_line = Int.min (List.length new_lines - 1) (last_changed_new + context) in
+        List.init (end_line - start_line + 1) ~f:(fun i -> i + start_line)
+        |> List.map ~f:(fun idx ->
+          let line = List.nth_exn new_lines idx in
+          let prefix_char =
+            if idx >= first_changed && idx <= last_changed_new then '+' else ' '
+          in
+          Printf.sprintf "%4d | %c%s" (idx + 1) prefix_char line)
+        |> String.concat ~sep:"\n"
+    in
+    (path, snippet) :: acc)
+  |> List.rev
 ;;
 
 (** [process_patch ~text ~open_fn ~write_fn ~remove_fn] interprets and
@@ -570,14 +658,19 @@ let process_patch
       ~(open_fn : string -> string)
       ~(write_fn : string -> string -> unit)
       ~(remove_fn : string -> unit)
-  : string
+  : string * (string * string) list
   =
   if not (String.is_prefix text ~prefix:patch_prefix)
-  then raise (Diff_error "Patch must start with *** Begin Patch\\n");
+  then
+    raise
+      (Diff_error
+         (Apply_patch_error.Syntax_error
+            { line = 0; text = "Patch must start with *** Begin Patch\\n" }));
   let needed = identify_files_needed text in
   let orig = load_files needed ~open_fn in
   let patch, _ = text_to_patch text orig in
   let commit = patch_to_commit patch orig in
+  let snippets = generate_snippets commit ~_orig:orig in
   apply_commit commit ~write_fn ~remove_fn;
-  "Done!"
+  "Done!", snippets
 ;;

@@ -29,6 +29,8 @@ type t =
   ; msg_buffers : (string, Types.msg_buffer) Base.Hashtbl.t
   ; function_name_by_id : (string, string) Base.Hashtbl.t
   ; reasoning_idx_by_id : (string, int ref) Base.Hashtbl.t
+  ; mutable tasks : Session.Task.t list
+  ; kv_store : (string, string) Base.Hashtbl.t
   ; mutable fetch_sw : Eio.Switch.t option
   ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int (** Current position inside [input_line] (bytes). *)
@@ -95,6 +97,8 @@ val create
   -> msg_buffers:(string, Types.msg_buffer) Base.Hashtbl.t
   -> function_name_by_id:(string, string) Base.Hashtbl.t
   -> reasoning_idx_by_id:(string, int ref) Base.Hashtbl.t
+  -> tasks:Session.Task.t list
+  -> kv_store:(string, string) Base.Hashtbl.t
   -> fetch_sw:Eio.Switch.t option
   -> scroll_box:Notty_scroll_box.t
   -> cursor_pos:int
@@ -137,6 +141,12 @@ val selection_active : t -> bool
 (** [messages t] returns the list of renderable messages in top-down order.
     Each element is a [(role, text)] pair as defined in {!Types.message}. *)
 val messages : t -> message list
+
+(** List of tasks currently associated with the session. *)
+val tasks : t -> Session.Task.t list
+
+(** Key–value store for arbitrary plugin data. *)
+val kv_store : t -> (string, string) Base.Hashtbl.t
 
 (** Auto-scroll flag.  When [true] the view follows new incoming messages
     automatically; otherwise the scroll position stays unchanged. *)
@@ -193,13 +203,9 @@ val set_fork_start_index : t -> int option -> unit
     top of the undo ring.  Any redo history is cleared. *)
 val push_undo : t -> unit
 
-(** returns [true] if something was undone *)
-
 (** [undo t] reverts the most recent change to the prompt.  Returns [true]
     when a state was restored, [false] if the stack was empty. *)
 val undo : t -> bool
-
-(** returns [true] if something was redone *)
 
 (** [redo t] reapplies the last undone change.  Returns [true] on success. *)
 val redo : t -> bool

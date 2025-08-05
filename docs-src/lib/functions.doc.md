@@ -51,16 +51,19 @@ capabilities (e.g. sandboxed directories).
 | Tool                               | JSON `name`      | Category    | Synopsis |
 |------------------------------------|------------------|-------------|----------|
 | `get_contents`                     | `read_file`      | filesystem  | Return the UTF-8 contents of a given file. |
-| `get_url_content`                  | `get_url_content`| web         | Fetch a URL, strip HTML, return plain text. |
-| `index_ocaml_code`                 | `index_ocaml_code`| indexing   | Crawl a folder and build a hybrid vector + BM25 index. |
-| `query_vector_db`                  | `query_vector_db`| search      | Query the index built by *index_ocaml_code*. |
-| `index_markdown_docs`              | `index_markdown_docs` | indexing   | Build a semantic index over a folder of Markdown files. |
-| `markdown_search`                  | `markdown_search`| search      | Query a Markdown index created with *index_markdown_docs*. |
-| `apply_patch`                      | `apply_patch`    | filesystem  | Apply a Ochat diff to the workspace. |
+| `apply_patch`                      | `apply_patch`    | filesystem  | Apply an Ochat diff to the workspace. |
+| `append_to_file`                   | `append_to_file` | filesystem  | Append text to a file (creates it if missing). |
+| `find_and_replace`                 | `find_and_replace` | filesystem | In-place string substitution (first or all matches). |
 | `read_dir`                         | `read_directory` | filesystem  | List immediate children of a directory. |
 | `mkdir`                            | `make_dir`       | filesystem  | Create a sub-directory (idempotent). |
-| `odoc_search`                      | `odoc_search`    | search      | Semantic search over locally-indexed OCaml docs. |
+| `get_url_content`                  | `get_url_content`| web         | Fetch a URL, strip HTML, return plain text. |
 | `webpage_to_markdown`              | `webpage_to_markdown` | web   | Convert a remote page to Markdown. |
+| `index_ocaml_code`                 | `index_ocaml_code`| indexing   | Crawl a folder and build a hybrid vector + BM25 index. |
+| `query_vector_db`                  | `query_vector_db`| search      | Query the index built by *index_ocaml_code*. |
+| `index_markdown_docs`              | `index_markdown_docs` | indexing | Build a semantic index over a folder of Markdown files. |
+| `markdown_search`                  | `markdown_search`| search      | Query a Markdown index created with *index_markdown_docs*. |
+| `odoc_search`                      | `odoc_search`    | search      | Semantic search over locally-indexed OCaml docs. |
+| `meta_refine`                      | `meta_refine`    | misc        | Refine a raw prompt using Recursive Meta-Prompting. |
 | `fork`                             | `fork`           | misc        | *Stub* – reserved for future agent-forking support. |
 
 > ℹ️  All tools return *plain strings* – exactly what OpenAI expects today.
@@ -136,6 +139,50 @@ let search = Functions.markdown_search ~dir ~net in
 
 (* JSON arguments *)
 {"query": "how to configure dune for js_of_ocaml", "k": 3, "index_name": "project_docs"}
+```
+
+### 9 . `append_to_file`
+
+Append arbitrary text to the end of a file.  If the target file does not yet
+exist it will be created.  The helper prefixes the payload with a newline so
+that multiple calls result in clean paragraph breaks.
+
+```ocaml
+let append = Functions.append_to_file ~dir in
+
+(* JSON expected from the model *)
+{"file": "CHANGELOG.md", "content": "\n## 0.2.0 – 2025-08-05\n* Add new CLI flags"}
+```
+
+### 10 . `find_and_replace`
+
+Search–replace convenience wrapper.  Receives a four-tuple
+`(file, search, replace, all)` and rewrites the file in-place using
+`String.substr_replace_*`:
+
+* When `all = false` only the **first** occurrence is changed.  An error is
+  returned if multiple matches are present – in that case you should fall back
+  to the more explicit `apply_patch` tool.
+* When `all = true` all non-overlapping matches are replaced.
+
+```ocaml
+let sub = Functions.find_and_replace ~dir in
+
+(* Replace absolute imports with ppxlib qualified ones *)
+{"file": "lib/parser.ml", "search": "open Ast", "replace": "open Ppxlib.Ast", "all": true}
+```
+
+### 11 . `meta_refine`
+
+Performs *Recursive Meta-Prompting* ([paper link](https://arxiv.org/abs/2302.00000))
+on an input prompt.  Useful for auto-improving user instructions before they
+are forwarded to another agent or LLM.
+
+```ocaml
+let refine = Functions.meta_refine in
+
+refine """You are ChatGPT, a large language model trained by OpenAI."""
+(* ⇒ returns a better structured system prompt *)
 ```
 
 ---

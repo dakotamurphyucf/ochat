@@ -80,7 +80,7 @@ val slice
 
     The function guarantees:
 
-    • {!text} length in tokens lies within the inclusive range
+    • The slice length in tokens lies within the inclusive range
       {b 64 – 320} unless the document itself is shorter.  
     • Consecutive slices overlap by 64 tokens to preserve context.  
     • No slice breaks inside fenced code blocks or GitHub-style tables.  

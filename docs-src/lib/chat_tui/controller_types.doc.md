@@ -13,6 +13,7 @@ type reaction =
   | Redraw
   | Submit_input
   | Cancel_or_quit
+  | Compact_context
   | Quit
   | Unhandled
 ```
@@ -30,6 +31,7 @@ re-define it.
 | `Redraw` | The visible model state changed. | Invoke `Renderer.render` and refresh the Notty viewport. |
 | `Submit_input` | The user finished editing the prompt (⌥⇧-Enter in normal mode). | Assemble an OpenAI request from the current input buffer, append a *pending* message bubble to the conversation view, and spawn the network fiber. |
 | `Cancel_or_quit` | The *Escape* key was pressed.  If a request is running, cancel it; otherwise fall back to `Quit`. | `Eio.Switch.fail` the fetch fiber *or* terminate the app. |
+| `Compact_context` | User explicitly triggered conversation summarisation.  The controller wants the main loop to compact historical messages to free token budget. | Call `Context_compaction.Compactor.run`, replace the elided messages with the summary, then redraw. |
 | `Quit` | Immediate termination (Ctrl-C, `q`). | Cleanly shut down and exit. |
 | `Unhandled` | The controller doesn’t recognise the event. | Pass the event to the next handler in the chain (global bindings, debug console, …). |
 

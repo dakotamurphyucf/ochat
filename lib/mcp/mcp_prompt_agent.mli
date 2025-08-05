@@ -1,4 +1,4 @@
-(** Agent wrapper for static {.chatmd} prompt files.
+(** Wrap a *static* {.chatmd} document as an MCP **tool** and **prompt**.
 
     This module turns a single *ChatMD* document (typically created with
     [chatmd] tooling) into the trio of values expected by an MCP-compatible
@@ -28,9 +28,10 @@
     fresh {!Eio.Switch} so that all resources (HTTP calls, files, etc.) are
     scoped and released properly.
 
-    @raise Failure if the file at [path] cannot be read or contains invalid
-           XML/ChatMD.  Most operational errors are, however, caught and
-           returned as [Error] results by the handler itself.
+    @raise Failure if [path] cannot be read or contains invalid
+           ChatMarkdown/XML.  Runtime failures **inside** the agent are
+           intercepted by the handler and reported as [Error _] values
+           instead of propagating an exception.
 *)
 
 (** [of_chatmd_file ~env ~core path] loads the ChatMD document located at

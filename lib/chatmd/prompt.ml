@@ -706,10 +706,41 @@ module Chat_markdown = struct
   ;;
 
   let parse_chat_inputs ~dir (xml_content : string) : top_level_elements list =
+    let xml_content = Meta_prompting.Preprocessor.preprocess xml_content in
     let document = parse xml_content in
     let expanded = Import_expansion.expand_imports ~dir document in
     let chat_elements = chat_elements expanded in
     let parsed_elements = List.map ~f:parse_chat_element chat_elements in
     of_chat_elements parsed_elements
   ;;
+end
+
+(** ------------------------------------------------------------------ *)
+
+(** {1 Metadata helpers}  *)
+
+module Metadata = struct
+  open Core
+
+  module CM = struct
+    type t = Chat_markdown.top_level_elements
+
+    let hash = Chat_markdown.hash_top_level_elements
+    let compare = Chat_markdown.compare_top_level_elements
+    let sexp_of_t = Chat_markdown.sexp_of_top_level_elements
+    let t_of_sexp = Chat_markdown.top_level_elements_of_sexp
+  end
+
+  module Table = Hashtbl.Make (CM)
+
+  let store : (string * string) list Table.t = Table.create ~size:16 ()
+
+  let add element ~key ~value =
+    let existing = Hashtbl.find store element |> Option.value ~default:[] in
+    Hashtbl.set store ~key:element ~data:((key, value) :: existing)
+  ;;
+
+  let get element = Hashtbl.find store element
+  let set element kvs = Hashtbl.set store ~key:element ~data:kvs
+  let clear () = Hashtbl.clear store
 end

@@ -27,30 +27,30 @@ open Eio
     underlying directory capability is preserved. *)
 val ( / ) : ([> Fs.dir_ty ] as 'a) Path.t -> string -> 'a Path.t
 
-(** Run [f ()] and wrap the outcome in [Result.t].
+(** [to_res f] executes [f ()] and converts its outcome to
+    [`('a, string) result`].
 
-    • Returns [Ok (f ())] on success.
-    • Returns [Error msg] if [f] raises, where [msg] is obtained via
-      [Fmt.str "%a" Eio.Exn.pp ex].
+    • Returns [Ok (f ())] when no exception is raised.
+    • Returns [Error msg] if [f] raises, using {!Eio.Exn.pp} to format
+      the exception.
 
-    This helper is useful at API boundaries to convert exceptions into
-    a plain-data error channel. *)
+    Handy at API boundaries where callers prefer a result type over
+    exceptions. *)
 val to_res : (unit -> 'a) -> ('a, string) result
 
-(** Append a line to a log file.
+(** [log ~dir ?file msg] appends [msg] to [file] under [dir].
 
-    [log ~dir ?file msg] opens (or creates) [file] under [dir] with
-    permissions [0o600] and appends [msg] at the end, without adding a
-    newline.  The operation is atomic with respect to the flow that the
-    underlying [Eio.Path.with_open_out] returns.
+    The function opens (or creates with mode [0o600]) the target file
+    in append mode and writes the string {i verbatim} (no newline is
+    added).  Using {!Eio.Path.with_open_out} makes the operation
+    atomic with respect to other fibres in the current process.
 
-    Default [file] value is ["./logs.txt"]. *)
+    Default [file] is {b "./logs.txt"}. *)
 val log : dir:Eio.Fs.dir_ty Eio.Path.t -> ?file:string -> string -> unit
 
-(** Write [msg] to [stdout].
+(** [console_log ~stdout msg] writes [msg] directly to [stdout].
 
-    This is a thin wrapper over [Eio.Flow.copy_string] that exists only
-    so callers do not need to open [Eio] directly. *)
+    Thin wrapper over {!Eio.Flow.copy_string}. *)
 val console_log : stdout:[> Flow.sink_ty ] Resource.t -> string -> unit
 
 (** Overwrite a file with [contents].

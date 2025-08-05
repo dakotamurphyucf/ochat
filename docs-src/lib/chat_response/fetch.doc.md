@@ -1,56 +1,88 @@
-Fetch – Document retrieval utilities
-====================================
+# `Chat_response.Fetch`
 
-High-level overview
--------------------
+Asynchronous helpers for turning a *URL* – either a local path or an
+`http(s)` address – into the textual representation expected by the
+ChatMarkdown → OpenAI pipeline.
 
-`Fetch` wraps the low-level I/O primitives of the **ChatMarkdown** stack.
-It answers two common needs:
+The implementation purposefully avoids sophisticated features such as
+redirect-following, streaming or connection pooling in favour of a
+minimal surface area that is easy to reason about and adequate for the
+small (≤ 1 MiB) resources typically embedded in prompts.
 
-* Bring a local or remote resource into memory as an OCaml `string`.
-* Convert HTML pages to plain text so that language-model context is not
-  wasted on markup.
-
-API reference
--------------
-
-| Function | Purpose |
-|----------|---------|
-| `clean_html` | Strip markup &amp; compress whitespace from an HTML document. |
-| `tab_on_newline` | Indent every newline with two TABs – handy for raw XML blocks. |
-| `get_remote` | Blocking HTTP GET via Eio (`Accept: */*`). |
-| `get` | General entry point – fallbacks to local disk when `is_local` is `true`. |
-| `get_html` | Same as `get` but post-processed by `clean_html`. |
-
-
-Usage example
--------------
+## Quick tour
 
 ```ocaml
-open Chat_response.Fetch
+(* Assume we already have an execution context: *)
+let ctx = Ctx.of_env ~env ~cache:(Cache.create ())
 
-let summary_of_readme ctx repo_url =
-  (* GitHub raw URL – we want only text *)
-  let raw_html = get_html ~ctx repo_url ~is_local:false in
-  (* Pass plain text to the LLM or do further processing … *)
-  raw_html
+(* 1.  Read a local README *)
+let readme = Fetch.get ~ctx "README.md" ~is_local:true
+
+(* 2.  Grab OCaml’s homepage as visible text *)
+let ocaml_txt =
+  Fetch.get_html ~ctx "https://ocaml.org" ~is_local:false
+
+(* 3.  Prepare a multi-line assistant reply *)
+let payload =
+  "<assistant>" ^ (Fetch.tab_on_newline "Line one\nLine two") ^ "</assistant>"
 ```
 
+## Function reference
 
-Implementation notes
---------------------
+### `get`
 
-* Remote requests rely on `Io.Net.get`, therefore redirects are **not**
-  automatically followed.
-* A very small subset of HTML sanitisation is performed – the goal is to
-  keep the helper lightweight and dependency-free.
-* The helpers are **synchronous**; they should only be used for assets
-  below ~1 MiB.
+`get ~ctx url ~is_local` → `string`
 
-Known limitations
------------------
+Retrieve *raw* content.
 
-* `get_remote` does not handle HTTP status codes other than `200` – the
-  caller must wrap it in a `try…with` if they need structured error
-  handling.
+* `~ctx` — immutable execution context providing network (`ctx#net`) and
+  file-system (`Ctx.dir ctx`) capabilities.
+* `url` — file path or `http(s)` address.
+* `~is_local` — `true` for disk access, `false` for network.
+
+Resolution rules for local paths:
+
+1. First try `Filename.concat (Ctx.dir ctx) url`.
+2. If the previous step failed *and* `url` is relative, retry relative
+   to `ctx#cwd` (so that paths pasted interactively behave like a shell
+   prompt).
+
+An exception is raised when the file cannot be found or the HTTP
+request fails (non-200 status or network error).
+
+### `get_html`
+
+Identical to `get` but returns a *sanitised* version of an HTML
+document:
+
+* Attempts a best-effort gzip decompression first (many servers enable
+  transparent compression).
+* Uses *LambdaSoup* to strip markup and collapse consecutive
+  whitespace.
+
+
+### `tab_on_newline`
+
+`tab_on_newline s` → `string`
+
+Insert two tab characters after every newline in `s`.  The helper is a
+small convenience for embedding multi-line payloads into *indented*
+ChatMarkdown blocks where correct indentation is required (e.g.
+`<assistant>` raw payloads).
+
+## Known limitations
+
+* **No redirect handling** — a `301`, `302`, … response raises.
+* **No streaming support** — large files are read entirely into memory.
+* **Shallow sanitisation** — `get_html` removes tags and compresses
+  whitespace but does not decode entities or execute powerful cleaning
+  such as CSS/JS removal.
+
+## See also
+
+* [`Io`](../Io.doc.md) for generic file and network utilities.
+* [`Chat_response.Ctx`](./ctx.doc.md) for the execution context type
+  used by *Fetch*.
+* [`Chat_response.Converter`](./converter.doc.md) for the module that
+  consumes *Fetch* to build OpenAI request payloads.
 

@@ -17,7 +17,10 @@
   path_completion
   conversation
   snippet
-  app)
+  app
+  attachments
+  export
+  ui_helpers)
  (libraries
   core
   openai
@@ -28,6 +31,9 @@
   io
   chat_response
   chatmd
-  ochat.notty_scroll_box)
+  meta_prompting
+  ochat.notty_scroll_box
+  ochat.session
+  context_compaction)
  (preprocess
   (pps ppx_jane)))

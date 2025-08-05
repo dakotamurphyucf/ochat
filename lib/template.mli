@@ -102,6 +102,33 @@ module type RENDERABLE = sig
   val to_key_value_pairs : t -> (string * string) list
 end
 
+(** {1 Simple one-shot helper API}
+
+    The original functor interface is convenient when you have a
+    well-typed record to render.  For quick substitutions we expose a
+    minimal helper trio compatible with the needs of
+    [Meta_prompting.Make].  This keeps legacy code working while
+    avoiding another template library. *)
+
+(** [of_string s] is identity.  It exists solely for API symmetry with
+    {!load}. *)
+val of_string : string -> string
+
+(** [load ?search_dirs path] reads template contents from disk.
+
+    Search order:
+    1. iterate over [?search_dirs] (defaults to [["."]]);
+    2. fall back to the literal [path] if no directory matched.
+
+    @raise Failure if no readable file is found in the candidate
+      locations. *)
+val load : ?search_dirs:string list -> string -> string
+
+(** [render tmpl mapping] substitutes every occurrence of {{key}} in
+    [tmpl] with its value from [mapping].  Keys that are absent from
+    [mapping] are replaced by the empty string. *)
+val render : string -> (string * string) list -> string
+
 (** The [Make_Template] functor instantiates a templating module for a
     given {!RENDERABLE}.  Placeholders follow the `{{variable}}`
     convention. *)

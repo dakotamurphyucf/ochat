@@ -13,6 +13,21 @@ Although the implementation is <100 lines, the abstractions make it
 easy to scale from one-off substitutions to larger, nested
 templates—all without reflection or fragile global state.
 
+> **Quick-and-dirty helpers** — For ad-hoc needs the module also
+> exposes three standalone functions, mirroring Mustache’s CLI:
+>
+> * `Template.of_string   : string -> string` – identity.
+> * `Template.load        : ?search_dirs:string list -> string -> string` –
+>   read a template file, searching `search_dirs` first (defaults to
+>   `"."`).
+> * `Template.render      : string -> (string * string) list -> string` –
+>   substitute `{{key}}` placeholders directly, without going through
+>   a `RENDERABLE` module.
+>
+> These helpers exist primarily for internal modules such as
+> `Meta_prompting` but are convenient in scripts where defining a full
+> record type would be over-kill.
+
 ---
 
 ## 1. High-level overview
@@ -49,6 +64,15 @@ templates—all without reflection or fragile global state.
 ---
 
 ## 2. Public API
+
+### 2.0 One-shot helpers
+
+| Value | Description |
+|-------|-------------|
+| `of_string : string -> string` | Identity function (convenience wrapper). |
+| `load : ?search_dirs:string list -> string -> string` | Read a template file from disk, trying each directory in `search_dirs` (default `"."`). Raises if the file is not found. |
+| `render : string -> (string * string) list -> string` | Direct substitution on a raw string (no functor instantiation). |
+
 
 ### 2.1 `module type RENDERABLE`
 

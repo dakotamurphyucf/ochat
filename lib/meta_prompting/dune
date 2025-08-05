@@ -1,0 +1,19 @@
+(library
+ (name meta_prompting)
+ (public_name ochat.meta_prompting)
+ (modules
+  task_intf
+  prompt_intf
+  meta_prompt
+  recursive_mp
+  evaluator
+  preprocessor
+  aggregator
+  context
+  prompting_guides
+  mp_flow
+  prompts)
+ (wrapped true)
+ (libraries core re ochat.openai vector_db bm25 owl ochat.template log)
+ (preprocess
+  (pps ppx_jane)))

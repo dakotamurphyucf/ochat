@@ -38,6 +38,7 @@ letter.
 | `q`, `quit` | Quit the application immediately | `Quit` |
 | `w` | *Write* – submit the current input buffer to the assistant | `Submit_input` |
 | `wq` | Submit and then quit | `Quit` |
+| `c`, `cmp`, `compact` | Summarise the conversation context (triggers context-compaction) | `Compact_context` |
 | `d`, `delete` | Delete the currently selected message | `Redraw` |
 | `e`, `edit` | Copy selected message into the prompt and switch to *Insert* mode | `Redraw` |
 

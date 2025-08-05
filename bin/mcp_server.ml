@@ -1,10 +1,24 @@
 (** MCP server – command-line wrapper around {!module:Mcp_server_core}.
 
     The binary initialises a fresh in-memory registry, registers a handful
-    of *built-in* tools (such as {!val:setup_tool_echo} and the wrappers
-    around {!module:Definitions.Apply_patch}, {!module:Definitions.Read_directory}
-    and friends) and then exposes the registry either over **stdio** (default)
-    or **HTTP** when the [--http] flag is supplied.
+    of *built-in* tools (see list below) and then exposes the registry either
+    over **stdio** (default) or **HTTP** when the [--http] flag is supplied.
+
+    {2 Built-in tools}
+
+    | Name | Purpose |
+    |------|---------|
+    | ["echo"] | Trivial helper that returns the supplied text verbatim. |
+    | ["apply_patch"] | Apply a textual V4A diff/patch to the workspace. |
+    | ["read_dir"] | List the contents of a directory. |
+    | ["get_contents"] | Read a file and return its contents. |
+    | ["meta_refine"] | Refine a *meta-prompt* using LLM-backed heuristics. |
+    | ["webpage_to_markdown"] | Download a web page and convert it to Markdown. |
+
+    In addition, every *.chatmd* file discovered in the prompts directory is
+    registered twice: once as a *prompt* (accessible via
+    [`prompts/*`](#)) and once as a *tool* that exposes the same prompt under
+    [`tools/call`].
 
     Additional *.chatmd* files located in the prompts directory are scanned
     at start-up and on a lightweight polling loop, turning each prompt into
@@ -77,9 +91,19 @@ let () =
 
     The tool specification declares a single required parameter
     {[ {"text" : string} ]}.  At runtime the handler returns the same
-    string wrapped in a JSON value.  The helper is intended purely as a
-    smoke-test for the request/response plumbing and as a reference
-    implementation when writing new tools.  *)
+    string wrapped in a JSON value.
+
+    This helper is intended purely as a smoke-test for the
+    request/response plumbing and as a reference implementation when
+    creating new tools.
+
+    @param core  Registry instance returned by
+      {!Mcp_server_core.create}.  The function mutates the registry in
+      place.
+
+    @raise Invalid_argument  If a subsequent attempt is made to
+      register another tool under the name ["echo"].  The exception is
+      raised by {!Mcp_server_core.register_tool}.  *)
 let setup_tool_echo (core : Mcp_server_core.t) : unit =
   let input_schema =
     Jsonaf.of_string
@@ -103,13 +127,33 @@ let setup_tool_echo (core : Mcp_server_core.t) : unit =
 (* Built-in ocamlochat tools exposed over MCP                                *)
 (* --------------------------------------------------------------------- *)
 
-(** [register_builtin_apply_patch core ~dir] exposes the
-    {!module:Definitions.Apply_patch} helper as an MCP tool named
-    ["apply_patch"].  The heavy lifting is delegated to
-    {!module:Functions.apply_patch}; this wrapper only converts between the
-    structured argument object and the plain text expected by the library
-    function.  [dir] represents the process working directory so that
-    relative paths are resolved correctly. *)
+(** [register_builtin_apply_patch core ~dir] registers the
+    built-in ["apply_patch"] tool.
+
+    The underlying implementation is provided by
+    {!module:Functions.apply_patch}; this helper merely adapts the JSON-RPC
+    call-site contract to the untyped text interface expected by
+    [Functions.apply_patch].
+
+    The handler accepts a single field:
+
+    {v
+      {
+        "input" : "<unified-v4a-patch>"
+      }
+    v}
+
+    It returns the patched contents as a plain JSON string.
+
+    @param core Mutable registry returned by {!Mcp_server_core.create} and
+      shared by all transports.
+    @param dir  Capability representing the current working directory. The
+      value is used by {!Functions.apply_patch} to resolve relative file
+      paths in the diff hunk headers.
+
+    @raise Invalid_argument  Propagated from
+      {!Mcp_server_core.register_tool} if a tool called ["apply_patch"] was
+      already present in the registry. *)
 let register_builtin_apply_patch (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t) : unit =
   (* Pull metadata from the existing [Definitions] module so that we keep a
      single source of truth. *)
@@ -132,11 +176,29 @@ let register_builtin_apply_patch (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t
   Mcp_server_core.register_tool core spec handler
 ;;
 
-(** [register_builtin_read_dir core ~dir] installs the ["read_dir"] tool
-    backed by {!module:Functions.read_dir}.  The tool expects a single field
-    [path] and returns a JSON array with the directory listing.  I/O errors
-    are surfaced as [`Error _`] results which the router translates to a
-    JSON-RPC exception. *)
+(** [register_builtin_read_dir core ~dir] registers the built-in
+    ["read_dir"] tool.
+
+    The handler is powered by {!module:Functions.read_dir}.  It accepts a
+    single required argument:
+
+    {v
+      {
+        "path" : "/absolute/or/relative"
+      }
+    v}
+
+    The function responds with a JSON array holding all entries of the
+    requested directory, sorted lexicographically, with the usual ["."] and
+    [".."] components omitted.
+
+    I/O errors (permission denied, missing directory, …) are propagated as
+    [`Error msg`] which the router converts into a JSON-RPC exception
+    visible to the client.
+
+    @param core Registry to mutate.
+    @param dir  Capability to the cwd – required by
+      {!Functions.read_dir}. *)
 let register_builtin_read_dir (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t) : unit =
   let module Def = Definitions.Read_directory in
   let spec : JT.Tool.t =
@@ -156,10 +218,24 @@ let register_builtin_read_dir (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t) :
   Mcp_server_core.register_tool core spec handler
 ;;
 
-(** [register_builtin_get_contents core ~dir] registers the
-    ["get_contents"] tool (kept for backward-compatibility with the older
-    name ["read_file"]).  The handler reads the file specified by the `file`
-    parameter and returns its contents verbatim. *)
+(** [register_builtin_get_contents core ~dir] registers the built-in
+    ["get_contents"] tool (kept for backward compatibility with the legacy
+    name ["read_file"].)
+
+    The tool expects exactly one argument:
+
+    {v
+      {
+        "file" : "path/to/file"
+      }
+    v}
+
+    It returns the *raw* file contents wrapped in a JSON string.  Binary
+    files are therefore not supported.
+
+    @param core Registry to mutate.
+    @param dir  Capability to the working directory, forwarded to
+      {!Functions.get_contents} so that relative paths resolve correctly. *)
 let register_builtin_get_contents (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t) : unit =
   let module Def = Definitions.Get_contents in
   let spec : JT.Tool.t =
@@ -182,11 +258,23 @@ let register_builtin_get_contents (core : Mcp_server_core.t) ~(dir : _ Eio.Path.
   Mcp_server_core.register_tool core spec handler
 ;;
 
-(** [run_stdio ~core ~env] starts a blocking loop that reads one JSON value
-    per line from [stdin], forwards it to {!module:Mcp_server_router} and
-    writes each response on its own line to [stdout].  The function never
-    returns and therefore blocks the calling fibre.  Used when no [--http]
-    flag was supplied. *)
+(** [run_stdio ~core ~env] implements the *line-delimited JSON* transport.
+
+    The function blocks indefinitely, performing the following steps in a
+    tight loop:
+
+    1. Read a single line from [stdin] and parse it as JSON;
+    2. Dispatch the value to {!Mcp_server_router.handle};
+    3. Serialise every response returned by the router and write it back to
+       [stdout], each on its own line.
+
+    All work happens inside the caller’s fibre – the function never
+    returns unless an exception bubbles up or the surrounding switch is
+    aborted.
+
+    @param core Shared registry instance.
+    @param env  Eio standard environment obtained from
+      [Eio_main.run]. *)
 let run_stdio ~core ~env : unit =
   let stdin = Eio.Stdenv.stdin env in
   let stdout = Eio.Stdenv.stdout env in
@@ -218,6 +306,26 @@ let () =
     register_builtin_apply_patch core ~dir;
     register_builtin_read_dir core ~dir;
     register_builtin_get_contents core ~dir;
+    (* Meta-prompting refinement tool ----------------------------------- *)
+    let register_builtin_meta_refine (core : Mcp_server_core.t) : unit =
+      let module Def = Definitions.Meta_refine in
+      let spec : JT.Tool.t =
+        { name = Def.name; description = Def.description; input_schema = Def.parameters }
+      in
+      let ochat_fn = Functions.meta_refine ~env in
+      let handler (args : Jsonaf.t) : (Jsonaf.t, string) Result.t =
+        match args with
+        | `Object kvs ->
+          (match List.Assoc.find kvs ~equal:String.equal "prompt" with
+           | Some (`String prompt) ->
+             let input_json = `Object [ "prompt", `String prompt; "task", `String "" ] in
+             Ok (`String (ochat_fn.run (Jsonaf.to_string input_json)))
+           | _ -> Error "meta_refine expects field 'prompt' (string)")
+        | _ -> Error "meta_refine arguments must be object"
+      in
+      Mcp_server_core.register_tool core spec handler
+    in
+    register_builtin_meta_refine core;
     (* Webpage → Markdown tool --------------------------------------- *)
     let module Def = Definitions.Webpage_to_markdown in
     let spec : JT.Tool.t =

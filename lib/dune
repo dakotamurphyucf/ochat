@@ -7,6 +7,19 @@
   (pps ppx_jane)))
 
 ;; ---------------------------------------------------------------------------
+;; Session persistence (prompt sessions)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name session)
+ (public_name ochat.session)
+ (modules session session_store)
+ (wrapped false)
+ (libraries core core_unix eio eio.unix openai bin_prot_utils_eio)
+ (preprocess
+  (pps ppx_jane)))
+
+;; ---------------------------------------------------------------------------
 ;; Logging library
 ;; ---------------------------------------------------------------------------
 
@@ -111,7 +124,7 @@
  (name template)
  (modules template)
  (public_name ochat.template)
- (libraries core expect_test_helpers_core re2 angstrom)
+ (libraries core core_unix expect_test_helpers_core re2 angstrom)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -212,7 +225,8 @@
   md_index_catalog
   piaf
   package_index
-  apply_patch)
+  apply_patch
+  meta_prompting)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 
@@ -251,7 +265,7 @@
 (library
  (name apply_patch)
  (public_name ochat.apply_patch)
- (modules apply_patch)
+ (modules apply_patch apply_patch_error)
  (libraries core uutf uunf)
  (preprocess
   (pps ppx_jane)))

@@ -41,6 +41,8 @@ val create :
   msg_buffers:(string, Types.msg_buffer) Base.Hashtbl.t ->
   function_name_by_id:(string, string) Base.Hashtbl.t ->
   reasoning_idx_by_id:(string, int ref) Base.Hashtbl.t ->
+  tasks:Session.Task.t list ->
+  kv_store:(string, string) Base.Hashtbl.t ->
   fetch_sw:Eio.Switch.t option ->
   scroll_box:Notty_scroll_box.t ->
   cursor_pos:int ->
@@ -72,9 +74,11 @@ let empty () =
     ~messages:[]
     ~input_line:""
     ~auto_follow:true
+    ~tasks:[]
     ~msg_buffers:(Hashtbl.create (module String))
     ~function_name_by_id:(Hashtbl.create (module String))
     ~reasoning_idx_by_id:(Hashtbl.create (module String))
+    ~kv_store:(Hashtbl.create (module String))
     ~fetch_sw:None
     ~scroll_box:(Notty_scroll_box.create Notty.I.empty)
     ~cursor_pos:0
@@ -100,6 +104,9 @@ let empty () =
 | `selection_active` | `true` whenever a selection is active. |
 | `messages` | Renderable `(role, text)` tuples. |
 | `auto_follow` | `true` → scroll follows new messages automatically. |
+| `tasks` | Background jobs associated with the current session. |
+| `kv_store` | Arbitrary key–value store used by plugins and tools. |
+| `cmdline` / `cmdline_cursor` | ':' command buffer and its caret position. |
 
 Additional mutators exist that operate on these fields (`clear_selection`,
 `set_selection_anchor` …) and do exactly what their names suggest.
@@ -155,7 +162,13 @@ Append_text { id; role = "assistant"; text = "\nnew delta…" }
 ```
 
 `apply_patch` interprets those commands and updates the model in place.
-`apply_patches` is a convenience helper that folds a list of commands.
+`apply_patches` folds over a list of commands.
+
+`add_history_item` is a low-level helper that appends a raw
+`Openai.Responses.Item.t` to the canonical history _without_ touching the
+visible message list.  The function is useful when streaming responses
+populate the history retro-actively (i.e. after all deltas have already
+been rendered).
 
 ---
 

@@ -28,8 +28,6 @@
     Invoke [ochat help SUBCOMMAND] for the fine-grained flag reference rendered
     by {!module:Core.Command}.  The sections below document each helper in
     more depth than the auto-generated usage strings.
-
-    @author Ochat
 *)
 
 open Core
@@ -59,7 +57,7 @@ open Io
 
     Example:
     {[
-      $ ochat index -folder-to-index ./lib -vector-db-folder ./_index
+      $ ochat index -folder-to-index ./lib -vector-db-folder ./vector
     ]}
 *)
 let index_command =
@@ -83,18 +81,23 @@ let index_command =
        run_main
        @@ fun env ->
        let dir = Eio.Stdenv.fs env in
-       let dm = Eio.Stdenv.domain_mgr env in
        log ~dir @@ sprintf "Indexing OCaml code in folder: %s\n" folder_to_index;
        log ~dir @@ sprintf "Storing vector database data in folder: %s\n" vector_db_folder;
        Switch.run
        @@ fun sw ->
-       Indexer.index ~sw ~dir ~dm ~net:env#net ~vector_db_folder ~folder_to_index)
+       let pool =
+         Eio.Executor_pool.create
+           ~sw
+           (Eio.Stdenv.domain_mgr env)
+           ~domain_count:(Domain.recommended_domain_count () - 1)
+       in
+       Indexer.index ~dir ~pool ~net:env#net ~vector_db_folder ~folder_to_index)
 ;;
 
 (** [query_command] performs hybrid semantic × lexical retrieval over a corpus.
 
     Usage example:
-    {[ ochat query -vector-db-folder ./_index -query-text "tail-recursive map" ]}
+    {[ ochat query -vector-db-folder ./vector -query-text "tail-recursive map" ]}
 
     * [-vector-db-folder] must point at the directory that holds the artefacts
       produced by {{!val:index_command} index_command}.
@@ -279,10 +282,10 @@ let html_to_markdown_command =
        let markdown =
          Webpage_markdown.Driver.(convert_html_file path |> Markdown.to_string)
        in
-       let block_strings =
+       (* let block_strings =
          markdown |> String.split_lines |> Odoc_snippet.Chunker.chunk_by_heading_or_blank
-       in
-       let slice =
+       in *)
+       (* let slice =
          Odoc_snippet.slice
            ~pkg:"html_to_markdown"
            ~doc_path:file
@@ -292,13 +295,8 @@ let html_to_markdown_command =
        in
        let s =
          Sexp.to_string_hum ~indent:2 [%sexp (slice : (Odoc_snippet.meta * string) list)]
-       in
-       Io.console_log ~stdout:env#stdout
-       @@ sprintf
-            "Markdown:\n%s\nChunks:\n%s\nSlice:\n%s"
-            markdown
-            (String.concat ~sep:"\n-----------------------\n\n\n" block_strings)
-            s)
+       in *)
+       Io.console_log ~stdout:env#stdout @@ sprintf "%s" markdown)
 ;;
 
 (** [main_command] is the top-level {!Command.group} executed by the [ochat]

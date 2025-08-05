@@ -40,6 +40,8 @@ val run :
   ?max_output_tokens:int ->
   ?tools:Openai.Responses.Request.Tool.t list ->
   ?reasoning:Openai.Responses.Request.Reasoning.t ->
+  ?fork_depth:int ->
+  ?history_compaction:bool ->
   model:Openai.Responses.Request.model ->
   tool_tbl:(string, string -> string) Hashtbl.t ->
   Openai.Responses.Item.t list ->
@@ -54,6 +56,9 @@ val run :
 * **max_output_tokens** – (optional) per-request token budget.
 * **tools** – list of tools forward-declared to the model.
 * **reasoning** – whether the model should emit [`Reasoning`] blocks.
+* **fork_depth** – recursion counter incremented when the loop is
+  entered from a nested agent (created via the builtin `fork` tool).
+* **history_compaction** – when `true`, repeated reads of the same file are collapsed so that only the most recent version is sent to the model.
 * **model** – OpenAI model to call (e.g. `Gpt4`).
 * **tool_tbl** – mapping from tool names to implementations. **Must**
   contain `"fork"` ↦ {!Fork.execute}.
@@ -106,6 +111,9 @@ let () =
 3. The lookup in [tool_tbl] raises [`Not_found`] when a tool name is
    missing – wrap the call or catch the exception if the table is built
    dynamically.
+4. The `history_compaction` flag performs a naïve *last-write-wins* collapse.
+   Disable it if your prompt relies on previous versions of imported
+   documents (for instance when computing diffs).
 
 ---
 

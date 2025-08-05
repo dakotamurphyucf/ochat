@@ -123,6 +123,7 @@
 
 (executables
  (names piaf_example eio_get)
+ (modules piaf_example eio_get)
  (libraries
   piaf
   core
@@ -159,3 +160,20 @@
   ochat.mcp_server_http
   ochat.chat_response
   ochat.chatmd))
+
+(executable
+ (name mp_refine_run)
+ (public_name mp-refine-run)
+ (modules mp_refine_run)
+ (libraries core eio_main log ochat.meta_prompting core_unix.command_unix)
+ (preprocess
+  (pps ppx_jane)))
+
+(executable
+ (package ochat)
+ (public_name sync)
+ (modules sync)
+ (name sync)
+ (libraries eio_main irmin-git.unix irmin-watcher io lwt_eio)
+ (preprocess
+  (pps ppx_irmin)))

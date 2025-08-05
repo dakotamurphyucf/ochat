@@ -1,84 +1,99 @@
-(** Multi-file patch application (OCaml port of OpenAI’s reference
-    «apply_patch» helper).
+(** Apply *Ochat diff* patches against any storage backend.
 
-    This module parses patch descriptions in the “Ochat diff”
-    flavour and applies them to an arbitrary workspace via
-    user-provided callback functions.  The implementation is a
-    near-literal rewrite of the reference Python/TypeScript code into
-    OCaml with some additional Unicode–canonicalisation tweaks.  It is
-    completely side-effect free apart from the functions you pass in –
-    *all* I/O happens through those callbacks.  Consequently the
-    module works equally well on a real file-system, an in-memory map
-    (see {!test/apply_patch_test.ml}), or any other storage backend.
+    This module is an OCaml rewrite of OpenAI’s reference
+    «apply_patch» helper and understands the *Ochat diff* dialect that
+    frequently appears in code-generation prompts.  A patch can:
 
-    {1 Patch format}
+    • add new files;
+    • delete existing files;
+    • update one or more hunks of an existing file; and
+    • rename a file while updating it.
 
-    The expected syntax is a simplified, but multi-file capable, diff
-    inspired by `git apply`.  A patch starts with
+    All I/O is delegated to the three callback functions supplied to
+    {!val:process_patch}.  The implementation itself performs **no
+    side-effects**, which makes it equally useful on a POSIX file
+    system, an in-memory map, or any custom storage layer.  See
+    {!file:docs-src/lib/apply_patch.doc.md} for an extended tutorial
+    and design notes.
 
-    {v
-    *** Begin Patch
-    v}
+    {1 Patch syntax}
 
-    and must be terminated by
+    A diff is bracketed by the markers
 
-    {v
-    *** End Patch
-    v}
+    {[ *** Begin Patch ]}
+    …
+    {[ *** End Patch ]}
 
-    In between, a sequence of *file sections* follows.  The
-    declarative keywords recognised are:
+    Between the markers a sequence of *file sections* follows; each
+    starts with one of:
 
     • {[*** Add File: <path>]}
     • {[*** Delete File: <path>]}
     • {[*** Update File: <path>]}
-    • (optional) {[*** Move to: <new-path>]} – only valid directly
+    • *(optional)* {[*** Move to: <new-path>]} – only valid directly
       after an [Update File] line.
 
-    An *update* section contains one or more unified-diff hunks marked
-    by `@@` pairs.  Context matching is fuzzy: the algorithm tolerates
-    trailing whitespace differences, ASCII/Unicode punctuation
-    mismatches (e.g. fancy quotes vs straight quotes), and can search the whole
-    file if the exact line numbers drifted.  The amount of deviation
-    encountered is returned as the second component of
-    {!val:text_to_patch} for debugging.
+    Update sections contain one or more unified-diff hunks delimited
+    by `@@`.  The algorithm employs *fuzzy* context matching – it
+    ignores leading/trailing whitespace, canonicalises common smart
+    punctuation via [Uunf] + [Uutf], and will search the whole file if
+    line numbers drifted.
 
-    {1 Public interface}
+    {1 Exposed symbols}
 
-    The library purposefully exposes only a single high-level helper
-    besides the [Diff_error] exception – everything else is considered
-    private implementation detail.  If you need lower-level access
-    (e.g. to instrument commits) please open a feature request instead
-    of relying on the internal types.
+    • {!exception:Diff_error} / {!val:error_to_string} – structured
+      error reporting.
+    • {!val:process_patch} – parse and apply a patch.
 *)
 
-(** Raised when the patch is malformed or cannot be applied to the
-    provided workspace.  The payload describes the first error that
-    was encountered. *)
-exception Diff_error of string
+(** Raised when the patch is malformed or cannot be applied.
 
-(** [process_patch ~text ~open_fn ~write_fn ~remove_fn] applies the
-    multi-file patch [text] to the workspace.
+     The exception carries a value of type {!Apply_patch_error.t} that
+     pinpoints the exact problem (syntax error, missing file, context
+     mismatch, …).  Use {!val:error_to_string} for a user-friendly
+     diagnostic or pattern-match on the constructors to implement
+     custom recovery logic. *)
+exception Diff_error of Apply_patch_error.t
 
-    The three callback functions abstract over the backing storage:
+(** [error_to_string err] converts structured error [err] into a
+     colour-free, multi-line diagnostic message similar to what
+     [git apply] prints.  The function never raises. *)
+val error_to_string : Apply_patch_error.t -> string
 
-    • [open_fn path]   must return the current contents of [path].  It
-      is called for every file that is updated or deleted.
+(** [process_patch ~text ~open_fn ~write_fn ~remove_fn] parses and
+     applies the *Ochat diff* [text].
 
-    • [write_fn path contents] is invoked for each newly added file or
-      updated destination.  When a file is renamed the *destination*
-      path is passed.
+     {1 Callback contract}
 
-    • [remove_fn path] must delete [path] from the workspace.  It is
-      called for every [Delete] action and for the *source* path of a
-      rename.
+     • [open_fn path]   – returns the current contents of [path].  It
+       is invoked for every [Update] and [Delete] action.
 
-    On success the function returns the string {['Done!']}.  If any
-    problem occurs a {!exception:Diff_error} is raised explaining the
-    issue. *)
+     • [write_fn path contents] – must atomically replace or create
+       [path] with [contents].  The function is called for every [Add]
+       and [Update] destination (including the *new* path of a rename).
+
+     • [remove_fn path] – deletes [path] from the workspace; called
+       for every [Delete] action and for the *source* path of a rename.
+
+     All three callbacks should be exception-free; any error they raise
+     will propagate to the caller of [process_patch].
+
+     {1 Return value}
+
+     The function returns a tuple:
+
+     – the literal string {e "Done!"} (kept for API compatibility);
+     – a list of [(path, snippet)] pairs, one per affected file.
+       Each [snippet] shows a small **line-numbered** window around the
+       modified hunk(s) and is handy for logging or chat-ops
+       confirmations.
+
+     @raise Diff_error if the patch is syntactically invalid, refers to
+       a non-existent file, fails context matching, or violates any
+       other constraint described in the patch-format section above. *)
 val process_patch
   :  text:string
   -> open_fn:(string -> string)
   -> write_fn:(string -> string -> unit)
   -> remove_fn:(string -> unit)
-  -> string
+  -> string * (string * string) list

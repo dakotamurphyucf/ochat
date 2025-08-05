@@ -222,10 +222,12 @@ let custom_fn ~env (c : CM.custom_tool) : Ochat_function.t =
       Eio.Flow.close w;
       (match Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all r with
        | res ->
-         let max_len = 100000 in
+         let max_len = 10000 in
          let res =
            if String.length res > max_len
            then String.append (String.sub res ~pos:0 ~len:max_len) " ...truncated"
+           else if String.is_empty res
+           then "Command output is empty"
            else res
          in
          res
@@ -437,21 +439,33 @@ let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
   match decl with
   | CM.Builtin name ->
     (match name with
-     | "apply_patch" -> [ Functions.apply_patch ~dir:(Ctx.dir ctx) ]
-     | "read_dir" -> [ Functions.read_dir ~dir:(Ctx.dir ctx) ]
-     | "get_contents" -> [ Functions.get_contents ~dir:(Ctx.dir ctx) ]
+     | "apply_patch" -> [ Functions.apply_patch ~dir:(Ctx.tool_dir ctx) ]
+     | "read_dir" -> [ Functions.read_dir ~dir:(Ctx.tool_dir ctx) ]
+     | "append_to_file" -> [ Functions.append_to_file ~dir:(Ctx.tool_dir ctx) ]
+     | "find_and_replace" -> [ Functions.find_and_replace ~dir:(Ctx.tool_dir ctx) ]
+     | "get_contents" | "read_file" -> [ Functions.get_contents ~dir:(Ctx.tool_dir ctx) ]
      | "webpage_to_markdown" ->
        [ Functions.webpage_to_markdown
            ~env:(Ctx.env ctx)
-           ~dir:(Ctx.dir ctx)
+           ~dir:(Ctx.tool_dir ctx)
            ~net:(Ctx.net ctx)
        ]
      | "fork" -> [ Functions.fork ]
-     | "odoc_search" -> [ Functions.odoc_search ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
+     | "odoc_search" ->
+       [ Functions.odoc_search ~dir:(Ctx.tool_dir ctx) ~net:(Ctx.net ctx) ]
      | "index_markdown_docs" ->
-       [ Functions.index_markdown_docs ~env:(Ctx.env ctx) ~dir:(Ctx.dir ctx) ]
+       [ Functions.index_markdown_docs ~env:(Ctx.env ctx) ~dir:(Ctx.tool_dir ctx) ]
      | "markdown_search" ->
-       [ Functions.markdown_search ~dir:(Ctx.dir ctx) ~net:(Ctx.net ctx) ]
+       [ Functions.markdown_search ~dir:(Ctx.tool_dir ctx) ~net:(Ctx.net ctx) ]
+     | "query_vector_db" ->
+       [ Functions.query_vector_db ~dir:(Ctx.tool_dir ctx) ~net:(Ctx.net ctx) ]
+     | "index_ocaml_code" ->
+       [ Functions.index_ocaml_code
+           ~env:(Ctx.env ctx)
+           ~dir:(Ctx.tool_dir ctx)
+           ~net:(Ctx.net ctx)
+       ]
+     | "meta_refine" -> [ Functions.meta_refine ~env:(Ctx.env ctx) ]
      | other -> failwithf "Unknown built-in tool: %s" other ())
   | CM.Custom c -> [ custom_fn ~env:(Ctx.env ctx) c ]
   | CM.Agent agent_spec -> [ agent_fn ~ctx ~run_agent agent_spec ]

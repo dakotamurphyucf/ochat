@@ -50,6 +50,34 @@ let () =
   post_response (Stream print_delta) ~temperature:0.7 ~dir net ~inputs
 ```
 
+### Parallel tool calls
+
+By default the backend assumes a **serial** tool-invocation model: the
+assistant will only produce a new `function_call` / `file_search_call` /
+`web_search_call` item after the previous one has finished executing on
+the client side.  This is often the simplest approach but can become a
+bottleneck when the calls are independent.
+
+Starting with schema version `2024-05-21` the parameter
+`parallel_tool_calls` can be enabled to lift that restriction.  When
+set to `true` the model may emit several calls in quick succession,
+allowing the owner application to dispatch them concurrently:
+
+```ocaml
+Responses.post_response
+  (Responses.Stream handle_event)
+  ~parallel_tool_calls:true         (* allow concurrent calls          *)
+  ~tools:[ my_function_tool ]       (* tool definitions                *)
+  ~dir
+  net
+  ~inputs
+```
+
+Use this flag with care – your event loop must be able to keep up with
+potential out-of-order completions.  If unsure, leave it to its default
+`false` value.
+
+
 The helper `response_type` GADT encodes the result type at the call site:
 
 * `Default` → returns a fully-parsed `Response.t`.

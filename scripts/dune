@@ -1,0 +1,5 @@
+(install
+ (section bin)
+ (package ochat)
+ (files
+  (chrome_dump.sh as chrome-dump)))

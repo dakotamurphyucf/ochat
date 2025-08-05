@@ -39,22 +39,12 @@ type msg_buffer =
                            hold the final message once streaming completes. *)
   }
 
-(* ––– forward declarations for upcoming steps ––– *)
-
-(* ------------------------------------------------------------------------ *)
-(*  Cmd constructors introduced in refactoring step 7                       *)
-(* ------------------------------------------------------------------------ *)
-
 type cmd =
   | Persist_session of (unit -> unit)
   (** Persist the current conversation by running [f] in a separate fibre. *)
   | Start_streaming of (unit -> unit)
   (** Kick off an OpenAI streaming request by executing the thunk. *)
   | Cancel_streaming of (unit -> unit) (** Abort the in-flight streaming request. *)
-
-(* ------------------------------------------------------------------------ *)
-(*  Patch constructors introduced in refactoring step 6                      *)
-(* ------------------------------------------------------------------------ *)
 
 (* These constructors describe {e pure} modifications to the immutable
    [Model.t] record that will be executed by [Model.apply].  They are
@@ -96,3 +86,18 @@ type patch =
       }
   (** Append the transient placeholder [(role, text)].  The message is
       rendered only in the UI and is {b not} persisted. *)
+
+(** User-togglable settings that influence runtime behaviour.  The record is
+    intentionally minimal – future flags can extend it without breaking
+    backwards compatibility by adding new optional fields. *)
+type settings =
+  { parallel_tool_calls : bool
+    (** When [true] the assistant may request multiple tool calls in a single
+        turn.  Each call will be executed concurrently by the runtime.  Set to
+        [false] to fall back to sequential execution – useful for debugging or
+        when using models that do not yet support the feature. *)
+  }
+
+(** [default_settings ()] returns the default {!settings} record with
+    [parallel_tool_calls] set to [true]. *)
+val default_settings : unit -> settings

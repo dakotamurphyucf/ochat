@@ -34,14 +34,11 @@ open Eio
 (** Blocks until the index has been written.  May raise if the OpenAI
       request fails or the file system is read-only. *)
 val index
-  :  sw:Switch.t
-       (** Parent switch for all fibres spawned by the indexer.  Cancelling
-      the switch aborts outstanding HTTP requests and file IO. *)
-  -> dir:Fs.dir_ty Path.t
+  :  dir:Fs.dir_ty Path.t
        (** Root directory where output files are written and from which
       [folder_to_index] is resolved. *)
-  -> dm:Domain_manager.ty Resource.t
-       (** Optional {!Domain_manager} resource for multi-core execution of
+  -> pool:Executor_pool.t
+       (** {!Executor_pool}  for multi-core execution of
       CPU-heavy parsing tasks. *)
   -> net:_ Net.t (** Network capability used for the HTTPS calls to the OpenAI API. *)
   -> vector_db_folder:string

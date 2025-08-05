@@ -9,6 +9,28 @@ module type RENDERABLE = sig
   val to_key_value_pairs : t -> (string * string) list
 end
 
+(*------------------------------------------------------------------*)
+(* Simple helper API (compat layer)                                 *)
+(*------------------------------------------------------------------*)
+
+let of_string s = s
+
+let load ?search_dirs path : string =
+  let dirs = Option.value search_dirs ~default:[ "." ] in
+  let rec try_dirs = function
+    | [] -> raise_s [%message "Template.load: file not found" path (dirs : string list)]
+    | d :: tl ->
+      let full = Filename.concat d path in
+      if Stdlib.Sys.file_exists full then In_channel.read_all full else try_dirs tl
+  in
+  try_dirs dirs
+;;
+
+let render (tmpl : string) (mapping : (string * string) list) : string =
+  List.fold mapping ~init:tmpl ~f:(fun acc (k, v) ->
+    String.substr_replace_all acc ~pattern:("{{" ^ k ^ "}}") ~with_:v)
+;;
+
 (** The Make_Template functor creates a templating module for a given RENDERABLE type. 
     Supports variable replacement with the syntax {{variable}} *)
 module Make_Template (R : RENDERABLE) : sig

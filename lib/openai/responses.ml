@@ -1397,6 +1397,7 @@ type _ response_type =
   | Default : Response.t response_type
 
 exception Response_stream_parsing_error of Jsonaf.t * exn
+exception Response_parsing_error of Jsonaf.t * exn
 
 let post_response
   : type a.
@@ -1405,6 +1406,7 @@ let post_response
     -> ?temperature:float
     -> ?tools:Request.Tool.t list
     -> ?model:Request.model
+    -> ?parallel_tool_calls:bool
     -> ?reasoning:Request.Reasoning.t
     -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> _ Eio.Net.t
@@ -1416,6 +1418,7 @@ let post_response
     ?temperature
     ?tools
     ?(model = Request.Gpt4)
+    ?parallel_tool_calls
     ?reasoning
     ~dir
     net
@@ -1444,6 +1447,7 @@ let post_response
       ~model
       ~input:inputs
       ~max_output_tokens
+      ?parallel_tool_calls
       ?temperature
       ?tools
       ?reasoning
@@ -1474,7 +1478,8 @@ let post_response
         | Some json -> Ok json)
     in
     (match json_result with
-     | Ok _ -> failwith data
+     | Ok _ ->
+       raise (Response_parsing_error (Jsonaf.of_string data, Failure "Error in response"))
      | Error _ -> (Response.t_of_jsonaf @@ Jsonaf.of_string @@ data : a))
   | Stream cb ->
     let reader = Eio.Buf_read.of_flow reader ~max_size:Int.max_value in

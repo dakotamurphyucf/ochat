@@ -10,12 +10,121 @@ let add_line_numbers str =
 ;;
 
 let get_contents ~dir : Ochat_function.t =
-  let f path =
-    match Io.load_doc ~dir path with
+  let f (path, offset) =
+    let read () =
+      Eio.Path.with_open_in Eio.Path.(dir / path)
+      @@ fun flow ->
+      try
+        let r = Eio.Buf_read.of_flow flow ~max_size:1_000_000 in
+        let skipped = ref 0 in
+        let total = 380_928 in
+        let taken = ref 0 in
+        let truncated = ref false in
+        let result =
+          match offset with
+          | None ->
+            let lines = r |> Eio.Buf_read.(seq line) in
+            let lines =
+              Seq.take_while
+                (fun s ->
+                   if !taken < total
+                   then (
+                     taken := !taken + String.length s;
+                     true)
+                   else (
+                     truncated := true;
+                     false))
+                lines
+            in
+            Sequence.of_seq lines |> Sequence.to_list |> String.concat ~sep:"\n"
+          | Some offset ->
+            let lines =
+              r
+              |> Eio.Buf_read.(seq line)
+              |> Seq.drop_while (fun s ->
+                if !skipped < offset
+                then (
+                  skipped := !skipped + String.length s;
+                  true)
+                else false)
+            in
+            let lines =
+              Seq.take_while
+                (fun s ->
+                   if !taken < total
+                   then (
+                     taken := !taken + String.length s;
+                     true)
+                   else if !taken > total
+                   then (
+                     truncated := true;
+                     false)
+                   else true)
+                lines
+            in
+            Sequence.of_seq lines |> Sequence.to_list |> String.concat ~sep:"\n"
+        in
+        if !truncated
+        then
+          (* Truncate to last full line *)
+          Printf.sprintf "%s\n\n---\n[File truncated]" result
+        else result
+      with
+      | Eio.Exn.Io _ as ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
+    in
+    match read () with
     | res -> res
     | exception ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
   in
-  Ochat_function.create_function (module Definitions.Get_contents) f
+  Ochat_function.create_function (module Definitions.Get_contents) ~strict:false f
+;;
+
+let append_to_file ~dir : Ochat_function.t =
+  let f (path, content) =
+    try
+      Io.append_doc ~dir path ("\n" ^ content);
+      Printf.sprintf "Content appended to %s successfully." path
+    with
+    | ex -> Fmt.str "error running append_to_file: %a" Eio.Exn.pp ex
+  in
+  Ochat_function.create_function (module Definitions.Append_to_file) f
+;;
+
+let find_and_replace ~dir : Ochat_function.t =
+  let f (path, search, replace, all) =
+    try
+      let content = Io.load_doc ~dir path in
+      let match_idexes =
+        String.substr_index_all ~may_overlap:false ~pattern:search content
+      in
+      match all, match_idexes with
+      | _, [] -> Printf.sprintf "No occurrences of '%s' found in %s." search path
+      | false, _ :: [] ->
+        let new_content =
+          String.substr_replace_first content ~pattern:search ~with_:replace
+        in
+        Io.save_doc ~dir path new_content;
+        Printf.sprintf
+          "Replaced first occurrence of '%s' with '%s' in %s successfully."
+          search
+          replace
+          path
+      | false, _ :: _ ->
+        sprintf
+          "Error Found multiple occurrences of '%s' in %s, but all set to false. Use \
+           apply_patch instead."
+          search
+          path
+      | true, _ ->
+        let new_content =
+          String.substr_replace_all content ~pattern:search ~with_:replace
+        in
+        Io.save_doc ~dir path new_content;
+        Printf.sprintf "Replaced '%s' with '%s' in %s successfully." search replace path
+    with
+    | ex -> Fmt.str "error running find_and_replace: %a" Eio.Exn.pp ex
+  in
+  Ochat_function.create_function (module Definitions.Find_and_replace) f
 ;;
 
 let get_url_content ~net : Ochat_function.t =
@@ -36,11 +145,17 @@ let get_url_content ~net : Ochat_function.t =
   Ochat_function.create_function (module Definitions.Get_url_content) f
 ;;
 
-let index_ocaml_code ~dir ~dm ~net : Ochat_function.t =
+let index_ocaml_code ~env ~dir ~net : Ochat_function.t =
   let f (folder_to_index, vector_db_folder) =
     Eio.Switch.run
     @@ fun sw ->
-    Indexer.index ~sw ~dir ~dm ~net ~vector_db_folder ~folder_to_index;
+    let pool =
+      Eio.Executor_pool.create
+        ~sw
+        (Eio.Stdenv.domain_mgr env)
+        ~domain_count:(Domain.recommended_domain_count () - 1)
+    in
+    Indexer.index ~dir ~pool ~net ~vector_db_folder ~folder_to_index;
     "code has been indexed"
   in
   Ochat_function.create_function (module Definitions.Index_ocaml_code) f
@@ -107,7 +222,22 @@ let apply_patch ~dir : Ochat_function.t =
     in
     let remove_fn path = Io.delete_doc ~dir path in
     match Apply_patch.process_patch ~text:patch ~open_fn ~write_fn ~remove_fn with
-    | _ -> sprintf "git patch successful"
+    | _, snippets ->
+      let format_snippet (path, snip) =
+        let header =
+          Printf.sprintf
+            "┏━[ %s ]%s"
+            path
+            (String.concat @@ List.init 70 ~f:(fun _ -> "-"))
+        in
+        let footer = String.concat @@ List.init 42 ~f:(fun _ -> "") in
+        String.concat ~sep:"\n" [ header; snip; footer ]
+      in
+      let snippets_text =
+        String.concat ~sep:"\n\n" (List.map ~f:format_snippet snippets)
+      in
+      Printf.sprintf "✅ Patch applied successfully!\n\n%s" snippets_text
+    | exception Apply_patch.Diff_error err -> Apply_patch.error_to_string err
     | exception ex -> Fmt.str "error running apply_patch: %a" Eio.Exn.pp ex
   in
   Ochat_function.create_function (module Definitions.Apply_patch) f
@@ -129,6 +259,23 @@ let mkdir ~dir : Ochat_function.t =
     | exception ex -> Fmt.str "error running mkdir: %a" Eio.Exn.pp ex
   in
   Ochat_function.create_function (module Definitions.Make_dir) f
+;;
+
+(* -------------------------------------------------------------------------- *)
+(* Meta-prompting – recursive refinement tool                                 *)
+(* -------------------------------------------------------------------------- *)
+
+let meta_refine ~env : Ochat_function.t =
+  let f (prompt_raw, task) =
+    let open Meta_prompting in
+    let action =
+      match String.is_empty prompt_raw with
+      | true -> Context.Generate
+      | false -> Context.Update
+    in
+    Mp_flow.first_flow ~env ~prompt:prompt_raw ~task ~action ()
+  in
+  Ochat_function.create_function (module Definitions.Meta_refine) f
 ;;
 
 (* -------------------------------------------------------------------------- *)

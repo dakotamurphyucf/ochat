@@ -44,6 +44,7 @@ type reaction =
   | Redraw          (* Visible state changed – rerender *)
   | Submit_input    (* Meta+Enter – send prompt to assistant *)
   | Cancel_or_quit  (* ESC – cancel streaming or quit if idle *)
+  | Compact_context (* Trigger context compaction request *)
   | Quit            (* Immediate termination (Ctrl-C / q) *)
   | Unhandled       (* Let caller try the next fallback *)
 ```
@@ -126,10 +127,12 @@ let rec main_loop term model =
 1. **UTF-8 granularity** — word movement and column counts operate on bytes.
 2. **Undo / redo** — not yet implemented for Insert mode; Normal mode offers
    a prototype based on a simple ring buffer.
-3. **Limited key coverage** — only popular shortcuts are included by default.
+3. **Context compaction shortcut** — the dedicated *Compact_context* reaction
+   is only exposed via the Normal-mode key map (currently mapped to `F2`).
+   A binding for Insert mode will be added once the workflow has stabilised.
+4. **Limited key coverage** — only popular shortcuts are included by default.
    Adding more is straightforward once a clear demand arises.
 
 ---
 
-*File version: generated from `main` branch – commit `$FORMAT:SHORT_COMMIT`.*
 

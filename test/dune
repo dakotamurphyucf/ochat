@@ -20,6 +20,146 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Meta-prompting – Reward model judge tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name meta_prompting_reward_model_judge_test)
+ (modules meta_prompting_reward_model_judge_test)
+ (libraries core expect_test_helpers_core ochat.meta_prompting)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Meta-prompting – Rubric critic judge tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name meta_prompting_rubric_critic_test)
+ (modules meta_prompting_rubric_critic_test)
+ (libraries core expect_test_helpers_core ochat.meta_prompting)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Meta-prompting – Pairwise arena judge basic tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name meta_prompting_pairwise_arena_test)
+ (modules meta_prompting_pairwise_arena_test)
+ (libraries core expect_test_helpers_core ochat.meta_prompting)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Meta-prompting – Self-consistency judge tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name meta_prompting_self_consistency_test)
+ (modules meta_prompting_self_consistency_test)
+ (libraries core expect_test_helpers_core ochat.meta_prompting)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Meta-prompting – Aggregate function additional property tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name meta_prompting_aggregate_prop_test)
+ (modules meta_prompting_aggregate_prop_test)
+ (libraries core expect_test_helpers_core ochat.meta_prompting)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Meta-prompting – Refined prompt diff expect test
+;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; Meta-prompting – [join] monad law property tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name meta_prompting_join_prop_test)
+ (modules recursive_mp_join_test)
+ (libraries core expect_test_helpers_core ochat.meta_prompting)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Meta-prompting – Refined prompt diff expect test
+;; ---------------------------------------------------------------------------
+
+(library
+ (name meta_prompting_diff_test)
+ (modules meta_prompting_diff_test)
+ (libraries core expect_test_helpers_core ochat.meta_prompting)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Relative-path resolution tests for Chat_response.Fetch
+;; ---------------------------------------------------------------------------
+
+(library
+ (name relative_path_resolution_test)
+ (modules relative_path_resolution_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.unix
+  chat_response
+  ochat.io)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Export ChatMarkdown correctness test
+;; ---------------------------------------------------------------------------
+
+(library
+ (name export_chatmd_correctness_test)
+ (modules export_chatmd_correctness_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  ochat.io
+  ochat.session
+  chat_tui
+  chat_response
+  eio
+  eio_main
+  eio.unix)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Session reset tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name session_reset_test)
+ (modules session_reset_test)
+ (libraries core expect_test_helpers_core ochat.session)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; Markdown crawler tests
 ;; ---------------------------------------------------------------------------
 
@@ -80,6 +220,18 @@
 (library
  (name chat_tui_normal_mode_cursor_test)
  (modules chat_tui_normal_mode_cursor_test)
+ (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Parallel tool-call buffer integration test
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_parallel_tool_calls_test)
+ (modules chat_tui_parallel_tool_calls_test)
  (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
  (inline_tests)
  (preprocess
@@ -264,6 +416,25 @@
  (preprocess
   (pps ppx_jane ppx_expect)))
 
+;; ---------------------------------------------------------------------------
+;; Session persistence tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name session_persistence_test)
+ (modules session_persistence_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.unix
+  ochat.session)
+ ;; Inline expect tests
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
 (library
  (name chat_response_converter_test)
  (modules chat_response_converter_test)
@@ -309,6 +480,18 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Apply_patch success snippets test
+;; ---------------------------------------------------------------------------
+
+(library
+ (name apply_patch_snippets_test)
+ (modules apply_patch_snippets_test)
+ (libraries core expect_test_helpers_core apply_patch)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; MCP transport – stdio implementation tests
 ;; ---------------------------------------------------------------------------
 
@@ -323,6 +506,18 @@
   eio.mock
   eio.unix
   ochat.mcp_transport)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Meta-prompting – Monad & Evaluator property tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name meta_prompting_quickcheck_test)
+ (modules meta_prompting_quickcheck_test)
+ (libraries core expect_test_helpers_core ochat.meta_prompting)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

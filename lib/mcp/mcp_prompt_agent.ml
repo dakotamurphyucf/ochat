@@ -75,7 +75,9 @@ let of_chatmd_file
               Eio.Switch.run
               @@ fun _sw ->
               let cache = Chat_response.Cache.create ~max_size:256 () in
-              let ctx = Chat_response.Ctx.create ~env ~dir:env#cwd ~cache in
+              let ctx =
+                Chat_response.Ctx.create ~env ~dir:env#cwd ~cache ~tool_dir:env#cwd
+              in
               Chat_response.Driver.run_agent
                 ~ctx
                 prompt_xml

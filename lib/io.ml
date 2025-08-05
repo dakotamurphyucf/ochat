@@ -43,17 +43,17 @@ let log ~dir ?(file = "./logs.txt") s =
 let console_log ~stdout log = Eio.Flow.copy_string log stdout
 
 (** [save_doc ~dir file p] saves the content of [p] to the file [file] in directory [dir].
-    If the file does not exist, it will be created with permissions 0o777. *)
+    If the file does not exist, it will be created with permissions 0o600. *)
 let save_doc ~dir file p =
   let path = dir / file in
-  Path.save ~create:(`Or_truncate 0o777) path p
+  Path.save ~create:(`Or_truncate 0o600) path p
 ;;
 
 (** [append_doc ~dir file p] appends the content of [p] to the file [file] in directory [dir].
-    If the file does not exist, it will be created with permissions 0o777. *)
+    If the file does not exist, it will be created with permissions 0o600. *)
 let append_doc ~dir file p =
   let path = dir / file in
-  Path.save ~append:true ~create:(`If_missing 0o777) path p
+  Path.save ~append:true ~create:(`If_missing 0o600) path p
 ;;
 
 (** [delete_doc ~dir file] deletes the file [file] in directory [dir]. *)

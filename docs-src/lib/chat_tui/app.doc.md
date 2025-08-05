@@ -20,7 +20,8 @@ The module was carved out of the old `bin/chat_tui.ml` monolith and lives in
 2. [Synchronous helpers](#sync_helpers)
 3. [Asynchronous helpers](#async_helpers)
 4. [Prompt context](#prompt_context)
-5. [Known limitations](#limitations)
+5. [Persistence policy](#persist_mode)
+6. [Known limitations](#limitations)
 
 ---
 
@@ -124,7 +125,7 @@ val handle_submit :
 Runs inside its own `Switch.run` and kicks off the OpenAI completion stream
 via `Chat_response.Driver.run_completion_stream_in_memory_v1`.  All
 callbacks (`on_event`, `on_fn_out`, …) forward data to the main loop by
-enqueuing `Stream` events on `ev_stream`.
+enqueuing `Stream` events on `ev_stream`.
 
 Failure handling:
 
@@ -157,13 +158,35 @@ return value is fed back into the stream as a `Function_call_output` item.
 
 ---
 
-## 5  Known limitations <a id="limitations"></a>
+## 5  Persistence policy <a id="persist_mode"></a>
+
+`Chat_tui.App` can save a **session snapshot** on exit so that a
+conversation can be resumed later via the [`~session`](run_chat.html)
+parameter.  The behaviour is governed by the optional
+[`persist_mode`](#type-persist_mode) argument of {!run_chat}:
+
+```ocaml
+type persist_mode = [ `Always | `Never | `Ask ]
+```
+
+| Variant    | Behaviour |
+|------------|-----------|
+| `\`Always` | always save the snapshot |
+| `\`Never`  | never write any snapshot |
+| `\`Ask`    | interactively ask the user *(default)* |
+
+Snapshots are tiny (<1 kB) and contain the full chat *history*, the current
+*task list* and the user‐level key–value store behind [`Model.kv_store`].
+
+---
+
+## 6  Known limitations <a id="limitations"></a>
 
 | Limitation | Impact | Workaround |
 |------------|--------|-----------|
 | UTF-8 cursor positions are **byte-based** | Multi-byte glyphs break left/right navigation | none (yet) |
 | Placeholder "(thinking…)" is not removed if the request fails before any item is streamed | Cosmetic / might confuse users | upcoming PR will reuse the error-handling path |
-| No hard separation between *model* and *view* | Renderer mutates scroll-box for auto-follow | will be fixed once the Elm-style refactor is finished |
+| No hard separation between *model* and *view* | Renderer mutates scroll-box for auto-follow | will be fixed  |
 
 
 

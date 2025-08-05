@@ -26,6 +26,9 @@ type reaction =
         - If a request is in flight, cancel it (by failing the associated
           {!Eio.Switch.t}).
         - Otherwise treat the event as {!Quit}. *)
+  | Compact_context
+  (** Trigger conversation compaction via {!Context_compaction.Compactor}.
+        The main loop should summarise history and redraw. *)
   | Quit
   (** Immediate termination request (e.g. Ctrl-C).
 

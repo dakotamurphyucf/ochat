@@ -3,7 +3,7 @@
  (public_name ochat.chatmd)
  (wrapped false)
  (modules chatmd_ast chatmd_lexer chatmd_parser prompt)
- (libraries core str menhirLib jsonaf io)
+ (libraries core str menhirLib jsonaf io ochat.meta_prompting)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))
 

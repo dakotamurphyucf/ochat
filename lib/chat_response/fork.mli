@@ -14,6 +14,10 @@
       performs the actual streaming request and forwards every event back
       to the parent so UIs may surface fork progress in real-time. *)
 
+(* -------------------------------------------------------------------- *)
+(*  Public API                                                           *)
+(* -------------------------------------------------------------------- *)
+
 (** [execute env history call_id arguments tools tool_tbl on_event on_fn_out ()]
     runs a forked agent to completion and returns its final reply.
 

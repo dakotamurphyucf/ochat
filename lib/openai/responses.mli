@@ -829,6 +829,7 @@ type _ response_type =
   | Default : Response.t response_type
 
 exception Response_stream_parsing_error of Jsonaf.t * exn
+exception Response_parsing_error of Jsonaf.t * exn
 
 (** [post_response response_type ?max_output_tokens ?temperature ?tools ?model
     ?reasoning ~dir net ~inputs] sends [inputs] to the
@@ -852,6 +853,11 @@ exception Response_stream_parsing_error of Jsonaf.t * exn
 
     [temperature] – higher values yield more random completions (same
     semantics as the Chat Completions API).
+
+    [parallel_tool_calls] – when set to [true] the model is permitted to
+    issue several tool invocations in parallel.  The default ([false])
+    instructs the backend to process tool calls sequentially, mirroring
+    the behaviour of the Chat Completions REST API.
 
     [tools] – optional list of tool definitions that the model is
     allowed to invoke via function calls, file search, or web search.
@@ -898,6 +904,7 @@ val post_response
   -> ?temperature:float
   -> ?tools:Request.Tool.t list
   -> ?model:Request.model
+  -> ?parallel_tool_calls:bool
   -> ?reasoning:Request.Reasoning.t
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> 'n Eio.Net.t

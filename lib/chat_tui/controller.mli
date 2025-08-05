@@ -45,6 +45,7 @@
 | Redraw         – visible state changed; re-render the UI
 | Submit_input   – draft is ready; send it to the assistant
 | Cancel_or_quit – ESC; cancel streaming or quit if idle
+| Compact_context – user requested context compaction
 | Quit           – immediate termination (Ctrl-C / 'q')
 | Unhandled      – event not recognised; try other handlers
 ]}
@@ -56,16 +57,48 @@ type reaction = Controller_types.reaction =
   | Redraw (** The event modified the visible state – caller should refresh. *)
   | Submit_input (** User pressed Meta+Enter to submit the prompt. *)
   | Cancel_or_quit (** ESC – cancel running request or quit. *)
+  | Compact_context (** Trigger conversation compaction. *)
   | Quit (** Immediate quit (Ctrl-C / q). *)
   | Unhandled (** Controller didn’t deal with the event. *)
 
-(** [handle_key ~model ~term ev] dispatches [ev] according to [model.mode] and
-    returns a {!reaction}.
+(** [handle_key ~model ~term ev] is the {b single} public function of the
+    controller hierarchy.  It examines [model.mode] and forwards [ev] to the
+    appropriate key-map – Insert (local), Normal or Cmdline – then returns the
+    resulting {!reaction}.
 
-    Side-effects are limited to in-place updates of the [model]; the function
-    performs no network or file IO.  The [term] argument is required for
-    helpers that must query the current terminal geometry (e.g. for paging
-    calculations). *)
+    {1 Parameters}
+    @param model The mutable snapshot of the UI state that will be modified
+    {i in-place}.  Only the record fields are changed – no network or disk IO
+    happens here.
+    @param term  The Notty terminal abstraction used to query run-time
+    geometry with {!Notty_eio.Term.size}.  The value is {i never} modified.
+    @param ev    The raw event received from {!Notty.Unescape.event}.
+
+    {1 Return value}
+    A {!Controller_types.reaction}.  The caller {b must} pattern-match on the
+    result and perform the side-effects described by the variant:
+    {ul
+    {- {!Redraw} – re-render the viewport}
+    {- {!Submit_input} – wrap the draft into an OpenAI request and append a
+       pending entry to the history}
+    {- {!Cancel_or_quit} – either cancel an in-flight stream or quit when
+       idle}
+    {- {!Compact_context} – asynchronously trigger context compaction}
+    {- {!Quit} – stop the application immediately}
+    {- {!Unhandled} – fall back to global shortcuts or ignore the event}}
+
+    {1 Example}
+    Dispatch an event inside the main loop:
+    {[
+      let reaction = Chat_tui.Controller.handle_key ~model ~term ev in
+      match reaction with
+      | Redraw -> Renderer.draw ~model ~term
+      | Submit_input -> send_prompt_to_assistant model
+      | Cancel_or_quit -> handle_escape model
+      | Quit -> exit 0
+      | Unhandled -> ()
+      | Compact_context -> Context_compaction.request ()
+    ]} *)
 val handle_key
   :  model:Model.t
   -> term:Notty_eio.Term.t

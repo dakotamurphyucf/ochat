@@ -11,6 +11,21 @@
  (package
   (name piaf)))
 
+(pin
+ (url "git+https://github.com/mirage/irmin.git#eio")
+ (package
+  (name irmin)))
+
+(pin
+ (url "git+https://github.com/mirage/irmin.git#eio")
+ (package
+  (name irmin-git)))
+
+(pin
+ (url "git+https://github.com/mirage/irmin.git#eio")
+ (package
+  (name irmin-watcher)))
+
 (package
  (name ochat)
  (synopsis "A short synopsis")
@@ -43,6 +58,9 @@
   ppx_jsonaf_conv
   ppx_expect
   cohttp
+  irmin
+  irmin-git
+  irmin-watcher
   expect_test_helpers_core
   re2
   path_glob

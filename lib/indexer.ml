@@ -230,9 +230,7 @@ let get_vectors ~net docs =
     * All blocking IO (disk and network) happens under the provided
       switch [sw].  Cancelling the switch therefore aborts embedding
       requests and leaves no half-written files behind.
-    * The function schedules three worker fibres (arbitrarily named
-      "A", "B", "C") via {!module:Task_pool}.  Feel free to spawn more
-      if your workload benefits from it.
+    * The function schedules work in a domain pool.
     * Output layout (relative to [dir]):
 
       {v
@@ -245,18 +243,10 @@ let get_vectors ~net docs =
 
     The function returns once all four files are durably written.
 *)
-let index ~sw ~dir ~dm ~net ~vector_db_folder ~folder_to_index =
+let index ~dir ~pool ~net ~vector_db_folder ~folder_to_index =
   let vf = dir / vector_db_folder in
-  let module Pool =
-    Task_pool (struct
-      type input = Ocaml_parser.traverse_input list
-      type output = (string * string * string * int) list
-
-      let dm = dm
-      let stream = Eio.Stream.create 0
-      let sw = sw
-      let handler = handle_job
-    end)
+  let submit input =
+    Eio.Executor_pool.submit_exn pool ~weight:1.0 (fun () -> handle_job input)
   in
   let save (doc, v) =
     save_doc ~dir:vf v.Vector_db.Vec.id doc;
@@ -271,12 +261,11 @@ let index ~sw ~dir ~dm ~net ~vector_db_folder ~folder_to_index =
   in
   let task thunks =
     traceln "Client  submitting job...";
-    chunk 50 @@ Pool.submit thunks
+    chunk 50 @@ submit thunks
     |> Fiber.List.map (get_vectors ~net)
     |> List.concat
     |> Fiber.List.map save
   in
-  List.iter ~f:Pool.spawn [ "A"; "B"; "C" ];
   let modules = collect_ocaml_files dir folder_to_index in
   let mli_input, ml_input =
     Fiber.List.map (parse_module_info ~dir) modules |> List.fold ~init:([], []) ~f

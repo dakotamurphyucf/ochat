@@ -24,6 +24,8 @@
 
     • Filesystem – {{!val:get_contents}get_contents},
                    {{!val:apply_patch}apply_patch},
+                   {{!val:append_to_file}append_to_file},
+                   {{!val:find_and_replace}find_and_replace},
                    {{!val:read_dir}read_dir},
                    {{!val:mkdir}mkdir}
 
@@ -71,8 +73,8 @@ val get_url_content : net:_ Eio.Net.t -> Ochat_function.t
     {!module:Indexer}.  Progress reporting happens on stdout; the returned
     string is always ["code has been indexed"]. *)
 val index_ocaml_code
-  :  dir:Eio.Fs.dir_ty Eio.Path.t
-  -> dm:Eio.Domain_manager.ty Eio.Resource.t
+  :  env:Eio_unix.Stdenv.base
+  -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> net:_ Eio.Net.t
   -> Ochat_function.t
 
@@ -112,6 +114,18 @@ val read_dir : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
     0o700.  The action is idempotent when the folder already exists. *)
 val mkdir : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
+(** Register the [`append_to_file`] tool.  Appends a string to a file, creating
+    it if necessary.  The input is a tuple of [file] and [text].  The action is
+    idempotent when the text is already present at the end of the file. *)
+val append_to_file : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
+
+(** Register the [`find_and_replace`] tool.  Searches for a string in a file and
+    replaces it with another string.  The input is a tuple of [file], [search],
+    [replace], and a boolean [all] that controls whether all occurrences should
+    be replaced or only the first one.  The action is idempotent when the search
+    string is not found or already replaced. *)
+val find_and_replace : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
+
 (** {1 Search helpers} *)
 
 (** Register the [`odoc_search`] tool – a semantic search over locally indexed
@@ -139,3 +153,8 @@ val webpage_to_markdown
     stub and should never be called directly; it exists only so that the JSON
     schema can be advertised to the model. *)
 val fork : Ochat_function.t
+
+(** Apply *Recursive Meta-Prompting* refinement to a raw prompt.  The tool
+    receives the full prompt in its JSON [prompt] field and returns the
+    improved version produced by {!Meta_prompting.Recursive_mp.refine}. *)
+val meta_refine : env:Eio_unix.Stdenv.base -> Ochat_function.t

@@ -31,6 +31,14 @@ conversation.chatmd   ─► Driver.run_completion                ─► updated
 | `run_agent` | Evaluate a self-contained `<agent>` prompt inside the current conversation. |
 | `run_completion_stream_in_memory_v1` | Headless helper working on an in-memory history. |
 
+### Optional flags shared by several helpers
+
+| Flag | Default | Effect |
+|------|---------|--------|
+| `parallel_tool_calls` | `true` | Execute tool invocations concurrently under a bounded semaphore while still inserting outputs **in the original call order** so the document remains deterministic. |
+| `history_compaction` | `false` | Collapse repeated reads of the same file into a single entry before sending the history to the model.  Significantly reduces prompt size in conversations that iterate over large documents. |
+| `meta_refine` | `false` | Enable the *meta-refine* experimental feature which lets the model run an additional self-critique pass.  Can also be toggled globally by setting the environment variable `OCHAT_META_REFINE=1`. |
+
 ### 2.1 `run_completion`
 
 ```ocaml
@@ -111,6 +119,21 @@ complete history in a database.
    stream is live, ensuring that the output buffer on disk stays
    well-formed even if the program is terminated abruptly.
 
+## 3.1 · Invariants
+
+The driver maintains several important invariants that callers can rely on:
+
+* **Document integrity** – the `.chatmd` buffer is always well-formed XML.
+  Even in streaming mode every opening tag is flushed to disk before the
+  corresponding closing tag is emitted.
+* **Deterministic ordering of tool calls** – when `parallel_tool_calls = true`
+  results are still inserted **in the order the calls appeared in the
+  stream**, not when the underlying fibers finish.
+* **Shared context** – nested agents created with `run_agent` inherit the
+  parent cache and the current working directory contained in `Ctx.t`.
+* **Crash-resilience** – partial assistant messages are closed on shutdown so
+  that a subsequent run can resume without repairing the file.
+
 ## 4 · Examples
 
 ### 4.1 CLI one-shot
@@ -149,6 +172,22 @@ let assistant_answer =
   Driver.run_agent ~ctx "<system>Translate</system>" [ CM.Text "Bonjour" ]
 in
 assert (String.equal assistant_answer "Hello")
+```
+
+### 4.4 In-memory variant
+
+```ocaml
+let initial_history = [] in
+
+Eio_main.run @@ fun env ->
+  let history' =
+    Driver.run_completion_stream_in_memory_v1
+      ~env
+      ~history:initial_history
+      ~tools:[]
+      ()
+  in
+  Format.printf "History length = %d\n" (List.length history')
 ```
 
 ## 5 · Limitations / TODOs

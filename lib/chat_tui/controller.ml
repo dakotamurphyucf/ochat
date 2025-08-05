@@ -33,6 +33,7 @@ type reaction = Controller_types.reaction =
   | Redraw
   | Submit_input
   | Cancel_or_quit
+  | Compact_context
   | Quit
   | Unhandled
 
@@ -325,8 +326,16 @@ let scroll_by_lines (model : Model.t) ~term delta =
     | [] -> 1
     | ls -> List.length ls
   in
-  let history_h = Int.max 1 (screen_h - input_height - 2) in
-  Scroll_box.scroll_by (Model.scroll_box model) ~height:history_h delta
+  let history_height =
+    let base = Int.max 1 (screen_h - input_height - 2) in
+    max 1 (base - 1)
+  in
+  (* let history_h = Int.max 1 (screen_h - input_height - 2) in *)
+  Scroll_box.scroll_by (Model.scroll_box model) ~height:history_height delta;
+  if
+    Scroll_box.max_scroll (Model.scroll_box model) ~height:history_height
+    = Scroll_box.scroll (Model.scroll_box model)
+  then Model.set_auto_follow model true
 ;;
 
 let page_size ~term (model : Model.t) =

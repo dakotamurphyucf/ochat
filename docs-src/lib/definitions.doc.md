@@ -52,15 +52,20 @@ Below is a concise reference.  For the *exact* JSON schema consult the
 
 | Tool | `input` OCaml type | Synopsis |
 |------|--------------------|----------|
-| **Get_contents** | `string` | Return the contents of a local file |
+| **Get_contents** | `(string * int option)` | Return the contents of a local file (with optional offset) |
+| **Meta_refine** | `string` | Refine a user prompt via Recursive Meta-Prompting |
+| **Index_markdown_docs** | `(string * string * string * string option)` | Build a vector DB from a directory of Markdown docs |
+| **Markdown_search** | `(string * int option * string option * string option)` | Semantic search over Markdown indices |
 | **Odoc_search** | `(string * int option * string option * string)` | Semantic search over locally-indexed odoc docs |
-| **Fork** | `{ command : string; arguments : string list }` | Spawn a fully-isolated helper agent |
+| **Fork** | `{ command : string; arguments : string list }` | Spawn an auxiliary helper agent |
 | **Webpage_to_markdown** | `string` | Download an URL and convert it to Markdown |
 | **Add_line_numbers** | `string` | Prefix each line of a text block with its index |
 | **Get_url_content** | `string` | Fetch the raw body of a remote resource |
 | **Index_ocaml_code** | `(string * string)` | Embed OCaml sources into a vector DB |
 | **Query_vector_db** | `(string * string * int * string option)` | Search the vector DB for relevant snippets |
 | **Apply_patch** | `string` | Apply a V4A diff/patch to the workspace |
+| **Append_to_file** | `(string * string)` | Append text to an existing file |
+| **Find_and_replace** | `(string * string * string * bool)` | Find & replace occurrences of a substring in a file |
 | **Read_directory** | `string` | List entries of the given directory |
 | **Make_dir** | `string` | Create a new directory |
 

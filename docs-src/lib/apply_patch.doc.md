@@ -69,11 +69,16 @@ Elements:
 -------------------------
 
 ```ocaml
-exception Diff_error of string
+exception Diff_error of Apply_patch_error.t
 ```
 
-Raised on the first parsing or application error.  The payload explains
-what went wrong.
+Raised on the first parsing or application error.  The payload is a
+rich, structured value (see {!module:Apply_patch_error}) that conveys
+the exact reason of the failure together with helpful metadata such as
+file paths, line numbers, and—in the case of a context mismatch—a
+snippet of the conflicting section.  Use
+`Apply_patch_error.to_string` for a human-readable representation or
+pattern-match directly to implement custom recovery strategies.
 
 ```ocaml
 val process_patch :
@@ -81,13 +86,20 @@ val process_patch :
   open_fn:(string -> string) ->
   write_fn:(string -> string -> unit) ->
   remove_fn:(string -> unit) ->
-  string
+  string * (string * string) list
 ```
 
-Parses and applies the patch.  The helper functions mirror a minimal
-file-system API and allow you to map the logical operations to anything
-you like (POSIX FS, Git index, an in-memory table, …).  On success it
-returns the literal string `"Done!"`.
+Parses and applies the patch.  The callback trio abstracts over your
+storage layer (POSIX FS, Git index, in-memory map, …).  On success it
+returns a tuple:
+
+* The literal string `"Done!"` – kept for API compatibility with the
+  reference implementation.
+* A list of `(path, snippet)` pairs, one for every affected file.  Each
+  *snippet* shows a small, **line-numbered** window around the modified
+  hunks and is convenient for logging or chat-ops style confirmations.
+
+If anything goes wrong a `Diff_error` is raised (see above).
 
 
 4  Usage examples

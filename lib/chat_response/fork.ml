@@ -168,6 +168,7 @@ let rec run_stream
       ?temperature
       ?max_output_tokens
       ?reasoning
+      ~parallel_tool_calls:true
       net
       ~inputs:hist
       ~tools

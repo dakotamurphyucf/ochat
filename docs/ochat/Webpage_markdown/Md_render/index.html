@@ -1,0 +1,24 @@
+<!DOCTYPE html>
+<html xmlns="http://www.w3.org/1999/xhtml"><head><title>Md_render (ochat.Webpage_markdown.Md_render)</title><meta charset="utf-8"/><link rel="stylesheet" href="../../../odoc.support/odoc.css"/><meta name="generator" content="odoc 3.1.0"/><meta name="viewport" content="width=device-width,initial-scale=1.0"/><script src="../../../odoc.support/highlight.pack.js"></script><script>hljs.initHighlightingOnLoad();</script><script>let base_url = '../../../';
+let search_urls = ['../../db.js','../../../sherlodoc.js'];
+</script><script src="../../../odoc.support/odoc_search.js" defer="defer"></script></head><body class="odoc"><nav class="odoc-nav"><a href="../index.html">Up</a> – <a href="../../../index.html">Index</a> &#x00BB; <a href="../../index.html">ochat</a> &#x00BB; <a href="../index.html">Webpage_markdown</a> &#x00BB; Md_render</nav><div class="odoc-search"><div class="search-inner"><input class="search-bar" placeholder="🔎 Type '/' to search..."/><div class="search-snake"></div><div class="search-result"></div></div></div><header class="odoc-preamble"><h1>Module <code><span>Webpage_markdown.Md_render</span></code></h1><p>Minimal Markdown pretty-printer used by <a href="../Html_to_md/index.html"><code>Html_to_md</code></a>.</p><p><code>`Md_render`</code> converts an <code>Omd.doc</code> – the abstract syntax tree used by the <code>https://github.com/ocaml/omd Omd</code> Markdown library – into a textual document that renders correctly on GitHub, GitLab and any other CommonMark-compliant engine.</p><p>The implementation deliberately supports only the node kinds emitted by <a href="../Html_to_md/index.html#val-convert"><code>Html_to_md.convert</code></a>. Unknown or unsupported nodes are preserved inside fenced `html` blocks so that *no information is ever lost* during the HTML → Markdown round-trip.</p><p>The conversion is pure, deterministic and never raises.</p></header><div class="odoc-content"><div class="odoc-spec"><div class="spec value anchored" id="val-to_string"><a href="#val-to_string" class="anchor"></a><code><span><span class="keyword">val</span> to_string : <span><span class="xref-unresolved">Omd</span>.doc <span class="arrow">&#45;&gt;</span></span> string</span></code></div><div class="spec-doc"><p><code>to_string doc</code> returns a UTF-8 encoded string containing the Markdown representation of <code>doc</code>.</p><p>Unknown nodes fall back to fenced `html` blocks.</p><p>Example – render a small document with emphasis and a link:</p><pre class="language-ocaml"><code>  let doc : Omd.doc =
+    [ Omd.Heading ([], 1, Omd.Text ([], &quot;Example&quot;));
+      Omd.Paragraph
+        ( [],
+          Omd.Concat
+            ( [],
+              [ Omd.Text ([], &quot;Some &quot;);
+                Omd.Emph ([], Omd.Text ([], &quot;italics&quot;));
+                Omd.Text ([], &quot; and a &quot;);
+                Omd.Link
+                  ( [],
+                    { Omd.label = Omd.Text ([], &quot;link&quot;);
+                      destination = &quot;https://example.com&quot;;
+                      title = None } ) ] ) ) ]
+  in
+  print_endline (Md_render.to_string doc)
+  (* Output:
+     # Example
+
+     Some *italics* and a [link](https://example.com)
+  *)</code></pre></div></div></div></body></html>

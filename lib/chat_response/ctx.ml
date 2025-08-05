@@ -11,6 +11,11 @@
       This is often {!Eio.Stdenv.fs}, but callers may provide a
       sandboxed subtree if they want to restrict file-system access.
 
+    • [tool_dir] – Directory that acts as the current working directory
+      when spawning external tools (defaults to [dir] but can be
+      overridden by the caller so that helpers such as {!module-Chat_response.Tool}
+      respect the user’s chosen CWD).
+
     • [cache] – A {!Cache.t} instance used to memoise network fetches
       and nested agent calls.
 
@@ -48,16 +53,22 @@ type 'env t =
   { env : 'env
   ; dir : Eio.Fs.dir_ty Eio.Path.t
     (** Root directory used by {!Fetch} helpers for reading local files. *)
+  ; tool_dir : Eio.Fs.dir_ty Eio.Path.t
+    (** Directory where tools are executed.  Defaults to [dir] but may be
+        overridden by the caller to ensure tools run relative to the user’s
+        current working directory. *)
   ; cache : Cache.t
     (** Shared TTL-LRU store for memoising agent answers and HTTP fetches. *)
   }
 
 (** [create ~env ~dir ~cache] builds a fresh context from its parts. *)
-let create ~env ~dir ~cache = { env; dir; cache }
+let create ~env ~dir ~tool_dir ~cache = { env; dir; tool_dir; cache }
 
 (** [of_env ~env ~cache] is a shorthand for
-    {[create ~env ~dir:(Eio.Stdenv.fs env) ~cache]}. *)
-let of_env ~env ~cache = { env; dir = Eio.Stdenv.fs env; cache }
+    {[create ~env ~dir:(Eio.Stdenv.fs env) ~tool_dir:(Eio.Stdenv.cwd env) ~cache]}. *)
+let of_env ~env ~cache =
+  { env; dir = Eio.Stdenv.fs env; tool_dir = Eio.Stdenv.cwd env; cache }
+;;
 
 (** [net t] exposes the network namespace ([env#net]). *)
 let net t = t.env#net
@@ -71,3 +82,8 @@ let dir t = t.dir
 
 (** Shared cache instance carried by the context. *)
 let cache t = t.cache
+
+(** Directory where tools are executed.  Defaults to [dir] but may be
+    overridden by the caller to ensure tools run relative to the user’s
+    current working directory. *)
+let tool_dir t = t.tool_dir

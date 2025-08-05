@@ -51,10 +51,6 @@ module Req = Res.Request
     request.  The exception is caught locally and never leaves the module. *)
 exception Cancelled
 
-(* ────────────────────────────────────────────────────────────────────────── *)
-(*  Local helpers                                                            *)
-(* ────────────────────────────────────────────────────────────────────────── *)
-
 (* Emit a transient “(thinking…)” placeholder so the user sees immediate
       feedback after hitting submit.  The placeholder is appended via a patch so
       the mutation goes through the centralised [Model.apply_patch] function. *)
@@ -76,6 +72,29 @@ let add_placeholder_stream_error (model : Model.t) text : unit =
   ignore (Model.apply_patch model patch)
 ;;
 
+let add_placeholder_compact_message (model : Model.t) : unit =
+  let patch = Add_placeholder_message { role = "assistant"; text = "(compacting…)" } in
+  ignore (Model.apply_patch model patch)
+;;
+
+(* Persist the in-memory session snapshot to disk unconditionally.  We
+     call this helper in all quit branches so that conversation history is
+     never lost, even if the user aborts ChatMarkdown export. *)
+let persist_snapshot env session model =
+  match session with
+  | None -> ()
+  | Some s ->
+    let updated_session =
+      Session.
+        { s with
+          history = Model.history_items model
+        ; tasks = Model.tasks model
+        ; kv_store = Hashtbl.to_alist (Model.kv_store model)
+        }
+    in
+    Session_store.save ~env updated_session
+;;
+
 (** [apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term]
     performs {b synchronous} updates that take effect immediately after the
     user submits the draft but {i before} the OpenAI request is sent.  In
@@ -91,7 +110,44 @@ let add_placeholder_stream_error (model : Model.t) text : unit =
     The heavy lifting (network call, token streaming) is delegated to
     {!handle_submit}. *)
 let apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term =
-  let user_msg = String.strip (Model.input_line model) in
+  (* ------------------------------------------------------------------ *)
+  (* 1. Retrieve original draft and run meta-refine                      *)
+  (* ------------------------------------------------------------------ *)
+  let orig_msg = String.strip (Model.input_line model) in
+  let refined_msg =
+    if String.is_empty orig_msg || true
+    then orig_msg
+    else (
+      (* Build prompt and invoke Recursive_mp.refine.  Any exception     *)
+      (* falls back to the original draft so we never block submission.  *)
+      try
+        let open Meta_prompting in
+        let prompt_t = Prompt_intf.make ~body:orig_msg () in
+        let refined_t = Recursive_mp.refine prompt_t in
+        Prompt_intf.to_string refined_t
+      with
+      | ex ->
+        (* Log but continue with original prompt *)
+        print_endline (Printf.sprintf "[meta_refine] fallback – %s" (Exn.to_string ex));
+        orig_msg)
+  in
+  let user_msg = refined_msg in
+  (* ------------------------------------------------------------------ *)
+  (* 2.  Optionally render a diff placeholder message for transparency   *)
+  (* ------------------------------------------------------------------ *)
+  (match String.equal orig_msg refined_msg with
+   | true -> ()
+   | false ->
+     let diff_text =
+       Printf.sprintf
+         "[meta_refine] applied changes:\n--- original\n%s\n--- refined\n%s"
+         orig_msg
+         refined_msg
+     in
+     ignore
+       (Model.apply_patch
+          model
+          (Add_placeholder_message { role = "meta_refine"; text = diff_text })));
   (* ------------------------------------------------------------------ *)
   (*  Inline helper commands ("/wrap", "/count", …)                  *)
   (* ------------------------------------------------------------------ *)
@@ -120,11 +176,11 @@ let apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term =
       let user_msg =
         List.find_map_exn elements ~f:(function
           | CM.User m ->
-            let ctx = Ctx.create ~env ~dir ~cache in
+            let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
             Some
               (Converter.convert_user_msg
                  ~ctx
-                 ~run_agent:Chat_response.Driver.run_agent
+                 ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:true)
                  m)
           | _ -> None)
       in
@@ -174,60 +230,6 @@ type prompt_context =
 (*  Main event handler for submitting the draft to the assistant             *)
 (* ────────────────────────────────────────────────────────────────────────── *)
 
-(* [handle_submit] is the main entry-point for processing user input.
-      It handles inline commands, submits the draft to the assistant, and
-      manages the UI updates accordingly. *)
-
-(* let debounce_duration = 0.016 *)
-
-(* [throttle] is a debounced version of a function that processes user input.
-   It ensures that the function is called at most once every [debounce_duration]
-   seconds, even if it is called multiple times in quick succession. *)
-(* Note: This implementation uses a mutex to ensure thread-safety when accessing
-   the buffer and last call time. *)
-(* let throttle sw env f f_batch =
-  let buffer = ref [] in
-  let mutex = Eio.Mutex.create () in
-  (* Use a mutex to ensure that only one fiber can access the buffer at a time. *)
-  let clock = Eio.Stdenv.mono_clock env in
-  let last_call = ref (Mtime.of_uint64_ns Int64.zero) in
-  fun a ->
-    let now = Eio.Time.Mono.now clock in
-    let diff = Mtime.span now !last_call |> Mtime.Span.to_float_ns in
-    let open Float in
-    (* If the time since the last call is greater than the debounce duration,
-       call the function and update the last call time. Otherwise, do nothing. *)
-    Eio.Mutex.lock mutex;
-    if diff >= debounce_duration
-    then (
-      last_call := now;
-      let items = !buffer in
-      buffer := [];
-      match items with
-      | [] -> f a
-      | _ -> f_batch (List.rev (a :: items)))
-    else (
-      match !buffer with
-      | [] ->
-        buffer := [ a ];
-        let timeout = Eio.Time.Timeout.seconds clock debounce_duration in
-        Fiber.fork ~sw (fun () ->
-          (* Wait for the debounce duration before calling the function. *)
-          Eio.Time.Timeout.sleep timeout;
-          (* Call the function with the buffered items. *)
-          (* Note: This assumes that [f] can handle a list of items. *)
-          Eio.Mutex.lock mutex;
-          (* Only call the unction if the buffer is not empty. *)
-          let items = !buffer in
-          buffer := [];
-          f_batch (List.rev items);
-          Eio.Mutex.unlock mutex
-          (* Unlock the mutex after processing the buffer. *))
-      | _ -> buffer := a :: !buffer);
-    Eio.Mutex.unlock mutex;
-    ()
-;; *)
-
 (** [handle_submit ~env ~model ~ev_stream ~prompt_ctx] launches the
     *asynchronous* OpenAI completion request in a fresh switch and wires the
     streaming callbacks back into the UI.  The function never blocks the UI
@@ -238,7 +240,16 @@ type prompt_context =
     placeholder and are persisted in {!Model.history_items}.  On failure the
     conversation is {i rolled-back} to the state before the request started
     and an error message is shown. *)
-let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
+let handle_submit
+      ~env
+      ~model
+      ~ev_stream
+      ~system_event
+      ~prompt_ctx
+      ~datadir
+      ~parallel_tool_calls
+      ~history_compaction
+  =
   (* Kick off the OpenAI streaming request via the [Cmd] interpreter. *)
   try
     Switch.run
@@ -299,9 +310,11 @@ let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
     let items =
       Chat_response.Driver.run_completion_stream_in_memory_v1
         ~env
+        ~datadir
         ~history:(Model.history_items model)
         ~tools:(Some prompt_ctx.tools)
         ~tool_tbl:prompt_ctx.tool_tbl
+        ~system_event
         ?temperature:prompt_ctx.cfg.temperature
         ?max_output_tokens:prompt_ctx.cfg.max_tokens
         ?reasoning:
@@ -310,9 +323,11 @@ let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
                { effort = Some (Req.Reasoning.Effort.of_str_exn eff)
                ; summary = Some Req.Reasoning.Summary.Detailed
                }))
+        ~history_compaction
         ?model:(Option.map prompt_ctx.cfg.model ~f:Req.model_of_str_exn)
         ~on_event
         ~on_fn_out
+        ~parallel_tool_calls
         ()
     in
     Model.set_fetch_sw model None;
@@ -385,7 +400,21 @@ let handle_submit ~env ~model ~ev_stream ~prompt_ctx =
         Eio_main.run @@ fun env ->
         Chat_tui.App.run_chat ~env ~prompt_file:"prompt.chatmd" ()
     ]} *)
-let run_chat ~env ~prompt_file () =
+type persist_mode =
+  [ `Always
+  | `Never
+  | `Ask
+  ]
+
+let run_chat
+      ~env
+      ~prompt_file
+      ?session
+      ?export_file
+      ?(persist_mode = `Ask)
+      ?(parallel_tool_calls = true)
+      ()
+  =
   Switch.run
   @@ fun ui_sw ->
   (* Event queue shared between the Notty IO thread and the pure event loop. *)
@@ -406,55 +435,95 @@ let run_chat ~env ~prompt_file () =
     =
     Eio.Stream.create 10
   in
+  let system_event = Eio.Stream.create 10 in
+  (* Load the chat prompt and initialise the model. *)
   let cwd = Eio.Stdenv.cwd env in
-  let datadir = Io.ensure_chatmd_dir ~cwd in
+  (* Determine the directory used to store runtime artefacts (cache,
+     tool outputs, etc.).  When running inside a session we place the
+     hidden [.chatmd] folder {i inside} the session directory so that
+     each session has an isolated cache.  Falling back to the process
+     [cwd] preserves the previous behaviour for ad-hoc one-off chats
+     where no session is active. *)
+  let datadir : _ Eio.Path.t =
+    match session with
+    | Some (s : Session.t) ->
+      let session_dir = Session_store.path ~env s.id in
+      let ( / ) = Eio.Path.( / ) in
+      let chatmd_dir = session_dir / ".chatmd" in
+      (match Eio.Path.is_directory chatmd_dir with
+       | true -> ()
+       | false -> Eio.Path.mkdirs ~perm:0o700 chatmd_dir);
+      chatmd_dir
+    | None -> Io.ensure_chatmd_dir ~cwd
+  in
   let cache_file = Eio.Path.(datadir / "cache.bin") in
   let cache = Cache.load ~file:cache_file ~max_size:1000 () in
-  let dir = Eio.Stdenv.fs env in
-  let prompt_xml =
-    match Io.load_doc ~dir prompt_file with
-    | s -> s
-    | exception _ -> ""
+  (* Base directory of the prompt file – used for resolving relative paths in
+     <import/> and <doc src="…"> tags. *)
+  let prompt_dir : _ Eio.Path.t =
+    let dirname = Filename.dirname prompt_file in
+    if Filename.is_relative dirname
+    then Eio.Path.(cwd / dirname)
+    else Eio.Path.(Eio.Stdenv.fs env / dirname)
   in
-  let prompt_elements = CM.parse_chat_inputs ~dir prompt_xml in
+  (* Load the prompt file and parse it into a list of elements. *)
+  let prompt_xml =
+    match Io.load_doc ~dir:(Eio.Stdenv.fs env) prompt_file with
+    | s -> s
+    | exception e ->
+      raise
+        (Failure
+           (Printf.sprintf
+              "Failed to load prompt file %s: %s"
+              prompt_file
+              (Exn.to_string e)))
+  in
+  let prompt_elements = CM.parse_chat_inputs ~dir:prompt_dir prompt_xml in
   let cfg = Config.of_elements prompt_elements in
+  let ctx = Ctx.create ~env ~dir:prompt_dir ~tool_dir:cwd ~cache in
   let declared_tools =
     List.filter_map prompt_elements ~f:(function
       | CM.Tool t -> Some t
       | _ -> None)
   in
   let tools, tool_tbl =
-    let ctx_for_tool decl =
-      let dir = Eio.Stdenv.cwd env in
-      match decl with
-      | CM.Agent _ -> Ctx.create ~env ~dir ~cache
-      | _ -> Ctx.create ~env ~dir ~cache
-    in
+    (* Tools should execute relative to user’s current working directory *)
     let user_fns =
       List.concat_map declared_tools ~f:(fun decl ->
-        let ctx_tool = ctx_for_tool decl in
         Tool.of_declaration
           ~sw:ui_sw
-          ~ctx:ctx_tool
-          ~run_agent:Chat_response.Driver.run_agent
+          ~ctx
+          ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:true)
           decl)
     in
     let comp_tools, tbl = Ochat_function.functions user_fns in
     Tool.convert_tools comp_tools, tbl
   in
-  (* Convert prompt → initial history items. *)
-  let ctx_prompt = Ctx.create ~env ~dir ~cache in
-  let history_items =
+  (* Convert prompt → initial history items extracted from the static prompt. *)
+  let history_items_prompt =
     Converter.to_items
-      ~ctx:ctx_prompt
-      ~run_agent:Chat_response.Driver.run_agent
+      ~ctx
+      ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:true)
       prompt_elements
+  in
+  (* If a persisted [session] was passed in, prefer its history – otherwise
+     start from the prompt defaults. *)
+  let history_items =
+    match session with
+    | Some s when not (List.is_empty (s : Session.t).history) -> (s : Session.t).history
+    | _ -> history_items_prompt
   in
   let messages =
     let initial = Conversation.of_history history_items in
     initial
   in
-  let initial_msg_count = List.length history_items in
+  (* The original prompt items are already included at the top of the
+     exported ChatMarkdown file.  We now export the *entire* runtime
+     history (Task #26) instead of dropping the first
+     [initial_msg_count] entries.  Keep the computed value (prefixed
+     with [_] to silence unused-var warnings) in case future code
+     paths still need it. *)
+  let initial_msg_count = List.length history_items_prompt in
   let quit_via_esc = ref false in
   (* Load persisted draft, if exists, now that [cursor_pos] is available *)
   let model : Model.t =
@@ -466,6 +535,17 @@ let run_chat ~env ~prompt_file () =
       ~msg_buffers:(Hashtbl.create (module String))
       ~function_name_by_id:(Hashtbl.create (module String))
       ~reasoning_idx_by_id:(Hashtbl.create (module String))
+      ~tasks:
+        (match session with
+         | Some s -> s.tasks
+         | None -> [])
+      ~kv_store:
+        (let tbl = Hashtbl.create (module String) in
+         (match session with
+          | Some s ->
+            List.iter s.kv_store ~f:(fun (k, v) -> Hashtbl.set tbl ~key:k ~data:v)
+          | None -> ());
+         tbl)
       ~fetch_sw:None
       ~scroll_box:(Scroll_box.create Notty.I.empty)
       ~cursor_pos:0
@@ -581,46 +661,163 @@ let run_chat ~env ~prompt_file () =
       main_loop ()
     | Controller.Submit_input ->
       (match Model.fetch_sw model with
-       | Some _ -> main_loop ()
+       | Some _ ->
+         let user_msg = String.strip (Model.input_line model) in
+         let msg = sprintf "This is a Note From the User:\n%s" user_msg in
+         Model.set_input_line model "";
+         Model.set_cursor_pos model 0;
+         Eio.Stream.add system_event msg;
+         Eio.Stream.add ev_stream `Redraw;
+         main_loop ()
        | None ->
          apply_local_submit_effects ~dir:cwd ~env ~cache ~model ~ev_stream ~term;
          Fiber.fork ~sw:ui_sw (fun () ->
-           handle_submit ~env ~model ~ev_stream ~prompt_ctx:{ cfg; tools; tool_tbl });
+           handle_submit
+             ~env
+             ~model
+             ~ev_stream
+             ~system_event
+             ~prompt_ctx:{ cfg; tools; tool_tbl }
+             ~datadir
+             ~parallel_tool_calls
+             ~history_compaction:true);
          main_loop ())
     | Controller.Cancel_or_quit -> handle_cancel_or_quit ()
+    | Controller.Compact_context ->
+      (* Do nothing if a streaming request is in flight – compaction acts on
+         a {i stable} history snapshot.  Showing a terse system message keeps
+         the user informed without disrupting the UI. *)
+      (match Model.fetch_sw model with
+       | Some _ ->
+         add_placeholder_stream_error model "Cannot compact while streaming.";
+         Eio.Stream.add ev_stream `Redraw;
+         main_loop ()
+       | None ->
+         add_placeholder_compact_message model;
+         (* Fork a new switch to run the compaction in the background.  This
+            allows the user to continue interacting with the UI while the
+            compaction runs. *)
+         (* Note: we do not use [Switch.run] here because it would block the
+            UI thread until compaction finishes. *)
+         Log.emit `Info "Compacting history items…";
+         (* Start a new switch for the compaction operation. *)
+         Fiber.fork ~sw:ui_sw (fun () ->
+           try
+             Switch.run
+             @@ fun streaming_sw ->
+             Model.set_fetch_sw model (Some streaming_sw);
+             (* Compact the history items in the model.  This is a pure
+            operation that does not block the UI thread. *)
+             (match session with
+              | None -> ()
+              | Some s ->
+                persist_snapshot env session model;
+                Session_store.reset_session ~env ~id:s.id ~keep_history:false ());
+             let history' =
+               Context_compaction.Compactor.compact_history
+                 ~env:(Some env)
+                 ~history:(Model.history_items model)
+             in
+             (* Replace model state. *)
+             Model.set_history_items model history';
+             Model.set_messages model (Conversation.of_history history');
+             (* After compaction the selection is cleared and viewport resets. *)
+             Model.select_message model None;
+             Model.set_auto_follow model true;
+             Eio.Stream.add ev_stream `Redraw;
+             Model.set_fetch_sw model None
+             (* Show a success message. *)
+           with
+           | _ ->
+             Model.set_fetch_sw model None;
+             add_placeholder_stream_error model "Compaction failed.";
+             Eio.Stream.add ev_stream `Redraw);
+         (* Continue the main loop after compaction. *)
+         Eio.Stream.add ev_stream `Redraw;
+         main_loop ())
     | Controller.Quit -> ()
-    | Controller.Unhandled -> main_loop ()
+    | Controller.Unhandled ->
+      (match ev with
+       | `Paste `End ->
+         Log.emit `Warn "Unhandled paste event – this is a bug.";
+         main_loop ()
+       | `Paste `Start ->
+         Log.emit `Warn "Unhandled paste start event – this is a bug.";
+         main_loop ()
+       | _ -> main_loop ())
   in
   main_loop ();
-  (* On shutdown, decide whether to persist the session.  We ask for
-        confirmation when the user pressed ESC to quit, otherwise keep the
-        previous auto-export behaviour. *)
-  let export_session () =
-    let cmd : Types.cmd =
-      Persist_session
-        (fun () ->
-          Persistence.persist_session
-            ~dir
-            ~prompt_file
-            ~datadir
-            ~cfg
-            ~initial_msg_count
-            ~history_items:(Model.history_items model))
-    in
+  (* Helper: export conversation to ChatMarkdown at [target_path]. *)
+  let do_export ~target_path () =
+    Export.archive ~env ~model ~prompt_file ~target_path ~cfg ~initial_msg_count ~session
+  in
+  (* ------------------------------------------------------------------ *)
+  (* Shutdown & persistence                                              *)
+  (* ------------------------------------------------------------------ *)
+
+  (* Decide whether to export the conversation as ChatMarkdown.  When the
+     user quits via ESC we prompt for confirmation; otherwise we keep the
+     previous automatic export behaviour.  Snapshot persistence happens
+     independently via [persist_snapshot]. *)
+  let export_session ~target_path () =
+    let cmd : Types.cmd = Persist_session (fun () -> do_export ~target_path ()) in
     Cmd.run cmd
   in
-  match !quit_via_esc with
-  | false ->
-    (* Quit triggered via other means (Ctrl-C / q) – preserve previous
-           behaviour and export automatically. *)
-    export_session ()
-  | true ->
-    Notty_eio.Term.release term;
-    Out_channel.(output_string stdout "Export conversation to promptmd file? [y/N] ");
-    Out_channel.flush stdout;
-    (match In_channel.input_line In_channel.stdin with
-     | Some ans ->
-       let ans = String.lowercase (String.strip ans) in
-       if List.mem [ "y"; "yes" ] ans ~equal:String.equal then export_session ()
-     | None -> ())
+  (* Release the Notty terminal before printing any messages to stdout so
+     that they appear correctly in the user’s shell.  We do this once and
+     only once – further calls are benign but avoided for clarity. *)
+  Notty_eio.Term.release term;
+  (match !quit_via_esc with
+   | false ->
+     (* Quit triggered via other means (Ctrl-C / q) – export automatically. *)
+     let target = Option.value export_file ~default:prompt_file in
+     export_session ~target_path:target ()
+   | true ->
+     Out_channel.(output_string stdout "Export conversation to promptmd file? [y/N] ");
+     Out_channel.flush stdout;
+     (match In_channel.input_line In_channel.stdin with
+      | Some ans
+        when List.mem
+               [ "y"; "yes" ]
+               (String.lowercase (String.strip ans))
+               ~equal:String.equal ->
+        (* Determine target path *)
+        let target_path =
+          match export_file with
+          | Some p -> p
+          | None ->
+            (* Prompt for filename *)
+            Out_channel.output_string
+              stdout
+              (Printf.sprintf "Enter output file path [default: %s]: " prompt_file);
+            Out_channel.flush stdout;
+            (match In_channel.input_line In_channel.stdin with
+             | Some line when not (String.is_empty (String.strip line)) ->
+               String.strip line
+             | _ -> prompt_file)
+        in
+        export_session ~target_path ()
+      | _ -> ()));
+  (* Decide whether to persist the snapshot. *)
+  let should_persist =
+    match persist_mode with
+    | `Always -> true
+    | `Never -> false
+    | `Ask ->
+      (* Ask the user – default to yes. *)
+      (match session with
+       | None -> false
+       | Some _ ->
+         Out_channel.output_string stdout "Save session snapshot? [Y/n] ";
+         Out_channel.flush stdout;
+         (match In_channel.input_line In_channel.stdin with
+          | Some ans ->
+            let ans = String.lowercase (String.strip ans) in
+            not (List.mem [ "n"; "no" ] ans ~equal:String.equal)
+          | None -> true))
+  in
+  if should_persist
+  then persist_snapshot env session model
+  else Log.emit `Info "Skipping session persistence as per user request."
 ;;
+(* Exit the program. *)

@@ -1,7 +1,17 @@
 (library
  (name chat_response)
  (public_name ochat.chat_response)
- (modules cache config converter ctx driver fetch response_loop tool fork)
+ (modules
+  cache
+  config
+  converter
+  ctx
+  driver
+  fetch
+  response_loop
+  tool
+  fork
+  compact_history)
  (libraries
   core
   openai

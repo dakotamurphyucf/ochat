@@ -82,7 +82,28 @@ the prompt is large (> 100 KB) and you need to keep the UI responsive.
 
 ---
 
-## 6. Re-exported helpers
+## 6. Metadata helpers
+
+`Chatmd_prompt.Metadata` is a lightweight in-process registry for
+attaching arbitrary annotations to any value returned by
+`parse_chat_inputs`.  Because storing the pairs externally keeps record
+types unchanged, you can evolve metadata independently from the wire
+format.
+
+| Function | Purpose |
+|----------|---------|
+| `add elt ~key ~value` | Append a pair to `elt`’s metadata list. Multiple entries with the same key are allowed. |
+| `get elt` | Retrieve the list currently associated with `elt` or `None` if none. |
+| `set elt kvs` | Replace the list with `kvs`. |
+| `clear ()` | Remove **all** metadata; call this between two independent requests in services that hold state. |
+
+The functions mutate global state and therefore are {i not} thread-safe
+by design.  If you use metadata from multiple Eio fibres, wrap the calls
+in a mutex or reconsider your design.
+
+---
+
+## 7. Re-exported helpers
 
 Although `prompt.ml` itself does not perform I/O, the typical workflow
 relies on:

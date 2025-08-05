@@ -32,10 +32,15 @@
     • {!Query_vector_db}     – semantic search in a vector database
     • {!Apply_patch}         – apply a V4A diff/patch to the workspace
     • {!Read_directory}      – list entries of a directory
+    • {!Append_to_file}      – append a string to an existing file
+    • {!Find_and_replace}    – find and replace a substring in a file
+    • {!Meta_refine}         – refine prompts via Recursive Meta-Prompting
+    • {!Index_markdown_docs} – build a vector index from Markdown docs
+    • {!Markdown_search}     – semantic search over Markdown indices
     • {!Make_dir}            – create a directory on the filesystem
 *)
 
-module Get_contents : Ochat_function.Def with type input = string
+module Get_contents : Ochat_function.Def with type input = string * int option
 
 module Odoc_search :
   Ochat_function.Def with type input = string * int option * string option * string
@@ -56,7 +61,16 @@ module Query_vector_db :
 
 module Apply_patch : Ochat_function.Def with type input = string
 module Read_directory : Ochat_function.Def with type input = string
+module Append_to_file : Ochat_function.Def with type input = string * string
+
+module Find_and_replace :
+  Ochat_function.Def with type input = string * string * string * bool
+
 module Make_dir : Ochat_function.Def with type input = string
+
+(** {1 Meta-prompting helpers} *)
+
+module Meta_refine : Ochat_function.Def with type input = string * string
 
 (* ---------------------------------------------------------------------- *)
 (*  Markdown indexing & search                                              *)

@@ -13,11 +13,12 @@ the guiding principle is *“only what is needed right now”*.
 ## Table of contents
 
 1. [Filesystem helpers](#filesystem-helpers)  
-2. [Logging](#logging)  
-3. [HTTP helpers – `Io.Net`](#http-helpers--ionet)  
-4. [Domain-aware worker pools – `Io.Task_pool`](#domainaware-worker-pools--iotask_pool)  
-5. [Example echo server / client](#example-echo-server--client)  
-6. [Base-64 data-URIs](#base64-datauris)
+2. [General utilities](#general-utilities)  
+3. [Logging](#logging)  
+4. [HTTP helpers – `Io.Net`](#http-helpers--ionet)  
+5. [Domain-aware worker pools – `Io.Task_pool`](#domainaware-worker-pools--iotask_pool)  
+6. [Example echo server / client](#example-echo-server--client)  
+7. [Base-64 data-URIs](#base64-datauris)
 
 
 ---
@@ -50,6 +51,40 @@ Eio_main.run @@ fun env ->
   let back = Io.load_doc ~dir:cwd "hello.txt" in
   assert (back = "Hello, Io!")
 ```
+
+---
+
+## General utilities
+
+### `to_res`
+
+```ocaml
+val to_res : (unit -> 'a) -> ('a, string) result
+```
+
+`to_res f` executes `f ()` and converts its outcome to a
+`Result.t`:
+
+* returns `Ok v` on success where `v` is the value produced by
+  the function;
+* returns `Error msg` when `f` raises, with `msg` containing a
+  human-readable description obtained through `Eio.Exn.pp`.
+
+The helper is particularly handy at process or fibre boundaries where
+you want to surface failures without using exceptions.
+
+### `ensure_chatmd_dir`
+
+```ocaml
+val ensure_chatmd_dir : cwd:'d Eio.Path.t -> 'd Eio.Path.t
+```
+
+Ensures the hidden directory `.chatmd` exists under `cwd` (it is
+created with mode `0o700` if missing) and returns an `Eio.Path.t`
+capability to it.  Several high-level modules rely on this helper to
+keep their scratch files out of the way.
+
+---
 
 
 ## Logging

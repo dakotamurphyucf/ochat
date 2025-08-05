@@ -9,6 +9,8 @@ type t =
   ; msg_buffers : (string, Types.msg_buffer) Base.Hashtbl.t
   ; function_name_by_id : (string, string) Base.Hashtbl.t
   ; reasoning_idx_by_id : (string, int ref) Base.Hashtbl.t
+  ; mutable tasks : Session.Task.t list
+  ; kv_store : (string, string) Base.Hashtbl.t
   ; mutable fetch_sw : Eio.Switch.t option
   ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int
@@ -42,6 +44,8 @@ let create
       ~msg_buffers
       ~function_name_by_id
       ~reasoning_idx_by_id
+      ~tasks
+      ~kv_store
       ~fetch_sw
       ~scroll_box
       ~cursor_pos
@@ -61,6 +65,8 @@ let create
   ; msg_buffers
   ; function_name_by_id
   ; reasoning_idx_by_id
+  ; tasks
+  ; kv_store
   ; fetch_sw
   ; scroll_box
   ; cursor_pos
@@ -84,6 +90,8 @@ let clear_selection t = t.selection_anchor <- None
 let set_selection_anchor t idx = t.selection_anchor <- Some idx
 let selection_active t = Option.is_some t.selection_anchor
 let messages t = t.messages
+let tasks t = t.tasks
+let kv_store t = t.kv_store
 let auto_follow t = t.auto_follow
 let cmdline t = t.cmdline
 let cmdline_cursor t = t.cmdline_cursor
