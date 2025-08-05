@@ -1,117 +1,5 @@
 # Ochat – OCaml toolkit for building custom AI Agents, scripted LLM pipelines & vector search
 
-### 📑 Persistent sessions – pause, resume & branch your chats
-
-`chat_tui` (installed as `chat-tui` when you `opam install ochat`) now **persists the full conversation state automatically** under
-`$HOME/.ochat/sessions/<id>` so you can close the terminal, pull the latest
-commit and pick up the thread days later – tool cache and all.
-
-Key facts at a glance:
-
-* A *session* captures:  
-  • the prompt that seeded the run (a copy is stored as `prompt.chatmd`)  
-  • the complete message history (assistant, tool calls, reasoning deltas…)  
-  • the per-session tool cache (`.chatmd/cache.bin`)  
-  • misc metadata (task list, virtual-FS root, user-defined key/value pairs)
-
-* Snapshots live in a single binary file `snapshot.bin` alongside the prompt
-  copy – easy to back-up, copy or sync.
-
-* When you open a prompt without explicit flags `chat_tui` hashes the prompt
-  path and resumes the matching snapshot if present – **zero-config resume**.
-
-CLI flags (all mutually-exclusive where it makes sense):
-
-| Flag | Action |
-|------|--------|
-| `--list-sessions` | enumerate `(id\t<prompt_file>)` of every stored snapshot |
-| `--session <ID>` | resume the given session (fails if it doesn’t exist) |
-| `--new-session`  | ignore any existing snapshot for that prompt and start fresh |
-| `--session-info <ID>` | print metadata (history length, timestamps, prompt path) |
-| `--reset-session <ID>` | archive the current snapshot (timestamped) and restart; combine with `--keep-history` or change `--prompt-file` |
-| `--rebuild-from-prompt <ID>` | delete history & cache, rebuild snapshot from the stored prompt copy – perfect after editing `prompt.chatmd` manually |
-| `--export-session <ID> --out FILE` | convert a snapshot plus attachments to a standalone `.chatmd` document |
-
-Interactive workflow examples:
-
-```console
-# 1️⃣  Enumeration
-$ chat_tui --list-sessions
-6f9ab3d5  prompts/interactive.md
-a821c9f0  prompts/refactor.chatmd
-
-# 2️⃣  Resume last week’s debugging chat
-$ chat_tui --session 6f9ab3d5
-
-# 3️⃣  Branch off a clean slate (keeps the old snapshot untouched)
-$ chat_tui --session 6f9ab3d5 --new-session
-
-# 4️⃣  Export a finished session to share with teammates
-$ chat_tui --export-session a821c9f0 --out docs/refactor_walkthrough.chatmd
-
-# 5️⃣  Reset but keep the conversation history and switch prompt
-$ chat_tui --reset-session a821c9f0 --keep-history --prompt-file prompts/new_spec.md
-```
-
-`--auto-persist` saves on exit without confirmation; `--no-persist` drops
-changes – useful in CI or when you want a quick throw-away run.
-
-Under the hood **Session_store** migrates old snapshots transparently,
-maintains advisory locks to prevent concurrent writes, and provides helpers
-surfaced by the flags above.  Snapshot writes happen inside an Eio fiber so
-the UI never blocks.
-
-➡️  See `lib/session_store.mli` for the authoritative API contract.
-
-### 🔁 Recursive meta-prompting – automate **prompt refinement**
-
-Ochat now ships a **first-class prompt-improvement loop** powered by
-_recursive meta-prompting_ and exposed via the `mp_refine_run` helper.  Give it
-
-1. a **task** (what the prompt should accomplish) and
-2. an optional **draft prompt**,
-
-and it will iterate:
-
-• generate *k* candidate prompts with an **O-series model** (e.g., `o3`),  
-• score them via an OpenAI reward-model,  
-• select the best using a Thompson bandit, and  
-• stop when the score plateaus or the iteration budget is exhausted.
-
-The refined prompt is printed to *stdout* or appended to a file – perfect for
-CI pipelines where prompts live under version control.
-
-CLI flags at a glance:
-
-| Flag | Purpose |
-|------|---------|
-| `-task-file FILE` *(required)* | Markdown file describing the task |
-| `-input-file FILE` | Existing prompt to refine (omit to start from scratch) |
-| `-output-file FILE` | Append the result instead of printing to *stdout* |
-| `-action generate\|update` | Create a new prompt or mutate an existing one |
-| `-prompt-type general\|tool` | Assistant prompt vs tool description |
-
-Quick examples:
-
-```console
-# 1️⃣  Draft a brand-new assistant prompt
-$ mp_refine_run -task-file tasks/summarise.md
-
-# 2️⃣  Improve an existing tool schema and persist the update
-$ mp_refine_run \
-    -task-file tasks/translate_task.md \
-    -input-file  prompts/translate_draft.md \
-    -output-file prompts/translate_refined.md \
-    -action      update \
-    -prompt-type tool
-```
-
-All heavy-lifting lives under `lib/meta_prompting` – functors, evaluators,
-bandit logic and convergence checks.  The CLI is a thin wrapper around
-`Mp_flow.first_flow`/`Mp_flow.tool_flow`; have a look at
-`bin/mp_refine_run.ml` or the annotated API docs in
-`lib/meta_prompting/mp_flow.mli` for the full story.
-
 
 *Everything you need to prototype, run and embed modern LLM workflows without leaving the OCaml ecosystem.*
 
@@ -1300,6 +1188,118 @@ Programmatic embedding:
 Io.run_main @@ fun env ->
   Chat_tui.App.run_chat ~env ~prompt_file:"prompts/interactive.md" ()
 ```
+
+### 📑 Persistent sessions – pause, resume & branch your chats
+
+`chat_tui` (installed as `chat-tui` when you `opam install ochat`) now **persists the full conversation state automatically** under
+`$HOME/.ochat/sessions/<id>` so you can close the terminal, pull the latest
+commit and pick up the thread days later – tool cache and all.
+
+Key facts at a glance:
+
+* A *session* captures:  
+  • the prompt that seeded the run (a copy is stored as `prompt.chatmd`)  
+  • the complete message history (assistant, tool calls, reasoning deltas…)  
+  • the per-session tool cache (`.chatmd/cache.bin`)  
+  • misc metadata (task list, virtual-FS root, user-defined key/value pairs)
+
+* Snapshots live in a single binary file `snapshot.bin` alongside the prompt
+  copy – easy to back-up, copy or sync.
+
+* When you open a prompt without explicit flags `chat_tui` hashes the prompt
+  path and resumes the matching snapshot if present – **zero-config resume**.
+
+CLI flags (all mutually-exclusive where it makes sense):
+
+| Flag | Action |
+|------|--------|
+| `--list-sessions` | enumerate `(id\t<prompt_file>)` of every stored snapshot |
+| `--session <ID>` | resume the given session (fails if it doesn’t exist) |
+| `--new-session`  | ignore any existing snapshot for that prompt and start fresh |
+| `--session-info <ID>` | print metadata (history length, timestamps, prompt path) |
+| `--reset-session <ID>` | archive the current snapshot (timestamped) and restart; combine with `--keep-history` or change `--prompt-file` |
+| `--rebuild-from-prompt <ID>` | delete history & cache, rebuild snapshot from the stored prompt copy – perfect after editing `prompt.chatmd` manually |
+| `--export-session <ID> --out FILE` | convert a snapshot plus attachments to a standalone `.chatmd` document |
+
+Interactive workflow examples:
+
+```console
+# 1️⃣  Enumeration
+$ chat_tui --list-sessions
+6f9ab3d5  prompts/interactive.md
+a821c9f0  prompts/refactor.chatmd
+
+# 2️⃣  Resume last week’s debugging chat
+$ chat_tui --session 6f9ab3d5
+
+# 3️⃣  Branch off a clean slate (keeps the old snapshot untouched)
+$ chat_tui --session 6f9ab3d5 --new-session
+
+# 4️⃣  Export a finished session to share with teammates
+$ chat_tui --export-session a821c9f0 --out docs/refactor_walkthrough.chatmd
+
+# 5️⃣  Reset but keep the conversation history and switch prompt
+$ chat_tui --reset-session a821c9f0 --keep-history --prompt-file prompts/new_spec.md
+```
+
+`--auto-persist` saves on exit without confirmation; `--no-persist` drops
+changes – useful in CI or when you want a quick throw-away run.
+
+Under the hood **Session_store** migrates old snapshots transparently,
+maintains advisory locks to prevent concurrent writes, and provides helpers
+surfaced by the flags above.  Snapshot writes happen inside an Eio fiber so
+the UI never blocks.
+
+➡️  See `lib/session_store.mli` for the authoritative API contract.
+
+### 🔁 Recursive meta-prompting – automate **prompt refinement**
+
+Ochat now ships a **first-class prompt-improvement loop** powered by
+_recursive meta-prompting_ and exposed via the `mp_refine_run` helper.  Give it
+
+1. a **task** (what the prompt should accomplish) and
+2. an optional **draft prompt**,
+
+and it will iterate:
+
+• generate *k* candidate prompts with an **O-series model** (e.g., `o3`),  
+• score them via an OpenAI reward-model,  
+• select the best using a Thompson bandit, and  
+• stop when the score plateaus or the iteration budget is exhausted.
+
+The refined prompt is printed to *stdout* or appended to a file – perfect for
+CI pipelines where prompts live under version control.
+
+CLI flags at a glance:
+
+| Flag | Purpose |
+|------|---------|
+| `-task-file FILE` *(required)* | Markdown file describing the task |
+| `-input-file FILE` | Existing prompt to refine (omit to start from scratch) |
+| `-output-file FILE` | Append the result instead of printing to *stdout* |
+| `-action generate\|update` | Create a new prompt or mutate an existing one |
+| `-prompt-type general\|tool` | Assistant prompt vs tool description |
+
+Quick examples:
+
+```console
+# 1️⃣  Draft a brand-new assistant prompt
+$ mp_refine_run -task-file tasks/summarise.md
+
+# 2️⃣  Improve an existing tool schema and persist the update
+$ mp_refine_run \
+    -task-file tasks/translate_task.md \
+    -input-file  prompts/translate_draft.md \
+    -output-file prompts/translate_refined.md \
+    -action      update \
+    -prompt-type tool
+```
+
+All heavy-lifting lives under `lib/meta_prompting` – functors, evaluators,
+bandit logic and convergence checks.  The CLI is a thin wrapper around
+`Mp_flow.first_flow`/`Mp_flow.tool_flow`; have a look at
+`bin/mp_refine_run.ml` or the annotated API docs in
+`lib/meta_prompting/mp_flow.mli` for the full story.
 
 ---
 
