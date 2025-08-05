@@ -408,13 +408,13 @@ Below is a condensed checklist distilled from months of day-to-day usage.  All t
 10. **Reusable workflows = agents.** Encapsulate a sequence of steps into `my_flow.chatmd`, and mount it through `<agent src="my_flow.chatmd"/>` for LEGO-style composition.
 12. **Mind the token budget.** O-series models (e.g., `o3`) can handle ~1 M tokens, but both latency and price grow linearly.  Check with `ochat tokenize -file foo.chatmd` before you hit *Send*.
 
-### reasoning vs GPT quick‐reference
+### reasoning vs GPT quick‐reference (not exhaustive)
 
 | Situation | Recommended model | Prompting style |
 |-----------|------------------|-----------------|
-| Complex, multi-step planning | **o3-mini / o3** | Concise goal + constraints, *no* step-by-step request; use `reasoning_effort` when you need depth. |
-| Latency-sensitive UI chats | **O-series / GPT-4.1** | Explicit, detailed instructions; CoT or *think step-by-step* when logic matters. |
-| Giant context (≥ 200k tokens) | **O-series / GPT-4.1** | Repeat key constraints at *top & bottom* of the prompt. |
+| Complex, multi-step planning | **o4-mini / o3** | Concise goal + constraints, *no* step-by-step request; use `reasoning_effort` when you need depth. |
+| Latency-sensitive UI chats | **gpt-4.1-nano** | Explicit, detailed instructions; CoT or *think step-by-step* when logic matters. |
+| Giant context (≥ 200k tokens) | **gpt-4.1** | Repeat key constraints at *top & bottom* of the prompt. |
 
 Additional reminders for reasoning models:
 
