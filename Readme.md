@@ -28,8 +28,9 @@
 14. [Project layout](#project-layout)
 15. [License](#license)
 
-
----
+<div>
+ <img src="assets/demo.gif" alt="chat_tui demo" height="700" width="900"/>
+</div>
 
 ## Why Ochat?
 
