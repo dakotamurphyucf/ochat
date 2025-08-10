@@ -64,6 +64,7 @@ let first_flow
       ~(task : string)
       ~prompt
       ?(action = Context.Generate)
+      ?(use_meta_factory_online = true)
       ()
   =
   Log.emit `Info "mp_flow: start first_flow";
@@ -83,14 +84,19 @@ let first_flow
     ]
   in
   Log.emit `Debug "mp_flow: building refine parameters";
+  let strategies =
+    if use_meta_factory_online
+    then [ RMP.meta_factory_online_strategy ]
+    else [ RMP.default_llm_strategy ]
+  in
   let params : RMP.refine_params =
     RMP.make_params
       ~judges
       ~bandit_enabled:true
-      ~max_iters:5
-      ~proposer_model:Openai.Responses.Request.O3
-      ~executor_model:Openai.Responses.Request.O3
-      ~strategies:[ RMP.default_llm_strategy ]
+      ~max_iters:3
+      ~proposer_model:Openai.Responses.Request.Gpt5
+      ~executor_model:Openai.Responses.Request.Gpt5
+      ~strategies
       ~score_epsilon:1e-8
       ~bayes_alpha:0.05
       ()
@@ -143,6 +149,7 @@ let tool_flow
       ~(task : string)
       ~prompt
       ?(action = Context.Generate)
+      ?(use_meta_factory_online = true)
       ()
   =
   Log.emit `Info "mp_flow: start tool_flow";
@@ -164,14 +171,19 @@ let tool_flow
     ]
   in
   Log.emit `Debug "mp_flow: building refine parameters";
+  let strategies =
+    if use_meta_factory_online
+    then [ RMP.meta_factory_online_strategy ]
+    else [ RMP.default_llm_strategy ]
+  in
   let params : RMP.refine_params =
     RMP.make_params
       ~judges
       ~bandit_enabled:true
-      ~max_iters:5
-      ~proposer_model:Openai.Responses.Request.O3
-      ~executor_model:Openai.Responses.Request.O3
-      ~strategies:[ RMP.default_llm_strategy ]
+      ~max_iters:3
+      ~proposer_model:Openai.Responses.Request.Gpt5
+      ~executor_model:Openai.Responses.Request.Gpt5
+      ~strategies
       ~score_epsilon:1e-8
       ~bayes_alpha:0.05
       ()

@@ -95,6 +95,20 @@ let persist_snapshot env session model =
     Session_store.save ~env updated_session
 ;;
 
+(* Construct a new history item representing the user's input and append
+       it to both the canonical history list and the list of renderable
+       messages.  For now we keep the simple implementation that mirrors the
+       previous imperative code.  A future refactor might introduce a helper
+       that converts user text into a history item in a single place. *)
+let get_user_message_item text =
+  let open Openai.Responses in
+  Item.Input_message
+    { Input_message.role = Input_message.User
+    ; content = [ Input_message.Text { text; _type = "input_text" } ]
+    ; _type = "message"
+    }
+;;
+
 (** [apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term]
     performs {b synchronous} updates that take effect immediately after the
     user submits the draft but {i before} the OpenAI request is sent.  In
@@ -161,7 +175,8 @@ let apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term =
     (* Decide between plain-text and raw-XML submission based on draft mode. *)
     match Model.draft_mode model with
     | Model.Plain ->
-      ignore (Model.apply_patch model (Add_user_message { text = user_msg }))
+      ignore (Model.apply_patch model (Add_user_message { text = user_msg }));
+      ignore @@ Model.add_history_item model (get_user_message_item user_msg)
     | Model.Raw_xml ->
       let module CM = Prompt.Chat_markdown in
       let xml =
@@ -171,8 +186,12 @@ let apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term =
       in
       let elements =
         try CM.parse_chat_inputs ~dir xml with
-        | _ -> []
+        | exn ->
+          Log.emit `Error (Printf.sprintf "XML parse error: %s" (Exn.to_string exn));
+          []
       in
+      Log.emit `Debug (Printf.sprintf "Parsed %d XML elements" (List.length elements));
+      (* Extract the original user message from the parsed elements. *)
       let user_msg =
         List.find_map_exn elements ~f:(function
           | CM.User m ->
@@ -203,6 +222,7 @@ let apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term =
       in
       let txt = Option.value user_msg_txt ~default:(Util.sanitize xml) in
       ignore (Model.apply_patch model (Add_user_message { text = txt }));
+      ignore (Model.add_history_item model user_msg);
       Model.set_draft_mode model Model.Plain);
   Model.set_auto_follow model true;
   let _, h = Notty_eio.Term.size term in

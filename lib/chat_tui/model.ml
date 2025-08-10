@@ -219,24 +219,6 @@ let apply_patch (model : t) (p : Types.patch) : t =
      | None -> Hashtbl.set model.reasoning_idx_by_id ~key:id ~data:(ref idx));
     model
   | Types.Add_user_message { text } ->
-    (* Construct a new history item representing the user's input and append
-       it to both the canonical history list and the list of renderable
-       messages.  For now we keep the simple implementation that mirrors the
-       previous imperative code.  A future refactor might introduce a helper
-       that converts user text into a history item in a single place. *)
-    let content_item =
-      Openai.Responses.Input_message.Text { text; _type = "input_text" }
-    in
-    let user_item : Openai.Responses.Item.t =
-      let open Openai.Responses in
-      Item.Input_message
-        { Input_message.role = Input_message.User
-        ; content = [ content_item ]
-        ; _type = "message"
-        }
-    in
-    (* Update underlying refs *)
-    model.history_items <- model.history_items @ [ user_item ];
     model.messages <- model.messages @ [ "user", text ];
     model
   | Types.Add_placeholder_message { role; text } ->

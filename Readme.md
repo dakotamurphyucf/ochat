@@ -1280,6 +1280,9 @@ CLI flags at a glance:
 | `-output-file FILE` | Append the result instead of printing to *stdout* |
 | `-action generate\|update` | Create a new prompt or mutate an existing one |
 | `-prompt-type general\|tool` | Assistant prompt vs tool description |
+| `-meta-factory BOOL` | Use the pure, offline Prompt Factory to create/iterate a prompt pack (non-destructive). Default: `false`. |
+| `-meta-factory-online BOOL` | Enable the online Prompt Factory strategy inside the refinement loop and for greenfield prompts. Default: `true`. |
+| `-classic-rmp BOOL` | Force the classic recursive meta-prompting strategy (disables `-meta-factory-online`). Default: `false`. |
 
 Quick examples:
 
@@ -1294,6 +1297,12 @@ $ mp_refine_run \
     -output-file prompts/translate_refined.md \
     -action      update \
     -prompt-type tool
+
+# 3️⃣  Generate using the offline Prompt Factory (pure, no network)
+$ mp_refine_run -task-file tasks/summarise.md -meta-factory true
+
+# 4️⃣  Disable online factory and run the classic loop only
+$ mp_refine_run -task-file tasks/summarise.md -classic-rmp true
 ```
 
 All heavy-lifting lives under `lib/meta_prompting` – functors, evaluators,
@@ -1301,6 +1310,27 @@ bandit logic and convergence checks.  The CLI is a thin wrapper around
 `Mp_flow.first_flow`/`Mp_flow.tool_flow`; have a look at
 `bin/mp_refine_run.ml` or the annotated API docs in
 `lib/meta_prompting/mp_flow.mli` for the full story.
+
+#### New: Prompt Factory – offline and online
+
+The meta‑prompting subsystem now includes a Prompt Factory that can either:
+
+* run **offline** (pure, deterministic) via `Meta_prompting.Prompt_factory` to create or iterate self‑contained prompt packs, or
+* run **online** (LLM‑backed) via `Meta_prompting.Prompt_factory_online` to propose revised prompts and full packs using OpenAI’s Responses API.
+
+How it ties into the CLI
+
+* `-meta-factory` switches the run to the offline factory (no network) and returns a prompt pack or a minimal update pack.
+* With `-meta-factory` off, `-meta-factory-online` (default: true) augments the refinement loop with online proposals and is also used for greenfield generation when no `-input-file` is supplied.
+* `-classic-rmp` disables the online factory entirely and runs the original recursive loop.
+
+Programmatic note
+
+`Mp_flow.first_flow` and `Mp_flow.tool_flow` accept `?use_meta_factory_online:bool` to enable or disable the online strategy from code (default: enabled).
+
+Customization
+
+When using the online factory you can override the default templates by placing files under `meta-prompt/templates/` and guard‑rails under `meta-prompt/integration/`. The `meta-prompt/` folder is git‑ignored by default.
 
 ---
 

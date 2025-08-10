@@ -191,6 +191,37 @@ let ask_llm ~env ~user_content ~context ?model ?guidelines : string option =
            ^ Printf.sprintf "\n\n<additional-guidelines>\n%s\n</additional-guidelines>" g
          | _ -> system_prompt
        in
+       let system_text =
+         let guardrails_default = Templates.system_prompt_guardrails in
+         let guardrails =
+           let path =
+             Eio.Path.(
+               dir / "meta-prompt" / "integration" / "system_prompt_guardrails.txt")
+           in
+           try Eio.Path.load path with
+           | _ -> guardrails_default
+         in
+         let insert_after_marker text marker insertion =
+           match String.substr_index text ~pattern:marker with
+           | None -> None
+           | Some idx ->
+             let before = String.prefix text (idx + String.length marker) in
+             let after = String.drop_prefix text (idx + String.length marker) in
+             Some (before ^ "\n" ^ insertion ^ "\n" ^ after)
+         in
+         match insert_after_marker system_text "Self-Check" guardrails with
+         | Some s ->
+           (match String.substr_index s ~pattern:"# Output Format" with
+            | Some _ -> s
+            | None -> s)
+         | None ->
+           (match String.substr_index system_text ~pattern:"# Output Format" with
+            | Some idx ->
+              let before = String.prefix system_text idx in
+              let after = String.drop_prefix system_text idx in
+              before ^ "\n" ^ guardrails ^ "\n" ^ after
+            | None -> system_text ^ "\n" ^ guardrails)
+       in
        let system_msg : Input_message.t =
          { role = Developer
          ; content = [ Text { text = system_text; _type = "input_text" } ]
@@ -310,7 +341,7 @@ let ask_llm ~env ~user_content ~context ?model ?guidelines : string option =
            ]
        in
        let max_output_tokens = 1000000 in
-       let chosen_model = Option.value model ~default:Request.O3 in
+       let chosen_model = Option.value model ~default:Request.Gpt5 in
        let ({ Response.output; _ } : Response.t) =
          post_response
            Default
@@ -401,6 +432,41 @@ let heuristic_strategy : transform_strategy =
   ; apply =
       (fun p ?env:_ ~iteration ~context:_ ->
         P.add_metadata p ~key:"heuristic_iter" ~value:(Int.to_string iteration))
+  }
+;;
+
+let extract_goal_from_header (p : P.t) : string =
+  match p.header with
+  | None -> ""
+  | Some h ->
+    let open String in
+    let tag = "<user-task>" in
+    let close = "</user-task>" in
+    (match String.substr_index h ~pattern:tag, String.substr_index h ~pattern:close with
+     | Some i1, Some i2 when Int.( > ) i2 i1 ->
+       let start = i1 + length tag in
+       String.(sub h ~pos:start ~len:(i2 - start) |> strip)
+     | _ -> h |> strip)
+;;
+
+let meta_factory_online_strategy : transform_strategy =
+  { name = "meta_factory_online"
+  ; apply =
+      (fun p ?env ~iteration ~context ->
+        match env with
+        | None -> P.add_metadata p ~key:"iteration" ~value:(Int.to_string iteration)
+        | Some e ->
+          let goal = extract_goal_from_header p in
+          (match
+             Prompt_factory_online.iterate_revised_prompt
+               ~env:e
+               ~goal
+               ~current_prompt:p.body
+               ~proposer_model:context.proposer_model
+           with
+           | Some revised when not (String.is_empty (String.strip revised)) ->
+             { p with body = revised }
+           | _ -> P.add_metadata p ~key:"iteration" ~value:(Int.to_string iteration)))
   }
 ;;
 

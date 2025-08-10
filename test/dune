@@ -108,6 +108,18 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Meta-prompt factory structure tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name meta_prompt_factory_test)
+ (modules meta_prompt_factory_test prompt_factory_online_test)
+ (libraries core expect_test_helpers_core ochat.meta_prompting)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; Relative-path resolution tests for Chat_response.Fetch
 ;; ---------------------------------------------------------------------------
 

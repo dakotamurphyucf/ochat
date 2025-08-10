@@ -6,7 +6,7 @@ module S = Summarizer
 (*  Helpers                                                          *)
 (*------------------------------------------------------------------*)
 
-let render_item (item : Openai.Responses.Item.t) : string option =
+let _render_item (item : Openai.Responses.Item.t) : string option =
   let open Openai.Responses in
   match item with
   | Item.Input_message { content; role; _ } ->
@@ -53,22 +53,22 @@ let compact_history ~env ~(history : Openai.Responses.Item.t list)
     (* Keep only messages deemed relevant.  We do not attempt an exact token
        budget at this stage – the upcoming property tests approximate one
        token per character. *)
-    let convo =
+    (* let convo =
       history
       |> List.filter_map ~f:(fun item ->
         match render_item item with
         | None -> None
         | Some txt -> Some txt)
       |> String.concat ~sep:"\n"
-    in
-    let prompt msg = Printf.sprintf "message:\n%s\nconversation:\n%s" msg convo in
+    in *)
+    (* let prompt msg = Printf.sprintf "message:\n%s\nconversation:\n%s" msg convo in *)
     (* If the system message is empty, we do not summarise. *)
     let relevant_items =
       history
-      |> Eio.Fiber.List.filter ~max_fibers:10 (fun item ->
+      (* |> Eio.Fiber.List.filter ~max_fibers:10 (fun item ->
         match render_item item with
         | None -> false
-        | Some txt -> R.is_relevant ?env cfg ~prompt:(prompt txt))
+        | Some txt -> R.is_relevant ?env cfg ~prompt:(prompt txt)) *)
     in
     (* Generate summary – this is an expensive call but runs once per
        compaction request. *)

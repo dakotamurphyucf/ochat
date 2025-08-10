@@ -17,6 +17,58 @@
 
     This makes it easy to plug in a heuristic string manipulation, an LLM-based
     re-writer, or any other strategy without changing the control flow.
+
+    {1 Usage example}
+
+    Refining a plain string prompt with the defaults:
+
+    {[
+      open Meta_prompting
+
+      let improved : string =
+        let prompt =
+          Prompt_intf.make
+            ~body:"Explain the HTTP protocol in one paragraph."
+            ()
+        in
+        Recursive_mp.refine prompt |> Prompt_intf.to_string
+    ]}
+
+    Changing a single parameter – here the maximum number of iterations – is
+    done inline via optional arguments:
+
+    {[
+      let improved = Recursive_mp.refine ~max_iters:5 prompt
+    ]}
+
+    For more advanced control compose a full [refine_params] value:
+
+    {[
+      let params =
+        Recursive_mp.make_params
+          ~judges:[ Evaluator.Judge Recursive_mp.Evaluator.rubric_critic_judge ]
+          ~bandit_enabled:true
+          ~strategies:
+            [ Recursive_mp.default_llm_strategy
+            ; Recursive_mp.meta_factory_online_strategy
+            ]
+          ()
+      in
+      let improved = Recursive_mp.refine ~params prompt
+    ]}
+
+    {2 Environment variables}
+
+    The implementation honours several environment variables that influence the
+    default behaviour.  All of them are optional.
+
+    • [OPENAI_API_KEY] – enables LLM-based transformation and evaluation.\\
+    • [META_PROPOSER_MODEL] – default model for the proposer agent.\\
+    • [META_PROMPT_BUDGET] – soft limit for the number of output tokens.\\
+    • [META_PROMPT_GUIDELINES] – toggle injection of extra guidelines.\\
+    • [META_PROMPT_CTX_K] – number of vector-DB context snippets to retrieve.
+
+    Refer to the README for a complete list.
 *)
 
 (** re-exported to allow using [Int.t] etc. in record fields *)
@@ -91,10 +143,20 @@ type refine_params =
  *  Builders and defaults                                              *
  ***********************************************************************)
 
-(** A transformation strategy that delegates to an LLM via the OpenAI
-    {e /responses} API.  The model can be overridden with the
-    [~proposer_model] parameter of {!make_params} or {!refine}. *)
+(** [default_llm_strategy] delegates the heavy lifting to an LLM via the
+    OpenAI {/responses} endpoint.  The actual model is resolved from
+    {!field:refine_params.proposer_model} (or the [`META_PROPOSER_MODEL`]
+    environment variable), allowing callers to switch models without touching
+    the strategy value. *)
 val default_llm_strategy : transform_strategy
+
+(** [meta_factory_online_strategy] submits the current prompt to the online
+    *meta-prompt factory* template, extracts the `<Revised_Prompt>` block from
+    the LLM reply and uses it as the next candidate.  When the LLM cannot be
+    reached (for instance because `OPENAI_API_KEY` is unset) the function
+    degrades gracefully to a metadata-only no-op, thereby preserving the
+    monotonicity guarantee of the refinement loop. *)
+val meta_factory_online_strategy : transform_strategy
 
 (** [default_params ()] returns a parameter set that performs up to three
     iterations using {!default_llm_strategy} and the default

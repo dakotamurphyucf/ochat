@@ -240,6 +240,7 @@ module Request : sig
     | O3_mini
     | Gpt4
     | O4_mini
+    | Gpt5
     | Gpt_4_1_mini
     | Gpt4o
     | Gpt4_1

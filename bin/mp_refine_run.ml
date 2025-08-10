@@ -115,6 +115,28 @@ let command : Command.t =
          "-prompt-type"
          (optional_with_default "general" string)
          ~doc:"TYPE Type of prompt (default: general)"
+     and meta_factory =
+       flag
+         "-meta-factory"
+         (optional_with_default false bool)
+         ~doc:
+           "BOOL When true, generate/iterate using the meta-prompt factory \
+            (non-destructive)"
+     and meta_factory_online =
+       flag
+         "-meta-factory-online"
+         (optional_with_default true bool)
+         ~doc:
+           "BOOL When true, use the online meta-prompt factory strategy inside the \
+            recursive refinement loop (LLM-backed). Precedence: -meta-factory (offline) \
+            > -meta-factory-online > default RMP"
+     and classic_rmp =
+       flag
+         "-classic-rmp"
+         (optional_with_default false bool)
+         ~doc:
+           "BOOL When true, force the classic recursive meta-prompting strategy \
+            (disables meta-factory-online)."
      in
      fun () ->
        Log.emit `Info "mp_refine_run: starting";
@@ -146,11 +168,80 @@ let command : Command.t =
            Log.emit `Error (Printf.sprintf "Unknown prompt type: %s" prompt_type);
            exit 1
        in
+       let online_enabled = (not classic_rmp) && meta_factory_online in
        let result =
-         match prompt_type with
-         | Context.General ->
-           Mp_flow.first_flow ~env ~task:task_contents ~prompt ~action ()
-         | Context.Tool -> Mp_flow.tool_flow ~env ~task:task_contents ~prompt ~action ()
+         if meta_factory
+         then (
+           match input_file with
+           | None ->
+             let p : Prompt_factory.create_params =
+               { agent_name = "Meta-Prompt Agent"
+               ; goal = task_contents
+               ; success_criteria = [ "Adheres to safety and output constraints" ]
+               ; audience = Some "technical"
+               ; tone = Some "neutral"
+               ; domain =
+                   (match prompt_type with
+                    | Context.General -> Some "general"
+                    | Context.Tool -> Some "coding")
+               ; use_responses_api = true
+               ; markdown_allowed = true
+               ; eagerness = Prompt_factory.Medium
+               ; reasoning_effort = `Medium
+               ; verbosity_target = `Low
+               }
+             in
+             Prompt_factory.create_pack p ~prompt
+           | Some _ ->
+             let ip : Prompt_factory.iterate_params =
+               { goal = task_contents
+               ; desired_behaviors = []
+               ; undesired_behaviors = []
+               ; safety_boundaries = []
+               ; stop_conditions = []
+               ; reasoning_effort = `Low
+               ; verbosity_target = `Low
+               ; use_responses_api = true
+               }
+             in
+             Prompt_factory.iterate_pack ip ~current_prompt:prompt)
+         else (
+           match input_file with
+           | None when online_enabled ->
+             (match
+                Prompt_factory_online.create_pack_online
+                  ~env
+                  ~agent_name:"Meta-Prompt Agent"
+                  ~goal:task_contents
+                  ~proposer_model:(Some Openai.Responses.Request.O3)
+              with
+              | Some txt -> txt
+              | None ->
+                Mp_flow.first_flow
+                  ~env
+                  ~task:task_contents
+                  ~prompt
+                  ~action
+                  ~use_meta_factory_online:false
+                  ())
+           | _ ->
+             (match prompt_type with
+              | Context.General ->
+                Mp_flow.first_flow
+                  ~env
+                  ~task:task_contents
+                  ~prompt
+                  ~action
+                  ~use_meta_factory_online:online_enabled
+                  ()
+              | Context.Tool ->
+                Mp_flow.tool_flow
+                  ~env
+                  ~task:task_contents
+                  ~prompt
+                  ~action
+                  ~use_meta_factory_online:online_enabled
+                  ()))
        in
        (match output_file_opt with
         | Some path ->

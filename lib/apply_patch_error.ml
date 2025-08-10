@@ -29,7 +29,21 @@ let tips =
 Tips:
 - remember that Add file still requires a + at the start of each new line
 - there needs to be a space after the + or - at the start of each line
-- If you are trying to use the @@ syntax for unique search context remember that you must put the context line on the same line as the @@ symbol, like this:
+- If you are trying to use the @@ syntax for unique search context remember that you must put the context line on the same line as
+the @@ with a space after the @@
+correct syntax:
+@@ module My_module
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+incorrect syntax:
+@@
+module My_module
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
 |}
 ;;
 

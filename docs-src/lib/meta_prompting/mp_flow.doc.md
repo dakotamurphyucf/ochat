@@ -1,6 +1,6 @@
 # `Mp_flow` – One-shot recursive meta-prompting helper
 
-`Mp_flow` wraps the more general `Recursive_mp` API and exposes two
+`Mp_flow` wraps the lower-level `Recursive_mp` API and exposes two
 turn-key flows that cover the most common use-cases:
 
 * **`first_flow`** — refines *general prompts* such as a system
@@ -12,8 +12,9 @@ Both helpers follow the same four-step recipe:
 
 1. **Seed prompt** – create a `Prompt_intf.t` from the caller-supplied
    `task` and `prompt` strings.
-2. **Evaluator** – build a small `Evaluator.t` that uses a reward-model
-   judge wrapped in *self-consistency* (`k = 6`, arithmetic mean).
+2. **Evaluator** – build a small [`Evaluator.t`](./evaluator.doc.md)
+   that uses a reward-model judge wrapped in *self-consistency*
+   (`k = 6`, arithmetic mean).
 3. **Parameterisation** – construct `Recursive_mp.refine_params` with
    a five-iteration budget and Thompson-sampling bandits enabled.
 4. **Refinement loop** – call `Recursive_mp.refine` until the expected
@@ -45,6 +46,7 @@ val first_flow :
   task:string ->
   prompt:string ->
   ?action:Context.action ->
+  ?use_meta_factory_online:bool ->
   unit -> string
 
 val tool_flow :
@@ -52,6 +54,7 @@ val tool_flow :
   task:string ->
   prompt:string ->
   ?action:Context.action ->
+  ?use_meta_factory_online:bool ->
   unit -> string
 ```
 
@@ -65,8 +68,11 @@ val tool_flow :
   specification.
 * **`prompt`** – The initial draft prompt (or tool description) you would like
   to improve.
-* **`action`** – `Context.Generate` (default) or `Context.Update`.  Use the
+* **`action`** – `Context.Generate` (default) or `Context.Update`. Use the
   latter when you supply an existing prompt that should be edited in place.
+* **`use_meta_factory_online`** – When `true`, enable the *online*
+  meta-prompt factory strategy which produces multiple candidate edits per
+  iteration before bandit selection. Defaults to `true`.
 
 ### Return value
 

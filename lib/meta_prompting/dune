@@ -12,7 +12,10 @@
   context
   prompting_guides
   mp_flow
-  prompts)
+  prompts
+  templates
+  prompt_factory
+  prompt_factory_online)
  (wrapped true)
  (libraries core re ochat.openai vector_db bm25 owl ochat.template log)
  (preprocess

@@ -120,11 +120,11 @@ val wrap_self_consistency_judge
     aggregation function.  Use {!val:create} to obtain a fresh value. *)
 type t
 
-(** [create ?judges ?pw_judges ?aggregate ()] constructs a new evaluator.
-    • [judges] – list of single-answer judges (defaults to a stub that
-      always returns 0.5).
-    • [aggregate] – function used to combine the individual scores.
-      Defaults to {!Aggregator.mean}. *)
+(** [create ?judges ?aggregate ()] constructs a new evaluator.
+    • [judges]   – collection of heterogenous judges (defaults to a stub that
+      always returns the neutral score 0.5).
+    • [aggregate] – function used to combine the individual scores
+      into a single scalar.  Defaults to {!Aggregator.mean}. *)
 val create : ?judges:judge list -> ?aggregate:Aggregator.t -> unit -> t
 
 (** Singleton using the module default parameters. *)

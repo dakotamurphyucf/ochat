@@ -345,6 +345,7 @@ module Request = struct
     | O3_mini [@name "o3-mini"]
     | Gpt4 [@name "gpt-4.5-preview"]
     | O4_mini [@name "o4-mini"]
+    | Gpt5 [@name "gpt-5"]
     | Gpt_4_1_mini [@name "gpt-4.1-nano"]
     | Gpt4o [@name "gpt-4o"]
     | Gpt4_1 [@name "gpt-4.1"]
@@ -360,6 +361,7 @@ module Request = struct
     | Gpt4_1 -> `String "gpt-4.1"
     | Gpt4 -> `String "gpt-4.5-preview"
     | Gpt4o -> `String "gpt-4o"
+    | Gpt5 -> `String "gpt-5"
     | Gpt3 -> `String "gpt-3.5-turbo"
     | Gpt3_16k -> `String "gpt-3.5-turbo-16k"
   ;;
@@ -374,6 +376,7 @@ module Request = struct
     | `String "gpt-4o" -> Gpt4o
     | `String "gpt-3.5-turbo" -> Gpt3
     | `String "gpt-3.5-turbo-16k" -> Gpt3_16k
+    | `String "gpt-5" -> Gpt5
     | _ -> failwith "Invalid model"
   ;;
 
@@ -386,6 +389,7 @@ module Request = struct
     | Gpt_4_1_mini -> "gpt-4.1-nano"
     | Gpt3 -> "gpt-3.5-turbo"
     | Gpt3_16k -> "gpt-3.5-turbo-16k"
+    | Gpt5 -> "gpt-5"
     | Gpt4 -> "gpt-4.5-preview"
   ;;
 
@@ -399,6 +403,7 @@ module Request = struct
     | "gpt-3.5-turbo-16k" -> Gpt3_16k
     | "gpt-4.5" -> Gpt4
     | "gpt-4o" -> Gpt4o
+    | "gpt-5" -> Gpt5
     | _ -> failwith "Invalid model"
   ;;
 
