@@ -230,7 +230,7 @@ module Paint = struct
             let inner = String.sub para ~pos:2 ~len:(len - 4) in
             let bold_attr =
               Highlight_theme.attr_of_scopes
-                Highlight_theme.default_dark
+                Highlight_theme.github_dark
                 ~scopes:[ "markup.bold" ]
             in
             [ bold_attr, inner ])
@@ -242,7 +242,7 @@ module Paint = struct
             let inner = String.sub para ~pos:2 ~len:(len - 4) in
             let bold_attr =
               Highlight_theme.attr_of_scopes
-                Highlight_theme.default_dark
+                Highlight_theme.github_dark
                 ~scopes:[ "markup.bold" ]
             in
             [ bold_attr, inner ])

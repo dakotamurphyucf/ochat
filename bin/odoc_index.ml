@@ -66,7 +66,7 @@ let main env =
              ; "ocamlgraph"
              ; "tls"
              ]
-         , [ "ochat"; "textmate-language" ] ))
+         , [ "ochat"; "textmate-language"; "irmin"; "irmin-git"; "irmin-watcher" ] ))
     ~env
     ~root:root_path
     ~output:out_path

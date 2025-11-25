@@ -44,17 +44,6 @@ type t
 (** [empty] is the theme with no rules. Always returns {!Notty.A.empty}. *)
 val empty : t
 
-(** [default_dark] is a built-in palette optimised for dark terminals.
-
-    - Uses the ANSI 16-colour names and extended 256-colour helpers from
-      {!Notty.A} (e.g. {!Notty.A.gray}, truecolor via {!Notty.A.rgb_888}, and {!Notty.A.lightwhite}).
-    - Aims for good contrast on dark backgrounds while keeping tokens
-      distinguishable. *)
-val default_dark : t
-
-(** [default_light] mirrors {!default_dark} but is tuned for light backgrounds. *)
-val default_light : t
-
 (** [github_dark] matches GitHub Dark Default token colours using truecolor
     (24-bit). Strings are light azure,
     keywords salmon, constants/support azure, functions and types purple,
