@@ -1,79 +1,60 @@
-(** Terminal renderer – converts immutable chat {!Model} data into Notty
-    images.
+(** Full-screen renderer for the terminal UI (history, status bar, input box).
 
-    The renderer is **pure**: every function in this module returns a value
-    that depends only on its arguments – there are no hidden side–effects.
-    State that belongs to the UI (scroll offsets, colour scheme, cursor
-    position …) lives in {!Model}; this module merely *reads* that state and
-    produces {!module:Notty} images.
+    The module assembles a complete Notty image of the chat interface from an
+    immutable snapshot of {!Chat_tui.Model.t}. The layout consists of:
+    - a virtualised, scrollable history viewport at the top,
+    - a one-line mode/status bar,
+    - a multi-line input box with cursor and optional selection.
 
-    Design decisions
-    {ul
-    {-  The colour palette is centralised here so that it is easy to tweak
-        the visual style in one place.}
-    {-  Word-wrapping is delegated to {!Util.wrap_line}.  This keeps
-        rendering free from terminal I/O – the logic can be unit-tested
-        without spawning an actual TTY.}}
+    Rendering is side-effect free with two exceptions that are part of the UI
+    contract:
+    - the model’s internal per-message render cache is maintained to avoid
+      re-highlighting and re-wrapping unchanged messages, and
+    - the scroll box inside the model is updated to implement auto-follow.
 
-    @since 0.1.0 *)
+    Text handling and highlighting
+    - Message text is sanitised via {!Chat_tui.Util.sanitize} to avoid control
+      characters that {!Notty.I.string} rejects (see Notty docs on control
+      characters). Newlines are preserved.
+    - Fenced code blocks (three backticks or three tildes) are detected via
+      {!Chat_tui.Markdown_fences.split} and rendered with
+      {!Chat_tui.Highlight_tm_engine}, falling back to plain text when the
+      language cannot be resolved.
 
-open Types
+    Cursor position
+    - The returned cursor coordinates are absolute screen coordinates suitable
+      for {!Notty_unix.Term.cursor} or {!Notty_eio.Term.cursor}.
 
-(** [attr_of_role role] returns the display attribute used to render chat
-    messages coming from [role].  Unknown roles map to {!Notty.A.empty}. *)
-
-val attr_of_role : role -> Notty.A.t
-
-(** [message_to_image ~max_width ?selected (role, txt)] returns a boxed image
-    of [(role, txt)].
-
-    Parameters
-    {ul
-    {-  [max_width] – total width available in terminal cells.  The rendered
-        text is word-wrapped so that the outer frame never exceeds this
-        width.  Must be ≥ 1.}
-    {-  [?selected] – highlights the message by drawing it in reverse video
-        (defaults to [false]).}}
-
-    Invariants
-    {ul
-    {-  Blank or whitespace-only [txt] yields {!Notty.I.empty}.}
-    {-  The result never exceeds [max_width] columns.}}
-
-    The first line is prefixed with "[role]: ", subsequent wrapped lines are
-    indented so that text aligns. *)
-val message_to_image : max_width:int -> ?selected:bool -> message -> Notty.I.t
-
-(** [history_image ~width ~messages ~selected_idx] vertically concatenates
-    [messages] into a scrollable history view.
-
-    {ul
-    {-  [width] – terminal width used for each individual message.}
-    {-  [selected_idx] – 0-based index of the highlighted message
-        (`None` = no highlight).}}
-
-    Every message is rendered with {!message_to_image}; the function merely
-    stacks the resulting images with {!Notty.I.vcat}. *)
-val history_image
-  :  width:int
-  -> messages:message list
-  -> selected_idx:int option
-  -> Notty.I.t
-
-(** [render_full ~size:(w, h) ~model] computes the complete TUI.
-
-    Returns an image representing the whole screen (history viewport,
-    status-bar, and multi-line input box) **plus** the zero-based cursor
-    position to be provided to {!Notty_eio.Term.cursor}.
-
-    Notes
-    {ul
-    {-  [size] – available terminal area in *cells* (columns × rows).}
-    {-  The function is side-effect-free except that it may mutate the
-        internal offset of the {!Notty_scroll_box.t} stored in [model] in
-        order to honour the *auto-follow* flag.  This is considered part of
-        the model’s mutable state.}}
-
-    Performance: the function allocates a fresh image every call; use an
-    external diffing strategy if you need to minimise redraws. *)
+    Performance characteristics
+    - The renderer caches per-message images keyed by terminal width and
+      message text. Heights are tracked and prefix-summed to render only the
+      visible slice of the history.
+*)
 val render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)
+(** [render_full ~size ~model] builds the full screen image and the cursor
+    position.
+
+    - [size] is [(width, height)] in terminal cells.
+    - [model] is the current UI state (messages, input line, selection,
+      scroll box, mode, etc.).
+
+    Returns [(image, (cx, cy))] where [image] is the composite screen and
+    [(cx, cy)] is the caret position inside the input box in absolute cell
+    coordinates, with [(0, 0)] at the top-left corner of the screen.
+
+    Behaviour
+    - When [Model.auto_follow model] is [true], the history view scrolls to
+      the bottom automatically after updating the content image.
+    - If the terminal width changed since the last call, cached per-message
+      renders are invalidated to ensure correct wrapping.
+
+    Example – integrate into a Notty event loop:
+    {[
+      let render term model =
+        let (w, h) = Notty_eio.Term.size term in
+        let img, (cx, cy) = Chat_tui.Renderer2.render_full ~size:(w, h) ~model in
+        Notty_eio.Term.image term img;
+        Notty_eio.Term.cursor term (cx, cy)
+      in
+      ()
+    ]} *)

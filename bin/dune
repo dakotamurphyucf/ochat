@@ -177,3 +177,11 @@
  (libraries eio_main irmin-git.unix irmin-watcher io lwt_eio)
  (preprocess
   (pps ppx_irmin)))
+
+(executable
+ (public_name highlight-debug)
+ (name highlight_debug)
+ (modules highlight_debug)
+ (libraries core core_unix.command_unix ochat.chat_tui)
+ (preprocess
+  (pps ppx_jane)))

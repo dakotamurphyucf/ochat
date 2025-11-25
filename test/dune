@@ -250,6 +250,30 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Chat-TUI – Redraw throttle unit tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_redraw_throttle_test)
+ (modules chat_tui_redraw_throttle_test)
+ (libraries core expect_test_helpers_core chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Sanitize/Wrap pipeline tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_sanitize_wrap_test)
+ (modules chat_tui_sanitize_wrap_test)
+ (libraries core expect_test_helpers_core chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; OAuth dynamic client registration tests
 ;; ---------------------------------------------------------------------------
 
@@ -530,6 +554,18 @@
  (name meta_prompting_quickcheck_test)
  (modules meta_prompting_quickcheck_test)
  (libraries core expect_test_helpers_core ochat.meta_prompting)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Notty rendering unit tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name notty_render_test)
+ (modules notty_render_test)
+ (libraries core expect_test_helpers_core notty)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

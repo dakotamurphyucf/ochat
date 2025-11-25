@@ -1,0 +1,450 @@
+(** Implementation of {!Chat_tui.Highlight_theme}.
+
+    See the interface for user-facing documentation. This module represents
+    a theme as an ordered list of [prefix -> attr] rules. A rule matches a
+    scope when its [prefix] is a dot-segment-aware prefix of the scope:
+    it matches if the scope is exactly [prefix] or starts with
+    [prefix ^ "."].
+
+    Resolution selects the most specific matching rule across all provided
+    scopes using the following precedence: more dot-separated segments win;
+    exact match wins over prefix match; longer selector wins; earlier rule in
+    the theme list wins as a final tiebreaker.
+
+    Colours and styles come from {!module:Notty.A}; helpers live in
+    {!Chat_tui.Highlight_styles}. *)
+
+module Styles = Highlight_styles
+
+type rule =
+  { prefix : string
+  ; attr : Notty.A.t
+  }
+
+type t = rule list
+
+let empty = []
+
+let default_dark : t =
+  [ { prefix = "comment"; attr = Styles.(fg_gray 10) }
+    (* Markdown headings – modern cool-accent gradient on black. *)
+  ; { prefix = "heading.1.markdown"; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5 ++ bold) }
+  ; { prefix = "heading.2.markdown"; attr = Styles.(fg_rgb6 ~r:2 ~g:5 ~b:5 ++ bold) }
+  ; { prefix = "heading.3.markdown"; attr = Styles.(fg_rgb6 ~r:3 ~g:5 ~b:4 ++ bold) }
+  ; { prefix = "heading.4.markdown"; attr = Styles.(fg_rgb6 ~r:4 ~g:5 ~b:3 ++ bold) }
+  ; { prefix = "heading.5.markdown"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:3 ++ bold) }
+  ; { prefix = "heading.6.markdown"; attr = Styles.(fg_lightwhite ++ bold) }
+    (* Setext-style headings from the grammar. *)
+  ; { prefix = "markup.heading.setext.1.markdown"
+    ; attr = Styles.(fg_rgb6 ~r:2 ~g:5 ~b:5 ++ bold)
+    }
+  ; { prefix = "markup.heading.setext.2.markdown"
+    ; attr = Styles.(fg_rgb6 ~r:4 ~g:5 ~b:3 ++ bold)
+    }
+  ; { prefix = "entity.name.section"; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5) }
+  ; { prefix = "punctuation.definition.heading"
+    ; attr = Styles.(fg_rgb6 ~r:0 ~g:4 ~b:5 ++ bold)
+    }
+    (* Lists & quotes *)
+  ; { prefix = "markup.list.numbered"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "markup.list.unnumbered"; attr = Styles.(fg_rgb6 ~r:5 ~g:3 ~b:0) }
+  ; { prefix = "punctuation.definition.list"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "markup.quote"; attr = Styles.(fg_rgb6 ~r:4 ~g:3 ~b:5 ++ italic) }
+  ; { prefix = "punctuation.definition.quote"; attr = Styles.(fg_gray 9) }
+    (* Links & images – cyan primary accent. *)
+  ; { prefix = "meta.link"; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5) }
+  ; { prefix = "markup.underline.link"
+    ; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5 ++ underline)
+    }
+  ; { prefix = "constant.other.reference.link"; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5) }
+  ; { prefix = "string.other.link.title"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "string.other.link.description"; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5) }
+  ; { prefix = "punctuation.definition.link"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "punctuation.definition.image"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "markup.image"; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5) }
+  ; { prefix = "meta.image"; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5) }
+  ; { prefix = "string.other.link"; attr = Styles.(fg_rgb6 ~r:4 ~g:5 ~b:5 ++ underline) }
+    (* Tables, separators, inline code *)
+  ; { prefix = "markup.table"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "punctuation.separator.table"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "punctuation.definition.table"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "meta.separator.markdown"; attr = Styles.(fg_gray 10) }
+  ; { prefix = "markup.inline.code"; attr = Styles.(fg_lightwhite ++ bg_gray 1) }
+  ; { prefix = "markup.inline.raw"; attr = Styles.(fg_lightwhite ++ bg_gray 2) }
+  ; { prefix = "markup.raw"; attr = Styles.(fg_lightwhite) }
+  ; { prefix = "punctuation.definition.fenced"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "punctuation.definition.markdown"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "punctuation.definition.metadata.markdown"; attr = Styles.(fg_gray 8) }
+  ; { prefix = "punctuation.separator.key-value.markdown"; attr = Styles.(fg_gray 8) }
+  ; { prefix = "punctuation.definition.raw.markdown"; attr = Styles.(fg_gray 10) }
+  ; { prefix = "fenced_code.block.language.markdown"
+    ; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5 ++ italic)
+    }
+  ; { prefix = "fenced_code.block.language.attributes.markdown"
+    ; attr = Styles.(fg_gray 11 ++ italic)
+    }
+  ; { prefix = "meta.embedded.block"; attr = Styles.(bg_gray 2 ++ fg_lightwhite) }
+  ; { prefix = "meta.embedded.block.frontmatter"
+    ; attr = Styles.(bg_gray 1 ++ fg_gray 12 ++ italic)
+    }
+  ; { prefix = "comment.frontmatter"; attr = Styles.(fg_gray 9 ++ italic) }
+  ; { prefix = "punctuation.definition.begin.frontmatter"; attr = Styles.(fg_gray 8) }
+  ; { prefix = "punctuation.definition.end.frontmatter"; attr = Styles.(fg_gray 8) }
+  ; { prefix = "punctuation.definition.bold"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "punctuation.definition.italic"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "markup.bold.markdown"; attr = Styles.bold }
+  ; { prefix = "markup.italic.markdown"; attr = Styles.italic }
+  ; { prefix = "markup.bold"; attr = Styles.bold }
+  ; { prefix = "markup.italic"; attr = Styles.italic }
+  ; { prefix = "markup.underline"; attr = Styles.underline }
+  ; { prefix = "markup.strike"; attr = Styles.(fg_rgb6 ~r:5 ~g:2 ~b:2) }
+  ; { prefix = "punctuation.definition.strikethrough.markdown"
+    ; attr = Styles.(fg_rgb6 ~r:5 ~g:2 ~b:2)
+    }
+  ; { prefix = "markup.list.checked"; attr = Styles.(fg_rgb6 ~r:2 ~g:5 ~b:3 ++ bold) }
+  ; { prefix = "markup.list.unchecked"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "punctuation.definition.checkbox"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "constant.character.escape"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "meta.other.valid-ampersand"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "meta.other.valid-bracket"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "string"; attr = Styles.(fg_rgb6 ~r:2 ~g:5 ~b:2) }
+  ; { prefix = "keyword"; attr = Styles.(fg_rgb6 ~r:5 ~g:3 ~b:5) }
+  ; { prefix = "constant.numeric"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "constant"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "entity.name.function"; attr = Styles.(fg_rgb6 ~r:0 ~g:4 ~b:5) }
+  ; { prefix = "entity.name.type"; attr = Styles.(fg_rgb6 ~r:4 ~g:3 ~b:5) }
+  ; { prefix = "entity.name.tag"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ; { prefix = "entity.other.attribute-name"; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5) }
+  ; { prefix = "variable"; attr = Styles.(fg_lightwhite) }
+  ; { prefix = "punctuation"; attr = Styles.(fg_gray 11) }
+  ; { prefix = "punctuation.definition.tag"; attr = Styles.(fg_gray 8) }
+  ; { prefix = "punctuation.definition.deleted"; attr = Styles.(fg_rgb6 ~r:5 ~g:3 ~b:4) }
+  ; { prefix = "punctuation.definition.inserted"; attr = Styles.(fg_rgb6 ~r:2 ~g:5 ~b:3) }
+  ; { prefix = "punctuation.definition.changed"; attr = Styles.(fg_rgb6 ~r:5 ~g:3 ~b:0) }
+  ; { prefix = "operator"; attr = Styles.(fg_gray 14) }
+  ; { prefix = "invalid.deprecated"; attr = Styles.(fg_rgb6 ~r:5 ~g:2 ~b:2) }
+  ; { prefix = "markup.heading.markdown"; attr = Styles.(fg_rgb6 ~r:0 ~g:5 ~b:5 ++ bold) }
+  ; { prefix = "punctuation.definition.bold.markdown"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "punctuation.definition.italic.markdown"; attr = Styles.(fg_gray 9) }
+  ; { prefix = "markup.list"; attr = Styles.(fg_rgb6 ~r:5 ~g:4 ~b:0) }
+  ]
+;;
+
+let default_light : t =
+  [ { prefix = "comment"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "markup.heading.1"; attr = Styles.(fg_magenta ++ bold) }
+  ; { prefix = "markup.heading.2"; attr = Styles.(fg_blue ++ bold) }
+  ; { prefix = "markup.heading.3"; attr = Styles.(fg_green ++ bold) }
+  ; { prefix = "markup.heading.4"; attr = Styles.(fg_yellow ++ bold) }
+  ; { prefix = "markup.heading.5"; attr = Styles.(fg_cyan ++ bold) }
+  ; { prefix = "markup.heading.6"; attr = Styles.(fg_black ++ bold) }
+  ; { prefix = "entity.name.section"; attr = Styles.(fg_blue ++ bold) }
+  ; { prefix = "punctuation.definition.heading"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "markup.list.numbered"; attr = Styles.(fg_yellow) }
+  ; { prefix = "markup.list.unnumbered"; attr = Styles.(fg_green) }
+  ; { prefix = "punctuation.definition.list"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "markup.quote"; attr = Styles.(fg_magenta) }
+  ; { prefix = "punctuation.definition.quote"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "meta.link"; attr = Styles.(fg_blue) }
+  ; { prefix = "markup.underline.link"; attr = Styles.(fg_blue) }
+  ; { prefix = "constant.other.reference.link"; attr = Styles.(fg_cyan) }
+  ; { prefix = "string.other.link.title"; attr = Styles.(fg_cyan) }
+  ; { prefix = "string.other.link.description"; attr = Styles.(fg_blue) }
+  ; { prefix = "punctuation.definition.link"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "punctuation.definition.image"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "markup.image"; attr = Styles.(fg_cyan) }
+  ; { prefix = "markup.table"; attr = Styles.(fg_yellow) }
+  ; { prefix = "punctuation.separator.table"; attr = Styles.(fg_gray 6) }
+  ; { prefix = "meta.separator.markdown"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "markup.inline.code"; attr = Styles.(fg_black) }
+  ; { prefix = "markup.inline.raw"; attr = Styles.(fg_black) }
+  ; { prefix = "markup.raw"; attr = Styles.(fg_black) }
+  ; { prefix = "punctuation.definition.fenced"; attr = Styles.(fg_gray 6) }
+  ; { prefix = "punctuation.definition.markdown"; attr = Styles.(fg_gray 6) }
+  ; { prefix = "punctuation.definition.metadata.markdown"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "punctuation.separator.key-value.markdown"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "punctuation.definition.raw.markdown"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "fenced_code.block.language.markdown"; attr = Styles.(fg_blue ++ italic) }
+  ; { prefix = "fenced_code.block.language.attributes.markdown"
+    ; attr = Styles.(fg_gray 8 ++ italic)
+    }
+  ; { prefix = "meta.embedded.block"; attr = Styles.(bg_gray 12 ++ fg_black) }
+  ; { prefix = "meta.embedded.block.frontmatter"
+    ; attr = Styles.(bg_gray 13 ++ fg_gray 2 ++ italic)
+    }
+  ; { prefix = "comment.frontmatter"; attr = Styles.(fg_gray 7 ++ italic) }
+  ; { prefix = "punctuation.definition.begin.frontmatter"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "punctuation.definition.end.frontmatter"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "punctuation.definition.bold"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "punctuation.definition.italic"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "markup.strike"; attr = Styles.(fg_red) }
+  ; { prefix = "markup.strikethrough"; attr = Styles.(fg_red) }
+  ; { prefix = "markup.list.checked"; attr = Styles.(fg_green ++ bold) }
+  ; { prefix = "markup.list.unchecked"; attr = Styles.(fg_yellow) }
+  ; { prefix = "punctuation.definition.checkbox"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "constant.character.escape"; attr = Styles.(fg_yellow) }
+  ; { prefix = "string"; attr = Styles.(fg_green) }
+  ; { prefix = "keyword"; attr = Styles.(fg_magenta) }
+  ; { prefix = "constant.numeric"; attr = Styles.(fg_blue) }
+  ; { prefix = "constant"; attr = Styles.(fg_cyan) }
+  ; { prefix = "entity.name.function"; attr = Styles.(fg_yellow) }
+  ; { prefix = "entity.name.type"; attr = Styles.(fg_blue) }
+  ; { prefix = "entity.name.tag"; attr = Styles.(fg_blue) }
+  ; { prefix = "entity.other.attribute-name"; attr = Styles.(fg_magenta) }
+  ; { prefix = "variable"; attr = Styles.(fg_black) }
+  ; { prefix = "punctuation"; attr = Styles.(fg_black) }
+  ; { prefix = "punctuation.definition.tag"; attr = Styles.(fg_gray 7) }
+  ; { prefix = "operator"; attr = Styles.(fg_black) }
+  ; { prefix = "invalid.deprecated"; attr = Styles.(fg_red) }
+  ; { prefix = "markup.heading"; attr = Styles.(fg_black ++ bold) }
+  ; { prefix = "markup.bold"; attr = Styles.(fg_yellow ++ bold) }
+  ; { prefix = "markup.italic"; attr = Styles.(fg_magenta) }
+  ; { prefix = "markup.list"; attr = Styles.(fg_magenta) }
+  ]
+;;
+
+(* VSCode/GitHub-dark truecolor palette. Matches tokens from the supplied
+   theme JSON as closely as Notty allows. *)
+let github_dark : t =
+  [ { prefix = "comment"; attr = Styles.(fg_hex "#6A737D") } (* Headings – azure, bold. *)
+  ; { prefix = "heading.1.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
+  ; { prefix = "heading.2.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
+  ; { prefix = "heading.3.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
+  ; { prefix = "heading.4.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
+  ; { prefix = "heading.5.markdown"; attr = Styles.(fg_hex "#E1E4E8" ++ bold) }
+  ; { prefix = "heading.6.markdown"; attr = Styles.(fg_hex "#E1E4E8" ++ bold) }
+    (* Setext headings *)
+  ; { prefix = "markup.heading.setext.1.markdown"
+    ; attr = Styles.(fg_hex "#79B8FF" ++ bold)
+    }
+  ; { prefix = "markup.heading.setext.2.markdown"
+    ; attr = Styles.(fg_hex "#79B8FF" ++ bold)
+    }
+  ; { prefix = "entity.name.section"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "punctuation.definition.heading"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "meta.paragraph.markdown"; attr = Styles.(fg_hex "#D1D5DA") }
+  ; { prefix = "source"; attr = Styles.(fg_hex "#D1D5DA") } (* Lists & quotes *)
+  ; { prefix = "markup.list.numbered"; attr = Styles.(fg_hex "#FFAB70") }
+  ; { prefix = "markup.list.unnumbered"; attr = Styles.(fg_hex "#FFAB70") }
+  ; { prefix = "punctuation.definition.list"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "punctuation.definition.list.begin.markdown"
+    ; attr = Styles.(fg_hex "#FFAB70")
+    }
+  ; { prefix = "markup.quote"; attr = Styles.(fg_hex "#85E89D") }
+  ; { prefix = "punctuation.definition.quote"; attr = Styles.(fg_hex "#6A737D") }
+    (* Links & images *)
+  ; { prefix = "meta.link"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "markup.underline.link"; attr = Styles.(fg_hex "#79B8FF" ++ underline) }
+  ; { prefix = "constant.other.reference.link"
+    ; attr = Styles.(fg_hex "#DBEDFF" ++ underline)
+    }
+  ; { prefix = "string.other.link.title"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "string.other.link.description"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "punctuation.definition.link"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "punctuation.definition.image"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "markup.image"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "meta.image"; attr = Styles.(fg_hex "#79B8FF") }
+    (* Tables, separators, inline code chip *)
+  ; { prefix = "markup.table"; attr = Styles.(fg_hex "#FFAB70") }
+  ; { prefix = "punctuation.separator.table"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "punctuation.definition.table"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "meta.separator.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
+  ; { prefix = "meta.separator"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
+  ; { prefix = "markup.inline.code"
+    ; attr = Styles.(fg_hex "#D1D5DA" ++ bg_hex "#2F363D")
+    }
+  ; { prefix = "markup.inline.raw.string.markdown"
+    ; attr = Styles.(fg_hex "#D1D5DA" ++ bg_hex "#2F363D")
+    }
+  ; { prefix = "markup.inline.raw"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "markup.raw"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "markup.raw.block.markdown"
+    ; attr = Styles.(fg_hex "#D1D5DA" ++ bg_hex "#2F363D")
+    }
+  ; { prefix = "punctuation.definition.fenced"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "punctuation.definition.markdown"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "punctuation.definition.metadata.markdown"
+    ; attr = Styles.(fg_hex "#6A737D")
+    }
+  ; { prefix = "punctuation.separator.key-value.markdown"
+    ; attr = Styles.(fg_hex "#6A737D")
+    }
+  ; { prefix = "punctuation.definition.raw.markdown"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "fenced_code.block.language.markdown"
+    ; attr = Styles.(fg_hex "#79B8FF" ++ italic)
+    }
+  ; { prefix = "fenced_code.block.language.attributes.markdown"
+    ; attr = Styles.(fg_gray 11 ++ italic)
+    }
+  ; { prefix = "meta.embedded.block"; attr = Styles.(bg_gray 2 ++ fg_gray 15) }
+  ; { prefix = "meta.embedded.block.frontmatter"
+    ; attr = Styles.(bg_hex "#1F2428" ++ fg_hex "#E1E4E8" ++ italic)
+    }
+  ; { prefix = "comment.frontmatter"; attr = Styles.(fg_gray 9 ++ italic) }
+  ; { prefix = "punctuation.definition.begin.frontmatter"
+    ; attr = Styles.(fg_hex "#6A737D")
+    }
+  ; { prefix = "punctuation.definition.end.frontmatter"
+    ; attr = Styles.(fg_hex "#6A737D")
+    }
+  ; { prefix = "punctuation.definition.bold"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "punctuation.definition.italic"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "markup.bold.markdown"; attr = Styles.(fg_hex "#E1E4E8" ++ bold) }
+  ; { prefix = "markup.italic.markdown"; attr = Styles.(fg_hex "#E1E4E8" ++ italic) }
+  ; { prefix = "markup.bold"; attr = Styles.(fg_hex "#E1E4E8" ++ bold) }
+  ; { prefix = "markup.italic"; attr = Styles.(fg_hex "#E1E4E8" ++ italic) }
+  ; { prefix = "markup.underline"; attr = Styles.(underline) }
+  ; { prefix = "markup.strike"; attr = Styles.(fg_hex "#F97583") }
+  ; { prefix = "punctuation.definition.strikethrough.markdown"
+    ; attr = Styles.(fg_hex "#F97583")
+    }
+  ; { prefix = "markup.list.checked"; attr = Styles.(fg_hex "#85E89D" ++ bold) }
+  ; { prefix = "markup.list.unchecked"; attr = Styles.(fg_hex "#FFAB70") }
+  ; { prefix = "punctuation.definition.checkbox"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "constant.character.escape"; attr = Styles.(fg_hex "#85E89D" ++ bold) }
+    (* Core code tokens – GitHub Dark Default *)
+  ; { prefix = "string"; attr = Styles.(fg_hex "#9ECBFF") }
+  ; { prefix = "string.regexp"; attr = Styles.(fg_hex "#DBEDFF") }
+  ; { prefix = "source.regexp"; attr = Styles.(fg_hex "#DBEDFF") }
+  ; { prefix = "string.regexp constant.character.escape"
+    ; attr = Styles.(fg_hex "#85E89D" ++ bold)
+    }
+  ; { prefix = "keyword"; attr = Styles.(fg_hex "#F97583") }
+  ; { prefix = "keyword.operator"; attr = Styles.(fg_hex "#D1D5DA") }
+  ; { prefix = "constant.numeric"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "constant"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "support"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "support.constant"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "support.variable"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "meta.property-name"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "meta.module-reference"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "entity.name.function"; attr = Styles.(fg_hex "#B392F0") }
+  ; { prefix = "entity.name.type"; attr = Styles.(fg_hex "#B392F0") }
+  ; { prefix = "entity"; attr = Styles.(fg_hex "#B392F0") }
+  ; { prefix = "entity.name"; attr = Styles.(fg_hex "#B392F0") }
+  ; { prefix = "entity.name.tag"; attr = Styles.(fg_hex "#85E89D") }
+  ; { prefix = "entity.other.attribute-name"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "variable.parameter"; attr = Styles.(fg_hex "#E1E4E8") }
+  ; { prefix = "variable.language"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "variable.other.constant"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "variable.other.enummember"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "variable.other"; attr = Styles.(fg_hex "#E1E4E8") }
+  ; { prefix = "variable"; attr = Styles.(fg_hex "#FFAB70") }
+  ; { prefix = "punctuation"; attr = Styles.(fg_hex "#D1D5DA") }
+  ; { prefix = "punctuation.definition.tag"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "punctuation.definition.comment"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "operator"; attr = Styles.(fg_hex "#D1D5DA") }
+  ; { prefix = "invalid.broken"; attr = Styles.(fg_hex "#FDAEB7" ++ italic) }
+  ; { prefix = "invalid.deprecated"; attr = Styles.(fg_hex "#FDAEB7" ++ italic) }
+  ; { prefix = "invalid.illegal"; attr = Styles.(fg_hex "#FDAEB7" ++ italic) }
+  ; { prefix = "invalid.unimplemented"; attr = Styles.(fg_hex "#FDAEB7" ++ italic) }
+  ; { prefix = "carriage-return"
+    ; attr = Styles.(bg_hex "#F97583" ++ fg_hex "#24292E" ++ italic ++ underline)
+    }
+  ; { prefix = "markup.heading.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
+  ; { prefix = "markup.list"; attr = Styles.(fg_hex "#FFAB70") }
+  ; { prefix = "markup.deleted"; attr = Styles.(fg_hex "#FDAEB7" ++ bg_hex "#86181D") }
+  ; { prefix = "markup.inserted"; attr = Styles.(fg_hex "#85E89D" ++ bg_hex "#144620") }
+  ; { prefix = "markup.changed"; attr = Styles.(fg_hex "#FFAB70" ++ bg_hex "#C24E00") }
+  ; { prefix = "meta.diff.index"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "meta.diff.file.a"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "meta.diff.file.b"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "meta.diff.hunk"; attr = Styles.(fg_hex "#B392F0" ++ bold) }
+  ; { prefix = "meta.diff.range"; attr = Styles.(fg_hex "#B392F0" ++ bold) }
+  ; { prefix = "meta.diff.header"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "text.diff.context"; attr = Styles.(fg_hex "#D1D5DA") }
+  ; { prefix = "brackethighlighter"; attr = Styles.(fg_hex "#D1D5DA") }
+  ; { prefix = "brackethighlighter.unmatched"; attr = Styles.(fg_hex "#FDAEB7") }
+  ; { prefix = "token.info-token"; attr = Styles.(fg_hex "#6796E6") }
+  ; { prefix = "token.warn-token"; attr = Styles.(fg_hex "#CD9731") }
+  ; { prefix = "token.error-token"; attr = Styles.(fg_hex "#F44747") }
+  ; { prefix = "token.debug-token"; attr = Styles.(fg_hex "#B267E6") }
+  ; { prefix = "comment.line.number-sign.shell"; attr = Styles.(fg_hex "#6A737D") }
+  ; { prefix = "variable.parameter.option.shell"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "string.quoted.double.shell"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "constant.character.escape.shell"; attr = Styles.(fg_hex "#85E89D") }
+  ; { prefix = "string.quoted.single.shell"; attr = Styles.(fg_hex "#FDAEB7") }
+  ; { prefix = "keyword.control.shell"; attr = Styles.(fg_hex "#F97583") }
+  ; { prefix = "variable.other.shell"; attr = Styles.(fg_hex "#CD9731") }
+  ; { prefix = "string.interpolated.command-substitution.shell"
+    ; attr = Styles.(fg_hex "#231ce4ff")
+    }
+  ; { prefix = "string.other.backtick.shell"; attr = Styles.(fg_hex "#a22782ff") }
+  ; { prefix = "meta.arithmetic.shell"; attr = Styles.(fg_hex "#d0bb1bff") }
+  ; { prefix = "operator.redirection.shell"; attr = Styles.(fg_hex "#c71818ff") }
+  ; { prefix = "punctuation.separator.shell"; attr = Styles.(fg_hex "#d4df3bff") }
+  ; { prefix = "operator.equal.shell"; attr = Styles.(fg_hex "#F44747") }
+  ; { prefix = "entity.name.type.shell"; attr = Styles.(fg_hex "#E1E4E8") }
+  ; { prefix = "entity.name.keyword.function.shell"; attr = Styles.(fg_hex "#B392F0") }
+  ; { prefix = "entity.name.keyword.echo.shell"; attr = Styles.(fg_hex "#79B8FF") }
+  ]
+;;
+
+let is_selector_match ~selector scope =
+  let sel_len = String.length selector in
+  let scope_len = String.length scope in
+  scope_len >= sel_len
+  && String.sub scope 0 sel_len = selector
+  && (scope_len = sel_len || scope.[sel_len] = '.')
+;;
+
+let count_segments s =
+  let len = String.length s in
+  let rec loop i acc =
+    if i >= len then acc else loop (i + 1) (acc + if s.[i] = '.' then 1 else 0)
+  in
+  1 + loop 0 0
+;;
+
+let cmp_int (a : int) (b : int) = if a < b then -1 else if a > b then 1 else 0
+
+let attr_of_scopes (t : t) ~scopes =
+  let best_key = ref None in
+  let best_attr = ref None in
+  List.iteri
+    (fun rule_index rule ->
+       let selector = rule.prefix in
+       let segments = count_segments selector in
+       let sel_len = String.length selector in
+       List.iter
+         (fun scope ->
+            if is_selector_match ~selector scope
+            then (
+              let exact = if String.length scope = sel_len then 1 else 0 in
+              let key_segments = segments in
+              let key_exact = exact in
+              let key_len = sel_len in
+              let key_rule = -rule_index in
+              match !best_key with
+              | None ->
+                best_key := Some (key_segments, key_exact, key_len, key_rule);
+                best_attr := Some rule.attr
+              | Some (s', e', l', r') ->
+                let c1 = cmp_int key_segments s' in
+                let better, combine =
+                  if c1 <> 0
+                  then c1 > 0, false
+                  else (
+                    let c2 = cmp_int key_exact e' in
+                    if c2 <> 0
+                    then c2 > 0, false
+                    else (
+                      let c3 = cmp_int key_len l' in
+                      if c3 <> 0 then c3 > 0, true else cmp_int key_rule r' > 0, true))
+                in
+                (match better, combine with
+                 | true, false ->
+                   best_key := Some (key_segments, key_exact, key_len, key_rule);
+                   best_attr := Some rule.attr
+                 | true, true ->
+                   best_key := Some (key_segments, key_exact, key_len, key_rule);
+                   best_attr := Some Styles.(Option.get !best_attr ++ rule.attr)
+                 | false, true ->
+                   best_attr := Some Styles.(Option.get !best_attr ++ rule.attr)
+                 | false, false -> ())))
+         scopes)
+    t;
+  match !best_attr with
+  | None -> Styles.empty
+  | Some a -> a
+;;

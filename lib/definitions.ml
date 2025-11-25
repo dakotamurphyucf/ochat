@@ -646,63 +646,80 @@ module Apply_patch : Ochat_function.Def with type input = string = struct
 
   let description =
     Some
-      {|Applies an atomic V4A unified patch that adds, updates, or deletes one or more text files.
+      {|Applies an atomic V4A unified patch that adds, updates, or deletes one or more text files.  `apply_patch` effectively allows you to execute a diff/patch against a file, but the format of the diff specification is unique to this task, so pay careful attention to these instructions. To use `apply_patch`, you should call the tool with the following structure:
+
+*** Begin Patch
+[YOUR_PATCH]
+*** End Patch
+
+Where [YOUR_PATCH] is the actual content of your patch, specified in the following V4A diff format.
+*** [ACTION] File: [path/to/file] -> ACTION can be one of Add, Update, or Delete.
+For each snippet of code that needs to be changed, repeat the following:
+[context_before] -> See below for further instructions on context.
+- [old_code] -> Precede the old code with a minus sign.
++ [new_code] -> Precede the new, replacement code with a plus sign.
+[context_after] -> See below for further instructions on context.
+
+For instructions on [context_before] and [context_after]:
+- By default, show 3 lines of code immediately above and 3 lines immediately below each change. If a change is within 3 lines of a previous change, do NOT duplicate the first change’s [context_after] lines in the second change’s [context_before] lines.
+- If 3 lines of context is insufficient to uniquely identify the snippet of code within the file, use the @@ operator to indicate the class or function to which the snippet belongs. For instance, we might have:
+@@ class BaseClass
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+- If a code block is repeated so many times in a class or function such that even a single `@@` statement and 3 lines of context cannot uniquely identify the snippet of code, you can use multiple `@@` statements to jump to the right context. For instance:
+
+@@ class BaseClass
+@@  def method():
+[3 lines of pre-context]
+- [old_code]
++ [new_code]
+[3 lines of post-context]
+
+Note, then, that we do not use line numbers in this diff format, as the context is enough to uniquely identify code. An example of a message that you might pass as "patch" to this function, in order to apply a patch, is shown below.
+
+*** Begin Patch
+*** Update File: pygorithm/searching/binary_search.py
+@@ class BaseClass
+@@     def search():
+-        pass
++        raise NotImplementedError()
+
+@@ class Subclass
+@@     def search():
+-        pass
++        raise NotImplementedError()
+*** End Patch
+
+File references can only be relative, NEVER ABSOLUTE.
 
 – When to use:  
-  • Cohesive multi-file or multi-line edits that must land together.  
+  - Cohesive multi-file or multi-line edits that must land together.  
 – When NOT to use:  
-  • Binary assets or very large files.  
-  • Interactive one-off tweaks where a smaller “edit_line” tool exists.
+  - Binary assets or very large files.  
+  - Interactive one-off tweaks where a smaller “edit_line” tool exists.
 
 Arguments  
-• patch (string, required) – Entire diff.  
-  – Must start with “*** Begin Patch” and end with “*** End Patch”.  
-  – Each file block: “*** Add|Update|Delete File: relative/path”.  
+- patch (string, required) – Entire diff.  
+  – Must start with "*** Begin Patch" and end with "*** End Patch".  
+  – Each file block: "*** Add|Update|Delete File: relative/path".  
   – Hunk rules:  
-    • ≥3 unchanged pre- and post-context lines.  
-    • “- ” for deletions, “+ ” for additions; unchanged lines have no prefix.  
-    • New files contain only “+ ” lines; forgetting the “+” causes failure.  
-    • No mixed “+/-” on one line; no line numbers or timestamps.  
-    • Use @@ only when 3-line context is ambiguous. Place the tag on its own line, directly above the hunk.
+    - ≥3 unchanged pre- and post-context lines.  
+    - "- " for deletions, "+ " for additions; unchanged lines have no prefix.  
+    - New files contain only "+ " lines; forgetting the "+" causes failure.  
+    - No mixed "+/-" on one line; no line numbers or timestamps.  
+    - Use @@ only when 3-line context is ambiguous.
 
-Key @@ usage  
-  Correct:  
-    @@ def search():  
-    -    raise NotImplementedError  
-    +    raise LookupError  
-  Incorrect: tag omitted or typo (“@” or extra spaces).
-  Incorrect: @@ on its own line, e.g.
-    @@ 
-    def search():  
-    -    raise NotImplementedError 
-    +    raise LookupError  
-    print("This line is not part of the hunk")
 
 Pre-conditions  
-• Target files exist (Update/Delete) or do NOT exist (Add).  
-• Workspace matches context exactly; whitespace is significant.  
-• Regenerate the patch after any earlier edits in the session.
-• path must be relative not absolute
+- Target files exist (Update/Delete) or do NOT exist (Add).  
+- Workspace matches context exactly; whitespace is significant.  
+- path must be relative not absolute
 
-Common failure modes & caller safeguards  
-• “Context mismatch” → refresh files or widen context.  
-• “Malformed diff” → missing *** markers, +/- prefixes, or unmatched @@; validate before calling.  
-• Permission/path errors → confirm relative paths and write access.
 
-Quick examples  
-  ✔ Correct new file  
-    *** Begin Patch  
-    *** Add File: docs/README.md  
-    + # Project README  
-    + Initial content.  
-    *** End Patch  
-
-  ✖ Incorrect (missing “+”)  
-    *** Begin Patch  
-    *** Add File: docs/README.md  
-      # Project README  
-      Initial content.  
-    *** End Patch|}
+|}
   ;;
 
   let parameters : Jsonaf.t =

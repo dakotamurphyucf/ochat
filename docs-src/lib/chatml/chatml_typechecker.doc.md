@@ -14,8 +14,7 @@ variants.  It operates directly on the abstract-syntax tree produced by the
 ChatML parser and resolver and can be executed independently from the
 interpreter.
 
-Running the checker is optional at runtime — ChatML is intentionally a
-dynamically-typed language — but doing so:
+Running the checker:
 
 * surfaces mistakes early (e.g. field/variant mismatches, arithmetic on
   strings);

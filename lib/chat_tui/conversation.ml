@@ -35,7 +35,7 @@ let pair_of_item (it : Res_item.t) : message option =
     Some (role, Printf.sprintf "%s(%s)" fc.name (sanitize fc.arguments))
   | Res_item.Function_call_output fco ->
     let role = "tool_output" in
-    let max_len = 2_000 in
+    let max_len = 10_000 in
     let txt = sanitize fco.output in
     let txt =
       if String.length txt > max_len

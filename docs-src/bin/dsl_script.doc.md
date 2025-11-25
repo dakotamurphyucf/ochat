@@ -21,7 +21,7 @@ defined by the source string embedded in
 [`bin/dsl_script.ml`](../../bin/dsl_script.ml).
 
 ---
-
+•
 ## 2 What does it do?
 
 1. Allocates a fresh `Chatml_lang.env` with `Chatml_lang.create_env`.

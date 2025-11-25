@@ -29,8 +29,9 @@ modified exclusively through patches.
    * [`handle_fn_out`](#val-handle_fn_out)
    * [`handle_event`](#val-handle_event)
    * [`handle_events`](#val-handle_events)
-3. [Examples](#examples)
-4. [Current limitations](#current-limitations)
+3. [Implementation / pipeline notes](#implementation--pipeline-notes)
+4. [Examples](#examples)
+5. [Current limitations](#current-limitations)
 
 ---
 
@@ -88,6 +89,7 @@ function currently knows about the following event classes:
 | ------------- | -------------- |
 | `Output_text_delta` | `Ensure_buffer` · `Append_text` |
 | `Output_item_added` | `Ensure_buffer` · `Set_function_name` · *(optional)* book-keeping |
+| `Output_message` | `Ensure_buffer` · `Append_text` |
 | `Reasoning_summary_text_delta` | `Ensure_buffer` · `Update_reasoning_idx` · `Append_text` |
 | `Function_call_arguments_delta` | `Ensure_buffer` · `Append_text` |
 | `Function_call_arguments_done`  | `Ensure_buffer` · `Append_text` *(closing paren)* |
@@ -104,6 +106,47 @@ handle_events ~model evs =
 Pure convenience wrapper when a caller already buffered multiple events.  It
 does not introduce additional side-effects beyond those already performed
 inside `handle_event`.
+
+---
+
+## Implementation / pipeline notes
+
+```text
+┌────────────────────────────────┐    Raw UTF-8
+│ OpenAI HTTP stream             │───► text deltas
+└────────────────────────────────┘
+            │                     (no sanitisation)
+            ▼
+   Chat_tui.Stream (this module) ──► `Append_text` patches (one per delta)
+            │
+            │      coalesce + batch
+            ▼
+   Chat_tui.App.Stream_batch ──────► consolidated patch list
+            │
+            ▼     sanitize + wrap (once)
+   Chat_tui.Renderer ──────────────► cached Notty images
+```
+
+1. **Raw text deltas** — `Stream` forwards the *verbatim* text received
+   from OpenAI.  Previously every delta passed through a UTF-8 validator and
+   word-wrapper which wasted CPU and repeatedly invalidated the per-message
+   render cache.
+
+2. **Batching & coalescing** — the `Stream_batch` helper inside
+   `Chat_tui.App` merges **adjacent** `Append_text` patches that target the
+   same message buffer.  This shrinks the patch list while retaining fine
+   grained updates for the live log view.
+
+3. **Renderer-side sanitisation** — invalid byte sequences are stripped and
+   lines are wrapped **once per cached render** in `Chat_tui.Renderer`.
+   Because the cache key contains both *terminal width* and *message text*
+   the sanitisation happens at most once for every unique `(w, text)`
+   combination.  In practice this reduces the number of cache invalidations
+   and word-wrap operations per frame by an order of magnitude without
+   altering the final on-screen layout.
+
+The end-user should not notice any visual difference — only lower CPU usage
+and smoother scrolling when large streams are active.
 
 ---
 

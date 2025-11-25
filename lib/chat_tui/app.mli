@@ -1,7 +1,12 @@
 (** Terminal chat application – event-loop, streaming and persistence.
 
     This is the public interface of {!Chat_tui.App}, the orchestration
-    layer that powers the Ochat terminal UI.
+    layer that powers the Ochat terminal UI.  Beyond the traditional
+    *event-loop & renderer* triad it also provides
+
+    • on-device {i context-compaction} (hit \[Ctrl-K]),
+    • graceful request {i cancellation} (hit \[Esc]) and
+    • automatic / interactive {i snapshot persistence}.
 
     A single call to {!run_chat} boots the Notty terminal, parses the
     ChatMarkdown prompt, starts the main event-loop and only returns once
@@ -68,9 +73,46 @@ val apply_local_submit_effects
   -> term:Notty_eio.Term.t
   -> unit
 
-(** Launches the OpenAI completion stream in a new switch and shuttles the
-    resulting events back to the main loop via [ev_stream].  The function
-    never blocks the UI – all network IO happens in spawned fibres. *)
+(** Launch an {b asynchronous} OpenAI completion request and stream the
+    results back into the UI.
+
+    A fresh {!Eio.Switch.t} is created so the request can be cancelled
+    independently via \[Esc\].  All network IO happens in spawned fibres –
+    the call therefore returns {i immediately} and never blocks the event
+    loop.
+
+    {2 Batching strategy}
+
+    Individual token events arrive at sub-millisecond latency which is far
+    too fast for human eyes.  To avoid wasting CPU cycles (and battery!)
+    contiguous [`Stream] events are coalesced into a single
+    [`Stream_batch] if they arrive within a ~12 ms time-window.  The
+    window can be tweaked—primarily for benchmarking—via the environment
+    variable [$OCHAT_STREAM_BATCH_MS] (valid range 1–50 ms).
+
+    Function-call output events are *not* batched because they are rare and
+    often trigger further side-effects.
+
+    {2 Parameters}
+
+    @param env  The current {!Eio.Stdenv.t}
+    @param model Mutable state record that will be updated while the stream
+           progresses.
+    @param ev_stream  Event queue shared with the main UI loop.  Both
+           [`Stream] and [`Stream_batch] events are emitted here, as well as
+           [`Function_output] values.
+    @param system_event  Out-of-band messages (e.g. notes from the user)
+           that should appear in the assistant’s context but must not be
+           rendered in the viewport.
+    @param prompt_ctx  Runtime artefacts (model temperature, tool
+           declarations, …) derived from the static prompt.
+    @param datadir  Directory used to store temporary artefacts such as the
+           response cache and tool outputs.
+    @param parallel_tool_calls  When [true] (default) tool invocations are
+           evaluated concurrently; otherwise they run sequentially.
+    @param history_compaction  Enables automatic history pruning when the
+           assistant hits the context window limit.
+ *)
 val handle_submit
   :  env:Eio_unix.Stdenv.base
   -> model:Model.t

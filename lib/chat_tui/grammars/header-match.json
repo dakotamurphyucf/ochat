@@ -1,0 +1,54 @@
+{
+  "name": "Markdown headings (simplified explicit matches)",
+  "patterns": [
+    {
+      "name": "heading.6.markdown",
+      "match": "^(#{6})[ \\t]+(.*?)[ \\t]*(?:#+[ \\t]*)?$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.markdown" },
+        "2": { "name": "entity.name.section.markdown" }
+      }
+    },
+    {
+      "name": "heading.5.markdown",
+      "match": "^(#{5})[ \\t]+(.*?)[ \\t]*(?:#+[ \\t]*)?$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.markdown" },
+        "2": { "name": "entity.name.section.markdown" }
+      }
+    },
+    {
+      "name": "heading.4.markdown",
+      "match": "^(#{4})[ \\t]+(.*?)[ \\t]*(?:#+[ \\t]*)?$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.markdown" },
+        "2": { "name": "entity.name.section.markdown" }
+      }
+    },
+    {
+      "name": "heading.3.markdown",
+      "match": "^(#{3})[ \\t]+(.*?)[ \\t]*(?:#+[ \\t]*)?$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.markdown" },
+        "2": { "name": "entity.name.section.markdown" }
+      }
+    },
+    {
+      "name": "heading.2.markdown",
+      "match": "^(#{2})[ \\t]+(.*?)[ \\t]*(?:#+[ \\t]*)?$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.markdown" },
+        "2": { "name": "entity.name.section.markdown" }
+      }
+    },
+    {
+      "name": "heading.1.markdown",
+      "match": "^(#{1})[ \\t]+(.*?)[ \\t]*(?:#+[ \\t]*)?$",
+      "captures": {
+        "1": { "name": "punctuation.definition.heading.markdown" },
+        "2": { "name": "entity.name.section.markdown" }
+      }
+    }
+  ]
+}
+

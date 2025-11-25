@@ -3,6 +3,13 @@
  (public_name ochat.chat_tui)
  (modules
   util
+  highlight_styles
+  highlight_theme
+  highlight_tm_engine
+  highlight_tm_loader
+  highlight_grammars
+  highlight_registry
+  markdown_fences
   types
   model
   renderer
@@ -14,6 +21,7 @@
   controller_normal
   controller_shared
   controller_cmdline
+  redraw_throttle
   path_completion
   conversation
   snippet
@@ -23,6 +31,8 @@
   ui_helpers)
  (libraries
   core
+  jsonaf
+  textmate-language
   openai
   eio
   notty

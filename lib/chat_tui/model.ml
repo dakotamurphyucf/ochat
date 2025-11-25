@@ -1,6 +1,15 @@
 open Core
 open Types
 
+type msg_img_cache =
+  { width : int
+  ; text : string
+  ; img_unselected : Notty.I.t
+  ; height_unselected : int
+  ; img_selected : Notty.I.t option
+  ; height_selected : int option
+  }
+
 type t =
   { mutable history_items : Openai.Responses.Item.t list
   ; mutable messages : message list
@@ -24,6 +33,11 @@ type t =
   ; mutable cmdline_cursor : int
   ; mutable active_fork : string option
   ; mutable fork_start_index : int option
+  ; mutable msg_img_cache : (int, msg_img_cache) Hashtbl.t
+  ; mutable last_history_width : int option
+  ; mutable msg_heights : int array
+  ; mutable height_prefix : int array
+  ; mutable dirty_height_indices : int list
   }
 [@@deriving fields ~getters ~setters]
 
@@ -80,6 +94,11 @@ let create
   ; cmdline_cursor
   ; active_fork = None
   ; fork_start_index = None
+  ; msg_img_cache = Hashtbl.create (module Int)
+  ; last_history_width = None
+  ; msg_heights = [||]
+  ; height_prefix = [||]
+  ; dirty_height_indices = []
   }
 ;;
 
@@ -110,6 +129,34 @@ let set_fork_start_index t v = t.fork_start_index <- v
 (* ------------------------------------------------------------------------- *)
 (*  Command-mode helpers                                                     *)
 (* ------------------------------------------------------------------------- *)
+
+(* ------------------------------------------------------------------------- *)
+(*  Rendering cache helpers                                                   *)
+(* ------------------------------------------------------------------------- *)
+
+let last_history_width t = t.last_history_width
+let set_last_history_width t v = t.last_history_width <- v
+
+let clear_all_img_caches t =
+  Hashtbl.clear t.msg_img_cache;
+  t.msg_heights <- [||];
+  t.height_prefix <- [||];
+  t.dirty_height_indices <- []
+;;
+
+let invalidate_img_cache_index t ~idx =
+  Hashtbl.remove t.msg_img_cache idx;
+  t.dirty_height_indices <- idx :: t.dirty_height_indices
+;;
+
+let find_img_cache t ~idx = Hashtbl.find t.msg_img_cache idx
+let set_img_cache t ~idx entry = Hashtbl.set t.msg_img_cache ~key:idx ~data:entry
+
+let take_and_clear_dirty_height_indices t =
+  let lst = t.dirty_height_indices in
+  t.dirty_height_indices <- [];
+  lst
+;;
 
 let toggle_mode (t : t) : unit =
   t.mode
@@ -162,7 +209,8 @@ let redo (t : t) : bool =
 let update_message_text (model : t) index new_txt =
   model.messages
   <- List.mapi model.messages ~f:(fun idx (role, txt) ->
-       if idx = index then role, new_txt else role, txt)
+       if idx = index then role, new_txt else role, txt);
+  invalidate_img_cache_index model ~idx:index
 ;;
 
 let ensure_buffer (model : t) ~(id : string) ~(role : string) : Types.msg_buffer =
@@ -170,7 +218,7 @@ let ensure_buffer (model : t) ~(id : string) ~(role : string) : Types.msg_buffer
   | Some b -> b
   | None ->
     let index = List.length model.messages in
-    let b = { Types.text = ref ""; index } in
+    let b = { Types.buf = Buffer.create 256; index } in
     Hashtbl.set model.msg_buffers ~key:id ~data:b;
     (* add empty placeholder so the UI can render incrementally *)
     model.messages <- model.messages @ [ role, "" ];
@@ -189,8 +237,8 @@ let apply_patch (model : t) (p : Types.patch) : t =
   | Types.Append_text { id; role; text } ->
     let buf = ensure_buffer model ~id ~role in
     (* Append new text and update the corresponding visible message. *)
-    buf.text := !(buf.text) ^ text;
-    update_message_text model buf.index !(buf.text);
+    Buffer.add_string buf.buf text;
+    update_message_text model buf.index (Buffer.contents buf.buf);
     model
   | Types.Set_function_name { id; name } ->
     Hashtbl.set model.function_name_by_id ~key:id ~data:name;
@@ -202,7 +250,7 @@ let apply_patch (model : t) (p : Types.patch) : t =
       | Some b -> b
       | None -> ensure_buffer model ~id ~role
     in
-    let max_len = 2_000 in
+    let max_len = 10_000 in
     let txt = Util.sanitize output in
     let txt =
       if String.length txt > max_len
@@ -210,8 +258,9 @@ let apply_patch (model : t) (p : Types.patch) : t =
       else txt
     in
     (* Overwrite buffer text *)
-    buf.text := txt;
-    update_message_text model buf.index txt;
+    Buffer.clear buf.buf;
+    Buffer.add_string buf.buf txt;
+    update_message_text model buf.index (Buffer.contents buf.buf);
     model
   | Types.Update_reasoning_idx { id; idx } ->
     (match Hashtbl.find model.reasoning_idx_by_id id with

@@ -11,8 +11,7 @@
     • first-class functions, arrays and references,
     • built-in support for a small prelude of primitives (see {!init_env}).
 
-    The checker is optional at runtime—the ChatML interpreter works fine
-    without it—but running it gives early feedback to users and enables
+    Running the type checker gives early feedback to users and enables
     richer editor tooling.
 
     The public surface is intentionally tiny:

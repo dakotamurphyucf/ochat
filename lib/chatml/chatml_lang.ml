@@ -1,6 +1,6 @@
 (** ChatML evaluator runtime.
 
-    This module implements the small, dynamically-typed {e ChatML} language
+    This module implements the small, statically-typed {e ChatML} language
     used by the rest of the code-base to describe lightweight scripts in
     prompts and test-scenarios.
 

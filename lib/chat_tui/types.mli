@@ -33,10 +33,11 @@ type message = role * string
     accumulate partial output in [text] and remember the target index into
     the [messages] list so the UI can update incrementally. *)
 type msg_buffer =
-  { text : string ref (** Mutable accumulator for the streaming text. *)
+  { buf : Buffer.t (** Mutable accumulator for the streaming text. *)
   ; index : int
-    (** Index into {!Chat_tui.Model.messages} that will
-                           hold the final message once streaming completes. *)
+    (** Zero-based index into {!Chat_tui.Model.messages} where the fully
+        assembled assistant message will be stored once streaming
+        finishes. *)
   }
 
 type cmd =
@@ -98,6 +99,16 @@ type settings =
         when using models that do not yet support the feature. *)
   }
 
-(** [default_settings ()] returns the default {!settings} record with
-    [parallel_tool_calls] set to [true]. *)
+(** [default_settings ()] returns the default {!settings} record.
+
+    The helper exists to future-proof call-sites: new fields can be added
+    to {!settings} later without breaking existing code.  Users are
+    encouraged to start from the default and tweak only the flags they
+    care about.
+
+    Example – disable parallel tool calls while keeping other defaults:
+    {[
+      let cfg = default_settings () in
+      { cfg with parallel_tool_calls = false }
+    ]} *)
 val default_settings : unit -> settings

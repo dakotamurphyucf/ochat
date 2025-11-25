@@ -9,7 +9,7 @@ type role = string
 type message = role * string
 
 type msg_buffer =
-  { text : string ref
+  { buf : Buffer.t
   ; index : int
   }
 

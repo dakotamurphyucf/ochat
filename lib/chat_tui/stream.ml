@@ -39,9 +39,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
     let patches = ref [] in
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
-    patches
-    := Append_text { id = item_id; role; text = Util.sanitize ~strip:false delta }
-       :: !patches;
+    patches := Append_text { id = item_id; role; text = delta } :: !patches;
     List.rev !patches
   (* --------------------------------------------------------------------- *)
   (* A new item has been announced – we may need to prepare buffers.        *)
@@ -56,6 +54,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
        if not (Hashtbl.mem (Model.msg_buffers model) idx)
        then patches := Ensure_buffer { id = idx; role } :: !patches;
        patches := Set_function_name { id = idx; name = fc.name } :: !patches;
+       patches := Append_text { id = idx; role; text = fc.name ^ "(" } :: !patches;
        (* Track active fork so subsequent deltas are coloured appropriately *)
        if is_fork
        then (
@@ -68,10 +67,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
        else [ Ensure_buffer { id = r.id; role = "reasoning" } ]
      | Item_stream.Output_message om ->
        let role = role_for_event model ~default:"assistant" in
-       let txt =
-         List.map om.content ~f:(fun c -> Util.sanitize ~strip:false c.text)
-         |> String.concat ~sep:" "
-       in
+       let txt = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" " in
        let patches =
          if Hashtbl.mem (Model.msg_buffers model) om.id
          then []
@@ -83,31 +79,25 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
   (* Reasoning summaries                                                    *)
   (* --------------------------------------------------------------------- *)
   | Res_stream.Reasoning_summary_text_delta { item_id; delta; summary_index; _ } ->
-    let prefix_newline =
-      match Hashtbl.find (Model.reasoning_idx_by_id model) item_id with
-      | Some idx_ref when !idx_ref = summary_index -> ""
-      | Some _ -> "\n"
-      | None -> ""
-    in
-    (* We'll also update the remembered summary index. *)
+    (* Append reasoning summaries verbatim; do not inject extra newlines between
+       summary segments – the renderer handles reflow. *)
     let patches = ref [] in
     let role = role_for_event model ~default:"reasoning" in
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
     patches := Update_reasoning_idx { id = item_id; idx = summary_index } :: !patches;
-    let txt = prefix_newline ^ Util.sanitize ~strip:false delta in
-    patches := Append_text { id = item_id; role = "reasoning"; text = txt } :: !patches;
+    patches := Append_text { id = item_id; role = "reasoning"; text = delta } :: !patches;
     List.rev !patches
   (* --------------------------------------------------------------------- *)
   (* Function call argument streaming                                       *)
   (* --------------------------------------------------------------------- *)
   | Res_stream.Function_call_arguments_delta { item_id; delta; _ } ->
-    let buf_empty =
+    let _buf_empty =
       match Hashtbl.find (Model.msg_buffers model) item_id with
-      | Some b -> String.is_empty !(b.text)
+      | Some b -> Buffer.length b.buf = 0
       | None -> true
     in
-    let fn_name =
+    let _fn_name =
       Option.value
         (Hashtbl.find (Model.function_name_by_id model) item_id)
         ~default:"tool"
@@ -116,19 +106,15 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
     let role = role_for_event model ~default:"tool" in
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
-    if buf_empty
-    then patches := Append_text { id = item_id; role; text = fn_name ^ "(" } :: !patches;
-    patches
-    := Append_text { id = item_id; role; text = Util.sanitize ~strip:false delta }
-       :: !patches;
+    patches := Append_text { id = item_id; role; text = delta } :: !patches;
     List.rev !patches
   | Res_stream.Function_call_arguments_done { item_id; _ } ->
-    let buf_empty =
+    let _buf_empty =
       match Hashtbl.find (Model.msg_buffers model) item_id with
-      | Some b -> String.is_empty !(b.text)
+      | Some b -> Buffer.length b.buf = 0
       | None -> true
     in
-    let fn_name =
+    let _fn_name =
       Option.value
         (Hashtbl.find (Model.function_name_by_id model) item_id)
         ~default:"tool"
@@ -137,11 +123,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
     let role = role_for_event model ~default:"tool" in
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
-    if buf_empty
-    then patches := Append_text { id = item_id; role; text = fn_name ^ "(" } :: !patches;
-    patches
-    := Append_text { id = item_id; role; text = Util.sanitize ~strip:false ")" }
-       :: !patches;
+    patches := Append_text { id = item_id; role; text = ")" } :: !patches;
     List.rev !patches
   (* --------------------------------------------------------------------- *)
   (* Everything else is ignored for now                                      *)

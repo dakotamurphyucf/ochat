@@ -24,6 +24,22 @@
       model representation lands, even the remaining book-keeping updates
       will move into patches so that the module regains full referential
       transparency.
+
+    {1 Pipeline change 2024-07}
+
+    • **Raw text deltas** – the stream handler now emits *unsanitised* raw
+      text via {!Types.Append_text} patches.  No UTF-8 validation or
+      word-wrapping happens at this stage.
+
+    • **Batching & coalescing** – {!Chat_tui.App} groups the deltas in its
+      {!Stream_batch} handler and merges adjacent [Append_text] patches
+      that target the same buffer.  This keeps the patch volume small
+      without compromising incremental updates.
+
+    • **Renderer-side sanitisation** – invalid byte sequences are removed
+      exactly once during rendering, together with word-wrapping.  The
+      change reduces cache invalidations and re-wraps per frame while
+      leaving the visual output unchanged.
 *)
 
 module Res = Openai.Responses
@@ -60,7 +76,10 @@ val handle_fn_out : model:Model.t -> Res.Function_call_output.t -> Types.patch l
     patches for) the following event classes:
 
     • [Output_text_delta] – append assistant text chunks
-    • [Output_item_added] – initialise message buffers and metadata
+    • [Output_item_added] – announce new items (messages, reasoning blocks
+      or function calls) and initialise their buffers / metadata
+    • [Output_message]     – full assistant message delivered in a single
+      event (handled as a sub-variant of [Output_item_added])
     • [Reasoning_summary_text_delta] – update tool reasoning sections
     • [Function_call_arguments_delta] / [Function_call_arguments_done] –
       stream the argument list of a tool invocation

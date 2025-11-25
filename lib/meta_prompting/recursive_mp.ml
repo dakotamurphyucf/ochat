@@ -572,14 +572,9 @@ let refine
       | _ -> []
     in
     let task =
-      let open Prompts in
-      match context.model_to_optimize, context.action, context.prompt_type with
-      | Some O3, Update, General -> openai_system_edit_instructions_prompt_o3
-      | Some O3, Generate, General -> openai_system_instructions_prompt_o3
-      | _, Update, General -> openai_system_edit_instructions_prompt
-      | _, Generate, General -> openai_system_instructions_prompt
-      | _, Update, Tool -> openai_tool_description_prompt
-      | _, Generate, Tool -> openai_tool_description_prompt
+      match context.env with
+      | Some env -> Prompt_factory_online.get_iterate_system_prompt env
+      | None -> Templates.iteration_prompt_v2
     in
     let tag =
       match context.prompt_type with

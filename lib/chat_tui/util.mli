@@ -77,3 +77,35 @@ val truncate : ?max_len:int -> string -> string
     ]}
 *)
 val wrap_line : limit:int -> string -> string list
+
+(** [reflow_reasoning_paragraphs s] collapses {i soft} line breaks in [s]
+    into paragraphs to improve readability of streamed reasoning text.
+
+    Behaviour:
+    - Consecutive non-empty lines are joined with a single space.
+    - Blank lines remain as paragraph separators (becoming "\n\n").
+    - Bullet-like lines (starting with "-", "*" or a digit followed by '.')
+      are kept as-is and start their own paragraph.
+
+    The function is intentionally conservative and designed for display
+    purposes; it does not attempt full markdown parsing. *)
+val reflow_reasoning_paragraphs : string -> string
+
+(** [reflow_soft_breaks s] collapses soft line breaks for general text while
+    preserving structure:
+    - keeps blank lines as paragraph separators,
+    - keeps list items ("- ", "* ", "+ ", "1.") on their own line,
+    - keeps headings (#...), quotes (> ...), and preformatted lines (indent ≥4)
+      as-is,
+    - respects fenced code blocks delimited by ``` or ~~~, keeping them
+      verbatim.
+
+    Intended to improve readability of pasted or generated markdown that was
+    hard-wrapped at ~80 columns. *)
+val reflow_soft_breaks : string -> string
+
+(** [reflow_bulleted_paragraphs s] joins hard-wrapped continuation lines that
+    belong to the same markdown list item into a single logical line while
+    preserving blank lines, new list items, headings, blockquotes, fenced code
+    and preformatted blocks. It is conservative and only affects list items. *)
+val reflow_bulleted_paragraphs : string -> string

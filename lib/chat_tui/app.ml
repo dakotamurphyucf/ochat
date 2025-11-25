@@ -30,6 +30,7 @@ open Eio.Std
 open Types
 module Model = Model
 module Renderer = Renderer
+module Redraw_throttle = Redraw_throttle
 module Stream_handler = Stream
 module Controller = Controller
 module Persistence = Persistence
@@ -108,6 +109,8 @@ let get_user_message_item text =
     ; _type = "message"
     }
 ;;
+
+let stream_in_flight (model : Model.t) = Option.is_some (Model.fetch_sw model)
 
 (** [apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term]
     performs {b synchronous} updates that take effect immediately after the
@@ -282,42 +285,43 @@ let handle_submit
     (* let on_event_batch evs = Eio.Stream.add ev_stream (`Stream_batch evs) in
     let on_event = throttle streaming_sw env on_event on_event_batch in *)
     let on_fn_out ev = Eio.Stream.add ev_stream (`Function_output ev) in
-    (* Fork a daemon fiber to batch events that  *)
+    (* Fork a daemon fiber to batch events using a short time window. *)
     Eio.Fiber.fork_daemon ~sw:streaming_sw (fun () ->
-      let rec loop () =
+      let clock = Eio.Stdenv.clock env in
+      let batch_ms =
+        match Sys.getenv "OCHAT_STREAM_BATCH_MS" with
+        | Some s ->
+          (try Float.min 50. (Float.max 1. (Float.of_string s)) with
+           | _ -> 12.)
+        | None -> 12.
+      in
+      let dt = batch_ms /. 1000. in
+      let rec loop acc window_open =
         match Eio.Stream.take stream with
         | `Stream ev ->
-          let rec inner_loop acc =
-            match Eio.Stream.take_nonblocking stream with
-            | None ->
-              (match acc with
-               | [] -> ()
-               | [ ev ] -> on_event ev
-               | _ ->
-                 Io.log
-                   ~dir:(Eio.Stdenv.cwd env)
-                   ~file:"batch.txt"
-                   (Sexp.to_string [%sexp "Batching events", (acc : Res_stream.t list)]
-                    ^ "\n");
-                 (* If we have accumulated events, send them as a batch. *)
-                 on_event_batch (List.rev acc))
-            | Some (`Stream ev) -> inner_loop (ev :: acc)
-            | Some (`Function_output ev) ->
-              if List.is_empty acc
-              then on_fn_out ev
-              else (
-                (* If we have accumulated events, send them as a batch. *)
-                on_event_batch (List.rev acc);
-                on_fn_out ev);
-              inner_loop []
-          in
-          inner_loop [ ev ];
-          loop ()
+          let acc = ev :: acc in
+          if not window_open
+          then (
+            Fiber.fork ~sw:streaming_sw (fun () ->
+              Eio.Time.sleep clock dt;
+              Eio.Stream.add stream `Flush);
+            loop acc true)
+          else loop acc true
         | `Function_output ev ->
+          (match acc with
+           | [] -> ()
+           | [ ev1 ] -> on_event ev1
+           | _ -> on_event_batch (List.rev acc));
           on_fn_out ev;
-          loop ()
+          loop [] false
+        | `Flush ->
+          (match acc with
+           | [] -> ()
+           | [ ev1 ] -> on_event ev1
+           | _ -> on_event_batch (List.rev acc));
+          loop [] false
       in
-      loop ());
+      loop [] false);
     (* openapi stream events -------->  *)
     let on_fn_out ev =
       (* Function call output events are sent to the UI for rendering. *)
@@ -369,7 +373,7 @@ let handle_submit
       let module Item = Openai.Responses.Item in
       let rec loop rev_items acc state =
         match rev_items with
-        | [] -> List.rev acc
+        | [] -> acc
         | item :: rest ->
           (match state with
            | `Keep -> loop rest (item :: acc) `Keep
@@ -453,7 +457,7 @@ let run_chat
        'ev)
         Eio.Stream.t
     =
-    Eio.Stream.create 10
+    Eio.Stream.create 256
   in
   let system_event = Eio.Stream.create 10 in
   (* Load the chat prompt and initialise the model. *)
@@ -599,7 +603,22 @@ let run_chat
     Notty_eio.Term.image term img;
     Notty_eio.Term.cursor term (Some (cx, cy))
   in
+  let fps =
+    match Sys.getenv "OCHAT_TUI_FPS" with
+    | Some s ->
+      (try Float.max 1. (Float.of_string s) with
+       | _ -> 30.)
+    | None -> 30.
+  in
+  let throttler =
+    Redraw_throttle.create ~fps ~enqueue_redraw:(fun () ->
+      Eio.Stream.add ev_stream `Redraw)
+  in
+  let redraw_immediate () = Redraw_throttle.redraw_immediate throttler ~draw:redraw in
   redraw ();
+  (* Start the periodic scheduler to coalesce frequent updates. *)
+  Redraw_throttle.spawn throttler ~sw:ui_sw ~sleep:(fun dt ->
+    Eio.Time.sleep (Eio.Stdenv.clock env) dt);
   let rec handle_cancel_or_quit () =
     match Model.fetch_sw model with
     | Some sw ->
@@ -617,67 +636,107 @@ let run_chat
     match ev with
     | #Notty.Unescape.event as ev -> handle_key ev
     | `Resize ->
-      redraw ();
+      redraw_immediate ();
       main_loop ()
     | `Redraw ->
+      Redraw_throttle.on_redraw_handled throttler;
       redraw ();
       main_loop ()
     | `Stream ev ->
-      let patches = Stream_handler.handle_event ~model ev in
-      ignore (Model.apply_patches model patches);
-      (match ev with
-       | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
-         (match item with
-          | Openai.Responses.Response_stream.Item.Output_message om ->
-            ignore
-            @@ Model.add_history_item model (Openai.Responses.Item.Output_message om)
-          | Openai.Responses.Response_stream.Item.Reasoning r ->
-            ignore @@ Model.add_history_item model (Openai.Responses.Item.Reasoning r)
-          | Openai.Responses.Response_stream.Item.Function_call fc ->
-            ignore
-            @@ Model.add_history_item model (Openai.Responses.Item.Function_call fc)
-          | _ -> ())
-       | _ -> ());
-      redraw ();
-      main_loop ()
+      (match not (stream_in_flight model) with
+       | true -> main_loop ()
+       | false ->
+         let patches = Stream_handler.handle_event ~model ev in
+         ignore (Model.apply_patches model patches);
+         (match ev with
+          | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
+            (match item with
+             | Openai.Responses.Response_stream.Item.Output_message om ->
+               ignore
+               @@ Model.add_history_item model (Openai.Responses.Item.Output_message om)
+             | Openai.Responses.Response_stream.Item.Reasoning r ->
+               ignore @@ Model.add_history_item model (Openai.Responses.Item.Reasoning r)
+             | Openai.Responses.Response_stream.Item.Function_call fc ->
+               ignore
+               @@ Model.add_history_item model (Openai.Responses.Item.Function_call fc)
+             | _ -> ())
+          | _ -> ());
+         (* Defer redraw to scheduler to avoid per-token redraws. *)
+         Redraw_throttle.request_redraw throttler;
+         main_loop ())
     | `Stream_batch items ->
-      List.iter items ~f:(fun item ->
-        let patches = Stream_handler.handle_event ~model item in
-        ignore (Model.apply_patches model patches);
-        match item with
-        | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
-          (match item with
-           | Openai.Responses.Response_stream.Item.Output_message om ->
-             ignore
-             @@ Model.add_history_item model (Openai.Responses.Item.Output_message om)
-           | Openai.Responses.Response_stream.Item.Reasoning r ->
-             ignore @@ Model.add_history_item model (Openai.Responses.Item.Reasoning r)
-           | Openai.Responses.Response_stream.Item.Function_call fc ->
-             ignore
-             @@ Model.add_history_item model (Openai.Responses.Item.Function_call fc)
-           | _ -> ())
-        | _ -> ());
-      redraw ();
-      main_loop ()
+      (match not (stream_in_flight model) with
+       | true -> main_loop ()
+       | false ->
+         (* Collect patches for the whole batch, then coalesce adjacent text appends. *)
+         let patches =
+           List.concat_map items ~f:(fun item -> Stream_handler.handle_event ~model item)
+         in
+         let weight = function
+           | Types.Ensure_buffer _ -> 0
+           | Types.Set_function_name _ -> 1
+           | Types.Update_reasoning_idx _ -> 1
+           | Types.Append_text _ -> 2
+           | _ -> 3
+         in
+         let stable_sorted =
+           List.mapi patches ~f:(fun i p -> i, p)
+           |> List.stable_sort ~compare:(fun (i1, p1) (i2, p2) ->
+             match Int.compare (weight p1) (weight p2) with
+             | 0 -> Int.compare i1 i2
+             | c -> c)
+           |> List.map ~f:snd
+         in
+         let rec coalesce acc = function
+           | [] -> List.rev acc
+           | Types.Append_text a1 :: Types.Append_text a2 :: rest
+             when String.equal a1.id a2.id && String.equal a1.role a2.role ->
+             let merged = Types.Append_text { a1 with text = a1.text ^ a2.text } in
+             coalesce acc (merged :: rest)
+           | p :: rest -> coalesce (p :: acc) rest
+         in
+         let patches = coalesce [] stable_sorted in
+         ignore (Model.apply_patches model patches);
+         (* Update history for completed items after applying the batch. *)
+         List.iter items ~f:(fun item ->
+           match item with
+           | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
+             (match item with
+              | Openai.Responses.Response_stream.Item.Output_message om ->
+                ignore
+                @@ Model.add_history_item model (Openai.Responses.Item.Output_message om)
+              | Openai.Responses.Response_stream.Item.Reasoning r ->
+                ignore @@ Model.add_history_item model (Openai.Responses.Item.Reasoning r)
+              | Openai.Responses.Response_stream.Item.Function_call fc ->
+                ignore
+                @@ Model.add_history_item model (Openai.Responses.Item.Function_call fc)
+              | _ -> ())
+           | _ -> ());
+         (* Defer redraw to scheduler to avoid per-batch burst redraws. *)
+         Redraw_throttle.request_redraw throttler;
+         main_loop ())
     | `Function_output out ->
-      let patches = Stream_handler.handle_fn_out ~model out in
-      ignore (Model.apply_patches model patches);
-      ignore (Model.add_history_item model (Res_item.Function_call_output out));
-      (* Update the UI to reflect the new function output. *)
-      redraw ();
-      main_loop ()
+      (match not (stream_in_flight model) with
+       | true -> main_loop ()
+       | false ->
+         let patches = Stream_handler.handle_fn_out ~model out in
+         ignore (Model.apply_patches model patches);
+         ignore (Model.add_history_item model (Res_item.Function_call_output out));
+         (* Defer redraw to scheduler to coalesce frequent updates. *)
+         Redraw_throttle.request_redraw throttler;
+         main_loop ())
     | `Replace_history items ->
       (* Replace the model's history items with the new ones. *)
       Model.set_history_items model items;
       Model.set_messages model (Conversation.of_history (Model.history_items model));
       (* Update the UI to reflect the new function output. *)
-      redraw ();
+      redraw_immediate ();
       main_loop ()
   (* Defer to controller for local key handling first. *)
   and handle_key (ev : Notty.Unescape.event) =
     match Controller.handle_key ~model ~term ev with
     | Controller.Redraw ->
-      redraw ();
+      Redraw_throttle.request_redraw throttler;
       main_loop ()
     | Controller.Submit_input ->
       (match Model.fetch_sw model with
@@ -687,7 +746,7 @@ let run_chat
          Model.set_input_line model "";
          Model.set_cursor_pos model 0;
          Eio.Stream.add system_event msg;
-         Eio.Stream.add ev_stream `Redraw;
+         Redraw_throttle.request_redraw throttler;
          main_loop ()
        | None ->
          apply_local_submit_effects ~dir:cwd ~env ~cache ~model ~ev_stream ~term;
@@ -710,7 +769,7 @@ let run_chat
       (match Model.fetch_sw model with
        | Some _ ->
          add_placeholder_stream_error model "Cannot compact while streaming.";
-         Eio.Stream.add ev_stream `Redraw;
+         Redraw_throttle.request_redraw throttler;
          main_loop ()
        | None ->
          add_placeholder_compact_message model;
@@ -744,16 +803,16 @@ let run_chat
              (* After compaction the selection is cleared and viewport resets. *)
              Model.select_message model None;
              Model.set_auto_follow model true;
-             Eio.Stream.add ev_stream `Redraw;
+             Redraw_throttle.request_redraw throttler;
              Model.set_fetch_sw model None
              (* Show a success message. *)
            with
            | _ ->
              Model.set_fetch_sw model None;
              add_placeholder_stream_error model "Compaction failed.";
-             Eio.Stream.add ev_stream `Redraw);
+             Redraw_throttle.request_redraw throttler);
          (* Continue the main loop after compaction. *)
-         Eio.Stream.add ev_stream `Redraw;
+         Redraw_throttle.request_redraw throttler;
          main_loop ())
     | Controller.Quit -> ()
     | Controller.Unhandled ->

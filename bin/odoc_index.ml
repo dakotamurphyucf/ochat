@@ -66,7 +66,7 @@ let main env =
              ; "ocamlgraph"
              ; "tls"
              ]
-         , [ "ochat" ] ))
+         , [ "ochat"; "textmate-language" ] ))
     ~env
     ~root:root_path
     ~output:out_path

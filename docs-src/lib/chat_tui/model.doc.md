@@ -25,8 +25,9 @@ simple mutations that will later be replaced by pure transformations.
 4. [Command-line helpers](#command-line-helpers)
 5. [Undo / Redo](#undo--redo)
 6. [Fork helpers](#fork-helpers)
-7. [Applying patches – `apply_patch`](#apply_patch)
-8. [Known limitations](#known-limitations)
+7. [Rendering cache helpers](#rendering-cache-helpers)
+8. [Applying patches – `apply_patch`](#apply_patch)
+9. [Known limitations](#known-limitations)
 
 ---
 
@@ -106,10 +107,11 @@ let empty () =
 | `auto_follow` | `true` → scroll follows new messages automatically. |
 | `tasks` | Background jobs associated with the current session. |
 | `kv_store` | Arbitrary key–value store used by plugins and tools. |
-| `cmdline` / `cmdline_cursor` | ':' command buffer and its caret position. |
+| `cmdline` / `cmdline_cursor` | Current ':' command buffer and its caret position. |
 
 Additional mutators exist that operate on these fields (`clear_selection`,
-`set_selection_anchor` …) and do exactly what their names suggest.
+`set_selection_anchor`, `set_cmdline`, `set_cmdline_cursor` …) and do exactly
+what their names suggest.
 
 ---
 
@@ -128,9 +130,13 @@ Additional mutators exist that operate on these fields (`clear_selection`,
 ### Command-line helpers <a id="command-line-helpers"></a>
 
 When the user presses `:` the UI enters *command line* mode.  The buffer and
-cursor position live in the `cmdline` / `cmdline_cursor` fields.  The helper
-functions mirror those in the accessors section and allow the controller to
-edit the line in place.
+cursor position live in the `cmdline` / `cmdline_cursor` fields.
+
+* **Reading:** use `cmdline` and `cmdline_cursor` to inspect the current
+  contents and caret position.
+* **Writing:** `set_cmdline` and `set_cmdline_cursor` mutate the buffer and
+  the cursor, respectively.  Both functions operate on {e byte} indices – the
+  caller is responsible for maintaining valid UTF-8 boundaries.
 
 ---
 
@@ -149,6 +155,51 @@ conversation re-writer or the summariser) stream their output into the UI.
 `active_fork` stores the _call-id_ of the process so the renderer can
 highlight incoming deltas.  `fork_start_index` remembers where the forked
 output began inside the message list.
+
+---
+
+### Rendering cache helpers <a id="rendering-cache-helpers"></a>
+
+Rendering a markdown-heavy chat history is surprisingly expensive because
+every mouse movement or keystroke may invalidate word-wrapping and ANSI
+colour escapes.  To keep interactive latencies low the renderer therefore
+caches the **Notty** image for each message in a small hash-table that
+lives inside the model:
+
+*Key* → message index `int` (0-based)  
+*Value* → [`msg_img_cache`](#type-msg_img_cache) record containing the
+original text, pre-rendered image(s) and their heights.
+
+The helpers below expose a minimal API that allows the renderer to flush or
+update the cache only when required.
+
+| Function | Behaviour |
+|----------|-----------|
+| `last_history_width` | Width (cells) the cached images are valid for. |
+| `set_last_history_width` | Updates the width tracking field. **Does not** flush the cache. |
+| `clear_all_img_caches` | Drops every entry – used after a hard resize. |
+| `invalidate_img_cache_index` | Removes the entry for a single message. |
+| `find_img_cache` | Reads a cache entry, returns `None` when missing. |
+| `set_img_cache` | Inserts / overwrites a cached render. |
+| `take_and_clear_dirty_height_indices` | Returns the list of message indices whose cached height might be stale and clears the internal tracking list. |
+
+Algorithm sketch used by the renderer:
+
+1. Check the history pane width.  
+   If the value differs from `last_history_width`:
+   * flush the entire cache via `clear_all_img_caches`,
+   * call `set_last_history_width` with the new width, then
+   * restart the render pass.
+2. For each message consult `find_img_cache`.  
+   * *Hit* → reuse the cached image.  
+   * *Miss* → render, then store via `set_img_cache`.
+3. When streaming deltas modify an existing message the controller calls
+   `invalidate_img_cache_index` for the affected index only.
+
+These helpers are **private to the TUI layer**.  External modules must not
+reach into or rely on the cache.
+
+---
 
 ---
 

@@ -2,200 +2,600 @@ open Core
 open Notty
 open Types
 
-(* ------------------------------------------------------------------------- *)
-(*  Colour scheme                                                            *)
-(* ------------------------------------------------------------------------- *)
+module Theme = struct
+  let attr_of_role = function
+    | "assistant" -> A.(fg (rgb ~r:0 ~g:5 ~b:5))
+    | "user" -> A.(fg (rgb ~r:5 ~g:4 ~b:0))
+    | "developer" -> A.(fg (rgb ~r:5 ~g:2 ~b:2))
+    | "tool" -> A.(fg (rgb ~r:5 ~g:3 ~b:5))
+    | "fork" -> A.(fg (rgb ~r:5 ~g:4 ~b:0))
+    | "reasoning" -> A.(fg (rgb ~r:2 ~g:4 ~b:5))
+    | "system" -> A.(fg (gray 10))
+    | "tool_output" -> A.(fg (rgb ~r:2 ~g:5 ~b:2))
+    | "error" -> A.(fg red ++ st reverse)
+    | _ -> A.empty
+  ;;
 
-let attr_of_role = function
-  | "assistant" -> A.(fg lightcyan)
-  (* User messages are highlighted in yellow to distinguish them from assistant responses. *)
-  | "user" -> A.(fg yellow)
-  | "developer" -> A.(fg red)
-  | "tool" -> A.(fg lightmagenta)
-  | "fork" -> A.(fg lightyellow)
-  | "reasoning" -> A.(fg lightblue)
-  (* System messages (model instructions, meta information, …) are rendered
-     in a dimmed grey so that they stand out from regular assistant output
-     without being too prominent. *)
-  | "system" -> A.(fg lightblack)
-  | "tool_output" -> A.(fg lightgreen)
-  | "error" -> A.(fg red ++ st reverse)
-  (* Default case for any unknown role, we use a neutral empty attribute. *)
-  | _ -> A.empty
+  let selection_attr base = A.(base ++ st reverse)
+end
+
+let safe_string attr s =
+  match I.string attr s with
+  | img -> img
+  | exception e ->
+    Printf.eprintf "Error rendering line: %s" (Exn.to_string e);
+    I.string attr "[error: invalid input]"
 ;;
 
-(* ------------------------------------------------------------------------- *)
-(*  Word-wrapping & layout                                                   *)
-(* ------------------------------------------------------------------------- *)
-
-(* Render a single chat [message] into a boxed [Notty] image.  We mimic the
-   "box" helper from [prompts/example_notty_eio.ml]: the textual content is
-   word-wrapped, then displayed on top of a coloured background with a one
-  -column/row margin on every side.  This yields a cleaner look than the old
-   ASCII/Unicode line drawing frame while still keeping messages visually
-   separate. *)
-
-let message_to_image ~max_width ?(selected = false) ((role, text) : message) : I.t =
-  (* Skip entirely blank messages (after trimming whitespace). *)
-  let trimmed = String.strip text in
-  if String.is_empty trimmed
-  then I.empty
-  else (
-    (* ------------------------------------------------------------------- *)
-    (*  Colours                                                            *)
-    (* ------------------------------------------------------------------- *)
-    let base_attr = attr_of_role role in
-    let content_attr = if selected then A.(base_attr ++ st reverse) else base_attr in
-    (* ------------------------------------------------------------------- *)
-    (*  Word-wrapping                                                     *)
-    (* ------------------------------------------------------------------- *)
-    (* We leave two columns for interior padding (a single space on each
-       side), plus the border itself.  Therefore the usable width for the
-       actual content is [max_width - 4]. *)
-    let content_width = Int.max 1 (max_width - 4) in
-    let prefix = role ^ ": " in
-    let indent = String.make (String.length prefix) ' ' in
-    let make_lines body pref =
-      let limit = Int.max 1 (content_width - String.length pref) in
-      match Util.wrap_line ~limit body with
-      | [] -> [ pref ]
-      | first :: rest -> (pref ^ first) :: List.map rest ~f:(fun l -> indent ^ l)
-    in
-    let lines =
-      String.split_lines text
-      |> List.concat_mapi ~f:(fun idx para ->
-        let pref = if idx = 0 then prefix else indent in
-        make_lines para pref)
-    in
-    (* Pre-create image per line to get display width. *)
-    let line_imgs =
-      List.map lines ~f:(fun l ->
-        match I.string content_attr l with
-        | s -> s
-        | exception e ->
-          Printf.eprintf "Error rendering line: %s" (Exn.to_string e);
-          I.string content_attr (Printf.sprintf "[error: invalid input]"))
-    in
-    let line_widths = List.map line_imgs ~f:I.width in
-    let max_line_w = List.fold line_widths ~init:0 ~f:Int.max in
-    (* Borders reuse content colour. *)
-    let border_attr = content_attr in
-    (* Helper: horizontal rule of box-drawing chars, sized by cells. *)
-    let hline len =
-      let seg = "─" in
-      let line = String.concat ~sep:"" (List.init len ~f:(fun _ -> seg)) in
-      I.string border_attr line
-    in
-    let top_border =
-      let left = I.string border_attr "┌" in
-      let mid = hline (max_line_w + 2) in
-      let right = I.string border_attr "┐" in
-      Notty.Infix.(left <|> mid <|> right)
-    in
-    let bottom_border =
-      let left = I.string border_attr "└" in
-      let mid = hline (max_line_w + 2) in
-      let right = I.string border_attr "┘" in
-      Notty.Infix.(left <|> mid <|> right)
-    in
-    (* Build each interior row: │ <space><text><padding><space> │ *)
-    let build_row (img, w) =
-      let pad_w = max_line_w - w in
-      let padding = if pad_w = 0 then I.empty else I.char A.empty ' ' pad_w 1 in
-      Notty.Infix.(
-        I.string border_attr "│ " <|> img <|> padding <|> I.string border_attr " │")
-    in
-    let content_rows =
-      List.map (List.zip_exn line_imgs line_widths) ~f:build_row |> I.vcat
-    in
-    Notty.I.vcat [ top_border; content_rows; bottom_border ])
+let create_hi_engine () =
+  let e = Highlight_tm_engine.create ~theme:Highlight_theme.github_dark in
+  let reg = Highlight_registry.get () in
+  Highlight_tm_engine.with_registry e ~registry:reg
 ;;
 
-let history_image ~width ~(messages : message list) ~(selected_idx : int option) : I.t =
-  messages
-  |> List.mapi ~f:(fun idx msg ->
-    let sel = Option.value_map selected_idx ~default:false ~f:(Int.equal idx) in
-    message_to_image ~max_width:width ~selected:sel msg)
-  |> I.vcat
-;;
+module Roles = struct
+  let is_toollike = function
+    | "tool" | "tool_output" -> true
+    | _ -> false
+  ;;
 
-(* ------------------------------------------------------------------------- *)
-(*  High-level compositor – history viewport + multi-line prompt             *)
-(* ------------------------------------------------------------------------- *)
+  let label_of_role (r : role) = r
+end
 
-let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
-  let open Notty in
-  let w, h = size in
-  (* Prepare / update history image inside the scroll box. *)
-  let history_img =
-    history_image
-      ~width:w
-      ~messages:(Model.messages model)
-      ~selected_idx:(Model.selected_msg model)
-  in
-  Notty_scroll_box.set_content (Model.scroll_box model) history_img;
-  (* Keep bottom aligned if [auto_follow] is enabled.  The scroll helpers are
-     effect-free apart from mutating the scroll box’s internal offset, which
-     is an intended side effect that belongs to the model. *)
-  let input_lines =
-    match Model.mode model with
-    | Cmdline -> [ Model.cmdline model ]
-    | _ ->
-      (match String.split ~on:'\n' (Model.input_line model) with
-       | [] -> [ "" ]
-       | ls -> ls)
-  in
-  (* ---------------------------- Dimensions ---------------------------- *)
-  let input_content_height = List.length input_lines in
-  let border_rows =
-    2
-    (* top & bottom of input box *)
-  in
-  let history_height =
-    let base = Int.max 1 (h - input_content_height - border_rows) in
-    max 1 (base - 1)
-  in
-  if Model.auto_follow model
-  then Notty_scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:history_height;
-  let history_view =
-    Notty_scroll_box.render (Model.scroll_box model) ~width:w ~height:history_height
-  in
-  (* ------------------------------------------------------------------- *)
-  (*  Status bar – shows current editor mode                              *)
-  (* ------------------------------------------------------------------- *)
-  let status_attr = A.(bg lightblack ++ fg lightwhite) in
-  let mode_txt =
-    match Model.mode model with
-    | Insert -> "-- INSERT --"
-    | Normal -> "-- NORMAL --"
-    | Cmdline -> "-- CMD --"
-  in
-  let raw_txt =
-    match Model.draft_mode model with
-    | Model.Raw_xml -> " -- RAW --"
-    | Model.Plain -> ""
-  in
-  let mode_tag = I.string status_attr (mode_txt ^ raw_txt) |> I.hsnap ~align:`Left w in
-  (* ------------------------ Input box & BG --------------------------- *)
-  let border_attr = A.(fg lightblue) in
-  let bg_attr = A.(bg (rgb ~r:1 ~g:1 ~b:2)) in
-  (* ---------------- Selection attributes --------------------------- *)
-  let selection_attr base = A.(base ++ st reverse) in
-  let input_img =
-    let open I in
+module Spans = struct
+  type run = Notty.A.t * string
+  type line = run list
+end
+
+module Wrap = struct
+  open Spans
+
+  let width_of_text s = I.width (I.string A.empty s)
+
+  let wrap_runs ~limit (runs : run list) : line list =
+    if limit <= 0
+    then [ runs ]
+    else (
+      let push_run acc a s =
+        match acc with
+        | (a', s') :: tl when phys_equal a a' -> (a, s' ^ s) :: tl
+        | _ -> (a, s) :: acc
+      in
+      let flush acc cur = List.rev cur :: acc in
+      let rec add_text acc cur cur_w a s pos =
+        if pos >= String.length s
+        then acc, cur, cur_w
+        else (
+          let code = Char.to_int (String.unsafe_get s pos) in
+          let clen =
+            if code land 0x80 = 0
+            then 1
+            else if code land 0xE0 = 0xC0
+            then 2
+            else if code land 0xF0 = 0xE0
+            then 3
+            else if code land 0xF8 = 0xF0
+            then 4
+            else 1
+          in
+          let clen = if clen <= 0 then 1 else clen in
+          let piece =
+            if pos + clen <= String.length s
+            then String.sub s ~pos ~len:clen
+            else String.sub s ~pos ~len:(String.length s - pos)
+          in
+          let ch_w = width_of_text piece in
+          if cur_w + ch_w > limit && not (List.is_empty cur)
+          then (
+            let acc = flush acc cur in
+            add_text acc [] 0 a s pos)
+          else (
+            let cur = push_run cur a piece in
+            add_text acc cur (cur_w + ch_w) a s (pos + clen)))
+      in
+      let rec loop acc cur cur_w = function
+        | [] -> List.rev (if List.is_empty cur then acc else flush acc cur)
+        | (a, s) :: rest ->
+          let acc, cur, cur_w = add_text acc cur cur_w a s 0 in
+          loop acc cur cur_w rest
+      in
+      loop [] [] 0 runs)
+  ;;
+end
+
+module Blocks = struct
+  type t =
+    | Text of string
+    | Code of
+        { lang : string option
+        ; code : string
+        }
+
+  let of_message_text s =
+    Markdown_fences.split s
+    |> List.map ~f:(function
+      | Markdown_fences.Text t -> Text t
+      | Markdown_fences.Code_block { lang; code } -> Code { lang; code })
+  ;;
+end
+
+module Code_cache2 = struct
+  type role_class =
+    | Toollike
+    | Userlike
+
+  let bucket_size = 8
+
+  let bucket_for_width w =
+    if w <= 0 then 0 else (w + bucket_size - 1) / bucket_size * bucket_size
+  ;;
+
+  let role_tag = function
+    | Toollike -> 'T'
+    | Userlike -> 'U'
+  ;;
+
+  let key ~klass ~lang ~digest ~wb =
+    let l = Option.value lang ~default:"-" in
+    String.concat
+      [ String.of_char (role_tag klass); "|"; l; "|"; digest; "|"; Int.to_string wb ]
+  ;;
+
+  type entry =
+    { mutable last_used : int
+    ; img : I.t
+    }
+
+  let capacity = 128
+  let tbl : (string, entry) Hashtbl.t = Hashtbl.create (module String)
+  let tick = ref 0
+
+  let get ~klass ~lang ~digest ~wb =
+    incr tick;
+    let k = key ~klass ~lang ~digest ~wb in
+    match Hashtbl.find tbl k with
+    | None -> None
+    | Some e ->
+      e.last_used <- !tick;
+      Some e.img
+  ;;
+
+  let evict_if_needed () =
+    if Hashtbl.length tbl > capacity
+    then (
+      let oldest =
+        Hashtbl.fold tbl ~init:None ~f:(fun ~key ~data acc ->
+          match acc with
+          | None -> Some (key, data.last_used)
+          | Some (_k, t) -> if data.last_used < t then Some (key, data.last_used) else acc)
+      in
+      match oldest with
+      | None -> ()
+      | Some (k, _) -> Hashtbl.remove tbl k)
+  ;;
+
+  let set ~klass ~lang ~digest ~wb img =
+    incr tick;
+    let k = key ~klass ~lang ~digest ~wb in
+    Hashtbl.set tbl ~key:k ~data:{ last_used = !tick; img };
+    evict_if_needed ()
+  ;;
+end
+
+module Render_context = struct
+  type t =
+    { width : int
+    ; selected : bool
+    ; role : string
+    ; hi_engine : Highlight_tm_engine.t
+    }
+
+  let make ~width ~selected ~role ~hi_engine = { width; selected; role; hi_engine }
+  let prefix_first t = Roles.label_of_role t.role ^ ": "
+  let prefix_cont t = String.make (String.length (prefix_first t)) ' '
+end
+
+module Paint = struct
+  open Render_context
+
+  let render_paragraph (ctx : t) ~(is_first : bool) ~(para : string) : I.t list =
+    let first_pref = prefix_first ctx in
+    let indent = prefix_cont ctx in
+    let base_attr = Theme.attr_of_role ctx.role in
+    let sel = if ctx.selected then Theme.selection_attr else Fn.id in
+    let limit = Int.max 1 (ctx.width - String.length first_pref) in
+    if String.is_empty para
+    then [ I.hsnap ~align:`Left ctx.width (I.string A.empty "") ]
+    else (
+      let lines, info =
+        Highlight_tm_engine.highlight_text_with_info
+          ctx.hi_engine
+          ~lang:(Some "markdown")
+          ~text:para
+      in
+      let spans =
+        match info.Highlight_tm_engine.fallback with
+        | None ->
+          (match lines with
+           | [ xs ] -> xs
+           | xs -> List.concat xs)
+        | Some _ ->
+          print_endline "uouououo";
+          let len = String.length para in
+          if
+            len >= 4
+            && String.is_prefix para ~prefix:"**"
+            && String.is_suffix para ~suffix:"**"
+          then (
+            let inner = String.sub para ~pos:2 ~len:(len - 4) in
+            let bold_attr =
+              Highlight_theme.attr_of_scopes
+                Highlight_theme.default_dark
+                ~scopes:[ "markup.bold" ]
+            in
+            [ bold_attr, inner ])
+          else if
+            len >= 4
+            && String.is_prefix para ~prefix:"__"
+            && String.is_suffix para ~suffix:"__"
+          then (
+            let inner = String.sub para ~pos:2 ~len:(len - 4) in
+            let bold_attr =
+              Highlight_theme.attr_of_scopes
+                Highlight_theme.default_dark
+                ~scopes:[ "markup.bold" ]
+            in
+            [ bold_attr, inner ])
+          else [ A.empty, para ]
+      in
+      let runs = List.map spans ~f:(fun (a, s) -> A.(base_attr ++ a), s) in
+      let wrapped = Wrap.wrap_runs ~limit runs in
+      let render_line ~pref line_runs =
+        let content_img =
+          List.map line_runs ~f:(fun (a, s) -> safe_string (sel a) s) |> I.hcat
+        in
+        Notty.Infix.(safe_string (sel base_attr) pref <|> content_img)
+        |> I.hsnap ~align:`Left ctx.width
+      in
+      match wrapped with
+      | [] -> []
+      | l0 :: rest ->
+        let first_pref = if is_first then first_pref else indent in
+        let row0 = render_line ~pref:first_pref l0 in
+        let rest_rows = List.map rest ~f:(render_line ~pref:indent) in
+        row0 :: rest_rows)
+  ;;
+
+  let render_code_block
+        (ctx : t)
+        ~(is_first : bool)
+        ~(lang : string option)
+        ~(code : string)
+        ~(klass : Code_cache2.role_class)
+    : I.t list
+    =
+    let first_pref0 = prefix_first ctx in
+    let indent = prefix_cont ctx in
+    let first_pref = if is_first then first_pref0 else indent in
+    let pref_len = String.length first_pref in
+    let content_w_first = Int.max 0 (ctx.width - pref_len) in
+    let make_content ~w ~selected =
+      let spans = Highlight_tm_engine.highlight_text ctx.hi_engine ~lang ~text:code in
+      let rows =
+        List.map spans ~f:(fun line_spans ->
+          List.map line_spans ~f:(fun (a, s) ->
+            safe_string (if selected then A.(a ++ st reverse) else a) s)
+          |> I.hcat
+          |> I.hsnap ~align:`Left w)
+      in
+      I.vcat rows
+    in
+    if content_w_first <= 0
+    then (
+      let spans = Highlight_tm_engine.highlight_text ctx.hi_engine ~lang ~text:code in
+      let rows =
+        List.mapi spans ~f:(fun i line_spans ->
+          let pref = if Int.equal i 0 then first_pref else indent in
+          let content_img =
+            List.map line_spans ~f:(fun (a, s) ->
+              safe_string (if ctx.selected then A.(a ++ st reverse) else a) s)
+            |> I.hcat
+          in
+          Notty.Infix.(
+            safe_string
+              (Theme.attr_of_role ctx.role
+               |> fun a -> if ctx.selected then Theme.selection_attr a else a)
+              pref
+            <|> content_img)
+          |> I.hsnap ~align:`Left ctx.width)
+      in
+      rows)
+    else (
+      let bucket = Code_cache2.bucket_for_width content_w_first in
+      let digest =
+        Md5.(to_hex (digest_string (Option.value lang ~default:"-" ^ "\x00" ^ code)))
+      in
+      let content_img =
+        if ctx.selected
+        then make_content ~w:content_w_first ~selected:true
+        else (
+          match Code_cache2.get ~klass ~lang ~digest ~wb:bucket with
+          | Some img -> img
+          | None ->
+            let img = make_content ~w:bucket ~selected:false in
+            Code_cache2.set ~klass ~lang ~digest ~wb:bucket img;
+            img)
+      in
+      let h = I.height content_img in
+      let base_attr = Theme.attr_of_role ctx.role in
+      let base_attr =
+        if ctx.selected then Theme.selection_attr base_attr else base_attr
+      in
+      let prefix_img =
+        let row0 = safe_string base_attr first_pref in
+        let rowi = safe_string base_attr indent in
+        let rows = if h <= 0 then [] else row0 :: List.init (h - 1) ~f:(fun _ -> rowi) in
+        I.vcat rows
+      in
+      [ Notty.Infix.(prefix_img <|> content_img) |> I.hsnap ~align:`Left ctx.width ])
+  ;;
+end
+
+module Message = struct
+  open Render_context
+
+  let sanitize_developer role text =
+    if String.equal role "developer"
+    then (
+      let s = String.lstrip text in
+      let label = role ^ ":" in
+      let s_lower = String.lowercase s in
+      let label_lower = String.lowercase label in
+      if String.is_prefix s_lower ~prefix:label_lower
+      then String.lstrip (String.drop_prefix s (String.length label))
+      else text)
+    else text
+  ;;
+
+  let render (ctx : Render_context.t) ((role, text) : message) : I.t =
+    let text = Util.sanitize ~strip:false text |> sanitize_developer role in
+    let trimmed = String.strip text in
+    if String.is_empty trimmed
+    then I.empty
+    else (
+      let blocks = Blocks.of_message_text text in
+      let first_row = ref true in
+      let rows =
+        List.concat_map blocks ~f:(fun block ->
+          match block with
+          | Blocks.Text s | Blocks.Code { lang = Some "html"; code = s } ->
+            String.split_lines s
+            |> List.concat_map ~f:(fun para ->
+              let rs = Paint.render_paragraph ctx ~is_first:!first_row ~para in
+              if not (List.is_empty rs) then first_row := false;
+              rs)
+          | Blocks.Code { lang; code } ->
+            let klass =
+              if Roles.is_toollike role
+              then Code_cache2.Toollike
+              else Code_cache2.Userlike
+            in
+            let rs =
+              Paint.render_code_block ctx ~is_first:!first_row ~lang ~code ~klass
+            in
+            if (not (Roles.is_toollike role)) && not (List.is_empty rs)
+            then first_row := false;
+            rs)
+      in
+      let gap = I.hsnap ~align:`Left ctx.width (I.string A.empty " ") in
+      I.vcat (rows @ [ gap ]))
+  ;;
+end
+
+module Viewport = struct
+  let render
+        ~(model : Model.t)
+        ~(width : int)
+        ~(height : int)
+        ~(messages : message list)
+        ~(selected_idx : int option)
+        ~(render_message : selected:bool -> message -> I.t)
+    : I.t
+    =
+    let len = List.length messages in
+    let heights = Model.msg_heights model in
+    let prefix = Model.height_prefix model in
+    let get_height idx msg =
+      match Model.find_img_cache model ~idx with
+      | Some entry when entry.width = width && String.equal entry.text (snd msg) ->
+        entry.height_unselected
+      | _ ->
+        let img_unselected = render_message ~selected:false msg in
+        let h = I.height img_unselected in
+        let entry =
+          { Model.width
+          ; text = snd msg
+          ; img_unselected
+          ; height_unselected = h
+          ; img_selected = None
+          ; height_selected = None
+          }
+        in
+        Model.set_img_cache model ~idx entry;
+        h
+    in
+    let ensure_arrays () =
+      if Array.length heights <> len || Array.length prefix <> len + 1
+      then (
+        let heights' = Array.create ~len 0 in
+        let prefix' = Array.create ~len:(len + 1) 0 in
+        let rec fill i msgs =
+          match msgs with
+          | [] -> ()
+          | msg :: rest ->
+            let h = get_height i msg in
+            heights'.(i) <- h;
+            prefix'.(i + 1) <- prefix'.(i) + h;
+            fill (i + 1) rest
+        in
+        fill 0 messages;
+        Model.set_msg_heights model heights';
+        Model.set_height_prefix model prefix')
+      else (
+        match Model.take_and_clear_dirty_height_indices model with
+        | [] -> ()
+        | dirty ->
+          let dirty = List.dedup_and_sort ~compare:Int.compare dirty in
+          List.iter dirty ~f:(fun idx ->
+            if idx >= 0 && idx < len
+            then (
+              let msg = List.nth_exn messages idx in
+              let old_h = heights.(idx) in
+              let new_h = get_height idx msg in
+              let delta = new_h - old_h in
+              if not (Int.equal delta 0)
+              then (
+                heights.(idx) <- new_h;
+                let n = Array.length prefix - 1 in
+                for j = idx + 1 to n do
+                  prefix.(j) <- prefix.(j) + delta
+                done))))
+    in
+    ensure_arrays ();
+    let prefix = Model.height_prefix model in
+    let total_height = prefix.(len) in
+    let max_scroll = Int.max 0 (total_height - height) in
+    let scroll =
+      if Model.auto_follow model
+      then max_scroll
+      else (
+        let s = Notty_scroll_box.scroll (Model.scroll_box model) in
+        Int.max 0 (Int.min s max_scroll))
+    in
+    let bsearch_first_gt arr ~len ~target =
+      let lo = ref 0 in
+      let hi = ref len in
+      while !lo < !hi do
+        let mid = (!lo + !hi) lsr 1 in
+        if arr.(mid) <= target then lo := mid + 1 else hi := mid
+      done;
+      !lo
+    in
+    let bsearch_first_ge arr ~len ~target =
+      let lo = ref 0 in
+      let hi = ref len in
+      while !lo < !hi do
+        let mid = (!lo + !hi) lsr 1 in
+        if arr.(mid) < target then lo := mid + 1 else hi := mid
+      done;
+      !lo
+    in
+    let start_k = bsearch_first_gt prefix ~len:(len + 1) ~target:scroll in
+    let start_idx = Int.max 0 (start_k - 1) in
+    let end_pos = Int.min total_height (scroll + height) in
+    let end_k = bsearch_first_ge prefix ~len:(len + 1) ~target:end_pos in
+    let last_idx = Int.max 0 (Int.min (len - 1) (end_k - 1)) in
+    let top_blank = if len = 0 then 0 else prefix.(start_idx) in
+    let bottom_blank = if len = 0 then 0 else total_height - prefix.(last_idx + 1) in
+    let get_img idx msg ~selected =
+      match Model.find_img_cache model ~idx with
+      | Some entry when entry.width = width && String.equal entry.text (snd msg) ->
+        (match selected, entry.img_selected with
+         | true, Some img -> img
+         | true, None ->
+           let img = render_message ~selected:true msg in
+           let entry' =
+             { entry with img_selected = Some img; height_selected = Some (I.height img) }
+           in
+           Model.set_img_cache model ~idx entry';
+           img
+         | false, _ -> entry.img_unselected)
+      | _ ->
+        let img_unselected = render_message ~selected:false msg in
+        let h = I.height img_unselected in
+        let entry =
+          { Model.width
+          ; text = snd msg
+          ; img_unselected
+          ; height_unselected = h
+          ; img_selected = None
+          ; height_selected = None
+          }
+        in
+        Model.set_img_cache model ~idx entry;
+        if Option.value_map selected_idx ~default:false ~f:(Int.equal idx)
+        then render_message ~selected:true msg
+        else img_unselected
+    in
+    let body =
+      if len = 0 || last_idx < start_idx
+      then I.empty
+      else (
+        let imgs =
+          List.init
+            (last_idx - start_idx + 1)
+            ~f:(fun off ->
+              let idx = start_idx + off in
+              let msg = List.nth_exn messages idx in
+              let sel = Option.value_map selected_idx ~default:false ~f:(Int.equal idx) in
+              get_img idx msg ~selected:sel)
+        in
+        I.vcat imgs)
+    in
+    let top_pad = I.void width top_blank in
+    let bot_pad = I.void width bottom_blank in
+    I.vcat [ top_pad; body; bot_pad ]
+  ;;
+end
+
+module Status_bar = struct
+  let render ~width ~(model : Model.t) =
+    let bar_attr = A.(bg (gray 2) ++ fg (gray 15)) in
+    let mode_txt =
+      match Model.mode model with
+      | Insert -> "-- INSERT --"
+      | Normal -> "-- NORMAL --"
+      | Cmdline -> "-- CMD --"
+    in
+    let raw_txt =
+      match Model.draft_mode model with
+      | Model.Raw_xml -> " -- RAW --"
+      | Model.Plain -> ""
+    in
+    let text = mode_txt ^ raw_txt in
+    let text_img = I.string bar_attr text in
+    let pad_w = Int.max 0 (width - I.width text_img) in
+    let pad = I.string bar_attr (String.make pad_w ' ') in
+    Notty.Infix.(text_img <|> pad)
+  ;;
+end
+
+module Input_box = struct
+  let render ~width ~(model : Model.t) : I.t * (int * int) =
+    let w = width in
+    let input_lines =
+      match Model.mode model with
+      | Cmdline -> [ Model.cmdline model ]
+      | _ ->
+        (match String.split ~on:'\n' (Model.input_line model) with
+         | [] -> [ "" ]
+         | ls -> ls)
+    in
+    let border_attr = A.(fg (rgb ~r:1 ~g:4 ~b:5)) in
+    let bg_attr = A.empty in
+    let selection_attr base = A.(base ++ st reverse) in
     let prefix, indent =
       match Model.mode model with
-      | Cmdline -> ":", "" (* command line has single ':' and no indent *)
+      | Cmdline -> ":", ""
       | _ ->
         let p = "> " in
         p, String.make (String.length p) ' '
     in
     let sel_active = Model.selection_active model in
-    (* We'll iterate lines keeping track of absolute offset *)
     let rows =
       let text_attr = bg_attr in
       let sel_attr = selection_attr text_attr in
-      let rec build_rows lines idx abs_off acc =
+      let rec build lines idx abs_off acc =
         match lines with
         | [] -> List.rev acc
         | line :: rest ->
@@ -203,7 +603,6 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
           let line_len = String.length line in
           let line_start = abs_off in
           let line_end = abs_off + line_len in
-          (* Determine selection overlap in input coordinates *)
           let overlap_start, overlap_end =
             if not sel_active
             then None, None
@@ -218,7 +617,6 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
                 let ov_end = Int.min sel_end line_end in
                 if ov_start < ov_end then Some ov_start, Some ov_end else None, None)
           in
-          (* Build content segments *)
           let content_img =
             match overlap_start, overlap_end with
             | None, _ | _, None -> I.string text_attr (line_prefix ^ line)
@@ -237,53 +635,114 @@ let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
                 ; I.string text_attr after
                 ]
           in
-          let row_text_img = content_img |> I.hsnap ~align:`Left (w - 2) in
-          let bg = I.char bg_attr ' ' (w - 2) 1 in
-          let inside = Notty.Infix.(row_text_img </> bg) in
+          let inside = content_img |> I.hsnap ~align:`Left (w - 2) in
           let row_img =
             Notty.Infix.(I.string border_attr "│" <|> inside <|> I.string border_attr "│")
           in
-          let next_abs =
-            line_end + 1
-            (* newline *)
-          in
-          build_rows rest (idx + 1) next_abs (row_img :: acc)
+          let next_abs = line_end + 1 in
+          build rest (idx + 1) next_abs (row_img :: acc)
       in
-      build_rows input_lines 0 0 []
+      build input_lines 0 0 []
     in
     let hline len =
       let seg = "─" in
-      String.concat ~sep:"" (List.init len ~f:(fun _ -> seg)) |> string border_attr
+      String.concat ~sep:"" (List.init len ~f:(fun _ -> seg)) |> I.string border_attr
     in
     let top_border =
-      Notty.Infix.(string border_attr "┌" <|> hline (w - 2) <|> string border_attr "┐")
+      Notty.Infix.(
+        I.string border_attr "┌" <|> hline (w - 2) <|> I.string border_attr "┐")
     in
     let bottom_border =
-      Notty.Infix.(string border_attr "└" <|> hline (w - 2) <|> string border_attr "┘")
+      Notty.Infix.(
+        I.string border_attr "└" <|> hline (w - 2) <|> I.string border_attr "┘")
     in
-    I.vcat ((top_border :: rows) @ [ bottom_border ])
-  in
-  let full_img = Notty.Infix.(history_view <-> mode_tag <-> input_img) in
-  (* Compute cursor position. *)
-  let total_index = Model.cursor_pos model in
-  let rec row_col lines offset row =
-    match lines with
-    | [] -> row, 0
-    | l :: ls ->
-      let len = String.length l in
-      if total_index <= offset + len
-      then row, total_index - offset
-      else row_col ls (offset + len + 1) (row + 1)
-  in
-  let row, col_in_line = row_col input_lines 0 0 in
-  let cursor_x =
-    match Model.mode model with
-    | Cmdline -> 2 + col_in_line (* border + ':' *)
-    | _ -> 3 + col_in_line
-  in
-  let cursor_y =
-    history_height + 1 (* status bar *) + 1 + row
-    (* +1 for top border *)
-  in
-  full_img, (cursor_x, cursor_y)
-;;
+    let img = I.vcat ((top_border :: rows) @ [ bottom_border ]) in
+    let total_index = Model.cursor_pos model in
+    let rec row_col lines offset row =
+      match lines with
+      | [] -> row, 0
+      | l :: ls ->
+        let len = String.length l in
+        if total_index <= offset + len
+        then row, total_index - offset
+        else row_col ls (offset + len + 1) (row + 1)
+    in
+    let row, col_in_line = row_col input_lines 0 0 in
+    let cursor_x =
+      (match Model.mode model with
+       | Cmdline -> 2
+       | _ -> 3)
+      + col_in_line
+    in
+    img, (cursor_x, row)
+  ;;
+end
+
+module Compose = struct
+  let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
+    let w, h = size in
+    let input_lines =
+      match Model.mode model with
+      | Cmdline -> [ Model.cmdline model ]
+      | _ ->
+        (match String.split ~on:'\n' (Model.input_line model) with
+         | [] -> [ "" ]
+         | ls -> ls)
+    in
+    let input_content_height = List.length input_lines in
+    let border_rows = 2 in
+    let history_height =
+      let base = Int.max 1 (h - input_content_height - border_rows) in
+      max 1 (base - 1)
+    in
+    let hi_engine = create_hi_engine () in
+    (match Model.last_history_width model with
+     | Some prev when Int.equal prev w -> ()
+     | _ ->
+       Model.clear_all_img_caches model;
+       Model.set_last_history_width model (Some w));
+    let render_message ~selected ((role, _) as msg) =
+      let ctx = Render_context.make ~width:w ~selected ~role ~hi_engine in
+      Message.render ctx msg
+    in
+    let history_img =
+      Viewport.render
+        ~model
+        ~width:w
+        ~height:history_height
+        ~messages:(Model.messages model)
+        ~selected_idx:(Model.selected_msg model)
+        ~render_message
+    in
+    Notty_scroll_box.set_content (Model.scroll_box model) history_img;
+    if Model.auto_follow model
+    then Notty_scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:history_height;
+    let history_view =
+      Notty_scroll_box.render (Model.scroll_box model) ~width:w ~height:history_height
+    in
+    let status = Status_bar.render ~width:w ~model in
+    let input_img, _ = Input_box.render ~width:w ~model in
+    let full_img = Notty.Infix.(history_view <-> status <-> input_img) in
+    let total_index = Model.cursor_pos model in
+    let rec row_col lines offset row =
+      match lines with
+      | [] -> row, 0
+      | l :: ls ->
+        let len = String.length l in
+        if total_index <= offset + len
+        then row, total_index - offset
+        else row_col ls (offset + len + 1) (row + 1)
+    in
+    let row_input, col_in_line = row_col input_lines 0 0 in
+    let cursor_x =
+      (match Model.mode model with
+       | Cmdline -> 2
+       | _ -> 3)
+      + col_in_line
+    in
+    let cursor_y = history_height + 1 + 1 + row_input in
+    full_img, (cursor_x, cursor_y)
+  ;;
+end
+
+let render_full ~size ~model = Compose.render_full ~size ~model

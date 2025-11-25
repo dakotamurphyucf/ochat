@@ -106,3 +106,5 @@ val create_pack_online
   -> goal:string
   -> proposer_model:Openai.Responses.Request.model option
   -> string option
+
+val get_iterate_system_prompt : Eio_unix.Stdenv.base -> string

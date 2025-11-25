@@ -118,20 +118,38 @@ val handle_submit :
   env:_ Eio.Stdenv.t ->
   model:Model.t ->
   ev_stream:_ Eio.Stream.t ->
+  system_event:string Eio.Stream.t ->
   prompt_ctx:prompt_context ->
+  datadir:Eio.Fs.dir_ty Eio.Path.t ->
+  parallel_tool_calls:bool ->
+  history_compaction:bool ->
   unit
 ```
 
-Runs inside its own `Switch.run` and kicks off the OpenAI completion stream
-via `Chat_response.Driver.run_completion_stream_in_memory_v1`.  All
+Runs inside its own `Switch.run` and kicks off the OpenAI completion
+stream via
+`Chat_response.Driver.run_completion_stream_in_memory_v1`.  All
 callbacks (`on_event`, `on_fn_out`, …) forward data to the main loop by
-enqueuing `Stream` events on `ev_stream`.
+enqueuing events on `ev_stream`.
 
-Failure handling:
+Additional parameters introduced since Ochat v0.5:
 
-* rolls back dangling reasoning or function-call stubs,
-* restores the history to the last consistent prefix, and
-* displays the exception in-line as an *error* message.
+* **`system_event`** — channel for out-of-band notes that should enter the
+  assistant context but must not be rendered as user-visible messages.
+* **`datadir`** — directory for caching responses and persisting tool
+  outputs between runs (defaults to `~/.chatmd`, or the session directory
+  when `~session` is supplied).
+* **`parallel_tool_calls`** — toggles concurrent evaluation of tool
+  invocations.  Disable on platforms where massive threading hurts more
+  than it helps.
+* **`history_compaction`** — enable semantic pruning when the context
+  window limit is approached.
+
+Failure handling remains unchanged and still
+
+1. rolls back dangling reasoning or function-call stubs,
+2. restores the history to the last consistent prefix, and
+3. displays the exception in-line as an *error* message.
 
 ---
 
@@ -190,3 +208,40 @@ Snapshots are tiny (<1 kB) and contain the full chat *history*, the current
 
 
 
+
+
+---
+
+## 6  Runtime context-compaction <a id="compaction"></a>
+
+Long-lived conversations eventually exceed the model’s context limit.  Press
+`Ctrl-K` (mirroring Emacs’ *kill* command family) to trigger **semantic
+compaction**:
+
+1. The current history is frozen; any in-flight streaming request is refused
+   with an inline error message so that the history stays consistent.
+2. `Context_compaction.Compactor.compact_history` summarises earlier turns
+   while keeping the assistant’s knowledge intact.
+3. The model is replaced atomically and a transient “(compacting…)” placeholder
+   is shown until the operation finishes.
+
+The whole procedure is executed locally – no data leave your machine – and
+therefore also works offline.
+
+---
+
+## 7  Cancellation & error handling <a id="cancellation"></a>
+
+Two escape hatches exist during streaming:
+
+* **`Esc`** – raises the internal `Cancelled` exception; the streaming fiber
+  is aborted and the model rolls back to its pre-request state.
+* **`Ctrl-C`** – quits the UI, optionally exports ChatMarkdown and (depending on
+  [`persist_mode`](#persist_mode)) saves a session snapshot.
+
+Runtime exceptions (rate-limits, malformed JSON, network hiccups, …) are
+caught and converted into *error* system messages via
+`add_placeholder_stream_error`, making failures visible directly in the
+conversation instead of hiding them in the log.
+
+---

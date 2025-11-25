@@ -112,7 +112,7 @@ let first_flow
   Log.emit `Info "mp_flow: starting refinement";
   let refined_prompt =
     Log.with_span "recursive_refine" (fun () ->
-      RMP.refine ~context ~params prompt ~proposer_model:Openai.Responses.Request.O3)
+      RMP.refine ~context ~params prompt ~proposer_model:Openai.Responses.Request.Gpt5)
   in
   Log.emit `Info "mp_flow: refinement completed";
   refined_prompt.body
@@ -197,7 +197,7 @@ let tool_flow
   Log.emit `Info "mp_flow: starting refinement";
   let refined_prompt =
     Log.with_span "recursive_refine" (fun () ->
-      RMP.refine ~context ~params prompt ~proposer_model:Openai.Responses.Request.O3)
+      RMP.refine ~context ~params prompt ~proposer_model:Openai.Responses.Request.Gpt5)
   in
   Log.emit `Info "mp_flow: refinement completed";
   refined_prompt.body

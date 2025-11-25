@@ -13,7 +13,7 @@ who prefer markdown over generated API docs.
 ## 1  Overview
 
 `Chatml_lang` is the reference interpreter for the **ChatML** language – a
-small, dynamically-typed, expression-oriented dialect used internally to
+small, statically-typed, expression-oriented dialect used internally to
 script prompts, smoke-test chat agents, and prototype new features.
 
 Why roll our own language?  Because embedding snippets of OCaml or Lua in
@@ -28,7 +28,7 @@ The interpreter is split in several passes:
 1. **Parsing** (`chatml_parser.ml`) and **lexing** (`chatml_lexer.mll`).
 2. **Resolver** (`chatml_resolver.ml`): resolves identifiers and pre-computes
    frame layouts.
-3. **Type-checker** (`chatml_typechecker.ml`, optional).
+3. **Type-checker** (`chatml_typechecker.ml`).
 4. **Evaluation** – *this* file.
 
 Only step 4 is documented here; refer to the other `.doc.md` files for the

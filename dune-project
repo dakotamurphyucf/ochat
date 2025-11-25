@@ -44,6 +44,7 @@
   ppxlib
   pcre
   re
+  textmate-language
   owl
   eio
   eio_main

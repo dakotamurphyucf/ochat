@@ -1722,5 +1722,3 @@ I use it daily with custom agents for everything from developing and documentati
 But please budget time for occasional refactors and breaking changes.
 Bug reports and PRs are welcome – just keep in mind the ground may still be
 moving beneath your feet. 🚧
-
-

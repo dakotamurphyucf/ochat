@@ -21,6 +21,17 @@
 
 open Types
 
+(** Cached render for a single history message.  The [selected] variant is
+    populated on demand. *)
+type msg_img_cache =
+  { width : int
+  ; text : string
+  ; img_unselected : Notty.I.t
+  ; height_unselected : int
+  ; img_selected : Notty.I.t option
+  ; height_selected : int option
+  }
+
 type t =
   { mutable history_items : Openai.Responses.Item.t list
   ; mutable messages : message list
@@ -52,6 +63,24 @@ type t =
   ; mutable active_fork : string option
     (** Currently running fork tool call-id, if any. *)
   ; mutable fork_start_index : int option (** History length when fork started. *)
+  ; mutable msg_img_cache : (int, msg_img_cache) Base.Hashtbl.t
+    (** Per-message render cache for the history view.  Keys are message
+        indices.  Entries are invalidated on width changes or when the
+        corresponding message text is updated. *)
+  ; mutable last_history_width : int option
+    (** Width (in cells) for which [msg_img_cache] is valid.  A mismatch
+        triggers a full cache flush. *)
+  ; mutable msg_heights : int array
+    (** Cached heights for each message at [last_history_width].  Length
+        equals [List.length (messages t)].  Rebuilt on width changes. *)
+  ; mutable height_prefix : int array
+    (** Prefix sums of [msg_heights].  Length is
+        [Array.length msg_heights + 1] with [height_prefix.(0) = 0] and
+        [height_prefix.(i+1) = height_prefix.(i) + msg_heights.(i)]. *)
+  ; mutable dirty_height_indices : int list
+    (** Indices whose height may have changed since the last rebuild.  The
+        renderer consumes and clears this list to incrementally maintain
+        [height_prefix]. *)
   }
 [@@deriving fields ~getters ~setters]
 
@@ -236,3 +265,37 @@ val apply_patches : t -> Types.patch list -> t
     (mutated) model.  Unlike [Add_user_message] the helper bypasses any UI
     manipulation. *)
 val add_history_item : t -> Openai.Responses.Item.t -> t
+
+(** {1 Rendering cache helpers}
+
+    Low-level helpers for the renderer.  Callers outside the rendering path
+    should not need these. *)
+
+val last_history_width : t -> int option
+
+(** [set_last_history_width t w] updates {!last_history_width}.  Calling the
+    function does **not** invalidate individual entries – that is done by
+    the renderer which knows whether a global flush or targeted
+    invalidations are cheaper. *)
+val set_last_history_width : t -> int option -> unit
+
+(** Completely clears {!msg_img_cache}.  Use this when the terminal has
+    been resized and *all* cached images are now stale. *)
+val clear_all_img_caches : t -> unit
+
+(** [invalidate_img_cache_index t ~idx] removes the cache entry for the
+    message at index [idx].  Called whenever the underlying text changes
+    (e.g. when streaming deltas arrive). *)
+val invalidate_img_cache_index : t -> idx:int -> unit
+
+(** [find_img_cache t ~idx] returns the cached render of the message at
+    [idx] or [None] if no entry exists or the cache was invalidated. *)
+val find_img_cache : t -> idx:int -> msg_img_cache option
+
+(** [set_img_cache t ~idx entry] stores [entry] in the per-message cache.
+    Existing data for the same index is overwritten. *)
+val set_img_cache : t -> idx:int -> msg_img_cache -> unit
+
+(** Returns and clears the list of indices whose heights may be stale.  The
+    list may contain duplicates and is not guaranteed to be ordered. *)
+val take_and_clear_dirty_height_indices : t -> int list

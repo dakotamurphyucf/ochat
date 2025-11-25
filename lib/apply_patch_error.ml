@@ -24,7 +24,7 @@ type t =
 
 exception Diff_error of t
 
-let tips =
+let _tips =
   {|
 Tips:
 - remember that Add file still requires a + at the start of each new line
@@ -50,8 +50,7 @@ module My_module
 let to_string =
   let join = String.concat ~sep:"\n" in
   function
-  | Syntax_error { line; text } ->
-    sprintf "Syntax error at line %d:\n%s\n%s" line text tips
+  | Syntax_error { line; text } -> sprintf "Syntax error at line %d:\n%s" line text
   | Missing_file { path; action } ->
     (match action with
      | `Update -> sprintf "Update file missing: %s" path
@@ -61,12 +60,11 @@ let to_string =
     let expected_block = join expected in
     let snippet_block = join snippet in
     sprintf
-      "Context mismatch (fuzz=%d) in %s:\n--- expected ---\n%s\n--- actual ---\n%s\n%s"
+      "Context mismatch (fuzz=%d) in %s:\n--- expected ---\n%s\n--- actual ---\n%s"
       fuzz
       path
       expected_block
       snippet_block
-      tips
   | Bounds_error { path; index; len } ->
     sprintf "%s: index %d out of bounds (len=%d)" path index len
 ;;

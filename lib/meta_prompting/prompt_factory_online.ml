@@ -126,6 +126,16 @@ let extract_section ~text ~section : string option =
     if String.is_empty content then None else Some content
 ;;
 
+let get_iterate_system_prompt env =
+  let templ =
+    match load_template ~env "iteration_prompt_v2.txt" with
+    | Some t -> t
+    | None -> Templates.iteration_prompt_v2
+  in
+  let system_text = templ ^ "\n" ^ load_guardrails ~env in
+  system_text
+;;
+
 let iterate_revised_prompt ~env ~goal ~current_prompt ~proposer_model : string option =
   match getenv_opt "OPENAI_API_KEY" with
   | None -> None
@@ -134,12 +144,7 @@ let iterate_revised_prompt ~env ~goal ~current_prompt ~proposer_model : string o
        let dir = Eio.Stdenv.fs env in
        let net = Eio.Stdenv.net env in
        let open Openai.Responses in
-       let templ =
-         match load_template ~env "iteration_prompt_v2.txt" with
-         | Some t -> t
-         | None -> Templates.iteration_prompt_v2
-       in
-       let system_text = templ ^ "\n" ^ load_guardrails ~env in
+       let system_text = get_iterate_system_prompt env in
        let system_msg : Input_message.t =
          { role = Developer
          ; content = [ Text { text = system_text; _type = "input_text" } ]
