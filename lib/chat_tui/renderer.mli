@@ -89,3 +89,12 @@ val render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)
       in
       ()
     ]} *)
+
+(** Best-effort language inference used for [read_file] tool outputs.
+
+    The helper inspects the file extension and returns a TextMate
+    language identifier when known (for example ["ml"] → ["ocaml"],
+    ["md"] → ["markdown"]).  Unrecognised or extension-less paths
+    yield [None].  Exposed primarily for unit tests. *)
+val lang_of_path : string -> string option
+
