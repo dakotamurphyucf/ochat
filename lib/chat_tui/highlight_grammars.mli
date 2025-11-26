@@ -29,6 +29,10 @@ val add_shell : Highlight_tm_loader.registry -> unit Or_error.t
 (** Add the Diff grammar (scopeName = ["source.diff"]). Maps [diff], [patch]. *)
 val add_diff : Highlight_tm_loader.registry -> unit Or_error.t
 
+(** Add the ochat apply_patch grammar (scopeName = ["source.ochat-apply-patch"]).
+    Intended for rendering outputs from the [apply_patch] tool. *)
+val add_ochat_apply_patch : Highlight_tm_loader.registry -> unit Or_error.t
+
 (** Add the JSON grammar (scopeName = ["source.json"]). Maps [json]. *)
 val add_json : Highlight_tm_loader.registry -> unit Or_error.t
 

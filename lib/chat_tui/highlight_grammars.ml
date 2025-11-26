@@ -282,3 +282,23 @@ let add_html (reg : Highlight_tm_loader.registry) : unit Or_error.t =
   let%bind shim = Jsonaf.parse html_derivative_shim_tm_json in
   Highlight_tm_loader.add_grammar_jsonaf reg shim
 ;;
+
+
+let ochat_apply_patch_tm_json =
+  {|{
+  "name": "ochat-apply-patch",
+  "scopeName": "source.ochat-apply-patch",
+  "patterns": [
+    { "name": "meta.header.ochatpatch", "match": "^┏.*$" },
+    { "name": "meta.header.ochatpatch.file-op", "match": "^\\*\\*\\* (Add|Update|Delete) File: .*$" },
+    { "include": "source.diff" }
+  ]
+}
+|}
+;;
+
+let add_ochat_apply_patch (reg : Highlight_tm_loader.registry) : unit Or_error.t =
+  let open Or_error.Let_syntax in
+  let%bind json = Jsonaf.parse ochat_apply_patch_tm_json in
+  Highlight_tm_loader.add_grammar_jsonaf reg json
+;;

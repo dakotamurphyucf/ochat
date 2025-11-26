@@ -475,9 +475,66 @@ module Message = struct
     I.hsnap ~align:`Left ctx.width text_img
   ;;
 
+  let render_body_default (ctx : Render_context.t) ~(role : string) ~(text : string) : I.t list =
+    let blocks = Blocks.of_message_text text in
+    let first_row = ref true in
+    List.concat_map blocks ~f:(fun block ->
+      match block with
+      | Blocks.Text s | Blocks.Code { lang = Some "html"; code = s } ->
+        String.split_lines s
+        |> List.concat_map ~f:(fun para ->
+          let rs = Paint.render_paragraph ctx ~is_first:!first_row ~para in
+          if not (List.is_empty rs) then first_row := false;
+          rs)
+      | Blocks.Code { lang; code } ->
+        let klass =
+          if Roles.is_toollike role
+          then Code_cache2.Toollike
+          else Code_cache2.Userlike
+        in
+        let rs = Paint.render_code_block ctx ~is_first:!first_row ~lang ~code ~klass in
+        if (not (Roles.is_toollike role)) && not (List.is_empty rs)
+        then first_row := false;
+        rs)
+  ;;
+
+  let render_body_apply_patch (ctx : Render_context.t) ~(role : string) ~(text : string) : I.t list =
+    let lines = String.split_lines text in
+    let rec split_status acc = function
+      | [] -> List.rev acc, []
+      | "" as l :: rest -> List.rev (l :: acc), rest
+      | l :: rest -> split_status (l :: acc) rest
+    in
+    let status_lines, patch_lines = split_status [] lines in
+    let first_row = ref true in
+    let status_rows =
+      List.concat_map status_lines ~f:(fun para ->
+        let rs = Paint.render_paragraph ctx ~is_first:!first_row ~para in
+        if not (List.is_empty rs) then first_row := false;
+        rs)
+    in
+    let patch_rows =
+      match patch_lines with
+      | [] -> []
+      | _ ->
+        let code = String.concat ~sep:"\n" patch_lines in
+        let lang = Some "ochat-apply-patch" in
+        let klass =
+          if Roles.is_toollike role
+          then Code_cache2.Toollike
+          else Code_cache2.Userlike
+        in
+        let rs =
+          Paint.render_code_block ctx ~is_first:!first_row ~lang ~code ~klass
+        in
+        if not (List.is_empty rs) then first_row := false;
+        rs
+    in
+    status_rows @ patch_rows
+  ;;
+
   let render (ctx : Render_context.t) ((role, text) : message) : I.t =
     let text = Util.sanitize ~strip:false text |> sanitize_developer role in
-    let (_ : tool_output_kind option) = ctx.tool_output in
     let trimmed = String.strip text in
     if String.is_empty trimmed
     then I.empty
@@ -485,29 +542,10 @@ module Message = struct
       let blank_before_header = I.hsnap ~align:`Left ctx.width (I.string A.empty "") in
       let header = render_header_line ctx in
       let blank_after_header = I.hsnap ~align:`Left ctx.width (I.string A.empty "") in
-      let blocks = Blocks.of_message_text text in
-      let first_row = ref true in
       let body_rows =
-        List.concat_map blocks ~f:(fun block ->
-          match block with
-          | Blocks.Text s | Blocks.Code { lang = Some "html"; code = s } ->
-            String.split_lines s
-            |> List.concat_map ~f:(fun para ->
-              let rs = Paint.render_paragraph ctx ~is_first:!first_row ~para in
-              if not (List.is_empty rs) then first_row := false;
-              rs)
-          | Blocks.Code { lang; code } ->
-            let klass =
-              if Roles.is_toollike role
-              then Code_cache2.Toollike
-              else Code_cache2.Userlike
-            in
-            let rs =
-              Paint.render_code_block ctx ~is_first:!first_row ~lang ~code ~klass
-            in
-            if (not (Roles.is_toollike role)) && not (List.is_empty rs)
-            then first_row := false;
-            rs)
+        match ctx.tool_output with
+        | Some Apply_patch -> render_body_apply_patch ctx ~role ~text
+        | _ -> render_body_default ctx ~role ~text
       in
       let gap = I.hsnap ~align:`Left ctx.width (I.string A.empty " ") in
       I.vcat ((blank_before_header :: header :: blank_after_header :: body_rows) @ [ gap ]))
