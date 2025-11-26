@@ -278,8 +278,7 @@ module Paint = struct
              | [ xs ] -> xs
              | xs -> List.concat xs)
           | Some _ ->
-            print_endline "uouououo";
-            let len = String.length para in
+                        let len = String.length para in
             if
               len >= 4
               && String.is_prefix para ~prefix:"**"
