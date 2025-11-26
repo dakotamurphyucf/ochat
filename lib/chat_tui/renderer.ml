@@ -256,6 +256,11 @@ module Paint = struct
         let rest_rows = List.map rest ~f:(render_line ~pref:indent) in
         row0 :: rest_rows
     in
+    let is_read_directory =
+      match ctx.tool_output with
+      | Some (Read_directory _) -> true
+      | _ -> false
+    in
     let render_markdown () : I.t list =
       if String.is_empty para
       then [ I.hsnap ~align:`Left ctx.width (I.string A.empty "") ]
@@ -300,6 +305,13 @@ module Paint = struct
               in
               [ bold_attr, inner ])
             else [ A.empty, para ]
+        in
+        let spans =
+          if is_read_directory
+          then (
+            let dir_attr = Styles.fg_gray 13 in
+            List.map spans ~f:(fun (_a, s) -> dir_attr, s))
+          else spans
         in
         let runs = List.map spans ~f:(fun (a, s) -> a, s) in
         render_runs runs)
