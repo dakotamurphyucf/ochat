@@ -1,18 +1,25 @@
+(** Implementation of {!Chat_tui.Renderer}.
+
+    The public API and user-facing invariants are documented in
+    [renderer.mli]; this module contains the concrete Notty-based
+    rendering pipeline and internal helpers. *)
+
 open Core
 open Notty
 open Types
+module Styles = Highlight_styles
 
 module Theme = struct
   let attr_of_role = function
-    | "assistant" -> A.(fg (rgb ~r:0 ~g:5 ~b:5))
-    | "user" -> A.(fg (rgb ~r:5 ~g:4 ~b:0))
-    | "developer" -> A.(fg (rgb ~r:5 ~g:2 ~b:2))
-    | "tool" -> A.(fg (rgb ~r:5 ~g:3 ~b:5))
-    | "fork" -> A.(fg (rgb ~r:5 ~g:4 ~b:0))
-    | "reasoning" -> A.(fg (rgb ~r:2 ~g:4 ~b:5))
-    | "system" -> A.(fg (gray 10))
-    | "tool_output" -> A.(fg (rgb ~r:2 ~g:5 ~b:2))
-    | "error" -> A.(fg red ++ st reverse)
+    | "assistant" -> Styles.fg_hex "#FF9800"
+    | "user" -> Styles.fg_hex "#FFD700"
+    | "developer" -> Styles.fg_hex "#FF5C38"
+    | "tool" -> Styles.fg_hex "#13A3F2"
+    | "fork" -> Styles.fg_hex "#FFB454"
+    | "reasoning" -> Styles.fg_hex "#13F2A3"
+    | "system" -> Styles.fg_hex "#C7CCD8"
+    | "tool_output" -> Styles.fg_hex "#8BD649"
+    | "error" -> A.(Styles.fg_hex "#FF5370" ++ st reverse)
     | _ -> A.empty
   ;;
 
@@ -191,8 +198,15 @@ module Render_context = struct
     }
 
   let make ~width ~selected ~role ~hi_engine = { width; selected; role; hi_engine }
-  let prefix_first t = Roles.label_of_role t.role ^ ": "
-  let prefix_cont t = String.make (String.length (prefix_first t)) ' '
+
+  (*
+     Message content lines are rendered without an inline role label so that
+    copying code or text from the terminal does not include
+    "assistant: "/"user: " prefixes.  The role is rendered separately as a
+    header line above the message body.
+  *)
+  let prefix_first _t = ""
+  let prefix_cont _t = ""
 end
 
 module Paint = struct
@@ -201,7 +215,6 @@ module Paint = struct
   let render_paragraph (ctx : t) ~(is_first : bool) ~(para : string) : I.t list =
     let first_pref = prefix_first ctx in
     let indent = prefix_cont ctx in
-    let base_attr = Theme.attr_of_role ctx.role in
     let sel = if ctx.selected then Theme.selection_attr else Fn.id in
     let limit = Int.max 1 (ctx.width - String.length first_pref) in
     if String.is_empty para
@@ -248,13 +261,13 @@ module Paint = struct
             [ bold_attr, inner ])
           else [ A.empty, para ]
       in
-      let runs = List.map spans ~f:(fun (a, s) -> A.(base_attr ++ a), s) in
+      let runs = List.map spans ~f:(fun (a, s) -> a, s) in
       let wrapped = Wrap.wrap_runs ~limit runs in
       let render_line ~pref line_runs =
         let content_img =
           List.map line_runs ~f:(fun (a, s) -> safe_string (sel a) s) |> I.hcat
         in
-        Notty.Infix.(safe_string (sel base_attr) pref <|> content_img)
+        Notty.Infix.(safe_string A.empty pref <|> content_img)
         |> I.hsnap ~align:`Left ctx.width
       in
       match wrapped with
@@ -357,15 +370,44 @@ module Message = struct
     else text
   ;;
 
+  let render_header_line (ctx : Render_context.t) : I.t =
+    let base_attr = Theme.attr_of_role ctx.role in
+    let attr = if ctx.selected then Theme.selection_attr base_attr else base_attr in
+    let icon =
+      match ctx.role with
+      | "assistant" -> "💡 "
+      | "user" -> "🙋 "
+      | "developer" -> "🧑‍💻 "
+      | "tool" -> "🛠  "
+      | "system" -> "🛡 "
+      | "reasoning" -> "🧠 "
+      | "tool_output" -> "📬 "
+      | "fork" -> "🌿 "
+      | "error" -> "❌ "
+      | _ -> ""
+    in
+    let label = Roles.label_of_role ctx.role in
+    let label =
+      if String.is_empty label
+      then label
+      else String.mapi label ~f:(fun i c -> if Int.equal i 0 then Char.uppercase c else c)
+    in
+    let text_img = safe_string attr (icon ^ label) in
+    I.hsnap ~align:`Left ctx.width text_img
+  ;;
+
   let render (ctx : Render_context.t) ((role, text) : message) : I.t =
     let text = Util.sanitize ~strip:false text |> sanitize_developer role in
     let trimmed = String.strip text in
     if String.is_empty trimmed
     then I.empty
     else (
+      let blank_before_header = I.hsnap ~align:`Left ctx.width (I.string A.empty "") in
+      let header = render_header_line ctx in
+      let blank_after_header = I.hsnap ~align:`Left ctx.width (I.string A.empty "") in
       let blocks = Blocks.of_message_text text in
       let first_row = ref true in
-      let rows =
+      let body_rows =
         List.concat_map blocks ~f:(fun block ->
           match block with
           | Blocks.Text s | Blocks.Code { lang = Some "html"; code = s } ->
@@ -388,7 +430,7 @@ module Message = struct
             rs)
       in
       let gap = I.hsnap ~align:`Left ctx.width (I.string A.empty " ") in
-      I.vcat (rows @ [ gap ]))
+      I.vcat ((blank_before_header :: header :: blank_after_header :: body_rows) @ [ gap ]))
   ;;
 end
 
@@ -679,6 +721,50 @@ module Input_box = struct
 end
 
 module Compose = struct
+  let top_visible_index
+        ~(model : Model.t)
+        ~(scroll_height : int)
+        ~(messages : message list)
+    : int option
+    =
+    let len = List.length messages in
+    if Int.equal len 0
+    then None
+    else (
+      let prefix = Model.height_prefix model in
+      if Array.length prefix < len + 1
+      then None
+      else (
+        let total_height = prefix.(len) in
+        let max_scroll = Int.max 0 (total_height - scroll_height) in
+        let scroll =
+          if Model.auto_follow model
+          then max_scroll
+          else (
+            let s = Notty_scroll_box.scroll (Model.scroll_box model) in
+            Int.max 0 (Int.min s max_scroll))
+        in
+        let bsearch_first_gt arr ~len ~target =
+          let lo = ref 0 in
+          let hi = ref len in
+          while !lo < !hi do
+            let mid = (!lo + !hi) lsr 1 in
+            if arr.(mid) <= target then lo := mid + 1 else hi := mid
+          done;
+          !lo
+        in
+        let k = bsearch_first_gt prefix ~len:(len + 1) ~target:scroll in
+        let idx = Int.max 0 (k - 1) in
+        if idx >= len
+        then None
+        else (
+          let message_start_y = prefix.(idx) in
+          let header_y = message_start_y + 1 in
+          let header_vpos = header_y - scroll in
+          let exclusion_band = 2 in
+          if header_vpos >= 0 && header_vpos < exclusion_band then None else Some idx)))
+  ;;
+
   let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
     let w, h = size in
     let input_lines =
@@ -695,6 +781,8 @@ module Compose = struct
       let base = Int.max 1 (h - input_content_height - border_rows) in
       max 1 (base - 1)
     in
+    let sticky_height = if history_height > 1 then 1 else 0 in
+    let scroll_height = history_height - sticky_height in
     let hi_engine = create_hi_engine () in
     (match Model.last_history_width model with
      | Some prev when Int.equal prev w -> ()
@@ -705,20 +793,39 @@ module Compose = struct
       let ctx = Render_context.make ~width:w ~selected ~role ~hi_engine in
       Message.render ctx msg
     in
+    let messages = Model.messages model in
     let history_img =
       Viewport.render
         ~model
         ~width:w
-        ~height:history_height
-        ~messages:(Model.messages model)
+        ~height:scroll_height
+        ~messages
         ~selected_idx:(Model.selected_msg model)
         ~render_message
     in
     Notty_scroll_box.set_content (Model.scroll_box model) history_img;
     if Model.auto_follow model
-    then Notty_scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:history_height;
+    then Notty_scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:scroll_height;
+    let top_visible_idx = top_visible_index ~model ~scroll_height ~messages in
+    let scroll_view =
+      Notty_scroll_box.render (Model.scroll_box model) ~width:w ~height:scroll_height
+    in
+    let sticky_header =
+      if sticky_height <= 0
+      then I.empty
+      else (
+        match top_visible_idx with
+        | None -> I.hsnap ~align:`Left w (I.string A.empty "")
+        | Some idx ->
+          let role, _ = List.nth_exn messages idx in
+          let selected =
+            Option.value_map (Model.selected_msg model) ~default:false ~f:(Int.equal idx)
+          in
+          let ctx = Render_context.make ~width:w ~selected ~role ~hi_engine in
+          Message.render_header_line ctx)
+    in
     let history_view =
-      Notty_scroll_box.render (Model.scroll_box model) ~width:w ~height:history_height
+      if sticky_height <= 0 then scroll_view else I.vcat [ sticky_header; scroll_view ]
     in
     let status = Status_bar.render ~width:w ~model in
     let input_img, _ = Input_box.render ~width:w ~model in

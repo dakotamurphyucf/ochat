@@ -780,7 +780,7 @@ module Generate_Reward_model_judge (P : sig
             { temperature = Some 1.0
             ; top_p = None
             ; seed = None
-            ; reasoning_effort = Some "high"
+            ; reasoning_effort = Some "low"
             }
         in
         let reward =

@@ -23,15 +23,25 @@
     shortcuts.  Selected examples:
 
     {ul
-    {- Arrow keys, {b Home} / {b End} – caret movement}
-    {- Meta+←/→ or Ctrl+←/→ – word-wise movement}
-    {- Ctrl-A / Ctrl-E – beginning / end of line}
-    {- Backspace – delete previous character}
-    {- Ctrl-K / Ctrl-U / Ctrl-W – kill to EOL / BOL / previous word}
-    {- Ctrl-Y – yank the last killed text}
+    {- Left / Right arrow keys – move the caret by one character}
+    {- Ctrl+Up / Ctrl+Down – move the caret by one visual line inside the
+       multi-line prompt}
+    {- Meta+←/→ or Ctrl+←/→ and Meta+{b b} / Meta+{b f} – word-wise
+       movement}
+    {- Ctrl-A / Ctrl-E – beginning / end of the current line; Ctrl+Home /
+       Ctrl+End – beginning / end of the entire prompt}
+    {- Backspace – delete the previous character}
+    {- Ctrl-K / Ctrl-U / Ctrl-W or Meta+Backspace – kill to EOL / BOL /
+       previous word; Ctrl-Y – yank the last killed text}
+    {- Meta+v (or Alt+{b s}) – toggle a selection anchor; Ctrl-C /
+       Ctrl-X operate on the active selection (copy / cut)}
+    {- Up / Down arrows, PageUp / PageDown, Home / End – scroll conversation
+       history while keeping the editor in Insert mode; this disables
+       {!Chat_tui.Model.auto_follow} until the viewport reaches the bottom
+       again}
     {- Meta+Enter – submit the current prompt ([Submit_input])}
-    {- PageUp / PageDown – scroll conversation history}
-    {- ESC – cancel streaming or return to Normal mode}
+    {- ESC – switch to Normal mode when pressed without modifiers; when a
+       modifier is present it bubbles up as {!Cancel_or_quit}}
     }
 
     The set of bindings is intentionally conservative; unsupported keys are
@@ -56,10 +66,19 @@
 type reaction = Controller_types.reaction =
   | Redraw (** The event modified the visible state – caller should refresh. *)
   | Submit_input (** User pressed Meta+Enter to submit the prompt. *)
-  | Cancel_or_quit (** ESC – cancel running request or quit. *)
-  | Compact_context (** Trigger conversation compaction. *)
-  | Quit (** Immediate quit (Ctrl-C / q). *)
-  | Unhandled (** Controller didn’t deal with the event. *)
+  | Cancel_or_quit
+  (** ESC request – cancel a running request via {!Eio.Switch.fail} when a
+      stream is in flight, or fall back to {!Quit} when idle. *)
+  | Compact_context
+  (** Trigger conversation compaction via {!Context_compaction.Compactor} –
+      the caller should summarise the earlier history, replace elided
+      messages with the summary and then issue {!Redraw}. *)
+  | Quit
+  (** Immediate quit (Ctrl-C / q).  The main loop should terminate the Notty
+      session, release resources and exit. *)
+  | Unhandled
+  (** Controller didn’t deal with the event – propagate it to higher-level
+      handlers or ignore it. *)
 
 (** [handle_key ~model ~term ev] is the {b single} public function of the
     controller hierarchy.  It examines [model.mode] and forwards [ev] to the

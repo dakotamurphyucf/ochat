@@ -1,31 +1,30 @@
-(** Insert-mode implementation and mode dispatcher for {!Chat_tui.Controller}.
+(** Insert-mode implementation and mode dispatcher for
+    {!Chat_tui.Controller}.
 
-    The file consists of two conceptual parts:
+    The implementation is split into two conceptual parts:
 
-     1. {b Insert-mode key map}.  A self-contained handler that translates raw
-       {!Notty.Unescape.event}s into in-place mutations of {!Chat_tui.Model.t}
-       while the editor is in [Insert] mode.  The supported shortcut set is a
-       pragmatic union of readline, Vim and typical GUI-editor bindings.  All
-       mutations are pure OCaml data changes – rendering and network IO are
-       handled elsewhere.
+    1. {b Insert-mode key map}.  A self-contained handler that translates
+       raw {!Notty.Unescape.event} values into in-place mutations of
+       {!Chat_tui.Model.t} while the editor is in [Insert] mode.  The
+       supported shortcut set is a pragmatic union of readline, Vim and
+       typical GUI-editor bindings.  All mutations are pure OCaml data
+       changes – rendering and network IO are handled elsewhere.
 
-     2. {b Dispatcher}.  [handle_key] examines [Model.mode] and forwards the
+    2. {b Dispatcher}.  {!handle_key} examines [Model.mode] and forwards the
        event to the correct handler: the local Insert map, or the Normal /
        Cmdline controllers living in their own compilation units.  The
        function therefore represents the single public entry-point for the
        caller.
 
-    Implementation details (kill-ring, scrolling maths, etc.) are kept
-    private to avoid polluting the interface.  Refer to [controller.doc.md]
-    for a high-level usage guide and key table. *)
+    Implementation details (kill-ring, selection helpers, scrolling maths,
+    etc.) are kept private to avoid polluting the interface.  For a
+    high-level usage guide, reaction semantics and key tables, see the
+    Markdown documentation in docs-src/chat_tui/controller.doc.md. *)
 
 open Core
 module UC = Stdlib.Uchar
 module Scroll_box = Notty_scroll_box
 
-(* Re-expose the constructors locally so that the remainder of this file can
-   stay unchanged.  The alias keeps them identical to the single source of
-   truth in [Controller_types]. *)
 (* Re-expose the constructors locally so that the remainder of this file can
    stay unchanged.  The alias keeps them identical to the single source of
    truth in [Controller_types]. *)
@@ -330,10 +329,11 @@ let scroll_by_lines (model : Model.t) ~term delta =
     let base = Int.max 1 (screen_h - input_height - 2) in
     max 1 (base - 1)
   in
-  (* let history_h = Int.max 1 (screen_h - input_height - 2) in *)
-  Scroll_box.scroll_by (Model.scroll_box model) ~height:history_height delta;
+  let sticky_height = if history_height > 1 then 1 else 0 in
+  let scroll_height = history_height - sticky_height in
+  Scroll_box.scroll_by (Model.scroll_box model) ~height:scroll_height delta;
   if
-    Scroll_box.max_scroll (Model.scroll_box model) ~height:history_height
+    Scroll_box.max_scroll (Model.scroll_box model) ~height:scroll_height
     = Scroll_box.scroll (Model.scroll_box model)
   then Model.set_auto_follow model true
 ;;

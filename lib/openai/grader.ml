@@ -40,11 +40,12 @@ module Grader = struct
     ; input : Message.t list
     ; model : string
     ; sampling_params : Sampling_params.t option [@jsonaf.option]
+    ; pass_threshold : float
     }
   [@@deriving sexp, jsonaf, bin_io]
 
   let create ?(model = "o3-2025-04-16") ?sampling_params ~name ~input () : t =
-    { type_ = "score_model"; name; input; model; sampling_params }
+    { type_ = "score_model"; name; input; model; sampling_params; pass_threshold = 0.5 }
   ;;
 end
 
@@ -91,6 +92,7 @@ let post_run
         [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
     in
     let body = Jsonaf.to_string (Request.jsonaf_of_t req) in
+    print_endline body;
     (* Persist raw request for debugging when needed. *)
     Io.log ~dir ~file:"raw-openai-grader-request.txt" (body ^ "\n");
     let raw = post Default ~net ~host ~headers ~path body in

@@ -213,7 +213,7 @@ let command : Command.t =
                   ~env
                   ~agent_name:"Meta-Prompt Agent"
                   ~goal:task_contents
-                  ~proposer_model:(Some Openai.Responses.Request.O3)
+                  ~proposer_model:(Some Openai.Responses.Request.Gpt5)
               with
               | Some txt -> txt
               | None ->
