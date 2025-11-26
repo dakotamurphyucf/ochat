@@ -219,53 +219,9 @@ module Paint = struct
     let indent = prefix_cont ctx in
     let sel = if ctx.selected then Theme.selection_attr else Fn.id in
     let limit = Int.max 1 (ctx.width - String.length first_pref) in
-    if String.is_empty para
-    then [ I.hsnap ~align:`Left ctx.width (I.string A.empty "") ]
-    else (
-      let lines, info =
-        Highlight_tm_engine.highlight_text_with_info
-          ctx.hi_engine
-          ~lang:(Some "markdown")
-          ~text:para
-      in
-      let spans =
-        match info.Highlight_tm_engine.fallback with
-        | None ->
-          (match lines with
-           | [ xs ] -> xs
-           | xs -> List.concat xs)
-        | Some _ ->
-          print_endline "uouououo";
-          let len = String.length para in
-          if
-            len >= 4
-            && String.is_prefix para ~prefix:"**"
-            && String.is_suffix para ~suffix:"**"
-          then (
-            let inner = String.sub para ~pos:2 ~len:(len - 4) in
-            let bold_attr =
-              Highlight_theme.attr_of_scopes
-                Highlight_theme.github_dark
-                ~scopes:[ "markup.bold" ]
-            in
-            [ bold_attr, inner ])
-          else if
-            len >= 4
-            && String.is_prefix para ~prefix:"__"
-            && String.is_suffix para ~suffix:"__"
-          then (
-            let inner = String.sub para ~pos:2 ~len:(len - 4) in
-            let bold_attr =
-              Highlight_theme.attr_of_scopes
-                Highlight_theme.github_dark
-                ~scopes:[ "markup.bold" ]
-            in
-            [ bold_attr, inner ])
-          else [ A.empty, para ]
-      in
-      let runs = List.map spans ~f:(fun (a, s) -> a, s) in
+    let render_runs (runs : Spans.run list) : I.t list =
       let wrapped = Wrap.wrap_runs ~limit runs in
-      let render_line ~pref line_runs =
+      let render_line ~pref (line_runs : Spans.run list) =
         let content_img =
           List.map line_runs ~f:(fun (a, s) -> safe_string (sel a) s) |> I.hcat
         in
@@ -278,7 +234,128 @@ module Paint = struct
         let first_pref = if is_first then first_pref else indent in
         let row0 = render_line ~pref:first_pref l0 in
         let rest_rows = List.map rest ~f:(render_line ~pref:indent) in
-        row0 :: rest_rows)
+        row0 :: rest_rows
+    in
+    let render_markdown () : I.t list =
+      if String.is_empty para
+      then [ I.hsnap ~align:`Left ctx.width (I.string A.empty "") ]
+      else (
+        let lines, info =
+          Highlight_tm_engine.highlight_text_with_info
+            ctx.hi_engine
+            ~lang:(Some "markdown")
+            ~text:para
+        in
+        let spans =
+          match info.Highlight_tm_engine.fallback with
+          | None ->
+            (match lines with
+             | [ xs ] -> xs
+             | xs -> List.concat xs)
+          | Some _ ->
+            print_endline "uouououo";
+            let len = String.length para in
+            if
+              len >= 4
+              && String.is_prefix para ~prefix:"**"
+              && String.is_suffix para ~suffix:"**"
+            then (
+              let inner = String.sub para ~pos:2 ~len:(len - 4) in
+              let bold_attr =
+                Highlight_theme.attr_of_scopes
+                  Highlight_theme.github_dark
+                  ~scopes:[ "markup.bold" ]
+              in
+              [ bold_attr, inner ])
+            else if
+              len >= 4
+              && String.is_prefix para ~prefix:"__"
+              && String.is_suffix para ~suffix:"__"
+            then (
+              let inner = String.sub para ~pos:2 ~len:(len - 4) in
+              let bold_attr =
+                Highlight_theme.attr_of_scopes
+                  Highlight_theme.github_dark
+                  ~scopes:[ "markup.bold" ]
+              in
+              [ bold_attr, inner ])
+            else [ A.empty, para ]
+        in
+        let runs = List.map spans ~f:(fun (a, s) -> a, s) in
+        render_runs runs)
+    in
+    let is_tool_call =
+      String.equal ctx.role "tool" && Option.is_none ctx.tool_output
+    in
+    if (not is_tool_call) || String.is_empty para
+    then render_markdown ()
+    else (
+      let tool_spans : (A.t * string) list option =
+        match String.lfindi para ~f:(fun _ c -> Char.( = ) c '(') with
+        | None -> None
+        | Some open_idx ->
+          let prefix = String.sub para ~pos:0 ~len:open_idx in
+          let total_len = String.length para in
+          if open_idx + 1 > total_len
+          then None
+          else
+            let after_open_len = total_len - open_idx - 1 in
+            let after_open =
+              String.sub para ~pos:(open_idx + 1) ~len:after_open_len
+            in
+            let prefix_trimmed = String.rstrip prefix in
+            if String.is_empty prefix_trimmed
+            then None
+            else (
+              let name = prefix_trimmed in
+              let ws_len = String.length prefix - String.length prefix_trimmed in
+              let ws_after_name =
+                if ws_len > 0
+                then String.sub prefix ~pos:(String.length prefix_trimmed) ~len:ws_len
+                else ""
+              in
+              let closing, args =
+                let len_after = String.length after_open in
+                if len_after > 0
+                   && Char.(String.get after_open (len_after - 1) = ')')
+                then ")", String.sub after_open ~pos:0 ~len:(len_after - 1)
+                else "", after_open
+              in
+              let base_attr = Theme.attr_of_role ctx.role in
+              let tool_name_attr = Styles.(base_attr ++ bold ++ fg_hex "#FFCC66") in
+              let name_spans =
+                if String.is_empty name then [] else [ tool_name_attr, name ]
+              in
+              let ws_spans =
+                if String.is_empty ws_after_name
+                then []
+                else [ base_attr, ws_after_name ]
+              in
+              let open_paren_spans = [ base_attr, "(" ] in
+              let args_spans =
+                if String.is_empty args
+                then []
+                else (
+                  let json_lines =
+                    Highlight_tm_engine.highlight_text
+                      ctx.hi_engine
+                      ~lang:(Some "json")
+                      ~text:args
+                  in
+                  List.concat json_lines)
+              in
+              let closing_spans =
+                if String.is_empty closing then [] else [ base_attr, closing ]
+              in
+              Some
+                (List.concat
+                   [ name_spans; ws_spans; open_paren_spans; args_spans; closing_spans ]))
+      in
+      match tool_spans with
+      | None -> render_markdown ()
+      | Some spans ->
+        let runs = List.map spans ~f:(fun (a, s) -> a, s) in
+        render_runs runs)
   ;;
 
   let render_code_block
