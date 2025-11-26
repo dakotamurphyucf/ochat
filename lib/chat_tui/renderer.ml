@@ -57,7 +57,7 @@ end
 module Wrap = struct
   open Spans
 
-  let width_of_text s = I.width (I.string A.empty s)
+  let width_of_text s = I.width (safe_string A.empty s)
 
   let wrap_runs ~limit (runs : run list) : line list =
     if limit <= 0
