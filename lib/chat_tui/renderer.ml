@@ -194,10 +194,12 @@ module Render_context = struct
     { width : int
     ; selected : bool
     ; role : string
+    ; tool_output : tool_output_kind option
     ; hi_engine : Highlight_tm_engine.t
     }
 
-  let make ~width ~selected ~role ~hi_engine = { width; selected; role; hi_engine }
+  let make ~width ~selected ~role ~tool_output ~hi_engine =
+    { width; selected; role; tool_output; hi_engine }
 
   (*
      Message content lines are rendered without an inline role label so that
@@ -398,6 +400,7 @@ module Message = struct
 
   let render (ctx : Render_context.t) ((role, text) : message) : I.t =
     let text = Util.sanitize ~strip:false text |> sanitize_developer role in
+    let (_ : tool_output_kind option) = ctx.tool_output in
     let trimmed = String.strip text in
     if String.is_empty trimmed
     then I.empty
@@ -441,7 +444,7 @@ module Viewport = struct
         ~(height : int)
         ~(messages : message list)
         ~(selected_idx : int option)
-        ~(render_message : selected:bool -> message -> I.t)
+        ~(render_message : idx:int -> selected:bool -> message -> I.t)
     : I.t
     =
     let len = List.length messages in
@@ -452,7 +455,7 @@ module Viewport = struct
       | Some entry when entry.width = width && String.equal entry.text (snd msg) ->
         entry.height_unselected
       | _ ->
-        let img_unselected = render_message ~selected:false msg in
+        let img_unselected = render_message ~idx ~selected:false msg in
         let h = I.height img_unselected in
         let entry =
           { Model.width
@@ -545,7 +548,7 @@ module Viewport = struct
         (match selected, entry.img_selected with
          | true, Some img -> img
          | true, None ->
-           let img = render_message ~selected:true msg in
+           let img = render_message ~idx ~selected:true msg in
            let entry' =
              { entry with img_selected = Some img; height_selected = Some (I.height img) }
            in
@@ -553,7 +556,7 @@ module Viewport = struct
            img
          | false, _ -> entry.img_unselected)
       | _ ->
-        let img_unselected = render_message ~selected:false msg in
+        let img_unselected = render_message ~idx ~selected:false msg in
         let h = I.height img_unselected in
         let entry =
           { Model.width
@@ -566,7 +569,7 @@ module Viewport = struct
         in
         Model.set_img_cache model ~idx entry;
         if Option.value_map selected_idx ~default:false ~f:(Int.equal idx)
-        then render_message ~selected:true msg
+        then render_message ~idx ~selected:true msg
         else img_unselected
     in
     let body =
@@ -784,13 +787,17 @@ module Compose = struct
     let sticky_height = if history_height > 1 then 1 else 0 in
     let scroll_height = history_height - sticky_height in
     let hi_engine = create_hi_engine () in
+    let tool_outputs = Model.tool_output_by_index model in
     (match Model.last_history_width model with
      | Some prev when Int.equal prev w -> ()
      | _ ->
        Model.clear_all_img_caches model;
        Model.set_last_history_width model (Some w));
-    let render_message ~selected ((role, _) as msg) =
-      let ctx = Render_context.make ~width:w ~selected ~role ~hi_engine in
+    let render_message ~idx ~selected ((role, _) as msg) =
+      let tool_output = Hashtbl.find tool_outputs idx in
+      let ctx =
+        Render_context.make ~width:w ~selected ~role ~tool_output ~hi_engine
+      in
       Message.render ctx msg
     in
     let messages = Model.messages model in
@@ -821,7 +828,14 @@ module Compose = struct
           let selected =
             Option.value_map (Model.selected_msg model) ~default:false ~f:(Int.equal idx)
           in
-          let ctx = Render_context.make ~width:w ~selected ~role ~hi_engine in
+          let ctx =
+            Render_context.make
+              ~width:w
+              ~selected
+              ~role
+              ~tool_output:None
+              ~hi_engine
+          in
           Message.render_header_line ctx)
     in
     let history_view =

@@ -1,5 +1,6 @@
 open Core
 open Types
+module Res_item = Openai.Responses.Item
 
 type msg_img_cache =
   { width : int
@@ -50,6 +51,15 @@ and editor_mode =
 and draft_mode =
   | Plain
   | Raw_xml
+
+let classify_tool_output_from_name (name_opt : string option) : Types.tool_output_kind =
+  match Option.map ~f:String.lowercase name_opt with
+  | Some "apply_patch" -> Types.Apply_patch
+  | Some "read_file" -> Types.Read_file { path = None }
+  | Some "read_directory" -> Types.Read_directory { path = None }
+  | Some other -> Types.Other { name = Some other }
+  | None -> Types.Other { name = None }
+;;
 
 let create
       ~history_items
@@ -265,6 +275,11 @@ let apply_patch (model : t) (p : Types.patch) : t =
     Buffer.clear buf.buf;
     Buffer.add_string buf.buf txt;
     update_message_text model buf.index (Buffer.contents buf.buf);
+    (* Classify this tool output for renderer metadata. *)
+    let kind =
+      classify_tool_output_from_name (Hashtbl.find model.function_name_by_id id)
+    in
+    Hashtbl.set model.tool_output_by_index ~key:buf.index ~data:kind;
     model
   | Types.Update_reasoning_idx { id; idx } ->
     (match Hashtbl.find model.reasoning_idx_by_id id with
@@ -286,4 +301,26 @@ let apply_patches model patches = List.fold patches ~init:model ~f:apply_patch
 let add_history_item (model : t) (item : Openai.Responses.Item.t) =
   model.history_items <- model.history_items @ [ item ];
   model
+;;
+
+let rebuild_tool_output_index (model : t) : unit =
+  Hashtbl.clear model.tool_output_by_index;
+  let call_name_by_id = Hashtbl.create (module String) in
+  List.iter model.history_items ~f:(function
+    | Res_item.Function_call fc ->
+      Hashtbl.set call_name_by_id ~key:fc.call_id ~data:fc.name
+    | _ -> ());
+  let idx = ref 0 in
+  List.iter model.history_items ~f:(fun it ->
+    match Conversation.pair_of_item it with
+    | None -> ()
+    | Some _msg ->
+      (match it with
+       | Res_item.Function_call_output fco ->
+         let kind =
+           classify_tool_output_from_name (Hashtbl.find call_name_by_id fco.call_id)
+         in
+         Hashtbl.set model.tool_output_by_index ~key:!idx ~data:kind
+       | _ -> ());
+      incr idx)
 ;;

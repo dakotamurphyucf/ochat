@@ -583,6 +583,7 @@ let run_chat
       ~cmdline:""
       ~cmdline_cursor:0
   in
+  Model.rebuild_tool_output_index model;
   (* Start the Notty terminal – its [on_event] callback just pushes events
         into [ev_stream] so the UI stays single-threaded. *)
   Notty_eio.Term.run ~input:env#stdin ~output:env#stdout ~mouse:false ~on_event:(fun ev ->
@@ -730,6 +731,7 @@ let run_chat
       (* Replace the model's history items with the new ones. *)
       Model.set_history_items model items;
       Model.set_messages model (Conversation.of_history (Model.history_items model));
+      Model.rebuild_tool_output_index model;
       (* Update the UI to reflect the new function output. *)
       redraw_immediate ();
       main_loop ()
@@ -801,6 +803,7 @@ let run_chat
              (* Replace model state. *)
              Model.set_history_items model history';
              Model.set_messages model (Conversation.of_history history');
+             Model.rebuild_tool_output_index model;
              (* After compaction the selection is cleared and viewport resets. *)
              Model.select_message model None;
              Model.set_auto_follow model true;

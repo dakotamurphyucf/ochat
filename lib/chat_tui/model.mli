@@ -274,6 +274,14 @@ val apply_patches : t -> Types.patch list -> t
     manipulation. *)
 val add_history_item : t -> Openai.Responses.Item.t -> t
 
+(** Rebuild [tool_output_by_index] from the current {!history_items}.
+
+    This is intended for situations where the entire history is replaced at
+    once (initial model construction, history compaction, or handling of a
+    [`Replace_history] event).  Streaming updates do not need this helper –
+    they classify tool outputs incrementally via [Set_function_output]. *)
+val rebuild_tool_output_index : t -> unit
+
 (** {1 Rendering cache helpers}
 
     Low-level helpers for the renderer.  Callers outside the rendering path
