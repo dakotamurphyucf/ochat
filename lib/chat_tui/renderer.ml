@@ -211,6 +211,26 @@ module Render_context = struct
   let prefix_cont _t = ""
 end
 
+let lang_of_path (path : string) : string option =
+  let _, ext_opt = Filename.split_extension path in
+  match ext_opt with
+  | None -> None
+  | Some ext ->
+    let ext =
+      if String.length ext > 0 && Char.( = ) (String.get ext 0) '.'
+      then String.sub ext ~pos:1 ~len:(String.length ext - 1)
+      else ext
+    in
+    let ext = String.lowercase ext in
+    match ext with
+    | "ml" | "mli" -> Some "ocaml"
+    | "md" -> Some "markdown"
+    | "json" -> Some "json"
+    | "sh" -> Some "bash"
+    | "txt" -> None
+    | _ -> None
+;;
+
 module Paint = struct
   open Render_context
 
@@ -533,6 +553,27 @@ module Message = struct
     status_rows @ patch_rows
   ;;
 
+  let render_body_read_file
+        (ctx : Render_context.t)
+        ~(role : string)
+        ~(text : string)
+        ~(path : string option)
+    : I.t list
+    =
+    match path with
+    | None -> render_body_default ctx ~role ~text
+    | Some p ->
+      (match lang_of_path p with
+       | None -> render_body_default ctx ~role ~text
+       | Some lang ->
+         let klass =
+           if Roles.is_toollike role
+           then Code_cache2.Toollike
+           else Code_cache2.Userlike
+         in
+         Paint.render_code_block ctx ~is_first:true ~lang:(Some lang) ~code:text ~klass)
+  ;;
+
   let render (ctx : Render_context.t) ((role, text) : message) : I.t =
     let text = Util.sanitize ~strip:false text |> sanitize_developer role in
     let trimmed = String.strip text in
@@ -545,6 +586,7 @@ module Message = struct
       let body_rows =
         match ctx.tool_output with
         | Some Apply_patch -> render_body_apply_patch ctx ~role ~text
+        | Some (Read_file { path }) -> render_body_read_file ctx ~role ~text ~path
         | _ -> render_body_default ctx ~role ~text
       in
       let gap = I.hsnap ~align:`Left ctx.width (I.string A.empty " ") in
