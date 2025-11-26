@@ -18,6 +18,7 @@ type t =
   ; msg_buffers : (string, Types.msg_buffer) Base.Hashtbl.t
   ; function_name_by_id : (string, string) Base.Hashtbl.t
   ; reasoning_idx_by_id : (string, int ref) Base.Hashtbl.t
+  ; tool_output_by_index : (int, Types.tool_output_kind) Base.Hashtbl.t
   ; mutable tasks : Session.Task.t list
   ; kv_store : (string, string) Base.Hashtbl.t
   ; mutable fetch_sw : Eio.Switch.t option
@@ -58,6 +59,7 @@ let create
       ~msg_buffers
       ~function_name_by_id
       ~reasoning_idx_by_id
+      ~tool_output_by_index
       ~tasks
       ~kv_store
       ~fetch_sw
@@ -79,6 +81,7 @@ let create
   ; msg_buffers
   ; function_name_by_id
   ; reasoning_idx_by_id
+  ; tool_output_by_index
   ; tasks
   ; kv_store
   ; fetch_sw
@@ -111,6 +114,7 @@ let selection_active t = Option.is_some t.selection_anchor
 let messages t = t.messages
 let tasks t = t.tasks
 let kv_store t = t.kv_store
+let tool_output_by_index t = t.tool_output_by_index
 let auto_follow t = t.auto_follow
 let cmdline t = t.cmdline
 let cmdline_cursor t = t.cmdline_cursor

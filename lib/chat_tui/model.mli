@@ -40,6 +40,7 @@ type t =
   ; msg_buffers : (string, Types.msg_buffer) Base.Hashtbl.t
   ; function_name_by_id : (string, string) Base.Hashtbl.t
   ; reasoning_idx_by_id : (string, int ref) Base.Hashtbl.t
+  ; tool_output_by_index : (int, Types.tool_output_kind) Base.Hashtbl.t
   ; mutable tasks : Session.Task.t list
   ; kv_store : (string, string) Base.Hashtbl.t
   ; mutable fetch_sw : Eio.Switch.t option
@@ -126,6 +127,7 @@ val create
   -> msg_buffers:(string, Types.msg_buffer) Base.Hashtbl.t
   -> function_name_by_id:(string, string) Base.Hashtbl.t
   -> reasoning_idx_by_id:(string, int ref) Base.Hashtbl.t
+  -> tool_output_by_index:(int, Types.tool_output_kind) Base.Hashtbl.t
   -> tasks:Session.Task.t list
   -> kv_store:(string, string) Base.Hashtbl.t
   -> fetch_sw:Eio.Switch.t option
@@ -176,6 +178,12 @@ val tasks : t -> Session.Task.t list
 
 (** Key–value store for arbitrary plugin data. *)
 val kv_store : t -> (string, string) Base.Hashtbl.t
+
+(** Classification metadata for tool-output messages keyed by message
+    index in {!messages}.  Entries are present only for messages whose
+    [role] is tool-like and for which the TUI managed to infer the
+    corresponding tool call. *)
+val tool_output_by_index : t -> (int, Types.tool_output_kind) Base.Hashtbl.t
 
 (** Auto-scroll flag.  When [true] the view follows new incoming messages
     automatically; otherwise the scroll position stays unchanged. *)

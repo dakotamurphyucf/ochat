@@ -8,6 +8,12 @@
 type role = string
 type message = role * string
 
+type tool_output_kind =
+  | Apply_patch
+  | Read_file of { path : string option }
+  | Read_directory of { path : string option }
+  | Other of { name : string option }
+
 type msg_buffer =
   { buf : Buffer.t
   ; index : int

@@ -643,9 +643,7 @@ let refine
         | None -> { candidate with P.header = Some current.body }
         | Some _ -> candidate
       in
-      print_endline "Y0";
       let score = evaluate ~best:best_prompt.P.body candidate in
-      print_endline "ro";
       Log.emit
         `Debug
         (Printf.sprintf

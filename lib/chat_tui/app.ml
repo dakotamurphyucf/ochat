@@ -559,6 +559,7 @@ let run_chat
       ~msg_buffers:(Hashtbl.create (module String))
       ~function_name_by_id:(Hashtbl.create (module String))
       ~reasoning_idx_by_id:(Hashtbl.create (module String))
+      ~tool_output_by_index:(Hashtbl.create (module Int))
       ~tasks:
         (match session with
          | Some s -> s.tasks

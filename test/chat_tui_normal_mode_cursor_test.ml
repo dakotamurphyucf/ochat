@@ -16,6 +16,7 @@ let make_model () : Chat_tui.Model.t =
     ~msg_buffers:(Hashtbl.create (module String))
     ~function_name_by_id:(Hashtbl.create (module String))
     ~reasoning_idx_by_id:(Hashtbl.create (module String))
+    ~tool_output_by_index:(Hashtbl.create (module Int))
     ~tasks:[]
     ~kv_store:(Hashtbl.create (module String))
     ~fetch_sw:None
