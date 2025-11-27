@@ -13,13 +13,11 @@ type rule =
   ; attr : Notty.A.t
   }
 
-type t = rule list
-
-let empty = []
+open Core
 
 (* VSCode/GitHub-dark truecolor palette. Matches tokens from the supplied
    theme JSON as closely as Notty allows. *)
-let github_dark : t =
+let github_dark_rules : rule list =
   [ { prefix = "comment"; attr = Styles.(fg_hex "#6A737D") } (* Headings – azure, bold. *)
   ; { prefix = "heading.1.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
   ; { prefix = "heading.2.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
@@ -207,71 +205,232 @@ let github_dark : t =
   ]
 ;;
 
-let is_selector_match ~selector scope =
-  let sel_len = String.length selector in
-  let scope_len = String.length scope in
-  scope_len >= sel_len
-  && String.sub scope 0 sel_len = selector
-  && (scope_len = sel_len || scope.[sel_len] = '.')
-;;
+module Rule = struct
+  type t =
+    { attr : Notty.A.t
+    ; index : int
+    ; segments : string array
+    ; seg_count : int
+    }
+end
 
-let count_segments s =
-  let len = String.length s in
-  let rec loop i acc =
-    if i >= len then acc else loop (i + 1) (acc + if s.[i] = '.' then 1 else 0)
+module Trie = struct
+  type node =
+    { children : node String.Table.t
+    ; mutable rules_here : Rule.t list
+    }
+
+  type t = node
+
+  let create () = { children = String.Table.create (); rules_here = [] }
+
+  let rec insert_segments node segments i rule =
+    if i = Array.length segments
+    then node.rules_here <- rule :: node.rules_here
+    else (
+      let seg = segments.(i) in
+      let child =
+        match Hashtbl.find node.children seg with
+        | Some c -> c
+        | None ->
+          let c = create () in
+          Hashtbl.set node.children ~key:seg ~data:c;
+          c
+      in
+      insert_segments child segments (i + 1) rule)
+  ;;
+
+  let insert t rule = insert_segments t rule.Rule.segments 0 rule
+end
+
+module Scope_cache = struct
+  type t = Notty.A.t String.Table.t
+
+  let create ~initial_capacity = String.Table.create ~size:initial_capacity ()
+end
+
+type compiled =
+  { rules : Rule.t array
+  ; trie : Trie.t
+  ; cache : Scope_cache.t
+  }
+
+let sort_uniq_scopes scopes =
+  let sorted = List.sort ~compare:String.compare scopes in
+  let rec dedup acc = function
+    | [] -> List.rev acc
+    | x :: y :: tl when String.(x = y) -> dedup acc (y :: tl)
+    | x :: tl -> dedup (x :: acc) tl
   in
-  1 + loop 0 0
+  dedup [] sorted
 ;;
 
-let cmp_int (a : int) (b : int) = if a < b then -1 else if a > b then 1 else 0
+let scope_key_separator = "."
+let key_of_scopes scopes = String.concat ~sep:scope_key_separator scopes
+
+let split_segments prefix =
+  let len = String.length prefix in
+  let rec loop i start acc =
+    if i = len
+    then (
+      let segment = String.sub prefix ~pos:start ~len:(i - start) in
+      List.rev (segment :: acc))
+    else if Char.(prefix.[i] = '.')
+    then (
+      let segment = String.sub prefix ~pos:start ~len:(i - start) in
+      loop (i + 1) (i + 1) (segment :: acc))
+    else loop (i + 1) start acc
+  in
+  Array.of_list (loop 0 0 [])
+;;
+
+let compile (rules : rule list) : compiled =
+  let rules_array =
+    Array.of_list
+      (List.mapi
+         ~f:(fun index { prefix; attr } ->
+           let segments = split_segments prefix in
+           let seg_count = Array.length segments in
+           { Rule.attr; index; segments; seg_count })
+         rules)
+  in
+  let trie = Trie.create () in
+  Array.iter ~f:(Trie.insert trie) rules_array;
+  let cache = Scope_cache.create ~initial_capacity:1024 in
+  { rules = rules_array; trie; cache }
+;;
+
+type t = { compiled : compiled }
+
+let make_theme (rules : rule list) : t =
+  let compiled = compile rules in
+  { compiled }
+;;
+
+let empty = make_theme []
+let github_dark : t = make_theme github_dark_rules
 
 let attr_of_scopes (t : t) ~scopes =
-  let best_key = ref None in
-  let best_attr = ref None in
-  List.iteri
-    (fun rule_index rule ->
-       let selector = rule.prefix in
-       let segments = count_segments selector in
-       let sel_len = String.length selector in
-       List.iter
-         (fun scope ->
-            if is_selector_match ~selector scope
-            then (
-              let exact = if String.length scope = sel_len then 1 else 0 in
-              let key_segments = segments in
-              let key_exact = exact in
-              let key_len = sel_len in
-              let key_rule = -rule_index in
-              match !best_key with
-              | None ->
-                best_key := Some (key_segments, key_exact, key_len, key_rule);
-                best_attr := Some rule.attr
-              | Some (s', e', l', r') ->
-                let c1 = cmp_int key_segments s' in
-                let better, combine =
-                  if c1 <> 0
-                  then c1 > 0, false
-                  else (
-                    let c2 = cmp_int key_exact e' in
-                    if c2 <> 0
-                    then c2 > 0, false
-                    else (
-                      let c3 = cmp_int key_len l' in
-                      if c3 <> 0 then c3 > 0, true else cmp_int key_rule r' > 0, true))
-                in
-                (match better, combine with
-                 | true, false ->
-                   best_key := Some (key_segments, key_exact, key_len, key_rule);
-                   best_attr := Some rule.attr
-                 | true, true ->
-                   best_key := Some (key_segments, key_exact, key_len, key_rule);
-                   best_attr := Some Styles.(Option.get !best_attr ++ rule.attr)
-                 | false, true ->
-                   best_attr := Some Styles.(Option.get !best_attr ++ rule.attr)
-                 | false, false -> ())))
-         scopes)
-    t;
-  match !best_attr with
-  | None -> Styles.empty
-  | Some a -> a
+  let compiled = t.compiled in
+  let rules = compiled.rules in
+  let n_rules = Array.length rules in
+  if n_rules = 0
+  then Styles.empty
+  else (
+    let scopes = sort_uniq_scopes scopes in
+    match scopes with
+    | [] -> Styles.empty
+    | _ ->
+      let key = key_of_scopes scopes in
+      let compiled_cache = compiled.cache in
+      (match Hashtbl.find compiled_cache key with
+       | Some attr -> attr
+       | None ->
+         let exact0 = Array.init n_rules ~f:(fun _ -> 0) in
+         let exact1 = Array.init n_rules ~f:(fun _ -> 0) in
+         let process_scope scope =
+           let segments = split_segments scope in
+           let scope_seg_count = Array.length segments in
+           let rec traverse node depth =
+             if depth = scope_seg_count
+             then ()
+             else (
+               match Hashtbl.find node.Trie.children segments.(depth) with
+               | None -> ()
+               | Some child ->
+                 List.iter
+                   ~f:(fun (rule : Rule.t) ->
+                     let idx = rule.index in
+                     if rule.seg_count = scope_seg_count
+                     then exact1.(idx) <- exact1.(idx) + 1
+                     else exact0.(idx) <- exact0.(idx) + 1)
+                   child.Trie.rules_here;
+                 traverse child (depth + 1))
+           in
+           traverse compiled.trie 0
+         in
+         List.iter ~f:process_scope scopes;
+         let best_segments = ref (-1) in
+         let best_exact = ref (-1) in
+         let best_exact_for_rule = Array.init n_rules ~f:(fun _ -> -1) in
+         for j = 0 to n_rules - 1 do
+           let e_j = if exact1.(j) > 0 then 1 else if exact0.(j) > 0 then 0 else -1 in
+           best_exact_for_rule.(j) <- e_j;
+           if e_j >= 0
+           then (
+             let s_j = rules.(j).seg_count in
+             if s_j > !best_segments
+             then (
+               best_segments := s_j;
+               best_exact := e_j)
+             else if s_j = !best_segments && e_j > !best_exact
+             then best_exact := e_j)
+         done;
+         let result =
+           if !best_segments < 0
+           then Styles.empty
+           else (
+             let acc = ref Styles.empty in
+             for j = 0 to n_rules - 1 do
+               let rule = rules.(j) in
+               let s_j = rule.seg_count in
+               let e_j = best_exact_for_rule.(j) in
+               if s_j = !best_segments && e_j = !best_exact
+               then (
+                 let count = if !best_exact = 1 then exact1.(j) else exact0.(j) in
+                 for _ = 1 to count do
+                   acc := Styles.(!acc ++ rule.attr)
+                 done)
+             done;
+             !acc)
+         in
+         if Hashtbl.length compiled_cache >= 1000000 then Hashtbl.clear compiled_cache;
+         Hashtbl.set compiled_cache ~key ~data:result;
+         result))
+;;
+
+let%test_unit "attr_of_scopes_golden_same_specificity_composes_in_order" =
+  let rules =
+    [ { prefix = "scope"; attr = Styles.fg_red }
+    ; { prefix = "scope"; attr = Styles.bold }
+    ; { prefix = "other"; attr = Styles.italic }
+    ]
+  in
+  let theme = make_theme rules in
+  let scopes = [ "scope" ] in
+  let got = attr_of_scopes theme ~scopes in
+  let expected = Styles.(fg_red ++ bold) in
+  if not (Notty.A.equal got expected)
+  then failwith "attr_of_scopes should compose equal-specificity rules in order"
+;;
+
+let%test_unit "attr_of_scopes_golden_longest_prefix_wins_across_scopes" =
+  let rules =
+    [ { prefix = "a"; attr = Styles.fg_red }
+    ; { prefix = "a.b"; attr = Styles.fg_green }
+    ; { prefix = "a.b.c"; attr = Styles.fg_blue }
+    ]
+  in
+  let theme = make_theme rules in
+  let scopes = [ "a"; "a.b.c.d" ] in
+  let got = attr_of_scopes theme ~scopes in
+  let expected = Styles.fg_blue in
+  if not (Notty.A.equal got expected)
+  then failwith "attr_of_scopes should pick the longest matching prefix"
+;;
+
+let%test_unit "attr_of_scopes_golden_empty_scopes" =
+  let scopes = [] in
+  let trie = attr_of_scopes github_dark ~scopes in
+  if not (Notty.A.equal trie Styles.empty)
+  then failwith "attr_of_scopes should return empty for empty scopes"
+;;
+
+let%test_unit "attr_of_scopes_golden_scope_order_irrelevant" =
+  let scopes = [ "keyword"; "source.ocaml"; "keyword.operator" ] in
+  let scopes_permuted = [ "source.ocaml"; "keyword.operator"; "keyword" ] in
+  let trie1 = attr_of_scopes github_dark ~scopes in
+  let trie2 = attr_of_scopes github_dark ~scopes:scopes_permuted in
+  if not (Notty.A.equal trie1 trie2)
+  then failwith "attr_of_scopes should not depend on scope order"
 ;;
