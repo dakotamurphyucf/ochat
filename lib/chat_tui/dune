@@ -46,4 +46,5 @@
   ochat.session
   context_compaction)
  (preprocess
-  (pps ppx_jane)))
+  (pps ppx_jane))
+ (inline_tests))

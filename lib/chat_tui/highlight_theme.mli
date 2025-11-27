@@ -39,8 +39,12 @@
     {-  The theme is used by {!Chat_tui.Highlight_tm_engine} to colourize
         tokens. Callers can further compose attributes with
         {!Chat_tui.Highlight_styles.(++)}.}
-    {-  Resolution cost is linear in the number of rules times the number of
-        scopes provided.}}
+    {-  Resolution is implemented via an internal precompiled index and a
+        small cache keyed by canonicalised scope sets. In the worst case it
+        is linear in the number of rules times the number of scopes
+        provided, but repeated calls with the same scope sets are typically
+        much cheaper. The function is suitable for per-token use in the
+        renderer.}}
   *)
 
 (** Opaque theme value. Represents an ordered list of [prefix -> attr] rules. *)
@@ -69,8 +73,11 @@ val github_dark : t
     {!Chat_tui.Highlight_styles.(++)}. If no rule matches, the result is
     {!Chat_tui.Highlight_styles.empty}.
 
-    The function is inexpensive (linear in the number of rules times the
-    number of scopes) and suitable for per-token calls in the renderer.
+    The implementation maintains an internal cache keyed by canonicalised
+    scope sets and uses a precompiled index of rules, so repeated calls for
+    the same [scopes] are typically very cheap. In the worst case the cost is
+    linear in the number of rules times the number of scopes and remains
+    suitable for per-token calls in the renderer.
 
     Example – obtain an attribute for an OCaml keyword and add underline:
     {[
@@ -84,3 +91,4 @@ val github_dark : t
       ()
     ]} *)
 val attr_of_scopes : t -> scopes:string list -> Notty.A.t
+
