@@ -168,7 +168,7 @@ let json_tm_json =
     ]},
     { "name": "constant.numeric.json", "match": "-?\\b[0-9]+(\\.[0-9]+)?([eE][+-]?[0-9]+)?\\b" },
     { "name": "constant.language.json", "match": "\\b(true|false|null)\\b" },
-    { "name": "punctuation.separator.json", "match": "[{}\[\]:,]" }
+    { "name": "punctuation.separator.json", "match": "[{}:,]" }
   ]
 }
 |}
@@ -289,8 +289,24 @@ let ochat_apply_patch_tm_json =
   "name": "ochat-apply-patch",
   "scopeName": "source.ochat-apply-patch",
   "patterns": [
-    { "name": "meta.header.ochatpatch", "match": "^┏.*$" },
-    { "name": "meta.header.ochatpatch.file-op", "match": "^\\*\\*\\* (Add|Update|Delete) File: .*$" },
+    { "name": "meta.header.ochatpatch",
+      "match": "^(┏━\\[\\s*)([^]]+)(\\s*\\].*)$",
+      "captures": {
+        "1": { "name": "punctuation.definition.header.ochatpatch" },
+        "2": { "name": "entity.name.filename.ochatpatch" },
+        "3": { "name": "punctuation.definition.header.trailing.ochatpatch" }
+      }
+    },
+    { "name": "meta.header.ochatpatch.file-op",
+      "match": "^\\*\\*\\* (Add|Update|Delete) File: .*$"
+    },
+    { "name": "meta.ochatpatch.snippet",
+      "match": "^(\\s*\\d+\\s*\\|\\s*)(.*)$",
+      "captures": {
+        "1": { "name": "constant.numeric.line-number.ochatpatch" },
+        "2": { "name": "markup.inserted.ochatpatch" }
+      }
+    },
     { "include": "source.diff" }
   ]
 }

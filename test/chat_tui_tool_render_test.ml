@@ -49,7 +49,6 @@ let%expect_test "tool call rendering preserves call text" =
        if String.is_substring line ~substring:"read_file("
        then print_endline (String.strip line));
   [%expect {|
-    failed to load JSON grammar: json > object > array > object > string: unterminated string
     failed to load HTML grammar: json > object: not enough input
     failed to load Markdown grammar: (Sys_error
      "lib/chat_tui/grammars/markdown.tmLanguage.json: No such file or directory")
