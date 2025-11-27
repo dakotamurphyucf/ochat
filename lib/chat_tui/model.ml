@@ -25,7 +25,7 @@ type t =
   ; mutable fetch_sw : Eio.Switch.t option
   ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int
-  ; mutable selection_anchor : int option (* Command-mode scaffolding *)
+  ; mutable selection_anchor : int option
   ; mutable mode : editor_mode
   ; mutable draft_mode : draft_mode
   ; mutable selected_msg : int option
@@ -52,9 +52,7 @@ and draft_mode =
   | Plain
   | Raw_xml
 
-let classify_tool_output
-      ~(name_opt : string option)
-      ~(path : string option)
+let classify_tool_output ~(name_opt : string option) ~(path : string option)
   : Types.tool_output_kind
   =
   match Option.map ~f:String.lowercase name_opt with
@@ -217,7 +215,6 @@ let select_message (t : t) (idx : int option) = t.selected_msg <- idx
 
 let push_undo (t : t) : unit =
   t.undo_stack <- (t.input_line, t.cursor_pos) :: t.undo_stack;
-  (* any new edit invalidates the redo ring *)
   t.redo_stack <- []
 ;;
 
@@ -311,8 +308,7 @@ let apply_patch (model : t) (p : Types.patch) : t =
     Buffer.add_string buf.buf txt;
     update_message_text model buf.index (Buffer.contents buf.buf);
     (* Classify this tool output for renderer metadata. *)
-    let kind =
-      classify_tool_output ~name_opt ~path in
+    let kind = classify_tool_output ~name_opt ~path in
     Hashtbl.set model.tool_output_by_index ~key:buf.index ~data:kind;
     model
   | Types.Update_reasoning_idx { id; idx } ->

@@ -11,8 +11,11 @@
     • maintains a mutable {!Chat_tui.Model.t} value that represents the
       current UI state,
     • streams assistant replies from the OpenAI API using
-      {!Chat_response.Driver.run_completion_stream_in_memory_v1}, and
-    • persists finished conversations to disk on exit.
+      {!Chat_response.Driver.run_completion_stream_in_memory_v1},
+    • triggers optional context-compaction runs via
+      {!Context_compaction.Compactor.compact_history} when requested by the
+      user, and
+    • persists finished conversations and session snapshots to disk on exit.
 
     Placing the code in a library module (instead of the old monolithic
     [`bin/chat_tui.ml`] executable) allows
@@ -73,14 +76,23 @@ let add_placeholder_stream_error (model : Model.t) text : unit =
   ignore (Model.apply_patch model patch)
 ;;
 
+(** [add_placeholder_compact_message model] appends a temporary
+    "(compacting…)" assistant message to [model] while background context
+    compaction is running.  The message is replaced once compaction either
+    succeeds or fails and an explicit status message is shown. *)
 let add_placeholder_compact_message (model : Model.t) : unit =
   let patch = Add_placeholder_message { role = "assistant"; text = "(compacting…)" } in
   ignore (Model.apply_patch model patch)
 ;;
 
-(* Persist the in-memory session snapshot to disk unconditionally.  We
-     call this helper in all quit branches so that conversation history is
-     never lost, even if the user aborts ChatMarkdown export. *)
+(** [persist_snapshot env session model] copies the live [model] back into
+    [session] and persists it to disk.
+
+    The helper updates the canonical history, task list and key/value store
+    fields of the supplied {!Session.t} and then delegates the actual
+    serialisation to {!Session_store.save}.  It is used from all quit
+    branches so that conversation state is not lost even when the user
+    skips ChatMarkdown export. *)
 let persist_snapshot env session model =
   match session with
   | None -> ()
@@ -119,8 +131,10 @@ let stream_in_flight (model : Model.t) = Option.is_some (Model.fetch_sw model)
 
     - copies the prompt into the history as a user message, handling both
       plain text and the *Raw XML* tool-invocation dialect,
-    - resets the draft buffer and caret position,
-    - scrolls the viewport so the newest message is visible, and
+    - resets the draft buffer and caret position and enables
+      {!Model.auto_follow},
+    - scrolls the viewport so the newest message is visible,
+    - injects a transient "(thinking…)" assistant placeholder, and
     - pushes a redraw request onto [ev_stream] so the renderer can refresh
       the screen.
 

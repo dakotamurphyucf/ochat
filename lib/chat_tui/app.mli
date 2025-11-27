@@ -4,8 +4,9 @@
     layer that powers the Ochat terminal UI.  Beyond the traditional
     *event-loop & renderer* triad it also provides
 
-    • on-device {i context-compaction} (hit \[Ctrl-K]),
-    • graceful request {i cancellation} (hit \[Esc]) and
+    • on-device {i context-compaction} (triggered via small ':' commands
+       such as [:c] / [:compact]),
+    • graceful request {i cancellation} (hit [Esc]) and
     • automatic / interactive {i snapshot persistence}.
 
     A single call to {!run_chat} boots the Notty terminal, parses the
@@ -24,10 +25,14 @@ type prompt_context =
   ; tools : Openai.Responses.Request.Tool.t list
     (** Tools exposed to the assistant at runtime. *)
   ; tool_tbl : (string, string -> string) Base.Hashtbl.t
-    (** Mapping [tool-name ↦ implementation]. *)
+    (** Mapping [tool-name → implementation]. *)
   }
 
-(** Persistence policy to use when the UI terminates. *)
+(** Persistence policy to use when the UI terminates.
+
+    The value controls whether a {!Session.t} snapshot derived from the
+    final {!Model.t} is written back to disk at the end of {!run_chat}.  The
+    policy is ignored when no [session] was supplied. *)
 type persist_mode =
   [ `Always
   | `Never
@@ -47,14 +52,30 @@ val add_placeholder_stream_error : Model.t -> string -> unit
     compaction is running. *)
 val add_placeholder_compact_message : Model.t -> unit
 
-(** [persist_snapshot env session model] saves [model] to the session on
-    disk.  No-op when [session] is [None]. *)
+(** [persist_snapshot env session model] persists the in-memory [model] back
+    into [session] and writes it to disk.
+
+    The helper copies the canonical history, task list and key/value store
+    from [model] into the supplied {!Session.t} and then delegates to
+    {!Session_store.save}.  It is a no-op when [session] is [None]. *)
 val persist_snapshot : Eio_unix.Stdenv.base -> Session.t option -> Model.t -> unit
 
 (** Immediate (synchronous) UI updates that happen right after the user
-    hits ⏎ but {b before} the OpenAI request is sent.  The helper moves the
-    draft into the history, clears the prompt, scrolls the viewport and
-    issues a {!`Redraw} request on [ev_stream]. *)
+    hits ⏎ but {b before} the OpenAI request is sent.
+
+    The helper:
+    {ul
+    {- snapshots the current draft buffer, converts it into a user history
+       item (plain text or raw-XML, depending on [Model.draft_mode]);}
+    {- appends a renderable user message to {!Model.messages} and updates
+       {!Model.history_items};}
+    {- clears {!Model.input_line}, resets the caret and enables
+       {!Model.auto_follow};}
+    {- scrolls the viewport so the freshly submitted message is visible;}
+    {- injects a transient "(thinking…)" assistant placeholder; and}
+    {- pushes a [`Redraw] request on [ev_stream].}}
+
+    Actual network IO and streaming are delegated to {!handle_submit}. *)
 val apply_local_submit_effects
   :  dir:Eio.Fs.dir_ty Eio.Path.t
   -> env:Eio_unix.Stdenv.base
@@ -86,16 +107,17 @@ val apply_local_submit_effects
     Individual token events arrive at sub-millisecond latency which is far
     too fast for human eyes.  To avoid wasting CPU cycles (and battery!)
     contiguous [`Stream] events are coalesced into a single
-    [`Stream_batch] if they arrive within a ~12 ms time-window.  The
-    window can be tweaked—primarily for benchmarking—via the environment
-    variable [$OCHAT_STREAM_BATCH_MS] (valid range 1–50 ms).
+    [`Stream_batch] if they arrive within a small time-window (12 ms by
+    default).  The window can be tweaked—primarily for benchmarking—via the
+    environment variable [$OCHAT_STREAM_BATCH_MS] (valid range 1–50 ms).
 
     Function-call output events are *not* batched because they are rare and
     often trigger further side-effects.
 
     {2 Parameters}
 
-    @param env  The current {!Eio.Stdenv.t}
+    @param env  The current {!Eio.Stdenv.t} (typically
+           [Eio_unix.Stdenv.base]).
     @param model Mutable state record that will be updated while the stream
            progresses.
     @param ev_stream  Event queue shared with the main UI loop.  Both
@@ -110,8 +132,10 @@ val apply_local_submit_effects
            response cache and tool outputs.
     @param parallel_tool_calls  When [true] (default) tool invocations are
            evaluated concurrently; otherwise they run sequentially.
-    @param history_compaction  Enables automatic history pruning when the
-           assistant hits the context window limit.
+    @param history_compaction  Forwarded to
+           {!Chat_response.Driver.run_completion_stream_in_memory_v1} to
+           enable its lightweight history-compaction pipeline (collapsing
+           redundant file-read entries).
  *)
 val handle_submit
   :  env:Eio_unix.Stdenv.base
@@ -135,15 +159,34 @@ val handle_submit
 
 (** Boot the TUI and block until the user terminates the program.
 
-    @param env          The standard environment supplied by
-                        {!Eio_main.run}.
-    @param prompt_file  Path to the *.chatmd* prompt.
-    @param session      Optional persisted session that should be resumed.
-    @param export_file  Override for the ChatMarkdown export path.
-    @param persist_mode Policy whether to save the session snapshot on
-                        exit.  Defaults to {!`Ask}.
-    @param parallel_tool_calls Allow multiple tool calls to run in
-                               parallel (default: [true]).
+    Calling [run_chat ~env ~prompt_file ()] is the primary way to start an
+    interactive Ochat session from an executable.  The function initialises
+    a full-screen {!Notty_eio.Term}, parses the ChatMarkdown prompt, builds
+    an initial {!Model.t} and then runs the main event-loop until the user
+    quits.
+
+    On shutdown the helper can:
+    {ul
+    {- optionally export the full conversation as ChatMarkdown (either
+       automatically or after a [y/N] prompt, depending on how the user
+       exited the UI and the value of [?export_file]);}
+    {- optionally persist the session snapshot according to
+       [?persist_mode].}}
+
+    Parameters:
+    {ul
+    {- [env] – The standard environment supplied by {!Eio_main.run}.}
+    {- [prompt_file] – Path to the [*.chatmd*] prompt that seeds the
+       conversation, declares tools and configures default model settings.}
+    {- [session] – Optional persisted session that should be resumed.
+       When present, its history, tasks and key/value store take precedence
+       over the defaults from [prompt_file].}
+    {- [export_file] – Optional override for the ChatMarkdown export
+       path.  When omitted the prompt file path is reused.}
+    {- [persist_mode] – Policy controlling whether the session snapshot
+       is written back on exit.  Defaults to [`Ask].}
+    {- [parallel_tool_calls] – Allow multiple tool calls to run in
+       parallel (default: [true]).}}
  *)
 val run_chat
   :  env:Eio_unix.Stdenv.base

@@ -298,7 +298,10 @@ let%expect_test "rebuild_tool_output_index classifies history items" =
        | Types.Read_file { path } ->
          Printf.printf "%d: Read_file path=%s\n" idx (Option.value path ~default:"<none>")
        | Types.Read_directory { path } ->
-         Printf.printf "%d: Read_directory path=%s\n" idx (Option.value path ~default:"<none>")
+         Printf.printf
+           "%d: Read_directory path=%s\n"
+           idx
+           (Option.value path ~default:"<none>")
        | Types.Apply_patch -> Printf.printf "%d: Apply_patch\n" idx
        | Types.Other { name } ->
          Printf.printf "%d: Other name=%s\n" idx (Option.value name ~default:"<none>"))
@@ -341,4 +344,3 @@ let%expect_test "lang_of_path maps common extensions" =
       UPPER.ML -> ocaml
     |}]
 ;;
-

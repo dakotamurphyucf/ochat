@@ -36,12 +36,22 @@
        highlighted with {!Chat_tui.Highlight_tm_engine} configured with the
        {!Chat_tui.Highlight_theme.github_dark} palette and the shared
        registry from {!Chat_tui.Highlight_registry};}
+    {- messages classified as tool output via
+       {!Chat_tui.Model.tool_output_by_index} and
+       {!Chat_tui.Types.tool_output_kind} may be rendered with specialised
+       layouts – for example, [Apply_patch] responses are split into a
+       status preamble and a fenced patch section highlighted using an
+       internal ["ochat-apply-patch"] grammar, [Read_file { path }]
+       responses attempt to infer a syntax-highlighting language via
+       {!lang_of_path} when [path] has a recognised extension, and
+       [Read_directory] responses are tinted to distinguish them from
+       regular prose;}
     {- non-code paragraphs are highlighted as markdown when a grammar is
        available, otherwise rendered as plain text with a simple
-       ["**bold**"]/["__bold__"] heuristic.}}
+       ["**bold**"]/ ["__bold__"] heuristic.}}
 
-    Each message is preceded by a header line that centres the role label
-    (e.g. ["assistant"], ["user"], ["tool"]) and tints it using a small
+    Each message is preceded by a header line that shows an icon and the
+    capitalised role label (e.g. ["assistant"], ["user"], ["tool"]) and tints it using a small
     colour palette; the body lines themselves do not carry an inline
     ["role:"] prefix so that copying code from the terminal yields clean
     snippets.
@@ -90,11 +100,18 @@ val render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)
       ()
     ]} *)
 
-(** Best-effort language inference used for [read_file] tool outputs.
+(** [lang_of_path path] performs best-effort language inference for
+    [read_file] tool outputs.
 
-    The helper inspects the file extension and returns a TextMate
-    language identifier when known (for example ["ml"] → ["ocaml"],
-    ["md"] → ["markdown"]).  Unrecognised or extension-less paths
-    yield [None].  Exposed primarily for unit tests. *)
+    The helper inspects the file extension of [path] and returns a
+    TextMate-style language identifier when known.  For example:
+    {ul
+    {- [".ml"] and [".mli"] map to ["ocaml"];}
+    {- [".md"] maps to ["markdown"];}
+    {- [".json"] maps to ["json"];}
+    {- [".sh"] maps to ["bash"].}}
+
+    Paths without an extension and unrecognised extensions yield [None].
+    The function is exposed primarily for unit tests and debugging of the
+    renderer's tool-output handling. *)
 val lang_of_path : string -> string option
-

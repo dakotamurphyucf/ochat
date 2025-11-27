@@ -26,8 +26,9 @@ simple mutations that will later be replaced by pure transformations.
 5. [Undo / Redo](#undo--redo)
 6. [Fork helpers](#fork-helpers)
 7. [Rendering cache helpers](#rendering-cache-helpers)
-8. [Applying patches – `apply_patch`](#apply_patch)
-9. [Known limitations](#known-limitations)
+8. [Tool-output metadata](#tool-output-metadata)
+9. [Applying patches – `apply_patch`](#apply_patch)
+10. [Known limitations](#known-limitations)
 
 ---
 
@@ -42,6 +43,7 @@ val create :
   msg_buffers:(string, Types.msg_buffer) Base.Hashtbl.t ->
   function_name_by_id:(string, string) Base.Hashtbl.t ->
   reasoning_idx_by_id:(string, int ref) Base.Hashtbl.t ->
+  tool_output_by_index:(int, Types.tool_output_kind) Base.Hashtbl.t ->
   tasks:Session.Task.t list ->
   kv_store:(string, string) Base.Hashtbl.t ->
   fetch_sw:Eio.Switch.t option ->
@@ -75,10 +77,11 @@ let empty () =
     ~messages:[]
     ~input_line:""
     ~auto_follow:true
-    ~tasks:[]
     ~msg_buffers:(Hashtbl.create (module String))
     ~function_name_by_id:(Hashtbl.create (module String))
     ~reasoning_idx_by_id:(Hashtbl.create (module String))
+    ~tool_output_by_index:(Hashtbl.create (module Int))
+    ~tasks:[]
     ~kv_store:(Hashtbl.create (module String))
     ~fetch_sw:None
     ~scroll_box:(Notty_scroll_box.create Notty.I.empty)
@@ -105,6 +108,7 @@ let empty () =
 | `selection_active` | `true` whenever a selection is active. |
 | `messages` | Renderable `(role, text)` tuples. |
 | `auto_follow` | `true` → scroll follows new messages automatically. |
+| `tool_output_by_index` | Per-message classification metadata for tool-output messages (see [Tool-output metadata](#tool-output-metadata)). |
 | `tasks` | Background jobs associated with the current session. |
 | `kv_store` | Arbitrary key–value store used by plugins and tools. |
 | `cmdline` / `cmdline_cursor` | Current ':' command buffer and its caret position. |
@@ -200,6 +204,42 @@ These helpers are **private to the TUI layer**.  External modules must not
 reach into or rely on the cache.
 
 ---
+### Tool-output metadata <a id="tool-output-metadata"></a>
+
+The OpenAI streaming API exposes a rich history of response items
+(`Openai.Responses.Item.t`), only some of which become visible chat
+messages. To let the renderer treat **tool outputs** specially without
+hard-coding tool names, the model tracks a small side map:
+
+```ocaml
+tool_output_by_index : (int, Types.tool_output_kind) Hashtbl.t
+```
+
+* Keys are zero-based indices into `messages` (the renderable transcript).
+* Values are `Types.tool_output_kind` tags such as `Apply_patch`,
+  `Read_file { path = … }` or `Other { name = Some "diff" }`.
+
+Entries exist **only** for messages that represent the output of a tool
+call and for which the TUI could successfully link the output back to its
+corresponding `Function_call` item. Regular assistant text leaves no
+entry.
+
+During streaming, the `Set_function_output` patch is responsible for
+populating or updating this map. When the entire history is replaced at
+once (for example after context compaction or a `Replace_history` event)
+you must call `rebuild_tool_output_index` so that `tool_output_by_index`
+stays in sync with both `history_items` and `messages`:
+
+```ocaml
+Model.set_history_items model new_items;
+Model.set_messages model (Chat_tui.Conversation.of_history new_items);
+Model.rebuild_tool_output_index model;
+```
+
+Downstream consumers – primarily the renderer – can then decide how to
+display a message based on its classification. For example, a
+`Read_file { path = Some p }` output can be rendered using a path-aware
+syntax highlighter.
 
 ---
 

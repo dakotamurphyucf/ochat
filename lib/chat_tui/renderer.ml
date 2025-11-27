@@ -2,7 +2,20 @@
 
     The public API and user-facing invariants are documented in
     [renderer.mli]; this module contains the concrete Notty-based
-    rendering pipeline and internal helpers. *)
+    rendering pipeline and internal helpers for:
+
+    {ul
+    {- laying out the history viewport, status bar and input box;}
+    {- syntax-highlighting chat text and fenced code blocks using
+       {!Chat_tui.Highlight_tm_engine} and {!Chat_tui.Highlight_theme};}
+    {- rendering specialised views for tool output such as
+       [read_file] and [apply_patch], including best-effort language
+       detection via {!lang_of_path};}
+    {- maintaining per-message render caches and scroll virtualisation via
+       {!Chat_tui.Model} and {!Notty_scroll_box}.}}
+
+    Callers should use {!render_full}, exported from the interface, rather
+    than relying on the internal submodules defined here. *)
 
 open Core
 open Notty
@@ -200,6 +213,7 @@ module Render_context = struct
 
   let make ~width ~selected ~role ~tool_output ~hi_engine =
     { width; selected; role; tool_output; hi_engine }
+  ;;
 
   (*
      Message content lines are rendered without an inline role label so that
@@ -222,13 +236,13 @@ let lang_of_path (path : string) : string option =
       else ext
     in
     let ext = String.lowercase ext in
-    match ext with
-    | "ml" | "mli" -> Some "ocaml"
-    | "md" -> Some "markdown"
-    | "json" -> Some "json"
-    | "sh" -> Some "bash"
-    | "txt" -> None
-    | _ -> None
+    (match ext with
+     | "ml" | "mli" -> Some "ocaml"
+     | "md" -> Some "markdown"
+     | "json" -> Some "json"
+     | "sh" -> Some "bash"
+     | "txt" -> None
+     | _ -> None)
 ;;
 
 module Paint = struct
@@ -278,7 +292,7 @@ module Paint = struct
              | [ xs ] -> xs
              | xs -> List.concat xs)
           | Some _ ->
-                        let len = String.length para in
+            let len = String.length para in
             if
               len >= 4
               && String.is_prefix para ~prefix:"**"
@@ -315,9 +329,7 @@ module Paint = struct
         let runs = List.map spans ~f:(fun (a, s) -> a, s) in
         render_runs runs)
     in
-    let is_tool_call =
-      String.equal ctx.role "tool" && Option.is_none ctx.tool_output
-    in
+    let is_tool_call = String.equal ctx.role "tool" && Option.is_none ctx.tool_output in
     if (not is_tool_call) || String.is_empty para
     then render_markdown ()
     else (
@@ -329,11 +341,9 @@ module Paint = struct
           let total_len = String.length para in
           if open_idx + 1 > total_len
           then None
-          else
+          else (
             let after_open_len = total_len - open_idx - 1 in
-            let after_open =
-              String.sub para ~pos:(open_idx + 1) ~len:after_open_len
-            in
+            let after_open = String.sub para ~pos:(open_idx + 1) ~len:after_open_len in
             let prefix_trimmed = String.rstrip prefix in
             if String.is_empty prefix_trimmed
             then None
@@ -347,8 +357,7 @@ module Paint = struct
               in
               let closing, args =
                 let len_after = String.length after_open in
-                if len_after > 0
-                   && Char.(String.get after_open (len_after - 1) = ')')
+                if len_after > 0 && Char.(String.get after_open (len_after - 1) = ')')
                 then ")", String.sub after_open ~pos:0 ~len:(len_after - 1)
                 else "", after_open
               in
@@ -358,9 +367,7 @@ module Paint = struct
                 if String.is_empty name then [] else [ tool_name_attr, name ]
               in
               let ws_spans =
-                if String.is_empty ws_after_name
-                then []
-                else [ base_attr, ws_after_name ]
+                if String.is_empty ws_after_name then [] else [ base_attr, ws_after_name ]
               in
               let open_paren_spans = [ base_attr, "(" ] in
               let args_spans =
@@ -380,7 +387,7 @@ module Paint = struct
               in
               Some
                 (List.concat
-                   [ name_spans; ws_spans; open_paren_spans; args_spans; closing_spans ]))
+                   [ name_spans; ws_spans; open_paren_spans; args_spans; closing_spans ])))
       in
       match tool_spans with
       | None -> render_markdown ()
@@ -506,7 +513,9 @@ module Message = struct
     I.hsnap ~align:`Left ctx.width text_img
   ;;
 
-  let render_body_default (ctx : Render_context.t) ~(role : string) ~(text : string) : I.t list =
+  let render_body_default (ctx : Render_context.t) ~(role : string) ~(text : string)
+    : I.t list
+    =
     let blocks = Blocks.of_message_text text in
     let first_row = ref true in
     List.concat_map blocks ~f:(fun block ->
@@ -519,9 +528,7 @@ module Message = struct
           rs)
       | Blocks.Code { lang; code } ->
         let klass =
-          if Roles.is_toollike role
-          then Code_cache2.Toollike
-          else Code_cache2.Userlike
+          if Roles.is_toollike role then Code_cache2.Toollike else Code_cache2.Userlike
         in
         let rs = Paint.render_code_block ctx ~is_first:!first_row ~lang ~code ~klass in
         if (not (Roles.is_toollike role)) && not (List.is_empty rs)
@@ -529,11 +536,13 @@ module Message = struct
         rs)
   ;;
 
-  let render_body_apply_patch (ctx : Render_context.t) ~(role : string) ~(text : string) : I.t list =
+  let render_body_apply_patch (ctx : Render_context.t) ~(role : string) ~(text : string)
+    : I.t list
+    =
     let lines = String.split_lines text in
     let rec split_status acc = function
       | [] -> List.rev acc, []
-      | "" as l :: rest -> List.rev (l :: acc), rest
+      | ("" as l) :: rest -> List.rev (l :: acc), rest
       | l :: rest -> split_status (l :: acc) rest
     in
     let status_lines, patch_lines = split_status [] lines in
@@ -551,13 +560,9 @@ module Message = struct
         let code = String.concat ~sep:"\n" patch_lines in
         let lang = Some "ochat-apply-patch" in
         let klass =
-          if Roles.is_toollike role
-          then Code_cache2.Toollike
-          else Code_cache2.Userlike
+          if Roles.is_toollike role then Code_cache2.Toollike else Code_cache2.Userlike
         in
-        let rs =
-          Paint.render_code_block ctx ~is_first:!first_row ~lang ~code ~klass
-        in
+        let rs = Paint.render_code_block ctx ~is_first:!first_row ~lang ~code ~klass in
         if not (List.is_empty rs) then first_row := false;
         rs
     in
@@ -578,9 +583,7 @@ module Message = struct
        | None -> render_body_default ctx ~role ~text
        | Some lang ->
          let klass =
-           if Roles.is_toollike role
-           then Code_cache2.Toollike
-           else Code_cache2.Userlike
+           if Roles.is_toollike role then Code_cache2.Toollike else Code_cache2.Userlike
          in
          Paint.render_code_block ctx ~is_first:true ~lang:(Some lang) ~code:text ~klass)
   ;;
@@ -963,9 +966,7 @@ module Compose = struct
        Model.set_last_history_width model (Some w));
     let render_message ~idx ~selected ((role, _) as msg) =
       let tool_output = Hashtbl.find tool_outputs idx in
-      let ctx =
-        Render_context.make ~width:w ~selected ~role ~tool_output ~hi_engine
-      in
+      let ctx = Render_context.make ~width:w ~selected ~role ~tool_output ~hi_engine in
       Message.render ctx msg
     in
     let messages = Model.messages model in
@@ -997,12 +998,7 @@ module Compose = struct
             Option.value_map (Model.selected_msg model) ~default:false ~f:(Int.equal idx)
           in
           let ctx =
-            Render_context.make
-              ~width:w
-              ~selected
-              ~role
-              ~tool_output:None
-              ~hi_engine
+            Render_context.make ~width:w ~selected ~role ~tool_output:None ~hi_engine
           in
           Message.render_header_line ctx)
     in

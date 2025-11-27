@@ -19,6 +19,9 @@
       immutable {!Chat_tui.Model.t}.  This mirrors the
       {i Model-View-Update} architecture.
 
+    • {b Runtime settings} – {!settings} toggles features that influence how
+      tools run at execution time.
+
     @canonical Chat_tui.Types *)
 
 (** Role of a chat message.  Expected values are the strings mandated by
@@ -47,8 +50,8 @@ type tool_output_kind =
   | Other of { name : string option }
 
 (** Streaming-time buffer.  While we receive deltas from the OpenAI API we
-    accumulate partial output in [text] and remember the target index into
-    the [messages] list so the UI can update incrementally. *)
+    accumulate partial output in [buf] and remember the target index [index]
+    into {!Chat_tui.Model.messages} so the UI can update incrementally. *)
 type msg_buffer =
   { buf : Buffer.t (** Mutable accumulator for the streaming text. *)
   ; index : int
@@ -57,19 +60,29 @@ type msg_buffer =
         finishes. *)
   }
 
+(** Commands produced by the pure controller and executed by a side-effecting
+    runner.
+
+    Values of this type carry thunks that start or stop IO-heavy operations
+    such as persistence and streaming without forcing the controller itself
+    to perform those effects. *)
 type cmd =
   | Persist_session of (unit -> unit)
   (** Persist the current conversation by running [f] in a separate fibre. *)
   | Start_streaming of (unit -> unit)
-  (** Kick off an OpenAI streaming request by executing the thunk. *)
-  | Cancel_streaming of (unit -> unit) (** Abort the in-flight streaming request. *)
+  (** Kick off an OpenAI streaming request by executing [f]. *)
+  | Cancel_streaming of (unit -> unit)
+  (** Abort the in-flight streaming request by running [f]. *)
 
-(* These constructors describe {e pure} modifications to the immutable
-   [Model.t] record that will be executed by [Model.apply].  They are
-   defined here – as an extension of the open variant – so that they can be
-   shared between multiple compilation units without introducing circular
-   dependencies.  *)
+(** High-level, mostly pure updates to {!Chat_tui.Model.t}.
 
+    Each constructor describes an abstract change to the UI state that is
+    applied by {!Chat_tui.Model.apply_patch}.  Today patches are executed by
+    mutating the model in place; a future refactor is expected to rebuild an
+    immutable record instead.
+
+    Defining the type here keeps it shared between the controller, model,
+    and streaming code without introducing circular dependencies. *)
 type patch =
   | Ensure_buffer of
       { id : string
@@ -97,7 +110,11 @@ type patch =
       ; idx : int
       } (** Update the last-seen reasoning summary index for buffer [id]. *)
   | Add_user_message of { text : string }
-  (** Insert the user's prompt [text] into the chat history. *)
+  (** Append the user's prompt [text] to {!Chat_tui.Model.messages}.
+
+      The patch currently affects only the renderable transcript; callers
+      that maintain a separate canonical history should update it via
+      {!Chat_tui.Model.add_history_item}. *)
   | Add_placeholder_message of
       { role : string
       ; text : string
@@ -113,7 +130,8 @@ type settings =
     (** When [true] the assistant may request multiple tool calls in a single
         turn.  Each call will be executed concurrently by the runtime.  Set to
         [false] to fall back to sequential execution – useful for debugging or
-        when using models that do not yet support the feature. *)
+        when using models that do not yet support the feature.  The default
+        from {!default_settings} is [true]. *)
   }
 
 (** [default_settings ()] returns the default {!settings} record.

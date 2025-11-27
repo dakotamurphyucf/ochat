@@ -3,7 +3,7 @@
 Theme definitions and lookup utilities for syntax-highlighting inside the
 terminal user-interface.
 
-The module maps **TextMate scope names** – as produced by the tokenizer used in the TUI – to [`Notty.A.attr`][notty-a] values.  The
+The module maps **TextMate scope names** – as produced by the tokenizer used in the TUI – to [`Notty.A.t`][notty-a] attributes. The
 resulting attribute is passed to the renderer so that each token is drawn in
 the right colour.
 
@@ -13,51 +13,62 @@ the right colour.
 ## Quick start
 
 ```ocaml
-open Chat_tui.Highlight_theme
-
-(* Choose one of the built-ins … *)
-let theme = default_dark (* or [default_light] *)
+(* Choose a built-in theme … *)
+let theme = Chat_tui.Highlight_theme.github_dark
 
 (* … and obtain the attribute for a set of scopes. *)
-let attr = attr_of_scopes theme ~scopes:[ "keyword.operator" ; "source.ocaml" ]
+let base =
+  Chat_tui.Highlight_theme.attr_of_scopes
+    theme ~scopes:[ "keyword.operator"; "source.ocaml" ]
+in
 
-(* [attr] is the themed attribute for the best-matching scope.
-   You can compose styles if desired: Notty.A.(attr ++ st underline) *)
+(* [base] is the themed attribute for the best-matching scopes.
+   You can compose styles using Chat_tui.Highlight_styles helpers: *)
+let attr = Chat_tui.Highlight_styles.(base ++ underline)
 ```
 
-Customising colour using helpers from Chat_tui.Highlight_styles:
+Customising colour using helpers from `Chat_tui.Highlight_styles`:
 ```ocaml
-let theme = Chat_tui.Highlight_theme.default_dark in
-let base = Chat_tui.Highlight_theme.attr_of_scopes theme ~scopes:["string"] in
+let theme = Chat_tui.Highlight_theme.github_dark in
+let base =
+  Chat_tui.Highlight_theme.attr_of_scopes theme ~scopes:[ "string" ]
+in
 let blue = Chat_tui.Highlight_styles.fg_hex "#79B8FF" in
-let attr = Notty.A.(base ++ blue)
+let attr = Chat_tui.Highlight_styles.(base ++ blue)
 ```
 
 ## API overview
 
 | Value | Description |
 |-------|-------------|
-| `type t` | Opaque theme value (internally an ordered set of prefix -> attribute rules). |
-| `empty` | A theme with no rules – always yields `Notty.A.empty`. Useful as a neutral base you can extend yourself. |
-| `default_dark` | Reasonable defaults for dark terminals (black background). |
-| `default_light` | Counterpart of `default_dark` adapted to light backgrounds. |
+| `type t` | Opaque theme value (internally an ordered list of `prefix -> attribute` rules). |
+| `empty` | Theme with no rules – always yields `Chat_tui.Highlight_styles.empty` (equivalently `Notty.A.empty`). Useful as a neutral base you can extend yourself. |
 | `github_dark` | Palette that approximates GitHub Dark Default using truecolor; includes link, heading, diff, and code-chip styling. |
-| `attr_of_scopes` | `t -> scopes:string list -> Notty.A.t` – picks the attribute for the best-matching scope. |
+| `attr_of_scopes` | `t -> scopes:string list -> Notty.A.t` – composes the attributes of the best-matching rules for the given scopes. |
 
 ## Matching semantics
 
-1. For every *scope* in the `scopes` list, iterate over the rules.
-2. A rule matches when its `prefix` is a prefix of the scope string.
-3. If multiple rules match the same scope, the longest prefix wins.
-4. If several scopes match different rules, the overall winner is the rule with the
-   longest prefix amongst all matches.
-5. If multiple rules tie on prefix length, the earlier rule in the theme list wins.
-6. The order of scopes in the list does not matter; only the single best match across the union of scopes is considered.
-7. When no rule matches, the function returns `Notty.A.empty` (identity).
+1. For every *scope* in the `scopes` list, consider all rules whose `prefix`
+   matches the scope on dot-segment boundaries (the scope is exactly the
+   prefix, or starts with `prefix ^ "."`).
+2. Each matching rule is assigned a **specificity** key
+   `(segments, exact)` where `segments` is the number of dot-separated
+   segments in `prefix` and `exact` is `1` for an exact match and `0`
+   for a proper prefix.
+3. Among all matches across all scopes, only rules with maximal
+   specificity contribute to the result.
+4. Attributes from these rules are composed in theme order using
+   `Chat_tui.Highlight_styles.(++)`. Later rules in this maximum-specificity
+   group override earlier ones for overlapping properties (e.g. foreground
+   colour); styles are unioned.
+5. The order of scopes in the list does not matter; the list is treated as a
+   set.
+6. When no rule matches, the function returns `Chat_tui.Highlight_styles.empty`
+   (equivalently `Notty.A.empty`).
 
 This mirrors how most TextMate colour-schemes are resolved. Fine-grained
-palettes are expressed using longer, more specific prefixes (e.g.
-"keyword.operator.logical" vs "keyword").
+palettes are typically expressed using more specific prefixes (e.g.
+`"keyword.operator.logical"` vs `"keyword"`).
 
 ## Customising a theme
 
@@ -66,27 +77,30 @@ the public API. You can still customise the output in a few ways:
 
 - Compose additional styles at use sites:
   ```ocaml
-  let base = Chat_tui.Highlight_theme.attr_of_scopes theme ~scopes in
-  let attr = Notty.A.(base ++ st underline)
+  let base =
+    Chat_tui.Highlight_theme.attr_of_scopes theme ~scopes
+  in
+  let attr = Chat_tui.Highlight_styles.(base ++ underline)
   ```
 - Overlay your own small mapping before or after calling `attr_of_scopes`,
   e.g. detect specific scopes and substitute your own attribute, otherwise
   delegate to the theme.
 - Contribute or maintain an alternate palette by editing the module and using
-  `default_dark`/`default_light` as examples.
+  `github_dark` as an example.
 
 ## Performance considerations
 
-The implementation is intentionally simple – a double `List.fold_left` – and
-therefore **O(m × n)** where *m* is the number of rules and *n* the number of
+The implementation is intentionally simple – a nested loop over rules and
+scopes – and therefore **O(m × n)** where *m* is the number of rules and *n* the number of
 scopes.  In practice both numbers are small (dozens), so a per-token call is
 perfectly fine even on slow terminals.
 
 ## Limitations
 
 * Built-in palettes primarily use colours, and apply a few styles (e.g. `bold`, `italic`, `underline`) for headings and links.
-* No attempt is made to parse hierarchical scope paths; matching is purely
-  string-prefix based.
+* No attempt is made to validate hierarchical scope paths; matching is purely
+  string-prefix-based with dot-segment boundaries. Scopes are compared as
+  strings; the function does not understand individual segments.
 * Theme files are hard-coded.  Future versions might load “.tmTheme”/JSON files
   at runtime.
 
@@ -108,6 +122,9 @@ those scopes to `attr_of_scopes` during rendering.
 
 ## Built-in palettes
 
-- default_dark: Dark-terminal friendly colours with occasional bold/italic for headings and links.
-- default_light: Light-background counterpart of default_dark.
-- github_dark: Approximates GitHub Dark Default using truecolor via helpers from Chat_tui.Highlight_styles (fg_hex, bg_hex).
+There is currently a single built-in palette:
+
+- github_dark: Approximates GitHub Dark Default using truecolor via helpers
+  from `Chat_tui.Highlight_styles` (`fg_hex`, `bg_hex`). It includes
+  dedicated styling for headings, links, inline code chips, diffs, and patch
+  metadata.

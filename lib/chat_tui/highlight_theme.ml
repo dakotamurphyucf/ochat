@@ -1,18 +1,10 @@
 (** Implementation of {!Chat_tui.Highlight_theme}.
 
-    See the interface for user-facing documentation. This module represents
-    a theme as an ordered list of [prefix -> attr] rules. A rule matches a
-    scope when its [prefix] is a dot-segment-aware prefix of the scope:
-    it matches if the scope is exactly [prefix] or starts with
-    [prefix ^ "."].
+    Represent a theme as an ordered list of [prefix -> attr] rules and
+    implement the dot-segment-aware resolution described in the interface.
 
-    Resolution selects the most specific matching rule across all provided
-    scopes using the following precedence: more dot-separated segments win;
-    exact match wins over prefix match; longer selector wins; earlier rule in
-    the theme list wins as a final tiebreaker.
-
-    Colours and styles come from {!module:Notty.A}; helpers live in
-    {!Chat_tui.Highlight_styles}. *)
+    The public API and matching semantics are documented in
+    {!Chat_tui.Highlight_theme}. *)
 
 module Styles = Highlight_styles
 

@@ -21,9 +21,7 @@ let reg_lazy : Highlight_tm_loader.registry Lazy.t =
      (match Highlight_grammars.add_ochat_apply_patch r with
       | Ok () -> ()
       | Error e ->
-        printf
-          "failed to load ochat-apply-patch grammar: %s\n"
-          (Error.to_string_hum e));
+        printf "failed to load ochat-apply-patch grammar: %s\n" (Error.to_string_hum e));
      (match Highlight_grammars.add_json r with
       | Ok () -> ()
       | Error e -> printf "failed to load JSON grammar: %s\n" (Error.to_string_hum e));

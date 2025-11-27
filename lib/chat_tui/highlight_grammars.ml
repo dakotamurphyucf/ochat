@@ -283,7 +283,6 @@ let add_html (reg : Highlight_tm_loader.registry) : unit Or_error.t =
   Highlight_tm_loader.add_grammar_jsonaf reg shim
 ;;
 
-
 let ochat_apply_patch_tm_json =
   {|{
   "name": "ochat-apply-patch",

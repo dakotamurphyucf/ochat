@@ -21,8 +21,13 @@
 
 open Types
 
-(** Cached render for a single history message.  The [selected] variant is
-    populated on demand. *)
+(** Cached render for a single history message at a fixed history-pane
+    width.
+
+    The record stores the original [text] together with pre-rendered
+    {!Notty.I.t} images for unselected and (optionally) selected states,
+    plus their heights in terminal cells.  Selected images are constructed
+    lazily on first use. *)
 type msg_img_cache =
   { width : int
   ; text : string
@@ -46,11 +51,7 @@ type t =
   ; mutable fetch_sw : Eio.Switch.t option
   ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int (** Current position inside [input_line] (bytes). *)
-  ; mutable selection_anchor : int option
-    (* --------------------------------------------------------------------------- *)
-    (* Command-mode scaffolding (Phase 0)                                           *)
-    (* --------------------------------------------------------------------------- *)
-    (** Anchor position for active selection. *)
+  ; mutable selection_anchor : int option (** Anchor position for active selection. *)
   ; mutable mode : editor_mode (** Current editor mode (Insert/Normal). *)
   ; mutable draft_mode : draft_mode
     (** Whether the draft buffer is plain text or raw XML. *)
@@ -69,8 +70,9 @@ type t =
         indices.  Entries are invalidated on width changes or when the
         corresponding message text is updated. *)
   ; mutable last_history_width : int option
-    (** Width (in cells) for which [msg_img_cache] is valid.  A mismatch
-        triggers a full cache flush. *)
+    (** Width (in cells) for which [msg_img_cache] and the height caches are
+        currently valid.  The renderer compares this value to the live
+        history-pane width to decide when to flush or rebuild caches. *)
   ; mutable msg_heights : int array
     (** Cached heights for each message at [last_history_width].  Length
         equals [List.length (messages t)].  Rebuilt on width changes. *)
@@ -85,15 +87,6 @@ type t =
   }
 [@@deriving fields ~getters ~setters]
 
-and editor_mode =
-  | Insert
-  | Normal
-  | Cmdline
-
-and draft_mode =
-  | Plain
-  | Raw_xml
-
 (** Editor-mode of the input area.
 
     • [Insert] – default; printable keys modify {!input_line} and move the
@@ -103,6 +96,10 @@ and draft_mode =
     • [Cmdline] – a ':' prompt is active at the bottom.  The content is kept
       in {!cmdline} / {!cmdline_cursor}.  Leaving the prompt returns to
       [Insert]. *)
+and editor_mode =
+  | Insert
+  | Normal
+  | Cmdline
 
 (** Draft representation of the {i scratch} buffer that will be sent to the
     assistant next.
@@ -110,6 +107,9 @@ and draft_mode =
     • [Plain] – regular markdown that goes straight to the OpenAI API.
     • [Raw_xml] – low-level XML encoded function call.  This mode is used by
       the command palette to prepare structured tool invocations. *)
+and draft_mode =
+  | Plain
+  | Raw_xml
 
 (** [create …] bundles the many independent references that make up the
     current application state into a single record.  The constructor is
@@ -154,8 +154,8 @@ val input_line : t -> string
     [String.length (input_line t)]. *)
 val cursor_pos : t -> int
 
-(** Position at which the current selection started, if any.  [None] means
-    no active selection. *)
+(** [selection_anchor t] is the position at which the current selection
+    started, if any.  [None] means no active selection. *)
 val selection_anchor : t -> int option
 
 (** [clear_selection t] drops any active selection and resets
@@ -173,20 +173,27 @@ val selection_active : t -> bool
     Each element is a [(role, text)] pair as defined in {!Types.message}. *)
 val messages : t -> message list
 
-(** List of tasks currently associated with the session. *)
+(** [tasks t] returns the list of tasks currently associated with the
+    session. *)
 val tasks : t -> Session.Task.t list
 
-(** Key–value store for arbitrary plugin data. *)
+(** [kv_store t] returns the mutable key–value store used by plugins and
+    tools to stash arbitrary metadata. *)
 val kv_store : t -> (string, string) Base.Hashtbl.t
 
-(** Classification metadata for tool-output messages keyed by message
-    index in {!messages}.  Entries are present only for messages whose
-    [role] is tool-like and for which the TUI managed to infer the
-    corresponding tool call. *)
+(** [tool_output_by_index t] returns classification metadata for tool-output
+    messages keyed by message index in {!messages}.
+
+    Entries are present only for messages whose [role] is tool-like and for
+    which the TUI managed to infer the corresponding tool call; the stored
+    values are {!Types.tool_output_kind} tags that guide specialised
+    rendering of built-in tools (for example, path-aware styling for
+    [read_file]). *)
 val tool_output_by_index : t -> (int, Types.tool_output_kind) Base.Hashtbl.t
 
-(** Auto-scroll flag.  When [true] the view follows new incoming messages
-    automatically; otherwise the scroll position stays unchanged. *)
+(** [auto_follow t] is the auto-scroll flag.  When [true] the view follows
+    new incoming messages automatically; otherwise the scroll position stays
+    unchanged. *)
 val auto_follow : t -> bool
 
 (** {1 Command-mode helpers} *)
@@ -205,33 +212,35 @@ val select_message : t -> int option -> unit
 
 (** {1 Command-line helpers} *)
 
-(** Current contents of the ':' command-line buffer (without the leading
-    ':'). *)
+(** [cmdline t] returns the current contents of the ':' command-line buffer
+    (without the leading ':'). *)
 val cmdline : t -> string
 
 (** [cmdline_cursor t] is the byte offset of the caret inside {!cmdline}. *)
 val cmdline_cursor : t -> int
 
-(** Overwrites the command-line buffer. *)
+(** [set_cmdline t s] overwrites the ':' command-line buffer with [s]. *)
 val set_cmdline : t -> string -> unit
 
-(** Moves the cursor inside the command-line buffer. *)
+(** [set_cmdline_cursor t n] moves the cursor inside the ':' command-line
+    buffer to byte offset [n]. *)
 val set_cmdline_cursor : t -> int -> unit
 
 (** {1 Fork helpers} *)
 
-(** Identifier of a long-running {!functions.fork} call that streams into
-    the UI, or [None] if no fork is active. *)
+(** [active_fork t] is the identifier of a long-running {!functions.fork}
+    call that streams into the UI, or [None] if no fork is active. *)
 val active_fork : t -> string option
 
-(** Updates {!active_fork}. *)
+(** [set_active_fork t id] updates {!active_fork} to [id]. *)
 val set_active_fork : t -> string option -> unit
 
-(** Index into the message list that marked the boundary when the current
-    fork started.  Used to highlight new assistant output. *)
+(** [fork_start_index t] is the index into the message list that marked the
+    boundary when the current fork started.  Used to highlight new
+    assistant output. *)
 val fork_start_index : t -> int option
 
-(** Updates {!fork_start_index}. *)
+(** [set_fork_start_index t idx] updates {!fork_start_index} to [idx]. *)
 val set_fork_start_index : t -> int option -> unit
 
 (** {1 Undo / Redo helpers} *)
@@ -269,17 +278,25 @@ val apply_patch : t -> Types.patch -> t
 (** Folds {!apply_patch} over a list of commands. *)
 val apply_patches : t -> Types.patch list -> t
 
-(** Appends a raw OpenAI history item to the canonical list and returns the
-    (mutated) model.  Unlike [Add_user_message] the helper bypasses any UI
-    manipulation. *)
+(** [add_history_item t item] appends the raw OpenAI history [item] to the
+    canonical list and returns the (mutated) model.  Unlike the
+    [Add_user_message] patch the helper bypasses any UI manipulation and
+    does not touch {!messages}. *)
 val add_history_item : t -> Openai.Responses.Item.t -> t
 
-(** Rebuild [tool_output_by_index] from the current {!history_items}.
+(** [rebuild_tool_output_index t] recomputes {!tool_output_by_index} from
+    the current {!history_items}.
 
-    This is intended for situations where the entire history is replaced at
-    once (initial model construction, history compaction, or handling of a
-    [`Replace_history] event).  Streaming updates do not need this helper –
-    they classify tool outputs incrementally via [Set_function_output]. *)
+    The helper walks the OpenAI history, pairs each renderable item (as
+    determined by {!Chat_tui.Conversation.pair_of_item}) with its message
+    index in {!messages}, and populates the map with
+    {!Types.tool_output_kind} values for corresponding
+    [Function_call_output] entries.
+
+    Use this when the entire history is replaced at once (initial model
+    construction, history compaction, or handling of a [`Replace_history]
+    event).  Streaming updates do not need this helper – they classify tool
+    outputs incrementally via the [Set_function_output] patch. *)
 val rebuild_tool_output_index : t -> unit
 
 (** {1 Rendering cache helpers}
@@ -287,6 +304,9 @@ val rebuild_tool_output_index : t -> unit
     Low-level helpers for the renderer.  Callers outside the rendering path
     should not need these. *)
 
+(** [last_history_width t] is the width (in terminal cells) for which the
+    cached message images and heights are currently valid, or [None] if no
+    cache has been built yet. *)
 val last_history_width : t -> int option
 
 (** [set_last_history_width t w] updates {!last_history_width}.  Calling the
@@ -295,8 +315,9 @@ val last_history_width : t -> int option
     invalidations are cheaper. *)
 val set_last_history_width : t -> int option -> unit
 
-(** Completely clears {!msg_img_cache}.  Use this when the terminal has
-    been resized and *all* cached images are now stale. *)
+(** [clear_all_img_caches t] completely clears {!msg_img_cache} and the
+    associated height caches.  Use this when the terminal has been resized
+    and *all* cached images are now stale. *)
 val clear_all_img_caches : t -> unit
 
 (** [invalidate_img_cache_index t ~idx] removes the cache entry for the
@@ -312,6 +333,7 @@ val find_img_cache : t -> idx:int -> msg_img_cache option
     Existing data for the same index is overwritten. *)
 val set_img_cache : t -> idx:int -> msg_img_cache -> unit
 
-(** Returns and clears the list of indices whose heights may be stale.  The
-    list may contain duplicates and is not guaranteed to be ordered. *)
+(** [take_and_clear_dirty_height_indices t] returns and clears the list of
+    indices whose heights may be stale.  The list may contain duplicates and
+    is not guaranteed to be ordered. *)
 val take_and_clear_dirty_height_indices : t -> int list

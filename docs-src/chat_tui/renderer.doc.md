@@ -93,6 +93,18 @@ Key details:
   using the block's language tag when available. Code is wrapped to the
   available width while preserving indentation and colouring.
 
+- **Tool outputs** – messages classified as tool output via
+  `Chat_tui.Types.tool_output_kind` receive specialised treatment:
+  - `Apply_patch` responses are split into a status preamble and a fenced
+    patch section highlighted using the internal `"ochat-apply-patch"`
+    grammar.
+  - `Read_file { path }` responses use `Chat_tui.Renderer.lang_of_path path`
+    to infer a syntax-highlighting language when possible (for example,
+    `.ml` and `.mli` map to `"ocaml"`, `.md` to `"markdown"`, `.json` to
+    `"json"`, `.sh` to `"bash"`).
+  - `Read_directory` responses are rendered as plain text but tinted with a
+    directory-specific style to distinguish them from regular prose.
+
 - **Wrapping** – both text and code are wrapped on *cell* boundaries using
   Notty's notion of width (`Notty.I.width (Notty.I.string attr s)`). This
   accounts for most combining characters and emoji; a few terminal/Unicode
@@ -149,7 +161,7 @@ them when mutating messages outside the normal update path.
 
 ## Public API
 
-The module exposes a single entry point:
+The module exposes two entry points:
 
 ### `render_full : size:int * int -> model:Chat_tui.Model.t -> Notty.I.t * (int * int)`
 
@@ -181,6 +193,24 @@ Behavioural notes:
   the bottom after updating its content image. Otherwise the existing scroll
   offset in the model's `Notty_scroll_box.t` is preserved.
 
+### `lang_of_path : string -> string option`
+
+`lang_of_path path` performs best-effort language inference for `read_file`
+tool outputs.
+
+It inspects the file extension of `path` and returns a TextMate-style
+language identifier when known. In particular:
+
+- `.ml` and `.mli` map to `"ocaml"`
+- `.md` maps to `"markdown"`
+- `.json` maps to `"json"`
+- `.sh` maps to `"bash"`
+
+Paths without an extension, or with unrecognised extensions, yield `None`.
+The function is exposed primarily for unit tests and to keep the
+renderer-specific heuristic out of the higher-level model and controller
+modules.
+
 ---
 
 ## Example: draw once with Notty_eio
@@ -202,6 +232,10 @@ let empty_model () : Chat_tui.Model.t =
   let reasoning_by_id : (string, int ref) Base.Hashtbl.t =
     Base.Hashtbl.create (module String)
   in
+  let tool_output_by_index
+    : (int, Chat_tui.Types.tool_output_kind) Base.Hashtbl.t
+    = Base.Hashtbl.create (module Int)
+  in
   let kv_store : (string, string) Base.Hashtbl.t =
     Base.Hashtbl.create (module String)
   in
@@ -214,6 +248,7 @@ let empty_model () : Chat_tui.Model.t =
     ~msg_buffers
     ~function_name_by_id:fn_by_id
     ~reasoning_idx_by_id:reasoning_by_id
+    ~tool_output_by_index
     ~tasks:[]
     ~kv_store
     ~fetch_sw:None
@@ -279,7 +314,7 @@ necessary.
   high-level `patch` commands).
 - `Chat_tui.Highlight_tm_engine` / `Chat_tui.Highlight_theme` — TextMate-based
   syntax highlighting used for markdown and code.
-- `ochat.Notty_scroll_box` — scrolling helper that backs the history
+- `Notty_scroll_box` — scrolling helper that backs the history
   viewport.
 - `Notty`, `Notty_eio` — terminal drawing and IO used by the renderer.
 

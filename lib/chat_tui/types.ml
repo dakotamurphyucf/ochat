@@ -20,20 +20,16 @@ type msg_buffer =
   }
 
 (* ------------------------------------------------------------------------ *)
-(*  Cmd constructors (step 7)                                               *)
+(*  Cmd constructors                                                        *)
 (* ------------------------------------------------------------------------ *)
 
 type cmd =
   | Persist_session of (unit -> unit)
-  (** Execute a closure that kicks off the OpenAI streaming request in its own
-      fibre.  The indirection through a closure allows the pure controller or
-      submit handler to hand over the side–effecting job to the [{!Cmd}]
-      interpreter without having to perform any IO itself. *)
   | Start_streaming of (unit -> unit)
   | Cancel_streaming of (unit -> unit)
 
 (* ------------------------------------------------------------------------ *)
-(*  Patch constructors (step 6)                                             *)
+(*  Patch constructors                                                      *)
 (* ------------------------------------------------------------------------ *)
 
 type patch =
@@ -58,10 +54,6 @@ type patch =
       { id : string
       ; idx : int
       }
-  (* Added in refactoring step 13 – represents the act of the user submitting
-     a prompt.  The pure controller layer will emit this patch which is then
-     applied by the model (adding the corresponding history item and visible
-     message). *)
   | Add_user_message of { text : string }
   | Add_placeholder_message of
       { role : string

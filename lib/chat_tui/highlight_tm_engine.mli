@@ -51,7 +51,7 @@ type span = Notty.A.t * string
     {[
       let engine =
         Chat_tui.Highlight_tm_engine.create
-          ~theme:Chat_tui.Highlight_theme.default_dark
+          ~theme:Chat_tui.Highlight_theme.github_dark
       in
       let lines =
         Chat_tui.Highlight_tm_engine.highlight_text
@@ -113,7 +113,7 @@ type info =
     {[
       let engine =
         Chat_tui.Highlight_tm_engine.create
-          ~theme:Chat_tui.Highlight_theme.default_dark
+          ~theme:Chat_tui.Highlight_theme.github_dark
       in
       let lines =
         Chat_tui.Highlight_tm_engine.highlight_text
