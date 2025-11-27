@@ -167,6 +167,7 @@ let github_dark : t =
   ; { prefix = "markup.list"; attr = Styles.(fg_hex "#FFAB70") }
   ; { prefix = "markup.deleted"; attr = Styles.(fg_hex "#FDAEB7" ++ bg_hex "#86181D") }
   ; { prefix = "markup.inserted"; attr = Styles.(fg_hex "#85E89D" ++ bg_hex "#144620") }
+  ; { prefix = "markup.inserted.ochatpatch"; attr = Styles.(fg_hex "#85E89D") }
   ; { prefix = "markup.changed"; attr = Styles.(fg_hex "#FFAB70" ++ bg_hex "#C24E00") }
   ; { prefix = "meta.diff.index"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "meta.diff.file.a"; attr = Styles.(fg_hex "#79B8FF") }
@@ -175,6 +176,18 @@ let github_dark : t =
   ; { prefix = "meta.diff.range"; attr = Styles.(fg_hex "#B392F0" ++ bold) }
   ; { prefix = "meta.diff.header"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "text.diff.context"; attr = Styles.(fg_hex "#D1D5DA") }
+  ; { prefix = "punctuation.definition.header.ochatpatch"
+    ; attr = Styles.(fg_hex "#6A737D")
+    }
+  ; { prefix = "entity.name.filename.ochatpatch"
+    ; attr = Styles.(fg_hex "#79B8FF" ++ bold)
+    }
+  ; { prefix = "punctuation.definition.header.trailing.ochatpatch"
+    ; attr = Styles.(fg_gray 8)
+    }
+  ; { prefix = "constant.numeric.line-number.ochatpatch"
+    ; attr = Styles.(fg_hex "#F97583")
+    }
   ; { prefix = "brackethighlighter"; attr = Styles.(fg_hex "#D1D5DA") }
   ; { prefix = "brackethighlighter.unmatched"; attr = Styles.(fg_hex "#FDAEB7") }
   ; { prefix = "token.info-token"; attr = Styles.(fg_hex "#6796E6") }

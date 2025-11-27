@@ -1,5 +1,6 @@
 open Core
 open Types
+module Res_item = Openai.Responses.Item
 
 type msg_img_cache =
   { width : int
@@ -18,6 +19,7 @@ type t =
   ; msg_buffers : (string, Types.msg_buffer) Base.Hashtbl.t
   ; function_name_by_id : (string, string) Base.Hashtbl.t
   ; reasoning_idx_by_id : (string, int ref) Base.Hashtbl.t
+  ; tool_output_by_index : (int, Types.tool_output_kind) Base.Hashtbl.t
   ; mutable tasks : Session.Task.t list
   ; kv_store : (string, string) Base.Hashtbl.t
   ; mutable fetch_sw : Eio.Switch.t option
@@ -50,6 +52,43 @@ and draft_mode =
   | Plain
   | Raw_xml
 
+let classify_tool_output
+      ~(name_opt : string option)
+      ~(path : string option)
+  : Types.tool_output_kind
+  =
+  match Option.map ~f:String.lowercase name_opt with
+  | Some "apply_patch" -> Types.Apply_patch
+  | Some "read_file" -> Types.Read_file { path }
+  | Some "read_directory" -> Types.Read_directory { path }
+  | Some other -> Types.Other { name = Some other }
+  | None -> Types.Other { name = None }
+;;
+
+let read_file_path_of_arguments (json_string : string) : string option =
+  match Jsonaf.of_string json_string with
+  | exception _ -> None
+  | `Object fields ->
+    List.find_map fields ~f:(fun (key, value) ->
+      match key, value with
+      | "file", `String p | "path", `String p -> Some p
+      | _ -> None)
+  | _ -> None
+;;
+
+let extract_path_from_call_text (s : string) : string option =
+  match String.lsplit2 ~on:'(' s with
+  | None -> None
+  | Some (_, rest) ->
+    let len = String.length rest in
+    let args =
+      if len > 0 && Char.( = ) (String.get rest (len - 1)) ')'
+      then String.sub rest ~pos:0 ~len:(len - 1)
+      else rest
+    in
+    read_file_path_of_arguments args
+;;
+
 let create
       ~history_items
       ~messages
@@ -58,6 +97,7 @@ let create
       ~msg_buffers
       ~function_name_by_id
       ~reasoning_idx_by_id
+      ~tool_output_by_index
       ~tasks
       ~kv_store
       ~fetch_sw
@@ -79,6 +119,7 @@ let create
   ; msg_buffers
   ; function_name_by_id
   ; reasoning_idx_by_id
+  ; tool_output_by_index
   ; tasks
   ; kv_store
   ; fetch_sw
@@ -111,6 +152,7 @@ let selection_active t = Option.is_some t.selection_anchor
 let messages t = t.messages
 let tasks t = t.tasks
 let kv_store t = t.kv_store
+let tool_output_by_index t = t.tool_output_by_index
 let auto_follow t = t.auto_follow
 let cmdline t = t.cmdline
 let cmdline_cursor t = t.cmdline_cursor
@@ -250,6 +292,13 @@ let apply_patch (model : t) (p : Types.patch) : t =
       | Some b -> b
       | None -> ensure_buffer model ~id ~role
     in
+    let call_text = Buffer.contents buf.buf in
+    let name_opt = Hashtbl.find model.function_name_by_id id in
+    let path =
+      match Option.map ~f:String.lowercase name_opt with
+      | Some "read_file" | Some "read_directory" -> extract_path_from_call_text call_text
+      | _ -> None
+    in
     let max_len = 10_000 in
     let txt = Util.sanitize output in
     let txt =
@@ -261,6 +310,10 @@ let apply_patch (model : t) (p : Types.patch) : t =
     Buffer.clear buf.buf;
     Buffer.add_string buf.buf txt;
     update_message_text model buf.index (Buffer.contents buf.buf);
+    (* Classify this tool output for renderer metadata. *)
+    let kind =
+      classify_tool_output ~name_opt ~path in
+    Hashtbl.set model.tool_output_by_index ~key:buf.index ~data:kind;
     model
   | Types.Update_reasoning_idx { id; idx } ->
     (match Hashtbl.find model.reasoning_idx_by_id id with
@@ -282,4 +335,35 @@ let apply_patches model patches = List.fold patches ~init:model ~f:apply_patch
 let add_history_item (model : t) (item : Openai.Responses.Item.t) =
   model.history_items <- model.history_items @ [ item ];
   model
+;;
+
+let rebuild_tool_output_index (model : t) : unit =
+  Hashtbl.clear model.tool_output_by_index;
+  let call_info_by_id = Hashtbl.create (module String) in
+  List.iter model.history_items ~f:(function
+    | Res_item.Function_call fc ->
+      let name = fc.name in
+      let path =
+        match String.lowercase name with
+        | "read_file" | "read_directory" -> read_file_path_of_arguments fc.arguments
+        | _ -> None
+      in
+      Hashtbl.set call_info_by_id ~key:fc.call_id ~data:(name, path)
+    | _ -> ());
+  let idx = ref 0 in
+  List.iter model.history_items ~f:(fun it ->
+    match Conversation.pair_of_item it with
+    | None -> ()
+    | Some _msg ->
+      (match it with
+       | Res_item.Function_call_output fco ->
+         let name_opt, path =
+           match Hashtbl.find call_info_by_id fco.call_id with
+           | None -> None, None
+           | Some (name, path) -> Some name, path
+         in
+         let kind = classify_tool_output ~name_opt ~path in
+         Hashtbl.set model.tool_output_by_index ~key:!idx ~data:kind
+       | _ -> ());
+      incr idx)
 ;;

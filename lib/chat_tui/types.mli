@@ -29,6 +29,23 @@ type role = string
 (** One chat message represented as [(role, content)]. *)
 type message = role * string
 
+(** Classification of a tool-output message.
+
+    This metadata is derived {b only} in the TUI layer and is not
+    persisted in the core chat history. It allows the renderer to
+    choose specialised layouts or syntax-highlighting modes for
+    particular built-in tools without baking those concerns into the
+    runtime.
+
+    The constructors are intentionally coarse so that additional
+    per-tool detail can be layered on later without disturbing call
+    sites. *)
+type tool_output_kind =
+  | Apply_patch
+  | Read_file of { path : string option }
+  | Read_directory of { path : string option }
+  | Other of { name : string option }
+
 (** Streaming-time buffer.  While we receive deltas from the OpenAI API we
     accumulate partial output in [text] and remember the target index into
     the [messages] list so the UI can update incrementally. *)

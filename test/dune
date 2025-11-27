@@ -274,6 +274,30 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Chat-TUI – Tool metadata and language inference tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_tool_metadata_test)
+ (modules chat_tui_tool_metadata_test)
+ (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Tool rendering smoke tests                                      
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_tool_render_test)
+ (modules chat_tui_tool_render_test)
+ (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; OAuth dynamic client registration tests
 ;; ---------------------------------------------------------------------------
 
