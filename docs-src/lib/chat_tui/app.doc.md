@@ -147,8 +147,10 @@ Additional parameters introduced since Ochat v0.5:
 
 Failure handling remains unchanged and still
 
-1. rolls back dangling reasoning or function-call stubs,
-2. restores the history to the last consistent prefix, and
+1. removes trailing reasoning fragments,
+2. repairs any dangling tool calls by inserting a synthetic `Function_call_output`
+   item (so the history continues to satisfy the OpenAI Responses API
+   function-call/output pairing contract), and
 3. displays the exception in-line as an *error* message.
 
 ---

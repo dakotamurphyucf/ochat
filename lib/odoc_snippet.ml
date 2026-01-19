@@ -126,11 +126,9 @@ let token_count ~codec text =
           |> List.filter ~f:(fun s -> not (String.is_empty s))
           |> List.length
       in
-      if String.length text < 10_000
-      then (
-        Eio.Mutex.lock cache_mu;
-        Cache.set tok_cache ~key:text ~data:n;
-        Eio.Mutex.unlock cache_mu);
+      Eio.Mutex.lock cache_mu;
+      Cache.set tok_cache ~key:text ~data:n;
+      Eio.Mutex.unlock cache_mu;
       n)
 ;;
 

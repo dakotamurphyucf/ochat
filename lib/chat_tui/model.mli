@@ -46,6 +46,8 @@ type t =
   ; function_name_by_id : (string, string) Base.Hashtbl.t
   ; reasoning_idx_by_id : (string, int ref) Base.Hashtbl.t
   ; tool_output_by_index : (int, Types.tool_output_kind) Base.Hashtbl.t
+  ; call_id_by_item_id : (string, string) Base.Hashtbl.t
+  ; tool_path_by_call_id : (string, string option) Base.Hashtbl.t
   ; mutable tasks : Session.Task.t list
   ; kv_store : (string, string) Base.Hashtbl.t
   ; mutable fetch_sw : Eio.Switch.t option

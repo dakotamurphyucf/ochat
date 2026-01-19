@@ -47,6 +47,54 @@ module Res = Openai.Responses
 
 type 'env ctx = 'env Ctx.t
 
+let function_call_output_part_of_content_item ~ctx ~run_agent (ci : CM.content_item)
+  : Res.Tool_output.Output_part.t
+  =
+  let cache = Ctx.cache ctx in
+  let dir = Ctx.dir ctx in
+  match ci with
+  | CM.Basic b ->
+    (match b.image_url, b.document_url with
+     | Some { url }, _ ->
+       let image_url = if b.is_local then Io.Base64.file_to_data_uri ~dir url else url in
+       Res.Tool_output.Output_part.Input_image
+         { image_url; detail = Some Res.Input_message.Auto }
+     | _, Some doc ->
+       let text =
+         match b.cleanup_html, b.markdown, b.is_local with
+         | true, _, _ -> Fetch.get_html ~ctx doc ~is_local:b.is_local
+         | _, true, true ->
+           let env = Ctx.env ctx in
+           Webpage_markdown.Driver.(
+             convert_html_file Eio.Path.(Eio.Stdenv.fs env / doc) |> Markdown.to_string)
+         | _, true, false ->
+           let net = Ctx.net ctx in
+           let env = Ctx.env ctx in
+           Webpage_markdown.Driver.(fetch_and_convert ~env ~net doc |> Markdown.to_string)
+         | false, false, _ -> Fetch.get ~ctx doc ~is_local:b.is_local
+       in
+       Res.Tool_output.Output_part.Input_text { text }
+     | _, _ ->
+       Res.Tool_output.Output_part.Input_text { text = Option.value ~default:"" b.text })
+  | CM.Agent ({ url; is_local; items } as agent) ->
+    let text =
+      Cache.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
+        let prompt = Fetch.get ~ctx url ~is_local in
+        run_agent ~ctx prompt items)
+    in
+    Res.Tool_output.Output_part.Input_text { text }
+;;
+
+let function_call_output_of_items ~ctx ~run_agent (items : CM.content_item list)
+  : Res.Tool_output.Output.t
+  =
+  let parts =
+    List.map items ~f:(fun ci ->
+      function_call_output_part_of_content_item ~ctx ~run_agent ci)
+  in
+  Res.Tool_output.Output.Content parts
+;;
+
 (* Forward declarations *)
 
 (** [string_of_items ~ctx ~run_agent items] concatenates [items] into a plain
@@ -187,50 +235,59 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
       ; content = [ { annotations = []; text; _type = "output_text" } ]
       }
   | `Tool ->
-    let tool_call_id = Option.value_exn m.tool_call_id in
-    (match m.content with
-     | Some (CM.Text t) ->
-       (* function_call vs function_call_output discrimination *)
-       (match m.tool_call with
-        | Some { id; function_ = { name; arguments } } ->
-          Res.Item.Function_call
-            { name
-            ; arguments
-            ; call_id = id
-            ; _type = "function_call"
-            ; id = m.id
-            ; status = None
-            }
-        | None ->
-          Res.Item.Function_call_output
-            { call_id = tool_call_id
-            ; _type = "function_call_output"
-            ; id = None
-            ; status = None
-            ; output = t
-            })
-     | Some (CM.Items items) ->
-       (match m.tool_call with
-        | Some { id; function_ = { name; _ } } ->
-          Res.Item.Function_call
-            { name
-            ; arguments = string_of_items ~ctx ~run_agent items
-            ; call_id = id
-            ; _type = "function_call"
-            ; id = m.id
-            ; status = None
-            }
-        | None ->
-          Res.Item.Function_call_output
-            { call_id = tool_call_id
-            ; _type = "function_call_output"
-            ; id = None
-            ; status = None
-            ; output = string_of_items ~ctx ~run_agent items
-            })
-     | _ ->
-       failwith
-         "Expected function_call to be raw text arguments; found structured content.")
+    let is_custom_tool_call =
+      match m.type_ with
+      | Some ("custom_tool_call" | "custom_tool_call_output") -> true
+      | _ -> false
+    in
+    let output : Res.Tool_output.Output.t =
+      match m.content with
+      | None -> Res.Tool_output.Output.Text ""
+      | Some (CM.Text t) -> Res.Tool_output.Output.Text t
+      | Some (CM.Items items) -> function_call_output_of_items ~ctx ~run_agent items
+    in
+    (match m.tool_call with
+     | Some { id = call_id; function_ = { name; arguments = raw_args } } ->
+       let arguments =
+         if String.is_empty raw_args
+         then (
+           match m.content with
+           | None -> ""
+           | Some (CM.Text t) -> t
+           | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items)
+         else raw_args
+       in
+       if is_custom_tool_call
+       then
+         Res.Item.Custom_tool_call
+           { name; input = arguments; call_id; _type = "custom_tool_call"; id = m.id }
+       else
+         Res.Item.Function_call
+           { name
+           ; arguments
+           ; call_id
+           ; _type = "function_call"
+           ; id = m.id
+           ; status = None
+           }
+     | None ->
+       let call_id = Option.value_exn m.tool_call_id in
+       if is_custom_tool_call
+       then
+         Res.Item.Custom_tool_call_output
+           { call_id
+           ; _type = "custom_tool_call_output"
+           ; id = None
+           ; output
+           }
+       else
+         Res.Item.Function_call_output
+           { call_id
+           ; _type = "function_call_output"
+           ; id = None
+           ; status = None
+           ; output
+           })
   | (`User | `System | `Developer) as r ->
     let role_val =
       match r with
@@ -340,20 +397,36 @@ and convert_tool_call_msg ~ctx ~run_agent (m : CM.tool_call_msg) : Res.Item.t =
       | None -> "")
     else raw_args
   in
-  Res.Item.Function_call
-    { name; arguments; call_id; _type = "function_call"; id = m.id; status = None }
+  match m.type_ with
+  | Some "custom_tool_call" ->
+    Res.Item.Custom_tool_call
+      { name; input = arguments; call_id; _type = "custom_tool_call"; id = m.id }
+  | _ ->
+    Res.Item.Function_call
+      { name
+      ; arguments
+      ; call_id
+      ; _type = "function_call"
+      ; id = m.id
+      ; status = None
+      }
 
 and convert_tool_response_msg ~ctx ~run_agent (m : CM.tool_response_msg) : Res.Item.t =
   (* Shorthand <tool_response/> – the *output* of a previously invoked tool. *)
   let call_id = Option.value_exn m.tool_call_id in
   let output =
     match m.content with
-    | None -> ""
-    | Some (CM.Text t) -> t
-    | Some (CM.Items items) -> string_of_items ~ctx ~run_agent items
+    | None -> Res.Tool_output.Output.Text ""
+    | Some (CM.Text t) -> Text t
+    | Some (CM.Items items) -> function_call_output_of_items ~ctx ~run_agent items
   in
-  Res.Item.Function_call_output
-    { call_id; _type = "function_call_output"; id = None; status = None; output }
+  match m.type_ with
+  | Some "custom_tool_call" ->
+    Res.Item.Custom_tool_call_output
+      { call_id; _type = "custom_tool_call_output"; id = None; output }
+  | _ ->
+    Res.Item.Function_call_output
+      { call_id; _type = "function_call_output"; id = None; status = None; output }
 
 and convert_reasoning (r : CM.reasoning) : Res.Item.t =
   let summ =

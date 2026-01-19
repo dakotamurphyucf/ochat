@@ -256,7 +256,7 @@ let create_pack_online ~env ~agent_name ~goal ~proposer_model : string option =
          | Some t -> t
          | None -> Templates.generator_prompt_v2
        in
-       let system_text = templ ^ "\n" ^ load_guardrails ~env in
+       let system_text = templ in
        let system_msg : Input_message.t =
          { role = Developer
          ; content = [ Text { text = system_text; _type = "input_text" } ]

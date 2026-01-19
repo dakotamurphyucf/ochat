@@ -32,9 +32,6 @@
                     "include": "#fenced_code_block"
                 },
                 {
-                    "include": "#raw_block"
-                },
-                {
                     "include": "#link-def"
                 },
                 {
@@ -2769,37 +2766,77 @@
                 {
                     "begin": "(`+)(?=[^`]*<[A-Za-z/][^`>]*>)",
                     "beginCaptures": {
-                        "0": { "name": "punctuation.definition.raw.markdown" }
+                        "0": {
+                            "name": "punctuation.definition.raw.markdown"
+                        }
                     },
                     "end": "(?<!`)\\1(?!`)",
                     "endCaptures": {
-                        "0": { "name": "punctuation.definition.raw.markdown" }
+                        "0": {
+                            "name": "punctuation.definition.raw.markdown"
+                        }
                     },
                     "name": "markup.inline.raw.string.markdown",
                     "patterns": [
-                        { "include": "text.html.derivative" },
+                        {
+                            "include": "text.html.derivative"
+                        },
                         {
                             "captures": {
-                                "1": { "name": "punctuation.definition.tag.begin.html" },
-                                "2": { "name": "entity.name.tag.html" },
-                                "3": { "name": "punctuation.definition.tag.end.html" }
+                                "1": {
+                                    "name": "punctuation.definition.tag.begin.html"
+                                },
+                                "2": {
+                                    "name": "entity.name.tag.html"
+                                },
+                                "3": {
+                                    "name": "punctuation.definition.tag.end.html"
+                                }
                             },
                             "match": "(<)(/?[A-Za-z][A-Za-z0-9:-]*)(>)",
                             "name": "meta.tag.inline.simple.html"
                         },
                         {
                             "begin": "<",
-                            "beginCaptures": { "0": { "name": "punctuation.definition.tag.begin.html" } },
+                            "beginCaptures": {
+                                "0": {
+                                    "name": "punctuation.definition.tag.begin.html"
+                                }
+                            },
                             "end": ">",
-                            "endCaptures": { "0": { "name": "punctuation.definition.tag.end.html" } },
+                            "endCaptures": {
+                                "0": {
+                                    "name": "punctuation.definition.tag.end.html"
+                                }
+                            },
                             "name": "meta.tag.inline.html",
                             "patterns": [
-                                { "match": "[A-Za-z][A-Za-z0-9:-]*", "name": "entity.name.tag.html" },
-                                { "match": "[A-Za-z_:][A-Za-z0-9_.:-]*", "name": "entity.other.attribute-name.html" },
-                                { "match": "=", "name": "punctuation.separator.key-value.html" },
-                                { "begin": "\"", "end": "\"", "name": "string.quoted.double.html" },
-                                { "begin": "'", "end": "'", "name": "string.quoted.single.html" },
-                                { "match": "/", "name": "punctuation.definition.tag.end.html" }
+                                {
+                                    "match": "[A-Za-z][A-Za-z0-9:-]*",
+                                    "name": "entity.name.tag.html"
+                                },
+                                {
+                                    "match": "[A-Za-z_:][A-Za-z0-9_.:-]*",
+                                    "name": "entity.other.attribute-name.html"
+                                },
+                                {
+                                    "match": "=",
+                                    "name": "punctuation.separator.key-value.html"
+                                },
+                                {
+                                    "begin": "\"",
+                                    "end": "\"",
+                                    "name": "string.quoted.double.html"
+                                },
+                                {
+                                    "begin": "'",
+                                    "end": "'",
+                                    "name": "string.quoted.single.html"
+                                },
+                                {
+                                    "match": "/",
+                                    "name": "punctuation.definition.tag.end.html"
+                                }
                             ]
                         }
                     ]

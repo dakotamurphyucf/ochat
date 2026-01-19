@@ -22,6 +22,7 @@
         type input = string
 
         let name = "echo"
+        let type_ = "function"
         let description = Some "Return the given string unchanged"
 
         let parameters : Jsonaf.t =
@@ -59,6 +60,20 @@ module type Def = sig
       ["^[a-zA-Z0-9_]{1,64}$"]. *)
   val name : string
 
+  (** Tool kind exposed to the model.
+
+      This value is forwarded to OpenAI as the wire-level [type] for the tool
+      descriptor.
+
+      Common values:
+      - ["function"]: a regular tool call with JSON [arguments].
+      - ["custom"]: a custom tool call with a plain string [input] validated
+        server-side by a grammar / format.
+
+      Downstream code can use this to distinguish how to interpret
+      {!val:parameters} (JSON schema vs custom format). *)
+  val type_ : string
+
   (** Short, human-readable summary presented to the model. *)
   val description : string option
 
@@ -84,7 +99,7 @@ end
     value has been passed to OpenAI. *)
 type t =
   { info : Openai.Completions.tool
-  ; run : string -> string
+  ; run : string -> Openai.Responses.Tool_output.Output.t
   }
 
 (** [create_function (module D) ?strict impl] couples the declarative module
@@ -98,7 +113,7 @@ type t =
 val create_function
   :  (module Def with type input = 'a)
   -> ?strict:bool (** default = [true] – controls OpenAI's argument parsing *)
-  -> ('a -> string)
+  -> ('a -> Openai.Responses.Tool_output.Output.t)
   -> t
 
 (** [functions ts] converts a list of registered tools [ts] into:
@@ -107,4 +122,5 @@ val create_function
       the subsequent call. *)
 val functions
   :  t list
-  -> Openai.Completions.tool list * (string, string -> string) Core.Hashtbl.t
+  -> Openai.Completions.tool list
+     * (string, string -> Openai.Responses.Tool_output.Output.t) Core.Hashtbl.t

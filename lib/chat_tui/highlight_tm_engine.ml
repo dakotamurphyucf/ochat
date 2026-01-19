@@ -59,7 +59,7 @@ let highlight_text (t : t) ~lang ~text =
             with
             | Error e ->
               (* ignore @@ raise (Failure "Tokenization failed"); *)
-              ignore @@ raise (Failure (Error.to_string_hum e));
+              ignore e;
               process ([ Notty.A.empty, line ] :: acc) stack rest
             | Ok (tokens, stack') ->
               let line_len = String.length line in
@@ -86,6 +86,9 @@ let highlight_text (t : t) ~lang ~text =
                   tokens
               in
               let spans = compress_adjacent (List.rev spans) in
+              let spans =
+                if List.is_empty spans then [ Notty.A.empty, line ] else spans
+              in
               process (spans :: acc) stack' rest)
        in
        process [] TmLanguage.empty lines)

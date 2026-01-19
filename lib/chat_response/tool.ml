@@ -114,7 +114,10 @@ let register_invalidation_listener ~sw ~mcp_server ~client =
     Complexity: O(n) where [n = List.length ts]. *)
 let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list =
   List.map ts ~f:(fun { type_; function_ = { name; description; parameters; strict } } ->
-    Res.Request.Tool.Function { name; description; parameters; strict; type_ })
+    match type_ with
+    | "custom" ->
+      Res.Request.Tool.Custom_function { name; description; format = parameters; type_ }
+    | _ -> Res.Request.Tool.Function { name; description; parameters; strict; type_ })
 ;;
 
 (*--- 4-b.  Custom shell command tool --------------------------------*)
@@ -146,6 +149,7 @@ let custom_fn ~env (c : CM.custom_tool) : Ochat_function.t =
     type input = string list
 
     let name = name
+    let type_ = "function"
 
     let description : string option =
       match description with
@@ -242,7 +246,9 @@ let custom_fn ~env (c : CM.custom_tool) : Ochat_function.t =
   (* Create the Ochat_function.t using the module M and the function fp. *)
   (* Note: we use [Ochat_function.create_function] to create the function. *)
   (* Note: we use [module M] to specify the module type for the function. *)
-  Ochat_function.create_function (module M) fp
+  Ochat_function.create_function
+    (module M)
+    (fun args -> Res.Tool_output.Output.Text (fp args))
 ;;
 
 (*--- 4-c.  Agent tool → Ochat_function.t ------------------------------*)
@@ -274,6 +280,7 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_fu
     type input = string
 
     let name = name
+    let type_ = "function"
 
     let description : string option =
       Option.first_some
@@ -317,7 +324,9 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_fu
     (* Delegate the heavy lifting to the provided [run_agent] callback. *)
     run_agent ~ctx prompt_xml [ CM.Basic basic_item ]
   in
-  Ochat_function.create_function (module M) run
+  Ochat_function.create_function
+    (module M)
+    (fun args -> Res.Tool_output.Output.Text (run args))
 ;;
 
 (** [mcp_tool ~sw ~ctx decl] resolves a `{<tool mcp_server="…"/>}`
@@ -465,6 +474,7 @@ let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
            ~dir:(Ctx.tool_dir ctx)
            ~net:(Ctx.net ctx)
        ]
+     | "import_image" -> [ Functions.import_image ~dir:(Ctx.tool_dir ctx) ]
      | "meta_refine" -> [ Functions.meta_refine ~env:(Ctx.env ctx) ]
      | other -> failwithf "Unknown built-in tool: %s" other ())
   | CM.Custom c -> [ custom_fn ~env:(Ctx.env ctx) c ]

@@ -41,6 +41,7 @@ module Res = Openai.Responses
       (* [final_history] now contains assistant replies and tool outputs *)
     }]}
 *)
+module Output = Res.Tool_output.Output
 
 (*********************************************************************
   Response_loop – keep going until no pending function calls
@@ -170,26 +171,30 @@ let rec run
       history
   | response ->
     let new_items = response.output in
-    (* 2.  Extract any function-call requests from the newly returned
-           items. *)
-    let function_calls =
+    (* 2.  Extract any tool-call requests from the newly returned items. *)
+    let tool_calls =
       List.filter_map new_items ~f:(function
-        | Res.Item.Function_call fc -> Some fc
+        | Res.Item.Function_call fc -> Some (`Function fc)
+        | Res.Item.Custom_tool_call tc -> Some (`Custom tc)
         | _ -> None)
     in
     (* 3.  If no calls – we're done.  Append the new items and return. *)
-    if List.is_empty function_calls
+    if List.is_empty tool_calls
     then history @ new_items
     else (
       (* 4.  Otherwise, run each requested tool, wrap the output into
              a Function_call_output item, and recurse with the extended
              history. *)
       let outputs =
-        List.map function_calls ~f:(fun fc ->
-          let fn = Hashtbl.find_exn tool_tbl fc.name in
+        List.map tool_calls ~f:(fun call ->
+          let name, call_id, payload =
+            match call with
+            | `Function fc -> fc.name, fc.call_id, fc.arguments
+            | `Custom tc -> tc.name, tc.call_id, tc.input
+          in
           let res =
-            if String.equal fc.name "fork"
-            then (
+            match call with
+            | `Function _ when String.equal name "fork" ->
               (* We do not have streaming callbacks in this synchronous path;
                pass in dummies.  History so far is [history @ new_items]
                (but we are still computing [outputs] so the current history
@@ -213,47 +218,52 @@ let rec run
                 then Compact_history.collapse_read_file_history (history @ new_items)
                 else history @ new_items
               in
-              match fork_depth with
-              | 0 | 1 ->
-                let res =
-                  run
-                    ~ctx
-                    ?temperature
-                    ?max_output_tokens
-                    ?tools
-                    ?reasoning
-                    ~history_compaction
-                    ~fork_depth:(fork_depth + 1)
-                    ~model
-                    ~tool_tbl
-                  @@ Fork.history ~history:inputs ~arguments:fc.arguments fc.call_id
-                in
-                [ List.last_exn res ]
-                |> List.filter_map ~f:(function
-                  | Res.Item.Output_message o ->
-                    Some
-                      (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
-                  | _ -> None)
-                |> String.concat ~sep:"\n"
-              | _ ->
-                "Error: Called the [fork] tool in a forked process! Remember that if you \
-                 are running in a forked process that you must Respond with a message in \
-                 the required Format when finished with the task.")
-            else fn fc.arguments
+              (match fork_depth with
+               | 0 | 1 ->
+                 let res =
+                   run
+                     ~ctx
+                     ?temperature
+                     ?max_output_tokens
+                     ?tools
+                     ?reasoning
+                     ~history_compaction
+                     ~fork_depth:(fork_depth + 1)
+                     ~model
+                     ~tool_tbl
+                     (Fork.history ~history:inputs ~arguments:payload call_id)
+                 in
+                 let result =
+                   [ List.last_exn res ]
+                   |> List.filter_map ~f:(function
+                     | Res.Item.Output_message o ->
+                       Some
+                         (List.map o.content ~f:(fun c -> c.text)
+                          |> String.concat ~sep:" ")
+                     | _ -> None)
+                   |> String.concat ~sep:"\n"
+                 in
+                 Output.Text result
+               | _ ->
+                 Output.Text
+                   "Error: Called the [fork] tool in a forked process! Remember that if \
+                    you are running in a forked process that you must Respond with a \
+                    message in the required Format when finished with the task.")
+            | `Custom _ when String.equal name "fork" ->
+              Output.Text "Error: [fork] cannot be invoked as a custom tool call."
+            | _ -> (Hashtbl.find_exn tool_tbl name) payload
           in
-          let data =
-            Res.Item.Function_call_output
-              { output = res
-              ; call_id = fc.call_id
-              ; _type = "function_call_output"
-              ; id = None
-              ; status = None
-              }
+          let data : Res.Item.t =
+            match call with
+            | `Function _ ->
+              Tool_call.output_item ~kind:Tool_call.Kind.Function ~call_id ~output:res
+            | `Custom _ ->
+              Tool_call.output_item ~kind:Tool_call.Kind.Custom ~call_id ~output:res
           in
           Io.log
             ~dir:(Ctx.dir ctx)
             ~file:"raw-openai-response.txt"
-            ((Jsonaf.to_string @@ Res.Item.jsonaf_of_t @@ data) ^ "\n");
+            (Jsonaf.to_string (Res.Item.jsonaf_of_t data) ^ "\n");
           data)
       in
       run

@@ -72,6 +72,7 @@ let ochat_function_of_remote_tool ~sw ~client ~strict (tool : Tool.t) : Ochat_fu
   let module Def = struct
     type input = Jsonaf.t
 
+    let type_ = "function"
     let name = tool.name
     let description = tool.description
     let parameters = tool.input_schema
@@ -100,10 +101,10 @@ let ochat_function_of_remote_tool ~sw ~client ~strict (tool : Tool.t) : Ochat_fu
   (* The function that will be called by the chat runtime. *)
   (* It takes a JSON object as input, calls the MCP server, and returns
      a string result. *)
-  let run (args : Jsonaf.t) : string =
+  let run (args : Jsonaf.t) : Openai.Responses.Tool_output.Output.t =
     match Client.call_tool client ~name:tool.name ~arguments:args with
-    | Ok res -> string_of_result res
-    | Error msg -> msg
+    | Ok res -> Openai.Responses.Tool_output.Output.Text (string_of_result res)
+    | Error msg -> Openai.Responses.Tool_output.Output.Text msg
   in
   Ochat_function.create_function (module Def) ~strict run
 ;;

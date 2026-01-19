@@ -158,3 +158,5 @@ val fork : Ochat_function.t
     receives the full prompt in its JSON [prompt] field and returns the
     improved version produced by {!Meta_prompting.Recursive_mp.refine}. *)
 val meta_refine : env:Eio_unix.Stdenv.base -> Ochat_function.t
+
+val import_image : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t

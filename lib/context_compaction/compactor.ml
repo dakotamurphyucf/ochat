@@ -8,6 +8,17 @@ module S = Summarizer
 
 let _render_item (item : Openai.Responses.Item.t) : string option =
   let open Openai.Responses in
+  let string_of_tool_output (output : Tool_output.Output.t) : string =
+    match output with
+    | Tool_output.Output.Text text -> text
+    | Content parts ->
+      parts
+      |> List.map ~f:(function
+        | Tool_output.Output_part.Input_text { text } -> text
+        | Input_image { image_url; _ } ->
+          Printf.sprintf "<image src=\"%s\" />" image_url)
+      |> String.concat ~sep:"\n"
+  in
   match item with
   | Item.Input_message { content; role; _ } ->
     (match content with
@@ -21,8 +32,14 @@ let _render_item (item : Openai.Responses.Item.t) : string option =
      | { text; _ } :: _ -> sprintf "%s: %s" "Assistant" text |> Some)
   | Function_call { name; arguments; call_id; _ } ->
     sprintf "Function call (%s): %s(%s)" call_id name arguments |> Some
+  | Custom_tool_call { name; input; call_id; _ } ->
+    sprintf "Custom tool call (%s): %s(%s)" call_id name input |> Some
   | Function_call_output { call_id; output; _ } ->
+    let output = string_of_tool_output output in
     sprintf "Function call output (%s): %s" call_id output |> Some
+  | Custom_tool_call_output { call_id; output; _ } ->
+    let output = string_of_tool_output output in
+    sprintf "Custom tool call output (%s): %s" call_id output |> Some
   | _ -> None
 ;;
 
@@ -78,7 +95,7 @@ let compact_history ~env ~(history : Openai.Responses.Item.t list)
       String.prefix s cfg.context_limit
       |> sprintf
            "<system-reminder>This is a message from the system that we compacted the \
-            conversation history from out last session.\n\
+            conversation history from a previous session.\n\
             Here is a summary of the session that you saved:\n\
             %s\n\
             Remember this is not a message from the user, but a system reminder that you \
@@ -92,15 +109,23 @@ let compact_history ~env ~(history : Openai.Responses.Item.t list)
          (String.length summary);
     Log.emit `Debug @@ sprintf "Compactor.compact_history: summary:\n%s" summary;
     (* Build the new history, keeping the first message intact. *)
-    match history with
-    | [] ->
-      [ build_system_summary_message ~role:System "You are a helpful assistant."
-      ; build_system_summary_message summary
-      ]
-    | [ hd ] ->
-      (* Always keep the first message intact, as it is usually a system prompt. *)
-      [ hd; build_system_summary_message summary ]
-    | _ -> [ List.hd_exn history; build_system_summary_message summary ]
+    (* filter so only developer messages and system-reminders are kept *)
+    let new_history =
+      List.filter history ~f:(fun item ->
+        let open Openai.Responses in
+        match item with
+        | Input_message { role; content; _ } ->
+          (match role with
+           | System | Developer -> true
+           | User ->
+             (match content with
+              | Input_message.Text { text; _ } :: _ ->
+                String.strip text |> String.is_prefix ~prefix:"<system-reminder>"
+              | _ -> false)
+           | _ -> false)
+        | _ -> false)
+    in
+    List.concat [ new_history; [ build_system_summary_message summary ] ]
   with
   | exn ->
     (* Fallback to identity transformation on error. *)

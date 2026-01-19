@@ -93,7 +93,7 @@ let first_flow
     RMP.make_params
       ~judges
       ~bandit_enabled:true
-      ~max_iters:3
+      ~max_iters:5
       ~proposer_model:Openai.Responses.Request.Gpt5
       ~executor_model:Openai.Responses.Request.Gpt5
       ~strategies

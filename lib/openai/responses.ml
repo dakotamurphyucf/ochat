@@ -183,7 +183,6 @@ module Output_message = struct
     | _ -> failwith "Invalid role"
   ;;
 
-  (* annotations is usually empty which works for our purposes but if provided will fail to parse because it is not array of strings *)
   type content =
     { annotations : Annotation.t list
     ; text : string
@@ -213,13 +212,136 @@ module Function_call = struct
   [@@deriving jsonaf, sexp, bin_io]
 end
 
+module Custom_tool_call = struct
+  type t =
+    { name : string
+    ; input : string
+    ; call_id : string
+    ; _type : string [@key "type"]
+    ; id : string option [@jsonaf.option]
+    }
+  [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+end
+
+module Tool_output = struct
+  module Output_part = struct
+    type input_text = { text : string } [@@deriving sexp, bin_io]
+
+    type input_image =
+      { image_url : string
+      ; detail : Input_message.image_detail option
+      }
+    [@@deriving sexp, bin_io]
+
+    type t =
+      | Input_text of input_text
+      | Input_image of input_image
+    [@@deriving sexp, bin_io]
+
+    let input_text_of_jsonaf = function
+      | `Object obj ->
+        (match Jsonaf.member "text" (`Object obj) with
+         | Some (`String text) -> { text }
+         | _ ->
+           failwith "Function_call_output.Output_part.input_text_of_jsonaf: missing text")
+      | _ ->
+        failwith "Function_call_output.Output_part.input_text_of_jsonaf: expected object"
+    ;;
+
+    let jsonaf_of_input_text { text } =
+      `Object [ "type", `String "input_text"; "text", `String text ]
+    ;;
+
+    let input_image_of_jsonaf = function
+      | `Object obj ->
+        let image_url =
+          match Jsonaf.member "image_url" (`Object obj) with
+          | Some (`String url) -> url
+          | Some (`Object obj) ->
+            (match Jsonaf.member "url" (`Object obj) with
+             | Some (`String url) -> url
+             | _ ->
+               failwith
+                 "Function_call_output.Output_part.input_image_of_jsonaf: invalid \
+                  image_url")
+          | _ ->
+            failwith
+              "Function_call_output.Output_part.input_image_of_jsonaf: missing image_url"
+        in
+        let detail =
+          match Jsonaf.member "detail" (`Object obj) with
+          | None | Some `Null -> None
+          | Some json -> Some (Input_message.image_detail_of_jsonaf json)
+        in
+        { image_url; detail }
+      | _ ->
+        failwith "Function_call_output.Output_part.input_image_of_jsonaf: expected object"
+    ;;
+
+    let jsonaf_of_input_image { image_url; detail } =
+      let fields = [ "type", `String "input_image"; "image_url", `String image_url ] in
+      let fields =
+        match detail with
+        | None -> fields
+        | Some detail -> ("detail", Input_message.jsonaf_of_image_detail detail) :: fields
+      in
+      `Object fields
+    ;;
+
+    let t_of_jsonaf = function
+      | `Object obj as json ->
+        (match Jsonaf.member "type" json with
+         | Some (`String "input_text") -> Input_text (input_text_of_jsonaf (`Object obj))
+         | Some (`String "input_image") ->
+           Input_image (input_image_of_jsonaf (`Object obj))
+         | _ -> failwith "Function_call_output.Output_part.t_of_jsonaf: unknown type")
+      | _ -> failwith "Function_call_output.Output_part.t_of_jsonaf: expected object"
+    ;;
+
+    let jsonaf_of_t = function
+      | Input_text t -> jsonaf_of_input_text t
+      | Input_image t -> jsonaf_of_input_image t
+    ;;
+  end
+
+  module Output = struct
+    type t =
+      | Text of string
+      | Content of Output_part.t list
+    [@@deriving sexp, bin_io]
+
+    let t_of_jsonaf = function
+      | `String text -> Text text
+      | `Array parts -> Content (List.map parts ~f:Output_part.t_of_jsonaf)
+      | _ -> failwith "Function_call_output.Output.t_of_jsonaf: expected string or array"
+    ;;
+
+    let jsonaf_of_t = function
+      | Text text -> `String text
+      | Content parts -> `Array (List.map parts ~f:Output_part.jsonaf_of_t)
+    ;;
+
+    (* end here *)
+  end
+end
+
 module Function_call_output = struct
   type t =
-    { output : string
+    { output : Tool_output.Output.t
     ; call_id : string
     ; _type : string [@key "type"]
     ; id : string option [@jsonaf.option]
     ; status : string option [@jsonaf.option]
+    }
+  [@@deriving jsonaf, sexp, bin_io]
+end
+
+module Custom_tool_call_output = struct
+  type t =
+    { output : Tool_output.Output.t
+    ; call_id : string
+    ; _type : string [@key "type"]
+    ; id : string option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, bin_io]
 end
@@ -292,7 +414,9 @@ module Item = struct
     | Input_message of Input_message.t
     | Output_message of Output_message.t
     | Function_call of Function_call.t
+    | Custom_tool_call of Custom_tool_call.t
     | Function_call_output of Function_call_output.t
+    | Custom_tool_call_output of Custom_tool_call_output.t
     | Web_search_call of Web_search_call.t
     | File_search_call of File_search_call.t
     | Reasoning of Reasoning.t
@@ -302,8 +426,11 @@ module Item = struct
     | Input_message input_message -> Input_message.jsonaf_of_t input_message
     | Output_message output_message -> Output_message.jsonaf_of_t output_message
     | Function_call function_too_call -> Function_call.jsonaf_of_t function_too_call
+    | Custom_tool_call custom_tool_call -> Custom_tool_call.jsonaf_of_t custom_tool_call
     | Function_call_output function_too_call_output ->
       Function_call_output.jsonaf_of_t function_too_call_output
+    | Custom_tool_call_output custom_tool_call_output ->
+      Custom_tool_call_output.jsonaf_of_t custom_tool_call_output
     | Web_search_call web_search_call -> Web_search_call.jsonaf_of_t web_search_call
     | File_search_call file_search_call -> File_search_call.jsonaf_of_t file_search_call
     | Reasoning reasoning -> Reasoning.jsonaf_of_t reasoning
@@ -320,8 +447,12 @@ module Item = struct
           | _ -> Input_message (Input_message.t_of_jsonaf (`Object obj)))
        | Some (`String "function_call") ->
          Function_call (Function_call.t_of_jsonaf (`Object obj))
+       | Some (`String "custom_tool_call") ->
+         Custom_tool_call (Custom_tool_call.t_of_jsonaf (`Object obj))
        | Some (`String "function_call_output") ->
          Function_call_output (Function_call_output.t_of_jsonaf (`Object obj))
+       | Some (`String "custom_tool_call_output") ->
+         Custom_tool_call_output (Custom_tool_call_output.t_of_jsonaf (`Object obj))
        | Some (`String "web_search_call") ->
          Web_search_call (Web_search_call.t_of_jsonaf (`Object obj))
        | Some (`String "file_search_call") ->
@@ -345,12 +476,13 @@ module Request = struct
     | O3_mini [@name "o3-mini"]
     | Gpt4 [@name "gpt-4.5-preview"]
     | O4_mini [@name "o4-mini"]
-    | Gpt5 [@name "gpt-5.1"]
+    | Gpt5 [@name "gpt-5.2"]
     | Gpt_4_1_mini [@name "gpt-4.1-nano"]
     | Gpt4o [@name "gpt-4o"]
     | Gpt4_1 [@name "gpt-4.1"]
     | Gpt3 [@name "gpt-3.5-turbo"]
     | Gpt3_16k [@name "gpt-3.5-turbo-16k"]
+    | Unknown of string [@name "unknown"]
   [@@deriving sexp, bin_io]
 
   let jsonaf_of_model = function
@@ -361,9 +493,10 @@ module Request = struct
     | Gpt4_1 -> `String "gpt-4.1"
     | Gpt4 -> `String "gpt-4.5-preview"
     | Gpt4o -> `String "gpt-4o"
-    | Gpt5 -> `String "gpt-5.1"
+    | Gpt5 -> `String "gpt-5.2"
     | Gpt3 -> `String "gpt-3.5-turbo"
     | Gpt3_16k -> `String "gpt-3.5-turbo-16k"
+    | Unknown s -> `String s
   ;;
 
   let model_of_jsonaf = function
@@ -377,6 +510,7 @@ module Request = struct
     | `String "gpt-3.5-turbo" -> Gpt3
     | `String "gpt-3.5-turbo-16k" -> Gpt3_16k
     | `String "gpt-5" -> Gpt5
+    | `String s -> Unknown s
     | _ -> failwith "Invalid model"
   ;;
 
@@ -391,6 +525,7 @@ module Request = struct
     | Gpt3_16k -> "gpt-3.5-turbo-16k"
     | Gpt5 -> "gpt-5"
     | Gpt4 -> "gpt-4.5-preview"
+    | Unknown s -> s
   ;;
 
   let model_of_str_exn = function
@@ -404,7 +539,7 @@ module Request = struct
     | "gpt-4.5" -> Gpt4
     | "gpt-4o" -> Gpt4o
     | "gpt-5" -> Gpt5
-    | _ -> failwith "Invalid model"
+    | s -> Unknown s
   ;;
 
   module Reasoning = struct
@@ -692,16 +827,28 @@ module Request = struct
       [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, bin_io, sexp]
     end
 
+    module Custom_function = struct
+      type t =
+        { name : string [@default "custom_function"]
+        ; description : string option
+        ; format : Jsonaf.t [@default `Object []]
+        ; type_ : string [@key "type"]
+        }
+      [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, bin_io, sexp]
+    end
+
     type t =
       | File_search of File_search.t
       | Web_search of Web_search.t
       | Function of Function.t
+      | Custom_function of Custom_function.t
     [@@deriving sexp, bin_io]
 
     let jsonaf_of_t = function
       | File_search file_search -> File_search.jsonaf_of_t file_search
       | Web_search web_search -> Web_search.jsonaf_of_t web_search
       | Function function_ -> Function.jsonaf_of_t function_
+      | Custom_function custom_function -> Custom_function.jsonaf_of_t custom_function
     ;;
 
     let t_of_jsonaf = function
@@ -713,6 +860,8 @@ module Request = struct
          | Some (`String "web_search_preview_2025_03_11") ->
            Web_search (Web_search.t_of_jsonaf (`Object obj))
          | Some (`String "function") -> Function (Function.t_of_jsonaf (`Object obj))
+         | Some (`String "custom") ->
+           Custom_function (Custom_function.t_of_jsonaf (`Object obj))
          | _ -> failwith "Invalid tool type")
       | _ -> failwith "Invalid tool format"
     ;;
@@ -974,6 +1123,7 @@ module Response_stream = struct
       | Input_message of Input_message.t
       | Output_message of Output_message.t
       | Function_call of Function_call.t
+      | Custom_function of Custom_tool_call.t
       | Reasoning of Reasoning.t
     [@@deriving sexp, bin_io]
 
@@ -981,6 +1131,7 @@ module Response_stream = struct
       | Input_message input_message -> Input_message.jsonaf_of_t input_message
       | Output_message output_message -> Output_message.jsonaf_of_t output_message
       | Function_call function_too_call -> Function_call.jsonaf_of_t function_too_call
+      | Custom_function custom_tool_call -> Custom_tool_call.jsonaf_of_t custom_tool_call
       | Reasoning reasoning -> Reasoning.jsonaf_of_t reasoning
     ;;
 
@@ -995,6 +1146,8 @@ module Response_stream = struct
             | _ -> Input_message (Input_message.t_of_jsonaf (`Object obj)))
          | Some (`String "function_call") ->
            Function_call (Function_call.t_of_jsonaf (`Object obj))
+         | Some (`String "custom_tool_call") ->
+           Custom_function (Custom_tool_call.t_of_jsonaf (`Object obj))
          | Some (`String "reasoning") -> Reasoning (Reasoning.t_of_jsonaf (`Object obj))
          | _ -> failwith "Invalid content type")
       | _ -> failwith "Invalid content format"
@@ -1062,9 +1215,29 @@ module Response_stream = struct
     [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
   end
 
+  module Custom_tool_call_input_delta = struct
+    type t =
+      { delta : string
+      ; item_id : string
+      ; output_index : int
+      ; type_ : string [@key "type"]
+      }
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+  end
+
   module Function_call_arguments_done = struct
     type t =
       { arguments : string
+      ; item_id : string
+      ; output_index : int
+      ; type_ : string [@key "type"]
+      }
+    [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
+  end
+
+  module Custom_tool_call_input_done = struct
+    type t =
+      { input : string
       ; item_id : string
       ; output_index : int
       ; type_ : string [@key "type"]
@@ -1265,6 +1438,8 @@ module Response_stream = struct
     | Output_text_done of Output_text_done.t
     | Function_call_arguments_delta of Function_call_arguments_delta.t
     | Function_call_arguments_done of Function_call_arguments_done.t
+    | Custom_tool_call_input_delta of Custom_tool_call_input_delta.t
+    | Custom_tool_call_input_done of Custom_tool_call_input_done.t
     | Response_created of Response_created.t
     | Response_in_progress of Response_in_progress.t
     | Reasoning_summary_text_delta of Reasoning_summary_text_delta.t
@@ -1299,6 +1474,10 @@ module Response_stream = struct
       Function_call_arguments_delta.jsonaf_of_t function_call_arguments_delta
     | Function_call_arguments_done function_call_arguments_done ->
       Function_call_arguments_done.jsonaf_of_t function_call_arguments_done
+    | Custom_tool_call_input_delta custom_tool_call_input_delta ->
+      Custom_tool_call_input_delta.jsonaf_of_t custom_tool_call_input_delta
+    | Custom_tool_call_input_done custom_tool_call_input_done ->
+      Custom_tool_call_input_done.jsonaf_of_t custom_tool_call_input_done
     | Response_created response_created -> Response_created.jsonaf_of_t response_created
     | Response_in_progress response_in_progress ->
       Response_in_progress.jsonaf_of_t response_in_progress
@@ -1354,6 +1533,12 @@ module Response_stream = struct
        | Some (`String "response.function_call_arguments.done") ->
          Function_call_arguments_done
            (Function_call_arguments_done.t_of_jsonaf (`Object obj))
+       | Some (`String "response.custom_tool_call_input.delta") ->
+         Custom_tool_call_input_delta
+           (Custom_tool_call_input_delta.t_of_jsonaf (`Object obj))
+       | Some (`String "response.custom_tool_call_input.done") ->
+         Custom_tool_call_input_done
+           (Custom_tool_call_input_done.t_of_jsonaf (`Object obj))
        | Some (`String "response.created") ->
          Response_created (Response_created.t_of_jsonaf (`Object obj))
        | Some (`String "response.in_progress") ->

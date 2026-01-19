@@ -87,6 +87,7 @@ module Chat_markdown : sig
 
   type msg =
     { role : string
+    ; type_ : string option [@key "type"] [@jsonaf.option]
     ; content : chat_message_content option [@jsonaf.option]
     ; name : string option [@jsonaf.option]
     ; id : string option [@jsonaf.option]

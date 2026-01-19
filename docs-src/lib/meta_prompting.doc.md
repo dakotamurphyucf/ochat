@@ -5,15 +5,16 @@
 
 `Meta_prompting` is the **library layer** that introduces
 
-* **Prompt generators** – functor `Meta_prompting.Make` maps a *typed* task
-  description to a fully-fledged [`Chatmd.Prompt.t`].  Think of it as a
+* **Prompt generators** – functor [`Meta_prompt.Make`] maps a *typed* task
+  description to a fully-fledged prompt record.  Think of it as a
   *single-shot compiler* from a *domain specific record* to the markdown that
   your LLM will consume.
-* **Recursive refinement** – module [`Recursive_mp`] wraps any existing prompt
-  in a *monad* that can *iteratively* call an evaluator, apply a transformation
-  strategy and keep the better variant.
+* **Recursive refinement** – module [`Recursive_mp`] implements an iterative
+  loop that can call an evaluator, apply a transformation strategy and keep
+  the better variant.  When run with an Eio environment it can delegate the
+  heavy lifting to OpenAI models and an optional vector database.
 * **Flexible evaluation** – module [`Evaluator`] bundles a set of *judges*
-  (regex check, log-prob proxy, LLM ensemble, …) into an aggregate score that
+  (regex check, reward model, LLM ensemble, …) into an aggregate score that
   drives the refinement loop.
 
 All pieces are deliberately kept **orthogonal**: swap any evaluator, inject a
@@ -62,7 +63,7 @@ module Prompt = struct
 end
 
 (* 3️⃣  Instantiate the functor *)
-module Mp = Meta_prompting.Make (Task) (Prompt)
+module Mp = Meta_prompt.Make (Task) (Prompt)
 
 (* 4️⃣  Generate & refine the prompt *)
 let () =
@@ -74,18 +75,23 @@ let () =
 
 Running the program prints a prompt that already includes the default *meta*
 header as well as an `iteration=1` metadata field injected by
-`Recursive_mp.transform_prompt` (a placeholder until the transformation is
-replaced by an actual LLM call).
+`Recursive_mp.refine`.  In this minimal configuration the transformation
+remains local and deterministic; the same API is also used by the `Mp_flow`
+helpers and the `mp-refine-run` CLI to drive the full LLM-backed pipeline
+when an [`Eio_unix.Stdenv.base`] environment is available.
 
 ---
 
 ## API overview
 
-### Functor `Meta_prompting.Make`
+### Functor `Meta_prompt.Make`
 
 ```ocaml
 module Make
-  (Task   : sig type t val to_markdown : t -> string end)
+  (Task   : sig
+              type t
+              val to_markdown : t -> string
+            end)
   (Prompt : sig
               type t
               val make
@@ -96,13 +102,19 @@ module Make
                 -> unit
                 -> t
             end) : sig
-  val generate : Task.t -> Prompt.t
+  val generate
+    :  ?env:< fs : Eio.Fs.dir_ty Eio.Path.t ; .. >
+    -> ?template:string
+    -> ?params:(string * string) list
+    -> Task.t
+    -> Prompt.t
 end
 ```
 
 *Supply two small adapters* – one for your task type and one for the concrete
-prompt implementation – and the functor gives back a module exposing a single
-`generate` function.
+prompt implementation – and the functor gives back a module exposing a
+`generate` function that can either render an on-disk template or fall back
+to the task’s Markdown representation.
 
 ### Monad `Recursive_mp`
 
@@ -112,24 +124,48 @@ val bind    : 'a Recursive_mp.t -> ('a -> 'b Recursive_mp.t) -> 'b Recursive_mp.
 val join    : 'a Recursive_mp.t Recursive_mp.t -> 'a Recursive_mp.t
 
 val refine
-  :  ?params:Recursive_mp.refine_params
-  -> Prompt.t
-  -> Prompt.t
+  :  ?context:Context.t
+  -> ?params:Recursive_mp.refine_params
+  -> ?judges:Evaluator.judge list
+  -> ?max_iters:int
+  -> ?score_epsilon:float
+  -> ?plateau_window:int
+  -> ?bayes_alpha:float
+  -> ?bandit_enabled:bool
+  -> ?strategies:Recursive_mp.transform_strategy list
+  -> ?proposer_model:Openai.Responses.Request.model
+  -> ?executor_model:Openai.Responses.Request.model
+  -> Prompt_intf.t
+  -> Prompt_intf.t
 ```
 
 The monad is *minimal*: it only supports the constructs required by the
-recursive refinement loop.  `refine` evaluates the current prompt, creates a
-candidate via `transform_prompt`, keeps the best of the two, and repeats until
-either the score plateaus or `max_iters` is reached.
+recursive refinement loop.  `refine` evaluates the current prompt, uses one or
+more transformation strategies to propose candidates, and repeats until either
+the Bayesian success estimate drops below [`bayes_alpha`] or [`max_iters`] is
+reached.  The optional [`context`] and parameters control which models are
+used, whether a bandit is enabled, and whether vector-DB retrieval should
+participate.
 
 ### Evaluator
 
 ```ocaml
 type Evaluator.t
 
-val Evaluator.create    : ?judges:(module Evaluator.Judge) list -> unit -> t
-val Evaluator.evaluate  : t -> string -> float
-val Evaluator.default   : t
+val Evaluator.create
+  :  ?judges:Evaluator.judge list
+  -> ?aggregate:Aggregator.t
+  -> unit
+  -> Evaluator.t
+
+val Evaluator.evaluate
+  :  ?env:Eio_unix.Stdenv.base
+  -> Evaluator.t
+  -> ?best:string
+  -> string
+  -> float
+
+val Evaluator.default   : Evaluator.t
 ```
 
 Provide a list of *judges* – that is, functions `string -> float` – and the
@@ -160,45 +196,73 @@ transformation strategy – both pluggable.
 
 ## Context retrieval & environment variables
 
-`Recursive_mp.ask_llm` can enrich the refinement step with **vector database**
-context.  When enabled, the current prompt string is embedded, the top
-`k` neighbours are fetched from the on-disk index and appended to the system
-context shown to the LLM.  This typically boosts the quality of the suggested
-transformations when the prompt is part of a larger project.
+When run with an [`Eio_unix.Stdenv.base`] environment, `Recursive_mp` and the
+higher-level helpers can enrich the refinement step with **vector-DB context**
+and control various OpenAI parameters via environment variables.
+
+### Vector-DB context
+
+`Recursive_mp.ask_llm` embeds the current prompt, runs a hybrid
+vector/BM25 query and appends the top `k` snippets to the system prompt.
 
 Configure the behaviour via these variables:
 
 | Variable | Default | Description |
 |----------|---------|-------------|
 | `META_PROMPT_CTX_K` | *(unset)* | Number of neighbours to retrieve.  Set to `0` or leave unset to disable retrieval. |
-| `VECTOR_DB_FOLDER` | `./vector_db` | Folder that holds `index.bin` and `metadata.bin` as produced by `vector_db build`. |
+| `VECTOR_DB_FOLDER` | `.md_index` | Folder that holds `vectors.ml.binio` and `bm25.ml.binio` as produced by tools such as `index_markdown_docs` and `index_ocaml_code`. |
 
-Both variables are read *once* at start-up.  Missing indices are ignored so you
-can safely deploy the same binary with or without a bundle.
+Missing indices are ignored so you can safely deploy the same binary with or
+without a bundle.
+
+### OpenAI and other control knobs
+
+In addition, the implementation honours:
+
+- `OPENAI_API_KEY` – enables LLM-based transformation and evaluation.
+- `META_PROPOSER_MODEL` – default model for the proposer agent, if no
+  explicit model is passed.
+- `META_PROMPT_BUDGET` – soft limit for the number of output tokens.
+- `META_PROMPT_GUIDELINES` – when set to a falsy value (`0`, `false`, `off`)
+  disables injection of extra guidelines into the system prompt.
+
+Most callers do not need to set these manually; [`Mp_flow`] and
+[`mp-refine-run`](../bin/mp_refine_run.doc.md) provide reasonable defaults.
 
 ---
 
 ## Integration guide
 
-`meta_prompting` powers several higher-level user interfaces:
+`Meta_prompting` powers several higher-level entry points:
 
-1. **Chat-TUI** – Toggle the `/meta_refine` command (or press *Ctrl-r*) to run
-   `Recursive_mp.refine` on the draft **before** it is sent.  The TUI renderer
-   shows a live **diff** so that users stay in the loop and can cancel if the
-   refinement looks wrong.
-2. **CLI `mp_prompt`** – Run batch refinement jobs from scripts:
+1. **ChatMD preprocessor** – `Meta_prompting.Preprocessor.preprocess` is wired
+   into `Chatmd.Prompt.parse_chat_inputs`.  When either the environment
+   variable `OCHAT_META_REFINE` is truthy or the prompt contains the marker
+   `<!-- META_REFINE -->`, the raw ChatMarkdown is routed through
+   `Recursive_mp.refine` before parsing.  In this mode the library runs in a
+   conservative "metadata-only" configuration and never calls the network
+   (no `Eio` environment is passed), which makes it safe for tests and offline
+   workflows.
+2. **Built-in tool `meta_refine`** – exposed from `Functions.meta_refine`.  When
+   you declare `<tool name="meta_refine"/>` in a ChatMD prompt the assistant
+   can delegate prompt improvement to a full LLM-backed refinement run driven
+   by [`Mp_flow.first_flow`].  This is the easiest way to plug meta-prompting
+   into agents and workflows.
+3. **CLI `mp-refine-run`** – batch refinement from the command line:
 
    ```console
-   $ mp-prompt -prompt-file tasks/design.chatmd \
-               -output-file sessions/design.chatmd \
-               -meta-refine
+   $ mp-refine-run -task-file task.md > prompt.txt
    ```
 
-3. **MCP tool** – Remote agents can call the `meta_refine` JSON-RPC endpoint to
-   refine prompts on demand without linking OCaml code.
+   See [`docs-src/bin/mp_refine_run.doc.md`](../bin/mp_refine_run.doc.md) for
+   the complete flag reference.
 
-Each integration uses the *same* `Recursive_mp.refine` API so improvements
-automatically propagate across all front-ends.
+4. **MCP / remote tools** – when a ChatMD prompt that declares `meta_refine`
+   is served via the MCP server, remote agents can call the tool using the
+   standard MCP tool protocol; there is no bespoke JSON-RPC method.
+
+All of these integrations reuse the same underlying `Recursive_mp` and
+`Evaluator` modules so improvements automatically propagate across the stack.
 
 ---
 
@@ -207,10 +271,12 @@ automatically propagate across all front-ends.
 ```ocaml
 module My_judge : Evaluator.Judge = struct
   let name = "starts_with_hello"
-  let evaluate s = if String.is_prefix s ~prefix:"Hello" then 1.0 else 0.0
+  let evaluate ?env:_ s =
+    if String.is_prefix s ~prefix:"Hello" then 1.0 else 0.0
 end
 
-let my_ev = Evaluator.create ~judges:[ (module My_judge) ] ()
+let my_ev =
+  Evaluator.create ~judges:[ Evaluator.Judge (module My_judge) ] ()
 
 let score = Evaluator.evaluate my_ev "Hello world!" (* ➜ 1.0 *)
 ```
@@ -222,11 +288,18 @@ built-in helper `Evaluator.with_exception_guard`.
 
 ## Limitations & next steps
 
-1. **Transformation is a stub** – upcoming tasks will replace
-   `transform_prompt` with an LLM-powered proposer and integrate vector DB
-   context retrieval.
-2. **Evaluator parallelism** – heavy judges will soon run in an `Io.Task_pool`.
-3. **Category-theory proofs** – functor and monad laws are checked via
-   Quickcheck but need formal documentation.
+1. **Offline vs online modes** – when no `Eio` environment is provided
+   `Recursive_mp.refine` degrades to a metadata-only transformation.  This is
+   intentional for safety, but it means that the preprocessor hook will not
+   call the network unless you go through [`Mp_flow`] / `mp-refine-run` or
+   provide a [`Context.t`] with [`env`] set.
+2. **Evaluator failure semantics** – most judges degrade to a neutral `0.5`
+   score on errors, but the reward-model based judges still have a few error
+   paths that raise.  Treat them as experimental and prefer offline judges in
+   CI.
+3. **Docs & examples** – the meta-prompting stack is evolving quickly; for the
+   most accurate signatures always refer to the OCaml interface files (`*.mli`)
+   in `lib/meta_prompting/` and the specialised docs under
+   `docs-src/meta_prompting/*.doc.md`.
 
 

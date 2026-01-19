@@ -2,4 +2,3 @@
  (name highlight_bench)
  (modules highlight_bench)
  (libraries core notty notty_scroll_box chat_tui))
-

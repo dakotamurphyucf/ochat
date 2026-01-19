@@ -1,142 +1,220 @@
-# `Responses` – High-level wrapper for OpenAI’s `/v1/responses` API
+# `Responses` – OpenAI `/v1/responses` API bindings
+
+`Openai.Responses` is the lowest-level OpenAI client used throughout the
+Ochat code-base. It mirrors the `/v1/responses` schema with OCaml types
+(generated via `ppx_jsonaf_conv`) and provides one function,
+`post_response`, that performs the HTTPS request and decodes either:
+
+* a single final JSON object (blocking mode), or
+* a stream of Server-Sent Events (streaming mode).
+
+If you are building an end-user app, you often want the higher-level
+orchestration in `Chat_response` (tool dispatch, history management,
+deterministic ordering, …). If you want full control of the wire format,
+`Openai.Responses` is the right layer.
 
 ---
 
-## Overview
-
-`Responses` offers a thin, type-safe layer over OpenAI’s JSON schema while
-taking care of the following low-level chores:
-
-* Building the request payload with optional streaming, tool-calling,
-  reasoning controls, etc.
-* Performing the HTTPS request via `cohttp-eio` with capability-safe
-  network handles.
-* Incrementally decoding the Server-Sent Events (SSE) stream when
-  requested, invoking a user callback for every event.
-* Converting the final JSON reply into rich OCaml records derived from
-  the schema.
-
-Everything is centred around a single function:
+## Quick-start (blocking)
 
 ```ocaml
-val post_response :
-  'a response_type
+Eio_main.run @@ fun env ->
+  let net = Eio.Stdenv.net env in
+  let dir = Eio.Stdenv.cwd env in
+
+  let user : Openai.Responses.Item.t =
+    Openai.Responses.Item.Input_message
+      { role = Openai.Responses.Input_message.User
+      ; content =
+          [ Openai.Responses.Input_message.Text
+              { text = "Tell me a joke"; _type = "input_text" }
+          ]
+      ; _type = "message"
+      }
+  in
+
+  let ({ output; _ } : Openai.Responses.Response.t) =
+    Openai.Responses.post_response Openai.Responses.Default ~dir net ~inputs:[ user ]
+  in
+  match output with
+  | [ Openai.Responses.Item.Output_message { content = [ { text; _ } ]; _ } ] ->
+    print_endline text
+  | _ -> print_endline "Unexpected reply"
+```
+
+---
+
+## API
+
+```ocaml
+val Openai.Responses.post_response :
+  'a Openai.Responses.response_type
   -> ?max_output_tokens:int
   -> ?temperature:float
-  -> ?tools:Request.Tool.t list
-  -> ?model:Request.model
-  -> ?reasoning:Request.Reasoning.t
+  -> ?tools:Openai.Responses.Request.Tool.t list
+  -> ?model:Openai.Responses.Request.model
+  -> ?parallel_tool_calls:bool
+  -> ?reasoning:Openai.Responses.Request.Reasoning.t
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> _ Eio.Net.t
-  -> inputs:Item.t list
+  -> inputs:Openai.Responses.Item.t list
   -> 'a
 ```
 
-### Blocking vs streaming modes
+### Parameters
+
+* `response_type` – selects blocking vs streaming behaviour:
+  * `Default` returns `Openai.Responses.Response.t`.
+  * `Stream f` returns `unit` and invokes `f` for each
+    `Openai.Responses.Response_stream.t` event.
+* `max_output_tokens` – hard cap on assistant output tokens (default `600`).
+* `temperature` – sampling temperature.
+* `tools` – tool catalog visible to the model (function calling, hosted tools
+  such as file/web search).
+* `model` – the target model (default `Gpt4`).
+* `parallel_tool_calls` – when `true`, allow the model to emit multiple tool
+  calls without waiting for previous ones to complete.
+* `reasoning` – optional reasoning settings (effort/summary controls).
+* `dir` – directory capability used for diagnostics; raw responses are appended
+  to:
+  * `raw-openai-response.txt` (blocking)
+  * `raw-openai-streaming-response.txt` (streaming)
+* `net` – the network capability (`Eio.Stdenv.net env`).
+* `inputs` – heterogeneous history (`Item.t list`) sent to OpenAI.
+
+### Exceptions
+
+`Openai.Responses.post_response` raises on errors rather than returning a
+result:
+
+* `Openai.Responses.Response_stream_parsing_error` if a streaming event cannot
+  be decoded (carries the JSON and underlying exception).
+* `Openai.Responses.Response_parsing_error` if the final JSON payload cannot be
+  decoded as `Response.t`.
+* Any exception coming from networking/TLS (`cohttp-eio`, `tls-eio`, `Eio`).
+
+Wrap the call with `Io.to_res` if you want a `('a, string) result` instead.
+
+---
+
+## Small conversion helpers
+
+These helpers are used pervasively by higher-level code (rendering,
+configuration parsing, etc.):
+
+* `Openai.Responses.Input_message.role_to_string` / `role_of_string`
+* `Openai.Responses.Request.model_to_str` / `model_of_str_exn`
+* `Openai.Responses.Request.Reasoning.Effort.to_str` / `of_str_exn`
+* `Openai.Responses.Request.Reasoning.Summary.to_str` / `of_str_exn`
+
+---
+
+## Streaming
+
+Streaming delivers a sequence of `Openai.Responses.Response_stream.t` events.
+For “live typing”, handle `Output_text_delta`:
 
 ```ocaml
-open Responses
-
-(* 1 – blocking variant returning a single JSON object *)
-let ({ Response.output; _ } : Response.t) =
-  post_response Default ~dir net ~inputs
-
-(* 2 – streaming variant.  The callback fires for every SSE event. *)
-let print_delta = function
-  | Response_stream.Output_text_delta { delta; _ } -> print_string delta
+let on_event = function
+  | Openai.Responses.Response_stream.Output_text_delta { delta; _ } ->
+    Out_channel.output_string stdout delta
   | _ -> ()
+in
 
-let () =
-  post_response (Stream print_delta) ~temperature:0.7 ~dir net ~inputs
-```
-
-### Parallel tool calls
-
-By default the backend assumes a **serial** tool-invocation model: the
-assistant will only produce a new `function_call` / `file_search_call` /
-`web_search_call` item after the previous one has finished executing on
-the client side.  This is often the simplest approach but can become a
-bottleneck when the calls are independent.
-
-Starting with schema version `2024-05-21` the parameter
-`parallel_tool_calls` can be enabled to lift that restriction.  When
-set to `true` the model may emit several calls in quick succession,
-allowing the owner application to dispatch them concurrently:
-
-```ocaml
-Responses.post_response
-  (Responses.Stream handle_event)
-  ~parallel_tool_calls:true         (* allow concurrent calls          *)
-  ~tools:[ my_function_tool ]       (* tool definitions                *)
+Openai.Responses.post_response
+  (Openai.Responses.Stream on_event)
   ~dir
   net
   ~inputs
 ```
 
-Use this flag with care – your event loop must be able to keep up with
-potential out-of-order completions.  If unsure, leave it to its default
-`false` value.
+Event ordering is determined by the server. If you enable
+`~parallel_tool_calls:true`, you must be prepared to observe interleavings
+between tool call argument streams and regular text deltas.
 
+---
 
-The helper `response_type` GADT encodes the result type at the call site:
+## Tool calling: the “call → run → output → continue” loop
 
-* `Default` → returns a fully-parsed `Response.t`.
-* `Stream f` → returns `unit` after piping every SSE chunk through `f`.
+Tools are *declared* via `~tools` (what the model is allowed to call), but
+tool *execution* is your responsibility.
 
-## Building a request
+At a high level:
 
-Requests are heterogeneous lists of `Item.t`, where each variant mirrors a
-possible entry in the JSON array sent to the server.  In practice you
-rarely need more than user / assistant messages:
+1. Send `inputs` (messages + tool outputs so far).
+2. Read `Function_call` items in the response.
+3. Execute your local tool implementation.
+4. Append `Function_call_output` with the same `call_id`.
+5. Call `post_response` again with the extended history.
+
+The Ochat code-base implements this loop in `Chat_response.Response_loop` and
+`Chat_response.Driver`.
+
+### Declaring a function tool
 
 ```ocaml
-open Responses
-
-open Responses.Input_message
-
-let user : Input_message.t =
-  { role = User
-  ; content = [ Text { text = "Tell me a joke"; _type = "input_text" } ]
-  ; _type = "message"
-  }
-
-let inputs = [ Item.Input_message user ]
+let echo_tool : Openai.Responses.Request.Tool.t =
+  Openai.Responses.Request.Tool.Function
+    { name = "echo"
+    ; description = Some "Return the given text"
+    ; parameters =
+        Jsonaf.of_string
+          {|{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}|}
+    ; strict = true
+    ; type_ = "function"
+    }
 ```
 
-### Tool calling
+---
 
-Adding support for function-calling or vector-store search is as simple as
-populating the optional `~tools` parameter with a value constructed via
-the nested `Request.Tool.*` helpers.  Refer to the type definitions in
-`responses.mli` for details; every field corresponds 1:1 to the JSON
-specification.
+## Function-call outputs: text vs multimodal content
 
-## Diagnostics
+The `/v1/responses` schema allows tool outputs to be either:
 
-When `post_response` is invoked in streaming mode it writes the raw text
-of each SSE line to `raw-openai-streaming-response.txt` in `~dir`.  This
-is invaluable when debugging JSON decoding errors.
+* a plain string (`Function_call_output.Output.Text`), or
+* a structured list of parts (`Function_call_output.Output.Content`) containing
+  `input_text` and `input_image` entries.
 
-## Limitations & Caveats
+This is reflected by:
 
-* **Breaking API** – The remote endpoint is not stable.  New event types
-  may appear without notice.
-* **No automatic retry/back-off** – Any network error bubbles up to the
-  caller.
-* **TLS verification** – `tls-eio` is configured with no explicit root
-  store.  Make sure your environment provides one if certificate
-  pinning is a requirement.
-* **Large payloads** – Neither request nor reply size is currently
-  chunked; the whole JSON object is materialised in memory when
-  `Default` is used.
+* `Openai.Responses.Function_call_output.Output.t` and
+* `Openai.Responses.Function_call_output.Output_part.t`.
+
+Two helpers are particularly useful:
+
+* `Openai.Responses.Function_call_output.Output.to_display_string` – render for
+  humans (images become `<image src="..."/>`).
+* `Openai.Responses.Function_call_output.Output.to_persisted_string` – preserve
+  structured output by serialising to JSON when needed.
+
+---
+
+## Security note (TLS)
+
+The HTTP plumbing ultimately goes through `Io.Net`, which intentionally uses a
+“null” TLS authenticator for convenience in development. This disables
+certificate validation.
+
+If you are shipping production code, do not use this configuration as-is.
+See `docs-src/lib/Io.doc.md` for details.
+
+---
+
+## Limitations / caveats
+
+* The OpenAI endpoint schema is evolving; new event constructors may appear.
+* No automatic retries/backoff.
+* The blocking path materialises the whole response body in memory.
+* The streaming path logs every received line; this is useful for debugging
+  but may produce large log files.
+
+---
 
 ## See also
 
-* [`Completions`](./completions.doc.md) – Simpler chat API without tool
-  calling.
-* [`Embeddings`](./embeddings.doc.md) – Generate vector embeddings for
-  semantic search.
-
----
+* [`Completions`](./completions.doc.md) – legacy chat-completions wrapper.
+* [`Embeddings`](./embeddings.doc.md) – `/v1/embeddings` wrapper.
+* [`Chat_response.Driver`](../chat_response/driver.doc.md) – high-level
+  orchestration of tool calls, streaming, and ChatMarkdown conversations.
 
 

@@ -2,10 +2,11 @@
 
      [Response_loop] is the **blocking** counterpart to {!Fork.run_stream}.
      It keeps forwarding the current conversation [history] to the OpenAI
-     *chat/completions* endpoint, resolves every tool invocation requested
-     by the model through the user-supplied [tool_tbl], and stops only when
-     the model’s last turn contains **no** {!Openai.Responses.Item.Function_call}
-     entries.
+     Responses API, resolves every tool invocation requested by the model
+     through the user-supplied [tool_tbl], and stops only when the model’s
+     last turn contains **no** tool-call entries (neither
+     {!Openai.Responses.Item.Function_call} nor
+     {!Openai.Responses.Item.Custom_tool_call}).
 
      The helper is used internally by {!Driver} (CLI & tests) and by nested
      agents spawned through the [fork] tool, but it can be called directly
@@ -15,10 +16,11 @@
 
      1. Push [history] to the backend via {!Openai.Responses.post_response}.
      2. Append the resulting [output] items to [history].
-     3. Collect every [`Function_call`] item; if the list is empty, return.
+     3. Collect every tool-call item; if the list is empty, return.
      4. For each call, look up the OCaml implementation in [tool_tbl],
         execute it, wrap its textual result in a
-        [`Function_call_output`] placeholder, and append it to [history].
+        [`Function_call_output`] or [`Custom_tool_call_output`] placeholder,
+        and append it to [history].
      5. Repeat from step 1.
 
      The function is pure except for the side-effects performed by the tools
@@ -32,8 +34,8 @@ open! Core
         ?fork_depth ?history_compaction ~model ~tool_tbl history]
 
     Expands [history] until the assistant’s most recent reply contains
-    **no** {!Openai.Responses.Item.Function_call} items and returns the
-    concatenated list of conversation items.
+    **no** tool-call items and returns the concatenated list of
+    conversation items.
 
     {1 Parameters}
 
@@ -71,8 +73,9 @@ open! Core
 
     {1 Return value}
 
-    Extended conversation that includes every assistant reply and
-    [`Function_call_output`] produced while the loop was active.
+    Extended conversation that includes every assistant reply and tool
+    outputs ([`Function_call_output`] and [`Custom_tool_call_output`])
+    produced while the loop was active.
 
     @raise Not_found if the model produces a tool name that is not
       present in [tool_tbl].
@@ -92,7 +95,7 @@ val run
                                     the latest version of each document is sent to the model.
                                     Defaults to [false]. *)
   -> model:Openai.Responses.Request.model (** OpenAI model used for **all** iterations. *)
-  -> tool_tbl:(string, string -> string) Hashtbl.t
+  -> tool_tbl:(string, string -> Openai.Responses.Tool_output.Output.t) Hashtbl.t
        (** Mapping *tool name ↦ implementation*.
                                                        Must contain a ["fork"] entry pointing at
                                                        {!Fork.execute}. *)

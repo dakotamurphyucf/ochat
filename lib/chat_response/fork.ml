@@ -21,6 +21,7 @@ module Res = Openai.Responses
     function-call output as soon as text becomes available so that user
     interfaces can render fork progress in real time.
 *)
+module Output = Res.Tool_output.Output
 
 (* -------------------------------------------------------------------- *)
 (*  Helper: build a system/input message instructing the forked agent.   *)
@@ -34,7 +35,8 @@ let rec run_stream
           ~(env : Eio_unix.Stdenv.base)
           ~(initial_history : Res.Item.t list)
           ~(tools : Res.Request.Tool.t list)
-          ~(tool_tbl : (string, string -> string) Base.Hashtbl.t)
+          ~(tool_tbl :
+             (string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t)
           ~(on_event : Res.Response_stream.t -> unit)
           ~(on_fn_out : Res.Function_call_output.t -> unit)
           ~(call_id_parent : string)
@@ -56,7 +58,13 @@ let rec run_stream
   (* ------------------------------------------------------------------ *)
   let rec turn (hist : Res.Item.t list) : Res.Item.t list =
     (* Tables for tracking function calls and reasoning items. *)
-    let func_info : (string, string * string) Hashtbl.t =
+    let module Tool_call_kind = struct
+      type t =
+        | Function
+        | Custom
+    end
+    in
+    let tool_info : (string, Tool_call_kind.t * string * string) Hashtbl.t =
       Hashtbl.create (module String)
     in
     let reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
@@ -65,58 +73,79 @@ let rec run_stream
     let run_again = ref false in
     (* Execute a tool once its arguments have been streamed. *)
     let handle_function_done ~item_id ~arguments =
-      match Hashtbl.find func_info item_id with
-      | None ->
+      match Hashtbl.find tool_info item_id with
+      | None | Some (Tool_call_kind.Custom, _, _) ->
         (* Should not happen, return dummy output *)
-        { Res.Function_call_output.output = ""
-        ; call_id = ""
-        ; _type = "function_call_output"
-        ; id = None
-        ; status = None
-        }
-      | Some (name, call_id) ->
-        let fn = Hashtbl.find_exn tool_tbl name in
+        Tool_call.function_call_output ~call_id:"" ~output:(Output.Text "")
+      | Some (Tool_call_kind.Function, name, call_id) ->
         let result =
-          if String.equal name "fork"
-          then
-            (* Recursive fork call – propagate streaming further. *)
-            execute
-              ~env
-              ~history:hist
-              ~call_id
-              ~arguments
-              ~tools
-              ~tool_tbl
-              ~on_event
-              ~on_fn_out
-              ?temperature
-              ?max_output_tokens
-              ?reasoning
-              ()
-          else fn arguments
+          Tool_call.run_tool
+            ~kind:Tool_call.Kind.Function
+            ~name
+            ~payload:arguments
+            ~call_id
+            ~tool_tbl
+            ~on_fork:
+              (Some
+                 (fun ~call_id ~arguments ->
+                   Openai.Responses.Tool_output.Output.Text
+                     (execute
+                        ~env
+                        ~history:hist
+                        ~call_id
+                        ~arguments
+                        ~tools
+                        ~tool_tbl
+                        ~on_event
+                        ~on_fn_out
+                        ?temperature
+                        ?max_output_tokens
+                        ?reasoning
+                        ())))
         in
         let fn_call_item : Res.Item.t =
-          Res.Item.Function_call
-            { name
-            ; arguments
-            ; call_id
-            ; _type = "function_call"
-            ; id = Some item_id
-            ; status = None
-            }
+          Tool_call.call_item
+            ~kind:Tool_call.Kind.Function
+            ~name
+            ~payload:arguments
+            ~call_id
+            ~id:(Some item_id)
         in
         let fn_out : Res.Function_call_output.t =
-          { output = result
-          ; call_id
-          ; _type = "function_call_output"
-          ; id = None
-          ; status = None
-          }
+          Tool_call.function_call_output ~call_id ~output:result
         in
         let fn_out_item = Res.Item.Function_call_output fn_out in
         new_items := fn_out_item :: fn_call_item :: !new_items;
         run_again := true;
         fn_out
+    in
+    let handle_custom_tool_call_done ~item_id ~input =
+      match Hashtbl.find tool_info item_id with
+      | None | Some (Tool_call_kind.Function, _, _) -> ()
+      | Some (Tool_call_kind.Custom, name, call_id) ->
+        let result =
+          Tool_call.run_tool
+            ~kind:Tool_call.Kind.Custom
+            ~name
+            ~payload:input
+            ~call_id
+            ~tool_tbl
+            ~on_fork:None
+        in
+        let tool_call_item : Res.Item.t =
+          Tool_call.call_item
+            ~kind:Tool_call.Kind.Custom
+            ~name
+            ~payload:input
+            ~call_id
+            ~id:(Some item_id)
+        in
+        let tool_out : Res.Custom_tool_call_output.t =
+          Tool_call.custom_tool_call_output ~call_id ~output:result
+        in
+        let tool_out_item = Res.Item.Custom_tool_call_output tool_out in
+        new_items := tool_out_item :: tool_call_item :: !new_items;
+        run_again := true
     in
     (* Streaming callback – forwards to caller while building history. *)
     let stream_cb (ev : Res.Response_stream.t) =
@@ -125,12 +154,9 @@ let rec run_stream
        | Res.Response_stream.Output_text_delta { delta; _ } ->
          Stdlib.Buffer.add_string output_buffer delta;
          let fn_out : Res.Function_call_output.t =
-           { output = Stdlib.Buffer.contents output_buffer
-           ; call_id = call_id_parent
-           ; _type = "function_call_output"
-           ; id = None
-           ; status = None
-           }
+           Tool_call.function_call_output
+             ~call_id:call_id_parent
+             ~output:(Output.Text (Stdlib.Buffer.contents output_buffer))
          in
          on_fn_out fn_out
        (* New item announced – track pending function calls *)
@@ -138,7 +164,16 @@ let rec run_stream
          (match item with
           | Res.Response_stream.Item.Function_call fc ->
             let idx = Option.value fc.id ~default:fc.call_id in
-            Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
+            Hashtbl.set
+              tool_info
+              ~key:idx
+              ~data:(Tool_call_kind.Function, fc.name, fc.call_id)
+          | Res.Response_stream.Item.Custom_function tc ->
+            let idx = Option.value tc.id ~default:tc.call_id in
+            Hashtbl.set
+              tool_info
+              ~key:idx
+              ~data:(Tool_call_kind.Custom, tc.name, tc.call_id)
           | Res.Response_stream.Item.Reasoning r ->
             Hashtbl.set reasoning_state ~key:r.id ~data:0
           | _ -> ())
@@ -154,6 +189,8 @@ let rec run_stream
          let fn_out = handle_function_done ~item_id ~arguments in
          (* also propagate result if this was nested call *)
          on_fn_out fn_out
+       | Res.Response_stream.Custom_tool_call_input_done { item_id; input; _ } ->
+         handle_custom_tool_call_done ~item_id ~input
        | _ -> ());
       (* Forward every raw event upward so the parent UI can, if desired,
          display fork activity.  The TUI will distinguish forked events by
@@ -210,7 +247,8 @@ and execute
       ~(call_id : string)
       ~(arguments : string)
       ~(tools : Res.Request.Tool.t list)
-      ~(tool_tbl : (string, string -> string) Base.Hashtbl.t)
+      ~(tool_tbl :
+         (string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t)
       ~(on_event : Res.Response_stream.t -> unit)
       ~(on_fn_out : Res.Function_call_output.t -> unit)
       ?temperature
@@ -260,7 +298,7 @@ Call-ID: %s
   (* Inject the instruction as a Function_call_output so the clone is aware
      it is a forked agent and what command to run. *)
   let instruction_fn_out : Res.Function_call_output.t =
-    { output = instruction_text
+    { output = Res.Tool_output.Output.Text instruction_text
     ; call_id
     ; _type = "function_call_output"
     ; id = None
@@ -341,7 +379,7 @@ Call-ID: %s
   (* Inject the instruction as a Function_call_output so the clone is aware
      it is a forked agent and what command to run. *)
   let instruction_fn_out : Res.Function_call_output.t =
-    { output = instruction_text
+    { output = Res.Tool_output.Output.Text instruction_text
     ; call_id
     ; _type = "function_call_output"
     ; id = None

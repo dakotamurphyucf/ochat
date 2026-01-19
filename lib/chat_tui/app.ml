@@ -1,31 +1,22 @@
-(** Terminal chat application – event-loop, streaming, persistence.
+(** Terminal chat application – event-loop, streaming, export, and persistence.
 
-    {1 Overview}
+    {!Chat_tui.App} glues together the building blocks of the terminal UI and
+    runs the main event-loop.
 
-    `Chat_tui.App` glues together all building blocks of the TUI and runs the
-    main event-loop.  In concrete terms it
+    Responsibilities:
+    {ul
+    {- run a full-screen {!Notty_eio.Term} and render frames via {!Chat_tui.Renderer}}
+    {- interpret keystrokes via {!Chat_tui.Controller}}
+    {- maintain a mutable {!Chat_tui.Model.t} (editor state, scroll position, caches)}
+    {- stream assistant replies and tool calls via
+       {!Chat_response.Driver.run_completion_stream_in_memory_v1}}
+    {- perform user-triggered history compaction via
+       {!Context_compaction.Compactor.compact_history}}
+    {- export the conversation as ChatMarkdown and optionally persist a session
+       snapshot on exit}}
 
-    • initialises `Notty_eio.Term` and renders frames via
-      {!Chat_tui.Renderer},
-    • interprets keystrokes with {!Chat_tui.Controller},
-    • maintains a mutable {!Chat_tui.Model.t} value that represents the
-      current UI state,
-    • streams assistant replies from the OpenAI API using
-      {!Chat_response.Driver.run_completion_stream_in_memory_v1},
-    • triggers optional context-compaction runs via
-      {!Context_compaction.Compactor.compact_history} when requested by the
-      user, and
-    • persists finished conversations and session snapshots to disk on exit.
-
-    Placing the code in a library module (instead of the old monolithic
-    [`bin/chat_tui.ml`] executable) allows
-
-    - reuse in tests (headless integration, golden image rendering), and
-    - alternative front-ends that still want to piggy-back on the same
-      orchestration logic.
-
-    The lone public entry-point is {!run_chat}; all other helpers are local
-    but kept in the interface so they can be unit-tested.
+    The main entry point is {!run_chat}.  The remaining values are exposed to
+    support white-box tests of the event-loop.
 *)
 
 open Core
@@ -51,35 +42,32 @@ module Tool = Chat_response.Tool
 module Config = Chat_response.Config
 module Req = Res.Request
 
-(** Propagated when the user presses *Esc* to cancel an ongoing streaming
-    request.  The exception is caught locally and never leaves the module. *)
-exception Cancelled
+(** Propagated when the user cancels an ongoing streaming request.
 
-(* Emit a transient “(thinking…)” placeholder so the user sees immediate
-      feedback after hitting submit.  The placeholder is appended via a patch so
-      the mutation goes through the centralised [Model.apply_patch] function. *)
+    The exception is caught locally and does not escape {!Chat_tui.App}. *)
+exception Cancelled
 
 (** [add_placeholder_thinking_message model] appends a transient
     "(thinking…)" assistant message to [model] so the user gets immediate
-    visual feedback after hitting ⏎.  The placeholder is replaced by the
-    first streaming token once {!handle_submit} starts receiving events. *)
+    visual feedback after submitting the draft.
+
+    The placeholder is replaced by the first streaming token once
+    {!handle_submit} starts receiving events. *)
 let add_placeholder_thinking_message (model : Model.t) : unit =
   let patch = Add_placeholder_message { role = "assistant"; text = "(thinking…)" } in
   ignore (Model.apply_patch model patch)
 ;;
 
-(** [add_placeholder_stream_error model msg] inserts a system message with
-    role "error" so that fatal conditions during streaming are surfaced to
-    the user instead of being silently logged. *)
+(** [add_placeholder_stream_error model text] appends a transient error message
+    to [model] so failures during streaming surface in the transcript. *)
 let add_placeholder_stream_error (model : Model.t) text : unit =
   let patch = Add_placeholder_message { role = "error"; text } in
   ignore (Model.apply_patch model patch)
 ;;
 
-(** [add_placeholder_compact_message model] appends a temporary
-    "(compacting…)" assistant message to [model] while background context
-    compaction is running.  The message is replaced once compaction either
-    succeeds or fails and an explicit status message is shown. *)
+(** [add_placeholder_compact_message model] appends a transient "(compacting…)"
+    assistant message to [model] while background context compaction is
+    running. *)
 let add_placeholder_compact_message (model : Model.t) : unit =
   let patch = Add_placeholder_message { role = "assistant"; text = "(compacting…)" } in
   ignore (Model.apply_patch model patch)
@@ -258,9 +246,11 @@ let apply_local_submit_effects ~dir ~env ~cache ~model ~ev_stream ~term =
 type prompt_context =
   { cfg : Config.t (** Behavioural settings such as temperature, model, … *)
   ; tools : Req.Tool.t list (** Tools exposed to the assistant at runtime. *)
-  ; tool_tbl : (string, string -> string) Hashtbl.t
-    (** Mapping *tool-name → implementation*.  The assistant returns a
-            JSON payload that is looked-up here and executed. *)
+  ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Hashtbl.t
+    (** Mapping [tool_name -> implementation].
+
+        The assistant returns a JSON payload that is looked up in this table and
+        then executed. *)
   }
 
 (* ────────────────────────────────────────────────────────────────────────── *)
@@ -298,7 +288,7 @@ let handle_submit
     let on_event_batch evs = Eio.Stream.add ev_stream (`Stream_batch evs) in
     (* let on_event_batch evs = Eio.Stream.add ev_stream (`Stream_batch evs) in
     let on_event = throttle streaming_sw env on_event on_event_batch in *)
-    let on_fn_out ev = Eio.Stream.add ev_stream (`Function_output ev) in
+    let on_tool_out item = Eio.Stream.add ev_stream (`Tool_output item) in
     (* Fork a daemon fiber to batch events using a short time window. *)
     Eio.Fiber.fork_daemon ~sw:streaming_sw (fun () ->
       let clock = Eio.Stdenv.clock env in
@@ -310,37 +300,36 @@ let handle_submit
         | None -> 12.
       in
       let dt = batch_ms /. 1000. in
-      let rec loop acc window_open =
+      let rec loop s_acc t_acc window_open =
         match Eio.Stream.take stream with
         | `Stream ev ->
-          let acc = ev :: acc in
+          let s_acc = ev :: s_acc in
           if not window_open
           then (
             Fiber.fork ~sw:streaming_sw (fun () ->
               Eio.Time.sleep clock dt;
               Eio.Stream.add stream `Flush);
-            loop acc true)
-          else loop acc true
-        | `Function_output ev ->
-          (match acc with
-           | [] -> ()
-           | [ ev1 ] -> on_event ev1
-           | _ -> on_event_batch (List.rev acc));
-          on_fn_out ev;
-          loop [] false
+            loop s_acc t_acc true)
+          else loop s_acc t_acc true
+        | `Tool_output item ->
+          if not window_open
+          then (
+            Fiber.fork ~sw:streaming_sw (fun () ->
+              Eio.Time.sleep clock dt;
+              Eio.Stream.add stream `Flush);
+            loop s_acc (item :: t_acc) true)
+          else loop s_acc (item :: t_acc) true
         | `Flush ->
-          (match acc with
+          (match s_acc with
            | [] -> ()
            | [ ev1 ] -> on_event ev1
-           | _ -> on_event_batch (List.rev acc));
-          loop [] false
+           | _ -> on_event_batch (List.rev s_acc));
+          List.iter (List.rev t_acc) ~f:on_tool_out;
+          loop [] [] false
       in
-      loop [] false);
+      loop [] [] false);
     (* openapi stream events -------->  *)
-    let on_fn_out ev =
-      (* Function call output events are sent to the UI for rendering. *)
-      Eio.Stream.add stream (`Function_output ev)
-    in
+    let on_tool_out item = Eio.Stream.add stream (`Tool_output item) in
     let on_event ev =
       (* OpenAI stream events are sent to the UI for rendering. *)
       Eio.Stream.add stream (`Stream ev)
@@ -364,7 +353,7 @@ let handle_submit
         ~history_compaction
         ?model:(Option.map prompt_ctx.cfg.model ~f:Req.model_of_str_exn)
         ~on_event
-        ~on_fn_out
+        ~on_tool_out
         ~parallel_tool_calls
         ()
     in
@@ -382,36 +371,106 @@ let handle_submit
        Model.set_active_fork model None;
        Model.set_fork_start_index model None
      | None -> ());
-    (* Remove dangling reasoning or incomplete function calls at the tail *)
-    let prune_trailing history =
+    let error_msg = Printf.sprintf "Error during streaming: %s" (Exn.to_string ex) in
+    let prune_trailing ~error history =
       let module Item = Openai.Responses.Item in
-      let rec loop rev_items acc state =
+      let module Fco = Openai.Responses.Function_call_output in
+      let module Cco = Openai.Responses.Custom_tool_call_output in
+      let seen_outputs = Hash_set.create (module String) in
+      let truncate s ~max_len =
+        if String.length s <= max_len then s else String.prefix s max_len ^ "…"
+      in
+      let synthetic_output_for_call (fc : Openai.Responses.Function_call.t) : Item.t =
+        let args_preview =
+          Util.sanitize ~strip:true fc.arguments |> truncate ~max_len:200
+        in
+        let output =
+          Printf.sprintf
+            "Tool call did not complete (call_id=%s, name=%s, arguments=%s).\n\n%s"
+            fc.call_id
+            fc.name
+            args_preview
+            error
+        in
+        Item.Function_call_output
+          { Fco.output = Openai.Responses.Tool_output.Output.Text output
+          ; call_id = fc.call_id
+          ; _type = "function_call_output"
+          ; id = None
+          ; status = None
+          }
+      in
+      let synthetic_output_for_custom_tool_call (ct : Openai.Responses.Custom_tool_call.t)
+        : Item.t
+        =
+        let input_preview = Util.sanitize ~strip:true ct.input |> truncate ~max_len:200 in
+        let output =
+          Printf.sprintf
+            "Tool call did not complete (call_id=%s, name=%s, input=%s).\n\n%s"
+            ct.call_id
+            ct.name
+            input_preview
+            error
+        in
+        Item.Custom_tool_call_output
+          { Cco.output = Openai.Responses.Tool_output.Output.Text output
+          ; call_id = ct.call_id
+          ; _type = "custom_tool_call_output"
+          ; id = None
+          }
+      in
+      let rec loop rev_items acc ~dropping_trailing_reasoning =
         match rev_items with
         | [] -> acc
         | item :: rest ->
-          (match state with
-           | `Keep -> loop rest (item :: acc) `Keep
-           | `Looking ->
-             (match item with
-              | Item.Output_message _ -> loop rest (item :: acc) `Keep
-              | Item.Function_call_output fo ->
-                loop rest (item :: acc) (`Await_call fo.call_id)
-              | Item.Reasoning _ -> loop rest acc `Looking
-              | _ -> loop rest (item :: acc) `Looking)
-           | `Await_call cid ->
-             (match item with
-              | Item.Function_call fc when String.equal fc.call_id cid ->
-                loop rest (item :: acc) `Keep
-              | Item.Reasoning _ -> loop rest acc (`Await_call cid)
-              | _ -> loop rest (item :: acc) (`Await_call cid)))
+          if dropping_trailing_reasoning
+          then (
+            match item with
+            | Item.Reasoning _ -> loop rest acc ~dropping_trailing_reasoning:true
+            | _ -> loop rev_items acc ~dropping_trailing_reasoning:false)
+          else (
+            match item with
+            | Item.Function_call_output fco ->
+              if Hash_set.mem seen_outputs fco.call_id
+              then loop rest acc ~dropping_trailing_reasoning:false
+              else (
+                Hash_set.add seen_outputs fco.call_id;
+                loop rest (item :: acc) ~dropping_trailing_reasoning:false)
+            | Item.Custom_tool_call_output cco ->
+              if Hash_set.mem seen_outputs cco.call_id
+              then loop rest acc ~dropping_trailing_reasoning:false
+              else (
+                Hash_set.add seen_outputs cco.call_id;
+                loop rest (item :: acc) ~dropping_trailing_reasoning:false)
+            | Item.Function_call fc ->
+              if Hash_set.mem seen_outputs fc.call_id
+              then loop rest (item :: acc) ~dropping_trailing_reasoning:false
+              else (
+                Hash_set.add seen_outputs fc.call_id;
+                let out = synthetic_output_for_call fc in
+                loop
+                  rest
+                  (Item.Function_call fc :: out :: acc)
+                  ~dropping_trailing_reasoning:false)
+            | Item.Custom_tool_call ct ->
+              if Hash_set.mem seen_outputs ct.call_id
+              then loop rest (item :: acc) ~dropping_trailing_reasoning:false
+              else (
+                Hash_set.add seen_outputs ct.call_id;
+                let out = synthetic_output_for_custom_tool_call ct in
+                loop
+                  rest
+                  (Item.Custom_tool_call ct :: out :: acc)
+                  ~dropping_trailing_reasoning:false)
+            | _ -> loop rest (item :: acc) ~dropping_trailing_reasoning:false)
       in
-      loop (List.rev history) [] `Looking
+      loop (List.rev history) [] ~dropping_trailing_reasoning:true
     in
-    let pruned = prune_trailing (Model.history_items model) in
+    let pruned = prune_trailing ~error:error_msg (Model.history_items model) in
     Model.set_history_items model pruned;
     Model.set_messages model (Conversation.of_history pruned);
-    let error_msg = Printf.sprintf "Error during streaming: %s" (Exn.to_string ex) in
-    print_endline error_msg;
+    Model.rebuild_tool_output_index model;
+    Model.clear_all_img_caches model;
     (* Add an error message to the model so the UI can display it. *)
     add_placeholder_stream_error model error_msg;
     Eio.Stream.add ev_stream `Redraw
@@ -466,6 +525,7 @@ let run_chat
          (* Update history events are used to update the model's history items. *)
        | (* Function call output events are sent to the UI for rendering. *)
          `Function_output of Res.Function_call_output.t
+       | `Tool_output of Res_item.t
        ]
        as
        'ev)
@@ -611,6 +671,7 @@ let run_chat
            | `Stream_batch of Res.Response_stream.t list
            | `Replace_history of Res_item.t list
            | `Function_output of Res.Function_call_output.t
+           | `Tool_output of Res_item.t
            ]))
   @@ fun term ->
   let redraw () =
@@ -675,6 +736,9 @@ let run_chat
              | Openai.Responses.Response_stream.Item.Function_call fc ->
                ignore
                @@ Model.add_history_item model (Openai.Responses.Item.Function_call fc)
+             | Openai.Responses.Response_stream.Item.Custom_function ct ->
+               ignore
+               @@ Model.add_history_item model (Openai.Responses.Item.Custom_tool_call ct)
              | _ -> ())
           | _ -> ());
          (* Defer redraw to scheduler to avoid per-token redraws. *)
@@ -726,9 +790,23 @@ let run_chat
               | Openai.Responses.Response_stream.Item.Function_call fc ->
                 ignore
                 @@ Model.add_history_item model (Openai.Responses.Item.Function_call fc)
+              | Openai.Responses.Response_stream.Item.Custom_function ct ->
+                ignore
+                @@ Model.add_history_item
+                     model
+                     (Openai.Responses.Item.Custom_tool_call ct)
               | _ -> ())
            | _ -> ());
          (* Defer redraw to scheduler to avoid per-batch burst redraws. *)
+         Redraw_throttle.request_redraw throttler;
+         main_loop ())
+    | `Tool_output item ->
+      (match not (stream_in_flight model) with
+       | true -> main_loop ()
+       | false ->
+         let patches = Stream_handler.handle_tool_out ~model item in
+         ignore (Model.apply_patches model patches);
+         ignore (Model.add_history_item model item);
          Redraw_throttle.request_redraw throttler;
          main_loop ())
     | `Function_output out ->

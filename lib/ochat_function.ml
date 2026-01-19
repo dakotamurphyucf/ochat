@@ -10,6 +10,7 @@ module type Def = sig
   type input
 
   val name : string
+  val type_ : string
   val description : string option
   val parameters : Jsonaf.t
   val input_of_string : string -> input
@@ -18,7 +19,7 @@ end
 (* represents a ochat function implementation *)
 type t =
   { info : Openai.Completions.tool
-  ; run : string -> string
+  ; run : string -> Openai.Responses.Tool_output.Output.t
   }
 
 (* takes a module of type Def and a function Def.input -> string and returns type t. Use to create a ochat function implementation for the given the  ochat function definition and implementation function *)
@@ -26,7 +27,7 @@ let create_function (type a) (module M : Def with type input = a) ?(strict = tru
   let run s = f @@ M.input_of_string s in
   let info =
     Openai.Completions.
-      { type_ = "function"
+      { type_ = M.type_
       ; function_ =
           { name = M.name
           ; description = M.description

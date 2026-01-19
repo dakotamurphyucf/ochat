@@ -20,6 +20,8 @@ type t =
   ; function_name_by_id : (string, string) Base.Hashtbl.t
   ; reasoning_idx_by_id : (string, int ref) Base.Hashtbl.t
   ; tool_output_by_index : (int, Types.tool_output_kind) Base.Hashtbl.t
+  ; call_id_by_item_id : (string, string) Base.Hashtbl.t
+  ; tool_path_by_call_id : (string, string option) Base.Hashtbl.t
   ; mutable tasks : Session.Task.t list
   ; kv_store : (string, string) Base.Hashtbl.t
   ; mutable fetch_sw : Eio.Switch.t option
@@ -118,6 +120,8 @@ let create
   ; function_name_by_id
   ; reasoning_idx_by_id
   ; tool_output_by_index
+  ; call_id_by_item_id = Hashtbl.create (module String)
+  ; tool_path_by_call_id = Hashtbl.create (module String)
   ; tasks
   ; kv_store
   ; fetch_sw
@@ -293,11 +297,14 @@ let apply_patch (model : t) (p : Types.patch) : t =
     let name_opt = Hashtbl.find model.function_name_by_id id in
     let path =
       match Option.map ~f:String.lowercase name_opt with
-      | Some "read_file" | Some "read_directory" -> extract_path_from_call_text call_text
+      | Some "read_file" | Some "read_directory" ->
+        (match Option.join (Hashtbl.find model.tool_path_by_call_id id) with
+         | Some _ as p -> p
+         | None -> extract_path_from_call_text call_text)
       | _ -> None
     in
     let max_len = 10_000 in
-    let txt = Util.sanitize output in
+    let txt = Util.sanitize ~strip:false output in
     let txt =
       if String.length txt > max_len
       then String.sub txt ~pos:0 ~len:max_len ^ "\n…truncated…"
@@ -345,6 +352,14 @@ let rebuild_tool_output_index (model : t) : unit =
         | _ -> None
       in
       Hashtbl.set call_info_by_id ~key:fc.call_id ~data:(name, path)
+    | Res_item.Custom_tool_call tc ->
+      let name = tc.name in
+      let path =
+        match String.lowercase name with
+        | "read_file" | "read_directory" -> read_file_path_of_arguments tc.input
+        | _ -> None
+      in
+      Hashtbl.set call_info_by_id ~key:tc.call_id ~data:(name, path)
     | _ -> ());
   let idx = ref 0 in
   List.iter model.history_items ~f:(fun it ->
@@ -355,6 +370,14 @@ let rebuild_tool_output_index (model : t) : unit =
        | Res_item.Function_call_output fco ->
          let name_opt, path =
            match Hashtbl.find call_info_by_id fco.call_id with
+           | None -> None, None
+           | Some (name, path) -> Some name, path
+         in
+         let kind = classify_tool_output ~name_opt ~path in
+         Hashtbl.set model.tool_output_by_index ~key:!idx ~data:kind
+       | Res_item.Custom_tool_call_output tco ->
+         let name_opt, path =
+           match Hashtbl.find call_info_by_id tco.call_id with
            | None -> None, None
            | Some (name, path) -> Some name, path
          in

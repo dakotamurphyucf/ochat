@@ -43,7 +43,7 @@ let github_dark_rules : rule list =
     ; attr = Styles.(fg_hex "#FFAB70")
     }
   ; { prefix = "markup.quote"; attr = Styles.(fg_hex "#85E89D") }
-  ; { prefix = "punctuation.definition.quote"; attr = Styles.(fg_hex "#6A737D") }
+    (* ; { prefix = "punctuation.definition.quote"; attr = Styles.(fg_hex "#6A737D") } *)
     (* Links & images *)
   ; { prefix = "meta.link"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "markup.underline.link"; attr = Styles.(fg_hex "#79B8FF" ++ underline) }
@@ -62,19 +62,18 @@ let github_dark_rules : rule list =
   ; { prefix = "punctuation.definition.table"; attr = Styles.(fg_hex "#6A737D") }
   ; { prefix = "meta.separator.markdown"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
   ; { prefix = "meta.separator"; attr = Styles.(fg_hex "#79B8FF" ++ bold) }
-  ; { prefix = "markup.inline.code"
-    ; attr = Styles.(fg_hex "#D1D5DA" ++ bg_hex "#2F363D")
-    }
-  ; { prefix = "markup.inline.raw.string.markdown"
-    ; attr = Styles.(fg_hex "#D1D5DA" ++ bg_hex "#2F363D")
-    }
+  ; { prefix = "markup.inline.code"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "markup.inline.raw.string.markdown"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "markup.inline.raw"; attr = Styles.(fg_hex "#79B8FF") }
-  ; { prefix = "markup.raw"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "markup.quote.markdown"; attr = Styles.(fg_hex "#85E89D") }
+  ; { prefix = "punctuation.definition.quote.begin.markdown"
+    ; attr = Styles.(fg_hex "#85E89D")
+    }
   ; { prefix = "markup.raw.block.markdown"
     ; attr = Styles.(fg_hex "#D1D5DA" ++ bg_hex "#2F363D")
     }
   ; { prefix = "punctuation.definition.fenced"; attr = Styles.(fg_hex "#6A737D") }
-  ; { prefix = "punctuation.definition.markdown"; attr = Styles.(fg_hex "#6A737D") }
+    (* ; { prefix = "punctuation.definition.markdown"; attr = Styles.(fg_hex "#6A737D") } *)
   ; { prefix = "punctuation.definition.metadata.markdown"
     ; attr = Styles.(fg_hex "#6A737D")
     }

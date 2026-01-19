@@ -1,7 +1,7 @@
 (** Apply *Ochat diff* patches against any storage backend.
 
     This module is an OCaml rewrite of OpenAI’s reference
-    «apply_patch» helper and understands the *Ochat diff* dialect that
+    apply_patch helper and understands the *Ochat diff* dialect that
     frequently appears in code-generation prompts.  A patch can:
 
     • add new files;

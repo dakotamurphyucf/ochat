@@ -188,8 +188,9 @@ val run_completion_stream_in_memory_v1
   -> history:Openai.Responses.Item.t list
   -> ?on_event:(Openai.Responses.Response_stream.t -> unit)
   -> ?on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
+  -> ?on_tool_out:(Openai.Responses.Item.t -> unit)
   -> tools:Openai.Responses.Request.Tool.t list option
-  -> ?tool_tbl:(string, string -> string) Hashtbl.t
+  -> ?tool_tbl:(string, string -> Openai.Responses.Tool_output.Output.t) Hashtbl.t
   -> ?temperature:float
   -> ?max_output_tokens:int
   -> ?reasoning:Openai.Responses.Request.Reasoning.t

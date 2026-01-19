@@ -1,5 +1,4 @@
 open Core
-
 module H = Chat_tui.Highlight_theme
 module R = Chat_tui.Renderer
 module M = Chat_tui.Model
@@ -47,10 +46,7 @@ let run_microbench () =
     calls_per_iter
     iterations
     total_calls;
-  printf
-    "  trie+cache  : %.6fs total, %.3fus / call\n"
-    trie_time
-    (per_call_trie *. 1e6)
+  printf "  trie+cache  : %.6fs total, %.3fus / call\n" trie_time (per_call_trie *. 1e6)
 ;;
 
 let mk_model ~(messages : Chat_tui.Types.message list) ~selected_idx ~auto_follow : M.t =
@@ -143,4 +139,4 @@ let () =
   run_microbench ();
   let () = Out_channel.newline stdout in
   run_render_bench ()
-
+;;

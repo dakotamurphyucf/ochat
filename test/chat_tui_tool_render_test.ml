@@ -135,3 +135,50 @@ let%expect_test "read_directory output rendering preserves entries" =
       bar/
     |}]
 ;;
+
+let%expect_test "read_file output rendering preserves blank lines" =
+  let open Chat_tui in
+  let body = String.concat ~sep:"\n" [ "let x = 1"; ""; "let y = 2" ] in
+  let messages = [ "tool_output", body ] in
+  let tool_outputs = Hashtbl.create (module Int) in
+  Hashtbl.set tool_outputs ~key:0 ~data:(Types.Read_file { path = Some "foo.ml" });
+  let model = make_base_model ~messages ~tool_outputs in
+  let s = render_to_string ~w:40 ~h:12 model in
+  let lines = String.split_lines s in
+  let find_index substring =
+    List.find_mapi lines ~f:(fun i line ->
+      if String.is_substring line ~substring then Some i else None)
+  in
+  let ix = Option.value_exn (find_index "let x = 1") in
+  let iy = Option.value_exn (find_index "let y = 2") in
+  Printf.printf "gap=%d\n" (iy - ix - 1);
+  [%expect {| gap=1 |}]
+;;
+
+let%expect_test "read_file markdown rendering splits fenced code blocks" =
+  let open Chat_tui in
+  let body =
+    String.concat ~sep:"\n" [ "# Title"; ""; "```ocaml"; "let x = 1"; "```"; ""; "after" ]
+  in
+  let messages = [ "tool_output", body ] in
+  let tool_outputs = Hashtbl.create (module Int) in
+  Hashtbl.set tool_outputs ~key:0 ~data:(Types.Read_file { path = Some "README.md" });
+  let model = make_base_model ~messages ~tool_outputs in
+  let s = render_to_string ~w:60 ~h:20 model in
+  let lines = String.split_lines s in
+  let fences =
+    List.count lines ~f:(fun line -> String.is_substring line ~substring:"```")
+  in
+  Printf.printf "fences=%d\n" fences;
+  List.iter lines ~f:(fun line ->
+    if
+      String.is_substring line ~substring:"# Title"
+      || String.is_substring line ~substring:"let x = 1"
+    then print_endline (String.strip line));
+  [%expect
+    {|
+    fences=0
+    # Title
+    let x = 1
+    |}]
+;;

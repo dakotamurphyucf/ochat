@@ -1,67 +1,80 @@
 (** Full-screen renderer for the terminal chat UI.
 
-    Render the current {!Chat_tui.Model.t} into a composite {!Notty.I.t}
-    image plus cursor position. This module acts as the "view" in a
-    Model–View–Update style architecture; it reads the model and terminal
-    size and leaves input handling and state updates to {!Chat_tui.Controller}
-    and {!Chat_tui.App}.
+     [Chat_tui.Renderer] turns the current {!Chat_tui.Model.t} into a
+     composite {!Notty.I.t} image plus a caret position for the input box.
+     It acts as the "view" in the TUI architecture: it reads the model and
+     terminal size and leaves input handling and state updates to
+     {!Chat_tui.Controller} and {!Chat_tui.App}.
 
-    Layout
-    {ul
-    {- a virtualised, scrollable history viewport at the top backed by a
-       {!Chat_tui.Notty_scroll_box.t}; when there is enough vertical space,
-       a single sticky header row repeats the role label of the first fully
-       visible message so that the speaker stays visible while scrolling;}
-    {- a one-line mode / status bar in the middle;}
-    {- a framed, multi-line input box at the bottom.}}
+     {1 Layout}
 
-    Rendering is pure with respect to the outside world but does mutate a
-    few cache fields inside [model] as part of its contract:
+     The screen is laid out top-to-bottom as:
 
-    {ul
-    {- per-message render cache and height-prefix arrays used to avoid
-       re-highlighting and re-wrapping unchanged messages;}
-    {- the scroll box stored in [model], updated to honour
-       {!Chat_tui.Model.auto_follow} and to clamp the scroll offset to the
-       valid range for the current viewport height.}}
+     {ul
+     {- a virtualised, scrollable history viewport backed by a
+        {!Notty_scroll_box.t};}
+     {- optionally, a one-row sticky header (when there is enough vertical
+        space) that repeats the role header of the first fully visible
+        message;}
+     {- a one-line mode / status bar;}
+     {- a framed, multi-line input box.}}
 
-    Text handling and highlighting
-    {ul
-    {- message bodies are first sanitised with
-       {!Chat_tui.Util.sanitize}[ ~strip:false] so that [Notty.I.string]
-       never sees control characters (Notty rejects them); newlines are
-       preserved;}
-    {- fenced code blocks delimited by three backticks or three tildes are
-       detected via {!Chat_tui.Markdown_fences.split}; non-HTML blocks are
-       highlighted with {!Chat_tui.Highlight_tm_engine} configured with the
-       {!Chat_tui.Highlight_theme.github_dark} palette and the shared
-       registry from {!Chat_tui.Highlight_registry};}
-    {- messages classified as tool output via
-       {!Chat_tui.Model.tool_output_by_index} and
-       {!Chat_tui.Types.tool_output_kind} may be rendered with specialised
-       layouts – for example, [Apply_patch] responses are split into a
-       status preamble and a fenced patch section highlighted using an
-       internal ["ochat-apply-patch"] grammar, [Read_file { path }]
-       responses attempt to infer a syntax-highlighting language via
-       {!lang_of_path} when [path] has a recognised extension, and
-       [Read_directory] responses are tinted to distinguish them from
-       regular prose;}
-    {- non-code paragraphs are highlighted as markdown when a grammar is
-       available, otherwise rendered as plain text with a simple
-       ["**bold**"]/ ["__bold__"] heuristic.}}
+     {1 State and caching}
 
-    Each message is preceded by a header line that shows an icon and the
-    capitalised role label (e.g. ["assistant"], ["user"], ["tool"]) and tints it using a small
-    colour palette; the body lines themselves do not carry an inline
-    ["role:"] prefix so that copying code from the terminal yields clean
-    snippets.
+     Rendering is pure with respect to the outside world (no I/O), but the
+     renderer does mutate a few cache fields inside [model] as part of its
+     contract:
 
-    Cursor position
+     {ul
+     {- per-message render cache and cached height / prefix-sum arrays used
+        for scroll virtualisation;}
+     {- the scroll box stored in [model], updated to honour
+        {!Chat_tui.Model.auto_follow} and to clamp the scroll offset to the
+        valid range for the current viewport height.}}
 
-    The cursor coordinates returned by {!render_full} are absolute screen
-    coordinates suitable for {!Notty_unix.Term.cursor} and
-    {!Notty_eio.Term.cursor}.
-*)
+     {1 Text handling and highlighting}
+
+     {ul
+     {- Message bodies are sanitised with {!Chat_tui.Util.sanitize}
+        [~strip:false] so that [Notty.I.string] never sees control
+        characters; newlines are preserved.}
+     {- Fenced code blocks delimited by three backticks or three tildes are
+        detected via {!Chat_tui.Markdown_fences.split}. Non-HTML blocks are
+        highlighted with {!Chat_tui.Highlight_tm_engine} configured with the
+        shared registry from {!Chat_tui.Highlight_registry}.}
+     {- Messages classified as tool output via
+        {!Chat_tui.Model.tool_output_by_index} and
+        {!Chat_tui.Types.tool_output_kind} may be rendered with specialised
+        layouts. For example:
+        {ul
+        {- [Apply_patch] output splits into a status preamble and a patch
+           section highlighted using the internal ["ochat-apply-patch"]
+           grammar.}
+        {- [Read_file { path }] output may infer a syntax-highlighting
+           language via {!lang_of_path}. Markdown files are rendered using
+           the normal Markdown pipeline (including fence splitting) so that
+           fenced code blocks can be highlighted by their own info strings.}
+        {- [Read_directory] output is tinted to distinguish it from prose.}}}
+     {- Non-code paragraphs are highlighted as markdown when a grammar is
+        available. When markdown highlighting falls back to plain text,
+        a small ["**bold**"] / ["__bold__"] heuristic is used to preserve
+        emphasis in common cases.}}
+
+     Each non-empty message is preceded by a header row that shows an icon
+     and the capitalised role label (for example ["assistant"], ["user"],
+     ["tool"]). The message body does not include an inline ["role:"]
+     prefix so that copying terminal selections yields clean snippets.
+
+     {1 Cursor position}
+
+     The cursor coordinates returned by {!render_full} are absolute screen
+     coordinates suitable for {!Notty_unix.Term.cursor} and
+     {!Notty_eio.Term.cursor}.
+
+     {b Limitation:} the caret position is derived from byte offsets in the
+     input buffer. With multi-byte UTF-8 and East-Asian wide glyphs, the
+     cursor may not line up with the displayed text.
+ *)
 val render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)
 (** [render_full ~size ~model] builds the full screen image and the cursor
     position.
@@ -74,6 +87,10 @@ val render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)
     The result is [(image, (cx, cy))] where [image] is the composite screen
     and [(cx, cy)] is the caret position inside the input box in absolute
     cell coordinates with [(0, 0)] at the top-left corner of the terminal.
+
+    [render_full] updates renderer caches inside [model] (message image
+    cache, cached heights/prefix sums, and the embedded scroll box) to make
+    subsequent renders cheaper.
 
     Behaviour
     {ul

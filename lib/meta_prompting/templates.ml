@@ -97,6 +97,7 @@ Inputs you will receive:
 - ENVIRONMENT_TOOLS: name, purpose, safeActions, unsafeActions, requiredArgs, rateLimits, handbackConditions, reversible, irreversible
 - DATA_SOURCES and KNOWLEDGE_BOUNDARIES
 - OUTPUT_CONTRACT (formatDescription, fields, markdownAllowed)
+- MARKDOWN_ALLOWED (true/false)
 - EAGERNESS_PROFILE (low|medium|high)
 - REASONING_EFFORT (minimal|low|medium|high)
 - VERBOSITY_TARGET (low|medium|high), PER_TOOL_VERBOSITY_OVERRIDES
@@ -112,6 +113,9 @@ Your tasks:
 4) Include a concise tool preamble spec (plan, progress updates, completion summary) and context-gathering rules with early-stop and tool budgets.
 5) Provide Recommended API Parameters for GPT-5.
 6) Provide a Smoke-Test Checklist and Telemetry to validate adherence.
+
+NOTE: markdownAllowed in OUTPUT_CONTRACT determines if you add the policy That markdown formatting is permitted in formatting_and_verbosity. It does
+not imply that you output the entire prompt pack in markdown. Your output should should follow your standard output format.
 
 Required output sections (use exactly these tags):
 - Assumptions

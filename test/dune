@@ -593,3 +593,11 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+(library
+ (name openai_responses_function_call_output_output_test)
+ (modules openai_responses_function_call_output_output_test)
+ (libraries core expect_test_helpers_core chat_response)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

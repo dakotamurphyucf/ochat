@@ -138,6 +138,7 @@ and convert ~dir ~net ~cache msg =
       ; tool_call_id
       ; id = _
       ; status = _
+      ; type_ = _
       }
     =
     msg
@@ -297,7 +298,11 @@ and run_agent prompt items ~dir ~net ~cache =
     let func = Option.value_exn call.function_ in
     let name = func.name in
     let f = Hashtbl.find_exn tbl name in
-    let res = f func.arguments in
+    let res =
+      match f func.arguments with
+      | Openai.Responses.Tool_output.Output.Text t -> t
+      | _ -> "Unsupported output type"
+    in
     let call =
       sprintf
         "\n\
@@ -397,7 +402,11 @@ let run_completion ~env ~output_file ~prompt_file =
                  (* call function and add results to doc in funtion role type with name*)
                  let name = Hashtbl.find_exn func_name key in
                  let f = Hashtbl.find_exn tbl name in
-                 let res = f data in
+                 let res =
+                   match f data with
+                   | Openai.Responses.Tool_output.Output.Text t -> t
+                   | _ -> "Unsupported output type"
+                 in
                  append_doc
                    (sprintf
                       "\n\

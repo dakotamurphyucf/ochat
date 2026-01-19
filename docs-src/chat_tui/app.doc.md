@@ -1,6 +1,6 @@
 # Chat_tui.App
 
-Event loop, streaming, and persistence for the terminal chat UI.
+Event loop, streaming, export, and persistence for the terminal chat UI.
 
 `Chat_tui.App` is the orchestration layer that wires together:
 
@@ -27,7 +27,7 @@ At a high level `Chat_tui.App`:
    persisted `Session.t`.
 3. Runs a **single-threaded event loop** that reads from an
    `Eio.Stream.t` of UI events:
-   - key and mouse events decoded by Notty,
+   - key / paste events decoded by Notty,
    - `Redraw` requests,
    - streaming events from the OpenAI API,
    - function-call output notifications, and
@@ -53,7 +53,7 @@ the Notty callback and the pure event loop:
 
 - `Notty_eio.Term.run` installs an `on_event` callback that pushes
   `Notty.Unescape.event` values and `\`Resize` notifications into
-  `ev_stream`.
+  `ev_stream`. The TUI uses `~mouse:false`, so mouse events are not produced.
 - The main loop repeatedly `Eio.Stream.take`'s from `ev_stream` and
   dispatches on a closed event type:
 
@@ -96,8 +96,9 @@ Key paths:
 - **Redraw throttling** – frequent updates (especially streaming) request a
   redraw via `Redraw_throttle.request_redraw`. A separate scheduler fiber
   calls `Redraw_throttle.tick` at the configured FPS and enqueues a single
-  `\`Redraw` event when the UI is dirty. `\`Redraw` events then re-render
-  the model using `Chat_tui.Renderer.render_full`.
+  `\`Redraw` event when the UI is dirty. The FPS defaults to 30 and can be
+  overridden via `OCHAT_TUI_FPS`. `\`Redraw` events then re-render the model
+  using `Chat_tui.Renderer.render_full`.
 
 Context compaction is handled separately: when the user triggers the
 `Compact_context` reaction (via `:` commands such as `:c` or `:compact`),
@@ -131,7 +132,7 @@ Runtime artefacts derived from the static ChatMarkdown prompt:
   `Chat_response.Driver.run_completion_stream_in_memory_v1`.
 - `tool_tbl` – mapping from tool name to an OCaml implementation
   (`string -> string`) produced by `Ochat_function.functions`. When the
-  model issues a tool call, its JSON payload is dispatches through this
+  model issues a tool call, its JSON payload is dispatched through this
   table.
 
 `prompt_context` is computed once in `run_chat` and threaded into
@@ -297,8 +298,9 @@ Error handling:
 
 - On exception from the OpenAI client or tool functions, the helper:
   - clears `Model.fetch_sw`,
-  - prunes trailing reasoning and partial function calls from
-    `Model.history_items`,
+  - removes trailing reasoning fragments and repairs any dangling tool calls by
+    inserting a synthetic `Function_call_output` item into `Model.history_items`
+    (to preserve the function-call/output pairing contract),
   - rebuilds `Model.messages` from the pruned history,
   - logs a message to `stdout`, and
   - appends an error placeholder via `add_placeholder_stream_error` before
@@ -422,6 +424,11 @@ restricted environment.
 - **Streaming batch size tuning** – the `OCHAT_STREAM_BATCH_MS` knob is
   meant for experimentation and benchmarking. Extremely small values can
   increase CPU usage; very large values may make the UI feel sluggish.
+
+- **Cancellation is treated like an error** – pressing `Esc` during a stream
+  cancels the `Eio.Switch.t`, which currently goes through the same exception
+  path as genuine failures and therefore appends an error placeholder to the
+  transcript.
 
 ---
 

@@ -69,6 +69,17 @@ module Res_stream = Openai.Responses.Response_stream
                  finishes. *)
 val handle_fn_out : model:Model.t -> Res.Function_call_output.t -> Types.patch list
 
+(** [handle_tool_out ~model item] is like {!handle_fn_out} but accepts the
+    full history item.
+
+    The function currently handles:
+
+    - {!Openai.Responses.Item.Function_call_output}
+    - {!Openai.Responses.Item.Custom_tool_call_output}
+
+    All other items yield [\[\]]. *)
+val handle_tool_out : model:Model.t -> Res.Item.t -> Types.patch list
+
 (** [handle_event ~model ev] converts a single incremental streaming event
     into a list of patches.
 
@@ -83,6 +94,14 @@ val handle_fn_out : model:Model.t -> Res.Function_call_output.t -> Types.patch l
     • [Reasoning_summary_text_delta] – update tool reasoning sections
     • [Function_call_arguments_delta] / [Function_call_arguments_done] –
       stream the argument list of a tool invocation
+
+    For [read_file] and [read_directory] calls, the implementation extracts
+    the requested path from the final argument JSON. When tool calls run in
+    parallel, the OpenAI stream may deliver [Function_call_output] before
+    [Function_call_arguments_done]; in that case, the stream handler updates
+    the already-rendered tool output metadata and invalidates the per-message
+    render cache so syntax-highlighting can be applied immediately (without
+    waiting for a full history rebuild at turn end).
 
     All other variants are ignored for now and yield [\[\]].
 

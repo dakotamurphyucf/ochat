@@ -85,7 +85,7 @@ val execute
   -> call_id:string
   -> arguments:string
   -> tools:Openai.Responses.Request.Tool.t list
-  -> tool_tbl:(string, string -> string) Base.Hashtbl.t
+  -> tool_tbl:(string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t
   -> on_event:(Openai.Responses.Response_stream.t -> unit)
   -> on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
   -> ?temperature:float

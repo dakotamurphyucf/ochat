@@ -20,7 +20,7 @@ let%expect_test "compactor – identity on empty" =
   let result = Context_compaction.Compactor.compact_history ~env:(Some env) ~history:[] in
   (* Expect two system messages: initial + stub summary *)
   printf "items: %d\n" (List.length result);
-  [%expect {|items: 2|}]
+  [%expect {|items: 1|}]
 ;;
 
 let%expect_test "compactor – long transcript reduces to summary" =
@@ -32,7 +32,7 @@ let%expect_test "compactor – long transcript reduces to summary" =
   let result = Context_compaction.Compactor.compact_history ~env:(Some env) ~history in
   printf "original: %d  compacted: %d\n" (List.length history) (List.length result);
   (match result with
-   | _ :: summary_msg :: _ ->
+   | [ summary_msg ] ->
      (match summary_msg with
       | Openai.Responses.Item.Input_message m ->
         (match m.Openai.Responses.Input_message.content with
@@ -44,6 +44,6 @@ let%expect_test "compactor – long transcript reduces to summary" =
       | _ -> printf "unexpected second item kind\n")
    | _ -> printf "unexpected result length\n");
   [%expect
-    {|original: 60  compacted: 2
+    {|original: 60  compacted: 1
 has system-reminder: true|}]
 ;;

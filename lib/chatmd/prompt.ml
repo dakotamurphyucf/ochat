@@ -107,6 +107,7 @@ module Chat_content = struct
 
   type msg =
     { role : string
+    ; type_ : string option [@key "type"] [@jsonaf.option]
     ; content : chat_message_content option
           [@jsonaf.option]
           [@jsonaf.of chat_message_content_of_jsonaf]
@@ -337,6 +338,7 @@ module Chat_markdown = struct
         else None, content_opt
     in
     { role = Hashtbl.find_exn hash_tbl "role"
+    ; type_ = Hashtbl.find hash_tbl "type"
     ; name = Hashtbl.find hash_tbl "name"
     ; id = Hashtbl.find hash_tbl "id" (* NEW *)
     ; status = Hashtbl.find hash_tbl "status" (* NEW *)

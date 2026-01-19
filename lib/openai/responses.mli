@@ -1,47 +1,54 @@
 (** OpenAI [/v1/responses] client.
 
-    This interface provides a faithful OCaml representation of the
-    request and response payloads used by OpenAI’s experimental
-    “responses” endpoint (a superset of the Chat Completions API that
-    adds sophisticated tool-calling and streaming semantics).
+    Provide a low-level, mostly schema-faithful OCaml view of the JSON
+    payloads used by OpenAI’s {e responses} endpoint.
 
-    Only one high-level helper is exposed – {!post_response}.  All other
-    sub-modules are thin, auto-generated mirrors of the JSON schema and
-    are useful when you need to construct a request by hand or inspect a
-    streaming reply in a type-safe manner.
+    The module has two roles:
+
+    {ul
+    {- Provide strongly typed records/variants that mirror the API (inputs,
+       tool calls, streamed events, ...), derived with [ppx_jsonaf_conv].}
+    {- Provide one high-level entry point, {!post_response}, which performs
+       the HTTPS call and (optionally) decodes the Server-Sent Events stream.}}
 
     {1 Environment}
 
-    The function {!post_response} expects the environment variable
-    [OPENAI_API_KEY] to hold a valid secret key.  A missing or empty key
-    will lead to HTTP 401 responses from the server.
+    Authentication uses the environment variable [OPENAI_API_KEY]. The
+    variable is read when the module is initialised; a missing or empty key
+    will typically result in HTTP 401 responses.
 
     {1 Quick-start}
+
+    Send a single user message and print the assistant’s first output text:
 
     {[
       Eio_main.run @@ fun env ->
         let net = Eio.Stdenv.net env in
         let dir = Eio.Stdenv.cwd env in
-
-        (* Build a minimal user message *)
-        let open Responses in
-        let open Responses.Input_message in
-        let user : Input_message.t =
-          { role = User
-          ; content = [ Text { text = "Hello"; _type = "input_text" } ]
-          ; _type = "message"
-          }
+        let user : Openai.Responses.Item.t =
+          Openai.Responses.Item.Input_message
+            { role = Openai.Responses.Input_message.User
+            ; content =
+                [ Openai.Responses.Input_message.Text
+                    { text = "Hello"; _type = "input_text" }
+                ]
+            ; _type = "message"
+            }
         in
-
-        (* Blocking, non-streaming call *)
-        let ({ Response.output; _ } : Response.t) =
-          post_response Default ~dir net ~inputs:[ Item.Input_message user ]
+        let ({ output; _ } : Openai.Responses.Response.t) =
+          Openai.Responses.post_response Openai.Responses.Default ~dir net ~inputs:[ user ]
         in
         match output with
-        | [ Output_message { content = [ { text; _ } ]; _ } ] ->
-          Format.printf "Assistant said: %s@." text
+        | [ Openai.Responses.Item.Output_message { content = [ { text; _ } ]; _ } ] ->
+          Format.printf "%s@." text
         | _ -> Format.printf "Unexpected reply@."
     ]}
+
+    {1 Streaming}
+
+    Pass {!Stream} to stream incremental events of type
+    {!Openai.Responses.Response_stream.t}. A common pattern is to append
+    {!Openai.Responses.Response_stream.Output_text_delta} values to a buffer.
 *)
 
 module Input_message : sig
@@ -52,7 +59,14 @@ module Input_message : sig
     | Developer
   [@@deriving jsonaf, sexp, bin_io]
 
+  (** [role_to_string r] returns OpenAI’s wire-level role name for [r]
+      (e.g. ["user"], ["assistant"], ["system"], ["developer"]). *)
   val role_to_string : role -> string
+
+  (** [role_of_string s] parses [s] as a {!type:role}.
+
+      @raise Failure if [s] is not one of ["user"], ["assistant"], ["system"],
+      or ["developer"]. *)
   val role_of_string : string -> role
 
   type text_input =
@@ -160,13 +174,64 @@ module Function_call : sig
   [@@deriving jsonaf, sexp, bin_io]
 end
 
+module Custom_tool_call : sig
+  type t =
+    { name : string
+    ; input : string
+    ; call_id : string
+    ; _type : string
+    ; id : string option
+    }
+  [@@deriving jsonaf, sexp, bin_io]
+end
+
+module Tool_output : sig
+  module Output_part : sig
+    type input_text = { text : string } [@@deriving sexp, bin_io]
+
+    type input_image =
+      { image_url : string
+      ; detail : Input_message.image_detail option
+      }
+    [@@deriving sexp, bin_io]
+
+    type t =
+      | Input_text of input_text
+      | Input_image of input_image
+    [@@deriving sexp, bin_io]
+
+    val t_of_jsonaf : Jsonaf.t -> t
+    val jsonaf_of_t : t -> Jsonaf.t
+  end
+
+  module Output : sig
+    type t =
+      | Text of string
+      | Content of Output_part.t list
+    [@@deriving sexp, bin_io]
+
+    val t_of_jsonaf : Jsonaf.t -> t
+    val jsonaf_of_t : t -> Jsonaf.t
+  end
+end
+
 module Function_call_output : sig
   type t =
-    { output : string
+    { output : Tool_output.Output.t
     ; call_id : string
     ; _type : string
     ; id : string option
     ; status : string option
+    }
+  [@@deriving jsonaf, sexp, bin_io]
+end
+
+module Custom_tool_call_output : sig
+  type t =
+    { output : Tool_output.Output.t
+    ; call_id : string
+    ; _type : string
+    ; id : string option
     }
   [@@deriving jsonaf, sexp, bin_io]
 end
@@ -227,7 +292,9 @@ module Item : sig
     | Input_message of Input_message.t
     | Output_message of Output_message.t
     | Function_call of Function_call.t
+    | Custom_tool_call of Custom_tool_call.t
     | Function_call_output of Function_call_output.t
+    | Custom_tool_call_output of Custom_tool_call_output.t
     | Web_search_call of Web_search_call.t
     | File_search_call of File_search_call.t
     | Reasoning of Reasoning.t
@@ -246,9 +313,17 @@ module Request : sig
     | Gpt4_1
     | Gpt3
     | Gpt3_16k
+    | Unknown of string
   [@@deriving jsonaf, sexp, bin_io]
 
+  (** [model_to_str m] returns the OpenAI model identifier used on the wire.
+
+      For {!Unknown s}, returns [s] unchanged. *)
   val model_to_str : model -> string
+
+  (** [model_of_str_exn s] parses [s] into a {!type:model}.
+
+      Unrecognised values are preserved as {!Unknown}. *)
   val model_of_str_exn : string -> model
 
   module Reasoning : sig
@@ -387,10 +462,21 @@ module Request : sig
       [@@deriving jsonaf, bin_io, sexp]
     end
 
+    module Custom_function : sig
+      type t =
+        { name : string
+        ; description : string option
+        ; format : Jsonaf.t
+        ; type_ : string
+        }
+      [@@deriving jsonaf, bin_io, sexp]
+    end
+
     type t =
       | File_search of File_search.t
       | Web_search of Web_search.t
       | Function of Function.t
+      | Custom_function of Custom_function.t
     [@@deriving jsonaf, bin_io, sexp]
   end
 
@@ -555,6 +641,7 @@ module Response_stream : sig
       | Input_message of Input_message.t
       | Output_message of Output_message.t
       | Function_call of Function_call.t
+      | Custom_function of Custom_tool_call.t
       | Reasoning of Reasoning.t
     [@@deriving jsonaf, sexp, bin_io]
   end
@@ -620,9 +707,29 @@ module Response_stream : sig
     [@@deriving jsonaf, sexp, bin_io]
   end
 
+  module Custom_tool_call_input_delta : sig
+    type t =
+      { delta : string
+      ; item_id : string
+      ; output_index : int
+      ; type_ : string
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
   module Function_call_arguments_done : sig
     type t =
       { arguments : string
+      ; item_id : string
+      ; output_index : int
+      ; type_ : string
+      }
+    [@@deriving jsonaf, sexp, bin_io]
+  end
+
+  module Custom_tool_call_input_done : sig
+    type t =
+      { input : string
       ; item_id : string
       ; output_index : int
       ; type_ : string
@@ -803,6 +910,8 @@ module Response_stream : sig
     | Output_text_done of Output_text_done.t
     | Function_call_arguments_delta of Function_call_arguments_delta.t
     | Function_call_arguments_done of Function_call_arguments_done.t
+    | Custom_tool_call_input_delta of Custom_tool_call_input_delta.t
+    | Custom_tool_call_input_done of Custom_tool_call_input_done.t
     | Response_created of Response_created.t
     | Response_in_progress of Response_in_progress.t
     | Reasoning_summary_text_delta of Reasoning_summary_text_delta.t
@@ -829,11 +938,18 @@ type _ response_type =
   | Stream : (Response_stream.t -> unit) -> unit response_type
   | Default : Response.t response_type
 
+(** Raised when a streaming event cannot be decoded.
+
+    Carries the offending JSON payload and the exception raised by the decoder. *)
 exception Response_stream_parsing_error of Jsonaf.t * exn
+
+(** Raised when the non-streaming response cannot be decoded.
+
+    Carries the offending JSON payload and the exception raised by the decoder. *)
 exception Response_parsing_error of Jsonaf.t * exn
 
 (** [post_response response_type ?max_output_tokens ?temperature ?tools ?model
-    ?reasoning ~dir net ~inputs] sends [inputs] to the
+    ?parallel_tool_calls ?reasoning ~dir net ~inputs] sends [inputs] to the
     [/v1/responses] endpoint using the capability-safe network handle
     [net].
 
@@ -868,7 +984,7 @@ exception Response_parsing_error of Jsonaf.t * exn
     [reasoning] – hints influencing how detailed the model’s chain-of-thought will be.
 
     [dir] – directory capability used to write diagnostic logs (the
-    file [raw-openai-streaming-response.txt]).
+    files [raw-openai-response.txt] and [raw-openai-streaming-response.txt]).
 
     [net] – capability granting outbound HTTPS access.
 
@@ -880,20 +996,22 @@ exception Response_parsing_error of Jsonaf.t * exn
     • {!Response_stream_parsing_error} when the incremental JSON event
       cannot be decoded; the constructor carries the offending JSON
       value and the underlying error.
+    • {!Response_parsing_error} when the final JSON payload cannot be decoded
+      as {!Response.t}.
     • Any network or TLS exception thrown by [cohttp-eio].
 
     {2 Example}
 
     {[
-      (* Stream the assistant’s answer token-by-token *)
+      (* Stream the assistant’s answer token-by-token. *)
       let print_stream = function
-        | Responses.Response_stream.Output_text_delta { delta; _ } ->
+        | Openai.Responses.Response_stream.Output_text_delta { delta; _ } ->
           Format.printf "%s%!" delta
         | _ -> ()
       in
 
-      Responses.post_response
-        (Responses.Stream print_stream)
+      Openai.Responses.post_response
+        (Openai.Responses.Stream print_stream)
         ~temperature:0.7
         ~dir:(Eio.Stdenv.cwd env)
         net

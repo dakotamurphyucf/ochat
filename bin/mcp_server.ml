@@ -169,7 +169,12 @@ let register_builtin_apply_patch (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t
       (match List.Assoc.find kvs ~equal:String.equal "input" with
        | Some (`String patch_text) ->
          let input_json = `Object [ "input", `String patch_text ] in
-         Ok (`String (ochat_fn.run (Jsonaf.to_string input_json)))
+         let res =
+           match ochat_fn.run (Jsonaf.to_string input_json) with
+           | Openai.Responses.Tool_output.Output.Text t -> t
+           | _ -> "Unsupported output type"
+         in
+         Ok (`String res)
        | _ -> Error "apply_patch expects field 'input' (string)")
     | _ -> Error "apply_patch arguments must be object"
   in
@@ -211,7 +216,12 @@ let register_builtin_read_dir (core : Mcp_server_core.t) ~(dir : _ Eio.Path.t) :
       (match List.Assoc.find kvs ~equal:String.equal "path" with
        | Some (`String path) ->
          let input_json = `Object [ "path", `String path ] in
-         Ok (`String (ochat_fn.run (Jsonaf.to_string input_json)))
+         let res =
+           match ochat_fn.run (Jsonaf.to_string input_json) with
+           | Openai.Responses.Tool_output.Output.Text t -> t
+           | _ -> "Unsupported output type"
+         in
+         Ok (`String res)
        | _ -> Error "read_dir expects field 'path' (string)")
     | _ -> Error "read_dir arguments must be object"
   in
@@ -251,7 +261,12 @@ let register_builtin_get_contents (core : Mcp_server_core.t) ~(dir : _ Eio.Path.
       (match List.Assoc.find kvs ~equal:String.equal "file" with
        | Some (`String file_path) ->
          let input_json = `Object [ "file", `String file_path ] in
-         Ok (`String (ochat_fn.run (Jsonaf.to_string input_json)))
+         let res =
+           match ochat_fn.run (Jsonaf.to_string input_json) with
+           | Openai.Responses.Tool_output.Output.Text t -> t
+           | _ -> "Unsupported output type"
+         in
+         Ok (`String res)
        | _ -> Error "get_contents expects field 'file' (string)")
     | _ -> Error "get_contents arguments must be object"
   in
@@ -319,7 +334,12 @@ let () =
           (match List.Assoc.find kvs ~equal:String.equal "prompt" with
            | Some (`String prompt) ->
              let input_json = `Object [ "prompt", `String prompt; "task", `String "" ] in
-             Ok (`String (ochat_fn.run (Jsonaf.to_string input_json)))
+             let res =
+               match ochat_fn.run (Jsonaf.to_string input_json) with
+               | Openai.Responses.Tool_output.Output.Text t -> t
+               | _ -> "Unsupported output type"
+             in
+             Ok (`String res)
            | _ -> Error "meta_refine expects field 'prompt' (string)")
         | _ -> Error "meta_refine arguments must be object"
       in
@@ -338,7 +358,12 @@ let () =
         (match List.Assoc.find kvs ~equal:String.equal "url" with
          | Some (`String url) ->
            let input_json = `Object [ "url", `String url ] in
-           Ok (`String ((ochat_fn ~env).run (Jsonaf.to_string input_json)))
+           let res =
+             match (ochat_fn ~env).run (Jsonaf.to_string input_json) with
+             | Openai.Responses.Tool_output.Output.Text t -> t
+             | _ -> "Unsupported output type"
+           in
+           Ok (`String res)
          | _ -> Error "webpage_to_markdown expects field 'url' (string)")
       | _ -> Error "arguments must be object"
     in

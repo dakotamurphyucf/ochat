@@ -19,14 +19,19 @@ from **stdin** and writes the responses line-delimited to **stdout**.  With
 `--http PORT` it instead binds a small HTTP server on `127.0.0.1:PORT` that
 implements the transport described in [`Mcp_server_http`](../lib/mcp/mcp_server_http.doc.md).
 
+The additional flags `--require-auth`, `--client-id` and `--client-secret`
+are accepted for forward compatibility but are currently no-ops in the CLI
+wrapper; authentication behaviour is described in the HTTP transport section
+below.
+
 ## 2 Command-line flags
 
 | Flag | Default | Description |
 |------|---------|-------------|
-| `--http PORT` | *(absent)* | Start a streamable HTTP endpoint on `PORT`. |
-| `--require-auth` | `false` | Enable OAuth 2.1 bearer-token validation. |
-| `--client-id ID` | *(absent)* | Static client ID accepted by the token endpoint. |
-| `--client-secret SECRET` | *(absent)* | Static client secret accepted by the token endpoint. |
+| `--http PORT` | *(absent)* | Start the HTTP/SSE transport on `PORT`. |
+| `--require-auth` | `false` | Reserved for future use; currently ignored. The `mcp_server` binary always enforces OAuth 2.1 bearer tokens in HTTP mode. |
+| `--client-id ID` | *(absent)* | Reserved for future use; currently ignored. Dev OAuth client credentials come from `MCP_DEV_CLIENT_ID`. |
+| `--client-secret SECRET` | *(absent)* | Reserved for future use; currently ignored. Dev OAuth client credentials come from `MCP_DEV_CLIENT_SECRET`. |
 
 ## 3 Built-in tools
 
@@ -45,6 +50,20 @@ registered as **two** additional resources:
 
 1. a *prompt* that users can select via `prompts/*` JSON-RPC calls;
 2. a *tool* exposing the prompt via `tools/call`.
+
+## Environment variables
+
+The `mcp_server` binary honours a small set of environment variables:
+
+- `MCP_PROMPTS_DIR` – Directory scanned for `*.chatmd` prompt files.  If
+  unset it defaults to `./prompts` relative to the server's current working
+  directory.
+- `MCP_ADDITIONAL_ROOTS` – Optional colon-separated list of additional roots
+  that the server advertises from `roots/list`.  Each entry is turned into a
+  root whose `uri` is a `file://...` URI and whose `name` is the basename.
+- `MCP_DEV_CLIENT_ID`, `MCP_DEV_CLIENT_SECRET` – Credentials for the
+  pre-registered development OAuth client accepted by the `/token` endpoint
+  in HTTP mode.  When unset they default to `dev-client` / `dev-secret`.
 
 ## 4 Stdio transport
 
@@ -139,12 +158,80 @@ When the `--http` flag is supplied the stdio loop is replaced by a call to
 [`Mcp_server_http.run`](../lib/mcp/mcp_server_http.doc.md).  The function
 binds a lightweight Piaf server that supports:
 
-* **JSON-RPC 2.0** over `POST /mcp`;
-* **Server-Sent Events** for push notifications via `GET /mcp`.
+* **JSON-RPC 2.0** over `POST /mcp` for requests and batches;
+* **Server-Sent Events** for push notifications via `GET /mcp` (tools,
+  prompts and resources list-changed events, progress updates and structured
+  logs);
+* OAuth2 helper endpoints under `/.well-known/oauth-authorization-server`,
+  `/token`, `/authorize` and `/register`.
 
 Internally the same registry instance is shared between all transports,
 therefore a tool call performed over HTTP is immediately visible to stdio
 clients and vice-versa.
+
+### Authentication and tokens
+
+The standalone `mcp_server` binary always calls
+`Mcp_server_http.run ~require_auth:true`, so the HTTP transport currently
+**always** enforces OAuth 2.1 bearer tokens.  There is no CLI flag to run the
+HTTP endpoint without authentication.
+
+By default the server exposes a single development client whose
+credentials come from `MCP_DEV_CLIENT_ID` and `MCP_DEV_CLIENT_SECRET`,
+falling back to `dev-client` / `dev-secret` when the variables are unset.
+
+A minimal local flow looks like this:
+
+1. Obtain a token:
+
+   ```console
+   $ curl -X POST http://127.0.0.1:8080/token \
+       -d 'grant_type=client_credentials' \
+       -d "client_id=${MCP_DEV_CLIENT_ID:-dev-client}" \
+       -d "client_secret=${MCP_DEV_CLIENT_SECRET:-dev-secret}"
+   ```
+
+   The response body contains an `access_token` that you can use in
+   subsequent requests.
+
+2. Call the MCP endpoint using that token and a session id:
+
+   ```console
+   $ curl -X POST http://127.0.0.1:8080/mcp \
+       -H "Authorization: Bearer $ACCESS_TOKEN" \
+       -H "Content-Type: application/json" \
+       -d '{"jsonrpc":"2.0","id":1,"method":"initialize","params":{}}'
+   ```
+
+   The first successful `initialize` call creates a new session identifier
+   that is returned in the `Mcp-Session-Id` response header.  Subsequent
+   requests must repeat the same header; see the
+   [`Mcp_server_http`](../lib/mcp/mcp_server_http.doc.md) documentation for
+   full details.
+
+### Additional MCP methods and notifications
+
+Beyond tools and prompts, `mcp_server` also exposes several other MCP
+operations:
+
+- `roots/list` – reports the current working directory as a root and adds
+  any extra roots from `MCP_ADDITIONAL_ROOTS`.
+- `resources/list` – enumerates regular files in the server's current
+  working directory.
+- `resources/read` – reads file-based resources addressed by `file://` URIs
+  and refuses files larger than 1 MiB.
+
+When using the HTTP transport the server emits Server-Sent Events on the
+`GET /mcp` channel for:
+
+- `notifications/tools/list_changed`
+- `notifications/prompts/list_changed`
+- `notifications/resources/list_changed`
+- `notifications/progress`
+- `notifications/message` (structured logging)
+
+Stdio clients can invoke the same JSON-RPC methods but do not see these
+streaming notifications.
 
 ## 6 Hot-reloading of prompts and resources
 
@@ -174,6 +261,19 @@ they terminate automatically when the main service shuts down.
   if external access is required.
 * File-watching relies on cheap polling; a future iteration will switch to
   platform-specific watchers when exposed by Eio.
+* In the CLI wrapper the HTTP transport always requires a valid bearer
+  token; an unauthenticated mode is not currently exposed.
+* Stdio clients do not receive streaming notifications
+  (`notifications/*/list_changed`, `notifications/progress`,
+  `notifications/message`); those are HTTP-only.
+* In stdio mode a single malformed JSON line on stdin will currently
+  terminate the process rather than returning a structured JSON-RPC error.
+* The `resources` API is intentionally minimal: `resources/list` only covers
+  regular files in the server's current working directory, `resources/read`
+  refuses files larger than 1 MiB and URIs are simple `file://<filename>`
+  values.
+* `tools/list` and `resources/list` always return the full set; server-side
+  filtering and pagination are not implemented.
 
 ---
 

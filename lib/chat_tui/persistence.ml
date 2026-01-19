@@ -21,6 +21,16 @@ let write_user_message ~dir ~file message =
   Io.save_doc ~dir file updated_xml
 ;;
 
+let to_persisted_string = function
+  | Openai.Responses.Tool_output.Output.Text text -> text
+  | Content cont ->
+    List.map cont ~f:(fun part ->
+      match part with
+      | Input_text { text } -> text
+      | Input_image { image_url; _ } -> Printf.sprintf "<img src=\"%s\" />" image_url)
+    |> String.concat ~sep:"\n"
+;;
+
 let persist_session
       ~(dir : _ Eio.Path.t)
       ~(prompt_file : string)
@@ -93,6 +103,43 @@ let persist_session
              fc.call_id
              (Option.value fc.id ~default:fc.call_id)
              filename))
+    | Res_item.Custom_tool_call tc ->
+      let idx =
+        match Hashtbl.find tool_call_index_by_id tc.call_id with
+        | Some i -> i
+        | None ->
+          let i = !fn_id in
+          Hashtbl.set tool_call_index_by_id ~key:tc.call_id ~data:i;
+          Int.incr fn_id;
+          i
+      in
+      if cfg.show_tool_call
+      then
+        append
+          (Printf.sprintf
+             "\n\
+              <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
+              %s|\n\
+              %s\n\
+              |%s\n\
+              </tool_call>\n"
+             tc.call_id
+             tc.name
+             (Option.value tc.id ~default:tc.call_id)
+             "RAW"
+             tc.input
+             "RAW")
+      else (
+        let filename = Printf.sprintf "%i.tool-call.%s.json" idx tc.call_id in
+        Io.save_doc ~dir:datadir filename tc.input;
+        append
+          (Printf.sprintf
+             "<tool_call type=\"custom_tool_call\" function_name=\"%s\" tool_call_id=\"%s\" id=\"%s\"><doc \
+              src=\"./.chatmd/%s\" local/></tool_call>\n"
+             tc.name
+             tc.call_id
+             (Option.value tc.id ~default:tc.call_id)
+             filename))
     | Res_item.Function_call_output fco ->
       (match Hashtbl.find tool_call_index_by_id fco.call_id with
        | None -> ()
@@ -103,15 +150,35 @@ let persist_session
              (Printf.sprintf
                 "<tool_response tool_call_id=\"%s\">\nRAW|\n%s\n|RAW\n</tool_response>\n"
                 fco.call_id
-                fco.output)
+                (to_persisted_string fco.output))
          else (
            let filename = Printf.sprintf "%i.tool-call-result.%s.json" idx fco.call_id in
-           Io.save_doc ~dir:datadir filename fco.output;
+           Io.save_doc ~dir:datadir filename (to_persisted_string fco.output);
            append
              (Printf.sprintf
                 "<tool_response tool_call_id=\"%s\"><doc src=\"./.chatmd/%s\" \
                  local/></tool_response>\n"
                 fco.call_id
+                filename)))
+    | Res_item.Custom_tool_call_output tco ->
+      (match Hashtbl.find tool_call_index_by_id tco.call_id with
+       | None -> ()
+       | Some idx ->
+         if cfg.show_tool_call
+         then
+           append
+             (Printf.sprintf
+                "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\">\nRAW|\n%s\n|RAW\n</tool_response>\n"
+                tco.call_id
+                (to_persisted_string tco.output))
+         else (
+           let filename = Printf.sprintf "%i.tool-call-result.%s.json" idx tco.call_id in
+           Io.save_doc ~dir:datadir filename (to_persisted_string tco.output);
+           append
+             (Printf.sprintf
+                "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\"><doc src=\"./.chatmd/%s\" \
+                 local/></tool_response>\n"
+                tco.call_id
                 filename)))
     | Res_item.Reasoning r ->
       let summaries =

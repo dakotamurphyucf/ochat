@@ -1,5 +1,6 @@
 open Core
 open Io
+module Output = Openai.Responses.Tool_output.Output
 
 let add_line_numbers str =
   let lines = String.split_lines str in
@@ -9,9 +10,48 @@ let add_line_numbers str =
   String.concat ~sep:"\n" numbered_lines
 ;;
 
+let is_text_char = function
+  | ' ' .. '~' (* ASCII printable *)
+  | '\n' | '\r' | '\t' (* common whitespace: LF, CR, TAB *) -> true
+  | c ->
+    (* Treat non-ASCII bytes as “text” (UTF-8 payload or legacy encodings). *)
+    Char.to_int c >= 0x80
+;;
+
+let has_nul s = String.exists s ~f:(fun c -> Char.to_int c = 0x00)
+
+let is_utf8 s =
+  let dec = Uutf.decoder ~encoding:`UTF_8 (`String s) in
+  let rec loop () =
+    match Uutf.decode dec with
+    | `Uchar _ | `Await -> loop ()
+    | `End -> true
+    | `Malformed _ -> false
+  in
+  loop ()
+;;
+
+let is_text s =
+  (* NUL is a strong binary signal; reject early *)
+  if has_nul s then false else String.for_all s ~f:is_text_char && is_utf8 s
+;;
+
+(* prevent path for binary files like gif/image/ect *)
+let is_binary_file ~dir path =
+  (* Fallback: try to guess from file content (very basic) *)
+  let content = Io.load_doc ~dir path in
+  not (is_text content)
+;;
+
 let get_contents ~dir : Ochat_function.t =
   let f (path, offset) =
     let read () =
+      if is_binary_file ~dir path
+      then
+        failwith
+          (Printf.sprintf
+             "Refusing to read binary file: %s"
+             Eio.Path.(native_exn (dir / path)));
       Eio.Path.with_open_in Eio.Path.(dir / path)
       @@ fun flow ->
       try
@@ -76,7 +116,10 @@ let get_contents ~dir : Ochat_function.t =
     | res -> res
     | exception ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
   in
-  Ochat_function.create_function (module Definitions.Get_contents) ~strict:false f
+  Ochat_function.create_function
+    (module Definitions.Get_contents)
+    ~strict:false
+    (fun args -> Output.Text (f args))
 ;;
 
 let append_to_file ~dir : Ochat_function.t =
@@ -87,7 +130,9 @@ let append_to_file ~dir : Ochat_function.t =
     with
     | ex -> Fmt.str "error running append_to_file: %a" Eio.Exn.pp ex
   in
-  Ochat_function.create_function (module Definitions.Append_to_file) f
+  Ochat_function.create_function
+    (module Definitions.Append_to_file)
+    (fun args -> Output.Text (f args))
 ;;
 
 let find_and_replace ~dir : Ochat_function.t =
@@ -124,7 +169,9 @@ let find_and_replace ~dir : Ochat_function.t =
     with
     | ex -> Fmt.str "error running find_and_replace: %a" Eio.Exn.pp ex
   in
-  Ochat_function.create_function (module Definitions.Find_and_replace) f
+  Ochat_function.create_function
+    (module Definitions.Find_and_replace)
+    (fun args -> Output.Text (f args))
 ;;
 
 let get_url_content ~net : Ochat_function.t =
@@ -142,7 +189,9 @@ let get_url_content ~net : Ochat_function.t =
     @@ List.map ~f:(fun s -> String.strip s)
     @@ Soup.texts soup
   in
-  Ochat_function.create_function (module Definitions.Get_url_content) f
+  Ochat_function.create_function
+    (module Definitions.Get_url_content)
+    (fun args -> Output.Text (f args))
 ;;
 
 let index_ocaml_code ~env ~dir ~net : Ochat_function.t =
@@ -158,7 +207,9 @@ let index_ocaml_code ~env ~dir ~net : Ochat_function.t =
     Indexer.index ~dir ~pool ~net ~vector_db_folder ~folder_to_index;
     "code has been indexed"
   in
-  Ochat_function.create_function (module Definitions.Index_ocaml_code) f
+  Ochat_function.create_function
+    (module Definitions.Index_ocaml_code)
+    (fun args -> Output.Text (f args))
 ;;
 
 let query_vector_db ~dir ~net : Ochat_function.t =
@@ -196,7 +247,9 @@ let query_vector_db ~dir ~net : Ochat_function.t =
     in
     String.concat ~sep:"\n" results
   in
-  Ochat_function.create_function (module Definitions.Query_vector_db) f
+  Ochat_function.create_function
+    (module Definitions.Query_vector_db)
+    (fun args -> Output.Text (f args))
 ;;
 
 let apply_patch ~dir : Ochat_function.t =
@@ -208,11 +261,7 @@ let apply_patch ~dir : Ochat_function.t =
     let open_fn path = Io.load_doc ~dir path in
     let write_fn path s =
       match split path with
-      | Some (dirname, basename) ->
-        print_endline "dirname";
-        print_endline dirname;
-        print_endline path;
-        print_endline basename;
+      | Some (dirname, _) ->
         (match Io.is_dir ~dir dirname with
          | true -> Io.save_doc ~dir path s
          | false ->
@@ -240,7 +289,9 @@ let apply_patch ~dir : Ochat_function.t =
     | exception Apply_patch.Diff_error err -> Apply_patch.error_to_string err
     | exception ex -> Fmt.str "error running apply_patch: %a" Eio.Exn.pp ex
   in
-  Ochat_function.create_function (module Definitions.Apply_patch) f
+  Ochat_function.create_function
+    (module Definitions.Apply_patch)
+    (fun args -> Output.Text (f args))
 ;;
 
 let read_dir ~dir : Ochat_function.t =
@@ -249,7 +300,9 @@ let read_dir ~dir : Ochat_function.t =
     | res -> String.concat ~sep:"\n" res
     | exception ex -> Fmt.str "error running read_directory: %a" Eio.Exn.pp ex
   in
-  Ochat_function.create_function (module Definitions.Read_directory) f
+  Ochat_function.create_function
+    (module Definitions.Read_directory)
+    (fun args -> Output.Text (f args))
 ;;
 
 let mkdir ~dir : Ochat_function.t =
@@ -258,7 +311,9 @@ let mkdir ~dir : Ochat_function.t =
     | () -> sprintf "Directory %s created successfully." path
     | exception ex -> Fmt.str "error running mkdir: %a" Eio.Exn.pp ex
   in
-  Ochat_function.create_function (module Definitions.Make_dir) f
+  Ochat_function.create_function
+    (module Definitions.Make_dir)
+    (fun args -> Output.Text (f args))
 ;;
 
 (* -------------------------------------------------------------------------- *)
@@ -275,7 +330,9 @@ let meta_refine ~env : Ochat_function.t =
     in
     Mp_flow.first_flow ~env ~prompt:prompt_raw ~task ~action ()
   in
-  Ochat_function.create_function (module Definitions.Meta_refine) f
+  Ochat_function.create_function
+    (module Definitions.Meta_refine)
+    (fun args -> Output.Text (f args))
 ;;
 
 (* -------------------------------------------------------------------------- *)
@@ -402,7 +459,10 @@ let odoc_search ~dir ~net : Ochat_function.t =
           Printf.sprintf "[%d] [%s] %s\n%s" rank pkg id preview)
         |> String.concat ~sep:"\n\n---\n\n")
   in
-  Ochat_function.create_function (module Definitions.Odoc_search) ~strict:false f
+  Ochat_function.create_function
+    (module Definitions.Odoc_search)
+    ~strict:false
+    (fun args -> Output.Text (f args))
 ;;
 
 (* -------------------------------------------------------------------------- *)
@@ -421,7 +481,9 @@ let fork : Ochat_function.t =
   let impl (_ : Definitions.Fork.input) =
     "[fork-tool placeholder – should never be called directly]"
   in
-  Ochat_function.create_function (module Definitions.Fork) impl
+  Ochat_function.create_function
+    (module Definitions.Fork)
+    (fun args -> Output.Text (impl args))
 ;;
 
 (* -------------------------------------------------------------------------- *)
@@ -443,7 +505,9 @@ let index_markdown_docs ~env ~dir : Ochat_function.t =
     with
     | ex -> Fmt.str "error indexing markdown docs: %a" Eio.Exn.pp ex
   in
-  Ochat_function.create_function (module Definitions.Index_markdown_docs) f
+  Ochat_function.create_function
+    (module Definitions.Index_markdown_docs)
+    (fun args -> Output.Text (f args))
 ;;
 
 (* -------------------------------------------------------------------------- *)
@@ -586,5 +650,21 @@ let markdown_search ~dir ~net : Ochat_function.t =
             Printf.sprintf "[%d] [%s] %s\n%s" rank idx_name id preview)
           |> String.concat ~sep:"\n\n---\n\n"))
   in
-  Ochat_function.create_function (module Definitions.Markdown_search) ~strict:false f
+  Ochat_function.create_function
+    (module Definitions.Markdown_search)
+    ~strict:false
+    (fun args -> Output.Text (f args))
+;;
+
+let import_image ~dir : Ochat_function.t =
+  let f image_path =
+    let open Eio.Path in
+    let img_full_path = dir / image_path in
+    if not (is_file img_full_path)
+    then Output.Text (Printf.sprintf "Image file %s does not exist." image_path)
+    else (
+      let image_url = Io.Base64.file_to_data_uri ~dir image_path in
+      Output.Content [ Input_image { image_url; detail = Some Auto } ])
+  in
+  Ochat_function.create_function (module Definitions.Import_image) f
 ;;

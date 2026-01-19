@@ -120,6 +120,17 @@ let max_stub_chars = 2_000
 
 let render_item (item : Openai.Responses.Item.t) : string option =
   let open Openai.Responses in
+  let string_of_tool_output (output : Tool_output.Output.t) : string =
+    match output with
+    | Tool_output.Output.Text text -> text
+    | Content parts ->
+      parts
+      |> List.map ~f:(function
+        | Tool_output.Output_part.Input_text { text } -> text
+        | Input_image { image_url; _ } ->
+          Printf.sprintf "<image src=\"%s\" />" image_url)
+      |> String.concat ~sep:"\n"
+  in
   match item with
   | Item.Input_message { content; role; _ } ->
     (match content with
@@ -133,8 +144,14 @@ let render_item (item : Openai.Responses.Item.t) : string option =
      | { text; _ } :: _ -> sprintf "%s: %s" "Assistant" text |> Some)
   | Function_call { name; arguments; call_id; _ } ->
     sprintf "Function call (%s): %s(%s)" call_id name arguments |> Some
+  | Custom_tool_call { name; input; call_id; _ } ->
+    sprintf "Custom tool call (%s): %s(%s)" call_id name input |> Some
   | Function_call_output { call_id; output; _ } ->
+    let output = string_of_tool_output output in
     sprintf "Function call output (%s): %s" call_id output |> Some
+  | Custom_tool_call_output { call_id; output; _ } ->
+    let output = string_of_tool_output output in
+    sprintf "Custom tool call output (%s): %s" call_id output |> Some
   | _ -> None
 ;;
 

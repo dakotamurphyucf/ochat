@@ -1,21 +1,24 @@
-(** Terminal chat application – event-loop, streaming and persistence.
+(** Terminal chat application – event-loop, streaming, export, and persistence.
 
-    This is the public interface of {!Chat_tui.App}, the orchestration
-    layer that powers the Ochat terminal UI.  Beyond the traditional
-    *event-loop & renderer* triad it also provides
+     {!Chat_tui.App} is the orchestration layer that powers the Ochat terminal
+     UI.
 
-    • on-device {i context-compaction} (triggered via small ':' commands
-       such as [:c] / [:compact]),
-    • graceful request {i cancellation} (hit [Esc]) and
-    • automatic / interactive {i snapshot persistence}.
+     It wires together:
+     {ul
+     {- {!Chat_tui.Model} for mutable UI state}
+     {- {!Chat_tui.Controller} for key handling}
+     {- {!Chat_tui.Renderer} for full-screen rendering}
+     {- {!Notty_eio.Term} for terminal IO}
+     {- {!Chat_response.Driver} for OpenAI streaming and tool execution}
+     {- {!Context_compaction.Compactor} for user-triggered history compaction}}
 
-    A single call to {!run_chat} boots the Notty terminal, parses the
-    ChatMarkdown prompt, starts the main event-loop and only returns once
-    the user quits the application.  All other values are exported to
-    facilitate {e white-box} unit– and integration tests – regular
-    consumers should ignore them.
+     Use {!run_chat} to boot the UI and block until the user quits.
 
-    @canonical Chat_tui.App *)
+     Most callers should treat everything other than {!run_chat} as
+     test-support: these helpers are exposed to enable white-box unit and
+     integration tests of the event-loop and streaming behaviour.
+
+     @canonical Chat_tui.App *)
 
 open! Core
 
@@ -24,8 +27,8 @@ type prompt_context =
   { cfg : Chat_response.Config.t (** Behavioural settings (temperature, …) *)
   ; tools : Openai.Responses.Request.Tool.t list
     (** Tools exposed to the assistant at runtime. *)
-  ; tool_tbl : (string, string -> string) Base.Hashtbl.t
-    (** Mapping [tool-name → implementation]. *)
+  ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t
+    (** Mapping [tool_name -> implementation]. *)
   }
 
 (** Persistence policy to use when the UI terminates.
@@ -44,12 +47,13 @@ type persist_mode =
     first streaming token arrives. *)
 val add_placeholder_thinking_message : Model.t -> unit
 
-(** Insert a one-shot *error* message so fatal conditions during streaming
-    surface in the conversation instead of being silently logged. *)
+(** [add_placeholder_stream_error model msg] appends a transient error message
+    to [model] so failures during streaming surface in the transcript instead
+    of being silently logged. *)
 val add_placeholder_stream_error : Model.t -> string -> unit
 
-(** Display a temporary "(compacting…)" assistant stub while context
-    compaction is running. *)
+(** [add_placeholder_compact_message model] appends a transient "(compacting…)"
+    assistant message to [model] while context compaction is running. *)
 val add_placeholder_compact_message : Model.t -> unit
 
 (** [persist_snapshot env session model] persists the in-memory [model] back
@@ -61,12 +65,12 @@ val add_placeholder_compact_message : Model.t -> unit
 val persist_snapshot : Eio_unix.Stdenv.base -> Session.t option -> Model.t -> unit
 
 (** Immediate (synchronous) UI updates that happen right after the user
-    hits ⏎ but {b before} the OpenAI request is sent.
+    submits the draft but {b before} the OpenAI request is sent.
 
     The helper:
     {ul
-    {- snapshots the current draft buffer, converts it into a user history
-       item (plain text or raw-XML, depending on [Model.draft_mode]);}
+    {- snapshots the current draft buffer, converts it into a user history item
+       (plain text or raw-XML, depending on [Model.draft_mode]);}
     {- appends a renderable user message to {!Model.messages} and updates
        {!Model.history_items};}
     {- clears {!Model.input_line}, resets the caret and enables
@@ -75,7 +79,10 @@ val persist_snapshot : Eio_unix.Stdenv.base -> Session.t option -> Model.t -> un
     {- injects a transient "(thinking…)" assistant placeholder; and}
     {- pushes a [`Redraw] request on [ev_stream].}}
 
-    Actual network IO and streaming are delegated to {!handle_submit}. *)
+    Actual network IO and streaming are delegated to {!handle_submit}.
+
+    This function performs no network IO.
+*)
 val apply_local_submit_effects
   :  dir:Eio.Fs.dir_ty Eio.Path.t
   -> env:Eio_unix.Stdenv.base
@@ -87,6 +94,7 @@ val apply_local_submit_effects
         | `Stream_batch of Openai.Responses.Response_stream.t list
         | `Replace_history of Openai.Responses.Item.t list
         | `Function_output of Openai.Responses.Function_call_output.t
+        | `Tool_output of Openai.Responses.Item.t
         ]
         as
         'ev)
@@ -111,18 +119,17 @@ val apply_local_submit_effects
     default).  The window can be tweaked—primarily for benchmarking—via the
     environment variable [$OCHAT_STREAM_BATCH_MS] (valid range 1–50 ms).
 
-    Function-call output events are *not* batched because they are rare and
-    often trigger further side-effects.
+    Tool output items are *not* batched because they are rare and often
+    trigger further side-effects.
 
     {2 Parameters}
 
-    @param env  The current {!Eio.Stdenv.t} (typically
-           [Eio_unix.Stdenv.base]).
+    @param env  The current {!Eio.Stdenv.t} (typically [Eio_unix.Stdenv.base]).
     @param model Mutable state record that will be updated while the stream
            progresses.
     @param ev_stream  Event queue shared with the main UI loop.  Both
            [`Stream] and [`Stream_batch] events are emitted here, as well as
-           [`Function_output] values.
+           [`Tool_output] values.
     @param system_event  Out-of-band messages (e.g. notes from the user)
            that should appear in the assistant’s context but must not be
            rendered in the viewport.
@@ -146,6 +153,7 @@ val handle_submit
         | `Stream_batch of Openai.Responses.Response_stream.t list
         | `Replace_history of Openai.Responses.Item.t list
         | `Function_output of Openai.Responses.Function_call_output.t
+        | `Tool_output of Openai.Responses.Item.t
         ]
         as
         'ev)
@@ -185,8 +193,8 @@ val handle_submit
        path.  When omitted the prompt file path is reused.}
     {- [persist_mode] – Policy controlling whether the session snapshot
        is written back on exit.  Defaults to [`Ask].}
-    {- [parallel_tool_calls] – Allow multiple tool calls to run in
-       parallel (default: [true]).}}
+    {- [parallel_tool_calls] – Allow multiple tool calls to run in parallel
+       (default: [true]).}}
  *)
 val run_chat
   :  env:Eio_unix.Stdenv.base

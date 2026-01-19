@@ -1,193 +1,118 @@
-# Renderer — turning chat history into pixels
+# Renderer — rendering the Chat TUI to a Notty image
 
-`chat_tui/renderer` is a **pure rendering layer** for the terminal user
-interface.  It takes immutable snapshots of the application
-[`Model`](model.doc.md) and converts them into [`Notty`](https://github.com/pqwy/notty)
-images.  All concerns related to **layout, word-wrapping, colours and cursor
-placement** live here; higher-level modules decide *what* to render, the
-renderer decides *how*.
+`Chat_tui.Renderer` is the terminal UI “view” layer. It takes the current
+mutable [`Model.t`](model.doc.md) plus the terminal size and produces:
 
----
+- a composite [`Notty.I.t`](https://github.com/pqwy/notty) image for the whole screen, and
+- an absolute cursor position for the input box.
 
-## High-level architecture
+The renderer is pure with respect to the outside world (no I/O), but it
+*intentionally mutates* a few cache fields inside `Model.t` (per-message image
+caches, cached message heights/prefix sums, and the embedded
+`Notty_scroll_box.t`) to make subsequent frames cheaper.
 
-```
-┌───────────┐       ┌────────────────┐        ┌─────────────┐
-│ Controller│ ----▶ │   Model (t)    │ ----▶  │  Renderer   │
-└───────────┘       └────────────────┘        └─────────────┘
-                                    (pure functions ⟶ Notty.I.t)
-```
+## Screen layout
 
-The renderer keeps a small per-message render cache inside the `Model.t` and
-may adjust the scroll-box offset when *auto-follow* is active.  For test
-pyramids this means you can instantiate a dummy model and snapshot the
-resulting `Notty.I.t` to ensure the visual output stays stable.
+Top-to-bottom, the renderer produces:
 
-## Colour palette
+1. A scrollable, virtualised history viewport (rendered through
+   `Notty_scroll_box`).
+2. Optionally, a one-row sticky header showing the role of the first fully
+   visible message.
+3. A one-line status bar (`-- INSERT --`, `-- NORMAL --`, `-- CMD --` plus
+   draft-mode hints).
+4. A framed, multi-line input box (with selection highlighting when active).
 
-| Role          | Attribute                                   |
-|-------------- |---------------------------------------------|
-| `assistant`   | `fg lightcyan`                              |
-| `user`        | `fg yellow`                                 |
-| `developer`   | `fg red`                                    |
-| `tool`        | `fg lightmagenta`                           |
-| `fork`        | `fg lightyellow`                            |
-| `reasoning`   | `fg lightblue`                              |
-| `system`      | `fg lightblack` (dim)                       |
-| `tool_output` | `fg lightgreen`                             |
-| `error`       | `fg red ++ st reverse` (red on black)       |
+## Message rendering rules
 
-Values are created with `Notty.A.(...)` and centralised in
-[`attr_of_role`](#attr_of_role).
+Within the history viewport:
 
----
+- Each non-empty message is rendered as:
+  - a blank line,
+  - a header row containing an icon plus the capitalised role label, then
+  - another blank line,
+  - the body (markdown-aware), and
+  - a trailing blank spacer line.
+- Message bodies are sanitised with `Chat_tui.Util.sanitize ~strip:false` so
+  that `Notty.I.string` does not see control characters.
+- Fenced code blocks (``` or ~~~) are detected via
+  `Chat_tui.Markdown_fences.split` and highlighted via
+  `Chat_tui.Highlight_tm_engine` with the shared registry from
+  `Chat_tui.Highlight_registry`.
+- Tool output can be rendered specially when the message index is present in
+  `Model.tool_output_by_index` (see `Chat_tui.Types.tool_output_kind`).
 
-## API
+### Tool output special cases
 
-### `attr_of_role : role -> Notty.A.t`
+The renderer currently has dedicated layouts for some built-in tools:
 
-Maps a chat role string ("assistant", "user", …) to a Notty attribute.  Unknown
-roles fall back to `Notty.A.empty` so callers do not need special handling.
+- `Apply_patch`: splits the output into a “status preamble” and a patch
+  section, and highlights the patch using the internal `ochat-apply-patch`
+  grammar.
+- `Read_file { path }`: may infer a language from `path`. For Markdown files,
+  the renderer uses the standard Markdown pipeline (including fenced-block
+  splitting) so embedded code blocks can be highlighted by their info strings.
+- `Read_directory`: applies a different tint to help distinguish directory
+  listings from regular prose.
 
-```ocaml
-let cyan = Renderer.attr_of_role "assistant"    (* fg lightcyan *)
-let none = Renderer.attr_of_role "unknown-role"  (* A.empty      *)
-```
+## Public API
 
-### `is_toollike : role -> bool`
+Only two identifiers are exported from the library interface.
 
-Returns `true` for roles that should be rendered as tool output. At the
-moment this includes `"tool"` and `"tool_output"`. Tool-like roles render
-their body as a single code block and try to infer a language (`bash`,
-`diff`, `json`) when no explicit fenced language is present.
-
-### `label_of_role : role -> string`
-
-Returns the textual label used as the message prefix on the first line
-(`role ^ ": "`). Currently this is the role unchanged.
-
-### `message_to_image : ~max_width:int -> ?selected:bool -> message -> Notty.I.t`
-
-Creates a framed, word-wrapped image for a single message.
+### `render_full`
 
 ```ocaml
-open Notty
-
-let img =
-  Renderer.message_to_image
-    ~max_width:80
-    ~selected:true
-    ("assistant", "Hello, world! This text will be wrapped automatically.")
-
-Notty_unix.output_image img; (* see examples/notty *)
+val render_full
+  :  size:int * int
+  -> model:Chat_tui.Model.t
+  -> Notty.I.t * (int * int)
 ```
 
-Behaviour:
+`render_full ~size ~model` builds the full screen image and returns
+`(image, (cx, cy))`, where `(cx, cy)` is the caret position inside the input
+box in absolute screen coordinates.
 
-* Empty or whitespace-only text returns `I.empty` so that pipelines can filter
-  out noise with `I.is_empty`.
-* `selected:true` flips the colours via `Notty.A.st reverse` while preserving
-  the message's base hue.  This keeps the highlight consistent across roles.
-* Soft-wrapping respects the `"role: "` prefix.  Hard newlines (`\n`) split
-  the text into paragraphs that are wrapped independently.
-
-### `history_image : model:Model.t -> width:int -> height:int -> messages:message list -> selected_idx:int option -> Notty.I.t`
-
-Creates the *virtualised* chat history image that is fed into the internal
-`Notty_scroll_box`.
-
-Parameters
-
-* `~model` – the mutable [`Model.t`](model.doc.md) that holds the scroll box
-  and the per-message render cache.
-* `~width` – current terminal width in cells.  Serves as the cache key.
-* `~height` – height of the *viewport*.  Only messages that can become visible
-  in the rectangle of `width × height` cells are rendered on each call.
-* `~messages` – full chat transcript in chronological order.
-* `~selected_idx` – index of the highlighted message, if any.
-
-The function
-
-1. updates/increments prefix sums of message heights in `model`,
-2. figures out which slice of `messages` intersects with the viewport, and
-3. concatenates only those images with `I.vcat`, padding with transparent
-   space above and below so the total height stays intact.
-
-```ocaml
-let history =
-  Renderer.history_image
-    ~model ~width:80 ~height:25 ~messages ~selected_idx:None
-in
-Notty_unix.output_image history
-```
-
-### `render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)`
-
-The main entry point.  Builds the complete screen (history viewport, mode
-status bar and multi-line input box) and returns:
-
-1. the `Notty.I.t` to blit, and
-2. the 2-tuple cursor position `(x, y)` in *absolute* screen coordinates.
+The renderer updates caches inside `model` as part of this call.
 
 Example integration with `Notty_eio`:
 
 ```ocaml
-let rec ui_loop term model =
-  let (w, h) = Notty_eio.Term.size term in
-  let img, cursor = Renderer.render_full ~size:(w, h) ~model in
-  Notty_eio.Term.image term img;
-  Notty_eio.Term.cursor term cursor;
-  (* wait for events, mutate model, recurse … *)
+let render term model =
+  let w, h = Notty_eio.Term.size term in
+  let image, (cx, cy) = Chat_tui.Renderer.render_full ~size:(w, h) ~model in
+  Notty_eio.Term.image term image;
+  Notty_eio.Term.cursor term (Some (cx, cy))
 ```
 
----
+### `lang_of_path`
 
-## Implementation notes
+```ocaml
+val lang_of_path : string -> string option
+```
 
-* **Word-wrapping** – wrapping is performed by measuring the display-cell
-  width of candidate rows via `Notty.I.string`/`Notty.I.width` and cutting
-  before the next character would exceed the available columns. Hard newlines
-  split the input into paragraphs that wrap independently. For background
-  on width calculation and its limitations, see Notty’s documentation on
-  Unicode geometry (Uucp.Break.tty_width_hint).
-* **Input sanitisation** – invalid UTF-8 sequences are stripped **once, at
-  render time**, instead of for every streaming delta. This avoids repeated
-  sanitisation and re-wrapping of the same text while keeping on-screen
-  formatting unchanged and reducing word-wrap work per frame.
-* **Performance** – the renderer caches per-message `Notty.I.t` images and
-  their heights in the model, keyed by terminal width and message text.  The
-  selected variant is populated on demand; caches are invalidated on width
-  changes or message updates.
-* **Input selection** – starting with version 0.3 users can mark a range in
-  the multi-line input buffer.  The renderer draws the highlighted span in
-  reverse video (same foreground/background hue) while keeping the rest of
-  the line untouched.  Because the highlight is recomputed every frame no
-  additional cache entries are created.
-* **Mutable state in the model** – to implement *auto-follow* the renderer
-  calls `Notty_scroll_box.scroll_to_bottom`, and it maintains the render cache
-  described above.  The functional API seen by callers remains unchanged.
+`lang_of_path path` performs best-effort language inference for `read_file`
+tool output. It inspects the last file extension (as defined by
+`Core.Filename.split_extension`) and returns a TextMate-style language tag.
 
----
+Example:
+
+```ocaml
+Chat_tui.Renderer.lang_of_path "foo.ml" = Some "ocaml";
+Chat_tui.Renderer.lang_of_path "README.md" = Some "markdown";
+Chat_tui.Renderer.lang_of_path "data.json" = Some "json";
+Chat_tui.Renderer.lang_of_path "script.sh" = Some "bash";
+Chat_tui.Renderer.lang_of_path "no_extension" = None
+```
 
 ## Known limitations
 
-1. **Display width heuristics** – Notty approximates display width using
-   Uucp.Break.tty_width_hint. Some terminals may render East-Asian wide
-   glyphs or emoji differently, so wrapping can occasionally be off by a
-   cell.
-2. **Emoji support** – Notty does not currently support colour emoji.  They
-   are rendered as text fallback or black-and-white glyphs depending on the
-   terminal.
-3. **Horizontal resize artefacts** – when the terminal is shrunk quickly the
-   scroll-box may momentarily display horizontal artefacts because Notty
-   redraws happen asynchronously.  They disappear on the next full render.
-
----
-
-## Unit testing
-
-Because every function is deterministic you can write approval tests that
-serialise `Notty.I.t` to ASCII art and compare the output against a reference
-file.  See `tests/renderer_expect.ml` for an example (not part of the public
-library).
+1. Cursor positioning in the input box is derived from byte offsets in
+   `Model.cursor_pos`. Multi-byte UTF-8 and East-Asian wide glyphs can cause
+   the visual caret to drift.
+2. Notty’s geometry is based on `Uucp.Break.tty_width_hint` and can be wrong
+   for some Unicode sequences (see Notty’s documentation on Unicode vs. text
+   geometry).
+3. If the input box grows taller than the available terminal height, the
+   composed image can exceed the requested `size`. Backends typically crop the
+   output, but the cursor may end up off-screen.
 

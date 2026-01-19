@@ -1,15 +1,22 @@
 open Core
 module CM = Prompt.Chat_markdown
 module Res = Openai.Responses
+module Output = Res.Tool_output.Output
 
 (* --------------------------------------------------------------------------- *)
 (* Internal helper – record used for keeping track of running tool invocations *)
 (* --------------------------------------------------------------------------- *)
 
+type driver_pending_call_kind =
+  [ `Function
+  | `Custom
+  ]
+
 type driver_pending_call =
   { seq : int
   ; call_id : string
-  ; promise : string Eio.Promise.or_exn
+  ; kind : driver_pending_call_kind
+  ; promise : Openai.Responses.Tool_output.Output.t Eio.Promise.or_exn
   }
 
 (*********************************************************************
@@ -147,6 +154,7 @@ let rec run_agent
       ; function_call = None
       ; tool_call = None
       ; tool_call_id = None
+      ; type_ = None
       }
   in
   (* 2.  Parse the merged document into structured elements. *)
@@ -274,10 +282,10 @@ let run_completion
   let datadir = Io.ensure_chatmd_dir ~cwd in
   let cache_file = Eio.Path.(datadir / "cache.bin") in
   let cache = Cache.load ~file:cache_file ~max_size:1000 () in
-  (* 1 • append initial prompt file if provided *)
+  (* 1 •append initial prompt file if provided *)
   Option.iter prompt_file ~f:(fun file ->
     Io.append_doc ~dir output_file (Io.load_doc ~dir file));
-  (* 2 • main loop *)
+  (* 2 • main loop *)
   let rec loop () =
     let xml = Io.load_doc ~dir output_file in
     (* Parse ChatMarkdown with [output_dir] as the base for resolving      *)
@@ -337,7 +345,6 @@ let run_completion
              ~f:Res.Request.model_of_str_exn)
         init_items
     in
-    (* 3 • render assistant text back into XML buffer *)
     let append = Io.append_doc ~dir output_file in
     List.iter
       (List.drop all_items (List.length init_items))
@@ -376,12 +383,53 @@ let run_completion
                fc.name
                fc.call_id
                fc.arguments)
+        | Res.Item.Custom_tool_call tc ->
+          append
+            (Printf.sprintf
+               "\n\
+                <tool_call type=\"custom_tool_call\" function_name=\"%s\" \
+                tool_call_id=\"%s\">\n\
+                %s\n\
+                </tool_call>\n"
+               tc.name
+               tc.call_id
+               tc.input)
         | Res.Item.Function_call_output fco ->
+          let output =
+            match fco.output with
+            | Openai.Responses.Tool_output.Output.Text text -> text
+            | Content parts ->
+              parts
+              |> List.map ~f:(function
+                | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
+                | Input_image { image_url; _ } ->
+                  Printf.sprintf "<image src=\"%s\" />" image_url)
+              |> String.concat ~sep:"\n"
+          in
           append
             (Printf.sprintf
                "\n<tool_response tool_call_id=\"%s\">%s</tool_response>\n"
                fco.call_id
-               fco.output)
+               output)
+        | Res.Item.Custom_tool_call_output tco ->
+          let output =
+            match tco.output with
+            | Openai.Responses.Tool_output.Output.Text text -> text
+            | Content parts ->
+              parts
+              |> List.map ~f:(function
+                | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
+                | Input_image { image_url; _ } ->
+                  Printf.sprintf "<image src=\"%s\" />" image_url)
+              |> String.concat ~sep:"\n"
+          in
+          append
+            (Printf.sprintf
+               "\n\
+                <tool_response type=\"custom_tool_call\" \
+                tool_call_id=\"%s\">%s</tool_response>\n"
+               tco.call_id
+               output)
         | Res.Item.Input_message _
         | Res.Item.Web_search_call _
         | Res.Item.File_search_call _ -> ());
@@ -389,6 +437,7 @@ let run_completion
     if
       List.exists all_items ~f:(function
         | Res.Item.Function_call _ -> true
+        | Res.Item.Custom_tool_call _ -> true
         | _ -> false)
     then loop ()
     else append "\n<user>\n\n</user>"
@@ -604,18 +653,15 @@ let run_completion_stream
           Io.save_doc ~dir:datadir (tool_call_url call_id) arguments);
         (* 2.  Add the function_call item so the model sees the invocation *)
         let fn_call_item =
-          Res.Item.Function_call
-            { name
-            ; arguments
-            ; call_id
-            ; _type = "function_call"
-            ; id = Some item_id
-            ; status = None
-            }
+          Tool_call.call_item
+            ~kind:Tool_call.Kind.Function
+            ~name
+            ~payload:arguments
+            ~call_id
+            ~id:(Some item_id)
         in
         add_item fn_call_item;
         (* 3.  Spawn the actual tool invocation in its own fiber           *)
-        let fn = Hashtbl.find_exn tool_tbl name in
         let history_so_far =
           if history_compaction
           then
@@ -625,28 +671,36 @@ let run_completion_stream
             @@ List.append inputs (List.rev !new_items)
           else List.append inputs (List.rev !new_items)
         in
+        let run_tool () =
+          Tool_call.run_tool
+            ~kind:Tool_call.Kind.Function
+            ~name
+            ~payload:arguments
+            ~call_id
+            ~tool_tbl
+            ~on_fork:
+              (Some
+                 (fun ~call_id ~arguments ->
+                   Res.Tool_output.Output.Text
+                     (Fork.execute
+                        ~env
+                        ~history:history_so_far
+                        ~call_id
+                        ~arguments
+                        ~tools
+                        ~tool_tbl
+                        ~on_event
+                        ~on_fn_out:(fun _ -> ())
+                        ?temperature
+                        ?max_output_tokens:max_tokens
+                        ?reasoning
+                        ())))
+        in
         let promise =
           if not parallel_tool_calls
           then (
             (* Sequential fall-back – run immediately in the current fiber *)
-            let result =
-              if String.equal name "fork"
-              then
-                Fork.execute
-                  ~env
-                  ~history:history_so_far
-                  ~call_id
-                  ~arguments
-                  ~tools
-                  ~tool_tbl
-                  ~on_event
-                  ~on_fn_out:(fun _ -> ())
-                  ?temperature
-                  ?max_output_tokens:max_tokens
-                  ?reasoning
-                  ()
-              else fn arguments
-            in
+            let result = run_tool () in
             (* Wrap result into an already-resolved promise so code below is
                agnostic to the execution mode. *)
             let pr, resv = Eio.Promise.create () in
@@ -660,26 +714,86 @@ let run_completion_stream
               Eio.Semaphore.acquire s;
               Fun.protect
                 ~finally:(fun () -> Eio.Semaphore.release s)
-                (fun () ->
-                   if String.equal name "fork"
-                   then
-                     Fork.execute
-                       ~env
-                       ~history:history_so_far
-                       ~call_id
-                       ~arguments
-                       ~tools
-                       ~tool_tbl
-                       ~on_event
-                       ~on_fn_out:(fun _ -> ())
-                       ?temperature
-                       ?max_output_tokens:max_tokens
-                       ?reasoning
-                       ()
-                   else fn arguments))
+                (fun () -> run_tool ()))
         in
         (* 4.  Record the pending call for later collection *)
-        pending_calls := { seq; call_id; promise } :: !pending_calls;
+        pending_calls := { seq; call_id; kind = `Function; promise } :: !pending_calls;
+        run_again := true
+    in
+    let handle_custom_tool_call_done ~item_id ~input =
+      match Hashtbl.find func_info item_id with
+      | None -> ()
+      | Some (name, call_id) ->
+        let seq = !fn_id in
+        Int.incr fn_id;
+        let tool_call_url id = Printf.sprintf "%i.tool-call.%s.json" seq id in
+        if show_tool_call
+        then
+          append_doc
+            (Printf.sprintf
+               "\n\
+                <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
+                function_name=\"%s\" id=\"%s\">\n\
+                \t%s|\n\
+                \t\t%s\n\
+                \t|%s\n\
+                </tool_call>\n"
+               call_id
+               name
+               item_id
+               "RAW"
+               (Fetch.tab_on_newline input)
+               "RAW")
+        else (
+          let content =
+            Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_url call_id)
+          in
+          append_doc
+            (Printf.sprintf
+               "\n\
+                <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
+                function_name=\"%s\" id=\"%s\">\n\
+                \t%s\n\
+                </tool_call>\n"
+               call_id
+               name
+               item_id
+               (Fetch.tab_on_newline content));
+          Io.save_doc ~dir:datadir (tool_call_url call_id) input);
+        let call_item : Res.Item.t =
+          Tool_call.call_item
+            ~kind:Tool_call.Kind.Custom
+            ~name
+            ~payload:input
+            ~call_id
+            ~id:(Some item_id)
+        in
+        add_item call_item;
+        let run_tool () =
+          Tool_call.run_tool
+            ~kind:Tool_call.Kind.Custom
+            ~name
+            ~payload:input
+            ~call_id
+            ~tool_tbl
+            ~on_fork:None
+        in
+        let promise =
+          if not parallel_tool_calls
+          then (
+            let result = run_tool () in
+            let pr, resv = Eio.Promise.create () in
+            Eio.Promise.resolve_ok resv result;
+            pr)
+          else
+            Eio.Fiber.fork_promise ~sw (fun () ->
+              let s = Lazy.force sem in
+              Eio.Semaphore.acquire s;
+              Fun.protect
+                ~finally:(fun () -> Eio.Semaphore.release s)
+                (fun () -> run_tool ()))
+        in
+        pending_calls := { seq; call_id; kind = `Custom; promise } :: !pending_calls;
         run_again := true
     in
     let callback (ev : Res.Response_stream.t) =
@@ -728,6 +842,9 @@ let run_completion_stream
           | Res.Response_stream.Item.Function_call fc ->
             let idx = Option.value fc.id ~default:fc.call_id in
             Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
+          | Res.Response_stream.Item.Custom_function tc ->
+            let idx = Option.value tc.id ~default:tc.call_id in
+            Hashtbl.set func_info ~key:idx ~data:(tc.name, tc.call_id)
           | Res.Response_stream.Item.Reasoning r ->
             (* first chunk for this reasoning item *)
             open_reasoning r.id;
@@ -735,6 +852,8 @@ let run_completion_stream
           | _ -> ())
        | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
          handle_function_done ~item_id ~arguments
+       | Res.Response_stream.Custom_tool_call_input_done { item_id; input; _ } ->
+         handle_custom_tool_call_done ~item_id ~input
        | _ -> ());
       on_event ev
     in
@@ -765,19 +884,35 @@ let run_completion_stream
     let sorted_calls =
       List.sort !pending_calls ~compare:(fun a b -> Int.compare a.seq b.seq)
     in
-    List.iter sorted_calls ~f:(fun { seq; call_id; promise } ->
-      let result = Eio.Promise.await_exn promise in
+    List.iter sorted_calls ~f:(fun { seq; call_id; kind; promise } ->
+      let result =
+        match Eio.Promise.await_exn promise with
+        | Openai.Responses.Tool_output.Output.Text t -> t
+        | Content parts ->
+          parts
+          |> List.map ~f:(function
+            | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
+            | Input_image { image_url; _ } ->
+              Printf.sprintf "<image src=\"%s\" />" image_url)
+          |> String.concat ~sep:"\n"
+      in
       let tool_call_result_url id = Printf.sprintf "%i.tool-call-result.%s.json" seq id in
+      let type_attr =
+        match kind with
+        | `Function -> ""
+        | `Custom -> " type=\"custom_tool_call\""
+      in
       if show_tool_call
       then
         append_doc
           (Printf.sprintf
              "\n\
-              <tool_response tool_call_id=\"%s\" id=\"%d\">\n\
+              <tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\
               \t%s|\n\
               \t\t%s\n\
               \t|%s\n\
               </tool_response>\n"
+             type_attr
              call_id
              seq
              "RAW"
@@ -789,21 +924,21 @@ let run_completion_stream
         in
         append_doc
           (Printf.sprintf
-             "\n<tool_response tool_call_id=\"%s\" id=\"%d\">\n\t%s\n</tool_response>\n"
+             "\n<tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\t%s\n</tool_response>\n"
+             type_attr
              call_id
              seq
              (Fetch.tab_on_newline content));
         Io.save_doc ~dir:datadir (tool_call_result_url call_id) result);
-      let fn_out_item =
-        Res.Item.Function_call_output
-          { call_id
-          ; _type = "function_call_output"
-          ; id = None
-          ; status = None
-          ; output = result
-          }
+      let kind : Tool_call.Kind.t =
+        match kind with
+        | `Function -> Tool_call.Kind.Function
+        | `Custom -> Tool_call.Kind.Custom
       in
-      add_item fn_out_item);
+      let out_item : Res.Item.t =
+        Tool_call.output_item ~kind ~call_id ~output:(Output.Text result)
+      in
+      add_item out_item);
     (* make sure any dangling assistant block is closed *)
     Hashtbl.iter_keys opened_msgs ~f:(fun id -> close_message id);
     (* 4 • If no function call just happened, append empty user message.   *)
@@ -865,6 +1000,7 @@ let run_completion_stream_in_memory_v1
       ~(history : Openai.Responses.Item.t list)
       ?(on_event : Openai.Responses.Response_stream.t -> unit = fun _ -> ())
       ?(on_fn_out : Openai.Responses.Function_call_output.t -> unit = fun _ -> ())
+      ?(on_tool_out : Openai.Responses.Item.t -> unit = fun _ -> ())
       ~tools
       ?tool_tbl
       ?temperature
@@ -925,17 +1061,14 @@ let run_completion_stream_in_memory_v1
       | Some (name, call_id) ->
         let seq = List.length !pending_calls in
         let fn_call_item : Openai.Responses.Item.t =
-          Openai.Responses.Item.Function_call
-            { name
-            ; arguments
-            ; call_id
-            ; _type = "function_call"
-            ; id = Some item_id
-            ; status = None
-            }
+          Tool_call.call_item
+            ~kind:Tool_call.Kind.Function
+            ~name
+            ~payload:arguments
+            ~call_id
+            ~id:(Some item_id)
         in
         add_item fn_call_item;
-        let fn = Hashtbl.find_exn tool_tbl name in
         let history_so_far =
           if history_compaction
           then
@@ -946,28 +1079,34 @@ let run_completion_stream_in_memory_v1
           else (* Otherwise we keep the full history as is. *)
             List.append hist (List.rev !new_items)
         in
+        let run_fork ~call_id ~arguments =
+          let res =
+            turn
+            @@ Fork.history ~history:(List.append history_so_far []) ~arguments call_id
+          in
+          let result =
+            [ List.last_exn res ]
+            |> List.filter_map ~f:(function
+              | Res.Item.Output_message o ->
+                Some (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
+              | _ -> None)
+            |> String.concat ~sep:"\n"
+          in
+          Output.Text result
+        in
+        let run_tool () =
+          Tool_call.run_tool
+            ~kind:Tool_call.Kind.Function
+            ~name
+            ~payload:arguments
+            ~call_id
+            ~tool_tbl
+            ~on_fork:(Some run_fork)
+        in
         let promise =
           if not parallel_tool_calls
           then (
-            let res =
-              if String.equal name "fork"
-              then (
-                let res =
-                  turn
-                  @@ Fork.history
-                       ~history:(List.append history_so_far [])
-                       ~arguments
-                       call_id
-                in
-                [ List.last_exn res ]
-                |> List.filter_map ~f:(function
-                  | Res.Item.Output_message o ->
-                    Some
-                      (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
-                  | _ -> None)
-                |> String.concat ~sep:"\n")
-              else fn arguments
-            in
+            let res = run_tool () in
             let p, r = Eio.Promise.create () in
             Eio.Promise.resolve_ok r res;
             p)
@@ -977,27 +1116,50 @@ let run_completion_stream_in_memory_v1
               Eio.Semaphore.acquire s;
               Fun.protect
                 ~finally:(fun () -> Eio.Semaphore.release s)
-                (fun () ->
-                   if String.equal name "fork"
-                   then (
-                     let res =
-                       turn
-                       @@ Fork.history
-                            ~history:(List.append history_so_far [])
-                            ~arguments
-                            call_id
-                     in
-                     [ List.last_exn res ]
-                     |> List.filter_map ~f:(function
-                       | Res.Item.Output_message o ->
-                         Some
-                           (List.map o.content ~f:(fun c -> c.text)
-                            |> String.concat ~sep:" ")
-                       | _ -> None)
-                     |> String.concat ~sep:"\n")
-                   else fn arguments))
+                (fun () -> run_tool ()))
         in
-        pending_calls := { seq; call_id; promise } :: !pending_calls;
+        pending_calls := { seq; call_id; kind = `Function; promise } :: !pending_calls;
+        run_again := true
+    in
+    let handle_custom_tool_call_done ~item_id ~input =
+      match Hashtbl.find func_info item_id with
+      | None -> ()
+      | Some (name, call_id) ->
+        let seq = List.length !pending_calls in
+        let call_item : Openai.Responses.Item.t =
+          Tool_call.call_item
+            ~kind:Tool_call.Kind.Custom
+            ~name
+            ~payload:input
+            ~call_id
+            ~id:(Some item_id)
+        in
+        add_item call_item;
+        let run_tool () =
+          Tool_call.run_tool
+            ~kind:Tool_call.Kind.Custom
+            ~name
+            ~payload:input
+            ~call_id
+            ~tool_tbl
+            ~on_fork:None
+        in
+        let promise =
+          if not parallel_tool_calls
+          then (
+            let res = run_tool () in
+            let p, r = Eio.Promise.create () in
+            Eio.Promise.resolve_ok r res;
+            p)
+          else
+            Eio.Fiber.fork_promise ~sw (fun () ->
+              let s = Lazy.force sem in
+              Eio.Semaphore.acquire s;
+              Fun.protect
+                ~finally:(fun () -> Eio.Semaphore.release s)
+                (fun () -> run_tool ()))
+        in
+        pending_calls := { seq; call_id; kind = `Custom; promise } :: !pending_calls;
         run_again := true
     in
     (* Streaming callback – keep minimal book-keeping for tool-calls while
@@ -1009,6 +1171,9 @@ let run_completion_stream_in_memory_v1
          | Openai.Responses.Response_stream.Item.Function_call fc ->
            let idx = Option.value fc.id ~default:fc.call_id in
            Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
+         | Openai.Responses.Response_stream.Item.Custom_function tc ->
+           let idx = Option.value tc.id ~default:tc.call_id in
+           Hashtbl.set func_info ~key:idx ~data:(tc.name, tc.call_id)
          | Openai.Responses.Response_stream.Item.Reasoning r ->
            Hashtbl.set reasoning_state ~key:r.id ~data:0
          | _ -> ());
@@ -1024,7 +1189,11 @@ let run_completion_stream_in_memory_v1
       | Function_call_arguments_done { item_id; arguments; _ } ->
         on_event ev;
         handle_function_done ~item_id ~arguments hist
+      | Custom_tool_call_input_done { item_id; input; _ } ->
+        on_event ev;
+        handle_custom_tool_call_done ~item_id ~input
       | Function_call_arguments_delta _
+      | Custom_tool_call_input_delta _
       | Reasoning_summary_text_delta _
       | Output_text_delta _ -> on_event ev
       | _ -> ()
@@ -1058,7 +1227,7 @@ let run_completion_stream_in_memory_v1
         List.sort !pending_calls ~compare:(fun a b -> Int.compare a.seq b.seq)
       in
       (* If no tool calls were made, we can return the history immediately. *)
-      List.iteri sorted_calls ~f:(fun i { seq = _; call_id; promise } ->
+      List.iteri sorted_calls ~f:(fun i { seq = _; call_id; kind; promise } ->
         let result = Eio.Promise.await_exn promise in
         let system_event_msg =
           match i, system_event with
@@ -1080,19 +1249,38 @@ let run_completion_stream_in_memory_v1
         let result =
           if String.is_empty system_event_msg
           then result
-          else Printf.sprintf "%s\n\n-------------\n\n%s" result system_event_msg
+          else (
+            match result with
+            | Output.Text t ->
+              Output.Text (Printf.sprintf "%s\n\n-------------\n\n%s" t system_event_msg)
+            | Content c ->
+              Content
+                (Input_text
+                   { text =
+                       Printf.sprintf
+                         "%s\n\n-------------\n\n%s"
+                         (String.concat
+                            ~sep:"\n"
+                            (List.map c ~f:(function
+                               | Input_text { text } -> text
+                               | Input_image { image_url; _ } ->
+                                 Printf.sprintf "<image src=\"%s\" />" image_url)))
+                         system_event_msg
+                   }
+                 :: c))
         in
-        let fn_out : Openai.Responses.Function_call_output.t =
-          { output = result
-          ; call_id
-          ; _type = "function_call_output"
-          ; id = None
-          ; status = None
-          }
-        in
-        let fn_out_item = Openai.Responses.Item.Function_call_output fn_out in
-        add_item fn_out_item;
-        on_fn_out fn_out);
+        match kind with
+        | `Function ->
+          let fn_out = Tool_call.function_call_output ~call_id ~output:result in
+          let item = Openai.Responses.Item.Function_call_output fn_out in
+          add_item item;
+          on_fn_out fn_out;
+          on_tool_out item
+        | `Custom ->
+          let out = Tool_call.custom_tool_call_output ~call_id ~output:result in
+          let item = Openai.Responses.Item.Custom_tool_call_output out in
+          add_item item;
+          on_tool_out item);
       let hist = List.append hist (List.rev !new_items) in
       if !run_again then turn hist else hist
     with
@@ -1104,9 +1292,16 @@ let run_completion_stream_in_memory_v1
          ^ "\n"
          ^ Jsonaf.to_string json
          ^ "\n");
+      Io.log
+        ~dir:(Eio.Stdenv.cwd env)
+        ~file:"raw-openai-streaming-response-json-parsing-error.txt"
+        (Printf.sprintf "Error parsing JSON from line: %s" (Core.Exn.to_string exn)
+         ^ "\n"
+         ^ Jsonaf.to_string json
+         ^ "\n");
       Eio.Time.sleep (Eio.Stdenv.clock env) 0.1;
       (* give the log time to flush *)
-      turn hist
+      failwith (Core.Exn.to_string exn)
   in
   let full_history = turn history in
   Cache.save ~file:cache_file cache;

@@ -102,7 +102,7 @@ let%expect_test "parallel_tool_calls_basic_flow" =
   let patches_out2 =
     Stream.handle_fn_out
       ~model:m
-      { output = "result2"
+      { output = Res.Tool_output.Output.Text "result2"
       ; call_id = "call-2"
       ; _type = "function_call_output"
       ; id = None
@@ -113,7 +113,7 @@ let%expect_test "parallel_tool_calls_basic_flow" =
   let patches_out1 =
     Stream.handle_fn_out
       ~model:m
-      { output = "result1"
+      { output = Res.Tool_output.Output.Text "result1"
       ; call_id = "call-1"
       ; _type = "function_call_output"
       ; id = None

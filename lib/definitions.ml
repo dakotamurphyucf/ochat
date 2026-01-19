@@ -31,6 +31,7 @@ module Get_contents : Ochat_function.Def with type input = string * int option =
   type input = string * int option
 
   let name = "read_file"
+  let type_ = "function"
 
   let description =
     Some
@@ -89,6 +90,7 @@ module Meta_refine : Ochat_function.Def with type input = string * string = stru
   type input = string * string
 
   let name = "meta_refine"
+  let type_ = "function"
 
   let description =
     Some
@@ -145,6 +147,7 @@ module Index_markdown_docs :
   type input = string * string * string * string option
 
   let name = "index_markdown_docs"
+  let type_ = "function"
 
   let description =
     Some "Index a directory of Markdown files into a vector database for semantic search"
@@ -198,6 +201,7 @@ struct
   type input = string * int option * string option * string option
 
   let name = "markdown_search"
+  let type_ = "function"
 
   let description =
     Some
@@ -292,6 +296,7 @@ struct
   type input = string * int option * string option * string
 
   let name = "odoc_search"
+  let type_ = "function"
 
   let description =
     Some
@@ -384,6 +389,7 @@ module Fork : Ochat_function.Def with type input = fork_input = struct
 
   type input = fork_input
 
+  let type_ = "function"
   let name = "fork"
 
   let description =
@@ -461,6 +467,7 @@ module Webpage_to_markdown : Ochat_function.Def with type input = string = struc
   type input = string
 
   let name = "webpage_to_markdown"
+  let type_ = "function"
 
   let description =
     Some "Download a web page and return its contents converted to Markdown"
@@ -491,6 +498,7 @@ end
 module Add_line_numbers : Ochat_function.Def with type input = string = struct
   type input = string
 
+  let type_ = "function"
   let name = "add_line_numbers"
   let description = Some "add line numbers to a snippet of text"
 
@@ -518,6 +526,7 @@ end
 module Get_url_content : Ochat_function.Def with type input = string = struct
   type input = string
 
+  let type_ = "function"
   let name = "get_url_content"
   let description = Some "get the contents of a URL"
 
@@ -548,6 +557,7 @@ module Index_ocaml_code : Ochat_function.Def with type input = string * string =
   type input = string * string
 
   let name = "index_ocaml_code"
+  let type_ = "function"
 
   let description =
     Some
@@ -591,6 +601,7 @@ module Query_vector_db :
   type input = string * string * int * string option
 
   let name = "query_vector_db"
+  let type_ = "function"
   let description = Some "Query a vector database for code snippets given a user query"
 
   let parameters : Jsonaf.t =
@@ -643,6 +654,7 @@ module Apply_patch : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "apply_patch"
+  let type_ = "custom"
 
   let description =
     Some
@@ -722,26 +734,48 @@ Pre-conditions
 |}
   ;;
 
+  let apply_patch_grammar =
+    {|start: begin_patch hunk+ end_patch
+begin_patch: "*** Begin Patch" LF
+end_patch: "*** End Patch" LF?
+
+hunk: add_hunk | delete_hunk | update_hunk
+add_hunk: "*** Add File: " filename LF add_line+
+delete_hunk: "*** Delete File: " filename LF
+update_hunk: "*** Update File: " filename LF change_move? change?
+
+filename: /(.+)/
+add_line: "+" /(.*)/ LF -> line
+
+change_move: "*** Move to: " filename LF
+change: (change_context | change_line)+ eof_line?
+change_context: ("@@" | "@@ " /(.+)/) LF
+change_line: ("+" | "-" | " ") /(.*)/ LF
+eof_line: "*** End of File" LF
+
+%import common.LF
+|}
+  ;;
+
   let parameters : Jsonaf.t =
     `Object
-      [ "type", `String "object"
-      ; ( "properties"
-        , `Object
-            [ ( "patch"
-              , `Object
-                  [ "type", `String "string"
-                  ; ( "description"
-                    , `String "The apply_patch command that you wish to execute." )
-                  ] )
-            ] )
-      ; "required", `Array [ `String "patch" ]
-      ; "additionalProperties", `False
+      [ "type", `String "grammar"
+      ; "syntax", `String "lark"
+      ; "definition", `String apply_patch_grammar
       ]
   ;;
 
   let input_of_string s =
-    let j = Jsonaf.of_string s in
-    Jsonaf.string_exn @@ Jsonaf.member_exn "patch" j
+    match Or_error.try_with (fun () -> Jsonaf.of_string s) with
+    | Ok (`String str) -> str
+    | Ok j ->
+      (match Jsonaf.member "patch" j with
+       | Some v -> Jsonaf.string_exn v
+       | None ->
+         (match Jsonaf.member "input" j with
+          | Some v -> Jsonaf.string_exn v
+          | None -> s))
+    | Error _ -> s
   ;;
 end
 
@@ -760,6 +794,7 @@ module Append_to_file : Ochat_function.Def with type input = string * string = s
       appended block always starts on its own line. *)
   type input = string * string
 
+  let type_ = "function"
   let name = "append_to_file"
 
   let description =
@@ -821,6 +856,7 @@ module Find_and_replace :
       runtime implementation to act upon. *)
   type input = string * string * string * bool
 
+  let type_ = "function"
   let name = "find_and_replace"
 
   let description =
@@ -900,6 +936,7 @@ module Read_directory : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "read_directory"
+  let type_ = "function"
 
   let description =
     Some "Read the contents of a directory and return a list of files and directories."
@@ -937,6 +974,7 @@ module Make_dir : Ochat_function.Def with type input = string = struct
   type input = string
 
   let name = "mkdir"
+  let type_ = "function"
   let description = Some "Create a directory at the specified path."
 
   let parameters : Jsonaf.t =
@@ -948,6 +986,35 @@ module Make_dir : Ochat_function.Def with type input = string = struct
               , `Object
                   [ "type", `String "string"
                   ; "description", `String "The path of the directory to create."
+                  ] )
+            ] )
+      ; "required", `Array [ `String "path" ]
+      ; "additionalProperties", `False
+      ]
+  ;;
+
+  let input_of_string s =
+    let j = Jsonaf.of_string s in
+    Jsonaf.string_exn @@ Jsonaf.member_exn "path" j
+  ;;
+end
+
+module Import_image : Ochat_function.Def with type input = string = struct
+  type input = string
+
+  let name = "import_image"
+  let type_ = "function"
+  let description = Some "Import an image from the specified path."
+
+  let parameters : Jsonaf.t =
+    `Object
+      [ "type", `String "object"
+      ; ( "properties"
+        , `Object
+            [ ( "path"
+              , `Object
+                  [ "type", `String "string"
+                  ; "description", `String "The path of the image to import."
                   ] )
             ] )
       ; "required", `Array [ `String "path" ]

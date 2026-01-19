@@ -8,7 +8,9 @@
 
     • [name] – unique identifier that the language model uses.
     • [description] – one-paragraph human-readable summary.
-    • [parameters] – JSON schema (draft-07) of the expected input.
+    • [parameters] – JSON schema (draft-07) of the expected input for
+      standard function tools, or a custom tool “format” object for
+      tools with [type_ = "custom"].
     • [input_of_string] – converts the JSON payload returned by the
       API into a strongly-typed OCaml value.
 
@@ -107,3 +109,5 @@ module Index_markdown_docs :
 
 module Markdown_search :
   Ochat_function.Def with type input = string * int option * string option * string option
+
+module Import_image : Ochat_function.Def with type input = string

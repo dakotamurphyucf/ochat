@@ -16,6 +16,7 @@
 *)
 
 open Core
+module Output = Openai.Responses.Tool_output.Output
 
 module Url_key = struct
   type t = string [@@deriving sexp, bin_io, hash, compare]
@@ -36,5 +37,7 @@ let register ~env ~dir:_ ~net : Ochat_function.t =
     with
     | exn -> Printf.sprintf "Error fetching %s: %s\n" url (Exn.to_string exn)
   in
-  Ochat_function.create_function (module Definitions.Webpage_to_markdown) run
+  Ochat_function.create_function
+    (module Definitions.Webpage_to_markdown)
+    (fun url -> Output.Text (run url))
 ;;

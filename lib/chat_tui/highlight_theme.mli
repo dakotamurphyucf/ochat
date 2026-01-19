@@ -91,4 +91,3 @@ val github_dark : t
       ()
     ]} *)
 val attr_of_scopes : t -> scopes:string list -> Notty.A.t
-

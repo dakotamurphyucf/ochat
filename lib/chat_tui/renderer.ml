@@ -215,12 +215,6 @@ module Render_context = struct
     { width; selected; role; tool_output; hi_engine }
   ;;
 
-  (*
-     Message content lines are rendered without an inline role label so that
-    copying code or text from the terminal does not include
-    "assistant: "/"user: " prefixes.  The role is rendered separately as a
-    header line above the message body.
-  *)
   let prefix_first _t = ""
   let prefix_cont _t = ""
 end
@@ -581,6 +575,7 @@ module Message = struct
     | Some p ->
       (match lang_of_path p with
        | None -> render_body_default ctx ~role ~text
+       | Some "markdown" -> render_body_default ctx ~role ~text
        | Some lang ->
          let klass =
            if Roles.is_toollike role then Code_cache2.Toollike else Code_cache2.Userlike
