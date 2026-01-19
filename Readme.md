@@ -388,7 +388,7 @@ Planned and experimental directions include:
 
 - **Custom Ocaml functions as tools via Dune plugins**  \
   A planned direction is to expose custom OCaml
-  functions as tools via [Dune plugins](https://dune.build/plugins).
+  functions as tools via [Dune plugins](https://dune.readthedocs.io/en/stable/sites.html#plugins).
 
 All of these directions share the same goal: make agents more reliable, 
 composable, and expressive **without** sacrificing the “everything is a text file” property
