@@ -386,6 +386,10 @@ Planned and experimental directions include:
   that agents can write and execute via a tool call, and can be embed inside ChatMD files for small,
   deterministic pieces of logic. Since it is strongly typed with full type inference, it provides a simple way to express logic without sacrificing safety or auditability. You can provide code execution capablities with high confidence, and provide a powerful tool for agents to express complex logic 
 
+- **Custom Ocaml functions as tools via Dune plugins**  \
+  A planned direction is to expose custom OCaml
+  functions as tools via [Dune plugins](https://dune.build/plugins).
+
 All of these directions share the same goal: make agents more reliable, 
 composable, and expressive **without** sacrificing the “everything is a text file” property
 that makes ChatMD workflows easy to debug and version‑control.
