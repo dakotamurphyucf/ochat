@@ -6,8 +6,14 @@ Philosophy
 - Composable, safe defaults: deny before auto-fix, once-per-session opt-in, cooldowns to avoid loops, explicit priorities.
 
 New top-level blocks
-1) <rules> … </rules> — event-driven behaviors (periodic reminders, triggers, auto-compaction, etc.)
-2) <policy> … </policy> — per-tool constraints (prerequisites, input invariants, quotas)
+1) event-driven behaviors (periodic reminders, triggers, auto-compaction, etc.)
+ ```xml
+ <rules> … </rules> 
+ ```
+2) per-tool constraints (prerequisites, input invariants, quotas)
+```xml
+<policy> … </policy>
+```
 
 Core mental model: Events → Guards → Actions
 - Event types (initial set):
@@ -39,23 +45,39 @@ Expression language (small, predictable)
 - Determinism: no network side-effects in expressions; time only for cooldown comparisons.
 
 Actions
-- <insert role="user|assistant|developer|system" synthetic="true" via_rule="id">…markdown…</insert>
+- ```xml
+  <insert role="user|assistant|developer|system" synthetic="true" via_rule="id">…markdown…</insert>
+  ```
   - Appends a message block at that point; “synthetic” and “via_rule” annotate provenance.
-- <deny reason="…"/>
+- ```xml
+  <deny reason="…"/>
+  ```
   - Only valid in pre_tool_call; prevents the call and emits a <tool_response status="error"> with the reason, plus an optional developer reminder.
-- <call tool="NAME" via_rule="id">{"json": "args"}</call>
+- ```xml
+  <call tool="NAME" via_rule="id">{"json": "args"}</call>
+  ```
   - Triggers a tool call; materialized as <tool_call> / <tool_response> with via_rule annotation. For safety, default max one auto-call per event unless overridden.
-- <agent src="…">…</agent>
+- ```xml
+  <agent src="…">…</agent>
+  ```
   - Equivalent to the existing inline agent; action form allows using it in reaction to events.
-- <compact keep="system,developer,latest:6" strategy="relevance+summary" threshold_tokens="40000"/>
+- ```xml
+  <compact keep="system,developer,latest:6" strategy="relevance+summary" threshold_tokens="40000"/>
+  ```
   - Invokes the built-in compaction pipeline; replaces history per existing semantics and appends a small developer note marking compaction.
-- <set var="name" value="expr"/>
+- ```xml
+  <set var="name" value="expr"/>
+  ```
   - Sets a session-scoped runtime variable available to expressions.
-- <stop/>
+- ```xml
+  <stop/>
+  ```
   - Stop further rules for this event.
 
 Rule wiring and safety
-- <on event="…" [tool="NAME|*"] [if="…"] [priority="0"] [once="false"] [cooldown_turns="0"] [cooldown_ms="0"]>…actions…</on>
+- ```xml
+  <on event="…" [tool="NAME|*"] [if="…"] [priority="0"] [once="false"] [cooldown_turns="0"] [cooldown_ms="0"]>…actions…</on>
+  ```
   - Rules run in ascending priority; within the same priority, source order.
   - once="true": only fire the first time the guard holds this session.
   - cooldown_*: prevent repeated firings.
@@ -67,14 +89,17 @@ Tool policy (gatekeeping and invariants)
 Simple, per-tool declarations collected under a <policy> block; avoids changing <tool …/> syntax.
 
 - Prerequisites:
+  ```xml
   <policy>
     <tool name="X">
       <requires tools="Y,Z" mode="enforce"/>  <!-- or mode="warn" -->
     </tool>
   </policy>
+  ```
   Semantics: On pre_tool_call for X, if not ever_called("Y") or not ever_called("Z"), the runtime denies with a clear <tool_response status="error"> unless mode="warn".
 
 - Input invariants (guards):
+  ```xml
   <policy>
     <tool name="translate">
       <validate level="error">
@@ -83,20 +108,24 @@ Simple, per-tool declarations collected under a <policy> block; avoids changing 
       </validate>
     </tool>
   </policy>
+  ```
   Semantics: Checks are evaluated before execution. level="error" denies; level="warn" lets it proceed but appends a developer note.
 
 - Quotas and cool-downs:
+  ```xml
   <policy>
     <tool name="apply_patch">
       <quota per_turn="1" per_session="10"/>
       <cooldown turns="1"/>
     </tool>
   </policy>
+  ```
   Semantics: Enforced via pre_tool_call denial with a specific reason.
 
 Representative examples for your use cases
 
 1) Every N messages, insert a user reminder
+```xml
 <rules>
   <on id="periodic-reminder"
       event="turn_start"
@@ -106,15 +135,18 @@ Representative examples for your use cases
     </insert>
   </on>
 </rules>
-
+```
 2) Tool X only after Y and Z have been called
+```xml
 <policy>
   <tool name="X">
     <requires tools="Y,Z" mode="enforce"/>
   </tool>
 </policy>
+```
 
 Optional, friendlier variant that suggests the fix:
+```xml
 <rules>
   <on id="x-prereqs"
       event="pre_tool_call"
@@ -126,8 +158,10 @@ Optional, friendlier variant that suggests the fix:
     </insert>
   </on>
 </rules>
+```
 
 3) Invariants on tool call inputs
+```xml
 <policy>
   <tool name="translate">
     <validate level="error">
@@ -138,9 +172,11 @@ Optional, friendlier variant that suggests the fix:
     </validate>
   </tool>
 </policy>
+```
 
 4) Do B whenever A happens
 - After odoc_search succeeds, call markdown_search to enrich results:
+```xml
 <rules>
   <on id="enrich-search" event="post_tool_response"
       tool="odoc_search"
@@ -150,8 +186,10 @@ Optional, friendlier variant that suggests the fix:
     </call>
   </on>
 </rules>
+```
 
 - After apply_patch error, insert a developer hint:
+```xml
 <rules>
   <on id="patch-help" event="post_tool_response"
       tool="apply_patch"
@@ -161,8 +199,10 @@ Optional, friendlier variant that suggests the fix:
     </insert>
   </on>
 </rules>
+```
 
 5) Compact context over a threshold
+```xml
 <rules>
   <on id="auto-compact"
       event="turn_end"
@@ -173,9 +213,10 @@ Optional, friendlier variant that suggests the fix:
              strategy="relevance+summary"/>
   </on>
 </rules>
+```
 
 Simplicity and backward compatibility
-- Pure additive: existing ChatMD files continue to work unchanged; <rules> and <policy> are optional.
+- Pure additive: existing ChatMD files continue to work unchanged; `<rules>` and `<policy>` are optional.
 - Minimal surface:
   - Two blocks, one small expression language, a handful of actions.
   - No templating or hidden mutations; everything appears as normal ChatMD elements with provenance attributes.
@@ -185,7 +226,7 @@ Simplicity and backward compatibility
   - Max one action per event unless you opt in to more.
 
 Runtime integration plan (high-level)
-- Parser: Add <rules>/<policy> nodes; allow both self-closing and block forms for future growth.
+- Parser: Add `<rules>/<policy>` nodes; allow both self-closing and block forms for future growth.
 - Driver hooks:
   - fire turn_start before assembling request to OpenAI,
   - intercept pre_tool_call to enforce policy and validations,
@@ -195,7 +236,7 @@ Runtime integration plan (high-level)
 - Evaluator: deterministic order (priority then source order); guard eval with a sandbox; enforce max_actions_per_event.
 - Materialization:
   - All actions append standard ChatMD blocks with synthetic="true" and via_rule="…".
-  - pre_tool_call deny emits a <tool_response status="error"> with reason.
+  - pre_tool_call deny emits a `<tool_response status="error">` with reason.
 - Observability: optional trace line in a developer message whenever a rule fires and what it did; helpful in CI diffs.
 
 Why this design hits the goals
