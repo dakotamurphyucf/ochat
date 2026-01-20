@@ -7,33 +7,6 @@
  <img src="assets/demo.gif" alt="chat_tui demo" height="700" width="900"/>
 </div>
 
----
-
-## Migration checklist (from current Readme.md)
-
-This checklist tracks which sections of the original `Readme.md` have been migrated into this file or into dedicated docs under `docs-src/`.
-
-- [x] Why Ochat?
-- [x] Quick Start
-- [x] 30-second smoke-test — ochat chat-completion
-- [x] `ochat chat-completion` – script-friendly cousin of chat_tui
-- [x] Hands-on tutorial – your first ChatMD workflow
-- [x] ChatMarkdown ( ChatMD ) language
-- [x] Tools
-- [x] chat_tui – interactive terminal client
-- [x] MCP server – turn prompts into remote tools
-- [x] Search, indexing & code-intelligence
-- [x] Binaries cheat-sheet
-- [x] Embedding the libraries
-- [x] Key concepts & glossary
-- [x] Meta-prompting & self-improvement
-- [x] Project layout
-- [x] License
-- [x] Project status
-
-As the refactor proceeds, check items off and add any new sections that emerge.
-
----
 
 ## What is Ochat?
 
@@ -84,17 +57,93 @@ If you want the OCaml-specific entry points (embedding as a library, OCaml API d
 
   You can mix:
 
-  - **built-in tools** for common building blocks: file reads/writes and patch application (`read_dir`, `get_contents`, `apply_patch`), fetch webpage + HTML→Markdown conversion (`webpage_to_markdown`), local semantic search over docs (`markdown_search`, `odoc_search`), and vector DB retrieval (`query_vector_db`),
+  - **built-in tools** for common building blocks:
+    - repo-safe editing: `apply_patch`
+    - filesystem reads: `read_dir` (directory listing), `read_file` *(alias: `get_contents`)*
+    - web ingestion: `webpage_to_markdown` (HTML → Markdown + GitHub blob fast-path)
+    - local semantic search over docs: `index_markdown_docs` + `markdown_search`, and `odoc_search`
+    - hybrid retrieval over code: `index_ocaml_code` + `query_vector_db`
+    - vision inputs: `import_image` (bring local screenshots/diagrams into the model)
   - **custom shell tools** to wrap any command you already trust (`git`, `rg`, linters, internal CLIs…), and
   - **remote MCP tools** to import capabilities from other servers (or to export your own prompt pack as tools) like this:
   
     ```xml
-    <tool mcp_server="stdio:npx -y brave-search-mcp" />.
+    <tool mcp_server="stdio:npx -y brave-search-mcp" />
     ```
 
   - **agent-as-tool**: mount other `.md` files as tools inside a prompt.
   
   See [Tools – built-ins, custom helpers & MCP](docs-src/overview/tools.md).
+
+- **Tools & capabilities (quick tour)**  
+  These are the features most users care about on day 1—each with a minimal example.
+
+  **1) Atomic repo edits with `apply_patch`**
+
+  Declare:
+  ```xml
+  <tool name="apply_patch"/>
+  ```
+  Tool calls pass a single patch string (V4A format):
+  ```text
+  {
+    "patch": "*** Begin Patch\n*** Update File: path/to/file\n...\n*** End Patch"
+  }
+  ```
+  Why it’s great: you get **reviewable, multi-file, atomic** edits instead of ad-hoc mutations.
+
+  **2) Read files safely with `read_file` (alias: `get_contents`)**
+
+  Declare:
+  ```xml
+  <tool name="read_file"/>
+  ```
+  Notes: `read_file` refuses binary-ish content and truncates large files to keep context bounded.
+
+  **3) Ingest web pages (and GitHub code slices) with `webpage_to_markdown`**
+
+  Declare:
+  ```xml
+  <tool name="webpage_to_markdown"/>
+  ```
+  Works especially well on GitHub blob URLs with line ranges, e.g.:
+  - `https://github.com/owner/repo/blob/main/lib/foo.ml#L10-L80`
+
+  **4) Prompt-as-tool: mount a `.chatmd` workflow as a callable tool**
+
+  Declare:
+  ```xml
+  <tool name="triage" agent="prompts/triage.chatmd" local/>
+  ```
+  Why it’s great: build *small specialized agents* (triage, planner, doc-writer) and compose them.
+
+  **5) “Docs RAG” over your project Markdown**
+
+  Declare:
+  ```xml
+  <tool name="index_markdown_docs"/>
+  <tool name="markdown_search"/>
+  ```
+  Typical flow: index once (per repo), then query in natural language to pull high-signal snippets from your docs.
+
+  **6) Bring screenshots/diagrams into the model with `import_image`**
+
+  Declare:
+  ```xml
+  <tool name="import_image"/>
+  ```
+  Example payload:
+  ```json
+  { "path": "assets/screenshot.png" }
+  ```
+
+  **7) Import tools from elsewhere via MCP**
+
+  Declare:
+  ```xml
+  <tool mcp_server="https://tools.acme.dev" includes="weather,stock_ticker"/>
+  ```
+  Why it’s great: share tool catalogs across environments (local, container, CI) without changing prompts.
 
 - **Build Claude Code/Codex-style agentic applications via custom “prompt packs”**  
   You can implement this as a set of specialized agents (planning agent, coding agent, test agent, doc agent…) and wire them together in an orchestration agent via agent-as-tool. The “application” is just a set of ChatMD files and you can run it via the terminal ui (`chat_tui`) or via the chat-completion CLI (`ochat chat-completion`).
@@ -123,7 +172,7 @@ Turn a `.md` file into a refactoring bot that reads files and applies patches un
 <config model="gpt-4o" temperature="0"/>
 
 <tool name="read_dir"/>
-<tool name="get_contents"/>
+<tool name="read_file"/>
 <tool name="apply_patch"/>
 
 <system>
@@ -145,7 +194,7 @@ dune exec chat_tui -- -file prompts/refactor.md
 ```
 
 From there you can ask the assistant to rename a function, extract a helper, or
-update documentation. It will use `read_dir` and `get_contents` to inspect the
+update documentation. It will use `read_dir` and `read_file` to inspect the
 code, then generate `apply_patch` diffs and apply them, with every tool call
 and patch recorded in the `.md` file.
 
@@ -159,7 +208,7 @@ Export a `.md` file as a remote tool that other MCP‑compatible clients can cal
 <config model="gpt-4o" temperature="0"/>
 
 <tool name="read_dir"/>
-<tool name="get_contents"/>
+<tool name="read_file"/>
 
 <system>You are a documentation assistant.</system>
 
@@ -244,7 +293,7 @@ For more on `ochat chat-completion` (flags, exit codes, ephemeral runs), see
   A Markdown + XML dialect that stores model config, tool declarations and the full conversation (including tool calls, reasoning traces and imported artefacts) in a single `.md` file. Because prompts are plain text files you can review, diff and refactor them like code, and the runtime guarantees that what the model sees is exactly what is in the document. See the [language reference](docs-src/overview/chatmd-language.md).
 
 - **Tools**  \
-  Functions the model can call, described by explicit JSON schemas. They can be built‑ins (e.g. `apply_patch`, `read_dir`), shell wrappers around commands like `rg` or `git`, other ChatMD agents, or remote MCP tools discovered from another server. (When embedding Ochat, you can also expose custom functions from your host application.) See [Tools – built‑ins, custom helpers & MCP](docs-src/overview/tools.md).
+  Functions the model can call, described by explicit JSON schemas. They can be built‑ins (e.g. `apply_patch`, `read_dir`, `read_file` *(alias: `get_contents`)*, `webpage_to_markdown`, `import_image`), shell wrappers around commands like `rg` or `git`, other ChatMD agents (prompt‑as‑tool), or remote MCP tools discovered from another server. (When embedding Ochat, you can also expose custom functions from your host application.) See [Tools – built‑ins, custom helpers & MCP](docs-src/overview/tools.md).
 
 - **Agents & prompt‑as‑tool**  \
   Any `.md` file can be treated as an agent. Locally you can call it via `<agent>` blocks or mount it as a tool inside another prompt; remotely, `mcp_server` exposes it as a `tools/call::<name>` endpoint that IDEs or other hosts can invoke. Complex workflows become graphs of small, composable agents rather than monolithic prompts.

@@ -1,183 +1,242 @@
-# Tools – built-ins, custom helpers & MCP
+# Tools – built-ins, agent tools, shell wrappers & MCP
 
-This page collects the tools-related material from the README and expands on
-how built-ins, shell wrappers, custom OCaml helpers and remote MCP tools fit
-together in ChatMD.
+This page documents **tool calling** in ochat/ChatMD: how you declare tools in a prompt, what built-ins ship with ochat, and how to extend capabilities via **agent tools**, **shell wrappers**, and **MCP** (Model Context Protocol).
 
----
-
-## Built-in toolbox
-
-| Name | Category | Description |
-|------|----------|-------------|
-| `apply_patch`         | repo      | Apply an *Ochat diff* (V4A) to the working tree |
-| `read_dir`            | fs        | List entries (non-recursive) in a directory; returns plain-text lines |
-| `get_contents`        | fs        | Read a file (UTF-8); truncates very large files and supports an optional `offset` argument |
-| `get_url_content` *(experimental)* | web       | Download a raw resource and strip HTML to text *(OCaml API only; not exposed as a ChatMD `<tool>`)* |
-| `webpage_to_markdown` | web       | Download a page & convert it to Markdown |
-| `index_ocaml_code`    | index     | Build a vector index from a source tree |
-| `index_markdown_docs` | index     | Vector-index a folder of Markdown files |
-| `odoc_search`         | docs      | Semantic search over installed OCaml API docs |
-| `markdown_search` / `md-search` | search | Query Markdown indexes created by `index_markdown_docs` (ChatMD uses `markdown_search`; `md-search` is the CLI wrapper) |
-| `query_vector_db`     | search    | Hybrid dense + BM25 search over source indices |
-| `fork`                | misc      | Reserved name for future multi-agent flows; currently implemented as a placeholder tool |
-| `mkdir` *(experimental)*               | fs        | Create a directory (idempotent) *(OCaml API only; not exposed as a ChatMD `<tool>` yet)* |
-| `append_to_file`      | fs        | Append text to a file, creating it if absent |
-| `find_and_replace`    | fs        | Replace occurrences of a string in a file (single or all) |
-| `meta_refine`         | meta      | Recursive prompt refinement utility |
-
-<details>
-<summary><strong>Deep-dive: 7 helpers that turn ChatMD into a Swiss-Army knife</strong></summary>
-
-1. **`apply_patch`** – The bread-and-butter of autonomous coding sessions.  The assistant can literally rewrite the repository while you watch.  The command understands *move*, *add*, *delete* and multi-hunk updates in one atomic transaction.
-2. **`webpage_to_markdown`** – Turns *any* public web page (incl. GitHub *blob* URLs) into clean Markdown ready for embedding or in-prompt reading.  JS-heavy sites fall back to a head-less Chromium dump.
-3. **`odoc_search`** – Semantic search over your **installed** opam packages.  Because results are fetched locally there is zero network latency – ideal for day-to-day coding.
-4. **`markdown_search`** – Complement to `odoc_search`.  Index your design docs and Wiki once; query them from ChatMD forever.
-5. **`query_vector_db`** – When you need proper hybrid retrieval (dense + BM25) over a code base.  Works hand-in-hand with `index_ocaml_code`.
-6. **`fork`** –  Reserved for future multi-agent flows.  The current implementation is a placeholder that returns a static string; treat it as experimental and do not rely on it for real workflows.
-7. **`mkdir`** *(experimental)* – Exposed today via the OCaml `Functions.mkdir` helper rather than as a ChatMD `<tool>`.  You can approximate it inside ChatMD via a shell wrapper or by combining `apply_patch` with pre-created directories.
-
-</details>
+Tools are **opt-in**: the model can only call what your prompt declares via `<tool .../>`.
 
 ---
 
-## Importing remote MCP tools – one line, zero friction
+## Quick start: declare tools in ChatMD
 
 ```xml
-<!-- Mount the public Brave Search toolbox exposed by *npx brave-search-mcp* -->
+<!-- Built-ins -->
+<tool name="apply_patch"/>
+<tool name="read_dir"/>
+<tool name="read_file"/> <!-- alias: get_contents -->
+<tool name="webpage_to_markdown"/>
+
+<!-- Shell wrapper -->
+<tool name="git_status" command="git status" description="Show git status"/>
+
+<!-- Agent tool -->
+<tool name="triage" agent="prompts/triage.chatmd" local/>
+
+<!-- MCP tool catalog -->
+<tool mcp_server="stdio:npx -y brave-search-mcp"/>
+```
+
+---
+
+## Built-in tools
+
+### Recommended core set (start here)
+
+This set covers most real-world sessions (codebase navigation, retrieval, and safe edits):
+
+- **`apply_patch`** – atomic multi-file edits in a structured patch format.
+- **`read_file`** *(declare as `read_file` or `get_contents`)* – safe file reads with truncation + optional offset.
+- **`read_directory`** *(declare as `read_dir`)* – list directory entries without guessing paths.
+- **`webpage_to_markdown`** – ingest web pages and GitHub blob URLs as Markdown.
+- **`index_markdown_docs` + `markdown_search`** – semantic search over project Markdown docs.
+- **`index_ocaml_code` + `query_vector_db`** – hybrid retrieval over code indices (dense + BM25 overlay).
+- **`odoc_search`** – semantic search over locally indexed OCaml docs.
+- **`import_image`** – load a local image as a vision input (screenshots, diagrams).
+
+### Built-in catalog (code-correct)
+
+There are two names to be aware of:
+
+1. **ChatMD declaration name**: what you write in `<tool name="…"/>`.
+2. **Tool name the model sees**: what is advertised to the model and what it will call.
+
+Some tools have **declaration aliases** for compatibility.
+
+| ChatMD `<tool name="…"/>` | Model sees | Category | What it does |
+|---|---|---|---|
+| `apply_patch` | `apply_patch` | repo | Apply an atomic V4A patch (adds/updates/deletes/moves text files). |
+| `read_dir` | `read_directory` | fs | List directory entries (non-recursive) as newline-delimited text. |
+| `read_file` **or** `get_contents` | `read_file` | fs | Read a UTF-8 text file with truncation and optional `offset`. Refuses binary files. |
+| `append_to_file` | `append_to_file` | fs | Append text to a file (inserts a newline before the appended content). |
+| `find_and_replace` | `find_and_replace` | fs | Replace an exact substring in a file (single or all occurrences). |
+| `webpage_to_markdown` | `webpage_to_markdown` | web | Download a page and convert it to Markdown (includes a GitHub blob fast-path). |
+| `index_ocaml_code` | `index_ocaml_code` | index | Build a vector index from an OCaml source tree. |
+| `query_vector_db` | `query_vector_db` | search | Hybrid retrieval over code indices (dense + BM25 overlay). |
+| `index_markdown_docs` | `index_markdown_docs` | index | Index a folder of Markdown docs into a vector DB (default root: `.md_index`). |
+| `markdown_search` | `markdown_search` | search | Semantic search over Markdown indices created by `index_markdown_docs`. |
+| `odoc_search` | `odoc_search` | docs | Semantic search over locally indexed odoc docs. |
+| `meta_refine` | `meta_refine` | meta | Recursive meta-prompt refinement flow. |
+| `import_image` | `import_image` | vision | Load a local image file and return a vision input item (data URI). |
+| `fork` | `fork` | misc | Reserved name; currently a placeholder tool (do not rely on it). |
+
+#### Built-in behavior notes (practical gotchas)
+
+- **Naming/aliases**:
+  - declaring `<tool name="read_dir"/>` exposes a tool the model calls as `read_directory`.
+  - declaring `<tool name="get_contents"/>` exposes a tool the model calls as `read_file`.
+- **`read_file` truncation**: reads up to ~380,928 bytes and appends `---` + `[File truncated]` when it stops early.
+- **`read_file` binary refusal**: binary-like content is rejected to avoid polluting context.
+- **`append_to_file` always appends** (it does not deduplicate).
+- **`find_and_replace` with `all=false` and multiple matches** returns an error string advising to use `apply_patch`.
+
+#### Library-only helpers (not mountable as ChatMD built-ins by default)
+
+ochat’s OCaml library contains additional tool implementations (e.g. `mkdir`, `get_url_content`, `add_line_numbers`), but they are **not exposed via `<tool name="…"/>`** unless you:
+
+- add them to the built-in dispatcher, or
+- expose them via an MCP server, or
+- register them directly when embedding ochat as a library.
+
+---
+
+## High-signal ingestion: `webpage_to_markdown`
+
+`webpage_to_markdown` is designed for “read it once, reason on it immediately” workflows.
+
+Highlights:
+
+- Converts generic HTML pages into Markdown.
+- Special-cases **GitHub blob URLs**:
+  - automatically fetches from `raw.githubusercontent.com`
+  - respects line anchors like `#L10-L80`
+  - returns code slices wrapped in fenced blocks with line numbers
+- Caches results for a short TTL to make repeated calls to the same URL fast.
+
+Example:
+
+```xml
+<tool name="webpage_to_markdown"/>
+```
+
+---
+
+## Agent tools – turn prompts into callable sub-agents
+
+Agent tools mount a `*.chatmd` prompt as a callable tool. This is the fastest way to build repeatable “mini workflows” without writing code.
+
+```xml
+<!-- Local agent prompt (relative to the prompt directory) -->
+<tool name="triage" agent="prompts/triage.chatmd" local/>
+```
+
+Behavior:
+
+- Input schema is fixed: `{ "input": "..." }`.
+- The agent runs in a fresh sub-conversation (no inherited message history), but with the same execution context (filesystem root, network access, etc.).
+- The tool returns the agent’s final answer as tool output.
+
+When to use:
+
+- Decompose complex work (triage, summarization, planning, specialized refactors).
+- Keep your main conversation focused while a specialized prompt handles a subtask.
+
+---
+
+## Shell-command wrappers – the 30-second custom tool
+
+Shell wrappers expose a specific command as a function-callable tool:
+
+```xml
+<tool name="git_ls_files"
+      command="git ls-files --exclude=docs/"
+      description="Show files tracked by git except docs/"/>
+```
+
+Security note:
+
+- A `<tool command="…"/>` wrapper runs the specified binary with the full privileges of the current user.
+- Only mount shell wrappers in trusted environments, or inside a container/sandbox.
+
+Code-accurate behavior:
+
+1. The tool input schema is always:
+   ```json
+   { "arguments": ["..."] }
+   ```
+2. The declared command is executed as:
+   ```sh
+   <command> <arguments...>
+   ```
+3. stdout and stderr are captured (combined) and returned as text.
+
+Operational limits (important in practice):
+
+- Hard timeout: **60 seconds**
+- Output is truncated to a bounded size (currently ~10k characters) to avoid flooding context
+- Command parsing is intentionally simple:
+  - `%20` in `command="..."` is decoded to a space
+  - the command string is split on whitespace (do not rely on shell quoting/escaping)
+
+Design guidelines:
+
+- Prefer idempotent/read-only wrappers when possible.
+- Pin non-negotiable flags directly into `command="…"`.
+- Use clear, verb-based tool names (`git_pull`, `docker_ps`, `rg_search`) so the model can choose correctly.
+
+---
+
+## MCP tools – import remote tool catalogs
+
+MCP (Model Context Protocol) lets you mount tools from a remote server (stdio or HTTP). ochat turns each MCP tool into a normal function tool with the same JSON schema.
+
+```xml
+<!-- Mount a public MCP toolbox over stdio -->
 <tool mcp_server="stdio:npx -y brave-search-mcp"/>
 
-<!-- Or cherry-pick just two helpers from a self-hosted endpoint -->
+<!-- Or mount a subset from an HTTP endpoint -->
 <tool mcp_server="https://tools.acme.dev" includes="weather,stock_ticker"/>
 ```
 
-Ochat converts every entry returned by the server’s `tools/list` call into a
-local OCaml closure and forwards the **exact** JSON schema to OpenAI.  From the
-model’s perspective there is no difference between `weather` (remote) and
-`apply_patch` (local) – both are normal function calls.
+### Selection rules (name vs include(s))
 
-Additional attributes on `<tool mcp_server="…"/>` let you control which tools are exposed and how the client connects:
+- `name="foo"` selects a single tool and takes precedence over include(s).
+- `include="a,b"` or `includes="a,b"` selects a comma-separated subset.
+- If neither is present, **all tools** returned by `tools/list` are exposed.
 
-- `name="foo"` selects a single tool by name.
-- `includes="a,b"` or `include="a,b"` selects a comma-separated subset of tools; if neither `name` nor `include(s)` is present, all tools from `tools/list` are exposed.
-- `strict` (boolean flag) enables stricter behaviour when calling tools; see the OCaml `Mcp_tool` docs for details.
-- `client_id_env` / `client_secret_env` name environment variables whose values are injected as `client_id` / `client_secret` query parameters into the MCP server URI.
+### Connection/auth knobs
 
-> **Tip 💡** – All built-ins are **normal ChatMD tools** under the hood.  That means you can mount them remotely via MCP:
+- `strict` is a boolean flag (present/absent) controlling strict parameter handling for the wrapped MCP tool.
+- `client_id_env` / `client_secret_env` name environment variables whose values (if set) are injected as `client_id` / `client_secret` query params in the MCP server URI.
 
-```xml
-<!-- Consume read-only helpers from a sandboxed container on the CI runner -->
-<tool mcp_server="https://ci-tools.acme.dev" includes="read_dir,get_contents"/>
-```
+### Caching and refresh
 
-or hide them from the model entirely in production by simply omitting the `<tool>` declaration.  No code changes required.
+ochat caches MCP tool catalogs per server for a short TTL to avoid repeated `tools/list` calls. If the server emits `notifications/tools/list_changed`, ochat invalidates the cache and refreshes on the next access.
 
 ---
 
-## Rolling your own OCaml tool – 20 lines round-trip
+## Running ochat’s MCP server (share tools + “prompt-as-tool”)
 
-```ocaml
-open Ochat_function
+ochat includes an MCP server executable that exposes a small default set of tools and can also publish `*.chatmd` prompts as tools.
 
-module Hello = struct
-  type input = string
+Key behavior:
 
-  let def =
-    create_function
-      (module struct
-        type nonrec input = input
-        let name        = "say_hello"
-        let description = Some "Return a greeting for the supplied name"
-        let parameters  = Jsonaf.of_string
-          {|{"type":"object","properties":{"name":{"type":"string"}},"required":["name"]}|}
-        let input_of_string s =
-          Jsonaf.of_string s |> Jsonaf.member_exn "name" |> Jsonaf.string_exn
-      end)
-      (fun name -> "Hello " ^ name ^ "! 👋")
-end
+- Registers a few built-in tools (including patching, directory listing and file reading, prompt refinement, and web ingestion).
+- Scans a prompts directory (default `./prompts`, or `$MCP_PROMPTS_DIR`) and registers every `*.chatmd` file as:
+  - an MCP **prompt**, and
+  - an agent-backed MCP **tool**
 
-
-(* Gets the tools JSON and dispatch table *)
-let tools_json, dispatch =
-  Ochat_function.functions [ Hello.def ]
-
-(* If you want to add to the current drivers (Chat_tui and the chat-completion command)
- then add tool to of_declaration in lib/chat_response/tool.ml example *)
- 
-```
-
-Declare it once in ChatMD:
-
-```xml
-<tool name="say_hello"/>
-```
-
-That is **all** – the assistant can now greet users in 40+ languages without
-touching an HTTP stack.
+This enables a practical pattern: run the MCP server inside a sandbox/container/CI runner, then mount it from your interactive session via `<tool mcp_server="…"/>`.
 
 ---
 
-## Shell-command wrappers – *the 30-second custom tool*
+## Tool execution: parallel tool calls
 
-> ⚠️ **Security note** – A `<tool command="…"/>` wrapper runs the specified
-> binary with the *full privileges of the current user*.  Only mount such tools
-> in **trusted environments** or inside a container / sandbox.  Never expose
-> unrestricted shell helpers to untrusted prompts – limit the command and
-> validate the arguments instead.
+ochat can execute independent tool calls in parallel (useful when a model requests multiple reads/searches).
 
-Not every helper deserves a fully-blown OCaml module.  Often you just want to
-gate a **single shell command** behind a friendly JSON schema so the model can
-call it safely.  ChatMD does this out-of-the-box via the `command="…"`
+In the TUI this is configurable:
 
-```xml
-<!-- Pure viewer: let model know do use for write access → safe in read-only environments. (note: this is just a hint to the model. It could still call this with write ops. You need to implement proper access controls in your tool) -->
-<tool name="sed"
-      command="sed"
-      description="read-only file viewer"/>
+- `--parallel-tool-calls` (default)
+- `--no-parallel-tool-calls`
 
-<!-- Pre-pinned arguments – the model cannot escape the pattern.          -->
-<tool name="git_ls_files"
-      command="git ls-files --exclude=docs/"
-      description="show files tracked by git except docs/"/>
+---
 
-<!-- Mutation allowed, therefore keep it explicit and auditable →        -->
-<tool name="git_pull"
-      command="git pull"
-      description="fetch from and integrate with a remote repository"/>
-```
+## Extending ochat with new tools (what’s actually supported)
 
-Behaviour in a nutshell
+There are multiple extension routes depending on how you want to ship capabilities:
 
-1. The JSON schema is inferred automatically: an *array of strings* called
-   `arguments`.
-2. At run-time Ochat executes
+1. **Shell wrapper tool** (`<tool command="…"/>`): fastest way to expose a narrowly scoped command.
+2. **Agent tool** (`<tool agent="…"/>`): fastest way to expose a workflow encoded in ChatMD.
+3. **MCP tool catalog** (`<tool mcp_server="…"/>`): best for sharing tools across environments and for sandboxing.
+4. **Embedding ochat as a library**: register arbitrary `Ochat_function.t` values directly in your host program.
 
-   ```sh
-   <command> <arguments…>   # under the current working directory
-   ```
-
-3. Standard output and stderr are captured and
-   appended to the `<tool_response>` block and sent back to the assistant.  Output may be truncated and execution is subject to a timeout to avoid wedging the session.
-
-### Why wrapper tools beat *generic shell*
-
-| Aspect | Generic `sh -c` | Targeted wrapper |
-|--------|-----------------|-------------------|
-| Search space @ inference | enormous | tiny – the model only sees *git_pull* / *sed* |
-| Security                 | needs manual sandboxing | limited to pre-approved binaries |
-| Reliability              | model must remember *all* flags | happy-path baked into `command` |
-
-In practice:
-
-* **Generalist agents** benefit from one broad hammer such as `bash`, but may
-  waste tokens debating which flag to use or which command to run.
-* **Specialist agents** (e.g. *CI fixer*, *release-bot*) shine when equipped
-  with *exactly* the verbs they need — nothing more, nothing less.
-
-#### Design guidelines
-
-1. **Prefer idempotent actions**.  Read or list before you write or delete.
-2. **Embed flags** that should never change directly in `command="…"`.
-3. Add a verb-based **prefix** (`git_`, `docker_`, `kubectl_`) so the
-   language model can reason via pattern matching.
+Important note: a plain ChatMD declaration `<tool name="…"/>` (without `command=`, `agent=`, or `mcp_server=`) is treated as a **built-in**. Unknown built-in names are rejected unless you add them to ochat’s built-in dispatcher or expose them via MCP.
 
