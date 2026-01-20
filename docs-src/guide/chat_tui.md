@@ -1,323 +1,319 @@
-# chat_tui – interactive terminal client
+# chat_tui – interactive terminal client (guide + key bindings)
+
+`chat_tui` is the Notty-based terminal UI for running **ChatMarkdown** prompts interactively.
+
+- **Installed binary name:** `chat-tui`
+- **From the repo:** `dune exec chat_tui -- …`
+
+ChatMarkdown is Markdown + a small XML dialect; the runtime does **not** depend on file
+extensions, so any `.md` can be a ChatMarkdown prompt.
+
+---
+
+## chat_tui in 60 seconds
+
+`chat_tui` is designed for the “draft → run → iterate” loop:
+
+- **Multi-line drafts without accidental sends:** `Enter` inserts a newline; **`Meta+Enter` submits**.
+- **Streaming output in one place:** assistant text, tool calls, and tool outputs stream into the history viewport.
+- **Vim-ish interaction:** Insert / Normal / Cmdline modes, plus message selection and yank/edit/resubmit.
+- **Sessions you can resume/branch/export:** persistent snapshots under `$HOME/.ochat/sessions/<id>`.
+- **Manual context compaction:** `:compact` produces a concise summary so long chats stay usable.
+
+---
+
+## Launch
+
+Installed (via opam):
 
 ```console
 $ chat-tui -file prompts/interactive.md
 ```
 
-Think of **chat_tui** as the *interactive face* of your prompt-as-code
-workflow: each `.chatmd` file becomes a **self-contained agent** once you
-declare a handful of tools.  Need a refactoring bot?  Draft
-`prompts/refactor.chatmd`, mount `apply_patch`, `odoc_search` and a custom
-`shell_check` wrapper, then open the file in the TUI:
+From the repo:
 
 ```console
-$ chat-tui -file prompts/refactor.chatmd
+$ dune exec chat_tui -- -file prompts/interactive.md
 ```
 
-No servers to deploy, no runtime config – the static files plus your shell or
-OCaml tool implementations *are* the application.  The same technique scales
-from a quick one-off helper up to a fleet of purpose-built agents (release
-manager, design-doc auditor, knowledge-base explainer) – each living in its
-own `.chatmd` and selectable via `chat-tui`.
-
-Below is a one-page *muscle-memory* cheat-sheet distilled from the daily
-usage of the maintainers.  Print it, tape it to the wall, thank us later.
-
-| Mode | Keys (subset) | Action |
-|------|---------------|--------|
-| **Insert** | *free typing* | edit the draft prompt |
-|            | `Meta+Enter` | submit the draft |
-|            | `Esc` | switch to **Normal** mode |
-|            | `Ctrl-k / Ctrl-u / Ctrl-w` | delete to *EOL* / *BOL* / previous word |
-|            | `↑ / ↓ / PageUp / PageDown` | scroll history (disables auto-follow) |
-|            | `Meta-v` / `Meta-s` | toggle selection anchor in the draft; combine with `Ctrl-C` / `Ctrl-X` / `Ctrl-Y` |
-|            | `Ctrl-R` | toggle between plain markdown and **Raw XML** draft mode |
-| **Normal** | `j / k`, `gg / G` | navigate history; jump to top / bottom |
-|            | `dd`, `u`, `Ctrl-R` | delete line / undo / redo |
-|            | `o / O` | insert line below / above and jump into Insert |
-|            | `[` / `]` | move the **selected message** up / down |
-|            | `:` | open command-line mode |
-| **Cmd (:)** | `:w` | submit the draft (same as `Meta+Enter`) |
-|             | `:q`, `:wq` | quit the TUI (export and snapshots are handled on exit) |
-|             | `:c`, `:cmp`, `:compact` | compact context (see below) |
-|             | `:d`, `:delete` | delete selected message |
-|             | `:e`, `:edit` | copy selected message into the editor in Raw XML mode |
-
-Pro tip — use `[` / `]` in Normal mode to select the message you care
-about, then `:e` to yank its text into the draft, wrap it in e.g.
-`!apply_patch`, and submit with `Meta+Enter`.
-
-For the full keymap (including word motions and selection variants), see
-`docs-src/lib/chat_tui/controller.doc.md` and
-`docs-src/lib/chat_tui/controller_normal.doc.md`.
-
-Features
-
-* Live streaming of tool output, reasoning deltas & assistant text
-* Auto-follow & scroll-history with Notty
-* Manual **context compaction** via `:compact` (`:c`, `:cmp`) – summarises older messages when the history grows too large and replaces it with a concise summary, saving tokens and latency.
-* Persists conversation under `.chatmd/` so you can resume later
+Notes:
+- If `-file` is omitted, the default prompt file is `./prompts/interactive.md`.
+- The prompt file may be any filename; `.md` is fine.
 
 ---
 
-## Context compaction (`:compact`)
+## Muscle-memory cheat sheet (high signal)
 
-When a session grows beyond a comfortable token budget you can shrink it
-on demand:
+> Terminology: `Meta` is usually **Alt** (Linux terminals) or **Option** (macOS terminals).
+
+### Insert mode (typing mode)
+
+| Keys | Action |
+|---|---|
+| (type) | insert text |
+| `Enter` | insert newline in the draft |
+| `Meta+Enter` | **submit** the draft |
+| `Esc` (bare) | switch to **Normal** mode |
+| `↑ / ↓ / PageUp / PageDown` | scroll history (disables auto-follow) |
+| `Home / End` | jump history viewport top/bottom (End re-enables auto-follow) |
+| `Ctrl-l` | force a redraw (useful if your terminal got visually corrupted) |
+| `Ctrl-k / Ctrl-u / Ctrl-w` | kill to end-of-line / beginning-of-line / previous word |
+| `Ctrl-y` | yank (paste the last killed/copied text) |
+| `Meta-v` (or `Meta-s`) | toggle selection anchor in the draft |
+| `Ctrl-C / Ctrl-X` (selection active) | copy / cut selection |
+| `Ctrl-r` | toggle draft mode: **Plain** ⇄ **Raw XML** |
+
+**Important:** `Ctrl-C` copies only when a selection is active; otherwise it quits the TUI.
+On some terminals, `Alt-s` may arrive as the `ß` character; that also toggles the selection anchor.
+
+### Normal mode (Vim-ish commands over the draft + message selection)
+
+| Keys | Action |
+|---|---|
+| `i` | enter Insert mode |
+| `:` | enter command-line (Cmdline) mode |
+| `h j k l` | move cursor in the draft |
+| `w / b` | word motion forward/back (draft) |
+| `0 / $` | start/end of line (draft) |
+| `gg / G` | jump history viewport top / bottom |
+| `[` / `]` | move the **selected message** up / down |
+| `Esc` | cancel streaming (if in-flight) else “quit-via-ESC” path (see below) |
+
+### Cmdline (after typing `:` in Normal mode)
+
+| Command | Action |
+|---|---|
+| `:w` | submit the draft (same as `Meta+Enter`) |
+| `:q` / `:quit` | quit |
+| `:wq` | quit (**does not submit first**) |
+| `:c` / `:cmp` / `:compact` | compact context |
+| `:d` / `:delete` | delete selected message |
+| `:e` / `:edit` | yank selected message into editor and switch to **Raw XML** |
+
+---
+
+## Modes and the one subtle ESC behavior
+
+`chat_tui` has three editor modes:
+
+- **Insert:** you type into the draft buffer.
+- **Normal:** keys act like commands (Vim-ish) and you can select messages.
+- **Cmdline:** a `:` prompt for commands like `:compact` or `:edit`.
+
+### ESC is intentionally overloaded
+
+This is the most important behavior to learn:
+
+- **Insert + bare `Esc`** → switches to **Normal** mode (it does *not* cancel streaming).
+- **Normal + `Esc`** → “cancel or quit”:
+  - if a response is streaming: **cancel** the in-flight request
+  - otherwise: triggers the “quit-via-ESC” shutdown path (which changes export prompting)
+
+Practical tip:
+- To cancel while you’re typing in Insert: press `Esc` (go Normal), then `Esc` again (cancel).
+
+---
+
+## Editing & navigation (power features)
+
+### Draft editing (Insert mode)
+
+Beyond basic typing:
+
+- **Line navigation:** `Ctrl-A` / `Ctrl-E` (start/end of line)
+- **Whole-draft navigation:** `Ctrl-Home` / `Ctrl-End`
+- **Word navigation:** `Ctrl+←/→`, `Meta+←/→`, plus `Meta-b` / `Meta-f`
+- **Multi-line cursor movement inside the editor:** `Ctrl+↑/↓`
+  (plain `↑/↓` scrolls the history viewport instead)
+- **Duplicate line:** `Meta+Shift+↑/↓`
+- **Indent/unindent line:** `Meta+Shift+→/←`
+- **Kill/yank:** `Ctrl-k`, `Ctrl-u`, `Ctrl-w`, `Ctrl-y`
+- **`Meta+Backspace`:** kill previous word
+
+### Message selection + yank/edit/resubmit (a great workflow)
+
+This is one of the fastest ways to iterate on a previous result:
+
+1. `Esc` → Normal
+2. `[` / `]` to select the message you care about
+3. `:e` to yank it into the draft (switches to Raw XML)
+4. Edit and submit with `Meta+Enter` (or `:w`)
+
+Use cases:
+- tweak a previous tool call and rerun it
+- quote and refine an earlier instruction
+
+---
+
+## Submitting, streaming, and mid-stream control
+
+### Submitting
+
+- `Meta+Enter` (Insert) or `:w` (Cmdline) submits the draft.
+- The UI inserts a brief “(thinking…)” placeholder immediately, then replaces it with streaming tokens.
+- Auto-follow is enabled on submit so new output stays visible.
+
+### “Note From the User” while streaming
+
+If a response is currently streaming and you submit again, the draft text is **not** queued as a new
+visible user turn. Instead it is injected into the in-flight request as:
+
+> `This is a Note From the User:\n…`
+
+This lets you correct or refine mid-stream without restarting the run.
+
+---
+
+## Draft modes: Plain Markdown vs Raw XML
+
+The draft buffer has two interpretations:
+
+- **Plain**: normal Markdown text sent as a user message.
+- **Raw XML**: low-level ChatMarkdown XML elements (useful for editing tool calls/tags precisely).
+
+How to toggle:
+- Insert: `Ctrl-r`
+- Normal: `r` (bare) toggles Plain ⇄ Raw XML
+  - (`Ctrl-r` in Normal is redo)
+
+`:e` / `:edit` always yanks into the editor and forces **Raw XML** so you can safely rework
+structured content.
+
+---
+
+## Quitting & export (predictable rules)
+
+There are two distinct shutdown experiences:
+
+### Quit via `:q` (or `Ctrl-C`)
+
+- Quits immediately.
+- **Export happens automatically** to:
+  - `--export-file FILE` if provided, otherwise
+  - the original prompt file path (`-file …`).
+
+### Quit via `Esc` while idle (Normal mode)
+
+When no response is streaming and you press `Esc` in Normal mode, `chat_tui` treats that as a
+“quit-via-ESC” request and prompts:
 
 ```text
-:compact          # alias :c or :cmp
+Export conversation to promptmd file? [y/N]
 ```
 
-Compaction can only run when no response is currently streaming; if you
-try while the model is still thinking you'll get a small inline error
-message and nothing else will change.
+If you say yes, it may also ask for an output path when `--export-file` is not set.
 
-Ochat will:
-
-1. Take a *snapshot* of the current history.
-2. Score messages based on relevance to the current context via the relevance judge.
-3. Pass the most-relevant messages to the summariser which produces a
-   compacted version of the conversation. 
-4. Replace the original messages *in-place* and update the viewport.
-5. Archive the original history in a `<session>/archive` folder
-
-
-> Tip	When compaction runs under a session, the pre-compaction snapshot
-> is archived automatically and the compacted history will be saved when
-> you exit `chat-tui`, subject to `--auto-persist` / `--no-persist`.
-> `:w` still submits the current draft; it does not control snapshot
-> saving.
-
-### Under the hood – how the compaction pipeline works
-
-Calling `:compact` triggers a **four-stage pipeline** implemented in
-`lib/context_compaction/`:
-
-| Stage | Module | What happens |
-|-------|--------|--------------|
-| ① Load config | `Context_compaction.Config` | Reads `~/.config/ochat/context_compaction.json` (or XDG-override).  Missing file → hard-coded defaults `{ context_limit = 20_000 ; relevance_threshold = 0.5 }`. |
-| ② Score relevance | `Context_compaction.Relevance_judge` | For **every** message the *Importance judge* asks a small reward-model to rate how indispensable the line is on a scale **0–1**.  No `OPENAI_API_KEY` or network?  It returns the deterministic stub `0.5`, keeping semantics reproducible in CI. |
-| ③ Summarise keepers | `Context_compaction.Summarizer` | The messages whose score is ≥ `relevance_threshold` are passed to GPT-4.1 (or an offline stub) together with a purpose-built system prompt.  The model then writes a rich summary |
-| ④ Rewrite history | `Context_compaction.Compactor` | The function returns a **new transcript** that contains the original *first* item (usually the `<system>` prompt) **plus** *at most one* extra `<system-reminder>` message that embeds the summary.  If anything blows up along the way the original history is returned verbatim – the feature can never brick the session. |
-
-Configuration snippet
-
-```jsonc
-// ~/.config/ochat/context_compaction.json
-{
-  "context_limit": 10000,          // tighten character budget
-  "relevance_threshold": 0.7       // be more aggressive when pruning
-}
-```
-
-Programmatic use
-
-```ocaml
-let compacted =
-  Context_compaction.Compactor.compact_history
-    ~env:(Some stdenv)   (* pass Eio capabilities when network access is OK *)
-    ~history:full_history
-in
-send_to_llm (compacted @ new_user_turn)
-```
-
-
-**Self-serve checklist – 10 seconds to first answer**
-
-1. `chat-tui -file prompts/blank.chatmd` – starts in *Insert* mode with an empty history.
-2. Type *“2+2?”*, hit **⌥ ↵** (Meta+Enter) → an O-series model replies *“4”*.
-3. Type `:` then `q` and press **Enter** – this quits the TUI; on exit `chat-tui` exports the conversation to `prompts/blank.chatmd` (unless you decline the export prompt).
-
-### Power-user workflow – *code-edit-test* in one window
-
-That’s it – *no* OpenAI dashboard visit, *no* shell scripts.  Everything, including model name and temperature, is stored in the document you can now commit to Git.
-
-
-Programmatic embedding:
-
-```ocaml
-Io.run_main @@ fun env ->
-  Chat_tui.App.run_chat ~env ~prompt_file:"prompts/interactive.md" ()
-```
-
-## Advanced behaviours
-
-### Out-of-band notes while streaming
-
-If a response is currently streaming and you submit the draft again
-(either with `Meta+Enter` or via `:w` in command mode), `chat-tui` does
-not queue a new visible user turn. Instead it injects the text as a
-*Note From the User* into the in-flight request so the model can take it
-into account mid-stream.
-
-### Draft modes and Raw XML
-
-`Ctrl-R` toggles the draft between plain markdown and **Raw XML**. In Raw
-XML mode the editor contents are interpreted as low-level ChatMarkdown
-XML. The `:e` / `:edit` command uses this to copy the selected message
-into the editor and switch to Raw XML so you can tweak tool calls or tags
-before resubmitting.
-
-### Tuning redraw and streaming
-
-Two environment variables let you tune responsiveness:
-
-- `OCHAT_TUI_FPS` – target frames-per-second for redraw throttling
-  (default 30; values ≤ 0 are clamped to 1).
-- `OCHAT_STREAM_BATCH_MS` – batch window in milliseconds for streaming
-  events (1–50, default around 12 ms). Smaller values make the UI more
-  responsive at the cost of more redraws.
+Notes:
+- There is no `/quit` slash command.
+- `q` only triggers Quit in the Insert-mode key handler; for consistent quitting, prefer `:q` or `Ctrl-C`.
+- The prompt text says “promptmd”; it refers to exporting a **ChatMarkdown transcript**.
 
 ---
 
-## 📑 Persistent sessions – pause, resume & branch your chats
+## Persistent sessions (resume / branch / reset / export)
 
-The `chat-tui` executable (installed by `opam install ochat`; run as
-`dune exec chat_tui --` from the repo) now **persists the full conversation state automatically** under
-`$HOME/.ochat/sessions/<id>` so you can close the terminal, pull the latest
-commit and pick up the thread days later – tool cache and all.
+Sessions are stored under:
 
-Key facts at a glance:
-
-* A *session* captures:  
-  • the prompt that seeded the run (a copy is stored as `prompt.chatmd`)  
-  • the complete message history (assistant, tool calls, reasoning deltas…)  
-  • the per-session tool cache (`.chatmd/cache.bin`)  
-  • misc metadata (task list, virtual-FS root, user-defined key/value pairs)
-
-* Snapshots live in a single binary file `snapshot.bin` alongside the prompt
-  copy – easy to back-up, copy or sync.
-
-* When you open a prompt without explicit flags `chat-tui` hashes the prompt
-  path and resumes the matching snapshot if present – **zero-config resume**.
-
-CLI flags (all mutually-exclusive where it makes sense):
-
-| Flag | Action |
-|------|--------|
-| `--list-sessions` | enumerate `(id\t<prompt_file>)` of every stored snapshot |
-| `--session <ID>` | resume the given session (fails if it doesn’t exist) |
-| `--new-session`  | ignore any existing snapshot for that prompt and start fresh |
-| `--session-info <ID>` | print metadata (history length, timestamps, prompt path) |
-| `--reset-session <ID>` | archive the current snapshot (timestamped) and restart; combine with `--keep-history` or change `--prompt-file` |
-| `--rebuild-from-prompt <ID>` | delete history & cache, rebuild snapshot from the stored prompt copy – perfect after editing `prompt.chatmd` manually |
-| `--export-session <ID> --out FILE` | convert a snapshot plus attachments to a standalone `.chatmd` document |
-| `--parallel-tool-calls` / `--no-parallel-tool-calls` | enable or disable concurrent execution of tool calls during a run (default: parallel tool calls are enabled) |
-| `--auto-persist` / `--no-persist` | control whether session snapshots are saved on exit (`--auto-persist` = always save without prompting; `--no-persist` = never save) |
-
-Interactive workflow examples:
-
-```console
-# 1️⃣  Enumeration
-$ chat-tui --list-sessions
-6f9ab3d5  prompts/interactive.md
-a821c9f0  prompts/refactor.chatmd
-
-# 2️⃣  Resume last week’s debugging chat
-$ chat-tui --session 6f9ab3d5
-
-# 3️⃣  Branch off a clean slate (keeps the old snapshot untouched)
-$ chat-tui -file prompts/interactive.md --new-session
-
-# 4️⃣  Export a finished session to share with teammates
-$ chat-tui --export-session a821c9f0 --out docs/refactor_walkthrough.chatmd
-
-# 5️⃣  Reset but keep the conversation history and switch prompt
-$ chat-tui --reset-session a821c9f0 --keep-history --prompt-file prompts/new_spec.md
+```text
+$HOME/.ochat/sessions/<id>/
+  snapshot.bin
+  snapshot.bin.lock
+  archive/
+  .chatmd/cache.bin
+  prompt.chatmd        (a copy of the prompt, when available)
 ```
 
-`--auto-persist` saves on exit without confirmation; `--no-persist` drops
-changes – useful in CI or when you want a quick throw-away run.
+Key behaviors:
 
-Under the hood **Session_store** migrates old snapshots transparently,
-maintains advisory locks to prevent concurrent writes, and provides helpers
-surfaced by the flags above.  Snapshot writes happen inside an Eio fiber so
-the UI never blocks.
+- If you open a prompt without session flags, `chat_tui` uses a **deterministic session id**
+  derived from the prompt path (so re-opening the same prompt resumes naturally).
+- `--new-session` forces a fresh session id (handy for branching).
 
-➡️  See `lib/session_store.mli` for the authoritative API contract.
+### Snapshot saving on exit
+
+By default, `chat_tui` asks on exit whether to save the snapshot:
+
+```text
+Save session snapshot? [Y/n]
+```
+
+Use:
+- `--auto-persist` to always save without prompting
+- `--no-persist` to never save
+
+### CLI flags (authoritative)
+
+| Flag | Meaning |
+|---|---|
+| `--list-sessions` | list session ids and their prompt file |
+| `--session <ID>` | resume a specific session |
+| `--new-session` | start a brand-new session for the prompt |
+| `--session-info <ID>` | print metadata and exit |
+| `--reset-session <ID> [--prompt-file FILE] [--keep-history]` | archive snapshot and reset |
+| `--rebuild-from-prompt <ID>` | archive snapshot, clear history/cache, and rebuild from stored prompt copy |
+| `--export-session <ID> --out FILE` | export a session to a standalone ChatMarkdown file and exit |
+| `--export-file FILE` | set export destination on normal quit |
+| `--parallel-tool-calls` / `--no-parallel-tool-calls` | toggle parallel execution of tool calls |
+| `--auto-persist` / `--no-persist` | control snapshot persistence on exit |
 
 ---
 
-## 🔁 Recursive meta-prompting – automate **prompt refinement**
+## Context compaction (`:compact`) — current behavior
 
-Ochat now ships a **first-class prompt-improvement loop** powered by
-_recursive meta-prompting_ and exposed via the `mp_refine_run` helper.
-This is a separate CLI (not currently wired into `chat-tui`); run it as
-`mp_refine_run` (or `dune exec mp_refine_run --` from the repo).
-Give it
+When a conversation grows too large, you can compact it manually:
 
-1. a **task** (what the prompt should accomplish) and
-2. an optional **draft prompt**,
-
-and it will iterate:
-
-• generate *k* candidate prompts with an **O-series model** (e.g., `o3`),  
-• score them via an OpenAI reward-model,  
-• select the best using a Thompson bandit, and  
-• stop when the score plateaus or the iteration budget is exhausted.
-
-The refined prompt is printed to *stdout* or appended to a file – perfect for
-CI pipelines where prompts live under version control.
-
-CLI flags at a glance:
-
-| Flag | Purpose |
-|------|---------|
-| `-task-file FILE` *(required)* | Markdown file describing the task |
-| `-input-file FILE` | Existing prompt to refine (omit to start from scratch) |
-| `-output-file FILE` | Append the result instead of printing to *stdout* |
-| `-action generate\|update` | Create a new prompt or mutate an existing one |
-| `-prompt-type general\|tool` | Assistant prompt vs tool description |
-| `-meta-factory BOOL` | Use the pure, offline Prompt Factory to create/iterate a prompt pack (non-destructive). Default: `false`. |
-| `-meta-factory-online BOOL` | Enable the online Prompt Factory strategy inside the refinement loop and for greenfield prompts. Default: `true`. |
-| `-classic-rmp BOOL` | Force the classic recursive meta-prompting strategy (disables `-meta-factory-online`). Default: `false`. |
-
-Quick examples:
-
-```console
-# 1️⃣  Draft a brand-new assistant prompt
-$ mp_refine_run -task-file tasks/summarise.md
-
-# 2️⃣  Improve an existing tool schema and persist the update
-$ mp_refine_run \
-    -task-file tasks/translate_task.md \
-    -input-file  prompts/translate_draft.md \
-    -output-file prompts/translate_refined.md \
-    -action      update \
-    -prompt-type tool
-
-# 3️⃣  Generate using the offline Prompt Factory (pure, no network)
-$ mp_refine_run -task-file tasks/summarise.md -meta-factory true
-
-# 4️⃣  Disable online factory and run the classic loop only
-$ mp_refine_run -task-file tasks/summarise.md -classic-rmp true
+```text
+:compact    (aliases: :c, :cmp)
 ```
 
-All heavy-lifting lives under `lib/meta_prompting` – functors, evaluators,
-bandit logic and convergence checks.  The CLI is a thin wrapper around
-`Mp_flow.first_flow`/`Mp_flow.tool_flow`; have a look at
-`bin/mp_refine_run.ml` or the annotated API docs in
-`lib/meta_prompting/mp_flow.mli` for the full story.
+Rules:
+- Compaction cannot run while a response is streaming.
+- The compactor generates a **summary** and replaces most of the history with that summary.
 
-### New: Prompt Factory – offline and online
+### What it actually does today (implementation details)
 
-The meta‑prompting subsystem now includes a Prompt Factory that can either:
+The current compactor:
 
-* run **offline** (pure, deterministic) via `Meta_prompting.Prompt_factory` to create or iterate self‑contained prompt packs, or
-* run **online** (LLM‑backed) via `Meta_prompting.Prompt_factory_online` to propose revised prompts and full packs using OpenAI’s Responses API.
+- keeps only system/developer messages from the existing history (and any previous `<system-reminder>` messages),
+- appends a new summary wrapped in a `<system-reminder>…</system-reminder>` block.
 
-How it ties into the CLI
+If you are in a persisted session, compaction also archives the current `snapshot.bin` into the
+session’s `archive/` folder as part of the reset flow.
 
-* `-meta-factory` switches the run to the offline factory (no network) and returns a prompt pack or a minimal update pack.
-* With `-meta-factory` off, `-meta-factory-online` (default: true) augments the refinement loop with online proposals and is also used for greenfield generation when no `-input-file` is supplied.
-* `-classic-rmp` disables the online factory entirely and runs the original recursive loop.
+Note: there are modules for config and relevance scoring, but user config-file loading and relevance
+filtering are not fully wired in the current implementation.
 
-Programmatic note
+---
 
-`Mp_flow.first_flow` and `Mp_flow.tool_flow` accept `?use_meta_factory_online:bool` to enable or disable the online strategy from code (default: enabled).
+## Terminal & troubleshooting
 
-Customization
+### “Meta” / Alt / Option key confusion
 
-When using the online factory you can override the default templates by placing files under `meta-prompt/templates/` and guard‑rails under `meta-prompt/integration/`. The `meta-prompt/` folder is git‑ignored by default.
+Terminals differ in how they encode Alt/Option and which keys they report as `Meta`.
+To see exactly what your terminal sends, run the key inspector:
 
+```console
+$ dune exec key_dump --
+```
+
+### Known limitations
+
+- Cursor positioning is derived from **byte offsets** in the input buffer; wide Unicode glyphs may
+  misalign the cursor with what you see on screen.
+- Mouse input is disabled in `chat_tui` (keyboard-driven UI).
+
+### Tuning responsiveness (optional)
+
+Two environment variables influence how frequently the UI redraws while streaming:
+
+- `OCHAT_TUI_FPS` – target frames-per-second for redraw throttling (default: 30).
+- `OCHAT_STREAM_BATCH_MS` – batch window (ms) for coalescing streaming events (default: ~12ms, clamped to 1–50ms).
+
+---
+
+## See also
+
+- `chat_tui` CLI reference: `docs-src/bin/chat_tui.doc.md`
+- Key event inspector docs: `docs-src/bin/key_dump.doc.md`
+- TUI internals (odoc pages): `docs-src/lib/chat_tui/*.doc.md`
+- Meta-prompting CLI (not part of `chat_tui`): `docs-src/bin/mp_refine_run.doc.md`

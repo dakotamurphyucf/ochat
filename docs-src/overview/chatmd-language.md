@@ -1,225 +1,425 @@
-# ChatMarkdown ( ChatMD ) language
+# ChatMarkdown (ChatMD) language reference
 
-ChatMD combines the readability of Markdown with a minimal XML vocabulary.
-The model sees **exactly** what you write – no hidden pre-processing.
-ChatMD recognises a fixed set of tags; any other XML/HTML markup is preserved as literal text inside messages and passed through to the model unchanged.
+ChatMarkdown (ChatMD) is a **small, closed XML vocabulary embedded in Markdown** for authoring LLM conversations as plain files.
 
-| Element | Purpose | Important attributes |
-|---------|---------|----------------------|
-| `<config/>` | Current model and generation parameters. **Must appear once** near the top. | `model`, `max_tokens`, `temperature`, `reasoning_effort`, **`show_tool_call`** (flag), optional `id` label.  When `show_tool_call` is present the runtime embeds tool-call **arguments & results inline**; when absent they are written to disk and referenced via `<doc/>`. |
-| `<tool/>` | Declare a tool that the assistant may call. | • `name` – function name.<br>• Built-ins only need `name` (`apply_patch`, …).<br>• **Shell wrappers** add `command="rg"` + optional `description`.<br>• **Agent-backed** tools add `agent="./file.chatmd"` (plus `local` if the agent lives on disk).<br>• **MCP-backed** tools add `mcp_server="…"` plus optional `name` / `include` / `includes` (to select tools), `strict` (flag), `client_id_env` and `client_secret_env` for auth.<br>• Exactly one of `command`, `agent` or `mcp_server` may be present; combining them is rejected. |
-| `<msg>` | Generic chat message. | `role` one of `system,user,assistant,developer,tool`; optional `name`, `id`, `status`.  Assistant messages that *call a tool* additionally set `tool_call="true"` and provide `function_name` + `tool_call_id`. |
-| `<user/>` / `<assistant/>` / `<developer/>` / `<system>` | **Shorthand** wrappers around `<msg …>` for the common roles. | Accept the same optional attributes (`name`, `id`, `status`). |
-| `<tool_call/>` | Assistant *function invocation* shorthand – equivalent to `<msg role="assistant" tool_call …>` | Must include `function_name` & `tool_call_id`.  Body carries the JSON argument object (often wrapped in `RAW|…|RAW`). |
-| `<tool_response/>` | Tool reply shorthand – equivalent to `<msg role="tool" …>` | Must include the matching `tool_call_id`. Body contains the return value (or error) of the tool. |
-| `<reasoning>` | Chain-of-thought scratchpad emitted by reasoning models.  Normal prompts rarely use it directly. | `id`, `status`.  Contains one or more nested `<summary>` blocks. |
-| `<import/>` | Include another file *at parse time*.  Keeps prompts small while re-using large policy docs. | `src` – relative path of the file to include. Imports are expanded inside user/system/developer messages and inside `<user>`, `<system>`, `<developer>` and `<agent>` bodies; elsewhere `<import>` is preserved as literal text. |
+The core idea is simple: a ChatMD file is both:
 
-`<config>` currently wires through the subset of OpenAI chat parameters that Ochat understands: `model`, `max_tokens`, `temperature`, `reasoning_effort`, `show_tool_call` (flag) and an optional `id` label. Unknown attributes are ignored and additional parameters such as `response_format` or `top_p` are configured outside ChatMD today. Example:
+- a **prompt** (model config, tool permissions, instructions, context), and
+- an **auditable transcript** (tool calls + tool outputs + assistant replies).
+
+This makes workflows **reproducible**, **diffable**, and easy to review.
+
+## “What the model sees” (and the explicit exceptions)
+
+Ochat tries hard to ensure the model sees exactly what’s in your ChatMD document, but there are a few **explicit, documented** mechanisms that transform the file:
+
+- **HTML comments are stripped**: `<!-- ... -->` is removed before parsing and never reaches the model.
+- **`<import/>` expands**: selected `<import src="..."/>` directives are replaced with the contents of the referenced file *at parse time*.
+- **RAW blocks disable parsing**: `RAW| ... |RAW` is treated as literal text (no tag parsing inside).
+- **Optional meta-refine preprocessing**: if enabled, the prompt may be rewritten before parsing (see “Meta-refine” below).
+
+Everything else is intentionally boring: there are no hidden templates, implicit tool permissions, or “magic” side channels.
+
+---
+
+## 1) What is valid ChatMD?
+
+ChatMD is **not** general HTML/XML. It recognises a **closed set of lowercase tag names**.
+
+### 1.0 Official tag set
+
+These are the tag names ChatMD recognises (lowercase, case-sensitive):
+
+- Message / transcript structure: `msg`, `user`, `assistant`, `system`, `developer`
+- Tools / tool trace: `tool`, `tool_call`, `tool_response`
+- Inline helpers: `doc`, `img`, `agent`, `import`
+- Reasoning: `reasoning`, `summary`
+- Configuration: `config`
+
+### 1.1 Top-level rule (important)
+
+A ChatMD document must be a sequence of **recognised ChatMD elements at the top level**.
+
+- ✅ Allowed at top-level: `<user>...</user>`, `<tool .../>`, `<config .../>`, etc.
+- ✅ Whitespace between top-level elements is allowed.
+- ❌ Plain text at top-level is an error.
+- ❌ Unknown tags at top-level are an error (because unknown tags are treated as literal text).
+
+Example:
 
 ```xml
-<config model="gpt-4o" temperature="0.2" max_tokens="1024" reasoning_effort="detailed"/>
+<!-- ✅ valid -->
+<user>Hello</user>
+
+<!-- ❌ invalid: top-level text -->
+Hello
 ```
 
----
+### 1.2 Unknown tags
 
-## Inline content helpers
-
-Inside various element bodies you can embed richer content that is expanded **before** the request
-is sent to OpenAI:
-
-| Tag | Effect |
-|-----|--------|
-| `<img src="path_or_url" [local] />` | Embeds an image. If `local` is present the file is encoded as a data-URI so the API sees it. |
-| `<doc src="path_or_url" [local] [strip] [markdown]/>` | Inlines the *text* of a document. <br>• `local` reads from disk.  <br>• Without it the file is fetched over HTTP.<br>• `strip` removes HTML tags (useful for web pages). <br>• `markdown` converts the document to Markdown format.<br>• If both `strip` and `markdown` are present, HTML-stripping wins and the content is treated as plain text. |
-| `<agent src="prompt.chatmd" [local]> … </agent>` | Runs the referenced chatmd document as a *sub-agent* and substitutes its final answer.  Any nested content inside the tag is appended as extra user input before execution. |
-
-### The `<agent/>` element – running sub-conversations
-
-An **agent** lets you embed *another* chatmd prompt as a sub-task and reuse its answer as
-inline text.  Think of it as a one-off function call powered by an LLM for prompt engineering.
-
-• `src` is the file (local or remote URL) that defines the agent’s prompt.  
-• Add the `local` attribute to read the file from disk instead of fetching over HTTP.  
-• Any child items you place inside `<agent>` become *additional* user input that is appended
-  to the sub-conversation *before* it is executed.
-
-Example – call a documentation-summary agent and insert its answer inside the current
-message:
+Unknown markup is preserved as literal text **inside** recognised elements. For example:
 
 ```xml
-<msg role="user">
-  Here is a summary of the README:
-  <agent src="summarise.chatmd" local>
-     <doc src="README.md" local strip/>
-  </agent>
-</msg>
+<user>Hello <b>world</b></user>
 ```
 
-At runtime the inner prompt `summarise.chatmd` is executed with the stripped text of the
-local `README.md` as user input, and the resulting summary is injected in place of the
-`<agent>` tag.
+`<b>` is not a ChatMD tag, so it is preserved as literal text and passed through to the model.
+
+### 1.3 Case sensitivity
+
+Tags are case-sensitive. Use lowercase:
+
+- ✅ `<user>...</user>`
+- ❌ `<User>...</User>` (treated as unknown text; may break top-level validity)
+
+### 1.4 Attribute syntax (practical rules)
+
+- **Flag attributes** are supported and mean “present = true”, e.g. `<doc src="x" local/>`.
+- Attributes can be quoted with **single** or **double** quotes.
+- Quoted values support backslash-escaped quotes.
+- A small set of HTML entities are decoded in **attribute values**: `&amp;`, `&lt;`, `&gt;`, `&quot;`, `&apos;`.
 
 ---
 
-## End-to-end example
+## 2) RAW blocks (highly recommended)
+
+RAW blocks let you embed arbitrary text without the ChatMD lexer interpreting `<tags>` inside it.
+
+**Syntax:**
+
+- opener: `RAW|`
+- terminator: `|RAW`
+
+Everything between them is treated as literal text.
+
+This is the #1 way to embed:
+
+- JSON tool arguments / results
+- code containing `<` / `>` or XML-like snippets
+- “literal ChatMD” examples inside a message
+
+Example:
 
 ```xml
-<config model="gpt-4o" temperature="0.1" max_tokens="512"/>
-
-<tool name="odoc_search" description="Search local OCaml docs"/>
-
-<system>Answer strictly in JSON.</system>
-
-<user>Find an example of Eio.Switch usage</user>
+<user>
+Here is JSON (no escaping needed):
+RAW|
+{ "path": "README.md", "offset": 0 }
+|RAW
+</user>
 ```
-
-When the assistant chooses to call the tool Ochat inserts a `<tool_call>`
-element, streams the live output, appends a `<tool_response>` block with the
-result and finally resumes the assistant stream – **all captured in the same
-file**.
 
 ---
 
-## Useful Conceptual model
+## 3) Core elements (top-level)
 
-I have found it helpful to think about ChatMD, agents, and conversations in functional terms.
+These elements form the “program” and the transcript.
 
-### Agents
+### 3.1 Minimal skeleton
 
-You can think of an **agent** (defined as a ChatMD document) as a function — but instead of being implemented as a well-defined algorithm, it is defined as a **high-level description** of the algorithm (a compressed specification): what the agent is trying to do, what tools it may use, and any constraints/policies.
+The smallest useful ChatMD file is:
 
-At runtime, the system “decompresses” (or compiles) that description into concrete steps **conditioned on the current input and context**, executes those steps, and returns the result.
+```xml
+<config model="gpt-4o" temperature="0"/>
 
-That decompression is performed by the LLM: given the agent description, the accumulated context, and the current input, the model fills in the missing details of *how* to implement the high-level intent.
-
-Operationally, running an agent is a loop:
-
-1. Provide the LLM with:
-   - the agent description (your ChatMD file),
-   - the current context (conversation history, tool outputs, any imported artefacts) and
-   - the current input (user message / tool result).
-2. The LLM either:
-   - produces a final output (an assistant message), or
-   - produces a set of concrete steps to execute (for example: “call tool X with arguments Y”).
-3. If the model requested steps:
-   1. execute them (call tools as needed),
-   2. collect the results, and
-   3. feed those results back into the next iteration.
-
-In this model, tool calls are the “instruction tape” for concrete actions, and the transcript is the ground truth record of what happened.
-
-### Conversation/Session
-
-A **conversation** can be described in functional terms as a reducer (fold): a loop that repeatedly applies “run agent” to successive inputs.
-
-Each turn takes:
-
-- an input, and
-- the current agent state,
-
-and produces:
-
-- an output, and
-- a new agent state whose description incorporates prior instructions plus runtime history.
-
-In practice, that “state” is primarily the accumulated ChatMD transcript: the agent definition plus the sequence of user messages, assistant messages, tool calls, and tool results.
-
-If you model a single turn as:
-
-```text
-run_agent : agent_state -> input -> (output * agent_state)
+<user>
+Hello.
+</user>
 ```
 
-then a multi-turn conversation is just a fold over inputs:
+### 3.2 Conversation structure elements
 
-```text
-conversation : inputs -> agent_state0 -> agent_stateN
-conversation inputs s0 = fold_left run_agent s0 inputs
-```
+| Element | Purpose | Notes / key attributes |
+|---|---|---|
+| `<config .../>` | Model and generation parameters | Optional. If multiple appear, the **first `<config/>` wins**. Flag attribute: `show_tool_call`. |
+| `<tool .../>` | Declare tools available to the assistant | Builtin, shell, agent-backed, or MCP-backed. Exactly one of `command`, `agent`, `mcp_server` may appear. |
+| `<user>...</user>` | User message | The most common input block. |
+| `<assistant>...</assistant>` | Assistant message | Usually written by ochat into the transcript. Often uses RAW blocks for faithful round-tripping. |
+| `<system>...</system>` | System message | High-priority instructions. |
+| `<developer>...</developer>` | Developer message | Mid-priority instructions (below system). |
+| `<msg role="...">...</msg>` | Generic message form | Escape hatch for less common roles/legacy. Roles supported by the runtime: `user`, `assistant`, `system`, `developer`, `tool`. |
+| `<tool_call ...>...</tool_call>` | Tool invocation record | Typically written by ochat; see “Tool calls & tool responses”. |
+| `<tool_response ...>...</tool_response>` | Tool output record | Typically written by ochat; see “Tool calls & tool responses”. |
+| `<reasoning ...>...</reasoning>` | Reasoning record | Typically written by reasoning-capable models; requires `id` if authored manually. |
 
-### Putting it all together
+### 3.3 Inline content helpers (only inside message bodies)
 
-This is the core mental model behind Ochat: “agents as text-defined functions” and “conversations as stateful folds”, with the LLM providing the dynamic expansion from high-level specification to concrete, tool-mediated execution. You can think of building agents as writing a programs composed of higher-order functions that leverage the LLM to fill in the implementation details, while conversations become straightforward applications of those functions over sequences of inputs. With this perspective, you can approach prompt engineering and agent design with the same principles you would use in traditional software development, focusing on modularity, clarity, and composability.
+These tags are recognised by the parser, but they are primarily meaningful **inside message bodies** (e.g. inside `<user>...</user>`):
 
-With this mental model in place, it becomes easier to reason about how to structure prompts, design tools, and manage state over time because it gives insight into how to think about prompt design and its role in agent behaviour. Thinking about the prompt as a compressed specification and the model as the dynamic decompressor leads to the insight that for the model to produce effective behaviour, the prompt must effectively compress the desired runtime behaviour in the high level description such that the model can reliably expand it into the intended sequence of actions. 
-
-This means that prompt design becomes an exercise in finding the right abstractions and constraints to guide the model's behaviour, rather than trying to micromanage every detail of the execution. So it helps to think though your prompt and ask yourself: "Does this prompt effectively describe the high-level intent and constraints such that enough information is properly encoded with sufficent tools for the model to reliably expand it into the desired sequence of actions to accomplish the task?" 
+| Inline tag | What it does |
+|---|---|
+| `<doc src="..." [local] [strip] [markdown] />` | Inline document text (local file or remote URL). |
+| `<img src="..." [local] />` | Inline an image (remote URL or local file encoded as a data URI). |
+| `<agent src="..." [local]> ... </agent>` | Run another ChatMD prompt as a sub-agent and insert its final answer. |
+| `<import src="..."/>` | Parse-time include (only expands in certain places; see below). |
 
 ---
 
-## Here are some of the key lessons I learned while experimenting with ChatMD and tool-driven development:
+## 4) `<config/>`
 
-### The prompt + tooling recipe that worked best
+`<config/>` controls model selection and generation parameters that ochat currently wires through.
 
-The highest-leverage change for reliability was: **make the workflow rules explicit**.
+Supported attributes:
 
-Tell the model:
+- `model="..."` (string)
+- `max_tokens="..."` (int)
+- `temperature="..."` (float)
+- `reasoning_effort="..."` (string; interpreted by the OpenAI client)
+- `id="..."` (string label; optional)
+- `show_tool_call` (**flag attribute**; presence enables inline tool payloads)
 
-- what the workflow is (inspect → propose → patch → test → iterate)
-- what tools exist
-- when to use which tool
-- what constraints it must respect
+Example:
 
-Then give it a feedback loop that produces hard evidence:
+```xml
+<config model="gpt-4o" temperature="0.2" max_tokens="1024"/>
+```
 
-- compiler errors
-- test failures
-- doc search hits
-- tool errors and schema validation
+### 4.1 `show_tool_call` (inline vs externalised tool payloads)
 
-### Iterative refinement beats clever prompting
+When `show_tool_call` is present, ochat persists tool arguments/results inline using RAW blocks.
+When absent (default), large tool payloads are written to `./.chatmd/*.json` and referenced via `<doc .../>`.
 
-The most reliable loop is:
+See the “Tool calls & tool responses” section for exact layouts.
 
-1. propose a step
-2. call a tool
-3. observe concrete output
-4. adjust
+---
 
-Repeat as needed — with evidence, not guesswork.
+## 5) `<tool/>` declarations (capabilities)
 
-### Plan first, then execute
+`<tool/>` declarations define what actions the assistant is allowed to take.
 
-For big tasks, the two-stage approach works best:
+ChatMD supports four tool “shapes”:
 
-1. make a plan with small, manageable subtasks
-2. execute them sequentially, using results to guide what comes next
+### 5.1 Built-in tools
 
-And for long sessions: compaction is not optional.
-Keep the decisions/constraints, drop the noise.
+```xml
+<tool name="read_file"/>
+<tool name="apply_patch"/>
+```
 
-### Why constraining tools helps (reduced search space)
+### 5.2 Shell tools (wrap trusted commands)
 
-Giving the model a defined tool vocabulary with clear constraints (i.e no general shell access):
+```xml
+<tool name="rg" command="rg" description="ripgrep search"/>
+```
 
-- reduces the action space
-- makes planning easier
-- avoids “random shell command roulette”
-- improves consistency at the cost of some flexibility
+### 5.3 Agent-backed tools (prompt-as-tool)
 
-I’ve found “minimal tool set for the task” works best.
-Too many tools increases the chance of the model going off-track or misusing them. And tools that are too general-purpose (e.g. arbitrary shell access) lead to unpredictable behaviour.
+```xml
+<tool name="triage" agent="prompts/triage.chatmd" local description="Triage a bug report"/>
+```
 
-### Meta-prompting (refining prompts over time)
+### 5.4 MCP-backed tools (import tools from an MCP server)
 
-Meta-prompting is basically: use the model (and evaluators) to improve prompts iteratively.
+```xml
+<tool mcp_server="https://tools.acme.dev" includes="weather,stock_ticker" strict/>
+```
 
-- generate variations
-- test them
-- select the best
-- repeat
+### 5.5 Validation rules (important)
 
-### Other tips
+- Exactly one of these attributes may be present: `command`, `agent`, `mcp_server`.
+- For builtin/shell/agent tools, `name="..."` must be non-empty.
+- For MCP tools:
+  - `name="..."` selects a single tool name, **or**
+  - `include="a,b"` / `includes="a,b"` selects a comma-separated list, **or**
+  - neither means “no filter” (implementation-dependent; typically exposes the server’s tool catalog).
 
-Evals are the key ingredient because they turn “prompt vibes” into actual feedback you can iterate on.
+For a deeper tool reference (built-ins, schemas, and examples), see:
+[`docs-src/overview/tools.md`](tools.md).
 
-XML-style boundaries are, in my experience, king when you want prompts to have clear separation between instructions, tools, and context. They also opened up interesting functionality that would be hard to do otherwise. The chat-tui app takes advantage of xml to allow the user to send messages to the model to guide in real time while the model is actively performing tool calls without interrupting the models flow. This is accomplished by embedding the messages within xml tags and appening it to the next tool call ouput. The xml boundary helps the model to clearly distinguish the user message from the tool call ouput.
+---
 
-Also:
+## 6) Messages: `<user>`, `<assistant>`, `<system>`, `<developer>`, `<msg>`
 
-- avoid logical inconsistencies and ambiguities
-- reuse consistent terminology
-- don’t assume the model “can’t do it” — usually there’s a way to prompt it into the behavior you want
+Most prompts use the shorthand message tags:
 
+```xml
+<system>You are careful and cite sources.</system>
+
+<user>
+Read README.md and propose a patch.
+</user>
+```
+
+`<msg role="...">` exists as an escape hatch:
+
+```xml
+<msg role="user">Hello</msg>
+```
+
+Supported roles in the runtime conversion are:
+`user`, `assistant`, `system`, `developer`, `tool`.
+
+---
+
+## 7) Tool calls & tool responses (`<tool_call>`, `<tool_response>`)
+
+These elements represent the **on-disk execution trace** of tool usage.
+
+They are usually written by ochat, not hand-authored.
+
+### 7.1 Required attributes
+
+Tool calls:
+
+```xml
+<tool_call function_name="read_file" tool_call_id="call_123">
+...
+</tool_call>
+```
+
+Tool responses:
+
+```xml
+<tool_response tool_call_id="call_123">
+...
+</tool_response>
+```
+
+There is also a special round-tripping convention for “custom tool calls”:
+
+- `<tool_call type="custom_tool_call" ...>`
+- `<tool_response type="custom_tool_call" ...>`
+
+### 7.2 Persistence mode A: inline payloads (`show_tool_call`)
+
+When `show_tool_call` is enabled, ochat persists payloads inline:
+
+```xml
+<tool_call tool_call_id="call_123" function_name="read_file" id="item_456">
+RAW|
+{ "path": "README.md" }
+|RAW
+</tool_call>
+
+<tool_response tool_call_id="call_123">
+RAW|
+...tool output...
+|RAW
+</tool_response>
+```
+
+### 7.3 Persistence mode B: externalised payloads (default)
+
+When `show_tool_call` is not set, payloads are written to `./.chatmd/` and referenced:
+
+```xml
+<tool_call function_name="read_file" tool_call_id="call_123" id="item_456">
+  <doc src="./.chatmd/0.tool-call.call_123.json" local/>
+</tool_call>
+
+<tool_response tool_call_id="call_123">
+  <doc src="./.chatmd/0.tool-call-result.call_123.json" local/>
+</tool_response>
+```
+
+This keeps the main transcript readable even when tools exchange large JSON payloads.
+
+---
+
+## 8) Inline content helpers (the “power tools” inside messages)
+
+### 8.1 `<doc src="..." .../>` — inline documents (local or remote)
+
+```xml
+<user>
+Summarise this:
+<doc src="README.md" local/>
+</user>
+```
+
+Attributes:
+
+- `src="..."` required
+- `local` (flag): read from disk instead of HTTP
+- `strip` (flag): if the doc is HTML, strip markup and collapse whitespace into readable text
+- `markdown` (flag): convert HTML to Markdown (local file or remote URL)
+
+Precedence:
+
+- If `strip` is present, it takes precedence over `markdown`.
+
+Local path resolution:
+
+- Local docs are resolved against the prompt directory first; if still relative and not found, the process CWD is also consulted.
+
+### 8.2 `<img src="..." [local]/>` — inline images
+
+```xml
+<user>
+What’s wrong with this UI?
+<img src="assets/screenshot.png" local/>
+</user>
+```
+
+If `local` is present, the image is encoded as a data URI before being sent to the API.
+
+### 8.3 `<agent src="..." [local]> ... </agent>` — call a sub-agent
+
+An `<agent>` runs another ChatMD prompt and substitutes its final answer inline.
+
+Example (summarise a document using a specialised agent prompt):
+
+```xml
+<user>
+Here’s a summary produced by my sub-agent:
+<agent src="prompts/summarise.chatmd" local>
+  <doc src="README.md" local strip/>
+</agent>
+</user>
+```
+
+Notes:
+
+- Any children of `<agent>` become the sub-agent’s runtime input.
+- Results are cached (so repeated identical agent calls can be cheap).
+
+---
+
+## 9) `<import src="..."/>` — parse-time include (modularity)
+
+`<import/>` keeps prompts maintainable by letting you reuse shared text (policies, glossaries, style guides).
+
+**Where imports expand**
+
+Imports are expanded recursively when they appear inside:
+
+- `<user>...</user>`
+- `<system>...</system>`
+- `<developer>...</developer>`
+- `<agent>...</agent>`
+- `<msg role="user|system|developer">...</msg>`
+
+**Where imports do not expand**
+
+Everywhere else, `<import/>` is preserved as literal text (for example inside `<assistant>`, `<tool_call>`, `<tool_response>`, `<reasoning>`).
+
+Example:
+
+```xml
+<system>
+<import src="policies/safety.md"/>
+</system>
+```
+
+---
+
+## 10) Meta-refine (optional preprocessing)
+
+If enabled, ochat can run a “meta-refine” pass before parsing ChatMD.
+
+Enable it via:
+
+- environment variable `OCHAT_META_REFINE` (truthy values like `1`, `true`, `yes`, `on`), or
+- placing the marker comment `<!-- META_REFINE -->` anywhere in the prompt.
+
+---
+
+## 11) Common errors and gotchas
+
+- **Top-level text is forbidden**: wrap content in `<user>...</user>`, etc.
+- **Unknown tags at top-level fail**: unknown markup becomes literal text and triggers the top-level text rule.
+- **Mismatched tags fail**: `<user>...</assistant>` is an error.
+- **Unterminated quoted attribute values fail**: e.g. `alt="...` without closing quote.
+- **Unterminated RAW blocks fail**: `RAW| ... |RAW` must be closed.
+- **Tag names are lowercase and case-sensitive**.
 
