@@ -88,9 +88,9 @@ odoc-search --query "Eio.Switch.run usage" -k 5 --index .odoc_index
 Sometimes it’s easiest to understand what a command does by seeing *the shape of the results*.
 These example files are **illustrative** (hand-written sample outputs) so you can quickly recognize what “good” looks like.
 
-- [`md-search` example (Markdown docs search)](docs-src/guide/search-examples/md-search.md)
-- [`odoc-search` example (odoc docs search)](docs-src/guide/search-examples/odoc-search.md)
-- [`ochat query` example (hybrid code search)](docs-src/guide/search-examples/ochat-query.md)
+- [`md-search` example (Markdown docs search)](search-examples/md-search.md)
+- [`odoc-search` example (odoc docs search)](search-examples/odoc-search.md)
+- [`ochat query` example (hybrid code search)](search-examples/ochat-query.md)
 
 ---
 
