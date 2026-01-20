@@ -100,7 +100,7 @@ If you want the OCaml-specific entry points (embedding as a library, OCaml API d
   ```
   Notes: `read_file` refuses binary-ish content and truncates large files to keep context bounded.
 
-  **3) Ingest web pages (and GitHub code slices) with `webpage_to_markdown`**
+  **3) Ingest web pages (and GitHub code slices) as Markdown with `webpage_to_markdown`**
 
   Declare:
   ```xml
@@ -108,6 +108,8 @@ If you want the OCaml-specific entry points (embedding as a library, OCaml API d
   ```
   Works especially well on GitHub blob URLs with line ranges, e.g.:
   - `https://github.com/owner/repo/blob/main/lib/foo.ml#L10-L80`
+
+  Why it’s great: get clean, readable Markdown with code blocks instead of raw HTML. Much easier for the model to digest.
 
   **4) Prompt-as-tool: mount a `.chatmd` workflow as a callable tool**
 
@@ -321,6 +323,7 @@ For more on `ochat chat-completion` (flags, exit codes, ephemeral runs), see
 
 Deep-dive docs live under `docs-src/`. Key entry points:
 
+- [Real-world example session: updating the tools docs](real-world-example-session/update-tool-docs/readme.md) – a non-trivial end-to-end ochat run (full transcript + compacted version).
 - [ChatMarkdown language reference](docs-src/overview/chatmd-language.md) – element tags, inline helpers, and prompt‑writing guidelines.
 - [Built-in tools & custom tools](docs-src/overview/tools.md) – built‑in toolbox, shell wrappers, custom tools, and MCP tool import.
 - [chat_tui guide & key bindings](docs-src/guide/chat_tui.md) – keybindings, context compaction, persistent sessions, and advanced behaviours.
