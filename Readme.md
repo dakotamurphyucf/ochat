@@ -335,7 +335,7 @@ Deep-dive docs live under `docs-src/`. Key entry points:
 OCaml integration and internals:
 
 - [Embedding Ochat in OCaml](docs-src/lib/embedding.md) – reusing the libraries and caching patterns.
-- [ChatML language & runtime](docs-src/lib/chatml/chatml_lang.doc.md) – experimental typed scripting language; see also the parser and resolver docs under `docs-src/lib/chatml/`.
+- [ChatML language & runtime](docs-src/lib/chatml/chatml_lang.doc.md) – experimental typed scripting language; see also the parser and resolver docs under `docs-src/lib/chatml/`. For concrete examples of the language in action, see [`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml) and [`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml).
 
 ---
 
@@ -385,6 +385,8 @@ The repository ships an experimental language called *ChatML*: a small, expressi
 
 The parser, type‑checker and runtime live under the `Chatml` modules and are documented under `docs-src/lib/chatml/` (see [`chatml_lang`](docs-src/lib/chatml/chatml_lang.doc.md), [`chatml_parser`](docs-src/lib/chatml/chatml_parser.doc.md) and [`chatml_resolver`](docs-src/lib/chatml/chatml_resolver.doc.md)). Today it is exposed primarily via the experimental `dsl_script` binary and the `Chatml_*` library modules; it is not yet wired into ChatMD prompts or the main CLIs.
 
+If you want “real code” examples (including expected types and evaluation results), the tests are a good starting point: [`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml) and [`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml).
+
 ---
 
 ## Future directions
@@ -431,7 +433,7 @@ Planned and experimental directions include:
   type‑checker and runtime live under the `Chatml` modules and are documented
   under `docs-src/lib/chatml/` (see [`chatml_lang`](docs-src/lib/chatml/chatml_lang.doc.md),
   [`chatml_parser`](docs-src/lib/chatml/chatml_parser.doc.md) and
-  [`chatml_resolver`](docs-src/lib/chatml/chatml_resolver.doc.md)). Today it is
+  [`chatml_resolver`](docs-src/lib/chatml/chatml_resolver.doc.md)). For examples of the language in action, see [`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml) and [`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml). Today it is
   exposed primarily via the experimental `dsl_script` binary and the
   `Chatml_*` library modules; it is not yet wired into ChatMD prompts or the
   main CLIs. The long‑term plan is to use ChatML as a safe scripting language
