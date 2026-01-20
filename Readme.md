@@ -171,17 +171,17 @@ Turn a `.md` file into a refactoring bot that reads files and applies patches un
 1. Create `prompts/refactor.md`:
 
 ```xml
-<config model="gpt-4o" temperature="0"/>
+<config model="gpt-5.2" reasoning_effort="medium"/>
 
 <tool name="read_dir"/>
 <tool name="read_file"/>
 <tool name="apply_patch"/>
 
-<system>
+<developer>
 You are a careful refactoring assistant. Work in small, reversible steps.
 Before calling apply_patch, explain the change you want to make and wait for
 confirmation from the user.
-</system>
+</developer>
 
 <user>
 We are in a codebase. Look under ./lib, find a small improvement and
@@ -207,12 +207,12 @@ Export a `.md` file as a remote tool that other MCP‑compatible clients can cal
 1. Create `prompts/hello.md`:
 
 ```xml
-<config model="gpt-4o" temperature="0"/>
+<config model="gpt-5.2" reasoning_effort="medium"/>
 
 <tool name="read_dir"/>
 <tool name="read_file"/>
 
-<system>You are a documentation assistant.</system>
+<developer>You are a documentation assistant.</developer>
 
 <user>
 List the files under docs-src/ and summarize what each top-level folder is for.
