@@ -326,7 +326,7 @@ Deep-dive docs live under `docs-src/`. Key entry points:
 - [Real-world example session: updating the tools docs](real-world-example-session/update-tool-docs/readme.md) – a non-trivial end-to-end ochat run (full transcript + compacted version).
 - [ChatMarkdown language reference](docs-src/overview/chatmd-language.md) – element tags, inline helpers, and prompt‑writing guidelines.
 - [Built-in tools & custom tools](docs-src/overview/tools.md) – built‑in toolbox, shell wrappers, custom tools, and MCP tool import.
-- [chat_tui guide & key bindings](docs-src/guide/chat_tui.md) – keybindings, context compaction, persistent sessions, and advanced behaviours.
+- [chat_tui guide & key bindings](docs-src/guide/chat_tui.md) – quick-start + muscle-memory cheat sheet, modes (including the ESC/cancel/quit behavior), editing + message selection workflows, quitting/export rules, sessions, context compaction, and troubleshooting.
 - [`ochat chat-completion` CLI](docs-src/cli/chat-completion.md) – non‑interactive runs, flags, exit codes and ephemeral runs.
 - [MCP server & protocol details](docs-src/bin/mcp_server.doc.md) – how `mcp_server` exposes prompts and tools over stdio or HTTP/SSE.
 - [Search, indexing & code intelligence](docs-src/guide/search-and-indexing.md) – indexers, searchers and prompt patterns for hybrid retrieval.
