@@ -218,7 +218,7 @@ For more on `ochat chat-completion` (flags, exit codes, ephemeral runs), see
 
 ---
 
-## Core concepts
+## [Core concepts](#concepts)
 
 - **ChatMarkdown (ChatMD)**  \
   A Markdown + XML dialect that stores model config, tool declarations and the full conversation (including tool calls, reasoning traces and imported artefacts) in a single `.md` file. Because prompts are plain text files you can review, diff and refactor them like code, and the runtime guarantees that what the model sees is exactly what is in the document. See the [language reference](docs-src/overview/chatmd-language.md).
