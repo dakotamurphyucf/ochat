@@ -177,7 +177,7 @@ to the client.
 For a more advanced, end-to-end agent built from the same building
 blocks, see the
 [General Assistant – agent workflow](docs-src/guide/general-agent-workflow.md). This is the agent that was used to generate the example
-recording at the top of this readme.
+recording at the top of this readme. Other examples located in [prompt-examples](prompt-examples/)
 
 ---
 
