@@ -42,8 +42,8 @@ end
 let safe_string attr s =
   match I.string attr s with
   | img -> img
-  | exception e ->
-    Printf.eprintf "Error rendering line: %s" (Exn.to_string e);
+  | exception _e ->
+    (* Printf.eprintf "Error rendering line: %s" (Exn.to_string e); *)
     I.string attr "[error: invalid input]"
 ;;
 

@@ -112,16 +112,5 @@ the final ChatMD document directly to the console while still giving the
 runtime a valid *file descriptor* to append to — a requirement of the current
 implementation.
 
----
 
-## 6 Exit codes
-
-| Code | Meaning |
-|------|---------|
-| `0` | Assistant replied successfully. |
-| `1` | Prompt malformed or missing OpenAI key. |
-| `2` | At least one tool call failed. |
-| `≥3` | Unexpected OCaml exception. |
-
-Run `ochat --help` for an exhaustive list of sub-commands and defaults.
 

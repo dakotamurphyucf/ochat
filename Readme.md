@@ -4,7 +4,7 @@
 *Everything you need to prototype and run modern LLM workflows as plain files (implemented in OCaml).*
 
 <div>
- <img src="assets/demo.gif" alt="chat_tui demo" height="700" width="900"/>
+<a href="https://asciinema.org/a/gIelV4eAeA0LKvG7" target="_blank"><img height="700" width="900" src="https://asciinema.org/a/gIelV4eAeA0LKvG7.svg" /></a>
 </div>
 
 
@@ -28,137 +28,72 @@ Because everything is captured in text files, workflows are:
 - **reproducible** – the exact config and transcript are version‑controlled,
 - **diff‑able** – reviews show exactly what changed and what the model did,
 - **composable** – workflows can call other workflows (prompt‑as‑tool),
-- **portable** – prompts are plain text; tools exchange JSON.
-
+- **portable** – prompts are plain text.
+- **editable** – you can open prompts in any text editor, IDE, or even a terminal.
+- **LLM-friendly** – the XML structure is easy for models to parse and generate.
+  - A ChatMD file can be embedded in prompts to other models.
+  - You can build agents that write or modify other agents dynamically.
+- **Defines multiple Git tools** – define multiple Git tools instead of a single `git` tool.
+  - Allows more granular control over Git operations.
+  - Controls which Git operations the agent can perform.
+  - Reduces the chance of incorrect Git commands due to more precise command definitions.
+ 
 The same `.md` definition can be executed in multiple hosts:
 
 - the **terminal UI** (`chat_tui`) for interactive work,
 - **scripts and CI** via `ochat chat-completion`, and
 - a **remote MCP server** via `mcp_server`, so IDEs or other applications can call agents over stdio or HTTP/SSE.
 
-The chatmd language provides a rich set of features for prompt engineering in a modular way supporting all levels of complexity.
+The ChatMD language provides a rich set of features for prompt engineering in a modular way supporting all levels of complexity.
+  - See the [language reference](docs-src/overview/chatmd-language.md)
 
-Ochat is implemented in OCaml, and provides tools for ocaml development, but the workflows themselves are **language‑agnostic** and ochat makes no assumptions about the types of applications the workflows target: you can use ochat to build workflows for any use case that benefits from LLMs + tools, and it puts no contraints on how simple or complex those workflows are.
+Ochat is implemented in OCaml, and provides tools for OCaml development, but the workflows themselves are **language‑agnostic** and ochat makes no assumptions about the types of applications the workflows target: you can use ochat to build workflows for any use case that benefits from LLMs + tools, and it puts no constraints on how simple or complex those workflows are.
 
-**LLM provider support (today): OpenAI only.** Ochat currently integrates with OpenAI for chat execution and embeddings. The architecture is intended to support additional providers, but those integrations are not implemented yet. 
-
-For details on the current OpenAI surface, see `docs-src/lib/openai/` (for example: [`responses`](docs-src/lib/openai/responses.doc.md)).
-
-If you want the OCaml-specific entry points (embedding as a library, OCaml API doc search, `opam`/`dune` workflows), see the **OCaml integration** section below.
+**LLM provider support (today): OpenAI only.** Ochat currently integrates with OpenAI for chat execution and embeddings. It uses the Responses API, so any model that supports that API scheme could be used. The architecture is intended to support additional providers, but those integrations are not implemented yet.
 
 ---
 
 ## What can I do with Ochat?
 
 - **Author agent workflows as static files**  
-  Write agents as `.md` files (ChatMarkdown). Each file is both the prompt *and* the execution log: model config, tool permissions, tool calls/results, and the full transcript.
+  Write agents as `.md` files (ChatMarkdown). A file can act as a reusable prompt *and* the execution log of running one: model config, tool permissions, tool calls/results, and the full transcript. You can version-control, diff, and refactor them like code. Supports branching: run a prompt and export the full conversation log with the original prompt to a new file that you can resume or fork later.
 
-- **Compose unique agents via composition of tools (built-ins + your tools) and chat messages inputs via chatmd prompts**  
+- **Compose unique agents via composition of tools (built-ins + your tools) and message inputs via ChatMD prompts**  
 
   You can mix:
 
-  - **built-in tools** for common building blocks:
-    - repo-safe editing: `apply_patch`
+  - **Well-crafted prompting via message inputs** 
+    - Use the rich ChatMD language to express developer / user messages to drive agent behavior.
+
+  - **built-in tools** for common building blocks like:
+    - repo-safe editing: `apply_patch` 
     - filesystem reads: `read_dir` (directory listing), `read_file` *(alias: `get_contents`)*
     - web ingestion: `webpage_to_markdown` (HTML → Markdown + GitHub blob fast-path)
     - local semantic search over docs: `index_markdown_docs` + `markdown_search`, and `odoc_search`
     - hybrid retrieval over code: `index_ocaml_code` + `query_vector_db`
     - vision inputs: `import_image` (bring local screenshots/diagrams into the model)
-  - **custom shell tools** to wrap any command you already trust (`git`, `rg`, linters, internal CLIs…), and
-  - **remote MCP tools** to import capabilities from other servers (or to export your own prompt pack as tools) like this:
-  
-    ```xml
-    <tool mcp_server="stdio:npx -y brave-search-mcp" />
-    ```
-
+  - **custom shell tools** to wrap any command you already trust (`git`, `rg`, linters, internal CLIs…)
+  - **remote MCP tools** to import capabilities from other servers (or to export your own prompt pack as tools)
   - **agent-as-tool**: mount other `.md` files as tools inside a prompt.
-  
   See [Tools – built-ins, custom helpers & MCP](docs-src/overview/tools.md).
 
-- **Tools & capabilities (quick tour)**  
-  These are the features most users care about on day 1—each with a minimal example.
+  
 
-  **1) Atomic repo edits with `apply_patch`**
-
-  Declare:
-  ```xml
-  <tool name="apply_patch"/>
-  ```
-  Tool calls pass a single patch string (V4A format):
-  ```text
-  {
-    "patch": "*** Begin Patch\n*** Update File: path/to/file\n...\n*** End Patch"
-  }
-  ```
-  Why it’s great: you get **reviewable, multi-file, atomic** edits instead of ad-hoc mutations.
-
-  **2) Read files safely with `read_file` (alias: `get_contents`)**
-
-  Declare:
-  ```xml
-  <tool name="read_file"/>
-  ```
-  Notes: `read_file` refuses binary-ish content and truncates large files to keep context bounded.
-
-  **3) Ingest web pages (and GitHub code slices) as Markdown with `webpage_to_markdown`**
-
-  Declare:
-  ```xml
-  <tool name="webpage_to_markdown"/>
-  ```
-  Works especially well on GitHub blob URLs with line ranges, e.g.:
-  - `https://github.com/owner/repo/blob/main/lib/foo.ml#L10-L80`
-
-  Why it’s great: get clean, readable Markdown with code blocks instead of raw HTML. Much easier for the model to digest.
-
-  **4) Prompt-as-tool: mount a `.chatmd` workflow as a callable tool**
-
-  Declare:
-  ```xml
-  <tool name="triage" agent="prompts/triage.chatmd" local/>
-  ```
-  Why it’s great: build *small specialized agents* (triage, planner, doc-writer) and compose them.
-
-  **5) “Docs RAG” over your project Markdown**
-
-  Declare:
-  ```xml
-  <tool name="index_markdown_docs"/>
-  <tool name="markdown_search"/>
-  ```
-  Typical flow: index once (per repo), then query in natural language to pull high-signal snippets from your docs.
-
-  **6) Bring screenshots/diagrams into the model with `import_image`**
-
-  Declare:
-  ```xml
-  <tool name="import_image"/>
-  ```
-  Example payload:
-  ```json
-  { "path": "assets/screenshot.png" }
-  ```
-
-  **7) Import tools from elsewhere via MCP**
-
-  Declare:
-  ```xml
-  <tool mcp_server="https://tools.acme.dev" includes="weather,stock_ticker"/>
-  ```
-  Why it’s great: share tool catalogs across environments (local, container, CI) without changing prompts.
 
 - **Build Claude Code/Codex-style agentic applications via custom “prompt packs”**  
-  You can implement this as a set of specialized agents (planning agent, coding agent, test agent, doc agent…) and wire them together in an orchestration agent via agent-as-tool. The “application” is just a set of ChatMD files and you can run it via the terminal ui (`chat_tui`) or via the chat-completion CLI (`ochat chat-completion`).
+  You can implement this as a set of specialized agents (planning agent, coding agent, test agent, doc agent…) and wire them together in an orchestration agent via agent-as-tool. The “application” is just a set of ChatMD files and you can run it via the terminal ui (`chat_tui`) or via the chat-completion CLI (`ochat chat-completion`). The key is combining well crafted prompts with the right set of tools (e.g. `read_file`, `apply_patch`, `webpage_to_markdown`, etc) to achieve desired behavior. All without having to be vendor-locked into a specific UI or platform.
 
 - **Run the same workflows in different hosts**  
   Use `chat_tui` for interactive sessions, `ochat chat-completion` for scripts/CI/cron, and `mcp_server` to expose prompts as tools to IDEs and other hosts.
 
 - **Ground agents in your own corpus**  
-  Build indexes for docs/source trees and query them from within prompts so the agent can cite and follow project conventions rather than guessing. See [Search, indexing & code intelligence](docs-src/guide/search-and-indexing.md).
+  Build vector indexes for docs/source trees and provide query capabilities within prompts so the agent can use natural language to query them. See [Search, indexing & code intelligence](docs-src/guide/search-and-indexing.md).
 
-- **Continuously improve prompts**  
-  Use the `mp-refine-run` binary to iteratively refine prompts and tool descriptions using evaluators, treating prompt design as a versioned, testable artifact.
+- **Generate and continuously improve prompts**  
+   Via a technique known as meta-prompt refinement, use the `mp-refine-run` binary to iteratively refine prompts and tool descriptions using an LLM to generate/refine drafts and judge quality over multiple iterations.
 
+- **Provide reproducible conversation state**  
+  Because everything is stored in text files, you can version-control, diff, and refactor conversations like code. You can also export the full conversation log (including tool calls/results) to a new file that you can share, resume or fork later.
 ---
 
 ## Example ChatMD prompts
@@ -197,8 +132,8 @@ dune exec chat_tui -- -file prompts/refactor.md
 
 From there you can ask the assistant to rename a function, extract a helper, or
 update documentation. It will use `read_dir` and `read_file` to inspect the
-code, then generate `apply_patch` diffs and apply them, with every tool call
-and patch recorded in the `.md` file.
+code, then generate `apply_patch` diffs and apply them, where every tool call
+and patch can be recorded in the `.md` file.
 
 ### Example: publish a prompt as an MCP tool
 
@@ -239,9 +174,10 @@ The response includes an entry for `hello` whose JSON schema is inferred from
 the ChatMD file; calling that tool runs your prompt and streams the result back
 to the client.
 
-For a more advanced, end-to-end research agent built from the same building
+For a more advanced, end-to-end agent built from the same building
 blocks, see the
-[Discovery bot – research agent workflow](docs-src/guide/discovery-bot-workflow.md).
+[General Assistant – agent workflow](docs-src/guide/general-agent-workflow.md). This is the agent that was used to generate the example
+recording at the top of this readme.
 
 ---
 
@@ -255,14 +191,7 @@ opam install . --deps-only
 
 dune build
 dune runtest
-
-# Optional – build API docs when the dune-project declares a (documentation ...) stanza
-dune build @doc
 ```
-
-> The `@doc` alias is generated only when the project’s `dune-project` file
-> contains a `(documentation ...)` stanza. If the command above fails, add the
-> stanza or skip the step.
 
 > On Apple Silicon (macOS arm64), Owl's OpenBLAS dependency can sometimes fail
 > to build during `opam install`. If you see BLAS/OpenBLAS errors while
@@ -270,7 +199,7 @@ dune build @doc
 > [Build & installation troubleshooting](docs-src/guide/build-troubleshooting.md#owl--openblas-on-apple-silicon-macos-arm64)
 > for a proven workaround.
 
-Run a quick interactive session with the terminal UI:
+Run an interactive session with the terminal UI:
 
 ```sh
 dune exec chat_tui -- -file prompts/interactive.md
@@ -289,16 +218,13 @@ For more on `ochat chat-completion` (flags, exit codes, ephemeral runs), see
 
 ---
 
-## Core concepts in one page
+## Core concepts
 
 - **ChatMarkdown (ChatMD)**  \
   A Markdown + XML dialect that stores model config, tool declarations and the full conversation (including tool calls, reasoning traces and imported artefacts) in a single `.md` file. Because prompts are plain text files you can review, diff and refactor them like code, and the runtime guarantees that what the model sees is exactly what is in the document. See the [language reference](docs-src/overview/chatmd-language.md).
 
 - **Tools**  \
   Functions the model can call, described by explicit JSON schemas. They can be built‑ins (e.g. `apply_patch`, `read_dir`, `read_file` *(alias: `get_contents`)*, `webpage_to_markdown`, `import_image`), shell wrappers around commands like `rg` or `git`, other ChatMD agents (prompt‑as‑tool), or remote MCP tools discovered from another server. (When embedding Ochat, you can also expose custom functions from your host application.) See [Tools – built‑ins, custom helpers & MCP](docs-src/overview/tools.md).
-
-- **Agents & prompt‑as‑tool**  \
-  Any `.md` file can be treated as an agent. Locally you can call it via `<agent>` blocks or mount it as a tool inside another prompt; remotely, `mcp_server` exposes it as a `tools/call::<name>` endpoint that IDEs or other hosts can invoke. Complex workflows become graphs of small, composable agents rather than monolithic prompts.
 
 - **chat_tui**  \
   A Notty‑based terminal UI for editing and running `.md` files. It turns each prompt into a **terminal application**: live streaming of model output and tool responses, Vim‑style navigation, context compaction for long histories, and persistent sessions that you can resume or branch. You can think of `chat_tui` as the “host” and `.md` files as pluggable apps. See the [chat_tui guide](docs-src/guide/chat_tui.md).
@@ -323,7 +249,6 @@ For more on `ochat chat-completion` (flags, exit codes, ephemeral runs), see
 
 Deep-dive docs live under `docs-src/`. Key entry points:
 
-- [Real-world example session: updating the tools docs](real-world-example-session/update-tool-docs/readme.md) – a non-trivial end-to-end ochat run (full transcript + compacted version).
 - [ChatMarkdown language reference](docs-src/overview/chatmd-language.md) – element tags, inline helpers, and prompt‑writing guidelines.
 - [Built-in tools & custom tools](docs-src/overview/tools.md) – built‑in toolbox, shell wrappers, custom tools, and MCP tool import.
 - [chat_tui guide & key bindings](docs-src/guide/chat_tui.md) – quick-start + muscle-memory cheat sheet, modes (including the ESC/cancel/quit behavior), editing + message selection workflows, quitting/export rules, sessions, context compaction, and troubleshooting.
@@ -331,11 +256,7 @@ Deep-dive docs live under `docs-src/`. Key entry points:
 - [MCP server & protocol details](docs-src/bin/mcp_server.doc.md) – how `mcp_server` exposes prompts and tools over stdio or HTTP/SSE.
 - [Search, indexing & code intelligence](docs-src/guide/search-and-indexing.md) – indexers, searchers and prompt patterns for hybrid retrieval.
 - [Meta-prompting & Prompt Factory](docs-src/lib/meta_prompting.doc.md) – generators, evaluators, refinement loops and prompt packs.
-
-OCaml integration and internals:
-
-- [Embedding Ochat in OCaml](docs-src/lib/embedding.md) – reusing the libraries and caching patterns.
-- [ChatML language & runtime](docs-src/lib/chatml/chatml_lang.doc.md) – experimental typed scripting language; see also the parser and resolver docs under `docs-src/lib/chatml/`. For concrete examples of the language in action, see [`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml) and [`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml).
+- [Real-world example session: updating the tools docs](real-world-example-session/update-tool-docs/readme.md) – a non-trivial end-to-end ochat run (full transcript + compacted version using the chat compaction feature).
 
 ---
 
@@ -469,6 +390,8 @@ generation, to writing emails and automating mundane tasks.
 Please budget time for occasional refactors and breaking changes.
 Bug reports, feature requests, and PRs are welcome and encouraged actually – just keep in mind the ground may still be
 moving beneath your feet.
+
+Documentation is a work in progress too – I try to keep things as updated as possible but some features may have outpaced the docs. If you find gaps or rough edges, please open issues or PRs to help improve it.
 
 ---
 
