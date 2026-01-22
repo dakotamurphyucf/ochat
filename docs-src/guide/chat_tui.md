@@ -10,6 +10,11 @@ extensions, so any `.md` can be a ChatMarkdown prompt.
 
 ---
 
+<div>
+<img src="../../assets/tui-snapshot.png" alt="chat_tui demo" height="700" width="900"/>
+</div>
+
+
 ## chat_tui in 60 seconds
 
 `chat_tui` is designed for the “draft → run → iterate” loop:
@@ -19,8 +24,8 @@ extensions, so any `.md` can be a ChatMarkdown prompt.
 - **Vim-ish interaction:** Insert / Normal / Cmdline modes, plus message selection and yank/edit/resubmit.
 - **Sessions you can resume/branch/export:** persistent snapshots under `$HOME/.ochat/sessions/<id>`.
 - **Manual context compaction:** `:compact` produces a concise summary so long chats stay usable.
+- **Syntax highlighting:** Rich syntax highlighting enabled for Markdown, XML, Json, Ocaml with more to come.
 
----
 
 ## Launch
 

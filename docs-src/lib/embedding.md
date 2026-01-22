@@ -50,10 +50,6 @@ The same embedding stack underpins all the indexers:
 Markdown and odoc indexers use `Embed_service` internally to batch requests
 and respect rate limits; the code indexer calls `Openai.Embeddings` directly.
 
-When `OPENAI_API_KEY` is not set or `OPENAI_EMBEDDINGS_STUB` is enabled, all
-of these callers switch to a deterministic stub backend. The same stub is used
-at query time, so you can build and query indices in tests without talking to
-the real OpenAI service.
 
 ## Caching in practice
 
