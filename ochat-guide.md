@@ -52,7 +52,7 @@ When the program and log are unified into a single structured file:
 ChatMD is intentionally **not general XML**. It is a *closed set* of tags embedded in Markdown with strict parsing rules (ChatMD reference: https://github.com/dakotamurphyucf/ochat/blob/main/docs-src/overview/chatmd-language.md):
 
 - Top-level must be recognized ChatMD elements (no free text at the top level).
-- RAW blocks exist as an escape hatch for literal JSON/code: `RAW| ... |RAW`.
+- RAW blocks exist as an escape hatch for literal Chatmd XML elements: `RAW| ... |RAW`.
 - Some deterministic transforms exist (e.g., stripping HTML comments; `<import/>` expansion under defined circumstances).
 
 This “closed vocabulary” is a major design choice: it reduces ambiguity, avoids “best effort parsing,” and keeps workflows human-reviewable while still being machine-checked.
