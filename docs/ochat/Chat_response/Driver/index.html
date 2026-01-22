@@ -38,8 +38,10 @@ let search_urls = ['../../db.js','../../../sherlodoc.js'];
   <span><span class="label">history</span>:<span><a href="../../Openai/Responses/Item/index.html#type-t">Openai.Responses.Item.t</a> list</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?on_event</span>:<span>(<span><a href="../../Openai/Responses/Response_stream/index.html#type-t">Openai.Responses.Response_stream.t</a> <span class="arrow">&#45;&gt;</span></span> unit)</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?on_fn_out</span>:<span>(<span><a href="../../Openai/Responses/Function_call_output/index.html#type-t">Openai.Responses.Function_call_output.t</a> <span class="arrow">&#45;&gt;</span></span> unit)</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?on_tool_out</span>:<span>(<span><a href="../../Openai/Responses/Item/index.html#type-t">Openai.Responses.Item.t</a> <span class="arrow">&#45;&gt;</span></span> unit)</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="label">tools</span>:<span><span><a href="../../Openai/Responses/Request/Tool/index.html#type-t">Openai.Responses.Request.Tool.t</a> list</span> option</span> <span class="arrow">&#45;&gt;</span></span>
-  <span><span class="optlabel">?tool_tbl</span>:<span><span>(string, <span>string <span class="arrow">&#45;&gt;</span></span> string)</span> <span class="xref-unresolved">Core</span>.Hashtbl.t</span> <span class="arrow">&#45;&gt;</span></span>
+  <span><span class="optlabel">?tool_tbl</span>:
+    <span><span>(string, <span>string <span class="arrow">&#45;&gt;</span></span> <a href="../../Openai/Responses/Tool_output/Output/index.html#type-t">Openai.Responses.Tool_output.Output.t</a>)</span> <span class="xref-unresolved">Core</span>.Hashtbl.t</span> <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?temperature</span>:float <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?max_output_tokens</span>:int <span class="arrow">&#45;&gt;</span></span>
   <span><span class="optlabel">?reasoning</span>:<a href="../../Openai/Responses/Request/Reasoning/index.html#type-t">Openai.Responses.Request.Reasoning.t</a> <span class="arrow">&#45;&gt;</span></span>
