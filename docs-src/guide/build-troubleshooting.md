@@ -40,6 +40,7 @@ Notes:
 - The exact Owl version or pin target may change over time; if the commands
   above stop working, please refer to the latest guidance in the
   [upstream Owl issue tracker](https://github.com/owlbarn/owl/issues).
+- [follow this if you do not want to pin](https://github.com/owlbarn/owl/issues/684#issuecomment-3076071845)
 - Once Owl and its BLAS dependencies build successfully in your switch,
   `dune build` for this project should proceed normally.
 
