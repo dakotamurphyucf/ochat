@@ -92,7 +92,7 @@ let yank (model : Model.t) =
 let delete_range (model : Model.t) ~first ~last =
   (* Remove [first,last) from input line. Assumes indices are valid. *)
   if first >= last
-  then ()
+  then backspace model
   else (
     let s = Model.input_line model in
     let before = String.sub s ~pos:0 ~len:first in
@@ -321,7 +321,7 @@ let scroll_by_lines (model : Model.t) ~term delta =
   let _, screen_h = Notty_eio.Term.size term in
   (* Number of lines occupied by the multiline input editor. *)
   let input_height =
-    match String.split_lines (Model.input_line model) with
+    match String.split_on_chars ~on:[ '\n' ] (Model.input_line model) with
     | [] -> 1
     | ls -> List.length ls
   in
@@ -491,12 +491,16 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     Model.set_auto_follow model false;
     scroll_by_lines model ~term (-1);
     Redraw
+  | `Key (`Arrow `Up, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
+    Model.set_auto_follow model false;
+    scroll_by_lines model ~term (-1);
+    Redraw
   (* ----------------------------------------------------------------- *)
   (*  Cursor vertical move within editor (Ctrl-Up / Ctrl-Down)          *)
-  | `Key (`Arrow `Up, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
+  | `Key (`Arrow `Up, mods) when List.mem mods `Meta ~equal:Poly.equal ->
     move_cursor_vertically model ~dir:(-1);
     Redraw
-  | `Key (`Arrow `Down, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
+  | `Key (`Arrow `Down, mods) when List.mem mods `Meta ~equal:Poly.equal ->
     move_cursor_vertically model ~dir:1;
     Redraw
   (* ----------------------------------------------------------------- *)
@@ -621,8 +625,22 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     Model.set_auto_follow model false;
     scroll_by_lines model ~term 1;
     Redraw
+  | `Key (`Arrow `Down, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
+    Model.set_auto_follow model false;
+    scroll_by_lines model ~term 1;
+    Redraw
   (* ----------------------------------------------------------------- *)
   (* Duplicate current line (Meta+Shift+Up / Meta+Shift+Down)           *)
+  | `Mouse (`Press (`Scroll dir), (_x, _y), _mods) ->
+    (match dir with
+     | `Up ->
+       Model.set_auto_follow model false;
+       scroll_by_lines model ~term (-1);
+       Redraw
+     | `Down ->
+       Model.set_auto_follow model false;
+       scroll_by_lines model ~term 1;
+       Redraw)
   | `Key (`Arrow `Up, mods)
     when List.mem mods `Meta ~equal:Poly.equal && List.mem mods `Shift ~equal:Poly.equal
     ->
