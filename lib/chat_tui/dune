@@ -25,6 +25,13 @@
   path_completion
   conversation
   snippet
+  app_runtime
+  app_events
+  app_submit
+  app_compaction
+  app_streaming
+  app_stream_apply
+  app_reducer
   app
   attachments
   export

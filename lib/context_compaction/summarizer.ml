@@ -127,8 +127,7 @@ let render_item (item : Openai.Responses.Item.t) : string option =
       parts
       |> List.map ~f:(function
         | Tool_output.Output_part.Input_text { text } -> text
-        | Input_image { image_url; _ } ->
-          Printf.sprintf "<image src=\"%s\" />" image_url)
+        | Input_image { image_url; _ } -> Printf.sprintf "<image src=\"%s\" />" image_url)
       |> String.concat ~sep:"\n"
   in
   match item with
