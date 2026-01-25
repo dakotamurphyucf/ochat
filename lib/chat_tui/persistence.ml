@@ -118,7 +118,8 @@ let persist_session
         append
           (Printf.sprintf
              "\n\
-              <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
+              <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
+              function_name=\"%s\" id=\"%s\">\n\
               %s|\n\
               %s\n\
               |%s\n\
@@ -134,8 +135,8 @@ let persist_session
         Io.save_doc ~dir:datadir filename tc.input;
         append
           (Printf.sprintf
-             "<tool_call type=\"custom_tool_call\" function_name=\"%s\" tool_call_id=\"%s\" id=\"%s\"><doc \
-              src=\"./.chatmd/%s\" local/></tool_call>\n"
+             "<tool_call type=\"custom_tool_call\" function_name=\"%s\" \
+              tool_call_id=\"%s\" id=\"%s\"><doc src=\"./.chatmd/%s\" local/></tool_call>\n"
              tc.name
              tc.call_id
              (Option.value tc.id ~default:tc.call_id)
@@ -168,7 +169,11 @@ let persist_session
          then
            append
              (Printf.sprintf
-                "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\">\nRAW|\n%s\n|RAW\n</tool_response>\n"
+                "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\">\n\
+                 RAW|\n\
+                 %s\n\
+                 |RAW\n\
+                 </tool_response>\n"
                 tco.call_id
                 (to_persisted_string tco.output))
          else (
@@ -176,8 +181,8 @@ let persist_session
            Io.save_doc ~dir:datadir filename (to_persisted_string tco.output);
            append
              (Printf.sprintf
-                "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\"><doc src=\"./.chatmd/%s\" \
-                 local/></tool_response>\n"
+                "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\"><doc \
+                 src=\"./.chatmd/%s\" local/></tool_response>\n"
                 tco.call_id
                 filename)))
     | Res_item.Reasoning r ->

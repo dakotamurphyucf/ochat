@@ -466,9 +466,9 @@ let%expect_test "tool_output_kind: read_file output can arrive before arguments_
   [%expect {| Read_file path=README.md |}]
 ;;
 
-
 let%expect_test
-    "tool_output_kind: read_file args_done in same stream batch as output_item_added populates path"
+    "tool_output_kind: read_file args_done in same stream batch as output_item_added \
+     populates path"
   =
   let module Stream = Chat_tui.Stream in
   let module Model = Chat_tui.Model in
@@ -524,8 +524,8 @@ let%expect_test
   [%expect {| Read_file path=README.md |}]
 ;;
 
-
-let%expect_test "tool_output_kind: output can arrive before output_item_added (read_file)" =
+let%expect_test "tool_output_kind: output can arrive before output_item_added (read_file)"
+  =
   let module Stream = Chat_tui.Stream in
   let module Model = Chat_tui.Model in
   let module Types = Chat_tui.Types in
@@ -575,7 +575,9 @@ let%expect_test "tool_output_kind: output can arrive before output_item_added (r
   [%expect {| Read_file path=README.md |}]
 ;;
 
-let%expect_test "tool_output_kind: output can arrive before output_item_added (apply_patch)" =
+let%expect_test
+    "tool_output_kind: output can arrive before output_item_added (apply_patch)"
+  =
   let module Stream = Chat_tui.Stream in
   let module Model = Chat_tui.Model in
   let module Types = Chat_tui.Types in
@@ -625,8 +627,9 @@ let%expect_test "tool_output_kind: output can arrive before output_item_added (a
   [%expect {| Apply_patch |}]
 ;;
 
-
-let%expect_test "tool_output_kind: parallel tool outputs stay separated (read_file + apply_patch)" =
+let%expect_test
+    "tool_output_kind: parallel tool outputs stay separated (read_file + apply_patch)"
+  =
   let module Stream = Chat_tui.Stream in
   let module Model = Chat_tui.Model in
   let module Types = Chat_tui.Types in
@@ -681,7 +684,10 @@ let%expect_test "tool_output_kind: parallel tool outputs stay separated (read_fi
   in
   apply
     (Res_stream.Output_item_added
-       { item = Item.Function_call fc_read; output_index = 0; type_ = "output_item_added" });
+       { item = Item.Function_call fc_read
+       ; output_index = 0
+       ; type_ = "output_item_added"
+       });
   apply
     (Res_stream.Output_item_added
        { item = Item.Function_call fc_patch

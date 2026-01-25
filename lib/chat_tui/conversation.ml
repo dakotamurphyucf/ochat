@@ -17,8 +17,7 @@ let pair_of_item (it : Res_item.t) : message option =
       parts
       |> List.map ~f:(function
         | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-        | Input_image { image_url; _ } ->
-          Printf.sprintf "<image src=\"%s\" />" image_url)
+        | Input_image { image_url; _ } -> Printf.sprintf "<image src=\"%s\" />" image_url)
       |> String.concat ~sep:"\n"
   in
   let string_of_content_items content_items =

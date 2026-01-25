@@ -263,31 +263,16 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
            { name; input = arguments; call_id; _type = "custom_tool_call"; id = m.id }
        else
          Res.Item.Function_call
-           { name
-           ; arguments
-           ; call_id
-           ; _type = "function_call"
-           ; id = m.id
-           ; status = None
-           }
+           { name; arguments; call_id; _type = "function_call"; id = m.id; status = None }
      | None ->
        let call_id = Option.value_exn m.tool_call_id in
        if is_custom_tool_call
        then
          Res.Item.Custom_tool_call_output
-           { call_id
-           ; _type = "custom_tool_call_output"
-           ; id = None
-           ; output
-           }
+           { call_id; _type = "custom_tool_call_output"; id = None; output }
        else
          Res.Item.Function_call_output
-           { call_id
-           ; _type = "function_call_output"
-           ; id = None
-           ; status = None
-           ; output
-           })
+           { call_id; _type = "function_call_output"; id = None; status = None; output })
   | (`User | `System | `Developer) as r ->
     let role_val =
       match r with
@@ -403,13 +388,7 @@ and convert_tool_call_msg ~ctx ~run_agent (m : CM.tool_call_msg) : Res.Item.t =
       { name; input = arguments; call_id; _type = "custom_tool_call"; id = m.id }
   | _ ->
     Res.Item.Function_call
-      { name
-      ; arguments
-      ; call_id
-      ; _type = "function_call"
-      ; id = m.id
-      ; status = None
-      }
+      { name; arguments; call_id; _type = "function_call"; id = m.id; status = None }
 
 and convert_tool_response_msg ~ctx ~run_agent (m : CM.tool_response_msg) : Res.Item.t =
   (* Shorthand <tool_response/> – the *output* of a previously invoked tool. *)

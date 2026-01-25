@@ -86,7 +86,6 @@ let%expect_test "to_items converts user message with basic text" =
     |}]
 ;;
 
-
 let%expect_test "to_items converts <tool_call type=custom_tool_call>" =
   Eio_main.run
   @@ fun env ->

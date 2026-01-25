@@ -1,0 +1,240 @@
+version: 1
+
+scope:
+  project: "ochat"
+  target_file: "lib/chat_tui/app.ml"
+  principle: "Refactor for maintainability and responsiveness; preserve existing behavior except where explicitly called out (submit during streaming becomes a system note; submit during compaction queues; compaction queues while streaming)."
+  status_values: ["pending", "inprogress", "finished"]
+
+plan:
+  what: "Refactor lib/chat_tui/app.ml to use two event queues (input vs internal), a single reducer owning all model mutations, explicit runtime op state, FIFO queueing of submits/compactions, and level-triggered redraw via Redraw_throttle."
+  why: "Improve keypress/UI responsiveness under heavy streaming load and make future TUI enhancements easier without introducing concurrency/state bugs."
+  constraints:
+    - "Single-writer invariant: only the reducer mutates Model.t and runtime state."
+    - "Two queues: Notty input events must not be backpressured by internal streaming/redraw traffic."
+    - "Submit never cancels: only Cancel/ESC cancels the active op."
+    - "Submit while Streaming: enqueue a system note (do NOT queue a submit request)."
+    - "Submit while Compacting: enqueue a submit request FIFO (do NOT cancel compaction)."
+    - "Keep existing stable streaming/error-handling behavior; migrate logic but do not weaken edge-case handling."
+    - "Do not regress tool output handling: tool call outputs must remain incrementally visible and syntax-highlighted during streaming (not only after final Replace_history)."
+    - "Do not change semantics of parallel_tool_calls; preserve correct association of tool outputs with the correct tool calls."
+    - "Eio version is 1.2; use Eio.Stream.take_nonblocking and Eio.Fiber.n_any (avoid Fiber.first/any for select-like behavior)."
+    - "In-place refactor first (stay in app.ml); avoid splitting files until after the refactor is stable."
+  agent_guidance:
+    - "Before starting, read chat_tui_app_refactor_tasks_details.md for each task."
+    - "Keep diffs small: finish one task at a time; run dune build after each task."
+    - "Prefer mechanical refactors; avoid opportunistic rewrites."
+    - "When waiting on multiple streams, use Fiber.n_any to avoid dropped events if both become ready."
+    - "Record manual checks in notes (submit/stream, submit during streaming -> system note, submit during compaction -> queued, queued compaction, cancel during streaming)."
+
+tasks:
+  - id: 1
+    status: finished
+    name: "Add Runtime + event types scaffolding"
+    notes: |
+      - Added input_event, Runtime scaffolding, and internal_event type near top of app.ml.
+      - Avoided warning-suppression attributes; added a small touch_runtime_scaffolding helper (called from run_chat) to satisfy warn-error until wiring lands.
+      - dune build: OK.
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 2
+    status: finished
+    name: "Introduce two streams in run_chat and route Notty events"
+    notes: |
+      - run_chat now creates input_stream (4096) and internal_stream (1024); Notty input events go to input_stream, Resize goes to internal_stream.
+      - Loop.run now accepts both streams and merges them into a local ev_stream via two forwarder fibers (keeps rest of loop working for now).
+      - Added internal_event/app_event typing and handled `Force_redraw` plus future internal tags (`Submit_request`/`Compact_request`/`System_note`) in the loop.
+      - Note: Notty_eio.Term event type in this repo does not include `Redraw`, so there is no Notty->Force_redraw routing yet.
+      - dune build: OK.
+    depends_on: [1]
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 3
+    status: finished
+    name: "Wire level-triggered redraw through internal stream"
+    notes: |
+      - Kept throttler enqueue callback as the only place that does `Stream.add internal_stream `Redraw` (run_chat).
+      - Replaced direct `Stream.add ... `Redraw` in submit local-effects + streaming error cleanup with `Redraw_throttle.request_redraw throttler` (plumbed throttler where needed).
+      - `Force_redraw`/`Resize` still trigger `redraw_immediate`; `Redraw_throttle.on_redraw_handled` remains only in the `Redraw` event handler.
+      - dune build: OK.
+    depends_on: [2]
+    touches: ["lib/chat_tui/app.ml", "lib/chat_tui/redraw_throttle.ml"]
+
+  - id: 4
+    status: finished
+    name: "Make Controller submit/compact produce request events (no background work)"
+    notes: |
+      - Controller submit now captures {text; draft_mode}, clears editor immediately, enqueues `Submit_requested into internal_stream, and requests redraw (no background work in controller).
+      - Controller compact now enqueues `Compact_requested into internal_stream (no background work in controller).
+      - Loop now handles `Submit_requested/`Compact_requested by running the previous submit/compaction logic (system note if streaming; otherwise apply local submit effects + fork streaming submit; compaction fork unchanged).
+      - Submit_local_effects now takes ~submit_request (no longer reads Model.input_line/draft_mode for submission payload).
+      - dune build: OK.
+      - dune runtest: OK.
+    depends_on: [2, 3]
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 5
+    status: finished
+    name: "Implement single reducer loop consuming input+internal streams with input priority"
+    notes: |
+      - Loop.run now consumes input_stream + internal_stream directly (removed ev_stream + forwarder fibers), so it is the only consumer of both streams.
+      - Scheduling: drain up to 64 input events via Stream.take_nonblocking; then handle one internal event via take_nonblocking; if both empty, block using Fiber.n_any on Stream.take for both streams and process returned events with input priority.
+      - Loop.run now takes ~runtime (model + quit_via_esc); run_chat constructs Runtime.create ~model and passes it in.
+      - dune build: OK.
+      - dune runtest: OK.
+    depends_on: [2, 3, 4]
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 6
+    status: finished
+    name: "Move compaction execution into reducer (producer-only compaction fiber + FIFO queue)"
+    notes: |
+      - Added runtime.op/pending-based FIFO scheduling with maybe_start_next_pending; reducer enqueues Compact on `Compact_requested (even during streaming) and starts it when idle.
+      - Compaction now runs in a background fiber that snapshots history (+ session data) and emits `Compaction_started/`Compaction_done/`Compaction_error events only; reducer applies all model updates on completion.
+      - Submit during compaction now enqueues Runtime.Submit in runtime.pending and starts after compaction completes (FIFO).
+      - Cancel/ESC cancels an active compaction via Switch.fail (including cancel requested while Starting_compaction).
+      - dune build: OK.
+      - dune runtest: OK.
+    depends_on: [5]
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 7
+    status: finished
+    name: "Refactor Streaming_submit to producer-only (emit internal events; no model mutation)"
+    notes: |
+      - Streaming_submit.handle_submit is now producer-only: it takes a history snapshot and emits `Streaming_started/`Stream/`Stream_batch/`Tool_output/`Streaming_done/`Streaming_error into internal_stream (no Model mutations in the streaming fiber).
+      - Reducer now owns streaming lifecycle updates by handling `Streaming_started/`Streaming_done/`Streaming_error (including moving the prior streaming-error rollback/placeholder logic into the reducer).
+      - dune build: OK.
+      - dune runtest: OK.
+    depends_on: [5]
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 8
+    status: finished
+    name: "Implement reducer handlers for Streaming_* and preserve streaming error recovery"
+    notes: |
+      - Reducer now handles Streaming_* lifecycle: `Streaming_started sets runtime.op=Streaming, `Streaming_done clears runtime.op and replaces history, `Streaming_error clears runtime.op and runs the prior rollback/prune/synthetic-tool-output recovery logic.
+      - Stream/Stream_batch/Tool_output/Function_output application is now gated on runtime.op=Streaming (ignores otherwise), preserving incremental tool-output patch flow.
+      - dune build: OK.
+      - dune runtest: OK.
+      - Manual checks (failure path + incremental tool output highlighting): not run in this automation pass.
+    depends_on: [7]
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 9
+    status: finished
+    name: "Replace Model.fetch_sw busy-state usage with Runtime.op everywhere (cancel + gating)"
+    notes: |
+      - Removed busy-state checks based on Model.fetch_sw in maybe_start_next_pending, submit handling, and cancel/quit; runtime.op is now the authoritative busy flag for reducer decisions.
+      - Added Runtime.Starting_streaming + cancel_streaming_on_start latch, and wired it through start_submit + Streaming_started to cover cancel-before-switch edge cases.
+      - Cancel/ESC logic now uses runtime.op to select the active switch to fail (still delegates to Cmd.Cancel_streaming for streaming cancellation).
+      - dune build: OK.
+      - dune runtest: OK.
+      - Manual cancel scenarios: not run in this automation pass.
+    depends_on: [6, 8]
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 10
+    status: finished
+    name: "Verification + cleanup pass (remove unused event variants, ensure no direct model mutations in fibers)"
+    notes: |
+      - Removed unused internal_event variants (`Force_redraw, `Function_output, `Replace_history, `System_note) and their handlers.
+      - Dropped obsolete touch_runtime_scaffolding helper/call; Runtime and event types are now fully wired and referenced.
+      - Stopped mirroring streaming switch into Model.fetch_sw (Model.fetch_sw is unused; runtime.op is authoritative).
+      - Verified redraw enqueues: only throttler callback does Stream.add internal_stream `Redraw.
+      - dune build: OK.
+      - dune runtest: OK.
+    depends_on: [9]
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 11
+    status: finished
+    name: "Add op_id (operation id) to guard against stale internal events"
+    notes: |
+      - Added Runtime.next_op_id + Runtime.alloc_op_id; runtime.op now stores an id for Streaming/Compacting/Starting_*.
+      - Streaming/compaction internal events now carry op_id; reducer ignores events whose op_id doesn't match the currently active op id.
+      - Prevents stale Stream/Tool_output flush events from a cancelled/completed op applying during a subsequent op.
+      - dune build: OK.
+      - dune runtest: OK.
+      - Manual cancel-during-streaming check: not run in this automation pass.
+    depends_on: [10]
+    touches: ["lib/chat_tui/app.ml"]
+
+  - id: 12
+    status: finished
+    name: "Extract Runtime + event types into dedicated files"
+    notes: |
+      - Added lib/chat_tui/app_runtime.ml (Runtime types + create/alloc_op_id).
+      - Added lib/chat_tui/app_events.ml (input_event + internal_event types).
+      - app.ml now aliases Runtime/App_events types instead of defining them inline.
+      - Updated lib/chat_tui/dune modules list to include app_runtime + app_events.
+      - dune build: OK.
+      - dune runtest: OK.
+    depends_on: [11]
+    touches:
+      - "lib/chat_tui/app.ml"
+      - "lib/chat_tui/app_runtime.ml"
+      - "lib/chat_tui/app_events.ml"
+
+  - id: 13
+    status: finished
+    name: "Extract reducer loop + handlers into App_reducer module"
+    notes: |
+      - Added lib/chat_tui/app_reducer.ml containing the reducer loop previously in App.Loop.run (including event draining/waiting, scheduling, cancel/quit handling, and internal event handlers).
+      - app.ml now calls App_reducer.run and partially applies prompt_ctx into Streaming_submit.handle_submit before passing it into the reducer.
+      - Updated lib/chat_tui/dune modules list to include app_reducer; removed now-unused app_event type alias from app.ml to satisfy warn-error.
+      - dune build: OK.
+      - dune runtest: OK.
+      - Manual Task-10 scenario smoke test: not run in this automation pass.
+    depends_on: [12]
+    touches:
+      - "lib/chat_tui/app.ml"
+      - "lib/chat_tui/app_reducer.ml"
+
+  - id: 14
+    status: finished
+    name: "Extract submit/queueing + compaction starters into small modules"
+    notes: |
+      - Added lib/chat_tui/app_submit.ml:
+        - capture_request/clear_editor helpers (controller path).
+        - apply_start_effects + start helper (adds user msg/placeholder/scroll + forks streaming producer).
+      - Added lib/chat_tui/app_compaction.ml with compaction start helper (snapshots + forks producer-only worker emitting internal events).
+      - App_reducer now delegates submit/compaction start codepaths to these modules; reducer semantics/queueing unchanged.
+      - Updated lib/chat_tui/dune modules list (app_submit/app_compaction).
+      - dune build: OK.
+      - dune runtest: OK.
+      - Manual submit/compaction/queueing scenarios: not run in this automation pass.
+    depends_on: [13]
+    touches:
+      - "lib/chat_tui/app.ml"
+      - "lib/chat_tui/app_submit.ml"
+      - "lib/chat_tui/app_compaction.ml"
+
+  - id: 15
+    status: finished
+    name: "Extract streaming producer + stream-apply logic into small modules"
+    notes: |
+      - Added lib/chat_tui/app_streaming.ml (producer-only); app.ml now aliases Streaming_submit to App_streaming and partially applies cfg/tools/tool_tbl.
+      - Added lib/chat_tui/app_stream_apply.ml; app_reducer now aliases Stream_apply to App_stream_apply.
+      - Preserved existing reducer gating on runtime.op + op_id; producer fibers still emit internal events only (no model mutation).
+      - dune build: OK.
+      - dune runtest: OK.
+      - Manual checks (stream incremental render/cancel, parallel tool call output association/highlighting; re-run Task 10 scenarios): not run in this automation pass.
+    depends_on: [13]
+    touches:
+      - "lib/chat_tui/app.ml"
+      - "lib/chat_tui/app_streaming.ml"
+      - "lib/chat_tui/app_stream_apply.ml"
+
+  - id: 16
+    status: finished
+    name: "Cleanup: remove/feature-flag dead meta_refine branch"
+    notes: |
+      - Removed the unreachable meta_refine branch and diff placeholder logic from lib/chat_tui/app_submit.ml (it was guarded by `String.is_empty orig_msg || true`).
+      - Default behavior preserved: submit text is unchanged (no meta-refine by default, same as before).
+      - dune build: OK.
+      - dune runtest: OK.
+      - Manual submit smoke test: not run in this automation pass.
+    depends_on: [10]
+    touches: ["lib/chat_tui/app.ml"]
+
