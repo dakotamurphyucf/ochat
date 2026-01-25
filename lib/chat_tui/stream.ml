@@ -106,11 +106,25 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
        Hashtbl.set (Model.function_name_by_id model) ~key:fc.call_id ~data:fc.name;
        Hashtbl.set (Model.function_name_by_id model) ~key:idx ~data:fc.name;
        (match String.lowercase fc.name with
-        | "read_file" | "read_directory" ->
-          Hashtbl.set
-            (Model.tool_path_by_call_id model)
-            ~key:fc.call_id
-            ~data:(read_file_path_of_arguments fc.arguments)
+        | "read_file" ->
+          let path = read_file_path_of_arguments fc.arguments in
+          Hashtbl.set (Model.tool_path_by_call_id model) ~key:fc.call_id ~data:path;
+          update_tool_output_metadata_if_present
+            ~model
+            ~call_id:fc.call_id
+            ~kind:(Types.Read_file { path })
+        | "read_directory" ->
+          let path = read_file_path_of_arguments fc.arguments in
+          Hashtbl.set (Model.tool_path_by_call_id model) ~key:fc.call_id ~data:path;
+          update_tool_output_metadata_if_present
+            ~model
+            ~call_id:fc.call_id
+            ~kind:(Types.Read_directory { path })
+        | "apply_patch" ->
+          update_tool_output_metadata_if_present
+            ~model
+            ~call_id:fc.call_id
+            ~kind:Types.Apply_patch
         | _ -> ());
        let is_fork = String.equal fc.name "fork" in
        let role = if is_fork then "fork" else role_for_event model ~default:"tool" in
@@ -132,11 +146,25 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
        Hashtbl.set (Model.function_name_by_id model) ~key:tc.call_id ~data:tc.name;
        Hashtbl.set (Model.function_name_by_id model) ~key:idx ~data:tc.name;
        (match String.lowercase tc.name with
-        | "read_file" | "read_directory" ->
-          Hashtbl.set
-            (Model.tool_path_by_call_id model)
-            ~key:tc.call_id
-            ~data:(read_file_path_of_arguments tc.input)
+        | "read_file" ->
+          let path = read_file_path_of_arguments tc.input in
+          Hashtbl.set (Model.tool_path_by_call_id model) ~key:tc.call_id ~data:path;
+          update_tool_output_metadata_if_present
+            ~model
+            ~call_id:tc.call_id
+            ~kind:(Types.Read_file { path })
+        | "read_directory" ->
+          let path = read_file_path_of_arguments tc.input in
+          Hashtbl.set (Model.tool_path_by_call_id model) ~key:tc.call_id ~data:path;
+          update_tool_output_metadata_if_present
+            ~model
+            ~call_id:tc.call_id
+            ~kind:(Types.Read_directory { path })
+        | "apply_patch" ->
+          update_tool_output_metadata_if_present
+            ~model
+            ~call_id:tc.call_id
+            ~kind:Types.Apply_patch
         | _ -> ());
        let role = role_for_event model ~default:"tool" in
        if not (Hashtbl.mem (Model.msg_buffers model) idx)
