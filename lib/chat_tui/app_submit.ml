@@ -13,6 +13,17 @@ module Runtime = App_runtime
 
 type request = Runtime.submit_request
 
+type handle_submit =
+  env:Eio_unix.Stdenv.base
+  -> history:Openai.Responses.Item.t list
+  -> internal_stream:App_events.internal_event Eio.Stream.t
+  -> system_event:string Eio.Stream.t
+  -> datadir:Eio.Fs.dir_ty Eio.Path.t
+  -> parallel_tool_calls:bool
+  -> history_compaction:bool
+  -> op_id:int
+  -> unit
+
 let capture_request ~model : request =
   let text = Model.input_line model in
   let draft_mode = Model.draft_mode model in

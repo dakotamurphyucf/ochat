@@ -23,18 +23,8 @@ type app_event =
   ]
 
 module Placeholders = struct
-  let add_placeholder_thinking_message (model : Model.t) : unit =
-    let patch = Add_placeholder_message { role = "assistant"; text = "(thinking…)" } in
-    ignore (Model.apply_patch model patch)
-  ;;
-
   let add_placeholder_stream_error (model : Model.t) text : unit =
     let patch = Add_placeholder_message { role = "error"; text } in
-    ignore (Model.apply_patch model patch)
-  ;;
-
-  let add_placeholder_compact_message (model : Model.t) : unit =
-    let patch = Add_placeholder_message { role = "assistant"; text = "(compacting…)" } in
     ignore (Model.apply_patch model patch)
   ;;
 end

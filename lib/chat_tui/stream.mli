@@ -31,10 +31,10 @@
       text via {!Types.Append_text} patches.  No UTF-8 validation or
       word-wrapping happens at this stage.
 
-    • **Batching & coalescing** – {!Chat_tui.App} groups the deltas in its
-      {!Stream_batch} handler and merges adjacent [Append_text] patches
-      that target the same buffer.  This keeps the patch volume small
-      without compromising incremental updates.
+    • **Batching & coalescing** – the app event loop batches contiguous
+      stream events and merges adjacent [Append_text] patches that target the
+      same buffer.  This keeps the patch volume small without compromising
+      incremental updates.
 
     • **Renderer-side sanitisation** – invalid byte sequences are removed
       exactly once during rendering, together with word-wrapping.  The
@@ -77,7 +77,13 @@ val handle_fn_out : model:Model.t -> Res.Function_call_output.t -> Types.patch l
     - {!Openai.Responses.Item.Function_call_output}
     - {!Openai.Responses.Item.Custom_tool_call_output}
 
-    All other items yield [\[\]]. *)
+    All other items yield [\[\]].
+
+    @param model Mutable UI state used for fork bookkeeping.
+    @param item  History item that may carry tool output.
+
+    @side_effect May clear {!Model.active_fork}/{!Model.fork_start_index} if the
+                 output corresponds to the active fork call. *)
 val handle_tool_out : model:Model.t -> Res.Item.t -> Types.patch list
 
 (** [handle_event ~model ev] converts a single incremental streaming event
@@ -95,13 +101,14 @@ val handle_tool_out : model:Model.t -> Res.Item.t -> Types.patch list
     • [Function_call_arguments_delta] / [Function_call_arguments_done] –
       stream the argument list of a tool invocation
 
-    For [read_file] and [read_directory] calls, the implementation extracts
-    the requested path from the final argument JSON. When tool calls run in
-    parallel, the OpenAI stream may deliver [Function_call_output] before
-    [Function_call_arguments_done]; in that case, the stream handler updates
-    the already-rendered tool output metadata and invalidates the per-message
-    render cache so syntax-highlighting can be applied immediately (without
-    waiting for a full history rebuild at turn end).
+    For [read_file], [read_directory], and [apply_patch] calls, the
+    implementation records tool metadata (function name and, where applicable,
+    the referenced path). When tool calls run in parallel, the OpenAI stream may
+    deliver tool output before the final arguments event; in that case, the
+    stream handler updates the already-rendered tool output metadata and
+    invalidates the per-message render cache so syntax-highlighting can be
+    applied immediately (without waiting for a full history rebuild at turn
+    end).
 
     All other variants are ignored for now and yield [\[\]].
 

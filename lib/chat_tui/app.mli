@@ -56,20 +56,39 @@ type persist_mode =
     {- optionally persist the session snapshot according to
        [?persist_mode].}}
 
-    Parameters:
-    {ul
-    {- [env] – The standard environment supplied by {!Eio_main.run}.}
-    {- [prompt_file] – Path to the [*.chatmd*] prompt that seeds the
-       conversation, declares tools and configures default model settings.}
-    {- [session] – Optional persisted session that should be resumed.
-       When present, its history, tasks and key/value store take precedence
-       over the defaults from [prompt_file].}
-    {- [export_file] – Optional override for the ChatMarkdown export
-       path.  When omitted the prompt file path is reused.}
-    {- [persist_mode] – Policy controlling whether the session snapshot
-       is written back on exit.  Defaults to [`Ask].}
-    {- [parallel_tool_calls] – Allow multiple tool calls to run in parallel
-       (default: [true]).}}
+    @param env The standard environment supplied by {!Eio_main.run}.
+    @param prompt_file Path to the [*.chatmd*] prompt that seeds the
+           conversation, declares tools and configures default model settings.
+    @param session Optional persisted session to resume.  When present, its
+           history, tasks and key/value store take precedence over the
+           defaults from [prompt_file].
+    @param export_file Optional override for the ChatMarkdown export path.
+           When omitted the prompt file path is reused.
+    @param persist_mode Policy controlling whether the session snapshot is
+           written back on exit.  Defaults to [`Ask].
+    @param parallel_tool_calls Allow multiple tool calls to run in parallel
+           (default: [true]).
+
+    Starting the UI from an executable:
+    {[
+      let () =
+        Eio_main.run @@ fun env ->
+        Chat_tui.App.run_chat ~env ~prompt_file:"prompt.chatmd" ()
+    ]}
+
+    Resuming a saved session and exporting to a separate file:
+    {[
+      let () =
+        Eio_main.run @@ fun env ->
+        let session = Session_store.load ~env ~id:"my-session-id" in
+        Chat_tui.App.run_chat
+          ~env
+          ~prompt_file:"prompt.chatmd"
+          ~session
+          ~export_file:"exported.chatmd"
+          ~persist_mode:`Always
+          ()
+    ]}
  *)
 val run_chat
   :  env:Eio_unix.Stdenv.base
