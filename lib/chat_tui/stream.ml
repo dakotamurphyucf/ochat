@@ -103,6 +103,8 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
        let patches = ref [] in
        let idx = Option.value fc.id ~default:fc.call_id in
        Hashtbl.set (Model.call_id_by_item_id model) ~key:idx ~data:fc.call_id;
+       Hashtbl.set (Model.function_name_by_id model) ~key:fc.call_id ~data:fc.name;
+       Hashtbl.set (Model.function_name_by_id model) ~key:idx ~data:fc.name;
        (match String.lowercase fc.name with
         | "read_file" | "read_directory" ->
           Hashtbl.set
@@ -127,6 +129,8 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
        let patches = ref [] in
        let idx = Option.value tc.id ~default:tc.call_id in
        Hashtbl.set (Model.call_id_by_item_id model) ~key:idx ~data:tc.call_id;
+       Hashtbl.set (Model.function_name_by_id model) ~key:tc.call_id ~data:tc.name;
+       Hashtbl.set (Model.function_name_by_id model) ~key:idx ~data:tc.name;
        (match String.lowercase tc.name with
         | "read_file" | "read_directory" ->
           Hashtbl.set

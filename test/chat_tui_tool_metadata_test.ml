@@ -465,3 +465,61 @@ let%expect_test "tool_output_kind: read_file output can arrive before arguments_
         Printf.printf "Other name=%s\n" (Option.value name ~default:"<none>")));
   [%expect {| Read_file path=README.md |}]
 ;;
+
+
+let%expect_test
+    "tool_output_kind: read_file args_done in same stream batch as output_item_added populates path"
+  =
+  let module Stream = Chat_tui.Stream in
+  let module Model = Chat_tui.Model in
+  let module Types = Chat_tui.Types in
+  let module Res = Stream.Res in
+  let module Res_stream = Stream.Res_stream in
+  let module Item = Res_stream.Item in
+  let m = make_model () in
+  let fc : Res.Function_call.t =
+    { name = "read_file"
+    ; arguments = ""
+    ; call_id = "call-read-file"
+    ; _type = "function_call"
+    ; id = Some "item-123"
+    ; status = Some "in_progress"
+    }
+  in
+  let events : Res_stream.t list =
+    [ Res_stream.Output_item_added
+        { item = Item.Function_call fc; output_index = 0; type_ = "output_item_added" }
+    ; Res_stream.Function_call_arguments_done
+        { arguments = "{\"file\": \"README.md\"}"
+        ; item_id = Option.value_exn fc.id
+        ; output_index = 0
+        ; type_ = "function_call_arguments_done"
+        }
+    ]
+  in
+  let patches = Stream.handle_events ~model:m events in
+  ignore (Model.apply_patches m patches : Model.t);
+  let out : Res.Function_call_output.t =
+    { output = Res.Tool_output.Output.Text "contents"
+    ; call_id = fc.call_id
+    ; _type = "function_call_output"
+    ; id = None
+    ; status = Some "completed"
+    }
+  in
+  let patches_out = Stream.handle_fn_out ~model:m out in
+  ignore (Model.apply_patches m patches_out : Model.t);
+  let tbl = Model.tool_output_by_index m in
+  (match Hashtbl.find tbl 1 with
+   | None -> print_endline "none"
+   | Some kind ->
+     (match kind with
+      | Types.Read_file { path } ->
+        Printf.printf "Read_file path=%s\n" (Option.value path ~default:"<none>")
+      | Types.Apply_patch -> print_endline "Apply_patch"
+      | Types.Read_directory { path } ->
+        Printf.printf "Read_directory path=%s\n" (Option.value path ~default:"<none>")
+      | Types.Other { name } ->
+        Printf.printf "Other name=%s\n" (Option.value name ~default:"<none>")));
+  [%expect {| Read_file path=README.md |}]
+;;

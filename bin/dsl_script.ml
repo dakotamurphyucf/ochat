@@ -100,5 +100,8 @@ let () =
   |}
   in
   let ast = parse code in
-  Chatml_resolver.eval_program env (ast, code)
+  Chatml_resolver.eval_program env (ast, code);
+  print_endline "Program completed successfully.";
+  let file = (Sys.get_argv ()).(1) in
+  print_endline ("Read file: " ^ file)
 ;;
