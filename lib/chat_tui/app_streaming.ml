@@ -6,19 +6,27 @@ module Config = Chat_response.Config
 
 exception Cancelled
 
-let start
-      ~env
-      ~history
-      ~internal_stream
-      ~system_event
-      ~(cfg : Config.t)
-      ~tools
-      ~tool_tbl
-      ~datadir
-      ~parallel_tool_calls
-      ~history_compaction
-      ~op_id
-  =
+module Context = struct
+  type t =
+    { shared : App_context.Resources.t
+    ; cfg : Config.t
+    ; tools : Req.Tool.t list
+    ; tool_tbl : (string, string -> Res.Tool_output.Output.t) Core.Hashtbl.t
+    ; parallel_tool_calls : bool
+    ; history_compaction : bool
+    }
+end
+
+let start (ctx : Context.t) ~history ~op_id =
+  let env = ctx.shared.services.env in
+  let internal_stream = ctx.shared.streams.internal in
+  let system_event = ctx.shared.streams.system in
+  let cfg = ctx.cfg in
+  let tools = ctx.tools in
+  let tool_tbl = ctx.tool_tbl in
+  let datadir = ctx.shared.services.datadir in
+  let parallel_tool_calls = ctx.parallel_tool_calls in
+  let history_compaction = ctx.history_compaction in
   try
     Switch.run
     @@ fun streaming_sw ->

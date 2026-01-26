@@ -194,7 +194,9 @@ controller simply flips the enum on the model; it does not validate or
 rewrite the buffer.
 
 Submitting the prompt is bound to **Meta+Enter**. In Insert mode this returns
-`Submit_input` without touching the model. The main loop is responsible for
+`Submit_input` without touching the model. In Normal mode, `Enter` also
+returns `Submit_input` as a convenience fallback for terminals that encode
+`Meta+Enter` as an `Esc` prefix sequence. The main loop is responsible for
 moving the draft into the history, clearing the prompt, scheduling the
 network request, and streaming the response.
 

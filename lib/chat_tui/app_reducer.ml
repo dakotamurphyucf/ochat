@@ -22,6 +22,16 @@ type app_event =
   | internal_event
   ]
 
+module Context = struct
+  type t =
+    { runtime : Runtime.t
+    ; shared : App_context.Resources.t
+    ; submit : App_submit.Context.t
+    ; compaction : App_compaction.Context.t
+    ; cancelled : exn
+    }
+end
+
 module Placeholders = struct
   let add_placeholder_stream_error (model : Model.t) text : unit =
     let patch = Add_placeholder_message { role = "error"; text } in
@@ -32,39 +42,27 @@ end
 module Stream_apply = App_stream_apply
 
 module Controller_actions = struct
-  let handle_controller_result
-        ~env:_
-        ~ui_sw:_
-        ~cwd:_
-        ~cache:_
-        ~datadir:_
-        ~session:_
-        ~term:_
-        ~model
-        ~internal_stream
-        ~system_event:_
-        ~throttler
-        ~redraw_immediate:_
-        ~prompt_ctx:_
-        ~handle_submit:_
-        ~parallel_tool_calls:_
-        ~handle_cancel_or_quit
-        (ev : input_event)
-        controller_result
-    =
+  type t =
+    { model : Model.t
+    ; internal_stream : internal_event Eio.Stream.t
+    ; throttler : Redraw_throttle.t
+    ; handle_cancel_or_quit : unit -> bool
+    }
+
+  let handle_controller_result (t : t) (ev : input_event) controller_result =
     match controller_result with
     | Controller.Redraw ->
-      Redraw_throttle.request_redraw throttler;
+      Redraw_throttle.request_redraw t.throttler;
       true
     | Controller.Submit_input ->
-      let submit_request = App_submit.capture_request ~model in
-      App_submit.clear_editor ~model;
-      Eio.Stream.add internal_stream (`Submit_requested submit_request);
-      Redraw_throttle.request_redraw throttler;
+      let submit_request = App_submit.capture_request ~model:t.model in
+      App_submit.clear_editor ~model:t.model;
+      Eio.Stream.add t.internal_stream (`Submit_requested submit_request);
+      Redraw_throttle.request_redraw t.throttler;
       true
-    | Controller.Cancel_or_quit -> handle_cancel_or_quit ()
+    | Controller.Cancel_or_quit -> t.handle_cancel_or_quit ()
     | Controller.Compact_context ->
-      Eio.Stream.add internal_stream `Compact_requested;
+      Eio.Stream.add t.internal_stream `Compact_requested;
       true
     | Controller.Quit -> false
     | Controller.Unhandled ->
@@ -81,48 +79,26 @@ end
 
 exception Compaction_cancelled
 
-let run
-      ~env
-      ~ui_sw
-      ~cwd
-      ~cache
-      ~datadir
-      ~session
-      ~term
-      ~runtime
-      ~input_stream
-      ~internal_stream
-      ~system_event
-      ~throttler
-      ~redraw_immediate
-      ~redraw
-      ~handle_submit
-      ~parallel_tool_calls
-      ~cancelled
-      ()
-  =
+let run (ctx : Context.t) =
+  let runtime = ctx.runtime in
+  let shared = ctx.shared in
+  let streams = shared.streams in
+  let ui = shared.ui in
+  let term = ui.term in
+  let input_stream = streams.input in
+  let internal_stream = streams.internal in
+  let system_event = streams.system in
+  let throttler = ui.throttler in
+  let redraw_immediate = ui.redraw_immediate in
+  let redraw = ui.redraw in
+  let cancelled = ctx.cancelled in
   let model = runtime.Runtime.model in
   let quit_via_esc = runtime.Runtime.quit_via_esc in
   let max_input_drain_per_iteration = 64 in
   let start_submit (submit_request : Runtime.submit_request) : unit =
-    App_submit.start
-      ~env
-      ~ui_sw
-      ~cwd
-      ~cache
-      ~datadir
-      ~term
-      ~runtime
-      ~internal_stream
-      ~system_event
-      ~throttler
-      ~handle_submit
-      ~parallel_tool_calls
-      submit_request
+    App_submit.start ctx.submit submit_request
   in
-  let start_compaction () : unit =
-    App_compaction.start ~env ~ui_sw ~session ~runtime ~internal_stream ~throttler
-  in
+  let start_compaction () : unit = App_compaction.start ctx.compaction in
   let maybe_start_next_pending () : unit =
     match runtime.Runtime.op with
     | Some _ -> ()
@@ -152,25 +128,10 @@ let run
       false
   and handle_key (ev : input_event) : bool =
     let controller_result = Controller.handle_key ~model ~term ev in
-    Controller_actions.handle_controller_result
-      ~env
-      ~ui_sw
-      ~cwd
-      ~cache
-      ~datadir
-      ~session
-      ~term
-      ~model
-      ~internal_stream
-      ~system_event
-      ~throttler
-      ~redraw_immediate
-      ~prompt_ctx:()
-      ~handle_submit:()
-      ~parallel_tool_calls
-      ~handle_cancel_or_quit
-      ev
-      controller_result
+    let controller_actions =
+      Controller_actions.{ model; internal_stream; throttler; handle_cancel_or_quit }
+    in
+    Controller_actions.handle_controller_result controller_actions ev controller_result
   and handle_app_event (ev : app_event) : bool =
     match ev with
     | #Notty.Unescape.event as ev -> handle_key ev

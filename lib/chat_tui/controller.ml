@@ -726,6 +726,7 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
      | `Key (`ASCII 'i', mods) when List.is_empty mods ->
        Model.set_mode model Insert;
        Redraw
+     | `Key (`Enter, _) -> Submit_input
      | `Key (`Escape, _) -> Cancel_or_quit
      | _ -> Controller_normal.handle_key_normal ~model ~term ev)
   | Cmdline -> Controller_cmdline.handle_key_cmdline ~model ~term ev

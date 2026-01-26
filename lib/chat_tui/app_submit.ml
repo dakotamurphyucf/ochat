@@ -13,16 +13,12 @@ module Runtime = App_runtime
 
 type request = Runtime.submit_request
 
-type handle_submit =
-  env:Eio_unix.Stdenv.base
-  -> history:Openai.Responses.Item.t list
-  -> internal_stream:App_events.internal_event Eio.Stream.t
-  -> system_event:string Eio.Stream.t
-  -> datadir:Eio.Fs.dir_ty Eio.Path.t
-  -> parallel_tool_calls:bool
-  -> history_compaction:bool
-  -> op_id:int
-  -> unit
+module Context = struct
+  type t =
+    { runtime : Runtime.t
+    ; streaming : App_streaming.Context.t
+    }
+end
 
 let capture_request ~model : request =
   let text = Model.input_line model in
@@ -122,21 +118,16 @@ let apply_start_effects
   Redraw_throttle.request_redraw throttler
 ;;
 
-let start
-      ~env
-      ~ui_sw
-      ~cwd
-      ~cache
-      ~datadir
-      ~term
-      ~runtime
-      ~internal_stream
-      ~system_event
-      ~throttler
-      ~handle_submit
-      ~parallel_tool_calls
-      (submit_request : request)
-  =
+let start (ctx : Context.t) (submit_request : request) =
+  let shared = ctx.streaming.shared in
+  let services = shared.services in
+  let env = services.env in
+  let ui_sw = services.ui_sw in
+  let cwd = services.cwd in
+  let cache = services.cache in
+  let runtime = ctx.runtime in
+  let term = shared.ui.term in
+  let throttler = shared.ui.throttler in
   apply_start_effects
     ~cwd
     ~env
@@ -149,14 +140,5 @@ let start
   runtime.Runtime.op <- Some (Runtime.Starting_streaming { id = op_id });
   runtime.Runtime.cancel_streaming_on_start <- false;
   let history = Model.history_items runtime.Runtime.model in
-  Fiber.fork ~sw:ui_sw (fun () ->
-    handle_submit
-      ~env
-      ~history
-      ~internal_stream
-      ~system_event
-      ~datadir
-      ~parallel_tool_calls
-      ~history_compaction:true
-      ~op_id)
+  Fiber.fork ~sw:ui_sw (fun () -> App_streaming.start ctx.streaming ~history ~op_id)
 ;;
