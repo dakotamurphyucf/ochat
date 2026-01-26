@@ -10,9 +10,8 @@
     with this exception. *)
 exception Cancelled
 
-(** [start ~env ~history ~internal_stream ~system_event ~cfg ~tools ~tool_tbl ...]
-    runs a single OpenAI streaming request and reports progress to
-    [internal_stream].
+(** [start ctx ~history ~op_id] runs a single OpenAI streaming request and
+    reports progress to the internal event stream.
 
     The worker emits:
     {ul
@@ -25,41 +24,42 @@ exception Cancelled
     The function catches all exceptions and converts them into a
     [`Streaming_error] event.
 
-    @param env Provides network, filesystem, and clock resources.
+    All inputs other than [history] and [op_id] are bundled in {!Context.t}.
+
     @param history OpenAI item history that seeds the request.
-    @param internal_stream Receives streaming lifecycle and delta events.
-    @param system_event Queue of out-of-band notes that should be included in
-           the assistant context but must not be rendered in the transcript.
-    @param cfg Model settings (temperature, model name, token limits, ...).
-    @param tools Tool declaration list exposed to the assistant.
-    @param tool_tbl Maps tool names to implementations that produce tool outputs.
-    @param datadir Directory used for response cache and tool artefacts.
-    @param parallel_tool_calls Controls whether tool calls may run concurrently.
-    @param history_compaction Forwards to the driver’s lightweight history
-           compaction.
     @param op_id Tags events so the reducer can ignore stale messages.
 
-    Example (the app typically passes a partially-applied [start] into the reducer):
+    Example:
     {[
-      let handle_submit =
-        Chat_tui.App_streaming.start
-          ~cfg
-          ~tools
-          ~tool_tbl
+      let streams : Chat_tui.App_context.Streams.t =
+        { input; internal; system }
       in
-      ignore handle_submit
+      let services : Chat_tui.App_context.Services.t =
+        { env; ui_sw; cwd; cache; datadir; session }
+      in
+      let resources : Chat_tui.App_context.Resources.t = { services; streams; ui } in
+      let ctx : Chat_tui.App_streaming.Context.t =
+        { shared = resources
+        ; cfg
+        ; tools
+        ; tool_tbl
+        ; parallel_tool_calls = true
+        ; history_compaction = true
+        }
+      in
+      Chat_tui.App_streaming.start ctx ~history ~op_id:0
     ]}
 *)
-val start
-  :  env:Eio_unix.Stdenv.base
-  -> history:Openai.Responses.Item.t list
-  -> internal_stream:App_events.internal_event Eio.Stream.t
-  -> system_event:string Eio.Stream.t
-  -> cfg:Chat_response.Config.t
-  -> tools:Openai.Responses.Request.Tool.t list
-  -> tool_tbl:(string, string -> Openai.Responses.Tool_output.Output.t) Core.Hashtbl.t
-  -> datadir:Eio.Fs.dir_ty Eio.Path.t
-  -> parallel_tool_calls:bool
-  -> history_compaction:bool
-  -> op_id:int
-  -> unit
+module Context : sig
+  type t =
+    { shared : App_context.Resources.t
+    ; cfg : Chat_response.Config.t
+    ; tools : Openai.Responses.Request.Tool.t list
+    ; tool_tbl :
+        (string, string -> Openai.Responses.Tool_output.Output.t) Core.Hashtbl.t
+    ; parallel_tool_calls : bool
+    ; history_compaction : bool
+    }
+end
+
+val start : Context.t -> history:Openai.Responses.Item.t list -> op_id:int -> unit

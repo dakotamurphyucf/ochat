@@ -22,14 +22,9 @@
 open Core
 open Eio.Std
 open Types
-module Model = Model
 module Renderer = Renderer
 module Redraw_throttle = Redraw_throttle
 module Stream_handler = Stream
-module Controller = Controller
-module Persistence = Persistence
-module Cmd = Cmd
-module Snippet = Snippet
 module CM = Prompt.Chat_markdown
 module Scroll_box = Notty_scroll_box
 module Res = Openai.Responses
@@ -86,14 +81,14 @@ end
 
 module Setup = struct
   let init_datadir ~env ~cwd ~session : _ Eio.Path.t =
+    let open Eio.Path in
     match session with
     | Some (s : Session.t) ->
       let session_dir = Session_store.path ~env s.id in
-      let ( / ) = Eio.Path.( / ) in
       let chatmd_dir = session_dir / ".chatmd" in
-      (match Eio.Path.is_directory chatmd_dir with
+      (match is_directory chatmd_dir with
        | true -> ()
-       | false -> Eio.Path.mkdirs ~perm:0o700 chatmd_dir);
+       | false -> mkdirs ~perm:0o700 chatmd_dir);
       chatmd_dir
     | None -> Io.ensure_chatmd_dir ~cwd
   ;;
@@ -206,8 +201,7 @@ module Setup = struct
 end
 
 module Ui = struct
-  let make_redraw ~term ~model =
-    fun () ->
+  let make_redraw ~term ~model () =
     let size = Notty_eio.Term.size term in
     let img, (cx, cy) = Renderer.render_full ~size ~model in
     Notty_eio.Term.image term img;
@@ -374,6 +368,9 @@ let run_chat
   let input_stream : input_event Eio.Stream.t = Eio.Stream.create 4096 in
   let internal_stream : internal_event Eio.Stream.t = Eio.Stream.create 1024 in
   let system_event = Eio.Stream.create 10 in
+  let streams : App_context.Streams.t =
+    { input = input_stream; internal = internal_stream; system = system_event }
+  in
   (* Load the chat prompt and initialise the model. *)
   let cwd = Eio.Stdenv.cwd env in
   (* Determine the directory used to store runtime artefacts (cache,
@@ -384,6 +381,7 @@ let run_chat
      where no session is active. *)
   let datadir = Setup.init_datadir ~env ~cwd ~session in
   let cache = Setup.load_cache ~datadir in
+  let services : App_context.Services.t = { env; ui_sw; cwd; cache; datadir; session } in
   (* Base directory of the prompt file – used for resolving relative paths in
      <import/> and <doc src="…"> tags. *)
   let prompt_dir = Setup.resolve_prompt_dir ~env ~cwd ~prompt_file in
@@ -425,33 +423,23 @@ let run_chat
   redraw ();
   (* Start the periodic scheduler to coalesce frequent updates. *)
   Ui.spawn_throttler ~env ~sw:ui_sw ~throttler;
-  let handle_submit =
-    Streaming_submit.start
-      ~cfg:prompt_ctx.cfg
-      ~tools:prompt_ctx.tools
-      ~tool_tbl:prompt_ctx.tool_tbl
+  let ui : App_context.Ui.t = { term; throttler; redraw; redraw_immediate } in
+  let shared : App_context.Resources.t = { services; streams; ui } in
+  let streaming : Streaming_submit.Context.t =
+    { shared
+    ; cfg = prompt_ctx.cfg
+    ; tools = prompt_ctx.tools
+    ; tool_tbl = prompt_ctx.tool_tbl
+    ; parallel_tool_calls
+    ; history_compaction = true
+    }
   in
-  let quit_via_esc =
-    App_reducer.run
-      ~env
-      ~ui_sw
-      ~cwd
-      ~cache
-      ~datadir
-      ~session
-      ~term
-      ~runtime
-      ~input_stream
-      ~internal_stream
-      ~system_event
-      ~throttler
-      ~redraw_immediate
-      ~redraw
-      ~handle_submit
-      ~parallel_tool_calls
-      ~cancelled:Streaming_submit.Cancelled
-      ()
+  let submit : App_submit.Context.t = { runtime; streaming } in
+  let compaction : App_compaction.Context.t = { shared; runtime } in
+  let reducer_ctx : App_reducer.Context.t =
+    { runtime; shared; submit; compaction; cancelled = Streaming_submit.Cancelled }
   in
+  let quit_via_esc = App_reducer.run reducer_ctx in
   Shutdown.shutdown
     ~env
     ~term

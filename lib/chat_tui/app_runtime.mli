@@ -1,6 +1,6 @@
 (** Mutable runtime state for {!Chat_tui.App}'s event loop.
 
-    This module defines the shared state record that is threaded through
+    This module defines the runtime state record that is threaded through
     {!Chat_tui.App_reducer.run}.  It captures:
     {ul
     {- The current in-flight operation (streaming or compaction), if any.}
@@ -9,7 +9,7 @@
        "starting" (before the worker fibre has published its {!Eio.Switch.t}).}}
 
     The types are intentionally low-level because multiple helper modules
-    coordinate via shared mutable fields.  Treat this module as internal
+    coordinate via mutable fields.  Treat this module as internal
     plumbing; it is exposed primarily to keep {!Chat_tui.App} small and to
     support white-box tests of the event loop. *)
 
@@ -44,7 +44,7 @@ type queued_action =
   | Submit of submit_request
   | Compact
 
-(** Runtime container shared by the app reducer and its helper modules. *)
+(** Runtime container used by the app reducer and its helper modules. *)
 type t =
   { model : Model.t
   ; mutable op : op option

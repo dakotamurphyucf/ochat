@@ -5,12 +5,25 @@ module Model = Model
 module Redraw_throttle = Redraw_throttle
 module Runtime = App_runtime
 
+module Context = struct
+  type t =
+    { shared : App_context.Resources.t
+    ; runtime : Runtime.t
+    }
+end
+
 let add_placeholder_compact_message (model : Model.t) : unit =
   let patch = Add_placeholder_message { role = "assistant"; text = "(compacting…)" } in
   ignore (Model.apply_patch model patch)
 ;;
 
-let start ~env ~ui_sw ~session ~runtime ~internal_stream ~throttler =
+let start (ctx : Context.t) =
+  let env = ctx.shared.services.env in
+  let ui_sw = ctx.shared.services.ui_sw in
+  let session = ctx.shared.services.session in
+  let runtime = ctx.runtime in
+  let internal_stream = ctx.shared.streams.internal in
+  let throttler = ctx.shared.ui.throttler in
   let model = runtime.Runtime.model in
   let op_id = Runtime.alloc_op_id runtime in
   runtime.Runtime.op <- Some (Runtime.Starting_compaction { id = op_id });
