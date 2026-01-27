@@ -9,9 +9,17 @@
   highlight_tm_loader
   highlight_grammars
   highlight_registry
+  renderer_highlight_engine
   markdown_fences
   types
   model
+  renderer_component_history
+  renderer_component_input_box
+  renderer_component_message
+  renderer_component_status_bar
+  renderer_lang
+  renderer_page_chat
+  renderer_pages
   renderer
   persistence
   stream

@@ -51,11 +51,22 @@ val add_line_numbers : string -> string
 
 (** Register the [`read_file`] tool.
 
-    • **Schema** – expects an argument object `{ file : string }`.
+    • **Schema** – expects an argument object with:
+
+      {ul
+      {- [file] (string) – path to read (preferred field);}
+      {- [path] (string) – legacy alias accepted by the decoder;}
+      {- [offset] (int, optional) – 0-based line offset to start reading from;}
+      {- [line_count] (int, optional) – number of lines to return.}}
 
     • **Behaviour** – returns the UTF-8 contents of [`file`], read via
-      {!Io.load_doc}.  Errors are rendered with {!Eio.Exn.pp} and propagated as
-      plain strings so that the model can inspect the failure reason. *)
+      {!Eio.Buf_read} with a fixed byte cap. The returned text is prefixed with
+      a small metadata header of the form:
+
+      {[ path:START-END:\n[total_lines=N]\n... ]}
+
+      The tool refuses to read binary files (best-effort heuristic) and returns
+      a human-readable error message instead. *)
 val get_contents : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
 (** Register the [`get_url_content`] tool.
@@ -159,4 +170,11 @@ val fork : Ochat_function.t
     improved version produced by {!Meta_prompting.Recursive_mp.refine}. *)
 val meta_refine : env:Eio_unix.Stdenv.base -> Ochat_function.t
 
+(** Register the [`import_image`] tool.
+
+    The tool reads an image file from disk and returns a structured tool output
+    payload containing a data-URI (base64) suitable for OpenAI “image input”
+    parts.
+
+    If the file does not exist, a textual error is returned instead. *)
 val import_image : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t

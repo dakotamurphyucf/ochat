@@ -50,12 +50,12 @@ capabilities (e.g. sandboxed directories).
 
 | Tool                               | JSON `name`      | Category    | Synopsis |
 |------------------------------------|------------------|-------------|----------|
-| `get_contents`                     | `read_file`      | filesystem  | Return the UTF-8 contents of a given file. |
+| `get_contents`                     | `read_file`      | filesystem  | Return (part of) the UTF-8 contents of a given file with metadata header. |
 | `apply_patch`                      | `apply_patch`    | filesystem  | Apply an Ochat diff to the workspace. |
 | `append_to_file`                   | `append_to_file` | filesystem  | Append text to a file (creates it if missing). |
 | `find_and_replace`                 | `find_and_replace` | filesystem | In-place string substitution (first or all matches). |
 | `read_dir`                         | `read_directory` | filesystem  | List immediate children of a directory. |
-| `mkdir`                            | `make_dir`       | filesystem  | Create a sub-directory (idempotent). |
+| `mkdir`                            | `mkdir`          | filesystem  | Create a sub-directory (idempotent). |
 | `get_url_content`                  | `get_url_content`| web         | Fetch a URL, strip HTML, return plain text. |
 | `webpage_to_markdown`              | `webpage_to_markdown` | web   | Convert a remote page to Markdown. |
 | `index_ocaml_code`                 | `index_ocaml_code`| indexing   | Crawl a folder and build a hybrid vector + BM25 index. |
@@ -65,8 +65,11 @@ capabilities (e.g. sandboxed directories).
 | `odoc_search`                      | `odoc_search`    | search      | Semantic search over locally-indexed OCaml docs. |
 | `meta_refine`                      | `meta_refine`    | misc        | Refine a raw prompt using Recursive Meta-Prompting. |
 | `fork`                             | `fork`           | misc        | *Stub* – reserved for future agent-forking support. |
+| `import_image`                     | `import_image`   | filesystem  | Return an image as a data-URI suitable for image-input tool outputs. |
 
-> ℹ️  All tools return *plain strings* – exactly what OpenAI expects today.
+> ℹ️  Most tools return a plain string (`Tool_output.Output.Text`). The exception
+> is `import_image`, which returns a structured image part
+> (`Tool_output.Output.Content`) when the file exists.
 
 ### 1 . `get_contents`
 
@@ -76,8 +79,21 @@ registration.
 ```ocaml
 let read = Functions.get_contents ~dir in
 (* JSON arguments expected from the model *)
-{"file": "lib/bm25.ml"}
+{"file": "lib/bm25.ml", "offset": 0, "line_count": 200}
 ```
+
+Notes:
+
+- The JSON decoder also accepts `"path"` as an alias for `"file"`.
+- The returned text includes a ripgrep-like header:
+
+  ```
+  lib/bm25.ml:1-200:
+  [total_lines=1234]
+  ...
+  ```
+
+- Binary files are rejected (best-effort heuristic).
 
 ### 2 . `get_url_content`
 
@@ -151,13 +167,13 @@ that multiple calls result in clean paragraph breaks.
 let append = Functions.append_to_file ~dir in
 
 (* JSON expected from the model *)
-{"file": "CHANGELOG.md", "content": "\n## 0.2.0 – 2025-08-05\n* Add new CLI flags"}
+{"path": "CHANGELOG.md", "content": "## 0.2.0 – 2025-08-05\n* Add new CLI flags"}
 ```
 
 ### 10 . `find_and_replace`
 
 Search–replace convenience wrapper.  Receives a four-tuple
-`(file, search, replace, all)` and rewrites the file in-place using
+`(path, find, replace, all)` and rewrites the file in-place using
 `String.substr_replace_*`:
 
 * When `all = false` only the **first** occurrence is changed.  An error is
@@ -169,7 +185,7 @@ Search–replace convenience wrapper.  Receives a four-tuple
 let sub = Functions.find_and_replace ~dir in
 
 (* Replace absolute imports with ppxlib qualified ones *)
-{"file": "lib/parser.ml", "search": "open Ast", "replace": "open Ppxlib.Ast", "all": true}
+{"path": "lib/parser.ml", "find": "open Ast", "replace": "open Ppxlib.Ast", "all": true}
 ```
 
 ### 11 . `meta_refine`

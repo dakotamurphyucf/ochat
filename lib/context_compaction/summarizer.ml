@@ -79,7 +79,7 @@ Here's an example of how your output should be structured:
      - [Important outputs or results]
    - [...]
 
-6. All user messages: 
+6. All user messages:
     - [Detailed user message]
     - [...]
 
@@ -103,11 +103,12 @@ Here's an example of how your output should be structured:
 
 Please provide your Detailed summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response.
 - You must ensure that your summary contains any all the relevant information needed to pick up where you left off.
-- You will not be able to remember any information from this conversation after this summary is provided, so ensure that you capture all relevant information. 
+- You will not be able to remember any information from this conversation after this summary is provided, so ensure that you capture all relevant information.
 - If you do not save relevant information in this summary, you will not be able to continue the conversation effectively and that is not acceptable.
 - You must assume that the user will not remember any details from this conversation, so you must ensure that your summary is detailed and complete.
 - Think about information that the user might want to reference in the future, and ensure that it is included in your summary.
-- you should be going for 70% compression of the conversation, so you must be thorough and complete in your analysis. 
+- you should be going for 70% compression of the conversation, so you must be thorough and complete in your analysis.
+- if the assistant provides a section <important-details></important-details>, ensure that it is included in your summary verbatim along with your own summary.
 |}
 ;;
 

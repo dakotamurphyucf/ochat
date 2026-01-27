@@ -137,7 +137,7 @@ module Setup = struct
         Tool.of_declaration
           ~sw
           ~ctx
-          ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:true)
+          ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:false)
           decl)
     in
     let comp_tools, tbl = Ochat_function.functions user_fns in
@@ -147,7 +147,7 @@ module Setup = struct
   let history_items_from_prompt ~ctx ~prompt_elements =
     Converter.to_items
       ~ctx
-      ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:true)
+      ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:false)
       prompt_elements
   ;;
 
@@ -431,7 +431,7 @@ let run_chat
     ; tools = prompt_ctx.tools
     ; tool_tbl = prompt_ctx.tool_tbl
     ; parallel_tool_calls
-    ; history_compaction = true
+    ; history_compaction = false
     }
   in
   let submit : App_submit.Context.t = { runtime; streaming } in

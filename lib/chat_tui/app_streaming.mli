@@ -55,8 +55,7 @@ module Context : sig
     { shared : App_context.Resources.t
     ; cfg : Chat_response.Config.t
     ; tools : Openai.Responses.Request.Tool.t list
-    ; tool_tbl :
-        (string, string -> Openai.Responses.Tool_output.Output.t) Core.Hashtbl.t
+    ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Core.Hashtbl.t
     ; parallel_tool_calls : bool
     ; history_compaction : bool
     }

@@ -39,4 +39,3 @@ module Resources : sig
     ; ui : Ui.t
     }
 end
-

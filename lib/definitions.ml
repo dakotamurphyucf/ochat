@@ -16,8 +16,11 @@ open Core
 
     Definition of the "read_file" tool.  The tool expects a JSON
     object with a field [file] containing a path, and an optional field
-    [offset] specifying the byte offset to start reading from.  It
-    forwards the path and offset unchanged as a string and integer,
+    [offset] specifying the line offset (0-based line number) to start reading from.
+    It also accepts an optional field [line_count] specifying the number of lines
+    to return. If [line_count] is omitted, the tool returns the rest of the lines
+    in the file (subject to any internal safety limits).
+    It forwards the path, offset, and line_count unchanged as a string and integers,
     respectively.
 
     Example payload accepted by {!input_of_string}:
@@ -27,8 +30,9 @@ open Core
     ]}
 *)
 
-module Get_contents : Ochat_function.Def with type input = string * int option = struct
-  type input = string * int option
+module Get_contents :
+  Ochat_function.Def with type input = string * int option * int option = struct
+  type input = string * int option * int option
 
   let name = "read_file"
   let type_ = "function"
@@ -37,16 +41,20 @@ module Get_contents : Ochat_function.Def with type input = string * int option =
     Some
       {|
 Reads a file from the local filesystem and returns its contents as a string.
-The file is read with a limit of 380928 bytes (roughly 100000 tokens)  to avoid
-memory issues with large files. If the file is larger than that, it will be
-truncated to the last full line. Output will be appended with an indication
-of truncation "\n\n---\n[File truncated: %d more bytes not shown]". If you need the full file, you can read it in chunks using
-the offset parameter.
+
+Parameters:
+- file: Path to the file to read.
+- offset: Optional 0-based line offset (line number) to start reading from. If omitted, starts at line 0.
+- line_count: Optional number of lines to return. If omitted, returns the rest of the file (subject to internal safety limits).
+
+The output includes a metadata header indicating the line range returned and the total number of lines in the file.
 |}
   ;;
 
-  (** The JSON schema for the input.  The [file] field is mandatory, while
-      [offset] is optional and defaults to 0. *)
+  (** The JSON schema for the input.  The [file] field is mandatory.
+      [offset] is an optional 0-based line offset.
+      [line_count] is an optional number of lines to return; if omitted, returns
+      the rest of the file. *)
   let parameters : Jsonaf.t =
     `Object
       [ "type", `String "object"
@@ -54,6 +62,7 @@ the offset parameter.
         , `Object
             [ "file", `Object [ "type", `String "string" ]
             ; "offset", `Object [ "type", `String "integer" ]
+            ; "line_count", `Object [ "type", `String "integer" ]
             ] )
       ; "required", `Array [ `String "file" ]
       ; "additionalProperties", `False
@@ -72,7 +81,8 @@ the offset parameter.
         @@ Jsonaf.member "path" j
     in
     let offset = Option.map ~f:Jsonaf.int_exn @@ Jsonaf.member "offset" j in
-    file, offset
+    let line_count = Option.map ~f:Jsonaf.int_exn @@ Jsonaf.member "line_count" j in
+    file, offset, line_count
   ;;
 end
 
@@ -225,7 +235,7 @@ Query-crafting best practices
 Use for natural language search over the markdown documentation of the current ocaml project.
 When to use
 ✓ For initial exploration of the codebase to understand how it works.
-✓ The agent needs documentation that goes **beyond inline `*.mli` comments**.  
+✓ The agent needs documentation that goes **beyond inline `*.mli` comments**.
   That captures design notes, usage examples, historical decisions and any other background that helps a human (or an indexing tool) understand the code-base..
 ✓ When planning a refactor, code generation, or bug-fix and concrete documentation snippets would accelerate reasoning.
 ✓ Quick recall of module docs for a high-level understanding of the codebase
@@ -707,27 +717,27 @@ Note, then, that we do not use line numbers in this diff format, as the context 
 
 File references can only be relative, NEVER ABSOLUTE.
 
-– When to use:  
-  - Cohesive multi-file or multi-line edits that must land together.  
-– When NOT to use:  
-  - Binary assets or very large files.  
+– When to use:
+  - Cohesive multi-file or multi-line edits that must land together.
+– When NOT to use:
+  - Binary assets or very large files.
   - Interactive one-off tweaks where a smaller “edit_line” tool exists.
 
-Arguments  
-- patch (string, required) – Entire diff.  
-  – Must start with "*** Begin Patch" and end with "*** End Patch".  
-  – Each file block: "*** Add|Update|Delete File: relative/path".  
-  – Hunk rules:  
-    - ≥3 unchanged pre- and post-context lines.  
-    - "- " for deletions, "+ " for additions; unchanged lines have no prefix.  
-    - New files contain only "+ " lines; forgetting the "+" causes failure.  
-    - No mixed "+/-" on one line; no line numbers or timestamps.  
+Arguments
+- patch (string, required) – Entire diff.
+  – Must start with "*** Begin Patch" and end with "*** End Patch".
+  – Each file block: "*** Add|Update|Delete File: relative/path".
+  – Hunk rules:
+    - ≥3 unchanged pre- and post-context lines.
+    - "- " for deletions, "+ " for additions; unchanged lines have no prefix.
+    - New files contain only "+ " lines; forgetting the "+" causes failure.
+    - No mixed "+/-" on one line; no line numbers or timestamps.
     - Use @@ only when 3-line context is ambiguous.
 
 
-Pre-conditions  
-- Target files exist (Update/Delete) or do NOT exist (Add).  
-- Workspace matches context exactly; whitespace is significant.  
+Pre-conditions
+- Target files exist (Update/Delete) or do NOT exist (Add).
+- Workspace matches context exactly; whitespace is significant.
 - path must be relative not absolute
 
 

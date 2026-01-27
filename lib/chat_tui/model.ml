@@ -11,6 +11,26 @@ type msg_img_cache =
   ; height_selected : int option
   }
 
+module Page_id = struct
+  type t = Chat
+end
+
+module Chat_page_state = struct
+  type t =
+    { scroll_box : Notty_scroll_box.t
+    ; mutable selected_msg : int option
+    ; mutable msg_img_cache : (int, msg_img_cache) Hashtbl.t
+    ; mutable last_history_width : int option
+    ; mutable msg_heights : int array
+    ; mutable height_prefix : int array
+    ; mutable dirty_height_indices : int list
+    }
+end
+
+module Pages = struct
+  type t = { chat : Chat_page_state.t }
+end
+
 type t =
   { mutable history_items : Openai.Responses.Item.t list
   ; mutable messages : message list
@@ -22,26 +42,21 @@ type t =
   ; tool_output_by_index : (int, Types.tool_output_kind) Base.Hashtbl.t
   ; call_id_by_item_id : (string, string) Base.Hashtbl.t
   ; tool_path_by_call_id : (string, string option) Base.Hashtbl.t
+  ; mutable active_page : Page_id.t
+  ; pages : Pages.t
   ; mutable tasks : Session.Task.t list
   ; kv_store : (string, string) Base.Hashtbl.t
   ; mutable fetch_sw : Eio.Switch.t option
-  ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int
   ; mutable selection_anchor : int option
   ; mutable mode : editor_mode
   ; mutable draft_mode : draft_mode
-  ; mutable selected_msg : int option
   ; mutable undo_stack : (string * int) list
   ; mutable redo_stack : (string * int) list
   ; mutable cmdline : string
   ; mutable cmdline_cursor : int
   ; mutable active_fork : string option
   ; mutable fork_start_index : int option
-  ; mutable msg_img_cache : (int, msg_img_cache) Hashtbl.t
-  ; mutable last_history_width : int option
-  ; mutable msg_heights : int array
-  ; mutable height_prefix : int array
-  ; mutable dirty_height_indices : int list
   }
 [@@deriving fields ~getters ~setters]
 
@@ -122,26 +137,33 @@ let create
   ; tool_output_by_index
   ; call_id_by_item_id = Hashtbl.create (module String)
   ; tool_path_by_call_id = Hashtbl.create (module String)
+  ; active_page = Page_id.Chat
+  ; pages =
+      Pages.
+        { chat =
+            Chat_page_state.
+              { scroll_box
+              ; selected_msg
+              ; msg_img_cache = Hashtbl.create (module Int)
+              ; last_history_width = None
+              ; msg_heights = [||]
+              ; height_prefix = [||]
+              ; dirty_height_indices = []
+              }
+        }
   ; tasks
   ; kv_store
   ; fetch_sw
-  ; scroll_box
   ; cursor_pos
   ; selection_anchor
   ; mode
   ; draft_mode
-  ; selected_msg
   ; undo_stack
   ; redo_stack
   ; cmdline
   ; cmdline_cursor
   ; active_fork = None
   ; fork_start_index = None
-  ; msg_img_cache = Hashtbl.create (module Int)
-  ; last_history_width = None
-  ; msg_heights = [||]
-  ; height_prefix = [||]
-  ; dirty_height_indices = []
   }
 ;;
 
@@ -155,6 +177,11 @@ let messages t = t.messages
 let tasks t = t.tasks
 let kv_store t = t.kv_store
 let tool_output_by_index t = t.tool_output_by_index
+let active_page t = t.active_page
+let set_active_page t page = t.active_page <- page
+let chat_page t = t.pages.chat
+let scroll_box t = (chat_page t).scroll_box
+let selected_msg t = (chat_page t).selected_msg
 let auto_follow t = t.auto_follow
 let cmdline t = t.cmdline
 let cmdline_cursor t = t.cmdline_cursor
@@ -178,29 +205,40 @@ let set_fork_start_index t v = t.fork_start_index <- v
 (*  Rendering cache helpers                                                   *)
 (* ------------------------------------------------------------------------- *)
 
-let last_history_width t = t.last_history_width
-let set_last_history_width t v = t.last_history_width <- v
+let last_history_width t = (chat_page t).last_history_width
+let set_last_history_width t v = (chat_page t).last_history_width <- v
 
 let clear_all_img_caches t =
-  Hashtbl.clear t.msg_img_cache;
-  t.msg_heights <- [||];
-  t.height_prefix <- [||];
-  t.dirty_height_indices <- []
+  let chat = chat_page t in
+  Hashtbl.clear chat.msg_img_cache;
+  chat.msg_heights <- [||];
+  chat.height_prefix <- [||];
+  chat.dirty_height_indices <- []
 ;;
 
 let invalidate_img_cache_index t ~idx =
-  Hashtbl.remove t.msg_img_cache idx;
-  t.dirty_height_indices <- idx :: t.dirty_height_indices
+  let chat = chat_page t in
+  Hashtbl.remove chat.msg_img_cache idx;
+  chat.dirty_height_indices <- idx :: chat.dirty_height_indices
 ;;
 
-let find_img_cache t ~idx = Hashtbl.find t.msg_img_cache idx
-let set_img_cache t ~idx entry = Hashtbl.set t.msg_img_cache ~key:idx ~data:entry
+let find_img_cache t ~idx = Hashtbl.find (chat_page t).msg_img_cache idx
+
+let set_img_cache t ~idx entry =
+  Hashtbl.set (chat_page t).msg_img_cache ~key:idx ~data:entry
+;;
 
 let take_and_clear_dirty_height_indices t =
-  let lst = t.dirty_height_indices in
-  t.dirty_height_indices <- [];
+  let chat = chat_page t in
+  let lst = chat.dirty_height_indices in
+  chat.dirty_height_indices <- [];
   lst
 ;;
+
+let msg_heights t = (chat_page t).msg_heights
+let set_msg_heights t a = (chat_page t).msg_heights <- a
+let height_prefix t = (chat_page t).height_prefix
+let set_height_prefix t a = (chat_page t).height_prefix <- a
 
 let toggle_mode (t : t) : unit =
   t.mode
@@ -211,7 +249,7 @@ let toggle_mode (t : t) : unit =
 ;;
 
 let set_draft_mode (t : t) (m : draft_mode) = t.draft_mode <- m
-let select_message (t : t) (idx : int option) = t.selected_msg <- idx
+let select_message (t : t) (idx : int option) = (chat_page t).selected_msg <- idx
 
 (* ------------------------------------------------------------------------- *)
 (*  Undo / Redo helpers                                                       *)
