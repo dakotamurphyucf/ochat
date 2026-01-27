@@ -40,9 +40,11 @@
     • {!Index_markdown_docs} – build a vector index from Markdown docs
     • {!Markdown_search}     – semantic search over Markdown indices
     • {!Make_dir}            – create a directory on the filesystem
+    • {!Import_image}        – load an image file and return it as an image-input payload
 *)
 
-module Get_contents : Ochat_function.Def with type input = string * int option
+module Get_contents :
+  Ochat_function.Def with type input = string * int option * int option
 
 module Odoc_search :
   Ochat_function.Def with type input = string * int option * string option * string

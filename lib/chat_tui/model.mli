@@ -16,6 +16,13 @@
       toggling Vim-style modes, pushing undo states or applying the
       high-level {!Types.patch} commands emitted by the controller.
 
+    {1 Pages and page-local renderer state}
+
+    The full-screen UI is rendered as a {e page} chosen by
+    {!active_page}. Page-local renderer state (scroll boxes, selection, and
+    render caches) is stored under {!pages}.  Today the only page is
+    {!Page_id.Chat} with state {!Chat_page_state.t} stored at [pages.chat].
+
     @canonical Chat_tui.Model
 *)
 
@@ -37,6 +44,29 @@ type msg_img_cache =
   ; height_selected : int option
   }
 
+module Page_id : sig
+  (** Identifier of a full-screen renderer page. *)
+  type t = Chat
+end
+
+module Chat_page_state : sig
+  (** Mutable state and caches used by the chat page renderer.  Stored in
+      {!pages} under [pages.chat]. *)
+  type t =
+    { scroll_box : Notty_scroll_box.t
+    ; mutable selected_msg : int option
+    ; mutable msg_img_cache : (int, msg_img_cache) Base.Hashtbl.t
+    ; mutable last_history_width : int option
+    ; mutable msg_heights : int array
+    ; mutable height_prefix : int array
+    ; mutable dirty_height_indices : int list
+    }
+end
+
+module Pages : sig
+  type t = { chat : Chat_page_state.t }
+end
+
 type t =
   { mutable history_items : Openai.Responses.Item.t list
   ; mutable messages : message list
@@ -48,17 +78,16 @@ type t =
   ; tool_output_by_index : (int, Types.tool_output_kind) Base.Hashtbl.t
   ; call_id_by_item_id : (string, string) Base.Hashtbl.t
   ; tool_path_by_call_id : (string, string option) Base.Hashtbl.t
+  ; mutable active_page : Page_id.t
+  ; pages : Pages.t
   ; mutable tasks : Session.Task.t list
   ; kv_store : (string, string) Base.Hashtbl.t
   ; mutable fetch_sw : Eio.Switch.t option
-  ; scroll_box : Notty_scroll_box.t
   ; mutable cursor_pos : int (** Current position inside [input_line] (bytes). *)
   ; mutable selection_anchor : int option (** Anchor position for active selection. *)
   ; mutable mode : editor_mode (** Current editor mode (Insert/Normal). *)
   ; mutable draft_mode : draft_mode
     (** Whether the draft buffer is plain text or raw XML. *)
-  ; mutable selected_msg : int option
-    (** Currently selected message (Normal mode), if any. *)
   ; mutable undo_stack : (string * int) list
     (** Undo ring – previous states (line, cursor) *)
   ; mutable redo_stack : (string * int) list
@@ -67,25 +96,6 @@ type t =
   ; mutable active_fork : string option
     (** Currently running fork tool call-id, if any. *)
   ; mutable fork_start_index : int option (** History length when fork started. *)
-  ; mutable msg_img_cache : (int, msg_img_cache) Base.Hashtbl.t
-    (** Per-message render cache for the history view.  Keys are message
-        indices.  Entries are invalidated on width changes or when the
-        corresponding message text is updated. *)
-  ; mutable last_history_width : int option
-    (** Width (in cells) for which [msg_img_cache] and the height caches are
-        currently valid.  The renderer compares this value to the live
-        history-pane width to decide when to flush or rebuild caches. *)
-  ; mutable msg_heights : int array
-    (** Cached heights for each message at [last_history_width].  Length
-        equals [List.length (messages t)].  Rebuilt on width changes. *)
-  ; mutable height_prefix : int array
-    (** Prefix sums of [msg_heights].  Length is
-        [Array.length msg_heights + 1] with [height_prefix.(0) = 0] and
-        [height_prefix.(i+1) = height_prefix.(i) + msg_heights.(i)]. *)
-  ; mutable dirty_height_indices : int list
-    (** Indices whose height may have changed since the last rebuild.  The
-        renderer consumes and clears this list to incrementally maintain
-        [height_prefix]. *)
   }
 [@@deriving fields ~getters ~setters]
 
@@ -120,7 +130,31 @@ and draft_mode =
     still affects the model.
 
     The function is expected to disappear once the codebase migrates to an
-    immutable model. *)
+    immutable model.
+
+    @param history_items Raw OpenAI history items (canonical source of truth).
+    @param messages Renderable transcript derived from [history_items].
+    @param input_line Current insert buffer (without trailing newline).
+    @param auto_follow Auto-scroll flag for the history viewport.
+    @param msg_buffers Per-stream buffers keyed by OpenAI stream id.
+    @param function_name_by_id Tool/function name by call id for streaming.
+    @param reasoning_idx_by_id Per-call reasoning token counters (streaming).
+    @param tool_output_by_index Classification metadata for tool outputs keyed by
+           message index.
+    @param tasks Session task list.
+    @param kv_store Mutable key/value store for ad-hoc metadata.
+    @param fetch_sw Optional switch used to cancel in-flight background fetches.
+    @param scroll_box Scroll box backing the history viewport.
+    @param cursor_pos Byte offset of the caret inside [input_line] (or the active
+           buffer).
+    @param selection_anchor Optional selection anchor (byte offset).
+    @param mode Current editor mode.
+    @param draft_mode Current draft-mode flag (Plain vs Raw XML).
+    @param selected_msg Optional selected message index (Normal mode).
+    @param undo_stack Undo history (line, cursor) pairs.
+    @param redo_stack Redo history (line, cursor) pairs.
+    @param cmdline Command-line buffer (without the leading ':').
+    @param cmdline_cursor Cursor position inside [cmdline] (byte offset). *)
 val create
   :  history_items:Openai.Responses.Item.t list
   -> messages:message list
@@ -146,6 +180,27 @@ val create
   -> t
 
 (** Convenience accessors – added on demand. *)
+
+(** [active_page t] indicates which full-screen page is currently shown.
+    Initially this is always {!Page_id.Chat}. *)
+val active_page : t -> Page_id.t
+
+(** [set_active_page t page] changes the active page. *)
+val set_active_page : t -> Page_id.t -> unit
+
+(** [chat_page t] returns the chat page's renderer state/caches.  This is
+    the authoritative location for chat-only scroll state and render
+    caches. *)
+val chat_page : t -> Chat_page_state.t
+
+(** [scroll_box t] is the chat page's scroll box used by history
+    virtualisation and scrolling commands. *)
+val scroll_box : t -> Notty_scroll_box.t
+
+(** [selected_msg t] is the currently selected message (Normal mode), if
+    any.  The index is zero-based and refers to the list returned by
+    {!messages}. *)
+val selected_msg : t -> int option
 
 (** [input_line t] returns the editable contents of the prompt at the bottom
     of the screen.  The value is never [\n]-terminated. *)
@@ -307,8 +362,8 @@ val rebuild_tool_output_index : t -> unit
     should not need these. *)
 
 (** [last_history_width t] is the width (in terminal cells) for which the
-    cached message images and heights are currently valid, or [None] if no
-    cache has been built yet. *)
+    chat page's cached message images and heights are currently valid, or
+    [None] if no cache has been built yet. *)
 val last_history_width : t -> int option
 
 (** [set_last_history_width t w] updates {!last_history_width}.  Calling the
@@ -339,3 +394,16 @@ val set_img_cache : t -> idx:int -> msg_img_cache -> unit
     indices whose heights may be stale.  The list may contain duplicates and
     is not guaranteed to be ordered. *)
 val take_and_clear_dirty_height_indices : t -> int list
+
+(** [msg_heights t] are the cached rendered heights (in cells) for the chat
+    transcript at {!last_history_width}. *)
+val msg_heights : t -> int array
+
+(** [set_msg_heights t a] updates {!msg_heights}. *)
+val set_msg_heights : t -> int array -> unit
+
+(** [height_prefix t] are prefix sums of {!msg_heights}. *)
+val height_prefix : t -> int array
+
+(** [set_height_prefix t a] updates {!height_prefix}. *)
+val set_height_prefix : t -> int array -> unit

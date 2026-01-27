@@ -26,16 +26,29 @@ let error_to_string = Apply_patch_error.to_string
 
 [@@@warning "-20-26-32-69"]
 
+(* Debug tracing (opt-in) ------------------------------------------------------ *)
+
+let debug_enabled : bool ref = ref false
+let set_debug (enabled : bool) : unit = debug_enabled := enabled
+
+let debug_log fmt =
+  if !debug_enabled
+  then Printf.ksprintf (fun s -> prerr_endline ("[apply_patch] " ^ s)) fmt
+  else Printf.ksprintf (fun _ -> ()) fmt
+;;
+
 (* ──────────────────────────────────────────────────────────────────────────
 		   Constants (same strings as in the TypeScript reference)
 		   ──────────────────────────────────────────────────────────────────────────*)
 let patch_prefix = "*** Begin Patch\n"
 let patch_suffix = "\n*** End Patch"
+let end_patch_line = "*** End Patch"
 let add_file_prefix = "*** Add File: "
 let delete_file_prefix = "*** Delete File: "
 let update_file_prefix = "*** Update File: "
 let move_file_to_prefix = "*** Move to: "
 let end_of_file_prefix = "*** End of File"
+let section_break_line = "***"
 let hunk_add_line_prefix = '+'
 
 (* ──────────────────────────────────────────────────────────────────────────
@@ -191,7 +204,8 @@ let peek_next_section (lines : string array) ~(idx0 : int)
   let boundary s =
     List.exists
       [ "@@"
-      ; patch_suffix
+      ; end_patch_line
+      ; section_break_line
       ; update_file_prefix
       ; delete_file_prefix
       ; add_file_prefix
@@ -210,7 +224,18 @@ let peek_next_section (lines : string array) ~(idx0 : int)
       | c when Char.equal c hunk_add_line_prefix -> s, `Add
       | '-' -> s, `Del
       | ' ' -> s, `Keep
-      | _ -> " " ^ s, `Keep
+      (* Lenient continuation heuristic:
+         If a model wraps a line and drops the leading diff prefix, treat it as a
+         continuation of the previous add/delete run when applicable. Otherwise
+         treat it as context. *)
+      | _ ->
+        let m =
+          match prev with
+          | `Add -> `Add
+          | `Del -> `Del
+          | `Keep -> `Keep
+        in
+        " " ^ s, m
     in
     mode := m;
     (* --- handle the case of missing space in front of a line -------- *)
@@ -231,11 +256,10 @@ let peek_next_section (lines : string array) ~(idx0 : int)
     | `Keep -> old := line :: !old
   done;
   push_chunk ();
-  (* If we're positioned on a chunk delimiter "@@" advance the index so that
-     callers always observe forward progress.  This also treats the trailing
-     "@@" that closes a chunk as belonging to that chunk rather than the next
-     one. *)
-  if !idx < Array.length lines && String.equal lines.(!idx) "@@" then incr idx;
+  (* Do NOT consume a bare "@@" delimiter here.
+     The update-file loop expects "@@" to be present so it can delimit hunks.
+     Consuming it inside [peek_next_section] causes patches with single "@@" separators
+     between hunks to desync, requiring a double "@@" to work. *)
   let eof = !idx < Array.length lines && String.equal lines.(!idx) end_of_file_prefix in
   if eof then incr idx;
   List.rev !old, List.rev !chunks, !idx, eof
@@ -289,7 +313,8 @@ module Parser = struct
         (at_end
            t
            ~prefixes:
-             [ patch_suffix
+             [ end_patch_line
+             ; section_break_line
              ; update_file_prefix
              ; delete_file_prefix
              ; add_file_prefix
@@ -329,15 +354,19 @@ module Parser = struct
              t.fuzz <- t.fuzz + 1
            | None -> ()));
       let ctx, chunks, next_i, eof = peek_next_section t.lines ~idx0:t.i in
-      (* [peek_next_section] must always advance; otherwise we would loop
-         forever.  The helper now guarantees this property, so hitting this
-         branch indicates a logic bug or a malformed patch. *)
+      (* Lenient no-progress recovery:
+         If [peek_next_section] does not advance, consume one line so we never hang.
+         This can happen with malformed patches (e.g. unexpected terminators or
+         wrapped lines) and we prefer recovery over infinite loops. *)
       if Int.(next_i <= t.i)
       then
-        raise
-          (Diff_error
-             (Apply_patch_error.Syntax_error
-                { line = t.i; text = "Empty or malformed section in patch" }));
+        if t.i < Array.length t.lines
+        then t.i <- t.i + 1
+        else
+          raise
+            (Diff_error
+               (Apply_patch_error.Syntax_error
+                  { line = t.i; text = "Empty or malformed section in patch" }));
       let new_idx, fuzz_score =
         find_context ~lines:file_lines ~context:ctx ~start:!idx ~eof
       in
@@ -383,11 +412,14 @@ module Parser = struct
         at_end
           t
           ~prefixes:
-            [ patch_suffix; update_file_prefix; delete_file_prefix; add_file_prefix ]
+            [ end_patch_line; update_file_prefix; delete_file_prefix; add_file_prefix ]
       then List.rev acc
       else (
         let s = read t in
-        if Char.(s.[0] <> hunk_add_line_prefix)
+        (* Harden against empty lines to avoid [s.[0]] bounds errors. *)
+        if String.is_empty s
+        then raise (Diff_error (Apply_patch_error.Syntax_error { line = t.i; text = s }))
+        else if Char.(s.[0] <> hunk_add_line_prefix)
         then raise (Diff_error (Apply_patch_error.Syntax_error { line = t.i; text = s }))
         else collect (String.drop_prefix s 1 :: acc))
     in
@@ -401,48 +433,52 @@ module Parser = struct
 
   (* -- top-level ------------------------------------------------------- *)
   let parse t =
-    while not (at_end t ~prefixes:[ patch_suffix ]) do
-      match read ~pref:update_file_prefix t with
-      | path when not (String.is_empty path) ->
-        if not (Map.mem t.current path)
-        then
-          raise (Diff_error (Apply_patch_error.Missing_file { path; action = `Update }));
-        let move_to = read ~pref:move_file_to_prefix t in
-        let upd = parse_update_file t ~path ~orig_text:(Map.find_exn t.current path) in
-        let upd =
-          { upd with
-            move_path = (if String.is_empty move_to then None else Some move_to)
-          }
-        in
-        t.patch <- { actions = Map.set t.patch.actions ~key:path ~data:upd }
-      | _ ->
-        (match read ~pref:delete_file_prefix t with
-         | path when not (String.is_empty path) ->
-           if not (Map.mem t.current path)
-           then
-             raise
-               (Diff_error (Apply_patch_error.Missing_file { path; action = `Delete }));
-           t.patch
-           <- { actions =
-                  Map.set
-                    t.patch.actions
-                    ~key:path
-                    ~data:
-                      { kind = Delete; new_file = None; chunks = []; move_path = None }
-              }
-         | _ ->
-           (match read ~pref:add_file_prefix t with
-            | path when not (String.is_empty path) ->
-              if Map.mem t.current path
-              then raise (Diff_error (Apply_patch_error.File_exists { path }));
-              let add = parse_add_file t in
-              t.patch <- { actions = Map.set t.patch.actions ~key:path ~data:add }
-            | _ ->
-              raise
-                (Diff_error
-                   (Apply_patch_error.Syntax_error { line = t.i; text = t.lines.(t.i) }))))
+    while not (at_end t ~prefixes:[ end_patch_line ]) do
+      (* Accept optional "***" section break lines between sections. *)
+      if String.equal t.lines.(t.i) section_break_line
+      then t.i <- t.i + 1
+      else (
+        match read ~pref:update_file_prefix t with
+        | path when not (String.is_empty path) ->
+          if not (Map.mem t.current path)
+          then
+            raise (Diff_error (Apply_patch_error.Missing_file { path; action = `Update }));
+          let move_to = read ~pref:move_file_to_prefix t in
+          let upd = parse_update_file t ~path ~orig_text:(Map.find_exn t.current path) in
+          let upd =
+            { upd with
+              move_path = (if String.is_empty move_to then None else Some move_to)
+            }
+          in
+          t.patch <- { actions = Map.set t.patch.actions ~key:path ~data:upd }
+        | _ ->
+          (match read ~pref:delete_file_prefix t with
+           | path when not (String.is_empty path) ->
+             if not (Map.mem t.current path)
+             then
+               raise
+                 (Diff_error (Apply_patch_error.Missing_file { path; action = `Delete }));
+             t.patch
+             <- { actions =
+                    Map.set
+                      t.patch.actions
+                      ~key:path
+                      ~data:
+                        { kind = Delete; new_file = None; chunks = []; move_path = None }
+                }
+           | _ ->
+             (match read ~pref:add_file_prefix t with
+              | path when not (String.is_empty path) ->
+                if Map.mem t.current path
+                then raise (Diff_error (Apply_patch_error.File_exists { path }));
+                let add = parse_add_file t in
+                t.patch <- { actions = Map.set t.patch.actions ~key:path ~data:add }
+              | _ ->
+                raise
+                  (Diff_error
+                     (Apply_patch_error.Syntax_error { line = t.i; text = t.lines.(t.i) })))))
     done;
-    if not (String.is_prefix t.lines.(t.i) ~prefix:(String.strip patch_suffix))
+    if not (String.is_prefix t.lines.(t.i) ~prefix:end_patch_line)
     then
       raise
         (Diff_error

@@ -13,9 +13,16 @@ pure with respect to the outside world, but it does maintain a few
 
 ---
 
+## Pages and routing
+
+`Chat_tui.Renderer.render_full` is the single public entry point. Internally
+the renderer routes to a full-screen page based on `Model.active_page`.  At
+the moment only the chat page exists, but the module structure is intended
+to accommodate additional pages later.
+
 ## Layout
 
-`Chat_tui.Renderer` turns a `Model.t` into a three-part screen:
+The chat page turns a `Model.t` into a three-part screen:
 
 1. **History viewport (top)** — scrollable chat transcript, virtualised so
    that only potentially-visible messages are rendered. When there is enough
@@ -122,28 +129,31 @@ Rendering the entire transcript on each frame would be too slow once a
 session grows. `Chat_tui.Renderer` therefore uses a combination of
 virtualisation and caches stored on the model:
 
-- **Per-message image cache** – the model carries a
-  `msg_img_cache : (int, Model.msg_img_cache) Hashtbl.t`. Each entry stores
-  the unselected and selected images for a single message, together with the
+- **Per-message image cache** – the chat page state stores a cache mapping
+  message indices to `Model.msg_img_cache` entries (see
+  `Model.find_img_cache` / `Model.set_img_cache`). Each entry stores the
+  unselected and selected images for a single message, together with the
   width they were rendered at and their heights.
 
-- **Height prefix sums** – `Model.msg_heights` and `Model.height_prefix` hold
-  the cached heights for each message and the prefix sums over those
-  heights. Given a scroll offset and viewport height, the renderer performs
-  two binary searches over the prefix array to determine the index range of
+- **Height prefix sums** – the chat page state also stores cached heights
+  and prefix sums (accessible via `Model.msg_heights` / `Model.height_prefix`).
+  Given a scroll offset and viewport height, the renderer performs two
+  binary searches over the prefix array to determine the index range of
   messages that can be visible.
 
 - **Incremental maintenance** – when the underlying text of a message may
-  have changed, other parts of the UI mark its index in
-  `Model.dirty_height_indices`. The renderer consumes and clears that list on
-  each call, recomputes heights for dirty entries, and updates the prefix
-  array in-place.
+  have changed, other parts of the UI mark its index dirty via
+  `Model.invalidate_img_cache_index`. The renderer consumes and clears the
+  resulting dirty list via `Model.take_and_clear_dirty_height_indices`,
+  recomputes heights for dirty entries, and updates the prefix array
+  in-place.
 
-- **Scroll box integration** – the history viewport is stored in
-  `Model.scroll_box : Notty_scroll_box.t`. Each call to `render_full` updates
-  the scroll box content image to the most recent history view. If
-  `Model.auto_follow model` is `true`, the scroll offset is snapped to the
-  bottom; otherwise the existing offset (possibly adjusted by user input via
+- **Scroll box integration** – the chat page's history viewport is backed by
+  a `Notty_scroll_box.t` stored in the chat page state (accessible via
+  `Model.scroll_box`). Each call to `render_full` updates the scroll box
+  content image to the most recent history view. If `Model.auto_follow model`
+  is `true`, the scroll offset is snapped to the bottom; otherwise the
+  existing offset (possibly adjusted by user input via
   `Notty_scroll_box.scroll_by` and friends) is respected and clamped to the
   valid range for the current viewport height.
 
@@ -170,7 +180,7 @@ cursor position.
 
 - `size` — `(width, height)` of the terminal in character cells
 - `model` — current UI state (`messages`, `input_line`, editor mode, draft
-  mode, selection, `scroll_box`, and internal caches)
+  mode, selection, chat page `scroll_box`, and internal render caches)
 
 The result is `(image, (cx, cy))` where:
 
@@ -180,6 +190,10 @@ The result is `(image, (cx, cy))` where:
   input box, suitable for `Notty_eio.Term.cursor` or
   `Notty_unix.Term.cursor`. The origin `(0, 0)` is the top-left corner of the
   terminal.
+
+  The cursor is derived from byte offsets in the active input buffer:
+  `Model.cursor_pos` in Insert/Normal mode and `Model.cmdline_cursor` in
+  Cmdline mode.
 
 Behavioural notes:
 

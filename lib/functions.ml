@@ -44,7 +44,7 @@ let is_binary_file ~dir path =
 ;;
 
 let get_contents ~dir : Ochat_function.t =
-  let f (path, offset) =
+  let f (path, offset, line_count) =
     let read () =
       if is_binary_file ~dir path
       then
@@ -56,58 +56,74 @@ let get_contents ~dir : Ochat_function.t =
       @@ fun flow ->
       try
         let r = Eio.Buf_read.of_flow flow ~max_size:1_000_000 in
-        let skipped = ref 0 in
-        let total = 380_928 in
-        let taken = ref 0 in
+        let total_bytes_limit = 380_928 in
+        let taken_bytes = ref 0 in
         let truncated = ref false in
-        let result =
-          match offset with
-          | None ->
-            let lines = r |> Eio.Buf_read.(seq line) in
-            let lines =
-              Seq.take_while
-                (fun s ->
-                   if !taken < total
-                   then (
-                     taken := !taken + String.length s;
-                     true)
-                   else (
-                     truncated := true;
-                     false))
-                lines
-            in
-            Sequence.of_seq lines |> Sequence.to_list |> String.concat ~sep:"\n"
-          | Some offset ->
-            let lines =
-              r
-              |> Eio.Buf_read.(seq line)
-              |> Seq.drop_while (fun s ->
-                if !skipped < offset
-                then (
-                  skipped := !skipped + String.length s;
-                  true)
-                else false)
-            in
-            let lines =
-              Seq.take_while
-                (fun s ->
-                   if !taken < total
-                   then (
-                     taken := !taken + String.length s;
-                     true)
-                   else if !taken > total
-                   then (
-                     truncated := true;
-                     false)
-                   else true)
-                lines
-            in
-            Sequence.of_seq lines |> Sequence.to_list |> String.concat ~sep:"\n"
+        let start_line_0 = Option.value ~default:0 offset in
+        let requested_count = line_count in
+        let current_line_0 = ref 0 in
+        let returned_lines = ref 0 in
+        let total_lines_in_file = ref 0 in
+        let collected = ref [] in
+        let push_line s =
+          collected := s :: !collected;
+          incr returned_lines
         in
+        (* Read the whole file as a line stream once so we can compute total lines
+           and also return the requested slice, while still honoring the byte cap. *)
+        let lines = r |> Eio.Buf_read.(seq line) in
+        Seq.iter
+          (fun s ->
+             (* Always count total lines, even if we don't return them. *)
+             incr total_lines_in_file;
+             let this_line_0 = !current_line_0 in
+             incr current_line_0;
+             let should_consider =
+               this_line_0 >= start_line_0
+               &&
+               match requested_count with
+               | None -> true
+               | Some n -> !returned_lines < Int.max 0 n
+             in
+             if should_consider
+             then
+               if
+                 (* Enforce byte limit while building returned payload *)
+                 !taken_bytes < total_bytes_limit
+               then (
+                 taken_bytes := !taken_bytes + String.length s;
+                 if !taken_bytes <= total_bytes_limit
+                 then push_line s
+                 else truncated := true)
+               else truncated := true)
+          lines;
+        let result_body = List.rev !collected |> String.concat ~sep:"\n" in
+        let header =
+          (* ripgrep-like header: file:START-END:
+             Keep the first line in "file:line:..." shape so terminals can linkify it.
+             Put extra metadata on a second line that won't interfere with link selection. *)
+          let start_1 = start_line_0 + 1 in
+          let end_1 =
+            (* If we returned 0 lines, show an empty range as START-START (1-based). *)
+            if !returned_lines = 0 then start_1 else start_line_0 + !returned_lines
+          in
+          Printf.sprintf
+            "%s:%d-%d:\n[total_lines=%d]\n"
+            path
+            start_1
+            end_1
+            !total_lines_in_file
+        in
+        let result = header ^ result_body in
         if !truncated
-        then
-          (* Truncate to last full line *)
-          Printf.sprintf "%s\n\n---\n[File truncated]" result
+        then (
+          let remaining_lines =
+            Int.max 0 (!total_lines_in_file - (start_line_0 + !returned_lines))
+          in
+          Printf.sprintf
+            "%s\n\n---\n[File truncated: %d more lines not shown]"
+            result
+            remaining_lines)
         else result
       with
       | Eio.Exn.Io _ as ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex

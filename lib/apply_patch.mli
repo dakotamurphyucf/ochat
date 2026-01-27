@@ -44,6 +44,7 @@
     • {!exception:Diff_error} / {!val:error_to_string} – structured
       error reporting.
     • {!val:process_patch} – parse and apply a patch.
+    • {!val:set_debug} – enable/disable parser tracing (stderr).
 *)
 
 (** Raised when the patch is malformed or cannot be applied.
@@ -88,6 +89,13 @@ val error_to_string : Apply_patch_error.t -> string
        modified hunk(s) and is handy for logging or chat-ops
        confirmations.
 
+     @param text Patch text delimited by {[*** Begin Patch]} / {[*** End Patch]}.
+     @param open_fn Read callback used for [Update] and [Delete] actions.
+     @param write_fn Write callback used for [Add] and [Update] actions (and the
+            destination of a rename).
+     @param remove_fn Remove callback used for [Delete] actions (and the source
+            of a rename).
+
      @raise Diff_error if the patch is syntactically invalid, refers to
        a non-existent file, fails context matching, or violates any
        other constraint described in the patch-format section above. *)
@@ -97,3 +105,13 @@ val process_patch
   -> write_fn:(string -> string -> unit)
   -> remove_fn:(string -> unit)
   -> string * (string * string) list
+
+(** [set_debug enabled] toggles internal apply_patch tracing to stderr.
+
+    When enabled, the implementation emits debug logs prefixed with
+    [["[apply_patch] "]] that can help diagnose patch parser edge cases.
+
+    This is a global setting (module-level) and is intended for tests
+    and local debugging; production callers should typically leave this
+    disabled. *)
+val set_debug : bool -> unit

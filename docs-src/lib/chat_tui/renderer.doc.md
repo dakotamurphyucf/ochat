@@ -11,6 +11,14 @@ The renderer is pure with respect to the outside world (no I/O), but it
 caches, cached message heights/prefix sums, and the embedded
 `Notty_scroll_box.t`) to make subsequent frames cheaper.
 
+Internally, `Chat_tui.Renderer` is a thin façade over a small page/component
+framework:
+
+- `Renderer_pages` dispatches based on `Model.active_page`.
+- `Renderer_page_chat` implements the current chat page.
+- `Renderer_component_*` modules provide reusable parts (history viewport,
+  message rendering, status bar, input box).
+
 ## Screen layout
 
 Top-to-bottom, the renderer produces:
@@ -107,8 +115,8 @@ Chat_tui.Renderer.lang_of_path "no_extension" = None
 ## Known limitations
 
 1. Cursor positioning in the input box is derived from byte offsets in
-   `Model.cursor_pos`. Multi-byte UTF-8 and East-Asian wide glyphs can cause
-   the visual caret to drift.
+   `Model.cursor_pos` (or `Model.cmdline_cursor` in command-line mode). Multi-byte
+   UTF-8 and East-Asian wide glyphs can cause the visual caret to drift.
 2. Notty’s geometry is based on `Uucp.Break.tty_width_hint` and can be wrong
    for some Unicode sequences (see Notty’s documentation on Unicode vs. text
    geometry).

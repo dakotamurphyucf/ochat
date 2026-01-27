@@ -24,7 +24,11 @@
       just for unit tests.
 
     All errors are handled internally; the public API is synchronous
-    and exception-free. *)
+    and exception-free.
+
+    Tool outputs that contain image parts are preserved in the transcript using
+    a lightweight HTML placeholder of the form [<image src="..."/>] so that the
+    summariser can at least acknowledge their presence. *)
 
 open! Core
 

@@ -6,9 +6,16 @@
      terminal size and leaves input handling and state updates to
      {!Chat_tui.Controller} and {!Chat_tui.App}.
 
-     {1 Layout}
+     {1 Pages and routing}
 
-     The screen is laid out top-to-bottom as:
+     {!render_full} is the single entry point. Internally, the renderer routes
+     to a page-specific implementation via {!Chat_tui.Renderer_pages} based on
+     {!Chat_tui.Model.active_page}.  Today only the chat page exists, but the
+     structure is intended to accommodate future full-screen pages.
+
+     {1 Chat page layout}
+
+     The chat page screen is laid out top-to-bottom as:
 
      {ul
      {- a virtualised, scrollable history viewport backed by a
@@ -23,14 +30,14 @@
 
      Rendering is pure with respect to the outside world (no I/O), but the
      renderer does mutate a few cache fields inside [model] as part of its
-     contract:
+     contract (stored under the active page's state in {!Chat_tui.Model.pages}):
 
      {ul
      {- per-message render cache and cached height / prefix-sum arrays used
         for scroll virtualisation;}
-     {- the scroll box stored in [model], updated to honour
-        {!Chat_tui.Model.auto_follow} and to clamp the scroll offset to the
-        valid range for the current viewport height.}}
+     {- the chat page scroll box (see {!Chat_tui.Model.scroll_box}),
+        updated to honour {!Chat_tui.Model.auto_follow} and to clamp the
+        scroll offset to the valid range for the current viewport height.}}
 
      {1 Text handling and highlighting}
 
@@ -79,10 +86,9 @@ val render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)
 (** [render_full ~size ~model] builds the full screen image and the cursor
     position.
 
-    {ul
-    {- [size] is [(width, height)] in terminal cells;}
-    {- [model] is the current UI state (messages, input buffer, selection,
-       scroll box, modes, etc.).}}
+    @param size Terminal size [(width, height)] in cells.
+    @param model Current UI state (messages, input buffer, selection, scroll
+           box, modes, and renderer caches).
 
     The result is [(image, (cx, cy))] where [image] is the composite screen
     and [(cx, cy)] is the caret position inside the input box in absolute
