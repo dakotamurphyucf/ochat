@@ -39,12 +39,12 @@ let selection_overlap_for_line ~(model : Model.t) ~line_start ~line_end =
 ;;
 
 let content_img_for_line
-  ~(text_attr : A.t)
-  ~(sel_attr : A.t)
-  ~(line_prefix : string)
-  ~line
-  ~line_start
-  ~overlap
+      ~(text_attr : A.t)
+      ~(sel_attr : A.t)
+      ~(line_prefix : string)
+      ~line
+      ~line_start
+      ~overlap
   =
   match overlap with
   | None -> I.string text_attr (line_prefix ^ line)
@@ -68,26 +68,24 @@ let framed_row ~(border_attr : A.t) ~inside =
 ;;
 
 let render_row
-  ~(w : int)
-  ~(border_attr : A.t)
-  ~(text_attr : A.t)
-  ~(sel_attr : A.t)
-  ~(model : Model.t)
-  ~sel_active
-  ~prefix
-  ~indent
-  ~idx
-  ~abs_off
-  ~line
+      ~(w : int)
+      ~(border_attr : A.t)
+      ~(text_attr : A.t)
+      ~(sel_attr : A.t)
+      ~(model : Model.t)
+      ~sel_active
+      ~prefix
+      ~indent
+      ~idx
+      ~abs_off
+      ~line
   =
   let line_prefix = if idx = 0 then prefix else indent in
   let line_len = String.length line in
   let line_start = abs_off in
   let line_end = abs_off + line_len in
   let overlap =
-    if sel_active
-    then selection_overlap_for_line ~model ~line_start ~line_end
-    else None
+    if sel_active then selection_overlap_for_line ~model ~line_start ~line_end else None
   in
   let content_img =
     content_img_for_line ~text_attr ~sel_attr ~line_prefix ~line ~line_start ~overlap
@@ -98,15 +96,15 @@ let render_row
 ;;
 
 let render_rows
-  ~(w : int)
-  ~(border_attr : A.t)
-  ~(text_attr : A.t)
-  ~(sel_attr : A.t)
-  ~(model : Model.t)
-  ~sel_active
-  ~prefix
-  ~indent
-  lines
+      ~(w : int)
+      ~(border_attr : A.t)
+      ~(text_attr : A.t)
+      ~(sel_attr : A.t)
+      ~(model : Model.t)
+      ~sel_active
+      ~prefix
+      ~indent
+      lines
   =
   let render_row =
     render_row ~w ~border_attr ~text_attr ~sel_attr ~model ~sel_active ~prefix ~indent
@@ -125,11 +123,13 @@ let hline ~(border_attr : A.t) len =
 ;;
 
 let top_border ~(w : int) ~(border_attr : A.t) =
-  Notty.Infix.(I.string border_attr "┌" <|> hline ~border_attr (w - 2) <|> I.string border_attr "┐")
+  Notty.Infix.(
+    I.string border_attr "┌" <|> hline ~border_attr (w - 2) <|> I.string border_attr "┐")
 ;;
 
 let bottom_border ~(w : int) ~(border_attr : A.t) =
-  Notty.Infix.(I.string border_attr "└" <|> hline ~border_attr (w - 2) <|> I.string border_attr "┘")
+  Notty.Infix.(
+    I.string border_attr "└" <|> hline ~border_attr (w - 2) <|> I.string border_attr "┘")
 ;;
 
 let total_index ~(model : Model.t) =
@@ -151,7 +151,7 @@ let rec row_and_col_in_line lines ~total_index ~offset ~row =
 let cursor_position ~(model : Model.t) ~prefix lines =
   let total_index = total_index ~model in
   let row, col_in_line = row_and_col_in_line lines ~total_index ~offset:0 ~row:0 in
-  let cursor_x = (1 + String.length prefix) + col_in_line in
+  let cursor_x = 1 + String.length prefix + col_in_line in
   let cursor_y = 1 + row in
   cursor_x, cursor_y
 ;;
@@ -165,8 +165,19 @@ let render ~width ~(model : Model.t) : I.t * (int * int) =
   let sel_attr = A.(text_attr ++ st reverse) in
   let sel_active = is_selection_active ~model in
   let rows =
-    render_rows ~w ~border_attr ~text_attr ~sel_attr ~model ~sel_active ~prefix ~indent lines
+    render_rows
+      ~w
+      ~border_attr
+      ~text_attr
+      ~sel_attr
+      ~model
+      ~sel_active
+      ~prefix
+      ~indent
+      lines
   in
-  let img = I.vcat ((top_border ~w ~border_attr :: rows) @ [ bottom_border ~w ~border_attr ]) in
+  let img =
+    I.vcat ((top_border ~w ~border_attr :: rows) @ [ bottom_border ~w ~border_attr ])
+  in
   img, cursor_position ~model ~prefix lines
 ;;

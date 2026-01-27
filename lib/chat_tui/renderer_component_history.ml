@@ -35,11 +35,11 @@ let scroll_and_max_scroll ~(model : Model.t) ~total_height ~height =
 ;;
 
 let get_height
-  ~(model : Model.t)
-  ~width
-  ~(render_message : idx:int -> selected:bool -> message -> I.t)
-  ~idx
-  msg
+      ~(model : Model.t)
+      ~width
+      ~(render_message : idx:int -> selected:bool -> message -> I.t)
+      ~idx
+      msg
   =
   match Model.find_img_cache model ~idx with
   | Some entry when entry.width = width && String.equal entry.text (snd msg) ->
@@ -61,11 +61,11 @@ let get_height
 ;;
 
 let recompute_height_arrays
-  ~(model : Model.t)
-  ~len
-  ~(messages : message list)
-  ~width
-  ~(render_message : idx:int -> selected:bool -> message -> I.t)
+      ~(model : Model.t)
+      ~len
+      ~(messages : message list)
+      ~width
+      ~(render_message : idx:int -> selected:bool -> message -> I.t)
   =
   let heights = Array.create ~len 0 in
   let prefix = Array.create ~len:(len + 1) 0 in
@@ -85,14 +85,14 @@ let apply_delta_to_prefix prefix ~start ~delta =
 ;;
 
 let update_height_for_index
-  ~(model : Model.t)
-  ~len
-  ~(messages : message list)
-  ~width
-  ~(render_message : idx:int -> selected:bool -> message -> I.t)
-  ~(heights : int array)
-  ~(prefix : int array)
-  ~idx
+      ~(model : Model.t)
+      ~len
+      ~(messages : message list)
+      ~width
+      ~(render_message : idx:int -> selected:bool -> message -> I.t)
+      ~(heights : int array)
+      ~(prefix : int array)
+      ~idx
   =
   if idx >= 0 && idx < len
   then (
@@ -107,11 +107,11 @@ let update_height_for_index
 ;;
 
 let ensure_height_arrays
-  ~(model : Model.t)
-  ~len
-  ~(messages : message list)
-  ~width
-  ~(render_message : idx:int -> selected:bool -> message -> I.t)
+      ~(model : Model.t)
+      ~len
+      ~(messages : message list)
+      ~width
+      ~(render_message : idx:int -> selected:bool -> message -> I.t)
   =
   let heights = Model.msg_heights model in
   let prefix = Model.height_prefix model in
@@ -153,11 +153,11 @@ let top_and_bottom_blank ~(prefix : int array) ~len ~total_height ~start_idx ~la
 ;;
 
 let cache_entry_for_miss
-  ~(model : Model.t)
-  ~width
-  ~(render_message : idx:int -> selected:bool -> message -> I.t)
-  ~idx
-  msg
+      ~(model : Model.t)
+      ~width
+      ~(render_message : idx:int -> selected:bool -> message -> I.t)
+      ~idx
+      msg
   =
   let img_unselected = render_message ~idx ~selected:false msg in
   let h = I.height img_unselected in
@@ -175,12 +175,12 @@ let cache_entry_for_miss
 ;;
 
 let img_from_cache_hit
-  ~(model : Model.t)
-  ~(render_message : idx:int -> selected:bool -> message -> I.t)
-  ~idx
-  msg
-  ~selected
-  (entry : Model.msg_img_cache)
+      ~(model : Model.t)
+      ~(render_message : idx:int -> selected:bool -> message -> I.t)
+      ~idx
+      msg
+      ~selected
+      (entry : Model.msg_img_cache)
   =
   match selected, entry.img_selected with
   | false, _ -> entry.img_unselected
@@ -204,13 +204,13 @@ let get_img ~(model : Model.t) ~width ~render_message ~idx msg ~selected =
 ;;
 
 let body_img
-  ~(model : Model.t)
-  ~width
-  ~(messages : message list)
-  ~start_idx
-  ~last_idx
-  ~(selected_idx : int option)
-  ~(render_message : idx:int -> selected:bool -> message -> I.t)
+      ~(model : Model.t)
+      ~width
+      ~(messages : message list)
+      ~start_idx
+      ~last_idx
+      ~(selected_idx : int option)
+      ~(render_message : idx:int -> selected:bool -> message -> I.t)
   =
   if last_idx < start_idx
   then I.empty
@@ -221,7 +221,9 @@ let body_img
         ~f:(fun off ->
           let idx = start_idx + off in
           let msg = List.nth_exn messages idx in
-          let selected = Option.value_map selected_idx ~default:false ~f:(Int.equal idx) in
+          let selected =
+            Option.value_map selected_idx ~default:false ~f:(Int.equal idx)
+          in
           get_img ~model ~width ~render_message ~idx msg ~selected)
     in
     I.vcat imgs)
@@ -258,17 +260,23 @@ let top_visible_index ~(model : Model.t) ~(scroll_height : int) ~(messages : mes
   : int option
   =
   let len = List.length messages in
-  if Int.equal len 0 then None else (
+  if Int.equal len 0
+  then None
+  else (
     let prefix = Model.height_prefix model in
-    if Array.length prefix < len + 1 then None else (
+    if Array.length prefix < len + 1
+    then None
+    else (
       let total_height = prefix.(len) in
       let scroll, _max_scroll =
         scroll_and_max_scroll ~model ~total_height ~height:scroll_height
       in
       let k = bsearch_first_gt prefix ~len:(len + 1) ~target:scroll in
       let idx = Int.max 0 (k - 1) in
-      if idx >= len then None else (
+      if idx >= len
+      then None
+      else (
         let message_start_y = prefix.(idx) in
-        let header_vpos = (message_start_y + 1) - scroll in
+        let header_vpos = message_start_y + 1 - scroll in
         if header_vpos >= 0 && header_vpos < 2 then None else Some idx)))
 ;;
