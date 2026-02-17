@@ -4,10 +4,9 @@ module Res = Openai.Responses
 module Req = Res.Request
 
 let cursor_marker = "⟦CURSOR⟧"
-let max_context_chars = 2_000
-let max_draft_before_cursor = 1_500
-let max_draft_after_cursor = 500
-let max_returned_chars = 2_000
+let max_draft_before_cursor = 4000
+let max_draft_after_cursor = 4000
+let max_returned_chars = 4_000
 
 let insert_marker ~text ~cursor =
   let cursor = Int.min (String.length text) (Int.max 0 cursor) in
@@ -42,14 +41,7 @@ let render_history_for_prompt (items : Res.Item.t list) : string =
        | _ -> None)
     | _ -> None
   in
-  items
-  |> List.filter_map ~f:render_item
-  |> (fun lines ->
-  let keep = 12 in
-  let len = List.length lines in
-  if len <= keep then lines else List.drop lines (len - keep))
-  |> String.concat ~sep:"\n"
-  |> fun s -> String.prefix s max_context_chars
+  items |> List.filter_map ~f:render_item |> String.concat ~sep:"\n"
 ;;
 
 let strip_code_fences (text : string) : string =
@@ -73,10 +65,17 @@ You are given:
 
 Return ONLY the text to insert at ⟦CURSOR⟧ (the suffix after the marker).
 
+Guidelines for Completion:
+- Carefully review all supplementary context within one or more context blocks.
+- Use what you learn from context for more accurate predictions, *never* for referencing or summarizing; the context should inform completions, not appear in them.
+- Predict the most suitable code or text completion
+- Prefer succinct, single-line completions by default, but produce multi-line/block completions if and only if the structure of the input clearly signals a multi-line or block output.
+
 Constraints:
 - Output must be the insertion text only (no quotes, no explanations, no Markdown fences).
 - Do not repeat any draft text that appears before ⟦CURSOR⟧.
 - Keep it short; if no completion is appropriate, return an empty string.
+- If the input position clearly requests block-level or multi-line completion, provide it accordingly.
 - Do not use tools.
 |}
 ;;
@@ -102,8 +101,8 @@ let complete_suffix
     let net = Eio.Stdenv.net env in
     let temperature = Option.value cfg.temperature ~default:0.2 in
     let max_output_tokens =
-      let cfg_max = Option.value cfg.max_tokens ~default:96 in
-      Int.min 96 (Int.max 1 cfg_max)
+      let cfg_max = Option.value cfg.max_tokens ~default:500 in
+      Int.min 500 (Int.max 1 cfg_max)
     in
     let model = Option.map cfg.model ~f:Req.model_of_str_exn in
     let reasoning = Req.Reasoning.{ effort = Some None; summary = None } in
