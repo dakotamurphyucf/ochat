@@ -1,4 +1,4 @@
-(lang dune 3.18)
+(lang dune 3.21)
 
 (name ochat)
 
@@ -11,20 +11,14 @@
  (package
   (name piaf)))
 
-(pin
- (url "git+https://github.com/mirage/irmin.git#eio")
- (package
-  (name irmin)))
 
 (pin
- (url "git+https://github.com/mirage/irmin.git#eio")
- (package
-  (name irmin-git)))
+  (url "git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git")
+  (package
+  (name textmate-language)))
 
-(pin
- (url "git+https://github.com/mirage/irmin.git#eio")
- (package
-  (name irmin-watcher)))
+
+
 
 (package
  (name ochat)
@@ -67,6 +61,9 @@
   path_glob
   bimage
   bimage-unix
+  nottui
+  ppx_blob
+  menhirLib
   piaf)
  (tags
   (topics "to describe" your project)))

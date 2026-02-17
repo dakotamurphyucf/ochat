@@ -1,0 +1,19 @@
+(version 6.1.1)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
+
+(depends
+ (all_platforms
+  (dune base-domains cohttp eio logs uri fmt ptime http)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/ocaml-cohttp/releases/download/v6.1.1/cohttp-6.1.1.tbz)
+  (checksum
+   sha256=6b420c56203b3a0b515964f036bcea0fb9a362876b5791cd7ff50e12366c489c)))

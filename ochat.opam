@@ -6,7 +6,7 @@ tags: ["topics" "to describe" "your" "project"]
 depends: [
   "ocaml" {>= "5.1.0"}
   "eio"
-  "dune" {>= "3.18"}
+  "dune" {>= "3.21"}
   "omd"
   "lambdasoup"
   "markup"
@@ -39,6 +39,9 @@ depends: [
   "path_glob"
   "bimage"
   "bimage-unix"
+  "nottui"
+  "ppx_blob"
+  "menhirLib"
   "piaf"
   "odoc" {with-doc}
 ]

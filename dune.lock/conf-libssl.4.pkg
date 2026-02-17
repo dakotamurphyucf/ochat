@@ -1,0 +1,63 @@
+(version 4)
+
+(install
+ (all_platforms
+  (withenv
+   ((= HOMEBREW_NO_AUTO_UPDATE 1))
+   (when
+    (= %{os_distribution} homebrew)
+    (run sh -ex ./homebrew.sh install %{lib})))))
+
+(build
+ (all_platforms
+  ((action
+    (withenv
+     ((= HOMEBREW_NO_AUTO_UPDATE 1))
+     (progn
+      (when
+       (and_absorb_undefined_var true (<> %{os_distribution} homebrew))
+       (run pkg-config --print-errors --exists openssl))
+      (when (= %{os_distribution} homebrew) (run sh -ex ./homebrew.sh check))))))))
+
+(depends
+ (all_platforms (conf-pkg-config)))
+
+(depexts
+ ((libssl-dev)
+  (= %{os_family} debian))
+ ((libssl-dev)
+  (= %{os_family} ubuntu))
+ ((openssl-devel)
+  (= %{os_distribution} centos))
+ ((openssl-devel)
+  (= %{os_distribution} ol))
+ ((openssl-devel)
+  (or_absorb_undefined_var
+   (= %{os_family} fedora)
+   (= %{os_family} fedora)))
+ ((libopenssl-devel)
+  (or_absorb_undefined_var
+   (= %{os_family} suse)
+   (= %{os_family} opensuse)))
+ ((openssl-dev)
+  (= %{os_family} alpine))
+ ((openssl)
+  (= %{os_family} arch))
+ ((openssl)
+  (= %{os_distribution} homebrew))
+ ((openssl)
+  (= %{os_distribution} macports))
+ ((openssl)
+  (= %{os_distribution} nixos))
+ ((openssl)
+  (and_absorb_undefined_var
+   (= %{os} win32)
+   (= %{os_distribution} cygwinports))))
+
+(extra_sources
+ (homebrew.sh
+  (fetch
+   (url
+    https://raw.githubusercontent.com/ocaml/opam-source-archives/main/patches/conf-libssl/homebrew.sh.4)
+   (checksum
+    sha256=c6e132e784f0d3250b434a91ad806416ad6c30e25465bd4e37df946a33bfbad2))))

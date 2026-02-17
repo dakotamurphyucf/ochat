@@ -1,0 +1,19 @@
+(version 0.5.1)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
+
+(depends
+ (all_platforms
+  (dune eio lwt)))
+
+(source
+ (fetch
+  (url
+   https://github.com/ocaml-multicore/lwt_eio/releases/download/v0.5.1/lwt_eio-0.5.1.tbz)
+  (checksum
+   sha256=76526784787854d3bad0d64966a7351d2f303d1f795a175e0494cadfba4f6c21)))

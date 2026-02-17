@@ -7,6 +7,7 @@ let cursor_marker = "⟦CURSOR⟧"
 let max_draft_before_cursor = 4000
 let max_draft_after_cursor = 4000
 let max_returned_chars = 4_000
+let max_message_length = 10_000
 
 let insert_marker ~text ~cursor =
   let cursor = Int.min (String.length text) (Int.max 0 cursor) in
@@ -28,6 +29,18 @@ let excerpt_draft ~draft ~cursor =
     prefix ^ insert_marker ~text:sub ~cursor:cursor_in_sub ^ suffix)
 ;;
 
+let string_of_tool_output output =
+  let open Openai.Responses in
+  match output with
+  | Tool_output.Output.Text text -> text
+  | Content parts ->
+    parts
+    |> List.map ~f:(function
+      | Tool_output.Output_part.Input_text { text } -> text
+      | Input_image { image_url; _ } -> Printf.sprintf "<image src=\"%s\" />" image_url)
+    |> String.concat ~sep:"\n"
+;;
+
 let render_history_for_prompt (items : Res.Item.t list) : string =
   let render_item = function
     | Res.Item.Input_message { role; content; _type = _ } ->
@@ -39,9 +52,22 @@ let render_history_for_prompt (items : Res.Item.t list) : string =
       (match content with
        | { text; _ } :: _ -> Some (sprintf "assistant: %s" text)
        | _ -> None)
+    | Function_call { name; arguments; call_id; _ } ->
+      sprintf "Function call (%s): %s(%s)" call_id name arguments |> Some
+    | Custom_tool_call { name; input; call_id; _ } ->
+      sprintf "Custom tool call (%s): %s(%s)" call_id name input |> Some
+    | Function_call_output { call_id; output; _ } ->
+      let output = string_of_tool_output output in
+      sprintf "Function call output (%s): %s" call_id output |> Some
+    | Custom_tool_call_output { call_id; output; _ } ->
+      let output = string_of_tool_output output in
+      sprintf "Custom tool call output (%s): %s" call_id output |> Some
     | _ -> None
   in
-  items |> List.filter_map ~f:render_item |> String.concat ~sep:"\n"
+  items
+  |> List.filter_map ~f:render_item
+  |> List.map ~f:(fun x -> String.prefix x max_message_length)
+  |> String.concat ~sep:"\n"
 ;;
 
 let strip_code_fences (text : string) : string =
@@ -57,25 +83,27 @@ let strip_code_fences (text : string) : string =
 
 let completion_system_prompt =
   {|
-You are a type-ahead completion engine.
+You are a type-ahead completion engine. Your goal is to provide accurate and relevant text completions
 
 You are given:
 - a conversation context
-- a draft buffer excerpt containing the literal marker ⟦CURSOR⟧ that indicates the insertion point
+- a draft buffer excerpt for the next message in the conversation containing the literal marker ⟦CURSOR⟧ that indicates the insertion point
 
 Return ONLY the text to insert at ⟦CURSOR⟧ (the suffix after the marker).
 
 Guidelines for Completion:
-- Carefully review all supplementary context within one or more context blocks.
-- Use what you learn from context for more accurate predictions, *never* for referencing or summarizing; the context should inform completions, not appear in them.
-- Predict the most suitable code or text completion
-- Prefer succinct, single-line completions by default, but produce multi-line/block completions if and only if the structure of the input clearly signals a multi-line or block output.
+- Carefully review conversation context and draft buffer excerpt.
+- Use what you learn from conversation context for material to inform more accurate predictions
+- Use context clues from both conversation context, draft buffer, and your own knowledge to inform your predictions
+- Look for patterns in the conversation context and draft buffer to inform your predictions
+- Predictions must make logical sense
 
 Constraints:
 - Output must be the insertion text only (no quotes, no explanations, no Markdown fences).
 - Do not repeat any draft text that appears before ⟦CURSOR⟧.
 - Keep it short; if no completion is appropriate, return an empty string.
-- If the input position clearly requests block-level or multi-line completion, provide it accordingly.
+- Predictions must make logical sense. It is better to return an empty string than an incorrect or nonsensical prediction.
+- Multi-line completions should only be provided if the input position clearly requests block-level or multi-line completion.
 - Do not use tools.
 |}
 ;;

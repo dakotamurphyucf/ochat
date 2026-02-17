@@ -1,0 +1,19 @@
+(version 8.0.0)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml dune base-unix ppx_sexp_conv sexplib0 conduit lwt)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/ocaml-conduit/releases/download/v8.0.0/conduit-8.0.0.tbz)
+  (checksum
+   sha256=0a63d910865b5473893a170cda51f61388f488ecf4c4b2ed7fe9ec4e2cf66f61)))

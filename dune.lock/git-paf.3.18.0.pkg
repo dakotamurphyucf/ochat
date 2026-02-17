@@ -1,0 +1,33 @@
+(version 3.18.0)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (ocaml
+   dune
+   git
+   mimic
+   paf
+   ca-certs-nss
+   fmt
+   ipaddr
+   logs
+   lwt
+   tcpip
+   rresult
+   tls
+   uri
+   bigstringaf
+   domain-name
+   h1
+   mirage-flow
+   tls-mirage)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/ocaml-git/releases/download/3.18.0/git-3.18.0.tbz)
+  (checksum
+   sha256=925795627e6daae0b4bd16aa506879df11cb201e65fefe38e81378f18d517d4b)))

@@ -1,0 +1,19 @@
+(version 3.11.0)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml dune ppx_repr ppxlib logs)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/irmin/releases/download/3.11.0/irmin-3.11.0.tbz)
+  (checksum
+   sha256=09996fbcc2c43e117a9bd8e9028c635e81cccb264d5e02d425ab8b06bbacdbdb)))

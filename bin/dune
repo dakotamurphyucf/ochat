@@ -170,14 +170,6 @@
  (preprocess
   (pps ppx_jane)))
 
-(executable
- (package ochat)
- (public_name sync)
- (modules sync)
- (name sync)
- (libraries eio_main irmin-git.unix irmin-watcher io lwt_eio)
- (preprocess
-  (pps ppx_irmin)))
 
 (executable
  (public_name highlight-debug)

@@ -1,0 +1,14 @@
+(version 0.5)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (ocaml dune fmt)))
+
+(source
+ (fetch
+  (url https://github.com/mirage/duff/releases/download/v0.5/duff-0.5.tbz)
+  (checksum
+   sha256=f9453cf4aa3b6850efe8cc6f13f053ebe5f2111faf177ceabfbb03e5d9ad6ede)))

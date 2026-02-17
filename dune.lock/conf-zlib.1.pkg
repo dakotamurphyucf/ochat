@@ -1,0 +1,41 @@
+(version 1)
+
+(build
+ (all_platforms ((action (run pkg-config zlib)))))
+
+(depends
+ (all_platforms (conf-pkg-config)))
+
+(depexts
+ ((zlib-dev)
+  (= %{os_distribution} alpine))
+ ((zlib1g-dev)
+  (= %{os_family} debian))
+ ((zlib1g-dev)
+  (= %{os_family} ubuntu))
+ ((zlib-devel)
+  (= %{os_distribution} centos))
+ ((zlib-devel)
+  (and_absorb_undefined_var
+   (= %{os_family} fedora)
+   (< %{os_version} 40)))
+ ((zlib-ng-compat-devel)
+  (and_absorb_undefined_var
+   (= %{os_family} fedora)
+   (>= %{os_version} 40)))
+ ((zlib-devel)
+  (= %{os_distribution} ol))
+ ((zlib)
+  (= %{os_distribution} nixos))
+ ((zlib)
+  (and_absorb_undefined_var
+   (= %{os_distribution} homebrew)
+   (= %{os} macos)))
+ ((zlib)
+  (= %{os_family} arch))
+ ((zlib)
+  (and_absorb_undefined_var
+   (= %{os} win32)
+   (= %{os_distribution} cygwinports)))
+ ((zlib-devel)
+  (= %{os} cygwin)))

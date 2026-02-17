@@ -1,0 +1,25 @@
+(version 17.0.0)
+
+(build
+ (all_platforms
+  ((action
+    (run
+     ocaml
+     pkg/pkg.ml
+     build
+     --dev-pkg
+     %{pkg-self:dev}
+     --with-uutf
+     %{pkg:uutf:installed}
+     --with-cmdliner
+     %{pkg:cmdliner:installed})))))
+
+(depends
+ (all_platforms
+  (ocaml ocamlfind ocamlbuild topkg uutf cmdliner)))
+
+(source
+ (fetch
+  (url https://erratique.ch/software/uunf/releases/uunf-17.0.0.tbz)
+  (checksum
+   sha512=1ec4d7229bb473ab2dd146ec732c8c70f357f73211e71d32625cd2410a35766e684bbeb1bd4e186b7403d4af8d597d46b7ccf58b23ae95aac32a96c0b4321691)))

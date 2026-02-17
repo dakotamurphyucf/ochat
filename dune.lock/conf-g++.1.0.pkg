@@ -1,0 +1,34 @@
+(version 1.0)
+
+(build
+ (all_platforms ((action (run g++ --version)))))
+
+(depexts
+ ((gcc-c++)
+  (= %{os_distribution} centos))
+ ((gcc-c++)
+  (= %{os_family} fedora))
+ ((gcc-c++)
+  (or_absorb_undefined_var
+   (= %{os_family} suse)
+   (= %{os_family} opensuse)))
+ ((g++)
+  (= %{os_family} debian))
+ ((g++)
+  (= %{os_family} ubuntu))
+ ((g++)
+  (= %{os_distribution} alpine))
+ ((gcc)
+  (= %{os_distribution} nixos))
+ ((gcc)
+  (= %{os_distribution} arch))
+ ((gcc)
+  (and_absorb_undefined_var
+   (= %{os} macos)
+   (= %{os_distribution} homebrew)))
+ ((gcc-g++)
+  (and_absorb_undefined_var
+   (= %{os} win32)
+   (= %{os_distribution} cygwinports)))
+ ((gcc)
+  (= %{os} freebsd)))

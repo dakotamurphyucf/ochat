@@ -1,0 +1,19 @@
+(version 3.118)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
+
+(depends
+ (all_platforms
+  (dune mirage-ptime x509 ocaml digestif logs fmt bos cmdliner)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/ca-certs-nss/releases/download/v3.118/ca-certs-nss-3.118.tbz)
+  (checksum
+   sha256=06d84a5147ae7f78c5466433c3453d4846ef46a71573550a1e66f8f9878f462a)))

@@ -1,0 +1,19 @@
+(version 5.2.0)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml dune mtime)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/mirage-mtime/releases/download/v5.2.0/mirage-mtime-5.2.0.tbz)
+  (checksum
+   sha256=91a04352a405d5215e724bbce624675fd8e2d7c4e36d3225cf806546e44089bf)))

@@ -27,7 +27,6 @@
   bin_prot_utils_eio
   nottui
   lwd
-  nottui-pretty
   eio
   eio.unix
   mcp_tool

@@ -1,0 +1,26 @@
+(version 1.2)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml
+   base
+   base-bigarray
+   conf-openblas
+   ctypes
+   dune
+   dune-configurator
+   owl-base
+   npy)))
+
+(source
+ (fetch
+  (url https://github.com/owlbarn/owl/releases/download/1.2/owl-1.2.tbz)
+  (checksum
+   sha256=3817a2e4391922c8a2225b4e33ca95da6809246994e6bf291a300c82d8cac6c5)))

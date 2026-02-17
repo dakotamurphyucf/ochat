@@ -1,0 +1,26 @@
+(version 0.8.0)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (ocaml
+   dune
+   tcpip
+   tls-mirage
+   mimic
+   ke
+   bigstringaf
+   h1
+   h2
+   faraday
+   tls
+   cstruct)))
+
+(source
+ (fetch
+  (url
+   https://github.com/dinosaure/paf-le-chien/releases/download/0.8.0/paf-0.8.0.tbz)
+  (checksum
+   sha256=d2ad3b819a735320e85a50389bf3fe1064afbd528067b470564a4ece2ab31b63)))

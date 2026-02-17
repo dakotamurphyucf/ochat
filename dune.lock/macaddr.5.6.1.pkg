@@ -1,0 +1,19 @@
+(version 5.6.1)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml dune)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/ocaml-ipaddr/releases/download/v5.6.1/ipaddr-5.6.1.tbz)
+  (checksum
+   sha256=1e617df8abd45843c823e9be75267d27426cb578661cf25622d50b25ae14a319)))

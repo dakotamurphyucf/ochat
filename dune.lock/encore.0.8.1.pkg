@@ -1,0 +1,19 @@
+(version 0.8.1)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:pinned} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml dune angstrom fmt bigstringaf)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/encore/releases/download/v0.8.1/encore-0.8.1.tbz)
+  (checksum
+   sha256=aa0ea179205ce8e49f6fbbd9c448b8aeb2a1fa7c7e7df9ec09f56f855477c98d)))

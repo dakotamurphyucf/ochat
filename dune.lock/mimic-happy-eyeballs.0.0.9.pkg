@@ -1,0 +1,15 @@
+(version 0.0.9)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (ocaml dune mimic happy-eyeballs-mirage dns-client-mirage)))
+
+(source
+ (fetch
+  (url
+   https://github.com/dinosaure/mimic/releases/download/0.0.9/mimic-0.0.9.tbz)
+  (checksum
+   sha256=954df1ceb548a922a785440885a5d16a6af7f735d6c370ed35d339114b69e29f)))
