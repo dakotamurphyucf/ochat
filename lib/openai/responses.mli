@@ -287,6 +287,10 @@ module Reasoning : sig
   [@@deriving jsonaf, sexp, bin_io]
 end
 
+module Text : sig
+  type t = { verbosity : string } [@@deriving jsonaf, sexp, bin_io]
+end
+
 module Item : sig
   type t =
     | Input_message of Input_message.t
@@ -329,6 +333,7 @@ module Request : sig
   module Reasoning : sig
     module Effort : sig
       type t =
+        | None
         | Low
         | Medium
         | High
@@ -491,6 +496,7 @@ module Request : sig
     ; temperature : float option
     ; tools : Tool.t list option
     ; top_p : float option
+    ; text : Text.t option
     }
   [@@deriving jsonaf, sexp]
 
@@ -503,6 +509,7 @@ module Request : sig
     -> ?top_p:float
     -> ?reasoning:Reasoning.t
     -> ?tools:Tool.t list
+    -> ?verbosity:string
     -> model:model
     -> input:Item.t list
     -> unit
@@ -1025,6 +1032,7 @@ val post_response
   -> ?model:Request.model
   -> ?parallel_tool_calls:bool
   -> ?reasoning:Request.Reasoning.t
+  -> ?verbosity:string
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> 'n Eio.Net.t
   -> inputs:Item.t list

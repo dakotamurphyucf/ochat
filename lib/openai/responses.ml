@@ -409,6 +409,10 @@ module Reasoning = struct
   [@@deriving jsonaf, sexp, bin_io]
 end
 
+module Text = struct
+  type t = { verbosity : string } [@@deriving jsonaf, sexp, bin_io]
+end
+
 module Item = struct
   type t =
     | Input_message of Input_message.t
@@ -545,18 +549,21 @@ module Request = struct
   module Reasoning = struct
     module Effort = struct
       type t =
+        | None [@name "none"]
         | Low [@name "low"]
         | Medium [@name "medium"]
         | High [@name "high"]
       [@@deriving sexp, bin_io]
 
       let jsonaf_of_t = function
+        | None -> `String "none"
         | Low -> `String "low"
         | Medium -> `String "medium"
         | High -> `String "high"
       ;;
 
       let t_of_jsonaf = function
+        | `String "none" -> None
         | `String "low" -> Low
         | `String "medium" -> Medium
         | `String "high" -> High
@@ -564,12 +571,14 @@ module Request = struct
       ;;
 
       let to_str = function
+        | None -> "none"
         | Low -> "low"
         | Medium -> "medium"
         | High -> "high"
       ;;
 
       let of_str_exn = function
+        | "none" -> None
         | "low" -> Low
         | "medium" -> Medium
         | "high" -> High
@@ -878,6 +887,7 @@ module Request = struct
     ; temperature : float option [@jsonaf.option]
     ; tools : Tool.t list option [@jsonaf.option]
     ; top_p : float option [@jsonaf.option]
+    ; text : Text.t option [@jsonaf.option]
     }
   [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
 
@@ -890,10 +900,16 @@ module Request = struct
         ?top_p
         ?reasoning
         ?tools
+        ?verbosity
         ~model
         ~input
         ()
     =
+    let text =
+      match verbosity with
+      | Some verbosity -> Some Text.{ verbosity }
+      | None -> None
+    in
     { input
     ; model
     ; max_output_tokens = Some max_output_tokens
@@ -904,6 +920,7 @@ module Request = struct
     ; top_p
     ; reasoning
     ; tools
+    ; text
     }
   ;;
 end
@@ -1598,6 +1615,7 @@ let post_response
     -> ?model:Request.model
     -> ?parallel_tool_calls:bool
     -> ?reasoning:Request.Reasoning.t
+    -> ?verbosity:string
     -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> _ Eio.Net.t
     -> inputs:Item.t list
@@ -1610,6 +1628,7 @@ let post_response
     ?(model = Request.Gpt4)
     ?parallel_tool_calls
     ?reasoning
+    ?verbosity
     ~dir
     net
     ~inputs ->
@@ -1641,6 +1660,7 @@ let post_response
       ?temperature
       ?tools
       ?reasoning
+      ?verbosity
       ~stream
       ()
   in
