@@ -41,6 +41,7 @@
   app_streaming
   app_stream_apply
   app_reducer
+  type_ahead_provider
   app
   attachments
   export

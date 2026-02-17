@@ -22,6 +22,12 @@ type app_event =
   | internal_event
   ]
 
+type typeahead_request =
+  { generation : int
+  ; base_input : string
+  ; base_cursor : int
+  }
+
 module Context = struct
   type t =
     { runtime : Runtime.t
@@ -78,12 +84,17 @@ module Controller_actions = struct
 end
 
 exception Compaction_cancelled
+exception Typeahead_cancelled
 
 let run (ctx : Context.t) =
   let runtime = ctx.runtime in
   let shared = ctx.shared in
+  let services = shared.services in
   let streams = shared.streams in
   let ui = shared.ui in
+  let env = services.env in
+  let ui_sw = services.ui_sw in
+  let clock = Eio.Stdenv.clock env in
   let term = ui.term in
   let input_stream = streams.input in
   let internal_stream = streams.internal in
@@ -95,6 +106,94 @@ let run (ctx : Context.t) =
   let model = runtime.Runtime.model in
   let quit_via_esc = runtime.Runtime.quit_via_esc in
   let max_input_drain_per_iteration = 64 in
+  let typeahead_debounce_sw : Switch.t option ref = ref None in
+  let typeahead_pending_request : typeahead_request option ref = ref None in
+  let typeahead_debounce_s = 0.2 in
+  let is_ctrl_space (ev : input_event) =
+    match ev with
+    | `Key (`ASCII '@', mods) -> List.mem mods `Ctrl ~equal:Poly.equal
+    | `Key (`ASCII ' ', mods) -> List.mem mods `Ctrl ~equal:Poly.equal
+    | `Key (`ASCII '\000', _mods) -> true
+    | _ -> false
+  in
+  let cancel_typeahead_debounce () =
+    match !typeahead_debounce_sw with
+    | None -> ()
+    | Some sw ->
+      typeahead_debounce_sw := None;
+      Switch.fail sw Typeahead_cancelled
+  in
+  let cancel_running_typeahead () =
+    match runtime.Runtime.typeahead_op with
+    | None -> ()
+    | Some (Runtime.Typeahead { sw; id = _ }) ->
+      runtime.Runtime.typeahead_op <- None;
+      Switch.fail sw Typeahead_cancelled
+    | Some (Runtime.Starting_typeahead { id = _ }) ->
+      runtime.Runtime.cancel_typeahead_on_start <- true
+  in
+  let start_typeahead_worker (req : typeahead_request) : unit =
+    if String.is_empty (String.strip req.base_input)
+    then ()
+    else (
+      let op_id = Runtime.alloc_op_id runtime in
+      runtime.Runtime.typeahead_op <- Some (Runtime.Starting_typeahead { id = op_id });
+      runtime.Runtime.cancel_typeahead_on_start <- false;
+      Fiber.fork ~sw:ui_sw (fun () ->
+        match
+          Switch.run
+          @@ fun sw ->
+          Eio.Stream.add internal_stream (`Typeahead_started (op_id, sw));
+          let text =
+            Type_ahead_provider.complete_suffix
+              ~sw
+              ~env
+              ~dir:services.cwd
+              ~cfg:ctx.submit.streaming.cfg
+              ~history_items:(Model.history_items model)
+              ~draft:req.base_input
+              ~cursor:req.base_cursor
+          in
+          Eio.Stream.add
+            internal_stream
+            (`Typeahead_done
+                ( op_id
+                , { generation = req.generation
+                  ; base_input = req.base_input
+                  ; base_cursor = req.base_cursor
+                  ; text
+                  } ))
+        with
+        | () -> ()
+        | exception Typeahead_cancelled -> ()
+        | exception exn -> Eio.Stream.add internal_stream (`Typeahead_error (op_id, exn))))
+  in
+  let start_typeahead_request (req : typeahead_request) : unit =
+    cancel_typeahead_debounce ();
+    match runtime.Runtime.typeahead_op with
+    | None -> start_typeahead_worker req
+    | Some (Runtime.Typeahead { sw; id = _ }) ->
+      runtime.Runtime.typeahead_op <- None;
+      Switch.fail sw Typeahead_cancelled;
+      start_typeahead_worker req
+    | Some (Runtime.Starting_typeahead { id = _ }) ->
+      runtime.Runtime.cancel_typeahead_on_start <- true;
+      typeahead_pending_request := Some req
+  in
+  let restart_typeahead_debounce (req : typeahead_request) : unit =
+    cancel_typeahead_debounce ();
+    Fiber.fork ~sw:ui_sw (fun () ->
+      match
+        Switch.run
+        @@ fun sw ->
+        typeahead_debounce_sw := Some sw;
+        Eio.Time.sleep clock typeahead_debounce_s;
+        typeahead_debounce_sw := None;
+        start_typeahead_request req
+      with
+      | () -> ()
+      | exception Typeahead_cancelled -> ())
+  in
   let start_submit (submit_request : Runtime.submit_request) : unit =
     App_submit.start ctx.submit submit_request
   in
@@ -127,11 +226,92 @@ let run (ctx : Context.t) =
       quit_via_esc := true;
       false
   and handle_key (ev : input_event) : bool =
+    let pre_input_line = Model.input_line model in
+    let pre_cursor_pos = Model.cursor_pos model in
+    let pre_mode = Model.mode model in
+    let pre_generation = Model.typeahead_generation model in
     let controller_result = Controller.handle_key ~model ~term ev in
     let controller_actions =
       Controller_actions.{ model; internal_stream; throttler; handle_cancel_or_quit }
     in
-    Controller_actions.handle_controller_result controller_actions ev controller_result
+    let keep_going =
+      Controller_actions.handle_controller_result controller_actions ev controller_result
+    in
+    if keep_going
+    then (
+      let post_input_line = Model.input_line model in
+      let post_cursor_pos = Model.cursor_pos model in
+      let post_mode = Model.mode model in
+      let post_preview_open = Model.typeahead_preview_open model in
+      let post_generation = Model.typeahead_generation model in
+      let generation_changed = not (Int.equal pre_generation post_generation) in
+      if generation_changed then cancel_running_typeahead ();
+      if
+        is_ctrl_space ev
+        && Poly.(post_mode = Model.Insert)
+        && not (Model.typeahead_is_relevant model)
+      then (
+        let now_open = if post_preview_open then false else true in
+        Model.set_typeahead_preview_open model now_open;
+        if now_open
+        then (
+          Model.set_typeahead_preview_scroll model 0;
+          let generation =
+            if generation_changed
+            then post_generation
+            else Model.bump_typeahead_generation model
+          in
+          start_typeahead_request
+            { generation; base_input = post_input_line; base_cursor = post_cursor_pos };
+          Redraw_throttle.request_redraw throttler)
+        else (
+          cancel_running_typeahead ();
+          Redraw_throttle.request_redraw throttler))
+      else (
+        let input_changed = not (String.equal pre_input_line post_input_line) in
+        let cursor_changed = not (Int.equal pre_cursor_pos post_cursor_pos) in
+        let mode_changed = Poly.(pre_mode <> post_mode) in
+        if mode_changed && Poly.(post_mode <> Model.Insert)
+        then (
+          cancel_typeahead_debounce ();
+          cancel_running_typeahead ();
+          Model.clear_typeahead model)
+        else if Poly.(post_mode = Model.Insert) && (input_changed || cursor_changed)
+        then (
+          cancel_typeahead_debounce ();
+          if cursor_changed && not input_changed
+          then (
+            let generation =
+              if generation_changed
+              then post_generation
+              else Model.bump_typeahead_generation model
+            in
+            cancel_running_typeahead ();
+            Model.clear_typeahead model;
+            if
+              (not (Model.typeahead_is_relevant model))
+              && not (String.is_empty (String.strip post_input_line))
+            then
+              restart_typeahead_debounce
+                { generation
+                ; base_input = post_input_line
+                ; base_cursor = post_cursor_pos
+                };
+            Redraw_throttle.request_redraw throttler)
+          else if Model.typeahead_is_relevant model
+          then ()
+          else if String.is_empty (String.strip post_input_line)
+          then ()
+          else (
+            let generation =
+              if generation_changed
+              then post_generation
+              else Model.bump_typeahead_generation model
+            in
+            cancel_running_typeahead ();
+            restart_typeahead_debounce
+              { generation; base_input = post_input_line; base_cursor = post_cursor_pos }))));
+    keep_going
   and handle_app_event (ev : app_event) : bool =
     match ev with
     | #Notty.Unescape.event as ev -> handle_key ev
@@ -170,6 +350,67 @@ let run (ctx : Context.t) =
          Stream_apply.apply_tool_output model throttler item;
          true
        | _ -> true)
+    | `Typeahead_started (op_id, sw) ->
+      (match runtime.Runtime.typeahead_op with
+       | Some (Runtime.Starting_typeahead { id }) when Int.equal id op_id ->
+         if runtime.Runtime.cancel_typeahead_on_start
+         then (
+           runtime.Runtime.cancel_typeahead_on_start <- false;
+           runtime.Runtime.typeahead_op <- None;
+           Switch.fail sw Typeahead_cancelled;
+           match !typeahead_pending_request with
+           | None -> ()
+           | Some req ->
+             typeahead_pending_request := None;
+             start_typeahead_request req)
+         else runtime.Runtime.typeahead_op <- Some (Runtime.Typeahead { sw; id });
+         true
+       | _ -> true)
+    | `Typeahead_done (op_id, completion) ->
+      let is_current =
+        match runtime.Runtime.typeahead_op with
+        | Some (Runtime.Typeahead { id; sw = _ }) -> Int.equal id op_id
+        | Some (Runtime.Starting_typeahead { id }) -> Int.equal id op_id
+        | None -> false
+      in
+      if not is_current
+      then true
+      else (
+        runtime.Runtime.typeahead_op <- None;
+        let text = Util.sanitize ~strip:false completion.text in
+        let is_still_applicable =
+          Int.equal completion.generation (Model.typeahead_generation model)
+          && Poly.(Model.mode model = Model.Insert)
+          && String.equal completion.base_input (Model.input_line model)
+          && Int.equal completion.base_cursor (Model.cursor_pos model)
+        in
+        if is_still_applicable && not (String.is_empty text)
+        then (
+          Model.set_typeahead_completion
+            model
+            (Some
+               { text
+               ; base_input = completion.base_input
+               ; base_cursor = completion.base_cursor
+               ; generation = completion.generation
+               });
+          Redraw_throttle.request_redraw throttler);
+        true)
+    | `Typeahead_error (op_id, exn) ->
+      let is_current =
+        match runtime.Runtime.typeahead_op with
+        | Some (Runtime.Typeahead { id; sw = _ }) -> Int.equal id op_id
+        | Some (Runtime.Starting_typeahead { id }) -> Int.equal id op_id
+        | None -> false
+      in
+      if not is_current
+      then true
+      else (
+        runtime.Runtime.typeahead_op <- None;
+        (match exn with
+         | Typeahead_cancelled -> ()
+         | _ -> Log.emit `Warn (sprintf "Type-ahead error: %s" (Exn.to_string exn)));
+        true)
     | `Submit_requested submit_request ->
       (match runtime.Runtime.op with
        | Some (Runtime.Streaming _ | Runtime.Starting_streaming _) ->

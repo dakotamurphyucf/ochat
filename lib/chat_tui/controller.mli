@@ -40,8 +40,14 @@
        {!Chat_tui.Model.auto_follow} until the viewport reaches the bottom
        again}
     {- Meta+Enter – submit the current prompt ([Submit_input])}
-    {- ESC – switch to Normal mode when pressed without modifiers; when a
-       modifier is present it bubbles up as {!Cancel_or_quit}}
+    {- Type-ahead (when a completion is available and relevant): Tab accepts
+       the full completion, Shift+Tab accepts a single line, Ctrl+Space
+       toggles the preview popup; while the preview is open, Ctrl+Shift+Up/Down
+       scrolls it by one line (with PageUp/PageDown as a fallback on terminals
+       that cannot encode the Ctrl+Shift combinations); bare ESC closes the
+       preview (if open), otherwise dismisses the completion (if present),
+       otherwise switches to Normal mode}
+    {- ESC with modifiers bubbles up as {!Cancel_or_quit}}
     }
 
     The set of bindings is intentionally conservative; unsupported keys are

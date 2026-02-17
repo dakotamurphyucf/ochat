@@ -200,12 +200,47 @@ returns `Submit_input` as a convenience fallback for terminals that encode
 moving the draft into the history, clearing the prompt, scheduling the
 network request, and streaming the response.
 
+### Type-ahead completion (Insert mode)
+
+When a type-ahead completion is available and *relevant* (see
+`Model.typeahead_is_relevant`), Insert mode recognises additional editor keys:
+
+- `Tab` accepts the entire completion.
+- `Shift+Tab` accepts a single line of the completion (up to and including the
+  first newline, when present).
+- `Ctrl+Space` toggles the preview popup open/closed.
+
+`Tab` and `Shift+Tab` always close the preview as part of accepting the
+completion.
+
+While the preview is open, the preview body can be scrolled:
+
+- `Ctrl+Shift+Up` / `Ctrl+Shift+Down` scroll by one line.
+- Fallback: `PageUp` / `PageDown` scroll the preview while it is open (useful
+  on terminals that cannot encode the `Ctrl+Shift+Up/Down` combinations).
+
+Any typing/edit that mutates `Model.input_line` closes the preview and dismisses
+the current completion so it cannot linger across edits.
+
+Note: different terminals may encode “Ctrl+Space” differently. The controller
+handles both a space key with the `Ctrl` modifier and the `NUL` character
+(`'\000'`) as preview toggles.
+Some terminals report `Ctrl+Space` as `Ctrl+@` (i.e. `Key (ASCII '@', mods=[Ctrl])`);
+the controller treats that as equivalent.
+
+In the full application (via `Chat_tui.App_reducer`), pressing `Ctrl+Space`
+when no relevant completion exists also triggers an immediate type-ahead request
+so the preview can open with fresh content.
+
 ### Escape, cancel, and quit
 
 Escape handling is intentionally layered:
 
-- In Insert mode, a **bare** `Esc` switches to Normal mode and returns
-  `Redraw` so the status bar can be updated.
+- In Insert mode, a **bare** `Esc` follows this priority order:
+  1. if the type-ahead preview is open: close it and return `Redraw`
+  2. else if a type-ahead completion is relevant: dismiss it and return
+     `Redraw`
+  3. else: switch to Normal mode and return `Redraw`
 - In Normal mode (and for `Esc` pressed with modifiers in Insert mode), the
   controller returns `Cancel_or_quit`. The main loop should cancel an
   in-flight request when there is one, otherwise fall back to `Quit`.
@@ -214,6 +249,34 @@ Escape handling is intentionally layered:
 
 Other `Notty.Unescape.event` variants (`Mouse`, `Paste`, etc.) are currently
 left as `Unhandled` and can be dealt with by outer layers if desired.
+
+---
+
+## Manual verification checklist (type-ahead UX / key encoding)
+
+The available modifier combinations depend on terminal emulation and what
+`Notty.Unescape` can decode. Before relying on a key combination, confirm what
+your terminal delivers.
+
+1. Run `bin/key_dump.ml` and confirm the event shapes:
+   - `Shift+Tab` appears as `Key Tab mods=[Shift]`
+   - `Ctrl+Space` is delivered consistently (many terminals send NUL; Notty may
+     decode this as `Key (ASCII '\000', [])` or as `Key (ASCII '@', mods=[Ctrl])`)
+   - `Ctrl+Shift+Up/Down` are distinguishable events (on some terminals this
+     combination is not encodable; in that case use `PageUp/PageDown` while the
+     preview is open)
+2. Layout stability: show/hide a completion and confirm the transcript region
+   does not jump (no extra rows appear/disappear).
+3. Preview: open the preview (`Ctrl+Space`), then type a printable character:
+   - preview closes immediately (typing closes preview)
+4. Esc priority in Insert mode (bare Esc only):
+   - Esc closes preview first
+   - then dismisses the completion
+   - only then (when nothing to dismiss) switches to Normal mode
+5. Undo:
+   - accept a completion (Tab or Shift+Tab)
+   - switch to Normal mode
+   - press `u` to undo the acceptance (draft and cursor should revert)
 
 ---
 

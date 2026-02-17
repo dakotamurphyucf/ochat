@@ -27,6 +27,8 @@ let capture_request ~model : request =
 ;;
 
 let clear_editor ~model : unit =
+  ignore (Model.bump_typeahead_generation model : int);
+  Model.clear_typeahead model;
   Model.set_input_line model "";
   Model.set_cursor_pos model 0;
   Model.set_draft_mode model Model.Plain

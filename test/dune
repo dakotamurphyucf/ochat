@@ -298,6 +298,42 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Chat-TUI – Type-ahead tests (no async)
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_type_ahead_test)
+ (modules chat_tui_type_ahead_test)
+ (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Type-ahead reducer debounce / stale-result tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_type_ahead_debounce_test)
+ (modules chat_tui_type_ahead_debounce_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.unix
+  notty
+  notty_eio
+  notty_scroll_box
+  openai
+  chat_response
+  ochat.session
+  chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; OAuth dynamic client registration tests
 ;; ---------------------------------------------------------------------------
 

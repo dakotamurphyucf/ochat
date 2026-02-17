@@ -67,6 +67,22 @@ module Pages : sig
   type t = { chat : Chat_page_state.t }
 end
 
+(** {1 Type-ahead completion state}
+
+    A type-ahead completion is a single candidate suffix computed for the
+    current prompt.  The completion is never merged into {!input_line} unless
+    explicitly accepted by the controller.
+
+    The [base_*] fields snapshot the prompt state at computation time; they are
+    used to detect whether a completion is still applicable after further
+    edits/movement. *)
+type typeahead_completion =
+  { text : string
+  ; base_input : string
+  ; base_cursor : int
+  ; generation : int
+  }
+
 type t =
   { mutable history_items : Openai.Responses.Item.t list
   ; mutable messages : message list
@@ -96,6 +112,10 @@ type t =
   ; mutable active_fork : string option
     (** Currently running fork tool call-id, if any. *)
   ; mutable fork_start_index : int option (** History length when fork started. *)
+  ; mutable typeahead_completion : typeahead_completion option
+  ; mutable typeahead_preview_open : bool
+  ; mutable typeahead_preview_scroll : int
+  ; mutable typeahead_generation : int
   }
 [@@deriving fields ~getters ~setters]
 
@@ -312,6 +332,90 @@ val undo : t -> bool
 
 (** [redo t] reapplies the last undone change.  Returns [true] on success. *)
 val redo : t -> bool
+
+(** {1 Type-ahead completion helpers}
+
+    Type-ahead completion augments the prompt editor with a single-candidate
+    suffix:
+    {ul
+    {- the reducer triggers background requests (debounced after edits) and
+       publishes results into {!typeahead_completion};}
+    {- the controller handles key bindings to accept/dismiss completions and to
+       open/scroll/close the preview popup; and}
+    {- the renderer shows a dim inline "ghost" suffix, optional hint text, and
+       a preview overlay.}}
+
+    Invariants:
+    {ul
+    {- The completion must be a suffix to insert at [base_cursor] in
+       [base_input]; it must not repeat the prefix before the cursor.}
+    {- A completion is considered relevant only when [base_input] /
+       [base_cursor] still match the current editor state (see
+       {!typeahead_is_relevant}).}}
+*)
+
+(** [typeahead_completion t] is the current inline completion candidate, if any. *)
+val typeahead_completion : t -> typeahead_completion option
+
+(** [set_typeahead_completion t c] overwrites the current completion candidate. *)
+val set_typeahead_completion : t -> typeahead_completion option -> unit
+
+(** [clear_typeahead t] drops the completion candidate and resets preview state. *)
+val clear_typeahead : t -> unit
+
+(** [typeahead_preview_open t] is [true] when the preview popup should be shown. *)
+val typeahead_preview_open : t -> bool
+
+(** [set_typeahead_preview_open t b] opens/closes the preview popup. *)
+val set_typeahead_preview_open : t -> bool -> unit
+
+(** [typeahead_preview_scroll t] is the preview popup scroll offset (lines). *)
+val typeahead_preview_scroll : t -> int
+
+(** [set_typeahead_preview_scroll t n] updates the preview scroll offset. *)
+val set_typeahead_preview_scroll : t -> int -> unit
+
+(** [bump_typeahead_generation t] increments the generation counter and returns
+    the updated value. *)
+val bump_typeahead_generation : t -> int
+
+(** [typeahead_is_relevant t] is [true] iff:
+
+    - the editor mode is [Insert], and
+    - a completion exists, and
+    - the completion's [base_input] and [base_cursor] still match the current
+      {!input_line} / {!cursor_pos}.
+*)
+val typeahead_is_relevant : t -> bool
+
+(** [accept_typeahead_all t] inserts the current relevant completion at the
+    cursor and clears the completion state.
+
+    Returns [true] if a completion was accepted, [false] otherwise.
+
+    The operation:
+
+    - sanitises the completion text with {!Util.sanitize} [[~strip:false]]
+    - calls {!push_undo} exactly once
+    - clears any active selection
+    - inserts the completion at {!cursor_pos} and advances the cursor
+    - clears the completion and closes the preview
+    - bumps the type-ahead generation counter
+*)
+val accept_typeahead_all : t -> bool
+
+(** [accept_typeahead_line t] inserts the first line of the relevant completion
+    at the cursor and keeps the remainder as a new completion (progressive
+    accept).
+
+    Returns [true] if a completion was accepted, [false] otherwise.
+
+    The inserted segment is the prefix up to and including the first ['\n'] if
+    present; otherwise the whole completion is inserted.
+
+    The operation calls {!push_undo} exactly once, clears any active selection,
+    closes the preview, and bumps the generation counter. *)
+val accept_typeahead_line : t -> bool
 
 (** {1 Applying patches}
 

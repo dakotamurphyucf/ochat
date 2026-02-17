@@ -16,6 +16,11 @@
     @param model Current UI state. The renderer updates caches in [model] (see
            {!Chat_tui.Renderer}).
 
+    Type-ahead preview: when Insert mode is active and
+    {!Chat_tui.Model.typeahead_preview_open} is true, the renderer overlays a
+    preview popup inside the transcript region (using Notty's overlay operator)
+    so the input box geometry and scroll-box state do not change.
+
     Returns [(img, (cx, cy))] where [(cx, cy)] is the absolute cursor position
     for the input box. *)
 val render : size:int * int -> model:Model.t -> Notty.I.t * (int * int)

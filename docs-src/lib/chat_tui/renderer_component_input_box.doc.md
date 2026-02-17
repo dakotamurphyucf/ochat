@@ -7,6 +7,19 @@
 
 It also returns a cursor position relative to the returned image.
 
+## Type-ahead “ghost” completion
+
+When a type-ahead completion exists and is relevant (see
+`Model.typeahead_is_relevant`), the input box renderer draws a dim inline
+“ghost” suffix:
+
+- it is drawn at the cursor column on the cursor row only
+- it does **not** affect the returned cursor position
+- it is not part of selection highlighting
+- multi-line completions do not change layout:
+  - only the first line is rendered inline
+  - remaining lines are represented as an indicator: `… (+N more lines)`
+
 ## API
 
 ```ocaml

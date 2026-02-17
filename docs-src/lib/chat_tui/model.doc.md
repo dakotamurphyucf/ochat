@@ -24,11 +24,12 @@ simple mutations that will later be replaced by pure transformations.
 3. [Command-mode helpers](#command-mode-helpers)
 4. [Command-line helpers](#command-line-helpers)
 5. [Undo / Redo](#undo--redo)
-6. [Fork helpers](#fork-helpers)
-7. [Rendering cache helpers](#rendering-cache-helpers)
-8. [Tool-output metadata](#tool-output-metadata)
-9. [Applying patches – `apply_patch`](#apply_patch)
-10. [Known limitations](#known-limitations)
+6. [Type-ahead completion](#type-ahead-completion)
+7. [Fork helpers](#fork-helpers)
+8. [Rendering cache helpers](#rendering-cache-helpers)
+9. [Tool-output metadata](#tool-output-metadata)
+10. [Applying patches – `apply_patch`](#apply_patch)
+11. [Known limitations](#known-limitations)
 
 ---
 
@@ -149,6 +150,34 @@ cursor position live in the `cmdline` / `cmdline_cursor` fields.
 `push_undo` takes a snapshot of the prompt before a mutation happens and
 puts it on top of the undo ring.  `undo` and `redo` move back and forth in
 that ring.  Both return `true` when a change was applied.
+
+---
+
+### Type-ahead completion <a id="type-ahead-completion"></a>
+
+Type-ahead completion is a single-candidate suffix suggestion for the current
+draft buffer. The completion lives in:
+
+- `typeahead_completion : typeahead_completion option`
+- `typeahead_preview_open : bool`
+- `typeahead_preview_scroll : int`
+- `typeahead_generation : int`
+
+High-level semantics:
+
+- A completion is considered *relevant* only when its snapshot
+  (`base_input`, `base_cursor`) still matches the current editor state (see
+  `typeahead_is_relevant`).
+- Accepting a completion (`accept_typeahead_all` / `accept_typeahead_line`)
+  calls `push_undo` exactly once so the acceptance can be undone (typically via
+  Normal mode `u`).
+- Any “mode-like” transitions (leaving Insert mode, clearing the editor on
+  submit) should clear the type-ahead state and bump `typeahead_generation` so
+  stale asynchronous results are ignored.
+
+This module intentionally does not perform network I/O. Fetching completions is
+done elsewhere (see `Chat_tui.Type_ahead_provider` and the reducer wiring in
+`Chat_tui.App_reducer`).
 
 ---
 
