@@ -8,7 +8,18 @@
     {ul
     {- At most one operation (streaming or compaction) is active at a time.}
     {- Additional submits/compactions are queued in FIFO order.}
-    {- [Esc] cancels the active operation; when idle, it exits the UI.}}
+    {- [Esc] (outside Insert mode, or with modifiers) cancels the active
+       operation; when idle, it exits the UI.}}
+
+    Separately, the reducer also manages a background type-ahead completion
+    worker (see {!Chat_tui.Type_ahead_provider}).  Type-ahead work is tracked
+    by {!Chat_tui.App_runtime.typeahead_op} and is {b independent} of
+    streaming/compaction:
+    {ul
+    {- it can run while a stream is in flight;}
+    {- it is debounced after input edits;}
+    {- results are applied only when they still match the editor snapshot
+       (generation, base input, base cursor).}}
 *)
 
 (** [run ...] runs the main event loop and blocks until the UI should stop.

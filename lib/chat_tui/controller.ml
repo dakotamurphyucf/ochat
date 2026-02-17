@@ -36,6 +36,73 @@ type reaction = Controller_types.reaction =
   | Quit
   | Unhandled
 
+let close_preview (model : Model.t) = Model.set_typeahead_preview_open model false
+
+let dismiss_typeahead (model : Model.t) =
+  ignore (Model.bump_typeahead_generation model : int);
+  Model.clear_typeahead model
+;;
+
+let completion_text_if_relevant (model : Model.t) : string option =
+  if not (Model.typeahead_is_relevant model)
+  then None
+  else (
+    match Model.typeahead_completion model with
+    | None -> None
+    | Some completion -> Some (Util.sanitize ~strip:false completion.text))
+;;
+
+let max_preview_scroll
+      ~(term : Notty_eio.Term.t)
+      ~(model : Model.t)
+      ~(completion_text : string)
+  =
+  let _, screen_h = Notty_eio.Term.size term in
+  let input_h =
+    match String.split_lines (Model.input_line model) with
+    | [] -> 1
+    | ls -> List.length ls
+  in
+  let history_h = Int.max 1 (screen_h - input_h - 1) in
+  let popup_h_max = Int.min history_h 10 in
+  let header_h = 1 in
+  let footer_h = if popup_h_max >= 3 then 1 else 0 in
+  let body_h = Int.max 0 (popup_h_max - header_h - footer_h) in
+  let lines = String.split ~on:'\n' completion_text in
+  if body_h <= 0 then 0 else Int.max 0 (List.length lines - body_h)
+;;
+
+let clamp_preview_scroll ~(term : Notty_eio.Term.t) ~(model : Model.t) (scroll : int)
+  : int
+  =
+  match completion_text_if_relevant model with
+  | None -> 0
+  | Some completion_text ->
+    let max_scroll = max_preview_scroll ~term ~model ~completion_text in
+    scroll |> Int.max 0 |> fun s -> Int.min s max_scroll
+;;
+
+let scroll_preview ~(term : Notty_eio.Term.t) ~(model : Model.t) ~delta : unit =
+  let desired = Model.typeahead_preview_scroll model + delta in
+  let desired = clamp_preview_scroll ~term ~model desired in
+  Model.set_typeahead_preview_scroll model desired
+;;
+
+let toggle_preview ~(term : Notty_eio.Term.t) ~(model : Model.t) : bool =
+  if not (Model.typeahead_is_relevant model)
+  then false
+  else (
+    let was_open = Model.typeahead_preview_open model in
+    Model.set_typeahead_preview_open model (not was_open);
+    if not was_open
+    then (
+      let scroll =
+        clamp_preview_scroll ~term ~model (Model.typeahead_preview_scroll model)
+      in
+      Model.set_typeahead_preview_scroll model scroll);
+    true)
+;;
+
 (* -------------------------------------------------------------------- *)
 (* Helper – update the input_line ref while keeping it UTF-8 safe.       *)
 (* For the purpose of the demo we take the simple approach of slicing   *)
@@ -388,6 +455,35 @@ let skip_space s j =
 
 let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   match ev with
+  | `Key (`Tab, mods) when List.is_empty mods ->
+    if Model.accept_typeahead_all model then Redraw else Unhandled
+  | `Key (`Tab, mods) when List.equal Poly.( = ) mods [ `Shift ] ->
+    if Model.accept_typeahead_line model then Redraw else Unhandled
+  | `Key (`ASCII '@', mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
+    (* Some terminals encode Ctrl+Space as Ctrl+@. *)
+    if toggle_preview ~term ~model then Redraw else Unhandled
+  | `Key (`ASCII ' ', mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
+    if toggle_preview ~term ~model then Redraw else Unhandled
+  | `Key (`ASCII '\000', _mods) ->
+    if toggle_preview ~term ~model then Redraw else Unhandled
+  | `Key (`Arrow `Up, mods)
+    when Model.typeahead_preview_open model
+         && List.mem mods `Ctrl ~equal:Poly.equal
+         && List.mem mods `Shift ~equal:Poly.equal ->
+    scroll_preview ~term ~model ~delta:(-1);
+    Redraw
+  | `Key (`Arrow `Down, mods)
+    when Model.typeahead_preview_open model
+         && List.mem mods `Ctrl ~equal:Poly.equal
+         && List.mem mods `Shift ~equal:Poly.equal ->
+    scroll_preview ~term ~model ~delta:1;
+    Redraw
+  | `Key (`Page `Up, _mods) when Model.typeahead_preview_open model ->
+    scroll_preview ~term ~model ~delta:(-5);
+    Redraw
+  | `Key (`Page `Down, _mods) when Model.typeahead_preview_open model ->
+    scroll_preview ~term ~model ~delta:5;
+    Redraw
   (* ----------------------------------------------------------------- *)
   (*  Ctrl-A / Ctrl-E fallback (terminals that don't set [`Ctrl] flag)  *)
   | `Key (`ASCII '\001', _) ->
@@ -422,26 +518,33 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
   | `Key (`ASCII c, mods) when List.is_empty mods && Char.to_int c >= 0x20 ->
     (* Printable ASCII insertion.  Ignore control chars so we can use them
        for shortcuts on terminals that don’t report modifier state. *)
+    dismiss_typeahead model;
     append_char model c;
     Redraw
   | `Key (`Backspace, mods) when List.is_empty mods ->
+    dismiss_typeahead model;
     backspace model;
     Redraw
   (* ----------------------------------------------------------------- *)
   (*  Quality-of-life kill/ yank / redraw shortcuts                     *)
   | `Key (`ASCII ('k' | 'K'), [ `Ctrl ]) ->
+    dismiss_typeahead model;
     kill_to_eol model;
     Redraw
   | `Key (`ASCII ('u' | 'U'), [ `Ctrl ]) ->
+    dismiss_typeahead model;
     kill_to_bol model;
     Redraw
   | `Key (`ASCII ('w' | 'W'), [ `Ctrl ]) ->
+    dismiss_typeahead model;
     kill_prev_word model;
     Redraw
   | `Key (`Backspace, mods) when List.mem mods `Meta ~equal:Poly.equal ->
+    dismiss_typeahead model;
     kill_prev_word model;
     Redraw
   | `Key (`ASCII ('y' | 'Y'), [ `Ctrl ]) ->
+    dismiss_typeahead model;
     yank model;
     Redraw
   (* ----------------------------------------------------------------- *)
@@ -522,6 +625,7 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     copy_selection model;
     Redraw
   | `Key (`ASCII ('x' | 'X'), [ `Ctrl ]) when selection_active model ->
+    dismiss_typeahead model;
     cut_selection model;
     Redraw
   (* ────────────────────────────────────────────────────────────────── *)
@@ -644,22 +748,26 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
   | `Key (`Arrow `Up, mods)
     when List.mem mods `Meta ~equal:Poly.equal && List.mem mods `Shift ~equal:Poly.equal
     ->
+    dismiss_typeahead model;
     duplicate_line model ~below:false;
     Redraw
   | `Key (`Arrow `Down, mods)
     when List.mem mods `Meta ~equal:Poly.equal && List.mem mods `Shift ~equal:Poly.equal
     ->
+    dismiss_typeahead model;
     duplicate_line model ~below:true;
     Redraw
   (* Indent / Unindent (Meta+Shift+Right / Meta+Shift+Left) *)
   | `Key (`Arrow `Right, mods)
     when List.mem mods `Meta ~equal:Poly.equal && List.mem mods `Shift ~equal:Poly.equal
     ->
+    dismiss_typeahead model;
     indent_line model ~amount:2;
     Redraw
   | `Key (`Arrow `Left, mods)
     when List.mem mods `Meta ~equal:Poly.equal && List.mem mods `Shift ~equal:Poly.equal
     ->
+    dismiss_typeahead model;
     indent_line model ~amount:(-2);
     Redraw
   | `Key (`Page `Up, _) ->
@@ -688,6 +796,7 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     Redraw
   | `Key (`Enter, []) ->
     (* Literal newline inside the input buffer *)
+    dismiss_typeahead model;
     append_char model '\n';
     Redraw
   (* High-level actions -------------------------------------------------- *)
@@ -707,10 +816,19 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   match Model.mode model with
   | Insert ->
     (match ev with
-     (* Switch to Normal mode on bare ESC. *)
      | `Key (`Escape, mods) when List.is_empty mods ->
-       Model.set_mode model Normal;
-       Redraw
+       if Model.typeahead_preview_open model
+       then (
+         close_preview model;
+         Redraw)
+       else if Model.typeahead_is_relevant model
+       then (
+         dismiss_typeahead model;
+         Redraw)
+       else (
+         dismiss_typeahead model;
+         Model.set_mode model Normal;
+         Redraw)
      | `Key (`ASCII 'r', mods) when List.equal Poly.( = ) mods [ `Ctrl ] ->
        (* Toggle Raw-XML draft mode in Insert state. *)
        let new_mode =

@@ -30,6 +30,12 @@ val capture_request : model:Model.t -> request
     This clears the input text, resets the cursor position to 0 and switches
     the draft mode back to {!Model.Plain}.
 
+    The helper also invalidates and clears any in-flight type-ahead state by:
+    {ul
+    {- bumping {!Model.typeahead_generation} so stale completions cannot apply;}
+    {- clearing {!Model.typeahead_completion}; and}
+    {- closing the preview popup.}}
+
     @param model UI model to mutate in-place. *)
 val clear_editor : model:Model.t -> unit
 

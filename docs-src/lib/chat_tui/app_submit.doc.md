@@ -6,7 +6,8 @@ user hits enter:
 1. Synchronous local effects (mutate `Model.t` immediately):
    - capture the draft buffer as a user message (plain text or raw XML),
    - append to the transcript/history,
-   - clear the editor and scroll to bottom,
+   - clear the editor and scroll to bottom (including clearing any type-ahead
+     completion/preview state),
    - insert a `(thinking…)` placeholder, and
    - request a redraw.
 2. Spawn the streaming worker (asynchronously):

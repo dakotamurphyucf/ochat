@@ -31,6 +31,13 @@ module Pages = struct
   type t = { chat : Chat_page_state.t }
 end
 
+type typeahead_completion =
+  { text : string
+  ; base_input : string
+  ; base_cursor : int
+  ; generation : int
+  }
+
 type t =
   { mutable history_items : Openai.Responses.Item.t list
   ; mutable messages : message list
@@ -57,6 +64,10 @@ type t =
   ; mutable cmdline_cursor : int
   ; mutable active_fork : string option
   ; mutable fork_start_index : int option
+  ; mutable typeahead_completion : typeahead_completion option
+  ; mutable typeahead_preview_open : bool
+  ; mutable typeahead_preview_scroll : int
+  ; mutable typeahead_generation : int
   }
 [@@deriving fields ~getters ~setters]
 
@@ -164,6 +175,10 @@ let create
   ; cmdline_cursor
   ; active_fork = None
   ; fork_start_index = None
+  ; typeahead_completion = None
+  ; typeahead_preview_open = false
+  ; typeahead_preview_scroll = 0
+  ; typeahead_generation = 0
   }
 ;;
 
@@ -187,6 +202,37 @@ let cmdline t = t.cmdline
 let cmdline_cursor t = t.cmdline_cursor
 let set_cmdline t s = t.cmdline <- s
 let set_cmdline_cursor t n = t.cmdline_cursor <- n
+
+(* ------------------------------------------------------------------------- *)
+(*  Type-ahead completion helpers                                             *)
+(* ------------------------------------------------------------------------- *)
+
+let typeahead_completion t = t.typeahead_completion
+let set_typeahead_completion t v = t.typeahead_completion <- v
+
+let clear_typeahead t =
+  t.typeahead_completion <- None;
+  t.typeahead_preview_open <- false;
+  t.typeahead_preview_scroll <- 0
+;;
+
+let typeahead_preview_open t = t.typeahead_preview_open
+let set_typeahead_preview_open t v = t.typeahead_preview_open <- v
+let typeahead_preview_scroll t = t.typeahead_preview_scroll
+let set_typeahead_preview_scroll t v = t.typeahead_preview_scroll <- v
+
+let bump_typeahead_generation t =
+  t.typeahead_generation <- t.typeahead_generation + 1;
+  t.typeahead_generation
+;;
+
+let typeahead_is_relevant t =
+  match t.mode, t.typeahead_completion with
+  | Insert, Some completion ->
+    String.equal completion.base_input t.input_line
+    && Int.equal completion.base_cursor t.cursor_pos
+  | (Normal | Cmdline), _ | Insert, None -> false
+;;
 
 (* ------------------------------------------------------------------------- *)
 (*  Fork helpers                                                              *)
@@ -280,6 +326,73 @@ let redo (t : t) : bool =
     t.redo_stack <- rest;
     true
   | [] -> false
+;;
+
+(* ------------------------------------------------------------------------- *)
+(*  Type-ahead acceptance algorithms                                          *)
+(* ------------------------------------------------------------------------- *)
+
+let insert_text_at_cursor (t : t) (text : string) =
+  if String.is_empty text
+  then ()
+  else (
+    let s = t.input_line in
+    let pos = t.cursor_pos in
+    let before = String.sub s ~pos:0 ~len:pos in
+    let after = String.sub s ~pos ~len:(String.length s - pos) in
+    t.input_line <- before ^ text ^ after;
+    t.cursor_pos <- pos + String.length text)
+;;
+
+let accept_typeahead_all (t : t) : bool =
+  if not (typeahead_is_relevant t)
+  then false
+  else (
+    match t.typeahead_completion with
+    | None -> false
+    | Some completion ->
+      let text = Util.sanitize ~strip:false completion.text in
+      if String.is_empty text
+      then false
+      else (
+        push_undo t;
+        clear_selection t;
+        insert_text_at_cursor t text;
+        clear_typeahead t;
+        ignore (bump_typeahead_generation t : int);
+        true))
+;;
+
+let accept_typeahead_line (t : t) : bool =
+  if not (typeahead_is_relevant t)
+  then false
+  else (
+    match t.typeahead_completion with
+    | None -> false
+    | Some completion ->
+      let text = Util.sanitize ~strip:false completion.text in
+      let inserted, remainder =
+        match String.index text '\n' with
+        | None -> text, ""
+        | Some i ->
+          let next = i + 1 in
+          String.prefix text next, String.drop_prefix text next
+      in
+      if String.is_empty inserted
+      then false
+      else (
+        push_undo t;
+        clear_selection t;
+        insert_text_at_cursor t inserted;
+        let generation = bump_typeahead_generation t in
+        let base_input = t.input_line in
+        let base_cursor = t.cursor_pos in
+        clear_typeahead t;
+        if not (String.is_empty remainder)
+        then
+          t.typeahead_completion
+          <- Some { text = remainder; base_input; base_cursor; generation };
+        true))
 ;;
 
 (* ------------------------------------------------------------------------- *)

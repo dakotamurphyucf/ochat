@@ -9,6 +9,13 @@
 
 It also ensures that model caches are reset when the terminal width changes.
 
+## Type-ahead preview overlay
+
+When Insert mode is active and `Model.typeahead_preview_open` is true, the chat
+page overlays a “completion preview” popup within the transcript region using
+Notty’s overlay operator. This keeps the input editor’s height and the scroll
+box state stable (no layout jump).
+
 ## API
 
 ```ocaml

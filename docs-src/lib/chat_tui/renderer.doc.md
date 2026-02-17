@@ -31,6 +31,53 @@ Top-to-bottom, the renderer produces:
    draft-mode hints).
 4. A framed, multi-line input box (with selection highlighting when active).
 
+---
+
+## Type-ahead completion rendering (chat page)
+
+Type-ahead completion is a **single-candidate** feature that augments the input
+editor without changing the editor's geometry.
+
+The renderer implements three UI pieces:
+
+### Inline “ghost” suffix in the input box
+
+When `Model.typeahead_is_relevant model` is true, the input box renderer draws a
+dim “ghost” suffix **inline at the cursor column on the cursor row only**. The
+cursor position returned by `render_full` is computed from the real draft buffer
+and is not affected by the ghost text.
+
+Multi-line completions are displayed without changing layout:
+
+- only the first completion line is rendered inline
+- if the completion contains newlines, the remainder is represented by a dim
+  indicator appended on the same row: `… (+N more lines)`
+
+The renderer never passes `'\n'` to `Notty.I.string`; it renders typed text and
+ghost fragments separately.
+
+### Status bar hint text (no layout jump)
+
+When a completion is relevant, the status bar appends a fixed hint string to the
+existing status bar line:
+
+`[Tab accept all] [Shift+Tab accept line] [Ctrl+Space preview] [Esc dismiss]`
+
+The status bar image is horizontally snapped to exactly the requested width, so
+the presence/absence of hints does not add/remove rows or change the overall
+layout.
+
+### Preview popup overlay (no layout impact)
+
+When Insert mode is active and the preview is open
+(`Model.typeahead_preview_open model`), the chat page renderer overlays a popup
+within the transcript (history) region using Notty's overlay operator. The popup
+is bottom-aligned to the history area and does not modify the underlying scroll
+box state or the input editor height.
+
+The popup body shows the full completion text (sanitised, split into lines) and
+supports internal scrolling via `Model.typeahead_preview_scroll`.
+
 ## Message rendering rules
 
 Within the history viewport:

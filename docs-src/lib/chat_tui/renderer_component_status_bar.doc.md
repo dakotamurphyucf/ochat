@@ -5,6 +5,12 @@
 - editor mode (`-- INSERT --`, `-- NORMAL --`, `-- CMD --`), and
 - draft mode hint (`-- RAW --` when `Model.draft_mode = Raw_xml`).
 
+When a type-ahead completion exists and is relevant (see
+`Model.typeahead_is_relevant`), the bar also appends a fixed hint string
+describing the type-ahead key bindings:
+
+`[Tab accept all] [Shift+Tab accept line] [Ctrl+Space preview] [Esc dismiss]`
+
 ## API
 
 ```ocaml

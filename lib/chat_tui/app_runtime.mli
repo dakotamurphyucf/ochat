@@ -33,6 +33,19 @@ type op =
   (** A compaction worker has been forked but has not yet published its
           switch. *)
 
+(** Tracking state for background type-ahead completion work. *)
+type typeahead_op =
+  | Typeahead of
+      { sw : Eio.Switch.t
+      ; id : int
+      }
+  (** A type-ahead worker is currently running.
+
+      The operation can be cancelled by failing [sw]. *)
+  | Starting_typeahead of { id : int }
+  (** A type-ahead worker has been forked but has not yet published its
+      switch. *)
+
 (** A snapshot of the editor state that is submitted to the assistant. *)
 type submit_request =
   { text : string
@@ -48,6 +61,7 @@ type queued_action =
 type t =
   { model : Model.t
   ; mutable op : op option
+  ; mutable typeahead_op : typeahead_op option
   ; pending : queued_action Core.Queue.t
   ; quit_via_esc : bool ref
     (** [true] iff the user hit [Esc] while idle, causing the app to exit. *)
@@ -59,6 +73,9 @@ type t =
   ; mutable cancel_compaction_on_start : bool
     (** Records a cancellation request that arrived while the state was
           [Starting_compaction]. *)
+  ; mutable cancel_typeahead_on_start : bool
+    (** Records a cancellation request that arrived while the state was
+        [Starting_typeahead]. *)
   }
 
 (** [create ~model] creates a fresh runtime container for [model].

@@ -13,6 +13,13 @@ type op =
   | Starting_streaming of { id : int }
   | Starting_compaction of { id : int }
 
+type typeahead_op =
+  | Typeahead of
+      { sw : Switch.t
+      ; id : int
+      }
+  | Starting_typeahead of { id : int }
+
 type submit_request =
   { text : string
   ; draft_mode : Model.draft_mode
@@ -25,21 +32,25 @@ type queued_action =
 type t =
   { model : Model.t
   ; mutable op : op option
+  ; mutable typeahead_op : typeahead_op option
   ; pending : queued_action Queue.t
   ; quit_via_esc : bool ref
   ; mutable next_op_id : int
   ; mutable cancel_streaming_on_start : bool
   ; mutable cancel_compaction_on_start : bool
+  ; mutable cancel_typeahead_on_start : bool
   }
 
 let create ~model =
   { model
   ; op = None
+  ; typeahead_op = None
   ; pending = Queue.create ()
   ; quit_via_esc = ref false
   ; next_op_id = 0
   ; cancel_streaming_on_start = false
   ; cancel_compaction_on_start = false
+  ; cancel_typeahead_on_start = false
   }
 ;;
 

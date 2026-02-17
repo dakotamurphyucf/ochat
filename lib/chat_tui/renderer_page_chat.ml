@@ -9,6 +9,72 @@ module Compose = struct
     Renderer_component_input_box.render ~width:w ~model
   ;;
 
+  let typeahead_preview_popup
+        ~(model : Model.t)
+        ~(w : int)
+        ~(history_height : int)
+        ~(max_popup_h : int)
+    =
+    let is_visible =
+      match Model.mode model with
+      | Insert -> Model.typeahead_is_relevant model && Model.typeahead_preview_open model
+      | Normal | Cmdline -> false
+    in
+    if not is_visible
+    then None
+    else (
+      match Model.typeahead_completion model with
+      | None -> None
+      | Some completion ->
+        let popup_h_max = Int.min history_height max_popup_h in
+        if popup_h_max <= 0
+        then None
+        else (
+          let completion_text = Util.sanitize ~strip:false completion.text in
+          let lines = String.split ~on:'\n' completion_text in
+          let header_h = 1 in
+          let footer_h = if popup_h_max >= 3 then 1 else 0 in
+          let body_h = Int.max 0 (popup_h_max - header_h - footer_h) in
+          let max_scroll =
+            if body_h <= 0 then 0 else Int.max 0 (List.length lines - body_h)
+          in
+          let preview_scroll =
+            Model.typeahead_preview_scroll model
+            |> Int.max 0
+            |> fun s -> Int.min s max_scroll
+          in
+          let visible_lines =
+            List.drop lines preview_scroll
+            |> fun ls ->
+            List.take ls body_h
+            |> fun ls ->
+            let missing = body_h - List.length ls in
+            if missing <= 0 then ls else ls @ List.init missing ~f:(fun _ -> "")
+          in
+          let popup_bg = A.(bg (gray 3)) in
+          let title_attr = A.(popup_bg ++ fg (gray 15)) in
+          let body_attr = A.(popup_bg ++ fg (gray 10)) in
+          let footer_attr = A.(popup_bg ++ fg (gray 12)) in
+          let title_img =
+            I.string title_attr "completion preview" |> I.hsnap ~align:`Left w
+          in
+          let body_imgs =
+            List.map visible_lines ~f:(fun line ->
+              I.string body_attr line |> I.hsnap ~align:`Left w)
+          in
+          let footer_imgs =
+            if footer_h <= 0
+            then []
+            else [ I.string footer_attr "↑/↓ scroll" |> I.hsnap ~align:`Left w ]
+          in
+          let text_layer = I.vcat ((title_img :: body_imgs) @ footer_imgs) in
+          let popup_h = I.height text_layer in
+          let bg = I.char popup_bg ' ' (Int.max 0 w) (Int.max 0 popup_h) in
+          let popup_img = Notty.Infix.(text_layer </> bg) |> I.hsnap w in
+          let popup_y = Int.max 0 (history_height - I.height popup_img) in
+          Some (I.pad ~t:popup_y popup_img)))
+  ;;
+
   let history_layout ~(h : int) ~(input_img : I.t) =
     let history_height = Int.max 1 (h - I.height input_img - 1) in
     let sticky_height = if history_height > 1 then 1 else 0 in
@@ -116,6 +182,11 @@ module Compose = struct
     in
     let status = Renderer_component_status_bar.render ~width:w ~model in
     let full_img = Notty.Infix.(history_view <-> status <-> input_img) in
+    let full_img =
+      match typeahead_preview_popup ~model ~w ~history_height ~max_popup_h:10 with
+      | None -> full_img
+      | Some popup -> Notty.Infix.(popup </> full_img)
+    in
     full_img, (cursor_x, history_height + 1 + cursor_y_in_box)
   ;;
 end
