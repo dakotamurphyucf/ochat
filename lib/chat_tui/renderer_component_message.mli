@@ -52,3 +52,20 @@ val render_header_line
   -> role:string
   -> hi_engine:Highlight_tm_engine.t
   -> Notty.I.t
+
+(** [should_drop_markdown_delimiter ~scopes ~text] returns [true] when a
+    TextMate-tokenised segment represents only a delimiter run for bold/italic
+    or inline code and should therefore be hidden from the rendered output.
+
+    This is exposed primarily for unit tests and debugging of markdown
+    marker suppression. *)
+val should_drop_markdown_delimiter : scopes:string list -> text:string -> bool
+
+(** [suppress_markdown_delimiters spans] filters out delimiter segments from a
+    list of scope-preserving spans.
+
+    This is exposed primarily for unit tests and debugging of markdown marker
+    suppression. *)
+val suppress_markdown_delimiters
+  :  Highlight_tm_engine.scoped_span list
+  -> Highlight_tm_engine.scoped_span list

@@ -197,6 +197,28 @@ end
 
 let lang_of_path = Renderer_lang.lang_of_path
 
+let has_scope_prefix scopes ~prefix =
+  List.exists scopes ~f:(String.is_prefix ~prefix)
+;;
+
+let is_only_char s ~char =
+  (not (String.is_empty s)) && String.for_all s ~f:(Char.equal char)
+;;
+
+let should_drop_markdown_delimiter ~scopes ~text =
+  if has_scope_prefix scopes ~prefix:"punctuation.definition.raw"
+  then is_only_char text ~char:'`'
+  else if has_scope_prefix scopes ~prefix:"punctuation.definition.bold"
+          || has_scope_prefix scopes ~prefix:"punctuation.definition.italic"
+  then is_only_char text ~char:'*' || is_only_char text ~char:'_'
+  else false
+;;
+
+let suppress_markdown_delimiters (spans : Highlight_tm_engine.scoped_span list) =
+  List.filter spans ~f:(fun s ->
+    not (should_drop_markdown_delimiter ~scopes:s.scopes ~text:s.text))
+;;
+
 module Paint = struct
   open Render_context
 
@@ -233,26 +255,187 @@ module Paint = struct
     | _ -> false
   ;;
 
-  let bold_fallback_spans (para : string) =
-    let len = String.length para in
-    let has ~prefix ~suffix =
-      len >= 4 && String.is_prefix para ~prefix && String.is_suffix para ~suffix
+  type fallback_style =
+    { bold : bool
+    ; italic : bool
+    }
+ 
+  let fallback_bold_attr =
+    Highlight_theme.attr_of_scopes
+      Highlight_theme.github_dark
+      ~scopes:[ "markup.bold.markdown" ]
+  ;;
+
+  let fallback_italic_attr =
+    Highlight_theme.attr_of_scopes
+      Highlight_theme.github_dark
+      ~scopes:[ "markup.italic.markdown" ]
+  ;;
+
+  let fallback_inline_code_attr =
+    Highlight_theme.attr_of_scopes
+      Highlight_theme.github_dark
+      ~scopes:[ "markup.inline.raw.string.markdown" ]
+  ;;
+
+  let fallback_attr_of_style { bold; italic } =
+    match bold, italic with
+    | false, false -> A.empty
+    | true, false -> fallback_bold_attr
+    | false, true -> fallback_italic_attr
+    | true, true -> Styles.(fallback_bold_attr ++ fallback_italic_attr)
+  ;;
+
+  let is_escaped (s : string) i = i > 0 && Char.equal s.[i - 1] '\\'
+
+  let is_intraword ~prev ~next =
+    Option.value_map prev ~default:false ~f:Char.is_alphanum
+    && Option.value_map next ~default:false ~f:Char.is_alphanum
+  ;;
+
+  let marker_at (s : string) ~pos ~limit =
+    if pos >= limit
+    then None
+    else (
+      match s.[pos] with
+      | '*' when pos + 1 < limit && Char.equal s.[pos + 1] '*' -> Some ('*', 2, `Bold)
+      | '_' when pos + 1 < limit && Char.equal s.[pos + 1] '_' -> Some ('_', 2, `Bold)
+      | '*' -> Some ('*', 1, `Italic)
+      | '_' -> Some ('_', 1, `Italic)
+      | _ -> None)
+  ;;
+
+  let can_open_marker (s : string) ~pos ~len ~limit ~ch =
+    let next =
+      let i = pos + len in
+      if i < limit then Some s.[i] else None
     in
-    if has ~prefix:"**" ~suffix:"**" || has ~prefix:"__" ~suffix:"__"
-    then (
-      let inner = String.sub para ~pos:2 ~len:(len - 4) in
-      let bold_attr =
-        Highlight_theme.attr_of_scopes
-          Highlight_theme.github_dark
-          ~scopes:[ "markup.bold" ]
-      in
-      Some [ bold_attr, inner ])
-    else None
+    let prev = if pos > 0 then Some s.[pos - 1] else None in
+    (not (is_escaped s pos))
+    && Option.value_map next ~default:false ~f:(fun c -> not (Char.is_whitespace c))
+    && not (is_intraword ~prev ~next)
+  ;;
+
+  let can_close_marker (s : string) ~pos ~len ~limit =
+    let prev = if pos > 0 then Some s.[pos - 1] else None in
+    let next =
+      let i = pos + len in
+      if i < limit then Some s.[i] else None
+    in
+    (not (is_escaped s pos))
+    && Option.value_map prev ~default:false ~f:(fun c -> not (Char.is_whitespace c))
+    && not (is_intraword ~prev ~next)
+  ;;
+
+  let find_next_open_marker (s : string) ~pos ~limit =
+    let rec loop i =
+      if i >= limit
+      then None
+      else (
+        match marker_at s ~pos:i ~limit with
+        | Some (ch, len, kind) when can_open_marker s ~pos:i ~len ~limit ~ch ->
+          if Int.equal len 1
+             && i > pos
+             && i > 0
+             && Char.equal s.[i - 1] ch
+          then loop (i + 1)
+          else Some (i, ch, len, kind)
+        | _ -> loop (i + 1))
+    in
+    loop pos
+  ;;
+
+  let is_marker_at (s : string) ~pos ~len ~limit ~ch =
+    pos + len <= limit
+    && List.for_all (List.init len ~f:Fn.id) ~f:(fun k -> Char.equal s.[pos + k] ch)
+  ;;
+
+  let find_close_marker (s : string) ~from ~limit ~ch ~len =
+    let rec loop i =
+      if i + len > limit
+      then None
+      else if is_marker_at s ~pos:i ~len ~limit ~ch && can_close_marker s ~pos:i ~len ~limit
+      then Some i
+      else loop (i + 1)
+    in
+    loop from
+  ;;
+
+  let apply_style style = function
+    | `Bold -> { style with bold = true }
+    | `Italic -> { style with italic = true }
+  ;;
+
+  let rec parse_emphasis_range (s : string) ~style ~pos ~limit =
+    match find_next_open_marker s ~pos ~limit with
+    | None ->
+      let text = String.sub s ~pos ~len:(limit - pos) in
+      if String.is_empty text then [] else [ fallback_attr_of_style style, text ]
+    | Some (open_pos, ch, len, kind) ->
+      let before = String.sub s ~pos ~len:(open_pos - pos) in
+      let open_end = open_pos + len in
+      (match find_close_marker s ~from:open_end ~limit ~ch ~len with
+       | None ->
+         let rest = parse_emphasis_range s ~style ~pos:open_end ~limit in
+         let marker = String.make len ch in
+         List.concat
+           [ (if String.is_empty before then [] else [ fallback_attr_of_style style, before ])
+           ; [ fallback_attr_of_style style, marker ]
+           ; rest
+           ]
+       | Some close_pos when close_pos = open_end ->
+         let marker = String.make len ch in
+         let rest = parse_emphasis_range s ~style ~pos:open_end ~limit in
+         List.concat
+           [ (if String.is_empty before then [] else [ fallback_attr_of_style style, before ])
+           ; [ fallback_attr_of_style style, marker ]
+           ; rest
+           ]
+       | Some close_pos ->
+         let inner =
+           parse_emphasis_range
+             s
+             ~style:(apply_style style kind)
+             ~pos:open_end
+             ~limit:close_pos
+         in
+         let rest = parse_emphasis_range s ~style ~pos:(close_pos + len) ~limit in
+         List.concat
+           [ (if String.is_empty before then [] else [ fallback_attr_of_style style, before ])
+           ; inner
+           ; rest
+           ])
+  ;;
+
+  let fallback_emphasis_spans s =
+    parse_emphasis_range s ~style:{ bold = false; italic = false } ~pos:0 ~limit:(String.length s)
+  ;;
+
+  let fallback_markdown_spans (para : string) : (A.t * string) list =
+    Markdown_fences.split_inline para
+    |> List.concat_map ~f:(function
+      | Markdown_fences.Inline_text s -> fallback_emphasis_spans s
+      | Markdown_fences.Inline_code code ->
+        if String.is_empty code then [] else [ fallback_inline_code_attr, code ])
+  ;;
+
+  let flatten_highlighted_lines lines =
+    match lines with
+    | [ xs ] -> xs
+    | xs -> List.concat xs
+  ;;
+
+  let compress_adjacent_spans spans =
+    List.fold spans ~init:[] ~f:(fun acc (a, s) ->
+      match acc with
+      | (a', s') :: tl when phys_equal a a' -> (a, s' ^ s) :: tl
+      | _ -> (a, s) :: acc)
+    |> List.rev
   ;;
 
   let markdown_spans (ctx : t) ~(para : string) : (A.t * string) list =
     let lines, info =
-      Highlight_tm_engine.highlight_text_with_info
+      Highlight_tm_engine.highlight_text_with_scopes_with_info
         ctx.hi_engine
         ~lang:(Some "markdown")
         ~text:para
@@ -260,22 +443,31 @@ module Paint = struct
     let spans =
       match info.Highlight_tm_engine.fallback with
       | None ->
-        (match lines with
-         | [ xs ] -> xs
-         | xs -> List.concat xs)
-      | Some _ -> Option.value (bold_fallback_spans para) ~default:[ A.empty, para ]
+        lines
+        |> List.map ~f:suppress_markdown_delimiters
+        |> flatten_highlighted_lines
+        |> List.map ~f:(fun s -> s.attr, s.text)
+      | Some _ ->
+        let spans = fallback_markdown_spans para in
+        if List.is_empty spans then [ A.empty, para ] else spans
     in
-    if is_read_directory ctx
-    then (
-      let dir_attr = Styles.fg_gray 13 in
-      List.map spans ~f:(fun (_a, s) -> dir_attr, s))
-    else spans
+    let spans =
+      if is_read_directory ctx
+      then (
+        let dir_attr = Styles.fg_gray 13 in
+        List.map spans ~f:(fun (_a, s) -> dir_attr, s))
+      else spans
+    in
+    compress_adjacent_spans spans
   ;;
 
   let render_markdown (ctx : t) ~(is_first : bool) ~(para : string) : I.t list =
+    let blank = I.hsnap ~align:`Left ctx.width (I.string A.empty "") in
     if String.is_empty para
-    then [ I.hsnap ~align:`Left ctx.width (I.string A.empty "") ]
-    else markdown_spans ctx ~para |> render_runs ctx ~is_first
+    then [ blank ]
+    else (
+      let spans = markdown_spans ctx ~para in
+      if List.is_empty spans then [ blank ] else spans |> render_runs ctx ~is_first)
   ;;
 
   let open_paren_index para = String.lfindi para ~f:(fun _ c -> Char.( = ) c '(')

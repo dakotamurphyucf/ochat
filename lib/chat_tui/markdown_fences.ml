@@ -113,23 +113,53 @@ let split_inline s =
       Buffer.clear buf;
       Inline_text t :: acc)
   in
-  let rec loop acc i in_code start_i =
+  let is_escaped i = i > 0 && Char.equal s.[i - 1] '\\' in
+  let count_run i =
+    let rec loop j =
+      if j < len && Char.equal s.[j] '`' then loop (j + 1) else j
+    in
+    loop i - i
+  in
+  let is_run_at i ~n =
+    i + n <= len
+    && (let rec loop k =
+          if k = n
+          then true
+          else if Char.equal s.[i + k] '`'
+          then loop (k + 1)
+          else false
+        in
+        loop 0)
+  in
+  let find_close ~from ~n =
+    let rec loop i =
+      if i + n > len
+      then None
+      else if (not (is_escaped i)) && is_run_at i ~n
+      then Some i
+      else loop (i + 1)
+    in
+    loop from
+  in
+  let rec loop acc i =
     if i >= len
     then (
       let acc = flush_text acc in
       List.rev acc)
-    else (
-      let c = s.[i] in
-      match in_code, c with
-      | false, '`' ->
+    else if Char.equal s.[i] '`' && not (is_escaped i)
+    then (
+      let n = count_run i in
+      match find_close ~from:(i + n) ~n with
+      | Some j when j > i + n ->
         let acc = flush_text acc in
-        loop acc (i + 1) true (i + 1)
-      | true, '`' ->
-        let code = String.sub s start_i (i - start_i) in
-        loop (Inline_code code :: acc) (i + 1) false 0
+        let code = String.sub s (i + n) (j - (i + n)) in
+        loop (Inline_code code :: acc) (j + n)
       | _ ->
-        Buffer.add_char buf c;
-        loop acc (i + 1) in_code start_i)
+        Buffer.add_substring buf s i n;
+        loop acc (i + n))
+    else (
+      Buffer.add_char buf s.[i];
+      loop acc (i + 1))
   in
-  loop [] 0 false 0
+  loop [] 0
 ;;

@@ -7,7 +7,7 @@ markdown-like text in the terminal UI:
   code blocks delimited by exactly three backticks (```), or by three tildes
   (~~~).
 - Split a single line into inline parts, separating plain text from segments
-  enclosed in single backticks.
+  enclosed in backticks (runs of one or more backticks).
 
 The implementation is intentionally conservative and tuned for rendering, not
 full Markdown compliance.
@@ -30,7 +30,7 @@ module Markdown_fences : sig
     | Inline_code of string
 
   val split_inline : string -> inline list
-  (** Split a line into plain text and single-backtick code spans. *)
+  (** Split a line into plain text and backtick-delimited code spans. *)
 end
 ```
 
@@ -86,21 +86,25 @@ Chat_tui.Markdown_fences.split input
 val split_inline : string -> inline list
 ```
 
-- Recognizes only single-backtick spans.
-- Does not support escaping, multi-backtick delimiters, or nesting.
-- If a closing backtick is missing, the unterminated code is treated as plain
-  text and the opening backtick is dropped.
+- Recognizes backtick runs of length `n >= 1` and forms a code span by finding
+  a closing delimiter that has at least `n` consecutive backticks.
+  (Only `n` backticks are consumed as the delimiter; any extra backticks are
+  treated as normal text.)
+- A backtick preceded by a backslash is treated as a literal character and
+  does not start or end a code span. (The backslash is preserved; no unescaping
+  is performed.)
+- Nesting is not supported.
+- If a closing delimiter is missing, the opening delimiter is treated as plain
+  text (it is not dropped).
 
 Example — current behavior with a closed span:
 
 ```ocaml
 let parts = Chat_tui.Markdown_fences.split_inline "a `b` c" in
-(* Note: current implementation duplicates the code contents in the
-   surrounding text segment. *)
 parts
 = [ Chat_tui.Markdown_fences.Inline_text "a "
   ; Chat_tui.Markdown_fences.Inline_code "b"
-  ; Chat_tui.Markdown_fences.Inline_text "b c"
+  ; Chat_tui.Markdown_fences.Inline_text " c"
   ]
 ```
 
@@ -108,21 +112,27 @@ Example — missing closing backtick:
 
 ```ocaml
 Chat_tui.Markdown_fences.split_inline "x `y"
-= [ Chat_tui.Markdown_fences.Inline_text "x "; Chat_tui.Markdown_fences.Inline_text "y" ]
+= [ Chat_tui.Markdown_fences.Inline_text "x `y" ]
+```
+
+Example — multi-backtick code span (content can include single backticks):
+
+```ocaml
+Chat_tui.Markdown_fences.split_inline "a ``b`c`` d"
+= [ Chat_tui.Markdown_fences.Inline_text "a "
+  ; Chat_tui.Markdown_fences.Inline_code "b`c"
+  ; Chat_tui.Markdown_fences.Inline_text " d"
+  ]
 ```
 
 ---
 
 ## Known issues and notes
 
-- `split_inline` currently accumulates characters inside a closed code span into
-  the surrounding `Inline_text` buffer as well, which can lead to duplication in
-  the returned list (see example). Callers should account for this until the
-  implementation is fixed.
 - The block parser is intentionally minimal: it does not accept fences longer
   than three characters, nor does it support tab indentation on the fence line.
 
 ---
 
-Last updated: 2025-08-10
+Last updated: 2026-02-17
 

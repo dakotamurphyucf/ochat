@@ -79,6 +79,14 @@
  - Paragraphs — A message is split on hard newlines into paragraphs. Each
    paragraph is wrapped to the available width (after the prefix) using
    display-cell width as measured by Notty.
+ - Inline markdown delimiters — When rendering a markdown paragraph, the
+   renderer suppresses the delimiter marker characters for:
+   - bold (`**...**` and `__...__`)
+   - italics (`*...*` and `_..._`)
+   - inline code (backticks, including multi-backtick spans)
+
+   The enclosed text remains styled (bold/italic/inline-code) and other
+   punctuation remains visible (for example list bullets are unaffected).
  - Fenced code blocks — Detected by `Chat_tui.Markdown_fences.split` and
    rendered with `Chat_tui.Highlight_tm_engine`. A simple width-bucket cache
    keyed by (`role-class`, `lang`, `md5(lang^NUL^code)`, `width-bucket`) avoids
@@ -105,9 +113,10 @@
  - Geometry heuristics — Notty’s display width is heuristic (see its docs on
    Unicode geometry). East-Asian wide glyphs and some emoji may cause off-by-1
    wrapping on certain terminals.
- - Debug output — When markdown highlighting falls back in a specific branch,
-   a temporary `print_endline` may emit a line during rendering. This does not
-   affect display but can pollute logs; it will be removed in a follow-up.
+ - Grammar loading diagnostics — If a bundled TextMate grammar fails to load,
+   the registry initialisation may print a diagnostic to stdout. This is most
+   visible for optional grammars; markdown highlighting continues to work as
+   long as the markdown grammar loads successfully.
 
  ---
 

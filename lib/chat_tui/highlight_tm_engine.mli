@@ -41,6 +41,14 @@ type t
     [attr] is the display attribute to use when rendering that segment. *)
 type span = Notty.A.t * string
 
+(** A highlighted text fragment that also preserves the tokenizer scopes used
+    to compute [attr]. *)
+type scoped_span =
+  { attr : Notty.A.t
+  ; text : string
+  ; scopes : string list
+  }
+
 (** [create ~theme] creates a highlighter configured to use [theme] when
     mapping token scopes to attributes.
 
@@ -85,7 +93,8 @@ type fallback_reason =
 
     - [No_registry] — the highlighter did not carry a TextMate registry.
     - [Unknown_language l] — no grammar could be resolved for [l].
-    - [Tokenize_error] — tokenization failed for at least one line. *)
+    - [Tokenize_error] — tokenization failed for at least one line; the engine
+      falls back to plain spans for the whole input. *)
 
 type info =
   { fallback : fallback_reason option
@@ -134,6 +143,16 @@ type info =
     ]} *)
 val highlight_text : t -> lang:string option -> text:string -> span list list
 
+(** Like {!highlight_text} but preserves TextMate scope information per
+    segment. This is intended for callers that need to filter output based on
+    scopes (e.g. removing markdown delimiter punctuation) before collapsing to
+    plain [(attr * text)] spans. *)
+val highlight_text_with_scopes
+  :  t
+  -> lang:string option
+  -> text:string
+  -> scoped_span list list
+
 (** [highlight_text_with_info] is like {!highlight_text} but also returns
     diagnostic information describing whether a fallback occurred.
 
@@ -146,3 +165,10 @@ val highlight_text_with_info
   -> lang:string option
   -> text:string
   -> span list list * info
+
+(** Like {!highlight_text_with_info}, but returns scope-preserving spans. *)
+val highlight_text_with_scopes_with_info
+  :  t
+  -> lang:string option
+  -> text:string
+  -> scoped_span list list * info

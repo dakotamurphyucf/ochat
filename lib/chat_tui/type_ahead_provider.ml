@@ -52,16 +52,6 @@ let render_history_for_prompt (items : Res.Item.t list) : string =
       (match content with
        | { text; _ } :: _ -> Some (sprintf "assistant: %s" text)
        | _ -> None)
-    | Function_call { name; arguments; call_id; _ } ->
-      sprintf "Function call (%s): %s(%s)" call_id name arguments |> Some
-    | Custom_tool_call { name; input; call_id; _ } ->
-      sprintf "Custom tool call (%s): %s(%s)" call_id name input |> Some
-    | Function_call_output { call_id; output; _ } ->
-      let output = string_of_tool_output output in
-      sprintf "Function call output (%s): %s" call_id output |> Some
-    | Custom_tool_call_output { call_id; output; _ } ->
-      let output = string_of_tool_output output in
-      sprintf "Custom tool call output (%s): %s" call_id output |> Some
     | _ -> None
   in
   items
