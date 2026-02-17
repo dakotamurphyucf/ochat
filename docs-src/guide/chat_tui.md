@@ -314,11 +314,19 @@ Two environment variables influence how frequently the UI redraws while streamin
 - `OCHAT_TUI_FPS` – target frames-per-second for redraw throttling (default: 30).
 - `OCHAT_STREAM_BATCH_MS` – batch window (ms) for coalescing streaming events (default: ~12ms, clamped to 1–50ms).
 
+### Ask AI subcommand (ask AI questions about using chat-tui):
+
+Use this subcommand for a high-level help command to ask AI questions about using chat-tui:
+
+```console
+$ chat-tui ask-ai -query QUERY
+```
+
 ---
 
 ## See also
 
-- `chat_tui` CLI reference: `docs-src/bin/chat_tui.doc.md`
-- Key event inspector docs: `docs-src/bin/key_dump.doc.md`
-- TUI internals (odoc pages): `docs-src/lib/chat_tui/*.doc.md`
-- Meta-prompting CLI (not part of `chat_tui`): `docs-src/bin/mp_refine_run.doc.md`
+- [chat_tui CLI reference](../bin/chat_tui.doc.md)
+- [Key event inspector docs](../bin/key_dump.doc.md)
+- chat_tui internals: `../lib/chat_tui/*.doc.md`
+- [Meta-prompting CLI (not part of chat_tui)](../bin/mp_refine_run.doc.md)

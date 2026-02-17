@@ -90,6 +90,7 @@
  (libraries
   core
   eio_main
+  jsonaf
   notty.unix
   ochat.notty_eio
   ochat.notty_scroll_box

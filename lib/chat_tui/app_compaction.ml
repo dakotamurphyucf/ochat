@@ -52,8 +52,8 @@ let start (ctx : Context.t) =
       (match session_snapshot with
        | None -> ()
        | Some s ->
-         Session_store.save ~env s;
-         Session_store.reset_session ~env ~id:s.id ~keep_history:false ());
+         Session_store.save ~env s
+         (* Session_store.reset_session ~env ~id:s.id ~keep_history:false () *));
       Context_compaction.Compactor.compact_history
         ~env:(Some env)
         ~history:history_snapshot

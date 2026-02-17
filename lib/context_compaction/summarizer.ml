@@ -9,7 +9,7 @@ let prompt =
 Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, architectural decisions, assistant outputs, and any other context that would be essential for continuing development work without losing context.
 
-Before providing your final summary, wrap your analysis in <analysis> tags to organize your thoughts and ensure you've covered all necessary points. In your analysis process:
+Before providing your final summary, wrap your analysis of the conversation in <analysis> tags to organize your thoughts with a rough outline of the main themes of the conversation and a detailed analysis of each section. In your analysis process:
 
 1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
    - The user's explicit requests and intents
@@ -21,7 +21,7 @@ Before providing your final summary, wrap your analysis in <analysis> tags to or
      - function signatures
      - file edits
      - analysis outputs
-  - Errors that you ran into and how you fixed them
+  - Errors that were ran into in the conversation and how they were fixed
   - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
 2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
 
@@ -44,7 +44,7 @@ Here's an example of how your output should be structured:
 
 <example>
 <analysis>
-[Your thought process, ensuring all points are covered thoroughly and accurately. You must be overly detailed and precise in your analysis]
+[Chronological analysis of the conversation, ensuring all points are covered thoroughly and accurately. You must be overly detailed and precise in your analysis]
 </analysis>
 
 <summary>
@@ -99,6 +99,10 @@ Here's an example of how your output should be structured:
    [Optional Next step to take]
 
 </summary>
+
+<important-details>
+[Important details to include verbatim that are provided in a assistant message]
+</important-details>
 </example>
 
 Please provide your Detailed summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response.
@@ -205,16 +209,18 @@ let summarise
       ]
     in
     (try
-       let ({ Response.output; _ } : Response.t) =
+       let response =
          post_response
            Default
            ~max_output_tokens:100000
            ~temperature:0.3
-           ~model:Request.Gpt4_1
+           ~model:(Request.Unknown "gpt-5.2")
+           ~verbosity:"high"
            ~dir
            net
            ~inputs
        in
+       let ({ Response.output; _ } : Response.t) = response in
        (* Extract assistant text from first Output_message. *)
        let rec find_text = function
          | [] -> None
@@ -230,5 +236,6 @@ let summarise
      with
      | exn ->
        eprintf "Summarizer.summarise: %s\n%!" (Exn.to_string exn);
+       Io.log ~dir ~file:"Summarizer.summarise.error-log.txt" (Exn.to_string exn);
        String.prefix transcript max_stub_chars)
 ;;
