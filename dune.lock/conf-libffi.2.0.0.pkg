@@ -1,0 +1,43 @@
+(version 2.0.0)
+
+(build
+ (all_platforms ((action (run pkg-config libffi)))))
+
+(depends
+ (all_platforms (conf-pkg-config)))
+
+(depexts
+ ((libffi)
+  (and_absorb_undefined_var
+   (= %{os} macos)
+   (= %{os_distribution} homebrew)))
+ ((libffi)
+  (and_absorb_undefined_var
+   (= %{os} macos)
+   (= %{os_distribution} macports)))
+ ((libffi-dev)
+  (= %{os_distribution} alpine))
+ ((libffi-dev)
+  (= %{os_family} debian))
+ ((libffi-dev)
+  (= %{os_family} ubuntu))
+ ((libffi-devel)
+  (= %{os_distribution} centos))
+ ((libffi-devel)
+  (= %{os_family} fedora))
+ ((libffi-devel)
+  (= %{os_distribution} mageia))
+ ((libffi-devel)
+  (= %{os_distribution} ol))
+ ((libffi-devel)
+  (or_absorb_undefined_var
+   (= %{os_family} suse)
+   (= %{os_family} opensuse)))
+ ((libffi)
+  (= %{os} freebsd))
+ ((libffi)
+  (and_absorb_undefined_var
+   (= %{os} win32)
+   (= %{os_distribution} cygwinports)))
+ ((libffi)
+  (= %{os_distribution} nixos)))

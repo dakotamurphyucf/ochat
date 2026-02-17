@@ -1,0 +1,19 @@
+(version 0.2.3)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml dune cppo uutf lwt)))
+
+(source
+ (fetch
+  (url
+   https://github.com/pqwy/notty/releases/download/v0.2.3/notty-0.2.3.tbz)
+  (checksum
+   sha256=74659fb14073db4438989891ab24f24bef81aa497dac16d9a67f9a1c9c200824)))

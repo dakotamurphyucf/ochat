@@ -1,0 +1,19 @@
+(version 5.0.0)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml dune cstruct fmt lwt)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/mirage-flow/releases/download/v5.0.0/mirage-flow-5.0.0.tbz)
+  (checksum
+   sha256=37ca79cae0ed9b270b87712edcb397a5dec4ab39357b28107e00daa6c8553323)))

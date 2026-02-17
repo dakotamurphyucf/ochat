@@ -1,0 +1,19 @@
+(version 8.0.5)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs} @install))))))
+
+(depends
+ (all_platforms
+  (dune ocaml dune-compiledb dune-configurator conf-libpcre)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mmottl/pcre-ocaml/releases/download/8.0.5/pcre-8.0.5.tbz)
+  (checksum
+   sha256=ed9bcf88d781767ad6a7c0480aff09d5889f2fc500dda0d1620a1786d4e44490)))

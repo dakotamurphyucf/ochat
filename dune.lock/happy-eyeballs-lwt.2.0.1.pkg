@@ -1,0 +1,30 @@
+(version 2.0.1)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml
+   dune
+   happy-eyeballs
+   cmdliner
+   duration
+   dns
+   domain-name
+   ipaddr
+   fmt
+   logs
+   lwt
+   mtime)))
+
+(source
+ (fetch
+  (url
+   https://github.com/robur-coop/happy-eyeballs/releases/download/v2.0.1/happy-eyeballs-2.0.1.tbz)
+  (checksum
+   sha256=b2554588302931ba85e18861e610a3ada7823496d4d49a195e953556c351d269)))

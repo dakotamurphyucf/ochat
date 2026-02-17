@@ -1,0 +1,18 @@
+(version 1.14)
+
+(install
+ (all_platforms
+  (run %{make} install)))
+
+(build
+ (all_platforms ((action (run %{make} all)))))
+
+(depends
+ (all_platforms
+  (ocaml ocamlfind conf-zlib)))
+
+(source
+ (fetch
+  (url https://github.com/xavierleroy/camlzip/archive/refs/tags/v1.14.tar.gz)
+  (checksum
+   sha256=d2ce7ebc4d3b7c029daecd0b491a36163b22f7e1d95e86224d4a27a101f36177)))

@@ -1,0 +1,15 @@
+(version 0.2.3)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (astring dune ocplib-endian rresult camlzip ocaml)))
+
+(source
+ (fetch
+  (url
+   https://github.com/hcarty/ezgzip/releases/download/v0.2.3/ezgzip-v0.2.3.tbz)
+  (checksum
+   sha256=8868eedb98f83b2d53f091a827db9b7a5b4e9ba538bbc080c91b4ac4baf679d4)))

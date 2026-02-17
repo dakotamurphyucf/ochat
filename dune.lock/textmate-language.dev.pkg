@@ -1,0 +1,14 @@
+(version dev)
+
+(build
+ (all_platforms ((dune))))
+
+(depends
+ (all_platforms
+  (oniguruma ocaml)))
+
+(source
+ (fetch
+  (url git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git)))
+
+(dev)

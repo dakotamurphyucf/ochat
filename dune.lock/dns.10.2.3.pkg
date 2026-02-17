@@ -1,0 +1,31 @@
+(version 10.2.3)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (dune
+   ocaml
+   logs
+   ptime
+   fmt
+   domain-name
+   gmap
+   ipaddr
+   lru
+   duration
+   metrics
+   ohex
+   base64)))
+
+(source
+ (fetch
+  (url
+   https://github.com/mirage/ocaml-dns/releases/download/v10.2.3/dns-10.2.3.tbz)
+  (checksum
+   sha256=c895b2d112c4aa60c0987a09eb59f0d9602bd804fecf4124795be16e4a86734a)))

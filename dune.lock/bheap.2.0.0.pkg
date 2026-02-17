@@ -1,0 +1,19 @@
+(version 2.0.0)
+
+(build
+ (all_platforms
+  ((action
+    (progn
+     (when %{pkg-self:dev} (run dune subst))
+     (run dune build -p %{pkg-self:name} -j %{jobs}))))))
+
+(depends
+ (all_platforms
+  (ocaml dune)))
+
+(source
+ (fetch
+  (url
+   https://github.com/backtracking/bheap/releases/download/2.0.0/bheap-2.0.0.tbz)
+  (checksum
+   sha256=5f43d7b237bc87b07097f60eae2b32de64e644158308da338bf1512014bdf636)))

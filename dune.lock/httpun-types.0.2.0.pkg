@@ -1,0 +1,15 @@
+(version 0.2.0)
+
+(build
+ (all_platforms ((action (run dune build -p %{pkg-self:name} -j %{jobs})))))
+
+(depends
+ (all_platforms
+  (ocaml dune faraday)))
+
+(source
+ (fetch
+  (url
+   https://github.com/anmonteiro/httpun/releases/download/0.2.0/httpun-0.2.0.tbz)
+  (checksum
+   sha256=a2ce27ef4c85ae8e1c1008d1e3d5e893d6b211b934586a1dd2942f7db687bd2c)))
