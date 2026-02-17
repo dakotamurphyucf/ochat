@@ -239,7 +239,7 @@ let custom_fn ~env (c : CM.custom_tool) : Ochat_function.t =
   in
   (* timeout functioin eio *)
   let fp x =
-    try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 60.0 (fun () -> fp x) with
+    try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 180.0 (fun () -> fp x) with
     | Eio.Time.Timeout ->
       Printf.sprintf "timeout running command %s" (String.concat ~sep:" " x)
   in

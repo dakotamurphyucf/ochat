@@ -57,18 +57,17 @@ type inline =
   | Inline_text of string
   | Inline_code of string
 
-(** [split_inline s] scans [s] for inline code spans delimited by single
-    backticks and returns an alternating sequence of [Inline_text] and
-    [Inline_code].
+(** [split_inline s] scans [s] for inline code spans delimited by backticks
+    and returns an alternating sequence of [Inline_text] and [Inline_code].
 
     Behaviour and limitations:
-    - Only single backticks are recognized; backtick escaping and multi-
-      backtick delimiters are not supported.
+    - Backtick runs of length [n >= 1] are recognized, and a code span is
+      formed by the next run with at least [n] consecutive backticks. (Only
+      [n] backticks are consumed as the delimiter; any remaining backticks are
+      treated as normal text.)
+    - A backtick preceded by a backslash is treated as a literal character and
+      does not start or end a code span.
     - Nesting is not supported.
-    - If a closing backtick is missing, the unterminated code content is
-      treated as plain text, and the opening backtick is dropped.
-    - Known issue: characters captured inside a closed code span are also
-      accumulated into the surrounding [Inline_text] buffer, which can lead to
-      duplication in the returned list (e.g. ["a ", `b`, "b c"]). Callers
-      should account for this until the implementation is fixed. *)
+    - If a closing delimiter is missing, the opening delimiter is treated as
+      plain text (it is not dropped). *)
 val split_inline : string -> inline list

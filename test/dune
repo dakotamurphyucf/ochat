@@ -310,6 +310,42 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Chat-TUI – Highlight engine scope-preserving API tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_highlight_tm_engine_scopes_test)
+ (modules chat_tui_highlight_tm_engine_scopes_test)
+ (libraries core expect_test_helpers_core jsonaf chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Highlight engine Tokenize_error fallback reporting tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_highlight_tm_engine_tokenize_error_test)
+ (modules chat_tui_highlight_tm_engine_tokenize_error_test)
+ (libraries core expect_test_helpers_core jsonaf chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Markdown marker suppression tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_markdown_marker_suppression_test)
+ (modules chat_tui_markdown_marker_suppression_test)
+ (libraries core expect_test_helpers_core notty chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; Chat-TUI – Type-ahead reducer debounce / stale-result tests
 ;; ---------------------------------------------------------------------------
 
