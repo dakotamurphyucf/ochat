@@ -56,6 +56,29 @@ let build_system_summary_message
   Item.Input_message msg
 ;;
 
+let process_current_history history =
+  let open Openai.Responses in
+  let devs, comps, count =
+    List.fold history ~init:([], [], 0) ~f:(fun (devs, comps, count) item ->
+      match item with
+      | Item.Input_message { role; content; _ } ->
+        (match role with
+         | System | Developer -> item :: devs, comps, count
+         | User ->
+           (match content with
+            | Input_message.Text { text; _ } :: _ ->
+              if String.strip text |> String.is_prefix ~prefix:"<system-reminder>"
+              then devs, item :: comps, count + 1
+              else devs, comps, count
+            | _ -> devs, comps, count)
+         | _ -> devs, comps, count)
+      | _ -> devs, comps, count)
+  in
+  let devs = List.rev devs in
+  let comps = List.rev comps in
+  devs, comps, count
+;;
+
 (*------------------------------------------------------------------*)
 (*  Public API                                                       *)
 (*------------------------------------------------------------------*)
@@ -109,22 +132,12 @@ let compact_history ~env ~(history : Openai.Responses.Item.t list)
     Log.emit `Debug @@ sprintf "Compactor.compact_history: summary:\n%s" summary;
     (* Build the new history, keeping the first message intact. *)
     (* filter so only developer messages and system-reminders are kept *)
-    let new_history =
-      List.filter history ~f:(fun item ->
-        let open Openai.Responses in
-        match item with
-        | Input_message { role; content; _ } ->
-          (match role with
-           | System | Developer -> true
-           | User ->
-             (match content with
-              | Input_message.Text { text; _ } :: _ ->
-                String.strip text |> String.is_prefix ~prefix:"<system-reminder>"
-              | _ -> false)
-           | _ -> false)
-        | _ -> false)
+    let devs, comps, summary_count = process_current_history history in
+    (* dropping older compactions to save on space and relying on hueristic that newer compacted sessions are more relevant *)
+    let comps =
+      if summary_count > 10 then List.drop comps (summary_count - 10) else comps
     in
-    List.concat [ new_history; [ build_system_summary_message summary ] ]
+    List.concat [ devs; comps; [ build_system_summary_message summary ] ]
   with
   | exn ->
     (* Fallback to identity transformation on error. *)

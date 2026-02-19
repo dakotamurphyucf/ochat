@@ -550,12 +550,14 @@ module Request = struct
     module Effort = struct
       type t =
         | None [@name "none"]
+        | Minimal [@name "minimal"]
         | Low [@name "low"]
         | Medium [@name "medium"]
         | High [@name "high"]
       [@@deriving sexp, bin_io]
 
       let jsonaf_of_t = function
+        | Minimal -> `String "minimal"
         | None -> `String "none"
         | Low -> `String "low"
         | Medium -> `String "medium"
@@ -563,6 +565,7 @@ module Request = struct
       ;;
 
       let t_of_jsonaf = function
+        | `String "minimal" -> Minimal
         | `String "none" -> None
         | `String "low" -> Low
         | `String "medium" -> Medium
@@ -572,6 +575,7 @@ module Request = struct
 
       let to_str = function
         | None -> "none"
+        | Minimal -> "minimal"
         | Low -> "low"
         | Medium -> "medium"
         | High -> "high"
@@ -579,6 +583,7 @@ module Request = struct
 
       let of_str_exn = function
         | "none" -> None
+        | "minimal" -> Minimal
         | "low" -> Low
         | "medium" -> Medium
         | "high" -> High

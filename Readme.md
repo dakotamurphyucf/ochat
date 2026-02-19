@@ -373,19 +373,15 @@ that makes ChatMD workflows easy to debug and version‑control.
 
 ## Project status – expect rapid change
 
-Ochat is a **research-grade** project that is evolving very rapidly.  APIs,
-tool schemas, file formats and even high-level design choices may change as
-we explore what works and what does not. If you intend to build something on
-top of Ochat, please be prepared to:
-
-* pin a specific commit or tag,
-* re-run the tests after every `git pull`, and
-* embrace breaking changes as part of the fun.
+Ochat is a *Fast-moving project; core file format is designed to stay stable.  APIs,
+tool schemas, and even high-level design choices may change as
+we explore what works and what does not.
 
 Despite the experimental label, **you can build real value today** – the
 repository already enables powerful custom agent workflows.  I use it daily
 with custom agents for everything from developing and documentation
-generation, to writing emails and automating mundane tasks.
+generation, to writing emails and automating mundane tasks. Plus the workflow artifacts are plain text; 
+even when internals change, your prompts remain portable
 
 Please budget time for occasional refactors and breaking changes.
 Bug reports, feature requests, and PRs are welcome and encouraged actually – just keep in mind the ground may still be

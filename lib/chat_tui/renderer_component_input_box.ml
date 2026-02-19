@@ -5,6 +5,12 @@ open Notty
 
 let ghost_attr = A.(bg (gray 2) ++ fg (gray 15))
 
+let safe_string attr s =
+  match I.string attr s with
+  | img -> img
+  | exception _e -> I.string attr "[error: invalid input]"
+;;
+
 let input_lines ~(model : Model.t) =
   match Model.mode model with
   | Cmdline -> [ Model.cmdline model ]
@@ -49,7 +55,7 @@ let content_img_for_line
       ~overlap
   =
   match overlap with
-  | None -> I.string text_attr (line_prefix ^ line)
+  | None -> safe_string text_attr (line_prefix ^ line)
   | Some (ov_s, ov_e) ->
     let line_len = String.length line in
     let local_start = ov_s - line_start in

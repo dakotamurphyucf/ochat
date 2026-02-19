@@ -9,7 +9,9 @@ let fallback_to_string = function
   | Some Chat_tui.Highlight_tm_engine.Tokenize_error -> "Tokenize_error"
 ;;
 
-let%expect_test "highlight_text_with_info reports Tokenize_error and falls back for all lines" =
+let%expect_test
+    "highlight_text_with_info reports Tokenize_error and falls back for all lines"
+  =
   let reg = Chat_tui.Highlight_tm_loader.create_registry () in
   let grammar =
     Jsonaf.parse
@@ -44,7 +46,9 @@ let%expect_test "highlight_text_with_info reports Tokenize_error and falls back 
     |}]
 ;;
 
-let%expect_test "highlight_text_with_scopes_with_info also reports Tokenize_error and falls back" =
+let%expect_test
+    "highlight_text_with_scopes_with_info also reports Tokenize_error and falls back"
+  =
   let reg = Chat_tui.Highlight_tm_loader.create_registry () in
   let grammar =
     Jsonaf.parse
@@ -82,4 +86,3 @@ let%expect_test "highlight_text_with_scopes_with_info also reports Tokenize_erro
        ((there ())))))
     |}]
 ;;
-

@@ -3,30 +3,14 @@ open Eio.Std
 module Res = Openai.Responses
 module Req = Res.Request
 
-let cursor_marker = "⟦CURSOR⟧"
-let max_draft_before_cursor = 4000
-let max_draft_after_cursor = 4000
+let cursor_marker = "⟦INSERT⟧"
 let max_returned_chars = 4_000
-let max_message_length = 10_000
+let max_message_length = 5000
+let max_history_length = max_message_length * 2
 
 let insert_marker ~text ~cursor =
   let cursor = Int.min (String.length text) (Int.max 0 cursor) in
   String.prefix text cursor ^ cursor_marker ^ String.drop_prefix text cursor
-;;
-
-let excerpt_draft ~draft ~cursor =
-  let len = String.length draft in
-  let cursor = Int.min len (Int.max 0 cursor) in
-  if len <= max_draft_before_cursor + max_draft_after_cursor
-  then insert_marker ~text:draft ~cursor
-  else (
-    let start = Int.max 0 (cursor - max_draft_before_cursor) in
-    let stop = Int.min len (cursor + max_draft_after_cursor) in
-    let sub = String.sub draft ~pos:start ~len:(stop - start) in
-    let cursor_in_sub = cursor - start in
-    let prefix = if start = 0 then "" else "…\n" in
-    let suffix = if stop = len then "" else "\n…" in
-    prefix ^ insert_marker ~text:sub ~cursor:cursor_in_sub ^ suffix)
 ;;
 
 let string_of_tool_output output =
@@ -41,21 +25,17 @@ let string_of_tool_output output =
     |> String.concat ~sep:"\n"
 ;;
 
-let render_history_for_prompt (items : Res.Item.t list) : string =
+let render_history_for_prompt items : string =
   let render_item = function
-    | Res.Item.Input_message { role; content; _type = _ } ->
-      (match content with
-       | Res.Input_message.Text { text; _type = _ } :: _ ->
-         Some (sprintf "%s: %s" (Res.Input_message.role_to_string role) text)
-       | _ -> None)
-    | Res.Item.Output_message { content; _ } ->
-      (match content with
-       | { text; _ } :: _ -> Some (sprintf "assistant: %s" text)
-       | _ -> None)
+    | "assistant", msg -> Some msg
+    | "user", msg -> Some msg
+    | "developer", msg -> Some msg
+    | "system", msg -> Some msg
     | _ -> None
   in
-  items
-  |> List.filter_map ~f:render_item
+  let items = List.map items ~f:(fun x -> render_item x) |> List.filter_opt in
+  let len = List.length items in
+  (if len > 3 then List.drop items (len - 3) else items)
   |> List.map ~f:(fun x -> String.prefix x max_message_length)
   |> String.concat ~sep:"\n"
 ;;
@@ -73,39 +53,36 @@ let strip_code_fences (text : string) : string =
 
 let completion_system_prompt =
   {|
-You are a type-ahead completion engine. Your goal is to provide accurate and relevant text completions
+You are a type-ahead completion engine.
 
 You are given:
-- a conversation context
-- a draft buffer excerpt for the next message in the conversation containing the literal marker ⟦CURSOR⟧ that indicates the insertion point
+- a completion context
+- a draft buffer excerpt containing the literal marker ⟦INSERT⟧ that indicates the insertion point
 
-Return ONLY the text to insert at ⟦CURSOR⟧ (the suffix after the marker).
+Return ONLY the text to insert at ⟦INSERT⟧ (the suffix after the marker).
 
 Guidelines for Completion:
-- Carefully review conversation context and draft buffer excerpt.
-- Use what you learn from conversation context for material to inform more accurate predictions
-- Use context clues from both conversation context, draft buffer, and your own knowledge to inform your predictions
-- Look for patterns in the conversation context and draft buffer to inform your predictions
-- Predictions must make logical sense
+- the completion context is possibly relevant information to the completion of the draft buffer.
 
 Constraints:
-- Output must be the insertion text only (no quotes, no explanations, no Markdown fences).
-- Do not repeat any draft text that appears before ⟦CURSOR⟧.
-- Keep it short; if no completion is appropriate, return an empty string.
-- Predictions must make logical sense. It is better to return an empty string than an incorrect or nonsensical prediction.
-- Multi-line completions should only be provided if the input position clearly requests block-level or multi-line completion.
-- Do not use tools.
+- Output must be the insertion text only.
+- You must ensure you do not repeat text that appears before ⟦INSERT⟧ or after it.
+  <example>
+  # so say you had this
+  mary had a li⟦INSERT⟧
+
+  # then you should output
+  ttle lamb
+
+  # do not output
+  little lamb
+  </example>
+- You must ensure lines do not exceed 80 characters. Insert a newline character if necessary.
+- You must keep completions short; if no completion is appropriate, return an empty string.
 |}
 ;;
 
-let complete_suffix
-      ~sw
-      ~env
-      ~dir
-      ~(cfg : Chat_response.Config.t)
-      ~history_items
-      ~draft
-      ~cursor
+let complete_suffix ~sw ~env ~dir ~(cfg : Chat_response.Config.t) ~messages ~draft ~cursor
   =
   Switch.check sw;
   let api_key_present =
@@ -117,25 +94,22 @@ let complete_suffix
   then ""
   else (
     let net = Eio.Stdenv.net env in
-    let temperature = Option.value cfg.temperature ~default:0.2 in
-    let max_output_tokens =
-      let cfg_max = Option.value cfg.max_tokens ~default:500 in
-      Int.min 500 (Int.max 1 cfg_max)
-    in
-    let model = Option.map cfg.model ~f:Req.model_of_str_exn in
-    let reasoning = Req.Reasoning.{ effort = Some None; summary = None } in
-    let conversation = render_history_for_prompt history_items in
-    let draft_excerpt = excerpt_draft ~draft ~cursor in
+    (* let temperature = Option.value cfg.temperature ~default:0.2 in *)
+    let max_output_tokens = 200 in
+    let model = Req.Unknown "gpt-5-mini" in
+    (* Option.map cfg.model ~f:Req.model_of_str_exn in *)
+    let reasoning = Req.Reasoning.{ effort = Some Minimal; summary = None } in
+    let completion_context = render_history_for_prompt messages in
+    let draft_excerpt = insert_marker ~text:draft ~cursor in
     let user_prompt =
       String.concat
         ~sep:"\n\n"
-        [ "<conversation>"
-        ; conversation
-        ; "</conversation>"
-        ; "<draft>"
+        [ "<<<|completion-context-start|>>>"
+        ; completion_context
+        ; "<<<|completion-context-end|>>>"
+        ; "<<<|draft-buffer-start|>>>"
         ; draft_excerpt
-        ; "</draft>"
-        ; sprintf "cursor_index: %d" cursor
+        ; "<<<|draft-buffer-end|>>>"
         ]
     in
     let text_item text : Res.Input_message.content_item =
@@ -155,11 +129,10 @@ let complete_suffix
     let ({ Res.Response.output; _ } : Res.Response.t) =
       Res.post_response
         Res.Default
-        ~max_output_tokens
-        ~temperature
+        ~max_output_tokens (* ~temperature *)
         ~verbosity:"low"
         ~tools:[]
-        ?model
+        ~model
         ?reasoning:(Some reasoning)
         ~dir
         net
@@ -175,8 +148,7 @@ let complete_suffix
     in
     let raw = find_text output in
     raw
-    |> strip_code_fences
     |> fun s ->
     String.substr_replace_all s ~pattern:cursor_marker ~with_:""
-    |> fun s -> String.prefix s max_returned_chars |> Util.sanitize ~strip:false)
+    |> Util.sanitize ~strip:false)
 ;;

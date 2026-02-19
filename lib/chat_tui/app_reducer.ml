@@ -150,7 +150,7 @@ let run (ctx : Context.t) =
               ~env
               ~dir:services.cwd
               ~cfg:ctx.submit.streaming.cfg
-              ~history_items:(Model.history_items model)
+              ~messages:(Model.messages model)
               ~draft:req.base_input
               ~cursor:req.base_cursor
           in
@@ -632,7 +632,7 @@ let run (ctx : Context.t) =
       match Eio.Stream.take_nonblocking internal_stream with
       | Some ev -> if handle_app_event (ev :> app_event) then main_loop () else ()
       | None ->
-        if not (List.is_empty input_batch)
+        if not (Eio.Stream.is_empty input_stream)
         then main_loop ()
         else (
           let ready : app_event list =

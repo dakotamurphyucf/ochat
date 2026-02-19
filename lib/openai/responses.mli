@@ -334,6 +334,7 @@ module Request : sig
     module Effort : sig
       type t =
         | None
+        | Minimal
         | Low
         | Medium
         | High

@@ -377,3 +377,10 @@
  (libraries core io openai owl bin_prot_utils_eio)
  (preprocess
   (pps ppx_jane)))
+
+;; ---------------------------------------------------------------------------
+;; Chromium agent tooling (CDP)
+;;
+;; The Chromium agent library lives in a subdirectory:
+;;   lib/chromium_agent/dune
+;; ---------------------------------------------------------------------------

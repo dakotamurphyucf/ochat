@@ -23,7 +23,7 @@ end
 let safe_string attr s =
   match I.string attr s with
   | img -> img
-  | exception _e -> I.string attr "[error: invalid input]"
+  | exception _e -> I.string attr ""
 ;;
 
 module Roles = struct
@@ -196,10 +196,7 @@ module Render_context = struct
 end
 
 let lang_of_path = Renderer_lang.lang_of_path
-
-let has_scope_prefix scopes ~prefix =
-  List.exists scopes ~f:(String.is_prefix ~prefix)
-;;
+let has_scope_prefix scopes ~prefix = List.exists scopes ~f:(String.is_prefix ~prefix)
 
 let is_only_char s ~char =
   (not (String.is_empty s)) && String.for_all s ~f:(Char.equal char)
@@ -208,8 +205,9 @@ let is_only_char s ~char =
 let should_drop_markdown_delimiter ~scopes ~text =
   if has_scope_prefix scopes ~prefix:"punctuation.definition.raw"
   then is_only_char text ~char:'`'
-  else if has_scope_prefix scopes ~prefix:"punctuation.definition.bold"
-          || has_scope_prefix scopes ~prefix:"punctuation.definition.italic"
+  else if
+    has_scope_prefix scopes ~prefix:"punctuation.definition.bold"
+    || has_scope_prefix scopes ~prefix:"punctuation.definition.italic"
   then is_only_char text ~char:'*' || is_only_char text ~char:'_'
   else false
 ;;
@@ -259,7 +257,7 @@ module Paint = struct
     { bold : bool
     ; italic : bool
     }
- 
+
   let fallback_bold_attr =
     Highlight_theme.attr_of_scopes
       Highlight_theme.github_dark
@@ -334,10 +332,7 @@ module Paint = struct
       else (
         match marker_at s ~pos:i ~limit with
         | Some (ch, len, kind) when can_open_marker s ~pos:i ~len ~limit ~ch ->
-          if Int.equal len 1
-             && i > pos
-             && i > 0
-             && Char.equal s.[i - 1] ch
+          if Int.equal len 1 && i > pos && i > 0 && Char.equal s.[i - 1] ch
           then loop (i + 1)
           else Some (i, ch, len, kind)
         | _ -> loop (i + 1))
@@ -354,7 +349,8 @@ module Paint = struct
     let rec loop i =
       if i + len > limit
       then None
-      else if is_marker_at s ~pos:i ~len ~limit ~ch && can_close_marker s ~pos:i ~len ~limit
+      else if
+        is_marker_at s ~pos:i ~len ~limit ~ch && can_close_marker s ~pos:i ~len ~limit
       then Some i
       else loop (i + 1)
     in
@@ -379,7 +375,9 @@ module Paint = struct
          let rest = parse_emphasis_range s ~style ~pos:open_end ~limit in
          let marker = String.make len ch in
          List.concat
-           [ (if String.is_empty before then [] else [ fallback_attr_of_style style, before ])
+           [ (if String.is_empty before
+              then []
+              else [ fallback_attr_of_style style, before ])
            ; [ fallback_attr_of_style style, marker ]
            ; rest
            ]
@@ -387,7 +385,9 @@ module Paint = struct
          let marker = String.make len ch in
          let rest = parse_emphasis_range s ~style ~pos:open_end ~limit in
          List.concat
-           [ (if String.is_empty before then [] else [ fallback_attr_of_style style, before ])
+           [ (if String.is_empty before
+              then []
+              else [ fallback_attr_of_style style, before ])
            ; [ fallback_attr_of_style style, marker ]
            ; rest
            ]
@@ -401,14 +401,20 @@ module Paint = struct
          in
          let rest = parse_emphasis_range s ~style ~pos:(close_pos + len) ~limit in
          List.concat
-           [ (if String.is_empty before then [] else [ fallback_attr_of_style style, before ])
+           [ (if String.is_empty before
+              then []
+              else [ fallback_attr_of_style style, before ])
            ; inner
            ; rest
            ])
   ;;
 
   let fallback_emphasis_spans s =
-    parse_emphasis_range s ~style:{ bold = false; italic = false } ~pos:0 ~limit:(String.length s)
+    parse_emphasis_range
+      s
+      ~style:{ bold = false; italic = false }
+      ~pos:0
+      ~limit:(String.length s)
   ;;
 
   let fallback_markdown_spans (para : string) : (A.t * string) list =

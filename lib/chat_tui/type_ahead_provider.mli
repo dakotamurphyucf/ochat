@@ -28,7 +28,7 @@ val complete_suffix
   -> env:Eio_unix.Stdenv.base
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> cfg:Chat_response.Config.t
-  -> history_items:Openai.Responses.Item.t list
+  -> messages:(string * string) list
   -> draft:string
   -> cursor:int
   -> string

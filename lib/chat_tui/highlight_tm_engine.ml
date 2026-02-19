@@ -67,7 +67,9 @@ let compress_adjacent_scoped (spans : scoped_span list) : scoped_span list =
   loop [] spans
 ;;
 
-let scoped_spans_of_tokens ~theme ~line (tokens : TmLanguage.token list) : scoped_span list =
+let scoped_spans_of_tokens ~theme ~line (tokens : TmLanguage.token list)
+  : scoped_span list
+  =
   let line_len = String.length line in
   let spans, _prev_end =
     Stdlib.List.fold_left
@@ -84,7 +86,7 @@ let scoped_spans_of_tokens ~theme ~line (tokens : TmLanguage.token list) : scope
          let attr = Highlight_theme.attr_of_scopes theme ~scopes in
          if String.is_empty text
          then acc_spans, ending
-         else ({ attr; text; scopes } :: acc_spans), ending)
+         else { attr; text; scopes } :: acc_spans, ending)
       ([], 0)
       tokens
   in
@@ -107,7 +109,9 @@ let spans_of_tokens ~theme ~line (tokens : TmLanguage.token list) : span list =
          let attr =
            Highlight_theme.attr_of_scopes theme ~scopes:(TmLanguage.scopes tok)
          in
-         if String.is_empty text then acc_spans, ending else (attr, text) :: acc_spans, ending)
+         if String.is_empty text
+         then acc_spans, ending
+         else (attr, text) :: acc_spans, ending)
       ([], 0)
       tokens
   in
@@ -127,7 +131,9 @@ let highlight_lines_with_scopes ~theme reg grammar ~text =
       (match tokenize_line reg grammar stack line with
        | Error _e -> Error ()
        | Ok (tokens, stack') ->
-         let spans = scoped_spans_of_tokens ~theme ~line tokens |> compress_adjacent_scoped in
+         let spans =
+           scoped_spans_of_tokens ~theme ~line tokens |> compress_adjacent_scoped
+         in
          let spans =
            if List.is_empty spans
            then [ { attr = Notty.A.empty; text = line; scopes = [] } ]
@@ -195,14 +201,12 @@ let highlight_text_with_scopes_with_info (t : t) ~lang ~text
   =
   match t.registry, lang with
   | None, _ -> fallback_scoped_spans ~text, { fallback = Some No_registry }
-  | Some _, None ->
-    fallback_scoped_spans ~text, { fallback = Some (Unknown_language "") }
+  | Some _, None -> fallback_scoped_spans ~text, { fallback = Some (Unknown_language "") }
   | Some reg, Some l ->
     (match Highlight_tm_loader.find_grammar_by_lang_tag reg l with
      | None -> fallback_scoped_spans ~text, { fallback = Some (Unknown_language l) }
      | Some grammar ->
        (match highlight_lines_with_scopes ~theme:t.theme reg grammar ~text with
         | Ok spans -> spans, { fallback = None }
-        | Error () ->
-          fallback_scoped_spans ~text, { fallback = Some Tokenize_error }))
+        | Error () -> fallback_scoped_spans ~text, { fallback = Some Tokenize_error }))
 ;;

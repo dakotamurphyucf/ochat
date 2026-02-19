@@ -603,7 +603,13 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
   | `Key (`Arrow `Up, mods) when List.mem mods `Meta ~equal:Poly.equal ->
     move_cursor_vertically model ~dir:(-1);
     Redraw
+  | `Key (`Arrow `Up, mods) when List.mem mods `Shift ~equal:Poly.equal ->
+    move_cursor_vertically model ~dir:(-1);
+    Redraw
   | `Key (`Arrow `Down, mods) when List.mem mods `Meta ~equal:Poly.equal ->
+    move_cursor_vertically model ~dir:1;
+    Redraw
+  | `Key (`Arrow `Down, mods) when List.mem mods `Shift ~equal:Poly.equal ->
     move_cursor_vertically model ~dir:1;
     Redraw
   (* ----------------------------------------------------------------- *)
@@ -634,7 +640,8 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
   (*  the feature works even if the terminal maps one modifier or the  *)
   (*  other.                                                           *)
   | `Key (`Arrow `Left, mods)
-    when List.exists mods ~f:(fun m -> Poly.equal m `Ctrl || Poly.equal m `Meta)
+    when List.exists mods ~f:(fun m ->
+           Poly.equal m `Ctrl || Poly.equal m `Meta || Poly.equal m `Shift)
          && not (List.mem mods `Shift ~equal:Poly.equal) ->
     let pos = Model.cursor_pos model in
     let s = Model.input_line model in
@@ -655,7 +662,8 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     Model.set_cursor_pos model (skip_word s len pos);
     Redraw
   | `Key (`Arrow `Right, mods)
-    when List.exists mods ~f:(fun m -> Poly.equal m `Ctrl || Poly.equal m `Meta)
+    when List.exists mods ~f:(fun m ->
+           Poly.equal m `Ctrl || Poly.equal m `Meta || Poly.equal m `Shift)
          && not (List.mem mods `Shift ~equal:Poly.equal) ->
     let pos = Model.cursor_pos model in
     let s = Model.input_line model in

@@ -50,4 +50,3 @@ let%expect_test "highlight_text_with_scopes preserves punctuation scopes per seg
       (`    false false true)))
     |}]
 ;;
-

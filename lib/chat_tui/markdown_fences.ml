@@ -115,21 +115,16 @@ let split_inline s =
   in
   let is_escaped i = i > 0 && Char.equal s.[i - 1] '\\' in
   let count_run i =
-    let rec loop j =
-      if j < len && Char.equal s.[j] '`' then loop (j + 1) else j
-    in
+    let rec loop j = if j < len && Char.equal s.[j] '`' then loop (j + 1) else j in
     loop i - i
   in
   let is_run_at i ~n =
     i + n <= len
-    && (let rec loop k =
-          if k = n
-          then true
-          else if Char.equal s.[i + k] '`'
-          then loop (k + 1)
-          else false
-        in
-        loop 0)
+    &&
+    let rec loop k =
+      if k = n then true else if Char.equal s.[i + k] '`' then loop (k + 1) else false
+    in
+    loop 0
   in
   let find_close ~from ~n =
     let rec loop i =

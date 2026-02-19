@@ -70,7 +70,11 @@ let render_to_string ~(w : int) ~(h : int) (img : Notty.I.t) : string =
   Buffer.contents buf
 ;;
 
-let render_message_to_string ~(width : int) ~(hi_engine : Chat_tui.Highlight_tm_engine.t) ~text =
+let render_message_to_string
+      ~(width : int)
+      ~(hi_engine : Chat_tui.Highlight_tm_engine.t)
+      ~text
+  =
   let img =
     Chat_tui.Renderer_component_message.render_message
       ~width
@@ -105,7 +109,13 @@ let%expect_test "should_drop_markdown_delimiter: unit cases" =
       [%here]
       (Bool.equal got expected)
       ~if_false_then_print_s:
-        (lazy [%message "unexpected result" (scopes : string list) (text : string) (got : bool) (expected : bool)]));
+        (lazy
+          [%message
+            "unexpected result"
+              (scopes : string list)
+              (text : string)
+              (got : bool)
+              (expected : bool)]));
   [%expect
     {|
     punctuation.definition.bold.markdown "**" -> true
@@ -121,16 +131,15 @@ let%expect_test "should_drop_markdown_delimiter: unit cases" =
     |}]
 ;;
 
-let%expect_test "scope-aware suppression removes markers and preserves content (scoped spans)" =
+let%expect_test
+    "scope-aware suppression removes markers and preserves content (scoped spans)"
+  =
   let open Chat_tui in
   let hi_engine = markdown_test_engine () in
   let text =
     String.concat
       ~sep:"\n"
-      [ "**BOLD** then *ITALIC* and `CODE`."
-      ; "* ITEM"
-      ; "**OUTER *INNER* OUTER**"
-      ]
+      [ "**BOLD** then *ITALIC* and `CODE`."; "* ITEM"; "**OUTER *INNER* OUTER**" ]
   in
   let lines, info =
     Highlight_tm_engine.highlight_text_with_scopes_with_info
@@ -141,9 +150,7 @@ let%expect_test "scope-aware suppression removes markers and preserves content (
   printf "fallback=%s\n" (fallback_to_string info.fallback);
   let lines = List.map lines ~f:Renderer_component_message.suppress_markdown_delimiters in
   let line_text spans =
-    spans
-    |> List.map ~f:(fun s -> s.Chat_tui.Highlight_tm_engine.text)
-    |> String.concat
+    spans |> List.map ~f:(fun s -> s.Chat_tui.Highlight_tm_engine.text) |> String.concat
   in
   let rendered = lines |> List.map ~f:line_text |> String.concat ~sep:"\n" in
   print_endline rendered;
@@ -176,7 +183,9 @@ let%expect_test "scope-aware suppression removes markers and preserves content (
     (has_scope
        code.Chat_tui.Highlight_tm_engine.scopes
        "markup.inline.raw.string.markdown")
-    (has_prefix code.Chat_tui.Highlight_tm_engine.scopes ~prefix:"punctuation.definition.raw");
+    (has_prefix
+       code.Chat_tui.Highlight_tm_engine.scopes
+       ~prefix:"punctuation.definition.raw");
   printf
     "inner: bold=%b italic=%b\n"
     (has_scope inner.Chat_tui.Highlight_tm_engine.scopes "markup.bold.markdown")
@@ -199,10 +208,7 @@ let%expect_test "renderer output: markers are hidden (scoped + fallback engines)
   let text_basic =
     String.concat
       ~sep:"\n"
-      [ "**BOLD** then *ITALIC* and `CODE`."
-      ; "* ITEM"
-      ; "**OUTER *INNER* OUTER**"
-      ]
+      [ "**BOLD** then *ITALIC* and `CODE`."; "* ITEM"; "**OUTER *INNER* OUTER**" ]
   in
   let text_multicode = "``CODE`WITH`BACKTICKS``" in
   let width = 140 in
@@ -231,11 +237,15 @@ let%expect_test "renderer output: markers are hidden (scoped + fallback engines)
     let hi_engine = Highlight_tm_engine.create ~theme:Highlight_theme.github_dark in
     let s = render_message_to_string ~width ~hi_engine ~text:text_multicode in
     let has sub = String.is_substring s ~substring:sub in
-    printf "fallback multicode: has_delims=%b has_content=%b\n" (has "``") (has "CODE`WITH`BACKTICKS");
+    printf
+      "fallback multicode: has_delims=%b has_content=%b\n"
+      (has "``")
+      (has "CODE`WITH`BACKTICKS");
     String.split_lines s
     |> List.map ~f:String.strip
     |> List.filter ~f:(fun line ->
-      String.is_substring line ~substring:"CODE" || String.is_substring line ~substring:"BACKTICKS")
+      String.is_substring line ~substring:"CODE"
+      || String.is_substring line ~substring:"BACKTICKS")
     |> List.iter ~f:(fun line -> printf "fallback multicode: %s\n" line)
   in
   check_basic ~which:"scoped" ~hi_engine:(markdown_test_engine ());
@@ -257,4 +267,3 @@ let%expect_test "renderer output: markers are hidden (scoped + fallback engines)
     fallback multicode: CODE`WITH`BACKTICKS
     |}]
 ;;
-

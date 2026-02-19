@@ -8,7 +8,7 @@
   (pps ppx_jane ppx_blob ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
-;; Webpage → Markdown conversion (MVP)                                         
+;; Webpage → Markdown conversion (MVP)
 ;; ---------------------------------------------------------------------------
 
 (library
@@ -286,7 +286,7 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
-;; Chat-TUI – Tool rendering smoke tests                                      
+;; Chat-TUI – Tool rendering smoke tests
 ;; ---------------------------------------------------------------------------
 
 (library
