@@ -25,6 +25,20 @@ let start (ctx : Context.t) ~history ~op_id =
   let tools = ctx.tools in
   let tool_tbl = ctx.tool_tbl in
   let datadir = ctx.shared.services.datadir in
+  let prompt_cache_key = Option.map ctx.shared.services.session ~f:(fun s -> s.id) in
+  let prompt_cache_retention =
+    match cfg.model with
+    | Some "gpt-5.2" -> Some "24h"
+    | Some "gp5-5.1-codex-max" -> Some "24h"
+    | Some "gpt-5.1" -> Some "24h"
+    | Some "gpt-5.1-codex" -> Some "24h"
+    | Some "gpt-5.1-codex-mini" -> Some "24h"
+    | Some "gpt-5.1-chat-latest" -> Some "24h"
+    | Some "gpt-5" -> Some "24h"
+    | Some "gpt-5-codex" -> Some "24h"
+    | Some "gpt-4.1" -> Some "24h"
+    | _ -> None
+  in
   let parallel_tool_calls = ctx.parallel_tool_calls in
   let history_compaction = ctx.history_compaction in
   try
@@ -93,6 +107,8 @@ let start (ctx : Context.t) ~history ~op_id =
                { effort = Some (Req.Reasoning.Effort.of_str_exn eff)
                ; summary = Some Req.Reasoning.Summary.Detailed
                }))
+        ?prompt_cache_key
+        ?prompt_cache_retention
         ~history_compaction
         ?model:(Option.map cfg.model ~f:Req.model_of_str_exn)
         ~on_event

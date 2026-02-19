@@ -596,13 +596,13 @@ let run_completion_stream
     let close_summary () = append_doc (Printf.sprintf "\n\t%s/summary%s" lt gt) in
     let close_reasoning () = append_doc (Printf.sprintf "\n%s/reasoning%s\n" lt gt) in
     (* -----------------------------------------------------------------
-       Parallel execution of tool calls                                   
+       Parallel execution of tool calls
 
        When [parallel_tool_calls] is [true], each tool invocation is
        scheduled in its own fiber under [sw].  A shared semaphore
        prevents unbounded concurrency.  The resulting outputs are
        collected and later appended **in the original call order** so
-       that the ChatMarkdown document remains deterministic.            
+       that the ChatMarkdown document remains deterministic.
        ---------------------------------------------------------------- *)
     (* Semaphore limiting concurrent invocations.  We create it lazily the
        first time a tool call is encountered to avoid the (small) cost
@@ -1011,6 +1011,8 @@ let run_completion_stream_in_memory_v1
       ?(meta_refine = false)
       ?system_event
       ?(model = Openai.Responses.Request.O3)
+      ?prompt_cache_key
+      ?prompt_cache_retention
       ()
   : Openai.Responses.Item.t list
   =
@@ -1218,6 +1220,8 @@ let run_completion_stream_in_memory_v1
         ~parallel_tool_calls
         ~model
         ?reasoning
+        ?prompt_cache_key
+        ?prompt_cache_retention
         ~dir:datadir
         net
         ~inputs:input_items;

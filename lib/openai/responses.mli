@@ -497,6 +497,8 @@ module Request : sig
     ; temperature : float option
     ; tools : Tool.t list option
     ; top_p : float option
+    ; prompt_cache_key : string option
+    ; prompt_cache_retention : string option
     ; text : Text.t option
     }
   [@@deriving jsonaf, sexp]
@@ -511,6 +513,8 @@ module Request : sig
     -> ?reasoning:Reasoning.t
     -> ?tools:Tool.t list
     -> ?verbosity:string
+    -> ?prompt_cache_key:string
+    -> ?prompt_cache_retention:string
     -> model:model
     -> input:Item.t list
     -> unit
@@ -1034,6 +1038,8 @@ val post_response
   -> ?parallel_tool_calls:bool
   -> ?reasoning:Request.Reasoning.t
   -> ?verbosity:string
+  -> ?prompt_cache_key:string
+  -> ?prompt_cache_retention:string
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> 'n Eio.Net.t
   -> inputs:Item.t list

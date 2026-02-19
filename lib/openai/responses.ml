@@ -892,6 +892,8 @@ module Request = struct
     ; temperature : float option [@jsonaf.option]
     ; tools : Tool.t list option [@jsonaf.option]
     ; top_p : float option [@jsonaf.option]
+    ; prompt_cache_key : string option [@jsonaf.option]
+    ; prompt_cache_retention : string option [@jsonaf.option]
     ; text : Text.t option [@jsonaf.option]
     }
   [@@jsonaf.allow_extra_fields] [@@deriving jsonaf, sexp]
@@ -906,6 +908,8 @@ module Request = struct
         ?reasoning
         ?tools
         ?verbosity
+        ?prompt_cache_key
+        ?prompt_cache_retention
         ~model
         ~input
         ()
@@ -926,6 +930,8 @@ module Request = struct
     ; reasoning
     ; tools
     ; text
+    ; prompt_cache_retention
+    ; prompt_cache_key
     }
   ;;
 end
@@ -1621,6 +1627,8 @@ let post_response
     -> ?parallel_tool_calls:bool
     -> ?reasoning:Request.Reasoning.t
     -> ?verbosity:string
+    -> ?prompt_cache_key:string
+    -> ?prompt_cache_retention:string
     -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> _ Eio.Net.t
     -> inputs:Item.t list
@@ -1634,6 +1642,8 @@ let post_response
     ?parallel_tool_calls
     ?reasoning
     ?verbosity
+    ?prompt_cache_key
+    ?prompt_cache_retention
     ~dir
     net
     ~inputs ->
@@ -1666,6 +1676,8 @@ let post_response
       ?tools
       ?reasoning
       ?verbosity
+      ?prompt_cache_key
+      ?prompt_cache_retention
       ~stream
       ()
   in

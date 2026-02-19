@@ -199,5 +199,7 @@ val run_completion_stream_in_memory_v1
   -> ?meta_refine:bool
   -> ?system_event:string Eio.Stream.t
   -> ?model:Openai.Responses.Request.model
+  -> ?prompt_cache_key:string
+  -> ?prompt_cache_retention:string
   -> unit
   -> Openai.Responses.Item.t list

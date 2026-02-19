@@ -110,6 +110,10 @@ let execute_command model line : reaction =
        else (
          let new_msgs = List.filteri msgs ~f:(fun i _ -> Int.(i <> sel_idx)) in
          Model.set_messages model new_msgs;
+         let new_history =
+           Model.history_items model |> List.filteri ~f:(fun i _ -> Int.(i <> sel_idx))
+         in
+         Model.set_history_items model new_history;
          (* Adjust selection to previous message or None *)
          let new_len = List.length new_msgs in
          if Int.(new_len = 0)
