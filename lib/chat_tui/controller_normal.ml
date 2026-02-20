@@ -39,60 +39,18 @@ open Controller_types
 (* Utility helpers – shared [line_bounds] lives in {!Controller_shared}.   *)
 (* -------------------------------------------------------------------- *)
 
-(** [move_cursor_vertically model ~dir] moves the caret [dir] visual lines
+(** [move_cursor_vertically model ~term ~dir] moves the caret [dir] visual rows
       up (`dir = -1`) or down (`dir = 1`).  The function keeps the {i visual
       column} constant where possible, i.e.
 
-      - It first determines the current column by subtracting the byte index
-        of the line start from {!Model.cursor_pos}.
-      - It then seeks the first byte of the target line in the requested
-        direction using {!Controller_shared.line_bounds}.
-      - Finally the caret is placed at the original column or, if the target
-        line is shorter, at its end‐of‐line.
-
       The operation is no-op when the cursor is already on the first or last
-      line of the input. *)
-let move_cursor_vertically model ~dir =
-  let input = Model.input_line model in
-  let pos = Model.cursor_pos model in
-  let col =
-    let start, _ = Controller_shared.line_bounds input pos in
-    pos - start
-  in
-  let rec seek_line i step remaining =
-    if remaining = 0 || i < 0 || i >= String.length input
-    then i
-    else (
-      let i' =
-        match dir with
-        | -1 (* up *) ->
-          (* move left until before newline *)
-          let j = ref (i - 1) in
-          while !j >= 0 && not (Char.equal (String.get input !j) '\n') do
-            decr j
-          done;
-          !j
-        | 1 ->
-          let j = ref (i + 1) in
-          while !j < String.length input && not (Char.equal (String.get input !j) '\n') do
-            incr j
-          done;
-          !j
-        | _ -> i
-      in
-      seek_line i' step (remaining - 1))
-  in
-  let target_line_pos =
-    let start, _ = Controller_shared.line_bounds input pos in
-    let i = if dir < 0 then start else snd (Controller_shared.line_bounds input pos) in
-    seek_line i dir 1
-  in
-  (* At line start of new line; now move to desired column or EOL *)
-  let target_line_start, target_line_end =
-    Controller_shared.line_bounds input target_line_pos
-  in
-  let new_pos = Int.min (target_line_start + col) target_line_end in
-  Model.set_cursor_pos model new_pos
+      display row of the input. *)
+
+let move_cursor_vertically model ~term ~dir =
+  let box_width, _ = Notty_eio.Term.size term in
+  match Input_display.cursor_pos_after_vertical_move ~box_width ~model ~dir with
+  | None -> ()
+  | Some new_pos -> Model.set_cursor_pos model new_pos
 ;;
 
 (* Word navigation helpers (adapted from Insert-mode implementation) *)
@@ -197,10 +155,10 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
   (* ------------------------------------------------------------------ *)
   (* Up / Down by visual line                                             *)
   | `Key (`ASCII 'k', mods) when List.is_empty mods ->
-    move_cursor_vertically model ~dir:(-1);
+    move_cursor_vertically model ~term ~dir:(-1);
     Redraw
   | `Key (`ASCII 'j', mods) when List.is_empty mods ->
-    move_cursor_vertically model ~dir:1;
+    move_cursor_vertically model ~term ~dir:1;
     Redraw
   (* ------------------------------------------------------------------ *)
   (* Word-wise navigation                                                 *)
@@ -255,13 +213,9 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     pending_dd := false;
     Unhandled
   | `Key (`ASCII 'G', mods) when List.is_empty mods ->
-    let _, screen_h = Notty_eio.Term.size term in
-    let input_h =
-      match String.split_lines (Model.input_line model) with
-      | [] -> 1
-      | ls -> List.length ls
-    in
-    Scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:(screen_h - input_h);
+    let screen_w, screen_h = Notty_eio.Term.size term in
+    let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
+    Scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:layout.scroll_height;
     (* Also move selection to bottom when in selection mode *)
     let msg_count = List.length (Model.messages model) in
     if msg_count > 0 then Model.select_message model (Some (msg_count - 1));

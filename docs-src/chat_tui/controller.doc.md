@@ -116,7 +116,8 @@ operations are **in-place updates** of `Model.t` fields.
 - `Ctrl-A` / `Ctrl-E` move to the beginning / end of the current line.
 - `Ctrl+Home` / `Ctrl+End` move to the beginning / end of the entire prompt.
 - `Ctrl+Up` / `Ctrl+Down` move the caret by one **visual line** within the
-  multi-line prompt while trying to preserve the visual column.
+  prompt while trying to preserve the visual column. Visual lines include
+  both literal newline-separated lines and soft-wrapped display rows.
 
 All cursor positions are stored as **byte indices** into the UTF‑8 string,
 mirroring `String.get` / `String.length` from Core. See
@@ -216,8 +217,19 @@ completion.
 While the preview is open, the preview body can be scrolled:
 
 - `Ctrl+Shift+Up` / `Ctrl+Shift+Down` scroll by one line.
+- `Ctrl+Shift+Left` jumps to the top of the preview.
+- `Ctrl+Shift+Right` jumps to the bottom of the preview.
 - Fallback: `PageUp` / `PageDown` scroll the preview while it is open (useful
   on terminals that cannot encode the `Ctrl+Shift+Up/Down` combinations).
+
+When the preview is *not* open, the same `Ctrl+Shift+Up` / `Ctrl+Shift+Down`
+key combinations page-jump the caret within the multi-line input buffer by one
+visible input-page. The input renderer then scrolls internally to keep the
+caret visible.
+
+Similarly, `Ctrl+Shift+Left` / `Ctrl+Shift+Right` jump the caret to the start /
+end of the input buffer (top/bottom of the input view) so the internal input
+viewport snaps accordingly.
 
 Any typing/edit that mutates `Model.input_line` closes the preview and dismisses
 the current completion so it cannot linger across edits.

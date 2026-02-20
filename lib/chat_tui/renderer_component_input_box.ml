@@ -11,21 +11,8 @@ let safe_string attr s =
   | exception _e -> I.string attr "[error: invalid input]"
 ;;
 
-let input_lines ~(model : Model.t) =
-  match Model.mode model with
-  | Cmdline -> [ Model.cmdline model ]
-  | _ ->
-    (match String.split ~on:'\n' (Model.input_line model) with
-     | [] -> [ "" ]
-     | ls -> ls)
-;;
-
 let prompt_prefix_and_indent ~(model : Model.t) =
-  match Model.mode model with
-  | Cmdline -> ":", ""
-  | _ ->
-    let prefix = "> " in
-    prefix, String.make (String.length prefix) ' '
+  Input_display.prompt_prefix_and_indent ~model
 ;;
 
 let is_selection_active ~(model : Model.t) =
@@ -104,11 +91,11 @@ let content_img_for_cursor_line
       ~line
       ~line_start
       ~overlap
-      ~cursor_col
+      ~cursor_byte
       ~(ghost : string)
   =
   let line_len = String.length line in
-  let cursor_col = Int.min cursor_col line_len in
+  let cursor_byte = Int.min cursor_byte line_len in
   let local_overlap =
     match overlap with
     | None -> None
@@ -116,8 +103,8 @@ let content_img_for_cursor_line
   in
   let breakpoints =
     (match local_overlap with
-     | None -> [ 0; cursor_col; line_len ]
-     | Some (ov_s, ov_e) -> [ 0; cursor_col; ov_s; ov_e; line_len ])
+     | None -> [ 0; cursor_byte; line_len ]
+     | Some (ov_s, ov_e) -> [ 0; cursor_byte; ov_s; ov_e; line_len ])
     |> List.filter ~f:(fun i -> i >= 0 && i <= line_len)
     |> List.dedup_and_sort ~compare:Int.compare
   in
@@ -138,7 +125,7 @@ let content_img_for_cursor_line
     let s = String.sub line ~pos:a ~len:(b - a) in
     I.string attr s
   in
-  let before, after = List.partition_tf segments ~f:(fun (_a, b) -> b <= cursor_col) in
+  let before, after = List.partition_tf segments ~f:(fun (_a, b) -> b <= cursor_byte) in
   I.hcat
     ([ I.string text_attr line_prefix ]
      @ List.map before ~f:segment_img
@@ -160,16 +147,15 @@ let render_row
       ~prefix
       ~indent
       ~cursor_row
-      ~cursor_col
+      ~cursor_byte
       ~ghost_text
       ~idx
-      ~abs_off
-      ~line
+      (row : Input_display.row)
   =
   let line_prefix = if idx = 0 then prefix else indent in
-  let line_len = String.length line in
-  let line_start = abs_off in
-  let line_end = abs_off + line_len in
+  let line = row.text in
+  let line_start = row.start in
+  let line_end = row.stop in
   let overlap =
     if sel_active then selection_overlap_for_line ~model ~line_start ~line_end else None
   in
@@ -183,14 +169,13 @@ let render_row
         ~line
         ~line_start
         ~overlap
-        ~cursor_col
+        ~cursor_byte
         ~ghost
     | false, _ | true, None ->
       content_img_for_line ~text_attr ~sel_attr ~line_prefix ~line ~line_start ~overlap
   in
   let inside = content_img |> I.hsnap ~align:`Left (w - 2) in
-  let next_abs_off = line_end + 1 in
-  framed_row ~border_attr ~inside, next_abs_off
+  framed_row ~border_attr ~inside
 ;;
 
 let render_rows
@@ -203,9 +188,9 @@ let render_rows
       ~prefix
       ~indent
       ~cursor_row
-      ~cursor_col
+      ~cursor_byte
       ~ghost_text
-      lines
+      (rows : Input_display.row list)
   =
   let render_row =
     render_row
@@ -218,15 +203,10 @@ let render_rows
       ~prefix
       ~indent
       ~cursor_row
-      ~cursor_col
+      ~cursor_byte
       ~ghost_text
   in
-  let _, rows_rev =
-    List.foldi lines ~init:(0, []) ~f:(fun idx (abs_off, acc) line ->
-      let row, next_abs_off = render_row ~idx ~abs_off ~line in
-      next_abs_off, row :: acc)
-  in
-  List.rev rows_rev
+  List.mapi rows ~f:(fun idx row -> render_row ~idx row)
 ;;
 
 let hline ~(border_attr : A.t) len =
@@ -244,58 +224,88 @@ let bottom_border ~(w : int) ~(border_attr : A.t) =
     I.string border_attr "└" <|> hline ~border_attr (w - 2) <|> I.string border_attr "┘")
 ;;
 
-let total_index ~(model : Model.t) =
-  match Model.mode model with
-  | Cmdline -> Model.cmdline_cursor model
-  | _ -> Model.cursor_pos model
-;;
-
-let rec row_and_col_in_line lines ~total_index ~offset ~row =
-  match lines with
-  | [] -> row, 0
-  | line :: rest ->
-    let len = String.length line in
-    if total_index <= offset + len
-    then row, total_index - offset
-    else row_and_col_in_line rest ~total_index ~offset:(offset + len + 1) ~row:(row + 1)
-;;
-
-let cursor_position ~prefix ~row ~col_in_line =
-  let cursor_x = 1 + String.length prefix + col_in_line in
+let cursor_position ~line_prefix ~row ~col =
+  let cursor_x = 1 + String.length line_prefix + col in
   let cursor_y = 1 + row in
   cursor_x, cursor_y
 ;;
 
-let render ~width ~(model : Model.t) : I.t * (int * int) =
+module Scrollable = struct
+  let clamp_scroll ~content_height ~viewport_height scroll =
+    let max_scroll = Int.max 0 (content_height - viewport_height) in
+    scroll |> Int.max 0 |> fun s -> Int.min s max_scroll
+  ;;
+
+  let scroll_to_make_row_visible ~content_height ~viewport_height ~row =
+    if viewport_height <= 0
+    then 0
+    else (
+      let desired = Int.max 0 (row - viewport_height + 1) in
+      clamp_scroll ~content_height ~viewport_height desired)
+  ;;
+
+  let window rows ~scroll ~height =
+    rows |> fun rs -> List.drop rs scroll |> fun rs -> List.take rs height
+  ;;
+end
+
+let render ~width ~max_height ~(model : Model.t) : I.t * (int * int) =
   let w = width in
-  let lines = input_lines ~model in
-  let prefix, indent = prompt_prefix_and_indent ~model in
-  let cursor_row, cursor_col =
-    let total_index = total_index ~model in
-    row_and_col_in_line lines ~total_index ~offset:0 ~row:0
-  in
-  let ghost_text = typeahead_ghost_text ~model in
-  let border_attr = A.(fg (rgb ~r:1 ~g:4 ~b:5)) in
-  let text_attr = A.empty in
-  let sel_attr = A.(text_attr ++ st reverse) in
-  let sel_active = is_selection_active ~model in
-  let rows =
-    render_rows
-      ~w
-      ~border_attr
-      ~text_attr
-      ~sel_attr
-      ~model
-      ~sel_active
-      ~prefix
-      ~indent
-      ~cursor_row
-      ~cursor_col
-      ~ghost_text
-      lines
-  in
-  let img =
-    I.vcat ((top_border ~w ~border_attr :: rows) @ [ bottom_border ~w ~border_attr ])
-  in
-  img, cursor_position ~prefix ~row:cursor_row ~col_in_line:cursor_col
+  let max_height = Int.max 0 max_height in
+  if max_height <= 0
+  then I.empty, (0, 0)
+  else if max_height < 3
+  then (
+    let img =
+      I.hsnap ~align:`Left w (I.string A.empty "") |> I.vsnap ~align:`Top max_height
+    in
+    img, (0, 0))
+  else (
+    let prefix, indent = prompt_prefix_and_indent ~model in
+    let ({ rows; cursor } : Input_display.t) =
+      Input_display.layout_for_render ~box_width:w ~model
+    in
+    let cursor_row = cursor.row in
+    let cursor_byte = cursor.byte_in_row in
+    let cursor_col = cursor.col in
+    let ghost_text = typeahead_ghost_text ~model in
+    let border_attr = A.(fg (rgb ~r:1 ~g:4 ~b:5)) in
+    let text_attr = A.empty in
+    let sel_attr = A.(text_attr ++ st reverse) in
+    let sel_active = is_selection_active ~model in
+    let rendered_rows =
+      render_rows
+        ~w
+        ~border_attr
+        ~text_attr
+        ~sel_attr
+        ~model
+        ~sel_active
+        ~prefix
+        ~indent
+        ~cursor_row
+        ~cursor_byte
+        ~ghost_text
+        rows
+    in
+    let content_height = List.length rendered_rows in
+    let viewport_height =
+      let total_height = Int.min (content_height + 2) max_height in
+      Int.max 0 (total_height - 2)
+    in
+    let scroll =
+      Scrollable.scroll_to_make_row_visible
+        ~content_height
+        ~viewport_height
+        ~row:cursor_row
+    in
+    let visible_rows = Scrollable.window rendered_rows ~scroll ~height:viewport_height in
+    let img =
+      I.vcat
+        ((top_border ~w ~border_attr :: visible_rows) @ [ bottom_border ~w ~border_attr ])
+    in
+    let visible_cursor_row = Int.max 0 (cursor_row - scroll) in
+    let cursor_prefix = if cursor_row = 0 then prefix else indent in
+    ( img
+    , cursor_position ~line_prefix:cursor_prefix ~row:visible_cursor_row ~col:cursor_col ))
 ;;

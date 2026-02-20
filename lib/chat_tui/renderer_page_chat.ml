@@ -5,8 +5,12 @@ open Notty
 open Types
 
 module Compose = struct
-  let render_input_box ~(w : int) ~(model : Model.t) =
-    Renderer_component_input_box.render ~width:w ~model
+  let render_input_box ~(w : int) ~(h : int) ~(model : Model.t) =
+    let layout = Chat_page_layout.compute ~screen_w:w ~screen_h:h ~model in
+    Renderer_component_input_box.render
+      ~width:w
+      ~max_height:layout.input_box_height
+      ~model
   ;;
 
   let typeahead_preview_popup
@@ -75,11 +79,8 @@ module Compose = struct
           Some (I.pad ~t:popup_y popup_img)))
   ;;
 
-  let history_layout ~(h : int) ~(input_img : I.t) =
-    let history_height = Int.max 1 (h - I.height input_img - 1) in
-    let sticky_height = if history_height > 1 then 1 else 0 in
-    let scroll_height = history_height - sticky_height in
-    history_height, sticky_height, scroll_height
+  let history_layout ~(w : int) ~(h : int) ~(model : Model.t) =
+    Chat_page_layout.compute ~screen_w:w ~screen_h:h ~model
   ;;
 
   let ensure_history_width ~(model : Model.t) ~(w : int) =
@@ -162,8 +163,11 @@ module Compose = struct
 
   let render_full ~(size : int * int) ~(model : Model.t) : I.t * (int * int) =
     let w, h = size in
-    let input_img, (cursor_x, cursor_y_in_box) = render_input_box ~w ~model in
-    let history_height, sticky_height, scroll_height = history_layout ~h ~input_img in
+    let layout = history_layout ~w ~h ~model in
+    let input_img, (cursor_x, cursor_y_in_box) = render_input_box ~w ~h ~model in
+    let history_height = layout.history_height in
+    let sticky_height = layout.sticky_height in
+    let scroll_height = layout.scroll_height in
     let hi_engine = Renderer_highlight_engine.get () in
     let messages = prepare_history ~model ~w ~hi_engine ~scroll_height in
     let top_visible_idx =

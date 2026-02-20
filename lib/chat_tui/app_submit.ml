@@ -109,13 +109,9 @@ let apply_start_effects
       ignore (Model.apply_patch model (Add_user_message { text = txt }));
       ignore (Model.add_history_item model user_msg));
   Model.set_auto_follow model true;
-  let _, h = Notty_eio.Term.size term in
-  let input_h =
-    match String.split_lines (Model.input_line model) with
-    | [] -> 1
-    | ls -> List.length ls
-  in
-  Scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:(h - input_h);
+  let screen_w, screen_h = Notty_eio.Term.size term in
+  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
+  Scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:layout.scroll_height;
   add_placeholder_thinking_message model;
   Redraw_throttle.request_redraw throttler
 ;;

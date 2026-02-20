@@ -12,6 +12,8 @@
   renderer_highlight_engine
   markdown_fences
   types
+  chat_page_layout
+  input_display
   model
   renderer_component_history
   renderer_component_input_box

@@ -57,14 +57,9 @@ let max_preview_scroll
       ~(model : Model.t)
       ~(completion_text : string)
   =
-  let _, screen_h = Notty_eio.Term.size term in
-  let input_h =
-    match String.split_lines (Model.input_line model) with
-    | [] -> 1
-    | ls -> List.length ls
-  in
-  let history_h = Int.max 1 (screen_h - input_h - 1) in
-  let popup_h_max = Int.min history_h 10 in
+  let screen_w, screen_h = Notty_eio.Term.size term in
+  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
+  let popup_h_max = Int.min layout.history_height 10 in
   let header_h = 1 in
   let footer_h = if popup_h_max >= 3 then 1 else 0 in
   let body_h = Int.max 0 (popup_h_max - header_h - footer_h) in
@@ -259,55 +254,22 @@ let kill_prev_word (model : Model.t) =
 (* Vertical cursor movement helpers (Ctrl-Up / Ctrl-Down)                *)
 (* -------------------------------------------------------------------- *)
 
-let move_cursor_vertically (model : Model.t) ~dir =
-  (* dir = -1 for up, +1 for down *)
-  let s = Model.input_line model in
-  let pos = Model.cursor_pos model in
-  let len = String.length s in
-  let line_start, line_end = Controller_shared.line_bounds s pos in
-  (* Determine current column (in bytes) *)
-  let col = pos - line_start in
-  let target_line_start, target_line_end =
-    if dir < 0
-    then (* move up *)
-      if line_start = 0
-      then line_start, line_end
-      else (
-        (* find previous line bounds *)
-        let rec find_prev_start i =
-          if i <= 0
-          then 0
-          else if Char.equal (String.get s (i - 1)) '\n'
-          then i
-          else find_prev_start (i - 1)
-        in
-        let prev_end =
-          line_start - 1
-          (* the '\n' of prev line *)
-        in
-        let prev_start = find_prev_start prev_end in
-        prev_start, prev_end)
-    else if
-      (* move down *)
-      line_end >= len
-    then line_start, line_end
+let move_cursor_vertically (model : Model.t) ~term ~dir =
+  let box_width, _ = Notty_eio.Term.size term in
+  match Input_display.cursor_pos_after_vertical_move ~box_width ~model ~dir with
+  | None -> ()
+  | Some new_pos -> Model.set_cursor_pos model new_pos
+;;
+
+let move_cursor_vertically_n (model : Model.t) ~term ~dir ~lines =
+  let rec loop n =
+    if n <= 0
+    then ()
     else (
-      let next_start = line_end + 1 in
-      let rec find_next_end i =
-        if i >= len
-        then len
-        else if Char.equal (String.get s i) '\n'
-        then i
-        else find_next_end (i + 1)
-      in
-      let next_end = find_next_end next_start in
-      next_start, next_end)
+      move_cursor_vertically model ~term ~dir;
+      loop (n - 1))
   in
-  if target_line_start = line_start && target_line_end = line_end
-  then () (* can't move *)
-  else (
-    let new_col = Int.min col (target_line_end - target_line_start) in
-    Model.set_cursor_pos model (target_line_start + new_col))
+  loop lines
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -385,19 +347,9 @@ let indent_line (model : Model.t) ~amount =
 (* -------------------------------------------------------------------- *)
 
 let scroll_by_lines (model : Model.t) ~term delta =
-  let _, screen_h = Notty_eio.Term.size term in
-  (* Number of lines occupied by the multiline input editor. *)
-  let input_height =
-    match String.split_on_chars ~on:[ '\n' ] (Model.input_line model) with
-    | [] -> 1
-    | ls -> List.length ls
-  in
-  let history_height =
-    let base = Int.max 1 (screen_h - input_height - 2) in
-    max 1 (base - 1)
-  in
-  let sticky_height = if history_height > 1 then 1 else 0 in
-  let scroll_height = history_height - sticky_height in
+  let screen_w, screen_h = Notty_eio.Term.size term in
+  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
+  let scroll_height = layout.scroll_height in
   Scroll_box.scroll_by (Model.scroll_box model) ~height:scroll_height delta;
   if
     Scroll_box.max_scroll (Model.scroll_box model) ~height:scroll_height
@@ -406,13 +358,15 @@ let scroll_by_lines (model : Model.t) ~term delta =
 ;;
 
 let page_size ~term (model : Model.t) =
-  let _, screen_h = Notty_eio.Term.size term in
-  let input_height =
-    match String.split_lines (Model.input_line model) with
-    | [] -> 1
-    | ls -> List.length ls
-  in
-  screen_h - input_height
+  let screen_w, screen_h = Notty_eio.Term.size term in
+  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
+  layout.scroll_height
+;;
+
+let input_page_size ~term (model : Model.t) =
+  let screen_w, screen_h = Notty_eio.Term.size term in
+  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
+  Int.max 1 (layout.input_box_height - 2)
 ;;
 
 let skip_word s len j =
@@ -477,6 +431,51 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
          && List.mem mods `Ctrl ~equal:Poly.equal
          && List.mem mods `Shift ~equal:Poly.equal ->
     scroll_preview ~term ~model ~delta:1;
+    Redraw
+  | `Key (`Arrow `Left, mods)
+    when Model.typeahead_preview_open model
+         && List.mem mods `Ctrl ~equal:Poly.equal
+         && List.mem mods `Shift ~equal:Poly.equal ->
+    Model.set_typeahead_preview_scroll model 0;
+    Redraw
+  | `Key (`Arrow `Right, mods)
+    when Model.typeahead_preview_open model
+         && List.mem mods `Ctrl ~equal:Poly.equal
+         && List.mem mods `Shift ~equal:Poly.equal ->
+    (match completion_text_if_relevant model with
+     | None ->
+       Model.set_typeahead_preview_scroll model 0;
+       Redraw
+     | Some completion_text ->
+       let max_scroll = max_preview_scroll ~term ~model ~completion_text in
+       Model.set_typeahead_preview_scroll model max_scroll;
+       Redraw)
+  | `Key (`Arrow `Up, mods)
+    when (not (Model.typeahead_preview_open model))
+         && List.mem mods `Ctrl ~equal:Poly.equal
+         && List.mem mods `Shift ~equal:Poly.equal ->
+    let n = input_page_size ~term model in
+    move_cursor_vertically_n model ~term ~dir:(-1) ~lines:n;
+    Redraw
+  | `Key (`Arrow `Down, mods)
+    when (not (Model.typeahead_preview_open model))
+         && List.mem mods `Ctrl ~equal:Poly.equal
+         && List.mem mods `Shift ~equal:Poly.equal ->
+    let n = input_page_size ~term model in
+    move_cursor_vertically_n model ~term ~dir:1 ~lines:n;
+    Redraw
+  | `Key (`Arrow `Left, mods)
+    when (not (Model.typeahead_preview_open model))
+         && List.mem mods `Ctrl ~equal:Poly.equal
+         && List.mem mods `Shift ~equal:Poly.equal ->
+    Model.set_cursor_pos model 0;
+    Redraw
+  | `Key (`Arrow `Right, mods)
+    when (not (Model.typeahead_preview_open model))
+         && List.mem mods `Ctrl ~equal:Poly.equal
+         && List.mem mods `Shift ~equal:Poly.equal ->
+    let input = Model.input_line model in
+    Model.set_cursor_pos model (String.length input);
     Redraw
   | `Key (`Page `Up, _mods) when Model.typeahead_preview_open model ->
     scroll_preview ~term ~model ~delta:(-5);
@@ -601,16 +600,16 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
   (* ----------------------------------------------------------------- *)
   (*  Cursor vertical move within editor (Ctrl-Up / Ctrl-Down)          *)
   | `Key (`Arrow `Up, mods) when List.mem mods `Meta ~equal:Poly.equal ->
-    move_cursor_vertically model ~dir:(-1);
+    move_cursor_vertically model ~term ~dir:(-1);
     Redraw
   | `Key (`Arrow `Up, mods) when List.mem mods `Shift ~equal:Poly.equal ->
-    move_cursor_vertically model ~dir:(-1);
+    move_cursor_vertically model ~term ~dir:(-1);
     Redraw
   | `Key (`Arrow `Down, mods) when List.mem mods `Meta ~equal:Poly.equal ->
-    move_cursor_vertically model ~dir:1;
+    move_cursor_vertically model ~term ~dir:1;
     Redraw
   | `Key (`Arrow `Down, mods) when List.mem mods `Shift ~equal:Poly.equal ->
-    move_cursor_vertically model ~dir:1;
+    move_cursor_vertically model ~term ~dir:1;
     Redraw
   (* ----------------------------------------------------------------- *)
   (*  Character-wise cursor movement.                                   *)
@@ -794,13 +793,9 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     Redraw
   | `Key (`End, _) ->
     Model.set_auto_follow model true;
-    let _, screen_h = Notty_eio.Term.size term in
-    let input_h =
-      match String.split_lines (Model.input_line model) with
-      | [] -> 1
-      | ls -> List.length ls
-    in
-    Scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:(screen_h - input_h);
+    let screen_w, screen_h = Notty_eio.Term.size term in
+    let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
+    Scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:layout.scroll_height;
     Redraw
   | `Key (`Enter, []) ->
     (* Literal newline inside the input buffer *)

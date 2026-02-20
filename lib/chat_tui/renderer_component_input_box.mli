@@ -22,17 +22,28 @@
     and rendered in line fragments so that no newline is ever passed to
     [Notty.I.string].
 
-    Selection highlighting is applied only in Insert/Normal mode.  Cursor
-    positioning is based on byte offsets and therefore may drift for multi-byte
-    UTF-8 glyphs. *)
+    Selection highlighting is applied only in Insert/Normal mode.
 
-(** [render ~width ~model] renders the framed input box.
+    Cursor position is derived from the byte index stored on the model
+    ([Model.cursor_pos] / [Model.cmdline_cursor]), but the returned [cx] is
+    measured in terminal cells by summing the display widths of the UTF-8 glyphs
+    preceding the cursor in the rendered row. *)
+
+(** [render ~width ~max_height ~model] renders the framed input box.
 
     @param width Width in terminal cells. Must be at least 2 so the border can
            be drawn.
+    @param max_height Maximum height in terminal cells of the returned image.
+           When the buffer exceeds this height, the input becomes internally
+           scrollable and the visible window is adjusted so the caret remains
+           visible.
     @param model Source of editor state (mode, input buffers, cursor/selection).
+
+    The input buffer is rendered as a sequence of display rows. Rows are broken
+    on literal newlines, and additionally soft-wrapped to fit the available
+    width without inserting newlines into the underlying buffer.
 
     Returns [(img, (cx, cy))] where [(cx, cy)] is the caret position relative to
     the returned image with [(0, 0)] in the top-left corner. In particular, the
     returned cursor already accounts for the border and prompt prefix. *)
-val render : width:int -> model:Model.t -> Notty.I.t * (int * int)
+val render : width:int -> max_height:int -> model:Model.t -> Notty.I.t * (int * int)
