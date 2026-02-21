@@ -241,9 +241,7 @@ let tokenize_command =
        run_main
        @@ fun env ->
        let dir = Eio.Stdenv.fs env in
-       let tiki_token_bpe =
-         load_doc ~dir:(Eio.Stdenv.fs env) "./out-cl100k_base.tikitoken.txt"
-       in
+       let tiki_token_bpe = Tiktoken_data.o200k_base in
        let text = load_doc ~dir:(Eio.Stdenv.fs env) file in
        let codec = Tikitoken.create_codec tiki_token_bpe in
        log ~dir @@ sprintf "Tokenizing file: %s\n" file;

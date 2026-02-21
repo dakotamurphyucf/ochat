@@ -10,7 +10,7 @@ let dot a b = Array.fold2_exn a b ~init:0.0 ~f:(fun acc x y -> acc +. (x *. y))
 let%expect_test "markdown_snippet.chunking" =
   (* Embed BPE file contents at compile-time. [%blob] provided by
      ppx_blob and file declared in preprocessor_deps in dune. *)
-  let tiki_bpe = [%blob "../out-cl100k_base.tikitoken.txt"] in
+  let tiki_bpe = [%blob "../tikitoken/o200k_base.tiktoken.txt"] in
   (* Build a markdown document with many paragraphs to trigger multiple
      slices. 20 paragraphs × 100 tokens ≈ 2 000 tokens. *)
   let para = String.concat ~sep:" " (List.init 100 ~f:(fun _ -> "token")) in

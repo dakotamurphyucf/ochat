@@ -12,10 +12,10 @@ open Eio
     index at [vector_db_root/index_name].  All heavy-lifting is delegated to
     specialised helper modules and external services:
 
-    • {!Markdown_crawler} – bounded-concurrency file traversal.          
-    • {!Markdown_snippet} – cut documents into ~64-320 token windows.    
+    • {!Markdown_crawler} – bounded-concurrency file traversal.
+    • {!Markdown_snippet} – cut documents into ~64-320 token windows.
     • {!Embed_service} – batched, rate-limited calls to OpenAI embeddings.
-    • {!Vector_db} – binary serialisation of float vectors.              
+    • {!Vector_db} – binary serialisation of float vectors.
     • {!Md_index_catalog} – global registry of indexes + centroid vectors.
 
     The implementation follows Eio’s structured-concurrency model and is
@@ -28,8 +28,6 @@ module M = struct
   module Vec = Vector_db.Vec
 
   (*────────────────────────  Helpers  ─────────────────────────────*)
-
-  let token_bpe_path = "./out-cl100k_base.tikitoken.txt"
 
   (* Compute centroid – simple arithmetic mean across all vectors. *)
   let centroid (vecs : Vec.t array) : float array =
@@ -61,7 +59,7 @@ module M = struct
      | true -> ()
      | false -> Path.mkdirs ~perm:0o700 out_dir);
     (* Load BPE table and codec once. *)
-    let tiki_token_bpe = Io.load_doc ~dir:env#fs token_bpe_path in
+    let tiki_token_bpe = Tiktoken_data.o200k_base in
     let tiki_codec = Tikitoken.create_codec tiki_token_bpe in
     (* Accumulate snippets. *)
     let snippets_ref = ref [] in

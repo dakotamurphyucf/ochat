@@ -124,31 +124,49 @@ let heuristic_token_count text =
   |> List.length
 ;;
 
-let token_count ~codec text =
-  if String.length text > 2_000
-  then (String.length text + 3) / 4
+let chunk_text_by_token_limit ~codec ~limit text =
+  if limit <= 0 then invalid_arg "chunk_text_by_token_limit: limit must be > 0";
+  let tokens_list = Tikitoken.encode ~codec ~text in
+  let tokens = Array.of_list tokens_list in
+  let n = Array.length tokens in
+  if n <= limit
+  then [ text, n ]
   else (
-    Eio.Mutex.lock cache_mu;
-    let cached = Cache.find tok_cache text in
-    match cached with
-    | Some n ->
-      Eio.Mutex.unlock cache_mu;
-      n
-    | None ->
-      Eio.Mutex.unlock cache_mu;
-      let n =
-        match codec with
-        | Some c ->
-          (try List.length (Tikitoken.encode ~codec:c ~text) with
-           | _ -> heuristic_token_count text)
-        | None -> heuristic_token_count text
-      in
-      if String.length text < 10_000
-      then (
-        Eio.Mutex.lock cache_mu;
-        Cache.set tok_cache ~key:text ~data:n;
-        Eio.Mutex.unlock cache_mu);
-      n)
+    let rec loop acc i =
+      if i >= n
+      then List.rev acc
+      else (
+        let len = Int.min limit (n - i) in
+        let tok_slice = Array.sub tokens ~pos:i ~len |> Array.to_list in
+        let bytes = Tikitoken.decode ~codec ~encoded:tok_slice in
+        let chunk = Bytes.to_string bytes, len in
+        loop (chunk :: acc) (i + len))
+    in
+    loop [] 0)
+;;
+
+let token_count ~codec text =
+  Eio.Mutex.lock cache_mu;
+  let cached = Cache.find tok_cache text in
+  match cached with
+  | Some n ->
+    Eio.Mutex.unlock cache_mu;
+    n
+  | None ->
+    Eio.Mutex.unlock cache_mu;
+    let n =
+      match codec with
+      | Some c ->
+        (try List.length (Tikitoken.encode ~codec:c ~text) with
+         | _ -> heuristic_token_count text)
+      | None -> heuristic_token_count text
+    in
+    if String.length text < 10_000
+    then (
+      Eio.Mutex.lock cache_mu;
+      Cache.set tok_cache ~key:text ~data:n;
+      Eio.Mutex.unlock cache_mu);
+    n
 ;;
 
 (**************************************************************************)
@@ -170,21 +188,27 @@ let find_title lines =
 (**************************************************************************)
 
 let slice ~index_name ~doc_path ~markdown ~tiki_token_bpe () : (Meta.t * string) list =
-  let codec =
-    try Some (Tikitoken.create_codec tiki_token_bpe) with
-    | _ -> None
-  in
+  let codec = Tikitoken.create_codec tiki_token_bpe in
   let min_tokens = 64 in
-  let max_tokens = 320 in
+  let max_tokens = 800 in
   let overlap_tokens = 64 in
   let block_strings =
     markdown |> String.split_lines |> Chunker.chunk_by_heading_or_blank
   in
   let blocks =
     List.map block_strings ~f:(fun b ->
-      let byte_len = String.length b in
-      let t = if byte_len > 8_000 then max_tokens + 1 else token_count ~codec b in
-      b, t)
+      let len =
+        (* heuristic to optimize use of token counting. we are limited to ~8400 tokens per vector so ~32000 characters. If
+        the text is way shorter than that we can use the the aproximate method of counting tokens.larges ones we need to make sure
+        we are accuarte and dont go over the limit and cause errors*)
+        if String.length b < 20000
+        then String.length b / 4
+        else token_count ~codec:(Some codec) b
+      in
+      match len > max_tokens with
+      | true -> chunk_text_by_token_limit ~codec ~limit:max_tokens b
+      | false -> [ b, token_count ~codec:(Some codec) b ])
+    |> List.concat
   in
   let title = find_title block_strings in
   let lower_path = String.lowercase doc_path in

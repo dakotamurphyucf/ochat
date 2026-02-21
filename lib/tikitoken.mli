@@ -39,10 +39,13 @@
 
 open Core
 
+type vocab_index = (int64, (Bytes.t * int) list) Hashtbl.t
+
 (** Bidirectional BPE vocabulary – a pair of hash tables. *)
 type codec =
   { encoder : (bytes, int) Hashtbl.t (** maps byte sequences -> token id *)
   ; decoder : (int, bytes) Hashtbl.t (** inverse mapping *)
+  ; vocab_idx : vocab_index
   }
 
 (** [create_codec contents] parses a `*.tiktoken` vocabulary and returns

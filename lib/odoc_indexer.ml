@@ -105,7 +105,10 @@ let rec get_vectors
   | exception ex ->
     traceln "Error fetching embeddings: %a" Eio.Exn.pp ex;
     (match attempts with
-     | 3 -> raise ex
+     | 3 ->
+       print_endline
+       @@ Sexp.to_string_hum [%sexp (snippets : (Odoc_snippet.meta * string) list)];
+       raise ex
      | _ ->
        traceln "Retrying embedding fetch (%d/3)" (attempts + 1);
        get_vectors ~net ~codec snippets ~attempts:(attempts + 1))
@@ -217,9 +220,7 @@ let index_packages
   (* 1. Gather docs via crawler *)
   let domain_count = Domain.recommended_domain_count () in
   let pkg_docs = Hashtbl.create (module String) in
-  let tiki_token_bpe =
-    Io.load_doc ~dir:(Eio.Stdenv.fs env) "./out-cl100k_base.tikitoken.txt"
-  in
+  let tiki_token_bpe = Tiktoken_data.o200k_base in
   let should_crawl =
     let rec fn filter =
       match filter with

@@ -411,15 +411,7 @@ let odoc_search ~dir ~net : Ochat_function.t =
     let index_path = dir / index_dir in
     (* 2. Determine candidate packages *)
     let pkgs =
-      if String.equal package "all"
-      then (
-        match Package_index.load ~dir:index_path with
-        | Some idx ->
-          (match Package_index.query idx ~embedding:query_vec ~k:5 with
-           | l when List.is_empty l -> Eio.Path.read_dir index_path
-           | l -> l)
-        | None -> Eio.Path.read_dir index_path)
-      else [ package ]
+      if String.equal package "all" then Eio.Path.read_dir index_path else [ package ]
     in
     (* 3. Aggregate vectors from selected packages *)
     let vectors_for_pkg pkg =
@@ -587,28 +579,11 @@ let markdown_search ~dir ~net : Ochat_function.t =
     (* 2. Determine candidate indexes *)
     let indexes =
       match index_name_opt with
-      | Some name when not (String.equal name "all") -> [ name ]
-      | _ ->
-        (match Md_index_catalog.load ~dir:index_dir with
-         | Some catalog ->
-           (* Compute similarity and sort *)
-           let scores =
-             Array.map catalog ~f:(fun { Md_index_catalog.Entry.name; vector; _ } ->
-               let score =
-                 Array.fold2_exn query_vec vector ~init:0.0 ~f:(fun acc q v ->
-                   acc +. (q *. v))
-               in
-               score, name)
-           in
-           scores
-           |> Array.to_list
-           |> List.sort ~compare:(fun (s1, _) (s2, _) -> Float.compare s2 s1)
-           |> (fun l -> List.take l 5)
-           |> List.map ~f:snd
-         | None ->
-           (* fallback list all dirs *)
-           List.filter (Eio.Path.read_dir index_dir) ~f:(fun entry ->
-             Eio.Path.is_directory (index_dir / entry)))
+      | Some "all" | None ->
+        (* fallback list all dirs *)
+        List.filter (Eio.Path.read_dir index_dir) ~f:(fun entry ->
+          Eio.Path.is_directory (index_dir / entry))
+      | Some name -> [ name ]
     in
     if List.is_empty indexes
     then Printf.sprintf "No Markdown indices found under %s" vector_db_root

@@ -328,7 +328,9 @@
   embed_service
   owl
   md_index_catalog
+  tiktoken_data
   doc)
+
  (preprocess
   (pps ppx_jane)))
 
@@ -366,6 +368,7 @@
   openai
   embed_service
   package_index
+  tiktoken_data
   doc)
  (preprocess
   (pps ppx_jane)))
@@ -378,6 +381,13 @@
  (preprocess
   (pps ppx_jane)))
 
+  (library
+   (name tiktoken_data)
+   (public_name ochat.tiktoken_data)
+   (modules tiktoken_data)
+   (libraries core)
+   (preprocess (pps ppx_blob))
+   (preprocessor_deps (glob_files ../tikitoken/*.tiktoken.txt)))
 ;; ---------------------------------------------------------------------------
 ;; Chromium agent tooling (CDP)
 ;;

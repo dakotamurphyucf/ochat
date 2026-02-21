@@ -18,6 +18,7 @@
   core_unix.command_unix
   openai
   tikitoken
+  tiktoken_data
   indexer
   github
   template
