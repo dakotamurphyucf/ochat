@@ -93,6 +93,7 @@ rule token = parse
 | "<="                     { LTEQ }
 | ">="                     { GTEQ }
 | "+"                      { PLUS }
+| "++"                     { PLUSPLUS }
 | "-"                      { MINUS }
 | "*"                      { STAR }
 | "/"                      { SLASH }

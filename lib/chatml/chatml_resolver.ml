@@ -164,6 +164,7 @@ let collect_pattern_vars (pat : L.pattern) : string list =
 let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
   let wrap nexp = { e with value = nexp } in
   match e.value with
+  | L.EUnit -> L.EUnit
   | L.EVar x ->
     (match lookup !stack x with
      | Some loc -> L.EVarLoc loc

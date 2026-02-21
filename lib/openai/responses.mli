@@ -947,7 +947,7 @@ module Response_stream : sig
 end
 
 type _ response_type =
-  | Stream : (Response_stream.t -> unit) -> unit response_type
+  | Stream : Response_stream.t Seq.t response_type
   | Default : Response.t response_type
 
 (** Raised when a streaming event cannot be decoded.

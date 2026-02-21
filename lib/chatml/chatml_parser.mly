@@ -109,7 +109,7 @@ let mk_node startp endp value =
 %token <string> UIDENT
 %token <string> TICKIDENT
 %token FUN IF THEN ELSE WHILE DO DONE LET IN MATCH WITH MODULE STRUCT END OPEN REF REC AND
-%token ARROW LEFTARROW COLONEQ BANGEQ EQ EQEQ LTEQ GTEQ LT GT PLUS MINUS STAR SLASH LPAREN RPAREN UNDERSCORE
+%token ARROW LEFTARROW COLONEQ BANGEQ EQ EQEQ LTEQ GTEQ LT GT PLUS MINUS PLUSPLUS STAR SLASH LPAREN RPAREN UNDERSCORE
 %token LBRACE RBRACE LBRACKET RBRACKET SEMI COMMA DOT BAR BANG
 %token EOF
 
@@ -118,9 +118,10 @@ let mk_node startp endp value =
 
 %left ELSE
 %left EQ EQEQ BANGEQ LT GT
-%left PLUS MINUS
+%left PLUS MINUS PLUSPLUS
 %left STAR SLASH
 %left BANG
+
 
 %%
 
@@ -139,6 +140,7 @@ stmt:
   LET REC rec_bindings          { mk_node $startpos $endpos (SLetRec( $3)) }
 | LET REC rec_bindings IN expr_sequence  { mk_node $startpos $endpos (SExpr( mk_exprnode $startpos $endpos (ELetRec($3, $5)) )) }
 | LET LIDENT params EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda($3, ($5))))) }
+| LET LIDENT LPAREN RPAREN EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda([], ($6))))) }
 | LET LIDENT EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
 | MODULE UIDENT EQ STRUCT stmts END { mk_node $startpos $endpos (SModule($2, $5)) }
 | OPEN UIDENT               { mk_node $startpos $endpos (SOpen($2)) }
@@ -152,6 +154,8 @@ expr:
     | STRING                  { mk_exprnode $startpos $endpos (EString $1) }
 
     | expr PLUS expr       { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "+"), [$1; $3])) }
+
+    | expr PLUSPLUS expr       { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "++"), [$1; $3])) }
     | expr MINUS expr      { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "-"), [$1; $3])) }
     | expr STAR expr       { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "*"), [$1; $3])) }
     | expr SLASH expr      { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "/"), [$1; $3])) }
@@ -303,5 +307,5 @@ rec_binding:
 | LIDENT params EQ expr_sequence { ($1, mk_exprnode $startpos $endpos (ELambda($2, $4)) ) }
 
 expr_sequence:
-| expr  { $1 }                        
+| expr  { $1 }
 | expr SEMI expr_sequence { mk_exprnode $startpos $endpos (ESequence($1, $3)) }

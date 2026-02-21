@@ -154,8 +154,19 @@ module BuiltinModules = struct
     (* ────────────────────────────────────────────────────────────────────────── *)
     (* 1. Arithmetic operators                                                 *)
     (* ────────────────────────────────────────────────────────────────────────── *)
-
+    let fn_num2str =
+      VBuiltin
+        (function
+          | [ VInt x ] -> VString (string_of_int x)
+          | _ -> failwith "num2str() expects a single integer argument")
+    in
+    set_var env "num2str" fn_num2str;
     (* + operator *)
+    set_var env "++"
+    @@ VBuiltin
+         (function
+           | [ VString x; VString y ] -> VString (x ^ y)
+           | _ -> failwith "Operator '++' expects two string arguments");
     set_var env "+"
     @@ VBuiltin
          (function

@@ -181,16 +181,20 @@ let rec run_stream
        | Res.Response_stream.Output_item_done { item; _ } ->
          (match item with
           | Res.Response_stream.Item.Output_message om ->
-            add_item (Res.Item.Output_message om)
+            add_item (Res.Item.Output_message om) (* message appended *)
           | Res.Response_stream.Item.Reasoning r -> add_item (Res.Item.Reasoning r)
           | _ -> ())
        (* Function-call argument streaming finished – run tool *)
        | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
+         (* PreToolCall *)
          let fn_out = handle_function_done ~item_id ~arguments in
+         (* PostToolResponse *)
          (* also propagate result if this was nested call *)
          on_fn_out fn_out
        | Res.Response_stream.Custom_tool_call_input_done { item_id; input; _ } ->
+         (* PreToolCall *)
          handle_custom_tool_call_done ~item_id ~input
+       (* PostToolResponse *)
        | _ -> ());
       (* Forward every raw event upward so the parent UI can, if desired,
          display fork activity.  The TUI will distinguish forked events by
@@ -199,21 +203,26 @@ let rec run_stream
       on_event ev
     in
     (* Fire request. *)
-    Res.post_response
-      (Res.Stream stream_cb)
-      ~dir:datadir
-      ?temperature
-      ?max_output_tokens
-      ?reasoning
-      ~parallel_tool_calls:true
-      net
-      ~inputs:hist
-      ~tools
-      ~model:Res.Request.O3;
+    let stream =
+      Res.post_response
+        Res.Stream
+        ~dir:datadir
+        ?temperature
+        ?max_output_tokens
+        ?reasoning
+        ~parallel_tool_calls:true
+        net
+        ~inputs:hist
+        ~tools
+        ~model:Res.Request.O3
+    in
+    Seq.iter stream_cb stream;
     let next_hist = hist @ List.rev !new_items in
     if !run_again then turn next_hist else next_hist
   in
+  (* turn start *)
   let full = turn initial_history in
+  (* turn end *)
   Cache.save ~file:cache_file cache;
   full
 
@@ -268,8 +277,8 @@ and execute
 You are an **isolated clone** of the main assistant.  Your internal state will be *discarded* once you hand control back and merge with the parent.  Only the information you explicitly place in the *PERSIST* section will survive.
 
 Primary task inside the fork
-• Execute: 
-  command - `%s`  
+• Execute:
+  command - `%s`
   arguments - `%s`
 
 You may leverage every available tool (except the [fork] tool), read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.
@@ -349,8 +358,8 @@ let history ~history ~arguments call_id =
 You are an **isolated clone** of the main assistant.  Your internal state will be *discarded* once you hand control back and merge with the parent.  Only the information you explicitly place in the *PERSIST* section will survive.
 
 Primary task inside the fork
-• Execute: 
-  command - `%s`  
+• Execute:
+  command - `%s`
   arguments - `%s`
 
 You may leverage every available tool (except the [fork] tool), read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.

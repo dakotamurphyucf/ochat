@@ -67,6 +67,7 @@ type var_loc =
 [@@deriving sexp_of]
 
 type expr =
+  | EUnit
   | EInt of int
   | EBool of bool
   | EFloat of float
@@ -410,6 +411,7 @@ let rec finish_eval (initial_frames : Frame_env.env) (initial_res : eval_result)
 
 and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result =
   match e.value with
+  | EUnit -> Value VUnit
   | EInt i -> Value (VInt i)
   | EBool b -> Value (VBool b)
   | EFloat f -> Value (VFloat f)

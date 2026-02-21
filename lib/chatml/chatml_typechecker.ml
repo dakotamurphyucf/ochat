@@ -192,11 +192,11 @@ let instantiate ty =
   inst ty
 ;;
 
-(** 
-  Generalisation                                                                                                                                                                          
-  We now adopt the same strategy that the Nox checker uses: all free type variables that were  
-  introduced at a deeper level than the current one are turned into           
-  universally-quantified (Generic) type variables.                            
+(**
+  Generalisation
+  We now adopt the same strategy that the Nox checker uses: all free type variables that were
+  introduced at a deeper level than the current one are turned into
+  universally-quantified (Generic) type variables.
 *)
 let generalise ty =
   let rec gen = function
@@ -420,6 +420,7 @@ let init_env () : tenv =
       ; "num2str", Fun ([ Number ], String)
       ; "bool2str", Fun ([ Boolean ], String)
       ; "+", Fun ([ Number; Number ], Number)
+      ; "++", Fun ([ String; String ], String)
       ; "-", Fun ([ Number; Number ], Number)
       ; "*", Fun ([ Number; Number ], Number)
       ; "/", Fun ([ Number; Number ], Number)
@@ -456,6 +457,7 @@ let rec infer_expr env expr =
   let result_ty =
     try
       match expr.value with
+      | EUnit -> Unit
       | EInt _ -> TInt
       | EFloat _ -> TFloat
       | EBool _ -> Boolean

@@ -7,6 +7,7 @@
   converter
   ctx
   driver
+  in_memory_stream
   fetch
   tool_call
   response_loop

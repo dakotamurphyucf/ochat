@@ -1611,7 +1611,7 @@ module Response_stream = struct
 end
 
 type _ response_type =
-  | Stream : (Response_stream.t -> unit) -> unit response_type
+  | Stream : Response_stream.t Seq.t response_type
   | Default : Response.t response_type
 
 exception Response_stream_parsing_error of Jsonaf.t * exn
@@ -1651,12 +1651,12 @@ let post_response
   let stream =
     match res_typ with
     | Default -> false
-    | Stream _ -> true
+    | Stream -> true
   in
   let content_type =
     match res_typ with
     | Default -> "application/json"
-    | Stream _ -> "application/json"
+    | Stream -> "application/json"
   in
   let headers =
     Http.Header.of_list
@@ -1708,17 +1708,13 @@ let post_response
      | Ok _ ->
        raise (Response_parsing_error (Jsonaf.of_string data, Failure "Error in response"))
      | Error _ -> (Response.t_of_jsonaf @@ Jsonaf.of_string @@ data : a))
-  | Stream cb ->
+  | Stream ->
     let reader = Eio.Buf_read.of_flow reader ~max_size:Int.max_value in
     let lines = Buf_read.lines reader in
-    Switch.run
-    @@ fun sw ->
     let rec loop seq =
       match Seq.uncons seq with
-      | None -> ()
+      | None -> Seq.Nil
       | Some (line, seq) ->
-        Fiber.fork ~sw
-        @@ fun () ->
         (* Log the raw response line to a file for debugging purposes *)
         Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n");
         let json_result =
@@ -1771,10 +1767,8 @@ let post_response
                 | "data: [DONE]" -> true
                 | _ -> false
               in
-              if done_ then () else loop seq
-            | Some choice ->
-              cb choice;
-              loop seq))
+              if done_ then Seq.Nil else loop seq
+            | Some choice -> Seq.Cons (choice, fun () -> loop seq)))
     in
-    loop lines
+    fun () -> loop lines
 ;;
