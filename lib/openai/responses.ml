@@ -1711,9 +1711,13 @@ let post_response
   | Stream ->
     let reader = Eio.Buf_read.of_flow reader ~max_size:Int.max_value in
     let lines = Buf_read.lines reader in
+    let stream = Eio.Stream.create Int.max_value in
+    let cb input = Eio.Stream.add stream input in
+    Switch.run
+    @@ fun sw ->
     let rec loop seq =
       match Seq.uncons seq with
-      | None -> Seq.Nil
+      | None -> cb `Done
       | Some (line, seq) ->
         (* Log the raw response line to a file for debugging purposes *)
         Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n");
@@ -1767,8 +1771,16 @@ let post_response
                 | "data: [DONE]" -> true
                 | _ -> false
               in
-              if done_ then Seq.Nil else loop seq
-            | Some choice -> Seq.Cons (choice, fun () -> loop seq)))
+              if done_ then cb `Done else loop seq
+            | Some choice ->
+              cb (`Val choice);
+              loop seq))
     in
-    fun () -> loop lines
+    (Fiber.fork ~sw @@ fun () -> loop lines);
+    let rec loop_stream () =
+      match Stream.take stream with
+      | `Done -> fun () -> Seq.Nil
+      | `Val value -> fun () -> Seq.Cons (value, loop_stream ())
+    in
+    loop_stream ()
 ;;

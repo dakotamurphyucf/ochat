@@ -24,8 +24,6 @@ module Apply_patch_error = Apply_patch_error
 
 let error_to_string = Apply_patch_error.to_string
 
-[@@@warning "-20-26-32-69"]
-
 (* Debug tracing (opt-in) ------------------------------------------------------ *)
 
 let debug_enabled : bool ref = ref false
@@ -372,12 +370,6 @@ module Parser = struct
       in
       if new_idx = -1
       then (
-        let ctx_txt = join ctx in
-        let msg =
-          if eof
-          then sprintf "Invalid EOF Context %d:\n%s" !idx ctx_txt
-          else sprintf "Invalid Context %d:\n%s" !idx ctx_txt
-        in
         let expected_ctx = ctx in
         (* Build a small snippet (±3 lines) around the position where the
            context was expected.  The reference index is [!idx]. *)
