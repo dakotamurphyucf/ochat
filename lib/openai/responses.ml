@@ -197,7 +197,7 @@ module Output_message = struct
     ; status : string
     ; _type : string [@key "type"]
     }
-  [@@deriving jsonaf, sexp, bin_io]
+  [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
 end
 
 module Function_call = struct
