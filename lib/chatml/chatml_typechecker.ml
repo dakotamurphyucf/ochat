@@ -431,8 +431,19 @@ and show_row row =
   in
   fields_str ^ tail_str
 
+and resolve_bound_type_for_display ty =
+  match ty with
+  | Var { contents = Bound bound_ty } -> resolve_bound_type_for_display bound_ty
+  | _ -> ty
+
+and variant_payload_components payload_ty =
+  match resolve_bound_type_for_display payload_ty with
+  | Unit -> []
+  | Tuple ts -> ts
+  | ty -> [ ty ]
+
 and show_variant_payload ty =
-  match payload_component_types ty with
+  match variant_payload_components ty with
   | [] -> ""
   | [ single ] -> Printf.sprintf "(%s)" (show_type single)
   | many ->
@@ -456,7 +467,7 @@ and show_variant_row row =
   fields_str ^ tail_str
 
 and ensure_equality_type ty =
-  match resolve_bound_type ty with
+  match resolve_bound_type_for_display ty with
   | TInt | TFloat | Boolean | String | Unit | Generic _ -> ()
   | Var { contents = Free _ } -> ()
   | Var { contents = Bound t } -> ensure_equality_type t
