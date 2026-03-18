@@ -827,15 +827,20 @@ let%test_unit "int match without wildcard reports fallback requirement" =
 let%test_unit "variant wildcard arm is redundant after all constructors are covered on a closed variant" =
   let code =
     {|
-      let normalize v =
+      let close v =
         match v with
         | `None -> `None
         | `Some(x) -> `Some(x)
 
-      match normalize(`Some(1)) with
-      | `None -> 0
-      | `Some(x) -> x
-      | _ -> 2
+      let f v =
+        close(v);
+        match v with
+        | `None -> 0
+        | `Some(x) -> x
+        | _ -> 2
+
+      f(`Some(1))
+      f(`None)
     |}
   in
   let rendered = check_program_formatted code in
@@ -850,13 +855,17 @@ let%test_unit "variant wildcard arm is redundant after all constructors are cove
 let%test_unit "variant constructor arm is redundant after earlier payload wildcard on a closed variant" =
   let code =
     {|
-      let keep_some v =
+      let close v =
         match v with
-        | `Some(x) -> `Some(x)
+        | `Some(x) -> x
 
-      match keep_some(`Some(1)) with
-      | `Some(x) -> x
-      | `Some(1) -> 1
+      let f v =
+        close(v);
+        match v with
+        | `Some(x) -> x
+        | `Some(1) -> 1
+
+      f(`Some(1))
     |}
   in
   let rendered = check_program_formatted code in
