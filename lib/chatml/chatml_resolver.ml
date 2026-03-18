@@ -61,7 +61,16 @@ let fallback_slot_of_expr (e : L.expr) : Frame_env.packed_slot =
     Frame_env.Slot Frame_env.SFloat
   | L.EPrim2 (L.BStringConcat, _, _) -> Frame_env.Slot Frame_env.SString
   | L.EPrim2
-      ( (L.BIntLt | L.BIntGt | L.BIntLe | L.BIntGe | L.BFloatLt | L.BFloatGt | L.BFloatLe | L.BFloatGe | L.BEq | L.BNeq)
+      ( ( L.BIntLt
+        | L.BIntGt
+        | L.BIntLe
+        | L.BIntGe
+        | L.BFloatLt
+        | L.BFloatGt
+        | L.BFloatLe
+        | L.BFloatGe
+        | L.BEq
+        | L.BNeq )
       , _
       , _ ) -> Frame_env.Slot Frame_env.SBool
   | _ -> Frame_env.Slot Frame_env.SObj
@@ -73,7 +82,9 @@ let choose_slot (rhs_node : L.expr L.node) : Frame_env.packed_slot =
   | None -> fallback_slot_of_expr rhs_node.value
 ;;
 
-let with_value node value = { L.value = value; span = node.span }
+let with_value (node : L.expr L.node) value = L.{ value; span = node.span }
+
+let with_stmt_value (node : L.stmt L.node) value = L.{ value; span = node.span }
 
 let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolved_expr =
   match e.value with
@@ -172,7 +183,8 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
     in
     push_frame stack fm;
     let binds' =
-      List.map binds ~f:(fun (nm, rhs_node) -> nm, with_value rhs_node (resolve_expr stack rhs_node))
+      List.map binds ~f:(fun (nm, rhs_node) ->
+        nm, with_value rhs_node (resolve_expr stack rhs_node))
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
@@ -184,7 +196,8 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
       Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
     push_frame stack fm;
     let binds' =
-      List.map binds ~f:(fun (nm, rhs_node) -> nm, with_value rhs_node (resolve_expr stack rhs_node))
+      List.map binds ~f:(fun (nm, rhs_node) ->
+        nm, with_value rhs_node (resolve_expr stack rhs_node))
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
@@ -196,7 +209,8 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
       Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
     push_frame stack fm;
     let binds' =
-      List.map binds ~f:(fun (nm, rhs_node) -> nm, with_value rhs_node (resolve_expr stack rhs_node))
+      List.map binds ~f:(fun (nm, rhs_node) ->
+        nm, with_value rhs_node (resolve_expr stack rhs_node))
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
@@ -228,7 +242,8 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
         in
         [ x, slot ]
       | L.PWildcard | L.PInt _ | L.PBool _ | L.PFloat _ | L.PString _ -> []
-      | L.PVariant (_tag, subpats) -> List.concat_map subpats ~f:(fun sp -> slots_of_pattern sp None)
+      | L.PVariant (_tag, subpats) ->
+        List.concat_map subpats ~f:(fun sp -> slots_of_pattern sp None)
       | L.PRecord (fields, _open) ->
         let field_type lbl =
           let rec search = function
@@ -333,7 +348,9 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
     L.RERecordExtend (with_value base base', fields')
 ;;
 
-let rec resolve_stmt (stack : frame_map list ref) (snode : L.stmt L.node) : L.resolved_stmt =
+let rec resolve_stmt (stack : frame_map list ref) (snode : L.stmt L.node)
+  : L.resolved_stmt
+  =
   match snode.value with
   | L.SLet (x, rhs) -> L.RSLet (x, with_value rhs (resolve_expr stack rhs))
   | L.SLetRec binds ->
@@ -343,9 +360,7 @@ let rec resolve_stmt (stack : frame_map list ref) (snode : L.stmt L.node) : L.re
     L.RSLetRec binds'
   | L.SExpr e -> L.RSExpr (with_value e (resolve_expr stack e))
   | L.SModule (mname, stmts) ->
-    let stmts' =
-      List.map stmts ~f:(fun st -> with_value st (resolve_stmt stack st))
-    in
+    let stmts' = List.map stmts ~f:(fun st -> with_stmt_value st (resolve_stmt stack st)) in
     L.RSModule (mname, stmts')
   | L.SOpen nm -> L.RSOpen nm
 ;;
@@ -359,7 +374,7 @@ let resolve_checked_program
   type_lookup_ref := Some lookup_fun;
   let stack = ref [] in
   let stmts' =
-    fst prog |> List.map ~f:(fun sn -> with_value sn (resolve_stmt stack sn))
+    fst prog |> List.map ~f:(fun sn -> with_stmt_value sn (resolve_stmt stack sn))
   in
   type_lookup_ref := None;
   stmts', snd prog

@@ -1,6 +1,7 @@
 open Core
 open Chatml
 module L = Chatml_lang
+module E = Chatml_eval
 open Chatml_builtin_modules
 
 (** Small parsing helper identical to the one used in the type-checker tests. *)
@@ -359,11 +360,11 @@ let%expect_test "record patterns allow trailing semicolons" =
 let%expect_test "runtime closure arity mismatch is reported clearly" =
   let env = L.create_env () in
   let slot = Frame_env.Slot Frame_env.SInt in
-  let body = node (L.EVarLoc { depth = 0; index = 0; slot }) in
-  let lam = node (L.ELambdaSlots ([ "x" ], [ slot ], body)) in
-  let bad_call = node (L.EApp (lam, [ node (L.EInt 1); node (L.EInt 2) ])) in
+  let body = node (L.REVarLoc { depth = 0; index = 0; slot }) in
+  let lam = node (L.RELambda ([ "x" ], [ slot ], body)) in
+  let bad_call = node (L.REApp (lam, [ node (L.REInt 1); node (L.REInt 2) ])) in
   (try
-     ignore (L.finish_eval [] (L.eval_expr env [] bad_call));
+     ignore (E.finish_eval [] (E.eval_expr env [] bad_call));
      print_endline "unexpected success"
    with
    | L.Runtime_error err -> print_endline err.message
