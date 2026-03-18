@@ -6,21 +6,44 @@
     for the {!module:Chatml.Chatml_lang} abstract syntax tree.  It performs
     full type inference with:
 
-    • classical `let`-polymorphism,
+    • `let`-polymorphism with a value restriction,
     • row-polymorphic records and variants,
     • first-class functions, arrays and references,
     • built-in support for a small prelude of primitives (see {!init_env}).
 
-    Running the type checker gives early feedback to users and enables
-    richer editor tooling.
+    The checker is used in two modes:
+
+    • a {e strict} mode via {!check_program}, which either returns a
+      snapshot of the inferred principal types or a structured diagnostic;
+    • a small compatibility/expect-test helper via {!infer_program}, which
+      formats the same result for humans.
+
+    A few implementation details are worth calling out because they shape
+    the current ChatML semantics:
+
+    • monomorphic bindings are {e not} instantiated on lookup, so helper
+      functions preserve sharing between a parameter's projected fields and
+      the value they eventually return;
+    • lambda parameters whose type has been constrained by record field
+      accesses are reopened to an open row before generalisation, allowing
+      helpers such as state-transition functions to accept larger records
+      than the subset of fields they touch;
+    • record copy-update (`{ r with field = v }`) treats missing labels on
+      an open base row as overrides of fields in the open tail instead of
+      recursively extending the row, which keeps array-update patterns
+      sound and ergonomic.
 
     The public surface is intentionally tiny:
 
     {ul
-    {- {!infer_program} validates a parsed program and prints diagnostics.}
-    {- {!type_lookup_for_program} returns a lookup function that maps an
-       arbitrary {!Source.span} back to the principal type inferred for that
-       AST node.}}
+    {- {!check_program} validates a parsed program and returns either a
+       checked snapshot or a diagnostic.}
+    {- {!checked_lookup_span_type} queries that snapshot for the principal
+       type inferred at a given {!Source.span}.}
+    {- {!format_diagnostic} renders strict-checking failures in the human
+       readable form used by tests and command-line tools.}
+    {- {!infer_program} and {!type_lookup_for_program} remain as small
+       convenience wrappers for tests/tooling.}}
 
     Everything else in this file exists to implement the inference engine
     itself and is **not** part of the stable API.
@@ -427,6 +450,15 @@ and show_row row =
 type scheme = typ
 type tenv = scheme Env.t
 
+(* Unlike a classical HM environment that stores only polymorphic schemes,
+   ChatML's typing environment stores both:
+   - generalized schemes (types containing [Generic] nodes), and
+   - monomorphic shared types for lambda parameters / weak bindings.
+
+   Preserving the latter by reference is important for record-heavy helper
+   functions: if we instantiated every lookup we would lose the sharing that
+   connects [st.tasks], [st.task_index] and the final [st] returned by the
+   helper, causing accidental row narrowing. *)
 let rec contains_generic (ty : typ) : bool =
   match ty with
   | Generic _ -> true
@@ -461,6 +493,8 @@ let init_env () : tenv =
   |> Env.of_list
 ;;
 
+(* Instantiate only genuinely polymorphic schemes.  Monomorphic bindings are
+   returned as-is so that all uses share the same mutable inference variables. *)
 let lookup (state : infer_state) (env : tenv) x =
   match Env.find env x with
   | Some sc ->
@@ -684,8 +718,10 @@ and reopen_lambda_row (state : infer_state) (row : typ) : typ =
     let merged_fields, _merged_tail = merge_fields full_row in
     (* Lambda parameters should be row-polymorphic by default: if a helper
        touches only a subset of record fields, callers should be able to pass
-       larger records.  We therefore always rebuild the parameter row with a
-       fresh open tail after inference has discovered the required fields. *)
+       larger records.  We therefore rebuild the parameter row with a fresh
+       open tail after inference has discovered the required fields.  This is
+       intentionally biased toward the "state-machine helper" use-case that
+       ChatML scripts rely on heavily. *)
     Row (merged_fields, new_var state state.current_lvl)
   | other -> other
 
@@ -852,6 +888,11 @@ and infer_expr (state : infer_state) (env : tenv) expr =
 
 (** --------------------------------------------------------------------- *)
 
+(* [infer_stmt_with_exports] mirrors the runtime's module semantics:
+   statements still mutate the local typing environment in-order, but only
+   explicit definitions contribute to a module's exported surface.
+   In particular, [open M] imports names for subsequent statements yet does
+   not re-export them from the enclosing module. *)
 let rec infer_stmt_with_exports
           (state : infer_state)
           (env : tenv)
@@ -910,21 +951,18 @@ let infer_stmt (state : infer_state) (env : tenv) (stmt : stmt) : tenv =
 
 (** --------------------------------------------------------------------- *)
 
-(** [infer_program prog] runs the HM type-checker on [prog].
+(** [check_program prog] runs strict HM inference on [prog].
 
-    All mutable checker state (identifier counters, levels and the span
-    table) is reset before starting so the function can be called
-    repeatedly on independent programs.
+    The function allocates a fresh inference state, infers every top-level
+    statement in order, and returns either:
 
-    Successful runs print ["Type checking succeeded!"] to standard output.
-    When a type error is detected the function catches the internal
-    exception, produces a human-readable diagnostic that includes a source
-    excerpt, and prints it; the exception does *not* escape the function
-    boundary.
+    - [Ok checked], where [checked] contains an immutable snapshot of the
+      principal types recorded for each source span; or
+    - [Error diagnostic], where [diagnostic] identifies the first typing
+      error and never permits evaluation to proceed.
 
-    The global {!span_types} table is populated during the traversal; it can
-    later be queried through {!type_lookup_for_program}.
-*)
+    The snapshot produced on success is the only source of type information
+    consulted by the resolver in production. *)
 let check_program (prog : program) : (checked_program, diagnostic) result =
   let state = create_state () in
   let env = init_env () in
@@ -942,6 +980,8 @@ let check_program (prog : program) : (checked_program, diagnostic) result =
   | Type_error_with_loc (msg, span) -> Error { message = msg; span = Some span }
 ;;
 
+(* Compatibility helper used by expect tests and ad-hoc debugging.  Strict
+   callers should prefer [check_program]. *)
 let infer_program (prog : program) : unit =
   match check_program prog with
   | Ok _ -> printf "Type checking succeeded!\n%!"
@@ -952,19 +992,11 @@ let infer_program (prog : program) : unit =
 (*  Public helper – produce a lookup function for a whole program          *)
 (*************************************************************************** *)
 
-(** [type_lookup_for_program prog] returns a lookup closure for [prog].
-
-    Internally the function first clears the span table, runs
-    {!infer_program} (silencing any error so that lookup still works on
-    ill-typed programs) and takes a snapshot of the resulting mapping.
-
-    The returned function takes a {!Source.span} and returns [Some ty] when
-    a principal type could be inferred for the node spanning [span], or
-    [None] otherwise.
-
-    The snapshot is immutable—subsequent calls to {!infer_program} will not
-    affect the closure.
-*)
+(** [type_lookup_for_program prog] is a small convenience wrapper around
+    {!check_program}.  On success it returns a span lookup closure backed by
+    the checked snapshot; on failure it returns a closure that always yields
+    [None].  This is suitable for tooling/tests that want best-effort access
+    to inferred types without running the program. *)
 let type_lookup_for_program (prog : program) : Source.span -> typ option =
   match check_program prog with
   | Ok checked -> checked_lookup_span_type checked

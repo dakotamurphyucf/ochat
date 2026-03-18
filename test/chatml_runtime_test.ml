@@ -551,6 +551,97 @@ let%expect_test "lambda values and map_in_place" =
 |}]
 ;;
 
+let%expect_test "state machine helpers can update nested task state" =
+  let code =
+    {|
+      let mk_task id =
+        { id = id
+        ; status = `Pending
+        ; attempts = 0
+        }
+
+      let set_task_status st new_status =
+        let t = st.tasks[st.task_index] in
+        let t = { t with status = new_status } in
+        st.tasks[st.task_index] <- t;
+        st
+
+      let bump_attempts st =
+        let t = st.tasks[st.task_index] in
+        let t = { t with attempts = t.attempts + 1 } in
+        st.tasks[st.task_index] <- t;
+        st
+
+      let step st ev =
+        match ev with
+        | `Start ->
+            let st = set_task_status(st, `Running) in
+            bump_attempts(st)
+        | `Done -> set_task_status(st, `Done)
+
+      let st0 =
+        { autopilot = true
+        ; task_index = 0
+        ; tasks = [ mk_task("t1") ]
+        }
+
+      let st1 = step(st0, `Start)
+      print(st1.tasks[0].attempts)
+      print(st1.tasks[0].status)
+      print(st1.autopilot)
+
+      let st2 = step(st1, `Done)
+      print(st2.tasks[0].status)
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+1 
+`Running 
+true 
+`Done 
+|}]
+;;
+
+let%expect_test "state machine helper imported from module keeps outer state width" =
+  let code =
+    {|
+      let mk_task id =
+        { id = id
+        ; status = `Pending
+        ; attempts = 0
+        }
+
+      module Flow = struct
+        let bump_attempts st =
+          let t = st.tasks[st.task_index] in
+          let t = { t with attempts = t.attempts + 1 } in
+          st.tasks[st.task_index] <- t;
+          st
+      end
+
+      open Flow
+
+      let st0 =
+        { autopilot = false
+        ; task_index = 0
+        ; tasks = [ mk_task("t1") ]
+        }
+
+      let st1 = bump_attempts(st0)
+      print(st1.autopilot)
+      print(st1.tasks[0].attempts)
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+false 
+1 
+|}]
+;;
+
 
 let%expect_test "ill-typed programs do not execute" =
   let code =

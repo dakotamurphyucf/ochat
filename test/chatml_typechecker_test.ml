@@ -695,6 +695,83 @@ let%expect_test "record helper remains row-polymorphic when returning a wider st
   [%expect {| Type checking succeeded! |}]
 ;;
 
+let%expect_test "state machine helper composition preserves wider state rows" =
+  let code =
+    {|
+      let mk_task id =
+        { id = id
+        ; status = `Pending
+        ; attempts = 0
+        }
+
+      let set_task_status st new_status =
+        let t = st.tasks[st.task_index] in
+        let t = { t with status = new_status } in
+        st.tasks[st.task_index] <- t;
+        st
+
+      let bump_attempts st =
+        let t = st.tasks[st.task_index] in
+        let t = { t with attempts = t.attempts + 1 } in
+        st.tasks[st.task_index] <- t;
+        st
+
+      let step st ev =
+        match ev with
+        | `Start ->
+            let st = set_task_status(st, `Running) in
+            bump_attempts(st)
+        | `Done -> set_task_status(st, `Done)
+
+      let s =
+        { autopilot = true
+        ; task_index = 0
+        ; tasks = [ mk_task("t1") ]
+        }
+
+      let s2 = step(s, `Start)
+      s2.autopilot
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "module helper over state remains row-polymorphic after open" =
+  let code =
+    {|
+      let mk_task id =
+        { id = id
+        ; status = `Pending
+        ; attempts = 0
+        }
+
+      module Flow = struct
+        let bump_attempts st =
+          let t = st.tasks[st.task_index] in
+          let t = { t with attempts = t.attempts + 1 } in
+          st.tasks[st.task_index] <- t;
+          st
+      end
+
+      open Flow
+
+      let s =
+        { autopilot = false
+        ; task_index = 0
+        ; tasks = [ mk_task("t1") ]
+        }
+
+      let s2 = bump_attempts(s)
+      s2.autopilot
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
 let%expect_test "record pattern subset ok" =
   let code =
     {|
