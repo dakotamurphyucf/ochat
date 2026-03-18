@@ -80,12 +80,10 @@ module BuiltinModules = struct
     (* global functions *)
     List.iter Builtin_spec.builtins ~f:(fun builtin ->
       set_var env builtin.name (VBuiltin builtin.impl));
-
     (* builtin modules *)
     List.iter Builtin_spec.modules ~f:(fun m ->
       let menv = create_env () in
-      List.iter m.exports ~f:(fun b ->
-        set_var menv b.name (VBuiltin b.impl));
+      List.iter m.exports ~f:(fun b -> set_var menv b.name (VBuiltin b.impl));
       set_var env m.name (VModule menv))
   ;;
 

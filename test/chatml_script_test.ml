@@ -463,7 +463,8 @@ let config_example_code =
     |}
 ;;
 
-let json_parse_code = {|
+let json_parse_code =
+  {|
   type json =
     [ `Null
     | `Bool(bool)
@@ -512,6 +513,7 @@ let json_parse_code = {|
   print("out: " ++ Json.stringify(j2))
   print("pretty:\n" ++ Json.pretty(j2))
 |}
+;;
 
 let run_chatml (code : string) : unit =
   let env = BuiltinModules.create_default_env () in

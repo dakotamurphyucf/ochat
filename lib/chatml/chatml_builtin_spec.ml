@@ -1,6 +1,7 @@
 open Core
 open Chatml_lang
 open Jsonaf
+module Eval = Chatml_eval
 
 type row =
   | TRow_empty
@@ -24,10 +25,19 @@ and ty =
   | TRec_var of string
 
 let closed_row (fields : (string * ty) list) : row = TRow_extend (fields, TRow_empty)
-let open_row (fields : (string * ty) list) (tail : string) : row = TRow_extend (fields, TRow_var tail)
+
+let open_row (fields : (string * ty) list) (tail : string) : row =
+  TRow_extend (fields, TRow_var tail)
+;;
+
 let record (fields : (string * ty) list) : ty = TRecord (closed_row fields)
-let record_open (fields : (string * ty) list) (tail : string) : ty = TRecord (open_row fields tail)
+
+let record_open (fields : (string * ty) list) (tail : string) : ty =
+  TRecord (open_row fields tail)
+;;
+
 let variant (cases : (string * ty) list) : ty = TVariant (closed_row cases)
+
 let variant_open (cases : (string * ty) list) (tail : string) : ty =
   TVariant (open_row cases tail)
 ;;
@@ -43,13 +53,29 @@ type builtin_module =
   ; exports : builtin list
   }
 
+let apply_chatml (name : string) (fn : value) (args : value list) : value =
+  match fn with
+  | VBuiltin bf ->
+    (try bf args with
+     | Failure msg -> failwith msg)
+  | VClosure cl ->
+    if List.length cl.params <> List.length args
+    then failwith (Printf.sprintf "%s: function arity mismatch" name)
+    else (
+      try Eval.finish_eval [] (Eval.TailCall (cl, args)) with
+      | Runtime_error err ->
+        (* Re-raise as [Failure] so the outer VBuiltin call site converts it
+           into a span-attached ChatML runtime error. *)
+        failwith err.message
+      | Failure msg -> failwith msg)
+  | _ -> failwith (Printf.sprintf "%s: expected a function" name)
+;;
+
 let module_scheme (m : builtin_module) : ty =
   record (List.map m.exports ~f:(fun b -> b.name, b.scheme))
 ;;
 
-let option_ty (a : string) : ty =
-  variant [ "None", TUnit; "Some", TVar a ]
-;;
+let option_ty (a : string) : ty = variant [ "None", TUnit; "Some", TVar a ]
 
 let expect_string (name : string) : value -> string = function
   | VString s -> s
@@ -111,8 +137,8 @@ let with_unary_arg (name : string) (f : value -> value) : value list -> value = 
   | _ -> failwith (Printf.sprintf "%s: expected exactly one argument" name)
 ;;
 
-let with_binary_args (name : string) (f : value -> value -> value) : value list -> value =
-  function
+let with_binary_args (name : string) (f : value -> value -> value) : value list -> value
+  = function
   | [ lhs; rhs ] -> f lhs rhs
   | _ -> failwith (Printf.sprintf "%s: expected exactly two arguments" name)
 ;;
@@ -121,10 +147,7 @@ let make_unary_builtin (name : string) (scheme : ty) (f : value -> value) : buil
   { name; scheme; impl = with_unary_arg name f }
 ;;
 
-let make_binary_builtin
-      (name : string)
-      (scheme : ty)
-      (f : value -> value -> value)
+let make_binary_builtin (name : string) (scheme : ty) (f : value -> value -> value)
   : builtin
   =
   { name; scheme; impl = with_binary_args name f }
@@ -166,29 +189,47 @@ let make_ternary_builtin
 ;;
 
 let builtins : builtin list =
-  [ make_unary_builtin "print" (TFun ([ TVar "a" ], TUnit)) (fun v ->
-      Printf.printf "%s \n" (value_to_string v);
-      VUnit)
-  ; make_unary_builtin "to_string" (TFun ([ TVar "a" ], TString)) (fun v ->
-      VString (value_to_string v))
-  ; make_unary_builtin "length" (TFun ([ TArray (TVar "a") ], TInt)) (fun v ->
-      VInt (Array.length (expect_array "length" v)))
-  ; make_unary_builtin "string_length" (TFun ([ TString ], TInt)) (fun v ->
-      VInt (String.length (expect_string "string_length" v)))
-  ; make_unary_builtin "string_is_empty" (TFun ([ TString ], TBool)) (fun v ->
-      VBool (String.is_empty (expect_string "string_is_empty" v)))
-  ; make_unary_builtin "array_copy" (TFun ([ TArray (TVar "a") ], TArray (TVar "a"))) (fun v ->
-      VArray (Array.copy (expect_array "array_copy" v)))
-  ; make_unary_builtin "record_keys" (TFun ([ TRecord (TRow_var "r") ], TArray TString)) (fun v ->
-      let keys =
-        expect_record_like "record_keys" v
-        |> List.sort ~compare:String.compare
-        |> List.map ~f:(fun key -> VString key)
-        |> Array.of_list
-      in
-      VArray keys)
-  ; make_unary_builtin "variant_tag" (TFun ([ TVariant (TRow_var "r") ], TString)) (fun v ->
-      VString (expect_variant "variant_tag" v))
+  [ make_unary_builtin
+      "print"
+      (TFun ([ TVar "a" ], TUnit))
+      (fun v ->
+         Printf.printf "%s \n" (value_to_string v);
+         VUnit)
+  ; make_unary_builtin
+      "to_string"
+      (TFun ([ TVar "a" ], TString))
+      (fun v -> VString (value_to_string v))
+  ; make_unary_builtin
+      "length"
+      (TFun ([ TArray (TVar "a") ], TInt))
+      (fun v -> VInt (Array.length (expect_array "length" v)))
+  ; make_unary_builtin
+      "string_length"
+      (TFun ([ TString ], TInt))
+      (fun v -> VInt (String.length (expect_string "string_length" v)))
+  ; make_unary_builtin
+      "string_is_empty"
+      (TFun ([ TString ], TBool))
+      (fun v -> VBool (String.is_empty (expect_string "string_is_empty" v)))
+  ; make_unary_builtin
+      "array_copy"
+      (TFun ([ TArray (TVar "a") ], TArray (TVar "a")))
+      (fun v -> VArray (Array.copy (expect_array "array_copy" v)))
+  ; make_unary_builtin
+      "record_keys"
+      (TFun ([ TRecord (TRow_var "r") ], TArray TString))
+      (fun v ->
+         let keys =
+           expect_record_like "record_keys" v
+           |> List.sort ~compare:String.compare
+           |> List.map ~f:(fun key -> VString key)
+           |> Array.of_list
+         in
+         VArray keys)
+  ; make_unary_builtin
+      "variant_tag"
+      (TFun ([ TVariant (TRow_var "r") ], TString))
+      (fun v -> VString (expect_variant "variant_tag" v))
   ; make_binary_builtin
       "swap_ref"
       (TFun ([ TRef (TVar "a"); TVar "a" ], TVar "a"))
@@ -197,14 +238,15 @@ let builtins : builtin list =
          let old = !cell in
          cell := rhs;
          old)
-  ; make_unary_builtin "fail" (TFun ([ TString ], TVar "a")) (fun v ->
-      failwith (expect_string "fail" v))
+  ; make_unary_builtin
+      "fail"
+      (TFun ([ TString ], TVar "a"))
+      (fun v -> failwith (expect_string "fail" v))
   ]
 ;;
 
-let json_entry_ty (self : ty) : ty =
-  record [ "key", TString; "value", self ]
-;;
+let json_entry_ty (self : ty) : ty = record [ "key", TString; "value", self ]
+
 let json_ty : ty =
   TMu
     ( "__builtin_json"
@@ -217,6 +259,7 @@ let json_ty : ty =
         ; "Object", TArray (json_entry_ty (TRec_var "__builtin_json"))
         ] )
 ;;
+
 let rec jsonaf_to_value (j : Jsonaf.t) : value =
   match j with
   | `Null -> VVariant ("Null", [])
@@ -282,174 +325,528 @@ let rec value_to_jsonaf (name : string) (v : value) : Jsonaf.t =
 
 let entry_ty a = record [ "key", TString; "value", TVar a ]
 let tbl_ty a = TRef (TArray (entry_ty a))
+let string_option_int_ty : ty = variant [ "None", TUnit; "Some", TInt ]
+
+let string_module : builtin_module =
+  { name = "String"
+  ; exports =
+      [ (* existing *)
+        make_unary_builtin
+          "length"
+          (TFun ([ TString ], TInt))
+          (fun v -> VInt (String.length (expect_string "String.length" v)))
+      ; make_unary_builtin
+          "is_empty"
+          (TFun ([ TString ], TBool))
+          (fun v -> VBool (String.is_empty (expect_string "String.is_empty" v)))
+      ; make_binary_builtin
+          "concat"
+          (TFun ([ TString; TString ], TString))
+          (fun a b ->
+             let a = expect_string "String.concat" a in
+             let b = expect_string "String.concat" b in
+             VString (a ^ b))
+      ; (* recommended additions *)
+        make_binary_builtin
+          "equal"
+          (TFun ([ TString; TString ], TBool))
+          (fun a b ->
+             VBool
+               (String.equal
+                  (expect_string "String.equal" a)
+                  (expect_string "String.equal" b)))
+      ; make_binary_builtin
+          "contains"
+          (TFun ([ TString; TString ], TBool))
+          (fun s sub ->
+             let s = expect_string "String.contains" s in
+             let sub = expect_string "String.contains" sub in
+             VBool (String.is_substring s ~substring:sub))
+      ; make_binary_builtin
+          "starts_with"
+          (TFun ([ TString; TString ], TBool))
+          (fun s prefix ->
+             let s = expect_string "String.starts_with" s in
+             let prefix = expect_string "String.starts_with" prefix in
+             VBool (String.is_prefix s ~prefix))
+      ; make_binary_builtin
+          "ends_with"
+          (TFun ([ TString; TString ], TBool))
+          (fun s suffix ->
+             let s = expect_string "String.ends_with" s in
+             let suffix = expect_string "String.ends_with" suffix in
+             VBool (String.is_suffix s ~suffix))
+      ; make_unary_builtin
+          "trim"
+          (TFun ([ TString ], TString))
+          (fun s -> VString (String.strip (expect_string "String.trim" s)))
+      ; make_ternary_builtin
+          "slice"
+          (TFun ([ TString; TInt; TInt ], TString))
+          (fun s start len ->
+             let s = expect_string "String.slice" s in
+             let start = expect_int "String.slice" start in
+             let len = expect_int "String.slice" len in
+             if start < 0 || len < 0
+             then failwith "String.slice: start and len must be non-negative"
+             else if start > String.length s
+             then failwith "String.slice: start out of bounds"
+             else if start + len > String.length s
+             then failwith "String.slice: start+len out of bounds"
+             else VString (String.sub s ~pos:start ~len))
+      ; make_binary_builtin
+          "find"
+          (TFun ([ TString; TString ], string_option_int_ty))
+          (fun s pat ->
+             let s = expect_string "String.find" s in
+             let pat = expect_string "String.find" pat in
+             match String.substr_index s ~pattern:pat with
+             | None -> VVariant ("None", [])
+             | Some i -> VVariant ("Some", [ VInt i ]))
+      ; make_binary_builtin
+          "split"
+          (TFun ([ TString; TString ], TArray TString))
+          (fun s sep ->
+             let s = expect_string "String.split" s in
+             let sep = expect_string "String.split" sep in
+             if String.is_empty sep
+             then failwith "String.split: separator must be non-empty"
+             else (
+               let pat = String.Search_pattern.create sep in
+               let parts = String.Search_pattern.split_on pat s in
+               VArray (parts |> List.map ~f:(fun p -> VString p) |> Array.of_list)))
+      ; make_unary_builtin
+          "to_upper"
+          (TFun ([ TString ], TString))
+          (fun s -> VString (String.uppercase (expect_string "String.to_upper" s)))
+      ; make_unary_builtin
+          "to_lower"
+          (TFun ([ TString ], TString))
+          (fun s -> VString (String.lowercase (expect_string "String.to_lower" s)))
+      ; make_ternary_builtin
+          "replace_all"
+          (TFun ([ TString; TString; TString ], TString))
+          (fun s pattern with_ ->
+             let s = expect_string "String.replace_all" s in
+             let pattern = expect_string "String.replace_all" pattern in
+             let with_ = expect_string "String.replace_all" with_ in
+             if String.is_empty pattern
+             then failwith "String.replace_all: pattern must be non-empty"
+             else VString (String.substr_replace_all s ~pattern ~with_))
+      ]
+  }
+;;
+
+let array_module : builtin_module =
+  { name = "Array"
+  ; exports =
+      [ (* existing / keep *)
+        make_unary_builtin
+          "length"
+          (TFun ([ TArray (TVar "a") ], TInt))
+          (fun v -> VInt (Array.length (expect_array "Array.length" v)))
+      ; make_unary_builtin
+          "copy"
+          (TFun ([ TArray (TVar "a") ], TArray (TVar "a")))
+          (fun v -> VArray (Array.copy (expect_array "Array.copy" v)))
+      ; make_binary_builtin
+          "get"
+          (TFun ([ TArray (TVar "a"); TInt ], TVar "a"))
+          (fun arr idx ->
+             let a = expect_array "Array.get" arr in
+             let i = expect_int "Array.get" idx in
+             if i < 0 || i >= Array.length a
+             then failwith "Array.get: index out of bounds"
+             else a.(i))
+      ; make_ternary_builtin
+          "set"
+          (TFun ([ TArray (TVar "a"); TInt; TVar "a" ], TUnit))
+          (fun arr idx v ->
+             let a = expect_array "Array.set" arr in
+             let i = expect_int "Array.set" idx in
+             if i < 0 || i >= Array.length a
+             then failwith "Array.set: index out of bounds"
+             else (
+               a.(i) <- v;
+               VUnit))
+      ; (* new: make *)
+        make_binary_builtin
+          "make"
+          (TFun ([ TInt; TVar "a" ], TArray (TVar "a")))
+          (fun n v ->
+             let n = expect_int "Array.make" n in
+             if n < 0
+             then failwith "Array.make: length must be non-negative"
+             else VArray (Array.create ~len:n v))
+      ; (* new: append *)
+        make_binary_builtin
+          "append"
+          (TFun ([ TArray (TVar "a"); TArray (TVar "a") ], TArray (TVar "a")))
+          (fun a b ->
+             let a = expect_array "Array.append" a in
+             let b = expect_array "Array.append" b in
+             VArray (Array.append a b))
+      ; (* new: sub(arr, start, len) *)
+        make_ternary_builtin
+          "sub"
+          (TFun ([ TArray (TVar "a"); TInt; TInt ], TArray (TVar "a")))
+          (fun arr start len ->
+             let a = expect_array "Array.sub" arr in
+             let start = expect_int "Array.sub" start in
+             let len = expect_int "Array.sub" len in
+             if start < 0 || len < 0
+             then failwith "Array.sub: start and len must be non-negative"
+             else if start > Array.length a
+             then failwith "Array.sub: start out of bounds"
+             else if start + len > Array.length a
+             then failwith "Array.sub: start+len out of bounds"
+             else VArray (Array.sub a ~pos:start ~len))
+      ; (* new: reverse (pure) *)
+        make_unary_builtin
+          "reverse"
+          (TFun ([ TArray (TVar "a") ], TArray (TVar "a")))
+          (fun arr ->
+             let a = expect_array "Array.reverse" arr in
+             VArray (Array.rev a))
+      ; (* new: reverse_in_place (mutating) *)
+        make_unary_builtin
+          "reverse_in_place"
+          (TFun ([ TArray (TVar "a") ], TUnit))
+          (fun arr ->
+             let a = expect_array "Array.reverse_in_place" arr in
+             let i = ref 0 in
+             let j = ref (Array.length a - 1) in
+             while !i < !j do
+               let tmp = a.(!i) in
+               a.(!i) <- a.(!j);
+               a.(!j) <- tmp;
+               i := !i + 1;
+               j := !j - 1
+             done;
+             VUnit)
+      ; (* new: swap(arr, i, j) *)
+        make_ternary_builtin
+          "swap"
+          (TFun ([ TArray (TVar "a"); TInt; TInt ], TUnit))
+          (fun arr i j ->
+             let a = expect_array "Array.swap" arr in
+             let i = expect_int "Array.swap" i in
+             let j = expect_int "Array.swap" j in
+             let n = Array.length a in
+             if i < 0 || i >= n || j < 0 || j >= n
+             then failwith "Array.swap: index out of bounds"
+             else (
+               let tmp = a.(i) in
+               a.(i) <- a.(j);
+               a.(j) <- tmp;
+               VUnit))
+      ; (* new: fill(arr, v) *)
+        make_binary_builtin
+          "fill"
+          (TFun ([ TArray (TVar "a"); TVar "a" ], TUnit))
+          (fun arr v ->
+             let a = expect_array "Array.fill" arr in
+             for i = 0 to Array.length a - 1 do
+               a.(i) <- v
+             done;
+             VUnit)
+      ; make_binary_builtin
+          "init"
+          (TFun ([ TInt; TFun ([ TInt ], TVar "a") ], TArray (TVar "a")))
+          (fun n f ->
+             let n = expect_int "Array.init" n in
+             if n < 0 then failwith "Array.init: length must be non-negative";
+             let arr =
+               Array.init n ~f:(fun i -> apply_chatml "Array.init" f [ VInt i ])
+             in
+             VArray arr)
+      ; make_binary_builtin
+          "map"
+          (TFun ([ TArray (TVar "a"); TFun ([ TVar "a" ], TVar "b") ], TArray (TVar "b")))
+          (fun arr f ->
+             let a = expect_array "Array.map" arr in
+             VArray (Array.map a ~f:(fun x -> apply_chatml "Array.map" f [ x ])))
+      ; (* mapi : 'a array -> (int -> 'a -> 'b) -> 'b array *)
+        make_binary_builtin
+          "mapi"
+          (TFun
+             ( [ TArray (TVar "a"); TFun ([ TInt; TVar "a" ], TVar "b") ]
+             , TArray (TVar "b") ))
+          (fun arr f ->
+             let a = expect_array "Array.mapi" arr in
+             VArray
+               (Array.mapi a ~f:(fun i x -> apply_chatml "Array.mapi" f [ VInt i; x ])))
+      ; (* iter : 'a array -> ('a -> unit) -> unit *)
+        make_binary_builtin
+          "iter"
+          (TFun ([ TArray (TVar "a"); TFun ([ TVar "a" ], TUnit) ], TUnit))
+          (fun arr f ->
+             let a = expect_array "Array.iter" arr in
+             Array.iter a ~f:(fun x -> ignore (apply_chatml "Array.iter" f [ x ]));
+             VUnit)
+      ; (* iteri : 'a array -> (int -> 'a -> unit) -> unit *)
+        make_binary_builtin
+          "iteri"
+          (TFun ([ TArray (TVar "a"); TFun ([ TInt; TVar "a" ], TUnit) ], TUnit))
+          (fun arr f ->
+             let a = expect_array "Array.iteri" arr in
+             Array.iteri a ~f:(fun i x ->
+               ignore (apply_chatml "Array.iteri" f [ VInt i; x ]));
+             VUnit)
+      ; (* fold : 'a array -> 'b -> ('b -> 'a -> 'b) -> 'b
+                   Call shape: fold(arr, init, f) *)
+        make_ternary_builtin
+          "fold"
+          (TFun
+             ( [ TArray (TVar "a"); TVar "b"; TFun ([ TVar "b"; TVar "a" ], TVar "b") ]
+             , TVar "b" ))
+          (fun arr init f ->
+             let a = expect_array "Array.fold" arr in
+             let acc = ref init in
+             Array.iter a ~f:(fun x -> acc := apply_chatml "Array.fold" f [ !acc; x ]);
+             !acc)
+      ; (* filter : 'a array -> ('a -> bool) -> 'a array *)
+        make_binary_builtin
+          "filter"
+          (TFun ([ TArray (TVar "a"); TFun ([ TVar "a" ], TBool) ], TArray (TVar "a")))
+          (fun arr pred ->
+             let a = expect_array "Array.filter" arr in
+             let kept =
+               a
+               |> Array.to_list
+               |> List.filter ~f:(fun x ->
+                 match apply_chatml "Array.filter" pred [ x ] with
+                 | VBool b -> b
+                 | _ -> failwith "Array.filter: predicate must return bool")
+               |> Array.of_list
+             in
+             VArray kept)
+      ; (* exists : 'a array -> ('a -> bool) -> bool *)
+        make_binary_builtin
+          "exists"
+          (TFun ([ TArray (TVar "a"); TFun ([ TVar "a" ], TBool) ], TBool))
+          (fun arr pred ->
+             let a = expect_array "Array.exists" arr in
+             let rec loop i =
+               if i >= Array.length a
+               then false
+               else (
+                 match apply_chatml "Array.exists" pred [ a.(i) ] with
+                 | VBool true -> true
+                 | VBool false -> loop (i + 1)
+                 | _ -> failwith "Array.exists: predicate must return bool")
+             in
+             VBool (loop 0))
+      ; (* for_all : 'a array -> ('a -> bool) -> bool *)
+        make_binary_builtin
+          "for_all"
+          (TFun ([ TArray (TVar "a"); TFun ([ TVar "a" ], TBool) ], TBool))
+          (fun arr pred ->
+             let a = expect_array "Array.for_all" arr in
+             let rec loop i =
+               if i >= Array.length a
+               then true
+               else (
+                 match apply_chatml "Array.for_all" pred [ a.(i) ] with
+                 | VBool true -> loop (i + 1)
+                 | VBool false -> false
+                 | _ -> failwith "Array.for_all: predicate must return bool")
+             in
+             VBool (loop 0))
+      ; (* find : 'a array -> ('a -> bool) -> option('a) *)
+        make_binary_builtin
+          "find"
+          (TFun ([ TArray (TVar "a"); TFun ([ TVar "a" ], TBool) ], option_ty "a"))
+          (fun arr pred ->
+             let a = expect_array "Array.find" arr in
+             let rec loop i =
+               if i >= Array.length a
+               then VVariant ("None", [])
+               else (
+                 match apply_chatml "Array.find" pred [ a.(i) ] with
+                 | VBool true -> VVariant ("Some", [ a.(i) ])
+                 | VBool false -> loop (i + 1)
+                 | _ -> failwith "Array.find: predicate must return bool")
+             in
+             loop 0)
+      ; (* find_map : 'a array -> ('a -> option('b)) -> option('b) *)
+        make_binary_builtin
+          "find_map"
+          (TFun ([ TArray (TVar "a"); TFun ([ TVar "a" ], option_ty "b") ], option_ty "b"))
+          (fun arr f ->
+             let a = expect_array "Array.find_map" arr in
+             let rec loop i =
+               if i >= Array.length a
+               then VVariant ("None", [])
+               else (
+                 match apply_chatml "Array.find_map" f [ a.(i) ] with
+                 | VVariant ("None", []) -> loop (i + 1)
+                 | VVariant ("Some", [ v ]) -> VVariant ("Some", [ v ])
+                 | _ -> failwith "Array.find_map: function must return `None or `Some(x)")
+             in
+             loop 0)
+      ]
+  }
+;;
 
 let modules : builtin_module list =
-  [ { name = "String"
-    ; exports =
-        [ make_unary_builtin "length" (TFun ([ TString ], TInt)) (fun v ->
-            VInt (String.length (expect_string "String.length" v)))
-        ; make_unary_builtin "is_empty" (TFun ([ TString ], TBool)) (fun v ->
-            VBool (String.is_empty (expect_string "String.is_empty" v)))
-        ; make_binary_builtin "concat" (TFun ([ TString; TString ], TString)) (fun a b ->
-            VString (expect_string "String.concat" a ^ expect_string "String.concat" b))
-        ]
-    }
-  ; { name = "Array"
-    ; exports =
-        [ make_unary_builtin "length" (TFun ([ TArray (TVar "a") ], TInt)) (fun v ->
-            VInt (Array.length (expect_array "Array.length" v)))
-        ; make_unary_builtin
-            "copy"
-            (TFun ([ TArray (TVar "a") ], TArray (TVar "a")))
-            (fun v -> VArray (Array.copy (expect_array "Array.copy" v)))
-        ; make_binary_builtin "get" (TFun ([ TArray (TVar "a"); TInt ], TVar "a")) (fun arr idx ->
-            let a = expect_array "Array.get" arr in
-            let i = expect_int "Array.get" idx in
-            if i < 0 || i >= Array.length a
-            then failwith "Array.get: index out of bounds"
-            else a.(i))
-        ; make_ternary_builtin
-            "set"
-            (TFun ([ TArray (TVar "a"); TInt; TVar "a" ], TUnit))
-            (fun arr idx v ->
-              let a = expect_array "Array.set" arr in
-              let i = expect_int "Array.set" idx in
-              if i < 0 || i >= Array.length a
-              then failwith "Array.set: index out of bounds"
-              else (
-                a.(i) <- v;
-                VUnit))
-        ]
-    }
+  [ string_module
+  ; array_module
   ; { name = "Option"
     ; exports =
-        [ make_nullary_builtin "none" (TFun ([], option_ty "a")) (fun () ->
-            VVariant ("None", []))
-        ; make_unary_builtin "some" (TFun ([ TVar "a" ], option_ty "a")) (fun v ->
-            VVariant ("Some", [ v ]))
-        ; make_unary_builtin "is_none" (TFun ([ option_ty "a" ], TBool)) (fun v ->
-            match v with
-            | VVariant ("None", []) -> VBool true
-            | VVariant ("Some", [ _ ]) -> VBool false
-            | _ -> failwith "Option.is_none: expected `None or `Some(_)")
-        ; make_unary_builtin "is_some" (TFun ([ option_ty "a" ], TBool)) (fun v ->
-            match v with
-            | VVariant ("None", []) -> VBool false
-            | VVariant ("Some", [ _ ]) -> VBool true
-            | _ -> failwith "Option.is_some: expected `None or `Some(_)")
-        ; make_binary_builtin "get_or" (TFun ([ option_ty "a"; TVar "a" ], TVar "a"))
+        [ make_nullary_builtin
+            "none"
+            (TFun ([], option_ty "a"))
+            (fun () -> VVariant ("None", []))
+        ; make_unary_builtin
+            "some"
+            (TFun ([ TVar "a" ], option_ty "a"))
+            (fun v -> VVariant ("Some", [ v ]))
+        ; make_unary_builtin
+            "is_none"
+            (TFun ([ option_ty "a" ], TBool))
+            (fun v ->
+               match v with
+               | VVariant ("None", []) -> VBool true
+               | VVariant ("Some", [ _ ]) -> VBool false
+               | _ -> failwith "Option.is_none: expected `None or `Some(_)")
+        ; make_unary_builtin
+            "is_some"
+            (TFun ([ option_ty "a" ], TBool))
+            (fun v ->
+               match v with
+               | VVariant ("None", []) -> VBool false
+               | VVariant ("Some", [ _ ]) -> VBool true
+               | _ -> failwith "Option.is_some: expected `None or `Some(_)")
+        ; make_binary_builtin
+            "get_or"
+            (TFun ([ option_ty "a"; TVar "a" ], TVar "a"))
             (fun opt default ->
-              match opt with
-              | VVariant ("None", []) -> default
-              | VVariant ("Some", [ v ]) -> v
-              | _ -> failwith "Option.get_or: expected `None or `Some(_)")
+               match opt with
+               | VVariant ("None", []) -> default
+               | VVariant ("Some", [ v ]) -> v
+               | _ -> failwith "Option.get_or: expected `None or `Some(_)")
         ]
     }
   ; (* Hashtbl: string-keyed, stored as ref(entry array) *)
-
     { name = "Hashtbl"
     ; exports =
-        [ make_nullary_builtin "create" (TFun ([], tbl_ty "a")) (fun () ->
-            VRef (ref (VArray [||])))
-
-        ; make_ternary_builtin "set" (TFun ([ tbl_ty "a"; TString; TVar "a" ], TUnit))
+        [ make_nullary_builtin
+            "create"
+            (TFun ([], tbl_ty "a"))
+            (fun () -> VRef (ref (VArray [||])))
+        ; make_ternary_builtin
+            "set"
+            (TFun ([ tbl_ty "a"; TString; TVar "a" ], TUnit))
             (fun tbl k v ->
-              let cell = expect_ref "Hashtbl.set" tbl in
-              let arr = expect_array "Hashtbl.set" !cell in
-              let key = expect_string "Hashtbl.set" k in
-              let entry =
-                VRecord
-                  (Map.of_alist_exn (module String) [ "key", VString key; "value", v ])
-              in
-              let n = Array.length arr in
-              let rec find i =
-                if i >= n then None
-                else (
-                  match arr.(i) with
-                  | VRecord m ->
-                    (match Map.find m "key" with
-                     | Some (VString k') when String.equal k' key -> Some i
-                     | _ -> find (i + 1))
-                  | _ -> find (i + 1))
-              in
-              (match find 0 with
-               | Some i ->
-                 let arr' = Array.copy arr in
-                 arr'.(i) <- entry;
-                 cell := VArray arr'
-               | None ->
-                 let arr' =
-                   Array.init (n + 1) ~f:(fun i -> if i < n then arr.(i) else entry)
-                 in
-                 cell := VArray arr');
-              VUnit)
-
-        ; make_binary_builtin "get" (TFun ([ tbl_ty "a"; TString ], option_ty "a"))
+               let cell = expect_ref "Hashtbl.set" tbl in
+               let arr = expect_array "Hashtbl.set" !cell in
+               let key = expect_string "Hashtbl.set" k in
+               let entry =
+                 VRecord
+                   (Map.of_alist_exn (module String) [ "key", VString key; "value", v ])
+               in
+               let n = Array.length arr in
+               let rec find i =
+                 if i >= n
+                 then None
+                 else (
+                   match arr.(i) with
+                   | VRecord m ->
+                     (match Map.find m "key" with
+                      | Some (VString k') when String.equal k' key -> Some i
+                      | _ -> find (i + 1))
+                   | _ -> find (i + 1))
+               in
+               (match find 0 with
+                | Some i ->
+                  let arr' = Array.copy arr in
+                  arr'.(i) <- entry;
+                  cell := VArray arr'
+                | None ->
+                  let arr' =
+                    Array.init (n + 1) ~f:(fun i -> if i < n then arr.(i) else entry)
+                  in
+                  cell := VArray arr');
+               VUnit)
+        ; make_binary_builtin
+            "get"
+            (TFun ([ tbl_ty "a"; TString ], option_ty "a"))
             (fun tbl k ->
-              let cell = expect_ref "Hashtbl.get" tbl in
-              let arr = expect_array "Hashtbl.get" !cell in
-              let key = expect_string "Hashtbl.get" k in
-              let rec loop i =
-                if i >= Array.length arr
-                then VVariant ("None", [])
-                else (
-                  match arr.(i) with
-                  | VRecord m ->
-                    (match Map.find m "key", Map.find m "value" with
-                     | Some (VString k'), Some v when String.equal k' key ->
-                       VVariant ("Some", [ v ])
-                     | _ -> loop (i + 1))
-                  | _ -> loop (i + 1))
-              in
-              loop 0)
-
-        ; make_binary_builtin "mem" (TFun ([ tbl_ty "a"; TString ], TBool))
+               let cell = expect_ref "Hashtbl.get" tbl in
+               let arr = expect_array "Hashtbl.get" !cell in
+               let key = expect_string "Hashtbl.get" k in
+               let rec loop i =
+                 if i >= Array.length arr
+                 then VVariant ("None", [])
+                 else (
+                   match arr.(i) with
+                   | VRecord m ->
+                     (match Map.find m "key", Map.find m "value" with
+                      | Some (VString k'), Some v when String.equal k' key ->
+                        VVariant ("Some", [ v ])
+                      | _ -> loop (i + 1))
+                   | _ -> loop (i + 1))
+               in
+               loop 0)
+        ; make_binary_builtin
+            "mem"
+            (TFun ([ tbl_ty "a"; TString ], TBool))
             (fun tbl k ->
-              let cell = expect_ref "Hashtbl.mem" tbl in
-              let arr = expect_array "Hashtbl.mem" !cell in
-              let key = expect_string "Hashtbl.mem" k in
-              let rec loop i =
-                if i >= Array.length arr then false
-                else (
-                  match arr.(i) with
-                  | VRecord m ->
-                    (match Map.find m "key" with
-                     | Some (VString k') when String.equal k' key -> true
-                     | _ -> loop (i + 1))
-                  | _ -> loop (i + 1))
-              in
-              VBool (loop 0))
-
-        ; make_binary_builtin "remove" (TFun ([ tbl_ty "a"; TString ], TUnit))
+               let cell = expect_ref "Hashtbl.mem" tbl in
+               let arr = expect_array "Hashtbl.mem" !cell in
+               let key = expect_string "Hashtbl.mem" k in
+               let rec loop i =
+                 if i >= Array.length arr
+                 then false
+                 else (
+                   match arr.(i) with
+                   | VRecord m ->
+                     (match Map.find m "key" with
+                      | Some (VString k') when String.equal k' key -> true
+                      | _ -> loop (i + 1))
+                   | _ -> loop (i + 1))
+               in
+               VBool (loop 0))
+        ; make_binary_builtin
+            "remove"
+            (TFun ([ tbl_ty "a"; TString ], TUnit))
             (fun tbl k ->
-              let cell = expect_ref "Hashtbl.remove" tbl in
-              let arr = expect_array "Hashtbl.remove" !cell in
-              let key = expect_string "Hashtbl.remove" k in
-              let kept =
-                arr
-                |> Array.to_list
-                |> List.filter ~f:(function
-                  | VRecord m ->
-                    (match Map.find m "key" with
-                     | Some (VString k') -> not (String.equal k' key)
-                     | _ -> true)
-                  | _ -> true)
-                |> Array.of_list
-              in
-              cell := VArray kept;
-              VUnit)
+               let cell = expect_ref "Hashtbl.remove" tbl in
+               let arr = expect_array "Hashtbl.remove" !cell in
+               let key = expect_string "Hashtbl.remove" k in
+               let kept =
+                 arr
+                 |> Array.to_list
+                 |> List.filter ~f:(function
+                   | VRecord m ->
+                     (match Map.find m "key" with
+                      | Some (VString k') -> not (String.equal k' key)
+                      | _ -> true)
+                   | _ -> true)
+                 |> Array.of_list
+               in
+               cell := VArray kept;
+               VUnit)
         ]
     }
   ; { name = "Json"
     ; exports =
-        [ make_unary_builtin "parse" (TFun ([ TString ], json_ty)) (fun v ->
-            let s = expect_string "Json.parse" v in
-            try jsonaf_to_value (Jsonaf.of_string s) with
-            | exn -> failwith (Printf.sprintf "Json.parse: %s" (Exn.to_string exn)))
-        ; make_unary_builtin "stringify" (TFun ([ json_ty ], TString)) (fun v ->
-          VString (Jsonaf.to_string (value_to_jsonaf "Json.stringify" v)))
-        ; make_unary_builtin "pretty" (TFun ([ json_ty ], TString)) (fun v ->
-            VString (Jsonaf.to_string_hum (value_to_jsonaf "Json.pretty" v)))
+        [ make_unary_builtin
+            "parse"
+            (TFun ([ TString ], json_ty))
+            (fun v ->
+               let s = expect_string "Json.parse" v in
+               try jsonaf_to_value (Jsonaf.of_string s) with
+               | exn -> failwith (Printf.sprintf "Json.parse: %s" (Exn.to_string exn)))
+        ; make_unary_builtin
+            "stringify"
+            (TFun ([ json_ty ], TString))
+            (fun v -> VString (Jsonaf.to_string (value_to_jsonaf "Json.stringify" v)))
+        ; make_unary_builtin
+            "pretty"
+            (TFun ([ json_ty ], TString))
+            (fun v -> VString (Jsonaf.to_string_hum (value_to_jsonaf "Json.pretty" v)))
         ]
     }
   ]

@@ -473,12 +473,8 @@ let rec unify (state : infer_state) lhs rhs =
       ensure_contractive_type mu1;
       ensure_contractive_type mu2;
       let fresh = "__unify_mu_" ^ gensym state in
-      let body1' =
-        substitute_rec_var ~target:b1 ~replacement:(Rec_var fresh) body1
-      in
-      let body2' =
-        substitute_rec_var ~target:b2 ~replacement:(Rec_var fresh) body2
-      in
+      let body1' = substitute_rec_var ~target:b1 ~replacement:(Rec_var fresh) body1 in
+      let body2' = substitute_rec_var ~target:b2 ~replacement:(Rec_var fresh) body2 in
       unify state body1' body2'
     | (Mu (_binder, _body) as mu), t | t, (Mu (_binder, _body) as mu) ->
       ensure_contractive_type mu;
@@ -917,7 +913,8 @@ let rec typ_of_type_expr ?self_name (types : type_env) (expr : type_expr) : typ 
     (match typ_of_type_expr ?self_name types rhs with
      | Fun (params, ret) ->
        if Poly.equal lhs_ty Unit then Fun (params, ret) else Fun (lhs_ty :: params, ret)
-     | rhs_ty -> if Poly.equal lhs_ty Unit then Fun ([], rhs_ty) else Fun ([ lhs_ty ], rhs_ty))
+     | rhs_ty ->
+       if Poly.equal lhs_ty Unit then Fun ([], rhs_ty) else Fun ([ lhs_ty ], rhs_ty))
   | TEArray inner -> Array (typ_of_type_expr ?self_name types inner)
   | TERecord fields ->
     ensure_unique_type_labels ~what:"type record field" (List.map fields ~f:fst);
@@ -976,6 +973,7 @@ let rec typ_of_builtin_ty (ty : Builtin_spec.ty) : typ =
     Fun (List.map params ~f:typ_of_builtin_ty, typ_of_builtin_ty ret)
   | Builtin_spec.TMu (binder, body) -> Mu (binder, typ_of_builtin_ty body)
   | Builtin_spec.TRec_var name -> Rec_var name
+
 and typ_of_builtin_row (row : Builtin_spec.row) : typ =
   match row with
   | Builtin_spec.TRow_empty -> Empty_row
@@ -988,8 +986,7 @@ and typ_of_builtin_row (row : Builtin_spec.row) : typ =
 
 let init_env () : tenv =
   let globals =
-    Builtin_spec.builtins
-    |> List.map ~f:(fun b -> b.name, typ_of_builtin_ty b.scheme)
+    Builtin_spec.builtins |> List.map ~f:(fun b -> b.name, typ_of_builtin_ty b.scheme)
   in
   let modules =
     Builtin_spec.modules
@@ -1708,10 +1705,7 @@ and row_tail_equivalent (lhs : typ) (rhs : typ) : bool =
   | Empty_row, Empty_row -> true
   | Var tv_l, Var tv_r -> phys_equal tv_l tv_r
   | Generic name_l, Generic name_r -> String.equal name_l name_r
-  | Mu _, _
-  | _, Mu _
-  | Rec_var _, _
-  | _, Rec_var _ -> false
+  | Mu _, _ | _, Mu _ | Rec_var _, _ | _, Rec_var _ -> false
   | _ -> false
 
 and build_row_type (fields : typ Env.t) (tail : typ) : typ =
@@ -1777,7 +1771,8 @@ and infer_expr_against_expected
       let body_ty = infer_expr state env_with_params types body in
       unify state body_ty expected_ret;
       expected_ty)
-  | (ELambda (params, _) | ELambdaSlots (params, _, _)), Fun (expected_params, _expected_ret) ->
+  | ( (ELambda (params, _) | ELambdaSlots (params, _, _))
+    , Fun (expected_params, _expected_ret) ) ->
     raise
       (Type_error
          (Printf.sprintf

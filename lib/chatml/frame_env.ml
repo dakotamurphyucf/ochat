@@ -51,7 +51,6 @@ let string_of_slot : type a. a slot -> string = function
 ;;
 
 let string_of_packed_slot (Slot slot) = string_of_slot slot
-
 let length (fr : frame) = Array.length fr.cells
 let layout (fr : frame) = fr.layout
 

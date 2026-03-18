@@ -1340,7 +1340,9 @@ let%expect_test "record extension override type" =
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "record copy update of array element field accepts explicit task/state annotations" =
+let%expect_test
+    "record copy update of array element field accepts explicit task/state annotations"
+  =
   let code =
     {|
       type status = [ `Pending | `Running | `Done ]
@@ -1360,9 +1362,7 @@ let%expect_test "record copy update of array element field accepts explicit task
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test
-    "record helper over mutable array state is accepted again"
-  =
+let%expect_test "record helper over mutable array state is accepted again" =
   let code =
     {|
       let bump_attempts st =
@@ -1386,7 +1386,8 @@ let%expect_test
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "state machine helper composition accepts explicit task/state annotations" =
+let%expect_test "state machine helper composition accepts explicit task/state annotations"
+  =
   let code =
     {|
       type status = [ `Pending | `Running | `Done ]
@@ -1446,9 +1447,7 @@ let%expect_test "state machine helper composition accepts explicit task/state an
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test
-    "module helper over mutable array state is accepted again"
-  =
+let%expect_test "module helper over mutable array state is accepted again" =
   let code =
     {|
       let mk_task id =
@@ -1619,7 +1618,9 @@ let%test_unit "match-arm widening does not make added field globally available" 
     |}
   in
   let rendered = check_program_formatted code in
-  if not (String.is_substring rendered ~substring:"Row does not contain label 'timeout_ms'")
+  if
+    not
+      (String.is_substring rendered ~substring:"Row does not contain label 'timeout_ms'")
   then failwith rendered
 ;;
 
@@ -1772,8 +1773,7 @@ let%test_unit "explicit recursive type helpers are cycle-safe" =
              , Chatml_typechecker.Empty_row )) )
   in
   let rendered = Chatml_typechecker.show_type ty in
-  if not (String.is_substring rendered ~substring:"mu a.")
-  then failwith rendered;
+  if not (String.is_substring rendered ~substring:"mu a.") then failwith rendered;
   Chatml_typechecker.ensure_equality_type ty;
   match Chatml_typechecker.record_field_type ty "next" with
   | Some _ -> ()
@@ -1804,7 +1804,8 @@ let%test_unit "contractiveness accepts recursive variant type" =
                  [ "Int", Chatml_typechecker.TInt
                  ; ( "Add"
                    , Chatml_typechecker.Tuple
-                       [ Chatml_typechecker.Rec_var "a"; Chatml_typechecker.Rec_var "a" ] )
+                       [ Chatml_typechecker.Rec_var "a"; Chatml_typechecker.Rec_var "a" ]
+                   )
                  ]
              , Chatml_typechecker.Empty_row )) )
   in
@@ -1910,7 +1911,9 @@ let%test_unit "bindings containing recursive types remain monomorphic" =
                  [ "Int", Chatml_typechecker.TInt
                  ; ( "Add"
                    , Chatml_typechecker.Tuple
-                       [ Chatml_typechecker.Rec_var "expr"; Chatml_typechecker.Rec_var "expr" ] )
+                       [ Chatml_typechecker.Rec_var "expr"
+                       ; Chatml_typechecker.Rec_var "expr"
+                       ] )
                  ]
              , Chatml_typechecker.Empty_row )) )
   in
@@ -1922,13 +1925,12 @@ let%test_unit "bindings containing recursive types remain monomorphic" =
   then failwith "recursive binding should have remained monomorphic";
   match stored with
   | Chatml_typechecker.Fun
-      ([ Chatml_typechecker.Mu _ ], Chatml_typechecker.Var { contents = Chatml_typechecker.Free _ }) -> ()
+      ( [ Chatml_typechecker.Mu _ ]
+      , Chatml_typechecker.Var { contents = Chatml_typechecker.Free _ } ) -> ()
   | _ -> failwith ("unexpected stored type: " ^ Chatml_typechecker.show_type stored)
 ;;
 
-let%test_unit
-    "explicit recursive types do not bypass conservative if-record join"
-  =
+let%test_unit "explicit recursive types do not bypass conservative if-record join" =
   let code =
     {|
       type expr = [ `Int(int) | `Add(expr, expr) ]
@@ -1947,9 +1949,7 @@ let%test_unit
   then failwith rendered
 ;;
 
-let%test_unit
-    "explicit recursive types do not bypass conservative match-record join"
-  =
+let%test_unit "explicit recursive types do not bypass conservative match-record join" =
   let code =
     {|
       type expr = [ `Int(int) | `Add(expr, expr) ]
@@ -1968,7 +1968,10 @@ let%test_unit
   then failwith rendered
 ;;
 
-let%expect_test "explicit recursive types at record control-flow joins accept explicit result annotations" =
+let%expect_test
+    "explicit recursive types at record control-flow joins accept explicit result \
+     annotations"
+  =
   let code =
     {|
       type expr = [ `Int(int) | `Add(expr, expr) ]

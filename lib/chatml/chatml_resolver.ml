@@ -10,6 +10,7 @@ type slot_info =
   }
 
 type frame_map = (string, slot_info) Hashtbl.t
+
 type resolve_ctx =
   { lookup_type : Source.span -> Chatml_typechecker.typ option
   ; stack : frame_map list ref
@@ -49,7 +50,6 @@ let choose_slot (ctx : resolve_ctx) (rhs_node : L.expr L.node) : Frame_env.packe
 ;;
 
 let with_value (node : L.expr L.node) value = L.{ value; span = node.span }
-
 let with_stmt_value (node : L.stmt L.node) value = L.{ value; span = node.span }
 
 let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
@@ -212,7 +212,9 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
       | L.PVariant (_tag, subpats) ->
         List.concat_map subpats ~f:(fun sp -> slots_of_pattern sp None)
       | L.PRecord (fields, _open) ->
-        let field_type lbl = Option.bind ty_opt ~f:(fun ty -> Chatml_typechecker.record_field_type ty lbl) in
+        let field_type lbl =
+          Option.bind ty_opt ~f:(fun ty -> Chatml_typechecker.record_field_type ty lbl)
+        in
         List.concat_map fields ~f:(fun (lbl, p) -> slots_of_pattern p (field_type lbl))
     in
     let cases' =
@@ -294,9 +296,7 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
     L.RERecordExtend (with_value base base', fields')
 ;;
 
-let rec resolve_stmt (ctx : resolve_ctx) (snode : L.stmt L.node)
-  : L.resolved_stmt option
-  =
+let rec resolve_stmt (ctx : resolve_ctx) (snode : L.stmt L.node) : L.resolved_stmt option =
   match snode.value with
   | L.SLet (x, rhs) -> Some (L.RSLet (x, with_value rhs (resolve_expr ctx rhs)))
   | L.SLetRec binds ->

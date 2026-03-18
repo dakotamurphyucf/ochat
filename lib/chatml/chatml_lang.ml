@@ -158,13 +158,9 @@ and resolved_expr =
   | REIf of resolved_expr node * resolved_expr node * resolved_expr node
   | REWhile of resolved_expr node * resolved_expr node
   | RELetBlock of
-      (string * resolved_expr node) list
-      * Frame_env.packed_slot list
-      * resolved_expr node
+      (string * resolved_expr node) list * Frame_env.packed_slot list * resolved_expr node
   | RELetRec of
-      (string * resolved_expr node) list
-      * Frame_env.packed_slot list
-      * resolved_expr node
+      (string * resolved_expr node) list * Frame_env.packed_slot list * resolved_expr node
   | REMatch of resolved_expr node * resolved_match_case list
   | RERecord of (string * resolved_expr node) list
   | REFieldGet of resolved_expr node * string
@@ -198,6 +194,7 @@ type resolved_stmt =
 
 type stmt_node = stmt node [@@deriving sexp_of]
 type resolved_stmt_node = resolved_stmt node [@@deriving sexp_of]
+
 type program =
   { stmts : stmt_node list
   ; source_text : string
@@ -221,9 +218,7 @@ type runtime_error =
 
 exception Runtime_error of runtime_error
 
-let raise_runtime_error ?span message =
-  raise (Runtime_error { message; span })
-;;
+let raise_runtime_error ?span message = raise (Runtime_error { message; span })
 
 let format_runtime_error (source_text : string) (err : runtime_error) : string =
   match err.span with

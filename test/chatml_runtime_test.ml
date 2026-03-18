@@ -938,7 +938,8 @@ let%expect_test "lambda values and map_in_place" =
 ;;
 
 let%expect_test
-    "state machine helpers over mutable task arrays run with explicit task/state annotations"
+    "state machine helpers over mutable task arrays run with explicit task/state \
+     annotations"
   =
   let code =
     {|
@@ -1076,6 +1077,13 @@ let%expect_test "builtin modules smoke test" =
       print(String.length("abcd"))
       print(String.is_empty(""))
       print(String.concat("a", "b"))
+      print(String.find("hello", "ll"))          (* `Some(2) *)
+      print(String.find("hello", "zz"))          (* `None *)
+
+      print(String.slice("abcdef", 1, 3))        (* "bcd" *)
+      print(String.split("a,b,c", ","))          (* [|"a","b","c"|] *)
+
+      print(String.replace_all("a-b-a", "a", "x"))  (* "x-b-x" *)
 
       print("== Array ==")
       let xs = [1, 2, 3]
@@ -1083,6 +1091,36 @@ let%expect_test "builtin modules smoke test" =
       print(Array.get(xs, 1))
       Array.set(xs, 1, 999)
       print(Array.get(xs, 1))
+      let a = Array.make(3, 0) in
+      Array.set(a, 1, 99);
+      print(a);                       (* [|0, 99, 0|] *)
+      let b = Array.append(a, [1,2]) in
+      print(b);                       (* [|0, 99, 0, 1, 2|] *)
+      print(Array.sub(b, 1, 3));      (* [|99, 0, 1|] *)
+      print(Array.reverse(b));        (* reversed copy *)
+      Array.reverse_in_place(b);
+      print(b);
+      Array.swap(b, 0, 1);
+      print(b);
+      Array.fill(b, -1);
+      print(b);
+      let xs = Array.init(5, fun i -> i * i) in
+      print(xs);  (* [|0, 1, 4, 9, 16|] *)
+      let ys = Array.map(xs, fun n -> n + 1) in
+      print(ys);
+      let sum = Array.fold(xs, 0, fun acc x -> acc + x) in
+      print(sum);
+      print(Array.exists(xs, fun x -> x == 9));
+      print(Array.for_all(xs, fun x -> x >= 0));
+      let xs = [1, 2, 3, 4] in
+      let first_even = Array.find(xs, fun n -> (n / 2) * 2 == n) in
+      print(variant_tag(first_even));     (* "Some" *)
+      print(first_even);                  (* `Some(2) *)
+      let first_big =
+        Array.find_map(xs, fun n ->
+          if n > 3 then `Some(n * 10) else `None)
+      in
+      print(first_big);
 
       print("== Option ==")
       let o1 = Option.none()
@@ -1135,10 +1173,30 @@ let%expect_test "builtin modules smoke test" =
     4
     true
     ab
+    `Some(2)
+    `None
+    bcd
+    [|a, b, c|]
+    x-b-x
     == Array ==
     3
     2
     999
+    [|0, 99, 0|]
+    [|0, 99, 0, 1, 2|]
+    [|99, 0, 1|]
+    [|2, 1, 0, 99, 0|]
+    [|2, 1, 0, 99, 0|]
+    [|1, 2, 0, 99, 0|]
+    [|-1, -1, -1, -1, -1|]
+    [|0, 1, 4, 9, 16|]
+    [|1, 2, 5, 10, 17|]
+    30
+    true
+    true
+    Some
+    `Some(2)
+    `Some(40)
     == Option ==
     None
     Some

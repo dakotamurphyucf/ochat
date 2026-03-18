@@ -1492,32 +1492,114 @@ Notes:
 ### 13.2 Builtin modules
 The runtime also installs several builtin modules. Each module is a VModule value at runtime, typed as a record of its exports by the typechecker.
 
-13.2.1 `String` module
+### 13.2.1 `String` module (updated)
+
+The `String` builtin module provides common string utilities.
+
 Exports:
 
-- String.length : string -> int
-- String.is_empty : string -> bool
-- String.concat : string -> string -> string
+#### Basic operations
+
+- `String.length : string -> int`
+- `String.is_empty : string -> bool`
+- `String.concat : string -> string -> string`
 
 Notes:
 
-- `String.concat(a, b)` corresponds to ordinary string concatenation.
-- The language also has the `++` operator for string concatenation; both exist.
+- `String.concat(a, b)` is ordinary concatenation. The language also provides the `++` operator.
 
-### 13.2.2 Array module
+#### Comparison and queries
+
+- `String.equal : string -> string -> bool`
+- `String.contains : string -> string -> bool`  
+  True if the second string is a substring of the first.
+- `String.starts_with : string -> string -> bool`
+- `String.ends_with : string -> string -> bool`
+
+#### Transformations
+
+- `String.trim : string -> string`  
+  Removes leading and trailing whitespace.
+- `String.to_upper : string -> string`
+- `String.to_lower : string -> string`
+
+#### Slicing, search, and split
+
+- `String.slice : string -> int -> int -> string`  
+  `slice(s, start, len)` returns the substring of length `len` starting at `start`. Raises on invalid bounds.
+- `String.find : string -> string -> [ \`None | \`Some(int) ]`  
+  Finds the first occurrence of the pattern and returns its starting index.
+- `String.split : string -> string -> string array`  
+  Splits on a non-empty separator string; raises if the separator is empty.
+- `String.replace_all : string -> string -> string -> string`  
+  `replace_all(s, pattern, with_)` replaces all non-overlapping occurrences. Raises if `pattern` is empty.
+
+---
+
+### 13.2.2 `Array` module (updated)
+
+The `Array` builtin module provides array utilities. Arrays are homogeneous and mutable.
+
 Exports:
 
-```ocaml
-Array.length : 'a array -> int
-Array.copy : 'a array -> 'a array
-Array.get : 'a array -> int -> 'a
-Array.set : 'a array -> int -> 'a -> unit
-```
+#### Basic operations
+
+- `Array.length : 'a array -> int`
+- `Array.copy : 'a array -> 'a array`
+- `Array.get : 'a array -> int -> 'a`
+- `Array.set : 'a array -> int -> 'a -> unit`
 
 Notes:
 
-- `Array.get / Array.set` perform bounds checks; out-of-bounds is a runtime error.
-- `Array.length `overlaps with the global length builtin.
+- `Array.get` and `Array.set` raise a runtime error on out-of-bounds indices.
+- `Array.length` overlaps with the global builtin `length`. Because `open` rejects shadowing, `open Array` may be rejected in scopes where `length` is already bound (including the default prelude).
+
+#### Allocation / structural utilities (non-higher-order)
+
+- `Array.make : int -> 'a -> 'a array`  
+  Creates an array of the given length filled with the provided value. Raises on negative length.
+- `Array.append : 'a array -> 'a array -> 'a array`  
+  Allocates a new array containing the concatenation of the two inputs.
+- `Array.sub : 'a array -> int -> int -> 'a array`  
+  `sub(arr, start, len)` returns a new array slice. Raises on invalid bounds.
+- `Array.reverse : 'a array -> 'a array`  
+  Returns a reversed copy.
+- `Array.reverse_in_place : 'a array -> unit`  
+  Mutates the array by reversing it.
+- `Array.swap : 'a array -> int -> int -> unit`  
+  Swaps two indices. Raises on invalid bounds.
+- `Array.fill : 'a array -> 'a -> unit`  
+  Mutates the array by filling every element with the provided value.
+
+#### Higher-order utilities (call back into ChatML)
+
+These functions accept ChatML functions/closures as arguments. They execute those callbacks using the interpreter’s normal call semantics (strict, arity-checked, tail-call aware), and propagate runtime failures from inside the callback.
+
+- `Array.init : int -> (int -> 'a) -> 'a array`  
+  Creates a new array by calling the function on indices `0..n-1`. Raises on negative length.
+- `Array.map : 'a array -> ('a -> 'b) -> 'b array`
+- `Array.mapi : 'a array -> (int -> 'a -> 'b) -> 'b array`
+- `Array.iter : 'a array -> ('a -> unit) -> unit`
+- `Array.iteri : 'a array -> (int -> 'a -> unit) -> unit`
+- `Array.fold : 'a array -> 'b -> ('b -> 'a -> 'b) -> 'b`  
+  Left fold in index order.
+- `Array.filter : 'a array -> ('a -> bool) -> 'a array`
+- `Array.exists : 'a array -> ('a -> bool) -> bool`
+- `Array.for_all : 'a array -> ('a -> bool) -> bool`
+
+#### Option-returning search helpers
+
+These use the standard option encoding as variants:
+
+- `` `None ``
+- `` `Some(x) ``
+
+Exports:
+
+- `Array.find : 'a array -> ('a -> bool) -> [ \`None | \`Some('a) ]`  
+  Returns the first element satisfying the predicate, or `\`None`.
+- `Array.find_map : 'a array -> ('a -> [ \`None | \`Some('b) ]) -> [ \`None | \`Some('b) ]`  
+  Applies the mapping function left-to-right and returns the first `\`Some(...)` result, or `\`None`.
 
 ### 13.2.3 `Option` module
 This module uses the convention that option values are represented as variants:

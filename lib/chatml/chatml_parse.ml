@@ -7,10 +7,7 @@ type diagnostic =
   }
 
 let position_of_lex (pos : Lexing.position) : Source.position =
-  { line = pos.pos_lnum
-  ; column = pos.pos_cnum - pos.pos_bol
-  ; offset = pos.pos_cnum
-  }
+  { line = pos.pos_lnum; column = pos.pos_cnum - pos.pos_bol; offset = pos.pos_cnum }
 ;;
 
 let span_of_lex (startp : Lexing.position) (endp : Lexing.position) : Source.span =

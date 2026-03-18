@@ -6,7 +6,10 @@ type eval_result =
   | TailCall of clos * value list
 
 let slot_matches_value = Chatml_slot_layout.matches_value
-let assert_recursive_slots_are_objects = Chatml_slot_layout.assert_recursive_slots_are_objects
+
+let assert_recursive_slots_are_objects =
+  Chatml_slot_layout.assert_recursive_slots_are_objects
+;;
 
 let store_with_slot
       (fr : Frame_env.frame)
@@ -102,9 +105,13 @@ and eval_expr_tail
      | UNegInt, VInt n -> Value (VInt (-n))
      | UNegFloat, VFloat f -> Value (VFloat (-.f))
      | UNegInt, _ ->
-       raise_runtime_error ~span:e.span "Internal type error: unary int negation on non-int"
+       raise_runtime_error
+         ~span:e.span
+         "Internal type error: unary int negation on non-int"
      | UNegFloat, _ ->
-       raise_runtime_error ~span:e.span "Internal type error: unary float negation on non-float")
+       raise_runtime_error
+         ~span:e.span
+         "Internal type error: unary float negation on non-float")
   | REPrim2 (prim, lhs_expr, rhs_expr) ->
     let lhs_val = finish_eval frames (eval_expr_tail ~tail:false env frames lhs_expr) in
     let rhs_val = finish_eval frames (eval_expr_tail ~tail:false env frames rhs_expr) in
@@ -125,17 +132,25 @@ and eval_expr_tail
      | BIntGt, VInt x, VInt y -> Value (VBool (x > y))
      | BIntLe, VInt x, VInt y -> Value (VBool (x <= y))
      | BIntGe, VInt x, VInt y -> Value (VBool (x >= y))
-     | BFloatLt, VFloat x, VFloat y -> Value (VBool (Float.(x < y)))
-     | BFloatGt, VFloat x, VFloat y -> Value (VBool (Float.(x > y)))
-     | BFloatLe, VFloat x, VFloat y -> Value (VBool (Float.(x <= y)))
-     | BFloatGe, VFloat x, VFloat y -> Value (VBool (Float.(x >= y)))
+     | BFloatLt, VFloat x, VFloat y -> Value (VBool Float.(x < y))
+     | BFloatGt, VFloat x, VFloat y -> Value (VBool Float.(x > y))
+     | BFloatLe, VFloat x, VFloat y -> Value (VBool Float.(x <= y))
+     | BFloatGe, VFloat x, VFloat y -> Value (VBool Float.(x >= y))
      | BEq, _, _ -> Value (VBool (equal_value lhs_val rhs_val))
      | BNeq, _, _ -> Value (VBool (not (equal_value lhs_val rhs_val)))
-     | ( (BIntAdd | BIntSub | BIntMul | BIntDiv | BIntLt | BIntGt | BIntLe | BIntGe)
-       , _
-       , _ ) ->
-       raise_runtime_error ~span:e.span "Internal type error: int primitive on non-int operands"
-     | ( (BFloatAdd | BFloatSub | BFloatMul | BFloatDiv | BFloatLt | BFloatGt | BFloatLe | BFloatGe)
+     | (BIntAdd | BIntSub | BIntMul | BIntDiv | BIntLt | BIntGt | BIntLe | BIntGe), _, _
+       ->
+       raise_runtime_error
+         ~span:e.span
+         "Internal type error: int primitive on non-int operands"
+     | ( ( BFloatAdd
+         | BFloatSub
+         | BFloatMul
+         | BFloatDiv
+         | BFloatLt
+         | BFloatGt
+         | BFloatLe
+         | BFloatGe )
        , _
        , _ ) ->
        raise_runtime_error
@@ -153,7 +168,9 @@ and eval_expr_tail
     let block_frame = Frame_env.alloc_packed slots in
     let child_frames = block_frame :: frames in
     List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
-      let v = finish_eval child_frames (eval_expr_tail ~tail:false env child_frames rhs_expr) in
+      let v =
+        finish_eval child_frames (eval_expr_tail ~tail:false env child_frames rhs_expr)
+      in
       let slot = List.nth_exn slots idx in
       store_with_slot block_frame idx slot v);
     eval_expr_tail ~tail env child_frames body
@@ -199,7 +216,9 @@ and eval_expr_tail
     List.iteri bindings ~f:(fun idx _ -> Frame_env.set_obj rec_frame idx (Obj.repr VUnit));
     let child_frames = rec_frame :: frames in
     List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
-      let v = finish_eval child_frames (eval_expr_tail ~tail:false env child_frames rhs_expr) in
+      let v =
+        finish_eval child_frames (eval_expr_tail ~tail:false env child_frames rhs_expr)
+      in
       let slot = List.nth_exn slots idx in
       store_with_slot rec_frame idx slot v);
     eval_expr_tail ~tail env child_frames body
@@ -220,12 +239,16 @@ and eval_expr_tail
        (match Map.find fields field with
         | Some v -> Value v
         | None ->
-          raise_runtime_error ~span:e.span (Printf.sprintf "No field '%s' in record" field))
+          raise_runtime_error
+            ~span:e.span
+            (Printf.sprintf "No field '%s' in record" field))
      | VModule menv ->
        (match find_var menv field with
         | Some v -> Value v
         | None ->
-          raise_runtime_error ~span:e.span (Printf.sprintf "No field '%s' in module" field))
+          raise_runtime_error
+            ~span:e.span
+            (Printf.sprintf "No field '%s' in module" field))
      | _ -> raise_runtime_error ~span:e.span "Field access on non-record/non-module")
   | REVariant (tag, exprs) ->
     let vals =

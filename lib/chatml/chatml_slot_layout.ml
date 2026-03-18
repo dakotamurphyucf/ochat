@@ -15,7 +15,16 @@ let fallback_of_expr_shape (e : expr) : Frame_env.packed_slot =
     Frame_env.Slot Frame_env.SFloat
   | EPrim2 (BStringConcat, _, _) -> Frame_env.Slot Frame_env.SString
   | EPrim2
-      ( (BIntLt | BIntGt | BIntLe | BIntGe | BFloatLt | BFloatGt | BFloatLe | BFloatGe | BEq | BNeq)
+      ( ( BIntLt
+        | BIntGt
+        | BIntLe
+        | BIntGe
+        | BFloatLt
+        | BFloatGt
+        | BFloatLe
+        | BFloatGe
+        | BEq
+        | BNeq )
       , _
       , _ ) -> Frame_env.Slot Frame_env.SBool
   | _ -> Frame_env.Slot Frame_env.SObj
