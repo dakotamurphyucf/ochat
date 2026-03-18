@@ -1,20 +1,23 @@
 # ChatML language specification
 
-This document is a detailed, implementation-faithful specification of
-ChatML as it exists in the current codebase.
+This document is the implementation-faithful specification of ChatML as it
+exists in the current codebase.
 
-It is intended to describe the language that is actually implemented by:
+It describes the language and runtime pipeline implemented by:
 
 - `lib/chatml/chatml_lexer.mll`
 - `lib/chatml/chatml_parser.mly`
 - `lib/chatml/chatml_lang.ml`
+- `lib/chatml/chatml_eval.ml`
+- `lib/chatml/frame_env.ml`
+- `lib/chatml/chatml_slot_layout.ml`
 - `lib/chatml/chatml_typechecker.ml`
 - `lib/chatml/chatml_resolver.ml`
 - `lib/chatml/chatml_builtin_spec.ml`
 - `lib/chatml/chatml_builtin_modules.ml`
 
-This is not a speculative design document. When in doubt, the
-implementation and tests are authoritative.
+When this document and the implementation disagree, the implementation is
+authoritative.
 
 ---
 
@@ -25,31 +28,33 @@ ChatML is a small, statically typed scripting language intended for:
 - orchestration scripts
 - event-driven glue logic
 - lightweight state-machine code
-- embedding inside a host runtime with a small standard library
-- prompt/test scenario scripting inside the surrounding OCaml project
+- embedding inside a host runtime with a tiny standard library
+- prompt/test-scenario scripting inside the surrounding OCaml project
 
-ChatML is **not** intended to be:
+ChatML is intentionally **not** trying to be:
 
-- a general-purpose application language
+- a full general-purpose application language
 - a rich module language
 - a type-class / trait / ad-hoc-overloading language
+- a user-extensible type-declaration language
 - a high-performance numerical language
 
-The language is intentionally biased toward:
+The implementation is intentionally biased toward:
 
 1. **sound static typing**
-2. **good ergonomics without annotations**
+2. **good ergonomics without user-written type annotations**
 3. **small surface area**
-4. **predictable, conservative semantics**
-5. **adequate runtime performance for scripting**
+4. **predictable operational behavior**
+5. **enough runtime performance for scripting workloads**
 
 Complexity is deliberately pushed into:
 
 - the host runtime
-- a tiny standard library
+- the typechecker and resolver
+- the internal frame/slot machinery
 - builtin host functions
 
-rather than into a large language core.
+rather than into a large user-facing surface language.
 
 ---
 
@@ -59,12 +64,12 @@ ChatML is:
 
 - expression-oriented
 - lexically scoped
-- statically typed with inference
 - call-by-value
-- ML-flavored in surface syntax
+- statically typed with inference
+- ML-flavored in syntax
 - able to mix immutable and mutable programming styles
 
-The language supports:
+The surface language supports:
 
 - first-class functions
 - local and recursive bindings
@@ -75,25 +80,170 @@ The language supports:
 - pattern matching
 - simple modules
 
-There are no user-written type annotations in the current language.
+There are currently **no user-written type annotations**.
+
+Function calls use explicit call syntax:
+
+```chatml
+f(x)
+f(x, y)
+g()
+```
+
+ChatML does **not** use whitespace application (`f x`) and does **not**
+expose currying as the primary call model. Functions are internally modeled
+as taking an explicit list of parameters and are called with exact arity.
 
 ---
 
-## 3. Lexical structure
+## 3. Implementation architecture
 
-### 3.1 Identifiers
+This section describes the actual pipeline used by the implementation.
+
+### 3.1 Phases
+
+The implementation is split into four conceptual phases:
+
+1. **Lexing/parsing**
+2. **Type checking**
+3. **Resolution/lowering**
+4. **Evaluation**
+
+### 3.2 Source AST vs resolved AST
+
+`lib/chatml/chatml_lang.ml` defines two different AST families:
+
+- a **source AST** used by the parser and typechecker
+- a **resolved AST** used by the evaluator
+
+Source expressions include forms such as:
+
+- `EVar`
+- `ELambda`
+- `ELetIn`
+- `ELetRec`
+- `EMatch`
+
+Resolved expressions include:
+
+- `REVarGlobal`
+- `REVarLoc`
+- `RELambda`
+- `RELetBlock`
+- `RELetRec`
+- `REMatch`
+
+This phase split is deliberate:
+
+- the typechecker works over source syntax
+- the resolver lowers local variables to lexical addresses and binding
+  layouts
+- the evaluator only runs resolved programs
+
+### 3.3 Program representation
+
+Internally, a parsed program is represented as:
+
+```ocaml
+type program =
+  { stmts : stmt_node list
+  ; source_text : string
+  }
+```
+
+and a resolved program as:
+
+```ocaml
+type resolved_program =
+  { stmts : resolved_stmt_node list
+  ; source_text : string
+  }
+```
+
+The stored `source_text` is used for diagnostic formatting.
+
+### 3.4 Type checking
+
+`lib/chatml/chatml_typechecker.ml` implements:
+
+- Hindley–Milner inference
+- value restriction
+- row-polymorphic records
+- row-polymorphic variants
+- match checking
+- builtin type import
+
+It also records inferred types by source span so the resolver can use that
+information later when choosing frame slots.
+
+### 3.5 Resolution
+
+`lib/chatml/chatml_resolver.ml` performs:
+
+- lexical-address resolution for locals
+- lowering to resolved AST
+- slot selection for locals, parameters, and pattern binders
+- non-recursive let-block coalescing
+
+After this pass:
+
+- local variable access is frame-based and indexed
+- globals/modules/builtins remain name lookups
+
+### 3.6 Evaluation
+
+`lib/chatml/chatml_eval.ml` evaluates only resolved AST.
+
+The evaluator uses:
+
+- a mutable hash-table environment for top-level/module/global bindings
+- a stack of frames for local lexical bindings
+
+Function calls use a trampoline. Tail calls are now **tail-position-aware**:
+
+- closure applications in tail position produce `TailCall`
+- closure applications outside tail position are forced immediately
+
+This preserves proper tail-call behavior where it matters while avoiding
+unnecessary trampoline traffic in non-tail contexts.
+
+### 3.7 Frames and slots
+
+`lib/chatml/frame_env.ml` provides the low-level local storage runtime.
+
+A frame now stores:
+
+- the raw cells
+- the slot layout used to allocate them
+
+Each frame access is validated against its expected slot descriptor.
+
+This means:
+
+- resolver/evaluator slot mismatches fail fast
+- out-of-bounds accesses fail fast
+- internal frame corruption is less likely to go unnoticed
+
+`lib/chatml/chatml_slot_layout.ml` centralizes the slot-selection policy so
+the resolver and evaluator do not maintain duplicated logic.
+
+---
+
+## 4. Lexical structure
+
+### 4.1 Identifiers
 
 ChatML has three main identifier classes:
 
 - lowercase identifiers, e.g. `x`, `state`, `task_index`
 - uppercase identifiers, e.g. `M`, `Flow`, `TaskHelpers`
-- polymorphic variant tags, e.g. `` `Some ``, `` `Done ``
+- variant tags, e.g. `` `Some ``, `` `Done ``
 
-Lowercase and uppercase identifiers are tokenized separately by the lexer.
-Uppercase identifiers are mainly used for module names, but syntactically
-they still enter the AST as variables in expression position.
+Lowercase and uppercase identifiers are tokenized separately. Uppercase
+identifiers are mostly intended for modules, but in expression position they
+still enter the AST as ordinary variable references.
 
-### 3.2 Literals
+### 4.2 Literals
 
 Supported literal forms:
 
@@ -103,7 +253,7 @@ Supported literal forms:
 - strings: `"hello"`
 - unit: `()`
 
-### 3.3 Comments
+### 4.3 Comments
 
 Comments use OCaml-style block syntax:
 
@@ -111,11 +261,11 @@ Comments use OCaml-style block syntax:
 (* this is a comment *)
 ```
 
-Nested comments are supported by the lexer implementation.
+Nested comments are supported by the lexer.
 
-### 3.4 Strings
+### 4.4 Strings
 
-Strings support a small set of escapes:
+Strings support at least:
 
 - `\n`
 - `\t`
@@ -124,14 +274,15 @@ Strings support a small set of escapes:
 
 Strings may span multiple lines.
 
-### 3.5 Whitespace
+### 4.5 Whitespace
 
 Whitespace is not significant except as a token separator.
+
 ChatML is **not** indentation-sensitive.
 
 ---
 
-## 4. Program structure
+## 5. Program structure
 
 A ChatML program is a sequence of top-level statements.
 
@@ -143,19 +294,18 @@ Top-level statement forms:
 - `let rec f x = expr and g y = expr`
 - `module M = struct ... end`
 - `open M`
-- bare expression statements
+- a bare expression statement
 
 Evaluation proceeds top-to-bottom in source order.
 
-The top level is mutable in the sense that each statement contributes new
-bindings to the current program environment, but closures capture lexical
-bindings stably.
+The top level is mutable in the sense that each statement extends the
+current environment, but closures capture lexical bindings stably.
 
 ---
 
-## 5. Statement forms
+## 6. Statement forms
 
-### 5.1 Non-recursive top-level `let`
+### 6.1 Non-recursive top-level `let`
 
 Examples:
 
@@ -168,12 +318,12 @@ let thunk () = 42
 
 Properties:
 
-- the right-hand side is evaluated before the binding is introduced
-- the binding is then added to the top-level environment
-- later bindings may shadow earlier bindings
-- previously created closures still see the lexical binding they captured
+- the RHS is evaluated before the new binding is introduced
+- the new binding is then added to the current environment
+- later top-level lets may shadow earlier ones
+- already-created closures still observe the lexical binding they captured
 
-### 5.2 Recursive top-level `let rec`
+### 6.2 Recursive top-level `let rec`
 
 Examples:
 
@@ -190,15 +340,17 @@ and odd n = if n == 0 then false else even(n - 1)
 Restrictions:
 
 - recursive bindings must be function-like
-- the typechecker rejects non-function recursive bindings
+- non-function recursive bindings are rejected statically
 
-Semantics:
+Operationally:
 
-- all recursive names are allocated first
-- each RHS is evaluated in an environment where all recursive names are visible
-- placeholders are then updated with final values
+- recursive names are allocated first
+- placeholders are installed
+- each RHS is evaluated in an environment where all recursive names are
+  visible
+- placeholders are updated with the final values
 
-### 5.3 Modules
+### 6.3 Modules
 
 Example:
 
@@ -211,14 +363,15 @@ end
 
 Modules are intentionally simple namespaces.
 
-Important properties:
+Properties:
 
 - module bodies may reference outer bindings
 - only names explicitly defined in the module body are exported
-- names imported via `open` inside a module are **not** re-exported
-- module values behave like namespace/record-like containers at runtime
+- names imported via `open` inside a module are not re-exported
+- modules are represented as records by the typechecker and as `VModule`
+  values at runtime
 
-### 5.4 `open`
+### 6.4 `open`
 
 Example:
 
@@ -228,16 +381,28 @@ open Flow
 
 Semantics:
 
-- imports exported module names into the current scope
+- imports all exported names from the module into the current scope
 - does not create a module alias
-- may shadow existing names in the current scope
-- is shallow and simple; there is no selective import syntax
+- is shallow; there is no selective import syntax
+- now **rejects shadowing** of existing names
+
+So this is rejected:
+
+```chatml
+let x = 1
+module M = struct
+  let x = 2
+end
+open M
+```
+
+Both the typechecker and the runtime reject such shadowing.
 
 ---
 
-## 6. Expression forms
+## 7. Expression forms
 
-### 6.1 Unit
+### 7.1 Unit
 
 ```chatml
 ()
@@ -245,7 +410,7 @@ Semantics:
 
 Type: `unit`
 
-### 6.2 Variables
+### 7.2 Variables
 
 ```chatml
 x
@@ -255,11 +420,12 @@ Flow
 
 Variables are lexically scoped.
 
-After resolution, local variables become lexical addresses internally.
-Top-level/module bindings remain environment lookups, but closure capture is
-lexically stable.
+After resolution:
 
-### 6.3 Functions
+- local variables become lexical-address lookups into frames
+- globals/modules/builtins remain environment lookups
+
+### 7.3 Functions
 
 Anonymous functions:
 
@@ -269,7 +435,7 @@ fun x y -> x
 fun () -> 42
 ```
 
-Named function syntax is surface sugar for a `let` binding of a lambda:
+Named function syntax is sugar for a `let` binding of a lambda:
 
 ```chatml
 let add x y = x + y
@@ -278,21 +444,20 @@ let add x y = x + y
 Properties:
 
 - functions are first-class
-- closures capture both lexical bindings and local frames
+- closures capture lexical environment plus local frame stack
 - calls are strict
-- tail calls are implemented via a trampoline in the evaluator
+- exact arity is required
+- tail calls are optimized through a trampoline
 
-### 6.4 Function application
+### 7.4 Function application
 
-Application uses explicit call syntax:
+Examples:
 
 ```chatml
 f(x)
 f(x, y)
 g()
 ```
-
-There is no whitespace application syntax such as `f x`.
 
 Function position may itself be any expression:
 
@@ -301,7 +466,9 @@ Function position may itself be any expression:
 choose(true)(1)
 ```
 
-### 6.5 Local `let ... in`
+There is no whitespace application syntax such as `f x`.
+
+### 7.5 Local `let ... in`
 
 Examples:
 
@@ -313,11 +480,13 @@ let rec loop n = ... in loop(10)
 
 Properties:
 
-- non-recursive `let` is sequential and lexical
-- nested non-recursive lets are internally grouped into block forms by the resolver
-- `let rec` inside expressions follows the same recursive-function restrictions as top level
+- non-recursive lets are lexical and sequential
+- nested non-recursive lets are internally grouped into `RELetBlock`
+  layouts by the resolver
+- `let rec` inside expressions follows the same recursive-function
+  restriction as top-level `let rec`
 
-### 6.6 Conditionals
+### 7.6 Conditionals
 
 ```chatml
 if cond then a else b
@@ -328,7 +497,7 @@ Rules:
 - condition must have type `bool`
 - both branches must have the same type
 
-### 6.7 Sequencing
+### 7.7 Sequencing
 
 ```chatml
 e1; e2
@@ -338,9 +507,9 @@ Rules:
 
 - `e1` is evaluated fully first
 - its value is discarded
-- the overall expression value is the value of `e2`
+- the result is the value of `e2`
 
-### 6.8 While loops
+### 7.8 While loops
 
 ```chatml
 while cond do body done
@@ -352,7 +521,7 @@ Rules:
 - loop result type is `unit`
 - loop body may have side effects
 
-### 6.9 Records
+### 7.9 Records
 
 Record literal:
 
@@ -372,17 +541,17 @@ Record copy-update:
 { person with age = person.age + 1 }
 ```
 
-Important record properties:
+Properties:
 
 - records are structural
-- fields are named
-- duplicate labels in one literal are rejected
+- field names are unique within a literal
+- duplicate field labels in a literal are rejected
 - copy-update is immutable
-- copy-update may overwrite existing fields
+- copy-update may overwrite fields
 - copy-update may add fields to closed records
 - copy-update may change field types
 
-### 6.10 Arrays
+### 7.10 Arrays
 
 Array literal:
 
@@ -407,10 +576,10 @@ Properties:
 - arrays are homogeneous
 - arrays are mutable
 - index type must be `int`
-- indexing out of bounds is a runtime error
-- array update returns `unit`
+- out-of-bounds access is a runtime error
+- update returns `unit`
 
-### 6.11 References
+### 7.11 References
 
 Creation:
 
@@ -434,10 +603,10 @@ Properties:
 
 - refs are mutable cells
 - dereference requires a ref
-- assignment requires a ref and a value of the stored type
+- assignment requires a ref value and a value of the stored type
 - assignment returns `unit`
 
-### 6.12 Variants
+### 7.12 Variants
 
 Examples:
 
@@ -449,21 +618,19 @@ Examples:
 
 Properties:
 
-- ChatML variants are polymorphic variants
+- variants are polymorphic variants
 - constructors are identified by tag name
 - constructors may carry zero, one, or multiple payload values
-- internally, multi-value payloads are modeled using tuple types
+- multi-value payloads are typed using internal tuple types
 
 ---
 
-## 7. Operators
+## 8. Operators
 
-Operators are part of the core language.
+Operators are built into the core AST. They are not looked up from the
+runtime environment and cannot be overridden.
 
-They are not looked up in the runtime environment and are not overridden by
-user code.
-
-### 7.1 Integer arithmetic
+### 8.1 Integer arithmetic
 
 - binary `+`
 - binary `-`
@@ -471,16 +638,11 @@ user code.
 - binary `/`
 - unary `-`
 
-Type rules:
+Operands must be `int`; result is `int`.
 
-- operands must be `int`
-- result is `int`
+Division by zero is a runtime error.
 
-Runtime notes:
-
-- division by zero is a runtime error
-
-### 7.2 Float arithmetic
+### 8.2 Float arithmetic
 
 - binary `+.`
 - binary `-.`
@@ -488,91 +650,97 @@ Runtime notes:
 - binary `/.`
 - unary `-.`
 
-Type rules:
+Operands must be `float`; result is `float`.
 
-- operands must be `float`
-- result is `float`
+Division by zero is a runtime error when the divisor is `0.0`.
 
-Runtime notes:
-
-- division by zero is a runtime error when the divisor is `0.0`
-
-### 7.3 String concatenation
+### 8.3 String concatenation
 
 - binary `++`
 
-Type rules:
+Operands must be `string`; result is `string`.
 
-- operands must be `string`
-- result is `string`
-
-### 7.4 Integer comparisons
+### 8.4 Integer comparisons
 
 - `<`
 - `>`
 - `<=`
 - `>=`
 
-Type rules:
+Operands must be `int`; result is `bool`.
 
-- both operands must be `int`
-- result is `bool`
-
-### 7.5 Float comparisons
+### 8.5 Float comparisons
 
 - `<.`
 - `>.`
 - `<=.`
 - `>=.`
 
-Type rules:
+Operands must be `float`; result is `bool`.
 
-- both operands must be `float`
-- result is `bool`
-
-### 7.6 Equality and inequality
+### 8.6 Equality and inequality
 
 - `==`
 - `!=`
 
-Type rules:
+Both operands must have the same type.
 
-- both operands must have the same type
-- result is `bool`
+However, equality is now **restricted**. It is accepted only for types that
+the typechecker considers equality-supporting.
 
-Runtime semantics:
+Accepted:
 
-- `int`, `float`, `bool`, `string`, `unit`: value equality
-- variants: structural equality
-- records: structural equality
-- arrays: identity equality
-- refs: identity equality
-- closures: identity equality
-- modules: identity equality
-- builtins: identity equality
+- `int`
+- `float`
+- `bool`
+- `string`
+- `unit`
+- tuples of equality-supporting element types
+- records whose known field types are equality-supporting
+- variants whose known payload types are equality-supporting
 
-### 7.7 Precedence and associativity
+Rejected:
 
-The parser currently uses precedence tiers roughly as follows:
+- arrays
+- refs
+- functions
+
+Examples:
+
+```chatml
+1 == 1         (* ok *)
+"a" != "b"     (* ok *)
+[1, 2] == [1]  (* type error *)
+```
+
+Implementation note:
+
+- runtime equality for records/variants is structural
+- runtime equality for arrays/refs/closures/modules/builtins is by identity
+- the typechecker now rejects the most problematic unsupported cases
+
+### 8.7 Precedence and associativity
+
+The current parser precedence is roughly:
 
 1. comparisons and equality
 2. additive operators
 3. multiplicative operators
-4. dereference precedence handling
+4. dereference handling
 
 Concretely:
 
 - `+`, `-`, `++`, `+.`, `-.` share a precedence level
 - `*`, `/`, `*.`, `/.` share a tighter precedence level
-- comparison operators are looser than arithmetic
+- comparison/equality are looser than arithmetic
 
 Use parentheses whenever readability matters.
 
 ---
 
-## 8. Pattern matching
+## 9. Pattern matching
 
-### 8.1 Supported patterns
+### 9.1 Supported patterns
 
 ChatML supports:
 
@@ -590,20 +758,20 @@ ChatML supports:
   - `{ field = pat; field2 = pat2 }`
   - `{ field = pat; _ }`
 
-### 8.2 Runtime matching semantics
+### 9.2 Runtime matching
 
-Match arms are tested in source order.
+Match arms are tried in source order.
 
-The first arm whose pattern matches the scrutinee is chosen.
+The first matching arm is selected.
 
-If no arm matches at runtime, execution raises a runtime error.
+If no arm matches at runtime, evaluation raises a runtime error.
 
-### 8.3 Pattern binding order
+### 9.3 Pattern variable order
 
 Pattern variables are collected in deterministic left-to-right order.
-This matters for resolver slot layout but not for user-visible semantics.
+This matters for resolver slot layout, but not for user-visible semantics.
 
-### 8.4 Record patterns
+### 9.4 Record patterns
 
 Closed record pattern:
 
@@ -611,7 +779,7 @@ Closed record pattern:
 { name = n }
 ```
 
-This requires the record to have exactly the specified fields.
+This requires the record to have exactly the named fields.
 
 Open record pattern:
 
@@ -619,23 +787,24 @@ Open record pattern:
 { name = n; _ }
 ```
 
-This requires the record to have at least the specified fields.
+This requires the record to have at least those fields.
 
-### 8.5 Static match checks
+### 9.5 Static match checks
 
 The typechecker performs:
 
 - duplicate binder checks
 - duplicate simple-arm checks
-- some redundancy detection
-- conservative exhaustiveness detection
+- some redundancy checks
+- conservative exhaustiveness checks
 
 Exhaustiveness is strongest for:
 
 - booleans
+- unit
 - sufficiently closed variant matches
 
-It is intentionally conservative for:
+It is conservative for:
 
 - ints
 - floats
@@ -643,17 +812,11 @@ It is intentionally conservative for:
 - records
 - open variants
 
-For a more specialized discussion, see:
+### 9.6 Variant narrowing by match
 
-- `docs-src/guide/chatml-match-semantics.md`
+Variant-using functions can become narrower after informative matches.
 
-### 8.6 Variant closure by match
-
-A key implementation behavior is that sufficiently informative variant
-matches can narrow and effectively close the set of constructors accepted
-by a function.
-
-That means code like:
+Example:
 
 ```chatml
 let f v =
@@ -661,16 +824,16 @@ let f v =
   | `Some(x) -> x
 ```
 
-may infer a parameter type that only accepts compatible variant inputs,
-rather than an arbitrarily open variant row.
+The parameter type inferred for `v` may be narrowed to compatible variants,
+rather than remaining arbitrarily open.
 
 This is intentional.
 
 ---
 
-## 9. Type system
+## 10. Type system
 
-ChatML uses Hindley-Milner style inference with extensions for:
+ChatML uses Hindley–Milner style inference with extensions for:
 
 - mutation safety via the value restriction
 - row-polymorphic records
@@ -678,7 +841,7 @@ ChatML uses Hindley-Milner style inference with extensions for:
 
 Users do not write type annotations.
 
-### 9.1 Primitive types
+### 10.1 Primitive types
 
 - `unit`
 - `int`
@@ -686,20 +849,25 @@ Users do not write type annotations.
 - `bool`
 - `string`
 
-### 9.2 Composite types
+### 10.2 Composite types
 
 - function types
 - array types
 - ref types
 - record types
 - variant types
-- tuple types (internal typing artifact for multi-argument variant payloads)
+- tuple types
 
-### 9.3 Let-polymorphism
+Tuple types currently exist in the type system and runtime representation,
+but tuple syntax is not exposed as a general user-facing surface feature.
+They are most visible as the internal typing of multi-argument variant
+payloads.
+
+### 10.3 Let-polymorphism
 
 Non-expansive bindings may be generalized.
 
-Typical example:
+Example:
 
 ```chatml
 let id x = x
@@ -707,7 +875,7 @@ id(1)
 id("s")
 ```
 
-### 9.4 Value restriction
+### 10.4 Value restriction
 
 Expansive bindings are not generalized.
 
@@ -717,9 +885,9 @@ This is necessary for soundness with:
 - arrays
 - mutable aliasing
 
-### 9.5 Records and row polymorphism
+### 10.5 Records and row polymorphism
 
-Record-using helpers are typically inferred with open-row behavior.
+Record helpers usually infer open-row behavior.
 
 Example:
 
@@ -736,13 +904,12 @@ This can be used on:
 
 Important implementation detail:
 
-- lambda parameters whose type is discovered to be record-shaped are
-  reopened to open rows
-- this reopening is intentionally tuned toward record-heavy scripting and
+- lambda parameters discovered to be record-shaped are reopened to open rows
+- this heuristic is intentionally biased toward record-heavy scripting and
   state-machine helpers
-- variant rows are **not** reopened by that heuristic
+- variants are not reopened by the same heuristic
 
-### 9.6 Variants and row polymorphism
+### 10.6 Variants and row polymorphism
 
 Variant constructors are typed using row-based variant information.
 
@@ -757,38 +924,50 @@ Examples:
 Variant row information interacts with pattern matching and may become
 narrower after informative matches.
 
-### 9.7 Recursive bindings
+### 10.7 Recursive bindings
 
 Recursive bindings must be functions.
 
-This avoids unsound and difficult recursive value inference cases.
+This avoids unsound and difficult recursive value-inference cases.
 
-### 9.8 Equality typing
+### 10.8 Builtin type schemes
 
-Equality is polymorphic in the sense that both sides may be any same-typed
-value, but there is no ad-hoc equality over mismatched operand types.
+The builtin specification language now supports:
 
-So:
+- type variables
+- primitive types
+- arrays
+- refs
+- tuples
+- row-based records
+- row-based variants
+- function types
 
-```chatml
-1 == 1
-```
+This is a host-side capability used by builtin declarations. Users still do
+not write these type forms directly.
 
-is accepted, but:
+### 10.9 Module typing
 
-```chatml
-1 == "x"
-```
+Modules are typed as records of exports.
 
-is rejected.
+This is intentionally simple and matches the intended “modules are just
+structuring” design.
+
+Implementation note:
+
+- runtime modules are represented as `VModule`
+- the typechecker models them as record types of exports
+
+This is usually ergonomic, but it also means module values are not a fully
+separate static category.
 
 ---
 
-## 10. Runtime model
+## 11. Runtime model
 
-### 10.1 Values
+### 11.1 Values
 
-The evaluator runtime supports these value forms:
+The runtime supports:
 
 - ints
 - bools
@@ -803,37 +982,79 @@ The evaluator runtime supports these value forms:
 - unit
 - builtins
 
-### 10.2 Closures
+### 11.2 Closures
 
 Closures capture:
 
-- lexical environment bindings
-- local frame stack
-- parameter slot layout
+- the lexical environment
+- the local frame stack
+- the parameter slot layout
 
-Closures capture lexical environments stably, so later rebinding does
-not retroactively change what an earlier closure sees.
+Closures capture lexical bindings stably, so later rebinding does not change
+what an earlier closure sees.
 
-### 10.3 Frames and lexical resolution
+### 11.3 Environments
+
+There are two main runtime storage mechanisms:
+
+1. a mutable hash-table environment for globals/modules/builtins
+2. a stack of local frames for resolved lexical locals
+
+### 11.4 Resolution and lexical addresses
 
 The resolver rewrites local variables into lexical addresses carrying:
 
 - frame depth
 - slot index
-- runtime slot descriptor
+- slot descriptor
 
 This allows:
 
-- O(1) local reads
+- O(1)-style local reads
 - one-frame block allocation for grouped lets
-- reduced name-based local lookup during evaluation
+- reduced runtime name lookup for locals
 
-### 10.4 Tail calls
+### 11.5 Frames
 
-The evaluator uses a trampoline for closure tail calls, reducing OCaml
-stack growth in tail-recursive function execution.
+Frames are heterogeneous storage blocks described by packed slot layouts.
 
-### 10.5 Runtime errors
+The runtime currently distinguishes slots for:
+
+- `int`
+- `bool`
+- `float`
+- `string`
+- generic object slots
+
+Each frame now stores its layout explicitly, and frame reads/writes validate
+that the requested slot matches the allocated layout.
+
+### 11.6 Slot selection
+
+Slot selection is shared between resolver and evaluator through
+`chatml_slot_layout.ml`.
+
+This keeps:
+
+- static slot selection
+- runtime slot/value validation
+- fallback expression-shape heuristics
+
+consistent.
+
+### 11.7 Tail calls
+
+Closure calls are executed through a trampoline.
+
+Current behavior:
+
+- calls in tail position use `TailCall`
+- calls outside tail position are forced immediately
+
+This gives tail recursion support without forcing every function call through
+the trampoline.
+
+### 11.8 Runtime errors
 
 Possible runtime failures include:
 
@@ -841,23 +1062,23 @@ Possible runtime failures include:
 - array index out of bounds
 - dereference of non-ref
 - assignment to non-ref
-- calling a non-function
+- calling a non-function value
 - function arity mismatch
-- non-exhaustive runtime match
-- malformed field access on non-record/non-module
+- non-exhaustive runtime pattern match
+- invalid field access
+- invalid `open`
+- `open` shadowing collisions
 
-Ill-typed programs are normally rejected before evaluation by the standard
+Ill-typed programs are normally rejected before evaluation in the standard
 pipeline.
 
 ---
 
-## 11. Modules
+## 12. Modules
 
-Modules are simple namespace containers.
+Modules are intentionally simple namespace containers.
 
-They are intentionally much less powerful than OCaml modules.
-
-### 11.1 What modules are for
+### 12.1 What modules are for
 
 Modules are for:
 
@@ -867,14 +1088,14 @@ Modules are for:
 
 Modules are not for:
 
-- abstraction boundaries with signatures
+- signatures
 - functors
 - generative module behavior
-- advanced namespace engineering
+- abstraction-heavy namespace engineering
 
-### 11.2 Export behavior
+### 12.2 Export behavior
 
-Only names explicitly defined in a module are exported.
+Only names explicitly defined in the module body are exported.
 
 Example:
 
@@ -897,17 +1118,25 @@ Invalid:
 M.x
 ```
 
-### 11.3 `open` behavior
+### 12.3 `open` behavior
 
 `open M` copies module exports into the current environment for subsequent
-lookup. It does not cause opened names to be re-exported automatically from
-the surrounding module.
+lookup.
+
+It does not:
+
+- re-export opened names automatically
+- support selective imports
+- allow silent shadowing
+
+The language now rejects `open` if it would overwrite an existing binding in
+the current scope.
 
 ---
 
-## 12. Standard library
+## 13. Standard library
 
-The current builtin prelude is intentionally tiny:
+The current runtime prelude is intentionally tiny:
 
 - `print : 'a -> unit`
 - `to_string : 'a -> string`
@@ -915,25 +1144,30 @@ The current builtin prelude is intentionally tiny:
 
 Notes:
 
-- `print` prints a stable human-readable representation of runtime values
-- `to_string` returns that representation as a string
+- `print` renders a stable human-readable representation of runtime values
+- `to_string` returns that representation
 - `length` works on arrays only
 
-Notably absent:
+Arithmetic, comparison, and concatenation are language primitives rather
+than builtins.
 
-- numeric conversion builtins such as `num2str`
-- operator builtins for arithmetic or comparison
+The builtin type-description language is richer than the currently installed
+prelude, so future builtins can safely describe:
 
-Those operations are language primitives instead.
+- refs
+- tuples
+- record-shaped APIs
+- variant-shaped APIs
+- open-row record/variant interfaces
 
 ---
 
-## 13. Surface syntax summary
+## 14. Surface syntax summary
 
-This is not a full formal grammar, but it summarizes the supported surface
-forms.
+This is not a full formal grammar, but it summarizes the implemented
+surface syntax.
 
-### 13.1 Statements
+### 14.1 Statements
 
 ```chatml
 let x = expr
@@ -945,7 +1179,7 @@ open M
 expr
 ```
 
-### 13.2 Expressions
+### 14.2 Expressions
 
 ```chatml
 ()
@@ -976,7 +1210,7 @@ e1; e2
 `Tag(e1, e2)
 ```
 
-### 13.3 Operators
+### 14.3 Operators
 
 ```chatml
 x + y
@@ -1007,7 +1241,7 @@ x == y
 x != y
 ```
 
-### 13.4 Patterns
+### 14.4 Patterns
 
 ```chatml
 _
@@ -1025,58 +1259,121 @@ true
 
 ---
 
-## 14. Soundness-related notes
+## 15. Diagnostics
 
-The current implementation intentionally enforces or relies on the
-following:
+### 15.1 Type errors
 
-- lexical closure capture is stable
-- recursive bindings are function-only
-- mutation interacts with polymorphism through a value restriction
-- integer and float operators are separate and explicit
-- array indexing is int-only
-- modules export only explicit definitions
-- row-polymorphic ergonomics are stronger for records than for variants
+Type errors are reported with:
 
-These are important to the language’s current safety/ergonomics tradeoff.
+- a message
+- an optional source span
+
+When a span is available, formatting uses source-text excerpts with caret
+markers.
+
+### 15.2 Runtime errors
+
+Runtime errors are also structured:
+
+- message
+- optional source span
+
+and are formatted in the same general style as type errors.
+
+### 15.3 Current strengths
+
+Diagnostics are now materially better for:
+
+- row-typed records
+- row-typed variants
+- equality misuse
+- `open` shadowing
+
+### 15.4 Current parser limitation
+
+Parse errors are still comparatively basic. Menhir failure reporting is not
+yet elevated to the same level of quality as type/runtime diagnostics.
 
 ---
 
-## 15. Known intentional limitations
+## 16. Soundness-related notes
+
+The current implementation intentionally enforces or relies on:
+
+- lexical closure capture being stable
+- recursive bindings being function-only
+- mutation interacting with polymorphism via a value restriction
+- explicit separation of integer and float operators
+- int-only array indexing
+- explicit resolver lowering before evaluation
+- runtime validation of frame slot layouts
+- no silent `open` shadowing
+- equality restrictions for unsupported runtime representations
+
+These are central to the language’s current safety/ergonomics tradeoff.
+
+---
+
+## 17. Known intentional limitations
 
 ChatML currently does **not** provide:
 
 - user-written type annotations
-- tuple syntax as a user-facing general feature
+- tuple syntax as a general user-facing feature
 - algebraic data type declarations
-- parametric modules or signatures
 - selective imports
+- signatures or functors
 - layout-sensitive syntax
 - Unicode identifiers
 - full ML-style match usefulness analysis
 - ad-hoc overloaded numeric operators
 
-The language is intentionally conservative and small.
+The language remains intentionally conservative and small.
 
 ---
 
-## 16. Recommended style
+## 18. Important implementation caveats
+
+These are worth documenting because they shape current behavior.
+
+### 18.1 Modules are statically record-like, but runtime-distinct
+
+The typechecker models modules as records of exports, while the runtime
+represents them as `VModule`.
+
+This is deliberate and ergonomic, but it means “module values” are not a
+fully separate static category.
+
+### 18.2 Records get stronger row ergonomics than variants
+
+Record-heavy scripting is a primary use case, so lambda parameters that
+become record-shaped are reopened to open rows. Variants do not get the
+same reopening heuristic.
+
+### 18.3 Builtins remain a host-side facility
+
+The richer builtin type language exists for host/runtime authors, not as a
+user-facing type-annotation mechanism.
+
+---
+
+## 19. Recommended style
 
 For the current language, the most ergonomic and robust style is:
 
 - use records for script state
-- use small helpers over row-polymorphic state records
+- write small helpers over row-polymorphic state records
 - use variants for finite event/state tags
 - use modules only for grouping
 - keep arithmetic explicit by numeric kind
-- prefer `M.name` over heavy use of `open` when readability matters
-- push complex host interactions into builtins/runtime services
+- prefer `M.name` over aggressive `open` use when readability matters
+- push complex host interaction into builtins/runtime services
 
 ---
 
-## 17. Reference examples
+## 20. Reference examples
 
-### 17.1 Record-heavy state helper
+### 20.1 Record-heavy state helper
 
 ```chatml
 let bump_attempts st =
@@ -1086,7 +1383,7 @@ let bump_attempts st =
   st
 ```
 
-### 17.2 Variant-driven event handler
+### 20.2 Variant-driven event handler
 
 ```chatml
 let step st ev =
@@ -1095,14 +1392,14 @@ let step st ev =
   | `Stop -> { st with running = false }
 ```
 
-### 17.3 Float logic with explicit dotted operators
+### 20.3 Float logic with explicit dotted operators
 
 ```chatml
 let avg x y = (x +. y) /. 2.0
 if avg(1.0, 3.0) >=. 2.0 then true else false
 ```
 
-### 17.4 Simple module namespace
+### 20.4 Simple module namespace
 
 ```chatml
 module Flow = struct
@@ -1113,3 +1410,22 @@ end
 Flow.inc(Flow.one)
 ```
 
+### 20.5 Shadow-safe module import
+
+```chatml
+module Math = struct
+  let two = 2
+end
+
+open Math
+print(two)
+```
+
+But:
+
+```chatml
+let two = 99
+open Math
+```
+
+is rejected because `open Math` would shadow `two`.
