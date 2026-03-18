@@ -7,7 +7,7 @@ open Chatml_builtin_modules
 (** Small parsing helper identical to the one used in the type-checker tests. *)
 let parse (str : string) : L.program =
   let lexbuf = Lexing.from_string str in
-  try Chatml_parser.program Chatml_lexer.token lexbuf, str with
+  try { L.stmts = Chatml_parser.program Chatml_lexer.token lexbuf; source_text = str } with
   | Chatml_parser.Error -> failwith "Parse error"
 ;;
 

@@ -344,17 +344,17 @@ let resolve_checked_program
   type_lookup_ref := Some lookup_fun;
   let stack = ref [] in
   let stmts' =
-    fst prog |> List.map ~f:(fun sn -> with_stmt_value sn (resolve_stmt stack sn))
+    prog.stmts |> List.map ~f:(fun sn -> with_stmt_value sn (resolve_stmt stack sn))
   in
   type_lookup_ref := None;
-  stmts', snd prog
+  { L.stmts = stmts'; source_text = prog.source_text }
 ;;
 
 let resolve_program (prog : L.program) : L.resolved_program =
   match Chatml_typechecker.check_program prog with
   | Ok checked -> resolve_checked_program checked prog
   | Error diagnostic ->
-    failwith (Chatml_typechecker.format_diagnostic (snd prog) diagnostic)
+    failwith (Chatml_typechecker.format_diagnostic prog.source_text diagnostic)
 ;;
 
 type eval_error =

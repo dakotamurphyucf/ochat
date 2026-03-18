@@ -1496,7 +1496,7 @@ let check_program (prog : program) : (checked_program, diagnostic) result =
      therefore simply discard the annotation for the time being. *)
   try
     let _final_env =
-      List.fold (fst prog) ~init:env ~f:(fun env_acc stmt_node ->
+      List.fold prog.stmts ~init:env ~f:(fun env_acc stmt_node ->
         infer_stmt state env_acc stmt_node.value)
     in
     Ok { span_types = Hashtbl.copy state.span_types }
@@ -1510,7 +1510,7 @@ let check_program (prog : program) : (checked_program, diagnostic) result =
 let infer_program (prog : program) : unit =
   match check_program prog with
   | Ok _ -> printf "Type checking succeeded!\n%!"
-  | Error diagnostic -> printf "%s\n%!" (format_diagnostic (snd prog) diagnostic)
+  | Error diagnostic -> printf "%s\n%!" (format_diagnostic prog.source_text diagnostic)
 ;;
 
 (*************************************************************************** *)

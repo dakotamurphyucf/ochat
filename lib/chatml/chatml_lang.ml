@@ -188,8 +188,17 @@ type resolved_stmt =
 
 type stmt_node = stmt node [@@deriving sexp_of]
 type resolved_stmt_node = resolved_stmt node [@@deriving sexp_of]
-type program = stmt_node list * string [@@deriving sexp_of]
-type resolved_program = resolved_stmt_node list * string [@@deriving sexp_of]
+type program =
+  { stmts : stmt_node list
+  ; source_text : string
+  }
+[@@deriving sexp_of]
+
+type resolved_program =
+  { stmts : resolved_stmt_node list
+  ; source_text : string
+  }
+[@@deriving sexp_of]
 
 (***************************************************************************)
 (* Runtime diagnostics                                                     *)

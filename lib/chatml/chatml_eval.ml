@@ -73,12 +73,18 @@ let rec finish_eval (initial_frames : Frame_env.env) (initial_res : eval_result)
         store_with_slot param_frame idx slot v);
       let child_env = cl.env in
       let child_frames = param_frame :: cl.frames in
-      let next_res = eval_expr child_env child_frames cl.body in
+      let next_res = eval_expr_tail ~tail:true child_env child_frames cl.body in
       loop child_frames next_res
   in
   loop initial_frames initial_res
 
-and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : eval_result =
+and eval_expr_tail
+      ~(tail : bool)
+      (env : env)
+      (frames : Frame_env.env)
+      (e : resolved_expr node)
+  : eval_result
+  =
   match e.value with
   | REUnit -> Value VUnit
   | REInt i -> Value (VInt i)
@@ -91,7 +97,7 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : ev
      | None -> raise_runtime_error ~span:e.span (Printf.sprintf "Unbound variable %s" x))
   | REVarLoc loc -> Value (load_from_frames frames loc)
   | REPrim1 (prim, arg_expr) ->
-    let arg_val = finish_eval frames (eval_expr env frames arg_expr) in
+    let arg_val = finish_eval frames (eval_expr_tail ~tail:false env frames arg_expr) in
     (match prim, arg_val with
      | UNegInt, VInt n -> Value (VInt (-n))
      | UNegFloat, VFloat f -> Value (VFloat (-.f))
@@ -100,8 +106,8 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : ev
      | UNegFloat, _ ->
        raise_runtime_error ~span:e.span "Internal type error: unary float negation on non-float")
   | REPrim2 (prim, lhs_expr, rhs_expr) ->
-    let lhs_val = finish_eval frames (eval_expr env frames lhs_expr) in
-    let rhs_val = finish_eval frames (eval_expr env frames rhs_expr) in
+    let lhs_val = finish_eval frames (eval_expr_tail ~tail:false env frames lhs_expr) in
+    let rhs_val = finish_eval frames (eval_expr_tail ~tail:false env frames rhs_expr) in
     (match prim, lhs_val, rhs_val with
      | BIntAdd, VInt x, VInt y -> Value (VInt (x + y))
      | BIntSub, VInt x, VInt y -> Value (VInt (x - y))
@@ -147,36 +153,39 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : ev
     let block_frame = Frame_env.alloc_packed slots in
     let child_frames = block_frame :: frames in
     List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
-      let v = finish_eval child_frames (eval_expr env child_frames rhs_expr) in
+      let v = finish_eval child_frames (eval_expr_tail ~tail:false env child_frames rhs_expr) in
       let slot = List.nth_exn slots idx in
       store_with_slot block_frame idx slot v);
-    eval_expr env child_frames body
+    eval_expr_tail ~tail env child_frames body
   | REApp (fn_expr, arg_exprs) ->
-    let fn_val = finish_eval frames (eval_expr env frames fn_expr) in
+    let fn_val = finish_eval frames (eval_expr_tail ~tail:false env frames fn_expr) in
     let arg_vals =
-      List.map arg_exprs ~f:(fun a -> finish_eval frames (eval_expr env frames a))
+      List.map arg_exprs ~f:(fun a ->
+        finish_eval frames (eval_expr_tail ~tail:false env frames a))
     in
     (match fn_val with
      | VClosure cl ->
        if List.length cl.params <> List.length arg_vals
        then raise_runtime_error ~span:e.span "Function arity mismatch";
-       TailCall (cl, arg_vals)
+       if tail
+       then TailCall (cl, arg_vals)
+       else Value (finish_eval frames (TailCall (cl, arg_vals)))
      | VBuiltin bf ->
        (try Value (bf arg_vals) with
         | Failure msg -> raise_runtime_error ~span:e.span msg)
      | _ -> raise_runtime_error ~span:e.span "Trying to call a non-function value")
   | REIf (cond_expr, then_expr, else_expr) ->
-    let cond_val = finish_eval frames (eval_expr env frames cond_expr) in
+    let cond_val = finish_eval frames (eval_expr_tail ~tail:false env frames cond_expr) in
     (match cond_val with
-     | VBool true -> eval_expr env frames then_expr
-     | VBool false -> eval_expr env frames else_expr
+     | VBool true -> eval_expr_tail ~tail env frames then_expr
+     | VBool false -> eval_expr_tail ~tail env frames else_expr
      | _ -> raise_runtime_error ~span:e.span "If condition must be bool")
   | REWhile (cond_expr, body_expr) ->
     let rec loop () =
-      let cval = finish_eval frames (eval_expr env frames cond_expr) in
+      let cval = finish_eval frames (eval_expr_tail ~tail:false env frames cond_expr) in
       match cval with
       | VBool true ->
-        ignore (finish_eval frames (eval_expr env frames body_expr));
+        ignore (finish_eval frames (eval_expr_tail ~tail:false env frames body_expr));
         loop ()
       | VBool false -> Value VUnit
       | _ -> raise_runtime_error ~span:e.span "While condition must be bool"
@@ -190,22 +199,22 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : ev
     List.iteri bindings ~f:(fun idx _ -> Frame_env.set_obj rec_frame idx (Obj.repr VUnit));
     let child_frames = rec_frame :: frames in
     List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
-      let v = finish_eval child_frames (eval_expr env child_frames rhs_expr) in
+      let v = finish_eval child_frames (eval_expr_tail ~tail:false env child_frames rhs_expr) in
       let slot = List.nth_exn slots idx in
       store_with_slot rec_frame idx slot v);
-    eval_expr env child_frames body
+    eval_expr_tail ~tail env child_frames body
   | REMatch (scrut_expr, cases) ->
-    let sv = finish_eval frames (eval_expr env frames scrut_expr) in
-    match_eval env frames e.span sv cases
+    let sv = finish_eval frames (eval_expr_tail ~tail:false env frames scrut_expr) in
+    match_eval ~tail env frames e.span sv cases
   | RERecord fields ->
     let record_fields =
       List.fold fields ~init:String.Map.empty ~f:(fun acc (fld, fe) ->
-        let fv = finish_eval frames (eval_expr env frames fe) in
+        let fv = finish_eval frames (eval_expr_tail ~tail:false env frames fe) in
         Map.set acc ~key:fld ~data:fv)
     in
     Value (VRecord record_fields)
   | REFieldGet (rec_expr, field) ->
-    let rec_val = finish_eval frames (eval_expr env frames rec_expr) in
+    let rec_val = finish_eval frames (eval_expr_tail ~tail:false env frames rec_expr) in
     (match rec_val with
      | VRecord fields ->
        (match Map.find fields field with
@@ -220,17 +229,19 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : ev
      | _ -> raise_runtime_error ~span:e.span "Field access on non-record/non-module")
   | REVariant (tag, exprs) ->
     let vals =
-      List.map exprs ~f:(fun ex -> finish_eval frames (eval_expr env frames ex))
+      List.map exprs ~f:(fun ex ->
+        finish_eval frames (eval_expr_tail ~tail:false env frames ex))
     in
     Value (VVariant (tag, vals))
   | REArray elts ->
     let arr_vals =
-      List.map elts ~f:(fun ex -> finish_eval frames (eval_expr env frames ex))
+      List.map elts ~f:(fun ex ->
+        finish_eval frames (eval_expr_tail ~tail:false env frames ex))
     in
     Value (VArray (Array.of_list arr_vals))
   | REArrayGet (arr_expr, idx_expr) ->
-    let arr_val = finish_eval frames (eval_expr env frames arr_expr) in
-    let idx_val = finish_eval frames (eval_expr env frames idx_expr) in
+    let arr_val = finish_eval frames (eval_expr_tail ~tail:false env frames arr_expr) in
+    let idx_val = finish_eval frames (eval_expr_tail ~tail:false env frames idx_expr) in
     (match arr_val, idx_val with
      | VArray arr, VInt i ->
        if i < 0 || i >= Array.length arr
@@ -238,9 +249,9 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : ev
        else Value arr.(i)
      | _ -> raise_runtime_error ~span:e.span "Invalid array access")
   | REArraySet (arr_expr, idx_expr, v_expr) ->
-    let arr_val = finish_eval frames (eval_expr env frames arr_expr) in
-    let idx_val = finish_eval frames (eval_expr env frames idx_expr) in
-    let new_val = finish_eval frames (eval_expr env frames v_expr) in
+    let arr_val = finish_eval frames (eval_expr_tail ~tail:false env frames arr_expr) in
+    let idx_val = finish_eval frames (eval_expr_tail ~tail:false env frames idx_expr) in
+    let new_val = finish_eval frames (eval_expr_tail ~tail:false env frames v_expr) in
     (match arr_val, idx_val with
      | VArray arr, VInt i ->
        if i < 0 || i >= Array.length arr
@@ -250,26 +261,26 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : ev
          Value VUnit)
      | _ -> raise_runtime_error ~span:e.span "Invalid array set")
   | RERef e1 ->
-    let v1 = finish_eval frames (eval_expr env frames e1) in
+    let v1 = finish_eval frames (eval_expr_tail ~tail:false env frames e1) in
     Value (VRef (ref v1))
   | RESetRef (ref_expr, new_expr) ->
-    let r = finish_eval frames (eval_expr env frames ref_expr) in
-    let nv = finish_eval frames (eval_expr env frames new_expr) in
+    let r = finish_eval frames (eval_expr_tail ~tail:false env frames ref_expr) in
+    let nv = finish_eval frames (eval_expr_tail ~tail:false env frames new_expr) in
     (match r with
      | VRef cell ->
        cell := nv;
        Value VUnit
      | _ -> raise_runtime_error ~span:e.span "Attempting to set a non-ref value")
   | REDeref e1 ->
-    let rv = finish_eval frames (eval_expr env frames e1) in
+    let rv = finish_eval frames (eval_expr_tail ~tail:false env frames e1) in
     (match rv with
      | VRef cell -> Value !cell
      | _ -> raise_runtime_error ~span:e.span "Deref on non-ref value")
   | RESequence (e1, e2) ->
-    ignore (finish_eval frames (eval_expr env frames e1));
-    eval_expr env frames e2
+    ignore (finish_eval frames (eval_expr_tail ~tail:false env frames e1));
+    eval_expr_tail ~tail env frames e2
   | RERecordExtend (base_expr, fields) ->
-    let base_val = finish_eval frames (eval_expr env frames base_expr) in
+    let base_val = finish_eval frames (eval_expr_tail ~tail:false env frames base_expr) in
     let base_fields =
       match base_val with
       | VRecord fields -> fields
@@ -277,12 +288,13 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : ev
     in
     let new_fields =
       List.fold fields ~init:base_fields ~f:(fun acc (fld, fe) ->
-        let fv = finish_eval frames (eval_expr env frames fe) in
+        let fv = finish_eval frames (eval_expr_tail ~tail:false env frames fe) in
         Map.set acc ~key:fld ~data:fv)
     in
     Value (VRecord new_fields)
 
 and match_eval
+      ~(tail : bool)
       (env : env)
       (frames : Frame_env.env)
       (match_span : Source.span)
@@ -294,7 +306,7 @@ and match_eval
   | [] -> raise_runtime_error ~span:match_span "Non-exhaustive pattern match"
   | case :: tl ->
     (match match_pattern v case.pat with
-     | None -> match_eval env frames match_span v tl
+     | None -> match_eval ~tail env frames match_span v tl
      | Some binds ->
        let vars = collect_pattern_vars case.pat in
        if List.length vars <> List.length case.slots
@@ -307,7 +319,10 @@ and match_eval
            store_with_slot pat_frame idx slot vl
          | None -> ());
        let child_frames = pat_frame :: frames in
-       eval_expr env child_frames case.rhs)
+       eval_expr_tail ~tail env child_frames case.rhs)
+
+and eval_expr (env : env) (frames : Frame_env.env) (e : resolved_expr node) : eval_result =
+  eval_expr_tail ~tail:true env frames e
 
 and import_module_bindings ?span (target_env : env) (mname : string) : string list =
   match find_var target_env mname with
@@ -379,5 +394,5 @@ and eval_stmt (env : env) (frames : Frame_env.env) (s : resolved_stmt node) : un
 
 let eval_program (env : env) (prog : resolved_program) : unit =
   let initial_frames : Frame_env.env = [] in
-  List.iter (fst prog) ~f:(fun stmt_node -> eval_stmt env initial_frames stmt_node)
+  List.iter prog.stmts ~f:(fun stmt_node -> eval_stmt env initial_frames stmt_node)
 ;;
