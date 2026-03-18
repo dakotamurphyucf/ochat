@@ -147,6 +147,14 @@ let builtins : builtin list =
           ~int_op:(fun x y -> VInt (x + y))
           ~float_op:(fun x y -> VFloat (x +. y))
     }
+  ; { name = "neg"
+    ; scheme = TFun ([ TNumber ], TNumber)
+    ; impl =
+        with_unary_arg "neg" (function
+          | VInt x -> VInt (-x)
+          | VFloat x -> VFloat (-.x)
+          | _ -> failwith "neg: expected a numeric argument")
+    }
   ; { name = "-"
     ; scheme = TFun ([ TNumber; TNumber ], TNumber)
     ; impl =
