@@ -77,5 +77,17 @@ module BuiltinModules = struct
     List.iter Builtin_spec.builtins ~f:(fun builtin ->
       set_var env builtin.name (VBuiltin builtin.impl))
   ;;
+
+  (** [create_default_env ()] allocates a fresh top-level environment and
+      installs the full built-in ChatML prelude into it.
+
+      This is the recommended bootstrap helper for embedders that want a
+      ready-to-run interpreter environment whose runtime bindings stay in
+      sync with the type-checker's builtin specification. *)
+  let create_default_env () : env =
+    let env = create_env () in
+    add_global_builtins env;
+    env
+  ;;
   (* end of add_global_builtins body *)
 end
