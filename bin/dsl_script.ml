@@ -43,8 +43,7 @@ let parse (str : string) : Chatml_lang.program =
 
 let () =
   let open Chatml_lang in
-  let env = create_env () in
-  BuiltinModules.add_global_builtins env;
+  let env = BuiltinModules.create_default_env () in
   let code =
     {|
     (* Type checking succeeded! Uncaught exception: (Failure "No field 'age' in record") *)
