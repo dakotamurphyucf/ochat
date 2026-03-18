@@ -10,7 +10,7 @@
   chatml_parser
   frame_env
   chatml_builtin_spec)
- (libraries core menhirLib source)
+ (libraries core jsonaf menhirLib source)
  (preprocess
   (pps ppx_jane)))
 

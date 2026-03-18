@@ -1,8 +1,0 @@
-Error parsing JSON from line: (Of_jsonaf_error
-  "lib/openai/responses.ml.Output_message.t_of_jsonaf: extra fields: phase"
-  (Object
-    ((id (String msg_0fd083b1259e2dd70069b9d93a47708196b51f6dcb5435380d))
-      (type (String message)) (status (String in_progress))
-      (content (Array ())) (phase (String final_answer))
-      (role (String assistant)))))
-{"type":"response.output_item.added","item":{"id":"msg_0fd083b1259e2dd70069b9d93a47708196b51f6dcb5435380d","type":"message","status":"in_progress","content":[],"phase":"final_answer","role":"assistant"},"output_index":0,"sequence_number":2}

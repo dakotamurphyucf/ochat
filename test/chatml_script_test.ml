@@ -463,6 +463,56 @@ let config_example_code =
     |}
 ;;
 
+let json_parse_code = {|
+  type json =
+    [ `Null
+    | `Bool(bool)
+    | `String(string)
+    | `Number(float)
+    | `Array(json array)
+    | `Object({ key : string; value : json } array)
+    ]
+
+  let rec map_numbers : json -> json =
+    fun j ->
+    match j with
+    | `Null -> `Null
+    | `Bool(b) -> `Bool(b)
+    | `String(s) -> `String(s)
+
+    | `Number(n) ->
+      (* Example transform: add 1.0 to every number *)
+      `Number(n +. 1.0)
+
+    | `Array(xs) ->
+      let ys = array_copy(xs) in
+      let i = ref(0) in
+      while !i < length(ys) do
+        ys[!i] <- map_numbers(ys[!i]);
+        i := !i + 1
+      done;
+      `Array(ys)
+
+    | `Object(entries) ->
+      let out = array_copy(entries) in
+      let i = ref(0) in
+      while !i < length(out) do
+        let e = out[!i] in
+        (* e : { key : string; value : Json.t } *)
+        out[!i] <- { key = e.key; value = map_numbers(e.value) };
+        i := !i + 1
+      done;
+      `Object(out)
+
+  let input = "{\"a\":1,\"b\":[2,3],\"c\":{\"d\":4}}"
+  let j = Json.parse(input)
+  let j2 = map_numbers(j)
+
+  print("in:  " ++ Json.stringify(j))
+  print("out: " ++ Json.stringify(j2))
+  print("pretty:\n" ++ Json.pretty(j2))
+|}
+
 let run_chatml (code : string) : unit =
   let env = BuiltinModules.create_default_env () in
   let prog = Chatml_parse.parse_program_exn code in
@@ -545,6 +595,28 @@ let%expect_test "bfs example" =
     {|
     dist 0->5 = 3
     BFS Program completed successfully.
+    |}]
+;;
+
+let%expect_test "json parse example" =
+  run_chatml json_parse_code;
+  print_endline "Json parse code completed successfully.";
+  [%expect
+    {|
+    in:  {"a":1.,"b":[2.,3.],"c":{"d":4.}}
+    out: {"a":2.,"b":[3.,4.],"c":{"d":5.}}
+    pretty:
+    {
+      "a": 2.,
+      "b": [
+        3.,
+        4.
+      ],
+      "c": {
+        "d": 5.
+      }
+    }
+    Json parse code completed successfully.
     |}]
 ;;
 

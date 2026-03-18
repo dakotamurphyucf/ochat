@@ -1068,3 +1068,90 @@ let%expect_test "ill-typed programs do not execute" =
     Type error: Cannot unify string with int
     |}]
 ;;
+
+let%expect_test "builtin modules smoke test" =
+  let code =
+    {|
+      print("== String ==")
+      print(String.length("abcd"))
+      print(String.is_empty(""))
+      print(String.concat("a", "b"))
+
+      print("== Array ==")
+      let xs = [1, 2, 3]
+      print(Array.length(xs))
+      print(Array.get(xs, 1))
+      Array.set(xs, 1, 999)
+      print(Array.get(xs, 1))
+
+      print("== Option ==")
+      let o1 = Option.none()
+      let o2 = Option.some(42)
+      print(variant_tag(o1))
+      print(variant_tag(o2))
+      print(Option.get_or(o1, 7))
+      print(Option.get_or(o2, 7))
+
+      print("== Hashtbl ==")
+      let t = Hashtbl.create()
+      Hashtbl.set(t, "a", 123)
+      Hashtbl.set(t, "b", 456)
+
+      print(Hashtbl.mem(t, "a"))
+      print(Hashtbl.mem(t, "z"))
+
+      let ga = Hashtbl.get(t, "a")
+      let gz = Hashtbl.get(t, "z")
+
+      let show_opt oi =
+        match oi with
+        | `None -> "<none>"
+        | `Some(x) -> "Some(" ++ to_string(x) ++ ")"
+
+
+      print(show_opt(ga))
+      print(show_opt(gz))
+
+      Hashtbl.remove(t, "a")
+      print(Hashtbl.mem(t, "a"))
+
+      print("== Json ==")
+      (* parse -> stringify round-trip on a simple array for deterministic output *)
+      let j = Json.parse("[1,2,3]")
+      print(Json.stringify(j))
+
+      (* manual Json.t construction (uses the Json.t encoding provided by the module) *)
+      let j2 = `Array([ `Number(1.25), `Number(2.5), `Bool(true), `Null, `String("x") ])
+      print(Json.stringify(j2))
+
+
+
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+    == String ==
+    4
+    true
+    ab
+    == Array ==
+    3
+    2
+    999
+    == Option ==
+    None
+    Some
+    7
+    42
+    == Hashtbl ==
+    true
+    false
+    Some(123)
+    <none>
+    false
+    == Json ==
+    [1.,2.,3.]
+    [1.25,2.5,true,null,"x"]
+    |}]
+;;

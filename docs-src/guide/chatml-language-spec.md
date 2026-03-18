@@ -1257,11 +1257,12 @@ The builtin specification language now supports:
 - row-based records
 - row-based variants
 - function types
+- explicit recursive types (mu-style binders) used internally by some builtin modules (not user-surface syntax)
 
-This is a host-side capability used by builtin declarations. It is richer
-than the current user-facing type language: users still do not directly
-write builtin-only forms such as ref types, tuple types, or open-row record
-/ variant specifications.
+Notes:
+
+This builtin type language is richer than the current user-facing type language.
+Users still do not write builtin-only forms such as ref types, tuple types, open-row forms, or explicit recursive binders directly; they appear only through host-provided builtin schemes.
 
 ### 10.9 Module typing
 
@@ -1456,46 +1457,151 @@ the current scope.
 
 ## 13. Standard library
 
-The current runtime prelude is still intentionally small, but it now goes a
-bit beyond the original minimal core.
+ChatML ships with a small runtime prelude consisting of:
 
-Installed builtins:
+a set of global builtin functions, and
+a set of builtin modules installed as VModule values (typed as records of exports).
+Arithmetic, string concatenation, comparison, and equality operators remain language primitives rather than runtime-installed builtins.
 
-- `print : 'a -> unit`
-- `to_string : 'a -> string`
-- `length : 'a array -> int`
-- `string_length : string -> int`
-- `string_is_empty : string -> bool`
-- `array_copy : 'a array -> 'a array`
-- `record_keys : { ...r } -> string array`
-- `variant_tag : [ ...r ] -> string`
-- `swap_ref : ref('a) -> 'a -> 'a`
-- `fail : string -> 'a`
+### 13.1 Global builtins
+Installed global builtins:
+
+```ocaml
+print : 'a -> unit
+to_string : 'a -> string
+length : 'a array -> int
+string_length : string -> int
+string_is_empty : string -> bool
+array_copy : 'a array -> 'a array
+record_keys : { ...r } -> string array
+variant_tag : [ ...r ] -> string
+swap_ref : ref('a) -> 'a -> 'a
+fail : string -> 'a
+```
 
 Notes:
 
-- `print` renders a stable human-readable representation of runtime values
-- `to_string` returns that representation
-- `length` works on arrays only
-- `array_copy` is a shallow copy of the array container
-- `record_keys` works on record values, and also on module values because
-  modules are statically record-like
-- `variant_tag` returns only the constructor/tag name, not the payload
-- `swap_ref r v` stores `v` into `r` and returns the old contents
-- `fail` always raises a runtime failure and is typed polymorphically in its
-  result position
+- print renders a stable human-readable representation of runtime values.
+- to_string returns that representation.
+- length works on arrays only.
+- array_copy is a shallow copy of the array container.
+- record_keys works on record values, and also on module values because modules are record-like at the type level.
+- variant_tag returns only the constructor/tag name, not the payload.
+- swap_ref r v stores v into r and returns the old contents.
+- fail raises a runtime failure and is polymorphic in its result position.
+### 13.2 Builtin modules
+The runtime also installs several builtin modules. Each module is a VModule value at runtime, typed as a record of its exports by the typechecker.
 
-Arithmetic, comparison, and concatenation are language primitives rather
-than builtins.
+13.2.1 `String` module
+Exports:
 
-The builtin type-description language is richer than the currently installed
-prelude and can safely describe:
+- String.length : string -> int
+- String.is_empty : string -> bool
+- String.concat : string -> string -> string
 
-- refs
-- tuples
-- record-shaped APIs
-- variant-shaped APIs
-- open-row record/variant interfaces
+Notes:
+
+- `String.concat(a, b)` corresponds to ordinary string concatenation.
+- The language also has the `++` operator for string concatenation; both exist.
+
+### 13.2.2 Array module
+Exports:
+
+```ocaml
+Array.length : 'a array -> int
+Array.copy : 'a array -> 'a array
+Array.get : 'a array -> int -> 'a
+Array.set : 'a array -> int -> 'a -> unit
+```
+
+Notes:
+
+- `Array.get / Array.set` perform bounds checks; out-of-bounds is a runtime error.
+- `Array.length `overlaps with the global length builtin.
+
+### 13.2.3 `Option` module
+This module uses the convention that option values are represented as variants:
+
+```ocaml
+`None
+`Some(x)
+```
+
+Exports:
+
+```ocaml
+Option.none : unit -> [ \None | `Some('a) ]`
+Option.some : 'a -> [ \None | `Some('a) ]`
+Option.is_none : [ \None | `Some('a) ] -> bool`
+Option.is_some : [ \None | `Some('a) ] -> bool`
+Option.get_or : [ \None | `Some('a) ] -> 'a -> 'a`
+```
+
+Notes:
+
+- This is a convenience module; users can also directly construct and match on `None and `Some(...).
+
+### 13.2.4 `Hashtbl` module (string-keyed)
+This is a small builtin hashtable-like abstraction with string keys. It is implemented using existing runtime values (refs + arrays of entries) and is intended for scripting convenience, not high performance.
+
+Exports (conceptual types):
+
+```ocaml
+Hashtbl.create : unit -> hashtbl('a)
+Hashtbl.set : hashtbl('a) -> string -> 'a -> unit
+Hashtbl.get : hashtbl('a) -> string -> [ \None | `Some('a) ]`
+Hashtbl.mem : hashtbl('a) -> string -> bool
+Hashtbl.remove : hashtbl('a) -> string -> unit
+```
+
+Notes:
+
+- The key type is always string.
+- Hashtbl.get returns an option-like variant (\None/`Some`).
+- Current representation is optimized for simplicity rather than asymptotic performance.
+
+### 13.2.5 `Json` module
+The Json module provides a real recursive JSON value type at the ChatML level and conversion to/from JSON text. It is backed by the host-side `Jsonaf` library.
+
+
+`Json.t` representation
+`Json.t` is represented as a recursive variant type equivalent to:
+
+```ocaml
+Json.t =
+  [ `Null
+  | `Bool(bool)
+  | `Number(float)
+  | `String(string)
+  | `Array(Json.t array)
+  | `Object({ key : string; value : Json.t } array)
+  ]
+```
+
+(Internally this is introduced using the builtin-spec recursive type binder; users do not write the binder directly.)
+
+Exports
+
+```ocaml
+Json.parse : string -> Json.t
+Json.stringify : Json.t -> string
+Json.pretty : Json.t -> string
+```
+
+Notes:
+
+- `Json.parse` raises a runtime failure on invalid JSON input.
+- `Json.stringify` produces a compact JSON representation.
+- `Json.pretty` produces a human-readable formatted representation (as provided by Jsonaf).
+-  `JSON numbers` are surfaced as float in ChatML. (When parsing, the underlying textual number is converted to float; when stringifying, floats are rendered back to strings.)
+
+### 13.3 Interaction with open and shadowing
+open imports module exports into the current scope and rejects any import that would shadow an existing binding.
+
+Because global builtins exist in the initial environment, opening some builtin modules may be rejected due to name collisions. For example:
+- `open Array` is rejected by default because Array.length would shadow the global length.
+
+Users can always access module exports through qualified access (Array.length(xs)) without using open.
 
 ---
 
@@ -1672,6 +1778,14 @@ The current implementation intentionally enforces or relies on:
 - equality restrictions for unsupported runtime representations
 
 These are central to the language’s current safety/ergonomics tradeoff.
+
+Recursive builtin types and unification
+ChatML supports explicit recursive types internally (Mu / Rec_var) for both user-declared recursive types and some builtin module types (notably Json.t).
+
+Implementation note:
+
+Unification of recursive types uses an alpha-renaming strategy for Mu-vs-Mu unification to avoid non-termination from repeated unfolding.
+(This is an internal typechecker detail; surface programs observe only the usual contractiveness and monomorphism rules for recursive types.)
 
 ---
 
@@ -2049,4 +2163,55 @@ let g =
   ]
 
 print("dist 0->5 = " ++ to_string(Graph.bfs_distance(g, 0, 5)))
+```
+
+### 20.10 JSON parse / transform / stringify (builtin Json module)
+```ocaml
+type json =
+  [ `Null
+  | `Bool(bool)
+  | `String(string)
+  | `Number(float)
+  | `Array(json array)
+  | `Object({ key : string; value : json } array)
+  ]
+
+let rec map_numbers : json -> json =
+  fun j ->
+  match j with
+  | `Null -> `Null
+  | `Bool(b) -> `Bool(b)
+  | `String(s) -> `String(s)
+
+  | `Number(n) ->
+    (* Example transform: add 1.0 to every number *)
+    `Number(n +. 1.0)
+
+  | `Array(xs) ->
+    let ys = array_copy(xs) in
+    let i = ref(0) in
+    while !i < length(ys) do
+      ys[!i] <- map_numbers(ys[!i]);
+      i := !i + 1
+    done;
+    `Array(ys)
+
+  | `Object(entries) ->
+    let out = array_copy(entries) in
+    let i = ref(0) in
+    while !i < length(out) do
+      let e = out[!i] in
+      (* e : { key : string; value : Json.t } *)
+      out[!i] <- { key = e.key; value = map_numbers(e.value) };
+      i := !i + 1
+    done;
+    `Object(out)
+
+let input = "{\"a\":1,\"b\":[2,3],\"c\":{\"d\":4}}"
+let j = Json.parse(input)
+let j2 = map_numbers(j)
+
+print("in:  " ++ Json.stringify(j))
+print("out: " ++ Json.stringify(j2))
+print("pretty:\n" ++ Json.pretty(j2))
 ```

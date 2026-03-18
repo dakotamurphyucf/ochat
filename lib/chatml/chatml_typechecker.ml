@@ -467,6 +467,19 @@ let rec unify (state : infer_state) lhs rhs =
         unify state r1 r2)
     | Var { contents = Bound t1 }, t2 | t1, Var { contents = Bound t2 } ->
       unify state t1 t2
+    | (Mu (b1, body1) as mu1), (Mu (b2, body2) as mu2) ->
+      (* General equi-recursive unification: treat mu-binders as alpha-equivalent.
+         Rename both binders to a fresh name and unify bodies without unfolding. *)
+      ensure_contractive_type mu1;
+      ensure_contractive_type mu2;
+      let fresh = "__unify_mu_" ^ gensym state in
+      let body1' =
+        substitute_rec_var ~target:b1 ~replacement:(Rec_var fresh) body1
+      in
+      let body2' =
+        substitute_rec_var ~target:b2 ~replacement:(Rec_var fresh) body2
+      in
+      unify state body1' body2'
     | (Mu (_binder, _body) as mu), t | t, (Mu (_binder, _body) as mu) ->
       ensure_contractive_type mu;
       unify state (unfold_mu mu) t
@@ -961,7 +974,8 @@ let rec typ_of_builtin_ty (ty : Builtin_spec.ty) : typ =
   | Builtin_spec.TVariant row -> Variant (typ_of_builtin_row row)
   | Builtin_spec.TFun (params, ret) ->
     Fun (List.map params ~f:typ_of_builtin_ty, typ_of_builtin_ty ret)
-
+  | Builtin_spec.TMu (binder, body) -> Mu (binder, typ_of_builtin_ty body)
+  | Builtin_spec.TRec_var name -> Rec_var name
 and typ_of_builtin_row (row : Builtin_spec.row) : typ =
   match row with
   | Builtin_spec.TRow_empty -> Empty_row
@@ -973,9 +987,15 @@ and typ_of_builtin_row (row : Builtin_spec.row) : typ =
 ;;
 
 let init_env () : tenv =
-  Builtin_spec.builtins
-  |> List.map ~f:(fun builtin -> builtin.name, typ_of_builtin_ty builtin.scheme)
-  |> Env.of_list
+  let globals =
+    Builtin_spec.builtins
+    |> List.map ~f:(fun b -> b.name, typ_of_builtin_ty b.scheme)
+  in
+  let modules =
+    Builtin_spec.modules
+    |> List.map ~f:(fun m -> m.name, typ_of_builtin_ty (Builtin_spec.module_scheme m))
+  in
+  Env.of_list (globals @ modules)
 ;;
 
 (* Instantiate only genuinely polymorphic schemes.  Monomorphic bindings are
