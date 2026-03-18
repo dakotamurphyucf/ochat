@@ -95,7 +95,7 @@ expression-level ascription syntax.
 
 Function calls use explicit call syntax:
 
-```chatml
+```ocaml
 f(x)
 f(x, y)
 g()
@@ -268,7 +268,7 @@ Supported literal forms:
 
 Comments use OCaml-style block syntax:
 
-```chatml
+```ocaml
 (* this is a comment *)
 ```
 
@@ -323,7 +323,7 @@ current environment, but closures capture lexical bindings stably.
 
 Examples:
 
-```chatml
+```ocaml
 let x = 1
 let name = "Alice"
 let inc n = n + 1
@@ -341,12 +341,12 @@ Properties:
 
 Examples:
 
-```chatml
+```ocaml
 let rec fact n =
   if n == 0 then 1 else n * fact(n - 1)
 ```
 
-```chatml
+```ocaml
 let rec even n = if n == 0 then true else odd(n - 1)
 and odd n = if n == 0 then false else even(n - 1)
 ```
@@ -368,7 +368,7 @@ Operationally:
 
 Examples:
 
-```chatml
+```ocaml
 type expr = [ `Int(int) | `Add(expr, expr) ]
 type task = { name : string; attempts : int; status : status }
 ```
@@ -403,7 +403,7 @@ Current intentional limitations:
 
 Example:
 
-```chatml
+```ocaml
 module Flow = struct
   let x = 1
   let id y = y
@@ -427,7 +427,7 @@ surface grammar.
 
 Example:
 
-```chatml
+```ocaml
 open Flow
 ```
 
@@ -440,7 +440,7 @@ Semantics:
 
 So this is rejected:
 
-```chatml
+```ocaml
 let x = 1
 module M = struct
   let x = 2
@@ -456,7 +456,7 @@ Both the typechecker and the runtime reject such shadowing.
 
 ### 7.1 Unit
 
-```chatml
+```ocaml
 ()
 ```
 
@@ -464,7 +464,7 @@ Type: `unit`
 
 ### 7.2 Variables
 
-```chatml
+```ocaml
 x
 state
 Flow
@@ -481,7 +481,7 @@ After resolution:
 
 Anonymous functions:
 
-```chatml
+```ocaml
 fun x -> x
 fun x y -> x
 fun () -> 42
@@ -489,7 +489,7 @@ fun () -> 42
 
 Named function syntax is sugar for a `let` binding of a lambda:
 
-```chatml
+```ocaml
 let add x y = x + y
 ```
 
@@ -504,14 +504,14 @@ Properties:
 For annotated functions, the current surface syntax annotates the binding,
 not individual parameters:
 
-```chatml
+```ocaml
 let rec eval : expr -> int =
   fun e -> ...
 ```
 
 Zero-argument annotated functions use `unit -> t`:
 
-```chatml
+```ocaml
 let finish_action : unit -> string =
   fun () -> "done"
 ```
@@ -520,7 +520,7 @@ let finish_action : unit -> string =
 
 Examples:
 
-```chatml
+```ocaml
 f(x)
 f(x, y)
 g()
@@ -528,7 +528,7 @@ g()
 
 Function position may itself be any expression:
 
-```chatml
+```ocaml
 (fun x -> x)(1)
 choose(true)(1)
 ```
@@ -539,7 +539,7 @@ There is no whitespace application syntax such as `f x`.
 
 Examples:
 
-```chatml
+```ocaml
 let x = 1 in x + 1
 let x : int = 1 in x + 1
 let f y = y in f(3)
@@ -559,7 +559,7 @@ Properties:
 
 ### 7.6 Conditionals
 
-```chatml
+```ocaml
 if cond then a else b
 ```
 
@@ -575,7 +575,7 @@ branch adds it with copy-update.
 
 Example:
 
-```chatml
+```ocaml
 let maybe_set_running b st =
   if b then st else { st with running = true }
 ```
@@ -585,7 +585,7 @@ The result of `maybe_set_running` is **not** treated as definitely having a
 
 By contrast:
 
-```chatml
+```ocaml
 let set_running st running =
   { st with running = running }
 
@@ -597,7 +597,7 @@ does guarantee `running` on every path, so the joined result keeps that field.
 
 ### 7.7 Sequencing
 
-```chatml
+```ocaml
 e1; e2
 ```
 
@@ -609,7 +609,7 @@ Rules:
 
 ### 7.8 While loops
 
-```chatml
+```ocaml
 while cond do body done
 ```
 
@@ -623,19 +623,19 @@ Rules:
 
 Record literal:
 
-```chatml
+```ocaml
 { name = "Alice"; age = 30 }
 ```
 
 Field access:
 
-```chatml
+```ocaml
 person.name
 ```
 
 Record copy-update:
 
-```chatml
+```ocaml
 { person with age = person.age + 1 }
 ```
 
@@ -654,19 +654,19 @@ Properties:
 
 Array literal:
 
-```chatml
+```ocaml
 [1, 2, 3]
 ```
 
 Indexing:
 
-```chatml
+```ocaml
 arr[i]
 ```
 
 Update:
 
-```chatml
+```ocaml
 arr[i] <- v
 ```
 
@@ -682,19 +682,19 @@ Properties:
 
 Creation:
 
-```chatml
+```ocaml
 ref(0)
 ```
 
 Dereference:
 
-```chatml
+```ocaml
 !r
 ```
 
 Assignment:
 
-```chatml
+```ocaml
 r := 1
 ```
 
@@ -709,7 +709,7 @@ Properties:
 
 Examples:
 
-```chatml
+```ocaml
 `None
 `Some(1)
 `Pair(1, "x")
@@ -806,7 +806,7 @@ Rejected:
 
 Examples:
 
-```chatml
+```ocaml
 1 == 1         (* ok *)
 "a" != "b"     (* ok *)
 [1, 2] == [1]  (* type error *)
@@ -874,7 +874,7 @@ This matters for resolver slot layout, but not for user-visible semantics.
 
 Closed record pattern:
 
-```chatml
+```ocaml
 { name = n }
 ```
 
@@ -882,7 +882,7 @@ This requires the record to have exactly the named fields.
 
 Open record pattern:
 
-```chatml
+```ocaml
 { name = n; _ }
 ```
 
@@ -926,7 +926,7 @@ Variant-using functions can become narrower after informative matches.
 
 Example:
 
-```chatml
+```ocaml
 let f v =
   match v with
   | `Some(x) -> x
@@ -1003,7 +1003,7 @@ The current user-facing type-expression syntax supports:
 
 Examples:
 
-```chatml
+```ocaml
 type status = [ `Pending | `Running | `Done | `Error(string) ]
 type task =
   { name : string
@@ -1038,7 +1038,7 @@ not through cyclic ordinary inference variables.
 
 Surface recursive types are introduced via named `type` declarations:
 
-```chatml
+```ocaml
 type expr = [ `Int(int) | `Add(expr, expr) ]
 ```
 
@@ -1052,14 +1052,14 @@ appear under a real constructor.
 
 Accepted:
 
-```chatml
+```ocaml
 type expr = [ `Int(int) | `Add(expr, expr) ]
 type node = { value : int; next : node }
 ```
 
 Rejected:
 
-```chatml
+```ocaml
 type bad = bad
 ```
 
@@ -1072,7 +1072,7 @@ Non-expansive bindings may be generalized.
 
 Example:
 
-```chatml
+```ocaml
 let id x = x
 id(1)
 id("s")
@@ -1104,13 +1104,13 @@ Record helpers usually infer open-row behavior.
 
 Example:
 
-```chatml
+```ocaml
 let get_name p = p.name
 ```
 
 This can be used on:
 
-```chatml
+```ocaml
 {name = "A"}
 {name = "A"; age = 1}
 ```
@@ -1126,7 +1126,7 @@ Important implementation detail:
 
 Record copy-update can widen a record result:
 
-```chatml
+```ocaml
 let with_timeout cfg ms =
   { cfg with timeout_ms = ms }
 ```
@@ -1158,7 +1158,7 @@ both shapes already guarantee the fields you plan to read later.
 For example, the following shape-changing helper is not something the
 conservative join will strengthen:
 
-```chatml
+```ocaml
 let init_state st =
   if st.inited then st else
     { inited = true
@@ -1172,7 +1172,7 @@ let init_state st =
 In the copied regression tests, callers already provide a fully initialized
 state, so the recommended rewrite is simply:
 
-```chatml
+```ocaml
 let init_state st = st
 ```
 
@@ -1182,7 +1182,7 @@ This satisfies the join trivially because both paths are the same shape.
 
 Instead of:
 
-```chatml
+```ocaml
 let step st ev =
   match ev with
   | `Start ->
@@ -1196,7 +1196,7 @@ let step st ev =
 
 prefer:
 
-```chatml
+```ocaml
 let set_running st running =
   { st with running = running }
 
@@ -1230,7 +1230,7 @@ Variant constructors are typed using row-based variant information.
 
 Examples:
 
-```chatml
+```ocaml
 `None
 `Some(1)
 `Pair(1, "x")
@@ -1419,7 +1419,7 @@ Only names explicitly defined in the module body are exported.
 
 Example:
 
-```chatml
+```ocaml
 let x = 1
 module M = struct
   let y = x
@@ -1428,13 +1428,13 @@ end
 
 Valid:
 
-```chatml
+```ocaml
 M.y
 ```
 
 Invalid:
 
-```chatml
+```ocaml
 M.x
 ```
 
@@ -1506,7 +1506,7 @@ surface syntax.
 
 ### 14.1 Statements
 
-```chatml
+```ocaml
 type t = type_expr
 let x = expr
 let x : type_expr = expr
@@ -1521,7 +1521,7 @@ expr
 
 ### 14.2 Expressions
 
-```chatml
+```ocaml
 ()
 1
 1.0
@@ -1553,7 +1553,7 @@ e1; e2
 
 ### 14.3 Operators
 
-```chatml
+```ocaml
 x + y
 x - y
 x * y
@@ -1584,7 +1584,7 @@ x != y
 
 ### 14.4 Patterns
 
-```chatml
+```ocaml
 _
 x
 ()
@@ -1600,7 +1600,7 @@ true
 
 ### 14.5 Type expressions
 
-```chatml
+```ocaml
 int
 float
 bool
@@ -1746,7 +1746,7 @@ For the current language, the most ergonomic and robust style is:
 
 ### 20.1 Record-heavy state helper
 
-```chatml
+```ocaml
 let bump_attempts st =
   let t = st.tasks[st.task_index] in
   let t = { t with attempts = t.attempts + 1 } in
@@ -1756,7 +1756,7 @@ let bump_attempts st =
 
 ### 20.2 Variant-driven event handler
 
-```chatml
+```ocaml
 let step st ev =
   match ev with
   | `Start -> { st with running = true }
@@ -1765,14 +1765,14 @@ let step st ev =
 
 ### 20.3 Float logic with explicit dotted operators
 
-```chatml
+```ocaml
 let avg x y = (x +. y) /. 2.0
 if avg(1.0, 3.0) >=. 2.0 then true else false
 ```
 
 ### 20.4 Simple module namespace
 
-```chatml
+```ocaml
 module Flow = struct
   let one = 1
   let inc x = x + 1
@@ -1783,7 +1783,7 @@ Flow.inc(Flow.one)
 
 ### 20.5 Shadow-safe module import
 
-```chatml
+```ocaml
 module Math = struct
   let two = 2
 end
@@ -1794,7 +1794,7 @@ print(two)
 
 But:
 
-```chatml
+```ocaml
 let two = 99
 open Math
 ```
@@ -1803,7 +1803,7 @@ is rejected because `open Math` would shadow `two`.
 
 ### 20.6 Explicit recursive type declaration
 
-```chatml
+```ocaml
 type expr = [ `Int(int) | `Add(expr, expr) ]
 
 let rec eval : expr -> int =
@@ -1817,7 +1817,7 @@ This is the supported way to write recursive structural data in ChatML.
 
 ### 20.7 Tiny workflow engine
 
-```chatml
+```ocaml
 (* A tiny workflow engine that processes events and mutates tasks in-place. *)
 
 type status = [ `Pending | `Running | `Done | `Error(string) ]
@@ -1933,7 +1933,7 @@ run(events)
 
 ### 20.8 Small Expression evaluation
 
-```chatml
+```ocaml
 type expr =
   [ `Int(int)
   | `Add(expr, expr)
@@ -1993,7 +1993,7 @@ print("result=" ++ to_string(eval(program)))
 
 ### 20.9 BFS program
 
-```chatml
+```ocaml
 let and_ a b =
   match `Tup(a, b) with
   | `Tup(true, true) -> true
