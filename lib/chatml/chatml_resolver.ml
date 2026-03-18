@@ -1,49 +1,8 @@
-(** {1 ChatML resolver — lexical-address resolution & slot selection}
-
-    This module performs the {e resolver} pass of the ChatML pipeline.
-    It walks the typed abstract syntax tree and rewrites it so that:
-
-    {ol
-    {- every source-level variable [`EVar "x"`] is replaced by a
-       concrete lexical address [`EVarLoc`] that names the frame depth
-       and slot index where the value will live at run-time;}
-    {- each binding site (lambda parameters, [let]-bindings, pattern
-       variables) receives a pre-computed [`Frame_env.slot`] witness.
-       The choice uses the principal type inferred by
-       {!Chatml_typechecker} when available and falls back to a simple
-       literal-based heuristic.  Specialising slots early allows the
-       evaluator to avoid run-time tag checks;}
-    {- consecutive non-recursive [let]s that belong to the same lexical
-       block are merged into a single [ELetBlockSlots] node so that the
-       evaluator only allocates {e one} frame for the whole block.}}
-
-    The transformation is purely structural – it does **not** change
-    the meaning of the program – but it equips subsequent passes with
-    enough information to allocate frames once and to access them in
-    O(1).
-
-    {2 High-level API}
-
-    • {!resolve_program} – turn a parsed & type-checked program into its
-      resolved form.  The function is idempotent: applying it twice is a
-      no-op.
-
-    • {!eval_program} – convenience helper that calls
-      {!resolve_program} and immediately interprets the result with
-      {!Chatml_lang.eval_program}.
-
-    Every other definition is an implementation detail and may change
-    without notice.  External callers should stick to the two functions
-    above.
-*)
+(** ChatML resolver — lexical-address resolution & slot selection. *)
 
 open Core
 open Chatml
 module L = Chatml_lang
-
-(* -------------------------------------------------------------------- *)
-(*  Helper  – frame stack                                                *)
-(* -------------------------------------------------------------------- *)
 
 type slot_info =
   { index : int
@@ -60,17 +19,6 @@ let pop_frame (stack : frame_map list ref) : unit =
   | [] -> failwith "Resolver: attempt to pop empty frame stack"
 ;;
 
-let _lookup (stack : frame_map list) (name : string) : slot_info option =
-  let rec aux depth = function
-    | [] -> None
-    | fm :: tl ->
-      (match Hashtbl.find fm name with
-       | Some info -> Some { info with index = info.index + depth }
-       | None -> aux (depth + 1) tl)
-  in
-  aux 0 stack
-;;
-
 let lookup (stack : frame_map list) (name : string) : L.var_loc option =
   let rec aux depth = function
     | [] -> None
@@ -82,23 +30,6 @@ let lookup (stack : frame_map list) (name : string) : L.var_loc option =
   aux 0 stack
 ;;
 
-(* ------------------------------------------------------------- *)
-(*  Pattern utilities                                             *)
-(* ------------------------------------------------------------- *)
-
-(* -------------------------------------------------------------------- *)
-(*  Integration with the static type-checker                             *)
-(* -------------------------------------------------------------------- *)
-
-(* The resolver needs to query the principal type of sub-expressions in
-   order to choose an efficient slot descriptor.  In production this
-   information now comes exclusively from a successful
-   [Chatml_typechecker.check_program] run, via the pure lookup closure
-   returned by [Chatml_typechecker.checked_lookup_span_type].
-   Keeping it in an [option ref] allows us to thread the function through
-   the mutually-recursive [resolve_*] helpers without changing every
-   signature. *)
-
 let type_lookup_ref : (Source.span -> Chatml_typechecker.typ option) option ref = ref None
 
 let lookup_type span =
@@ -107,20 +38,6 @@ let lookup_type span =
   | Some f -> f span
 ;;
 
-(*************************************************************************)
-(* Slot selection                                                        *)
-(*************************************************************************)
-
-(** A very small heuristic that inspects the *syntactic* form of an
-   expression and picks an appropriate slot descriptor.  This is *not* a
-   full type-inference algorithm: we only special-case literal constants
-   (ints, bools, floats, strings).  Everything else falls back to [SObj].
-
-   The function is intentionally kept local to the resolver – the
-   interpreter re-implements the same logic on values so that it can
-   decide which setter to use when storing into a frame.  The two pieces
-   of logic must stay in sync but do *not* create a dependency cycle
-   between modules. *)
 let slot_of_typ (t : Chatml_typechecker.typ) : Frame_env.packed_slot =
   match t with
   | Chatml_typechecker.Boolean -> Frame_env.Slot Frame_env.SBool
@@ -156,37 +73,36 @@ let choose_slot (rhs_node : L.expr L.node) : Frame_env.packed_slot =
   | None -> fallback_slot_of_expr rhs_node.value
 ;;
 
-(* -------------------------------------------------------------------- *)
-(*  Expression traversal                                                 *)
-(* -------------------------------------------------------------------- *)
+let with_value node value = { L.value = value; span = node.span }
 
-let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
-  let with_value node value = L.{ node with value } in
+let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolved_expr =
   match e.value with
-  | L.EUnit -> L.EUnit
+  | L.EUnit -> L.REUnit
+  | L.EInt i -> L.REInt i
+  | L.EBool b -> L.REBool b
+  | L.EFloat f -> L.REFloat f
+  | L.EString s -> L.REString s
   | L.EVar x ->
     (match lookup !stack x with
-     | Some loc -> L.EVarLoc loc
-     | None -> L.EVar x)
-  | L.EVarLoc l -> L.EVarLoc l
+     | Some loc -> L.REVarLoc loc
+     | None -> L.REVarGlobal x)
+  | L.EVarLoc loc -> L.REVarLoc loc
   | L.EPrim1 (prim, arg) ->
     let arg' = resolve_expr stack arg in
-    L.EPrim1 (prim, with_value arg arg')
+    L.REPrim1 (prim, with_value arg arg')
   | L.EPrim2 (prim, lhs, rhs) ->
     let lhs' = resolve_expr stack lhs in
     let rhs' = resolve_expr stack rhs in
-    L.EPrim2 (prim, with_value lhs lhs', with_value rhs rhs')
+    L.REPrim2 (prim, with_value lhs lhs', with_value rhs rhs')
   | L.ELambdaSlots (params, slots, body) ->
-    (* Already resolved; simply traverse body. *)
     let fm = Hashtbl.create (module String) in
     List.iteri params ~f:(fun idx param ->
       Hashtbl.set fm ~key:param ~data:{ index = idx; slot = List.nth_exn slots idx });
     push_frame stack fm;
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELambdaSlots (params, slots, with_value body body')
+    L.RELambda (params, slots, with_value body body')
   | L.ELambda (params, body) ->
-    (* Derive slot layout from static types when available. *)
     let param_slots =
       match lookup_type e.span with
       | Some (Chatml_typechecker.Fun (param_tys, _))
@@ -201,14 +117,12 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     push_frame stack fm;
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELambdaSlots (params, param_slots, with_value body body')
+    L.RELambda (params, param_slots, with_value body body')
   | L.EApp (fn, args) ->
     let fn' = resolve_expr stack fn in
-    let args' = List.map args ~f:(fun a -> with_value a (resolve_expr stack a)) in
-    L.EApp (with_value fn fn', args')
+    let args' = List.map args ~f:(fun arg -> with_value arg (resolve_expr stack arg)) in
+    L.REApp (with_value fn fn', args')
   | L.ELetIn (x, rhs, body) ->
-    (* Merge a chain of consecutive [let]s into a single [ELetBlock].
-       We first collect all nested bindings until we hit a non-let body. *)
     let rec collect (acc : (string * L.expr L.node) list) (expr_node : L.expr L.node)
       : (string * L.expr L.node) list * L.expr L.node
       =
@@ -218,39 +132,22 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
         collect ((y, rhs_y) :: acc) body_y
       | _ -> List.rev acc, expr_node
     in
-    let bindings_rev, tail_body = collect [ x, rhs ] body in
-    let bindings = bindings_rev in
-    (* 1. Create an empty frame-map that we will fill incrementally. *)
+    let bindings, tail_body = collect [ x, rhs ] body in
     let fm : frame_map = Hashtbl.create (module String) in
-    (* 2. Push the frame before processing any RHS so that earlier
-          bindings become visible to later ones. *)
     push_frame stack fm;
-    (* 3. Resolve each RHS in order, adding the bound name to [fm]
-          *after* its own RHS has been processed (non-rec semantics). *)
     let resolved_bindings_rev =
       List.foldi bindings ~init:[] ~f:(fun idx acc (nm, rhs_expr) ->
-        (* Resolve RHS with current mapping (earlier vars visible). *)
         let rhs_resolved = resolve_expr stack rhs_expr in
-        (* Choose slot using type information when available. *)
         let slot = choose_slot rhs_expr in
-        (* Register variable in the frame map for subsequent RHS + body. *)
         Hashtbl.set fm ~key:nm ~data:{ index = idx; slot };
-        (nm, { rhs_expr with value = rhs_resolved }) :: acc)
+        (nm, with_value rhs_expr rhs_resolved) :: acc)
     in
     let resolved_bindings = List.rev resolved_bindings_rev in
-    (* 4. Resolve the body with full mapping in scope. *)
     let body' = resolve_expr stack tail_body in
-    (* 5. Pop the frame when leaving the block scope. *)
     pop_frame stack;
-    let slots =
-      List.map bindings ~f:(fun (nm, _rhs) ->
-        (* fetch slot from fm *)
-        (Hashtbl.find_exn fm nm).slot)
-    in
-    L.ELetBlockSlots (resolved_bindings, slots, with_value tail_body body')
+    let slots = List.map bindings ~f:(fun (nm, _) -> (Hashtbl.find_exn fm nm).slot) in
+    L.RELetBlock (resolved_bindings, slots, with_value tail_body body')
   | L.ELetRec (binds, body) ->
-    (* Mutually-recursive let-resolution, unchanged from earlier code but
-       repositioned after the new [ELetBlock] arm. *)
     let fm = Hashtbl.create (module String) in
     let slots =
       List.mapi binds ~f:(fun idx (nm, rhs_expr) ->
@@ -260,13 +157,12 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     in
     push_frame stack fm;
     let binds' =
-      List.map binds ~f:(fun (nm, rhs) -> nm, { rhs with value = resolve_expr stack rhs })
+      List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr stack rhs))
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetRecSlots (binds', slots, with_value body body')
+    L.RELetRec (binds', slots, with_value body body')
   | L.ELetBlock (binds, body) ->
-    (* Convert to [ELetBlockSlots] and traverse children. *)
     let fm = Hashtbl.create (module String) in
     let slots =
       List.mapi binds ~f:(fun idx (nm, rhs_node) ->
@@ -276,26 +172,23 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     in
     push_frame stack fm;
     let binds' =
-      List.mapi binds ~f:(fun _idx (nm, rhs_node) ->
-        nm, { rhs_node with value = resolve_expr stack rhs_node })
+      List.map binds ~f:(fun (nm, rhs_node) -> nm, with_value rhs_node (resolve_expr stack rhs_node))
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetBlockSlots (binds', slots, with_value body body')
+    L.RELetBlock (binds', slots, with_value body body')
   | L.ELetBlockSlots (binds, slots, body) ->
-    (* Already resolved; traverse children preserving slot info. *)
     let fm = Hashtbl.create (module String) in
     List.iteri binds ~f:(fun idx (nm, _rhs) ->
       let slot = List.nth_exn slots idx in
       Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
     push_frame stack fm;
     let binds' =
-      List.mapi binds ~f:(fun _ (nm, rhs_node) ->
-        nm, { rhs_node with value = resolve_expr stack rhs_node })
+      List.map binds ~f:(fun (nm, rhs_node) -> nm, with_value rhs_node (resolve_expr stack rhs_node))
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetBlockSlots (binds', slots, with_value body body')
+    L.RELetBlock (binds', slots, with_value body body')
   | L.ELetRecSlots (binds, slots, body) ->
     let fm = Hashtbl.create (module String) in
     List.iteri binds ~f:(fun idx (nm, _rhs) ->
@@ -303,29 +196,27 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
       Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
     push_frame stack fm;
     let binds' =
-      List.mapi binds ~f:(fun _ (nm, rhs_node) ->
-        nm, { rhs_node with value = resolve_expr stack rhs_node })
+      List.map binds ~f:(fun (nm, rhs_node) -> nm, with_value rhs_node (resolve_expr stack rhs_node))
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetRecSlots (binds', slots, with_value body body')
+    L.RELetRec (binds', slots, with_value body body')
   | L.EIf (c, t, f) ->
     let c' = resolve_expr stack c in
     let t' = resolve_expr stack t in
     let f' = resolve_expr stack f in
-    L.EIf (with_value c c', with_value t t', with_value f f')
+    L.REIf (with_value c c', with_value t t', with_value f f')
   | L.EWhile (cond, bd) ->
     let cond' = resolve_expr stack cond in
     let bd' = resolve_expr stack bd in
-    L.EWhile (with_value cond cond', with_value bd bd')
+    L.REWhile (with_value cond cond', with_value bd bd')
   | L.ESequence (e1, e2) ->
     let e1' = resolve_expr stack e1 in
     let e2' = resolve_expr stack e2 in
-    L.ESequence (with_value e1 e1', with_value e2 e2')
+    L.RESequence (with_value e1 e1', with_value e2 e2')
   | L.EMatch (scrut, cases) ->
     let scrut' = resolve_expr stack scrut in
     let scrut_ty_opt = lookup_type scrut.span in
-    (* Helper: collect (var, slot) list in deterministic order *)
     let rec slots_of_pattern pat ty_opt =
       match pat with
       | L.PUnit -> []
@@ -337,9 +228,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
         in
         [ x, slot ]
       | L.PWildcard | L.PInt _ | L.PBool _ | L.PFloat _ | L.PString _ -> []
-      | L.PVariant (_tag, subpats) ->
-        (* We do not try to refine variant arguments for now. *)
-        List.concat_map subpats ~f:(fun sp -> slots_of_pattern sp None)
+      | L.PVariant (_tag, subpats) -> List.concat_map subpats ~f:(fun sp -> slots_of_pattern sp None)
       | L.PRecord (fields, _open) ->
         let field_type lbl =
           let rec search = function
@@ -363,16 +252,13 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
           in
           search ty_opt
         in
-        List.concat_map fields ~f:(fun (lbl, p) ->
-          let sub_ty = field_type lbl in
-          slots_of_pattern p sub_ty)
+        List.concat_map fields ~f:(fun (lbl, p) -> slots_of_pattern p (field_type lbl))
     in
     let cases' =
       List.map cases ~f:(fun case ->
         let var_slots = slots_of_pattern case.pat scrut_ty_opt in
         let vars = List.map var_slots ~f:fst in
         let slots = List.map var_slots ~f:snd in
-        (* Build frame map with those slots *)
         let fm : frame_map = Hashtbl.create (module String) in
         List.iteri vars ~f:(fun idx vnm ->
           let slot = List.nth_exn slots idx in
@@ -383,13 +269,11 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
         { L.pat = case.pat
         ; pat_span = case.pat_span
         ; slots
-        ; rhs = { case.rhs with value = rhs' }
+        ; rhs = with_value case.rhs rhs'
         })
     in
-    L.EMatchSlots (with_value scrut scrut', cases')
+    L.REMatch (with_value scrut scrut', cases')
   | L.EMatchSlots (scrut, cases) ->
-    (* AST already contains slot info; we only need to recursively resolve
-       sub-expressions to keep idempotence. *)
     let scrut' = resolve_expr stack scrut in
     let cases' =
       List.map cases ~f:(fun case ->
@@ -401,165 +285,109 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
         push_frame stack fm;
         let rhs' = resolve_expr stack case.rhs in
         pop_frame stack;
-        { case with rhs = { case.rhs with value = rhs' } })
+        { L.pat = case.pat
+        ; pat_span = case.pat_span
+        ; slots = case.slots
+        ; rhs = with_value case.rhs rhs'
+        })
     in
-    L.EMatchSlots (with_value scrut scrut', cases')
+    L.REMatch (with_value scrut scrut', cases')
   | L.ERecord fields ->
     let fields' =
-      List.map fields ~f:(fun (lbl, ex) -> lbl, { ex with value = resolve_expr stack ex })
+      List.map fields ~f:(fun (lbl, ex) -> lbl, with_value ex (resolve_expr stack ex))
     in
-    L.ERecord fields'
+    L.RERecord fields'
   | L.EFieldGet (obj, lbl) ->
     let obj' = resolve_expr stack obj in
-    L.EFieldGet (with_value obj obj', lbl)
+    L.REFieldGet (with_value obj obj', lbl)
   | L.EVariant (tag, vs) ->
-    let vs' = List.map vs ~f:(fun v -> { v with value = resolve_expr stack v }) in
-    L.EVariant (tag, vs')
+    let vs' = List.map vs ~f:(fun v -> with_value v (resolve_expr stack v)) in
+    L.REVariant (tag, vs')
   | L.EArray elts ->
-    let elts' = List.map elts ~f:(fun e -> { e with value = resolve_expr stack e }) in
-    L.EArray elts'
+    let elts' = List.map elts ~f:(fun elt -> with_value elt (resolve_expr stack elt)) in
+    L.REArray elts'
   | L.EArrayGet (arr, idx) ->
     let arr' = resolve_expr stack arr in
     let idx' = resolve_expr stack idx in
-    L.EArrayGet (with_value arr arr', with_value idx idx')
+    L.REArrayGet (with_value arr arr', with_value idx idx')
   | L.EArraySet (arr, idx, v) ->
     let arr' = resolve_expr stack arr in
     let idx' = resolve_expr stack idx in
     let v' = resolve_expr stack v in
-    L.EArraySet (with_value arr arr', with_value idx idx', with_value v v')
+    L.REArraySet (with_value arr arr', with_value idx idx', with_value v v')
   | L.ERef e1 ->
     let e1' = resolve_expr stack e1 in
-    L.ERef (with_value e1 e1')
+    L.RERef (with_value e1 e1')
   | L.ESetRef (r, v) ->
     let r' = resolve_expr stack r in
     let v' = resolve_expr stack v in
-    L.ESetRef (with_value r r', with_value v v')
+    L.RESetRef (with_value r r', with_value v v')
   | L.EDeref e1 ->
     let e1' = resolve_expr stack e1 in
-    L.EDeref (with_value e1 e1')
+    L.REDeref (with_value e1 e1')
   | L.ERecordExtend (base, fields) ->
     let base' = resolve_expr stack base in
     let fields' =
-      List.map fields ~f:(fun (lbl, ex) -> lbl, { ex with value = resolve_expr stack ex })
+      List.map fields ~f:(fun (lbl, ex) -> lbl, with_value ex (resolve_expr stack ex))
     in
-    L.ERecordExtend (with_value base base', fields')
-  (* Literals – no change ------------------------------------------------ *)
-  | L.EInt _ | L.EBool _ | L.EFloat _ | L.EString _ -> e.value
+    L.RERecordExtend (with_value base base', fields')
 ;;
 
-(* -------------------------------------------------------------------- *)
-(*  Statement traversal                                                  *)
-(* -------------------------------------------------------------------- *)
-
-let rec resolve_stmt (stack : frame_map list ref) (snode : L.stmt L.node) : L.stmt =
+let rec resolve_stmt (stack : frame_map list ref) (snode : L.stmt L.node) : L.resolved_stmt =
   match snode.value with
-  | L.SLet (x, rhs) ->
-    let rhs' = resolve_expr stack rhs in
-    L.SLet (x, { rhs with value = rhs' })
+  | L.SLet (x, rhs) -> L.RSLet (x, with_value rhs (resolve_expr stack rhs))
   | L.SLetRec binds ->
     let binds' =
-      List.map binds ~f:(fun (nm, rhs) -> nm, { rhs with value = resolve_expr stack rhs })
+      List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr stack rhs))
     in
-    L.SLetRec binds'
-  | L.SExpr e -> L.SExpr { e with value = resolve_expr stack e }
+    L.RSLetRec binds'
+  | L.SExpr e -> L.RSExpr (with_value e (resolve_expr stack e))
   | L.SModule (mname, stmts) ->
     let stmts' =
-      List.map stmts ~f:(fun st -> { st with value = resolve_stmt stack st })
+      List.map stmts ~f:(fun st -> with_value st (resolve_stmt stack st))
     in
-    L.SModule (mname, stmts')
-  | L.SOpen nm -> L.SOpen nm
+    L.RSModule (mname, stmts')
+  | L.SOpen nm -> L.RSOpen nm
 ;;
-
-(* -------------------------------------------------------------------- *)
-(*  Public entry-points                                                  *)
-(* -------------------------------------------------------------------- *)
-
-(** [resolve_program prog] returns a new program where every variable
-    reference and binding is annotated with its precise run-time
-    location.
-
-    Pre-conditions:
-    {ul
-    {- [prog] {b must} have been accepted by
-       {!Chatml_typechecker.type_check_program} so that the principal
-       type table is populated;}
-    {- the span information carried by each node is intact.}}
-
-    Post-conditions:
-    {ul
-    {- All occurrences of [`EVar] are replaced by [`EVarLoc];}
-    {- Every lambda, let-block, let-rec and match-case carries a list of
-       [`Frame_env.packed_slot] that mirrors its physical layout;}
-    {- The returned value is alpha-equivalent to the input and shares no
-       mutable state with it.}}
-
-    The transformation is idempotent.  Applying it on an already
-    resolved program yields the exact same AST.
-  *)
 
 let resolve_checked_program
       (checked : Chatml_typechecker.checked_program)
       (prog : L.program)
-  : L.program
+  : L.resolved_program
   =
-  (* 1.  Obtain a *pure* span→type lookup closure for this very program. *)
   let lookup_fun = Chatml_typechecker.checked_lookup_span_type checked in
-  (* 2.  Expose it to the recursive helpers. *)
   type_lookup_ref := Some lookup_fun;
-  (* 3.  Proceed with the original resolution. *)
   let stack = ref [] in
   let stmts' =
-    fst prog |> List.map ~f:(fun sn -> { sn with value = resolve_stmt stack sn })
+    fst prog |> List.map ~f:(fun sn -> with_value sn (resolve_stmt stack sn))
   in
-  (* 4.  Clear the lookup ref to avoid accidental reuse across programs. *)
   type_lookup_ref := None;
   stmts', snd prog
 ;;
 
-let resolve_program (prog : L.program) : L.program =
+let resolve_program (prog : L.program) : L.resolved_program =
   match Chatml_typechecker.check_program prog with
   | Ok checked -> resolve_checked_program checked prog
   | Error diagnostic ->
     failwith (Chatml_typechecker.format_diagnostic (snd prog) diagnostic)
 ;;
 
-(** Result of executing a ChatML program through the high-level public
-    runner. *)
 type eval_error =
   | Type_diagnostic of Chatml_typechecker.diagnostic
   | Runtime_diagnostic of L.runtime_error
 
-(** [run_program env prog] is the canonical execution
-    entry-point for parsed ChatML programs.  It strictly type-checks
-    [prog], resolves lexical addresses and frame slots, then interprets
-    the resolved program in [env].
-
-    It is equivalent to
-
-    {[ Chatml_lang.eval_program env (resolve_program prog) ]}
-
-    but avoids constructing the intermediate value at the call-site and
-    never evaluates ill-typed programs.  Callers embedding ChatML should
-    prefer this helper over the low-level {!Chatml_lang.eval_program},
-    which assumes a suitably resolved program. *)
-let run_program (env : L.env) (prog : L.program) : (unit, eval_error) result
-  =
+let run_program (env : L.env) (prog : L.program) : (unit, eval_error) result =
   match Chatml_typechecker.check_program prog with
   | Error diagnostic -> Error (Type_diagnostic diagnostic)
   | Ok checked ->
     let program = resolve_checked_program checked prog in
     (try
-       (* 1) Resolve the program; 2) Execute it in the given environment. *)
-       L.eval_program env program;
+       Chatml_eval.eval_program env program;
        Ok ()
      with
      | L.Runtime_error err -> Error (Runtime_diagnostic err))
 ;;
 
-(** Backwards-compatible wrapper preserving the historical API shape:
-    type errors are returned in the [Error] branch, while run-time
-    failures continue to surface as exceptions.  Callers that want
-    structured run-time diagnostics should use {!run_program}. *)
 let typecheck_resolve_and_eval (env : L.env) (prog : L.program)
   : (unit, Chatml_typechecker.diagnostic) result
   =
@@ -567,11 +395,10 @@ let typecheck_resolve_and_eval (env : L.env) (prog : L.program)
   | Error diagnostic -> Error diagnostic
   | Ok checked ->
     let program = resolve_checked_program checked prog in
-    L.eval_program env program;
+    Chatml_eval.eval_program env program;
     Ok ()
 ;;
 
-(** Backwards-compatible alias for {!typecheck_resolve_and_eval}. *)
 let eval_program (env : L.env) (prog : L.program)
   : (unit, Chatml_typechecker.diagnostic) result
   =

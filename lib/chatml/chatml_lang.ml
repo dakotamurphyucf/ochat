@@ -1,25 +1,21 @@
-(** ChatML evaluator runtime.
+(** ChatML language core.
 
-    This module implements the small, statically-typed {e ChatML} language
-    used by the rest of the code-base to describe lightweight scripts in
-    prompts and test-scenarios.
-
-    The code is organised in eight conceptual layers, each introduced by a
-    numbered banner in the source:
+    This module defines:
 
     {ol
-    {- Abstract syntax tree description (section 1).}
-    {- Runtime value representation (section 2).}
-    {- Helpers for environments and variable lookup (section 3).}
-    {- Pattern-matching engine (section 4).}
-    {- Tail-call trampoline and frame helpers (sections 5 & 6).}
-    {- Statement evaluation (section 7).}
-    {- Program evaluation entry-point (section 8).}}
+    {- The surface AST produced by the parser and consumed by the
+       typechecker.}
+    {- The resolved AST produced by the resolver and consumed by the
+       evaluator.}
+    {- Runtime value and environment types shared by the evaluator and
+       builtin libraries.}
+    {- Small helper functions for diagnostics, environments, and
+       pattern matching.}}
 
-    Each public type and function is documented individually below.  Only
-    the high-level entry point [eval_program] is intended for external
-    consumers; everything else is provided to make the implementation
-    testable.
+    Evaluation itself lives in {!module:Chatml_eval}.  Keeping the
+    evaluator out of this module makes the phase distinction explicit and
+    avoids dependency cycles between the parser, typechecker, resolver,
+    and interpreter.
 *)
 
 open Core
@@ -28,9 +24,6 @@ open Core
 (* 1) AST Types                                                            *)
 (***************************************************************************)
 
-(** A syntax node annotated with its source code span.  The parser wraps
-    every AST fragment in this record so that the evaluator and error
-    reporter can recover position information. *)
 type 'a node =
   { value : 'a
   ; span : Source.span
@@ -46,20 +39,9 @@ type pattern =
   | PFloat of float
   | PString of string
   | PVariant of string * pattern list
-  | PRecord of (string * pattern) list * bool (* true = open row with _ *)
+  | PRecord of (string * pattern) list * bool
 [@@deriving sexp, compare]
 
-(** Abstract patterns used in the surface syntax and by the runtime
-    matcher.  The constructors mirror the value space of the language.  A
-    record pattern carries a flag indicating whether a trailing [_]
-    wildcard ("open row") is present – [true] means additional fields are
-    allowed. *)
-
-(** Represents the lexical address of a variable after the resolver pass.
-   [depth] = how many frames to pop (0 = current frame),
-   [index] = slot inside that frame.  The runtime currently stores only
-   [Chatml_lang.value] values inside frames, therefore we do not need
-   the full GADT-powered descriptor from [Frame_env] at this stage.  *)
 type var_loc =
   { depth : int
   ; index : int
@@ -79,6 +61,14 @@ and match_case_slots =
   ; pat_span : Source.span
   ; slots : Frame_env.packed_slot list
   ; rhs : expr node
+  }
+[@@deriving sexp_of]
+
+and resolved_match_case =
+  { pat : pattern
+  ; pat_span : Source.span
+  ; slots : Frame_env.packed_slot list
+  ; rhs : resolved_expr node
   }
 [@@deriving sexp_of]
 
@@ -126,21 +116,8 @@ and expr =
   | EWhile of expr node * expr node
   | ELetIn of string * expr node * expr node
   | ELetRec of (string * expr node) list * expr node
-  (* A sequence of non-recursive let-bindings that belong to the SAME
-     lexical block (i.e. were originally written as nested [let … in]
-     constructs).  The resolver groups them so that the evaluator can
-     allocate *one* frame whose layout hosts all the bound variables,
-     thereby avoiding one frame allocation & push/pop per binding.      *)
   | ELetBlock of (string * expr node) list * expr node
-  (* Same as [ELetBlock] but carries *explicit* slot descriptors chosen
-     by the resolver.  The list of [packed_slot] is in one-to-one
-     correspondence with the [bindings] list so that the evaluator can
-     allocate a frame whose layout exactly matches the static
-     selection. *)
   | ELetBlockSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
-  (* Mutually recursive let-bindings with their slot layout.  Mirrors
-     [ELetRec] but lifts the slot list so that the runtime does not
-     need to recompute it. *)
   | ELetRecSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
   | EMatch of expr node * match_case list
   | EMatchSlots of expr node * match_case_slots list
@@ -152,16 +129,46 @@ and expr =
   | EArraySet of expr node * expr node * expr node
   | ERef of expr node
   | ESetRef of expr node * expr node
-  | ESequence of expr node * expr node (* e1 ; e2 *)
+  | ESequence of expr node * expr node
   | EDeref of expr node
   | ERecordExtend of expr node * (string * expr node) list
 [@@deriving sexp_of]
 
-(** Untyped core language expressions.  Variants whose names end with
-    [*Slots] are produced by the resolver pass and contain pre-computed
-    slot descriptors that guide frame allocation in the evaluator.  A
-    regular consumer of the module should never manufacture these
-    directly – use {!Chatml_resolver.resolve} instead. *)
+and resolved_expr =
+  | REUnit
+  | REInt of int
+  | REBool of bool
+  | REFloat of float
+  | REString of string
+  | REVarGlobal of string
+  | REVarLoc of var_loc
+  | REPrim1 of unary_prim * resolved_expr node
+  | REPrim2 of binary_prim * resolved_expr node * resolved_expr node
+  | RELambda of string list * Frame_env.packed_slot list * resolved_expr node
+  | REApp of resolved_expr node * resolved_expr node list
+  | REIf of resolved_expr node * resolved_expr node * resolved_expr node
+  | REWhile of resolved_expr node * resolved_expr node
+  | RELetBlock of
+      (string * resolved_expr node) list
+      * Frame_env.packed_slot list
+      * resolved_expr node
+  | RELetRec of
+      (string * resolved_expr node) list
+      * Frame_env.packed_slot list
+      * resolved_expr node
+  | REMatch of resolved_expr node * resolved_match_case list
+  | RERecord of (string * resolved_expr node) list
+  | REFieldGet of resolved_expr node * string
+  | REVariant of string * resolved_expr node list
+  | REArray of resolved_expr node list
+  | REArrayGet of resolved_expr node * resolved_expr node
+  | REArraySet of resolved_expr node * resolved_expr node * resolved_expr node
+  | RERef of resolved_expr node
+  | RESetRef of resolved_expr node * resolved_expr node
+  | RESequence of resolved_expr node * resolved_expr node
+  | REDeref of resolved_expr node
+  | RERecordExtend of resolved_expr node * (string * resolved_expr node) list
+[@@deriving sexp_of]
 
 type stmt =
   | SLet of string * expr node
@@ -171,27 +178,23 @@ type stmt =
   | SExpr of expr node
 [@@deriving sexp_of]
 
-(** Top–level statements accepted by the interpreter.  The concrete
-    syntax provides syntactic sugar that is desugared into this
-    representation by the parser. *)
-
-(* The [stmt] type is used to represent the top-level statements in a
-   module.  The [program] type is a list of statements, followed by the
-   module name.  This is used to represent the entire program. *)
+type resolved_stmt =
+  | RSLet of string * resolved_expr node
+  | RSLetRec of (string * resolved_expr node) list
+  | RSModule of string * resolved_stmt node list
+  | RSOpen of string
+  | RSExpr of resolved_expr node
+[@@deriving sexp_of]
 
 type stmt_node = stmt node [@@deriving sexp_of]
-
-(* The [program] type is a list of statements, followed by the module name.
-   This is used to represent the entire program. *)
+type resolved_stmt_node = resolved_stmt node [@@deriving sexp_of]
 type program = stmt_node list * string [@@deriving sexp_of]
+type resolved_program = resolved_stmt_node list * string [@@deriving sexp_of]
 
 (***************************************************************************)
 (* Runtime diagnostics                                                     *)
 (***************************************************************************)
 
-(** Structured run-time failure raised by the interpreter when execution
-    reaches an invalid dynamic state in user code.  Internal compiler /
-    resolver invariant violations still use plain [Failure]. *)
 type runtime_error =
   { message : string
   ; span : Source.span option
@@ -203,7 +206,6 @@ let raise_runtime_error ?span message =
   raise (Runtime_error { message; span })
 ;;
 
-(** Render a run-time error using the same location style as type errors. *)
 let format_runtime_error (source_text : string) (err : runtime_error) : string =
   match err.span with
   | None -> Printf.sprintf "Runtime error: %s" err.message
@@ -240,17 +242,12 @@ type value =
   | VUnit
   | VBuiltin of (value list -> value)
 
-(** Runtime values.  Except for [VBuiltin], every constructor is produced
-    by executing ChatML code.  [VBuiltin] wraps a host‐implemented OCaml
-    function and is used to expose primitive operations and the standard
-    library to user programs. *)
-
 and clos =
   { params : string list
-  ; body : expr node
+  ; body : resolved_expr node
   ; env : env
-  ; frames : Frame_env.env (** captured stack of frames at the lambda creation point *)
-  ; param_slots : Frame_env.packed_slot list (** static slot layout for parameters *)
+  ; frames : Frame_env.env
+  ; param_slots : Frame_env.packed_slot list
   }
 
 and cell = value ref
@@ -307,7 +304,7 @@ let rec equal_value (lhs : value) (rhs : value) : bool =
 ;;
 
 (***************************************************************************)
-(* 4) Pattern Matching                                                      *)
+(* 4) Pattern Matching                                                     *)
 (***************************************************************************)
 
 let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
@@ -332,7 +329,6 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
     in
     combine ps vs (Some [])
   | PRecord (fields, is_open), VRecord fields_map ->
-    (* Ensure specified fields match; if closed pattern, ensure no extra fields exist. *)
     let rec match_fields fl acc =
       match fl with
       | [] -> Some acc
@@ -349,16 +345,12 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
      | Some binds ->
        if is_open
        then Some binds
-       else if
-         (* closed: record must not have extra fields *)
-         Map.length fields_map = List.length fields
+       else if Map.length fields_map = List.length fields
        then Some binds
        else None)
   | _ -> None
 ;;
 
-(* Helper used both by the resolver and the interpreter to list variable
-   names appearing in a pattern in a deterministic left-to-right order. *)
 let collect_pattern_vars (pat : pattern) : string list =
   let rec aux acc p =
     match p with
@@ -369,647 +361,4 @@ let collect_pattern_vars (pat : pattern) : string list =
     | PRecord (fields, _open) -> List.fold fields ~init:acc ~f:(fun ac (_, p) -> aux ac p)
   in
   List.rev (aux [] pat)
-;;
-
-(***************************************************************************)
-(* 5) Trampoline for Tail Calls                                            *)
-(***************************************************************************)
-
-type eval_result =
-  | Value of value
-  | TailCall of clos * value list
-
-(* ------------------------------------------------------------------------- *)
-(* Slot helpers                                                               *)
-(* ------------------------------------------------------------------------- *)
-
-(* Decide the slot kind to use for a syntactic RHS.  This must stay in sync
-   with the resolver’s [slot_of_expr] logic to guarantee that the slot
-   recorded inside [var_loc] matches the one used by the evaluator when
-   allocating the frame and storing the value. *)
-
-let slot_of_expr (e : expr) : Frame_env.packed_slot =
-  match e with
-  | EInt _ -> Frame_env.Slot Frame_env.SInt
-  | EBool _ -> Frame_env.Slot Frame_env.SBool
-  | EFloat _ -> Frame_env.Slot Frame_env.SFloat
-  | EString _ -> Frame_env.Slot Frame_env.SString
-  | EPrim1 (UNegInt, _) -> Frame_env.Slot Frame_env.SInt
-  | EPrim1 (UNegFloat, _) -> Frame_env.Slot Frame_env.SFloat
-  | EPrim2 ((BIntAdd | BIntSub | BIntMul | BIntDiv), _, _) -> Frame_env.Slot Frame_env.SInt
-  | EPrim2 ((BFloatAdd | BFloatSub | BFloatMul | BFloatDiv), _, _) ->
-    Frame_env.Slot Frame_env.SFloat
-  | EPrim2 (BStringConcat, _, _) -> Frame_env.Slot Frame_env.SString
-  | EPrim2
-      ( (BIntLt | BIntGt | BIntLe | BIntGe | BFloatLt | BFloatGt | BFloatLe | BFloatGe | BEq | BNeq)
-      , _
-      , _ ) -> Frame_env.Slot Frame_env.SBool
-  | _ -> Frame_env.Slot Frame_env.SObj
-;;
-
-(* Infer a slot from a *runtime* value.  This is only used in the [let-in]
-   case because the frame is allocated *after* the RHS has been evaluated.
-   When in doubt we fall back to [SObj] so that we never crash at run-time
-   because of an unexpected constructor. *)
-
-let slot_of_value (v : value) : Frame_env.packed_slot =
-  match v with
-  | VInt _ -> Frame_env.Slot Frame_env.SInt
-  | VBool _ -> Frame_env.Slot Frame_env.SBool
-  | VFloat _ -> Frame_env.Slot Frame_env.SFloat
-  | VString _ -> Frame_env.Slot Frame_env.SString
-  | _ -> Frame_env.Slot Frame_env.SObj
-;;
-
-(* Store a [value] into the [frame] at [idx] using the setter that matches
-   the given slot descriptor.  If the value kind does not match the slot we
-   assert at run-time that the slot descriptor chosen by the static
-   resolver matches the *actual* value kind we are storing.  A mismatch is
-   symptomatic of a bug in the resolver / interpreter agreement and would
-   otherwise lead to silent corruption (for instance reading back an int
-   through [get_obj]).
-
-   The assertion raises a clear exception in debug builds; in production it
-   can be compiled away by defining [ocamlopt -assert false]. *)
-
-let slot_matches_value (slot : Frame_env.packed_slot) (v : value) : bool =
-  match slot, v with
-  | Frame_env.Slot Frame_env.SInt, VInt _ -> true
-  | Frame_env.Slot Frame_env.SBool, VBool _ -> true
-  | Frame_env.Slot Frame_env.SFloat, VFloat _ -> true
-  | Frame_env.Slot Frame_env.SString, VString _ -> true
-  | Frame_env.Slot Frame_env.SObj, _ -> true
-  | _ -> false
-;;
-
-let store_with_slot
-      (fr : Frame_env.frame)
-      (idx : int)
-      (slot : Frame_env.packed_slot)
-      (v : value)
-  : unit
-  =
-  (* Debug-time safety check – fail fast on inconsistent slot/value pair. *)
-  if not (slot_matches_value slot v)
-  then failwith "internal: slot/value mismatch between resolver slot and runtime value";
-  match slot with
-  | Frame_env.Slot Frame_env.SInt ->
-    (match v with
-     | VInt n -> Frame_env.set_int fr idx n
-     | _ -> Frame_env.set_obj fr idx (Obj.repr v))
-  | Frame_env.Slot Frame_env.SBool ->
-    (match v with
-     | VBool b -> Frame_env.set_bool fr idx b
-     | _ -> Frame_env.set_obj fr idx (Obj.repr v))
-  | Frame_env.Slot Frame_env.SFloat ->
-    (match v with
-     | VFloat f -> Frame_env.set_float fr idx f
-     | _ -> Frame_env.set_obj fr idx (Obj.repr v))
-  | Frame_env.Slot Frame_env.SString ->
-    (match v with
-     | VString s -> Frame_env.set_str fr idx s
-     | _ -> Frame_env.set_obj fr idx (Obj.repr v))
-  | Frame_env.Slot Frame_env.SObj -> Frame_env.set_obj fr idx (Obj.repr v)
-;;
-
-let assert_recursive_slots_are_objects (slots : Frame_env.packed_slot list) : unit =
-  List.iter slots ~f:(function
-    | Frame_env.Slot Frame_env.SObj -> ()
-    | _ -> failwith "internal: non-object recursive slot; typechecker should forbid this")
-;;
-
-(* finish_eval: resolves any TailCall until we get a concrete Value. *)
-(* ------------------------------------------------------------------------- *)
-(*  Frame helpers                                                            *)
-(* ------------------------------------------------------------------------- *)
-
-let rec frames_nth (frames : Frame_env.env) (n : int) : Frame_env.frame option =
-  match frames, n with
-  | [], _ -> None
-  | fr :: _, 0 -> Some fr
-  | _ :: tl, n when n > 0 -> frames_nth tl (n - 1)
-  | _ -> None
-;;
-
-let load_from_frames (frames : Frame_env.env) (loc : var_loc) : value =
-  match frames_nth frames loc.depth with
-  | None -> failwith "Frame stack underflow in EVarLoc evaluation"
-  | Some fr ->
-    (match loc.slot with
-     | Frame_env.Slot Frame_env.SInt -> VInt (Frame_env.get_int fr loc.index)
-     | Frame_env.Slot Frame_env.SBool -> VBool (Frame_env.get_bool fr loc.index)
-     | Frame_env.Slot Frame_env.SFloat -> VFloat (Frame_env.get_float fr loc.index)
-     | Frame_env.Slot Frame_env.SString -> VString (Frame_env.get_str fr loc.index)
-     | Frame_env.Slot Frame_env.SObj ->
-       let obj = Frame_env.get_obj fr loc.index in
-       Obj.obj obj)
-;;
-
-(* ------------------------------------------------------------------------- *)
-(*  Tail-call trampoline – now threads [frames] as an explicit parameter.    *)
-(* ------------------------------------------------------------------------- *)
-
-let rec finish_eval (initial_frames : Frame_env.env) (initial_res : eval_result) : value =
-  (* [loop] is an explicit tail-recursive trampoline that rolls through the
-     chain of [TailCall] results produced by the evaluator without growing
-     the OCaml call-stack. *)
-  let rec loop (_frames : Frame_env.env) (res : eval_result) : value =
-    match res with
-    | Value v -> v
-    | TailCall (cl, args) ->
-      (* 1. The resolver now guarantees that [param_slots] is populated and
-         has the same arity as the argument list.  Any discrepancy is a bug
-         in the compiler pipeline so we turn it into a hard failure. *)
-      if List.length cl.param_slots <> List.length args
-      then failwith "internal: closure param_slots length mismatch with call-site";
-      let slots = cl.param_slots in
-      (* 2. Allocate the frame and store arguments. *)
-      let param_frame = Frame_env.alloc_packed slots in
-      List.iteri args ~f:(fun idx v ->
-        let slot = List.nth_exn slots idx in
-        store_with_slot param_frame idx slot v);
-      (* 3. Build the environment and updated frame stack for the callee.  We
-         reuse the captured environment directly – function bodies do not
-         mutate it, so no copy is necessary – avoiding an O(n) hash-table
-         clone on every call. *)
-      let child_env = cl.env in
-      let child_frames = param_frame :: cl.frames in
-      (* 4. Evaluate the function body one step; iterate. *)
-      let next_res = eval_expr child_env child_frames cl.body in
-      loop child_frames next_res
-  in
-  loop initial_frames initial_res
-
-(***************************************************************************)
-(* 6) Expression Evaluation                                                *)
-(***************************************************************************)
-
-and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result =
-  match e.value with
-  | EUnit -> Value VUnit
-  | EInt i -> Value (VInt i)
-  | EBool b -> Value (VBool b)
-  | EFloat f -> Value (VFloat f)
-  | EString s -> Value (VString s)
-  | EVar x ->
-    (match find_var env x with
-     | Some v -> Value v
-     | None -> raise_runtime_error ~span:e.span (Printf.sprintf "Unbound variable %s" x))
-  | EVarLoc loc -> Value (load_from_frames frames loc)
-  | EPrim1 (prim, arg_expr) ->
-    let arg_val = finish_eval frames (eval_expr env frames arg_expr) in
-    (match prim, arg_val with
-     | UNegInt, VInt n -> Value (VInt (-n))
-     | UNegFloat, VFloat f -> Value (VFloat (-.f))
-     | UNegInt, _ ->
-       raise_runtime_error ~span:e.span "Internal type error: unary int negation on non-int"
-     | UNegFloat, _ ->
-       raise_runtime_error ~span:e.span "Internal type error: unary float negation on non-float")
-  | EPrim2 (prim, lhs_expr, rhs_expr) ->
-    let lhs_val = finish_eval frames (eval_expr env frames lhs_expr) in
-    let rhs_val = finish_eval frames (eval_expr env frames rhs_expr) in
-    (match prim, lhs_val, rhs_val with
-     | BIntAdd, VInt x, VInt y -> Value (VInt (x + y))
-     | BIntSub, VInt x, VInt y -> Value (VInt (x - y))
-     | BIntMul, VInt x, VInt y -> Value (VInt (x * y))
-     | BIntDiv, VInt _, VInt 0 -> raise_runtime_error ~span:e.span "Division by zero"
-     | BIntDiv, VInt x, VInt y -> Value (VInt (x / y))
-     | BFloatAdd, VFloat x, VFloat y -> Value (VFloat (x +. y))
-     | BFloatSub, VFloat x, VFloat y -> Value (VFloat (x -. y))
-     | BFloatMul, VFloat x, VFloat y -> Value (VFloat (x *. y))
-     | BFloatDiv, VFloat _, VFloat y when Float.equal y 0.0 ->
-       raise_runtime_error ~span:e.span "Division by zero"
-     | BFloatDiv, VFloat x, VFloat y -> Value (VFloat (x /. y))
-     | BStringConcat, VString x, VString y -> Value (VString (x ^ y))
-     | BIntLt, VInt x, VInt y -> Value (VBool (x < y))
-     | BIntGt, VInt x, VInt y -> Value (VBool (x > y))
-     | BIntLe, VInt x, VInt y -> Value (VBool (x <= y))
-     | BIntGe, VInt x, VInt y -> Value (VBool (x >= y))
-     | BFloatLt, VFloat x, VFloat y -> Value (VBool (Float.(x < y)))
-     | BFloatGt, VFloat x, VFloat y -> Value (VBool (Float.(x > y)))
-     | BFloatLe, VFloat x, VFloat y -> Value (VBool (Float.(x <= y)))
-     | BFloatGe, VFloat x, VFloat y -> Value (VBool (Float.(x >= y)))
-     | BEq, _, _ -> Value (VBool (equal_value lhs_val rhs_val))
-     | BNeq, _, _ -> Value (VBool (not (equal_value lhs_val rhs_val)))
-     | ( (BIntAdd | BIntSub | BIntMul | BIntDiv | BIntLt | BIntGt | BIntLe | BIntGe)
-       , _
-       , _ ) ->
-       raise_runtime_error ~span:e.span "Internal type error: int primitive on non-int operands"
-     | ( (BFloatAdd | BFloatSub | BFloatMul | BFloatDiv | BFloatLt | BFloatGt | BFloatLe | BFloatGe)
-       , _
-       , _ ) ->
-       raise_runtime_error
-         ~span:e.span
-         "Internal type error: float primitive on non-float operands"
-     | BStringConcat, _, _ ->
-       raise_runtime_error
-         ~span:e.span
-         "Internal type error: string concatenation on non-string operands")
-  | ELambda (params, body) ->
-    (* Param slot information is not yet threaded from the resolver, so we
-       default to an empty list which signals the trampoline to perform the
-       old dynamic fallback.  A future pass will populate it through the
-       resolver/type-checker link. *)
-    Value (VClosure { params; body; env = copy_env env; frames; param_slots = [] })
-  | ELambdaSlots (params, slots, body) ->
-    Value (VClosure { params; body; env = copy_env env; frames; param_slots = slots })
-  | ELetBlock (bindings, body) ->
-    (* 1. Decide the slot layout *syntactically* so that it matches exactly
-       what the resolver recorded. *)
-    let slots =
-      List.map bindings ~f:(fun (_nm, rhs_expr) -> slot_of_expr rhs_expr.value)
-    in
-    (* 2. Allocate the frame with the precise (but still heterogeneous)
-       slot layout produced by the resolver heuristic.  The new helper
-       hides the necessary [Obj.magic] to bypass the type-system
-       restriction on heterogeneous lists. *)
-    let block_frame = Frame_env.alloc_packed slots in
-    let child_frames = block_frame :: frames in
-    (* 3. Evaluate each RHS sequentially, storing the result with the proper
-       setter.  Earlier bindings are visible to later RHSs through the frame
-       we just pushed. *)
-    List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
-      let v = finish_eval child_frames (eval_expr env child_frames rhs_expr) in
-      let slot = List.nth_exn slots idx in
-      store_with_slot block_frame idx slot v);
-    (* 4. Evaluate the body with the populated frame stack. *)
-    eval_expr env child_frames body
-  | ELetBlockSlots (bindings, slots, body) ->
-    if List.length bindings <> List.length slots
-    then failwith "internal: slot list length mismatch in ELetBlockSlots";
-    (* 1. Allocate frame with the provided, *typed* slot layout. *)
-    let block_frame = Frame_env.alloc_packed slots in
-    let child_frames = block_frame :: frames in
-    (* 2. Evaluate each RHS sequentially and store using the precise setter. *)
-    List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
-      let v = finish_eval child_frames (eval_expr env child_frames rhs_expr) in
-      let slot = List.nth_exn slots idx in
-      store_with_slot block_frame idx slot v);
-    (* 3. Evaluate the body with the populated frame. *)
-    eval_expr env child_frames body
-  | EApp (fn_expr, arg_exprs) ->
-    (* Evaluate fn first (fully, so no nested tailcall escapes). *)
-    let fn_val = finish_eval frames (eval_expr env frames fn_expr) in
-    (* Evaluate each argument fully. *)
-    let arg_vals =
-      List.map arg_exprs ~f:(fun a -> finish_eval frames (eval_expr env frames a))
-    in
-    (match fn_val with
-     | VClosure cl ->
-       if List.length cl.params <> List.length arg_vals
-       then raise_runtime_error ~span:e.span "Function arity mismatch";
-       (* Produce a tail call in case we are in tail position of the caller. *)
-       TailCall (cl, arg_vals)
-     | VBuiltin bf ->
-       (try Value (bf arg_vals) with
-        | Failure msg -> raise_runtime_error ~span:e.span msg)
-     | _ -> raise_runtime_error ~span:e.span "Trying to call a non-function value")
-  | EIf (cond_expr, then_expr, else_expr) ->
-    let cond_val = finish_eval frames (eval_expr env frames cond_expr) in
-    (match cond_val with
-     | VBool true -> eval_expr env frames then_expr
-     | VBool false -> eval_expr env frames else_expr
-     | _ -> raise_runtime_error ~span:e.span "If condition must be bool")
-  | EWhile (cond_expr, body_expr) ->
-    let rec loop () =
-      let cval = finish_eval frames (eval_expr env frames cond_expr) in
-      match cval with
-      | VBool true ->
-        ignore (finish_eval frames (eval_expr env frames body_expr));
-        loop ()
-      | VBool false -> Value VUnit
-      | _ -> raise_runtime_error ~span:e.span "While condition must be bool"
-    in
-    loop ()
-  | ELetIn (_x, e1, e2) ->
-    (* Evaluate RHS first (variable is not in scope). *)
-    let v1 = finish_eval frames (eval_expr env frames e1) in
-    (* Choose slot kind from the *runtime* value we just obtained. *)
-    let slot = slot_of_value v1 in
-    (* Allocate the frame using the slot that matches the *runtime* value
-       we just computed.  Using the dedicated helper removes the need for
-       an intermediate homogeneous list. *)
-    let fr = Frame_env.alloc_packed [ slot ] in
-    store_with_slot fr 0 slot v1;
-    (* Push the frame and evaluate the body. *)
-    let child_frames = fr :: frames in
-    eval_expr env child_frames e2
-  | ELetRec (bindings, body) ->
-    (* 1.  Pick a slot descriptor for every mutually-recursive binding based on
-       the syntactic form of its RHS.  *)
-    let slots =
-      List.map bindings ~f:(fun (_nm, rhs_expr) -> slot_of_expr rhs_expr.value)
-    in
-    assert_recursive_slots_are_objects slots;
-    (* 2.  Allocate a frame with the exact slot layout. *)
-    let rec_frame = Frame_env.alloc_packed slots in
-    (* 3.  OCaml semantics: each name is visible to the others during the
-       evaluation of their RHS.  We insert a temporary [VUnit] so that a
-       function referring to itself does not fail with an unbound variable. *)
-    List.iteri bindings ~f:(fun idx _binding ->
-      Frame_env.set_obj rec_frame idx (Obj.repr VUnit));
-    let child_frames = rec_frame :: frames in
-    (* 4.  Evaluate each RHS and overwrite the placeholder with the real
-       value, using the specialised setter that matches its slot. *)
-    List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
-      let v = finish_eval child_frames (eval_expr env child_frames rhs_expr) in
-      let slot = List.nth_exn slots idx in
-      store_with_slot rec_frame idx slot v);
-    (* 5.  Evaluate the body with the populated frame. *)
-    eval_expr env child_frames body
-  | ELetRecSlots (bindings, slots, body) ->
-    if List.length bindings <> List.length slots
-    then failwith "internal: slot list length mismatch in ELetRecSlots";
-    assert_recursive_slots_are_objects slots;
-    (* 1. Allocate frame with exact slot layout. *)
-    let rec_frame = Frame_env.alloc_packed slots in
-    (* 2. Insert temporary placeholders so that recursive RHSs can see each other. *)
-    List.iteri bindings ~f:(fun idx _ -> Frame_env.set_obj rec_frame idx (Obj.repr VUnit));
-    let child_frames = rec_frame :: frames in
-    (* 3. Evaluate RHSs and overwrite placeholders with real values. *)
-    List.iteri bindings ~f:(fun idx (_nm, rhs_expr) ->
-      let v = finish_eval child_frames (eval_expr env child_frames rhs_expr) in
-      let slot = List.nth_exn slots idx in
-      store_with_slot rec_frame idx slot v);
-    (* 4. Evaluate body. *)
-    eval_expr env child_frames body
-  | EMatch (scrut_expr, cases) ->
-    let sv = finish_eval frames (eval_expr env frames scrut_expr) in
-    match_eval env frames e.span sv cases
-  | EMatchSlots (scrut_expr, cases) ->
-    let sv = finish_eval frames (eval_expr env frames scrut_expr) in
-    match_eval_slots env frames e.span sv cases
-  | ERecord fields ->
-    let record_fields =
-      List.fold fields ~init:String.Map.empty ~f:(fun acc (fld, fe) ->
-        let fv = finish_eval frames (eval_expr env frames fe) in
-        Map.set acc ~key:fld ~data:fv)
-    in
-    Value (VRecord record_fields)
-  | EFieldGet (rec_expr, field) ->
-    let rec_val = finish_eval frames (eval_expr env frames rec_expr) in
-    (match rec_val with
-     | VRecord fields ->
-       (match Map.find fields field with
-        | Some v -> Value v
-        | None ->
-          raise_runtime_error ~span:e.span (Printf.sprintf "No field '%s' in record" field))
-     | VModule menv ->
-       (match find_var menv field with
-        | Some v -> Value v
-        | None ->
-          raise_runtime_error ~span:e.span (Printf.sprintf "No field '%s' in module" field))
-     | _ -> raise_runtime_error ~span:e.span "Field access on non-record/non-module")
-  | EVariant (tag, exprs) ->
-    let vals =
-      List.map exprs ~f:(fun ex -> finish_eval frames (eval_expr env frames ex))
-    in
-    Value (VVariant (tag, vals))
-  | EArray elts ->
-    let arr_vals =
-      List.map elts ~f:(fun e -> finish_eval frames (eval_expr env frames e))
-    in
-    Value (VArray (Array.of_list arr_vals))
-  | EArrayGet (arr_expr, idx_expr) ->
-    let arr_val = finish_eval frames (eval_expr env frames arr_expr) in
-    let idx_val = finish_eval frames (eval_expr env frames idx_expr) in
-    (match arr_val, idx_val with
-     | VArray arr, VInt i ->
-       if i < 0 || i >= Array.length arr
-       then raise_runtime_error ~span:e.span "Array index out of bounds"
-       else Value arr.(i)
-     | _ -> raise_runtime_error ~span:e.span "Invalid array access")
-  | EArraySet (arr_expr, idx_expr, v_expr) ->
-    let arr_val = finish_eval frames (eval_expr env frames arr_expr) in
-    let idx_val = finish_eval frames (eval_expr env frames idx_expr) in
-    let new_val = finish_eval frames (eval_expr env frames v_expr) in
-    (match arr_val, idx_val with
-     | VArray arr, VInt i ->
-       if i < 0 || i >= Array.length arr
-       then raise_runtime_error ~span:e.span "Array index out of bounds"
-       else (
-         arr.(i) <- new_val;
-         Value VUnit)
-     | _ -> raise_runtime_error ~span:e.span "Invalid array set")
-  | ERef e1 ->
-    let v1 = finish_eval frames (eval_expr env frames e1) in
-    Value (VRef (ref v1))
-  | ESetRef (ref_expr, new_expr) ->
-    let r = finish_eval frames (eval_expr env frames ref_expr) in
-    let nv = finish_eval frames (eval_expr env frames new_expr) in
-    (match r with
-     | VRef cell ->
-       cell := nv;
-       Value VUnit
-     | _ -> raise_runtime_error ~span:e.span "Attempting to set a non-ref value")
-  | EDeref e1 ->
-    let rv = finish_eval frames (eval_expr env frames e1) in
-    (match rv with
-     | VRef cell -> Value !cell
-     | _ -> raise_runtime_error ~span:e.span "Deref on non-ref value")
-  | ESequence (e1, e2) ->
-    ignore (finish_eval frames (eval_expr env frames e1));
-    (* evaluate e1 fully, including any pending tail call, then discard its result *)
-    eval_expr env frames e2 (* then evaluate and return e2 *)
-  | ERecordExtend (base_expr, fields) ->
-    (* Evaluate the base record *)
-    let base_val = finish_eval frames (eval_expr env frames base_expr) in
-    let base_fields =
-      match base_val with
-      | VRecord fields -> fields
-      | _ -> raise_runtime_error ~span:e.span "Record extension base is not a record"
-    in
-    (* Evaluate new field expressions and replace/insert into a fresh map. *)
-    let new_fields =
-      List.fold fields ~init:base_fields ~f:(fun acc (fld, fe) ->
-        let fv = finish_eval frames (eval_expr env frames fe) in
-        Map.set acc ~key:fld ~data:fv)
-    in
-    Value (VRecord new_fields)
-
-and match_eval
-      (env : env)
-      (frames : Frame_env.env)
-      (match_span : Source.span)
-      (v : value)
-      (cases : match_case list)
-  : eval_result
-  =
-  match cases with
-  | [] -> raise_runtime_error ~span:match_span "Non-exhaustive pattern match"
-  | case :: tl ->
-    (match match_pattern v case.pat with
-     | None -> match_eval env frames match_span v tl
-     | Some binds ->
-       (* 1. Allocate a slot frame for the variables bound by the pattern *)
-       let vars = collect_pattern_vars case.pat in
-       (* Choose slot for each bound variable based on the actual runtime
-          value now that we have evaluated the scrutinee. *)
-       (* Use generic SObj slots to keep in sync with resolver which
-          currently annotates pattern-bound variables as SObj.  Using a
-          specialised setter here would mismatch the descriptor stored in
-          [var_loc] and lead to incorrect coercions when the variable is
-          read back. *)
-       let slots = List.map vars ~f:(fun _ -> Frame_env.Slot Frame_env.SObj) in
-       let pat_frame = Frame_env.alloc_packed slots in
-       (* Build var -> index table for quick assignment. *)
-       let idx_tbl = Hashtbl.create (module String) in
-       List.iteri vars ~f:(fun idx vnm -> Hashtbl.set idx_tbl ~key:vnm ~data:idx);
-       List.iter binds ~f:(fun (nm, vl) ->
-         match Hashtbl.find idx_tbl nm with
-         | Some idx ->
-           let slot = List.nth_exn slots idx in
-           store_with_slot pat_frame idx slot vl
-         | None -> ());
-       let child_frames = pat_frame :: frames in
-       eval_expr env child_frames case.rhs)
-
-and match_eval_slots
-      (env : env)
-      (frames : Frame_env.env)
-      (match_span : Source.span)
-      (v : value)
-      (cases : match_case_slots list)
-  : eval_result
-  =
-  match cases with
-  | [] -> raise_runtime_error ~span:match_span "Non-exhaustive pattern match"
-  | case :: tl ->
-    (match match_pattern v case.pat with
-     | None -> match_eval_slots env frames match_span v tl
-     | Some binds ->
-       let vars = collect_pattern_vars case.pat in
-       if List.length vars <> List.length case.slots
-       then failwith "Resolver/internal error: slot/var length mismatch in EMatchSlots";
-       (* All pattern-bound identifiers are resolved to [EVarLoc] whose
-          addresses point into the freshly allocated [pat_frame].  We do
-          not need to touch the string-keyed environment. *)
-       let child_env = env in
-       (* 2. Allocate frame using provided slots *)
-       let pat_frame = Frame_env.alloc_packed case.slots in
-       (* Map var name to index *)
-       List.iteri vars ~f:(fun idx vnm ->
-         match List.Assoc.find binds ~equal:String.equal vnm with
-         | Some vl ->
-           let slot = List.nth_exn case.slots idx in
-           store_with_slot pat_frame idx slot vl
-         | None -> ());
-       let child_frames = pat_frame :: frames in
-       eval_expr child_env child_frames case.rhs)
-
-(***************************************************************************)
-(* 7) Statement Evaluation                                                 *)
-(***************************************************************************)
-
-and import_module_bindings ?span (target_env : env) (mname : string) : string list =
-  match find_var target_env mname with
-  | Some (VModule menv) ->
-    Hashtbl.fold menv ~init:[] ~f:(fun ~key ~data acc ->
-      define_var target_env key !data;
-      key :: acc)
-  | _ -> raise_runtime_error ?span (Printf.sprintf "Cannot open non-module '%s'" mname)
-
-and eval_module_value
-      (outer_env : env)
-      (frames : Frame_env.env)
-      (mname : string)
-      (stmts : stmt node list)
-  : env
-  =
-  (* The module body evaluates in an environment that can see the outer
-     scope, but recursive references to the module itself go through a
-     separate export environment so that only explicit exports remain
-     visible once evaluation is complete. *)
-  let module_eval_env = copy_env outer_env in
-  let module_export_env = create_env () in
-  define_var module_eval_env mname (VModule module_export_env);
-  let exported_names =
-    List.concat_map stmts ~f:(fun st -> eval_stmt_with_exports module_eval_env frames st)
-  in
-  let seen = Hash_set.create (module String) in
-  List.iter exported_names ~f:(fun name ->
-    if not (Hash_set.mem seen name)
-    then (
-      Hash_set.add seen name;
-      match find_var module_eval_env name with
-      | Some value -> define_var module_export_env name value
-      | None -> ()));
-  module_export_env
-
-and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : stmt node)
-  : string list
-  =
-  match s.value with
-  | SLet (x, e1) ->
-    let v1 = finish_eval frames (eval_expr env frames e1) in
-    define_var env x v1;
-    [ x ]
-  | SLetRec bindings ->
-    (* Step 1: Initialize each name to VUnit in the top-level env. *)
-    List.iter bindings ~f:(fun (nm, _) -> define_var env nm VUnit);
-    (* Step 2: Evaluate each binding in env. *)
-    List.iter bindings ~f:(fun (nm, rhs_expr) ->
-      let v = finish_eval frames (eval_expr env frames rhs_expr) in
-      update_var env nm v);
-    List.map bindings ~f:fst
-  | SModule (mname, stmts) ->
-    let menv = eval_module_value env frames mname stmts in
-    define_var env mname (VModule menv);
-    [ mname ]
-  | SOpen mname ->
-    let _imported = import_module_bindings ~span:s.span env mname in
-    []
-  | SExpr e ->
-    ignore (finish_eval frames (eval_expr env frames e));
-    []
-
-and eval_stmt (env : env) (frames : Frame_env.env) (s : stmt node) : unit =
-  ignore (eval_stmt_with_exports env frames s)
-;;
-
-(***************************************************************************)
-(* 8) Program Evaluation                                                   *)
-(***************************************************************************)
-
-(** [eval_program env (stmts, module_name)] interprets a ChatML module.
-
-    The function mutates [env] in-place, inserting every value declared in
-    the module at top-level.  Evaluation proceeds in declaration order and
-    uses an empty frame stack – the interpreter never pushes frames for
-    the toplevel, therefore side-effects visible outside the call happen
-    solely through [env].
-
-    This is a low-level evaluator entry-point intended for already
-    resolved programs.  Typical callers should prefer
-    {!Chatml_resolver.run_program}, which first validates
-    and resolves the program before execution.
-
-    Example executing a minimal program that prints {e 42} using a
-    builtin [{!Chatml_builtin_modules.print_int}]:
-    {[
-      let open Chatochat.Chatml in
-      let env = Chatml_lang.create_env () in
-      (* Register primitives *)
-      Hashtbl.set env ~key:"print_int" ~data:(VBuiltin (function
-        | [ VInt n ] -> print_endline (Int.to_string n); VUnit
-        | _ -> failwith "invalid call"));
-
-      let prog : Chatml_lang.program =
-        ( [ { Chatml_lang.value = Chatml_lang.SExpr
-                ( { value = Chatml_lang.EApp
-                    ( { value = Chatml_lang.EVar "print_int"; span = Source.dummy }
-                    , [ { value = Chatml_lang.EInt 42; span = Source.dummy } ] )
-                ; span = Source.dummy } )
-            ; span = Source.dummy }
-          ]
-        , "Main" )
-      in
-      Chatml_lang.eval_program env prog
-    ]}
-    After the call, the program has printed [42] and [env] contains the
-    bindings introduced by the program (none in this example).
-*)
-let eval_program (env : env) (prog : program) : unit =
-  let initial_frames : Frame_env.env = [] in
-  List.iter (fst prog) ~f:(fun stmt_node -> eval_stmt env initial_frames stmt_node)
 ;;
