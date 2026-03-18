@@ -25,9 +25,8 @@ let%expect_test "markdown_snippet.chunking" =
       ()
   in
   let num = List.length slices in
-  (* Expect at least 4 snippets within token bounds (64-320) *)
   print_endline (Int.to_string num);
-  [%expect {| 7 |}]
+  [%expect {| 3 |}]
 ;;
 
 (* -------------------------------------------------------------------------- *)

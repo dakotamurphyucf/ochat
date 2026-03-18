@@ -31,9 +31,9 @@ open Chatml_builtin_modules
       contained in [src].
 
       @raise Failure if the parser encounters a syntax error *)
-let parse (src : string) : Chatml_lang.stmt_node list =
-  let lexbuf = Lexing.from_string src in
-  try Chatml_parser.program Chatml_lexer.token lexbuf with
+let parse (str : string) =
+  let lexbuf = Lexing.from_string str in
+  try Chatml_parser.program Chatml_lexer.token lexbuf, str with
   | Chatml_parser.Error -> failwith "Parse error"
 ;;
 
@@ -72,14 +72,16 @@ let () =
        st.tasks[st.task_index]
 
      let set_task_status st new_status =
-       let t = current_task(st) in
-       t.status <- new_status;
+       let t = st.tasks[st.task_index] in
+       let t = { t with status = new_status } in
+       st.tasks[st.task_index] <- t;
        st
 
-       let bump_attempts st =
-         let t = current_task(st) in
-         t.attempts <- t.attempts + 1;
-         st
+      let bump_attempts st =
+       let t = st.tasks[st.task_index] in
+       let t = { t with attempts = t.attempts + 1 } in
+       st.tasks[st.task_index] <- t;
+       st
 
        let emit_task_action st =
          let t = current_task(st) in
@@ -163,7 +165,7 @@ let () =
                   )
 
                   | `TurnEnd ->
-                      match `And(st.autopilot, ev.context_tokens > 40000) with
+                      (match `And(st.autopilot, ev.context_tokens > 40000) with
                       | `And(true, true) ->
                         `Tup( st
                         , [ `Compact({ keep = "system,developer,latest:8"
@@ -174,7 +176,7 @@ let () =
                           ]
                         )
                      | _ ->
-                        `Tup(st, [])
+                        `Tup(st, []))
 
                   | `PreToolCall ->
                       (* optional governance hooks here *)
@@ -234,7 +236,10 @@ let () =
   |}
   in
   let ast = parse code in
-  Chatml_resolver.eval_program env (ast, code);
+  let res = Chatml_resolver.eval_program env ast in
+  (match res with
+   | Ok () -> ()
+   | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic));
   print_endline "Program completed successfully."
 ;;
 (* let file = (Sys.get_argv ()).(1) in *)
