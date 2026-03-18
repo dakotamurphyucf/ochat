@@ -171,6 +171,7 @@ expr:
     | ident { mk_exprnode $startpos $endpos ($1) }
 
     (* function definition *)
+    | FUN LPAREN RPAREN ARROW expr_sequence { mk_exprnode $startpos $endpos (ELambda([], $5)) }
     | FUN params ARROW expr_sequence   { mk_exprnode $startpos $endpos (ELambda($2, $4)) }
 
     (* function application: expr(expr, ...) – now allows any *expression* in
@@ -192,6 +193,7 @@ expr:
 
     (* Let-in expression *)
     | LET LIDENT EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, $4, $6)) }
+	| LET LIDENT LPAREN RPAREN EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda([], $6)), $8)) }
 	| LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
 
     (* match with *)
@@ -218,6 +220,7 @@ expr:
     | expr LBRACKET expr RBRACKET LEFTARROW expr { mk_exprnode $startpos $endpos (EArraySet($1, $3, $6)) }
 
     (* parentheses *)
+    | LPAREN RPAREN                         { mk_exprnode $startpos $endpos EUnit }
     | LPAREN expr_sequence RPAREN           { $2 }
 
     (* references *)
@@ -227,7 +230,7 @@ expr:
 
     (* sequence of expressions *)
     | BANGEQ expr                  { failwith "Unsupported: != as a pattern" }
-    | MINUS expr                   %prec MINUS { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "-"), [$2]) ) }
+    | MINUS expr                   %prec MINUS { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "neg"), [$2]) ) }
     | DOT expr                     { failwith "Unexpected '.' expression" }
     /* fallback to handle conflicts if any. */
 
@@ -305,6 +308,7 @@ rec_bindings:
 | rec_binding AND rec_bindings { $1 :: $3 }
 
 rec_binding:
+| LIDENT LPAREN RPAREN EQ expr_sequence { ($1, mk_exprnode $startpos $endpos (ELambda([], $5)) ) }
 | LIDENT params EQ expr_sequence { ($1, mk_exprnode $startpos $endpos (ELambda($2, $4)) ) }
 
 expr_sequence:
