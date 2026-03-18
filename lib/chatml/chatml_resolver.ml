@@ -10,6 +10,10 @@ type slot_info =
   }
 
 type frame_map = (string, slot_info) Hashtbl.t
+type resolve_ctx =
+  { lookup_type : Source.span -> Chatml_typechecker.typ option
+  ; stack : frame_map list ref
+  }
 
 let push_frame (stack : frame_map list ref) (m : frame_map) : unit = stack := m :: !stack
 
@@ -30,14 +34,6 @@ let lookup (stack : frame_map list) (name : string) : L.var_loc option =
   aux 0 stack
 ;;
 
-let type_lookup_ref : (Source.span -> Chatml_typechecker.typ option) option ref = ref None
-
-let lookup_type span =
-  match !type_lookup_ref with
-  | None -> failwith "internal: resolver used without checked type information"
-  | Some f -> f span
-;;
-
 let slot_of_typ (t : Chatml_typechecker.typ) : Frame_env.packed_slot =
   match t with
   | Chatml_typechecker.Boolean -> Frame_env.Slot Frame_env.SBool
@@ -47,16 +43,16 @@ let slot_of_typ (t : Chatml_typechecker.typ) : Frame_env.packed_slot =
   | _ -> Frame_env.Slot Frame_env.SObj
 ;;
 
-let choose_slot (rhs_node : L.expr L.node) : Frame_env.packed_slot =
+let choose_slot (ctx : resolve_ctx) (rhs_node : L.expr L.node) : Frame_env.packed_slot =
   Chatml_slot_layout.choose_binding_slot rhs_node ~lookup_slot:(fun span ->
-    Option.map (lookup_type span) ~f:slot_of_typ)
+    Option.map (ctx.lookup_type span) ~f:slot_of_typ)
 ;;
 
 let with_value (node : L.expr L.node) value = L.{ value; span = node.span }
 
 let with_stmt_value (node : L.stmt L.node) value = L.{ value; span = node.span }
 
-let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolved_expr =
+let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
   match e.value with
   | L.EUnit -> L.REUnit
   | L.EInt i -> L.REInt i
@@ -64,28 +60,28 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
   | L.EFloat f -> L.REFloat f
   | L.EString s -> L.REString s
   | L.EVar x ->
-    (match lookup !stack x with
+    (match lookup !(ctx.stack) x with
      | Some loc -> L.REVarLoc loc
      | None -> L.REVarGlobal x)
   | L.EVarLoc loc -> L.REVarLoc loc
   | L.EPrim1 (prim, arg) ->
-    let arg' = resolve_expr stack arg in
+    let arg' = resolve_expr ctx arg in
     L.REPrim1 (prim, with_value arg arg')
   | L.EPrim2 (prim, lhs, rhs) ->
-    let lhs' = resolve_expr stack lhs in
-    let rhs' = resolve_expr stack rhs in
+    let lhs' = resolve_expr ctx lhs in
+    let rhs' = resolve_expr ctx rhs in
     L.REPrim2 (prim, with_value lhs lhs', with_value rhs rhs')
   | L.ELambdaSlots (params, slots, body) ->
     let fm = Hashtbl.create (module String) in
     List.iteri params ~f:(fun idx param ->
       Hashtbl.set fm ~key:param ~data:{ index = idx; slot = List.nth_exn slots idx });
-    push_frame stack fm;
-    let body' = resolve_expr stack body in
-    pop_frame stack;
+    push_frame ctx.stack fm;
+    let body' = resolve_expr ctx body in
+    pop_frame ctx.stack;
     L.RELambda (params, slots, with_value body body')
   | L.ELambda (params, body) ->
     let param_slots =
-      match lookup_type e.span with
+      match ctx.lookup_type e.span with
       | Some (Chatml_typechecker.Fun (param_tys, _))
         when List.length param_tys = List.length params ->
         List.map param_tys ~f:slot_of_typ
@@ -95,13 +91,13 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
     List.iteri params ~f:(fun idx param ->
       let slot = List.nth_exn param_slots idx in
       Hashtbl.set fm ~key:param ~data:{ index = idx; slot });
-    push_frame stack fm;
-    let body' = resolve_expr stack body in
-    pop_frame stack;
+    push_frame ctx.stack fm;
+    let body' = resolve_expr ctx body in
+    pop_frame ctx.stack;
     L.RELambda (params, param_slots, with_value body body')
   | L.EApp (fn, args) ->
-    let fn' = resolve_expr stack fn in
-    let args' = List.map args ~f:(fun arg -> with_value arg (resolve_expr stack arg)) in
+    let fn' = resolve_expr ctx fn in
+    let args' = List.map args ~f:(fun arg -> with_value arg (resolve_expr ctx arg)) in
     L.REApp (with_value fn fn', args')
   | L.ELetIn (x, rhs, body) ->
     let rec collect (acc : (string * L.expr L.node) list) (expr_node : L.expr L.node)
@@ -115,92 +111,92 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
     in
     let bindings, tail_body = collect [ x, rhs ] body in
     let fm : frame_map = Hashtbl.create (module String) in
-    push_frame stack fm;
+    push_frame ctx.stack fm;
     let resolved_bindings_rev =
       List.foldi bindings ~init:[] ~f:(fun idx acc (nm, rhs_expr) ->
-        let rhs_resolved = resolve_expr stack rhs_expr in
-        let slot = choose_slot rhs_expr in
+        let rhs_resolved = resolve_expr ctx rhs_expr in
+        let slot = choose_slot ctx rhs_expr in
         Hashtbl.set fm ~key:nm ~data:{ index = idx; slot };
         (nm, with_value rhs_expr rhs_resolved) :: acc)
     in
     let resolved_bindings = List.rev resolved_bindings_rev in
-    let body' = resolve_expr stack tail_body in
-    pop_frame stack;
+    let body' = resolve_expr ctx tail_body in
+    pop_frame ctx.stack;
     let slots = List.map bindings ~f:(fun (nm, _) -> (Hashtbl.find_exn fm nm).slot) in
     L.RELetBlock (resolved_bindings, slots, with_value tail_body body')
   | L.ELetRec (binds, body) ->
     let fm = Hashtbl.create (module String) in
     let slots =
       List.mapi binds ~f:(fun idx (nm, rhs_expr) ->
-        let slot = choose_slot rhs_expr in
+        let slot = choose_slot ctx rhs_expr in
         Hashtbl.set fm ~key:nm ~data:{ index = idx; slot };
         slot)
     in
-    push_frame stack fm;
+    push_frame ctx.stack fm;
     let binds' =
-      List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr stack rhs))
+      List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr ctx rhs))
     in
-    let body' = resolve_expr stack body in
-    pop_frame stack;
+    let body' = resolve_expr ctx body in
+    pop_frame ctx.stack;
     L.RELetRec (binds', slots, with_value body body')
   | L.ELetBlock (binds, body) ->
     let fm = Hashtbl.create (module String) in
     let slots =
       List.mapi binds ~f:(fun idx (nm, rhs_node) ->
-        let slot = choose_slot rhs_node in
+        let slot = choose_slot ctx rhs_node in
         Hashtbl.set fm ~key:nm ~data:{ index = idx; slot };
         slot)
     in
-    push_frame stack fm;
+    push_frame ctx.stack fm;
     let binds' =
       List.map binds ~f:(fun (nm, rhs_node) ->
-        nm, with_value rhs_node (resolve_expr stack rhs_node))
+        nm, with_value rhs_node (resolve_expr ctx rhs_node))
     in
-    let body' = resolve_expr stack body in
-    pop_frame stack;
+    let body' = resolve_expr ctx body in
+    pop_frame ctx.stack;
     L.RELetBlock (binds', slots, with_value body body')
   | L.ELetBlockSlots (binds, slots, body) ->
     let fm = Hashtbl.create (module String) in
     List.iteri binds ~f:(fun idx (nm, _rhs) ->
       let slot = List.nth_exn slots idx in
       Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
-    push_frame stack fm;
+    push_frame ctx.stack fm;
     let binds' =
       List.map binds ~f:(fun (nm, rhs_node) ->
-        nm, with_value rhs_node (resolve_expr stack rhs_node))
+        nm, with_value rhs_node (resolve_expr ctx rhs_node))
     in
-    let body' = resolve_expr stack body in
-    pop_frame stack;
+    let body' = resolve_expr ctx body in
+    pop_frame ctx.stack;
     L.RELetBlock (binds', slots, with_value body body')
   | L.ELetRecSlots (binds, slots, body) ->
     let fm = Hashtbl.create (module String) in
     List.iteri binds ~f:(fun idx (nm, _rhs) ->
       let slot = List.nth_exn slots idx in
       Hashtbl.set fm ~key:nm ~data:{ index = idx; slot });
-    push_frame stack fm;
+    push_frame ctx.stack fm;
     let binds' =
       List.map binds ~f:(fun (nm, rhs_node) ->
-        nm, with_value rhs_node (resolve_expr stack rhs_node))
+        nm, with_value rhs_node (resolve_expr ctx rhs_node))
     in
-    let body' = resolve_expr stack body in
-    pop_frame stack;
+    let body' = resolve_expr ctx body in
+    pop_frame ctx.stack;
     L.RELetRec (binds', slots, with_value body body')
   | L.EIf (c, t, f) ->
-    let c' = resolve_expr stack c in
-    let t' = resolve_expr stack t in
-    let f' = resolve_expr stack f in
+    let c' = resolve_expr ctx c in
+    let t' = resolve_expr ctx t in
+    let f' = resolve_expr ctx f in
     L.REIf (with_value c c', with_value t t', with_value f f')
   | L.EWhile (cond, bd) ->
-    let cond' = resolve_expr stack cond in
-    let bd' = resolve_expr stack bd in
+    let cond' = resolve_expr ctx cond in
+    let bd' = resolve_expr ctx bd in
     L.REWhile (with_value cond cond', with_value bd bd')
   | L.ESequence (e1, e2) ->
-    let e1' = resolve_expr stack e1 in
-    let e2' = resolve_expr stack e2 in
+    let e1' = resolve_expr ctx e1 in
+    let e2' = resolve_expr ctx e2 in
     L.RESequence (with_value e1 e1', with_value e2 e2')
   | L.EMatch (scrut, cases) ->
-    let scrut' = resolve_expr stack scrut in
-    let scrut_ty_opt = lookup_type scrut.span in
+    let scrut' = resolve_expr ctx scrut in
+    let scrut_ty_opt = ctx.lookup_type scrut.span in
     let rec slots_of_pattern pat ty_opt =
       match pat with
       | L.PUnit -> []
@@ -248,9 +244,9 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
         List.iteri vars ~f:(fun idx vnm ->
           let slot = List.nth_exn slots idx in
           Hashtbl.set fm ~key:vnm ~data:{ index = idx; slot });
-        push_frame stack fm;
-        let rhs' = resolve_expr stack case.rhs in
-        pop_frame stack;
+        push_frame ctx.stack fm;
+        let rhs' = resolve_expr ctx case.rhs in
+        pop_frame ctx.stack;
         { L.pat = case.pat
         ; pat_span = case.pat_span
         ; slots
@@ -259,7 +255,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
     in
     L.REMatch (with_value scrut scrut', cases')
   | L.EMatchSlots (scrut, cases) ->
-    let scrut' = resolve_expr stack scrut in
+    let scrut' = resolve_expr ctx scrut in
     let cases' =
       List.map cases ~f:(fun case ->
         let vars = L.collect_pattern_vars case.pat in
@@ -267,9 +263,9 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
         List.iteri vars ~f:(fun idx vnm ->
           let slot = List.nth_exn case.slots idx in
           Hashtbl.set fm ~key:vnm ~data:{ index = idx; slot });
-        push_frame stack fm;
-        let rhs' = resolve_expr stack case.rhs in
-        pop_frame stack;
+        push_frame ctx.stack fm;
+        let rhs' = resolve_expr ctx case.rhs in
+        pop_frame ctx.stack;
         { L.pat = case.pat
         ; pat_span = case.pat_span
         ; slots = case.slots
@@ -279,58 +275,58 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.resolv
     L.REMatch (with_value scrut scrut', cases')
   | L.ERecord fields ->
     let fields' =
-      List.map fields ~f:(fun (lbl, ex) -> lbl, with_value ex (resolve_expr stack ex))
+      List.map fields ~f:(fun (lbl, ex) -> lbl, with_value ex (resolve_expr ctx ex))
     in
     L.RERecord fields'
   | L.EFieldGet (obj, lbl) ->
-    let obj' = resolve_expr stack obj in
+    let obj' = resolve_expr ctx obj in
     L.REFieldGet (with_value obj obj', lbl)
   | L.EVariant (tag, vs) ->
-    let vs' = List.map vs ~f:(fun v -> with_value v (resolve_expr stack v)) in
+    let vs' = List.map vs ~f:(fun v -> with_value v (resolve_expr ctx v)) in
     L.REVariant (tag, vs')
   | L.EArray elts ->
-    let elts' = List.map elts ~f:(fun elt -> with_value elt (resolve_expr stack elt)) in
+    let elts' = List.map elts ~f:(fun elt -> with_value elt (resolve_expr ctx elt)) in
     L.REArray elts'
   | L.EArrayGet (arr, idx) ->
-    let arr' = resolve_expr stack arr in
-    let idx' = resolve_expr stack idx in
+    let arr' = resolve_expr ctx arr in
+    let idx' = resolve_expr ctx idx in
     L.REArrayGet (with_value arr arr', with_value idx idx')
   | L.EArraySet (arr, idx, v) ->
-    let arr' = resolve_expr stack arr in
-    let idx' = resolve_expr stack idx in
-    let v' = resolve_expr stack v in
+    let arr' = resolve_expr ctx arr in
+    let idx' = resolve_expr ctx idx in
+    let v' = resolve_expr ctx v in
     L.REArraySet (with_value arr arr', with_value idx idx', with_value v v')
   | L.ERef e1 ->
-    let e1' = resolve_expr stack e1 in
+    let e1' = resolve_expr ctx e1 in
     L.RERef (with_value e1 e1')
   | L.ESetRef (r, v) ->
-    let r' = resolve_expr stack r in
-    let v' = resolve_expr stack v in
+    let r' = resolve_expr ctx r in
+    let v' = resolve_expr ctx v in
     L.RESetRef (with_value r r', with_value v v')
   | L.EDeref e1 ->
-    let e1' = resolve_expr stack e1 in
+    let e1' = resolve_expr ctx e1 in
     L.REDeref (with_value e1 e1')
   | L.ERecordExtend (base, fields) ->
-    let base' = resolve_expr stack base in
+    let base' = resolve_expr ctx base in
     let fields' =
-      List.map fields ~f:(fun (lbl, ex) -> lbl, with_value ex (resolve_expr stack ex))
+      List.map fields ~f:(fun (lbl, ex) -> lbl, with_value ex (resolve_expr ctx ex))
     in
     L.RERecordExtend (with_value base base', fields')
 ;;
 
-let rec resolve_stmt (stack : frame_map list ref) (snode : L.stmt L.node)
+let rec resolve_stmt (ctx : resolve_ctx) (snode : L.stmt L.node)
   : L.resolved_stmt
   =
   match snode.value with
-  | L.SLet (x, rhs) -> L.RSLet (x, with_value rhs (resolve_expr stack rhs))
+  | L.SLet (x, rhs) -> L.RSLet (x, with_value rhs (resolve_expr ctx rhs))
   | L.SLetRec binds ->
     let binds' =
-      List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr stack rhs))
+      List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr ctx rhs))
     in
     L.RSLetRec binds'
-  | L.SExpr e -> L.RSExpr (with_value e (resolve_expr stack e))
+  | L.SExpr e -> L.RSExpr (with_value e (resolve_expr ctx e))
   | L.SModule (mname, stmts) ->
-    let stmts' = List.map stmts ~f:(fun st -> with_stmt_value st (resolve_stmt stack st)) in
+    let stmts' = List.map stmts ~f:(fun st -> with_stmt_value st (resolve_stmt ctx st)) in
     L.RSModule (mname, stmts')
   | L.SOpen nm -> L.RSOpen nm
 ;;
@@ -341,12 +337,10 @@ let resolve_checked_program
   : L.resolved_program
   =
   let lookup_fun = Chatml_typechecker.checked_lookup_span_type checked in
-  type_lookup_ref := Some lookup_fun;
-  let stack = ref [] in
+  let ctx = { lookup_type = lookup_fun; stack = ref [] } in
   let stmts' =
-    prog.stmts |> List.map ~f:(fun sn -> with_stmt_value sn (resolve_stmt stack sn))
+    prog.stmts |> List.map ~f:(fun sn -> with_stmt_value sn (resolve_stmt ctx sn))
   in
-  type_lookup_ref := None;
   { L.stmts = stmts'; source_text = prog.source_text }
 ;;
 

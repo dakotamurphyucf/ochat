@@ -537,6 +537,53 @@ let%expect_test "higher-order compose" =
 |}]
 ;;
 
+let%expect_test "deep tail recursion through if does not blow the stack" =
+  let code =
+    {|
+      let rec countdown n =
+        if n == 0 then 0 else countdown(n - 1)
+      print(countdown(20000))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+0
+|}]
+;;
+
+let%expect_test "tail recursion through match branch remains in tail position" =
+  let code =
+    {|
+      let rec count n acc =
+        match n with
+        | 0 -> acc
+        | _ -> count(n - 1, acc + 1)
+      print(count(15000, 0))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+15000
+|}]
+;;
+
+let%expect_test "non-tail function calls inside arithmetic still work" =
+  let code =
+    {|
+      let inc x = x + 1
+      let score x = inc(x) + inc(x)
+      print(score(10))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+22
+|}]
+;;
+
 (* ───────────────────────────────────────────────────────────────────── *)
 (* 8.  Comparison operators and division                                *)
 (* ───────────────────────────────────────────────────────────────────── *)
