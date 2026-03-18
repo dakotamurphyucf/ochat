@@ -1124,8 +1124,8 @@ and infer_expr (state : infer_state) (env : tenv) expr =
           let env_arm = infer_pattern state env pat scrut_ty in
           let rhs_ty = infer_expr state env_arm rhs in
           unify state rhs_ty result_ty);
-        validate_typed_match_redundancy scrut_ty (List.map cases ~f:fst);
         validate_match_exhaustiveness state scrut_ty (List.map cases ~f:fst);
+        validate_typed_match_redundancy scrut_ty (List.map cases ~f:fst);
         result_ty
       | EMatchSlots (scrut, cases) ->
         let scrut_ty = infer_expr state env scrut in
@@ -1136,11 +1136,11 @@ and infer_expr (state : infer_state) (env : tenv) expr =
           let env_arm = infer_pattern state env pat scrut_ty in
           let rhs_ty = infer_expr state env_arm rhs in
           unify state rhs_ty result_ty);
-        validate_typed_match_redundancy
-          scrut_ty
-          (List.map cases ~f:(fun (pat, _slots, _rhs) -> pat));
         validate_match_exhaustiveness
           state
+          scrut_ty
+          (List.map cases ~f:(fun (pat, _slots, _rhs) -> pat));
+        validate_typed_match_redundancy
           scrut_ty
           (List.map cases ~f:(fun (pat, _slots, _rhs) -> pat));
         result_ty
