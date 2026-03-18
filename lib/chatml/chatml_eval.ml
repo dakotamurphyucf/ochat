@@ -312,9 +312,17 @@ and match_eval
 and import_module_bindings ?span (target_env : env) (mname : string) : string list =
   match find_var target_env mname with
   | Some (VModule menv) ->
-    Hashtbl.fold menv ~init:[] ~f:(fun ~key ~data acc ->
-      define_var target_env key !data;
-      key :: acc)
+    let imports =
+      Hashtbl.fold menv ~init:[] ~f:(fun ~key ~data acc -> (key, !data) :: acc)
+    in
+    (match List.find imports ~f:(fun (key, _value) -> Hashtbl.mem target_env key) with
+     | Some (key, _value) ->
+       raise_runtime_error
+         ?span
+         (Printf.sprintf "open %s would shadow existing binding '%s'" mname key)
+     | None ->
+       List.iter imports ~f:(fun (key, value) -> define_var target_env key value);
+       List.map imports ~f:fst)
   | _ -> raise_runtime_error ?span (Printf.sprintf "Cannot open non-module '%s'" mname)
 
 and eval_module_value

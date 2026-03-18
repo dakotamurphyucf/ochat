@@ -194,6 +194,45 @@ let%expect_test "array heterogeneous types" =
     |}]
 ;;
 
+let%expect_test "array equality is rejected" =
+  let code =
+    {|
+      [1, 2] == [1, 2]
+    |}
+  in
+  (match check_program_result code with
+   | Ok _ -> print_endline "unexpected success"
+   | Error diagnostic -> print_endline diagnostic.message);
+  [%expect {| Equality is not supported for arrays |}]
+;;
+
+let%expect_test "function equality is rejected" =
+  let code =
+    {|
+      let f x = x
+      f == f
+    |}
+  in
+  (match check_program_result code with
+   | Ok _ -> print_endline "unexpected success"
+   | Error diagnostic -> print_endline diagnostic.message);
+  [%expect {| Equality is not supported for functions |}]
+;;
+
+let%expect_test "open shadowing is rejected" =
+  let code =
+    {|
+      let x = 1
+      module M = struct
+        let x = 2
+      end
+      open M
+    |}
+  in
+  print_endline (check_program_formatted code);
+  [%expect {| Type error: open M would shadow existing binding 'x' |}]
+;;
+
 (* ------------------------------------------------------------------ *)
 let%expect_test "print is polymorphic" =
   let code =

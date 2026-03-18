@@ -501,6 +501,22 @@ let%expect_test "open inside a module does not re-export imported names" =
   [%expect {| type error |}]
 ;;
 
+let%expect_test "open shadowing is rejected in the full pipeline" =
+  let code =
+    {|
+      let x = 1
+      module M = struct
+        let x = 2
+      end
+      open M
+    |}
+  in
+  (match eval_result code with
+   | Ok () -> print_endline "unexpected success"
+   | Error _ -> print_endline "type error");
+  [%expect {| type error |}]
+;;
+
 (* ───────────────────────────────────────────────────────────────────── *)
 (* 7. Higher-order functions & compose                                    *)
 (* ───────────────────────────────────────────────────────────────────── *)

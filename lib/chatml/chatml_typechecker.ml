@@ -396,32 +396,84 @@ and show_type = function
   | Record row -> Printf.sprintf "{%s}" (show_row row)
   | Tuple ts ->
     ts |> List.map ~f:show_type |> String.concat ~sep:" * " |> Printf.sprintf "(%s)"
-  | Variant _ -> "<variant>" (* not fully implemented *)
-  | Row _ | Empty_row -> "<row>" (* only appears nested *)
+  | Variant row -> Printf.sprintf "[%s]" (show_variant_row row)
+  | Row row -> show_row row
+  | Empty_row -> ""
   | Generic n -> n
   | Var { contents = Free (n, _) } -> Printf.sprintf "'%s" n
   | Var { contents = Bound t } -> show_type t
 
+and row_fields_and_tail row =
+  match row with
+  | Var { contents = Bound ty } -> row_fields_and_tail ty
+  | Record r -> row_fields_and_tail r
+  | Variant r -> row_fields_and_tail r
+  | Row (fs, rest) ->
+    let rest_fields, tail = row_fields_and_tail rest in
+    Env.merge fs rest_fields, tail
+  | Empty_row -> Env.empty, Empty_row
+  | Var _ as var -> Env.empty, var
+  | Generic _ as generic -> Env.empty, generic
+  | other -> Env.empty, other
+
 and show_row row =
-  let rec aux = function
-    | Empty_row -> ""
-    | Row (fs, rest) ->
-      let fields_str =
-        Env.bindings fs
-        |> List.map ~f:(fun (k, v) -> Printf.sprintf "%s: %s" k (show_type v))
-        |> String.concat ~sep:"; "
-      in
-      let rest_str =
-        match rest with
-        | Empty_row -> ""
-        | _ -> "; ..."
-      in
-      fields_str ^ rest_str
-    | Var { contents = Free (n, _) } -> Printf.sprintf "'%s" n
-    | Var { contents = Bound t } -> aux t
-    | _ -> ""
+  let fields, tail = row_fields_and_tail row in
+  let fields_str =
+    Env.bindings fields
+    |> List.map ~f:(fun (k, v) -> Printf.sprintf "%s: %s" k (show_type v))
+    |> String.concat ~sep:"; "
   in
-  aux row
+  let tail_str =
+    match tail with
+    | Empty_row -> ""
+    | _ when String.is_empty fields_str -> "..."
+    | _ -> "; ..."
+  in
+  fields_str ^ tail_str
+
+and show_variant_payload ty =
+  match payload_component_types ty with
+  | [] -> ""
+  | [ single ] -> Printf.sprintf "(%s)" (show_type single)
+  | many ->
+    let inside = many |> List.map ~f:show_type |> String.concat ~sep:", " in
+    Printf.sprintf "(%s)" inside
+
+and show_variant_row row =
+  let fields, tail = row_fields_and_tail row in
+  let fields_str =
+    Env.bindings fields
+    |> List.map ~f:(fun (tag, payload_ty) ->
+      Printf.sprintf "`%s%s" tag (show_variant_payload payload_ty))
+    |> String.concat ~sep:" | "
+  in
+  let tail_str =
+    match tail with
+    | Empty_row -> ""
+    | _ when String.is_empty fields_str -> "..."
+    | _ -> " | ..."
+  in
+  fields_str ^ tail_str
+
+and ensure_equality_type ty =
+  match resolve_bound_type ty with
+  | TInt | TFloat | Boolean | String | Unit | Generic _ -> ()
+  | Var { contents = Free _ } -> ()
+  | Var { contents = Bound t } -> ensure_equality_type t
+  | Tuple ts -> List.iter ts ~f:ensure_equality_type
+  | Record row | Variant row -> ensure_equality_row row
+  | Array _ -> raise (Type_error "Equality is not supported for arrays")
+  | Ref _ -> raise (Type_error "Equality is not supported for refs")
+  | Fun _ -> raise (Type_error "Equality is not supported for functions")
+  | Row _ | Empty_row -> ensure_equality_row ty
+
+and ensure_equality_row row =
+  let fields, tail = row_fields_and_tail row in
+  Env.iter fields ~f:(fun _field ty -> ensure_equality_type ty);
+  match tail with
+  | Empty_row | Var { contents = Free _ } | Generic _ -> ()
+  | Var { contents = Bound t } -> ensure_equality_row t
+  | _ -> ()
 ;;
 
 (** --------------------------------------------------------------------- *)
@@ -505,6 +557,17 @@ let add_mono (env : tenv) x ty : tenv = Env.add x ty env
 
 let add_generalized (state : infer_state) (env : tenv) x ty : tenv =
   Env.add x (generalise state ty) env
+;;
+
+let add_open_binding (state : infer_state) (env : tenv) ~(module_name : string) (name : string) (ty : typ)
+  : tenv
+  =
+  match Env.find env name with
+  | Some _ ->
+    raise
+      (Type_error
+         (Printf.sprintf "open %s would shadow existing binding '%s'" module_name name))
+  | None -> add_generalized state env name ty
 ;;
 
 let with_new_level (state : infer_state) ~(f : unit -> 'a) : 'a =
@@ -1149,6 +1212,7 @@ and infer_binary_prim
     Boolean
   | BEq | BNeq ->
     unify state lhs_ty rhs_ty;
+    ensure_equality_type lhs_ty;
     Boolean
 
 and infer_expr (state : infer_state) (env : tenv) expr =
@@ -1386,7 +1450,7 @@ let rec infer_stmt_with_exports (state : infer_state) (env : tenv) (stmt : stmt)
         | Empty_row | Var { contents = Free _ } -> ()
         | _ -> ());
        ( Env.fold fields ~init:env ~f:(fun ~key ~data acc ->
-           add_generalized state acc key data)
+           add_open_binding state acc ~module_name:mname key data)
        , [] )
      | _ -> raise (Type_error (Printf.sprintf "Cannot open non-module '%s'" mname)))
 ;;
