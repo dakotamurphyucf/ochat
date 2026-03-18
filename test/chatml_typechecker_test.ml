@@ -9,6 +9,11 @@ let parse (str : string) : L.program =
   | Chatml_parser.Error -> failwith "Parse error"
 ;;
 
+let check_program_result (code : string) =
+  let prog = parse code in
+  Chatml_typechecker.check_program prog
+;;
+
 let%expect_test "variant with tuple args" =
   let code =
     {|    
@@ -70,7 +75,7 @@ let%expect_test "polymorphic higher-order compose" =
     {|
       let compose f g x = f(g(x))
       let id x = x
-      let to_str n = num2str(n)
+      let to_str n = to_string(n)
       compose(id, id, "ok")
       compose(to_str, id, 1)
     |}
@@ -100,11 +105,12 @@ let%expect_test "ill-typed (missing field)" =
 ;;
 
 (* ------------------------------------------------------------------ *)
-let%expect_test "record field set ok" =
+let%expect_test "record copy update ok" =
   let code =
     {|
       let p = {name = "Bob"; age = 20}
-      p.age <- p.age + 1
+      let q = {p with age = p.age + 1}
+      q.age
     |}
   in
   let prog = parse code in
@@ -112,23 +118,17 @@ let%expect_test "record field set ok" =
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "record field set wrong type" =
+let%expect_test "record copy update may change field type" =
   let code =
     {|
       let p = {name = "Bob"; age = 20}
-      p.age <- "old"
+      let q = {p with age = "old"}
+      q.age
     |}
   in
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
-  [%expect
-    {|
-    line 3, characters 6-20:
-    3|    p.age <- "old"
-          ^^^^^^^^^^^^^^
-
-    Type error: Cannot unify int with string
-    |}]
+  [%expect {| Type checking succeeded! |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -146,6 +146,24 @@ let%expect_test "function arity mismatch" =
     line 3, characters 6-14:
     3|    id(1, 2)
           ^^^^^^^^
+
+    Type error: Function arity mismatch
+    |}]
+;;
+
+let%expect_test "print is unary" =
+  let code =
+    {|
+      print(1, 2)
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect
+    {|
+    line 2, characters 6-17:
+    2|    print(1, 2)
+          ^^^^^^^^^^^
 
     Type error: Function arity mismatch
     |}]
@@ -367,6 +385,59 @@ let%expect_test "fresh monomorphic variables for each call-site of id" =
   [%expect {| Type checking succeeded! |}]
 ;;
 
+let%test_unit "value restriction rejects polymorphic ref update" =
+  let code =
+    {|
+      let r = ref(fun x -> x) in
+      r := (fun x -> x + 1);
+      (!r)(true)
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected value restriction to reject polymorphic ref use"
+  | Error _ -> ()
+;;
+
+let%test_unit "value restriction rejects polymorphic array update" =
+  let code =
+    {|
+      let a = [fun x -> x] in
+      a[0] <- (fun x -> x + 1);
+      a[0](true)
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected value restriction to reject polymorphic array use"
+  | Error _ -> ()
+;;
+
+let%test_unit "value restriction rejects aliasing expansive binding" =
+  let code =
+    {|
+      let r = ref(fun x -> x)
+      let alias = r
+      alias := (fun x -> x + 1)
+      (!r)(true)
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected weakly-typed alias to remain monomorphic"
+  | Error _ -> ()
+;;
+
+let%test_unit "value restriction preserves polymorphic immutable record field" =
+  let code =
+    {|
+      let r = {id = fun x -> x}
+      r.id(1)
+      r.id("s")
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> ()
+  | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
 (* ------------------------------------------------------------------ *)
 let%expect_test "module basic access" =
   let code =
@@ -400,6 +471,54 @@ let%expect_test "module open and use" =
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
   [%expect {| Type checking succeeded! |}]
+;;
+
+let%test_unit "module can use outer bindings during definition" =
+  let code =
+    {|
+      let x = 1
+      module M = struct
+        let y = x
+      end
+      M.y
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> ()
+  | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let%test_unit "module does not export outer bindings implicitly" =
+  let code =
+    {|
+      let x = 1
+      module M = struct
+        let y = x
+      end
+      M.x
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected module field lookup to reject implicit outer export"
+  | Error _ -> ()
+;;
+
+let%test_unit "open inside module does not re-export imported names" =
+  let code =
+    {|
+      module N = struct
+        let x = 1
+      end
+      module M = struct
+        open N
+        let y = x
+      end
+      M.x
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected opened names inside module to stay unexported"
+  | Error _ -> ()
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -537,6 +656,45 @@ let%expect_test "record extension override type" =
   [%expect {| Type checking succeeded! |}]
 ;;
 
+let%expect_test "record copy update of array element field is allowed" =
+  let code =
+    {|
+      let set_task_status st new_status =
+        let t = st.tasks[st.task_index] in
+        let t = { t with status = new_status } in
+        st.tasks[st.task_index] <- t;
+        st
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "record helper remains row-polymorphic when returning a wider state" =
+  let code =
+    {|
+      let bump_attempts st =
+        let t = st.tasks[st.task_index] in
+        let t = { t with attempts = t.attempts + 1 } in
+        st.tasks[st.task_index] <- t;
+        st
+
+      let s =
+        { autopilot = true
+        ; task_index = 0
+        ; tasks = [ { attempts = 0 } ]
+        }
+
+      let s2 = bump_attempts(s)
+      s2.autopilot
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
 let%expect_test "record pattern subset ok" =
   let code =
     {|
@@ -569,18 +727,15 @@ let%expect_test "record pattern missing field" =
     |}]
 ;;
 
-let%expect_test "record pattern missing field" =
+let%expect_test "runtime record extension remains immutable" =
   let env = Chatml_lang.create_env () in
   BuiltinModules.add_global_builtins env;
   let code =
     {|
-    (* Type checking succeeded! Uncaught exception: (Failure "No field 'age' in record") *)
-    (* --------------------------------------- *)
     let p = {name = "Alice"; age = 25}
     let f p =
         let inc_age person =
-            person.age <- person.age + 1;
-            person
+            {person with age = person.age + 1}
         in
         print(p.name);
         print(inc_age({p with age = 30 + p.age}))
@@ -597,12 +752,57 @@ let%expect_test "record pattern missing field" =
   |}
   in
   let ast = parse code in
-  Chatml_resolver.eval_program env ast;
+  (match Chatml_resolver.eval_program env ast with
+   | Ok () -> ()
+   | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic));
   [%expect
     {|
-    Type checking succeeded!            
     Alice 
     { age = 56; name = Alice } 
     [|1, 2|]
+    |}]
+;;
+
+;;
+
+let%expect_test "inner let binding does not leak" =
+  let code = "let y = let x = 1 in x\nx\n" in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect
+    {|
+    line 2, characters 0-1:
+    2|    x
+          ^
+
+    Type error: Unknown variable 'x'
+    |}]
+;;
+
+let%expect_test "lambda parameter does not leak" =
+  let code = "let f x = x\nx\n" in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect
+    {|
+    line 2, characters 0-1:
+    2|    x
+          ^
+
+    Type error: Unknown variable 'x'
+    |}]
+;;
+
+let%expect_test "match binder does not leak" =
+  let code = "let v = `Some(1)\nmatch v with\n| `Some(x) -> x\n| _ -> 0\nx\n" in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect
+    {|
+    line 5, characters 0-1:
+    5|    x
+          ^
+
+    Type error: Unknown variable 'x'
     |}]
 ;;

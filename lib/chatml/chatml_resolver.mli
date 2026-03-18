@@ -6,14 +6,24 @@
 
 open Chatml.Chatml_lang
 
+(** [resolve_checked_program checked prog] resolves a program that has
+    already been accepted by {!Chatml_typechecker.check_program}. *)
+val resolve_checked_program
+  : Chatml_typechecker.checked_program
+  -> program
+  -> program
+
 (** [resolve_program prog] rewrites [prog] so that every variable is
     given an explicit lexical address ([EVarLoc]) and every binding site
-    carries a pre-computed list of frame slots.  The program must have
-    been type-checked beforehand so that the resolver can access the
-    principal type for each node.  Idempotent. *)
+    carries a pre-computed list of frame slots.  This convenience helper
+    first type-checks the program strictly and raises on failure.
+    Idempotent for already-resolved, well-typed programs. *)
 val resolve_program : program -> program
 
-(** [eval_program env prog] is a convenience wrapper that calls
-    {!resolve_program} and then delegates to {!Chatml_lang.eval_program}
-    to execute the result. *)
-val eval_program : env -> program -> unit
+(** [eval_program env prog] type-checks [prog].  If successful, it
+    resolves and evaluates it in [env]; otherwise it returns the typing
+    diagnostic and performs no evaluation. *)
+val eval_program
+  : env
+  -> program
+  -> (unit, Chatml_typechecker.diagnostic) result

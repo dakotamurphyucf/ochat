@@ -15,12 +15,22 @@ let parse (str : string) : L.program =
     pipeline (type-checker → resolver → interpreter).  We purposely
     thread the program through [Chatml_resolver.eval_program] so that we
     exercise *all* optimisation passes that the production runtime uses. *)
-let eval code =
+let eval_result code =
   let env = L.create_env () in
   BuiltinModules.add_global_builtins env;
   let prog = parse code in
   Chatml_resolver.eval_program env prog
 ;;
+
+let eval code =
+  match eval_result code with
+  | Ok () -> ()
+  | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let dummy_position = { Source.line = 1; column = 0; offset = 0 }
+let dummy_span = { Source.left = dummy_position; right = dummy_position }
+let node value : _ L.node = { value; span = dummy_span }
 
 (* ───────────────────────────────────────────────────────────────────── *)
 (* 1.  Recursion & arithmetic                                            *)
@@ -39,9 +49,8 @@ let%expect_test "recursive factorial" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    120 
-    |}]
+120 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -60,10 +69,9 @@ let%expect_test "array mutation and length" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    5 
-    3 
-    |}]
+5 
+3 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -84,9 +92,8 @@ let%expect_test "sequential let block" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    6 
-    |}]
+6 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -102,31 +109,31 @@ let%expect_test "simple if branch" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    1 
-    |}]
+1 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
-(* 3.  Records: field update & access                                     *)
+(* 3.  Records: immutable copy-update & access                            *)
 (* ───────────────────────────────────────────────────────────────────── *)
 
-let%expect_test "record field update" =
+let%expect_test "record copy update leaves original unchanged" =
   let code =
     {|      
       let person = {name = "Bob"; age = 20}
-      person.age <- person.age + 1
+      let older = {person with age = person.age + 1}
       print(person.age)
-      print(person.name)
+      print(older.age)
+      print(older.name)
     |}
   in
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    21 
-    Bob 
-    |}]
+20 
+21 
+Bob 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -145,9 +152,8 @@ let%expect_test "variant pattern match" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    [|3, 4|] 
-    |}]
+[|3, 4|] 
+|}]
 ;;
 
 let%expect_test "variant none match" =
@@ -162,9 +168,8 @@ let%expect_test "variant none match" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    none 
-    |}]
+none 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -189,11 +194,10 @@ let%expect_test "mutual recursion even/odd" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    true 
-    false 
-    true 
-    |}]
+true 
+false 
+true 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -211,9 +215,8 @@ let%expect_test "mutable reference update" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    10 
-    |}]
+10 
+|}]
 ;;
 
 (* while loop using a boolean flag to exercise loop semantics *)
@@ -233,9 +236,41 @@ let%expect_test "while toggle flag" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    1 
-    |}]
+1 
+|}]
+;;
+
+let%expect_test "sequence forces first function call before second" =
+  let code =
+    {|
+      let f () = print("a")
+      let g () = print("b")
+      let run () =
+        f();
+        g()
+      run()
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+a 
+b 
+|}]
+;;
+
+let%expect_test "runtime closure arity mismatch is reported clearly" =
+  let env = L.create_env () in
+  let slot = Frame_env.Slot Frame_env.SInt in
+  let body = node (L.EVarLoc { depth = 0; index = 0; slot }) in
+  let lam = node (L.ELambdaSlots ([ "x" ], [ slot ], body)) in
+  let bad_call = node (L.EApp (lam, [ node (L.EInt 1); node (L.EInt 2) ])) in
+  (try
+     ignore (L.finish_eval [] (L.eval_expr env [] bad_call));
+     print_endline "unexpected success"
+   with
+   | Failure msg -> print_endline msg);
+  [%expect {| Function arity mismatch |}]
 ;;
 
 (* additional while loop to test mutable updates in loop *)
@@ -259,9 +294,78 @@ let%expect_test "module definition and open" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    4 
-    |}]
+4 
+|}]
+;;
+
+let%expect_test "module can use outer bindings without exporting them" =
+  let code =
+    {|
+      let x = 1
+      module M = struct
+        let y = x
+      end
+      print(M.y)
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+1 
+|}]
+;;
+
+let%expect_test "module does not implicitly export outer bindings" =
+  let code =
+    {|
+      let x = 1
+      module M = struct
+        let y = x
+      end
+      print(M.x)
+    |}
+  in
+  (match eval_result code with
+   | Ok () -> print_endline "unexpected success"
+   | Error _ -> print_endline "type error");
+  [%expect {| type error |}]
+;;
+
+let%expect_test "module self-reference resolves through explicit exports only" =
+  let code =
+    {|
+      module M = struct
+        let id x = x
+        let call n = M.id(n)
+      end
+      print(M.call(7))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+7 
+|}]
+;;
+
+let%expect_test "open inside a module does not re-export imported names" =
+  let code =
+    {|
+      module N = struct
+        let x = 1
+      end
+      module M = struct
+        open N
+        let y = x
+      end
+      print(M.y)
+      print(M.x)
+    |}
+  in
+  (match eval_result code with
+   | Ok () -> print_endline "unexpected success"
+   | Error _ -> print_endline "type error");
+  [%expect {| type error |}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -280,9 +384,8 @@ let%expect_test "higher-order compose" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    7 
-    |}]
+7 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -304,15 +407,14 @@ let%expect_test "numeric comparisons and division" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    5 
-    true 
-    false 
-    true 
-    false 
-    true 
-    false 
-    |}]
+5 
+true 
+false 
+true 
+false 
+true 
+false 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -332,11 +434,27 @@ let%expect_test "record extension overwrite and add" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    Alice 
-    31 
-    123 
-    |}]
+Alice 
+31 
+123 
+|}]
+;;
+
+let%expect_test "record extension can change field type" =
+  let code =
+    {|      
+      let person = {name = "Alice"; age = 30}
+      let label = { person with age = "old" }
+      print(label.age)
+      print(person.age)
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+old 
+30 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -353,9 +471,8 @@ let%expect_test "array length builtin" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    4 
-    |}]
+4 
+|}]
 ;;
 
 let%expect_test "generic to_string builtin" =
@@ -364,16 +481,36 @@ let%expect_test "generic to_string builtin" =
       print(to_string(42))
       print(to_string(true))
       print(to_string([1, 2]))
+      print(to_string({a = 1; b = 2}))
+      print(to_string(`Some(1)))
     |}
   in
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    42 
-    true 
-    [|1, 2|] 
-    |}]
+42 
+true 
+[|1, 2|] 
+{ a = 1; b = 2 } 
+`Some(1) 
+|}]
+;;
+
+let%expect_test "polymorphic equality builtin handles records and variants" =
+  let code =
+    {|      
+      print({a = 1; b = 2} == {a = 1; b = 2})
+      print(`Some(1) == `Some(1))
+      print(`Some(1) != `Some(2))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+true 
+true 
+true 
+|}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
@@ -407,10 +544,31 @@ let%expect_test "lambda values and map_in_place" =
   eval code;
   [%expect
     {|
-    Type checking succeeded!
-    15 
-    2 
-    4 
-    6 
-    |}]
+15 
+2 
+4 
+6 
+|}]
+;;
+
+
+let%expect_test "ill-typed programs do not execute" =
+  let code =
+    {|
+      let x = 1
+      let y = x + "bad"
+      print("should not print")
+    |}
+  in
+  (match eval_result code with
+   | Ok () -> print_endline "unexpected success"
+   | Error diagnostic -> print_endline (Chatml_typechecker.format_diagnostic code diagnostic));
+  [%expect
+    {|
+line 3, characters 14-23:
+3|    x + "bad"
+      ^^^^^^^^^
+
+Type error: Cannot unify number with string
+|}]
 ;;

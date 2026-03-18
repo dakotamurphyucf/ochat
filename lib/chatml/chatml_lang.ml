@@ -101,7 +101,6 @@ type expr =
   | EMatchSlots of expr node * (pattern * Frame_env.packed_slot list * expr node) list
   | ERecord of (string * expr node) list
   | EFieldGet of expr node * string
-  | EFieldSet of expr node * string * expr node
   | EVariant of string * expr node list
   | EArray of expr node list
   | EArrayGet of expr node * expr node
@@ -151,7 +150,7 @@ type value =
   | VFloat of float
   | VString of string
   | VVariant of string * value list
-  | VRecord of (string, value) Hashtbl.t
+  | VRecord of value String.Map.t
   | VArray of value array
   | VRef of value ref
   | VClosure of clos
@@ -213,13 +212,13 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
       | _ -> None
     in
     combine ps vs (Some [])
-  | PRecord (fields, is_open), VRecord tbl ->
+  | PRecord (fields, is_open), VRecord fields_map ->
     (* Ensure specified fields match; if closed pattern, ensure no extra fields exist. *)
     let rec match_fields fl acc =
       match fl with
       | [] -> Some acc
       | (lbl, pat) :: tl ->
-        (match Hashtbl.find tbl lbl with
+        (match Map.find fields_map lbl with
          | None -> None
          | Some v_f ->
            (match match_pattern v_f pat with
@@ -233,7 +232,7 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
        then Some binds
        else if
          (* closed: record must not have extra fields *)
-         Hashtbl.length tbl = List.length fields
+         Map.length fields_map = List.length fields
        then Some binds
        else None)
   | _ -> None
@@ -472,6 +471,8 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     in
     (match fn_val with
      | VClosure cl ->
+       if List.length cl.params <> List.length arg_vals
+       then failwith "Function arity mismatch";
        (* Produce a tail call in case we are in tail position of the caller. *)
        TailCall (cl, arg_vals)
      | VBuiltin bf -> Value (bf arg_vals)
@@ -550,16 +551,17 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     let sv = finish_eval frames (eval_expr env frames scrut_expr) in
     match_eval_slots env frames sv cases
   | ERecord fields ->
-    let tbl = Hashtbl.create (module String) in
-    List.iter fields ~f:(fun (fld, fe) ->
-      let fv = finish_eval frames (eval_expr env frames fe) in
-      Hashtbl.set tbl ~key:fld ~data:fv);
-    Value (VRecord tbl)
+    let record_fields =
+      List.fold fields ~init:String.Map.empty ~f:(fun acc (fld, fe) ->
+        let fv = finish_eval frames (eval_expr env frames fe) in
+        Map.set acc ~key:fld ~data:fv)
+    in
+    Value (VRecord record_fields)
   | EFieldGet (rec_expr, field) ->
     let rec_val = finish_eval frames (eval_expr env frames rec_expr) in
     (match rec_val with
-     | VRecord tbl ->
-       (match Hashtbl.find tbl field with
+     | VRecord fields ->
+       (match Map.find fields field with
         | Some v -> Value v
         | None -> failwith (Printf.sprintf "No field '%s' in record" field))
      | VModule menv ->
@@ -567,14 +569,6 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
         | Some v -> Value v
         | None -> failwith (Printf.sprintf "No field '%s' in module" field))
      | _ -> failwith "Field access on non-record/non-module")
-  | EFieldSet (rec_expr, field, new_expr) ->
-    let rec_val = finish_eval frames (eval_expr env frames rec_expr) in
-    let new_val = finish_eval frames (eval_expr env frames new_expr) in
-    (match rec_val with
-     | VRecord tbl ->
-       Hashtbl.set tbl ~key:field ~data:new_val;
-       Value VUnit
-     | _ -> failwith "Field set on non-record")
   | EVariant (tag, exprs) ->
     let vals =
       List.map exprs ~f:(fun ex -> finish_eval frames (eval_expr env frames ex))
@@ -623,24 +617,24 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
      | VRef cell -> Value !cell
      | _ -> failwith "Deref on non-ref value")
   | ESequence (e1, e2) ->
-    let _ = eval_expr env frames e1 in
-    (* evaluate e1, discard its result *)
+    ignore (finish_eval frames (eval_expr env frames e1));
+    (* evaluate e1 fully, including any pending tail call, then discard its result *)
     eval_expr env frames e2 (* then evaluate and return e2 *)
   | ERecordExtend (base_expr, fields) ->
     (* Evaluate the base record *)
     let base_val = finish_eval frames (eval_expr env frames base_expr) in
-    let base_tbl =
+    let base_fields =
       match base_val with
-      | VRecord tbl -> tbl
+      | VRecord fields -> fields
       | _ -> failwith "Record extension base is not a record"
     in
-    (* Copy existing fields to a new table *)
-    let new_tbl = Hashtbl.copy base_tbl in
-    (* Evaluate new field expressions and replace/insert. *)
-    List.iter fields ~f:(fun (fld, fe) ->
-      let fv = finish_eval frames (eval_expr env frames fe) in
-      Hashtbl.set new_tbl ~key:fld ~data:fv);
-    Value (VRecord new_tbl)
+    (* Evaluate new field expressions and replace/insert into a fresh map. *)
+    let new_fields =
+      List.fold fields ~init:base_fields ~f:(fun acc (fld, fe) ->
+        let fv = finish_eval frames (eval_expr env frames fe) in
+        Map.set acc ~key:fld ~data:fv)
+    in
+    Value (VRecord new_fields)
 
 and match_eval
       (env : env)
@@ -714,29 +708,73 @@ and match_eval_slots
 (* 7) Statement Evaluation                                                 *)
 (***************************************************************************)
 
-and eval_stmt (env : env) (frames : Frame_env.env) (s : stmt node) : unit =
+and import_module_bindings (target_env : env) (mname : string) : string list =
+  match find_var target_env mname with
+  | Some (VModule menv) ->
+    Hashtbl.fold menv ~init:[] ~f:(fun ~key ~data acc ->
+      set_var target_env key data;
+      key :: acc)
+  | _ -> failwith (Printf.sprintf "Cannot open non-module '%s'" mname)
+
+and eval_module_value
+      (outer_env : env)
+      (frames : Frame_env.env)
+      (mname : string)
+      (stmts : stmt node list)
+  : env
+  =
+  (* The module body evaluates in an environment that can see the outer
+     scope, but recursive references to the module itself go through a
+     separate export environment so that only explicit exports remain
+     visible once evaluation is complete. *)
+  let module_eval_env = copy_env outer_env in
+  let module_export_env = create_env () in
+  set_var module_eval_env mname (VModule module_export_env);
+  let exported_names =
+    List.concat_map stmts ~f:(fun st -> eval_stmt_with_exports module_eval_env frames st)
+  in
+  let seen = Hash_set.create (module String) in
+  List.iter exported_names ~f:(fun name ->
+    if not (Hash_set.mem seen name)
+    then (
+      Hash_set.add seen name;
+      match find_var module_eval_env name with
+      | Some value -> set_var module_export_env name value
+      | None -> ()));
+  module_export_env
+
+and eval_stmt_with_exports
+      (env : env)
+      (frames : Frame_env.env)
+      (s : stmt node)
+  : string list
+  =
   match s.value with
   | SLet (x, e1) ->
     let v1 = finish_eval frames (eval_expr env frames e1) in
-    set_var env x v1
+    set_var env x v1;
+    [ x ]
   | SLetRec bindings ->
     (* Step 1: Initialize each name to VUnit in the top-level env. *)
     List.iter bindings ~f:(fun (nm, _) -> set_var env nm VUnit);
     (* Step 2: Evaluate each binding in env. *)
     List.iter bindings ~f:(fun (nm, rhs_expr) ->
       let v = finish_eval frames (eval_expr env frames rhs_expr) in
-      set_var env nm v)
+      set_var env nm v);
+    List.map bindings ~f:fst
   | SModule (mname, stmts) ->
-    let menv = create_env () in
-    Hashtbl.iteri env ~f:(fun ~key ~data -> set_var menv key data);
-    List.iter stmts ~f:(fun st -> eval_stmt menv frames st);
-    set_var env mname (VModule menv)
+    let menv = eval_module_value env frames mname stmts in
+    set_var env mname (VModule menv);
+    [ mname ]
   | SOpen mname ->
-    (match find_var env mname with
-     | Some (VModule menv) ->
-       Hashtbl.iteri menv ~f:(fun ~key ~data -> set_var env key data)
-     | _ -> failwith (Printf.sprintf "Cannot open non-module '%s'" mname))
-  | SExpr e -> ignore (finish_eval frames (eval_expr env frames e))
+    let _imported = import_module_bindings env mname in
+    []
+  | SExpr e ->
+    ignore (finish_eval frames (eval_expr env frames e));
+    []
+
+and eval_stmt (env : env) (frames : Frame_env.env) (s : stmt node) : unit =
+  ignore (eval_stmt_with_exports env frames s)
 ;;
 
 (***************************************************************************)

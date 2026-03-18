@@ -401,10 +401,6 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
   | L.EFieldGet (obj, lbl) ->
     let obj' = resolve_expr stack obj in
     L.EFieldGet (wrap obj', lbl)
-  | L.EFieldSet (obj, lbl, v) ->
-    let obj' = resolve_expr stack obj in
-    let v' = resolve_expr stack v in
-    L.EFieldSet (wrap obj', lbl, wrap v')
   | L.EVariant (tag, vs) ->
     let vs' = List.map vs ~f:(fun v -> { v with value = resolve_expr stack v }) in
     L.EVariant (tag, vs')
@@ -490,9 +486,13 @@ let rec resolve_stmt (stack : frame_map list ref) (snode : L.stmt L.node) : L.st
     resolved program yields the exact same AST.
   *)
 
-let resolve_program (prog : L.program) : L.program =
+let resolve_checked_program
+      (checked : Chatml_typechecker.checked_program)
+      (prog : L.program)
+  : L.program
+  =
   (* 1.  Obtain a *pure* span→type lookup closure for this very program. *)
-  let lookup_fun = Chatml_typechecker.type_lookup_for_program prog in
+  let lookup_fun = Chatml_typechecker.checked_lookup_span_type checked in
   (* 2.  Expose it to the recursive helpers. *)
   type_lookup_ref := Some lookup_fun;
   (* 3.  Proceed with the original resolution. *)
@@ -505,6 +505,13 @@ let resolve_program (prog : L.program) : L.program =
   stmts', snd prog
 ;;
 
+let resolve_program (prog : L.program) : L.program =
+  match Chatml_typechecker.check_program prog with
+  | Ok checked -> resolve_checked_program checked prog
+  | Error diagnostic ->
+    failwith (Chatml_typechecker.format_diagnostic (snd prog) diagnostic)
+;;
+
 (** [eval_program env prog] resolves [prog] with {!resolve_program} and
     immediately interprets it in [env] using
     {!Chatml_lang.eval_program}.  It is equivalent to
@@ -514,8 +521,16 @@ let resolve_program (prog : L.program) : L.program =
     but avoids constructing the intermediate value at the call-site.
     Use this helper when you do not need to inspect the resolved AST. *)
 
-let eval_program (env : L.env) (prog : L.program) : unit =
-  let program = resolve_program prog in
-  (* 1) Resolve the program; 2) Execute it in the given environment. *)
-  L.eval_program env program
+let eval_program
+      (env : L.env)
+      (prog : L.program)
+  : (unit, Chatml_typechecker.diagnostic) result
+  =
+  match Chatml_typechecker.check_program prog with
+  | Error diagnostic -> Error diagnostic
+  | Ok checked ->
+    let program = resolve_checked_program checked prog in
+    (* 1) Resolve the program; 2) Execute it in the given environment. *)
+    L.eval_program env program;
+    Ok ()
 ;;

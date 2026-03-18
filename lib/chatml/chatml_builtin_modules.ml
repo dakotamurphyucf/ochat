@@ -7,8 +7,8 @@
 
     {ul
     {- Basic printing utilities ([print] and [to_string]).}
-    {- Simple aggregation helper ([sum]).}
     {- Array helper ([length]).}
+    {- Convenience conversions ([num2str] and [bool2str]).}
     {- Arithmetic operators ([+], [-], [*], [/]).}
     {- Comparison operators ([<], [>], [<=], [>=], [==], [!=]).}}
 
@@ -24,11 +24,10 @@
       let env = create_env () in
       Chatml.Chatml_builtin_modules.BuiltinModules.add_global_builtins env;
 
-      match find_var env "sum" with
+      match find_var env "to_string" with
       | Some (VBuiltin f) ->
-          (* sum 1 2 3 = 6 *)
-          let VInt six = f [ VInt 1; VInt 2; VInt 3 ] in
-          assert (six = 6)
+          let VString s = f [ VInt 6 ] in
+          assert (String.equal s "6")
       | _ -> assert false
     ]}
 
@@ -39,6 +38,7 @@
 
 open Core
 open Chatml.Chatml_lang
+module Builtin_spec = Chatml.Chatml_builtin_spec
 (* Provides [value], [env], [set_var] … *)
 
 (* -------------------------------------------------------------------------- *)
@@ -57,32 +57,7 @@ open Chatml.Chatml_lang
       - Function, module and builtin closures are abstracted as
         placeholder strings.
   *)
-let rec value_to_string (v : value) : string =
-  match v with
-  | VInt i -> Int.to_string i
-  | VFloat f -> Float.to_string f
-  | VBool b -> Bool.to_string b
-  | VString s -> s
-  | VArray arr ->
-    let contents = Array.to_list arr |> List.map ~f:value_to_string in
-    "[|" ^ String.concat ~sep:", " contents ^ "|]"
-  | VRecord tbl ->
-    let fields =
-      Hashtbl.to_alist tbl |> List.map ~f:(fun (k, v') -> k ^ " = " ^ value_to_string v')
-    in
-    "{ " ^ String.concat ~sep:"; " fields ^ " }"
-  | VRef r -> "ref(" ^ value_to_string !r ^ ")"
-  | VModule _ -> "<module>"
-  | VClosure _ -> "<closure>"
-  | VUnit -> "()"
-  | VBuiltin _ -> "<builtin>"
-  | VVariant (slug, vals) ->
-    if List.is_empty vals
-    then Printf.sprintf "`%s" slug
-    else (
-      let inside = vals |> List.map ~f:value_to_string |> String.concat ~sep:", " in
-      Printf.sprintf "`%s(%s)" slug inside)
-;;
+let value_to_string = Builtin_spec.value_to_string
 
 module BuiltinModules = struct
   (** [add_global_builtins env] populates [env] with the standard
@@ -92,175 +67,15 @@ module BuiltinModules = struct
       fresh environment or be prepared for the existing bindings to be
       overwritten.
 
-      The newly added symbols are:
-      {ul
-      {- [print]: variadic – prints any number of arguments using
-         {!value_to_string} and appends a newline.}
-      {- [to_string]: single argument – converts a value to its
-         textual representation.}
-      {- [sum]: variadic – sums a list of [int]s (fails on
-         non-integers).}
-      {- [length]: single argument – returns the size of an array.}
-      {- Arithmetic operators: [+], [-], [*], [/] with numeric
-         overloading between [int] and [float] (mixed mode converts the
-         [int] to [float]).  Division by zero raises [Failure].}
-      {- Comparison operators: [<], [>], [<=], [>=], [==], [!=] with the
-         obvious semantics; heterogeneous arguments raise [Failure].}}
-      All operations raise [Failure] on arity or type mismatch.
+      The concrete builtin set is defined centrally in
+      {!module:Chatml.Chatml_builtin_spec}.  This function merely
+      installs those definitions into the mutable top-level runtime
+      environment.  All operations raise [Failure] on arity or type
+      mismatch.
   *)
   let add_global_builtins (env : env) =
-    (* 1) Shared printers --------------------------------------------------- *)
-    let fn_print =
-      VBuiltin
-        (fun args ->
-          (match args with
-           | [] -> failwith "print: expected at least one argument"
-           | _ -> ());
-          List.iter args ~f:(fun v -> Printf.printf "%s " (value_to_string v));
-          Printf.printf "\n";
-          VUnit)
-    in
-    set_var env "print" fn_print;
-    let fn_to_string =
-      VBuiltin
-        (fun args ->
-          match args with
-          | [ v ] -> VString (value_to_string v)
-          | _ -> failwith "to_string: expected exactly one argument")
-    in
-    set_var env "to_string" fn_to_string;
-    (* 2) A “sum” function that sums a list of integers. *)
-    let fn_sum =
-      VBuiltin
-        (fun args ->
-          let rec sumvals vs acc =
-            match vs with
-            | [] -> VInt acc
-            | VInt i :: tl -> sumvals tl (acc + i)
-            | _ -> failwith "sum() only supports integer values"
-          in
-          sumvals args 0)
-    in
-    set_var env "sum" fn_sum;
-    (* 3) Another built-in that returns array length if passed an array. *)
-    let fn_length =
-      VBuiltin
-        (fun args ->
-          match args with
-          | [ VArray arr ] -> VInt (Array.length arr)
-          | _ -> failwith "length() expects a single array argument")
-    in
-    set_var env "length" fn_length;
-    (* ────────────────────────────────────────────────────────────────────────── *)
-    (* 1. Arithmetic operators                                                 *)
-    (* ────────────────────────────────────────────────────────────────────────── *)
-    let fn_num2str =
-      VBuiltin
-        (function
-          | [ VInt x ] -> VString (string_of_int x)
-          | _ -> failwith "num2str() expects a single integer argument")
-    in
-    set_var env "num2str" fn_num2str;
-    (* + operator *)
-    set_var env "++"
-    @@ VBuiltin
-         (function
-           | [ VString x; VString y ] -> VString (x ^ y)
-           | _ -> failwith "Operator '++' expects two string arguments");
-    set_var env "+"
-    @@ VBuiltin
-         (function
-           | [ VInt x; VInt y ] -> VInt (x + y)
-           | [ VFloat x; VFloat y ] -> VFloat (x +. y)
-           | [ VInt x; VFloat y ] -> VFloat (Float.of_int x +. y)
-           | [ VFloat x; VInt y ] -> VFloat (x +. Float.of_int y)
-           | _ -> failwith "Operator '+' expects two numeric arguments");
-    (* - operator *)
-    set_var env "-"
-    @@ VBuiltin
-         (function
-           | [ VInt x; VInt y ] -> VInt (x - y)
-           | [ VFloat x; VFloat y ] -> VFloat (x -. y)
-           | [ VInt x; VFloat y ] -> VFloat (Float.of_int x -. y)
-           | [ VFloat x; VInt y ] -> VFloat (x -. Float.of_int y)
-           | _ -> failwith "Operator '-' expects two numeric arguments");
-    (* * operator *)
-    set_var env "*"
-    @@ VBuiltin
-         (function
-           | [ VInt x; VInt y ] -> VInt (x * y)
-           | [ VFloat x; VFloat y ] -> VFloat (x *. y)
-           | [ VInt x; VFloat y ] -> VFloat (Float.of_int x *. y)
-           | [ VFloat x; VInt y ] -> VFloat (x *. Float.of_int y)
-           | _ -> failwith "Operator '*' expects two numeric arguments");
-    (* / operator *)
-    set_var env "/"
-    @@ VBuiltin
-         (function
-           (* Integer division if both arguments are ints *)
-           | [ VInt x; VInt y ] ->
-             if y = 0 then failwith "Division by zero" else VInt (x / y)
-           | [ VFloat x; VFloat y ] ->
-             if Float.equal y 0.0 then failwith "Division by zero" else VFloat (x /. y)
-           | [ VInt x; VFloat y ] ->
-             if Float.equal y 0.0
-             then failwith "Division by zero"
-             else VFloat (Float.of_int x /. y)
-           | [ VFloat x; VInt y ] ->
-             if y = 0 then failwith "Division by zero" else VFloat (x /. Float.of_int y)
-           | _ -> failwith "Operator '/' expects two numeric arguments");
-    (* ────────────────────────────────────────────────────────────────────────── *)
-    (* 2. Comparison operators                                                 *)
-    (* ────────────────────────────────────────────────────────────────────────── *)
-
-    (* < operator *)
-    set_var env "<"
-    @@ VBuiltin
-         (function
-           | [ VInt x; VInt y ] -> VBool (x < y)
-           | [ VFloat x; VFloat y ] -> VBool Float.(x < y)
-           | _ -> failwith "Operator '<' requires two numeric (int/float) arguments");
-    (* > operator *)
-    set_var env ">"
-    @@ VBuiltin
-         (function
-           | [ VInt x; VInt y ] -> VBool (x > y)
-           | [ VFloat x; VFloat y ] -> VBool Float.(x > y)
-           | _ -> failwith "Operator '>' requires two numeric (int/float) arguments");
-    (* < operator *)
-    set_var env "<="
-    @@ VBuiltin
-         (function
-           | [ VInt x; VInt y ] -> VBool (x <= y)
-           | [ VFloat x; VFloat y ] -> VBool Float.(x <= y)
-           | _ -> failwith "Operator '<=' requires two numeric (int/float) arguments");
-    (* > operator *)
-    set_var env ">="
-    @@ VBuiltin
-         (function
-           | [ VInt x; VInt y ] -> VBool (x >= y)
-           | [ VFloat x; VFloat y ] -> VBool Float.(x >= y)
-           | _ -> failwith "Operator '>=' requires two numeric (int/float) arguments");
-    (* == operator *)
-    set_var env "=="
-    @@ VBuiltin
-         (function
-           | [ VInt x; VInt y ] -> VBool (x = y)
-           | [ VFloat x; VFloat y ] -> VBool (Float.equal x y)
-           | [ VBool x; VBool y ] -> VBool (Bool.equal x y)
-           | [ VString x; VString y ] -> VBool (String.equal x y)
-           | _ -> failwith "Operator '==' type mismatch or invalid argument count");
-    (* != operator *)
-    set_var env "!="
-    @@ VBuiltin
-         (function
-           | [ VInt x; VInt y ] -> VBool (x <> y)
-           | [ VFloat x; VFloat y ] -> VBool (not (Float.equal x y))
-           | [ VBool x; VBool y ] -> VBool (not (Bool.equal x y))
-           | [ VString x; VString y ] -> VBool (not (String.equal x y))
-           | _ -> failwith "Operator '!=' type mismatch or invalid argument count");
-    (* ────────────────────────────────────────────────────────────────────────── *)
-    ()
+    List.iter Builtin_spec.builtins ~f:(fun builtin ->
+      set_var env builtin.name (VBuiltin builtin.impl))
   ;;
   (* end of add_global_builtins body *)
 end

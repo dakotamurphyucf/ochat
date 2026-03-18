@@ -208,9 +208,6 @@ expr:
     | expr DOT LIDENT LPAREN expr_list RPAREN
 		    { mk_exprnode $startpos $endpos (EApp( mk_exprnode $startpos $endpos (EFieldGet($1, $3)),  $5)) }
 
-    (* record field set, e.g. expr.field <- expr *)
-    | expr DOT LIDENT LEFTARROW expr { mk_exprnode $startpos $endpos (EFieldSet($1, $3, $5)) }
-
     (* array literal *)
     | LBRACKET expr_list RBRACKET  { mk_exprnode $startpos $endpos (EArray(List.map (fun sn -> sn) $2)) }
 
