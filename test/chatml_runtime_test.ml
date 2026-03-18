@@ -1162,6 +1162,18 @@ let%expect_test "builtin modules smoke test" =
       let j2 = `Array([ `Number(1.25), `Number(2.5), `Bool(true), `Null, `String("x") ])
       print(Json.stringify(j2))
 
+      let j = Json.parse("{\"a\": {\"b\": [10, 20] }}")
+      print(Json.get_path(j, ["a", "b", "1"]))
+
+      print(Json.as_string(j))
+
+      print(Json.object_keys(j))
+      print(Json.get_field(j, "missing"))
+      let j = Json.parse("{\"a\":1,\"b\":2}") in
+      let j = Json.set_field(j, "b", `Number(99.0)) in
+      let j = Json.set_field(j, "c", `String("new")) in
+      let j = Json.remove_field(j, "a") in
+      print(Json.stringify(j))
 
 
     |}
@@ -1211,5 +1223,10 @@ let%expect_test "builtin modules smoke test" =
     == Json ==
     [1.,2.,3.]
     [1.25,2.5,true,null,"x"]
+    `Some(`Number(20.))
+    `None
+    [|a|]
+    `None
+    {"b":99.,"c":"new"}
     |}]
 ;;

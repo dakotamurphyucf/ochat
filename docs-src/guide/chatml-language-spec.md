@@ -1642,11 +1642,16 @@ Notes:
 - Hashtbl.get returns an option-like variant (\None/`Some`).
 - Current representation is optimized for simplicity rather than asymptotic performance.
 
-### 13.2.5 `Json` module
-The Json module provides a real recursive JSON value type at the ChatML level and conversion to/from JSON text. It is backed by the host-side `Jsonaf` library.
 
+### 13.2.5 `Json` module (updated)
 
-`Json.t` representation
+The `Json` module provides:
+
+- a real recursive JSON value type at the ChatML level (`Json.t`), and
+- conversion to/from JSON text via the host-side **Jsonaf** library.
+
+#### `Json.t` representation
+
 `Json.t` is represented as a recursive variant type equivalent to:
 
 ```ocaml
@@ -1658,24 +1663,66 @@ Json.t =
   | `Array(Json.t array)
   | `Object({ key : string; value : Json.t } array)
   ]
+(Internally this is introduced using an explicit recursive binder in the builtin type schemes; users do not write the binder directly.)
 ```
+  
+Exports:
+#### Text conversion:
 
-(Internally this is introduced using the builtin-spec recursive type binder; users do not write the binder directly.)
+- Json.parse : string -> Json.t
+Parses JSON text into a Json.t value. Raises a runtime failure on invalid JSON input.
+- Json.parse_opt : string -> [ \None | `Some(Json.t) ]
+Like parse, but returns `None` instead of raising on parse errors.
+- Json.stringify : Json.t -> string
+Produces a compact JSON string representation.
+- Json.pretty : Json.t -> string
+Produces a human-readable formatted JSON representation.
+- Json.validate : string -> bool
+Returns true iff the string parses as JSON.
+Introspection and shape-safe accessors:
 
-Exports
+- Json.tag : Json.t -> string
+Returns one of "Null", "Bool", "Number", "String", "Array", "Object".
 
-```ocaml
-Json.parse : string -> Json.t
-Json.stringify : Json.t -> string
-Json.pretty : Json.t -> string
-```
+- Json.as_bool : Json.t -> [ \None | `Some(bool) ]`
+
+- Json.as_number : Json.t -> [ \None | `Some(float) ]`
+
+- Json.as_string : Json.t -> [ \None | `Some(string) ]`
+
+- Json.as_array : Json.t -> [ \None | `Some(Json.t array) ]`
+
+- Json.as_object : Json.t -> [ \None | `Some({ key : string; value : Json.t } array) ]`
+
+Object helpers:
+
+- Json.object_keys : Json.t -> string array
+Returns an array of keys when given an object; returns an empty array on non-object values.
+- Json.get_field : Json.t -> string -> [ \None | `Some(Json.t) ]
+If the first argument is an object and the key exists, returns
+`Some(value); otherwise `None`.
+
+Path lookup:
+
+- Json.get_path : Json.t -> string array -> [ \None | `Some(Json.t) ]`
+Traverses the JSON value using a path of string segments:
+when the current value is an object, segments are treated as field names;
+when the current value is an array, segments are interpreted as integer indices (in decimal).
+Returns \None` if traversal fails at any point.
+Pure object update helpers:
+
+- Json.set_field : Json.t -> string -> Json.t -> Json.t
+Returns an updated object with the given field set to the new value.
+Raises a runtime failure if the first argument is not an object.
+- Json.remove_field : Json.t -> string -> Json.t
+Returns an updated object with all entries for the given key removed.
+Raises a runtime failure if the first argument is not an object.
 
 Notes:
+- Json.parse/Json.stringify/Json.pretty are backed by Jsonaf.
+- JSON numbers are surfaced as float in ChatML. Parsing converts Jsonaf’s numeric token text to float; stringifying renders the float back to JSON numeric text.
+- Option results use the standard variant encoding: `None and `Some(x).
 
-- `Json.parse` raises a runtime failure on invalid JSON input.
-- `Json.stringify` produces a compact JSON representation.
-- `Json.pretty` produces a human-readable formatted representation (as provided by Jsonaf).
--  `JSON numbers` are surfaced as float in ChatML. (When parsing, the underlying textual number is converted to float; when stringifying, floats are rendered back to strings.)
 
 ### 13.3 Interaction with open and shadowing
 open imports module exports into the current scope and rejects any import that would shadow an existing binding.

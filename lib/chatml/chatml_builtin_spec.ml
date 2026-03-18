@@ -323,6 +323,265 @@ let rec value_to_jsonaf (name : string) (v : value) : Jsonaf.t =
          name)
 ;;
 
+let option_of (t : ty) : ty = variant [ "None", TUnit; "Some", t ]
+let json_option_ty : ty = option_of json_ty
+
+let is_json_tag (tag : string) : bool =
+  match tag with
+  | "Null" | "Bool" | "Number" | "String" | "Array" | "Object" -> true
+  | _ -> false
+;;
+
+let expect_json (name : string) (v : value) : value =
+  match v with
+  | VVariant (tag, _payload) when is_json_tag tag -> v
+  | _ ->
+    failwith
+      (Printf.sprintf
+         "%s: expected Json.t (`Null/`Bool/`Number/`String/`Array/`Object)"
+         name)
+;;
+
+let json_entries_payload (name : string) (v : value) : value array option =
+  match expect_json name v with
+  | VVariant ("Object", [ VArray entries ]) -> Some entries
+  | _ -> None
+;;
+
+let json_array_payload (name : string) (v : value) : value array option =
+  match expect_json name v with
+  | VVariant ("Array", [ VArray arr ]) -> Some arr
+  | _ -> None
+;;
+
+let json_object_find_field (entries : value array) (key : string) : value option =
+  let rec loop i =
+    if i >= Array.length entries
+    then None
+    else (
+      match entries.(i) with
+      | VRecord m ->
+        (match Map.find m "key", Map.find m "value" with
+         | Some (VString k), Some v when String.equal k key -> Some v
+         | _ -> loop (i + 1))
+      | _ -> loop (i + 1))
+  in
+  loop 0
+;;
+
+let mk_json_entry (key : string) (value : value) : value =
+  VRecord (Map.of_alist_exn (module String) [ "key", VString key; "value", value ])
+;;
+
+let json_module =
+  { name = "Json"
+  ; exports =
+      [ (* existing: parse/stringify/pretty *)
+        make_unary_builtin
+          "parse"
+          (TFun ([ TString ], json_ty))
+          (fun v ->
+             let s = expect_string "Json.parse" v in
+             try jsonaf_to_value (Jsonaf.of_string s) with
+             | exn -> failwith (Printf.sprintf "Json.parse: %s" (Exn.to_string exn)))
+      ; make_unary_builtin
+          "stringify"
+          (TFun ([ json_ty ], TString))
+          (fun v ->
+             let v = expect_json "Json.stringify" v in
+             VString (Jsonaf.to_string (value_to_jsonaf "Json.stringify" v)))
+      ; make_unary_builtin
+          "pretty"
+          (TFun ([ json_ty ], TString))
+          (fun v ->
+             let v = expect_json "Json.pretty" v in
+             VString (Jsonaf.to_string_hum (value_to_jsonaf "Json.pretty" v)))
+        (* new: parse_opt / validate *)
+      ; make_unary_builtin
+          "parse_opt"
+          (TFun ([ TString ], json_option_ty))
+          (fun v ->
+             let s = expect_string "Json.parse_opt" v in
+             try VVariant ("Some", [ jsonaf_to_value (Jsonaf.of_string s) ]) with
+             | _ -> VVariant ("None", []))
+      ; make_unary_builtin
+          "validate"
+          (TFun ([ TString ], TBool))
+          (fun v ->
+             let s = expect_string "Json.validate" v in
+             try
+               ignore (Jsonaf.of_string s);
+               VBool true
+             with
+             | _ -> VBool false)
+        (* new: tag *)
+      ; make_unary_builtin
+          "tag"
+          (TFun ([ json_ty ], TString))
+          (fun v ->
+             match expect_json "Json.tag" v with
+             | VVariant (tag, _payload) -> VString tag
+             | _ -> assert false)
+        (* new: as_* accessors *)
+      ; make_unary_builtin
+          "as_bool"
+          (TFun ([ json_ty ], option_of TBool))
+          (fun v ->
+             match expect_json "Json.as_bool" v with
+             | VVariant ("Bool", [ VBool b ]) -> VVariant ("Some", [ VBool b ])
+             | _ -> VVariant ("None", []))
+      ; make_unary_builtin
+          "as_number"
+          (TFun ([ json_ty ], option_of TFloat))
+          (fun v ->
+             match expect_json "Json.as_number" v with
+             | VVariant ("Number", [ VFloat f ]) -> VVariant ("Some", [ VFloat f ])
+             | _ -> VVariant ("None", []))
+      ; make_unary_builtin
+          "as_string"
+          (TFun ([ json_ty ], option_of TString))
+          (fun v ->
+             match expect_json "Json.as_string" v with
+             | VVariant ("String", [ VString s ]) -> VVariant ("Some", [ VString s ])
+             | _ -> VVariant ("None", []))
+      ; make_unary_builtin
+          "as_array"
+          (TFun ([ json_ty ], option_of (TArray json_ty)))
+          (fun v ->
+             match json_array_payload "Json.as_array" v with
+             | Some arr -> VVariant ("Some", [ VArray arr ])
+             | None -> VVariant ("None", []))
+      ; make_unary_builtin
+          "as_object"
+          (TFun ([ json_ty ], option_of (TArray (json_entry_ty json_ty))))
+          (fun v ->
+             match json_entries_payload "Json.as_object" v with
+             | Some entries -> VVariant ("Some", [ VArray entries ])
+             | None -> VVariant ("None", []))
+        (* new: object helpers *)
+      ; make_unary_builtin
+          "object_keys"
+          (TFun ([ json_ty ], TArray TString))
+          (fun v ->
+             match json_entries_payload "Json.object_keys" v with
+             | None -> VArray [||]
+             | Some entries ->
+               let keys =
+                 entries
+                 |> Array.to_list
+                 |> List.filter_map ~f:(function
+                   | VRecord m ->
+                     (match Map.find m "key" with
+                      | Some (VString k) -> Some (VString k)
+                      | _ -> None)
+                   | _ -> None)
+                 |> Array.of_list
+               in
+               VArray keys)
+      ; make_binary_builtin
+          "get_field"
+          (TFun ([ json_ty; TString ], json_option_ty))
+          (fun obj key ->
+             let key = expect_string "Json.get_field" key in
+             match json_entries_payload "Json.get_field" obj with
+             | None -> VVariant ("None", [])
+             | Some entries ->
+               (match json_object_find_field entries key with
+                | None -> VVariant ("None", [])
+                | Some v -> VVariant ("Some", [ v ])))
+        (* new: get_path (string segments; supports numeric segments when current is `Array) *)
+      ; make_binary_builtin
+          "get_path"
+          (TFun ([ json_ty; TArray TString ], json_option_ty))
+          (fun root path ->
+             let path_arr =
+               expect_array "Json.get_path" path
+               |> Array.map ~f:(fun v ->
+                 match v with
+                 | VString s -> s
+                 | _ -> failwith "Json.get_path: path must be a string array")
+             in
+             let rec step (cur : value) (i : int) : value option =
+               if i >= Array.length path_arr
+               then Some cur
+               else (
+                 let seg = path_arr.(i) in
+                 match expect_json "Json.get_path" cur with
+                 | VVariant ("Object", [ VArray entries ]) ->
+                   (match json_object_find_field entries seg with
+                    | None -> None
+                    | Some next -> step next (i + 1))
+                 | VVariant ("Array", [ VArray arr ]) ->
+                   (match Int.of_string_opt seg with
+                    | None -> None
+                    | Some idx ->
+                      if idx < 0 || idx >= Array.length arr
+                      then None
+                      else step arr.(idx) (i + 1))
+                 | _ -> None)
+             in
+             match step root 0 with
+             | None -> VVariant ("None", [])
+             | Some v -> VVariant ("Some", [ v ]))
+      ; (* set_field : Json.t -> string -> Json.t -> Json.t *)
+        make_ternary_builtin
+          "set_field"
+          (TFun ([ json_ty; TString; json_ty ], json_ty))
+          (fun obj key new_value ->
+             let key = expect_string "Json.set_field" key in
+             let new_value = expect_json "Json.set_field" new_value in
+             match json_entries_payload "Json.set_field" obj with
+             | None -> failwith "Json.set_field: expected `Object(...)"
+             | Some entries ->
+               (* Replace first occurrence in-place, drop duplicates, preserve order.
+           If key not found, append at end. *)
+               let found = ref false in
+               let out_rev =
+                 entries
+                 |> Array.to_list
+                 |> List.fold ~init:[] ~f:(fun acc entry ->
+                   match entry with
+                   | VRecord m ->
+                     (match Map.find m "key" with
+                      | Some (VString k) when String.equal k key ->
+                        if !found
+                        then acc (* drop duplicates *)
+                        else (
+                          found := true;
+                          mk_json_entry key new_value :: acc)
+                      | _ -> entry :: acc)
+                   | _ -> entry :: acc)
+               in
+               let out =
+                 let out = List.rev out_rev in
+                 if !found then out else out @ [ mk_json_entry key new_value ]
+               in
+               VVariant ("Object", [ VArray (Array.of_list out) ]))
+      ; (* remove_field : Json.t -> string -> Json.t *)
+        make_binary_builtin
+          "remove_field"
+          (TFun ([ json_ty; TString ], json_ty))
+          (fun obj key ->
+             let key = expect_string "Json.remove_field" key in
+             match json_entries_payload "Json.remove_field" obj with
+             | None -> failwith "Json.remove_field: expected `Object(...)"
+             | Some entries ->
+               let kept =
+                 entries
+                 |> Array.to_list
+                 |> List.filter ~f:(function
+                   | VRecord m ->
+                     (match Map.find m "key" with
+                      | Some (VString k) -> not (String.equal k key)
+                      | _ -> true)
+                   | _ -> true)
+                 |> Array.of_list
+               in
+               VVariant ("Object", [ VArray kept ]))
+      ]
+  }
+;;
+
 let entry_ty a = record [ "key", TString; "value", TVar a ]
 let tbl_ty a = TRef (TArray (entry_ty a))
 let string_option_int_ty : ty = variant [ "None", TUnit; "Some", TInt ]
@@ -692,6 +951,7 @@ let array_module : builtin_module =
 let modules : builtin_module list =
   [ string_module
   ; array_module
+  ; json_module
   ; { name = "Option"
     ; exports =
         [ make_nullary_builtin
@@ -828,25 +1088,6 @@ let modules : builtin_module list =
                in
                cell := VArray kept;
                VUnit)
-        ]
-    }
-  ; { name = "Json"
-    ; exports =
-        [ make_unary_builtin
-            "parse"
-            (TFun ([ TString ], json_ty))
-            (fun v ->
-               let s = expect_string "Json.parse" v in
-               try jsonaf_to_value (Jsonaf.of_string s) with
-               | exn -> failwith (Printf.sprintf "Json.parse: %s" (Exn.to_string exn)))
-        ; make_unary_builtin
-            "stringify"
-            (TFun ([ json_ty ], TString))
-            (fun v -> VString (Jsonaf.to_string (value_to_jsonaf "Json.stringify" v)))
-        ; make_unary_builtin
-            "pretty"
-            (TFun ([ json_ty ], TString))
-            (fun v -> VString (Jsonaf.to_string_hum (value_to_jsonaf "Json.pretty" v)))
         ]
     }
   ]
