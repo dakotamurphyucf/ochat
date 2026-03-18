@@ -246,6 +246,7 @@ pattern_case:
        } }
 
 pattern:
+    | LPAREN RPAREN    { PUnit }
     | UNDERSCORE      { PWildcard }
     | INT             { PInt $1 }
     | FLOAT           { PFloat $1 }
@@ -270,6 +271,9 @@ opt_row_tail:
 
 pattern_field_decls:
     pattern_field_decl opt_row_tail { [$1], $2 }
+  | pattern_field_decl SEMI { [$1], false }
+  | pattern_field_decl SEMI UNDERSCORE { [$1], true }
+  | pattern_field_decl SEMI UNDERSCORE SEMI { [$1], true }
   | pattern_field_decl SEMI pattern_field_decls { $1 :: (fst $3), (snd $3) }
 
 pattern_field_decl:
@@ -294,6 +298,7 @@ field_list:
 
 field_decls:
     field_decl { [$1] }
+| field_decl SEMI { [$1] }
 | field_decl SEMI field_decls { $1 :: $3 }
 
 field_decl:

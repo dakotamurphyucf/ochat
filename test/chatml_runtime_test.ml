@@ -314,6 +314,48 @@ let%expect_test "recursive zero-argument function bindings parse and run" =
 |}]
 ;;
 
+let%expect_test "unit pattern matches unit values" =
+  let code =
+    {|
+      match () with
+      | () -> print("unit")
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+unit 
+|}]
+;;
+
+let%expect_test "record literals allow trailing semicolons" =
+  let code =
+    {|
+      let r = { x = 1; y = 2; }
+      print(r.x + r.y)
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+3 
+|}]
+;;
+
+let%expect_test "record patterns allow trailing semicolons" =
+  let code =
+    {|
+      match { x = 1; y = 2; } with
+      | { x = x; y = y; } -> print(x + y)
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+3 
+|}]
+;;
+
 let%expect_test "runtime closure arity mismatch is reported clearly" =
   let env = L.create_env () in
   let slot = Frame_env.Slot Frame_env.SInt in

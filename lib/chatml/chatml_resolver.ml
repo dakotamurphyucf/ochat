@@ -311,6 +311,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     (* Helper: collect (var, slot) list in deterministic order *)
     let rec slots_of_pattern pat ty_opt =
       match pat with
+      | L.PUnit -> []
       | L.PVar x ->
         let slot =
           match ty_opt with

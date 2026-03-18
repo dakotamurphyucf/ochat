@@ -706,7 +706,7 @@ and validate_unique_record_labels_in_pattern
   : unit
   =
   let rec loop = function
-    | PWildcard | PVar _ | PInt _ | PBool _ | PFloat _ | PString _ -> ()
+    | PUnit | PWildcard | PVar _ | PInt _ | PBool _ | PFloat _ | PString _ -> ()
     | PVariant (_tag, subpats) -> List.iter subpats ~f:loop
     | PRecord (fields, _is_open) ->
       validate_unique_labels
@@ -768,6 +768,10 @@ and show_missing_variant_case (tag : string) (payload_ty : typ) : string =
 
 and pattern_totally_covers_type (pat : pattern) (expected_ty : typ) : bool =
   match pat with
+  | PUnit -> (
+    match resolve_bound_type expected_ty with
+    | Unit -> true
+    | _ -> false)
   | PWildcard | PVar _ -> true
   | PRecord (fields, is_open) ->
     let subpatterns_cover_all =
@@ -815,6 +819,7 @@ and is_closed_variant_tail (tail_ty : typ) : bool =
 
 and show_pattern_brief (pat : pattern) : string =
   match pat with
+  | PUnit -> "()"
   | PWildcard -> "_"
   | PVar x -> x
   | PInt i -> Int.to_string i
@@ -827,6 +832,7 @@ and show_pattern_brief (pat : pattern) : string =
 
 and simple_pattern_key_of_pattern (pat : pattern) : (string * string) option =
   match pat with
+  | PUnit -> Some ("unit:()", "()")
   | PInt i -> Some ("int:" ^ Int.to_string i, Int.to_string i)
   | PBool b -> Some ("bool:" ^ Bool.to_string b, Bool.to_string b)
   | PFloat f ->
@@ -889,6 +895,20 @@ and validate_boolean_match_exhaustiveness (scrut_ty : typ) (patterns : pattern l
 
 and validate_typed_match_redundancy (scrut_ty : typ) (cases : (pattern * Source.span) list) : unit =
   match resolve_bound_type scrut_ty with
+  | Unit ->
+    let seen_unit = ref false in
+    List.iter cases ~f:(fun (pat, pat_span) ->
+      if is_catch_all_pattern pat && !seen_unit
+      then
+        raise
+          (Type_error_with_loc
+             (Printf.sprintf
+                "Redundant match arm '%s': previous arms already cover unit case '()'"
+                (show_pattern_brief pat),
+              pat_span));
+      match pat with
+      | PUnit -> seen_unit := true
+      | _ -> ())
   | Boolean ->
     let seen_true = ref false in
     let seen_false = ref false in
@@ -974,6 +994,10 @@ and validate_match_exhaustiveness
     | TInt -> raise (Type_error "Non-exhaustive match on int: add '_' arm")
     | TFloat -> raise (Type_error "Non-exhaustive match on float: add '_' arm")
     | Number -> raise (Type_error "Non-exhaustive match on number: add '_' arm")
+    | Unit ->
+      if List.exists patterns ~f:(function PUnit -> true | _ -> false)
+      then ()
+      else raise (Type_error "Non-exhaustive match on unit: missing case '()'")
     | String -> raise (Type_error "Non-exhaustive match on string: add '_' arm")
     | Record _ ->
       if List.exists patterns ~f:(fun pat -> pattern_totally_covers_type pat scrut_ty)
@@ -985,6 +1009,9 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
   : tenv
   =
   match pat with
+  | PUnit ->
+    unify state expected_ty Unit;
+    env
   | PWildcard -> env
   | PVar x -> add_mono env x expected_ty
   | PInt _ ->

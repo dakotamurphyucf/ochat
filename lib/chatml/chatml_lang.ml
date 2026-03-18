@@ -38,6 +38,7 @@ type 'a node =
 [@@deriving sexp]
 
 type pattern =
+  | PUnit
   | PWildcard
   | PVar of string
   | PInt of int
@@ -246,6 +247,7 @@ let set_var (e : env) (x : string) (v : value) : unit = Hashtbl.set e ~key:x ~da
 
 let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
   match p, v with
+  | PUnit, VUnit -> Some []
   | PWildcard, _ -> Some []
   | PVar x, _ -> Some [ x, v ]
   | PInt i, VInt j when i = j -> Some []
@@ -295,6 +297,7 @@ let rec match_pattern (v : value) (p : pattern) : (string * value) list option =
 let collect_pattern_vars (pat : pattern) : string list =
   let rec aux acc p =
     match p with
+    | PUnit -> acc
     | PVar x -> x :: acc
     | PWildcard | PInt _ | PBool _ | PFloat _ | PString _ -> acc
     | PVariant (_, ps) -> List.fold ps ~init:acc ~f:aux
