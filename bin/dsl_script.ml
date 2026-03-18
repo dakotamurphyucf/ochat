@@ -31,9 +31,13 @@ open Chatml_builtin_modules
       contained in [src].
 
       @raise Failure if the parser encounters a syntax error *)
-let parse (str : string) =
+let parse (str : string) : Chatml_lang.program =
   let lexbuf = Lexing.from_string str in
-  try Chatml_parser.program Chatml_lexer.token lexbuf, str with
+  try
+    { Chatml_lang.stmts = Chatml_parser.program Chatml_lexer.token lexbuf
+    ; source_text = str
+    }
+  with
   | Chatml_parser.Error -> failwith "Parse error"
 ;;
 
