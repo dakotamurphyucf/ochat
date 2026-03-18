@@ -91,9 +91,10 @@ let lookup (stack : frame_map list) (name : string) : L.var_loc option =
 (* -------------------------------------------------------------------- *)
 
 (* The resolver needs to query the principal type of sub-expressions in
-   order to choose an efficient slot descriptor.  Instead of peeking into
-   the type-checker’s *global* hash-table we now capture a *pure lookup
-   closure* produced by [Chatml_typechecker.type_lookup_for_program].
+   order to choose an efficient slot descriptor.  In production this
+   information now comes exclusively from a successful
+   [Chatml_typechecker.check_program] run, via the pure lookup closure
+   returned by [Chatml_typechecker.checked_lookup_span_type].
    Keeping it in an [option ref] allows us to thread the function through
    the mutually-recursive [resolve_*] helpers without changing every
    signature. *)
@@ -102,7 +103,7 @@ let type_lookup_ref : (Source.span -> Chatml_typechecker.typ option) option ref 
 
 let lookup_type span =
   match !type_lookup_ref with
-  | None -> None
+  | None -> failwith "internal: resolver used without checked type information"
   | Some f -> f span
 ;;
 
@@ -143,18 +144,6 @@ let choose_slot (rhs_node : L.expr L.node) : Frame_env.packed_slot =
   match lookup_type rhs_node.span with
   | Some typ -> slot_of_typ typ
   | None -> fallback_slot_of_expr rhs_node.value
-;;
-
-let collect_pattern_vars (pat : L.pattern) : string list =
-  let rec aux acc p =
-    match p with
-    | L.PVar x -> x :: acc
-    | L.PWildcard | L.PInt _ | L.PBool _ | L.PFloat _ | L.PString _ -> acc
-    | L.PVariant (_, ps) -> List.fold ps ~init:acc ~f:aux
-    | L.PRecord (fields, _open) ->
-      List.fold fields ~init:acc ~f:(fun ac (_, p) -> aux ac p)
-  in
-  List.rev (aux [] pat)
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -382,7 +371,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     let scrut' = resolve_expr stack scrut in
     let cases' =
       List.map cases ~f:(fun (pat, slots, rhs) ->
-        let vars = collect_pattern_vars pat in
+        let vars = L.collect_pattern_vars pat in
         let fm = Hashtbl.create (module String) in
         List.iteri vars ~f:(fun idx vnm ->
           let slot = List.nth_exn slots idx in

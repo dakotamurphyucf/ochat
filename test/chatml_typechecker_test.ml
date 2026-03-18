@@ -14,6 +14,12 @@ let check_program_result (code : string) =
   Chatml_typechecker.check_program prog
 ;;
 
+let check_program_formatted (code : string) =
+  match check_program_result code with
+  | Ok _ -> "ok"
+  | Error diagnostic -> Chatml_typechecker.format_diagnostic code diagnostic
+;;
+
 let%expect_test "variant with tuple args" =
   let code =
     {|    
@@ -519,6 +525,363 @@ let%test_unit "open inside module does not re-export imported names" =
   match check_program_result code with
   | Ok _ -> failwith "expected opened names inside module to stay unexported"
   | Error _ -> ()
+;;
+
+let%test_unit "duplicate binder in variant pattern is rejected" =
+  let code =
+    {|
+      let v = `Pair(1, 2) in
+      match v with
+      | `Pair(x, x) -> x
+      | _ -> 0
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected duplicate binder in pattern to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "duplicate binder across record pattern fields is rejected" =
+  let code =
+    {|
+      let r = {left = 1; right = 2} in
+      match r with
+      | {left = x; right = x} -> x
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected duplicate record-pattern binder to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "catch-all match arm makes later arms redundant" =
+  let code =
+    {|
+      match 1 with
+      | _ -> 0
+      | 1 -> 1
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected arm after wildcard to be rejected as redundant"
+  | Error _ -> ()
+;;
+
+let%test_unit "variable match arm makes later arms redundant" =
+  let code =
+    {|
+      match 1 with
+      | x -> x
+      | 1 -> 0
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected arm after variable pattern to be rejected as redundant"
+  | Error _ -> ()
+;;
+
+let%test_unit "duplicate int match arm is rejected" =
+  let code =
+    {|
+      match 1 with
+      | 0 -> 0
+      | 0 -> 1
+      | _ -> 2
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected duplicate int arm to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "duplicate bool match arm is rejected" =
+  let code =
+    {|
+      match true with
+      | true -> 1
+      | true -> 2
+      | false -> 0
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected duplicate bool arm to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "duplicate string match arm is rejected" =
+  let code =
+    {|
+      match "a" with
+      | "a" -> 1
+      | "a" -> 2
+      | _ -> 0
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected duplicate string arm to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "duplicate nullary variant match arm is rejected" =
+  let code =
+    {|
+      match `None with
+      | `None -> 0
+      | `None -> 1
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected duplicate nullary variant arm to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "boolean match must be exhaustive" =
+  let code =
+    {|
+      match true with
+      | true -> 1
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected non-exhaustive boolean match to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "boolean match with both arms is accepted" =
+  let code =
+    {|
+      match true with
+      | true -> 1
+      | false -> 0
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> ()
+  | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let%test_unit "boolean match with catch-all is accepted" =
+  let code =
+    {|
+      match true with
+      | true -> 1
+      | _ -> 0
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> ()
+  | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let%test_unit "variant exhaustiveness is still intentionally partial" =
+  let code =
+    {|
+      match `Some(1) with
+      | `Some(x) -> x
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> ()
+  | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let%test_unit "duplicate int arm diagnostic names offending pattern" =
+  let code =
+    {|
+      match 1 with
+      | 0 -> 0
+      | 0 -> 1
+      | _ -> 2
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if not (String.is_substring rendered ~substring:"Duplicate match arm for pattern '0'")
+  then failwith rendered
+;;
+
+let%test_unit "redundant arm diagnostic names current and catch-all patterns" =
+  let code =
+    {|
+      match 1 with
+      | _ -> 0
+      | 1 -> 1
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring
+         rendered
+         ~substring:"Redundant match arm '1': previous catch-all pattern '_' already matches all cases")
+  then failwith rendered
+;;
+
+let%test_unit "boolean diagnostic reports missing false case" =
+  let code =
+    {|
+      match true with
+      | true -> 1
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring
+         rendered
+         ~substring:"Non-exhaustive boolean match: missing case 'false'")
+  then failwith rendered
+;;
+
+let%test_unit "boolean diagnostic reports missing true case" =
+  let code =
+    {|
+      match false with
+      | false -> 0
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring rendered ~substring:"Non-exhaustive boolean match: missing case 'true'")
+  then failwith rendered
+;;
+
+let%test_unit "duplicate nullary variant diagnostic names offending constructor" =
+  let code =
+    {|
+      match `None with
+      | `None -> 0
+      | `None -> 1
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring rendered ~substring:"Duplicate match arm for pattern '`None'")
+  then failwith rendered
+;;
+
+let%test_unit "variant match closes function parameter constructor set" =
+  let code =
+    {|
+      let f v =
+        match v with
+        | `Some(x) -> x
+
+      f(`Some(1))
+      f(`None)
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected variant match to reject constructors outside the matched set"
+  | Error _ -> ()
+;;
+
+let%test_unit "two-constructor variant match is exhaustive without wildcard" =
+  let code =
+    {|
+      let f v =
+        match v with
+        | `None -> 0
+        | `Some(x) -> x
+
+      f(`Some(1))
+      f(`None)
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> ()
+  | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let%test_unit "variant exhaustiveness reports missing constructor payload wildcard" =
+  let code =
+    {|
+      match `Some(1) with
+      | `Some(1) -> 1
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring
+         rendered
+         ~substring:"Non-exhaustive variant match: missing case '`Some(_)'")
+  then failwith rendered
+;;
+
+let%test_unit "int match without wildcard reports fallback requirement" =
+  let code =
+    {|
+      match 1 with
+      | 0 -> 0
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring rendered ~substring:"Non-exhaustive match on int: add '_' arm")
+  then failwith rendered
+;;
+
+let%test_unit "variant wildcard arm is redundant after all constructors are covered" =
+  let code =
+    {|
+      let f v =
+        match v with
+        | `None -> 0
+        | `Some(x) -> x
+        | _ -> 2
+
+      f(`Some(1))
+      f(`None)
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring
+         rendered
+         ~substring:"Redundant match arm '_': previous arms already cover all variant constructors")
+  then failwith rendered
+;;
+
+let%test_unit "variant constructor arm is redundant after earlier payload wildcard" =
+  let code =
+    {|
+      let f v =
+        match v with
+        | `Some(x) -> x
+        | `Some(1) -> 1
+
+      f(`Some(1))
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring
+         rendered
+         ~substring:"Redundant match arm '`Some(...)': previous arms already cover variant case '`Some(_)'")
+  then failwith rendered
+;;
+
+let%test_unit "boolean wildcard arm is redundant after both literals are covered" =
+  let code =
+    {|
+      match true with
+      | true -> 1
+      | false -> 0
+      | _ -> 2
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring
+         rendered
+         ~substring:"Redundant match arm '_': previous arms already cover boolean cases 'true' and 'false'")
+  then failwith rendered
 ;;
 
 (* ------------------------------------------------------------------ *)

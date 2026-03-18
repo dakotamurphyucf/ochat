@@ -462,8 +462,7 @@ type tenv = scheme Env.t
 let rec contains_generic (ty : typ) : bool =
   match ty with
   | Generic _ -> true
-  | Fun (params, ret) ->
-    List.exists params ~f:contains_generic || contains_generic ret
+  | Fun (params, ret) -> List.exists params ~f:contains_generic || contains_generic ret
   | Var { contents = Bound t } -> contains_generic t
   | Var { contents = Free _ } -> false
   | Ref t | Record t | Variant t | Array t -> contains_generic t
@@ -497,10 +496,7 @@ let init_env () : tenv =
    returned as-is so that all uses share the same mutable inference variables. *)
 let lookup (state : infer_state) (env : tenv) x =
   match Env.find env x with
-  | Some sc ->
-    if contains_generic sc
-    then instantiate state sc
-    else sc
+  | Some sc -> if contains_generic sc then instantiate state sc else sc
   | None -> raise (Type_error (Printf.sprintf "Unknown variable '%s'" x))
 ;;
 
@@ -526,8 +522,10 @@ let rec is_non_expansive (expr : expr) : bool =
   | EVarLoc _
   | ELambda _
   | ELambdaSlots _ -> true
-  | ERecord fields -> List.for_all fields ~f:(fun (_lbl, expr_node) -> is_non_expansive expr_node.value)
-  | EVariant (_tag, exprs) -> List.for_all exprs ~f:(fun expr_node -> is_non_expansive expr_node.value)
+  | ERecord fields ->
+    List.for_all fields ~f:(fun (_lbl, expr_node) -> is_non_expansive expr_node.value)
+  | EVariant (_tag, exprs) ->
+    List.for_all exprs ~f:(fun expr_node -> is_non_expansive expr_node.value)
   | EApp _
   | EIf _
   | EWhile _
@@ -648,6 +646,263 @@ and infer_record_extend
       Env.add key data acc)
   in
   Record (Row (result_fields, result_tail))
+
+and validate_pattern_binders (pat : pattern) : unit =
+  let seen = Hash_set.create (module String) in
+  let duplicate =
+    collect_pattern_vars pat
+    |> List.find ~f:(fun name ->
+      if Hash_set.mem seen name
+      then true
+      else (
+        Hash_set.add seen name;
+        false))
+  in
+  match duplicate with
+  | None -> ()
+  | Some name -> raise (Type_error (Printf.sprintf "Duplicate pattern binder '%s'" name))
+
+and is_catch_all_pattern (pat : pattern) : bool =
+  match pat with
+  | PWildcard | PVar _ -> true
+  | _ -> false
+
+and record_field_type (row_ty : typ) (label : string) : typ option =
+  match resolve_bound_type row_ty with
+  | Record row -> record_field_type row label
+  | Row (fields, tail) ->
+    (match Env.find fields label with
+     | Some ty -> Some ty
+     | None -> record_field_type tail label)
+  | _ -> None
+
+and is_closed_record_row (row_ty : typ) : bool =
+  match resolve_bound_type row_ty with
+  | Record row -> is_closed_record_row row
+  | Row (_fields, tail) -> is_closed_record_row tail
+  | Empty_row -> true
+  | _ -> false
+
+and payload_component_types (payload_ty : typ) : typ list =
+  match resolve_bound_type payload_ty with
+  | Unit -> []
+  | Tuple ts -> ts
+  | ty -> [ ty ]
+
+and show_missing_variant_case (tag : string) (payload_ty : typ) : string =
+  match payload_component_types payload_ty with
+  | [] -> Printf.sprintf "`%s" tag
+  | components ->
+    let placeholders = List.map components ~f:(fun _ -> "_") |> String.concat ~sep:", " in
+    Printf.sprintf "`%s(%s)" tag placeholders
+
+and pattern_totally_covers_type (pat : pattern) (expected_ty : typ) : bool =
+  match pat with
+  | PWildcard | PVar _ -> true
+  | PRecord (fields, is_open) ->
+    let subpatterns_cover_all =
+      List.for_all fields ~f:(fun (label, subpat) ->
+        match record_field_type expected_ty label with
+        | Some field_ty -> pattern_totally_covers_type subpat field_ty
+        | None -> false)
+    in
+    if not subpatterns_cover_all
+    then false
+    else if is_open
+    then true
+    else (
+      match resolve_bound_type expected_ty with
+      | Record row ->
+        let row_fields, _tail = merge_fields row in
+        let field_names = List.map fields ~f:fst |> String.Set.of_list in
+        Set.equal field_names (Env.bindings row_fields |> List.map ~f:fst |> String.Set.of_list)
+        && is_closed_record_row row
+      | _ -> false)
+  | _ -> false
+
+and variant_constructor_info
+      (variant_ty : typ)
+  : ((string * typ) list * typ) option
+  =
+  match resolve_bound_type variant_ty with
+  | Variant row ->
+    let fields, tail = merge_fields row in
+    Some (Env.bindings fields, tail)
+  | _ -> None
+
+and pattern_fully_covers_variant_case (pat : pattern) ~(tag : string) ~(payload_ty : typ) : bool =
+  match pat with
+  | PVariant (tag', subpats) when String.equal tag tag' ->
+    let payload_tys = payload_component_types payload_ty in
+    List.length subpats = List.length payload_tys
+    && List.for_all2_exn subpats payload_tys ~f:pattern_totally_covers_type
+  | _ -> false
+
+and is_closed_variant_tail (tail_ty : typ) : bool =
+  match resolve_bound_type tail_ty with
+  | Empty_row -> true
+  | _ -> false
+
+and show_pattern_brief (pat : pattern) : string =
+  match pat with
+  | PWildcard -> "_"
+  | PVar x -> x
+  | PInt i -> Int.to_string i
+  | PBool b -> Bool.to_string b
+  | PFloat f -> Float.to_string f
+  | PString s -> Printf.sprintf "%S" s
+  | PVariant (tag, []) -> Printf.sprintf "`%s" tag
+  | PVariant (tag, _subpats) -> Printf.sprintf "`%s(...)" tag
+  | PRecord _ -> "{...}"
+
+and simple_pattern_key_of_pattern (pat : pattern) : (string * string) option =
+  match pat with
+  | PInt i -> Some ("int:" ^ Int.to_string i, Int.to_string i)
+  | PBool b -> Some ("bool:" ^ Bool.to_string b, Bool.to_string b)
+  | PFloat f ->
+    let rendered = Float.to_string f in
+    Some ("float:" ^ rendered, rendered)
+  | PString s -> Some ("string:" ^ s, Printf.sprintf "%S" s)
+  | PVariant (tag, []) -> Some ("variant:" ^ tag, Printf.sprintf "`%s" tag)
+  | _ -> None
+
+and validate_match_case_shapes (patterns : pattern list) : unit =
+  let seen_simple_patterns = Hash_set.create (module String) in
+  let rec loop catch_all_pat pats =
+    match pats with
+    | [] -> ()
+    | pat :: tl ->
+      (match catch_all_pat with
+       | Some prev_pat ->
+         raise
+           (Type_error
+              (Printf.sprintf
+                 "Redundant match arm '%s': previous catch-all pattern '%s' already \
+                  matches all cases"
+                 (show_pattern_brief pat)
+                 (show_pattern_brief prev_pat)))
+       | None -> ());
+      (match simple_pattern_key_of_pattern pat with
+       | Some (key, display) ->
+         if Hash_set.mem seen_simple_patterns key
+         then
+           raise
+             (Type_error
+                (Printf.sprintf "Duplicate match arm for pattern '%s'" display))
+         else Hash_set.add seen_simple_patterns key
+       | None -> ());
+      let next_catch_all_pat = if is_catch_all_pattern pat then Some pat else None in
+      loop next_catch_all_pat tl
+  in
+  loop None patterns
+
+and validate_boolean_match_exhaustiveness (scrut_ty : typ) (patterns : pattern list) : unit =
+  match resolve_bound_type scrut_ty with
+  | Boolean ->
+    let has_catch_all = List.exists patterns ~f:is_catch_all_pattern in
+    if not has_catch_all
+    then (
+      let seen_true = List.exists patterns ~f:(function PBool true -> true | _ -> false) in
+      let seen_false = List.exists patterns ~f:(function PBool false -> true | _ -> false) in
+      (match seen_true, seen_false with
+       | true, true -> ()
+       | true, false ->
+         raise (Type_error "Non-exhaustive boolean match: missing case 'false'")
+       | false, true ->
+         raise (Type_error "Non-exhaustive boolean match: missing case 'true'")
+       | false, false ->
+         raise
+           (Type_error
+              "Non-exhaustive boolean match: missing cases 'true' and 'false'")))
+  | _ -> ()
+
+and validate_typed_match_redundancy (scrut_ty : typ) (patterns : pattern list) : unit =
+  match resolve_bound_type scrut_ty with
+  | Boolean ->
+    let seen_true = ref false in
+    let seen_false = ref false in
+    List.iter patterns ~f:(fun pat ->
+      if is_catch_all_pattern pat && !seen_true && !seen_false
+      then
+        raise
+          (Type_error
+             (Printf.sprintf
+                "Redundant match arm '%s': previous arms already cover boolean cases 'true' \
+                 and 'false'"
+                (show_pattern_brief pat)));
+      (match pat with
+       | PBool true -> seen_true := true
+       | PBool false -> seen_false := true
+       | _ -> ()))
+  | Variant _ ->
+    (match variant_constructor_info scrut_ty with
+     | None -> ()
+     | Some (constructors, tail) ->
+       let covered_tags = Hash_set.create (module String) in
+       let payload_by_tag =
+         String.Map.of_alist_exn constructors
+       in
+       let all_known_tags_covered () =
+         List.for_all constructors ~f:(fun (tag, _payload_ty) -> Hash_set.mem covered_tags tag)
+       in
+       let closed_tail = is_closed_variant_tail tail in
+       List.iter patterns ~f:(fun pat ->
+         (match pat with
+          | PVariant (tag, _subpats) when Hash_set.mem covered_tags tag ->
+            let covered_payload = Map.find_exn payload_by_tag tag in
+            raise
+              (Type_error
+                 (Printf.sprintf
+                    "Redundant match arm '%s': previous arms already cover variant case '%s'"
+                    (show_pattern_brief pat)
+                    (show_missing_variant_case tag covered_payload)))
+          | _ when is_catch_all_pattern pat && closed_tail && all_known_tags_covered () ->
+            raise
+              (Type_error
+                 (Printf.sprintf
+                    "Redundant match arm '%s': previous arms already cover all variant constructors"
+                    (show_pattern_brief pat)))
+          | _ -> ());
+         List.iter constructors ~f:(fun (tag, payload_ty) ->
+           if pattern_fully_covers_variant_case pat ~tag ~payload_ty
+           then Hash_set.add covered_tags tag)))
+  | _ -> ()
+
+and validate_match_exhaustiveness (state : infer_state) (scrut_ty : typ) (patterns : pattern list)
+  : unit
+  =
+  if List.exists patterns ~f:is_catch_all_pattern
+  then ()
+  else (
+    match resolve_bound_type scrut_ty with
+    | Boolean -> validate_boolean_match_exhaustiveness scrut_ty patterns
+    | Variant _ ->
+      (match variant_constructor_info scrut_ty with
+       | None -> ()
+       | Some (constructors, tail) ->
+         let missing_constructor =
+           List.find constructors ~f:(fun (tag, payload_ty) ->
+             not
+               (List.exists patterns ~f:(fun pat ->
+                  pattern_fully_covers_variant_case pat ~tag ~payload_ty)))
+         in
+         (match missing_constructor with
+          | Some (tag, payload_ty) ->
+            raise
+              (Type_error
+                 (Printf.sprintf
+                    "Non-exhaustive variant match: missing case '%s'"
+                    (show_missing_variant_case tag payload_ty)))
+          | None -> unify state tail Empty_row))
+    | TInt -> raise (Type_error "Non-exhaustive match on int: add '_' arm")
+    | TFloat -> raise (Type_error "Non-exhaustive match on float: add '_' arm")
+    | Number -> raise (Type_error "Non-exhaustive match on number: add '_' arm")
+    | String -> raise (Type_error "Non-exhaustive match on string: add '_' arm")
+    | Record _ ->
+      if List.exists patterns ~f:(fun pat -> pattern_totally_covers_type pat scrut_ty)
+      then ()
+      else raise (Type_error "Non-exhaustive match on record: add '_' arm")
+    | _ -> raise (Type_error "Non-exhaustive match: add '_' arm"))
 
 and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_ty : typ)
   : tenv
@@ -838,7 +1093,8 @@ and infer_expr (state : infer_state) (env : tenv) expr =
         unify state (infer_expr state env arr) (Array v_ty);
         Unit
       | ERef e -> Ref (infer_expr state env e) (* simplified *)
-      | ERecordExtend (base_expr, fields) -> infer_record_extend state env base_expr fields
+      | ERecordExtend (base_expr, fields) ->
+        infer_record_extend state env base_expr fields
       | EDeref e ->
         let ty = new_var state state.current_lvl in
         unify state (Ref ty) (infer_expr state env e);
@@ -862,18 +1118,31 @@ and infer_expr (state : infer_state) (env : tenv) expr =
       | EMatch (scrut, cases) ->
         let scrut_ty = infer_expr state env scrut in
         let result_ty = new_var state state.current_lvl in
+        validate_match_case_shapes (List.map cases ~f:fst);
         List.iter cases ~f:(fun (pat, rhs) ->
+          validate_pattern_binders pat;
           let env_arm = infer_pattern state env pat scrut_ty in
           let rhs_ty = infer_expr state env_arm rhs in
           unify state rhs_ty result_ty);
+        validate_typed_match_redundancy scrut_ty (List.map cases ~f:fst);
+        validate_match_exhaustiveness state scrut_ty (List.map cases ~f:fst);
         result_ty
       | EMatchSlots (scrut, cases) ->
         let scrut_ty = infer_expr state env scrut in
         let result_ty = new_var state state.current_lvl in
+        validate_match_case_shapes (List.map cases ~f:(fun (pat, _slots, _rhs) -> pat));
         List.iter cases ~f:(fun (pat, _slots, rhs) ->
+          validate_pattern_binders pat;
           let env_arm = infer_pattern state env pat scrut_ty in
           let rhs_ty = infer_expr state env_arm rhs in
           unify state rhs_ty result_ty);
+        validate_typed_match_redundancy
+          scrut_ty
+          (List.map cases ~f:(fun (pat, _slots, _rhs) -> pat));
+        validate_match_exhaustiveness
+          state
+          scrut_ty
+          (List.map cases ~f:(fun (pat, _slots, _rhs) -> pat));
         result_ty
     with
     | Type_error msg -> raise (Type_error_with_loc (msg, expr.span))
@@ -893,15 +1162,13 @@ and infer_expr (state : infer_state) (env : tenv) expr =
    explicit definitions contribute to a module's exported surface.
    In particular, [open M] imports names for subsequent statements yet does
    not re-export them from the enclosing module. *)
-let rec infer_stmt_with_exports
-          (state : infer_state)
-          (env : tenv)
-          (stmt : stmt)
+let rec infer_stmt_with_exports (state : infer_state) (env : tenv) (stmt : stmt)
   : tenv * string list
   =
   match stmt with
   | SLet (x, e) -> infer_nonrecursive_binding state env x e, [ x ]
-  | SLetRec bindings -> infer_recursive_bindings state env bindings, List.map bindings ~f:fst
+  | SLetRec bindings ->
+    infer_recursive_bindings state env bindings, List.map bindings ~f:fst
   | SExpr e ->
     ignore (infer_expr state env e);
     env, []
@@ -910,7 +1177,9 @@ let rec infer_stmt_with_exports
     let mod_env_start = add_mono env mname module_placeholder in
     let mod_env_final, exported_names_rev =
       List.fold stmts ~init:(mod_env_start, []) ~f:(fun (env_acc, names_rev) stmt_node ->
-        let env_next, stmt_exports = infer_stmt_with_exports state env_acc stmt_node.value in
+        let env_next, stmt_exports =
+          infer_stmt_with_exports state env_acc stmt_node.value
+        in
         env_next, List.rev_append stmt_exports names_rev)
     in
     let exported_names = List.rev exported_names_rev in
@@ -935,9 +1204,9 @@ let rec infer_stmt_with_exports
        (match tail with
         | Empty_row | Var { contents = Free _ } -> ()
         | _ -> ());
-       (Env.fold fields ~init:env ~f:(fun ~key ~data acc ->
-          add_generalized state acc key data),
-        [])
+       ( Env.fold fields ~init:env ~f:(fun ~key ~data acc ->
+           add_generalized state acc key data)
+       , [] )
      | _ -> raise (Type_error (Printf.sprintf "Cannot open non-module '%s'" mname)))
 ;;
 
