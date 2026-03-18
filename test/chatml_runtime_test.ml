@@ -32,6 +32,21 @@ let eval code =
   | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic)
 ;;
 
+let print_eval_result code =
+  match eval_result code with
+  | Ok () -> print_endline "ok"
+  | Error diagnostic ->
+    print_endline (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let expect_phase1_recursive_types_error (code : string) : unit =
+  match eval_result code with
+  | Ok () -> failwith "expected implicit recursive typing to be rejected in Phase 1"
+  | Error diagnostic ->
+    if not (String.is_substring diagnostic.message ~substring:"Recursive types")
+    then failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
 let dummy_position = { Source.line = 1; column = 0; offset = 0 }
 let dummy_span = { Source.left = dummy_position; right = dummy_position }
 let node value : _ L.node = { value; span = dummy_span }
@@ -158,6 +173,62 @@ let%expect_test "variant pattern match" =
     {|
 [|3, 4|]
 |}]
+;;
+
+let%expect_test "explicit recursive type declaration runs end-to-end" =
+  let code =
+    {|
+      type expr = [ `Int(int) | `Add(expr, expr) | `Mul(expr, expr) ]
+
+      let rec eval : expr -> int =
+        fun e ->
+          match e with
+          | `Int(n) -> n
+          | `Add(a, b) -> eval(a) + eval(b)
+          | `Mul(a, b) -> eval(a) * eval(b)
+
+      let program : expr =
+        `Add(`Int(2), `Mul(`Int(3), `Int(4)))
+
+      print(eval(program))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+14
+|}]
+;;
+
+let%expect_test "recursive types inside records run with explicit result annotations" =
+  let code =
+    {|
+      type expr = [ `Int(int) | `Add(expr, expr) ]
+      type wrapped = { expr : expr; depth : int }
+
+      let rec eval : expr -> int =
+        fun e ->
+          match e with
+          | `Int(n) -> n
+          | `Add(a, b) -> eval(a) + eval(b)
+
+      let wrap : bool -> expr -> wrapped =
+        fun b e ->
+          if b
+          then { expr = e; depth = 0 }
+          else { expr = `Add(e, `Int(1)); depth = 1 }
+
+      let wrapped = wrap(true, `Int(5))
+      print(wrapped.depth)
+      print(eval(wrapped.expr))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+0
+5
+    |}]
 ;;
 
 let%expect_test "variant none match" =
@@ -866,33 +937,52 @@ let%expect_test "lambda values and map_in_place" =
 |}]
 ;;
 
-let%expect_test "state machine helpers can update nested task state" =
+let%expect_test
+    "state machine helpers over mutable task arrays run with explicit task/state annotations"
+  =
   let code =
     {|
-      let mk_task id =
-        { id = id
-        ; status = `Pending
-        ; attempts = 0
+      type status = [ `Pending | `Running | `Done ]
+      type task =
+        { id : string
+        ; status : status
+        ; attempts : int
+        }
+      type event = [ `Start | `Done ]
+      type state =
+        { autopilot : bool
+        ; task_index : int
+        ; tasks : task array
         }
 
-      let set_task_status st new_status =
-        let t = st.tasks[st.task_index] in
-        let t = { t with status = new_status } in
-        st.tasks[st.task_index] <- t;
-        st
+      let mk_task : string -> task =
+        fun id ->
+          { id = id
+          ; status = `Pending
+          ; attempts = 0
+          }
 
-      let bump_attempts st =
-        let t = st.tasks[st.task_index] in
-        let t = { t with attempts = t.attempts + 1 } in
-        st.tasks[st.task_index] <- t;
-        st
+      let set_task_status : state -> status -> state =
+        fun st new_status ->
+          let t : task = st.tasks[st.task_index] in
+          let t : task = { t with status = new_status } in
+          st.tasks[st.task_index] <- t;
+          st
 
-      let step st ev =
-        match ev with
-        | `Start ->
-            let st = set_task_status(st, `Running) in
-            bump_attempts(st)
-        | `Done -> set_task_status(st, `Done)
+      let bump_attempts : state -> state =
+        fun st ->
+          let t : task = st.tasks[st.task_index] in
+          let t : task = { t with attempts = t.attempts + 1 } in
+          st.tasks[st.task_index] <- t;
+          st
+
+      let step : state -> event -> state =
+        fun st ev ->
+          match ev with
+          | `Start ->
+              let st = set_task_status(st, `Running) in
+              bump_attempts(st)
+          | `Done -> set_task_status(st, `Done)
 
       let st0 =
         { autopilot = true
@@ -919,7 +1009,7 @@ true
 |}]
 ;;
 
-let%expect_test "state machine helper imported from module keeps outer state width" =
+let%expect_test "module-imported state machine helper runs again" =
   let code =
     {|
       let mk_task id =

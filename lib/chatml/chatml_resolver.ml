@@ -71,6 +71,7 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
     let lhs' = resolve_expr ctx lhs in
     let rhs' = resolve_expr ctx rhs in
     L.REPrim2 (prim, with_value lhs lhs', with_value rhs rhs')
+  | L.EAnnot (expr_node, _type_expr) -> resolve_expr ctx expr_node
   | L.ELambdaSlots (params, slots, body) ->
     let fm = Hashtbl.create (module String) in
     List.iteri params ~f:(fun idx param ->
@@ -211,28 +212,7 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
       | L.PVariant (_tag, subpats) ->
         List.concat_map subpats ~f:(fun sp -> slots_of_pattern sp None)
       | L.PRecord (fields, _open) ->
-        let field_type lbl =
-          let rec search = function
-            | Some (Chatml_typechecker.Record row) -> lookup_field row lbl
-            | Some (Chatml_typechecker.Row (fs, tail)) ->
-              (match Chatml_typechecker.Env.find fs lbl with
-               | Some t -> Some t
-               | None -> search (Some tail))
-            | Some (Chatml_typechecker.Var { contents = Chatml_typechecker.Bound t }) ->
-              search (Some t)
-            | _ -> None
-          and lookup_field row lbl =
-            match row with
-            | Chatml_typechecker.Row (fs, tail) ->
-              (match Chatml_typechecker.Env.find fs lbl with
-               | Some t -> Some t
-               | None -> lookup_field tail lbl)
-            | Chatml_typechecker.Var { contents = Chatml_typechecker.Bound t } ->
-              lookup_field t lbl
-            | _ -> None
-          in
-          search ty_opt
-        in
+        let field_type lbl = Option.bind ty_opt ~f:(fun ty -> Chatml_typechecker.record_field_type ty lbl) in
         List.concat_map fields ~f:(fun (lbl, p) -> slots_of_pattern p (field_type lbl))
     in
     let cases' =
@@ -315,20 +295,24 @@ let rec resolve_expr (ctx : resolve_ctx) (e : L.expr L.node) : L.resolved_expr =
 ;;
 
 let rec resolve_stmt (ctx : resolve_ctx) (snode : L.stmt L.node)
-  : L.resolved_stmt
+  : L.resolved_stmt option
   =
   match snode.value with
-  | L.SLet (x, rhs) -> L.RSLet (x, with_value rhs (resolve_expr ctx rhs))
+  | L.SLet (x, rhs) -> Some (L.RSLet (x, with_value rhs (resolve_expr ctx rhs)))
   | L.SLetRec binds ->
     let binds' =
       List.map binds ~f:(fun (nm, rhs) -> nm, with_value rhs (resolve_expr ctx rhs))
     in
-    L.RSLetRec binds'
-  | L.SExpr e -> L.RSExpr (with_value e (resolve_expr ctx e))
+    Some (L.RSLetRec binds')
+  | L.SType (_name, _body) -> None
+  | L.SExpr e -> Some (L.RSExpr (with_value e (resolve_expr ctx e)))
   | L.SModule (mname, stmts) ->
-    let stmts' = List.map stmts ~f:(fun st -> with_stmt_value st (resolve_stmt ctx st)) in
-    L.RSModule (mname, stmts')
-  | L.SOpen nm -> L.RSOpen nm
+    let stmts' =
+      List.filter_map stmts ~f:(fun st ->
+        Option.map (resolve_stmt ctx st) ~f:(with_stmt_value st))
+    in
+    Some (L.RSModule (mname, stmts'))
+  | L.SOpen nm -> Some (L.RSOpen nm)
 ;;
 
 let resolve_checked_program
@@ -339,7 +323,9 @@ let resolve_checked_program
   let lookup_fun = Chatml_typechecker.checked_lookup_span_type checked in
   let ctx = { lookup_type = lookup_fun; stack = ref [] } in
   let stmts' =
-    prog.stmts |> List.map ~f:(fun sn -> with_stmt_value sn (resolve_stmt ctx sn))
+    prog.stmts
+    |> List.filter_map ~f:(fun sn ->
+      Option.map (resolve_stmt ctx sn) ~f:(with_stmt_value sn))
   in
   { L.stmts = stmts'; source_text = prog.source_text }
 ;;

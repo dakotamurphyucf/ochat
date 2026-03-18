@@ -80,10 +80,12 @@ rule token = parse
 | "ref"                    { REF }
 | "rec"                    { REC }
 | "and"                    { AND }
+| "type"                   { TYPE }
 
     (* Operators / punctuation *)
 | "->"                     { ARROW }
 | "<-"                     { LEFTARROW }
+| ":"                      { COLON }
 | ":="                     { COLONEQ }
 | "!="                     { BANGEQ }
 | "="                      { EQ }

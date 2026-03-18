@@ -95,6 +95,11 @@ let mk_node startp endp value =
 
   let mk_exprnode startp endp value =
   { value; span = span_of_lex startp endp }
+
+let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : expr node =
+  match type_opt with
+  | None -> expr_node
+  | Some ty -> { value = EAnnot (expr_node, ty); span = expr_node.span }
 %}
 
 (***************************************************************************)
@@ -108,8 +113,8 @@ let mk_node startp endp value =
 %token <string> LIDENT
 %token <string> UIDENT
 %token <string> TICKIDENT
-%token FUN IF THEN ELSE WHILE DO DONE LET IN MATCH WITH MODULE STRUCT END OPEN REF REC AND
-%token ARROW LEFTARROW COLONEQ BANGEQ EQ EQEQ
+%token FUN IF THEN ELSE WHILE DO DONE LET IN MATCH WITH MODULE STRUCT END OPEN REF REC AND TYPE
+%token ARROW LEFTARROW COLON COLONEQ BANGEQ EQ EQEQ
 %token LTEQ GTEQ LT GT LTEQDOT GTEQDOT LTDOT GTDOT
 %token PLUS MINUS PLUSPLUS PLUSDOT MINUSDOT STAR SLASH STARDOT SLASHDOT
 %token LPAREN RPAREN UNDERSCORE
@@ -133,19 +138,29 @@ let mk_node startp endp value =
 (***************************************************************************)
 
 program:
-    stmts EOF  { $1 }
+    program_stmts EOF  { $1 }
 
-stmts:
-    stmts stmt { $1 @ [$2] }
+program_stmts:
+    program_stmts program_stmt { $1 @ [$2] }
 | /* empty */ { [] }
 
-stmt:
+module_stmts:
+    module_stmts module_stmt { $1 @ [$2] }
+| /* empty */ { [] }
+
+program_stmt:
+  TYPE LIDENT EQ type_expr     { mk_node $startpos $endpos (SType($2, $4)) }
+| module_stmt                  { $1 }
+
+module_stmt:
   LET REC rec_bindings          { mk_node $startpos $endpos (SLetRec( $3)) }
 | LET REC rec_bindings IN expr_sequence  { mk_node $startpos $endpos (SExpr( mk_exprnode $startpos $endpos (ELetRec($3, $5)) )) }
+| LET LIDENT COLON type_expr EQ expr_sequence
+    { mk_node $startpos $endpos (SLet($2, maybe_annotate_expr $6 (Some $4))) }
 | LET LIDENT params EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda($3, ($5))))) }
 | LET LIDENT LPAREN RPAREN EQ expr_sequence { mk_node $startpos $endpos (SLet($2, mk_exprnode $startpos $endpos (ELambda([], ($6))))) }
 | LET LIDENT EQ expr_sequence        { mk_node $startpos $endpos (SLet($2, $4)) }
-| MODULE UIDENT EQ STRUCT stmts END { mk_node $startpos $endpos (SModule($2, $5)) }
+| MODULE UIDENT EQ STRUCT module_stmts END { mk_node $startpos $endpos (SModule($2, $5)) }
 | OPEN UIDENT               { mk_node $startpos $endpos (SOpen($2)) }
 | expr                      { mk_node $startpos $endpos (SExpr($1)) }
 
@@ -202,6 +217,8 @@ expr:
     | LET REC rec_bindings IN expr_sequence  { mk_exprnode $startpos $endpos (ELetRec($3, $5)) }
 
     (* Let-in expression *)
+    | LET LIDENT COLON type_expr EQ expr_sequence IN expr_sequence
+        { mk_exprnode $startpos $endpos (ELetIn($2, maybe_annotate_expr $6 (Some $4), $8)) }
     | LET LIDENT EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, $4, $6)) }
 	| LET LIDENT LPAREN RPAREN EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda([], $6)), $8)) }
 	| LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
@@ -324,9 +341,59 @@ rec_bindings:
 | rec_binding AND rec_bindings { $1 :: $3 }
 
 rec_binding:
+| LIDENT COLON type_expr EQ expr_sequence { ($1, maybe_annotate_expr $5 (Some $3)) }
+| LIDENT EQ expr_sequence { ($1, $3) }
 | LIDENT LPAREN RPAREN EQ expr_sequence { ($1, mk_exprnode $startpos $endpos (ELambda([], $5)) ) }
 | LIDENT params EQ expr_sequence { ($1, mk_exprnode $startpos $endpos (ELambda($2, $4)) ) }
 
 expr_sequence:
 | expr  { $1 }
 | expr SEMI expr_sequence { mk_exprnode $startpos $endpos (ESequence($1, $3)) }
+
+type_expr:
+| type_arrow { $1 }
+
+type_arrow:
+| type_postfix ARROW type_arrow { TEArrow($1, $3) }
+| type_postfix { $1 }
+
+type_postfix:
+| type_primary { $1 }
+| type_postfix LIDENT
+    { if String.equal $2 "array"
+      then TEArray $1
+      else failwith ("Unknown postfix type constructor '" ^ $2 ^ "'") }
+
+type_primary:
+| LIDENT { TEName $1 }
+| LPAREN type_expr RPAREN { $2 }
+| LBRACE type_field_list RBRACE { TERecord $2 }
+| LBRACKET type_variant_cases_opt RBRACKET { TEVariant $2 }
+
+type_field_list:
+| /* empty */ { [] }
+| type_fields { $1 }
+
+type_fields:
+| type_field { [$1] }
+| type_field SEMI { [$1] }
+| type_field SEMI type_fields { $1 :: $3 }
+
+type_field:
+| LIDENT COLON type_expr { ($1, $3) }
+
+type_variant_cases_opt:
+| /* empty */ { [] }
+| type_variant_cases { $1 }
+
+type_variant_cases:
+| type_variant_case { [$1] }
+| type_variant_case BAR type_variant_cases { $1 :: $3 }
+
+type_variant_case:
+| TICKIDENT { ($1, []) }
+| TICKIDENT LPAREN type_expr_list RPAREN { ($1, $3) }
+
+type_expr_list:
+| type_expr { [$1] }
+| type_expr COMMA type_expr_list { $1 :: $3 }

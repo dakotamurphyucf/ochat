@@ -592,6 +592,19 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name chatml_script_test)
+ (modules chatml_script_test)
+ (libraries
+  core
+  chatml
+  chatml_resolver
+  chatml_typechecker
+  chatml_builtin_modules)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
  (name chatml_parse_test)
  (modules chatml_parse_test)
  (libraries core chatml)

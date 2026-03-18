@@ -28,10 +28,10 @@
       accesses are reopened to an open row before generalisation, allowing
       helpers such as state-transition functions to accept larger records
       than the subset of fields they touch;
-    • record copy-update (`{ r with field = v }`) treats missing labels on
-      an open base row as overrides of fields in the open tail instead of
-      recursively extending the row, which keeps array-update patterns
-      sound and ergonomic.
+    • record copy-update (`{ r with field = v }`) preserves the base row's
+      open tail and layers updated fields in front, so helpers can both
+      override existing fields and add new ones while still accepting
+      larger records.
 
     The public surface is intentionally tiny:
 
@@ -100,6 +100,8 @@ type typ =
   | Fun of typ list * typ
   | Generic of name
   | Var of tv ref
+  | Mu of name * typ
+  | Rec_var of name
   | Ref of typ
   | Record of typ (* row *)
   | Variant of typ (* not implemented – kept for parity *)
@@ -172,6 +174,9 @@ type diagnostic =
   ; span : Source.span option
   }
 
+exception Type_error of string
+exception Type_error_with_loc of string * Source.span
+
 type checked_program = { span_types : typ SpanTbl.t }
 
 let checked_lookup_span_type (checked : checked_program) (span : Source.span) : typ option
@@ -199,6 +204,42 @@ let format_diagnostic (source_text : string) (diagnostic : diagnostic) : string 
 
 let new_var (state : infer_state) level = Var (ref (Free (gensym state, level)))
 
+let tv_ref_mem (needle : tv ref) (haystack : tv ref list) : bool =
+  List.exists haystack ~f:(fun candidate -> phys_equal needle candidate)
+;;
+
+let rec_name_mem (needle : name) (haystack : name list) : bool =
+  List.exists haystack ~f:(String.equal needle)
+;;
+
+let rec substitute_rec_var ~(target : name) ~(replacement : typ) (ty : typ) : typ =
+  match ty with
+  | Fun (params, ret) ->
+    Fun
+      ( List.map params ~f:(substitute_rec_var ~target ~replacement)
+      , substitute_rec_var ~target ~replacement ret )
+  | Generic _ | Var _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ty
+  | Mu (binder, body) when String.equal binder target -> Mu (binder, body)
+  | Mu (binder, body) -> Mu (binder, substitute_rec_var ~target ~replacement body)
+  | Rec_var binder when String.equal binder target -> replacement
+  | Rec_var _ -> ty
+  | Ref t -> Ref (substitute_rec_var ~target ~replacement t)
+  | Record row -> Record (substitute_rec_var ~target ~replacement row)
+  | Variant row -> Variant (substitute_rec_var ~target ~replacement row)
+  | Tuple ts -> Tuple (List.map ts ~f:(substitute_rec_var ~target ~replacement))
+  | Array t -> Array (substitute_rec_var ~target ~replacement t)
+  | Row (fields, tail) ->
+    Row
+      ( Env.map fields ~f:(substitute_rec_var ~target ~replacement)
+      , substitute_rec_var ~target ~replacement tail )
+;;
+
+let unfold_mu (ty : typ) : typ =
+  match ty with
+  | Mu (binder, body) as mu -> substitute_rec_var ~target:binder ~replacement:mu body
+  | other -> other
+;;
+
 (** --------------------------------------------------------------------- *)
 
 (** 4. Generalisation / instantiation                                      *)
@@ -217,6 +258,8 @@ let instantiate (state : infer_state) ty =
          Hashtbl.add_exn table ~key:x ~data:v;
          v)
     | Var { contents = Bound ty } -> inst ty
+    | Mu (binder, body) -> Mu (binder, inst body)
+    | Rec_var _ as rec_var -> rec_var
     | Ref t -> Ref (inst t)
     | Record r -> Record (inst r)
     | Variant r -> Variant (inst r)
@@ -239,6 +282,8 @@ let generalise (state : infer_state) ty =
     | Fun (params, ret) -> Fun (List.map params ~f:gen, gen ret)
     | Var { contents = Bound t } -> gen t
     | Var { contents = Free (name, lvl) } when lvl > state.current_lvl -> Generic name
+    | Mu (binder, body) -> Mu (binder, gen body)
+    | Rec_var _ as rec_var -> rec_var
     | Ref t -> Ref (gen t)
     | Record row -> Record (gen row)
     | Variant row -> Variant (gen row)
@@ -250,23 +295,121 @@ let generalise (state : infer_state) ty =
   gen ty
 ;;
 
+let has_recursive_type (ty : typ) : bool =
+  let rec aux (seen : tv ref list) = function
+    | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
+    | Var ({ contents = Bound t } as tv) ->
+      if tv_ref_mem tv seen then true else aux (tv :: seen) t
+    | Mu (_binder, _body) -> true
+    | Rec_var _ -> true
+    | Var { contents = Free _ }
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
+    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Tuple ts -> List.exists ts ~f:(aux seen)
+    | Row (fields, tail) ->
+      Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
+  in
+  aux [] ty
+;;
+
+let check_contractive (ty : typ) : (unit, string) result =
+  let rec check_list
+            (seen : tv ref list)
+            ~(target : name option)
+            ~(guarded : bool)
+            ~(scope : name list)
+            (tys : typ list)
+    : (unit, string) result
+    =
+    match tys with
+    | [] -> Ok ()
+    | hd :: tl ->
+      (match check_ty seen ~target ~guarded ~scope hd with
+       | Ok () -> check_list seen ~target ~guarded ~scope tl
+       | Error _ as err -> err)
+  and check_fields
+        (seen : tv ref list)
+        ~(target : name option)
+        ~(guarded : bool)
+        ~(scope : name list)
+        (fields : typ Env.t)
+    : (unit, string) result
+    =
+    fields |> Env.bindings |> List.map ~f:snd |> check_list seen ~target ~guarded ~scope
+  and check_ty
+        (seen : tv ref list)
+        ~(target : name option)
+        ~(guarded : bool)
+        ~(scope : name list)
+        (ty : typ)
+    : (unit, string) result
+    =
+    match ty with
+    | Fun (params, ret) ->
+      (match check_list seen ~target ~guarded:true ~scope params with
+       | Ok () -> check_ty seen ~target ~guarded:true ~scope ret
+       | Error _ as err -> err)
+    | Var ({ contents = Bound bound_ty } as tv) ->
+      if tv_ref_mem tv seen
+      then Ok ()
+      else check_ty (tv :: seen) ~target ~guarded ~scope bound_ty
+    | Var { contents = Free _ }
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> Ok ()
+    | Mu (binder, body) ->
+      let scope' = binder :: scope in
+      let outer_target =
+        match target with
+        | Some target_name when String.equal target_name binder -> None
+        | _ -> target
+      in
+      (match check_ty seen ~target:(Some binder) ~guarded:false ~scope:scope' body with
+       | Error _ as err -> err
+       | Ok () -> check_ty seen ~target:outer_target ~guarded ~scope:scope' body)
+    | Rec_var binder ->
+      if not (rec_name_mem binder scope)
+      then Error (Printf.sprintf "Unbound recursive type variable '%s'" binder)
+      else (
+        match target with
+        | Some target_binder when String.equal target_binder binder && not guarded ->
+          Error (Printf.sprintf "Unguarded recursive type variable '%s'" binder)
+        | _ -> Ok ())
+    | Ref inner | Record inner | Variant inner | Array inner ->
+      check_ty seen ~target ~guarded:true ~scope inner
+    | Tuple tys -> check_list seen ~target ~guarded:true ~scope tys
+    | Row (fields, tail) ->
+      (match check_fields seen ~target ~guarded ~scope fields with
+       | Ok () -> check_ty seen ~target ~guarded ~scope tail
+       | Error _ as err -> err)
+  in
+  check_ty [] ~target:None ~guarded:false ~scope:[] ty
+;;
+
 (** --------------------------------------------------------------------- *)
 
 (** 5. Row utilities                                                       *)
 
 (** --------------------------------------------------------------------- *)
 
-let rec merge_fields = function
-  | Var { contents = Bound ty } -> merge_fields ty
-  | Var _ as var -> Env.empty, var
-  | Record r -> merge_fields r
-  | Variant r -> merge_fields r
-  | Row (fs, rest) ->
-    (match merge_fields rest with
-     | fs', rest' when Env.is_empty fs' -> fs, rest'
-     | fs', rest' -> Env.merge fs fs', rest')
-  | Empty_row -> Env.empty, Empty_row
-  | _ -> failwith "merge_fields: expect a row type"
+let merge_fields row =
+  let rec aux (seen : tv ref list) (seen_rec : name list) = function
+    | Var ({ contents = Bound ty } as tv) ->
+      if tv_ref_mem tv seen then Env.empty, Var tv else aux (tv :: seen) seen_rec ty
+    | Mu (binder, _body) as mu ->
+      if rec_name_mem binder seen_rec
+      then Env.empty, mu
+      else aux seen (binder :: seen_rec) (unfold_mu mu)
+    | Rec_var _ as rec_var -> Env.empty, rec_var
+    | Var _ as var -> Env.empty, var
+    | Record r -> aux seen seen_rec r
+    | Variant r -> aux seen seen_rec r
+    | Row (fs, rest) ->
+      (match aux seen seen_rec rest with
+       | fs', rest' when Env.is_empty fs' -> fs, rest'
+       | fs', rest' -> Env.merge fs fs', rest')
+    | Empty_row -> Env.empty, Empty_row
+    | _ -> failwith "merge_fields: expect a row type"
+  in
+  aux [] [] row
 ;;
 
 (** --------------------------------------------------------------------- *)
@@ -275,22 +418,28 @@ let rec merge_fields = function
 
 (** --------------------------------------------------------------------- *)
 
-let rec occurs tv = function
-  | Fun (ps, r) -> List.exists ps ~f:(occurs tv) || occurs tv r
-  | Var { contents = Bound ty } -> occurs tv ty
-  | Var tv' when phys_equal tv tv' -> true
-  | Var ({ contents = Free (name, lvl) } as tv') ->
-    let new_lvl =
-      match !tv with
-      | Free (_, lvl_tv) -> Int.min lvl lvl_tv
-      | _ -> lvl
-    in
-    tv' := Free (name, new_lvl);
-    false
-  | Ref t | Record t | Variant t | Array t -> occurs tv t
-  | Tuple ts -> List.exists ts ~f:(occurs tv)
-  | Row (fs, rest) -> Env.exists fs (fun _ t -> occurs tv t) || occurs tv rest
-  | _ -> false
+let occurs tv ty =
+  let rec aux (seen : tv ref list) = function
+    | Fun (ps, r) -> List.exists ps ~f:(aux seen) || aux seen r
+    | Var ({ contents = Bound ty } as tv') ->
+      if tv_ref_mem tv' seen then false else aux (tv' :: seen) ty
+    | Var tv' when phys_equal tv tv' -> true
+    | Var ({ contents = Free (name, lvl) } as tv') ->
+      let new_lvl =
+        match !tv with
+        | Free (_, lvl_tv) -> Int.min lvl lvl_tv
+        | _ -> lvl
+      in
+      tv' := Free (name, new_lvl);
+      false
+    | Mu (_binder, body) -> aux seen body
+    | Rec_var _ -> false
+    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Tuple ts -> List.exists ts ~f:(aux seen)
+    | Row (fs, rest) -> Env.exists fs (fun _ t -> aux seen t) || aux seen rest
+    | _ -> false
+  in
+  aux [] ty
 ;;
 
 (** --------------------------------------------------------------------- *)
@@ -299,8 +448,11 @@ let rec occurs tv = function
 
 (** --------------------------------------------------------------------- *)
 
-exception Type_error of string
-exception Type_error_with_loc of string * Source.span
+let ensure_contractive_type (ty : typ) : unit =
+  match check_contractive ty with
+  | Ok () -> ()
+  | Error msg -> raise (Type_error msg)
+;;
 
 let rec unify (state : infer_state) lhs rhs =
   if phys_equal lhs rhs
@@ -315,6 +467,10 @@ let rec unify (state : infer_state) lhs rhs =
         unify state r1 r2)
     | Var { contents = Bound t1 }, t2 | t1, Var { contents = Bound t2 } ->
       unify state t1 t2
+    | (Mu (_binder, _body) as mu), t | t, (Mu (_binder, _body) as mu) ->
+      ensure_contractive_type mu;
+      unify state (unfold_mu mu) t
+    | Rec_var lhs_name, Rec_var rhs_name when String.equal lhs_name rhs_name -> ()
     | Var ({ contents = Free _ } as tv), t | t, Var ({ contents = Free _ } as tv) ->
       if occurs tv t then raise (Type_error "Recursive types") else tv := Bound t
     | Ref t1, Ref t2 | Array t1, Array t2 -> unify state t1 t2
@@ -382,39 +538,144 @@ and unify_rows (state : infer_state) lhs rhs =
 
 (* Print human-readable type names used in diagnostics. *)
 
-and show_type = function
-  | TInt -> "int"
-  | TFloat -> "float"
-  | Boolean -> "bool"
-  | String -> "string"
-  | Unit -> "unit"
-  | Array t -> Printf.sprintf "[%s] array" (show_type t)
-  | Ref t -> Printf.sprintf "ref(%s)" (show_type t)
-  | Fun (ps, r) ->
-    let params = ps |> List.map ~f:show_type |> String.concat ~sep:", " in
-    Printf.sprintf "(%s -> %s)" params (show_type r)
-  | Record row -> Printf.sprintf "{%s}" (show_row row)
-  | Tuple ts ->
-    ts |> List.map ~f:show_type |> String.concat ~sep:" * " |> Printf.sprintf "(%s)"
-  | Variant row -> Printf.sprintf "[%s]" (show_variant_row row)
-  | (Row _ as row) -> show_row row
-  | Empty_row -> ""
-  | Generic n -> n
-  | Var { contents = Free (n, _) } -> Printf.sprintf "'%s" n
-  | Var { contents = Bound t } -> show_type t
+and show_type ty =
+  let rec show_type_with_seen (seen : tv ref list) (seen_rec : name list) = function
+    | TInt -> "int"
+    | TFloat -> "float"
+    | Boolean -> "bool"
+    | String -> "string"
+    | Unit -> "unit"
+    | Array t -> Printf.sprintf "[%s] array" (show_type_with_seen seen seen_rec t)
+    | Ref t -> Printf.sprintf "ref(%s)" (show_type_with_seen seen seen_rec t)
+    | Fun (ps, r) ->
+      let params =
+        ps |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
+      in
+      Printf.sprintf "(%s -> %s)" params (show_type_with_seen seen seen_rec r)
+    | Mu (binder, body) ->
+      if rec_name_mem binder seen_rec
+      then binder
+      else
+        Printf.sprintf
+          "mu %s. %s"
+          binder
+          (show_type_with_seen seen (binder :: seen_rec) body)
+    | Rec_var binder -> binder
+    | Record row -> Printf.sprintf "{%s}" (show_row_with_seen seen seen_rec row)
+    | Tuple ts ->
+      ts
+      |> List.map ~f:(show_type_with_seen seen seen_rec)
+      |> String.concat ~sep:" * "
+      |> Printf.sprintf "(%s)"
+    | Variant row -> Printf.sprintf "[%s]" (show_variant_row_with_seen seen seen_rec row)
+    | Row _ as row -> show_row_with_seen seen seen_rec row
+    | Empty_row -> ""
+    | Generic n -> n
+    | Var { contents = Free (n, _) } -> Printf.sprintf "'%s" n
+    | Var ({ contents = Bound t } as tv) ->
+      if tv_ref_mem tv seen then "'rec" else show_type_with_seen (tv :: seen) seen_rec t
+  and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
+    match row with
+    | Var ({ contents = Bound ty } as tv) ->
+      if tv_ref_mem tv seen
+      then Env.empty, Var tv
+      else row_fields_and_tail_with_seen (tv :: seen) seen_rec ty
+    | Mu (binder, _body) as mu ->
+      if rec_name_mem binder seen_rec
+      then Env.empty, mu
+      else row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu mu)
+    | Rec_var _ as rec_var -> Env.empty, rec_var
+    | Record r -> row_fields_and_tail_with_seen seen seen_rec r
+    | Variant r -> row_fields_and_tail_with_seen seen seen_rec r
+    | Row (fs, rest) ->
+      let rest_fields, tail = row_fields_and_tail_with_seen seen seen_rec rest in
+      Env.merge fs rest_fields, tail
+    | Empty_row -> Env.empty, Empty_row
+    | Var _ as var -> Env.empty, var
+    | Generic _ as generic -> Env.empty, generic
+    | other -> Env.empty, other
+  and show_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
+    let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
+    let fields_str =
+      Env.bindings fields
+      |> List.map ~f:(fun (k, v) ->
+        Printf.sprintf "%s: %s" k (show_type_with_seen seen seen_rec v))
+      |> String.concat ~sep:"; "
+    in
+    let tail_str =
+      match tail with
+      | Empty_row -> ""
+      | _ when String.is_empty fields_str -> "..."
+      | _ -> "; ..."
+    in
+    fields_str ^ tail_str
+  and resolve_bound_type_for_display_with_seen (seen : tv ref list) ty =
+    match ty with
+    | Var ({ contents = Bound bound_ty } as tv) ->
+      if tv_ref_mem tv seen
+      then Var tv
+      else resolve_bound_type_for_display_with_seen (tv :: seen) bound_ty
+    | _ -> ty
+  and variant_payload_components_with_seen
+        (seen : tv ref list)
+        (_seen_rec : name list)
+        payload_ty
+    =
+    match resolve_bound_type_for_display_with_seen seen payload_ty with
+    | Unit -> []
+    | Tuple ts -> ts
+    | ty -> [ ty ]
+  and show_variant_payload_with_seen (seen : tv ref list) (seen_rec : name list) ty =
+    match variant_payload_components_with_seen seen seen_rec ty with
+    | [] -> ""
+    | [ single ] -> Printf.sprintf "(%s)" (show_type_with_seen seen seen_rec single)
+    | many ->
+      let inside =
+        many |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
+      in
+      Printf.sprintf "(%s)" inside
+  and show_variant_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
+    let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
+    let fields_str =
+      Env.bindings fields
+      |> List.map ~f:(fun (tag, payload_ty) ->
+        Printf.sprintf
+          "`%s%s"
+          tag
+          (show_variant_payload_with_seen seen seen_rec payload_ty))
+      |> String.concat ~sep:" | "
+    in
+    let tail_str =
+      match tail with
+      | Empty_row -> ""
+      | _ when String.is_empty fields_str -> "..."
+      | _ -> " | ..."
+    in
+    fields_str ^ tail_str
+  in
+  show_type_with_seen [] [] ty
 
 and row_fields_and_tail row =
-  match row with
-  | Var { contents = Bound ty } -> row_fields_and_tail ty
-  | Record r -> row_fields_and_tail r
-  | Variant r -> row_fields_and_tail r
-  | Row (fs, rest) ->
-    let rest_fields, tail = row_fields_and_tail rest in
-    Env.merge fs rest_fields, tail
-  | Empty_row -> Env.empty, Empty_row
-  | Var _ as var -> Env.empty, var
-  | Generic _ as generic -> Env.empty, generic
-  | other -> Env.empty, other
+  let rec aux (seen : tv ref list) (seen_rec : name list) row =
+    match row with
+    | Var ({ contents = Bound ty } as tv) ->
+      if tv_ref_mem tv seen then Env.empty, Var tv else aux (tv :: seen) seen_rec ty
+    | Mu (binder, _body) as mu ->
+      if rec_name_mem binder seen_rec
+      then Env.empty, mu
+      else aux seen (binder :: seen_rec) (unfold_mu mu)
+    | Rec_var _ as rec_var -> Env.empty, rec_var
+    | Record r -> aux seen seen_rec r
+    | Variant r -> aux seen seen_rec r
+    | Row (fs, rest) ->
+      let rest_fields, tail = aux seen seen_rec rest in
+      Env.merge fs rest_fields, tail
+    | Empty_row -> Env.empty, Empty_row
+    | Var _ as var -> Env.empty, var
+    | Generic _ as generic -> Env.empty, generic
+    | other -> Env.empty, other
+  in
+  aux [] [] row
 
 and show_row row =
   let fields, tail = row_fields_and_tail row in
@@ -432,9 +693,12 @@ and show_row row =
   fields_str ^ tail_str
 
 and resolve_bound_type_for_display ty =
-  match ty with
-  | Var { contents = Bound bound_ty } -> resolve_bound_type_for_display bound_ty
-  | _ -> ty
+  let rec aux (seen : tv ref list) = function
+    | Var ({ contents = Bound bound_ty } as tv) ->
+      if tv_ref_mem tv seen then Var tv else aux (tv :: seen) bound_ty
+    | other -> other
+  in
+  aux [] ty
 
 and variant_payload_components payload_ty =
   match resolve_bound_type_for_display payload_ty with
@@ -467,16 +731,69 @@ and show_variant_row row =
   fields_str ^ tail_str
 
 and ensure_equality_type ty =
-  match resolve_bound_type_for_display ty with
-  | TInt | TFloat | Boolean | String | Unit | Generic _ -> ()
-  | Var { contents = Free _ } -> ()
-  | Var { contents = Bound t } -> ensure_equality_type t
-  | Tuple ts -> List.iter ts ~f:ensure_equality_type
-  | Record row | Variant row -> ensure_equality_row row
-  | Array _ -> raise (Type_error "Equality is not supported for arrays")
-  | Ref _ -> raise (Type_error "Equality is not supported for refs")
-  | Fun _ -> raise (Type_error "Equality is not supported for functions")
-  | Row _ | Empty_row -> ensure_equality_row ty
+  let rec ensure_equality_type_with_seen (seen : tv ref list) (seen_rec : name list) ty =
+    match resolve_bound_type_for_display_with_seen seen ty with
+    | TInt | TFloat | Boolean | String | Unit | Generic _ -> ()
+    | Var { contents = Free _ } -> ()
+    | Var ({ contents = Bound t } as tv) ->
+      if tv_ref_mem tv seen
+      then ()
+      else ensure_equality_type_with_seen (tv :: seen) seen_rec t
+    | Mu (binder, body) ->
+      if rec_name_mem binder seen_rec
+      then ()
+      else ensure_equality_type_with_seen seen (binder :: seen_rec) body
+    | Rec_var binder when rec_name_mem binder seen_rec -> ()
+    | Rec_var _ -> ()
+    | Tuple ts -> List.iter ts ~f:(ensure_equality_type_with_seen seen seen_rec)
+    | Record row | Variant row -> ensure_equality_row_with_seen seen seen_rec row
+    | Array _ -> raise (Type_error "Equality is not supported for arrays")
+    | Ref _ -> raise (Type_error "Equality is not supported for refs")
+    | Fun _ -> raise (Type_error "Equality is not supported for functions")
+    | Row _ | Empty_row -> ensure_equality_row_with_seen seen seen_rec ty
+  and ensure_equality_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
+    let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
+    Env.iter fields ~f:(fun _field ty -> ensure_equality_type_with_seen seen seen_rec ty);
+    match tail with
+    | Empty_row | Var { contents = Free _ } | Generic _ | Rec_var _ -> ()
+    | Mu (binder, body) ->
+      if rec_name_mem binder seen_rec
+      then ()
+      else ensure_equality_row_with_seen seen (binder :: seen_rec) body
+    | Var ({ contents = Bound t } as tv) ->
+      if tv_ref_mem tv seen
+      then ()
+      else ensure_equality_row_with_seen (tv :: seen) seen_rec t
+    | _ -> ()
+  and resolve_bound_type_for_display_with_seen (seen : tv ref list) ty =
+    match ty with
+    | Var ({ contents = Bound bound_ty } as tv) ->
+      if tv_ref_mem tv seen
+      then Var tv
+      else resolve_bound_type_for_display_with_seen (tv :: seen) bound_ty
+    | _ -> ty
+  and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
+    match row with
+    | Var ({ contents = Bound ty } as tv) ->
+      if tv_ref_mem tv seen
+      then Env.empty, Var tv
+      else row_fields_and_tail_with_seen (tv :: seen) seen_rec ty
+    | Mu (binder, _body) as mu ->
+      if rec_name_mem binder seen_rec
+      then Env.empty, mu
+      else row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu mu)
+    | Rec_var _ as rec_var -> Env.empty, rec_var
+    | Record r -> row_fields_and_tail_with_seen seen seen_rec r
+    | Variant r -> row_fields_and_tail_with_seen seen seen_rec r
+    | Row (fs, rest) ->
+      let rest_fields, tail = row_fields_and_tail_with_seen seen seen_rec rest in
+      Env.merge fs rest_fields, tail
+    | Empty_row -> Env.empty, Empty_row
+    | Var _ as var -> Env.empty, var
+    | Generic _ as generic -> Env.empty, generic
+    | other -> Env.empty, other
+  in
+  ensure_equality_type_with_seen [] [] ty
 
 and ensure_equality_row row =
   let fields, tail = row_fields_and_tail row in
@@ -499,6 +816,7 @@ and ensure_equality_row row =
 
 type scheme = typ
 type tenv = scheme Env.t
+type type_env = typ Env.t
 
 (* Unlike a classical HM environment that stores only polymorphic schemes,
    ChatML's typing environment stores both:
@@ -509,17 +827,121 @@ type tenv = scheme Env.t
    functions: if we instantiated every lookup we would lose the sharing that
    connects [st.tasks], [st.task_index] and the final [st] returned by the
    helper, causing accidental row narrowing. *)
-let rec contains_generic (ty : typ) : bool =
-  match ty with
-  | Generic _ -> true
-  | Fun (params, ret) -> List.exists params ~f:contains_generic || contains_generic ret
-  | Var { contents = Bound t } -> contains_generic t
-  | Var { contents = Free _ } -> false
-  | Ref t | Record t | Variant t | Array t -> contains_generic t
-  | Tuple ts -> List.exists ts ~f:contains_generic
-  | Row (fields, tail) ->
-    Env.exists fields (fun _field ty' -> contains_generic ty') || contains_generic tail
-  | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
+let contains_generic (ty : typ) : bool =
+  let rec aux (seen : tv ref list) = function
+    | Generic _ -> true
+    | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
+    | Var ({ contents = Bound t } as tv) ->
+      if tv_ref_mem tv seen then false else aux (tv :: seen) t
+    | Mu (_binder, body) -> aux seen body
+    | Rec_var _ -> false
+    | Var { contents = Free _ } -> false
+    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Tuple ts -> List.exists ts ~f:(aux seen)
+    | Row (fields, tail) ->
+      Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
+    | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
+  in
+  aux [] ty
+;;
+
+let primitive_type_of_name (name : string) : typ option =
+  match name with
+  | "int" -> Some TInt
+  | "float" -> Some TFloat
+  | "bool" -> Some Boolean
+  | "string" -> Some String
+  | "unit" -> Some Unit
+  | _ -> None
+;;
+
+let contains_rec_var_name (target : name) (ty : typ) : bool =
+  let rec aux (seen : tv ref list) = function
+    | Rec_var name when String.equal name target -> true
+    | Rec_var _ -> false
+    | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
+    | Var ({ contents = Bound t } as tv) ->
+      if tv_ref_mem tv seen then false else aux (tv :: seen) t
+    | Var { contents = Free _ }
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
+    | Mu (binder, body) -> if String.equal binder target then false else aux seen body
+    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Tuple ts -> List.exists ts ~f:(aux seen)
+    | Row (fields, tail) ->
+      Env.exists fields (fun _field ty' -> aux seen ty') || aux seen tail
+  in
+  aux [] ty
+;;
+
+let ensure_unique_type_labels ~(what : string) (labels : string list) : unit =
+  let seen = Hash_set.create (module String) in
+  match
+    List.find labels ~f:(fun label ->
+      if Hash_set.mem seen label
+      then true
+      else (
+        Hash_set.add seen label;
+        false))
+  with
+  | None -> ()
+  | Some label -> raise (Type_error (Printf.sprintf "Duplicate %s label '%s'" what label))
+;;
+
+let rec typ_of_type_expr ?self_name (types : type_env) (expr : type_expr) : typ =
+  match expr with
+  | TEName name ->
+    (match primitive_type_of_name name with
+     | Some ty -> ty
+     | None ->
+       (match self_name with
+        | Some self when String.equal self name -> Rec_var name
+        | _ ->
+          (match Env.find types name with
+           | Some ty -> ty
+           | None -> raise (Type_error (Printf.sprintf "Unknown type '%s'" name)))))
+  | TEArrow (lhs, rhs) ->
+    let lhs_ty = typ_of_type_expr ?self_name types lhs in
+    (match typ_of_type_expr ?self_name types rhs with
+     | Fun (params, ret) ->
+       if Poly.equal lhs_ty Unit then Fun (params, ret) else Fun (lhs_ty :: params, ret)
+     | rhs_ty -> if Poly.equal lhs_ty Unit then Fun ([], rhs_ty) else Fun ([ lhs_ty ], rhs_ty))
+  | TEArray inner -> Array (typ_of_type_expr ?self_name types inner)
+  | TERecord fields ->
+    ensure_unique_type_labels ~what:"type record field" (List.map fields ~f:fst);
+    Record
+      (Row
+         ( Env.of_list
+             (List.map fields ~f:(fun (label, ty_expr) ->
+                label, typ_of_type_expr ?self_name types ty_expr))
+         , Empty_row ))
+  | TEVariant cases ->
+    ensure_unique_type_labels ~what:"type variant constructor" (List.map cases ~f:fst);
+    let payload_ty payloads =
+      match List.map payloads ~f:(typ_of_type_expr ?self_name types) with
+      | [] -> Unit
+      | [ ty ] -> ty
+      | tys -> Tuple tys
+    in
+    Variant
+      (Row
+         ( Env.of_list
+             (List.map cases ~f:(fun (tag, payloads) -> tag, payload_ty payloads))
+         , Empty_row ))
+;;
+
+let infer_type_decl (types : type_env) (name : string) (body : type_expr) : type_env =
+  if Option.is_some (primitive_type_of_name name)
+  then raise (Type_error (Printf.sprintf "Cannot redefine primitive type '%s'" name))
+  else (
+    match Env.find types name with
+    | Some _ -> raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" name))
+    | None ->
+      let body_ty = typ_of_type_expr ~self_name:name types body in
+      let declared_ty =
+        if contains_rec_var_name name body_ty then Mu (name, body_ty) else body_ty
+      in
+      if has_recursive_type declared_ty then ensure_contractive_type declared_ty;
+      Env.add name declared_ty types)
 ;;
 
 let builtin_row_var_name (name : string) = "__builtin_row_" ^ name
@@ -564,13 +986,30 @@ let lookup (state : infer_state) (env : tenv) x =
   | None -> raise (Type_error (Printf.sprintf "Unknown variable '%s'" x))
 ;;
 
-let add_mono (env : tenv) x ty : tenv = Env.add x ty env
-
-let add_generalized (state : infer_state) (env : tenv) x ty : tenv =
-  Env.add x (generalise state ty) env
+let add_mono (env : tenv) x ty : tenv =
+  if has_recursive_type ty then ensure_contractive_type ty;
+  Env.add x ty env
 ;;
 
-let add_open_binding (state : infer_state) (env : tenv) ~(module_name : string) (name : string) (ty : typ)
+let should_generalize_binding (ty : typ) : bool = not (has_recursive_type ty)
+
+let add_generalized (state : infer_state) (env : tenv) x ty : tenv =
+  (* Phase 5 rule: bindings whose type contains an explicit recursive type
+     are kept monomorphic.  We therefore skip HM generalization entirely for
+     such bindings and store the checked type as-is. *)
+  if not (should_generalize_binding ty)
+  then (
+    ensure_contractive_type ty;
+    Env.add x ty env)
+  else Env.add x (generalise state ty) env
+;;
+
+let add_open_binding
+      (state : infer_state)
+      (env : tenv)
+      ~(module_name : string)
+      (name : string)
+      (ty : typ)
   : tenv
   =
   match Env.find env name with
@@ -601,6 +1040,7 @@ let rec is_non_expansive (expr : expr) : bool =
     List.for_all fields ~f:(fun (_lbl, expr_node) -> is_non_expansive expr_node.value)
   | EVariant (_tag, exprs) ->
     List.for_all exprs ~f:(fun expr_node -> is_non_expansive expr_node.value)
+  | EAnnot (expr_node, _) -> is_non_expansive expr_node.value
   | EPrim1 _
   | EPrim2 _
   | EApp _
@@ -624,36 +1064,44 @@ let rec is_non_expansive (expr : expr) : bool =
   | ERecordExtend _ -> false
 ;;
 
-let is_function_like_expr (expr : expr) : bool =
+let rec is_function_like_expr (expr : expr) : bool =
   match expr with
   | ELambda _ | ELambdaSlots _ -> true
+  | EAnnot (expr_node, _) -> is_function_like_expr expr_node.value
   | _ -> false
 ;;
 
-let rec restrict_free_vars_to_level (max_level : int) (ty : typ) : unit =
-  match ty with
-  | Fun (params, ret) ->
-    List.iter params ~f:(restrict_free_vars_to_level max_level);
-    restrict_free_vars_to_level max_level ret
-  | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ()
-  | Var { contents = Bound t } -> restrict_free_vars_to_level max_level t
-  | Var ({ contents = Free (name, lvl) } as tv) ->
-    if lvl > max_level then tv := Free (name, max_level)
-  | Ref t | Record t | Variant t | Array t -> restrict_free_vars_to_level max_level t
-  | Tuple ts -> List.iter ts ~f:(restrict_free_vars_to_level max_level)
-  | Row (fields, tail) ->
-    Env.iter fields ~f:(fun _field ty' -> restrict_free_vars_to_level max_level ty');
-    restrict_free_vars_to_level max_level tail
+let restrict_free_vars_to_level (max_level : int) (ty : typ) : unit =
+  let rec aux (seen : tv ref list) ty =
+    match ty with
+    | Fun (params, ret) ->
+      List.iter params ~f:(aux seen);
+      aux seen ret
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ()
+    | Var ({ contents = Bound t } as tv) ->
+      if not (tv_ref_mem tv seen) then aux (tv :: seen) t
+    | Var ({ contents = Free (name, lvl) } as tv) ->
+      if lvl > max_level then tv := Free (name, max_level)
+    | Mu (_binder, body) -> aux seen body
+    | Rec_var _ -> ()
+    | Ref t | Record t | Variant t | Array t -> aux seen t
+    | Tuple ts -> List.iter ts ~f:(aux seen)
+    | Row (fields, tail) ->
+      Env.iter fields ~f:(fun _field ty' -> aux seen ty');
+      aux seen tail
+  in
+  aux [] ty
 ;;
 
 let rec infer_nonrecursive_binding
           (state : infer_state)
           (env : tenv)
+          (types : type_env)
           (name : string)
           (rhs : expr node)
   : tenv
   =
-  let rhs_ty = with_new_level state ~f:(fun () -> infer_expr state env rhs) in
+  let rhs_ty = with_new_level state ~f:(fun () -> infer_expr state env types rhs) in
   if is_non_expansive rhs.value
   then add_generalized state env name rhs_ty
   else (
@@ -663,6 +1111,7 @@ let rec infer_nonrecursive_binding
 and infer_recursive_bindings
       (state : infer_state)
       (env : tenv)
+      (types : type_env)
       (bindings : (string * expr node) list)
   : tenv
   =
@@ -680,7 +1129,7 @@ and infer_recursive_bindings
       in
       List.iter bindings ~f:(fun (nm, rhs) ->
         let placeholder_ty = Env.find_exn env_with_placeholders nm in
-        let rhs_ty = infer_expr state env_with_placeholders rhs in
+        let rhs_ty = infer_expr state env_with_placeholders types rhs in
         unify state placeholder_ty rhs_ty);
       List.map bindings ~f:(fun (nm, _) -> nm, Env.find_exn env_with_placeholders nm))
   in
@@ -690,51 +1139,35 @@ and infer_recursive_bindings
 and infer_record_extend
       (state : infer_state)
       (env : tenv)
+      (types : type_env)
       (base_expr : expr node)
       (fields : (string * expr node) list)
   : typ
   =
-  let base_ty = infer_expr state env base_expr in
+  let base_ty = infer_expr state env types base_expr in
   let base_row = new_var state state.current_lvl in
   unify state base_ty (Record base_row);
   let base_fields, base_tail = merge_fields base_row in
   let override_fields =
     List.fold fields ~init:Env.empty ~f:(fun acc (lbl, expr) ->
-      let ty = infer_expr state env expr in
+      let ty = infer_expr state env types expr in
       Env.add lbl ty acc)
-  in
-  let missing_override_labels =
-    Env.fold override_fields ~init:[] ~f:(fun ~key ~data:_ acc ->
-      match Env.find base_fields key with
-      | Some _ -> acc
-      | None -> key :: acc)
-  in
-  let result_tail =
-    match List.rev missing_override_labels, base_tail with
-    | [], _ -> base_tail
-    | _missing, Empty_row ->
-      (* Closed records may genuinely gain new fields via copy-update. *)
-      Empty_row
-    | missing, _ ->
-      (* For an open base row, interpret updates on labels not yet
-         materialised in [base_fields] as overriding fields living in
-         the open tail rather than recursively extending the row.  This
-         avoids recursive equations when the updated record later flows
-         back into the original type, e.g. when writing an updated
-         array element back into the same array. *)
-      let old_field_types =
-        List.fold missing ~init:Env.empty ~f:(fun acc lbl ->
-          Env.add lbl (new_var state state.current_lvl) acc)
-      in
-      let fresh_tail = new_var state state.current_lvl in
-      unify state base_tail (Row (old_field_types, fresh_tail));
-      fresh_tail
   in
   let result_fields =
     Env.fold override_fields ~init:base_fields ~f:(fun ~key ~data acc ->
       Env.add key data acc)
   in
-  Record (Row (result_fields, result_tail))
+  (* Copy-update should support both:
+     - overriding a field already known on the base row, and
+     - adding a genuinely new field to an open-row parameter.
+
+     We therefore keep the original open tail unchanged and simply layer the
+     overriding fields in front of the base row.  If the tail later expands
+     to contain the same labels, the row machinery's left-biased field merge
+     ensures the updated field types win.  This gives helpers such as
+     [let with_timeout cfg ms = { cfg with timeout_ms = ms }] the expected
+     type [{ ...r } -> int -> { timeout_ms : int; ...r }]. *)
+  Record (Row (result_fields, base_tail))
 
 and validate_unique_labels
       ~(what : string)
@@ -743,12 +1176,13 @@ and validate_unique_labels
   : unit
   =
   let seen = Hash_set.create (module String) in
-  match List.find labels ~f:(fun lbl ->
-    if Hash_set.mem seen lbl
-    then true
-    else (
-      Hash_set.add seen lbl;
-      false))
+  match
+    List.find labels ~f:(fun lbl ->
+      if Hash_set.mem seen lbl
+      then true
+      else (
+        Hash_set.add seen lbl;
+        false))
   with
   | None -> ()
   | Some lbl ->
@@ -762,34 +1196,23 @@ and validate_unique_record_fields
       (fields : (string * expr node) list)
   : unit
   =
-  validate_unique_labels
-    ~what:"record field"
-    ~span:(Some span)
-    (List.map fields ~f:fst)
+  validate_unique_labels ~what:"record field" ~span:(Some span) (List.map fields ~f:fst)
 
 and validate_unique_record_update_fields
       (span : Source.span)
       (fields : (string * expr node) list)
   : unit
   =
-  validate_unique_labels
-    ~what:"record update"
-    ~span:(Some span)
-    (List.map fields ~f:fst)
+  validate_unique_labels ~what:"record update" ~span:(Some span) (List.map fields ~f:fst)
 
-and validate_unique_record_labels_in_pattern
-      (pat : pattern)
-      (span : Source.span option)
+and validate_unique_record_labels_in_pattern (pat : pattern) (span : Source.span option)
   : unit
   =
   let rec loop = function
     | PUnit | PWildcard | PVar _ | PInt _ | PBool _ | PFloat _ | PString _ -> ()
     | PVariant (_tag, subpats) -> List.iter subpats ~f:loop
     | PRecord (fields, _is_open) ->
-      validate_unique_labels
-        ~what:"record pattern"
-        ~span
-        (List.map fields ~f:fst);
+      validate_unique_labels ~what:"record pattern" ~span (List.map fields ~f:fst);
       List.iter fields ~f:(fun (_lbl, subpat) -> loop subpat)
   in
   loop pat
@@ -845,10 +1268,10 @@ and show_missing_variant_case (tag : string) (payload_ty : typ) : string =
 
 and pattern_totally_covers_type (pat : pattern) (expected_ty : typ) : bool =
   match pat with
-  | PUnit -> (
-    match resolve_bound_type expected_ty with
-    | Unit -> true
-    | _ -> false)
+  | PUnit ->
+    (match resolve_bound_type expected_ty with
+     | Unit -> true
+     | _ -> false)
   | PWildcard | PVar _ -> true
   | PRecord (fields, is_open) ->
     let subpatterns_cover_all =
@@ -866,22 +1289,23 @@ and pattern_totally_covers_type (pat : pattern) (expected_ty : typ) : bool =
       | Record row ->
         let row_fields, _tail = merge_fields row in
         let field_names = List.map fields ~f:fst |> String.Set.of_list in
-        Set.equal field_names (Env.bindings row_fields |> List.map ~f:fst |> String.Set.of_list)
+        Set.equal
+          field_names
+          (Env.bindings row_fields |> List.map ~f:fst |> String.Set.of_list)
         && is_closed_record_row row
       | _ -> false)
   | _ -> false
 
-and variant_constructor_info
-      (variant_ty : typ)
-  : ((string * typ) list * typ) option
-  =
+and variant_constructor_info (variant_ty : typ) : ((string * typ) list * typ) option =
   match resolve_bound_type variant_ty with
   | Variant row ->
     let fields, tail = merge_fields row in
     Some (Env.bindings fields, tail)
   | _ -> None
 
-and pattern_fully_covers_variant_case (pat : pattern) ~(tag : string) ~(payload_ty : typ) : bool =
+and pattern_fully_covers_variant_case (pat : pattern) ~(tag : string) ~(payload_ty : typ)
+  : bool
+  =
   match pat with
   | PVariant (tag', subpats) when String.equal tag tag' ->
     let payload_tys = payload_component_types payload_ty in
@@ -929,18 +1353,20 @@ and validate_match_case_shapes (cases : (pattern * Source.span) list) : unit =
        | Some (prev_pat, _prev_span) ->
          raise
            (Type_error_with_loc
-              (Printf.sprintf
-                 "Redundant match arm '%s': previous catch-all pattern '%s' already \
-                  matches all cases"
-                 (show_pattern_brief pat)
-                 (show_pattern_brief prev_pat),
-               pat_span))
+              ( Printf.sprintf
+                  "Redundant match arm '%s': previous catch-all pattern '%s' already \
+                   matches all cases"
+                  (show_pattern_brief pat)
+                  (show_pattern_brief prev_pat)
+              , pat_span ))
        | None -> ());
       (match simple_pattern_key_of_pattern pat with
        | Some (key, display) ->
          if Hash_set.mem seen_simple_patterns key
          then
-           raise (Type_error_with_loc (Printf.sprintf "Duplicate match arm for pattern '%s'" display, pat_span))
+           raise
+             (Type_error_with_loc
+                (Printf.sprintf "Duplicate match arm for pattern '%s'" display, pat_span))
          else Hash_set.add seen_simple_patterns key
        | None -> ());
       let next_catch_all_case =
@@ -950,27 +1376,40 @@ and validate_match_case_shapes (cases : (pattern * Source.span) list) : unit =
   in
   loop None cases
 
-and validate_boolean_match_exhaustiveness (scrut_ty : typ) (patterns : pattern list) : unit =
+and validate_boolean_match_exhaustiveness (scrut_ty : typ) (patterns : pattern list)
+  : unit
+  =
   match resolve_bound_type scrut_ty with
   | Boolean ->
     let has_catch_all = List.exists patterns ~f:is_catch_all_pattern in
     if not has_catch_all
     then (
-      let seen_true = List.exists patterns ~f:(function PBool true -> true | _ -> false) in
-      let seen_false = List.exists patterns ~f:(function PBool false -> true | _ -> false) in
-      (match seen_true, seen_false with
-       | true, true -> ()
-       | true, false ->
-         raise (Type_error "Non-exhaustive boolean match: missing case 'false'")
-       | false, true ->
-         raise (Type_error "Non-exhaustive boolean match: missing case 'true'")
-       | false, false ->
-         raise
-           (Type_error
-              "Non-exhaustive boolean match: missing cases 'true' and 'false'")))
+      let seen_true =
+        List.exists patterns ~f:(function
+          | PBool true -> true
+          | _ -> false)
+      in
+      let seen_false =
+        List.exists patterns ~f:(function
+          | PBool false -> true
+          | _ -> false)
+      in
+      match seen_true, seen_false with
+      | true, true -> ()
+      | true, false ->
+        raise (Type_error "Non-exhaustive boolean match: missing case 'false'")
+      | false, true ->
+        raise (Type_error "Non-exhaustive boolean match: missing case 'true'")
+      | false, false ->
+        raise
+          (Type_error "Non-exhaustive boolean match: missing cases 'true' and 'false'"))
   | _ -> ()
 
-and validate_typed_match_redundancy (scrut_ty : typ) (cases : (pattern * Source.span) list) : unit =
+and validate_typed_match_redundancy
+      (scrut_ty : typ)
+      (cases : (pattern * Source.span) list)
+  : unit
+  =
   match resolve_bound_type scrut_ty with
   | Unit ->
     let seen_unit = ref false in
@@ -979,10 +1418,10 @@ and validate_typed_match_redundancy (scrut_ty : typ) (cases : (pattern * Source.
       then
         raise
           (Type_error_with_loc
-             (Printf.sprintf
-                "Redundant match arm '%s': previous arms already cover unit case '()'"
-                (show_pattern_brief pat),
-              pat_span));
+             ( Printf.sprintf
+                 "Redundant match arm '%s': previous arms already cover unit case '()'"
+                 (show_pattern_brief pat)
+             , pat_span ));
       match pat with
       | PUnit -> seen_unit := true
       | _ -> ())
@@ -994,25 +1433,24 @@ and validate_typed_match_redundancy (scrut_ty : typ) (cases : (pattern * Source.
       then
         raise
           (Type_error_with_loc
-             (Printf.sprintf
-                "Redundant match arm '%s': previous arms already cover boolean cases 'true' \
-                 and 'false'"
-                (show_pattern_brief pat),
-              pat_span));
-      (match pat with
-       | PBool true -> seen_true := true
-       | PBool false -> seen_false := true
-       | _ -> ()))
+             ( Printf.sprintf
+                 "Redundant match arm '%s': previous arms already cover boolean cases \
+                  'true' and 'false'"
+                 (show_pattern_brief pat)
+             , pat_span ));
+      match pat with
+      | PBool true -> seen_true := true
+      | PBool false -> seen_false := true
+      | _ -> ())
   | Variant _ ->
     (match variant_constructor_info scrut_ty with
      | None -> ()
      | Some (constructors, tail) ->
        let covered_tags = Hash_set.create (module String) in
-       let payload_by_tag =
-         String.Map.of_alist_exn constructors
-       in
+       let payload_by_tag = String.Map.of_alist_exn constructors in
        let all_known_tags_covered () =
-         List.for_all constructors ~f:(fun (tag, _payload_ty) -> Hash_set.mem covered_tags tag)
+         List.for_all constructors ~f:(fun (tag, _payload_ty) ->
+           Hash_set.mem covered_tags tag)
        in
        let closed_tail = is_closed_variant_tail tail in
        List.iter cases ~f:(fun (pat, pat_span) ->
@@ -1021,18 +1459,20 @@ and validate_typed_match_redundancy (scrut_ty : typ) (cases : (pattern * Source.
             let covered_payload = Map.find_exn payload_by_tag tag in
             raise
               (Type_error_with_loc
-                 (Printf.sprintf
-                    "Redundant match arm '%s': previous arms already cover variant case '%s'"
-                    (show_pattern_brief pat)
-                    (show_missing_variant_case tag covered_payload),
-                  pat_span))
+                 ( Printf.sprintf
+                     "Redundant match arm '%s': previous arms already cover variant case \
+                      '%s'"
+                     (show_pattern_brief pat)
+                     (show_missing_variant_case tag covered_payload)
+                 , pat_span ))
           | _ when is_catch_all_pattern pat && closed_tail && all_known_tags_covered () ->
             raise
               (Type_error_with_loc
-                 (Printf.sprintf
-                    "Redundant match arm '%s': previous arms already cover all variant constructors"
-                    (show_pattern_brief pat),
-                  pat_span))
+                 ( Printf.sprintf
+                     "Redundant match arm '%s': previous arms already cover all variant \
+                      constructors"
+                     (show_pattern_brief pat)
+                 , pat_span ))
           | _ -> ());
          List.iter constructors ~f:(fun (tag, payload_ty) ->
            if pattern_fully_covers_variant_case pat ~tag ~payload_ty
@@ -1071,7 +1511,10 @@ and validate_match_exhaustiveness
     | TInt -> raise (Type_error "Non-exhaustive match on int: add '_' arm")
     | TFloat -> raise (Type_error "Non-exhaustive match on float: add '_' arm")
     | Unit ->
-      if List.exists patterns ~f:(function PUnit -> true | _ -> false)
+      if
+        List.exists patterns ~f:(function
+          | PUnit -> true
+          | _ -> false)
       then ()
       else raise (Type_error "Non-exhaustive match on unit: missing case '()'")
     | String -> raise (Type_error "Non-exhaustive match on string: add '_' arm")
@@ -1150,17 +1593,22 @@ and reopen_lambda_param_if_closed_record (state : infer_state) (ty : typ) : typ 
   | _ -> reopen_lambda_param_type state ty
 
 and resolve_bound_type (ty : typ) : typ =
-  match ty with
-  | Var { contents = Bound bound_ty } -> resolve_bound_type bound_ty
-  | _ -> ty
+  let rec aux (seen : tv ref list) (seen_rec : name list) = function
+    | Var ({ contents = Bound bound_ty } as tv) ->
+      if tv_ref_mem tv seen then Var tv else aux (tv :: seen) seen_rec bound_ty
+    | Mu (binder, _body) as mu ->
+      if rec_name_mem binder seen_rec
+      then mu
+      else aux seen (binder :: seen_rec) (unfold_mu mu)
+    | other -> other
+  in
+  aux [] [] ty
 
 and reopen_lambda_row (state : infer_state) (row : typ) : typ =
   match resolve_bound_type row with
   | Row _ as full_row ->
     let merged_fields, _merged_tail = merge_fields full_row in
-    let reopened_fields =
-      Env.map merged_fields ~f:(reopen_lambda_param_type state)
-    in
+    let reopened_fields = Env.map merged_fields ~f:(reopen_lambda_param_type state) in
     (* Lambda parameters should be row-polymorphic by default: if a helper
        touches only a subset of record fields, callers should be able to pass
        larger records.  We therefore rebuild the parameter row with a fresh
@@ -1177,11 +1625,12 @@ and reopen_lambda_row (state : infer_state) (row : typ) : typ =
 and infer_unary_prim
       (state : infer_state)
       (env : tenv)
+      (types : type_env)
       (prim : unary_prim)
       (arg : expr node)
   : typ
   =
-  let arg_ty = infer_expr state env arg in
+  let arg_ty = infer_expr state env types arg in
   match prim with
   | UNegInt ->
     unify state arg_ty TInt;
@@ -1193,13 +1642,14 @@ and infer_unary_prim
 and infer_binary_prim
       (state : infer_state)
       (env : tenv)
+      (types : type_env)
       (prim : binary_prim)
       (lhs : expr node)
       (rhs : expr node)
   : typ
   =
-  let lhs_ty = infer_expr state env lhs in
-  let rhs_ty = infer_expr state env rhs in
+  let lhs_ty = infer_expr state env types lhs in
+  let rhs_ty = infer_expr state env types rhs in
   match prim with
   | BIntAdd | BIntSub | BIntMul | BIntDiv ->
     unify state lhs_ty TInt;
@@ -1226,7 +1676,100 @@ and infer_binary_prim
     ensure_equality_type lhs_ty;
     Boolean
 
-and infer_expr (state : infer_state) (env : tenv) expr =
+and row_tail_equivalent (lhs : typ) (rhs : typ) : bool =
+  let lhs' = resolve_bound_type lhs in
+  let rhs' = resolve_bound_type rhs in
+  (* Phase 6 rule: explicit recursive types stay separate from row tails.
+     Control-flow joins must not preserve a row tail merely because both
+     sides happen to mention the same recursive binder structure. *)
+  phys_equal lhs' rhs'
+  ||
+  match lhs', rhs' with
+  | Empty_row, Empty_row -> true
+  | Var tv_l, Var tv_r -> phys_equal tv_l tv_r
+  | Generic name_l, Generic name_r -> String.equal name_l name_r
+  | Mu _, _
+  | _, Mu _
+  | Rec_var _, _
+  | _, Rec_var _ -> false
+  | _ -> false
+
+and build_row_type (fields : typ Env.t) (tail : typ) : typ =
+  if Env.is_empty fields then tail else Row (fields, tail)
+
+and row_known_fields_subset ~(subset : typ) ~(superset : typ) : bool =
+  let subset_fields, _subset_tail = merge_fields subset in
+  let superset_fields, _superset_tail = merge_fields superset in
+  Env.fold subset_fields ~init:true ~f:(fun ~key ~data:_ acc ->
+    acc
+    &&
+    match Env.find superset_fields key with
+    | Some _ -> true
+    | None -> false)
+
+and join_record_rows (state : infer_state) (lhs : typ) (rhs : typ) : typ =
+  let map_l, tail_l = merge_fields lhs in
+  let map_r, tail_r = merge_fields rhs in
+  let common_fields =
+    Env.fold map_l ~init:Env.empty ~f:(fun ~key ~data:lhs_field_ty acc ->
+      match Env.find map_r key with
+      | None -> acc
+      | Some rhs_field_ty -> Env.add key (join_type state lhs_field_ty rhs_field_ty) acc)
+  in
+  let shared_tail =
+    if row_tail_equivalent tail_l tail_r then resolve_bound_type tail_l else Empty_row
+  in
+  build_row_type common_fields shared_tail
+
+and join_type (state : infer_state) (lhs : typ) (rhs : typ) : typ =
+  match resolve_bound_type lhs, resolve_bound_type rhs with
+  | Record row_l, Record row_r -> Record (join_record_rows state row_l row_r)
+  | lhs', rhs' ->
+    unify state lhs' rhs';
+    lhs
+
+and infer_expr_against_expected
+      (state : infer_state)
+      (env : tenv)
+      (types : type_env)
+      (expr : expr node)
+      (expected_ty : typ)
+  : typ
+  =
+  match expr.value, resolve_bound_type expected_ty with
+  | ELambda (params, body), Fun (expected_params, expected_ret)
+    when List.length params = List.length expected_params ->
+    with_new_level state ~f:(fun () ->
+      let env_with_params =
+        List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
+          add_mono env_acc param param_ty)
+      in
+      let body_ty = infer_expr state env_with_params types body in
+      unify state body_ty expected_ret;
+      expected_ty)
+  | ELambdaSlots (params, _slots, body), Fun (expected_params, expected_ret)
+    when List.length params = List.length expected_params ->
+    with_new_level state ~f:(fun () ->
+      let env_with_params =
+        List.fold2_exn params expected_params ~init:env ~f:(fun env_acc param param_ty ->
+          add_mono env_acc param param_ty)
+      in
+      let body_ty = infer_expr state env_with_params types body in
+      unify state body_ty expected_ret;
+      expected_ty)
+  | (ELambda (params, _) | ELambdaSlots (params, _, _)), Fun (expected_params, _expected_ret) ->
+    raise
+      (Type_error
+         (Printf.sprintf
+            "Annotated function expects %d parameter(s), but lambda has %d"
+            (List.length expected_params)
+            (List.length params)))
+  | _ ->
+    let inferred_ty = infer_expr state env types expr in
+    unify state inferred_ty expected_ty;
+    expected_ty
+
+and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
   (* We first perform the usual inference work, then — if it succeeds — we
      record the resulting type in [state.span_types].  The resolver consults this
      table to choose an appropriate slot descriptor. *)
@@ -1240,8 +1783,8 @@ and infer_expr (state : infer_state) (env : tenv) expr =
       | EString _ -> String
       | EVar x -> lookup state env x
       | EVarLoc _ -> failwith "EVarLoc should not appear before resolver"
-      | EPrim1 (prim, arg) -> infer_unary_prim state env prim arg
-      | EPrim2 (prim, lhs, rhs) -> infer_binary_prim state env prim lhs rhs
+      | EPrim1 (prim, arg) -> infer_unary_prim state env types prim arg
+      | EPrim2 (prim, lhs, rhs) -> infer_binary_prim state env types prim lhs rhs
       | ELambda (params, body) ->
         with_new_level state ~f:(fun () ->
           let env_with_params, param_tys_rev =
@@ -1249,7 +1792,7 @@ and infer_expr (state : infer_state) (env : tenv) expr =
               let t = new_var state state.current_lvl in
               add_mono env_acc p t, t :: tys_rev)
           in
-          let body_ty = infer_expr state env_with_params body in
+          let body_ty = infer_expr state env_with_params types body in
           let param_tys =
             List.rev param_tys_rev
             |> List.map ~f:(reopen_lambda_param_if_closed_record state)
@@ -1262,97 +1805,96 @@ and infer_expr (state : infer_state) (env : tenv) expr =
               let t = new_var state state.current_lvl in
               add_mono env_acc p t, t :: tys_rev)
           in
-          let body_ty = infer_expr state env_with_params body in
+          let body_ty = infer_expr state env_with_params types body in
           let param_tys =
             List.rev param_tys_rev
             |> List.map ~f:(reopen_lambda_param_if_closed_record state)
           in
           Fun (param_tys, body_ty))
       | EApp (fn_expr, arg_exprs) ->
-        let fn_ty = infer_expr state env fn_expr in
-        let arg_tys = List.map arg_exprs ~f:(fun arg -> infer_expr state env arg) in
+        let fn_ty = infer_expr state env types fn_expr in
+        let arg_tys = List.map arg_exprs ~f:(fun arg -> infer_expr state env types arg) in
         let ret_ty = new_var state state.current_lvl in
         unify state fn_ty (Fun (arg_tys, ret_ty));
         ret_ty
       | EIf (c, t, e) ->
-        let c_ty = infer_expr state env c in
+        let c_ty = infer_expr state env types c in
         unify state c_ty Boolean;
-        let t_ty = infer_expr state env t in
-        let e_ty = infer_expr state env e in
-        unify state t_ty e_ty;
-        t_ty
+        let t_ty = infer_expr state env types t in
+        let e_ty = infer_expr state env types e in
+        join_type state t_ty e_ty
       | EWhile (cond, body) ->
-        unify state (infer_expr state env cond) Boolean;
-        ignore (infer_expr state env body);
+        unify state (infer_expr state env types cond) Boolean;
+        ignore (infer_expr state env types body);
         Unit
       | ESequence (e1, e2) ->
-        ignore (infer_expr state env e1);
-        infer_expr state env e2
+        ignore (infer_expr state env types e1);
+        infer_expr state env types e2
       | ELetIn (x, rhs, body) ->
-        let env' = infer_nonrecursive_binding state env x rhs in
-        infer_expr state env' body
+        let env' = infer_nonrecursive_binding state env types x rhs in
+        infer_expr state env' types body
       | ELetBlock (bindings, body) ->
         let block_env =
           List.fold bindings ~init:env ~f:(fun env_acc (nm, rhs) ->
-            infer_nonrecursive_binding state env_acc nm rhs)
+            infer_nonrecursive_binding state env_acc types nm rhs)
         in
-        infer_expr state block_env body
+        infer_expr state block_env types body
       | ELetBlockSlots (bindings, _slots, body) ->
         let block_env =
           List.fold bindings ~init:env ~f:(fun env_acc (nm, rhs) ->
-            infer_nonrecursive_binding state env_acc nm rhs)
+            infer_nonrecursive_binding state env_acc types nm rhs)
         in
-        infer_expr state block_env body
+        infer_expr state block_env types body
       | ELetRec (bindings, body) ->
-        let env_with_bindings = infer_recursive_bindings state env bindings in
-        infer_expr state env_with_bindings body
+        let env_with_bindings = infer_recursive_bindings state env types bindings in
+        infer_expr state env_with_bindings types body
       | ELetRecSlots (bindings, _slots, body) ->
-        let env_with_bindings = infer_recursive_bindings state env bindings in
-        infer_expr state env_with_bindings body
+        let env_with_bindings = infer_recursive_bindings state env types bindings in
+        infer_expr state env_with_bindings types body
       | ERecord fields ->
         validate_unique_record_fields expr.span fields;
         let row =
           List.fold_right fields ~init:Empty_row ~f:(fun (lbl, expr) acc ->
-            let ty = infer_expr state env expr in
+            let ty = infer_expr state env types expr in
             Row (Env.singleton lbl ty, acc))
         in
         Record row
       | EFieldGet (obj, lbl) ->
-        let obj_ty = infer_expr state env obj in
+        let obj_ty = infer_expr state env types obj in
         let field_ty = new_var state state.current_lvl in
         let tail_row = new_var state state.current_lvl in
         unify state obj_ty (Record (Row (Env.singleton lbl field_ty, tail_row)));
         field_ty
       | EArray elts ->
         let elt_ty = new_var state state.current_lvl in
-        List.iter elts ~f:(fun e -> unify state (infer_expr state env e) elt_ty);
+        List.iter elts ~f:(fun e -> unify state (infer_expr state env types e) elt_ty);
         Array elt_ty
       | EArrayGet (arr, idx) ->
-        unify state (infer_expr state env idx) TInt;
+        unify state (infer_expr state env types idx) TInt;
         let elt_ty = new_var state state.current_lvl in
-        unify state (infer_expr state env arr) (Array elt_ty);
+        unify state (infer_expr state env types arr) (Array elt_ty);
         elt_ty
       | EArraySet (arr, idx, v) ->
-        unify state (infer_expr state env idx) TInt;
-        let v_ty = infer_expr state env v in
-        unify state (infer_expr state env arr) (Array v_ty);
+        unify state (infer_expr state env types idx) TInt;
+        let v_ty = infer_expr state env types v in
+        unify state (infer_expr state env types arr) (Array v_ty);
         Unit
-      | ERef e -> Ref (infer_expr state env e) (* simplified *)
+      | ERef e -> Ref (infer_expr state env types e) (* simplified *)
       | ERecordExtend (base_expr, fields) ->
         validate_unique_record_update_fields expr.span fields;
-        infer_record_extend state env base_expr fields
+        infer_record_extend state env types base_expr fields
       | EDeref e ->
         let ty = new_var state state.current_lvl in
-        unify state (Ref ty) (infer_expr state env e);
+        unify state (Ref ty) (infer_expr state env types e);
         ty
       | ESetRef (lhs, rhs) ->
-        let lhs_ty = infer_expr state env lhs in
-        let rhs_ty = infer_expr state env rhs in
+        let lhs_ty = infer_expr state env types lhs in
+        let rhs_ty = infer_expr state env types rhs in
         unify state (Ref (new_var state state.current_lvl)) lhs_ty;
         unify state lhs_ty (Ref rhs_ty);
         Unit
       | EVariant (tag, exprs) ->
-        let arg_tys = List.map exprs ~f:(fun ex -> infer_expr state env ex) in
+        let arg_tys = List.map exprs ~f:(fun ex -> infer_expr state env types ex) in
         let case_ty =
           match arg_tys with
           | [] -> Unit
@@ -1361,45 +1903,57 @@ and infer_expr (state : infer_state) (env : tenv) expr =
         in
         let row_var = new_var state state.current_lvl in
         Variant (Row (Env.singleton tag case_ty, row_var))
+      | EAnnot (rhs, type_expr) ->
+        let annotated_ty = typ_of_type_expr types type_expr in
+        infer_expr_against_expected state env types rhs annotated_ty
       | EMatch (scrut, cases) ->
-        let scrut_ty = infer_expr state env scrut in
-        let result_ty = new_var state state.current_lvl in
+        let scrut_ty = infer_expr state env types scrut in
         let case_spans = List.map cases ~f:(fun case -> case.pat, case.pat_span) in
         validate_match_case_shapes case_spans;
-        List.iter cases ~f:(fun case ->
-          try
-            validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
-            validate_pattern_binders case.pat;
-            let env_arm = infer_pattern state env case.pat scrut_ty in
-            let rhs_ty = infer_expr state env_arm case.rhs in
-            unify state rhs_ty result_ty
-          with
-          | Type_error msg -> raise (Type_error_with_loc (msg, case.pat_span))
-          | Type_error_with_loc _ as exn -> raise exn);
+        let result_ty =
+          List.fold cases ~init:None ~f:(fun acc case ->
+            try
+              validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
+              validate_pattern_binders case.pat;
+              let env_arm = infer_pattern state env case.pat scrut_ty in
+              let rhs_ty = infer_expr state env_arm types case.rhs in
+              Some
+                (match acc with
+                 | None -> rhs_ty
+                 | Some prior_ty -> join_type state prior_ty rhs_ty)
+            with
+            | Type_error msg -> raise (Type_error_with_loc (msg, case.pat_span))
+            | Type_error_with_loc _ as exn -> raise exn)
+        in
         validate_match_exhaustiveness state scrut_ty (List.map case_spans ~f:fst);
         validate_typed_match_redundancy scrut_ty case_spans;
-        result_ty
+        (match result_ty with
+         | Some ty -> ty
+         | None -> new_var state state.current_lvl)
       | EMatchSlots (scrut, cases) ->
-        let scrut_ty = infer_expr state env scrut in
-        let result_ty = new_var state state.current_lvl in
+        let scrut_ty = infer_expr state env types scrut in
         let case_spans = List.map cases ~f:(fun case -> case.pat, case.pat_span) in
         validate_match_case_shapes case_spans;
-        List.iter cases ~f:(fun case ->
-          try
-            validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
-            validate_pattern_binders case.pat;
-            let env_arm = infer_pattern state env case.pat scrut_ty in
-            let rhs_ty = infer_expr state env_arm case.rhs in
-            unify state rhs_ty result_ty
-          with
-          | Type_error msg -> raise (Type_error_with_loc (msg, case.pat_span))
-          | Type_error_with_loc _ as exn -> raise exn);
-        validate_match_exhaustiveness
-          state
-          scrut_ty
-          (List.map case_spans ~f:fst);
+        let result_ty =
+          List.fold cases ~init:None ~f:(fun acc case ->
+            try
+              validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
+              validate_pattern_binders case.pat;
+              let env_arm = infer_pattern state env case.pat scrut_ty in
+              let rhs_ty = infer_expr state env_arm types case.rhs in
+              Some
+                (match acc with
+                 | None -> rhs_ty
+                 | Some prior_ty -> join_type state prior_ty rhs_ty)
+            with
+            | Type_error msg -> raise (Type_error_with_loc (msg, case.pat_span))
+            | Type_error_with_loc _ as exn -> raise exn)
+        in
+        validate_match_exhaustiveness state scrut_ty (List.map case_spans ~f:fst);
         validate_typed_match_redundancy scrut_ty case_spans;
-        result_ty
+        (match result_ty with
+         | Some ty -> ty
+         | None -> new_var state state.current_lvl)
     with
     | Type_error msg -> raise (Type_error_with_loc (msg, expr.span))
   in
@@ -1418,25 +1972,33 @@ and infer_expr (state : infer_state) (env : tenv) expr =
    explicit definitions contribute to a module's exported surface.
    In particular, [open M] imports names for subsequent statements yet does
    not re-export them from the enclosing module. *)
-let rec infer_stmt_with_exports (state : infer_state) (env : tenv) (stmt : stmt)
-  : tenv * string list
+let rec infer_stmt_with_exports
+          (state : infer_state)
+          (env : tenv)
+          (stmt : stmt)
+          (types : type_env)
+  : tenv * type_env * string list
   =
   match stmt with
-  | SLet (x, e) -> infer_nonrecursive_binding state env x e, [ x ]
+  | SLet (x, e) -> infer_nonrecursive_binding state env types x e, types, [ x ]
   | SLetRec bindings ->
-    infer_recursive_bindings state env bindings, List.map bindings ~f:fst
+    infer_recursive_bindings state env types bindings, types, List.map bindings ~f:fst
+  | SType (name, body) -> env, infer_type_decl types name body, []
   | SExpr e ->
-    ignore (infer_expr state env e);
-    env, []
+    ignore (infer_expr state env types e);
+    env, types, []
   | SModule (mname, stmts) ->
     let module_placeholder = new_var state state.current_lvl in
     let mod_env_start = add_mono env mname module_placeholder in
-    let mod_env_final, exported_names_rev =
-      List.fold stmts ~init:(mod_env_start, []) ~f:(fun (env_acc, names_rev) stmt_node ->
-        let env_next, stmt_exports =
-          infer_stmt_with_exports state env_acc stmt_node.value
-        in
-        env_next, List.rev_append stmt_exports names_rev)
+    let mod_env_final, _mod_types_final, exported_names_rev =
+      List.fold
+        stmts
+        ~init:(mod_env_start, types, [])
+        ~f:(fun (env_acc, types_acc, names_rev) stmt_node ->
+          let env_next, types_next, stmt_exports =
+            infer_stmt_with_exports state env_acc stmt_node.value types_acc
+          in
+          env_next, types_next, List.rev_append stmt_exports names_rev)
     in
     let exported_names = List.rev exported_names_rev in
     let seen = Hash_set.create (module String) in
@@ -1452,7 +2014,7 @@ let rec infer_stmt_with_exports (state : infer_state) (env : tenv) (stmt : stmt)
     in
     let module_typ = Record (Row (exports_map, Empty_row)) in
     unify state module_placeholder module_typ;
-    add_generalized state env mname module_typ, [ mname ]
+    add_generalized state env mname module_typ, types, [ mname ]
   | SOpen mname ->
     (match lookup state env mname with
      | Record row ->
@@ -1462,12 +2024,16 @@ let rec infer_stmt_with_exports (state : infer_state) (env : tenv) (stmt : stmt)
         | _ -> ());
        ( Env.fold fields ~init:env ~f:(fun ~key ~data acc ->
            add_open_binding state acc ~module_name:mname key data)
+       , types
        , [] )
      | _ -> raise (Type_error (Printf.sprintf "Cannot open non-module '%s'" mname)))
 ;;
 
-let infer_stmt (state : infer_state) (env : tenv) (stmt : stmt) : tenv =
-  fst (infer_stmt_with_exports state env stmt)
+let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stmt)
+  : tenv * type_env
+  =
+  let env', types', _exports = infer_stmt_with_exports state env stmt types in
+  env', types'
 ;;
 
 (** --------------------------------------------------------------------- *)
@@ -1491,13 +2057,14 @@ let infer_stmt (state : infer_state) (env : tenv) (stmt : stmt) : tenv =
 let check_program (prog : program) : (checked_program, diagnostic) result =
   let state = create_state () in
   let env = init_env () in
+  let types : type_env = Env.empty in
   (* Each element of [prog] now carries its own source span.  The current
      type-checker, however, does not yet make use of that information.  We
      therefore simply discard the annotation for the time being. *)
   try
-    let _final_env =
-      List.fold prog.stmts ~init:env ~f:(fun env_acc stmt_node ->
-        infer_stmt state env_acc stmt_node.value)
+    let _final_env, _final_types =
+      List.fold prog.stmts ~init:(env, types) ~f:(fun (env_acc, types_acc) stmt_node ->
+        infer_stmt state env_acc types_acc stmt_node.value)
     in
     Ok { span_types = Hashtbl.copy state.span_types }
   with

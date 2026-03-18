@@ -16,6 +16,14 @@ let check_program_formatted (code : string) =
   | Error diagnostic -> Chatml_typechecker.format_diagnostic code diagnostic
 ;;
 
+let expect_recursive_types_error (code : string) : unit =
+  match check_program_result code with
+  | Ok _ -> failwith "expected implicit recursive typing to be rejected in Phase 1"
+  | Error diagnostic ->
+    if not (String.is_substring diagnostic.message ~substring:"Recursive types")
+    then failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
 let%expect_test "variant with tuple args" =
   let code =
     {|
@@ -1332,14 +1340,19 @@ let%expect_test "record extension override type" =
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "record copy update of array element field is allowed" =
+let%expect_test "record copy update of array element field accepts explicit task/state annotations" =
   let code =
     {|
-      let set_task_status st new_status =
-        let t = st.tasks[st.task_index] in
-        let t = { t with status = new_status } in
-        st.tasks[st.task_index] <- t;
-        st
+      type status = [ `Pending | `Running | `Done ]
+      type task = { status : status }
+      type state = { task_index : int; tasks : task array }
+
+      let set_task_status : state -> status -> state =
+        fun st new_status ->
+          let t : task = st.tasks[st.task_index] in
+          let t : task = { t with status = new_status } in
+          st.tasks[st.task_index] <- t;
+          st
     |}
   in
   let prog = parse code in
@@ -1347,7 +1360,9 @@ let%expect_test "record copy update of array element field is allowed" =
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "record helper remains row-polymorphic when returning a wider state" =
+let%expect_test
+    "record helper over mutable array state is accepted again"
+  =
   let code =
     {|
       let bump_attempts st =
@@ -1371,33 +1386,50 @@ let%expect_test "record helper remains row-polymorphic when returning a wider st
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "state machine helper composition preserves wider state rows" =
+let%expect_test "state machine helper composition accepts explicit task/state annotations" =
   let code =
     {|
-      let mk_task id =
-        { id = id
-        ; status = `Pending
-        ; attempts = 0
+      type status = [ `Pending | `Running | `Done ]
+      type task =
+        { id : string
+        ; status : status
+        ; attempts : int
+        }
+      type event = [ `Start | `Done ]
+      type state =
+        { autopilot : bool
+        ; task_index : int
+        ; tasks : task array
         }
 
-      let set_task_status st new_status =
-        let t = st.tasks[st.task_index] in
-        let t = { t with status = new_status } in
-        st.tasks[st.task_index] <- t;
-        st
+      let mk_task : string -> task =
+        fun id ->
+          { id = id
+          ; status = `Pending
+          ; attempts = 0
+          }
 
-      let bump_attempts st =
-        let t = st.tasks[st.task_index] in
-        let t = { t with attempts = t.attempts + 1 } in
-        st.tasks[st.task_index] <- t;
-        st
+      let set_task_status : state -> status -> state =
+        fun st new_status ->
+          let t : task = st.tasks[st.task_index] in
+          let t : task = { t with status = new_status } in
+          st.tasks[st.task_index] <- t;
+          st
 
-      let step st ev =
-        match ev with
-        | `Start ->
-            let st = set_task_status(st, `Running) in
-            bump_attempts(st)
-        | `Done -> set_task_status(st, `Done)
+      let bump_attempts : state -> state =
+        fun st ->
+          let t : task = st.tasks[st.task_index] in
+          let t : task = { t with attempts = t.attempts + 1 } in
+          st.tasks[st.task_index] <- t;
+          st
+
+      let step : state -> event -> state =
+        fun st ev ->
+          match ev with
+          | `Start ->
+              let st = set_task_status(st, `Running) in
+              bump_attempts(st)
+          | `Done -> set_task_status(st, `Done)
 
       let s =
         { autopilot = true
@@ -1414,7 +1446,9 @@ let%expect_test "state machine helper composition preserves wider state rows" =
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "module helper over state remains row-polymorphic after open" =
+let%expect_test
+    "module helper over mutable array state is accepted again"
+  =
   let code =
     {|
       let mk_task id =
@@ -1441,6 +1475,164 @@ let%expect_test "module helper over state remains row-polymorphic after open" =
 
       let s2 = bump_attempts(s)
       s2.autopilot
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "record helper can add a fresh field through function application" =
+  let code =
+    {|
+      let require_enabled cfg =
+        if cfg.enabled == true then cfg else fail("feature disabled")
+
+      let with_timeout cfg ms =
+        { cfg with timeout_ms = ms }
+
+      let describe cfg =
+        "keys=" ++ to_string(record_keys(cfg))
+
+      let cfg0 = { name = "ingest"; enabled = true }
+      let cfg1 = require_enabled(cfg0)
+      let cfg2 = with_timeout(cfg1, 2500)
+
+      print(describe(cfg0))
+      print(describe(cfg2))
+      print("timeout=" ++ to_string(cfg2.timeout_ms))
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "state workflow helper accepts explicit task/state annotations" =
+  let code =
+    {|
+      type status = [ `Pending | `Running | `Done | `Error(string) ]
+      type task =
+        { name : string
+        ; attempts : int
+        ; status : status
+        }
+      type event = [ `Start | `Tick | `Fail(string) | `Stop ]
+      type state =
+        { tasks : task array
+        ; idx : int
+        ; running : bool
+        }
+
+      let status_witness : int -> status =
+        fun n ->
+          match n with
+          | 0 -> `Pending
+          | 1 -> `Running
+          | 2 -> `Done
+          | _ -> `Error("")
+
+      let mk_task : string -> task =
+        fun name ->
+          { name = name; attempts = 0; status = status_witness(0) }
+
+      let set_status : state -> status -> state =
+        fun st new_status ->
+          let i = st.idx in
+          let t : task = st.tasks[i] in
+          st.tasks[i] <- { t with status = new_status };
+          st
+
+      let set_running : state -> bool -> state =
+        fun st running ->
+          { st with running = running }
+
+      let bump_attempts : state -> state =
+        fun st ->
+          let i = st.idx in
+          let t : task = st.tasks[i] in
+          st.tasks[i] <- { t with attempts = t.attempts + 1 };
+          st
+
+      let step : state -> event -> state =
+        fun st ev ->
+          match ev with
+          | `Start ->
+            if st.idx >= length(st.tasks) then set_running(st, false)
+            else set_status(set_running(st, true), status_witness(1))
+
+          | `Tick ->
+            if st.running == false then set_running(st, false)
+            else
+              let st = set_running(st, true) in
+              let st = bump_attempts(st) in
+              let t : task = st.tasks[st.idx] in
+              if t.attempts >= 3 then
+                let st = set_status(st, `Done) in
+                let st = { st with idx = st.idx + 1 } in
+                if st.idx < length(st.tasks) then set_status(set_running(st, true), status_witness(1)) else st
+              else st
+
+          | `Fail(msg) ->
+            let st = set_status(st, `Error(msg)) in
+            set_running(st, false)
+
+          | `Stop ->
+            set_running(st, false)
+
+      let tasks = [ mk_task("fetch"), mk_task("transform"), mk_task("upload") ]
+      let st0 = { tasks = tasks; idx = 0; running = false }
+      let st1 = step(st0, `Start)
+      st1.running
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%test_unit "if-branch widening does not make added field globally available" =
+  let code =
+    {|
+      let maybe_set_running b st =
+        if b then st else { st with running = true }
+
+      let s = maybe_set_running(true, { idx = 0 })
+      s.running
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if not (String.is_substring rendered ~substring:"Row does not contain label 'running'")
+  then failwith rendered
+;;
+
+let%test_unit "match-arm widening does not make added field globally available" =
+  let code =
+    {|
+      let maybe_timeout tag cfg =
+        match tag with
+        | `Keep -> cfg
+        | `Add -> { cfg with timeout_ms = 2500 }
+
+      let cfg = maybe_timeout(`Keep, { name = "ingest"; enabled = true })
+      cfg.timeout_ms
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if not (String.is_substring rendered ~substring:"Row does not contain label 'timeout_ms'")
+  then failwith rendered
+;;
+
+let%expect_test "if-branch join keeps field when both branches provide it" =
+  let code =
+    {|
+      let ensure_running b st =
+        if b
+        then { st with running = true }
+        else { st with running = false }
+
+      let s = ensure_running(true, { idx = 0 })
+      s.running
     |}
   in
   let prog = parse code in
@@ -1555,4 +1747,307 @@ let%expect_test "match binder does not leak" =
 
     Type error: Unknown variable 'x'
     |}]
+;;
+
+let%test_unit "occurs check rejects self application" =
+  let code =
+    {|
+      let bad x = x(x)
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected occurs check to reject self application"
+  | Error diagnostic ->
+    if not (String.is_substring diagnostic.message ~substring:"Recursive types")
+    then failwith diagnostic.message
+;;
+
+let%test_unit "explicit recursive type helpers are cycle-safe" =
+  let ty =
+    Chatml_typechecker.Mu
+      ( "a"
+      , Chatml_typechecker.Record
+          (Chatml_typechecker.Row
+             ( Chatml_typechecker.Env.singleton "next" (Chatml_typechecker.Rec_var "a")
+             , Chatml_typechecker.Empty_row )) )
+  in
+  let rendered = Chatml_typechecker.show_type ty in
+  if not (String.is_substring rendered ~substring:"mu a.")
+  then failwith rendered;
+  Chatml_typechecker.ensure_equality_type ty;
+  match Chatml_typechecker.record_field_type ty "next" with
+  | Some _ -> ()
+  | None -> failwith "expected to find recursive record field through Mu"
+;;
+
+let%test_unit "contractiveness accepts recursive record type" =
+  let ty =
+    Chatml_typechecker.Mu
+      ( "a"
+      , Chatml_typechecker.Record
+          (Chatml_typechecker.Row
+             ( Chatml_typechecker.Env.singleton "next" (Chatml_typechecker.Rec_var "a")
+             , Chatml_typechecker.Empty_row )) )
+  in
+  match Chatml_typechecker.check_contractive ty with
+  | Ok () -> ()
+  | Error msg -> failwith msg
+;;
+
+let%test_unit "contractiveness accepts recursive variant type" =
+  let ty =
+    Chatml_typechecker.Mu
+      ( "a"
+      , Chatml_typechecker.Variant
+          (Chatml_typechecker.Row
+             ( Chatml_typechecker.Env.of_list
+                 [ "Int", Chatml_typechecker.TInt
+                 ; ( "Add"
+                   , Chatml_typechecker.Tuple
+                       [ Chatml_typechecker.Rec_var "a"; Chatml_typechecker.Rec_var "a" ] )
+                 ]
+             , Chatml_typechecker.Empty_row )) )
+  in
+  match Chatml_typechecker.check_contractive ty with
+  | Ok () -> ()
+  | Error msg -> failwith msg
+;;
+
+let%test_unit "contractiveness rejects unguarded recursion" =
+  let ty = Chatml_typechecker.Mu ("a", Chatml_typechecker.Rec_var "a") in
+  match Chatml_typechecker.check_contractive ty with
+  | Ok () -> failwith "expected unguarded recursive type to be rejected"
+  | Error msg ->
+    if not (String.is_substring msg ~substring:"Unguarded recursive type variable 'a'")
+    then failwith msg
+;;
+
+let%expect_test "top-level type declaration and annotation typecheck" =
+  let code =
+    {|
+      type expr = [ `Int(int) | `Add(expr, expr) ]
+      let one : expr = `Int(1)
+      let plus_one : expr = `Add(one, `Int(1))
+      plus_one
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "annotated recursive function over declared recursive type typechecks" =
+  let code =
+    {|
+      type expr = [ `Int(int) | `Add(expr, expr) | `Mul(expr, expr) ]
+
+      let rec eval : expr -> int =
+        fun e ->
+          match e with
+          | `Int(n) -> n
+          | `Add(a, b) -> eval(a) + eval(b)
+          | `Mul(a, b) -> eval(a) * eval(b)
+
+      let program : expr = `Add(`Int(2), `Mul(`Int(3), `Int(4)))
+      eval(program)
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "annotated zero-argument function uses unit-arrow surface syntax" =
+  let code =
+    {|
+      let finish_action : unit -> string =
+        fun () -> "done"
+      finish_action()
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%test_unit "unguarded recursive type declaration is rejected" =
+  let code =
+    {|
+      type bad = bad
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected unguarded recursive type declaration to be rejected"
+  | Error diagnostic ->
+    if
+      not
+        (String.is_substring
+           diagnostic.message
+           ~substring:"Unguarded recursive type variable 'bad'")
+    then failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let%test_unit "ordinary non-recursive bindings still generalize" =
+  let state = Chatml_typechecker.create_state () in
+  let free = Chatml_typechecker.Var (ref (Chatml_typechecker.Free ("z", 1))) in
+  let ty = Chatml_typechecker.Fun ([ Chatml_typechecker.TInt ], free) in
+  let env = Chatml_typechecker.Env.empty in
+  let env' = Chatml_typechecker.add_generalized state env "f" ty in
+  let stored = Chatml_typechecker.Env.find_exn env' "f" in
+  if not (Chatml_typechecker.contains_generic stored)
+  then failwith "expected ordinary non-recursive binding to generalize"
+;;
+
+let%test_unit "bindings containing recursive types remain monomorphic" =
+  let state = Chatml_typechecker.create_state () in
+  let free = Chatml_typechecker.Var (ref (Chatml_typechecker.Free ("z", 1))) in
+  let recursive_expr_ty =
+    Chatml_typechecker.Mu
+      ( "expr"
+      , Chatml_typechecker.Variant
+          (Chatml_typechecker.Row
+             ( Chatml_typechecker.Env.of_list
+                 [ "Int", Chatml_typechecker.TInt
+                 ; ( "Add"
+                   , Chatml_typechecker.Tuple
+                       [ Chatml_typechecker.Rec_var "expr"; Chatml_typechecker.Rec_var "expr" ] )
+                 ]
+             , Chatml_typechecker.Empty_row )) )
+  in
+  let ty = Chatml_typechecker.Fun ([ recursive_expr_ty ], free) in
+  let env = Chatml_typechecker.Env.empty in
+  let env' = Chatml_typechecker.add_generalized state env "f" ty in
+  let stored = Chatml_typechecker.Env.find_exn env' "f" in
+  if Chatml_typechecker.contains_generic stored
+  then failwith "recursive binding should have remained monomorphic";
+  match stored with
+  | Chatml_typechecker.Fun
+      ([ Chatml_typechecker.Mu _ ], Chatml_typechecker.Var { contents = Chatml_typechecker.Free _ }) -> ()
+  | _ -> failwith ("unexpected stored type: " ^ Chatml_typechecker.show_type stored)
+;;
+
+let%test_unit
+    "explicit recursive types do not bypass conservative if-record join"
+  =
+  let code =
+    {|
+      type expr = [ `Int(int) | `Add(expr, expr) ]
+
+      let maybe_wrap b e =
+        if b
+        then { expr = e; depth = 0 }
+        else { expr = e; depth = 1; extra = true }
+
+      let wrapped = maybe_wrap(true, `Int(1))
+      wrapped.extra
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if not (String.is_substring rendered ~substring:"Row does not contain label 'extra'")
+  then failwith rendered
+;;
+
+let%test_unit
+    "explicit recursive types do not bypass conservative match-record join"
+  =
+  let code =
+    {|
+      type expr = [ `Int(int) | `Add(expr, expr) ]
+
+      let maybe_wrap tag e =
+        match tag with
+        | `Keep -> { expr = e; depth = 0 }
+        | `Extra -> { expr = e; depth = 1; extra = true }
+
+      let wrapped = maybe_wrap(`Keep, `Int(1))
+      wrapped.extra
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if not (String.is_substring rendered ~substring:"Row does not contain label 'extra'")
+  then failwith rendered
+;;
+
+let%expect_test "explicit recursive types at record control-flow joins accept explicit result annotations" =
+  let code =
+    {|
+      type expr = [ `Int(int) | `Add(expr, expr) ]
+      type wrapped = { expr : expr; depth : int }
+
+      let wrap : bool -> expr -> wrapped =
+        fun b e ->
+          if b
+          then { expr = e; depth = 0 }
+          else { expr = `Add(e, `Int(1)); depth = 1 }
+
+      let wrapped = wrap(true, `Int(2))
+      wrapped.depth
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%test_unit "unknown type name in annotation is rejected" =
+  let code =
+    {|
+      let x : missing = 1
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected unknown type name to be rejected"
+  | Error diagnostic ->
+    if not (String.is_substring diagnostic.message ~substring:"Unknown type 'missing'")
+    then failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let%test_unit "duplicate type declaration is rejected" =
+  let code =
+    {|
+      type expr = [ `Int(int) ]
+      type expr = [ `Bool(bool) ]
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected duplicate type declaration to be rejected"
+  | Error diagnostic ->
+    if
+      not
+        (String.is_substring
+           diagnostic.message
+           ~substring:"Duplicate type declaration 'expr'")
+    then failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let%test_unit "primitive type names cannot be redefined" =
+  let code =
+    {|
+      type int = [ `Nope ]
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected primitive type redefinition to be rejected"
+  | Error diagnostic ->
+    if
+      not
+        (String.is_substring
+           diagnostic.message
+           ~substring:"Cannot redefine primitive type 'int'")
+    then failwith (Chatml_typechecker.format_diagnostic code diagnostic)
+;;
+
+let%test_unit "recursive type mismatch diagnostic is cycle-safe" =
+  let code =
+    {|
+      type expr = [ `Int(int) | `Add(expr, expr) ]
+      let bad : expr = 0
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring rendered ~substring:"mu expr."
+       && String.is_substring rendered ~substring:"with int")
+  then failwith rendered
 ;;

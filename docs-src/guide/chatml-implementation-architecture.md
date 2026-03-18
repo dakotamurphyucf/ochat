@@ -45,6 +45,7 @@ These phases are deliberately split across modules.
 
 - `chatml_lang.ml`
   - source AST
+  - parsed type-expression AST
   - resolved AST
   - runtime value types
   - shared helpers (pattern matching, environments, diagnostics)
@@ -53,6 +54,9 @@ These phases are deliberately split across modules.
 
 - `chatml_typechecker.ml`
   - Hindley–Milner inference
+  - explicit recursive types (`Mu` / `Rec_var`)
+  - type declaration elaboration
+  - contractiveness checking
   - row polymorphism
   - match checks
   - builtin type import
@@ -98,6 +102,8 @@ It contains source-level constructs such as:
 - `ELetIn`
 - `ELetRec`
 - `EMatch`
+- `EAnnot`
+- `SType`
 
 ### Resolved AST
 
@@ -117,6 +123,7 @@ It contains lowered forms such as:
 The split keeps concerns separated:
 
 - parser and typechecker work on user-facing syntax
+- type declarations and annotations are checked before runtime lowering
 - resolver chooses lexical addresses and slot layouts
 - evaluator only runs optimized/lowered forms
 
@@ -169,6 +176,10 @@ If you are adding new syntax, keep parser and wrapper diagnostics aligned.
 
 - infer types for expressions/statements
 - reject ill-typed programs
+- elaborate parsed `type_expr` syntax into internal types
+- maintain a separate compile-time type-declaration environment
+- represent recursion explicitly with `Mu` / `Rec_var`
+- validate recursive type contractiveness
 - enforce the value restriction
 - type records and variants with rows
 - check match arms for some redundancy/exhaustiveness properties
@@ -201,6 +212,34 @@ If you add a new type form to the builtin type language, you must update:
 - `Builtin_spec.ty`
 - conversion in `chatml_typechecker.ml`
 
+#### 5.4 Explicit recursive types
+
+Recursive types are no longer represented by cyclic ordinary inference
+variables. Instead, the checker uses explicit recursive type nodes:
+
+- `Mu of name * typ`
+- `Rec_var of name`
+
+Ordinary HM inference variables are therefore acyclic again, and recursive
+types are introduced only through explicit checked declarations.
+
+#### 5.5 Recursive type declarations and annotations
+
+The current user-facing recursive-type path is intentionally small:
+
+- top-level `type` declarations
+- binding annotations on `let`, `let rec`, and `let ... in`
+
+Type declarations are alias-like and compile-time only. They live in a
+separate type environment threaded through statement inference.
+
+#### 5.6 Contractiveness and monomorphism
+
+Recursive type declarations are validated for contractiveness before use.
+
+Bindings whose type contains explicit recursive structure are stored
+monomorphically; the implementation does not attempt polymorphic recursion.
+
 ---
 
 ## 6. Resolver architecture
@@ -213,6 +252,7 @@ If you add a new type form to the builtin type language, you must update:
 - keep globals/modules/builtins as global lookups
 - choose slot layouts for bindings
 - coalesce nested non-recursive lets into block layouts
+- erase type-only surface constructs before runtime
 
 ### Current design
 
@@ -225,6 +265,11 @@ The context threads:
 
 - `lookup_type`
 - lexical frame-stack state
+
+Type-only constructs have limited runtime impact:
+
+- `EAnnot` is erased during resolution
+- `SType` never appears in the resolved runtime AST
 
 ### If you add a new binding form
 
@@ -401,6 +446,10 @@ Touch:
 - `chatml_resolver.ml`
 - maybe `chatml_eval.ml`
 
+For type-only syntax such as `type` declarations or checked annotations,
+the runtime often needs no direct semantic change, but the resolver still
+usually needs to erase or skip the new forms.
+
 ### Add a builtin
 
 Touch:
@@ -441,12 +490,18 @@ because type-time and runtime behavior must stay aligned.
 Contributors should preserve these invariants:
 
 - evaluator consumes resolved AST only
+- ordinary inference variables are acyclic
+- recursive types are represented explicitly via `Mu` / `Rec_var`
+- recursive type declarations are contractive
+- recursive types are not generalized
 - recursive bindings are function-only
 - local variable addresses are resolver-produced lexical locations
 - frame slot accesses must match stored frame layout
 - `open` must not silently shadow existing bindings
 - equality restrictions must stay aligned between typechecker intent and
   runtime semantics
+- conservative record joins for `if` / `match` remain independent from
+  recursive type machinery
 
 ---
 

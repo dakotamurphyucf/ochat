@@ -42,6 +42,14 @@ type pattern =
   | PRecord of (string * pattern) list * bool
 [@@deriving sexp, compare]
 
+type type_expr =
+  | TEName of string
+  | TEArrow of type_expr * type_expr
+  | TEArray of type_expr
+  | TERecord of (string * type_expr) list
+  | TEVariant of (string * type_expr list) list
+[@@deriving sexp]
+
 type var_loc =
   { depth : int
   ; index : int
@@ -132,6 +140,7 @@ and expr =
   | ESequence of expr node * expr node
   | EDeref of expr node
   | ERecordExtend of expr node * (string * expr node) list
+  | EAnnot of expr node * type_expr
 [@@deriving sexp_of]
 
 and resolved_expr =
@@ -173,6 +182,7 @@ and resolved_expr =
 type stmt =
   | SLet of string * expr node
   | SLetRec of (string * expr node) list
+  | SType of string * type_expr
   | SModule of string * stmt node list
   | SOpen of string
   | SExpr of expr node

@@ -37,13 +37,13 @@ ChatML is intentionally **not** trying to be:
 - a full general-purpose application language
 - a rich module language
 - a type-class / trait / ad-hoc-overloading language
-- a user-extensible type-declaration language
+- a full algebraic-datatype / type-parameter language
 - a high-performance numerical language
 
 The implementation is intentionally biased toward:
 
 1. **sound static typing**
-2. **good ergonomics without user-written type annotations**
+2. **good ergonomics with inference-first typing and a small explicit type surface**
 3. **small surface area**
 4. **predictable operational behavior**
 5. **enough runtime performance for scripting workloads**
@@ -74,6 +74,8 @@ The surface language supports:
 
 - first-class functions
 - local and recursive bindings
+- top-level named type declarations
+- checked binding annotations
 - structural records
 - polymorphic variants
 - arrays
@@ -81,7 +83,15 @@ The surface language supports:
 - pattern matching
 - simple modules
 
-There are currently **no user-written type annotations**.
+ChatML now has a deliberately small user-facing type surface:
+
+- top-level `type` declarations,
+- binding annotations on `let`, `let rec`, and `let ... in`,
+- explicit recursive types introduced through those declarations.
+
+It still does **not** provide a full ML type language: there are no type
+parameters, no mutual recursive type declarations, and no general
+expression-level ascription syntax.
 
 Function calls use explicit call syntax:
 
@@ -289,9 +299,12 @@ A ChatML program is a sequence of top-level statements.
 
 Top-level statement forms:
 
+- `type t = type_expr`
 - `let x = expr`
+- `let x : type_expr = expr`
 - `let f a b = expr`
 - `let f () = expr`
+- `let rec f : type_expr = expr and g : type_expr = expr`
 - `let rec f x = expr and g y = expr`
 - `module M = struct ... end`
 - `open M`
@@ -351,7 +364,42 @@ Operationally:
   visible
 - placeholders are updated with the final values
 
-### 6.3 Modules
+### 6.3 Top-level `type`
+
+Examples:
+
+```chatml
+type expr = [ `Int(int) | `Add(expr, expr) ]
+type task = { name : string; attempts : int; status : status }
+```
+
+Properties:
+
+- type declarations are compile-time only
+- they introduce names into a separate type namespace
+- they are currently allowed only at the top level
+- later statements may refer to earlier type declarations
+- module bodies may refer to earlier top-level type declarations
+- `open` does not import type names
+- type declarations are alias-like, not nominal runtime entities
+
+Recursive type declarations are allowed, but only in explicit checked form.
+The typechecker validates them for **contractiveness**:
+
+- accepted:
+  - `type expr = [ \`Int(int) | \`Add(expr, expr) ]`
+  - `type node = { value : int; next : node }`
+- rejected:
+  - `type bad = bad`
+
+Current intentional limitations:
+
+- no `type ... and ...`
+- no type parameters
+- no module-local type declarations
+- no forward references to later type declarations
+
+### 6.4 Modules
 
 Example:
 
@@ -372,7 +420,10 @@ Properties:
 - modules are represented as records by the typechecker and as `VModule`
   values at runtime
 
-### 6.4 `open`
+Type declarations are not statements inside module bodies in the current
+surface grammar.
+
+### 6.5 `open`
 
 Example:
 
@@ -450,6 +501,21 @@ Properties:
 - exact arity is required
 - tail calls are optimized through a trampoline
 
+For annotated functions, the current surface syntax annotates the binding,
+not individual parameters:
+
+```chatml
+let rec eval : expr -> int =
+  fun e -> ...
+```
+
+Zero-argument annotated functions use `unit -> t`:
+
+```chatml
+let finish_action : unit -> string =
+  fun () -> "done"
+```
+
 ### 7.4 Function application
 
 Examples:
@@ -475,6 +541,7 @@ Examples:
 
 ```chatml
 let x = 1 in x + 1
+let x : int = 1 in x + 1
 let f y = y in f(3)
 let rec loop n = ... in loop(10)
 ```
@@ -486,6 +553,9 @@ Properties:
   layouts by the resolver
 - `let rec` inside expressions follows the same recursive-function
   restriction as top-level `let rec`
+- binding annotations are checked against the inferred RHS type
+- there is currently no general `(expr : type)` surface syntax; annotations
+  are introduced through binding forms
 
 ### 7.6 Conditionals
 
@@ -496,7 +566,34 @@ if cond then a else b
 Rules:
 
 - condition must have type `bool`
-- both branches must have the same type
+- both branches must have the same type for non-record results
+- record-valued branches are combined using a conservative **join**
+
+For records, ChatML keeps only the fields that are guaranteed on **every**
+branch. This avoids unsoundly concluding that a field exists just because one
+branch adds it with copy-update.
+
+Example:
+
+```chatml
+let maybe_set_running b st =
+  if b then st else { st with running = true }
+```
+
+The result of `maybe_set_running` is **not** treated as definitely having a
+`running` field, because the `then` branch returns `st` unchanged.
+
+By contrast:
+
+```chatml
+let set_running st running =
+  { st with running = running }
+
+let ensure_running b st =
+  if b then set_running(st, true) else set_running(st, false)
+```
+
+does guarantee `running` on every path, so the joined result keeps that field.
 
 ### 7.7 Sequencing
 
@@ -550,6 +647,7 @@ Properties:
 - copy-update is immutable
 - copy-update may overwrite fields
 - copy-update may add fields to closed records
+- copy-update may also add fields through open-row helper functions
 - copy-update may change field types
 
 ### 7.10 Arrays
@@ -799,6 +897,15 @@ The typechecker performs:
 - some redundancy checks
 - conservative exhaustiveness checks
 
+The result type of a `match` follows the same rule as `if`:
+
+- non-record arm results must unify to the same type
+- record-valued arm results are combined using the same conservative join
+  used for `if`
+
+So if one arm adds a record field and another arm does not guarantee it, the
+overall `match` result type does not retain that field.
+
 Exhaustiveness is strongest for:
 
 - booleans
@@ -836,11 +943,19 @@ This is intentional.
 
 ChatML uses Hindley–Milner style inference with extensions for:
 
+- explicit recursive types
 - mutation safety via the value restriction
 - row-polymorphic records
 - row-polymorphic variants
 
-Users do not write type annotations.
+Unlike earlier versions, ChatML now has a small explicit type surface for:
+
+- top-level named type declarations
+- checked binding annotations
+
+Ordinary HM inference variables are acyclic again. Recursive types are not
+inferred accidentally from ordinary unification; they are introduced only
+through explicit checked declarations.
 
 ### 10.1 Primitive types
 
@@ -864,6 +979,93 @@ but tuple syntax is not exposed as a general user-facing surface feature.
 They are most visible as the internal typing of multi-argument variant
 payloads.
 
+### 10.2.1 User-facing type syntax
+
+The current user-facing type-expression syntax supports:
+
+- primitive names:
+  - `int`
+  - `float`
+  - `bool`
+  - `string`
+  - `unit`
+- previously declared type names
+- function types:
+  - `expr -> int`
+  - `state -> event -> state`
+  - `unit -> string`
+- postfix array types:
+  - `task array`
+- closed record types:
+  - `{ name : string; attempts : int }`
+- closed variant types:
+  - `[ `Pending | `Done | `Error(string) ]`
+
+Examples:
+
+```chatml
+type status = [ `Pending | `Running | `Done | `Error(string) ]
+type task =
+  { name : string
+  ; attempts : int
+  ; status : status
+  }
+
+let step : task -> status =
+  fun t -> t.status
+```
+
+Current user-facing omissions are intentional:
+
+- no tuple type syntax
+- no ref type syntax
+- no open-row type syntax
+- no type parameters
+- no mutual recursive type declarations
+
+### 10.2.2 Explicit recursive types
+
+Recursive types are represented internally using explicit recursive binders,
+conceptually of the form:
+
+```ocaml
+| Mu of string * typ
+| Rec_var of string
+```
+
+Recursive cycles therefore appear only through this checked representation,
+not through cyclic ordinary inference variables.
+
+Surface recursive types are introduced via named `type` declarations:
+
+```chatml
+type expr = [ `Int(int) | `Add(expr, expr) ]
+```
+
+The typechecker elaborates those declarations into explicit internal
+recursive types and checks that they are contractive.
+
+### 10.2.3 Contractiveness
+
+Recursive type declarations must be **contractive**: self-reference must
+appear under a real constructor.
+
+Accepted:
+
+```chatml
+type expr = [ `Int(int) | `Add(expr, expr) ]
+type node = { value : int; next : node }
+```
+
+Rejected:
+
+```chatml
+type bad = bad
+```
+
+This rule keeps recursive types sound while still supporting the recursive
+record and recursive variant use-cases ChatML scripts rely on.
+
 ### 10.3 Let-polymorphism
 
 Non-expansive bindings may be generalized.
@@ -885,6 +1087,16 @@ This is necessary for soundness with:
 - refs
 - arrays
 - mutable aliasing
+
+### 10.4.1 Recursive types remain monomorphic
+
+Bindings whose type contains an explicit recursive type are kept
+monomorphic in the current design.
+
+This applies even when the binding is otherwise non-expansive.
+
+The implementation intentionally does **not** attempt polymorphic
+recursion.
 
 ### 10.5 Records and row polymorphism
 
@@ -909,6 +1121,108 @@ Important implementation detail:
 - this heuristic is intentionally biased toward record-heavy scripting and
   state-machine helpers
 - variants are not reopened by the same heuristic
+
+### 10.5.1 Control-flow joins for records
+
+Record copy-update can widen a record result:
+
+```chatml
+let with_timeout cfg ms =
+  { cfg with timeout_ms = ms }
+```
+
+This gives `with_timeout` the expected shape:
+
+```text
+{ ...r } -> int -> { timeout_ms : int; ...r }
+```
+
+However, `if` and `match` do **not** preserve fields that appear on only some
+paths. Instead, they compute a conservative join that keeps only fields
+guaranteed on every branch.
+
+This means ChatML no longer relies on branch-shape heuristics. If a field
+should be available after control flow, make that field explicit on every
+returned branch.
+
+Recommended patterns:
+
+- ensure initialization helpers return the same shape on all paths
+- make field updates explicit on every branch
+
+#### Initialization example
+
+Avoid writing a helper whose branches return different record shapes unless
+both shapes already guarantee the fields you plan to read later.
+
+For example, the following shape-changing helper is not something the
+conservative join will strengthen:
+
+```chatml
+let init_state st =
+  if st.inited then st else
+    { inited = true
+    ; autopilot = true
+    ; task_index = 0
+    ; task_count = 4
+    ; tasks = ...
+    }
+```
+
+In the copied regression tests, callers already provide a fully initialized
+state, so the recommended rewrite is simply:
+
+```chatml
+let init_state st = st
+```
+
+This satisfies the join trivially because both paths are the same shape.
+
+#### Explicit field-update example
+
+Instead of:
+
+```chatml
+let step st ev =
+  match ev with
+  | `Start ->
+    if st.idx >= length(st.tasks) then st
+    else set_status({ st with running = true }, status_witness(1))
+
+  | `Tick ->
+    if st.running == false then st
+    else ...
+```
+
+prefer:
+
+```chatml
+let set_running st running =
+  { st with running = running }
+
+let step st ev =
+  match ev with
+  | `Start ->
+    if st.idx >= length(st.tasks) then set_running(st, false)
+    else set_status(set_running(st, true), status_witness(1))
+
+  | `Tick ->
+    if st.running == false then set_running(st, false)
+    else
+      let st = set_running(st, true) in
+      ...
+```
+
+Why this works:
+
+- every returned branch now explicitly produces a state with `running`
+- the conservative join can therefore keep `running`
+- no branch-shape heuristic is required
+
+One-sentence summary:
+
+> if a record field must exist after `if` or `match`, make sure every branch
+> returns a record that explicitly contains that field.
 
 ### 10.6 Variants and row polymorphism
 
@@ -944,8 +1258,10 @@ The builtin specification language now supports:
 - row-based variants
 - function types
 
-This is a host-side capability used by builtin declarations. Users still do
-not write these type forms directly.
+This is a host-side capability used by builtin declarations. It is richer
+than the current user-facing type language: users still do not directly
+write builtin-only forms such as ref types, tuple types, or open-row record
+/ variant specifications.
 
 ### 10.9 Module typing
 
@@ -961,6 +1277,9 @@ Implementation note:
 
 This is usually ergonomic, but it also means module values are not a fully
 separate static category.
+
+Type declarations are not exported as module fields, because they do not
+exist at runtime and `open` affects only value bindings.
 
 ---
 
@@ -1188,9 +1507,12 @@ surface syntax.
 ### 14.1 Statements
 
 ```chatml
+type t = type_expr
 let x = expr
+let x : type_expr = expr
 let f x y = expr
 let f () = expr
+let rec f : type_expr = expr
 let rec f x = expr and g y = expr
 module M = struct stmts end
 open M
@@ -1212,6 +1534,7 @@ f(x)
 if c then t else e
 while c do body done
 let x = e1 in e2
+let x : t = e1 in e2
 let rec f x = e1 in e2
 match e with | pat -> e
 { a = e; b = e }
@@ -1275,6 +1598,22 @@ true
 { field = pat; _ }
 ```
 
+### 14.5 Type expressions
+
+```chatml
+int
+float
+bool
+string
+unit
+expr
+expr -> int
+unit -> string
+task array
+{ name : string; status : status }
+[ `Pending | `Done | `Error(string) ]
+```
+
 ---
 
 ## 15. Diagnostics
@@ -1319,6 +1658,10 @@ yet elevated to the same level of quality as type/runtime diagnostics.
 The current implementation intentionally enforces or relies on:
 
 - lexical closure capture being stable
+- ordinary inference variables being acyclic
+- recursive types being explicit and checked
+- recursive type declarations being contractive
+- recursive types remaining monomorphic
 - recursive bindings being function-only
 - mutation interacting with polymorphism via a value restriction
 - explicit separation of integer and float operators
@@ -1336,9 +1679,16 @@ These are central to the language’s current safety/ergonomics tradeoff.
 
 ChatML currently does **not** provide:
 
-- user-written type annotations
 - tuple syntax as a general user-facing feature
-- algebraic data type declarations
+- type parameters
+- mutual recursive type declarations
+- module-local type declarations
+- general expression ascription syntax
+- tuple type syntax as a general user-facing feature
+- ref type syntax
+- open-row type syntax
+- full user-facing algebraic datatype declarations beyond alias-style
+  structural `type` declarations
 - selective imports
 - signatures or functors
 - layout-sensitive syntax
@@ -1371,7 +1721,7 @@ same reopening heuristic.
 ### 18.3 Builtins remain a host-side facility
 
 The richer builtin type language exists for host/runtime authors, not as a
-user-facing type-annotation mechanism.
+complete user-facing type-annotation mechanism.
 
 ---
 
@@ -1380,6 +1730,9 @@ user-facing type-annotation mechanism.
 For the current language, the most ergonomic and robust style is:
 
 - use records for script state
+- declare explicit recursive record/variant types when a script's data model
+  is genuinely recursive
+- annotate recursive helper functions against those declared types
 - write small helpers over row-polymorphic state records
 - use variants for finite event/state tags
 - use modules only for grouping
@@ -1447,3 +1800,17 @@ open Math
 ```
 
 is rejected because `open Math` would shadow `two`.
+
+### 20.6 Explicit recursive type declaration
+
+```chatml
+type expr = [ `Int(int) | `Add(expr, expr) ]
+
+let rec eval : expr -> int =
+  fun e ->
+    match e with
+    | `Int(n) -> n
+    | `Add(a, b) -> eval(a) + eval(b)
+```
+
+This is the supported way to write recursive structural data in ChatML.
