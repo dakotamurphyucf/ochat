@@ -1,7 +1,12 @@
 open Core
 open Chatml_lang
 
-type ty =
+type row =
+  | TRow_empty
+  | TRow_var of string
+  | TRow_extend of (string * ty) list * row
+
+and ty =
   | TVar of string
   | TInt
   | TFloat
@@ -9,7 +14,20 @@ type ty =
   | TString
   | TUnit
   | TArray of ty
+  | TRef of ty
+  | TTuple of ty list
+  | TRecord of row
+  | TVariant of row
   | TFun of ty list * ty
+
+let closed_row (fields : (string * ty) list) : row = TRow_extend (fields, TRow_empty)
+let open_row (fields : (string * ty) list) (tail : string) : row = TRow_extend (fields, TRow_var tail)
+let record (fields : (string * ty) list) : ty = TRecord (closed_row fields)
+let record_open (fields : (string * ty) list) (tail : string) : ty = TRecord (open_row fields tail)
+let variant (cases : (string * ty) list) : ty = TVariant (closed_row cases)
+let variant_open (cases : (string * ty) list) (tail : string) : ty =
+  TVariant (open_row cases tail)
+;;
 
 type builtin =
   { name : string

@@ -459,6 +459,8 @@ let rec contains_generic (ty : typ) : bool =
   | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
 ;;
 
+let builtin_row_var_name (name : string) = "__builtin_row_" ^ name
+
 let rec typ_of_builtin_ty (ty : Builtin_spec.ty) : typ =
   match ty with
   | Builtin_spec.TVar name -> Generic name
@@ -468,8 +470,21 @@ let rec typ_of_builtin_ty (ty : Builtin_spec.ty) : typ =
   | Builtin_spec.TString -> String
   | Builtin_spec.TUnit -> Unit
   | Builtin_spec.TArray inner -> Array (typ_of_builtin_ty inner)
+  | Builtin_spec.TRef inner -> Ref (typ_of_builtin_ty inner)
+  | Builtin_spec.TTuple tys -> Tuple (List.map tys ~f:typ_of_builtin_ty)
+  | Builtin_spec.TRecord row -> Record (typ_of_builtin_row row)
+  | Builtin_spec.TVariant row -> Variant (typ_of_builtin_row row)
   | Builtin_spec.TFun (params, ret) ->
     Fun (List.map params ~f:typ_of_builtin_ty, typ_of_builtin_ty ret)
+
+and typ_of_builtin_row (row : Builtin_spec.row) : typ =
+  match row with
+  | Builtin_spec.TRow_empty -> Empty_row
+  | Builtin_spec.TRow_var name -> Generic (builtin_row_var_name name)
+  | Builtin_spec.TRow_extend (fields, tail) ->
+    Row
+      ( Env.of_list (List.map fields ~f:(fun (label, ty) -> label, typ_of_builtin_ty ty))
+      , typ_of_builtin_row tail )
 ;;
 
 let init_env () : tenv =
