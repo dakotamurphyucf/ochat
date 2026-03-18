@@ -151,7 +151,7 @@ let choose_slot (rhs_node : L.expr L.node) : Frame_env.packed_slot =
 (* -------------------------------------------------------------------- *)
 
 let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
-  let wrap nexp = { e with value = nexp } in
+  let with_value node value = L.{ node with value } in
   match e.value with
   | L.EUnit -> L.EUnit
   | L.EVar x ->
@@ -167,7 +167,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     push_frame stack fm;
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELambdaSlots (params, slots, wrap body')
+    L.ELambdaSlots (params, slots, with_value body body')
   | L.ELambda (params, body) ->
     (* Derive slot layout from static types when available. *)
     let param_slots =
@@ -184,11 +184,11 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     push_frame stack fm;
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELambdaSlots (params, param_slots, wrap body')
+    L.ELambdaSlots (params, param_slots, with_value body body')
   | L.EApp (fn, args) ->
     let fn' = resolve_expr stack fn in
-    let args' = List.map args ~f:(fun a -> { a with value = resolve_expr stack a }) in
-    L.EApp ({ fn with value = fn' }, args')
+    let args' = List.map args ~f:(fun a -> with_value a (resolve_expr stack a)) in
+    L.EApp (with_value fn fn', args')
   | L.ELetIn (x, rhs, body) ->
     (* Merge a chain of consecutive [let]s into a single [ELetBlock].
        We first collect all nested bindings until we hit a non-let body. *)
@@ -230,7 +230,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
         (* fetch slot from fm *)
         (Hashtbl.find_exn fm nm).slot)
     in
-    L.ELetBlockSlots (resolved_bindings, slots, wrap body')
+    L.ELetBlockSlots (resolved_bindings, slots, with_value tail_body body')
   | L.ELetRec (binds, body) ->
     (* Mutually-recursive let-resolution, unchanged from earlier code but
        repositioned after the new [ELetBlock] arm. *)
@@ -247,7 +247,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetRecSlots (binds', slots, wrap body')
+    L.ELetRecSlots (binds', slots, with_value body body')
   | L.ELetBlock (binds, body) ->
     (* Convert to [ELetBlockSlots] and traverse children. *)
     let fm = Hashtbl.create (module String) in
@@ -264,7 +264,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetBlockSlots (binds', slots, wrap body')
+    L.ELetBlockSlots (binds', slots, with_value body body')
   | L.ELetBlockSlots (binds, slots, body) ->
     (* Already resolved; traverse children preserving slot info. *)
     let fm = Hashtbl.create (module String) in
@@ -278,7 +278,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetBlockSlots (binds', slots, wrap body')
+    L.ELetBlockSlots (binds', slots, with_value body body')
   | L.ELetRecSlots (binds, slots, body) ->
     let fm = Hashtbl.create (module String) in
     List.iteri binds ~f:(fun idx (nm, _rhs) ->
@@ -291,20 +291,20 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     in
     let body' = resolve_expr stack body in
     pop_frame stack;
-    L.ELetRecSlots (binds', slots, wrap body')
+    L.ELetRecSlots (binds', slots, with_value body body')
   | L.EIf (c, t, f) ->
     let c' = resolve_expr stack c in
     let t' = resolve_expr stack t in
     let f' = resolve_expr stack f in
-    L.EIf (wrap c', wrap t', wrap f')
+    L.EIf (with_value c c', with_value t t', with_value f f')
   | L.EWhile (cond, bd) ->
     let cond' = resolve_expr stack cond in
     let bd' = resolve_expr stack bd in
-    L.EWhile (wrap cond', wrap bd')
+    L.EWhile (with_value cond cond', with_value bd bd')
   | L.ESequence (e1, e2) ->
     let e1' = resolve_expr stack e1 in
     let e2' = resolve_expr stack e2 in
-    L.ESequence (wrap e1', wrap e2')
+    L.ESequence (with_value e1 e1', with_value e2 e2')
   | L.EMatch (scrut, cases) ->
     let scrut' = resolve_expr stack scrut in
     let scrut_ty_opt = lookup_type scrut.span in
@@ -368,7 +368,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
         ; rhs = { case.rhs with value = rhs' }
         })
     in
-    L.EMatchSlots (wrap scrut', cases')
+    L.EMatchSlots (with_value scrut scrut', cases')
   | L.EMatchSlots (scrut, cases) ->
     (* AST already contains slot info; we only need to recursively resolve
        sub-expressions to keep idempotence. *)
@@ -385,7 +385,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
         pop_frame stack;
         { case with rhs = { case.rhs with value = rhs' } })
     in
-    L.EMatchSlots (wrap scrut', cases')
+    L.EMatchSlots (with_value scrut scrut', cases')
   | L.ERecord fields ->
     let fields' =
       List.map fields ~f:(fun (lbl, ex) -> lbl, { ex with value = resolve_expr stack ex })
@@ -393,7 +393,7 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
     L.ERecord fields'
   | L.EFieldGet (obj, lbl) ->
     let obj' = resolve_expr stack obj in
-    L.EFieldGet (wrap obj', lbl)
+    L.EFieldGet (with_value obj obj', lbl)
   | L.EVariant (tag, vs) ->
     let vs' = List.map vs ~f:(fun v -> { v with value = resolve_expr stack v }) in
     L.EVariant (tag, vs')
@@ -403,28 +403,28 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
   | L.EArrayGet (arr, idx) ->
     let arr' = resolve_expr stack arr in
     let idx' = resolve_expr stack idx in
-    L.EArrayGet (wrap arr', wrap idx')
+    L.EArrayGet (with_value arr arr', with_value idx idx')
   | L.EArraySet (arr, idx, v) ->
     let arr' = resolve_expr stack arr in
     let idx' = resolve_expr stack idx in
     let v' = resolve_expr stack v in
-    L.EArraySet (wrap arr', wrap idx', wrap v')
+    L.EArraySet (with_value arr arr', with_value idx idx', with_value v v')
   | L.ERef e1 ->
     let e1' = resolve_expr stack e1 in
-    L.ERef (wrap e1')
+    L.ERef (with_value e1 e1')
   | L.ESetRef (r, v) ->
     let r' = resolve_expr stack r in
     let v' = resolve_expr stack v in
-    L.ESetRef (wrap r', wrap v')
+    L.ESetRef (with_value r r', with_value v v')
   | L.EDeref e1 ->
     let e1' = resolve_expr stack e1 in
-    L.EDeref (wrap e1')
+    L.EDeref (with_value e1 e1')
   | L.ERecordExtend (base, fields) ->
     let base' = resolve_expr stack base in
     let fields' =
       List.map fields ~f:(fun (lbl, ex) -> lbl, { ex with value = resolve_expr stack ex })
     in
-    L.ERecordExtend (wrap base', fields')
+    L.ERecordExtend (with_value base base', fields')
   (* Literals – no change ------------------------------------------------ *)
   | L.EInt _ | L.EBool _ | L.EFloat _ | L.EString _ -> e.value
 ;;
@@ -505,25 +505,57 @@ let resolve_program (prog : L.program) : L.program =
     failwith (Chatml_typechecker.format_diagnostic (snd prog) diagnostic)
 ;;
 
-(** [eval_program env prog] resolves [prog] with {!resolve_program} and
-    immediately interprets it in [env] using
-    {!Chatml_lang.eval_program}.  It is equivalent to
+(** Result of executing a ChatML program through the high-level public
+    runner. *)
+type eval_error =
+  | Type_diagnostic of Chatml_typechecker.diagnostic
+  | Runtime_diagnostic of L.runtime_error
+
+(** [run_program env prog] is the canonical execution
+    entry-point for parsed ChatML programs.  It strictly type-checks
+    [prog], resolves lexical addresses and frame slots, then interprets
+    the resolved program in [env].
+
+    It is equivalent to
 
     {[ Chatml_lang.eval_program env (resolve_program prog) ]}
 
-    but avoids constructing the intermediate value at the call-site.
-    Use this helper when you do not need to inspect the resolved AST. *)
+    but avoids constructing the intermediate value at the call-site and
+    never evaluates ill-typed programs.  Callers embedding ChatML should
+    prefer this helper over the low-level {!Chatml_lang.eval_program},
+    which assumes a suitably resolved program. *)
+let run_program (env : L.env) (prog : L.program) : (unit, eval_error) result
+  =
+  match Chatml_typechecker.check_program prog with
+  | Error diagnostic -> Error (Type_diagnostic diagnostic)
+  | Ok checked ->
+    let program = resolve_checked_program checked prog in
+    (try
+       (* 1) Resolve the program; 2) Execute it in the given environment. *)
+       L.eval_program env program;
+       Ok ()
+     with
+     | L.Runtime_error err -> Error (Runtime_diagnostic err))
+;;
 
-let eval_program
-      (env : L.env)
-      (prog : L.program)
+(** Backwards-compatible wrapper preserving the historical API shape:
+    type errors are returned in the [Error] branch, while run-time
+    failures continue to surface as exceptions.  Callers that want
+    structured run-time diagnostics should use {!run_program}. *)
+let typecheck_resolve_and_eval (env : L.env) (prog : L.program)
   : (unit, Chatml_typechecker.diagnostic) result
   =
   match Chatml_typechecker.check_program prog with
   | Error diagnostic -> Error diagnostic
   | Ok checked ->
     let program = resolve_checked_program checked prog in
-    (* 1) Resolve the program; 2) Execute it in the given environment. *)
     L.eval_program env program;
     Ok ()
+;;
+
+(** Backwards-compatible alias for {!typecheck_resolve_and_eval}. *)
+let eval_program (env : L.env) (prog : L.program)
+  : (unit, Chatml_typechecker.diagnostic) result
+  =
+  typecheck_resolve_and_eval env prog
 ;;

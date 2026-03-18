@@ -259,6 +259,61 @@ b
 |}]
 ;;
 
+let%expect_test "unit literal prints as ()" =
+  let code =
+    {|
+      print(())
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+() 
+|}]
+;;
+
+let%expect_test "fun () -> ... defines zero-argument lambdas" =
+  let code =
+    {|
+      let f = fun () -> 42
+      print(f())
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+42 
+|}]
+;;
+
+let%expect_test "local let f () = ... in ... works" =
+  let code =
+    {|
+      let answer () = 42 in
+      print(answer())
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+42 
+|}]
+;;
+
+let%expect_test "recursive zero-argument function bindings parse and run" =
+  let code =
+    {|
+      let rec ping () = 7
+      print(ping())
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+7 
+|}]
+;;
+
 let%expect_test "runtime closure arity mismatch is reported clearly" =
   let env = L.create_env () in
   let slot = Frame_env.Slot Frame_env.SInt in
@@ -269,6 +324,7 @@ let%expect_test "runtime closure arity mismatch is reported clearly" =
      ignore (L.finish_eval [] (L.eval_expr env [] bad_call));
      print_endline "unexpected success"
    with
+   | L.Runtime_error err -> print_endline err.message
    | Failure msg -> print_endline msg);
   [%expect {| Function arity mismatch |}]
 ;;
