@@ -1,20 +1,19 @@
 (** Built-in standard library for the {e ChatML} interpreter.
 
-    This module registers a minimal set of run-time primitives
+    This module registers a minimal set of run-time library functions
     ("built-ins") inside a {!Chatml.Chatml_lang.env}.  The exported
     function {!BuiltinModules.add_global_builtins} mutates the provided
     environment in place so that user programs can access:
 
     {ul
     {- Basic printing utilities ([print] and [to_string]).}
-    {- Array helper ([length]).}
-    {- Convenience conversions ([num2str] and [bool2str]).}
-    {- Arithmetic operators ([+], [-], [*], [/]).}
-    {- Comparison operators ([<], [>], [<=], [>=], [==], [!=]).}}
+    {- Array helper ([length]).}}
 
-    The implementation is intentionally small – it exists mostly to
-    exercise the dynamic value representation of ChatML and to make the
-    REPL usable during development.
+    Arithmetic, string concatenation, comparison and equality operators
+    are now part of the core ChatML AST rather than runtime-installed
+    builtins.  The implementation here is intentionally small – it
+    exists mostly to exercise the dynamic value representation of
+    ChatML and to make the REPL usable during development.
 
     {2 Usage}
 

@@ -22,7 +22,7 @@ let check_program_formatted (code : string) =
 
 let%expect_test "variant with tuple args" =
   let code =
-    {|    
+    {|
       let p = `Pair(1, "two") in
       match p with
       | `Pair(a, b) -> b
@@ -50,7 +50,7 @@ let%expect_test "well-typed" =
 (* ------------------------------------------------------------------ *)
 let%expect_test "const function is polymorphic on second argument" =
   let code =
-    {|    
+    {|
       let const x y = x
       const(1, "a")
       const("hello", 3.14)
@@ -375,6 +375,179 @@ let%expect_test "array set element success" =
   let prog = parse code in
   Chatml_typechecker.infer_program prog;
   [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float arithmetic is rejected without explicit float operators" =
+  let code =
+    {|
+      1.0 + 2.0
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect
+    {|
+    line 2, characters 6-15:
+    2|    1.0 + 2.0
+          ^^^^^^^^^
+
+    Type error: Cannot unify float with int
+    |}]
+;;
+
+let%expect_test "float cannot be used as an array index" =
+  let code =
+    {|
+      let i = 1.0
+      let arr = [1, 2, 3]
+      arr[i]
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect
+    {|
+    line 4, characters 6-12:
+    4|    arr[i]
+          ^^^^^^
+
+    Type error: Cannot unify float with int
+    |}]
+;;
+
+let%expect_test "explicit float operators typecheck" =
+  let code =
+    {|
+      let x = 1.0 +. 2.5
+      let y = -.x
+      if x <. y then 0 else 1
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float addition operator parses and typechecks" =
+  let code =
+    {|
+      let x = 1.0 +. 2.5
+      x
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float subtraction operator parses and typechecks" =
+  let code =
+    {|
+      let x = 5.0 -. 1.25
+      x
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float multiplication operator parses and typechecks" =
+  let code =
+    {|
+      let x = 2.0 *. 3.0
+      x
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float division operator parses and typechecks" =
+  let code =
+    {|
+      let x = 9.0 /. 3.0
+      x
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float unary negation parses and typechecks" =
+  let code =
+    {|
+      let x = -.1.5
+      x
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float less-than operator parses and typechecks" =
+  let code =
+    {|
+      if 1.0 <. 2.0 then 1 else 0
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float greater-than operator parses and typechecks" =
+  let code =
+    {|
+      if 3.0 >. 2.0 then 1 else 0
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float less-equal operator parses and typechecks" =
+  let code =
+    {|
+      if 2.0 <=. 2.0 then 1 else 0
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "float greater-equal operator parses and typechecks" =
+  let code =
+    {|
+      if 2.0 >=. 2.0 then 1 else 0
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "redundant numeric conversion builtins are removed" =
+  let code =
+    {|
+      num2str(1)
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect
+    {|
+    line 2, characters 6-13:
+    2|    num2str
+          ^^^^^^^
+
+    Type error: Unknown variable 'num2str'
+    |}]
 ;;
 
 (* ------------------------------------------------------------------ *)
@@ -712,7 +885,9 @@ let%test_unit "redundant arm diagnostic names current and catch-all patterns" =
     not
       (String.is_substring
          rendered
-         ~substring:"Redundant match arm '1': previous catch-all pattern '_' already matches all cases")
+         ~substring:
+           "Redundant match arm '1': previous catch-all pattern '_' already matches all \
+            cases")
   then failwith rendered
 ;;
 
@@ -742,7 +917,9 @@ let%test_unit "boolean diagnostic reports missing true case" =
   let rendered = check_program_formatted code in
   if
     not
-      (String.is_substring rendered ~substring:"Non-exhaustive boolean match: missing case 'true'")
+      (String.is_substring
+         rendered
+         ~substring:"Non-exhaustive boolean match: missing case 'true'")
   then failwith rendered
 ;;
 
@@ -786,7 +963,8 @@ let%test_unit "variant match closes function parameter constructor set" =
     |}
   in
   match check_program_result code with
-  | Ok _ -> failwith "expected variant match to reject constructors outside the matched set"
+  | Ok _ ->
+    failwith "expected variant match to reject constructors outside the matched set"
   | Error _ -> ()
 ;;
 
@@ -837,7 +1015,10 @@ let%test_unit "int match without wildcard reports fallback requirement" =
   then failwith rendered
 ;;
 
-let%test_unit "variant wildcard arm is redundant after all constructors are covered on a closed variant" =
+let%test_unit
+    "variant wildcard arm is redundant after all constructors are covered on a closed \
+     variant"
+  =
   let code =
     {|
       let close v =
@@ -861,11 +1042,15 @@ let%test_unit "variant wildcard arm is redundant after all constructors are cove
     not
       (String.is_substring
          rendered
-         ~substring:"Redundant match arm '_': previous arms already cover all variant constructors")
+         ~substring:
+           "Redundant match arm '_': previous arms already cover all variant constructors")
   then failwith rendered
 ;;
 
-let%test_unit "variant constructor arm is redundant after earlier payload wildcard on a closed variant" =
+let%test_unit
+    "variant constructor arm is redundant after earlier payload wildcard on a closed \
+     variant"
+  =
   let code =
     {|
       let close v =
@@ -886,7 +1071,9 @@ let%test_unit "variant constructor arm is redundant after earlier payload wildca
     not
       (String.is_substring
          rendered
-         ~substring:"Redundant match arm '`Some(...)': previous arms already cover variant case '`Some(_)'")
+         ~substring:
+           "Redundant match arm '`Some(...)': previous arms already cover variant case \
+            '`Some(_)'")
   then failwith rendered
 ;;
 
@@ -904,7 +1091,9 @@ let%test_unit "boolean wildcard arm is redundant after both literals are covered
     not
       (String.is_substring
          rendered
-         ~substring:"Redundant match arm '_': previous arms already cover boolean cases 'true' and 'false'")
+         ~substring:
+           "Redundant match arm '_': previous arms already cover boolean cases 'true' \
+            and 'false'")
   then failwith rendered
 ;;
 
@@ -948,7 +1137,7 @@ let%expect_test "module missing field error" =
 (* ------------------------------------------------------------------ *)
 let%expect_test "variant match simple" =
   let code =
-    {|    
+    {|
       let v = `Some(1) in
       match v with
       | `Some(x) -> x
@@ -963,7 +1152,7 @@ let%expect_test "variant match simple" =
 (* ------------------------------------------------------------------ *)
 let%expect_test "match literals and wildcard" =
   let code =
-    {|      
+    {|
       let f n =
         match n with
         | 0 -> 0
@@ -981,7 +1170,7 @@ let%expect_test "match literals and wildcard" =
 (* ------------------------------------------------------------------ *)
 let%expect_test "variant polymorphic is_none" =
   let code =
-    {|      
+    {|
       let is_none v =
         match v with
         | `None -> true
@@ -998,7 +1187,7 @@ let%expect_test "variant polymorphic is_none" =
 (* ------------------------------------------------------------------ *)
 let%expect_test "variant payload type error" =
   let code =
-    {|      
+    {|
       let v = `Some("hi") in
       match v with
       | `Some(x) -> x + 1
@@ -1013,7 +1202,7 @@ let%expect_test "variant payload type error" =
     4|    x + 1
           ^^^^^
 
-    Type error: Cannot unify number with string
+    Type error: Cannot unify string with int
     |}]
 ;;
 
@@ -1194,13 +1383,13 @@ let%test_unit "record pattern missing field points at the pattern span" =
     |}
   in
   let rendered = check_program_formatted code in
-  if
-    not
-      (String.is_substring rendered ~substring:"line 3, characters 19-28:")
+  if not (String.is_substring rendered ~substring:"line 3, characters 19-28:")
   then failwith rendered;
   if
     not
-      (String.is_substring rendered ~substring:"Type error: Row does not contain label 'age'")
+      (String.is_substring
+         rendered
+         ~substring:"Type error: Row does not contain label 'age'")
   then failwith rendered
 ;;
 
@@ -1217,7 +1406,7 @@ let%expect_test "runtime record extension remains immutable" =
         print(p.name);
         print(inc_age({p with age = 30 + p.age}))
 
-    
+
     f(p)
     let a = `Some(1, 2)
      let b = `None
@@ -1234,12 +1423,10 @@ let%expect_test "runtime record extension remains immutable" =
    | Error diagnostic -> failwith (Chatml_typechecker.format_diagnostic code diagnostic));
   [%expect
     {|
-    Alice 
-    { age = 56; name = Alice } 
+    Alice
+    { age = 56; name = Alice }
     [|1, 2|]
     |}]
-;;
-
 ;;
 
 let%expect_test "inner let binding does not leak" =

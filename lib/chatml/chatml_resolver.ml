@@ -127,7 +127,6 @@ let slot_of_typ (t : Chatml_typechecker.typ) : Frame_env.packed_slot =
   | Chatml_typechecker.String -> Frame_env.Slot Frame_env.SString
   | Chatml_typechecker.TInt -> Frame_env.Slot Frame_env.SInt
   | Chatml_typechecker.TFloat -> Frame_env.Slot Frame_env.SFloat
-  | Chatml_typechecker.Number -> Frame_env.Slot Frame_env.SObj
   | _ -> Frame_env.Slot Frame_env.SObj
 ;;
 
@@ -137,6 +136,17 @@ let fallback_slot_of_expr (e : L.expr) : Frame_env.packed_slot =
   | L.EBool _ -> Frame_env.Slot Frame_env.SBool
   | L.EFloat _ -> Frame_env.Slot Frame_env.SFloat
   | L.EString _ -> Frame_env.Slot Frame_env.SString
+  | L.EPrim1 (L.UNegInt, _) -> Frame_env.Slot Frame_env.SInt
+  | L.EPrim1 (L.UNegFloat, _) -> Frame_env.Slot Frame_env.SFloat
+  | L.EPrim2 ((L.BIntAdd | L.BIntSub | L.BIntMul | L.BIntDiv), _, _) ->
+    Frame_env.Slot Frame_env.SInt
+  | L.EPrim2 ((L.BFloatAdd | L.BFloatSub | L.BFloatMul | L.BFloatDiv), _, _) ->
+    Frame_env.Slot Frame_env.SFloat
+  | L.EPrim2 (L.BStringConcat, _, _) -> Frame_env.Slot Frame_env.SString
+  | L.EPrim2
+      ( (L.BIntLt | L.BIntGt | L.BIntLe | L.BIntGe | L.BFloatLt | L.BFloatGt | L.BFloatLe | L.BFloatGe | L.BEq | L.BNeq)
+      , _
+      , _ ) -> Frame_env.Slot Frame_env.SBool
   | _ -> Frame_env.Slot Frame_env.SObj
 ;;
 
@@ -159,6 +169,13 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
      | Some loc -> L.EVarLoc loc
      | None -> L.EVar x)
   | L.EVarLoc l -> L.EVarLoc l
+  | L.EPrim1 (prim, arg) ->
+    let arg' = resolve_expr stack arg in
+    L.EPrim1 (prim, with_value arg arg')
+  | L.EPrim2 (prim, lhs, rhs) ->
+    let lhs' = resolve_expr stack lhs in
+    let rhs' = resolve_expr stack rhs in
+    L.EPrim2 (prim, with_value lhs lhs', with_value rhs rhs')
   | L.ELambdaSlots (params, slots, body) ->
     (* Already resolved; simply traverse body. *)
     let fm = Hashtbl.create (module String) in

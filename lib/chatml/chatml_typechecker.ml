@@ -107,7 +107,6 @@ type typ =
   | Array of typ
   | TInt
   | TFloat
-  | Number
   | Boolean
   | String
   | Row of typ Env.t * typ (* fields * tail *)
@@ -328,11 +327,6 @@ let rec unify (state : infer_state) lhs rhs =
     | Row (fs, _), Empty_row | Empty_row, Row (fs, _) ->
       let lbl, _ = Env.choose fs in
       raise (Type_error (Printf.sprintf "Row does not contain label '%s'" lbl))
-    | Number, Number
-    | Number, TInt
-    | TInt, Number
-    | Number, TFloat
-    | TFloat, Number
     | TInt, TInt
     | TFloat, TFloat
     | Boolean, Boolean
@@ -386,18 +380,11 @@ and unify_rows (state : infer_state) lhs rhs =
 (** 8. Pretty printer for types (used in error messages)                   *)
 (** --------------------------------------------------------------------- *)
 
-(* Print human-readable type names.
-   We purposefully differentiate the concrete machine types [int] and
-   [float] from the polymorphic super-type [number] so that error
-   messages such as “Cannot unify int with float” become actionable.
-   Previously both [TInt] and [TFloat] were printed as "number",
-   resulting in misleading diagnostics like “Cannot unify number with
-   number”. *)
+(* Print human-readable type names used in diagnostics. *)
 
 and show_type = function
   | TInt -> "int"
   | TFloat -> "float"
-  | Number -> "number"
   | Boolean -> "bool"
   | String -> "string"
   | Unit -> "unit"
@@ -469,7 +456,7 @@ let rec contains_generic (ty : typ) : bool =
   | Tuple ts -> List.exists ts ~f:contains_generic
   | Row (fields, tail) ->
     Env.exists fields (fun _field ty' -> contains_generic ty') || contains_generic tail
-  | TInt | TFloat | Number | Boolean | String | Empty_row | Unit -> false
+  | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
 ;;
 
 let rec typ_of_builtin_ty (ty : Builtin_spec.ty) : typ =
@@ -477,7 +464,6 @@ let rec typ_of_builtin_ty (ty : Builtin_spec.ty) : typ =
   | Builtin_spec.TVar name -> Generic name
   | Builtin_spec.TInt -> TInt
   | Builtin_spec.TFloat -> TFloat
-  | Builtin_spec.TNumber -> Number
   | Builtin_spec.TBool -> Boolean
   | Builtin_spec.TString -> String
   | Builtin_spec.TUnit -> Unit
@@ -526,6 +512,8 @@ let rec is_non_expansive (expr : expr) : bool =
     List.for_all fields ~f:(fun (_lbl, expr_node) -> is_non_expansive expr_node.value)
   | EVariant (_tag, exprs) ->
     List.for_all exprs ~f:(fun expr_node -> is_non_expansive expr_node.value)
+  | EPrim1 _
+  | EPrim2 _
   | EApp _
   | EIf _
   | EWhile _
@@ -558,7 +546,7 @@ let rec restrict_free_vars_to_level (max_level : int) (ty : typ) : unit =
   | Fun (params, ret) ->
     List.iter params ~f:(restrict_free_vars_to_level max_level);
     restrict_free_vars_to_level max_level ret
-  | Generic _ | TInt | TFloat | Number | Boolean | String | Empty_row | Unit -> ()
+  | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ()
   | Var { contents = Bound t } -> restrict_free_vars_to_level max_level t
   | Var ({ contents = Free (name, lvl) } as tv) ->
     if lvl > max_level then tv := Free (name, max_level)
@@ -993,7 +981,6 @@ and validate_match_exhaustiveness
           | None -> unify state tail Empty_row))
     | TInt -> raise (Type_error "Non-exhaustive match on int: add '_' arm")
     | TFloat -> raise (Type_error "Non-exhaustive match on float: add '_' arm")
-    | Number -> raise (Type_error "Non-exhaustive match on number: add '_' arm")
     | Unit ->
       if List.exists patterns ~f:(function PUnit -> true | _ -> false)
       then ()
@@ -1057,14 +1044,21 @@ and infer_pattern (state : infer_state) (env : tenv) (pat : pattern) (expected_t
     unify state expected_ty variant_ty;
     env_after
 
+and reopen_lambda_param_type (state : infer_state) (ty : typ) : typ =
+  match resolve_bound_type ty with
+  | Record row -> Record (reopen_lambda_row state row)
+  | Array elt_ty -> Array (reopen_lambda_param_type state elt_ty)
+  | Ref inner_ty -> Ref (reopen_lambda_param_type state inner_ty)
+  | Tuple tys -> Tuple (List.map tys ~f:(reopen_lambda_param_type state))
+  | other -> other
+
 and reopen_lambda_param_if_closed_record (state : infer_state) (ty : typ) : typ =
   match ty with
   | Var ({ contents = Bound bound_ty } as tv) ->
-    let reopened = reopen_lambda_param_if_closed_record state bound_ty in
+    let reopened = reopen_lambda_param_type state bound_ty in
     tv := Bound reopened;
     ty
-  | Record row -> Record (reopen_lambda_row state row)
-  | _ -> ty
+  | _ -> reopen_lambda_param_type state ty
 
 and resolve_bound_type (ty : typ) : typ =
   match ty with
@@ -1075,18 +1069,72 @@ and reopen_lambda_row (state : infer_state) (row : typ) : typ =
   match resolve_bound_type row with
   | Row _ as full_row ->
     let merged_fields, _merged_tail = merge_fields full_row in
+    let reopened_fields =
+      Env.map merged_fields ~f:(reopen_lambda_param_type state)
+    in
     (* Lambda parameters should be row-polymorphic by default: if a helper
        touches only a subset of record fields, callers should be able to pass
        larger records.  We therefore rebuild the parameter row with a fresh
        open tail after inference has discovered the required fields.  This is
        intentionally biased toward the "state-machine helper" use-case that
        ChatML scripts rely on heavily. *)
-    Row (merged_fields, new_var state state.current_lvl)
+    Row (reopened_fields, new_var state state.current_lvl)
   | other -> other
 
 (** --------------------------------------------------------------------- *)
 (** 10. Inference – expressions                                            *)
 (** --------------------------------------------------------------------- *)
+
+and infer_unary_prim
+      (state : infer_state)
+      (env : tenv)
+      (prim : unary_prim)
+      (arg : expr node)
+  : typ
+  =
+  let arg_ty = infer_expr state env arg in
+  match prim with
+  | UNegInt ->
+    unify state arg_ty TInt;
+    TInt
+  | UNegFloat ->
+    unify state arg_ty TFloat;
+    TFloat
+
+and infer_binary_prim
+      (state : infer_state)
+      (env : tenv)
+      (prim : binary_prim)
+      (lhs : expr node)
+      (rhs : expr node)
+  : typ
+  =
+  let lhs_ty = infer_expr state env lhs in
+  let rhs_ty = infer_expr state env rhs in
+  match prim with
+  | BIntAdd | BIntSub | BIntMul | BIntDiv ->
+    unify state lhs_ty TInt;
+    unify state rhs_ty TInt;
+    TInt
+  | BFloatAdd | BFloatSub | BFloatMul | BFloatDiv ->
+    unify state lhs_ty TFloat;
+    unify state rhs_ty TFloat;
+    TFloat
+  | BStringConcat ->
+    unify state lhs_ty String;
+    unify state rhs_ty String;
+    String
+  | BIntLt | BIntGt | BIntLe | BIntGe ->
+    unify state lhs_ty TInt;
+    unify state rhs_ty TInt;
+    Boolean
+  | BFloatLt | BFloatGt | BFloatLe | BFloatGe ->
+    unify state lhs_ty TFloat;
+    unify state rhs_ty TFloat;
+    Boolean
+  | BEq | BNeq ->
+    unify state lhs_ty rhs_ty;
+    Boolean
 
 and infer_expr (state : infer_state) (env : tenv) expr =
   (* We first perform the usual inference work, then — if it succeeds — we
@@ -1102,6 +1150,8 @@ and infer_expr (state : infer_state) (env : tenv) expr =
       | EString _ -> String
       | EVar x -> lookup state env x
       | EVarLoc _ -> failwith "EVarLoc should not appear before resolver"
+      | EPrim1 (prim, arg) -> infer_unary_prim state env prim arg
+      | EPrim2 (prim, lhs, rhs) -> infer_binary_prim state env prim lhs rhs
       | ELambda (params, body) ->
         with_new_level state ~f:(fun () ->
           let env_with_params, param_tys_rev =

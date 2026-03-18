@@ -90,7 +90,7 @@ let () =
            ; synthetic = true
            ; via = "emit_task"
            ; text =
-               "Current task (" ++ num2str(st.task_index + 1) ++ "/" ++ num2str(st.task_count) ++ ") [" ++ t.id ++ "]:\n\n"
+               "Current task (" ++ to_string(st.task_index + 1) ++ "/" ++ to_string(st.task_count) ++ ") [" ++ t.id ++ "]:\n\n"
                ++ t.title ++ "\n\n"
                ++ "Rules:\n"
                ++ "- Do only this task.\n"
@@ -99,7 +99,7 @@ let () =
            }
          )
 
-       print("ssdd " ++ num2str(2323 + 1) ++ " ++")
+       print("ssdd " ++ to_string(2323 + 1) ++ " ++")
 
        let finish_action () =
          `InsertMsg(

@@ -82,6 +82,33 @@ and match_case_slots =
   }
 [@@deriving sexp_of]
 
+and unary_prim =
+  | UNegInt
+  | UNegFloat
+[@@deriving sexp_of]
+
+and binary_prim =
+  | BIntAdd
+  | BIntSub
+  | BIntMul
+  | BIntDiv
+  | BFloatAdd
+  | BFloatSub
+  | BFloatMul
+  | BFloatDiv
+  | BStringConcat
+  | BIntLt
+  | BIntGt
+  | BIntLe
+  | BIntGe
+  | BFloatLt
+  | BFloatGt
+  | BFloatLe
+  | BFloatGe
+  | BEq
+  | BNeq
+[@@deriving sexp_of]
+
 and expr =
   | EUnit
   | EInt of int
@@ -90,6 +117,8 @@ and expr =
   | EString of string
   | EVar of string
   | EVarLoc of var_loc
+  | EPrim1 of unary_prim * expr node
+  | EPrim2 of binary_prim * expr node * expr node
   | ELambda of string list * expr node
   | ELambdaSlots of string list * Frame_env.packed_slot list * expr node
   | EApp of expr node * expr node list
@@ -224,7 +253,8 @@ and clos =
   ; param_slots : Frame_env.packed_slot list (** static slot layout for parameters *)
   }
 
-and env = (string, value) Hashtbl.t
+and cell = value ref
+and env = (string, cell) Hashtbl.t
 
 (***************************************************************************)
 (* 3) Environment Helpers                                                  *)
@@ -238,8 +268,43 @@ let copy_env (parent : env) : env =
   child
 ;;
 
-let find_var (e : env) (x : string) : value option = Hashtbl.find e x
-let set_var (e : env) (x : string) (v : value) : unit = Hashtbl.set e ~key:x ~data:v
+let find_var_cell (e : env) (x : string) : cell option = Hashtbl.find e x
+
+let find_var (e : env) (x : string) : value option =
+  Hashtbl.find e x |> Option.map ~f:(fun cell -> !cell)
+;;
+
+let define_var (e : env) (x : string) (v : value) : unit =
+  Hashtbl.set e ~key:x ~data:(ref v)
+;;
+
+let update_var (e : env) (x : string) (v : value) : unit =
+  match find_var_cell e x with
+  | Some cell -> cell := v
+  | None -> define_var e x v
+;;
+
+let set_var (e : env) (x : string) (v : value) : unit = define_var e x v
+
+let rec equal_value (lhs : value) (rhs : value) : bool =
+  match lhs, rhs with
+  | VInt x, VInt y -> x = y
+  | VFloat x, VFloat y -> Float.equal x y
+  | VBool x, VBool y -> Bool.equal x y
+  | VString x, VString y -> String.equal x y
+  | VUnit, VUnit -> true
+  | VVariant (tag_x, vals_x), VVariant (tag_y, vals_y) ->
+    String.equal tag_x tag_y
+    && List.length vals_x = List.length vals_y
+    && List.for_all2_exn vals_x vals_y ~f:equal_value
+  | VRecord fields_x, VRecord fields_y -> Map.equal equal_value fields_x fields_y
+  | VArray arr_x, VArray arr_y -> phys_equal arr_x arr_y
+  | VRef ref_x, VRef ref_y -> phys_equal ref_x ref_y
+  | VClosure clos_x, VClosure clos_y -> phys_equal clos_x clos_y
+  | VModule env_x, VModule env_y -> phys_equal env_x env_y
+  | VBuiltin fn_x, VBuiltin fn_y -> phys_equal fn_x fn_y
+  | _ -> false
+;;
 
 (***************************************************************************)
 (* 4) Pattern Matching                                                      *)
@@ -329,6 +394,16 @@ let slot_of_expr (e : expr) : Frame_env.packed_slot =
   | EBool _ -> Frame_env.Slot Frame_env.SBool
   | EFloat _ -> Frame_env.Slot Frame_env.SFloat
   | EString _ -> Frame_env.Slot Frame_env.SString
+  | EPrim1 (UNegInt, _) -> Frame_env.Slot Frame_env.SInt
+  | EPrim1 (UNegFloat, _) -> Frame_env.Slot Frame_env.SFloat
+  | EPrim2 ((BIntAdd | BIntSub | BIntMul | BIntDiv), _, _) -> Frame_env.Slot Frame_env.SInt
+  | EPrim2 ((BFloatAdd | BFloatSub | BFloatMul | BFloatDiv), _, _) ->
+    Frame_env.Slot Frame_env.SFloat
+  | EPrim2 (BStringConcat, _, _) -> Frame_env.Slot Frame_env.SString
+  | EPrim2
+      ( (BIntLt | BIntGt | BIntLe | BIntGe | BFloatLt | BFloatGt | BFloatLe | BFloatGe | BEq | BNeq)
+      , _
+      , _ ) -> Frame_env.Slot Frame_env.SBool
   | _ -> Frame_env.Slot Frame_env.SObj
 ;;
 
@@ -481,14 +556,63 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
      | Some v -> Value v
      | None -> raise_runtime_error ~span:e.span (Printf.sprintf "Unbound variable %s" x))
   | EVarLoc loc -> Value (load_from_frames frames loc)
+  | EPrim1 (prim, arg_expr) ->
+    let arg_val = finish_eval frames (eval_expr env frames arg_expr) in
+    (match prim, arg_val with
+     | UNegInt, VInt n -> Value (VInt (-n))
+     | UNegFloat, VFloat f -> Value (VFloat (-.f))
+     | UNegInt, _ ->
+       raise_runtime_error ~span:e.span "Internal type error: unary int negation on non-int"
+     | UNegFloat, _ ->
+       raise_runtime_error ~span:e.span "Internal type error: unary float negation on non-float")
+  | EPrim2 (prim, lhs_expr, rhs_expr) ->
+    let lhs_val = finish_eval frames (eval_expr env frames lhs_expr) in
+    let rhs_val = finish_eval frames (eval_expr env frames rhs_expr) in
+    (match prim, lhs_val, rhs_val with
+     | BIntAdd, VInt x, VInt y -> Value (VInt (x + y))
+     | BIntSub, VInt x, VInt y -> Value (VInt (x - y))
+     | BIntMul, VInt x, VInt y -> Value (VInt (x * y))
+     | BIntDiv, VInt _, VInt 0 -> raise_runtime_error ~span:e.span "Division by zero"
+     | BIntDiv, VInt x, VInt y -> Value (VInt (x / y))
+     | BFloatAdd, VFloat x, VFloat y -> Value (VFloat (x +. y))
+     | BFloatSub, VFloat x, VFloat y -> Value (VFloat (x -. y))
+     | BFloatMul, VFloat x, VFloat y -> Value (VFloat (x *. y))
+     | BFloatDiv, VFloat _, VFloat y when Float.equal y 0.0 ->
+       raise_runtime_error ~span:e.span "Division by zero"
+     | BFloatDiv, VFloat x, VFloat y -> Value (VFloat (x /. y))
+     | BStringConcat, VString x, VString y -> Value (VString (x ^ y))
+     | BIntLt, VInt x, VInt y -> Value (VBool (x < y))
+     | BIntGt, VInt x, VInt y -> Value (VBool (x > y))
+     | BIntLe, VInt x, VInt y -> Value (VBool (x <= y))
+     | BIntGe, VInt x, VInt y -> Value (VBool (x >= y))
+     | BFloatLt, VFloat x, VFloat y -> Value (VBool (Float.(x < y)))
+     | BFloatGt, VFloat x, VFloat y -> Value (VBool (Float.(x > y)))
+     | BFloatLe, VFloat x, VFloat y -> Value (VBool (Float.(x <= y)))
+     | BFloatGe, VFloat x, VFloat y -> Value (VBool (Float.(x >= y)))
+     | BEq, _, _ -> Value (VBool (equal_value lhs_val rhs_val))
+     | BNeq, _, _ -> Value (VBool (not (equal_value lhs_val rhs_val)))
+     | ( (BIntAdd | BIntSub | BIntMul | BIntDiv | BIntLt | BIntGt | BIntLe | BIntGe)
+       , _
+       , _ ) ->
+       raise_runtime_error ~span:e.span "Internal type error: int primitive on non-int operands"
+     | ( (BFloatAdd | BFloatSub | BFloatMul | BFloatDiv | BFloatLt | BFloatGt | BFloatLe | BFloatGe)
+       , _
+       , _ ) ->
+       raise_runtime_error
+         ~span:e.span
+         "Internal type error: float primitive on non-float operands"
+     | BStringConcat, _, _ ->
+       raise_runtime_error
+         ~span:e.span
+         "Internal type error: string concatenation on non-string operands")
   | ELambda (params, body) ->
     (* Param slot information is not yet threaded from the resolver, so we
        default to an empty list which signals the trampoline to perform the
        old dynamic fallback.  A future pass will populate it through the
        resolver/type-checker link. *)
-    Value (VClosure { params; body; env; frames; param_slots = [] })
+    Value (VClosure { params; body; env = copy_env env; frames; param_slots = [] })
   | ELambdaSlots (params, slots, body) ->
-    Value (VClosure { params; body; env; frames; param_slots = slots })
+    Value (VClosure { params; body; env = copy_env env; frames; param_slots = slots })
   | ELetBlock (bindings, body) ->
     (* 1. Decide the slot layout *syntactically* so that it matches exactly
        what the resolver recorded. *)
@@ -781,7 +905,7 @@ and import_module_bindings ?span (target_env : env) (mname : string) : string li
   match find_var target_env mname with
   | Some (VModule menv) ->
     Hashtbl.fold menv ~init:[] ~f:(fun ~key ~data acc ->
-      set_var target_env key data;
+      define_var target_env key !data;
       key :: acc)
   | _ -> raise_runtime_error ?span (Printf.sprintf "Cannot open non-module '%s'" mname)
 
@@ -798,7 +922,7 @@ and eval_module_value
      visible once evaluation is complete. *)
   let module_eval_env = copy_env outer_env in
   let module_export_env = create_env () in
-  set_var module_eval_env mname (VModule module_export_env);
+  define_var module_eval_env mname (VModule module_export_env);
   let exported_names =
     List.concat_map stmts ~f:(fun st -> eval_stmt_with_exports module_eval_env frames st)
   in
@@ -808,7 +932,7 @@ and eval_module_value
     then (
       Hash_set.add seen name;
       match find_var module_eval_env name with
-      | Some value -> set_var module_export_env name value
+      | Some value -> define_var module_export_env name value
       | None -> ()));
   module_export_env
 
@@ -818,19 +942,19 @@ and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : stmt node)
   match s.value with
   | SLet (x, e1) ->
     let v1 = finish_eval frames (eval_expr env frames e1) in
-    set_var env x v1;
+    define_var env x v1;
     [ x ]
   | SLetRec bindings ->
     (* Step 1: Initialize each name to VUnit in the top-level env. *)
-    List.iter bindings ~f:(fun (nm, _) -> set_var env nm VUnit);
+    List.iter bindings ~f:(fun (nm, _) -> define_var env nm VUnit);
     (* Step 2: Evaluate each binding in env. *)
     List.iter bindings ~f:(fun (nm, rhs_expr) ->
       let v = finish_eval frames (eval_expr env frames rhs_expr) in
-      set_var env nm v);
+      update_var env nm v);
     List.map bindings ~f:fst
   | SModule (mname, stmts) ->
     let menv = eval_module_value env frames mname stmts in
-    set_var env mname (VModule menv);
+    define_var env mname (VModule menv);
     [ mname ]
   | SOpen mname ->
     let _imported = import_module_bindings ~span:s.span env mname in

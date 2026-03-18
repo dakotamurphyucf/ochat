@@ -38,7 +38,7 @@ let node value : _ L.node = { value; span = dummy_span }
 
 let%expect_test "recursive factorial" =
   let code =
-    {|      
+    {|
       let rec fact n =
         match n with
         | 0 -> 1
@@ -49,7 +49,7 @@ let%expect_test "recursive factorial" =
   eval code;
   [%expect
     {|
-120 
+120
 |}]
 ;;
 
@@ -59,7 +59,7 @@ let%expect_test "recursive factorial" =
 
 let%expect_test "array mutation and length" =
   let code =
-    {|      
+    {|
       let arr = [1, 2, 3]
       arr[1] <- 5
       print(arr[1])
@@ -69,8 +69,8 @@ let%expect_test "array mutation and length" =
   eval code;
   [%expect
     {|
-5 
-3 
+5
+3
 |}]
 ;;
 
@@ -80,7 +80,7 @@ let%expect_test "array mutation and length" =
 
 let%expect_test "sequential let block" =
   let code =
-    {|      
+    {|
       let result =
         let a = 1 in
         let b = a + 2 in
@@ -92,7 +92,7 @@ let%expect_test "sequential let block" =
   eval code;
   [%expect
     {|
-6 
+6
 |}]
 ;;
 
@@ -102,14 +102,14 @@ let%expect_test "sequential let block" =
 
 let%expect_test "simple if branch" =
   let code =
-    {|      
+    {|
       print(if true then 1 else 2)
     |}
   in
   eval code;
   [%expect
     {|
-1 
+1
 |}]
 ;;
 
@@ -119,7 +119,7 @@ let%expect_test "simple if branch" =
 
 let%expect_test "record copy update leaves original unchanged" =
   let code =
-    {|      
+    {|
       let person = {name = "Bob"; age = 20}
       let older = {person with age = person.age + 1}
       print(person.age)
@@ -130,9 +130,9 @@ let%expect_test "record copy update leaves original unchanged" =
   eval code;
   [%expect
     {|
-20 
-21 
-Bob 
+20
+21
+Bob
 |}]
 ;;
 
@@ -142,7 +142,7 @@ Bob
 
 let%expect_test "variant pattern match" =
   let code =
-    {|      
+    {|
       let v = `Pair(3, 4) in
       match v with
       | `Pair(x, y) -> print([x, y])
@@ -152,13 +152,13 @@ let%expect_test "variant pattern match" =
   eval code;
   [%expect
     {|
-[|3, 4|] 
+[|3, 4|]
 |}]
 ;;
 
 let%expect_test "variant none match" =
   let code =
-    {|      
+    {|
       let v = `None in
       match v with
       | `None -> print("none")
@@ -168,7 +168,7 @@ let%expect_test "variant none match" =
   eval code;
   [%expect
     {|
-none 
+none
 |}]
 ;;
 
@@ -178,7 +178,7 @@ none
 
 let%expect_test "mutual recursion even/odd" =
   let code =
-    {|      
+    {|
       let rec is_even n =
         match n with
         | 0 -> true
@@ -194,9 +194,9 @@ let%expect_test "mutual recursion even/odd" =
   eval code;
   [%expect
     {|
-true 
-false 
-true 
+true
+false
+true
 |}]
 ;;
 
@@ -206,7 +206,7 @@ true
 
 let%expect_test "mutable reference update" =
   let code =
-    {|      
+    {|
       let r = ref(0)
       r := !r + 10
       print(!r)
@@ -215,7 +215,7 @@ let%expect_test "mutable reference update" =
   eval code;
   [%expect
     {|
-10 
+10
 |}]
 ;;
 
@@ -223,7 +223,7 @@ let%expect_test "mutable reference update" =
 
 let%expect_test "while toggle flag" =
   let code =
-    {|      
+    {|
       let flag = ref(true)
       let counter = ref(0)
       while !flag do
@@ -236,7 +236,7 @@ let%expect_test "while toggle flag" =
   eval code;
   [%expect
     {|
-1 
+1
 |}]
 ;;
 
@@ -254,8 +254,8 @@ let%expect_test "sequence forces first function call before second" =
   eval code;
   [%expect
     {|
-a 
-b 
+a
+b
 |}]
 ;;
 
@@ -268,7 +268,7 @@ let%expect_test "unit literal prints as ()" =
   eval code;
   [%expect
     {|
-() 
+()
 |}]
 ;;
 
@@ -282,7 +282,7 @@ let%expect_test "fun () -> ... defines zero-argument lambdas" =
   eval code;
   [%expect
     {|
-42 
+42
 |}]
 ;;
 
@@ -296,7 +296,7 @@ let%expect_test "local let f () = ... in ... works" =
   eval code;
   [%expect
     {|
-42 
+42
 |}]
 ;;
 
@@ -310,7 +310,7 @@ let%expect_test "recursive zero-argument function bindings parse and run" =
   eval code;
   [%expect
     {|
-7 
+7
 |}]
 ;;
 
@@ -324,7 +324,7 @@ let%expect_test "unit pattern matches unit values" =
   eval code;
   [%expect
     {|
-unit 
+unit
 |}]
 ;;
 
@@ -338,7 +338,7 @@ let%expect_test "record literals allow trailing semicolons" =
   eval code;
   [%expect
     {|
-3 
+3
 |}]
 ;;
 
@@ -352,7 +352,7 @@ let%expect_test "record patterns allow trailing semicolons" =
   eval code;
   [%expect
     {|
-3 
+3
 |}]
 ;;
 
@@ -379,12 +379,12 @@ let%expect_test "runtime closure arity mismatch is reported clearly" =
 
 let%expect_test "module definition and open" =
   let code =
-    {|      
+    {|
       module M = struct
         let square x = x * x
         let two = 2
       end
-     
+
       open M
       print(square(two))
     |}
@@ -392,7 +392,7 @@ let%expect_test "module definition and open" =
   eval code;
   [%expect
     {|
-4 
+4
 |}]
 ;;
 
@@ -409,7 +409,7 @@ let%expect_test "module can use outer bindings without exporting them" =
   eval code;
   [%expect
     {|
-1 
+1
 |}]
 ;;
 
@@ -442,7 +442,41 @@ let%expect_test "module self-reference resolves through explicit exports only" =
   eval code;
   [%expect
     {|
-7 
+7
+|}]
+;;
+
+let%expect_test "top-level closure keeps lexical binding across rebinding" =
+  let code =
+    {|
+      let x = 1
+      let f () = x
+      let x = 2
+      print(f())
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+1
+|}]
+;;
+
+let%expect_test "module closure keeps lexical binding across rebinding" =
+  let code =
+    {|
+      module M = struct
+        let x = 1
+        let f () = x
+        let x = 2
+      end
+      print(M.f())
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+1
 |}]
 ;;
 
@@ -472,7 +506,7 @@ let%expect_test "open inside a module does not re-export imported names" =
 
 let%expect_test "higher-order compose" =
   let code =
-    {|      
+    {|
       let compose f g x = f(g(x))
       let inc x = x + 1
       let double x = x * 2
@@ -482,7 +516,7 @@ let%expect_test "higher-order compose" =
   eval code;
   [%expect
     {|
-7 
+7
 |}]
 ;;
 
@@ -492,7 +526,7 @@ let%expect_test "higher-order compose" =
 
 let%expect_test "numeric comparisons and division" =
   let code =
-    {|      
+    {|
       print(10 / 2)
       print(3 < 5)
       print(6 > 9)
@@ -505,13 +539,38 @@ let%expect_test "numeric comparisons and division" =
   eval code;
   [%expect
     {|
-5 
-true 
-false 
-true 
-false 
-true 
-false 
+5
+true
+false
+true
+false
+true
+false
+|}]
+;;
+
+let%expect_test "float arithmetic and comparisons use explicit dotted operators" =
+  let code =
+    {|
+      print(1.5 +. 2.25)
+      print(5.0 -. 1.5)
+      print(2.0 *. 3.5)
+      print(7.5 /. 2.5)
+      print(-.1.25)
+      print(1.0 <. 2.0)
+      print(2.0 >=. 2.0)
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+3.75
+3.5
+7.
+3.
+-1.25
+true
+true
 |}]
 ;;
 
@@ -521,7 +580,7 @@ false
 
 let%expect_test "record extension overwrite and add" =
   let code =
-    {|      
+    {|
       let person = {name = "Alice"; age = 30}
       let employee = { person with age = 31; id = 123 }
       print(employee.name)
@@ -532,15 +591,15 @@ let%expect_test "record extension overwrite and add" =
   eval code;
   [%expect
     {|
-Alice 
-31 
-123 
+Alice
+31
+123
 |}]
 ;;
 
 let%expect_test "record extension can change field type" =
   let code =
-    {|      
+    {|
       let person = {name = "Alice"; age = 30}
       let label = { person with age = "old" }
       print(label.age)
@@ -550,8 +609,8 @@ let%expect_test "record extension can change field type" =
   eval code;
   [%expect
     {|
-old 
-30 
+old
+30
 |}]
 ;;
 
@@ -561,7 +620,7 @@ old
 
 let%expect_test "array length builtin" =
   let code =
-    {|      
+    {|
       let arr = [10, 20, 30, 40]
       print(length(arr))
     |}
@@ -569,13 +628,13 @@ let%expect_test "array length builtin" =
   eval code;
   [%expect
     {|
-4 
+4
 |}]
 ;;
 
 let%expect_test "generic to_string builtin" =
   let code =
-    {|      
+    {|
       print(to_string(42))
       print(to_string(true))
       print(to_string([1, 2]))
@@ -586,17 +645,17 @@ let%expect_test "generic to_string builtin" =
   eval code;
   [%expect
     {|
-42 
-true 
-[|1, 2|] 
-{ a = 1; b = 2 } 
-`Some(1) 
+42
+true
+[|1, 2|]
+{ a = 1; b = 2 }
+`Some(1)
 |}]
 ;;
 
-let%expect_test "polymorphic equality builtin handles records and variants" =
+let%expect_test "polymorphic equality primitive handles records and variants" =
   let code =
-    {|      
+    {|
       print({a = 1; b = 2} == {a = 1; b = 2})
       print(`Some(1) == `Some(1))
       print(`Some(1) != `Some(2))
@@ -605,9 +664,9 @@ let%expect_test "polymorphic equality builtin handles records and variants" =
   eval code;
   [%expect
     {|
-true 
-true 
-true 
+true
+true
+true
 |}]
 ;;
 
@@ -617,7 +676,7 @@ true
 
 let%expect_test "lambda values and map_in_place" =
   let code =
-    {|      
+    {|
       (* anonymous lambda bound to a variable and invoked *)
       let add10 = fun x -> x + 10
       print(add10(5))
@@ -630,7 +689,7 @@ let%expect_test "lambda values and map_in_place" =
           arr[!idx] <- f(arr[!idx]);
           idx := !idx + 1
         done
-      
+
 
       let nums = [1, 2, 3]
       map_in_place(nums, fun n -> n * 2)
@@ -642,10 +701,10 @@ let%expect_test "lambda values and map_in_place" =
   eval code;
   [%expect
     {|
-15 
-2 
-4 
-6 
+15
+2
+4
+6
 |}]
 ;;
 
@@ -695,10 +754,10 @@ let%expect_test "state machine helpers can update nested task state" =
   eval code;
   [%expect
     {|
-1 
-`Running 
-true 
-`Done 
+1
+`Running
+true
+`Done
 |}]
 ;;
 
@@ -735,11 +794,10 @@ let%expect_test "state machine helper imported from module keeps outer state wid
   eval code;
   [%expect
     {|
-false 
-1 
+false
+1
 |}]
 ;;
-
 
 let%expect_test "ill-typed programs do not execute" =
   let code =
@@ -751,13 +809,14 @@ let%expect_test "ill-typed programs do not execute" =
   in
   (match eval_result code with
    | Ok () -> print_endline "unexpected success"
-   | Error diagnostic -> print_endline (Chatml_typechecker.format_diagnostic code diagnostic));
+   | Error diagnostic ->
+     print_endline (Chatml_typechecker.format_diagnostic code diagnostic));
   [%expect
     {|
-line 3, characters 14-23:
-3|    x + "bad"
-      ^^^^^^^^^
+    line 3, characters 14-23:
+    3|    x + "bad"
+          ^^^^^^^^^
 
-Type error: Cannot unify number with string
-|}]
+    Type error: Cannot unify string with int
+    |}]
 ;;

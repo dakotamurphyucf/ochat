@@ -46,10 +46,10 @@
 
     {1 Grammar highlights}
 
-    * Arithmetic and comparison operators are desugared into
-      applications of the corresponding *variable* (e.g. [a + b] ↦
-      `EApp (EVar "+", [a; b])`).  This facilitates overloading at
-      the *resolver* phase.
+    * Arithmetic, comparison and equality operators are represented as
+      dedicated primitive AST nodes.  Integer and float arithmetic use
+      separate concrete syntax ([+], [-], [*], [/], unary [-] for ints;
+      [+.], [-.], [*.], [/.], unary [-.] for floats).
 
     * Record and array operations (`{ a = 1 }`, `arr[i] <- x`, …) are
       encoded explicitly into the AST instead of via sugar so that the
@@ -109,7 +109,10 @@ let mk_node startp endp value =
 %token <string> UIDENT
 %token <string> TICKIDENT
 %token FUN IF THEN ELSE WHILE DO DONE LET IN MATCH WITH MODULE STRUCT END OPEN REF REC AND
-%token ARROW LEFTARROW COLONEQ BANGEQ EQ EQEQ LTEQ GTEQ LT GT PLUS MINUS PLUSPLUS STAR SLASH LPAREN RPAREN UNDERSCORE
+%token ARROW LEFTARROW COLONEQ BANGEQ EQ EQEQ
+%token LTEQ GTEQ LT GT LTEQDOT GTEQDOT LTDOT GTDOT
+%token PLUS MINUS PLUSPLUS PLUSDOT MINUSDOT STAR SLASH STARDOT SLASHDOT
+%token LPAREN RPAREN UNDERSCORE
 %token LBRACE RBRACE LBRACKET RBRACKET SEMI COMMA DOT BAR BANG
 %token EOF
 
@@ -117,9 +120,9 @@ let mk_node startp endp value =
 %type <Chatml_lang.stmt_node list> program
 
 %left ELSE
-%left EQ EQEQ BANGEQ LT GT
-%left PLUS MINUS PLUSPLUS
-%left STAR SLASH
+%left EQ EQEQ BANGEQ LT GT LTEQ GTEQ LTDOT GTDOT LTEQDOT GTEQDOT
+%left PLUS MINUS PLUSPLUS PLUSDOT MINUSDOT
+%left STAR SLASH STARDOT SLASHDOT
 %left BANG
 
 
@@ -153,19 +156,26 @@ expr:
     | BOOL                    { mk_exprnode $startpos $endpos (EBool $1) }
     | STRING                  { mk_exprnode $startpos $endpos (EString $1) }
 
-    | expr PLUS expr       { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "+"), [$1; $3])) }
+    | expr PLUS expr       { mk_exprnode $startpos $endpos (EPrim2(BIntAdd, $1, $3)) }
+    | expr PLUSDOT expr    { mk_exprnode $startpos $endpos (EPrim2(BFloatAdd, $1, $3)) }
+    | expr PLUSPLUS expr   { mk_exprnode $startpos $endpos (EPrim2(BStringConcat, $1, $3)) }
+    | expr MINUS expr      { mk_exprnode $startpos $endpos (EPrim2(BIntSub, $1, $3)) }
+    | expr MINUSDOT expr   { mk_exprnode $startpos $endpos (EPrim2(BFloatSub, $1, $3)) }
+    | expr STAR expr       { mk_exprnode $startpos $endpos (EPrim2(BIntMul, $1, $3)) }
+    | expr STARDOT expr    { mk_exprnode $startpos $endpos (EPrim2(BFloatMul, $1, $3)) }
+    | expr SLASH expr      { mk_exprnode $startpos $endpos (EPrim2(BIntDiv, $1, $3)) }
+    | expr SLASHDOT expr   { mk_exprnode $startpos $endpos (EPrim2(BFloatDiv, $1, $3)) }
 
-    | expr PLUSPLUS expr       { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "++"), [$1; $3])) }
-    | expr MINUS expr      { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "-"), [$1; $3])) }
-    | expr STAR expr       { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "*"), [$1; $3])) }
-    | expr SLASH expr      { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "/"), [$1; $3])) }
-
-    | expr LT expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "<"), [$1; $3])) }
-    | expr GT expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar ">"), [$1; $3])) }
-    | expr LTEQ expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "<="), [$1; $3])) }
-    | expr GTEQ expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar ">="), [$1; $3])) }
-    | expr EQEQ expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "=="), [$1; $3])) }
-    | expr BANGEQ expr { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "!="), [$1; $3])) }
+    | expr LT expr         { mk_exprnode $startpos $endpos (EPrim2(BIntLt, $1, $3)) }
+    | expr GT expr         { mk_exprnode $startpos $endpos (EPrim2(BIntGt, $1, $3)) }
+    | expr LTEQ expr       { mk_exprnode $startpos $endpos (EPrim2(BIntLe, $1, $3)) }
+    | expr GTEQ expr       { mk_exprnode $startpos $endpos (EPrim2(BIntGe, $1, $3)) }
+    | expr LTDOT expr      { mk_exprnode $startpos $endpos (EPrim2(BFloatLt, $1, $3)) }
+    | expr GTDOT expr      { mk_exprnode $startpos $endpos (EPrim2(BFloatGt, $1, $3)) }
+    | expr LTEQDOT expr    { mk_exprnode $startpos $endpos (EPrim2(BFloatLe, $1, $3)) }
+    | expr GTEQDOT expr    { mk_exprnode $startpos $endpos (EPrim2(BFloatGe, $1, $3)) }
+    | expr EQEQ expr       { mk_exprnode $startpos $endpos (EPrim2(BEq, $1, $3)) }
+    | expr BANGEQ expr     { mk_exprnode $startpos $endpos (EPrim2(BNeq, $1, $3)) }
 
     (* variable / identifier *)
     | ident { mk_exprnode $startpos $endpos ($1) }
@@ -230,7 +240,8 @@ expr:
 
     (* sequence of expressions *)
     | BANGEQ expr                  { failwith "Unsupported: != as a pattern" }
-    | MINUS expr                   %prec MINUS { mk_exprnode $startpos $endpos (EApp(mk_exprnode $startpos $endpos (EVar "neg"), [$2]) ) }
+    | MINUS expr                   %prec MINUS { mk_exprnode $startpos $endpos (EPrim1(UNegInt, $2)) }
+    | MINUSDOT expr                %prec MINUS { mk_exprnode $startpos $endpos (EPrim1(UNegFloat, $2)) }
     | DOT expr                     { failwith "Unexpected '.' expression" }
     /* fallback to handle conflicts if any. */
 
