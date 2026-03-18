@@ -547,6 +547,12 @@ let rec is_non_expansive (expr : expr) : bool =
   | ERecordExtend _ -> false
 ;;
 
+let is_function_like_expr (expr : expr) : bool =
+  match expr with
+  | ELambda _ | ELambdaSlots _ -> true
+  | _ -> false
+;;
+
 let rec restrict_free_vars_to_level (max_level : int) (ty : typ) : unit =
   match ty with
   | Fun (params, ret) ->
@@ -583,6 +589,12 @@ and infer_recursive_bindings
       (bindings : (string * expr node) list)
   : tenv
   =
+  List.iter bindings ~f:(fun (nm, rhs) ->
+    if not (is_function_like_expr rhs.value)
+    then
+      raise
+        (Type_error_with_loc
+           (Printf.sprintf "Recursive binding '%s' must be a function" nm, rhs.span)));
   let binding_types =
     with_new_level state ~f:(fun () ->
       let env_with_placeholders =
@@ -646,6 +658,64 @@ and infer_record_extend
       Env.add key data acc)
   in
   Record (Row (result_fields, result_tail))
+
+and validate_unique_labels
+      ~(what : string)
+      ~(span : Source.span option)
+      (labels : string list)
+  : unit
+  =
+  let seen = Hash_set.create (module String) in
+  match List.find labels ~f:(fun lbl ->
+    if Hash_set.mem seen lbl
+    then true
+    else (
+      Hash_set.add seen lbl;
+      false))
+  with
+  | None -> ()
+  | Some lbl ->
+    let msg = Printf.sprintf "Duplicate %s label '%s'" what lbl in
+    (match span with
+     | Some sp -> raise (Type_error_with_loc (msg, sp))
+     | None -> raise (Type_error msg))
+
+and validate_unique_record_fields
+      (span : Source.span)
+      (fields : (string * expr node) list)
+  : unit
+  =
+  validate_unique_labels
+    ~what:"record field"
+    ~span:(Some span)
+    (List.map fields ~f:fst)
+
+and validate_unique_record_update_fields
+      (span : Source.span)
+      (fields : (string * expr node) list)
+  : unit
+  =
+  validate_unique_labels
+    ~what:"record update"
+    ~span:(Some span)
+    (List.map fields ~f:fst)
+
+and validate_unique_record_labels_in_pattern
+      (pat : pattern)
+      (span : Source.span option)
+  : unit
+  =
+  let rec loop = function
+    | PWildcard | PVar _ | PInt _ | PBool _ | PFloat _ | PString _ -> ()
+    | PVariant (_tag, subpats) -> List.iter subpats ~f:loop
+    | PRecord (fields, _is_open) ->
+      validate_unique_labels
+        ~what:"record pattern"
+        ~span
+        (List.map fields ~f:fst);
+      List.iter fields ~f:(fun (_lbl, subpat) -> loop subpat)
+  in
+  loop pat
 
 and validate_pattern_binders (pat : pattern) : unit =
   let seen = Hash_set.create (module String) in
@@ -1073,6 +1143,7 @@ and infer_expr (state : infer_state) (env : tenv) expr =
         let env_with_bindings = infer_recursive_bindings state env bindings in
         infer_expr state env_with_bindings body
       | ERecord fields ->
+        validate_unique_record_fields expr.span fields;
         let row =
           List.fold_right fields ~init:Empty_row ~f:(fun (lbl, expr) acc ->
             let ty = infer_expr state env expr in
@@ -1101,6 +1172,7 @@ and infer_expr (state : infer_state) (env : tenv) expr =
         Unit
       | ERef e -> Ref (infer_expr state env e) (* simplified *)
       | ERecordExtend (base_expr, fields) ->
+        validate_unique_record_update_fields expr.span fields;
         infer_record_extend state env base_expr fields
       | EDeref e ->
         let ty = new_var state state.current_lvl in
@@ -1129,6 +1201,7 @@ and infer_expr (state : infer_state) (env : tenv) expr =
         validate_match_case_shapes case_spans;
         List.iter cases ~f:(fun case ->
           try
+            validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
             validate_pattern_binders case.pat;
             let env_arm = infer_pattern state env case.pat scrut_ty in
             let rhs_ty = infer_expr state env_arm case.rhs in
@@ -1146,6 +1219,7 @@ and infer_expr (state : infer_state) (env : tenv) expr =
         validate_match_case_shapes case_spans;
         List.iter cases ~f:(fun case ->
           try
+            validate_unique_record_labels_in_pattern case.pat (Some case.pat_span);
             validate_pattern_binders case.pat;
             let env_arm = infer_pattern state env case.pat scrut_ty in
             let rhs_ty = infer_expr state env_arm case.rhs in
