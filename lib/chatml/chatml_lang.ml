@@ -156,6 +156,43 @@ type stmt_node = stmt node [@@deriving sexp_of]
 type program = stmt_node list * string [@@deriving sexp_of]
 
 (***************************************************************************)
+(* Runtime diagnostics                                                     *)
+(***************************************************************************)
+
+(** Structured run-time failure raised by the interpreter when execution
+    reaches an invalid dynamic state in user code.  Internal compiler /
+    resolver invariant violations still use plain [Failure]. *)
+type runtime_error =
+  { message : string
+  ; span : Source.span option
+  }
+
+exception Runtime_error of runtime_error
+
+let raise_runtime_error ?span message =
+  raise (Runtime_error { message; span })
+;;
+
+(** Render a run-time error using the same location style as type errors. *)
+let format_runtime_error (source_text : string) (err : runtime_error) : string =
+  match err.span with
+  | None -> Printf.sprintf "Runtime error: %s" err.message
+  | Some span ->
+    let source = Source.read (Source.make source_text) span in
+    let caret_count = Int.max 1 (span.right.column - span.left.column) in
+    Printf.sprintf
+      "line %i, characters %i-%i:\n%i|    %s%s\n      %s\n\nRuntime error: %s"
+      span.left.line
+      span.left.column
+      span.right.column
+      span.left.line
+      source
+      (String.make (span.left.column + 3) ' ')
+      (String.make caret_count '^')
+      err.message
+;;
+
+(***************************************************************************)
 (* 2) Runtime Value Types                                                  *)
 (***************************************************************************)
 
@@ -357,6 +394,12 @@ let store_with_slot
   | Frame_env.Slot Frame_env.SObj -> Frame_env.set_obj fr idx (Obj.repr v)
 ;;
 
+let assert_recursive_slots_are_objects (slots : Frame_env.packed_slot list) : unit =
+  List.iter slots ~f:(function
+    | Frame_env.Slot Frame_env.SObj -> ()
+    | _ -> failwith "internal: non-object recursive slot; typechecker should forbid this")
+;;
+
 (* finish_eval: resolves any TailCall until we get a concrete Value. *)
 (* ------------------------------------------------------------------------- *)
 (*  Frame helpers                                                            *)
@@ -433,7 +476,7 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
   | EVar x ->
     (match find_var env x with
      | Some v -> Value v
-     | None -> failwith (Printf.sprintf "Unbound variable %s" x))
+     | None -> raise_runtime_error ~span:e.span (Printf.sprintf "Unbound variable %s" x))
   | EVarLoc loc -> Value (load_from_frames frames loc)
   | ELambda (params, body) ->
     (* Param slot information is not yet threaded from the resolver, so we
@@ -487,17 +530,19 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     (match fn_val with
      | VClosure cl ->
        if List.length cl.params <> List.length arg_vals
-       then failwith "Function arity mismatch";
+       then raise_runtime_error ~span:e.span "Function arity mismatch";
        (* Produce a tail call in case we are in tail position of the caller. *)
        TailCall (cl, arg_vals)
-     | VBuiltin bf -> Value (bf arg_vals)
-     | _ -> failwith "Trying to call a non-function value")
+     | VBuiltin bf ->
+       (try Value (bf arg_vals) with
+        | Failure msg -> raise_runtime_error ~span:e.span msg)
+     | _ -> raise_runtime_error ~span:e.span "Trying to call a non-function value")
   | EIf (cond_expr, then_expr, else_expr) ->
     let cond_val = finish_eval frames (eval_expr env frames cond_expr) in
     (match cond_val with
      | VBool true -> eval_expr env frames then_expr
      | VBool false -> eval_expr env frames else_expr
-     | _ -> failwith "If condition must be bool")
+     | _ -> raise_runtime_error ~span:e.span "If condition must be bool")
   | EWhile (cond_expr, body_expr) ->
     let rec loop () =
       let cval = finish_eval frames (eval_expr env frames cond_expr) in
@@ -506,7 +551,7 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
         ignore (finish_eval frames (eval_expr env frames body_expr));
         loop ()
       | VBool false -> Value VUnit
-      | _ -> failwith "While condition must be bool"
+      | _ -> raise_runtime_error ~span:e.span "While condition must be bool"
     in
     loop ()
   | ELetIn (_x, e1, e2) ->
@@ -528,6 +573,7 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     let slots =
       List.map bindings ~f:(fun (_nm, rhs_expr) -> slot_of_expr rhs_expr.value)
     in
+    assert_recursive_slots_are_objects slots;
     (* 2.  Allocate a frame with the exact slot layout. *)
     let rec_frame = Frame_env.alloc_packed slots in
     (* 3.  OCaml semantics: each name is visible to the others during the
@@ -547,6 +593,7 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
   | ELetRecSlots (bindings, slots, body) ->
     if List.length bindings <> List.length slots
     then failwith "internal: slot list length mismatch in ELetRecSlots";
+    assert_recursive_slots_are_objects slots;
     (* 1. Allocate frame with exact slot layout. *)
     let rec_frame = Frame_env.alloc_packed slots in
     (* 2. Insert temporary placeholders so that recursive RHSs can see each other. *)
@@ -561,10 +608,10 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     eval_expr env child_frames body
   | EMatch (scrut_expr, cases) ->
     let sv = finish_eval frames (eval_expr env frames scrut_expr) in
-    match_eval env frames sv cases
+    match_eval env frames e.span sv cases
   | EMatchSlots (scrut_expr, cases) ->
     let sv = finish_eval frames (eval_expr env frames scrut_expr) in
-    match_eval_slots env frames sv cases
+    match_eval_slots env frames e.span sv cases
   | ERecord fields ->
     let record_fields =
       List.fold fields ~init:String.Map.empty ~f:(fun acc (fld, fe) ->
@@ -578,12 +625,14 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
      | VRecord fields ->
        (match Map.find fields field with
         | Some v -> Value v
-        | None -> failwith (Printf.sprintf "No field '%s' in record" field))
+        | None ->
+          raise_runtime_error ~span:e.span (Printf.sprintf "No field '%s' in record" field))
      | VModule menv ->
        (match find_var menv field with
         | Some v -> Value v
-        | None -> failwith (Printf.sprintf "No field '%s' in module" field))
-     | _ -> failwith "Field access on non-record/non-module")
+        | None ->
+          raise_runtime_error ~span:e.span (Printf.sprintf "No field '%s' in module" field))
+     | _ -> raise_runtime_error ~span:e.span "Field access on non-record/non-module")
   | EVariant (tag, exprs) ->
     let vals =
       List.map exprs ~f:(fun ex -> finish_eval frames (eval_expr env frames ex))
@@ -600,9 +649,9 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     (match arr_val, idx_val with
      | VArray arr, VInt i ->
        if i < 0 || i >= Array.length arr
-       then failwith "Array index out of bounds"
+       then raise_runtime_error ~span:e.span "Array index out of bounds"
        else Value arr.(i)
-     | _ -> failwith "Invalid array access")
+     | _ -> raise_runtime_error ~span:e.span "Invalid array access")
   | EArraySet (arr_expr, idx_expr, v_expr) ->
     let arr_val = finish_eval frames (eval_expr env frames arr_expr) in
     let idx_val = finish_eval frames (eval_expr env frames idx_expr) in
@@ -610,11 +659,11 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     (match arr_val, idx_val with
      | VArray arr, VInt i ->
        if i < 0 || i >= Array.length arr
-       then failwith "Array index out of bounds"
+       then raise_runtime_error ~span:e.span "Array index out of bounds"
        else (
          arr.(i) <- new_val;
          Value VUnit)
-     | _ -> failwith "Invalid array set")
+     | _ -> raise_runtime_error ~span:e.span "Invalid array set")
   | ERef e1 ->
     let v1 = finish_eval frames (eval_expr env frames e1) in
     Value (VRef (ref v1))
@@ -625,12 +674,12 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
      | VRef cell ->
        cell := nv;
        Value VUnit
-     | _ -> failwith "Attempting to set a non-ref value")
+     | _ -> raise_runtime_error ~span:e.span "Attempting to set a non-ref value")
   | EDeref e1 ->
     let rv = finish_eval frames (eval_expr env frames e1) in
     (match rv with
      | VRef cell -> Value !cell
-     | _ -> failwith "Deref on non-ref value")
+     | _ -> raise_runtime_error ~span:e.span "Deref on non-ref value")
   | ESequence (e1, e2) ->
     ignore (finish_eval frames (eval_expr env frames e1));
     (* evaluate e1 fully, including any pending tail call, then discard its result *)
@@ -641,7 +690,7 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     let base_fields =
       match base_val with
       | VRecord fields -> fields
-      | _ -> failwith "Record extension base is not a record"
+      | _ -> raise_runtime_error ~span:e.span "Record extension base is not a record"
     in
     (* Evaluate new field expressions and replace/insert into a fresh map. *)
     let new_fields =
@@ -651,14 +700,19 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     in
     Value (VRecord new_fields)
 
-and match_eval (env : env) (frames : Frame_env.env) (v : value) (cases : match_case list)
+and match_eval
+      (env : env)
+      (frames : Frame_env.env)
+      (match_span : Source.span)
+      (v : value)
+      (cases : match_case list)
   : eval_result
   =
   match cases with
-  | [] -> failwith "Non-exhaustive pattern match"
+  | [] -> raise_runtime_error ~span:match_span "Non-exhaustive pattern match"
   | case :: tl ->
     (match match_pattern v case.pat with
-     | None -> match_eval env frames v tl
+     | None -> match_eval env frames match_span v tl
      | Some binds ->
        (* 1. Allocate a slot frame for the variables bound by the pattern *)
        let vars = collect_pattern_vars case.pat in
@@ -686,15 +740,16 @@ and match_eval (env : env) (frames : Frame_env.env) (v : value) (cases : match_c
 and match_eval_slots
       (env : env)
       (frames : Frame_env.env)
+      (match_span : Source.span)
       (v : value)
       (cases : match_case_slots list)
   : eval_result
   =
   match cases with
-  | [] -> failwith "Non-exhaustive pattern match"
+  | [] -> raise_runtime_error ~span:match_span "Non-exhaustive pattern match"
   | case :: tl ->
     (match match_pattern v case.pat with
-     | None -> match_eval_slots env frames v tl
+     | None -> match_eval_slots env frames match_span v tl
      | Some binds ->
        let vars = collect_pattern_vars case.pat in
        if List.length vars <> List.length case.slots
@@ -719,13 +774,13 @@ and match_eval_slots
 (* 7) Statement Evaluation                                                 *)
 (***************************************************************************)
 
-and import_module_bindings (target_env : env) (mname : string) : string list =
+and import_module_bindings ?span (target_env : env) (mname : string) : string list =
   match find_var target_env mname with
   | Some (VModule menv) ->
     Hashtbl.fold menv ~init:[] ~f:(fun ~key ~data acc ->
       set_var target_env key data;
       key :: acc)
-  | _ -> failwith (Printf.sprintf "Cannot open non-module '%s'" mname)
+  | _ -> raise_runtime_error ?span (Printf.sprintf "Cannot open non-module '%s'" mname)
 
 and eval_module_value
       (outer_env : env)
@@ -775,7 +830,7 @@ and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : stmt node)
     set_var env mname (VModule menv);
     [ mname ]
   | SOpen mname ->
-    let _imported = import_module_bindings env mname in
+    let _imported = import_module_bindings ~span:s.span env mname in
     []
   | SExpr e ->
     ignore (finish_eval frames (eval_expr env frames e));
@@ -796,6 +851,11 @@ and eval_stmt (env : env) (frames : Frame_env.env) (s : stmt node) : unit =
     uses an empty frame stack – the interpreter never pushes frames for
     the toplevel, therefore side-effects visible outside the call happen
     solely through [env].
+
+    This is a low-level evaluator entry-point intended for already
+    resolved programs.  Typical callers should prefer
+    {!Chatml_resolver.run_program}, which first validates
+    and resolves the program before execution.
 
     Example executing a minimal program that prints {e 42} using a
     builtin [{!Chatml_builtin_modules.print_int}]:
