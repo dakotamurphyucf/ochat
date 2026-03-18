@@ -306,7 +306,7 @@ The repository ships an experimental language called *ChatML*: a small, expressi
 
 The parser, type‑checker and runtime live under the `Chatml` modules and are documented under `docs-src/lib/chatml/` and `docs-src/guide/` (see [`language-spec`](docs-src/guide/chatml-language-spec.md), [`match-semantics`](docs-src/guide/chatml-match-semantics.md), [`chatml_lang`](docs-src/lib/chatml/chatml_lang.doc.md), [`chatml_parser`](docs-src/lib/chatml/chatml_parser.doc.md) and [`chatml_resolver`](docs-src/lib/chatml/chatml_resolver.doc.md)). Today it is exposed primarily via the experimental `dsl_script` binary and the `Chatml_*` library modules; it is not yet wired into ChatMD prompts or the main CLIs.
 
-If you want “real code” examples (including expected types and evaluation results), the tests are a good starting point: [`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml) and [`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml).
+If you want “real code” examples (including expected types and evaluation results) see [examples](docs-src/guide/chatml-language-spec.md#207-tiny-workflow-engine), also the tests are a good starting point: [`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml) and [`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml).
 
 ---
 
