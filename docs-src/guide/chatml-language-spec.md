@@ -8,6 +8,7 @@ It describes the language and runtime pipeline implemented by:
 - `lib/chatml/chatml_lexer.mll`
 - `lib/chatml/chatml_parser.mly`
 - `lib/chatml/chatml_lang.ml`
+- `lib/chatml/chatml_parse.ml`
 - `lib/chatml/chatml_eval.ml`
 - `lib/chatml/frame_env.ml`
 - `lib/chatml/chatml_slot_layout.ml`

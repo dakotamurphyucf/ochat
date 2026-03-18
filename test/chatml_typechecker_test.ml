@@ -3,11 +3,7 @@ open Chatml
 module L = Chatml_lang
 open Chatml_builtin_modules
 
-let parse (str : string) : L.program =
-  let lexbuf = Lexing.from_string str in
-  try { L.stmts = Chatml_parser.program Chatml_lexer.token lexbuf; source_text = str } with
-  | Chatml_parser.Error -> failwith "Parse error"
-;;
+let parse (str : string) : L.program = Chatml_parse.parse_program_exn str
 
 let check_program_result (code : string) =
   let prog = parse code in

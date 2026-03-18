@@ -4,6 +4,7 @@
  (modules
   chatml_lang
   chatml_eval
+  chatml_parse
   chatml_slot_layout
   chatml_lexer
   chatml_parser

@@ -5,11 +5,7 @@ module E = Chatml_eval
 open Chatml_builtin_modules
 
 (** Small parsing helper identical to the one used in the type-checker tests. *)
-let parse (str : string) : L.program =
-  let lexbuf = Lexing.from_string str in
-  try { L.stmts = Chatml_parser.program Chatml_lexer.token lexbuf; source_text = str } with
-  | Chatml_parser.Error -> failwith "Parse error"
-;;
+let parse (str : string) : L.program = Chatml_parse.parse_program_exn str
 
 (** Convenience helper that prepares an evaluation environment with the
     standard built-ins, then executes the ChatML [code] using the full
