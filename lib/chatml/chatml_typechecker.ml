@@ -397,7 +397,7 @@ and show_type = function
   | Tuple ts ->
     ts |> List.map ~f:show_type |> String.concat ~sep:" * " |> Printf.sprintf "(%s)"
   | Variant row -> Printf.sprintf "[%s]" (show_variant_row row)
-  | Row row -> show_row row
+  | (Row _ as row) -> show_row row
   | Empty_row -> ""
   | Generic n -> n
   | Var { contents = Free (n, _) } -> Printf.sprintf "'%s" n
