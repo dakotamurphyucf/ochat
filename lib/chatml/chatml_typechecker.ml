@@ -766,35 +766,36 @@ and simple_pattern_key_of_pattern (pat : pattern) : (string * string) option =
   | PVariant (tag, []) -> Some ("variant:" ^ tag, Printf.sprintf "`%s" tag)
   | _ -> None
 
-and validate_match_case_shapes (patterns : pattern list) : unit =
+and validate_match_case_shapes (cases : (pattern * Source.span) list) : unit =
   let seen_simple_patterns = Hash_set.create (module String) in
-  let rec loop catch_all_pat pats =
-    match pats with
+  let rec loop catch_all_case remaining_cases =
+    match remaining_cases with
     | [] -> ()
-    | pat :: tl ->
-      (match catch_all_pat with
-       | Some prev_pat ->
+    | (pat, pat_span) :: tl ->
+      (match catch_all_case with
+       | Some (prev_pat, _prev_span) ->
          raise
-           (Type_error
+           (Type_error_with_loc
               (Printf.sprintf
                  "Redundant match arm '%s': previous catch-all pattern '%s' already \
                   matches all cases"
                  (show_pattern_brief pat)
-                 (show_pattern_brief prev_pat)))
+                 (show_pattern_brief prev_pat),
+               pat_span))
        | None -> ());
       (match simple_pattern_key_of_pattern pat with
        | Some (key, display) ->
          if Hash_set.mem seen_simple_patterns key
          then
-           raise
-             (Type_error
-                (Printf.sprintf "Duplicate match arm for pattern '%s'" display))
+           raise (Type_error_with_loc (Printf.sprintf "Duplicate match arm for pattern '%s'" display, pat_span))
          else Hash_set.add seen_simple_patterns key
        | None -> ());
-      let next_catch_all_pat = if is_catch_all_pattern pat then Some pat else None in
-      loop next_catch_all_pat tl
+      let next_catch_all_case =
+        if is_catch_all_pattern pat then Some (pat, pat_span) else catch_all_case
+      in
+      loop next_catch_all_case tl
   in
-  loop None patterns
+  loop None cases
 
 and validate_boolean_match_exhaustiveness (scrut_ty : typ) (patterns : pattern list) : unit =
   match resolve_bound_type scrut_ty with
@@ -816,20 +817,21 @@ and validate_boolean_match_exhaustiveness (scrut_ty : typ) (patterns : pattern l
               "Non-exhaustive boolean match: missing cases 'true' and 'false'")))
   | _ -> ()
 
-and validate_typed_match_redundancy (scrut_ty : typ) (patterns : pattern list) : unit =
+and validate_typed_match_redundancy (scrut_ty : typ) (cases : (pattern * Source.span) list) : unit =
   match resolve_bound_type scrut_ty with
   | Boolean ->
     let seen_true = ref false in
     let seen_false = ref false in
-    List.iter patterns ~f:(fun pat ->
+    List.iter cases ~f:(fun (pat, pat_span) ->
       if is_catch_all_pattern pat && !seen_true && !seen_false
       then
         raise
-          (Type_error
+          (Type_error_with_loc
              (Printf.sprintf
                 "Redundant match arm '%s': previous arms already cover boolean cases 'true' \
                  and 'false'"
-                (show_pattern_brief pat)));
+                (show_pattern_brief pat),
+              pat_span));
       (match pat with
        | PBool true -> seen_true := true
        | PBool false -> seen_false := true
@@ -846,29 +848,34 @@ and validate_typed_match_redundancy (scrut_ty : typ) (patterns : pattern list) :
          List.for_all constructors ~f:(fun (tag, _payload_ty) -> Hash_set.mem covered_tags tag)
        in
        let closed_tail = is_closed_variant_tail tail in
-       List.iter patterns ~f:(fun pat ->
+       List.iter cases ~f:(fun (pat, pat_span) ->
          (match pat with
           | PVariant (tag, _subpats) when Hash_set.mem covered_tags tag ->
             let covered_payload = Map.find_exn payload_by_tag tag in
             raise
-              (Type_error
+              (Type_error_with_loc
                  (Printf.sprintf
                     "Redundant match arm '%s': previous arms already cover variant case '%s'"
                     (show_pattern_brief pat)
-                    (show_missing_variant_case tag covered_payload)))
+                    (show_missing_variant_case tag covered_payload),
+                  pat_span))
           | _ when is_catch_all_pattern pat && closed_tail && all_known_tags_covered () ->
             raise
-              (Type_error
+              (Type_error_with_loc
                  (Printf.sprintf
                     "Redundant match arm '%s': previous arms already cover all variant constructors"
-                    (show_pattern_brief pat)))
+                    (show_pattern_brief pat),
+                  pat_span))
           | _ -> ());
          List.iter constructors ~f:(fun (tag, payload_ty) ->
            if pattern_fully_covers_variant_case pat ~tag ~payload_ty
            then Hash_set.add covered_tags tag)))
   | _ -> ()
 
-and validate_match_exhaustiveness (state : infer_state) (scrut_ty : typ) (patterns : pattern list)
+and validate_match_exhaustiveness
+      (state : infer_state)
+      (scrut_ty : typ)
+      (patterns : pattern list)
   : unit
   =
   if List.exists patterns ~f:is_catch_all_pattern
@@ -1118,31 +1125,39 @@ and infer_expr (state : infer_state) (env : tenv) expr =
       | EMatch (scrut, cases) ->
         let scrut_ty = infer_expr state env scrut in
         let result_ty = new_var state state.current_lvl in
-        validate_match_case_shapes (List.map cases ~f:fst);
-        List.iter cases ~f:(fun (pat, rhs) ->
-          validate_pattern_binders pat;
-          let env_arm = infer_pattern state env pat scrut_ty in
-          let rhs_ty = infer_expr state env_arm rhs in
-          unify state rhs_ty result_ty);
-        validate_match_exhaustiveness state scrut_ty (List.map cases ~f:fst);
-        validate_typed_match_redundancy scrut_ty (List.map cases ~f:fst);
+        let case_spans = List.map cases ~f:(fun case -> case.pat, case.pat_span) in
+        validate_match_case_shapes case_spans;
+        List.iter cases ~f:(fun case ->
+          try
+            validate_pattern_binders case.pat;
+            let env_arm = infer_pattern state env case.pat scrut_ty in
+            let rhs_ty = infer_expr state env_arm case.rhs in
+            unify state rhs_ty result_ty
+          with
+          | Type_error msg -> raise (Type_error_with_loc (msg, case.pat_span))
+          | Type_error_with_loc _ as exn -> raise exn);
+        validate_match_exhaustiveness state scrut_ty (List.map case_spans ~f:fst);
+        validate_typed_match_redundancy scrut_ty case_spans;
         result_ty
       | EMatchSlots (scrut, cases) ->
         let scrut_ty = infer_expr state env scrut in
         let result_ty = new_var state state.current_lvl in
-        validate_match_case_shapes (List.map cases ~f:(fun (pat, _slots, _rhs) -> pat));
-        List.iter cases ~f:(fun (pat, _slots, rhs) ->
-          validate_pattern_binders pat;
-          let env_arm = infer_pattern state env pat scrut_ty in
-          let rhs_ty = infer_expr state env_arm rhs in
-          unify state rhs_ty result_ty);
+        let case_spans = List.map cases ~f:(fun case -> case.pat, case.pat_span) in
+        validate_match_case_shapes case_spans;
+        List.iter cases ~f:(fun case ->
+          try
+            validate_pattern_binders case.pat;
+            let env_arm = infer_pattern state env case.pat scrut_ty in
+            let rhs_ty = infer_expr state env_arm case.rhs in
+            unify state rhs_ty result_ty
+          with
+          | Type_error msg -> raise (Type_error_with_loc (msg, case.pat_span))
+          | Type_error_with_loc _ as exn -> raise exn);
         validate_match_exhaustiveness
           state
           scrut_ty
-          (List.map cases ~f:(fun (pat, _slots, _rhs) -> pat));
-        validate_typed_match_redundancy
-          scrut_ty
-          (List.map cases ~f:(fun (pat, _slots, _rhs) -> pat));
+          (List.map case_spans ~f:fst);
+        validate_typed_match_redundancy scrut_ty case_spans;
         result_ty
     with
     | Type_error msg -> raise (Type_error_with_loc (msg, expr.span))

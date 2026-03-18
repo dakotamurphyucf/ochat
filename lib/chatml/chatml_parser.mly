@@ -195,7 +195,7 @@ expr:
 	| LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
 
     (* match with *)
-    | MATCH expr_sequence WITH pattern_cases { mk_exprnode $startpos $endpos (EMatch($2, List.map (fun (s,sn) -> s,sn) $4)) }
+    | MATCH expr_sequence WITH pattern_cases { mk_exprnode $startpos $endpos (EMatch($2, $4)) }
 
     (* record extension { base with a = expr; ... } *)
     | LBRACE expr_sequence WITH field_decls RBRACE { mk_exprnode $startpos $endpos (ERecordExtend($2, List.map (fun (s,sn) -> s,sn) $4)) }
@@ -236,7 +236,11 @@ pattern_cases:
 | pattern_case pattern_cases { $1 :: $2 }
 
 pattern_case:
-   BAR pattern ARROW expr_sequence { ($2, $4) }
+   BAR pattern ARROW expr_sequence
+     { { pat = $2
+       ; pat_span = span_of_lex $startpos($2) $endpos($2)
+       ; rhs = $4
+       } }
 
 pattern:
     | UNDERSCORE      { PWildcard }

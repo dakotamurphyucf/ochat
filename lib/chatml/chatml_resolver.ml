@@ -350,8 +350,8 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
           slots_of_pattern p sub_ty)
     in
     let cases' =
-      List.map cases ~f:(fun (pat, rhs) ->
-        let var_slots = slots_of_pattern pat scrut_ty_opt in
+      List.map cases ~f:(fun case ->
+        let var_slots = slots_of_pattern case.pat scrut_ty_opt in
         let vars = List.map var_slots ~f:fst in
         let slots = List.map var_slots ~f:snd in
         (* Build frame map with those slots *)
@@ -360,9 +360,13 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
           let slot = List.nth_exn slots idx in
           Hashtbl.set fm ~key:vnm ~data:{ index = idx; slot });
         push_frame stack fm;
-        let rhs' = resolve_expr stack rhs in
+        let rhs' = resolve_expr stack case.rhs in
         pop_frame stack;
-        pat, slots, { rhs with value = rhs' })
+        { L.pat = case.pat
+        ; pat_span = case.pat_span
+        ; slots
+        ; rhs = { case.rhs with value = rhs' }
+        })
     in
     L.EMatchSlots (wrap scrut', cases')
   | L.EMatchSlots (scrut, cases) ->
@@ -370,16 +374,16 @@ let rec resolve_expr (stack : frame_map list ref) (e : L.expr L.node) : L.expr =
        sub-expressions to keep idempotence. *)
     let scrut' = resolve_expr stack scrut in
     let cases' =
-      List.map cases ~f:(fun (pat, slots, rhs) ->
-        let vars = L.collect_pattern_vars pat in
+      List.map cases ~f:(fun case ->
+        let vars = L.collect_pattern_vars case.pat in
         let fm = Hashtbl.create (module String) in
         List.iteri vars ~f:(fun idx vnm ->
-          let slot = List.nth_exn slots idx in
+          let slot = List.nth_exn case.slots idx in
           Hashtbl.set fm ~key:vnm ~data:{ index = idx; slot });
         push_frame stack fm;
-        let rhs' = resolve_expr stack rhs in
+        let rhs' = resolve_expr stack case.rhs in
         pop_frame stack;
-        pat, slots, { rhs with value = rhs' })
+        { case with rhs = { case.rhs with value = rhs' } })
     in
     L.EMatchSlots (wrap scrut', cases')
   | L.ERecord fields ->

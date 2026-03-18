@@ -66,7 +66,22 @@ type var_loc =
   }
 [@@deriving sexp_of]
 
-type expr =
+type match_case =
+  { pat : pattern
+  ; pat_span : Source.span
+  ; rhs : expr node
+  }
+[@@deriving sexp_of]
+
+and match_case_slots =
+  { pat : pattern
+  ; pat_span : Source.span
+  ; slots : Frame_env.packed_slot list
+  ; rhs : expr node
+  }
+[@@deriving sexp_of]
+
+and expr =
   | EUnit
   | EInt of int
   | EBool of bool
@@ -97,8 +112,8 @@ type expr =
      [ELetRec] but lifts the slot list so that the runtime does not
      need to recompute it. *)
   | ELetRecSlots of (string * expr node) list * Frame_env.packed_slot list * expr node
-  | EMatch of expr node * (pattern * expr node) list
-  | EMatchSlots of expr node * (pattern * Frame_env.packed_slot list * expr node) list
+  | EMatch of expr node * match_case list
+  | EMatchSlots of expr node * match_case_slots list
   | ERecord of (string * expr node) list
   | EFieldGet of expr node * string
   | EVariant of string * expr node list
@@ -636,21 +651,17 @@ and eval_expr (env : env) (frames : Frame_env.env) (e : expr node) : eval_result
     in
     Value (VRecord new_fields)
 
-and match_eval
-      (env : env)
-      (frames : Frame_env.env)
-      (v : value)
-      (cases : (pattern * expr node) list)
+and match_eval (env : env) (frames : Frame_env.env) (v : value) (cases : match_case list)
   : eval_result
   =
   match cases with
   | [] -> failwith "Non-exhaustive pattern match"
-  | (pat, rhs) :: tl ->
-    (match match_pattern v pat with
+  | case :: tl ->
+    (match match_pattern v case.pat with
      | None -> match_eval env frames v tl
      | Some binds ->
        (* 1. Allocate a slot frame for the variables bound by the pattern *)
-       let vars = collect_pattern_vars pat in
+       let vars = collect_pattern_vars case.pat in
        (* Choose slot for each bound variable based on the actual runtime
           value now that we have evaluated the scrutinee. *)
        (* Use generic SObj slots to keep in sync with resolver which
@@ -670,39 +681,39 @@ and match_eval
            store_with_slot pat_frame idx slot vl
          | None -> ());
        let child_frames = pat_frame :: frames in
-       eval_expr env child_frames rhs)
+       eval_expr env child_frames case.rhs)
 
 and match_eval_slots
       (env : env)
       (frames : Frame_env.env)
       (v : value)
-      (cases : (pattern * Frame_env.packed_slot list * expr node) list)
+      (cases : match_case_slots list)
   : eval_result
   =
   match cases with
   | [] -> failwith "Non-exhaustive pattern match"
-  | (pat, slots, rhs) :: tl ->
-    (match match_pattern v pat with
+  | case :: tl ->
+    (match match_pattern v case.pat with
      | None -> match_eval_slots env frames v tl
      | Some binds ->
-       let vars = collect_pattern_vars pat in
-       if List.length vars <> List.length slots
+       let vars = collect_pattern_vars case.pat in
+       if List.length vars <> List.length case.slots
        then failwith "Resolver/internal error: slot/var length mismatch in EMatchSlots";
        (* All pattern-bound identifiers are resolved to [EVarLoc] whose
           addresses point into the freshly allocated [pat_frame].  We do
           not need to touch the string-keyed environment. *)
        let child_env = env in
        (* 2. Allocate frame using provided slots *)
-       let pat_frame = Frame_env.alloc_packed slots in
+       let pat_frame = Frame_env.alloc_packed case.slots in
        (* Map var name to index *)
        List.iteri vars ~f:(fun idx vnm ->
          match List.Assoc.find binds ~equal:String.equal vnm with
          | Some vl ->
-           let slot = List.nth_exn slots idx in
+           let slot = List.nth_exn case.slots idx in
            store_with_slot pat_frame idx slot vl
          | None -> ());
        let child_frames = pat_frame :: frames in
-       eval_expr child_env child_frames rhs)
+       eval_expr child_env child_frames case.rhs)
 
 (***************************************************************************)
 (* 7) Statement Evaluation                                                 *)
@@ -743,10 +754,7 @@ and eval_module_value
       | None -> ()));
   module_export_env
 
-and eval_stmt_with_exports
-      (env : env)
-      (frames : Frame_env.env)
-      (s : stmt node)
+and eval_stmt_with_exports (env : env) (frames : Frame_env.env) (s : stmt node)
   : string list
   =
   match s.value with

@@ -761,6 +761,19 @@ let%test_unit "duplicate nullary variant diagnostic names offending constructor"
   then failwith rendered
 ;;
 
+let%test_unit "duplicate constructor diagnostic points at the arm pattern span" =
+  let code =
+    {|
+      match `None with
+      | `None -> 0
+      | `None -> 1
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if not (String.is_substring rendered ~substring:"line 4, characters 8-13:")
+  then failwith rendered
+;;
+
 let%test_unit "variant match closes function parameter constructor set" =
   let code =
     {|
@@ -892,6 +905,20 @@ let%test_unit "boolean wildcard arm is redundant after both literals are covered
       (String.is_substring
          rendered
          ~substring:"Redundant match arm '_': previous arms already cover boolean cases 'true' and 'false'")
+  then failwith rendered
+;;
+
+let%test_unit "redundant wildcard diagnostic points at the wildcard pattern span" =
+  let code =
+    {|
+      match true with
+      | true -> 1
+      | false -> 0
+      | _ -> 2
+    |}
+  in
+  let rendered = check_program_formatted code in
+  if not (String.is_substring rendered ~substring:"line 5, characters 8-9:")
   then failwith rendered
 ;;
 
@@ -1159,23 +1186,22 @@ let%expect_test "record pattern subset ok" =
   [%expect {| Type checking succeeded! |}]
 ;;
 
-let%expect_test "record pattern missing field" =
+let%test_unit "record pattern missing field points at the pattern span" =
   let code =
     {|
     let r = {name = "Sue"}
     match r with | {age = a} -> a
     |}
   in
-  let prog = parse code in
-  Chatml_typechecker.infer_program prog;
-  [%expect
-    {|
-    line 3, characters 4-33:
-    3|    match r with | {age = a} -> a
-          ^^^^^^^^^^^^^^^^^^^^^^^^^^^^^
-
-    Type error: Row does not contain label 'age'
-    |}]
+  let rendered = check_program_formatted code in
+  if
+    not
+      (String.is_substring rendered ~substring:"line 3, characters 19-28:")
+  then failwith rendered;
+  if
+    not
+      (String.is_substring rendered ~substring:"Type error: Row does not contain label 'age'")
+  then failwith rendered
 ;;
 
 let%expect_test "runtime record extension remains immutable" =
