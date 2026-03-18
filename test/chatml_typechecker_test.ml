@@ -233,6 +233,57 @@ let%expect_test "open shadowing is rejected" =
   [%expect {| Type error: open M would shadow existing binding 'x' |}]
 ;;
 
+let%expect_test "record_keys accepts wider records" =
+  let code =
+    {|
+      let info = { id = "x"; retries = 2; enabled = true }
+      print(record_keys(info))
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "variant_tag accepts different variant rows" =
+  let code =
+    {|
+      print(variant_tag(`Done))
+      print(variant_tag(`Some(1)))
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "swap_ref is polymorphic over ref contents" =
+  let code =
+    {|
+      let ri = ref(1)
+      let rs = ref("old")
+      print(swap_ref(ri, 2))
+      print(swap_ref(rs, "new"))
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
+let%expect_test "fail is polymorphic in result position" =
+  let code =
+    {|
+      let choose b =
+        if b then 1 else fail("boom")
+      print(choose(true))
+    |}
+  in
+  let prog = parse code in
+  Chatml_typechecker.infer_program prog;
+  [%expect {| Type checking succeeded! |}]
+;;
+
 (* ------------------------------------------------------------------ *)
 let%expect_test "print is polymorphic" =
   let code =

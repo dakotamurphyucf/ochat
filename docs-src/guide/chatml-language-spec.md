@@ -1136,23 +1136,40 @@ the current scope.
 
 ## 13. Standard library
 
-The current runtime prelude is intentionally tiny:
+The current runtime prelude is still intentionally small, but it now goes a
+bit beyond the original minimal core.
+
+Installed builtins:
 
 - `print : 'a -> unit`
 - `to_string : 'a -> string`
 - `length : 'a array -> int`
+- `string_length : string -> int`
+- `string_is_empty : string -> bool`
+- `array_copy : 'a array -> 'a array`
+- `record_keys : { ...r } -> string array`
+- `variant_tag : [ ...r ] -> string`
+- `swap_ref : ref('a) -> 'a -> 'a`
+- `fail : string -> 'a`
 
 Notes:
 
 - `print` renders a stable human-readable representation of runtime values
 - `to_string` returns that representation
 - `length` works on arrays only
+- `array_copy` is a shallow copy of the array container
+- `record_keys` works on record values, and also on module values because
+  modules are statically record-like
+- `variant_tag` returns only the constructor/tag name, not the payload
+- `swap_ref r v` stores `v` into `r` and returns the old contents
+- `fail` always raises a runtime failure and is typed polymorphically in its
+  result position
 
 Arithmetic, comparison, and concatenation are language primitives rather
 than builtins.
 
 The builtin type-description language is richer than the currently installed
-prelude, so future builtins can safely describe:
+prelude and can safely describe:
 
 - refs
 - tuples

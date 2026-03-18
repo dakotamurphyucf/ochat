@@ -7,7 +7,11 @@
 
     {ul
     {- Basic printing utilities ([print] and [to_string]).}
-    {- Array helper ([length]).}}
+    {- Array helpers ([length] and [array_copy]).}
+    {- String helpers ([string_length] and [string_is_empty]).}
+    {- Introspection helpers ([record_keys] and [variant_tag]).}
+    {- Mutable convenience helper ([swap_ref]).}
+    {- Script failure helper ([fail]).}}
 
     Arithmetic, string concatenation, comparison and equality operators
     are now part of the core ChatML AST rather than runtime-installed

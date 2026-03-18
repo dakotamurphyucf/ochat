@@ -23,6 +23,13 @@ let eval_result code =
   Chatml_resolver.eval_program env prog
 ;;
 
+let run_result code =
+  let env = L.create_env () in
+  BuiltinModules.add_global_builtins env;
+  let prog = parse code in
+  Chatml_resolver.run_program env prog
+;;
+
 let eval code =
   match eval_result code with
   | Ok () -> ()
@@ -732,6 +739,97 @@ true
 true
 true
 |}]
+;;
+
+let%expect_test "practical string builtins" =
+  let code =
+    {|
+      print(string_length(""))
+      print(string_length("chatml"))
+      print(string_is_empty(""))
+      print(string_is_empty("x"))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+0
+6
+true
+false
+|}]
+;;
+
+let%expect_test "array_copy and swap_ref builtins" =
+  let code =
+    {|
+      let arr = [1, 2]
+      let arr2 = array_copy(arr)
+      arr[0] <- 99
+      print(arr[0])
+      print(arr2[0])
+
+      let r = ref("old")
+      print(swap_ref(r, "new"))
+      print(!r)
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+99
+1
+old
+new
+|}]
+;;
+
+let%expect_test "record_keys and variant_tag builtins" =
+  let code =
+    {|
+      print(record_keys({ b = 2; a = 1; c = true }))
+      print(variant_tag(`Done))
+      print(variant_tag(`Some(1)))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+[|a, b, c|]
+Done
+Some
+|}]
+;;
+
+let%expect_test "record_keys also works on module values" =
+  let code =
+    {|
+      module M = struct
+        let z = 1
+        let a = 2
+      end
+      print(record_keys(M))
+    |}
+  in
+  eval code;
+  [%expect
+    {|
+[|a, z|]
+|}]
+;;
+
+let%expect_test "fail builtin surfaces a runtime diagnostic" =
+  let code =
+    {|
+      fail("boom")
+    |}
+  in
+  (match run_result code with
+   | Ok () -> print_endline "unexpected success"
+   | Error (Chatml_resolver.Type_diagnostic diagnostic) ->
+     print_endline (Chatml_typechecker.format_diagnostic code diagnostic)
+   | Error (Chatml_resolver.Runtime_diagnostic err) -> print_endline err.message);
+  [%expect {| boom |}]
 ;;
 
 (* ───────────────────────────────────────────────────────────────────── *)
