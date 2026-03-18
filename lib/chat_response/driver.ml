@@ -877,6 +877,7 @@ let run_completion_stream
         ~model
         ~dir:datadir
         net
+        ~sw
         ~inputs:hist
     in
     Seq.iter callback stream;

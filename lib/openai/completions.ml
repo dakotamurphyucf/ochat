@@ -330,7 +330,11 @@ let post_chat_completion
       ()
   in
   let json = Jsonaf.to_string @@ jsonaf_of_completion_body input in
-  let post json f = post ~net ~host ~headers ~path:"/v1/chat/completions" (Raw f) json in
+  Eio.Switch.run
+  @@ fun sw ->
+  let post json f =
+    post ~net ~host ~headers ~path:"/v1/chat/completions" ~sw (Raw f) json
+  in
   post json
   @@ fun res ->
   let _, reader = res in

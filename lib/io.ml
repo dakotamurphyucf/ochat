@@ -151,12 +151,11 @@ module Net = struct
       -> host:string
       -> headers:Http.Header.t
       -> path:string
+      -> sw:Eio.Switch.t
       -> string
       -> a
     =
-    fun res_typ ~net ~host ~headers ~path body ->
-    Eio.Switch.run
-    @@ fun sw ->
+    fun res_typ ~net ~host ~headers ~path ~sw body ->
     let client = Client.make ~https:(Some (https ~authenticator:null_auth)) net in
     let res, body =
       Client.post

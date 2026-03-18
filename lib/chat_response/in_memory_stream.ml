@@ -171,7 +171,7 @@ let history_so_far
   else combined
 ;;
 
-let post_stream (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
+let post_stream (c : ctx) ~sw ~(inputs : Openai.Responses.Item.t list) =
   Openai.Responses.post_response
     Openai.Responses.Stream
     ?max_output_tokens:c.max_output_tokens
@@ -183,6 +183,7 @@ let post_stream (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
     ?prompt_cache_key:c.prompt_cache_key
     ?prompt_cache_retention:c.prompt_cache_retention
     ~dir:c.datadir
+    ~sw
     c.env#net
     ~inputs
 ;;
@@ -393,7 +394,7 @@ let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
           : string * Openai.Responses.Item.t list)])
 ;;
 
-let run_turn (c : ctx) ~(history : Openai.Responses.Item.t list) =
+let run_turn (c : ctx) ~sw ~(history : Openai.Responses.Item.t list) =
   let sem = lazy (Eio.Semaphore.make 8) in
   let rec turn (hist : Openai.Responses.Item.t list) =
     let inputs =
@@ -403,7 +404,7 @@ let run_turn (c : ctx) ~(history : Openai.Responses.Item.t list) =
     in
     log_request c ~inputs;
     try
-      let st = fold_stream ~turn c ~hist ~sem (post_stream c ~inputs) in
+      let st = fold_stream ~turn c ~hist ~sem (post_stream c ~sw ~inputs) in
       let new_items_rev = await_calls c st in
       let hist = List.append hist (List.rev new_items_rev) in
       if st.run_again then turn hist else hist
@@ -449,7 +450,7 @@ let run_completion_stream_in_memory_v1_impl (a : args) : Openai.Responses.Item.t
   Eio.Switch.run
   @@ fun sw ->
   let c, cache_file, cache = setup_ctx ~sw a in
-  let full_history = run_turn c ~history:a.history in
+  let full_history = run_turn c ~sw ~history:a.history in
   Cache.save ~file:cache_file cache;
   full_history
 ;;

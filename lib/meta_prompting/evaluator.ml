@@ -51,8 +51,8 @@ module Guidelines_judge : Judge = struct
 
   let system_prompt =
     {|
-  You are an impartial judge evaluating how closely a prompt follows 
-  best practices for prompting openai o-series and gpt4.1 models.  
+  You are an impartial judge evaluating how closely a prompt follows
+  best practices for prompting openai o-series and gpt4.1 models.
   Your task is to score how well a prompt adheres to the guidelines in the Prompting Guide appended to the model response.
   The score should be a floating-point number in the range [0,1], where
   0.0 means "not at all" and 1.0 means "perfectly".
@@ -265,14 +265,16 @@ module Pairwise_arena_judge : Pairwise_judge = struct
          let model = Option.value (model_override ()) ~default:Request.O3 in
          let max_output_tokens = 10000 in
          let ({ Response.output; _ } : Response.t) =
-           post_response
-             Default
-             ~model
-             ~dir
-             net
-             ~reasoning:{ effort = Some High; summary = Some Detailed }
-             ~max_output_tokens
-             ~inputs
+           Eio.Switch.run (fun sw ->
+             post_response
+               Default
+               ~model
+               ~dir
+               net
+               ~sw
+               ~reasoning:{ effort = Some High; summary = Some Detailed }
+               ~max_output_tokens
+               ~inputs)
          in
          let rec first_text = function
            | [] -> None
@@ -579,7 +581,8 @@ module Llm_judge : Judge = struct
                  we allocate 5 to be safe. *)
          let max_output_tokens = 5 in
          let ({ Response.output; _ } : Response.t) =
-           post_response Default ~model ~dir net ~max_output_tokens ~inputs
+           Eio.Switch.run (fun sw ->
+             post_response Default ~model ~dir net ~max_output_tokens ~inputs ~sw)
          in
          (* Extract the assistant-generated text from the first
                  [Output_message] element. *)
@@ -704,7 +707,16 @@ module Rubric_critic_judge : Judge = struct
          (* deterministic *)
          let max_output_tokens = 120 in
          let ({ Response.output; _ } : Response.t) =
-           post_response Default ~model ~temperature ~dir net ~max_output_tokens ~inputs
+           Eio.Switch.run (fun sw ->
+             post_response
+               Default
+               ~model
+               ~temperature
+               ~dir
+               net
+               ~max_output_tokens
+               ~inputs
+               ~sw)
          in
          let rec first_text = function
            | [] -> None

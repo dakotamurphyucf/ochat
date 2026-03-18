@@ -168,14 +168,16 @@ let iterate_revised_prompt ~env ~goal ~current_prompt ~proposer_model : string o
        let max_output_tokens = 1000000 in
        let chosen_model = Option.value proposer_model ~default:Request.Gpt5 in
        let ({ Response.output; _ } : Response.t) =
-         post_response
-           Default
-           ~reasoning:{ effort = Some High; summary = Some Detailed }
-           ~max_output_tokens
-           ~model:chosen_model
-           ~dir
-           net
-           ~inputs
+         Eio.Switch.run (fun sw ->
+           post_response
+             Default
+             ~sw
+             ~reasoning:{ effort = Some High; summary = Some Detailed }
+             ~max_output_tokens
+             ~model:chosen_model
+             ~dir
+             net
+             ~inputs)
        in
        let rec first_text = function
          | [] -> None
@@ -280,14 +282,16 @@ let create_pack_online ~env ~agent_name ~goal ~proposer_model : string option =
        let max_output_tokens = 1000000 in
        let chosen_model = Option.value proposer_model ~default:Request.Gpt5 in
        let ({ Response.output; _ } : Response.t) =
-         post_response
-           Default
-           ~reasoning:{ effort = Some High; summary = Some Detailed }
-           ~max_output_tokens
-           ~model:chosen_model
-           ~dir
-           net
-           ~inputs
+         Eio.Switch.run (fun sw ->
+           post_response
+             Default
+             ~sw
+             ~reasoning:{ effort = Some High; summary = Some Detailed }
+             ~max_output_tokens
+             ~model:chosen_model
+             ~dir
+             net
+             ~inputs)
        in
        let rec first_text = function
          | [] -> None

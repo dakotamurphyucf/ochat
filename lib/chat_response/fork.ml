@@ -202,6 +202,8 @@ let rec run_stream
          currently outstanding. *)
       on_event ev
     in
+    Eio.Switch.run
+    @@ fun sw ->
     (* Fire request. *)
     let stream =
       Res.post_response
@@ -214,6 +216,7 @@ let rec run_stream
         net
         ~inputs:hist
         ~tools
+        ~sw
         ~model:Res.Request.O3
     in
     Seq.iter stream_cb stream;

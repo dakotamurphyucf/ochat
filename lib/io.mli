@@ -137,6 +137,7 @@ module Net : sig
     -> host:string
     -> headers:Http.Header.t
     -> path:string
+    -> sw:Eio.Switch.t
     -> string
     -> 'a
 

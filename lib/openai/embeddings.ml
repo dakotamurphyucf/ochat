@@ -64,7 +64,9 @@ let post_openai_embeddings net ~input =
     in
     let input = { input; model } in
     let json = Jsonaf.to_string @@ jsonaf_of_embeddings_input input in
-    let res = post Default ~net ~host ~headers ~path:"/v1/embeddings" json in
+    Eio.Switch.run
+    @@ fun sw ->
+    let res = post Default ~net ~host ~headers ~path:"/v1/embeddings" ~sw json in
     let json = Jsonaf.of_string res in
     try response_of_jsonaf json with
     | _ as exe -> raise exe)

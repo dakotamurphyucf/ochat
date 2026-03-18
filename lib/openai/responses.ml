@@ -1630,6 +1630,7 @@ let post_response
     -> ?prompt_cache_key:string
     -> ?prompt_cache_retention:string
     -> dir:Eio.Fs.dir_ty Eio.Path.t
+    -> sw:Eio.Switch.t
     -> _ Eio.Net.t
     -> inputs:Item.t list
     -> a
@@ -1645,6 +1646,7 @@ let post_response
     ?prompt_cache_key
     ?prompt_cache_retention
     ~dir
+    ~sw
     net
     ~inputs ->
   let host = "api.openai.com" in
@@ -1682,7 +1684,7 @@ let post_response
       ()
   in
   let json = Jsonaf.to_string @@ Request.jsonaf_of_t input in
-  let post json f = post ~net ~host ~headers ~path:"/v1/responses" (Raw f) json in
+  let post json f = post ~net ~host ~sw ~headers ~path:"/v1/responses" (Raw f) json in
   post json
   @@ fun res ->
   let _, reader = res in
@@ -1713,8 +1715,6 @@ let post_response
     let lines = Buf_read.lines reader in
     let stream = Eio.Stream.create Int.max_value in
     let cb input = Eio.Stream.add stream input in
-    Switch.run
-    @@ fun sw ->
     let rec loop seq =
       match Seq.uncons seq with
       | None -> cb `Done

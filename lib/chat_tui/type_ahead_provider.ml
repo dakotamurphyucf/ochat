@@ -127,16 +127,18 @@ let complete_suffix ~sw ~env ~dir ~(cfg : Chat_response.Config.t) ~messages ~dra
       ]
     in
     let ({ Res.Response.output; _ } : Res.Response.t) =
-      Res.post_response
-        Res.Default
-        ~max_output_tokens (* ~temperature *)
-        ~verbosity:"low"
-        ~tools:[]
-        ~model
-        ?reasoning:(Some reasoning)
-        ~dir
-        net
-        ~inputs
+      Eio.Switch.run (fun sw ->
+        Res.post_response
+          Res.Default
+          ~max_output_tokens (* ~temperature *)
+          ~verbosity:"low"
+          ~tools:[]
+          ~model
+          ?reasoning:(Some reasoning)
+          ~dir
+          net
+          ~sw
+          ~inputs)
     in
     let rec find_text = function
       | [] -> ""

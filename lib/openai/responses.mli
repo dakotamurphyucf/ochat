@@ -1041,6 +1041,7 @@ val post_response
   -> ?prompt_cache_key:string
   -> ?prompt_cache_retention:string
   -> dir:Eio.Fs.dir_ty Eio.Path.t
+  -> sw:Eio.Switch.t
   -> 'n Eio.Net.t
   -> inputs:Item.t list
   -> 'a

@@ -320,6 +320,8 @@ let ask_ai input env =
   in
   let inputs = [ mk_input "system" system_prompt; mk_input "user" input ] in
   try
+    Eio.Switch.run
+    @@ fun sw ->
     let response =
       post_response
         Default
@@ -328,6 +330,7 @@ let ask_ai input env =
         ~model:(Request.Unknown "gpt-5.2")
         ~dir
         net
+        ~sw
         ~inputs
     in
     let ({ Response.output; _ } : Response.t) = response in

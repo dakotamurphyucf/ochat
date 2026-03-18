@@ -210,15 +210,17 @@ let summarise
     in
     (try
        let response =
-         post_response
-           Default
-           ~max_output_tokens:100000
-           ~temperature:0.3
-           ~model:(Request.Unknown "gpt-5.2")
-           ~verbosity:"high"
-           ~dir
-           net
-           ~inputs
+         Eio.Switch.run (fun sw ->
+           post_response
+             Default
+             ~sw
+             ~max_output_tokens:100000
+             ~temperature:0.3
+             ~model:(Request.Unknown "gpt-5.2")
+             ~verbosity:"high"
+             ~dir
+             net
+             ~inputs)
        in
        let ({ Response.output; _ } : Response.t) = response in
        (* Extract assistant text from first Output_message. *)

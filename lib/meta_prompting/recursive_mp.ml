@@ -343,14 +343,16 @@ let ask_llm ~env ~user_content ~context ?model ?guidelines : string option =
        let max_output_tokens = 1000000 in
        let chosen_model = Option.value model ~default:Request.Gpt5 in
        let ({ Response.output; _ } : Response.t) =
-         post_response
-           Default
-           ~reasoning:{ effort = Some High; summary = Some Detailed }
-           ~max_output_tokens
-           ~model:chosen_model
-           ~dir
-           net
-           ~inputs
+         Eio.Switch.run (fun sw ->
+           post_response
+             Default
+             ~sw
+             ~reasoning:{ effort = Some High; summary = Some Detailed }
+             ~max_output_tokens
+             ~model:chosen_model
+             ~dir
+             net
+             ~inputs)
        in
        Log.emit `Debug (Sexp.to_string_hum [%sexp (output : Item.t list)]);
        (* Extract the assistant text from the first [Output_message]

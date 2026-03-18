@@ -145,17 +145,19 @@ let rec run
   in
   (* 1.  Send current history to OpenAI and gather fresh items. *)
   match
-    Res.post_response
-      Res.Default
-      ~dir:(Ctx.dir ctx)
-      ~model
-      ~parallel_tool_calls:true
-      ?temperature
-      ?max_output_tokens
-      ?tools
-      ?reasoning
-      (Ctx.net ctx)
-      ~inputs
+    Eio.Switch.run (fun sw ->
+      Res.post_response
+        Res.Default
+        ~dir:(Ctx.dir ctx)
+        ~model
+        ~parallel_tool_calls:true
+        ?temperature
+        ?max_output_tokens
+        ?tools
+        ?reasoning
+        ~sw
+        (Ctx.net ctx)
+        ~inputs)
   with
   | exception Res.Response_stream_parsing_error (_, _) ->
     run

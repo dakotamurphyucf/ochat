@@ -95,7 +95,9 @@ let post_run
     print_endline body;
     (* Persist raw request for debugging when needed. *)
     Io.log ~dir ~file:"raw-openai-grader-request.txt" (body ^ "\n");
-    let raw = post Default ~net ~host ~headers ~path body in
+    let raw =
+      Eio.Switch.run (fun sw -> post Default ~net ~host ~headers ~path ~sw body)
+    in
     (* Log raw response for traceability. *)
     Io.log ~dir ~file:"raw-openai-grader-response.txt" (raw ^ "\n");
     try Response.t_of_jsonaf (Jsonaf.of_string raw) with
