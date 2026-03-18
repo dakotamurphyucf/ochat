@@ -47,39 +47,9 @@ let slot_of_typ (t : Chatml_typechecker.typ) : Frame_env.packed_slot =
   | _ -> Frame_env.Slot Frame_env.SObj
 ;;
 
-let fallback_slot_of_expr (e : L.expr) : Frame_env.packed_slot =
-  match e with
-  | L.EInt _ -> Frame_env.Slot Frame_env.SInt
-  | L.EBool _ -> Frame_env.Slot Frame_env.SBool
-  | L.EFloat _ -> Frame_env.Slot Frame_env.SFloat
-  | L.EString _ -> Frame_env.Slot Frame_env.SString
-  | L.EPrim1 (L.UNegInt, _) -> Frame_env.Slot Frame_env.SInt
-  | L.EPrim1 (L.UNegFloat, _) -> Frame_env.Slot Frame_env.SFloat
-  | L.EPrim2 ((L.BIntAdd | L.BIntSub | L.BIntMul | L.BIntDiv), _, _) ->
-    Frame_env.Slot Frame_env.SInt
-  | L.EPrim2 ((L.BFloatAdd | L.BFloatSub | L.BFloatMul | L.BFloatDiv), _, _) ->
-    Frame_env.Slot Frame_env.SFloat
-  | L.EPrim2 (L.BStringConcat, _, _) -> Frame_env.Slot Frame_env.SString
-  | L.EPrim2
-      ( ( L.BIntLt
-        | L.BIntGt
-        | L.BIntLe
-        | L.BIntGe
-        | L.BFloatLt
-        | L.BFloatGt
-        | L.BFloatLe
-        | L.BFloatGe
-        | L.BEq
-        | L.BNeq )
-      , _
-      , _ ) -> Frame_env.Slot Frame_env.SBool
-  | _ -> Frame_env.Slot Frame_env.SObj
-;;
-
 let choose_slot (rhs_node : L.expr L.node) : Frame_env.packed_slot =
-  match lookup_type rhs_node.span with
-  | Some typ -> slot_of_typ typ
-  | None -> fallback_slot_of_expr rhs_node.value
+  Chatml_slot_layout.choose_binding_slot rhs_node ~lookup_slot:(fun span ->
+    Option.map (lookup_type span) ~f:slot_of_typ)
 ;;
 
 let with_value (node : L.expr L.node) value = L.{ value; span = node.span }

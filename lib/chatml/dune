@@ -1,7 +1,14 @@
 (library
  (name chatml)
  (public_name ochat.chatml)
- (modules chatml_lang chatml_eval chatml_lexer chatml_parser frame_env chatml_builtin_spec)
+ (modules
+  chatml_lang
+  chatml_eval
+  chatml_slot_layout
+  chatml_lexer
+  chatml_parser
+  frame_env
+  chatml_builtin_spec)
  (libraries core menhirLib source)
  (preprocess
   (pps ppx_jane)))

@@ -5,24 +5,8 @@ type eval_result =
   | Value of value
   | TailCall of clos * value list
 
-let slot_of_value (v : value) : Frame_env.packed_slot =
-  match v with
-  | VInt _ -> Frame_env.Slot Frame_env.SInt
-  | VBool _ -> Frame_env.Slot Frame_env.SBool
-  | VFloat _ -> Frame_env.Slot Frame_env.SFloat
-  | VString _ -> Frame_env.Slot Frame_env.SString
-  | _ -> Frame_env.Slot Frame_env.SObj
-;;
-
-let slot_matches_value (slot : Frame_env.packed_slot) (v : value) : bool =
-  match slot, v with
-  | Frame_env.Slot Frame_env.SInt, VInt _ -> true
-  | Frame_env.Slot Frame_env.SBool, VBool _ -> true
-  | Frame_env.Slot Frame_env.SFloat, VFloat _ -> true
-  | Frame_env.Slot Frame_env.SString, VString _ -> true
-  | Frame_env.Slot Frame_env.SObj, _ -> true
-  | _ -> false
-;;
+let slot_matches_value = Chatml_slot_layout.matches_value
+let assert_recursive_slots_are_objects = Chatml_slot_layout.assert_recursive_slots_are_objects
 
 let store_with_slot
       (fr : Frame_env.frame)
@@ -51,12 +35,6 @@ let store_with_slot
      | VString s -> Frame_env.set_str fr idx s
      | _ -> Frame_env.set_obj fr idx (Obj.repr v))
   | Frame_env.Slot Frame_env.SObj -> Frame_env.set_obj fr idx (Obj.repr v)
-;;
-
-let assert_recursive_slots_are_objects (slots : Frame_env.packed_slot list) : unit =
-  List.iter slots ~f:(function
-    | Frame_env.Slot Frame_env.SObj -> ()
-    | _ -> failwith "internal: non-object recursive slot; typechecker should forbid this")
 ;;
 
 let rec frames_nth (frames : Frame_env.env) (n : int) : Frame_env.frame option =
