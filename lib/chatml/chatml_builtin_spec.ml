@@ -10,6 +10,7 @@ type row =
 
 and ty =
   | TVar of string
+  | TCon of string * ty list
   | TInt
   | TFloat
   | TBool
@@ -76,6 +77,12 @@ let module_scheme (m : builtin_module) : ty =
 ;;
 
 let option_ty (a : string) : ty = variant [ "None", TUnit; "Some", TVar a ]
+let task_ty (a : ty) : ty = TCon ("Task", [ a ])
+
+let expect_task (name : string) : value -> task = function
+  | VTask t -> t
+  | _ -> failwith (Printf.sprintf "%s: expected a Task argument" name)
+;;
 
 let expect_string (name : string) : value -> string = function
   | VString s -> s
@@ -124,6 +131,22 @@ let rec value_to_string (v : value) : string =
   | VClosure _ -> "<closure>"
   | VUnit -> "()"
   | VBuiltin _ -> "<builtin>"
+  | VTask task ->
+    let eff_to_string (eff : eff) =
+      let args = List.map eff.args ~f:value_to_string in
+      "{operation = " ^ eff.op ^ ", args = [" ^ String.concat ~sep:", " args ^ "]}"
+    in
+    let rec print_task task =
+      match task with
+      | TPure v -> "pure(" ^ value_to_string v ^ ")"
+      | TBind (t, v) -> "bind(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
+      | TMap (t, v) -> "map(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
+      | TFail s -> "fail(" ^ s ^ ")"
+      | TCatch (t, v) -> "catch(" ^ print_task t ^ ", " ^ value_to_string v ^ ")"
+      | TPerform eff -> "perform(" ^ eff_to_string eff ^ ")"
+      | TSpawn eff -> "spawn(" ^ eff_to_string eff ^ ")"
+    in
+    print_task task
   | VVariant (slug, vals) ->
     if List.is_empty vals
     then Printf.sprintf "`%s" slug
@@ -948,10 +971,42 @@ let array_module : builtin_module =
   }
 ;;
 
+let task_module : builtin_module =
+  { name = "Task"
+  ; exports =
+      [ make_unary_builtin
+          "pure"
+          (TFun ([ TVar "a" ], task_ty (TVar "a")))
+          (fun v -> VTask (TPure v))
+      ; make_binary_builtin
+          "bind"
+          (TFun
+             ( [ task_ty (TVar "a"); TFun ([ TVar "a" ], task_ty (TVar "b")) ]
+             , task_ty (TVar "b") ))
+          (fun t k -> VTask (TBind (expect_task "Task.bind" t, k)))
+      ; make_binary_builtin
+          "map"
+          (TFun ([ task_ty (TVar "a"); TFun ([ TVar "a" ], TVar "b") ], task_ty (TVar "b")))
+          (fun t f -> VTask (TMap (expect_task "Task.map" t, f)))
+      ; make_unary_builtin
+          "fail"
+          (TFun ([ TString ], task_ty (TVar "a")))
+          (fun s -> VTask (TFail (expect_string "Task.fail" s)))
+      ; make_binary_builtin
+          "catch"
+          (TFun
+             ( [ task_ty (TVar "a"); TFun ([ TString ], task_ty (TVar "a")) ]
+             , task_ty (TVar "a") ))
+          (fun t h -> VTask (TCatch (expect_task "Task.catch" t, h)))
+      ]
+  }
+;;
+
 let modules : builtin_module list =
   [ string_module
   ; array_module
   ; json_module
+  ; task_module
   ; { name = "Option"
     ; exports =
         [ make_nullary_builtin

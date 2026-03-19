@@ -527,6 +527,19 @@ let () =
         print(describe(cfg0))
         print(describe(cfg2))
         print("timeout=" ++ to_string(cfg2.timeout_ms))
+        let on_event st ev =
+          match ev with
+          | `AsyncEvent(name, result) ->
+              let* r = Task.pure(st) in
+              print(r);
+              Task.pure(st)
+          | _ ->
+              Task.bind(Task.pure(st), fun res ->
+                Task.pure(st)
+              )
+
+        let st = on_event(cfg2, `AsyncEvent("ingest", "2302032323"))
+        print(st)
       |}
   in
   let env = BuiltinModules.create_default_env () in

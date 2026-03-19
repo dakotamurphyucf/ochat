@@ -100,6 +100,34 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
   match type_opt with
   | None -> expr_node
   | Some ty -> { value = EAnnot (expr_node, ty); span = expr_node.span }
+
+
+  (* ------------------------------------------------------------------- *)
+  (* Task composition sugar: let* / let                                  *)
+  (* ------------------------------------------------------------------- *)
+
+  type task_let_binder =
+    | TLB_name of string
+    | TLB_unit
+
+  let binder_name_of_task_let = function
+    | TLB_name x -> x
+    | TLB_unit -> "__chatml_task_unit"
+
+  let desugar_task_let
+        (startp : Lexing.position)
+        (endp : Lexing.position)
+        ~(method_name : string)   (* "bind" | "map" *)
+        ~(binder : task_let_binder)
+        ~(rhs : expr node)
+        ~(body : expr node)
+    : expr node
+    =
+    let bname = binder_name_of_task_let binder in
+    let task_mod = mk_exprnode startp endp (EVar "Task") in
+    let fn = mk_exprnode startp endp (EFieldGet (task_mod, method_name)) in
+    let lam = mk_exprnode startp endp (ELambda ([ bname ], body)) in
+    mk_exprnode startp endp (EApp (fn, [ rhs; lam ]))
 %}
 
 (***************************************************************************)
@@ -114,6 +142,7 @@ let maybe_annotate_expr (expr_node : expr node) (type_opt : type_expr option) : 
 %token <string> UIDENT
 %token <string> TICKIDENT
 %token FUN IF THEN ELSE WHILE DO DONE LET IN MATCH WITH MODULE STRUCT END OPEN REF REC AND TYPE
+%token LETSTAR LETPLUS
 %token ARROW LEFTARROW COLON COLONEQ BANGEQ EQ EQEQ
 %token LTEQ GTEQ LT GT LTEQDOT GTEQDOT LTDOT GTDOT
 %token PLUS MINUS PLUSPLUS PLUSDOT MINUSDOT STAR SLASH STARDOT SLASHDOT
@@ -220,8 +249,16 @@ expr:
     | LET LIDENT COLON type_expr EQ expr_sequence IN expr_sequence
         { mk_exprnode $startpos $endpos (ELetIn($2, maybe_annotate_expr $6 (Some $4), $8)) }
     | LET LIDENT EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, $4, $6)) }
-	| LET LIDENT LPAREN RPAREN EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda([], $6)), $8)) }
-	| LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
+	  | LET LIDENT LPAREN RPAREN EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda([], $6)), $8)) }
+	  | LET LIDENT params EQ expr_sequence IN expr_sequence { mk_exprnode $startpos $endpos (ELetIn($2, mk_exprnode $startpos $endpos (ELambda($3, $5)), $7)) }
+    (* Task sugar:
+       let* x = t1 in t2  ==> Task.bind(t1, fun x -> t2)
+       let+ x = t1 in t2  ==> Task.map(t1,  fun x -> t2)
+    *)
+    | LETSTAR task_let_binder EQ expr_sequence IN expr_sequence
+        { desugar_task_let $startpos $endpos ~method_name:"bind" ~binder:$2 ~rhs:$4 ~body:$6 }
+    | LETPLUS task_let_binder EQ expr_sequence IN expr_sequence
+        { desugar_task_let $startpos $endpos ~method_name:"map" ~binder:$2 ~rhs:$4 ~body:$6 }
 
     (* match with *)
     | MATCH expr_sequence WITH pattern_cases { mk_exprnode $startpos $endpos (EMatch($2, $4)) }
@@ -319,6 +356,10 @@ params:
     /* possibly multiple variable names for e.g. fun x y ->  ... */
     LIDENT { [$1] }
 | LIDENT params { $1 :: $2 }
+
+task_let_binder:
+    LIDENT            { TLB_name $1 }
+  | LPAREN RPAREN     { TLB_unit }
 
 field_list:
     /* empty */ { [] }

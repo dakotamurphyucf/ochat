@@ -2344,3 +2344,127 @@ print("in:  " ++ Json.stringify(j))
 print("out: " ++ Json.stringify(j2))
 print("pretty:\n" ++ Json.pretty(j2))
 ```
+
+# (Proposed) Spec Addendum: Task values and agent-runtime effects
+
+This section specifies the Task facility used when ChatML is embedded as an
+event handler language inside an external agent runtime.
+
+When this document and the implementation disagree, the implementation is
+authoritative.
+
+---
+
+## 21. Tasks and agent-runtime effects
+
+### 21.1 Purpose
+
+ChatML is embedded as a “conversation moderator” language in a
+larger agent runtime. In this embedding:
+
+- ChatML code is intended to remain mostly pure and deterministic.
+- Side effects such as tool calls, model calls, message CRUD, scheduling,
+  and other world interaction are represented as Task values.
+- Task values are interpreted by the host agent runtime, not directly by
+  the ChatML evaluator.
+
+In this mode the primary user entry point is a handler function of the form:
+
+on_event : state -> event -> Task(state)
+
+The host runtime repeatedly:
+
+1) provides the current state and an incoming event,
+2) calls on_event,
+3) interprets the returned Task(state) to produce the next state,
+4) may enqueue further events (including async completions).
+
+### 21.2 Tasks are values, not immediate effects
+
+A Task('a) is a first-class value in ChatML that represents a computation
+which may perform effects when interpreted by the host runtime.
+
+Key property:
+
+Constructing or composing a Task does not itself perform the effect.
+Effects occur only when the host runtime interprets the returned task.
+
+This property is crucial for:
+
+- determinism and replay/debugging,
+- sandboxing (no direct IO in scripts),
+- policy enforcement by the host runtime.
+
+### 21.3 Task API (builtin module)
+
+ChatML provides a builtin Task module implementing a monadic interface:
+
+Task.pure  : 'a -> Task('a)
+Task.bind  : Task('a) -> ('a -> Task('b)) -> Task('b)
+Task.map   : Task('a) -> ('a -> 'b) -> Task('b)
+Task.fail  : string -> Task('a)
+Task.catch : Task('a) -> (string -> Task('a)) -> Task('a)
+
+Implementations are required to behave as the usual monad laws suggest
+(left/right identity and associativity), up to observable effects.
+
+Task.fail represents a failing task. Task.catch(t, h) handles failures by
+calling h with the failure message.
+
+### 21.4 Task effects: perform vs spawn
+
+Tasks may embed “effect requests” that are interpreted by the host runtime.
+
+Effects come in two forms:
+
+- blocking effects (perform): the host runtime executes the effect and
+  resumes the task with its result value; the conversation turn is blocked
+  until completion.
+
+- non-blocking effects (spawn): the host runtime starts an async job,
+  returns immediately, and later delivers the result by enqueuing a new event.
+
+In the current implementation, effects are represented internally by:
+
+- an operation name (string), and
+- a list of argument values.
+
+Examples of effectful builtins:
+
+Tool.call    : string -> string -> Task(string)                 (perform)
+Tool.spawn   : string -> string -> string -> Task(unit)         (spawn)
+
+LLM.complete : provider -> string -> string -> Task(string)     (perform)
+LLM.spawn    : string -> provider -> string -> string -> Task(unit)  (spawn)
+
+Conv.append  : message -> Task(unit)
+Conv.replace : string -> message -> Task(unit)
+Conv.delete  : string -> Task(unit)
+
+Task.emit      : event -> Task(unit)
+
+
+The set of supported operations is host-defined. ChatML scripts can only
+request operations that the runtime exposes.
+
+### 21.5 Optional surface syntax: let* and let+
+
+ChatML provides syntactic sugar for task composition:
+
+let* x = t1 in t2
+let+ x = t1 in t2
+
+Desugaring:
+
+- let* x = t1 in t2 desugars to:
+  Task.bind(t1, fun x -> t2)
+
+- let+ x = t1 in t2 desugars to:
+  Task.map(t1, fun x -> t2)
+
+Binders may also use unit:
+
+let* () = Task.emit(ev) in ...
+
+This is intended to reduce nesting and improve readability of task-heavy
+handlers.

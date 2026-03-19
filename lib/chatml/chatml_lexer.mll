@@ -70,6 +70,8 @@ rule token = parse
 | "do"                     { DO }
 | "done"                   { DONE }
 | "let"                    { LET }
+| "let*"                   { LETSTAR }
+| "let+"                   { LETPLUS }
 | "in"                     { IN }
 | "match"                  { MATCH }
 | "with"                   { WITH }

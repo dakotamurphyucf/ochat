@@ -255,6 +255,21 @@ type value =
   | VModule of env
   | VUnit
   | VBuiltin of (value list -> value)
+  | VTask of task
+
+and eff =
+  { op : string
+  ; args : value list
+  }
+
+and task =
+  | TPure of value
+  | TBind of task * value
+  | TMap of task * value
+  | TFail of string
+  | TCatch of task * value
+  | TPerform of eff
+  | TSpawn of eff
 
 and clos =
   { params : string list
@@ -314,6 +329,7 @@ let rec equal_value (lhs : value) (rhs : value) : bool =
   | VClosure clos_x, VClosure clos_y -> phys_equal clos_x clos_y
   | VModule env_x, VModule env_y -> phys_equal env_x env_y
   | VBuiltin fn_x, VBuiltin fn_y -> phys_equal fn_x fn_y
+  | VTask t_x, VTask t_y -> phys_equal t_x t_y
   | _ -> false
 ;;
 

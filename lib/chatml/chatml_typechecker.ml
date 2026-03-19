@@ -100,6 +100,7 @@ type typ =
   | Fun of typ list * typ
   | Generic of name
   | Var of tv ref
+  | Con of string * typ list
   | Mu of name * typ
   | Rec_var of name
   | Ref of typ
@@ -219,6 +220,8 @@ let rec substitute_rec_var ~(target : name) ~(replacement : typ) (ty : typ) : ty
       ( List.map params ~f:(substitute_rec_var ~target ~replacement)
       , substitute_rec_var ~target ~replacement ret )
   | Generic _ | Var _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ty
+  | Con (name, args) ->
+    Con (name, List.map args ~f:(substitute_rec_var ~target ~replacement))
   | Mu (binder, body) when String.equal binder target -> Mu (binder, body)
   | Mu (binder, body) -> Mu (binder, substitute_rec_var ~target ~replacement body)
   | Rec_var binder when String.equal binder target -> replacement
@@ -257,6 +260,7 @@ let instantiate (state : infer_state) ty =
          let v = new_var state state.current_lvl in
          Hashtbl.add_exn table ~key:x ~data:v;
          v)
+    | Con (n, args) -> Con (n, List.map args ~f:inst)
     | Var { contents = Bound ty } -> inst ty
     | Mu (binder, body) -> Mu (binder, inst body)
     | Rec_var _ as rec_var -> rec_var
@@ -282,6 +286,7 @@ let generalise (state : infer_state) ty =
     | Fun (params, ret) -> Fun (List.map params ~f:gen, gen ret)
     | Var { contents = Bound t } -> gen t
     | Var { contents = Free (name, lvl) } when lvl > state.current_lvl -> Generic name
+    | Con (n, args) -> Con (n, List.map args ~f:gen)
     | Mu (binder, body) -> Mu (binder, gen body)
     | Rec_var _ as rec_var -> rec_var
     | Ref t -> Ref (gen t)
@@ -300,6 +305,7 @@ let has_recursive_type (ty : typ) : bool =
     | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
     | Var ({ contents = Bound t } as tv) ->
       if tv_ref_mem tv seen then true else aux (tv :: seen) t
+    | Con (_n, args) -> List.exists args ~f:(aux seen)
     | Mu (_binder, _body) -> true
     | Rec_var _ -> true
     | Var { contents = Free _ }
@@ -353,6 +359,7 @@ let check_contractive (ty : typ) : (unit, string) result =
       if tv_ref_mem tv seen
       then Ok ()
       else check_ty (tv :: seen) ~target ~guarded ~scope bound_ty
+    | Con (_n, args) -> check_list seen ~target ~guarded ~scope args
     | Var { contents = Free _ }
     | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> Ok ()
     | Mu (binder, body) ->
@@ -421,6 +428,7 @@ let merge_fields row =
 let occurs tv ty =
   let rec aux (seen : tv ref list) = function
     | Fun (ps, r) -> List.exists ps ~f:(aux seen) || aux seen r
+    | Con (_n, args) -> List.exists args ~f:(aux seen)
     | Var ({ contents = Bound ty } as tv') ->
       if tv_ref_mem tv' seen then false else aux (tv' :: seen) ty
     | Var tv' when phys_equal tv tv' -> true
@@ -465,6 +473,11 @@ let rec unify (state : infer_state) lhs rhs =
       else (
         List.iter2_exn ps1 ps2 ~f:(unify state);
         unify state r1 r2)
+    | Con (n1, a1), Con (n2, a2) ->
+      if not (String.equal n1 n2) then raise (Type_error "Type constructor mismatch");
+      if List.length a1 <> List.length a2
+      then raise (Type_error "Type constructor arity mismatch");
+      List.iter2_exn a1 a2 ~f:(unify state)
     | Var { contents = Bound t1 }, t2 | t1, Var { contents = Bound t2 } ->
       unify state t1 t2
     | (Mu (b1, body1) as mu1), (Mu (b2, body2) as mu2) ->
@@ -583,6 +596,13 @@ and show_type ty =
     | Var { contents = Free (n, _) } -> Printf.sprintf "'%s" n
     | Var ({ contents = Bound t } as tv) ->
       if tv_ref_mem tv seen then "'rec" else show_type_with_seen (tv :: seen) seen_rec t
+    | Con (n, [ arg ]) ->
+      Printf.sprintf "%s(%s)" n (show_type_with_seen seen seen_rec arg)
+    | Con (n, args) ->
+      let inside =
+        args |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
+      in
+      Printf.sprintf "%s(%s)" n inside
   and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
     match row with
     | Var ({ contents = Bound ty } as tv) ->
@@ -748,6 +768,12 @@ and ensure_equality_type ty =
       if tv_ref_mem tv seen
       then ()
       else ensure_equality_type_with_seen (tv :: seen) seen_rec t
+    | Con (name, args) ->
+      (* If you want equality for some constructed types, recurse.
+             Tasks should almost certainly NOT be equality-comparable. *)
+      if String.equal name "Task"
+      then raise (Type_error "Equality is not supported for Task values")
+      else List.iter args ~f:(ensure_equality_type_with_seen seen seen_rec)
     | Mu (binder, body) ->
       if rec_name_mem binder seen_rec
       then ()
@@ -842,6 +868,7 @@ let contains_generic (ty : typ) : bool =
     | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
     | Var ({ contents = Bound t } as tv) ->
       if tv_ref_mem tv seen then false else aux (tv :: seen) t
+    | Con (_n, args) -> List.exists args ~f:(aux seen)
     | Mu (_binder, body) -> aux seen body
     | Rec_var _ -> false
     | Var { contents = Free _ } -> false
@@ -871,6 +898,7 @@ let contains_rec_var_name (target : name) (ty : typ) : bool =
     | Fun (params, ret) -> List.exists params ~f:(aux seen) || aux seen ret
     | Var ({ contents = Bound t } as tv) ->
       if tv_ref_mem tv seen then false else aux (tv :: seen) t
+    | Con (_n, args) -> List.exists args ~f:(aux seen)
     | Var { contents = Free _ }
     | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> false
     | Mu (binder, body) -> if String.equal binder target then false else aux seen body
@@ -959,6 +987,7 @@ let builtin_row_var_name (name : string) = "__builtin_row_" ^ name
 let rec typ_of_builtin_ty (ty : Builtin_spec.ty) : typ =
   match ty with
   | Builtin_spec.TVar name -> Generic name
+  | Builtin_spec.TCon (n, args) -> Con (n, List.map args ~f:typ_of_builtin_ty)
   | Builtin_spec.TInt -> TInt
   | Builtin_spec.TFloat -> TFloat
   | Builtin_spec.TBool -> Boolean
@@ -1097,6 +1126,7 @@ let restrict_free_vars_to_level (max_level : int) (ty : typ) : unit =
     | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ()
     | Var ({ contents = Bound t } as tv) ->
       if not (tv_ref_mem tv seen) then aux (tv :: seen) t
+    | Con (_n, args) -> List.iter args ~f:(aux seen)
     | Var ({ contents = Free (name, lvl) } as tv) ->
       if lvl > max_level then tv := Free (name, max_level)
     | Mu (_binder, body) -> aux seen body
