@@ -2054,3 +2054,170 @@ let%test_unit "recursive type mismatch diagnostic is cycle-safe" =
        && String.is_substring rendered ~substring:"with int")
   then failwith rendered
 ;;
+
+let%test_unit "inferred recursive variant AST typechecks without annotations" =
+  let code =
+    {|
+      let rec eval =
+        fun e ->
+        match e with
+        | `Int(n) -> n
+        | `Add(a, b) -> eval(a) + eval(b)
+        | `Sub(a, b) -> eval(a) - eval(b)
+        | `Mul(a, b) -> eval(a) * eval(b)
+        | `Div(a, b) -> eval(a) / eval(b)
+        | `Let(name, rhs, body) ->
+            let v = eval(rhs) in
+            eval(subst_x(body, v))
+        | `Var(name) -> fail("free var")
+
+      and subst_x =
+        fun e v ->
+        match e with
+        | `Int(_) -> e
+        | `Var(name) -> if name == "x" then `Int(v) else e
+        | `Add(a,b) -> `Add(subst_x(a,v), subst_x(b,v))
+        | `Sub(a,b) -> `Sub(subst_x(a,v), subst_x(b,v))
+        | `Mul(a,b) -> `Mul(subst_x(a,v), subst_x(b,v))
+        | `Div(a,b) -> `Div(subst_x(a,v), subst_x(b,v))
+        | `Let(name, rhs, body) -> `Let(name, subst_x(rhs,v), body)
+
+      eval(`Add(`Int(1), `Int(2)))
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> ()
+  | Error d -> failwith (Chatml_typechecker.format_diagnostic code d)
+;;
+
+let%test_unit "recursive variant match closes constructor set under recursion" =
+  let code =
+    {|
+      let rec eval e =
+        match e with
+        | `Int(n) -> n
+        | `Add(a, b) -> eval(a) + eval(b)
+
+      eval(`Sub(`Int(1), `Int(2)))
+    |}
+  in
+  match check_program_result code with
+  | Ok _ ->
+    failwith "expected use of `Sub to be rejected (constructor outside matched set)"
+  | Error _ -> ()
+;;
+
+let%test_unit "inferred recursive record typechecks (guarded cycle through record)" =
+  let code =
+    {|
+      let rec mk n =
+        { value = n; next = mk(n + 1) }
+
+      let x = mk(0)
+      x.value
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> ()
+  | Error d -> failwith (Chatml_typechecker.format_diagnostic code d)
+;;
+
+let%test_unit "unguarded cycle via self-application under lambda is rejected" =
+  let code =
+    {|
+      let f = fun x -> (fun y -> x(x))(0)
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected recursive types to be rejected"
+  | Error diagnostic ->
+    if not (String.is_substring diagnostic.message ~substring:"Recursive types")
+    then failwith diagnostic.message
+;;
+
+let%test_unit "unguarded cycle through ref is rejected" =
+  let code =
+    {|
+      let rec f x = ref(f)
+      f(0)
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected recursion through ref to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "value restriction: ref of variant becomes monomorphic after first write" =
+  let code =
+    {|
+      let r = ref(`Some(1)) in
+      r := `Some(2);
+      r := `Some("oops");
+      0
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected assignment of different payload type to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "value restriction: ref of record field type cannot change" =
+  let code =
+    {|
+      let r = ref({a = 1}) in
+      r := {a = 2};
+      r := {a = "oops"};
+      0
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected record field type change through ref to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "eta-expansion: function returning fresh ref is polymorphic/safe" =
+  let code =
+    {|
+      let mk () = ref(fun x -> x)
+
+      let r1 = mk() in
+      r1 := (fun x -> x + 1);
+      (!r1)(2);
+
+      let r2 = mk() in
+      (!r2)("ok")
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> ()
+  | Error d -> failwith (Chatml_typechecker.format_diagnostic code d)
+;;
+
+let%test_unit "row/int conflict is rejected (no weird row tail unification)" =
+  let code =
+    {|
+      let f x = x.a + x
+      f({a = 1})
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected record/int conflict to be rejected"
+  | Error _ -> ()
+;;
+
+let%test_unit "variant/int conflict is rejected" =
+  let code =
+    {|
+      let f x =
+        match x with
+        | `A -> 0
+        | _ -> 1;
+        x + 1
+
+      f(`A)
+    |}
+  in
+  match check_program_result code with
+  | Ok _ -> failwith "expected variant/int conflict to be rejected"
+  | Error _ -> ()
+;;
