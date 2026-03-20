@@ -2615,16 +2615,16 @@ let on_event : context -> state -> event -> state task =
     | `BeforeToolCall(call) ->
       let input = ... in
       let* review = Model.call("tool_safety_review", input) in
-       ( match review with
-        | `Ok(decision) ->
-          let* () = Tool.approve() in
-          Task.pure(st)
-        | `Refused(msg) ->
-          let* () = Tool.reject("model refused: " ++ msg) in
-          Task.pure(st)
-        | `Error(msg) ->
-          let* () = Tool.reject("review failed: " ++ msg) in
-          Task.pure(st))
+      ( match review with
+      | `Ok(decision) ->
+        let* () = Tool.approve() in
+        Task.pure(st)
+      | `Refused(msg) ->
+        let* () = Tool.reject("model refused: " ++ msg) in
+        Task.pure(st)
+      | `Error(msg) ->
+        let* () = Tool.reject("review failed: " ++ msg) in
+        Task.pure(st))
     | `AsyncCompleted(job_id, payload) ->
       let* () = Log.info("async completed: " ++ job_id) in
       Task.pure(st)
