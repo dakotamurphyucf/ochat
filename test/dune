@@ -591,6 +591,14 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name chatml_moderator_runtime_test)
+ (modules chatml_moderator_runtime_test)
+ (libraries core chatml chatml_builtin_modules chatml_moderator_runtime)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
  (name chatml_script_test)
  (modules chatml_script_test)
  (libraries

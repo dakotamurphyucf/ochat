@@ -42,6 +42,7 @@
 open Core
 open Chatml.Chatml_lang
 module Builtin_spec = Chatml.Chatml_builtin_spec
+module Builtin_surface = Chatml.Chatml_builtin_surface
 (* Provides [value], [env], [set_var] … *)
 
 (* -------------------------------------------------------------------------- *)
@@ -63,6 +64,22 @@ module Builtin_spec = Chatml.Chatml_builtin_spec
 let value_to_string = Builtin_spec.value_to_string
 
 module BuiltinModules = struct
+  let add_surface (env : env) (surface : Builtin_surface.surface) =
+    List.iter surface.globals ~f:(fun builtin ->
+      set_var env builtin.name (VBuiltin builtin.impl));
+    List.iter surface.modules ~f:(fun builtin_module ->
+      let menv = create_env () in
+      List.iter builtin_module.exports ~f:(fun builtin ->
+        set_var menv builtin.name (VBuiltin builtin.impl));
+      set_var env builtin_module.name (VModule menv))
+  ;;
+
+  let create_env_with_surface (surface : Builtin_surface.surface) : env =
+    let env = create_env () in
+    add_surface env surface;
+    env
+  ;;
+
   (** [add_global_builtins env] populates [env] with the standard
       library of ChatML.
 
@@ -76,16 +93,7 @@ module BuiltinModules = struct
       environment.  All operations raise [Failure] on arity or type
       mismatch.
   *)
-  let add_global_builtins (env : env) =
-    (* global functions *)
-    List.iter Builtin_spec.builtins ~f:(fun builtin ->
-      set_var env builtin.name (VBuiltin builtin.impl));
-    (* builtin modules *)
-    List.iter Builtin_spec.modules ~f:(fun m ->
-      let menv = create_env () in
-      List.iter m.exports ~f:(fun b -> set_var menv b.name (VBuiltin b.impl));
-      set_var env m.name (VModule menv))
-  ;;
+  let add_global_builtins (env : env) = add_surface env Builtin_surface.core_surface
 
   (** [create_default_env ()] allocates a fresh top-level environment and
       installs the full built-in ChatML prelude into it.
@@ -94,9 +102,12 @@ module BuiltinModules = struct
       ready-to-run interpreter environment whose runtime bindings stay in
       sync with the type-checker's builtin specification. *)
   let create_default_env () : env =
-    let env = create_env () in
-    add_global_builtins env;
-    env
+    create_env_with_surface Builtin_surface.core_surface
   ;;
   (* end of add_global_builtins body *)
 end
+
+let add_surface = BuiltinModules.add_surface
+let create_env_with_surface = BuiltinModules.create_env_with_surface
+let add_global_builtins = BuiltinModules.add_global_builtins
+let create_default_env = BuiltinModules.create_default_env

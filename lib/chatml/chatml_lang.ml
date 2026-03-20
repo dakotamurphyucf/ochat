@@ -45,7 +45,7 @@ type pattern =
 type type_expr =
   | TEName of string
   | TEArrow of type_expr * type_expr
-  | TEArray of type_expr
+  | TEConstr of string * type_expr list
   | TERecord of (string * type_expr) list
   | TEVariant of (string * type_expr list) list
 [@@deriving sexp]

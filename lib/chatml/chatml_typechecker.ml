@@ -52,6 +52,7 @@
 open Core
 open Chatml.Chatml_lang
 module Builtin_spec = Chatml.Chatml_builtin_spec
+module Builtin_surface = Chatml.Chatml_builtin_surface
 
 (***************************************************************************)
 (* A Hindley-Milner style type-checker for the ChatML language.            *)
@@ -733,7 +734,7 @@ and show_type ty =
     | Boolean -> "bool"
     | String -> "string"
     | Unit -> "unit"
-    | Array t -> Printf.sprintf "[%s] array" (show_type_with_seen seen seen_rec t)
+    | Array t -> Printf.sprintf "%s array" (show_postfix_arg seen seen_rec t)
     | Ref t -> Printf.sprintf "ref(%s)" (show_type_with_seen seen seen_rec t)
     | Fun (ps, r) ->
       let params =
@@ -762,6 +763,8 @@ and show_type ty =
     | Var { contents = Free (n, _) } -> Printf.sprintf "'%s" n
     | Var ({ contents = Bound t } as tv) ->
       if tv_ref_mem tv seen then "'rec" else show_type_with_seen (tv :: seen) seen_rec t
+    | Con ("task", [ arg ]) ->
+      Printf.sprintf "%s task" (show_postfix_arg seen seen_rec arg)
     | Con (n, [ arg ]) ->
       Printf.sprintf "%s(%s)" n (show_type_with_seen seen seen_rec arg)
     | Con (n, args) ->
@@ -769,6 +772,10 @@ and show_type ty =
         args |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
       in
       Printf.sprintf "%s(%s)" n inside
+  and show_postfix_arg (seen : tv ref list) (seen_rec : name list) (ty : typ) =
+    match resolve_bound_type_for_display_with_seen seen ty with
+    | Fun _ -> Printf.sprintf "(%s)" (show_type_with_seen seen seen_rec ty)
+    | _ -> show_type_with_seen seen seen_rec ty
   and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
     match row with
     | Var ({ contents = Bound ty } as tv) ->
@@ -937,7 +944,7 @@ and ensure_equality_type ty =
     | Con (name, args) ->
       (* If you want equality for some constructed types, recurse.
              Tasks should almost certainly NOT be equality-comparable. *)
-      if String.equal name "Task"
+      if String.equal name "task"
       then raise (Type_error "Equality is not supported for Task values")
       else List.iter args ~f:(ensure_equality_type_with_seen seen seen_rec)
     | Mu (binder, body) ->
@@ -1109,7 +1116,12 @@ let rec typ_of_type_expr ?self_name (types : type_env) (expr : type_expr) : typ 
        if Poly.equal lhs_ty Unit then Fun (params, ret) else Fun (lhs_ty :: params, ret)
      | rhs_ty ->
        if Poly.equal lhs_ty Unit then Fun ([], rhs_ty) else Fun ([ lhs_ty ], rhs_ty))
-  | TEArray inner -> Array (typ_of_type_expr ?self_name types inner)
+  | TEConstr (name, args) ->
+    (match name, List.map args ~f:(typ_of_type_expr ?self_name types) with
+     | "array", [ arg_ty ] -> Array arg_ty
+     | "task", [ arg_ty ] -> Con ("task", [ arg_ty ])
+     | _, _ ->
+       raise (Type_error (Printf.sprintf "Unknown type constructor '%s'" name)))
   | TERecord fields ->
     ensure_unique_type_labels ~what:"type record field" (List.map fields ~f:fst);
     Record
@@ -1179,15 +1191,31 @@ and typ_of_builtin_row (row : Builtin_spec.row) : typ =
       , typ_of_builtin_row tail )
 ;;
 
-let init_env () : tenv =
+let init_env_with_surface (surface : Builtin_surface.surface) : tenv =
   let globals =
-    Builtin_spec.builtins |> List.map ~f:(fun b -> b.name, typ_of_builtin_ty b.scheme)
+    surface.globals |> List.map ~f:(fun builtin -> builtin.name, typ_of_builtin_ty builtin.scheme)
   in
   let modules =
-    Builtin_spec.modules
-    |> List.map ~f:(fun m -> m.name, typ_of_builtin_ty (Builtin_spec.module_scheme m))
+    surface.modules
+    |> List.map ~f:(fun builtin_module ->
+      builtin_module.name, typ_of_builtin_ty (Builtin_spec.module_scheme builtin_module))
   in
   Env.of_list (globals @ modules)
+;;
+
+let init_env () : tenv = init_env_with_surface Builtin_surface.core_surface
+
+let init_types_with_surface (surface : Builtin_surface.surface) : type_env =
+  List.fold surface.type_aliases ~init:Env.empty ~f:(fun env alias ->
+    if Option.is_some (primitive_type_of_name alias.name)
+    then raise (Type_error (Printf.sprintf "Cannot redefine primitive type '%s'" alias.name))
+    else (
+      match Env.find env alias.name with
+      | Some _ -> raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" alias.name))
+      | None ->
+        let alias_ty = typ_of_builtin_ty alias.body in
+        if has_recursive_type alias_ty then ensure_contractive_type alias_ty;
+        Env.add alias.name alias_ty env))
 ;;
 
 (* Instantiate only genuinely polymorphic schemes.  Monomorphic bindings are
@@ -2253,14 +2281,18 @@ let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stm
 
     The snapshot produced on success is the only source of type information
     consulted by the resolver in production. *)
-let check_program (prog : program) : (checked_program, diagnostic) result =
+let check_program_with_surface
+      (surface : Builtin_surface.surface)
+      (prog : program)
+  : (checked_program, diagnostic) result
+  =
   let state = create_state () in
-  let env = init_env () in
-  let types : type_env = Env.empty in
-  (* Each element of [prog] now carries its own source span.  The current
-     type-checker, however, does not yet make use of that information.  We
-     therefore simply discard the annotation for the time being. *)
   try
+    let env = init_env_with_surface surface in
+    let types : type_env = init_types_with_surface surface in
+    (* Each element of [prog] now carries its own source span.  The current
+       type-checker, however, does not yet make use of that information.  We
+       therefore simply discard the annotation for the time being. *)
     let _final_env, _final_types =
       List.fold prog.stmts ~init:(env, types) ~f:(fun (env_acc, types_acc) stmt_node ->
         infer_stmt state env_acc types_acc stmt_node.value)
@@ -2269,6 +2301,10 @@ let check_program (prog : program) : (checked_program, diagnostic) result =
   with
   | Type_error msg -> Error { message = msg; span = None }
   | Type_error_with_loc (msg, span) -> Error { message = msg; span = Some span }
+;;
+
+let check_program (prog : program) : (checked_program, diagnostic) result =
+  check_program_with_surface Builtin_surface.core_surface prog
 ;;
 
 (* Compatibility helper used by expect tests and ad-hoc debugging.  Strict

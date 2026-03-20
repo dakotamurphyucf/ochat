@@ -465,15 +465,6 @@ let config_example_code =
 
 let json_parse_code =
   {|
-  type json =
-    [ `Null
-    | `Bool(bool)
-    | `String(string)
-    | `Number(float)
-    | `Array(json array)
-    | `Object({ key : string; value : json } array)
-    ]
-
   let rec map_numbers : json -> json =
     fun j ->
     match j with

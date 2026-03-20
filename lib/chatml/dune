@@ -9,7 +9,9 @@
   chatml_lexer
   chatml_parser
   frame_env
-  chatml_builtin_spec)
+  chatml_value_codec
+  chatml_builtin_spec
+  chatml_builtin_surface)
  (libraries core jsonaf menhirLib source)
  (preprocess
   (pps ppx_jane)))
@@ -35,6 +37,14 @@
  (public_name ochat.chatml_builtin_modules)
  (modules chatml_builtin_modules)
  (libraries chatml core)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name chatml_moderator_runtime)
+ (public_name ochat.chatml_moderator_runtime)
+ (modules chatml_moderator_runtime)
+ (libraries core chatml chatml_typechecker chatml_resolver chatml_builtin_modules)
  (preprocess
   (pps ppx_jane)))
 

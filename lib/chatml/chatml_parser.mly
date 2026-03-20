@@ -401,9 +401,7 @@ type_arrow:
 type_postfix:
 | type_primary { $1 }
 | type_postfix LIDENT
-    { if String.equal $2 "array"
-      then TEArray $1
-      else failwith ("Unknown postfix type constructor '" ^ $2 ^ "'") }
+    { TEConstr ($2, [ $1 ]) }
 
 type_primary:
 | LIDENT { TEName $1 }

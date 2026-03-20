@@ -41,7 +41,7 @@ let slot_of_typ (t : Chatml_typechecker.typ) : Frame_env.packed_slot =
   | Chatml_typechecker.String -> Frame_env.Slot Frame_env.SString
   | Chatml_typechecker.TInt -> Frame_env.Slot Frame_env.SInt
   | Chatml_typechecker.TFloat -> Frame_env.Slot Frame_env.SFloat
-  | Chatml_typechecker.Con ("Task", _) -> Frame_env.Slot Frame_env.SObj
+  | Chatml_typechecker.Con ("task", _) -> Frame_env.Slot Frame_env.SObj
   | _ -> Frame_env.Slot Frame_env.SObj
 ;;
 

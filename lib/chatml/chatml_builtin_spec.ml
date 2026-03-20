@@ -2,6 +2,7 @@ open Core
 open Chatml_lang
 open Jsonaf
 module Eval = Chatml_eval
+module Value_codec = Chatml_value_codec
 
 type row =
   | TRow_empty
@@ -55,21 +56,19 @@ type builtin_module =
   }
 
 let apply_chatml (name : string) (fn : value) (args : value list) : value =
-  match fn with
-  | VBuiltin bf ->
-    (try bf args with
-     | Failure msg -> failwith msg)
-  | VClosure cl ->
-    if List.length cl.params <> List.length args
-    then failwith (Printf.sprintf "%s: function arity mismatch" name)
-    else (
-      try Eval.finish_eval [] (Eval.TailCall (cl, args)) with
-      | Runtime_error err ->
-        (* Re-raise as [Failure] so the outer VBuiltin call site converts it
-           into a span-attached ChatML runtime error. *)
-        failwith err.message
-      | Failure msg -> failwith msg)
-  | _ -> failwith (Printf.sprintf "%s: expected a function" name)
+  match Eval.apply_value_result fn args with
+  | Ok value -> value
+  | Error err ->
+    let message =
+      match fn with
+      | VClosure _ when String.equal err.message "Function arity mismatch" ->
+        Printf.sprintf "%s: function arity mismatch" name
+      | VBuiltin _ | VClosure _ -> err.message
+      | _ -> Printf.sprintf "%s: expected a function" name
+    in
+    (* Re-raise as [Failure] so the outer VBuiltin call site converts it
+       into a span-attached ChatML runtime error. *)
+    failwith message
 ;;
 
 let module_scheme (m : builtin_module) : ty =
@@ -77,7 +76,7 @@ let module_scheme (m : builtin_module) : ty =
 ;;
 
 let option_ty (a : string) : ty = variant [ "None", TUnit; "Some", TVar a ]
-let task_ty (a : ty) : ty = TCon ("Task", [ a ])
+let task_ty (a : ty) : ty = TCon ("task", [ a ])
 
 let expect_task (name : string) : value -> task = function
   | VTask t -> t
@@ -211,6 +210,76 @@ let make_ternary_builtin
   { name; scheme; impl = with_ternary_args name f }
 ;;
 
+let make_task_nullary_perform_builtin
+      (name : string)
+      (result_ty : ty)
+      ~(op : string)
+  : builtin
+  =
+  make_nullary_builtin name (TFun ([], task_ty result_ty)) (fun () ->
+    VTask (TPerform { op; args = [] }))
+;;
+
+let make_task_unary_perform_builtin
+      (name : string)
+      (arg_ty : ty)
+      (result_ty : ty)
+      ~(op : string)
+  : builtin
+  =
+  make_unary_builtin name (TFun ([ arg_ty ], task_ty result_ty)) (fun arg ->
+    VTask (TPerform { op; args = [ arg ] }))
+;;
+
+let make_task_binary_perform_builtin
+      (name : string)
+      (lhs_ty : ty)
+      (rhs_ty : ty)
+      (result_ty : ty)
+      ~(op : string)
+  : builtin
+  =
+  make_binary_builtin
+    name
+    (TFun ([ lhs_ty; rhs_ty ], task_ty result_ty))
+    (fun lhs rhs -> VTask (TPerform { op; args = [ lhs; rhs ] }))
+;;
+
+let make_task_nullary_spawn_builtin
+      (name : string)
+      (result_ty : ty)
+      ~(op : string)
+  : builtin
+  =
+  make_nullary_builtin name (TFun ([], task_ty result_ty)) (fun () ->
+    VTask (TSpawn { op; args = [] }))
+;;
+
+let make_task_unary_spawn_builtin
+      (name : string)
+      (arg_ty : ty)
+      (result_ty : ty)
+      ~(op : string)
+  : builtin
+  =
+  make_unary_builtin name (TFun ([ arg_ty ], task_ty result_ty)) (fun arg ->
+    VTask (TSpawn { op; args = [ arg ] }))
+;;
+
+let make_task_binary_spawn_builtin
+      (name : string)
+      (lhs_ty : ty)
+      (rhs_ty : ty)
+      (result_ty : ty)
+      ~(op : string)
+  : builtin
+  =
+  make_binary_builtin
+    name
+    (TFun ([ lhs_ty; rhs_ty ], task_ty result_ty))
+    (fun lhs rhs -> VTask (TSpawn { op; args = [ lhs; rhs ] }))
+;;
+
 let builtins : builtin list =
   [ make_unary_builtin
       "print"
@@ -283,71 +352,54 @@ let json_ty : ty =
         ] )
 ;;
 
-let rec jsonaf_to_value (j : Jsonaf.t) : value =
-  match j with
-  | `Null -> VVariant ("Null", [])
-  | `True -> VVariant ("Bool", [ VBool true ])
-  | `False -> VVariant ("Bool", [ VBool false ])
-  | `String s -> VVariant ("String", [ VString s ])
-  | `Number n ->
-    let f = Float.of_string n in
-    VVariant ("Number", [ VFloat f ])
-  | `Array xs ->
-    VVariant ("Array", [ VArray (xs |> List.map ~f:jsonaf_to_value |> Array.of_list) ])
-  | `Object fields ->
-    let entries =
-      fields
-      |> List.map ~f:(fun (k, v) ->
-        VRecord
-          (Map.of_alist_exn
-             (module String)
-             [ "key", VString k; "value", jsonaf_to_value v ]))
-      |> Array.of_list
-    in
-    VVariant ("Object", [ VArray entries ])
-;;
+let jsonaf_to_value = Value_codec.jsonaf_to_value
 
-let rec value_to_jsonaf (name : string) (v : value) : Jsonaf.t =
-  match v with
-  | VVariant ("Null", []) -> `Null
-  | VVariant ("Bool", [ VBool true ]) -> `True
-  | VVariant ("Bool", [ VBool false ]) -> `False
-  | VVariant ("String", [ VString s ]) -> `String s
-  | VVariant ("Number", [ VFloat f ]) -> `Number (Float.to_string f)
-  | VVariant ("Array", [ VArray arr ]) ->
-    `Array (arr |> Array.to_list |> List.map ~f:(value_to_jsonaf name))
-  | VVariant ("Object", [ VArray entries ]) ->
-    let fields =
-      entries
-      |> Array.to_list
-      |> List.map ~f:(fun entry ->
-        let m =
-          match entry with
-          | VRecord m -> m
-          | _ -> failwith (name ^ ": object entry must be a record")
-        in
-        let key =
-          match Map.find m "key" with
-          | Some (VString s) -> s
-          | _ -> failwith (name ^ ": object entry missing string field 'key'")
-        in
-        let value =
-          match Map.find m "value" with
-          | Some v -> value_to_jsonaf name v
-          | None -> failwith (name ^ ": object entry missing field 'value'")
-        in
-        key, value)
-    in
-    `Object fields
-  | _ ->
-    failwith
-      (Printf.sprintf
-         "%s: expected Json.t (`Null/`Bool/`Number/`String/`Array/`Object)"
-         name)
+let value_to_jsonaf (name : string) (value : value) : Jsonaf.t =
+  match Value_codec.value_to_jsonaf_result value with
+  | Ok json -> json
+  | Error msg -> failwith (Printf.sprintf "%s: %s" name msg)
 ;;
 
 let option_of (t : ty) : ty = variant [ "None", TUnit; "Some", t ]
 let json_option_ty : ty = option_of json_ty
+
+let message_ty : ty =
+  record
+    [ "id", TString
+    ; "role", TString
+    ; "content", TString
+    ; "meta", json_ty
+    ]
+;;
+
+let tool_desc_ty : ty =
+  record [ "name", TString; "description", TString; "input_schema", json_ty ]
+;;
+
+let tool_call_ty : ty =
+  record [ "id", TString; "name", TString; "args", json_ty ]
+;;
+
+let tool_result_ty : ty =
+  record [ "call_id", TString; "name", TString; "result", json_ty ]
+;;
+
+let context_ty : ty =
+  record
+    [ "session_id", TString
+    ; "now_ms", TInt
+    ; "phase", TString
+    ; "messages", TArray message_ty
+    ; "available_tools", TArray tool_desc_ty
+    ; "session_meta", json_ty
+    ]
+;;
+
+let tool_call_result_ty : ty = variant [ "Ok", json_ty; "Error", TString ]
+
+let model_call_result_ty : ty =
+  variant [ "Ok", json_ty; "Refused", TString; "Error", TString ]
+;;
 
 let is_json_tag (tag : string) : bool =
   match tag with
@@ -1145,5 +1197,139 @@ let modules : builtin_module list =
                VUnit)
         ]
     }
+  ]
+;;
+
+let log_module : builtin_module =
+  { name = "Log"
+  ; exports =
+      [ make_task_unary_perform_builtin "debug" TString TUnit ~op:"Log.debug"
+      ; make_task_unary_perform_builtin "info" TString TUnit ~op:"Log.info"
+      ; make_task_unary_perform_builtin "warn" TString TUnit ~op:"Log.warn"
+      ; make_task_unary_perform_builtin "error" TString TUnit ~op:"Log.error"
+      ]
+  }
+;;
+
+let turn_module : builtin_module =
+  { name = "Turn"
+  ; exports =
+      [ make_task_unary_perform_builtin
+          "prepend_system"
+          TString
+          TUnit
+          ~op:"Turn.prepend_system"
+      ; make_task_unary_perform_builtin
+          "append_message"
+          message_ty
+          TUnit
+          ~op:"Turn.append_message"
+      ; make_task_binary_perform_builtin
+          "replace_message"
+          TString
+          message_ty
+          TUnit
+          ~op:"Turn.replace_message"
+      ; make_task_unary_perform_builtin
+          "delete_message"
+          TString
+          TUnit
+          ~op:"Turn.delete_message"
+      ; make_task_unary_perform_builtin "halt" TString TUnit ~op:"Turn.halt"
+      ]
+  }
+;;
+
+let tool_module : builtin_module =
+  { name = "Tool"
+  ; exports =
+      [ make_task_nullary_perform_builtin "approve" TUnit ~op:"Tool.approve"
+      ; make_task_unary_perform_builtin "reject" TString TUnit ~op:"Tool.reject"
+      ; make_task_unary_perform_builtin
+          "rewrite_args"
+          json_ty
+          TUnit
+          ~op:"Tool.rewrite_args"
+      ; make_task_binary_perform_builtin
+          "redirect"
+          TString
+          json_ty
+          TUnit
+          ~op:"Tool.redirect"
+      ; make_task_binary_perform_builtin
+          "call"
+          TString
+          json_ty
+          tool_call_result_ty
+          ~op:"Tool.call"
+      ; make_task_binary_spawn_builtin
+          "spawn"
+          TString
+          json_ty
+          TString
+          ~op:"Tool.spawn"
+      ]
+  }
+;;
+
+let model_module : builtin_module =
+  { name = "Model"
+  ; exports =
+      [ make_task_binary_perform_builtin
+          "call"
+          TString
+          json_ty
+          model_call_result_ty
+          ~op:"Model.call"
+      ; make_task_binary_spawn_builtin
+          "spawn"
+          TString
+          json_ty
+          TString
+          ~op:"Model.spawn"
+      ]
+  }
+;;
+
+let schedule_module : builtin_module =
+  { name = "Schedule"
+  ; exports =
+      [ make_task_binary_spawn_builtin
+          "after_ms"
+          TInt
+          (TVar "e")
+          TString
+          ~op:"Schedule.after_ms"
+      ; make_task_unary_perform_builtin "cancel" TString TUnit ~op:"Schedule.cancel"
+      ]
+  }
+;;
+
+let runtime_module : builtin_module =
+  { name = "Runtime"
+  ; exports =
+      [ make_task_unary_perform_builtin "emit" (TVar "e") TUnit ~op:"Runtime.emit"
+      ; make_task_nullary_perform_builtin
+          "request_compaction"
+          TUnit
+          ~op:"Runtime.request_compaction"
+      ; make_task_unary_perform_builtin
+          "end_session"
+          TString
+          TUnit
+          ~op:"Runtime.end_session"
+      ]
+  }
+;;
+
+let core_modules : builtin_module list = modules
+
+let moderator_modules : builtin_module list =
+  [ log_module
+  ; turn_module
+  ; tool_module
+  ; model_module
+  ; schedule_module
+  ; runtime_module
   ]
 ;;

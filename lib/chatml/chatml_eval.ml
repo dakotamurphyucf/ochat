@@ -415,6 +415,28 @@ and eval_stmt (env : env) (frames : Frame_env.env) (s : resolved_stmt node) : un
   ignore (eval_stmt_with_exports env frames s)
 ;;
 
+let apply_value_result (fn : value) (args : value list) : (value, runtime_error) result =
+  match fn with
+  | VClosure cl ->
+    if List.length cl.params <> List.length args
+    then Error { message = "Function arity mismatch"; span = None }
+    else (
+      try Ok (finish_eval [] (TailCall (cl, args))) with
+      | Runtime_error err -> Error err
+      | Failure msg -> Error { message = msg; span = None })
+  | VBuiltin bf ->
+    (try Ok (bf args) with
+     | Runtime_error err -> Error err
+     | Failure msg -> Error { message = msg; span = None })
+  | _ -> Error { message = "Trying to call a non-function value"; span = None }
+;;
+
+let apply_value_exn (fn : value) (args : value list) : value =
+  match apply_value_result fn args with
+  | Ok value -> value
+  | Error err -> raise (Runtime_error err)
+;;
+
 let eval_program (env : env) (prog : resolved_program) : unit =
   let initial_frames : Frame_env.env = [] in
   List.iter prog.stmts ~f:(fun stmt_node -> eval_stmt env initial_frames stmt_node)

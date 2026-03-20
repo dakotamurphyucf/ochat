@@ -5,7 +5,7 @@ module Req = Res.Request
 
 let cursor_marker = "⟦INSERT⟧"
 let max_returned_chars = 4_000
-let max_message_length = 5000
+let max_message_length = 10000
 let max_history_length = max_message_length * 2
 
 let insert_marker ~text ~cursor =
@@ -78,7 +78,7 @@ Constraints:
   little lamb
   </example>
 - You must ensure lines do not exceed 80 characters. Insert a newline character if necessary.
-- You must keep completions short; if no completion is appropriate, return an empty string.
+- You must favor keeping completions short; if no completion is appropriate, return an empty string.
 |}
 ;;
 
@@ -96,9 +96,9 @@ let complete_suffix ~sw ~env ~dir ~(cfg : Chat_response.Config.t) ~messages ~dra
     let net = Eio.Stdenv.net env in
     (* let temperature = Option.value cfg.temperature ~default:0.2 in *)
     let max_output_tokens = 200 in
-    let model = Req.Unknown "gpt-5-mini" in
+    let model = Req.Unknown "gpt-5.4-mini" in
     (* Option.map cfg.model ~f:Req.model_of_str_exn in *)
-    let reasoning = Req.Reasoning.{ effort = Some Minimal; summary = None } in
+    let reasoning = Req.Reasoning.{ effort = Some Low; summary = None } in
     let completion_context = render_history_for_prompt messages in
     let draft_excerpt = insert_marker ~text:draft ~cursor in
     let user_prompt =

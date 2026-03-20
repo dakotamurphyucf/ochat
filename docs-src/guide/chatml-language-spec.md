@@ -16,6 +16,9 @@ It describes the language and runtime pipeline implemented by:
 - `lib/chatml/chatml_resolver.ml`
 - `lib/chatml/chatml_builtin_spec.ml`
 - `lib/chatml/chatml_builtin_modules.ml`
+- `lib/chatml/chatml_builtin_surface.ml`
+- `lib/chatml/chatml_value_codec.ml`
+- `lib/chatml/chatml_moderator_runtime.ml`
 
 When this document and the implementation disagree, the implementation is
 authoritative.
@@ -544,6 +547,8 @@ let x = 1 in x + 1
 let x : int = 1 in x + 1
 let f y = y in f(3)
 let rec loop n = ... in loop(10)
+let* x = task1 in task2
+let+ x = task1 in value_expr
 ```
 
 Properties:
@@ -556,6 +561,8 @@ Properties:
 - binding annotations are checked against the inferred RHS type
 - there is currently no general `(expr : type)` surface syntax; annotations
   are introduced through binding forms
+- `let*` and `let+` are task-composition forms that desugar to `Task.bind`
+  and `Task.map`
 
 ### 7.6 Conditionals
 
@@ -803,6 +810,7 @@ Rejected:
 - arrays
 - refs
 - functions
+- tasks
 
 Examples:
 
@@ -994,8 +1002,10 @@ The current user-facing type-expression syntax supports:
   - `expr -> int`
   - `state -> event -> state`
   - `unit -> string`
-- postfix array types:
+- postfix unary type constructors:
   - `task array`
+  - `state task`
+  - `state task array`
 - closed record types:
   - `{ name : string; attempts : int }`
 - closed variant types:
@@ -1022,6 +1032,14 @@ Current user-facing omissions are intentional:
 - no open-row type syntax
 - no type parameters
 - no mutual recursive type declarations
+
+The parser accepts generic postfix lowercase unary constructors in type
+expressions, but the current typechecker recognizes only the constructors
+implemented by the host/type environment. In the built-in surface those are
+currently:
+
+- `array`
+- `task`
 
 ### 10.2.2 Explicit recursive types
 
@@ -1302,6 +1320,7 @@ The runtime supports:
 - modules
 - unit
 - builtins
+- tasks
 
 ### 11.2 Closures
 
@@ -1455,16 +1474,27 @@ the current scope.
 
 ---
 
-## 13. Standard library
+## 13. Standard library and builtin surfaces
 
-ChatML ships with a small runtime prelude consisting of:
+ChatML now uses a composable builtin-surface model rather than a single
+hard-coded builtin universe.
 
-a set of global builtin functions, and
-a set of builtin modules installed as VModule values (typed as records of exports).
-Arithmetic, string concatenation, comparison, and equality operators remain language primitives rather than runtime-installed builtins.
+A builtin surface may contribute:
+
+- global builtin functions,
+- builtin modules installed as `VModule` values (typed as records of exports),
+- builtin type aliases injected into the initial type environment.
+
+The current implementation exposes two standard assembled surfaces:
+
+- `core_surface`
+- `moderator_surface`
+
+Arithmetic, string concatenation, comparison, and equality operators remain
+language primitives rather than runtime-installed builtins.
 
 ### 13.1 Global builtins
-Installed global builtins:
+Installed global builtins in `core_surface`:
 
 ```ocaml
 print : 'a -> unit
@@ -1489,10 +1519,66 @@ Notes:
 - variant_tag returns only the constructor/tag name, not the payload.
 - swap_ref r v stores v into r and returns the old contents.
 - fail raises a runtime failure and is polymorphic in its result position.
-### 13.2 Builtin modules
-The runtime also installs several builtin modules. Each module is a VModule value at runtime, typed as a record of its exports by the typechecker.
 
-### 13.2.1 `String` module (updated)
+### 13.2 Builtin surfaces
+
+#### 13.2.1 `core_surface`
+
+`core_surface` currently provides:
+
+- the global builtins listed above,
+- builtin modules:
+  - `Task`
+  - `String`
+  - `Array`
+  - `Json`
+  - `Option`
+  - `Hashtbl`
+- builtin type aliases:
+  - `json`
+
+#### 13.2.2 `moderator_surface`
+
+`moderator_surface` extends `core_surface` with moderator-oriented modules
+and structural type aliases.
+
+Additional builtin modules:
+
+- `Log`
+- `Turn`
+- `Tool`
+- `Model`
+- `Schedule`
+- `Runtime`
+
+Additional builtin type aliases:
+
+- `message`
+- `tool_desc`
+- `tool_call`
+- `tool_result`
+- `context`
+
+Each builtin module is a `VModule` value at runtime and is typed as a
+record of its exports by the typechecker.
+
+### 13.2.3 `Task` module
+
+The `Task` builtin module provides the core task combinators used by the
+moderator-runtime embedding:
+
+```ocaml
+Task.pure  : 'a -> 'a task
+Task.bind  : 'a task -> ('a -> 'b task) -> 'b task
+Task.map   : 'a task -> ('a -> 'b) -> 'b task
+Task.fail  : string -> 'a task
+Task.catch : 'a task -> (string -> 'a task) -> 'a task
+```
+
+These functions construct and compose task values. They do not themselves
+perform host-side effects.
+
+### 13.2.4 `String` module (updated)
 
 The `String` builtin module provides common string utilities.
 
@@ -1536,7 +1622,7 @@ Notes:
 
 ---
 
-### 13.2.2 `Array` module (updated)
+### 13.2.5 `Array` module (updated)
 
 The `Array` builtin module provides array utilities. Arrays are homogeneous and mutable.
 
@@ -1601,7 +1687,7 @@ Exports:
 - `Array.find_map : 'a array -> ('a -> [ \`None | \`Some('b) ]) -> [ \`None | \`Some('b) ]`  
   Applies the mapping function left-to-right and returns the first `\`Some(...)` result, or `\`None`.
 
-### 13.2.3 `Option` module
+### 13.2.6 `Option` module
 This module uses the convention that option values are represented as variants:
 
 ```ocaml
@@ -1623,7 +1709,7 @@ Notes:
 
 - This is a convenience module; users can also directly construct and match on `None and `Some(...).
 
-### 13.2.4 `Hashtbl` module (string-keyed)
+### 13.2.7 `Hashtbl` module (string-keyed)
 This is a small builtin hashtable-like abstraction with string keys. It is implemented using existing runtime values (refs + arrays of entries) and is intended for scripting convenience, not high performance.
 
 Exports (conceptual types):
@@ -1643,25 +1729,27 @@ Notes:
 - Current representation is optimized for simplicity rather than asymptotic performance.
 
 
-### 13.2.5 `Json` module (updated)
+### 13.2.8 `Json` module (updated)
 
 The `Json` module provides:
 
-- a real recursive JSON value type at the ChatML level (`Json.t`), and
+- a real recursive JSON value type at the ChatML level (`json` in the
+  builtin type-alias surface), and
 - conversion to/from JSON text via the host-side **Jsonaf** library.
 
-#### `Json.t` representation
+#### `json` representation
 
-`Json.t` is represented as a recursive variant type equivalent to:
+The builtin alias `json` is represented as a recursive variant type
+equivalent to:
 
 ```ocaml
-Json.t =
+json =
   [ `Null
   | `Bool(bool)
   | `Number(float)
   | `String(string)
-  | `Array(Json.t array)
-  | `Object({ key : string; value : Json.t } array)
+  | `Array(json array)
+  | `Object({ key : string; value : json } array)
   ]
 (Internally this is introduced using an explicit recursive binder in the builtin type schemes; users do not write the binder directly.)
 ```
@@ -1669,52 +1757,52 @@ Json.t =
 Exports:
 #### Text conversion:
 
-- Json.parse : string -> Json.t
-Parses JSON text into a Json.t value. Raises a runtime failure on invalid JSON input.
-- Json.parse_opt : string -> [ \None | `Some(Json.t) ]
+- Json.parse : string -> json
+Parses JSON text into a `json` value. Raises a runtime failure on invalid JSON input.
+- Json.parse_opt : string -> [ \None | `Some(json) ]
 Like parse, but returns `None` instead of raising on parse errors.
-- Json.stringify : Json.t -> string
+- Json.stringify : json -> string
 Produces a compact JSON string representation.
-- Json.pretty : Json.t -> string
+- Json.pretty : json -> string
 Produces a human-readable formatted JSON representation.
 - Json.validate : string -> bool
 Returns true iff the string parses as JSON.
 Introspection and shape-safe accessors:
 
-- Json.tag : Json.t -> string
+- Json.tag : json -> string
 Returns one of "Null", "Bool", "Number", "String", "Array", "Object".
 
-- Json.as_bool : Json.t -> [ \None | `Some(bool) ]`
+- Json.as_bool : json -> [ \None | `Some(bool) ]`
 
-- Json.as_number : Json.t -> [ \None | `Some(float) ]`
+- Json.as_number : json -> [ \None | `Some(float) ]`
 
-- Json.as_string : Json.t -> [ \None | `Some(string) ]`
+- Json.as_string : json -> [ \None | `Some(string) ]`
 
-- Json.as_array : Json.t -> [ \None | `Some(Json.t array) ]`
+- Json.as_array : json -> [ \None | `Some(json array) ]`
 
-- Json.as_object : Json.t -> [ \None | `Some({ key : string; value : Json.t } array) ]`
+- Json.as_object : json -> [ \None | `Some({ key : string; value : json } array) ]`
 
 Object helpers:
 
-- Json.object_keys : Json.t -> string array
+- Json.object_keys : json -> string array
 Returns an array of keys when given an object; returns an empty array on non-object values.
-- Json.get_field : Json.t -> string -> [ \None | `Some(Json.t) ]
+- Json.get_field : json -> string -> [ \None | `Some(json) ]
 If the first argument is an object and the key exists, returns
 `Some(value); otherwise `None`.
 
 Path lookup:
 
-- Json.get_path : Json.t -> string array -> [ \None | `Some(Json.t) ]`
+- Json.get_path : json -> string array -> [ \None | `Some(json) ]`
 Traverses the JSON value using a path of string segments:
 when the current value is an object, segments are treated as field names;
 when the current value is an array, segments are interpreted as integer indices (in decimal).
 Returns \None` if traversal fails at any point.
 Pure object update helpers:
 
-- Json.set_field : Json.t -> string -> Json.t -> Json.t
+- Json.set_field : json -> string -> json -> json
 Returns an updated object with the given field set to the new value.
 Raises a runtime failure if the first argument is not an object.
-- Json.remove_field : Json.t -> string -> Json.t
+- Json.remove_field : json -> string -> json
 Returns an updated object with all entries for the given key removed.
 Raises a runtime failure if the first argument is not an object.
 
@@ -1731,6 +1819,84 @@ Because global builtins exist in the initial environment, opening some builtin m
 - `open Array` is rejected by default because Array.length would shadow the global length.
 
 Users can always access module exports through qualified access (Array.length(xs)) without using open.
+
+### 13.4 Moderator capability modules
+
+The following modules are available in `moderator_surface` and are intended
+for host-interpreted task-based moderation logic rather than ordinary core
+evaluation-only scripts.
+
+Their exported functions return task values and are interpreted by the host
+runtime operation registry.
+
+#### 13.4.1 `Log`
+
+```ocaml
+Log.debug : string -> unit task
+Log.info  : string -> unit task
+Log.warn  : string -> unit task
+Log.error : string -> unit task
+```
+
+These are diagnostic operations observed by the host runtime.
+
+#### 13.4.2 `Turn`
+
+```ocaml
+Turn.prepend_system  : string -> unit task
+Turn.append_message  : message -> unit task
+Turn.replace_message : string -> message -> unit task
+Turn.delete_message  : string -> unit task
+Turn.halt            : string -> unit task
+```
+
+These describe local turn-overlay style mutations. The current runtime
+records them as local transactional effects and leaves the concrete overlay
+semantics to host handlers.
+
+#### 13.4.3 `Tool`
+
+```ocaml
+Tool.approve      : unit -> unit task
+Tool.reject       : string -> unit task
+Tool.rewrite_args : json -> unit task
+Tool.redirect     : string -> json -> unit task
+Tool.call         : string -> json -> [ `Ok(json) | `Error(string) ] task
+Tool.spawn        : string -> json -> string task
+```
+
+`Tool.call` is interpreted as an external synchronous operation.
+`Tool.spawn` is interpreted as an external asynchronous operation.
+
+#### 13.4.4 `Model`
+
+```ocaml
+Model.call  : string -> json -> [ `Ok(json) | `Refused(string) | `Error(string) ] task
+Model.spawn : string -> json -> string task
+```
+
+The string argument is a host-defined recipe name, not an unrestricted raw
+provider/model identifier.
+
+#### 13.4.5 `Schedule`
+
+```ocaml
+Schedule.after_ms : int -> 'e -> string task
+Schedule.cancel   : string -> unit task
+```
+
+The event payload of `Schedule.after_ms` remains a raw ChatML value.
+
+#### 13.4.6 `Runtime`
+
+```ocaml
+Runtime.emit               : 'e -> unit task
+Runtime.request_compaction : unit -> unit task
+Runtime.end_session        : string -> unit task
+```
+
+`Runtime.emit` buffers a raw ChatML event for later enqueueing on
+successful task completion.
 
 ---
 
@@ -1771,6 +1937,8 @@ while c do body done
 let x = e1 in e2
 let x : t = e1 in e2
 let rec f x = e1 in e2
+let* x = e1 in e2
+let+ x = e1 in e2
 match e with | pat -> e
 { a = e; b = e }
 e.field
@@ -1844,7 +2012,9 @@ unit
 expr
 expr -> int
 unit -> string
+state task
 task array
+state task array
 { name : string; status : status }
 [ `Pending | `Done | `Error(string) ]
 ```
@@ -2296,15 +2466,6 @@ print("dist 0->5 = " ++ to_string(Graph.bfs_distance(g, 0, 5)))
 
 ### 20.10 JSON parse / transform / stringify (builtin Json module)
 ```ocaml
-type json =
-  [ `Null
-  | `Bool(bool)
-  | `String(string)
-  | `Number(float)
-  | `Array(json array)
-  | `Object({ key : string; value : json } array)
-  ]
-
 let rec map_numbers : json -> json =
   fun j ->
   match j with
@@ -2345,126 +2506,295 @@ print("out: " ++ Json.stringify(j2))
 print("pretty:\n" ++ Json.pretty(j2))
 ```
 
-# (Proposed) Spec Addendum: Task values and agent-runtime effects
+## 21. Task values and moderator-runtime embedding
 
-This section specifies the Task facility used when ChatML is embedded as an
-event handler language inside an external agent runtime.
+This section documents the current implementation of ChatML task values and
+the host-side moderator runtime.
 
-When this document and the implementation disagree, the implementation is
-authoritative.
+### 21.1 Task values in the core runtime
 
----
+Tasks are first-class runtime values. The core value space therefore
+includes:
 
-## 21. Tasks and agent-runtime effects
+```ocaml
+VTask of task
+```
 
-### 21.1 Purpose
+with the internal task representation:
 
-ChatML is embedded as a “conversation moderator” language in a
-larger agent runtime. In this embedding:
+```ocaml
+type task =
+  | TPure of value
+  | TBind of task * value
+  | TMap of task * value
+  | TFail of string
+  | TCatch of task * value
+  | TPerform of eff
+  | TSpawn of eff
+```
 
-- ChatML code is intended to remain mostly pure and deterministic.
-- Side effects such as tool calls, model calls, message CRUD, scheduling,
-  and other world interaction are represented as Task values.
-- Task values are interpreted by the host agent runtime, not directly by
-  the ChatML evaluator.
+The ChatML evaluator does not interpret these task nodes directly. It
+constructs and propagates them as values. Interpretation happens only in
+host code, such as the moderator runtime.
 
-In this mode the primary user entry point is a handler function of the form:
+### 21.2 Surface type convention
 
-on_event : state -> event -> Task(state)
+ChatML follows the existing postfix type-constructor style.
 
-The host runtime repeatedly:
+The type constructor is named:
 
-1) provides the current state and an incoming event,
-2) calls on_event,
-3) interprets the returned Task(state) to produce the next state,
-4) may enqueue further events (including async completions).
+- `task` in the type namespace
+- `Task` in the module/value namespace
 
-### 21.2 Tasks are values, not immediate effects
+Examples:
 
-A Task('a) is a first-class value in ChatML that represents a computation
-which may perform effects when interpreted by the host runtime.
+```ocaml
+state task
+message array
+state task array
+```
 
-Key property:
+The builtin helper functions therefore have shapes such as:
 
-Constructing or composing a Task does not itself perform the effect.
-Effects occur only when the host runtime interprets the returned task.
+```ocaml
+Task.pure : 'a -> 'a task
+Task.bind : 'a task -> ('a -> 'b task) -> 'b task
+```
 
-This property is crucial for:
+### 21.3 Task module and surface syntax
 
-- determinism and replay/debugging,
-- sandboxing (no direct IO in scripts),
-- policy enforcement by the host runtime.
+The builtin `Task` module currently exports:
 
-### 21.3 Task API (builtin module)
+```ocaml
+Task.pure  : 'a -> 'a task
+Task.bind  : 'a task -> ('a -> 'b task) -> 'b task
+Task.map   : 'a task -> ('a -> 'b) -> 'b task
+Task.fail  : string -> 'a task
+Task.catch : 'a task -> (string -> 'a task) -> 'a task
+```
 
-ChatML provides a builtin Task module implementing a monadic interface:
+ChatML also supports monadic let sugar for tasks:
 
-Task.pure  : 'a -> Task('a)
-Task.bind  : Task('a) -> ('a -> Task('b)) -> Task('b)
-Task.map   : Task('a) -> ('a -> 'b) -> Task('b)
-Task.fail  : string -> Task('a)
-Task.catch : Task('a) -> (string -> Task('a)) -> Task('a)
-
-Implementations are required to behave as the usual monad laws suggest
-(left/right identity and associativity), up to observable effects.
-
-Task.fail represents a failing task. Task.catch(t, h) handles failures by
-calling h with the failure message.
-
-### 21.4 Task effects: perform vs spawn
-
-Tasks may embed “effect requests” that are interpreted by the host runtime.
-
-Effects come in two forms:
-
-- blocking effects (perform): the host runtime executes the effect and
-  resumes the task with its result value; the conversation turn is blocked
-  until completion.
-
-- non-blocking effects (spawn): the host runtime starts an async job,
-  returns immediately, and later delivers the result by enqueuing a new event.
-
-In the current implementation, effects are represented internally by:
-
-- an operation name (string), and
-- a list of argument values.
-
-Examples of effectful builtins:
-
-Tool.call    : string -> string -> Task(string)                 (perform)
-Tool.spawn   : string -> string -> string -> Task(unit)         (spawn)
-
-LLM.complete : provider -> string -> string -> Task(string)     (perform)
-LLM.spawn    : string -> provider -> string -> string -> Task(unit)  (spawn)
-
-Conv.append  : message -> Task(unit)
-Conv.replace : string -> message -> Task(unit)
-Conv.delete  : string -> Task(unit)
-
-Task.emit      : event -> Task(unit)
-
-
-The set of supported operations is host-defined. ChatML scripts can only
-request operations that the runtime exposes.
-
-### 21.5 Optional surface syntax: let* and let+
-
-ChatML provides syntactic sugar for task composition:
-
+```ocaml
 let* x = t1 in t2
 let+ x = t1 in t2
+```
 
-Desugaring:
+desugaring to `Task.bind` and `Task.map` respectively.
 
-- let* x = t1 in t2 desugars to:
-  Task.bind(t1, fun x -> t2)
+### 21.4 Host-side function application
 
-- let+ x = t1 in t2 desugars to:
-  Task.map(t1, fun x -> t2)
+Because `TBind`, `TMap`, and `TCatch` store ChatML closures/builtins inside
+task values, host runtimes need a way to apply those values.
 
-Binders may also use unit:
+The evaluator therefore exposes a public host-side API:
 
-let* () = Task.emit(ev) in ...
+```ocaml
+apply_value_result : value -> value list -> (value, runtime_error) result
+apply_value_exn    : value -> value list -> value
+```
 
-This is intended to reduce nesting and improve readability of task-heavy
-handlers.
+These are used by the moderator runtime and may also be used by other host
+embeddings.
+
+### 21.5 Moderator script contract
+
+The current moderator runtime uses a convention-based contract:
+
+```ocaml
+let initial_state = ...
+
+let on_event =
+  fun ctx st ev ->
+    ...
+```
+
+Conceptually:
+
+```ocaml
+initial_state : state
+on_event : context -> state -> event -> state task
+```
+
+At present, the runtime validates entrypoints dynamically by name and
+callability when instantiating a session. It does not yet enforce the full
+entrypoint type contract statically.
+
+### 21.6 Structural runtime aliases exposed to moderator scripts
+
+`moderator_surface` installs the following builtin type aliases:
+
+```ocaml
+type message =
+  { id : string
+  ; role : string
+  ; content : string
+  ; meta : json
+  }
+
+type tool_desc =
+  { name : string
+  ; description : string
+  ; input_schema : json
+  }
+
+type tool_call =
+  { id : string
+  ; name : string
+  ; args : json
+  }
+
+type tool_result =
+  { call_id : string
+  ; name : string
+  ; result : json
+  }
+
+type context =
+  { session_id : string
+  ; now_ms : int
+  ; phase : string
+  ; messages : message array
+  ; available_tools : tool_desc array
+  ; session_meta : json
+  }
+```
+
+These aliases are compile-time conveniences layered on top of ordinary
+structural record/variant typing.
+
+### 21.7 Effect requests
+
+Task effects are represented internally as:
+
+```ocaml
+type eff =
+  { op : string
+  ; args : value list
+  }
+```
+
+with two execution modes:
+
+- `TPerform eff` for host-performed operations
+- `TSpawn eff` for host-spawned asynchronous operations
+
+The concrete set of supported operation names is host-defined.
+
+### 21.8 Host-side moderator runtime
+
+The current host runtime lives in `chatml_moderator_runtime.ml`. It
+supports:
+
+- compile once:
+  - parse
+  - typecheck against a selected surface
+  - resolve
+- instantiate per session:
+  - fresh environment
+  - install chosen builtin surface
+  - evaluate the program
+  - load `initial_state` and `on_event`
+- handle events:
+  - call `on_event`
+  - require a returned task
+  - interpret that task
+  - commit or discard local transactional outputs
+
+The public entrypoints are:
+
+```ocaml
+compile_script
+instantiate_session
+handle_event
+```
+
+### 21.9 Operation registry and defaults
+
+The moderator runtime interprets task effects through an operation registry:
+
+```ocaml
+type op_kind =
+  | Local_transactional
+  | External_sync
+  | External_async
+  | Diagnostic
+```
+
+Each operation definition provides:
+
+- an operation name,
+- its runtime kind,
+- a phase check,
+- and a host callback.
+
+The runtime also ships with a standard default registry constructor:
+
+```ocaml
+default_operations
+default_runtime_config
+```
+
+This default registry understands the standard moderator modules
+(`Log`/`Turn`/`Tool`/`Model`/`Schedule`/`Runtime`).
+
+Current default behavior is intentionally conservative:
+
+- diagnostic/log and local turn/tool-moderation handlers default to no-op
+  success,
+- `Runtime.emit` buffers an internal event,
+- `Runtime.end_session` marks the session as ended on successful commit,
+- external integrations such as `Tool.call`, `Model.call`, and
+  `Schedule.after_ms` fail with a clear `"… is not configured"` error unless
+  the host supplies handlers.
+
+### 21.10 Commit/rollback semantics
+
+The moderator runtime currently buffers:
+
+- the next script state,
+- local transactional effect records,
+- internal emitted events,
+- pending end-session requests.
+
+On successful completion of the returned task:
+
+- the new script state is persisted,
+- local transactional effects are committed in execution order,
+- buffered emitted events are appended to the session queue,
+- a pending end-session request halts the session.
+
+On task failure:
+
+- the previous script state is kept,
+- buffered local transactional effects are discarded,
+- buffered emitted events are discarded,
+- buffered end-session requests are discarded.
+
+`TCatch` restores the local transactional buffers before running the handler
+task.
+
+### 21.11 Phase restrictions
+
+The operation model includes runtime phase checks:
+
+```ocaml
+phase_check : string -> (unit, string) result
+```
+
+The current default registry provides helper constructors such as:
+
+```ocaml
+allow_all_phases
+require_phases
+```
+
+but the default assembled operation set currently uses permissive
+`allow_all_phases` checks unless the host overrides them.
+
+### 21.12 Current implementation limitation: no built-in structured overlay
+
+The current moderator runtime records committed local transactional effects,
+but it does not yet impose a rich built-in typed overlay model for turn
+editing/tool moderation. Hosts that need such an overlay can build it in
+their handlers from the local transactional operation stream.
