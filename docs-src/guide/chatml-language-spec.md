@@ -2602,11 +2602,35 @@ embeddings.
 The current moderator runtime uses a convention-based contract:
 
 ```ocaml
-let initial_state = ...
-
-let on_event =
+let initial_state = { reminder_count = 0 }
+  
+let on_event : context -> state -> event -> state task =
   fun ctx st ev ->
-    ...
+    match ev with
+    | `UserMessage(msg) ->
+      let st = { st with reminder_count = st.reminder_count + 1 } in
+      let* () = Turn.prepend_system("Be concise. Validate tool arguments before execution.") in
+      Task.pure(st)
+
+    | `BeforeToolCall(call) ->
+      let input = ... in
+      let* review = Model.call("tool_safety_review", input) in
+       ( match review with
+        | `Ok(decision) ->
+          let* () = Tool.approve() in
+          Task.pure(st)
+        | `Refused(msg) ->
+          let* () = Tool.reject("model refused: " ++ msg) in
+          Task.pure(st)
+        | `Error(msg) ->
+          let* () = Tool.reject("review failed: " ++ msg) in
+          Task.pure(st))
+    | `AsyncCompleted(job_id, payload) ->
+      let* () = Log.info("async completed: " ++ job_id) in
+      Task.pure(st)
+
+    | _ ->
+      Task.pure(st)
 ```
 
 Conceptually:
