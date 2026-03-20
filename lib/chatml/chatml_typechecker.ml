@@ -263,8 +263,8 @@ let unfold_mu (ty : typ) : typ =
 
 let instantiate (state : infer_state) ty =
   let table = Hashtbl.create (module String) in
-  let rec inst = function
-    | Fun (ps, r) -> Fun (List.map ps ~f:inst, inst r)
+  let rec inst (seen : tv ref list) = function
+    | Fun (ps, r) -> Fun (List.map ps ~f:(inst seen), inst seen r)
     | Generic x ->
       (match Hashtbl.find table x with
        | Some t -> t
@@ -272,19 +272,21 @@ let instantiate (state : infer_state) ty =
          let v = new_var state state.current_lvl in
          Hashtbl.add_exn table ~key:x ~data:v;
          v)
-    | Con (n, args) -> Con (n, List.map args ~f:inst)
-    | Var { contents = Bound ty } -> inst ty
-    | Mu (binder, body) -> Mu (binder, inst body)
+    | Con (n, args) -> Con (n, List.map args ~f:(inst seen))
+    | Var ({ contents = Bound t } as tvref) ->
+      if tv_ref_mem tvref seen then Var tvref else inst (tvref :: seen) t
+    | Var ({ contents = Free _ } as tvref) -> Var tvref
+    | Mu (binder, body) -> Mu (binder, inst seen body)
     | Rec_var _ as rec_var -> rec_var
-    | Ref t -> Ref (inst t)
-    | Record r -> Record (inst r)
-    | Variant r -> Variant (inst r)
-    | Tuple ts -> Tuple (List.map ts ~f:inst)
-    | Row (fields, t) -> Row (Env.map fields ~f:inst, inst t)
-    | Array t -> Array (inst t)
+    | Ref t -> Ref (inst seen t)
+    | Record r -> Record (inst seen r)
+    | Variant r -> Variant (inst seen r)
+    | Tuple ts -> Tuple (List.map ts ~f:(inst seen))
+    | Row (fields, t) -> Row (Env.map fields ~f:(inst seen), inst seen t)
+    | Array t -> Array (inst seen t)
     | t -> t
   in
-  inst ty
+  inst [] ty
 ;;
 
 (**
@@ -294,22 +296,24 @@ let instantiate (state : infer_state) ty =
   universally-quantified (Generic) type variables.
 *)
 let generalise (state : infer_state) ty =
-  let rec gen = function
-    | Fun (params, ret) -> Fun (List.map params ~f:gen, gen ret)
-    | Var { contents = Bound t } -> gen t
+  let rec gen (seen : tv ref list) = function
+    | Fun (params, ret) -> Fun (List.map params ~f:(gen seen), gen seen ret)
+    | Var ({ contents = Bound t } as tvref) ->
+      if tv_ref_mem tvref seen then Var tvref else gen (tvref :: seen) t
     | Var { contents = Free (name, lvl) } when lvl > state.current_lvl -> Generic name
-    | Con (n, args) -> Con (n, List.map args ~f:gen)
-    | Mu (binder, body) -> Mu (binder, gen body)
+    | Var ({ contents = Free _ } as tvref) -> Var tvref
+    | Con (n, args) -> Con (n, List.map args ~f:(gen seen))
+    | Mu (binder, body) -> Mu (binder, gen seen body)
     | Rec_var _ as rec_var -> rec_var
-    | Ref t -> Ref (gen t)
-    | Record row -> Record (gen row)
-    | Variant row -> Variant (gen row)
-    | Tuple ts -> Tuple (List.map ts ~f:gen)
-    | Row (fields, tail) -> Row (Env.map fields ~f:gen, gen tail)
-    | Array t -> Array (gen t)
+    | Ref t -> Ref (gen seen t)
+    | Record row -> Record (gen seen row)
+    | Variant row -> Variant (gen seen row)
+    | Tuple ts -> Tuple (List.map ts ~f:(gen seen))
+    | Row (fields, tail) -> Row (Env.map fields ~f:(gen seen), gen seen tail)
+    | Array t -> Array (gen seen t)
     | t -> t
   in
-  gen ty
+  gen [] ty
 ;;
 
 let has_recursive_type (ty : typ) : bool =
@@ -444,9 +448,9 @@ let occurs tv ty =
       List.iter ps ~f:(aux seen);
       aux seen r
     | Con (_n, args) -> List.iter args ~f:(aux seen)
+    | Var tv' when phys_equal tv tv' -> found := true
     | Var ({ contents = Bound ty } as tv') ->
       if not (tv_ref_mem tv' seen) then aux (tv' :: seen) ty
-    | Var tv' when phys_equal tv tv' -> found := true
     | Var ({ contents = Free (name, lvl) } as tv') ->
       let new_lvl =
         match !tv with
