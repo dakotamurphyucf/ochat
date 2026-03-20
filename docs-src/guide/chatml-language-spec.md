@@ -2798,3 +2798,87 @@ The current moderator runtime records committed local transactional effects,
 but it does not yet impose a rich built-in typed overlay model for turn
 editing/tool moderation. Hosts that need such an overlay can build it in
 their handlers from the local transactional operation stream.
+
+### 21.13 Planned next steps
+
+The current implementation provides the core task/value/runtime machinery,
+but several pieces are intentionally still planned rather than fully landed.
+
+#### 21.13.1 Entrypoint type validation
+
+The runtime currently validates moderator entrypoints dynamically:
+
+- `initial_state` must exist
+- `on_event` must exist
+- `on_event` must be callable
+- `on_event` must return a task at runtime
+
+A planned next step is to validate the full script contract statically at
+load time, conceptually along the lines of:
+
+```ocaml
+initial_state : state
+on_event : context -> state -> event -> state task
+```
+
+This would most likely require exposing top-level binding types from the
+typechecker in a host-consumable form.
+
+#### 21.13.2 Phase restriction policy
+
+The operation model already supports runtime phase checks:
+
+```ocaml
+phase_check : string -> (unit, string) result
+```
+
+and the default runtime exposes helpers such as:
+
+```ocaml
+allow_all_phases
+require_phases
+```
+
+However, the current default registry remains intentionally permissive and
+mostly uses `allow_all_phases`.
+
+A planned next step is to install stronger default phase restrictions for
+operations such as:
+
+- `Tool.approve`
+- `Tool.reject`
+- `Tool.rewrite_args`
+- `Tool.redirect`
+- `Turn.prepend_system`
+- `Turn.halt`
+
+once the desired host phase vocabulary is settled.
+
+#### 21.13.3 Structured overlay model
+
+The current runtime commits and rolls back local transactional effects, but
+it does not yet maintain a first-class typed working overlay that later
+operations can query directly.
+
+A planned next step is to replace or augment the current raw local-effect
+buffer with a structured overlay model for concepts such as:
+
+- prepended system instructions
+- appended/replaced/deleted messages
+- tool moderation state
+- compaction requests
+- halt/end-session state
+
+This would better realize the intended semantics where later host
+operations, such as model/tool calls, can observe earlier local edits within
+the same handler execution.
+
+#### 21.13.4 Summary of current status
+
+In short:
+
+- task values and host-side interpretation are implemented,
+- composable builtin surfaces are implemented,
+- moderator capability modules are implemented,
+- default operation registry plumbing is implemented,
+- but contract hardening and overlay semantics are still future work.
