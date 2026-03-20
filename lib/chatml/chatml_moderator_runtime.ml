@@ -426,9 +426,7 @@ let default_operations ?(handlers = default_handlers) () : op_def list =
     ; perform =
         with_unary "Runtime.emit" (fun session event ->
           match session.current_exec with
-          | None ->
-            Error
-              "Runtime.emit is only valid during active task interpretation"
+          | None -> Error "Runtime.emit is only valid during active task interpretation"
           | Some exec ->
             exec.emitted_rev <- event :: exec.emitted_rev;
             Ok Lang.VUnit)

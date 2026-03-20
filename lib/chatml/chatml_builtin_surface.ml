@@ -1,5 +1,4 @@
 open Core
-
 module Builtin_spec = Chatml_builtin_spec
 
 type builtin_type_alias =
@@ -15,11 +14,7 @@ type surface =
 
 let empty : surface = { globals = []; modules = []; type_aliases = [] }
 
-let dedupe_by_name
-      (entries : 'a list)
-      ~(name_of : 'a -> string)
-  : 'a list
-  =
+let dedupe_by_name (entries : 'a list) ~(name_of : 'a -> string) : 'a list =
   let seen = Hash_set.create (module String) in
   List.filter entries ~f:(fun entry ->
     let name = name_of entry in
@@ -32,17 +27,13 @@ let dedupe_by_name
 
 let merge (left : surface) (right : surface) : surface =
   { globals =
-      dedupe_by_name
-        (left.globals @ right.globals)
-        ~name_of:(fun builtin -> builtin.name)
+      dedupe_by_name (left.globals @ right.globals) ~name_of:(fun builtin -> builtin.name)
   ; modules =
-      dedupe_by_name
-        (left.modules @ right.modules)
-        ~name_of:(fun builtin_module -> builtin_module.name)
+      dedupe_by_name (left.modules @ right.modules) ~name_of:(fun builtin_module ->
+        builtin_module.name)
   ; type_aliases =
-      dedupe_by_name
-        (left.type_aliases @ right.type_aliases)
-        ~name_of:(fun alias -> alias.name)
+      dedupe_by_name (left.type_aliases @ right.type_aliases) ~name_of:(fun alias ->
+        alias.name)
   }
 ;;
 

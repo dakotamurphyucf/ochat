@@ -44,7 +44,12 @@
  (name chatml_moderator_runtime)
  (public_name ochat.chatml_moderator_runtime)
  (modules chatml_moderator_runtime)
- (libraries core chatml chatml_typechecker chatml_resolver chatml_builtin_modules)
+ (libraries
+  core
+  chatml
+  chatml_typechecker
+  chatml_resolver
+  chatml_builtin_modules)
  (preprocess
   (pps ppx_jane)))
 

@@ -1120,8 +1120,7 @@ let rec typ_of_type_expr ?self_name (types : type_env) (expr : type_expr) : typ 
     (match name, List.map args ~f:(typ_of_type_expr ?self_name types) with
      | "array", [ arg_ty ] -> Array arg_ty
      | "task", [ arg_ty ] -> Con ("task", [ arg_ty ])
-     | _, _ ->
-       raise (Type_error (Printf.sprintf "Unknown type constructor '%s'" name)))
+     | _, _ -> raise (Type_error (Printf.sprintf "Unknown type constructor '%s'" name)))
   | TERecord fields ->
     ensure_unique_type_labels ~what:"type record field" (List.map fields ~f:fst);
     Record
@@ -1193,7 +1192,8 @@ and typ_of_builtin_row (row : Builtin_spec.row) : typ =
 
 let init_env_with_surface (surface : Builtin_surface.surface) : tenv =
   let globals =
-    surface.globals |> List.map ~f:(fun builtin -> builtin.name, typ_of_builtin_ty builtin.scheme)
+    surface.globals
+    |> List.map ~f:(fun builtin -> builtin.name, typ_of_builtin_ty builtin.scheme)
   in
   let modules =
     surface.modules
@@ -1208,10 +1208,12 @@ let init_env () : tenv = init_env_with_surface Builtin_surface.core_surface
 let init_types_with_surface (surface : Builtin_surface.surface) : type_env =
   List.fold surface.type_aliases ~init:Env.empty ~f:(fun env alias ->
     if Option.is_some (primitive_type_of_name alias.name)
-    then raise (Type_error (Printf.sprintf "Cannot redefine primitive type '%s'" alias.name))
+    then
+      raise (Type_error (Printf.sprintf "Cannot redefine primitive type '%s'" alias.name))
     else (
       match Env.find env alias.name with
-      | Some _ -> raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" alias.name))
+      | Some _ ->
+        raise (Type_error (Printf.sprintf "Duplicate type declaration '%s'" alias.name))
       | None ->
         let alias_ty = typ_of_builtin_ty alias.body in
         if has_recursive_type alias_ty then ensure_contractive_type alias_ty;
@@ -2281,9 +2283,7 @@ let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stm
 
     The snapshot produced on success is the only source of type information
     consulted by the resolver in production. *)
-let check_program_with_surface
-      (surface : Builtin_surface.surface)
-      (prog : program)
+let check_program_with_surface (surface : Builtin_surface.surface) (prog : program)
   : (checked_program, diagnostic) result
   =
   let state = create_state () in

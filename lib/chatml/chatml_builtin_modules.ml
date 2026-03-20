@@ -101,9 +101,7 @@ module BuiltinModules = struct
       This is the recommended bootstrap helper for embedders that want a
       ready-to-run interpreter environment whose runtime bindings stay in
       sync with the type-checker's builtin specification. *)
-  let create_default_env () : env =
-    create_env_with_surface Builtin_surface.core_surface
-  ;;
+  let create_default_env () : env = create_env_with_surface Builtin_surface.core_surface
   (* end of add_global_builtins body *)
 end
 

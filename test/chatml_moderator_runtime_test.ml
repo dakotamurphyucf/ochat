@@ -1,6 +1,5 @@
 open Core
 open Chatml
-
 module L = Chatml_lang
 module Runtime = Chatml_moderator_runtime
 module Builtin_modules = Chatml_builtin_modules
@@ -40,9 +39,7 @@ let context ~(phase : string) : L.value =
        ])
 ;;
 
-let compile_session
-      ?(handlers = Runtime.default_handlers)
-      (source : string)
+let compile_session ?(handlers = Runtime.default_handlers) (source : string)
   : Runtime.session
   =
   let compiled = ok_or_fail (Runtime.compile_script ~source ()) in
@@ -124,12 +121,19 @@ let%expect_test "moderator runtime default local operations" =
     { Runtime.default_handlers with
       on_log =
         (fun _session ~level ~message ->
-           logs := !logs @ [ Printf.sprintf "%s:%s" (Runtime.string_of_log_level level) message ];
-           Ok ())
+          logs
+          := !logs
+             @ [ Printf.sprintf "%s:%s" (Runtime.string_of_log_level level) message ];
+          Ok ())
     }
   in
   let session = compile_session ~handlers local_ops_script in
-  (match Runtime.handle_event session ~context:(context ~phase:"before_model") ~event:(L.VVariant ("Tick", [])) with
+  (match
+     Runtime.handle_event
+       session
+       ~context:(context ~phase:"before_model")
+       ~event:(L.VVariant ("Tick", []))
+   with
    | Ok () -> print_endline "ok"
    | Error msg -> print_endline ("error: " ^ msg));
   print_endline ("state=" ^ show_value (Runtime.current_state session));
@@ -154,33 +158,39 @@ let%expect_test "moderator runtime default external handlers" =
     { Runtime.default_handlers with
       on_tool_call =
         (fun _session ~name ~args ->
-           actions := !actions @ [ "tool_call " ^ name ^ " " ^ show_value args ];
-           Ok (L.VVariant ("Ok", [ args ])))
+          actions := !actions @ [ "tool_call " ^ name ^ " " ^ show_value args ];
+          Ok (L.VVariant ("Ok", [ args ])))
     ; on_model_call =
         (fun _session ~recipe ~payload ->
-           actions := !actions @ [ "model_call " ^ recipe ^ " " ^ show_value payload ];
-           Ok (L.VVariant ("Refused", [ L.VString "policy" ])))
+          actions := !actions @ [ "model_call " ^ recipe ^ " " ^ show_value payload ];
+          Ok (L.VVariant ("Refused", [ L.VString "policy" ])))
     ; on_tool_spawn =
         (fun _session ~name ~args ->
-           actions := !actions @ [ "tool_spawn " ^ name ^ " " ^ show_value args ];
-           Ok "tool-job-1")
+          actions := !actions @ [ "tool_spawn " ^ name ^ " " ^ show_value args ];
+          Ok "tool-job-1")
     ; on_model_spawn =
         (fun _session ~recipe ~payload ->
-           actions := !actions @ [ "model_spawn " ^ recipe ^ " " ^ show_value payload ];
-           Ok "model-job-1")
+          actions := !actions @ [ "model_spawn " ^ recipe ^ " " ^ show_value payload ];
+          Ok "model-job-1")
     ; on_schedule_after_ms =
         (fun _session ~delay_ms ~payload ->
-           actions :=
-             !actions @ [ Printf.sprintf "schedule_after_ms %d %s" delay_ms (show_value payload) ];
-           Ok "timer-1")
+          actions
+          := !actions
+             @ [ Printf.sprintf "schedule_after_ms %d %s" delay_ms (show_value payload) ];
+          Ok "timer-1")
     ; on_schedule_cancel =
         (fun _session ~id ->
-           actions := !actions @ [ "schedule_cancel " ^ id ];
-           Ok ())
+          actions := !actions @ [ "schedule_cancel " ^ id ];
+          Ok ())
     }
   in
   let session = compile_session ~handlers external_ops_script in
-  (match Runtime.handle_event session ~context:(context ~phase:"before_model") ~event:(L.VVariant ("Tick", [])) with
+  (match
+     Runtime.handle_event
+       session
+       ~context:(context ~phase:"before_model")
+       ~event:(L.VVariant ("Tick", []))
+   with
    | Ok () -> print_endline "ok"
    | Error msg -> print_endline ("error: " ^ msg));
   print_endline ("state=" ^ show_value (Runtime.current_state session));
@@ -201,7 +211,12 @@ let%expect_test "moderator runtime default external handlers" =
 
 let%expect_test "moderator runtime default unconfigured external operation fails clearly" =
   let session = compile_session missing_external_handler_script in
-  (match Runtime.handle_event session ~context:(context ~phase:"before_model") ~event:(L.VVariant ("Tick", [])) with
+  (match
+     Runtime.handle_event
+       session
+       ~context:(context ~phase:"before_model")
+       ~event:(L.VVariant ("Tick", []))
+   with
    | Ok () -> print_endline "unexpected success"
    | Error msg -> print_endline msg);
   print_endline ("state=" ^ show_value (Runtime.current_state session));

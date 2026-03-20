@@ -13,7 +13,6 @@
     supplies the common execution model. *)
 
 open Chatml.Chatml_lang
-
 module Builtin_surface = Chatml.Chatml_builtin_surface
 
 (** Compiled script artifact produced by {!compile_script}. *)
@@ -87,11 +86,8 @@ type default_handlers =
   ; on_tool_spawn : session -> name:string -> args:value -> (string, string) result
   ; on_model_call : session -> recipe:string -> payload:value -> (value, string) result
   ; on_model_spawn : session -> recipe:string -> payload:value -> (string, string) result
-  ; on_schedule_after_ms
-      : session
-      -> delay_ms:int
-      -> payload:value
-      -> (string, string) result
+  ; on_schedule_after_ms :
+      session -> delay_ms:int -> payload:value -> (string, string) result
   ; on_schedule_cancel : session -> id:string -> (unit, string) result
   ; on_request_compaction : session -> (unit, string) result
   ; on_end_session : session -> reason:string -> (unit, string) result
@@ -172,8 +168,4 @@ val request_session_end : session -> reason:string -> (unit, string) result
     - interprets the returned task,
     - commits buffered state/effects on success,
     - or rolls back local transactional buffers on failure. *)
-val handle_event
-  :  session
-  -> context:value
-  -> event:value
-  -> (unit, string) result
+val handle_event : session -> context:value -> event:value -> (unit, string) result

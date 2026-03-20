@@ -1,10 +1,7 @@
 open Core
 open Chatml_lang
 
-let expect_record_field
-      (context : string)
-      (fields : value String.Map.t)
-      (field : string)
+let expect_record_field (context : string) (fields : value String.Map.t) (field : string)
   : (value, string) result
   =
   match Map.find fields field with
@@ -46,9 +43,7 @@ let rec jsonaf_to_value (json : Jsonaf.t) : value =
     VVariant ("Object", [ VArray entries ])
 ;;
 
-let json_shape_error =
-  "expected Json.t (`Null/`Bool/`Number/`String/`Array/`Object)"
-;;
+let json_shape_error = "expected Json.t (`Null/`Bool/`Number/`String/`Array/`Object)"
 
 let rec list_map_result (items : 'a list) ~(f : 'a -> ('b, string) result)
   : ('b list, string) result
@@ -77,7 +72,7 @@ let rec value_to_jsonaf_result (value : value) : (Jsonaf.t, string) result =
     |> list_map_result ~f:value_to_jsonaf_result
     |> Result.map ~f:(fun values -> `Array values)
   | VVariant ("Object", [ VArray entries ]) ->
-    let field_of_entry (entry : value) : ((string * Jsonaf.t), string) result =
+    let field_of_entry (entry : value) : (string * Jsonaf.t, string) result =
       match entry with
       | VRecord fields ->
         (match expect_record_field "JSON object entry" fields "key" with

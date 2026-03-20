@@ -210,14 +210,13 @@ let make_ternary_builtin
   { name; scheme; impl = with_ternary_args name f }
 ;;
 
-let make_task_nullary_perform_builtin
-      (name : string)
-      (result_ty : ty)
-      ~(op : string)
+let make_task_nullary_perform_builtin (name : string) (result_ty : ty) ~(op : string)
   : builtin
   =
-  make_nullary_builtin name (TFun ([], task_ty result_ty)) (fun () ->
-    VTask (TPerform { op; args = [] }))
+  make_nullary_builtin
+    name
+    (TFun ([], task_ty result_ty))
+    (fun () -> VTask (TPerform { op; args = [] }))
 ;;
 
 let make_task_unary_perform_builtin
@@ -227,8 +226,10 @@ let make_task_unary_perform_builtin
       ~(op : string)
   : builtin
   =
-  make_unary_builtin name (TFun ([ arg_ty ], task_ty result_ty)) (fun arg ->
-    VTask (TPerform { op; args = [ arg ] }))
+  make_unary_builtin
+    name
+    (TFun ([ arg_ty ], task_ty result_ty))
+    (fun arg -> VTask (TPerform { op; args = [ arg ] }))
 ;;
 
 let make_task_binary_perform_builtin
@@ -245,14 +246,13 @@ let make_task_binary_perform_builtin
     (fun lhs rhs -> VTask (TPerform { op; args = [ lhs; rhs ] }))
 ;;
 
-let make_task_nullary_spawn_builtin
-      (name : string)
-      (result_ty : ty)
-      ~(op : string)
+let make_task_nullary_spawn_builtin (name : string) (result_ty : ty) ~(op : string)
   : builtin
   =
-  make_nullary_builtin name (TFun ([], task_ty result_ty)) (fun () ->
-    VTask (TSpawn { op; args = [] }))
+  make_nullary_builtin
+    name
+    (TFun ([], task_ty result_ty))
+    (fun () -> VTask (TSpawn { op; args = [] }))
 ;;
 
 let make_task_unary_spawn_builtin
@@ -262,8 +262,10 @@ let make_task_unary_spawn_builtin
       ~(op : string)
   : builtin
   =
-  make_unary_builtin name (TFun ([ arg_ty ], task_ty result_ty)) (fun arg ->
-    VTask (TSpawn { op; args = [ arg ] }))
+  make_unary_builtin
+    name
+    (TFun ([ arg_ty ], task_ty result_ty))
+    (fun arg -> VTask (TSpawn { op; args = [ arg ] }))
 ;;
 
 let make_task_binary_spawn_builtin
@@ -364,21 +366,14 @@ let option_of (t : ty) : ty = variant [ "None", TUnit; "Some", t ]
 let json_option_ty : ty = option_of json_ty
 
 let message_ty : ty =
-  record
-    [ "id", TString
-    ; "role", TString
-    ; "content", TString
-    ; "meta", json_ty
-    ]
+  record [ "id", TString; "role", TString; "content", TString; "meta", json_ty ]
 ;;
 
 let tool_desc_ty : ty =
   record [ "name", TString; "description", TString; "input_schema", json_ty ]
 ;;
 
-let tool_call_ty : ty =
-  record [ "id", TString; "name", TString; "args", json_ty ]
-;;
+let tool_call_ty : ty = record [ "id", TString; "name", TString; "args", json_ty ]
 
 let tool_result_ty : ty =
   record [ "call_id", TString; "name", TString; "result", json_ty ]
@@ -1262,12 +1257,7 @@ let tool_module : builtin_module =
           json_ty
           tool_call_result_ty
           ~op:"Tool.call"
-      ; make_task_binary_spawn_builtin
-          "spawn"
-          TString
-          json_ty
-          TString
-          ~op:"Tool.spawn"
+      ; make_task_binary_spawn_builtin "spawn" TString json_ty TString ~op:"Tool.spawn"
       ]
   }
 ;;
@@ -1281,12 +1271,7 @@ let model_module : builtin_module =
           json_ty
           model_call_result_ty
           ~op:"Model.call"
-      ; make_task_binary_spawn_builtin
-          "spawn"
-          TString
-          json_ty
-          TString
-          ~op:"Model.spawn"
+      ; make_task_binary_spawn_builtin "spawn" TString json_ty TString ~op:"Model.spawn"
       ]
   }
 ;;
@@ -1325,11 +1310,5 @@ let runtime_module : builtin_module =
 let core_modules : builtin_module list = modules
 
 let moderator_modules : builtin_module list =
-  [ log_module
-  ; turn_module
-  ; tool_module
-  ; model_module
-  ; schedule_module
-  ; runtime_module
-  ]
+  [ log_module; turn_module; tool_module; model_module; schedule_module; runtime_module ]
 ;;

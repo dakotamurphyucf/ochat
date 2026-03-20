@@ -84,6 +84,7 @@ val json_ty : ty
 (** Structural moderator-runtime record types used for builtin type
     aliases. *)
 val message_ty : ty
+
 val tool_desc_ty : ty
 val tool_call_ty : ty
 val tool_result_ty : ty
