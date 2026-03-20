@@ -101,3 +101,109 @@ let value_to_jsonaf_exn (value : value) : Jsonaf.t =
   | Ok json -> json
   | Error msg -> failwith msg
 ;;
+
+module Snapshot = struct
+  type t =
+    | Int of int
+    | Float of float
+    | Bool of bool
+    | String of string
+    | Unit
+    | Array of t list
+    | Record of (string * t) list
+    | Variant of string * t list
+  [@@deriving sexp, compare, bin_io]
+
+  let field_path path field = Printf.sprintf "%s.%s" path field
+  let array_path path index = Printf.sprintf "%s[%d]" path index
+  let variant_path path tag index = Printf.sprintf "%s<%s>[%d]" path tag index
+
+  let unsupported path kind =
+    Error (Printf.sprintf "%s: %s are not serializable in ChatML snapshots" path kind)
+  ;;
+
+  let rec of_value_at ~path (value : value) : (t, string) result =
+    match value with
+    | VInt i -> Ok (Int i)
+    | VFloat f -> Ok (Float f)
+    | VBool b -> Ok (Bool b)
+    | VString s -> Ok (String s)
+    | VUnit -> Ok Unit
+    | VArray values ->
+      values
+      |> Array.to_list
+      |> List.mapi ~f:(fun index element ->
+        of_value_at ~path:(array_path path index) element)
+      |> list_map_result ~f:Fn.id
+      |> Result.map ~f:(fun values -> Array values)
+    | VRecord fields ->
+      fields
+      |> Map.to_alist
+      |> list_map_result ~f:(fun (field, value) ->
+        of_value_at ~path:(field_path path field) value
+        |> Result.map ~f:(fun value -> field, value))
+      |> Result.map ~f:(fun fields -> Record fields)
+    | VVariant (tag, payload) ->
+      payload
+      |> List.mapi ~f:(fun index element ->
+        of_value_at ~path:(variant_path path tag index) element)
+      |> list_map_result ~f:Fn.id
+      |> Result.map ~f:(fun payload -> Variant (tag, payload))
+    | VRef _ -> unsupported path "refs"
+    | VClosure _ -> unsupported path "closures"
+    | VModule _ -> unsupported path "modules"
+    | VBuiltin _ -> unsupported path "builtins"
+    | VTask _ -> unsupported path "tasks"
+  ;;
+
+  let of_value value = of_value_at ~path:"root" value
+
+  let of_value_exn value =
+    match of_value value with
+    | Ok snapshot -> snapshot
+    | Error msg -> failwith msg
+  ;;
+
+  let rec to_value_at ~path (snapshot : t) : (value, string) result =
+    match snapshot with
+    | Int i -> Ok (VInt i)
+    | Float f -> Ok (VFloat f)
+    | Bool b -> Ok (VBool b)
+    | String s -> Ok (VString s)
+    | Unit -> Ok VUnit
+    | Array values ->
+      values
+      |> List.mapi ~f:(fun index element ->
+        to_value_at ~path:(array_path path index) element)
+      |> list_map_result ~f:Fn.id
+      |> Result.map ~f:(fun values -> VArray (Array.of_list values))
+    | Record fields ->
+      fields
+      |> list_map_result ~f:(fun (field, snapshot) ->
+        to_value_at ~path:(field_path path field) snapshot
+        |> Result.map ~f:(fun value -> field, value))
+      |> Result.bind ~f:(fun fields ->
+        match String.Map.of_alist fields with
+        | `Ok fields -> Ok (VRecord fields)
+        | `Duplicate_key field ->
+          Error
+            (Printf.sprintf
+               "%s: duplicate record field %S in ChatML snapshot"
+               path
+               field))
+    | Variant (tag, payload) ->
+      payload
+      |> List.mapi ~f:(fun index element ->
+        to_value_at ~path:(variant_path path tag index) element)
+      |> list_map_result ~f:Fn.id
+      |> Result.map ~f:(fun payload -> VVariant (tag, payload))
+  ;;
+
+  let to_value snapshot = to_value_at ~path:"root" snapshot
+
+  let to_value_exn snapshot =
+    match to_value snapshot with
+    | Ok value -> value
+    | Error msg -> failwith msg
+  ;;
+end

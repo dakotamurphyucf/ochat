@@ -10,6 +10,7 @@
 
     {[
       <msg> <user> <assistant> <agent> <system> <developer>
+      <script>
       <doc> <img> <import> <config>
       <reasoning> <summary>
       <tool_call> <tool_response> <tool>
@@ -89,6 +90,7 @@ let string_of_tag : tag -> string = function
   | Agent -> "agent"
   | System -> "system"
   | Developer -> "developer"
+  | Script -> "script"
   | Doc -> "doc"
   | Import -> "import"
   | Img -> "img"

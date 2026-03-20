@@ -561,6 +561,14 @@ module Handlers = struct
       exit 1)
   ;;
 
+  let read_existing_or_exit ~env ~id =
+    match Session_store.read_existing ~env ~id with
+    | Some session -> session
+    | None ->
+      eprintf "Error: session '%s' could not be read.\n" id;
+      exit 1
+  ;;
+
   let print_json json = printf "%s\n" (Jsonaf.to_string_hum json)
 
   let sessions_to_json sessions =
@@ -594,7 +602,7 @@ module Handlers = struct
     let snapshot = Eio.Path.(dir / "snapshot.bin") in
     require_snapshot ~id snapshot;
     let stats = Eio.Path.stat ~follow:true snapshot in
-    let session = Session.Io.File.read snapshot in
+    let session = read_existing_or_exit ~env ~id in
     match format with
     | Output_format.Human ->
       printf "Session: %s\n" id;
@@ -629,13 +637,13 @@ module Handlers = struct
         exit 1)
     ;;
 
-    let read_with_lock ~lock_file ~snapshot =
+    let read_with_lock ~env ~id ~lock_file =
       protectx
         ~finally:(fun () ->
           try Eio.Path.unlink lock_file with
           | _ -> ())
         ()
-        ~f:(fun () -> Session.Io.File.read snapshot)
+        ~f:(fun () -> read_existing_or_exit ~env ~id)
     ;;
 
     let mkdirs_if_missing dir =
@@ -696,7 +704,7 @@ module Handlers = struct
       require_snapshot ~id snapshot;
       let lock_file = Eio.Path.(sdir / "snapshot.bin.lock") in
       acquire_lock_or_exit ~id ~lock_file;
-      let session = read_with_lock ~lock_file ~snapshot in
+      let session = read_with_lock ~env ~id ~lock_file in
       sdir, session
     ;;
 
@@ -957,7 +965,7 @@ module Handlers = struct
     let dir = Session_store.path ~env id in
     let snapshot = Eio.Path.(dir / "snapshot.bin") in
     require_snapshot ~id snapshot;
-    let session = Session.Io.File.read snapshot in
+    let session = read_existing_or_exit ~env ~id in
     let archive_dir = Eio.Path.(dir / "archive") in
     let archived_snapshot =
       Eio.Path.(archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp_for_archive ()))
@@ -987,7 +995,7 @@ module Handlers = struct
     let dir = Session_store.path ~env id in
     let snapshot = Eio.Path.(dir / "snapshot.bin") in
     require_snapshot ~id snapshot;
-    let session = Session.Io.File.read snapshot in
+    let session = read_existing_or_exit ~env ~id in
     let archive_dir = Eio.Path.(dir / "archive") in
     let archived_snapshot =
       Eio.Path.(archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp_for_archive ()))

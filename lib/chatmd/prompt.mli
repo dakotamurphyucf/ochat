@@ -151,6 +151,25 @@ module Chat_markdown : sig
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type script_reference =
+    { path : string
+    ; source_text : string
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  type script_source =
+    | Inline of string
+    | Src of script_reference
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  type script =
+    { id : string
+    ; language : string
+    ; kind : string
+    ; source : script_source
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
   type top_level_elements =
     | Msg of msg (** Legacy <msg/> element (system, developer…) *)
     | Developer of developer_msg
@@ -162,6 +181,7 @@ module Chat_markdown : sig
     | Config of config
     | Reasoning of reasoning
     | Tool of tool
+    | Script of script
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (** [parse_chat_inputs ~dir raw] tokenises, parses and normalises the
@@ -187,7 +207,8 @@ module Chat_markdown : sig
       4. Converts AST nodes into strongly-typed
          {!type:Chat_markdown.top_level_elements} values, mapping shorthand
          tags (`<user>`, `<assistant>` & co.) to dedicated aliases.
-      5. Filters out nodes that are irrelevant to the conversation
+      5. Resolves and validates top-level [`<script>`] declarations.
+      6. Filters out nodes that are irrelevant to the conversation
          (e.g. stray whitespace between top-level blocks).
 
       @raise Failure  If the source is not valid ChatMarkdown or if an

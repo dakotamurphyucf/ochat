@@ -46,6 +46,15 @@ type tool_moderation =
   | Rewrite_args of value
   | Redirect of string * value
 
+(** Structured local effects that can be decoded from committed
+    transactional operations after {!handle_event} succeeds. *)
+type local_effect =
+  | Turn_effect of turn_effect
+  | Tool_moderation_effect of tool_moderation
+  | Emit_internal_event of value
+  | Request_compaction
+  | End_session of string
+
 (** Runtime classification of task operations. *)
 type op_kind =
   | Local_transactional
@@ -148,8 +157,31 @@ val pending_local_effects : session -> eff list
     session, in execution order. *)
 val committed_local_effects : session -> eff list
 
+(** Decode one committed transactional effect into the structured local
+    runtime vocabulary. *)
+val decode_local_effect : eff -> (local_effect, string) result
+
+(** Decode committed transactional effects in execution order.  This is
+    the preferred way for embedders to inspect local turn mutations,
+    tool moderation actions, and runtime requests because it reflects the
+    runtime's transactional commit semantics. *)
+val decode_local_effects : eff list -> (local_effect list, string) result
+
 (** Buffered internal events currently queued for later delivery. *)
 val queued_events : session -> value list
+
+(** Remove and return the oldest queued internal event, if one exists. *)
+val take_queued_event : session -> value option
+
+(** Replace the session's durable runtime state from a persisted snapshot.
+
+    Any committed local effects from prior runs are cleared. *)
+val restore
+  :  session
+  -> state:value
+  -> queued_events:value list
+  -> halted:bool
+  -> (unit, string) result
 
 (** Whether the session has been ended by a committed runtime action. *)
 val is_halted : session -> bool

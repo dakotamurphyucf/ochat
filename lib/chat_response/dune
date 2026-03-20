@@ -9,6 +9,8 @@
   driver
   in_memory_stream
   fetch
+  moderation
+  moderator_manager
   tool_call
   response_loop
   tool
@@ -23,6 +25,9 @@
   definitions
   functions
   chatmd
+  chatml
+  chatml_moderator_runtime
+  session
   lru_cache
   ttl_lru_cache
   bin_prot_utils_eio

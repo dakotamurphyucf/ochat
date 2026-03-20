@@ -8,6 +8,7 @@ open Core
     * the system/user prompt file that seeded the conversation
     * the full message exchange with OpenAI (the {!module:History})
     * an optional lightweight task-list
+    * an optional persisted moderator snapshot
     * arbitrary key/value metadata
     * a virtual file-system (VFS) root used by tooling
 
@@ -48,6 +49,59 @@ module Task : sig
   val create : ?id:string -> title:string -> ?state:state -> unit -> t
 end
 
+module Snapshot = Chatml.Chatml_value_codec.Snapshot
+
+module Moderator_snapshot : sig
+  module Message : sig
+    type t =
+      { id : string
+      ; role : string
+      ; content : string
+      ; meta : Snapshot.t
+      }
+    [@@deriving bin_io, sexp]
+  end
+
+  module Overlay : sig
+    type replacement =
+      { target_id : string
+      ; message : Message.t
+      }
+    [@@deriving bin_io, sexp]
+
+    type t =
+      { prepended_system_messages : Message.t list
+      ; appended_messages : Message.t list
+      ; replacements : replacement list
+      ; deleted_message_ids : string list
+      ; halted_reason : string option
+      }
+    [@@deriving bin_io, sexp]
+
+    val empty : t
+  end
+
+  type t =
+    { script_id : string
+    ; script_source_hash : string
+    ; current_state : Snapshot.t
+    ; queued_internal_events : Snapshot.t list
+    ; halted : bool
+    ; overlay : Overlay.t
+    }
+  [@@deriving bin_io, sexp]
+
+  val create
+    :  script_id:string
+    -> script_source_hash:string
+    -> ?current_state:Snapshot.t
+    -> ?queued_internal_events:Snapshot.t list
+    -> ?halted:bool
+    -> ?overlay:Overlay.t
+    -> unit
+    -> t
+end
+
 (** Schema version emitted by the current binary.  Increment whenever
     the latest {!type:t} becomes incompatible with its previous shape. *)
 val current_version : int
@@ -61,6 +115,7 @@ type t =
     (** Optional prompt copy inside the session directory.    *)
   ; history : History.t
   ; tasks : Task.t list
+  ; moderator_snapshot : Moderator_snapshot.t option
   ; kv_store : (string * string) list
     (** Arbitrary metadata keyed by user-defined strings.       *)
   ; vfs_root : string (** Root directory for virtual files.           *)
@@ -86,21 +141,24 @@ val create
   -> ?local_prompt_copy:string
   -> ?history:History.t
   -> ?tasks:Task.t list
+  -> ?moderator_snapshot:Moderator_snapshot.t
   -> ?kv_store:(string * string) list
   -> ?vfs_root:string
   -> unit
   -> t
 
 (** [reset ?prompt_file session] returns **a copy** of [session] with an
-    empty {!field:history}.  Use it when the conversation should start
+    empty {!field:history} and no persisted moderator snapshot. Use it when
+    the conversation should start
     over while preserving bookkeeping and VFS content.
 
     The prompt path is overwritten when [prompt_file] is supplied. *)
 val reset : ?prompt_file:string -> t -> t
 
 (** [reset_keep_history ?prompt_file session] behaves like {!reset} but
-    keeps the current message history intact.  Only the prompt file may
-    change. *)
+    keeps the current message history intact. The moderator snapshot is still
+    cleared because a resumed prompt run must instantiate a fresh moderator
+    runtime. Only the prompt file may change. *)
 val reset_keep_history : ?prompt_file:string -> t -> t
 
 module Latest : sig
@@ -145,6 +203,24 @@ module Legacy : sig
   end
 
   val upgrade_v1 : V1.t -> t
+
+  module V2 : sig
+    type t =
+      { version : int
+      ; id : string
+      ; prompt_file : string
+      ; local_prompt_copy : string option
+      ; history : History.t
+      ; tasks : Task.t list
+      ; kv_store : (string * string) list
+      ; vfs_root : string
+      }
+    [@@deriving bin_io, sexp]
+
+    val version : int
+  end
+
+  val upgrade_v2 : V2.t -> t
 end
 
 module Io : sig

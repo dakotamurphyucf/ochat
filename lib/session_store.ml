@@ -58,6 +58,32 @@ let default_id_of_prompt (prompt_file : string) : string =
   Core.Md5.(digest_string prompt_file |> to_hex)
 ;;
 
+let read_snapshot_file (snapshot : Bin_prot_utils_eio.path) : Session.t option =
+  let try_read module_ upgrade_fn =
+    Or_error.try_with (fun () ->
+      let value = Bin_prot_utils_eio.read_bin_prot module_ snapshot in
+      upgrade_fn value)
+  in
+  match Or_error.try_with (fun () -> Session.Io.File.read snapshot) with
+  | Ok session -> Some session
+  | Error _ ->
+    (match try_read (module Session.Legacy.V2) Session.Legacy.upgrade_v2 with
+     | Ok session -> Some session
+     | Error _ ->
+       (match try_read (module Session.Legacy.V1) Session.Legacy.upgrade_v1 with
+        | Ok session -> Some session
+        | Error _ ->
+          (match try_read (module Session.Legacy.V0) Session.Legacy.upgrade_v0 with
+           | Ok session -> Some session
+           | Error _ -> None)))
+;;
+
+let read_existing ~env ~(id : id) : Session.t option =
+  let dir = path ~env id in
+  let snapshot = Eio.Path.(dir / "snapshot.bin") in
+  if Eio.Path.is_file snapshot then read_snapshot_file snapshot else None
+;;
+
 let load_or_create ~env ~prompt_file ?id ?(new_session = false) () : Session.t =
   (* Decide the session identifier to use.
      Priority order: explicit [?id] parameter → random UUID for
@@ -71,26 +97,6 @@ let load_or_create ~env ~prompt_file ?id ?(new_session = false) () : Session.t =
   let dir = ensure_dir ~env id in
   let ( / ) = Eio.Path.( / ) in
   let snapshot = dir / "snapshot.bin" in
-  (* Helper to attempt reading legacy snapshot and upgrading. *)
-  let read_and_upgrade () : Session.t option =
-    let try_read module_ upgrade_fn =
-      Or_error.try_with (fun () ->
-        let v = Bin_prot_utils_eio.read_bin_prot module_ snapshot in
-        upgrade_fn v)
-    in
-    (* First attempt using the latest schema (this should succeed for fresh or up-to-date snapshots). *)
-    match Or_error.try_with (fun () -> Session.Io.File.read snapshot) with
-    | Ok s -> Some s
-    | Error _ ->
-      (* Try legacy V1 *)
-      (match try_read (module Session.Legacy.V1) Session.Legacy.upgrade_v1 with
-       | Ok s -> Some s
-       | Error _ ->
-         (* Try legacy V0 *)
-         (match try_read (module Session.Legacy.V0) Session.Legacy.upgrade_v0 with
-          | Ok s -> Some s
-          | Error _ -> None))
-  in
   let newly_created_session () =
     let prompt_copy_path = "prompt.chatmd" in
     (* Attempt to copy the prompt file into the session directory; ignore errors. *)
@@ -113,7 +119,7 @@ let load_or_create ~env ~prompt_file ?id ?(new_session = false) () : Session.t =
   (* Decide whether to load an existing snapshot or create a new one. *)
   if (not new_session) && Eio.Path.is_file snapshot
   then (
-    match read_and_upgrade () with
+    match read_snapshot_file snapshot with
     | Some s -> s
     | None -> newly_created_session ())
   else newly_created_session ()
@@ -166,7 +172,9 @@ let reset_session ~env ~(id : id) ?prompt_file ?(keep_history = false) () : unit
   then Core.eprintf "Error: session '%s' not found.\n" id
   else (
     (* Read current snapshot. *)
-    let session = Session.Io.File.read snapshot in
+    match read_snapshot_file snapshot with
+    | None -> Core.eprintf "Error: session '%s' could not be loaded.\n" id
+    | Some session ->
     (* Create archive directory. *)
     let archive_dir = dir / "archive" in
     (match Eio.Path.is_directory archive_dir with
@@ -246,7 +254,9 @@ let rebuild_session ~env ~(id : id) () : unit =
   if not (Eio.Path.is_file snapshot)
   then Core.eprintf "Error: session '%s' not found.\n" id
   else (
-    let old_session = Session.Io.File.read snapshot in
+    match read_snapshot_file snapshot with
+    | None -> Core.eprintf "Error: session '%s' could not be loaded.\n" id
+    | Some old_session ->
     (* Archive old snapshot *)
     let archive_dir = dir / "archive" in
     (match Eio.Path.is_directory archive_dir with
@@ -315,7 +325,7 @@ let list ~env : (id * string) list =
          | false -> None
          | true ->
            (try
-              let session = Session.Io.File.read snapshot in
+              let session = Option.value_exn (read_snapshot_file snapshot) in
               Some (entry, session.prompt_file)
             with
             | _ -> None))))

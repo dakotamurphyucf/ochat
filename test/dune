@@ -583,6 +583,43 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name chat_response_moderation_test)
+ (modules chat_response_moderation_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_response
+  chatml
+  chatml_builtin_modules
+  chatml_moderator_runtime)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_response_moderator_manager_test)
+ (modules chat_response_moderator_manager_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_response
+  chatmd
+  chatml
+  chatml_builtin_modules
+  ochat.session)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatml_value_codec_test)
+ (modules chatml_value_codec_test)
+ (libraries core expect_test_helpers_core chatml chatml_builtin_modules)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
  (name chatml_runtime_test)
  (modules chatml_runtime_test)
  (libraries core chatml chatml_resolver chatml_builtin_modules)

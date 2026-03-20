@@ -21,6 +21,8 @@ let%expect_test "ast output" =
     ; "<tool />"
     ; "<tool_call></tool_call>"
     ; "<tool_response></tool_response>"
+    ; "<script language=\"chatml\" kind=\"moderator\">let x = 1</script>"
+    ; "<script language=\"chatml\" kind=\"moderator\" src=\"moderator.chatml\" />"
     ; "<reasoning><summary>this is a summary</summary></reasoning>"
     ; "<summary>hello</summary>"
     ; "<msg><yo/><doc/><yo><doc/></yo><doc/></msg>"
@@ -50,6 +52,10 @@ let%expect_test "ast output" =
     ((Element Tool () ()))
     ((Element Tool_call () ()))
     ((Element Tool_response () ()))
+    ((Element Script ((language (chatml)) (kind (moderator)))
+      ((Text "let x = 1"))))
+    ((Element Script
+      ((language (chatml)) (kind (moderator)) (src (moderator.chatml))) ()))
     ((Element Reasoning () ((Element Summary () ((Text "this is a summary"))))))
     ((Element Summary () ((Text hello))))
     ((Element Msg ()

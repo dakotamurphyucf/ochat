@@ -180,6 +180,25 @@ module Chat_content = struct
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
+  type script_reference =
+    { path : string
+    ; source_text : string
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  type script_source =
+    | Inline of string
+    | Src of script_reference
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
+  type script =
+    { id : string
+    ; language : string
+    ; kind : string
+    ; source : script_source
+    }
+  [@@deriving jsonaf, sexp, hash, bin_io, compare]
+
   type reasoning_summary =
     { text : string
     ; _type : string
@@ -205,6 +224,7 @@ module Chat_content = struct
     | Config of config
     | Reasoning of reasoning
     | Tool of tool
+    | Script of script
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 end
 
@@ -222,6 +242,7 @@ module Chat_markdown = struct
     | Tool_response_msg of tool_response_msg
     | Config of config
     | Tool of tool
+    | Script of script
     | Reasoning of reasoning
     | Summary of reasoning_summary
     | Text of string
@@ -281,7 +302,8 @@ module Chat_markdown = struct
       | Config _
       | Reasoning _
       | Summary _
-      | Tool _ )
+      | Tool _
+      | Script _ )
       :: rest -> content_items_of_elements rest
   ;;
 
@@ -349,6 +371,52 @@ module Chat_markdown = struct
     }
   ;;
 
+  let attr_table attr =
+    let tbl = Hashtbl.create (module String) in
+    List.iter attr ~f:(fun (name, value) -> Hashtbl.set tbl ~key:name ~data:value);
+    tbl
+  ;;
+
+  let find_required_attr tbl name =
+    match Hashtbl.find tbl name with
+    | Some value -> value
+    | None -> failwithf "<script> requires a %s attribute." name ()
+  ;;
+
+  let require_valid_script_attr attr =
+    let allowed name =
+      List.mem [ "id"; "language"; "kind"; "src" ] name ~equal:String.equal
+    in
+    match List.find attr ~f:(fun (name, _) -> not (allowed name)) with
+    | Some (name, _) -> failwithf "<script> does not support attribute %S." name ()
+    | None -> ()
+  ;;
+
+  let script_id tbl =
+    let id = Hashtbl.find tbl "id" |> Option.value ~default:"main" |> String.strip in
+    if String.is_empty id then failwith "<script> id cannot be empty.";
+    id
+  ;;
+
+  let script_language tbl =
+    let language = find_required_attr tbl "language" |> String.strip in
+    if not (String.equal language "chatml")
+    then failwithf "<script> only supports language=\"chatml\"; got %S." language ();
+    language
+  ;;
+
+  let script_kind tbl =
+    let kind = find_required_attr tbl "kind" |> String.strip in
+    if not (String.equal kind "moderator")
+    then failwithf "<script> only supports kind=\"moderator\"; got %S." kind ();
+    kind
+  ;;
+
+  let load_script_source_text ~dir path =
+    try Io.load_doc ~dir path with
+    | _ -> failwithf "Failed to load <script src=%S> relative to the prompt directory." path ()
+  ;;
+
   (* Helper to turn a chat_element back to string (for unrecognized markup). *)
   let rec chat_element_to_string = function
     | Summary s -> s.text
@@ -388,6 +456,18 @@ module Chat_markdown = struct
         if List.is_empty attrs then "" else " " ^ String.concat ~sep:" " attrs
       in
       Printf.sprintf "<config%s />" attrs_string
+    | Script { id; language; kind; source } ->
+      let attrs =
+        [ Some (Printf.sprintf "id=\"%s\"" id)
+        ; Some (Printf.sprintf "language=\"%s\"" language)
+        ; Some (Printf.sprintf "kind=\"%s\"" kind)
+        ]
+        |> List.filter_map ~f:Fun.id
+      in
+      let attrs_string = String.concat ~sep:" " attrs in
+      (match source with
+       | Inline body -> Printf.sprintf "<script %s>%s</script>" attrs_string body
+       | Src { path; _ } -> Printf.sprintf "<script %s src=\"%s\" />" attrs_string path)
     | Tool t ->
       (match t with
        | Builtin name -> Printf.sprintf "<tool name=\"%s\" />" name
@@ -460,6 +540,34 @@ module Chat_markdown = struct
          let pieces = List.map items ~f:aux in
          String.concat ~sep:"" pieces
        | None -> "")
+  and script_body_of_children children =
+    List.map children ~f:chat_element_to_string |> String.concat ~sep:""
+  ;;
+
+  let script_source ~dir tbl inline_body =
+    match Hashtbl.find tbl "src" with
+    | Some raw_path ->
+      if not (String.is_empty inline_body)
+      then failwith "<script> cannot combine a src attribute with inline body text.";
+      let path = String.strip raw_path in
+      if String.is_empty path then failwith "<script> src attribute cannot be empty.";
+      let source_text = load_script_source_text ~dir path in
+      Src { path; source_text }
+    | None ->
+      if String.is_empty inline_body
+      then failwith "<script> must provide inline source text or a src attribute.";
+      Inline inline_body
+  ;;
+
+  let parse_script ~dir ~attrs ~children =
+    let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
+    require_valid_script_attr attr;
+    let tbl = attr_table attr in
+    let id = script_id tbl in
+    let language = script_language tbl in
+    let kind = script_kind tbl in
+    let source = script_source ~dir tbl (script_body_of_children children) in
+    Script { id; language; kind; source }
   ;;
 
   (*--------------------------------------------------------------------------*)
@@ -485,9 +593,8 @@ module Chat_markdown = struct
       f node child_results
   ;;
 
-  (* The Markup.ml “tree” transformation that identifies <msg> or <config> elements
-     and returns them as Chat_parser.chat_element variants. *)
-  let parse_chat_element node =
+  (* Convert AST nodes into internal chat elements before exposing top-level values. *)
+  let parse_chat_element ~dir node =
     tree node ~f:(fun node children ->
       match node with
       | Element (Msg, attrs, _) ->
@@ -549,8 +656,7 @@ module Chat_markdown = struct
         Document (url, local, strip, md)
       | Element (Config, attrs, _) ->
         let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
-        let tbl = Hashtbl.create (module String) in
-        List.iter attr ~f:(fun (nm, v) -> Hashtbl.set tbl ~key:nm ~data:v);
+        let tbl = attr_table attr in
         let max_tokens = Option.map (Hashtbl.find tbl "max_tokens") ~f:Int.of_string in
         let model = Hashtbl.find tbl "model" in
         let reasoning_effort = Hashtbl.find tbl "reasoning_effort" in
@@ -560,6 +666,7 @@ module Chat_markdown = struct
         let show_tool_call = Hashtbl.mem tbl "show_tool_call" in
         let id = Hashtbl.find tbl "id" in
         Config { max_tokens; model; reasoning_effort; temperature; show_tool_call; id }
+      | Element (Script, attrs, _) -> parse_script ~dir ~attrs ~children
       | Element (Summary, attrs, _) ->
         let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
         let typ =
@@ -670,8 +777,7 @@ module Chat_markdown = struct
       | Text t -> Text t)
   ;;
 
-  (* We only want to capture top‐level <msg> or <config>. So we scan the stream
-     for those elements, parse them with parse_chat_elements, then flatten. *)
+  (* We only want to capture recognised top-level chat elements. *)
   let chat_elements document =
     List.filter document ~f:(function
       | Ast.Element (Msg, _, _)
@@ -683,7 +789,8 @@ module Chat_markdown = struct
       | Element (Tool_response, _, _)
       | Element (Config, _, _)
       | Element (Reasoning, _, _)
-      | Element (Tool, _, _) -> true
+      | Element (Tool, _, _)
+      | Element (Script, _, _) -> true
       | _ -> false)
   ;;
 
@@ -698,6 +805,7 @@ module Chat_markdown = struct
     | Config c -> Some (Config c)
     | Reasoning r -> Some (Reasoning r)
     | Tool t -> Some (Tool t)
+    | Script s -> Some (Script s)
     | Developer_msg m -> Some (Developer m)
     | System_msg m -> Some (System m) (* System is a legacy alias for Developer *)
     | _ -> None
@@ -707,13 +815,27 @@ module Chat_markdown = struct
     List.filter_map elts ~f:to_top_level
   ;;
 
+  let validate_scripts (elements : top_level_elements list) =
+    let count = List.count elements ~f:(function
+      | Script _ -> true
+      | _ -> false)
+    in
+    if count > 1
+    then
+      failwithf
+        "Expected at most one <script language=\"chatml\" kind=\"moderator\"> per prompt, found %d."
+        count
+        ();
+    elements
+  ;;
+
   let parse_chat_inputs ~dir (xml_content : string) : top_level_elements list =
     let xml_content = Meta_prompting.Preprocessor.preprocess xml_content in
     let document = parse xml_content in
     let expanded = Import_expansion.expand_imports ~dir document in
     let chat_elements = chat_elements expanded in
-    let parsed_elements = List.map ~f:parse_chat_element chat_elements in
-    of_chat_elements parsed_elements
+    let parsed_elements = List.map chat_elements ~f:(parse_chat_element ~dir) in
+    of_chat_elements parsed_elements |> validate_scripts
   ;;
 end
 

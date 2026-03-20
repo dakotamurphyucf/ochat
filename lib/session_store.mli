@@ -64,6 +64,12 @@ val load_or_create
   -> unit
   -> Session.t
 
+(** [read_existing ~env ~id] loads [snapshot.bin] for [id], upgrading any
+    supported legacy schema along the way.
+
+    Returns [None] when the snapshot is missing or unreadable. *)
+val read_existing : env:Eio_unix.Stdenv.base -> id:id -> Session.t option
+
 (** [save ~env session] atomically writes [session] to
      [<session-dir>/snapshot.bin] while holding an advisory lock file
      (`snapshot.bin.lock`).  The program exits with status 1 when the

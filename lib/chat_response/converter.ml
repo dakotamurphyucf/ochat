@@ -420,8 +420,8 @@ and convert_reasoning (r : CM.reasoning) : Res.Item.t =
 
     The traversal is *total*: every constructor of
     {!type:Prompt.Chat_markdown.top_level_elements} is handled.  Elements that
-    are processed elsewhere in the pipeline – namely [`<config/>`] and
-    [`<tool/>`] declarations – are silently ignored.
+    are processed elsewhere in the pipeline – namely [`<config/>`],
+    [`<tool/>`], and [`<script/>`] declarations – are silently ignored.
 
     Invariants:
     • The output list preserves the order of appearance.
@@ -455,5 +455,6 @@ let to_items ~ctx ~run_agent (els : CM.top_level_elements list) : Res.Item.t lis
     | CM.Tool_response m -> Some (convert_tool_response_msg ~ctx ~run_agent m)
     | CM.Reasoning r -> Some (convert_reasoning r)
     | CM.Config _ -> None
-    | CM.Tool _ -> None)
+    | CM.Tool _ -> None
+    | CM.Script _ -> None)
 ;;

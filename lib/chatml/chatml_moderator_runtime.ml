@@ -35,6 +35,13 @@ type tool_moderation =
   | Rewrite_args of Lang.value
   | Redirect of string * Lang.value
 
+type local_effect =
+  | Turn_effect of turn_effect
+  | Tool_moderation_effect of tool_moderation
+  | Emit_internal_event of Lang.value
+  | Request_compaction
+  | End_session of string
+
 type op_kind =
   | Local_transactional
   | External_sync
@@ -190,6 +197,164 @@ let expect_int_arg (name : string) (value : Lang.value) : (int, string) result =
   | _ -> Error (Printf.sprintf "%s: expected int argument" name)
 ;;
 
+let decode_turn_prepend_system (args : Lang.value list) : (turn_effect, string) result =
+  match args with
+  | [ value ] ->
+    Result.map (expect_string_arg "Turn.prepend_system" value) ~f:(fun message ->
+      Prepend_system message)
+  | _ ->
+    Error
+      (Printf.sprintf
+         "Turn.prepend_system: expected 1 argument(s), got %d"
+         (List.length args))
+;;
+
+let decode_turn_append_message (args : Lang.value list) : (turn_effect, string) result =
+  match args with
+  | [ message ] -> Ok (Append_message message)
+  | _ ->
+    Error
+      (Printf.sprintf
+         "Turn.append_message: expected 1 argument(s), got %d"
+         (List.length args))
+;;
+
+let decode_turn_replace_message (args : Lang.value list) : (turn_effect, string) result =
+  match args with
+  | [ id; message ] ->
+    (match expect_string_arg "Turn.replace_message" id with
+     | Error msg -> Error msg
+     | Ok message_id -> Ok (Replace_message (message_id, message)))
+  | _ ->
+    Error
+      (Printf.sprintf
+         "Turn.replace_message: expected 2 argument(s), got %d"
+         (List.length args))
+;;
+
+let decode_turn_delete_message (args : Lang.value list) : (turn_effect, string) result =
+  match args with
+  | [ id ] ->
+    Result.map (expect_string_arg "Turn.delete_message" id) ~f:(fun message_id ->
+      Delete_message message_id)
+  | _ ->
+    Error
+      (Printf.sprintf
+         "Turn.delete_message: expected 1 argument(s), got %d"
+         (List.length args))
+;;
+
+let decode_turn_halt (args : Lang.value list) : (turn_effect, string) result =
+  match args with
+  | [ reason ] ->
+    Result.map (expect_string_arg "Turn.halt" reason) ~f:(fun msg -> Halt msg)
+  | _ ->
+    Error (Printf.sprintf "Turn.halt: expected 1 argument(s), got %d" (List.length args))
+;;
+
+let decode_tool_approve (args : Lang.value list) : (tool_moderation, string) result =
+  match args with
+  | [] -> Ok Approve
+  | _ ->
+    Error
+      (Printf.sprintf "Tool.approve: expected 0 argument(s), got %d" (List.length args))
+;;
+
+let decode_tool_reject (args : Lang.value list) : (tool_moderation, string) result =
+  match args with
+  | [ reason ] ->
+    Result.map (expect_string_arg "Tool.reject" reason) ~f:(fun msg -> Reject msg)
+  | _ ->
+    Error
+      (Printf.sprintf "Tool.reject: expected 1 argument(s), got %d" (List.length args))
+;;
+
+let decode_tool_rewrite_args (args : Lang.value list) : (tool_moderation, string) result =
+  match args with
+  | [ args_value ] -> Ok (Rewrite_args args_value)
+  | _ ->
+    Error
+      (Printf.sprintf
+         "Tool.rewrite_args: expected 1 argument(s), got %d"
+         (List.length args))
+;;
+
+let decode_tool_redirect (args : Lang.value list) : (tool_moderation, string) result =
+  match args with
+  | [ name; args_value ] ->
+    (match expect_string_arg "Tool.redirect" name with
+     | Error msg -> Error msg
+     | Ok destination -> Ok (Redirect (destination, args_value)))
+  | _ ->
+    Error
+      (Printf.sprintf "Tool.redirect: expected 2 argument(s), got %d" (List.length args))
+;;
+
+let decode_runtime_emit (args : Lang.value list) : (local_effect, string) result =
+  match args with
+  | [ event ] -> Ok (Emit_internal_event event)
+  | _ ->
+    Error
+      (Printf.sprintf "Runtime.emit: expected 1 argument(s), got %d" (List.length args))
+;;
+
+let decode_runtime_request_compaction (args : Lang.value list) : (local_effect, string) result
+  =
+  match args with
+  | [] -> Ok Request_compaction
+  | _ ->
+    Error
+      (Printf.sprintf
+         "Runtime.request_compaction: expected 0 argument(s), got %d"
+         (List.length args))
+;;
+
+let decode_runtime_end_session (args : Lang.value list) : (local_effect, string) result =
+  match args with
+  | [ reason ] ->
+    Result.map (expect_string_arg "Runtime.end_session" reason) ~f:(fun msg ->
+      End_session msg)
+  | _ ->
+    Error
+      (Printf.sprintf
+         "Runtime.end_session: expected 1 argument(s), got %d"
+         (List.length args))
+;;
+
+let decode_local_effect (eff : Lang.eff) : (local_effect, string) result =
+  match eff.op with
+  | "Turn.prepend_system" ->
+    Result.map (decode_turn_prepend_system eff.args) ~f:(fun turn -> Turn_effect turn)
+  | "Turn.append_message" ->
+    Result.map (decode_turn_append_message eff.args) ~f:(fun turn -> Turn_effect turn)
+  | "Turn.replace_message" ->
+    Result.map (decode_turn_replace_message eff.args) ~f:(fun turn -> Turn_effect turn)
+  | "Turn.delete_message" ->
+    Result.map (decode_turn_delete_message eff.args) ~f:(fun turn -> Turn_effect turn)
+  | "Turn.halt" ->
+    Result.map (decode_turn_halt eff.args) ~f:(fun turn -> Turn_effect turn)
+  | "Tool.approve" ->
+    Result.map (decode_tool_approve eff.args) ~f:(fun action ->
+      Tool_moderation_effect action)
+  | "Tool.reject" ->
+    Result.map (decode_tool_reject eff.args) ~f:(fun action ->
+      Tool_moderation_effect action)
+  | "Tool.rewrite_args" ->
+    Result.map (decode_tool_rewrite_args eff.args) ~f:(fun action ->
+      Tool_moderation_effect action)
+  | "Tool.redirect" ->
+    Result.map (decode_tool_redirect eff.args) ~f:(fun action ->
+      Tool_moderation_effect action)
+  | "Runtime.emit" -> decode_runtime_emit eff.args
+  | "Runtime.request_compaction" -> decode_runtime_request_compaction eff.args
+  | "Runtime.end_session" -> decode_runtime_end_session eff.args
+  | op -> Error (Printf.sprintf "Unknown moderator local effect '%s'" op)
+;;
+
+let decode_local_effects (effects : Lang.eff list) : (local_effect list, string) result =
+  Result.all (List.map effects ~f:decode_local_effect)
+;;
+
 let with_nullary
       (name : string)
       (f : session -> (Lang.value, string) result)
@@ -286,79 +451,15 @@ let default_operations ?(handlers = default_handlers) () : op_def list =
   ; log_op "Log.info" Info
   ; log_op "Log.warn" Warn
   ; log_op "Log.error" Error_level
-  ; local_turn_op "Turn.prepend_system" (function
-      | [ value ] ->
-        Result.map (expect_string_arg "Turn.prepend_system" value) ~f:(fun message ->
-          Prepend_system message)
-      | args ->
-        Error
-          (Printf.sprintf
-             "Turn.prepend_system: expected 1 argument(s), got %d"
-             (List.length args)))
-  ; local_turn_op "Turn.append_message" (function
-      | [ message ] -> Ok (Append_message message)
-      | args ->
-        Error
-          (Printf.sprintf
-             "Turn.append_message: expected 1 argument(s), got %d"
-             (List.length args)))
-  ; local_turn_op "Turn.replace_message" (function
-      | [ id; message ] ->
-        (match expect_string_arg "Turn.replace_message" id with
-         | Error msg -> Error msg
-         | Ok message_id -> Ok (Replace_message (message_id, message)))
-      | args ->
-        Error
-          (Printf.sprintf
-             "Turn.replace_message: expected 2 argument(s), got %d"
-             (List.length args)))
-  ; local_turn_op "Turn.delete_message" (function
-      | [ id ] ->
-        Result.map (expect_string_arg "Turn.delete_message" id) ~f:(fun s ->
-          Delete_message s)
-      | args ->
-        Error
-          (Printf.sprintf
-             "Turn.delete_message: expected 1 argument(s), got %d"
-             (List.length args)))
-  ; local_turn_op "Turn.halt" (function
-      | [ reason ] ->
-        Result.map (expect_string_arg "Turn.halt" reason) ~f:(fun s -> Halt s)
-      | args ->
-        Error
-          (Printf.sprintf "Turn.halt: expected 1 argument(s), got %d" (List.length args)))
-  ; local_tool_moderation_op "Tool.approve" (function
-      | [] -> Ok Approve
-      | args ->
-        Error
-          (Printf.sprintf
-             "Tool.approve: expected 0 argument(s), got %d"
-             (List.length args)))
-  ; local_tool_moderation_op "Tool.reject" (function
-      | [ reason ] ->
-        Result.map (expect_string_arg "Tool.reject" reason) ~f:(fun msg -> Reject msg)
-      | args ->
-        Error
-          (Printf.sprintf
-             "Tool.reject: expected 1 argument(s), got %d"
-             (List.length args)))
-  ; local_tool_moderation_op "Tool.rewrite_args" (function
-      | [ args_value ] -> Ok (Rewrite_args args_value)
-      | args ->
-        Error
-          (Printf.sprintf
-             "Tool.rewrite_args: expected 1 argument(s), got %d"
-             (List.length args)))
-  ; local_tool_moderation_op "Tool.redirect" (function
-      | [ name; args_value ] ->
-        (match expect_string_arg "Tool.redirect" name with
-         | Error msg -> Error msg
-         | Ok destination -> Ok (Redirect (destination, args_value)))
-      | args ->
-        Error
-          (Printf.sprintf
-             "Tool.redirect: expected 2 argument(s), got %d"
-             (List.length args)))
+  ; local_turn_op "Turn.prepend_system" decode_turn_prepend_system
+  ; local_turn_op "Turn.append_message" decode_turn_append_message
+  ; local_turn_op "Turn.replace_message" decode_turn_replace_message
+  ; local_turn_op "Turn.delete_message" decode_turn_delete_message
+  ; local_turn_op "Turn.halt" decode_turn_halt
+  ; local_tool_moderation_op "Tool.approve" decode_tool_approve
+  ; local_tool_moderation_op "Tool.reject" decode_tool_reject
+  ; local_tool_moderation_op "Tool.rewrite_args" decode_tool_rewrite_args
+  ; local_tool_moderation_op "Tool.redirect" decode_tool_redirect
   ; { name = "Tool.call"
     ; kind = External_sync
     ; phase_check = allow_all_phases
@@ -589,7 +690,26 @@ let committed_local_effects (session : session) : Lang.eff list =
 ;;
 
 let queued_events (session : session) : Lang.value list = Queue.to_list session.queue
+let take_queued_event (session : session) : Lang.value option = Queue.dequeue session.queue
 let is_halted (session : session) : bool = session.halted
+
+let restore
+      (session : session)
+      ~(state : Lang.value)
+      ~(queued_events : Lang.value list)
+      ~(halted : bool)
+  : (unit, string) result
+  =
+  match session.current_exec with
+  | Some _ -> Error "Cannot restore moderator runtime during active task interpretation"
+  | None ->
+    session.state <- state;
+    Queue.clear session.queue;
+    List.iter queued_events ~f:(fun event -> Queue.enqueue session.queue event);
+    session.committed_local_effects_rev <- [];
+    session.halted <- halted;
+    Ok ()
+;;
 
 let with_current_exec
       (session : session)

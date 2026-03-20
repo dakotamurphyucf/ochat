@@ -6,6 +6,7 @@
 
     {[
       <msg> <user> <assistant> <agent> <system> <developer>
+      <script>
       <doc> <img> <import> <config>
       <reasoning> <summary>
       <tool_call> <tool_response> <tool>

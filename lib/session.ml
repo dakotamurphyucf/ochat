@@ -4,13 +4,15 @@ module History = struct
   type t = Openai.Responses.Item.t list [@@deriving bin_io, sexp]
 end
 
+module Snapshot = Chatml.Chatml_value_codec.Snapshot
+
 (* ----------------------------------------------------------------------- *)
 (*  Versioning                                                             *)
 (* ----------------------------------------------------------------------- *)
 
 (** Schema version supported by the running binary.  Increment whenever
     {!type:t} changes in a way that requires migrations. *)
-let current_version = 2
+let current_version = 3
 
 module Task = struct
   type state =
@@ -45,6 +47,72 @@ module Task = struct
   let _ : t = create ~title:"dummy" ()
 end
 
+module Moderator_snapshot = struct
+  module Message = struct
+    type t =
+      { id : string
+      ; role : string
+      ; content : string
+      ; meta : Snapshot.t
+      }
+    [@@deriving bin_io, sexp]
+  end
+
+  module Overlay = struct
+    type replacement =
+      { target_id : string
+      ; message : Message.t
+      }
+    [@@deriving bin_io, sexp]
+
+    type t =
+      { prepended_system_messages : Message.t list
+      ; appended_messages : Message.t list
+      ; replacements : replacement list
+      ; deleted_message_ids : string list
+      ; halted_reason : string option
+      }
+    [@@deriving bin_io, sexp]
+
+    let empty =
+      { prepended_system_messages = []
+      ; appended_messages = []
+      ; replacements = []
+      ; deleted_message_ids = []
+      ; halted_reason = None
+      }
+    ;;
+  end
+
+  type t =
+    { script_id : string
+    ; script_source_hash : string
+    ; current_state : Snapshot.t
+    ; queued_internal_events : Snapshot.t list
+    ; halted : bool
+    ; overlay : Overlay.t
+    }
+  [@@deriving bin_io, sexp]
+
+  let create
+        ~script_id
+        ~script_source_hash
+        ?(current_state = Snapshot.Unit)
+        ?(queued_internal_events = [])
+        ?(halted = false)
+        ?(overlay = Overlay.empty)
+        ()
+    =
+    { script_id
+    ; script_source_hash
+    ; current_state
+    ; queued_internal_events
+    ; halted
+    ; overlay
+    }
+  ;;
+end
+
 (* ----------------------------------------------------------------------- *)
 (*  Latest schema                                                           *)
 (* ----------------------------------------------------------------------- *)
@@ -57,6 +125,7 @@ type t =
   ; local_prompt_copy : string option
   ; history : History.t
   ; tasks : Task.t list
+  ; moderator_snapshot : Moderator_snapshot.t option
   ; kv_store : (string * string) list
   ; vfs_root : string
   }
@@ -96,6 +165,7 @@ module Legacy = struct
     ; local_prompt_copy = None
     ; history = v.history
     ; tasks = v.tasks
+    ; moderator_snapshot = None
     ; kv_store = v.kv_store
     ; vfs_root = v.vfs_root
     }
@@ -123,6 +193,36 @@ module Legacy = struct
     ; local_prompt_copy = None
     ; history = v.history
     ; tasks = v.tasks
+    ; moderator_snapshot = None
+    ; kv_store = v.kv_store
+    ; vfs_root = v.vfs_root
+    }
+  ;;
+
+  module V2 = struct
+    type t =
+      { version : int
+      ; id : string
+      ; prompt_file : string
+      ; local_prompt_copy : string option
+      ; history : History.t
+      ; tasks : Task.t list
+      ; kv_store : (string * string) list
+      ; vfs_root : string
+      }
+    [@@deriving bin_io, sexp]
+
+    let version = 2
+  end
+
+  let upgrade_v2 (v : V2.t) : Latest.t =
+    { version = current_version
+    ; id = v.id
+    ; prompt_file = v.prompt_file
+    ; local_prompt_copy = v.local_prompt_copy
+    ; history = v.history
+    ; tasks = v.tasks
+    ; moderator_snapshot = None
     ; kv_store = v.kv_store
     ; vfs_root = v.vfs_root
     }
@@ -135,6 +235,7 @@ let create
       ?local_prompt_copy
       ?(history = [])
       ?(tasks = [])
+      ?moderator_snapshot
       ?(kv_store = [])
       ?(vfs_root = "vfs")
       ()
@@ -154,6 +255,7 @@ let create
   ; local_prompt_copy
   ; history
   ; tasks
+  ; moderator_snapshot
   ; kv_store
   ; vfs_root
   }
@@ -179,11 +281,11 @@ let _ = ignore (create ~prompt_file:"/dev/null" ())
 
 let reset ?prompt_file (t : t) : t =
   let prompt_file = Option.value prompt_file ~default:t.prompt_file in
-  { t with prompt_file; history = [] }
+  { t with prompt_file; history = []; moderator_snapshot = None }
 ;;
 
 (** Same as {!reset} but preserves the existing conversation history. *)
 let reset_keep_history ?prompt_file (t : t) : t =
   let prompt_file = Option.value prompt_file ~default:t.prompt_file in
-  { t with prompt_file }
+  { t with prompt_file; moderator_snapshot = None }
 ;;

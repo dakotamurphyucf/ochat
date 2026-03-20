@@ -51,6 +51,7 @@ type tag =
   | Assistant
   | System
   | Developer
+  | Script
   | Doc
   | Img
   | Import
@@ -75,6 +76,7 @@ let tag_equal (a : tag) (b : tag) : bool =
   | Agent, Agent
   | System, System
   | Developer, Developer
+  | Script, Script
   | Doc, Doc
   | Import, Import
   | Img, Img
@@ -98,6 +100,7 @@ let tag_of_string_opt : string -> tag option = function
   | "assistant" -> Some Assistant
   | "system" -> Some System
   | "developer" -> Some Developer
+  | "script" -> Some Script
   | "doc" -> Some Doc
   | "import" -> Some Import
   | "img" -> Some Img

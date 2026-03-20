@@ -15,7 +15,7 @@
  (public_name ochat.session)
  (modules session session_store)
  (wrapped false)
- (libraries core core_unix eio eio.unix openai bin_prot_utils_eio)
+ (libraries core core_unix eio eio.unix openai bin_prot_utils_eio chatml)
  (preprocess
   (pps ppx_jane)))
 

@@ -205,6 +205,8 @@ Eio_main.run @@ fun env ->
 
 * [`Converter`](converter.doc.md) – ChatMarkdown → OpenAI item
   translation.
+* [`Moderation`](moderation.doc.md) – shared ChatML lifecycle events,
+  history projection, and overlay state.
 * [`Response_loop`](response_loop.doc.md) – recursive resolution of tool
   calls.
 * [`Tool`](tool.doc.md) – runtime representation of `<tool/>` and

@@ -15,6 +15,7 @@ Ochat tries hard to ensure the model sees exactly what’s in your ChatMD docume
 
 - **HTML comments are stripped**: `<!-- ... -->` is removed before parsing and never reaches the model.
 - **`<import/>` expands**: selected `<import src="..."/>` directives are replaced with the contents of the referenced file *at parse time*.
+- **`<script/>` stays host-managed**: top-level moderation scripts are parsed and validated, but they are not converted into model-visible request history.
 - **RAW blocks disable parsing**: `RAW| ... |RAW` is treated as literal text (no tag parsing inside).
 - **Optional meta-refine preprocessing**: if enabled, the prompt may be rewritten before parsing (see “Meta-refine” below).
 
@@ -31,6 +32,7 @@ ChatMD is **not** general HTML/XML. It recognises a **closed set of lowercase ta
 These are the tag names ChatMD recognises (lowercase, case-sensitive):
 
 - Message / transcript structure: `msg`, `user`, `assistant`, `system`, `developer`
+- Host-managed moderation: `script`
 - Tools / tool trace: `tool`, `tool_call`, `tool_response`
 - Inline helpers: `doc`, `img`, `agent`, `import`
 - Reasoning: `reasoning`, `summary`
@@ -141,6 +143,7 @@ Hello.
 | `<tool_call ...>...</tool_call>` | Tool invocation record | Typically written by ochat; see “Tool calls & tool responses”. |
 | `<tool_response ...>...</tool_response>` | Tool output record | Typically written by ochat; see “Tool calls & tool responses”. |
 | `<reasoning ...>...</reasoning>` | Reasoning record | Typically written by reasoning-capable models; requires `id` if authored manually. |
+| `<script ...>...</script>` / `<script ... src="..." />` | Host-managed moderation script | Top-level only. In v1, only `language="chatml"` and `kind="moderator"` are valid. |
 
 ### 3.3 Inline content helpers (only inside message bodies)
 
@@ -152,6 +155,42 @@ These tags are recognised by the parser, but they are primarily meaningful **ins
 | `<img src="..." [local] />` | Inline an image (remote URL or local file encoded as a data URI). |
 | `<agent src="..." [local]> ... </agent>` | Run another ChatMD prompt as a sub-agent and insert its final answer. |
 | `<import src="..."/>` | Parse-time include (only expands in certain places; see below). |
+
+### 3.4 `<script>` moderation declarations
+
+`<script>` declares a host-managed moderation program. The script is retained in
+the typed prompt model, but it is not sent to the model as a message.
+
+V1 supports exactly one script per prompt, and it must use:
+
+- `language="chatml"`
+- `kind="moderator"`
+- optional `id="..."` (defaults to `main`)
+
+Supported forms:
+
+```xml
+<script language="chatml" kind="moderator" id="main">
+... ChatML source ...
+</script>
+```
+
+```xml
+<script language="chatml" kind="moderator" id="main" src="moderator.chatml" />
+```
+
+Validation rules:
+
+- `src="..."` and inline body text are mutually exclusive.
+- `src="..."` is loaded during prompt parsing, so missing files fail early.
+- Relative `src` paths resolve against the prompt directory passed to
+  `parse_chat_inputs`.
+- More than one moderator script in a single prompt is an error.
+- Extra attributes are rejected in v1.
+
+If a script lives in a separate file, the parsed prompt retains both the `src`
+path and the loaded source text so later compilation can report the original
+location clearly.
 
 ---
 
