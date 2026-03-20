@@ -138,11 +138,17 @@ type infer_state =
   { mutable current_id : int
   ; mutable current_lvl : int
   ; mutable id_checkpoints : int list
+  ; mutable mu_id : int (* NEW: never reset *)
   ; span_types : typ SpanTbl.t
   }
 
 let create_state () : infer_state =
-  { current_id = 0; current_lvl = 0; id_checkpoints = []; span_types = SpanTbl.create () }
+  { current_id = 0
+  ; current_lvl = 0
+  ; id_checkpoints = []
+  ; mu_id = 0
+  ; span_types = SpanTbl.create ()
+  }
 ;;
 
 let enter_level (state : infer_state) =
@@ -164,6 +170,12 @@ let gensym (state : infer_state) : string =
   state.current_id <- state.current_id + 1;
   let letter = Char.of_int_exn ((id mod 26) + Char.to_int 'a') |> Char.to_string in
   if id >= 26 then letter ^ Int.to_string (id / 26) else letter
+;;
+
+let gensym_mu (state : infer_state) : string =
+  let id = state.mu_id in
+  state.mu_id <- state.mu_id + 1;
+  Int.to_string id
 ;;
 
 let record_span_type (state : infer_state) (span : Source.span) (ty : typ) : unit =
@@ -426,28 +438,33 @@ let merge_fields row =
 (** --------------------------------------------------------------------- *)
 
 let occurs tv ty =
+  let found = ref false in
   let rec aux (seen : tv ref list) = function
-    | Fun (ps, r) -> List.exists ps ~f:(aux seen) || aux seen r
-    | Con (_n, args) -> List.exists args ~f:(aux seen)
+    | Fun (ps, r) ->
+      List.iter ps ~f:(aux seen);
+      aux seen r
+    | Con (_n, args) -> List.iter args ~f:(aux seen)
     | Var ({ contents = Bound ty } as tv') ->
-      if tv_ref_mem tv' seen then false else aux (tv' :: seen) ty
-    | Var tv' when phys_equal tv tv' -> true
+      if not (tv_ref_mem tv' seen) then aux (tv' :: seen) ty
+    | Var tv' when phys_equal tv tv' -> found := true
     | Var ({ contents = Free (name, lvl) } as tv') ->
       let new_lvl =
         match !tv with
         | Free (_, lvl_tv) -> Int.min lvl lvl_tv
         | _ -> lvl
       in
-      tv' := Free (name, new_lvl);
-      false
+      tv' := Free (name, new_lvl)
     | Mu (_binder, body) -> aux seen body
-    | Rec_var _ -> false
+    | Rec_var _ -> ()
     | Ref t | Record t | Variant t | Array t -> aux seen t
-    | Tuple ts -> List.exists ts ~f:(aux seen)
-    | Row (fs, rest) -> Env.exists fs (fun _ t -> aux seen t) || aux seen rest
-    | _ -> false
+    | Tuple ts -> List.iter ts ~f:(aux seen)
+    | Row (fs, rest) ->
+      Env.iter fs ~f:(fun _ t -> aux seen t);
+      aux seen rest
+    | Generic _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ()
   in
-  aux [] ty
+  aux [] ty;
+  !found
 ;;
 
 (** --------------------------------------------------------------------- *)
@@ -462,59 +479,204 @@ let ensure_contractive_type (ty : typ) : unit =
   | Error msg -> raise (Type_error msg)
 ;;
 
+let resolve_bound_type (ty : typ) : typ =
+  let rec aux (seen : tv ref list) (seen_rec : name list) = function
+    | Var ({ contents = Bound bound_ty } as tv) ->
+      if tv_ref_mem tv seen then Var tv else aux (tv :: seen) seen_rec bound_ty
+    | Mu (binder, _body) as mu ->
+      if rec_name_mem binder seen_rec
+      then mu
+      else aux seen (binder :: seen_rec) (unfold_mu mu)
+    | other -> other
+  in
+  aux [] [] ty
+;;
+
+let rec can_infer_mu_through (ty : typ) : bool =
+  match resolve_bound_type ty with
+  (* allow recursive *data* types *)
+  | Variant _ | Record _ | Row _ | Tuple _ | Con _ -> true
+  (* optionally allow recursion through rows wrapped in Record/Variant already covered *)
+  (* | Empty_row -> true  (* not needed *) *)
+
+  (* disallow recursion through computational / mutable shapes *)
+  | Fun _ | Ref _ | Array _ -> false
+  (* be conservative for the rest *)
+  | TInt | TFloat | Boolean | String | Unit -> false
+  | Generic _ -> false
+  | Var { contents = Free _ } -> false
+  | Var { contents = Bound t } -> can_infer_mu_through t
+  | Mu _ -> true (* allow cycles involving explicit Mu types *)
+  | Rec_var _ ->
+    true (* likewise, though Rec_var shouldn't appear without Mu when well-formed *)
+  | Empty_row -> false
+;;
+
+module MuEnv = struct
+  type id = int
+  type t = id String.Map.t
+
+  let empty : t = String.Map.empty
+  let find = Map.find
+  let add = Map.set
+end
+
+let ensure_guarded_cycle (target : tv ref) (ty : typ) : unit =
+  let rec bad (seen_tv : tv ref list) (seen_mu : name list) ~(guarded : bool) (t : typ)
+    : bool
+    =
+    match t with
+    (* If we hit the target var again, it's only OK if we're under a "guard". *)
+    | Var tv' when phys_equal target tv' -> not guarded
+    (* Chase Bound vars, but avoid looping on cyclic Bound graphs. *)
+    | Var ({ contents = Bound t' } as tvref) ->
+      if tv_ref_mem tvref seen_tv
+      then false
+      else bad (tvref :: seen_tv) seen_mu ~guarded t'
+    (* Other free vars are irrelevant to this check. *)
+    | Var { contents = Free _ } -> false
+    | Generic _ -> false
+    (* Explicit recursive types (from user `type` decls). We can unfold them,
+       but we must avoid infinite unfolding by tracking binders. *)
+    | Mu (binder, _body) as mu ->
+      if rec_name_mem binder seen_mu
+      then false
+      else bad seen_tv (binder :: seen_mu) ~guarded (unfold_mu mu)
+    | Rec_var _ ->
+      (* A well-formed program should not have unbound Rec_var here.
+         For guardedness of inferred cycles, ignore it. *)
+      false
+    (* Base types *)
+    | TInt | TFloat | Boolean | String | Unit | Empty_row -> false
+    (* “Data guards” *)
+    | Variant row -> bad seen_tv seen_mu ~guarded:true row
+    | Record row -> bad seen_tv seen_mu ~guarded:true row
+    | Tuple ts -> List.exists ts ~f:(bad seen_tv seen_mu ~guarded:true)
+    | Con (_n, args) -> List.exists args ~f:(bad seen_tv seen_mu ~guarded:true)
+    | Row (fields, tail) ->
+      (* Row is only a *real* guard for its tail if it adds at least one label. *)
+      let row_adds_structure = not (Env.is_empty fields) in
+      let guarded_tail = guarded || row_adds_structure in
+      Env.exists fields (fun _lbl fty -> bad seen_tv seen_mu ~guarded:true fty)
+      || bad seen_tv seen_mu ~guarded:guarded_tail tail
+    (* Non-guards: do not introduce guardedness, but preserve current guardedness. *)
+    | Fun (ps, r) ->
+      List.exists ps ~f:(bad seen_tv seen_mu ~guarded) || bad seen_tv seen_mu ~guarded r
+    | Ref t' | Array t' -> bad seen_tv seen_mu ~guarded t'
+  in
+  if bad [] [] ~guarded:false ty
+  then raise (Type_error "Unguarded recursive type (e.g. self application x(x))")
+;;
+
 let rec unify (state : infer_state) lhs rhs =
-  if phys_equal lhs rhs
-  then ()
-  else (
-    match lhs, rhs with
-    | Fun (ps1, r1), Fun (ps2, r2) ->
-      if List.length ps1 <> List.length ps2
-      then raise (Type_error "Function arity mismatch")
-      else (
-        List.iter2_exn ps1 ps2 ~f:(unify state);
-        unify state r1 r2)
-    | Con (n1, a1), Con (n2, a2) ->
-      if not (String.equal n1 n2) then raise (Type_error "Type constructor mismatch");
-      if List.length a1 <> List.length a2
-      then raise (Type_error "Type constructor arity mismatch");
-      List.iter2_exn a1 a2 ~f:(unify state)
-    | Var { contents = Bound t1 }, t2 | t1, Var { contents = Bound t2 } ->
-      unify state t1 t2
-    | (Mu (b1, body1) as mu1), (Mu (b2, body2) as mu2) ->
-      (* General equi-recursive unification: treat mu-binders as alpha-equivalent.
-         Rename both binders to a fresh name and unify bodies without unfolding. *)
-      ensure_contractive_type mu1;
-      ensure_contractive_type mu2;
-      let fresh = "__unify_mu_" ^ gensym state in
-      let body1' = substitute_rec_var ~target:b1 ~replacement:(Rec_var fresh) body1 in
-      let body2' = substitute_rec_var ~target:b2 ~replacement:(Rec_var fresh) body2 in
-      unify state body1' body2'
-    | (Mu (_binder, _body) as mu), t | t, (Mu (_binder, _body) as mu) ->
-      ensure_contractive_type mu;
-      unify state (unfold_mu mu) t
-    | Rec_var lhs_name, Rec_var rhs_name when String.equal lhs_name rhs_name -> ()
-    | Var ({ contents = Free _ } as tv), t | t, Var ({ contents = Free _ } as tv) ->
-      if occurs tv t then raise (Type_error "Recursive types") else tv := Bound t
-    | Ref t1, Ref t2 | Array t1, Array t2 -> unify state t1 t2
-    | Record r1, Record r2 | Variant r1, Variant r2 -> unify state r1 r2
-    | Tuple ts1, Tuple ts2 ->
-      if List.length ts1 <> List.length ts2
-      then raise (Type_error "Tuple arity mismatch")
-      else List.iter2_exn ts1 ts2 ~f:(unify state)
-    | (Row _ as row1), (Row _ as row2) -> unify_rows state row1 row2
-    | Row (fs, _), Empty_row | Empty_row, Row (fs, _) ->
-      let lbl, _ = Env.choose fs in
-      raise (Type_error (Printf.sprintf "Row does not contain label '%s'" lbl))
-    | TInt, TInt
-    | TFloat, TFloat
-    | Boolean, Boolean
-    | String, String
-    | Empty_row, Empty_row
-    | Unit, Unit -> ()
-    | _ ->
-      raise
-        (Type_error
-           (Printf.sprintf "Cannot unify %s with %s" (show_type lhs) (show_type rhs))))
+  let next_mu_id =
+    let counter = ref 0 in
+    fun () ->
+      incr counter;
+      !counter
+  in
+  let rec go (env_l : MuEnv.t) (env_r : MuEnv.t) lhs rhs =
+    if phys_equal lhs rhs
+    then ()
+    else (
+      match lhs, rhs with
+      | Fun (ps1, r1), Fun (ps2, r2) ->
+        if List.length ps1 <> List.length ps2
+        then raise (Type_error "Function arity mismatch");
+        List.iter2_exn ps1 ps2 ~f:(go env_l env_r);
+        go env_l env_r r1 r2
+      | Con (n1, a1), Con (n2, a2) ->
+        if not (String.equal n1 n2) then raise (Type_error "Type constructor mismatch");
+        if List.length a1 <> List.length a2
+        then raise (Type_error "Type constructor arity mismatch");
+        List.iter2_exn a1 a2 ~f:(go env_l env_r)
+      | Var { contents = Bound t1 }, t2 | t1, Var { contents = Bound t2 } ->
+        go env_l env_r t1 t2
+      (* KEY CHANGE: Mu/Mu uses environments, not substitution. *)
+      | Mu (b1, body1), Mu (b2, body2) ->
+        let id = next_mu_id () in
+        let env_l' = MuEnv.add env_l ~key:b1 ~data:id in
+        let env_r' = MuEnv.add env_r ~key:b2 ~data:id in
+        go env_l' env_r' body1 body2
+      (* Keep your equi-recursive rule for Mu vs non-Mu by unfolding one step. *)
+      | (Mu _ as mu), t | t, (Mu _ as mu) ->
+        ensure_contractive_type mu;
+        go env_l env_r (unfold_mu mu) t
+      (* KEY CHANGE: Rec_var equality consults the environments. *)
+      | Rec_var x, Rec_var y ->
+        (match MuEnv.find env_l x, MuEnv.find env_r y with
+         | Some id1, Some id2 when Int.equal id1 id2 -> ()
+         | None, None when String.equal x y ->
+           () (* free rec-vars: only ok if same name *)
+         | _ -> raise (Type_error "Recursive type variables do not match"))
+      (* If a Rec_var meets a non-Rec_var, it's a mismatch *)
+      | Rec_var _, _ | _, Rec_var _ ->
+        raise (Type_error "Cannot unify recursive type variable with non-recursive type")
+      (* Your occurs-knot case (possibly gated to reject Fun recursion like x(x)) *)
+      | Var ({ contents = Free _ } as tv), t | t, Var ({ contents = Free _ } as tv) ->
+        if occurs tv t
+        then (
+          if not (can_infer_mu_through t) then raise (Type_error "Recursive types");
+          ensure_guarded_cycle tv t;
+          tv := Bound t (* cyclic bind; NO Rec_var/Mu synthesis *))
+        else tv := Bound t
+      | Ref t1, Ref t2 | Array t1, Array t2 -> go env_l env_r t1 t2
+      | Record r1, Record r2 | Variant r1, Variant r2 -> go env_l env_r r1 r2
+      | Tuple ts1, Tuple ts2 ->
+        if List.length ts1 <> List.length ts2
+        then raise (Type_error "Tuple arity mismatch");
+        List.iter2_exn ts1 ts2 ~f:(go env_l env_r)
+      | (Row _ as row1), (Row _ as row2) -> go_rows env_l env_r row1 row2
+      | Row (fs, _), Empty_row | Empty_row, Row (fs, _) ->
+        let lbl, _ = Env.choose fs in
+        raise (Type_error (Printf.sprintf "Row does not contain label '%s'" lbl))
+      | TInt, TInt
+      | TFloat, TFloat
+      | Boolean, Boolean
+      | String, String
+      | Empty_row, Empty_row
+      | Unit, Unit -> ()
+      | _ ->
+        raise
+          (Type_error
+             (Printf.sprintf "Cannot unify %s with %s" (show_type lhs) (show_type rhs))))
+  and go_rows env_l env_r lhs rhs =
+    (* same as unify_rows but replace calls to [unify state] with [go env_l env_r] *)
+    let map_l, tail_l = merge_fields lhs in
+    let map_r, tail_r = merge_fields rhs in
+    let rec collect l r missing_l missing_r =
+      match l, r with
+      | (lbl_l, ty_l) :: tl, (lbl_r, ty_r) :: tr ->
+        (match String.compare lbl_l lbl_r with
+         | 0 ->
+           go env_l env_r ty_l ty_r;
+           collect tl tr missing_l missing_r
+         | c when c < 0 -> collect tl r missing_l (Env.add lbl_l ty_l missing_r)
+         | _ -> collect l tr (Env.add lbl_r ty_r missing_l) missing_r)
+      | [], [] -> missing_l, missing_r
+      | [], rest -> Env.of_list rest |> Env.merge missing_l, missing_r
+      | rest, [] -> missing_l, Env.of_list rest |> Env.merge missing_r
+    in
+    let missing_l, missing_r =
+      collect (Env.bindings map_l) (Env.bindings map_r) Env.empty Env.empty
+    in
+    match Env.is_empty missing_l, Env.is_empty missing_r with
+    | true, true -> go env_l env_r tail_l tail_r
+    | true, false -> go env_l env_r tail_r (Row (missing_r, tail_l))
+    | false, true -> go env_l env_r tail_l (Row (missing_l, tail_r))
+    | false, false ->
+      (match tail_l with
+       | Var ({ contents = Free _ } as tv) ->
+         let row_var = new_var state state.current_lvl in
+         go env_l env_r tail_r (Row (missing_r, row_var));
+         (match !tv with
+          | Bound _ -> raise (Type_error "Recursive row types")
+          | _ -> ());
+         tv := Bound (Row (missing_l, row_var))
+       | Empty_row -> go env_l env_r tail_l (Row (missing_l, new_var state 0))
+       | _ -> assert false)
+  in
+  go MuEnv.empty MuEnv.empty lhs rhs
 
 and unify_rows (state : infer_state) lhs rhs =
   (* Convert both rows to a field-map plus a tail row var *)
@@ -1638,18 +1800,6 @@ and reopen_lambda_param_if_closed_record (state : infer_state) (ty : typ) : typ 
     tv := Bound reopened;
     ty
   | _ -> reopen_lambda_param_type state ty
-
-and resolve_bound_type (ty : typ) : typ =
-  let rec aux (seen : tv ref list) (seen_rec : name list) = function
-    | Var ({ contents = Bound bound_ty } as tv) ->
-      if tv_ref_mem tv seen then Var tv else aux (tv :: seen) seen_rec bound_ty
-    | Mu (binder, _body) as mu ->
-      if rec_name_mem binder seen_rec
-      then mu
-      else aux seen (binder :: seen_rec) (unfold_mu mu)
-    | other -> other
-  in
-  aux [] [] ty
 
 and reopen_lambda_row (state : infer_state) (row : typ) : typ =
   match resolve_bound_type row with

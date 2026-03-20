@@ -374,7 +374,7 @@ let () =
   print_endline "Task Runner Program completed successfully.";
   let small_expr_code =
     {|
-        type expr =
+        (* type expr =
           [ `Int(int)
           | `Add(expr, expr)
           | `Sub(expr, expr)
@@ -382,9 +382,9 @@ let () =
           | `Div(expr, expr)
           | `Let(string, expr, expr)
           | `Var(string)
-          ]
+          ] *)
 
-        let rec eval : expr -> int =
+        let rec eval  =
           fun e ->
           match e with
           | `Int(n) -> n
@@ -405,7 +405,7 @@ let () =
                 eval(subst_x(body, v))
           | `Var(name) -> fail("free variable in AST: " ++ name)
 
-        and subst_x : expr -> int -> expr =
+        and subst_x  =
           fun e v ->
           match e with
           | `Int(_) -> e
@@ -422,7 +422,7 @@ let () =
               else
                 `Let(name, subst_x(rhs, v), subst_x(body, v))
 
-        let program : expr =
+        let program  =
           `Let("x",
                `Add(`Int(10), `Int(5)),
                `Div(`Mul(`Var("x"), `Int(2)), `Sub(`Int(9), `Int(7)))
