@@ -414,7 +414,8 @@ module Chat_markdown = struct
 
   let load_script_source_text ~dir path =
     try Io.load_doc ~dir path with
-    | _ -> failwithf "Failed to load <script src=%S> relative to the prompt directory." path ()
+    | _ ->
+      failwithf "Failed to load <script src=%S> relative to the prompt directory." path ()
   ;;
 
   (* Helper to turn a chat_element back to string (for unrecognized markup). *)
@@ -540,6 +541,7 @@ module Chat_markdown = struct
          let pieces = List.map items ~f:aux in
          String.concat ~sep:"" pieces
        | None -> "")
+
   and script_body_of_children children =
     List.map children ~f:chat_element_to_string |> String.concat ~sep:""
   ;;
@@ -816,14 +818,16 @@ module Chat_markdown = struct
   ;;
 
   let validate_scripts (elements : top_level_elements list) =
-    let count = List.count elements ~f:(function
-      | Script _ -> true
-      | _ -> false)
+    let count =
+      List.count elements ~f:(function
+        | Script _ -> true
+        | _ -> false)
     in
     if count > 1
     then
       failwithf
-        "Expected at most one <script language=\"chatml\" kind=\"moderator\"> per prompt, found %d."
+        "Expected at most one <script language=\"chatml\" kind=\"moderator\"> per \
+         prompt, found %d."
         count
         ();
     elements

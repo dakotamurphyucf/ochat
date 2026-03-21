@@ -62,6 +62,8 @@ type t =
   { model : Model.t
   ; mutable op : op option
   ; mutable typeahead_op : typeahead_op option
+  ; moderator : Chat_response.In_memory_stream.moderator option
+  ; mutable halted_reason : string option
   ; pending : queued_action Core.Queue.t
   ; quit_via_esc : bool ref
     (** [true] iff the user hit [Esc] while idle, causing the app to exit. *)
@@ -78,7 +80,11 @@ type t =
         [Starting_typeahead]. *)
   }
 
-(** [create ~model] creates a fresh runtime container for [model].
+val visible_messages_of_history : t -> Openai.Responses.Item.t list -> Types.message list
+val refresh_messages : t -> unit
+val moderator_snapshot : t -> (Session.Moderator_snapshot.t option, string) result
+
+(** [create ?moderator ?halted_reason ~model ()] creates a fresh runtime container for [model].
 
     @param model Mutable UI model that the reducer will mutate.
 
@@ -87,10 +93,15 @@ type t =
 
     Example:
     {[
-      let runtime = Chat_tui.App_runtime.create ~model in
+      let runtime = Chat_tui.App_runtime.create ~model () in
       ignore (Chat_tui.App_runtime.alloc_op_id runtime : int)
     ]} *)
-val create : model:Model.t -> t
+val create
+  :  ?moderator:Chat_response.In_memory_stream.moderator
+  -> ?halted_reason:string
+  -> model:Model.t
+  -> unit
+  -> t
 
 (** [alloc_op_id t] allocates a fresh operation id.
 

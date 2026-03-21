@@ -1,5 +1,4 @@
 open! Core
-
 module CM = Prompt.Chat_markdown
 module Moderation = Moderation
 module Runtime = Chatml_moderator_runtime
@@ -41,14 +40,17 @@ module Registry = struct
   let of_elements (t : t) (elements : CM.top_level_elements list)
     : (t * artifact option, string) result
     =
-    List.fold elements ~init:(Ok (t, None)) ~f:(fun acc element ->
-      let open Result.Let_syntax in
-      let%bind registry, artifact = acc in
-      match element with
-      | CM.Script script ->
-        let%map registry, compiled = compile_script registry script in
-        registry, Some compiled
-      | _ -> Ok (registry, artifact))
+    List.fold
+      elements
+      ~init:(Ok (t, None))
+      ~f:(fun acc element ->
+        let open Result.Let_syntax in
+        let%bind registry, artifact = acc in
+        match element with
+        | CM.Script script ->
+          let%map registry, compiled = compile_script registry script in
+          registry, Some compiled
+        | _ -> Ok (registry, artifact))
   ;;
 
   let script_id artifact = artifact.script_id
@@ -65,8 +67,7 @@ type t =
   }
 
 let entrypoints =
-  Runtime.
-    { initial_state_name = "initial_state"; on_event_name = "on_event" }
+  Runtime.{ initial_state_name = "initial_state"; on_event_name = "on_event" }
 ;;
 
 let snapshot_of_jsonaf (json : Jsonaf.t) : (Snapshot.t, string) result =
@@ -92,8 +93,14 @@ let persisted_message_of_message (message : Moderation.Message.t)
 let message_of_persisted (message : Session.Moderator_snapshot.Message.t)
   : (Moderation.Message.t, string) result
   =
-  Result.map (jsonaf_of_snapshot ~name:"moderator overlay message meta" message.meta) ~f:(fun meta ->
-    Moderation.Message.create ~id:message.id ~role:message.role ~content:message.content ~meta)
+  Result.map
+    (jsonaf_of_snapshot ~name:"moderator overlay message meta" message.meta)
+    ~f:(fun meta ->
+      Moderation.Message.create
+        ~id:message.id
+        ~role:message.role
+        ~content:message.content
+        ~meta)
 ;;
 
 let persisted_overlay_of_overlay (overlay : Moderation.Overlay.t)
@@ -174,8 +181,7 @@ let restored_runtime_values (snapshot : Session.Moderator_snapshot.t)
   let open Result.Let_syntax in
   let%bind current_state = Value_codec.Snapshot.to_value snapshot.current_state in
   let%bind queued_internal_events =
-    Result.all
-      (List.map snapshot.queued_internal_events ~f:Value_codec.Snapshot.to_value)
+    Result.all (List.map snapshot.queued_internal_events ~f:Value_codec.Snapshot.to_value)
   in
   Ok (current_state, queued_internal_events)
 ;;
@@ -210,7 +216,9 @@ let create
              snapshot.script_source_hash
              artifact.source_hash)
       else (
-        let%bind current_state, queued_internal_events = restored_runtime_values snapshot in
+        let%bind current_state, queued_internal_events =
+          restored_runtime_values snapshot
+        in
         let%bind () =
           Runtime.restore
             runtime
@@ -251,12 +259,17 @@ let apply_overlay_op (t : t) (op : Moderation.Overlay.op) : unit =
   | Moderation.Overlay.Prepend_system text ->
     let message = next_overlay_message t ~role:"system" ~content:text in
     t.overlay
-    <- { t.overlay with prepended_system_messages = t.overlay.prepended_system_messages @ [ message ] }
+    <- { t.overlay with
+         prepended_system_messages = t.overlay.prepended_system_messages @ [ message ]
+       }
   | Append_message message ->
-    t.overlay <- { t.overlay with appended_messages = t.overlay.appended_messages @ [ message ] }
+    t.overlay
+    <- { t.overlay with appended_messages = t.overlay.appended_messages @ [ message ] }
   | Replace_message replacement ->
     t.overlay
-    <- { t.overlay with replacements = update_replacements t.overlay.replacements replacement }
+    <- { t.overlay with
+         replacements = update_replacements t.overlay.replacements replacement
+       }
   | Delete_message id ->
     if not (List.mem t.overlay.deleted_message_ids id ~equal:String.equal)
     then
@@ -393,9 +406,34 @@ let effective_messages (t : t) (history : Res.Item.t list) : Moderation.Message.
   Moderation.Overlay.apply t.overlay messages
 ;;
 
+let input_role_of_string (role : string) : Res.Input_message.role =
+  match String.lowercase role with
+  | "system" -> Res.Input_message.System
+  | "user" -> Res.Input_message.User
+  | "assistant" -> Res.Input_message.Assistant
+  | "developer" -> Res.Input_message.Developer
+  | _ -> Res.Input_message.Assistant
+;;
+
+let input_item_of_message (m : Moderation.Message.t) : Res.Item.t =
+  (* NOTE: adjust fields if your Openai.Responses.Input_message.Text record differs. *)
+  let role = input_role_of_string m.role in
+  let _type =
+    match role with
+    | Res.Input_message.System -> "input_text"
+    | Res.Input_message.User -> "input_text"
+    | Res.Input_message.Assistant -> "output_text"
+    | Res.Input_message.Developer -> "input_text"
+  in
+  let content = [ Res.Input_message.Text { text = m.content; _type } ] in
+  Res.Item.Input_message { role; content; _type = "message" }
+;;
+
 let snapshot (t : t) : (Session.Moderator_snapshot.t, string) result =
   let open Result.Let_syntax in
-  let%bind current_state = Value_codec.Snapshot.of_value (Runtime.current_state t.runtime) in
+  let%bind current_state =
+    Value_codec.Snapshot.of_value (Runtime.current_state t.runtime)
+  in
   let%bind queued_internal_events =
     Result.all
       (List.map (Runtime.queued_events t.runtime) ~f:Value_codec.Snapshot.of_value)

@@ -1,5 +1,4 @@
 open! Core
-
 module Lang = Chatml.Chatml_lang
 module Runtime = Chatml_moderator_runtime
 module Res = Openai.Responses
@@ -95,12 +94,7 @@ module Tool_result : sig
     }
   [@@deriving sexp]
 
-  val of_output_item
-    :  name:string
-    -> kind:Tool_call.kind
-    -> Res.Item.t
-    -> t option
-
+  val of_output_item : name:string -> kind:Tool_call.kind -> Res.Item.t -> t option
   val to_value : t -> Lang.value
 end
 
@@ -236,8 +230,7 @@ module Capabilities : sig
     ; on_tool_call : name:string -> args:Jsonaf.t -> (tool_call_result, string) result
     ; on_tool_spawn : name:string -> args:Jsonaf.t -> (string, string) result
     ; model_recipes : model_recipe String.Map.t
-    ; on_schedule_after_ms :
-        delay_ms:int -> payload:Lang.value -> (string, string) result
+    ; on_schedule_after_ms : delay_ms:int -> payload:Lang.value -> (string, string) result
     ; on_schedule_cancel : id:string -> (unit, string) result
     }
 

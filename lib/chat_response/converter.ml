@@ -47,6 +47,12 @@ module Res = Openai.Responses
 
 type 'env ctx = 'env Ctx.t
 
+let run_nested_agent ~ctx ~run_agent ~url ~is_local items =
+  let prompt = Fetch.get ~ctx url ~is_local in
+  let prompt_dir = if is_local then Fetch.resolve_local_dir ~ctx url else None in
+  run_agent ?prompt_dir ?session_id:(Some url) ~ctx prompt items
+;;
+
 let function_call_output_part_of_content_item ~ctx ~run_agent (ci : CM.content_item)
   : Res.Tool_output.Output_part.t
   =
@@ -79,8 +85,7 @@ let function_call_output_part_of_content_item ~ctx ~run_agent (ci : CM.content_i
   | CM.Agent ({ url; is_local; items } as agent) ->
     let text =
       Cache.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
-        let prompt = Fetch.get ~ctx url ~is_local in
-        run_agent ~ctx prompt items)
+        run_nested_agent ~ctx ~run_agent ~url ~is_local items)
     in
     Res.Tool_output.Output_part.Input_text { text }
 ;;
@@ -146,9 +151,7 @@ let rec string_of_items ~ctx ~run_agent (items : CM.content_item list) : string 
        | _, _ -> Option.value ~default:"" b.text)
     | CM.Agent ({ url; is_local; items } as agent) ->
       Cache.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
-        let prompt = Fetch.get ~ctx url ~is_local in
-        (* delegate to the shared agent runner *)
-        run_agent ~ctx prompt items))
+        run_nested_agent ~ctx ~run_agent ~url ~is_local items))
   |> String.concat ~sep:"\n"
 
 (** [convert_basic_item ~ctx b] converts a
@@ -203,8 +206,7 @@ and convert_content_item ~ctx ~run_agent (ci : CM.content_item)
   | CM.Agent ({ url; is_local; items } as agent) ->
     let txt =
       Cache.find_or_add cache agent ~ttl:Time_ns.Span.day ~default:(fun () ->
-        let prompt = Fetch.get ~ctx url ~is_local in
-        run_agent ~ctx prompt items)
+        run_nested_agent ~ctx ~run_agent ~url ~is_local items)
     in
     Text { text = txt; _type = "input_text" }
 

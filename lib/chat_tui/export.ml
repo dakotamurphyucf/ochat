@@ -43,6 +43,7 @@ let archive
       ~(target_path : string)
       ~(cfg : Chat_response.Config.t)
       ~(initial_msg_count : int)
+      ~(moderator_snapshot : Session.Moderator_snapshot.t option)
       ~(session : Session.t option)
   : unit
   =
@@ -119,5 +120,6 @@ let archive
       ~datadir:datadir_export
       ~cfg
       ~initial_msg_count
+      ~moderator_snapshot
       ~history_items:(Model.history_items model))
 ;;

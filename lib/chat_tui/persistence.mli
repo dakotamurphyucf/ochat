@@ -37,9 +37,23 @@
     returned by {!Eio.Path.with_open_out}. *)
 val write_user_message : dir:Eio.Fs.dir_ty Eio.Path.t -> file:string -> string -> unit
 
+(** [history_as_chatmd ?moderator_snapshot ~history_items] renders
+    [history_items] as ChatMarkdown.
+
+    When [moderator_snapshot] is provided, the rendering appends explicit
+    synthetic ChatMarkdown-visible entries derived from the persisted
+    moderator overlay so exported transcripts and previews surface the same
+    synthetic inserts, replacements, deletions, and halt reason that a
+    resumed session would carry in its moderator snapshot. *)
+val history_as_chatmd
+  :  moderator_snapshot:Session.Moderator_snapshot.t option
+  -> history_items:Openai.Responses.Item.t list
+  -> string
+
 (** [persist_session ~dir ~prompt_file ~datadir ~cfg ~initial_msg_count
-    ~history_items] appends every *new* item in [history_items] to the
-    transcript file [prompt_file] located under [dir].
+    ?moderator_snapshot ~history_items] appends every *new* item in
+    [history_items] to the transcript file [prompt_file] located under
+    [dir].
 
     "New" means entries whose list index is {>=} [initial_msg_count].  Earlier
     items are assumed to be already present on disk.
@@ -66,6 +80,11 @@ val write_user_message : dir:Eio.Fs.dir_ty Eio.Path.t -> file:string -> string -
 
     • *Reasoning summaries* become `<reasoning>` blocks with nested
       `<summary>` children.
+
+    • When [moderator_snapshot] is provided, overlay-derived synthetic
+      transcript entries are appended after the canonical history suffix so
+      exports remain explicit about moderation-visible inserts, replacements,
+      deletions, and halt state.
 
     The helper is {b append-only}: it never rewrites or deletes existing data
     and therefore preserves the original chronological order of the
@@ -94,5 +113,6 @@ val persist_session
   -> datadir:Eio.Fs.dir_ty Eio.Path.t
   -> cfg:Chat_response.Config.t
   -> initial_msg_count:int
+  -> moderator_snapshot:Session.Moderator_snapshot.t option
   -> history_items:Openai.Responses.Item.t list
   -> unit

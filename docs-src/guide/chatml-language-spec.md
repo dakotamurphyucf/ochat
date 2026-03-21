@@ -2599,7 +2599,7 @@ embeddings.
 
 ### 21.5 Moderator script contract
 
-The current moderator runtime uses a convention-based contract:
+The integrated moderator runtime uses a convention-based contract:
 
 ```ocaml
 let initial_state = { reminder_count = 0 }
@@ -2687,7 +2687,59 @@ type context =
 These aliases are compile-time conveniences layered on top of ordinary
 structural record/variant typing.
 
-### 21.7 Effect requests
+### 21.7 Integrated host lifecycle
+
+When a ChatMD prompt declares:
+
+```xml
+<script language="chatml" kind="moderator" id="main">
+...
+</script>
+```
+
+or:
+
+```xml
+<script language="chatml" kind="moderator" id="main" src="moderator.chatml" />
+```
+
+the host treats that script as the prompt's single v1 moderation program.
+
+Integration rules:
+
+- zero scripts means no moderation and preserves baseline driver behavior,
+- one script enables the shared moderation manager,
+- more than one script is a prompt validation error,
+- the script is parsed and validated during ChatMD prompt loading,
+- the script is compiled once per prompt load and instantiated per session,
+- the script remains host-managed and is not converted into model-visible
+  request history.
+
+The shared moderation vocabulary defines these phase names:
+
+- `session_start`
+- `session_resume`
+- `turn_start`
+- `message_appended`
+- `pre_tool_call`
+- `post_tool_response`
+- `turn_end`
+- `internal_event`
+
+Current built-in host paths emit:
+
+- `session_start` for fresh moderated sessions,
+- `session_resume` when restoring a persisted moderator snapshot,
+- `turn_start` before each model request,
+- `pre_tool_call` before tool execution,
+- `post_tool_response` after a tool output item is produced,
+- `turn_end` after a streamed assistant turn finishes,
+- `internal_event` while replaying queued emitted events.
+
+The `message_appended` phase is part of the shared API surface but is not
+currently emitted by the shipped drivers.
+
+### 21.8 Effect requests
 
 Task effects are represented internally as:
 
@@ -2705,7 +2757,7 @@ with two execution modes:
 
 The concrete set of supported operation names is host-defined.
 
-### 21.8 Host-side moderator runtime
+### 21.9 Host-side moderator runtime
 
 The current host runtime lives in `chatml_moderator_runtime.ml`. It
 supports:
@@ -2733,7 +2785,12 @@ instantiate_session
 handle_event
 ```
 
-### 21.9 Operation registry and defaults
+The repository's shared moderation integration layers this runtime under
+`Chat_response.Moderation`, `Chat_response.Moderator_manager`, and the shared
+drivers used by `chat_tui`, file-backed prompt execution, nested `run_agent`
+calls, and MCP prompt-agent wrappers.
+
+### 21.10 Operation registry and defaults
 
 The moderator runtime interprets task effects through an operation registry:
 
@@ -2772,7 +2829,12 @@ Current default behavior is intentionally conservative:
   `Schedule.after_ms` fail with a clear `"… is not configured"` error unless
   the host supplies handlers.
 
-### 21.10 Commit/rollback semantics
+Named model recipes are host-defined. `Model.call("recipe", payload)` and
+`Model.spawn("recipe", payload)` do not select arbitrary provider model names;
+they route through the host capability registry under a recipe name chosen by
+the embedder.
+
+### 21.11 Commit/rollback semantics
 
 The moderator runtime currently buffers:
 
@@ -2798,7 +2860,69 @@ On task failure:
 `TCatch` restores the local transactional buffers before running the handler
 task.
 
-### 21.11 Phase restrictions
+This rollback rule is what lets the host keep canonical history and persisted
+moderator state unchanged after a failed moderation task.
+
+### 21.12 Overlay and tool moderation semantics
+
+The shipped host integration interprets committed local effects through a
+shared moderation layer rather than mutating canonical history directly.
+
+`Turn.*` effects update a host-owned overlay that can:
+
+- prepend synthetic system messages,
+- append synthetic messages,
+- replace projected messages by stable host id,
+- delete projected messages by stable host id,
+- halt the session with a reason.
+
+The host computes the effective moderated request history by applying that
+overlay to projected canonical history before the next model turn.
+
+Tool moderation effects are interpreted as:
+
+- `Tool.approve()` – keep the tool call unchanged,
+- `Tool.reject(reason)` – synthesize a denied tool output item and skip tool execution,
+- `Tool.rewrite_args(json)` – keep the tool name but replace the payload,
+- `Tool.redirect(name, json)` – replace both tool name and payload.
+
+If one moderation event emits multiple conflicting tool moderation actions, the
+host treats that as an error instead of guessing precedence.
+
+### 21.13 Internal event replay
+
+`Runtime.emit(event)` buffers a raw ChatML value. After any successful host
+event handling, the moderation manager drains queued events FIFO and re-feeds
+them through phase `internal_event`.
+
+Current behavior:
+
+- replay happens only after successful task completion,
+- replay stops once the queue is empty,
+- a safety limit prevents unbounded loops,
+- end-session requests stop further replay for that host event.
+
+### 21.14 Persistence boundary
+
+The integrated host persists moderator state explicitly in `Session.t`.
+
+The persisted snapshot contains:
+
+- `script_id`
+- `script_source_hash`
+- serializable durable script state
+- serializable queued internal events
+- halted flag
+- host overlay snapshot
+
+Only data-shaped ChatML values cross this boundary. The snapshot codec rejects
+closures, refs, builtins, modules, and tasks.
+
+When a session is exported to ChatMD, canonical history stays canonical while
+overlay-derived synthetic entries are materialized explicitly in the exported
+transcript so resume/export semantics stay auditable.
+
+### 21.15 Phase restrictions
 
 The operation model includes runtime phase checks:
 
@@ -2816,93 +2940,8 @@ require_phases
 but the default assembled operation set currently uses permissive
 `allow_all_phases` checks unless the host overrides them.
 
-### 21.12 Current implementation limitation: no built-in structured overlay
+### 21.16 No-script fallback
 
-The current moderator runtime records committed local transactional effects,
-but it does not yet impose a rich built-in typed overlay model for turn
-editing/tool moderation. Hosts that need such an overlay can build it in
-their handlers from the local transactional operation stream.
-
-### 21.13 Planned next steps
-
-The current implementation provides the core task/value/runtime machinery,
-but several pieces are intentionally still planned rather than fully landed.
-
-#### 21.13.1 Entrypoint type validation
-
-The runtime currently validates moderator entrypoints dynamically:
-
-- `initial_state` must exist
-- `on_event` must exist
-- `on_event` must be callable
-- `on_event` must return a task at runtime
-
-A planned next step is to validate the full script contract statically at
-load time, conceptually along the lines of:
-
-```ocaml
-initial_state : state
-on_event : context -> state -> event -> state task
-```
-
-This would most likely require exposing top-level binding types from the
-typechecker in a host-consumable form.
-
-#### 21.13.2 Phase restriction policy
-
-The operation model already supports runtime phase checks:
-
-```ocaml
-phase_check : string -> (unit, string) result
-```
-
-and the default runtime exposes helpers such as:
-
-```ocaml
-allow_all_phases
-require_phases
-```
-
-However, the current default registry remains intentionally permissive and
-mostly uses `allow_all_phases`.
-
-A planned next step is to install stronger default phase restrictions for
-operations such as:
-
-- `Tool.approve`
-- `Tool.reject`
-- `Tool.rewrite_args`
-- `Tool.redirect`
-- `Turn.prepend_system`
-- `Turn.halt`
-
-once the desired host phase vocabulary is settled.
-
-#### 21.13.3 Structured overlay model
-
-The current runtime commits and rolls back local transactional effects, but
-it does not yet maintain a first-class typed working overlay that later
-operations can query directly.
-
-A planned next step is to replace or augment the current raw local-effect
-buffer with a structured overlay model for concepts such as:
-
-- prepended system instructions
-- appended/replaced/deleted messages
-- tool moderation state
-- compaction requests
-- halt/end-session state
-
-This would better realize the intended semantics where later host
-operations, such as model/tool calls, can observe earlier local edits within
-the same handler execution.
-
-#### 21.13.4 Summary of current status
-
-In short:
-
-- task values and host-side interpretation are implemented,
-- composable builtin surfaces are implemented,
-- moderator capability modules are implemented,
-- default operation registry plumbing is implemented,
-- but contract hardening and overlay semantics are still future work.
+All public moderation integration is optional. If a ChatMD prompt declares no
+moderator `<script>`, the shared drivers, `chat_tui`, export flow, and nested
+agent execution all use the baseline non-moderated behavior.

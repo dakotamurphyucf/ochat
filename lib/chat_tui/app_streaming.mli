@@ -43,6 +43,7 @@ exception Cancelled
         ; cfg
         ; tools
         ; tool_tbl
+        ; moderator = None
         ; parallel_tool_calls = true
         ; history_compaction = true
         }
@@ -56,6 +57,7 @@ module Context : sig
     ; cfg : Chat_response.Config.t
     ; tools : Openai.Responses.Request.Tool.t list
     ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Core.Hashtbl.t
+    ; moderator : Chat_response.In_memory_stream.moderator option
     ; parallel_tool_calls : bool
     ; history_compaction : bool
     }

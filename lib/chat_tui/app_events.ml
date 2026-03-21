@@ -19,6 +19,7 @@ type internal_event =
   | `Stream of int * Res_stream.t
   | `Stream_batch of int * Res_stream.t list
   | `Tool_output of int * Res_item.t
+  | `Moderator_runtime_request of int * Chat_response.Moderation.Runtime_request.t
   | `Streaming_done of int * Res_item.t list
   | `Streaming_error of int * exn
   | `Typeahead_started of int * Switch.t

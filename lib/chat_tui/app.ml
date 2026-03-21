@@ -35,6 +35,9 @@ module Ctx = Chat_response.Ctx
 module Cache = Chat_response.Cache
 module Tool = Chat_response.Tool
 module Config = Chat_response.Config
+module Moderation = Chat_response.Moderation
+module Moderator_manager = Chat_response.Moderator_manager
+module Stream_moderator = Chat_response.In_memory_stream
 module Req = Res.Request
 
 (** Runtime artefacts derived from the chat prompt. *)
@@ -46,6 +49,7 @@ type prompt_context =
 
         The assistant returns a JSON payload that is looked up in this table and
         then executed. *)
+  ; moderator : Stream_moderator.moderator option
   }
 
 type input_event = App_events.input_event
@@ -63,16 +67,24 @@ module Session_persist = struct
        serialisation to {!Session_store.save}.  It is used from all quit
        branches so that conversation state is not lost even when the user
        skips ChatMarkdown export. *)
-  let persist_snapshot env session model =
+  let persist_snapshot env session runtime =
     match session with
     | None -> ()
-    | Some s ->
+    | Some (s : Session.t) ->
+      let moderator_snapshot =
+        match Runtime.moderator_snapshot runtime with
+        | Ok moderator_snapshot -> moderator_snapshot
+        | Error msg ->
+          Log.emit `Error (Printf.sprintf "Failed to snapshot moderator state: %s" msg);
+          s.moderator_snapshot
+      in
       let updated_session =
         Session.
           { s with
-            history = Model.history_items model
-          ; tasks = Model.tasks model
-          ; kv_store = Hashtbl.to_alist (Model.kv_store model)
+            history = Model.history_items runtime.Runtime.model
+          ; tasks = Model.tasks runtime.Runtime.model
+          ; moderator_snapshot
+          ; kv_store = Hashtbl.to_alist (Model.kv_store runtime.Runtime.model)
           }
       in
       Session_store.save ~env updated_session
@@ -80,6 +92,8 @@ module Session_persist = struct
 end
 
 module Setup = struct
+  let now_ms ~env = Eio.Time.now (Eio.Stdenv.clock env) *. 1000. |> Int.of_float
+
   let init_datadir ~env ~cwd ~session : _ Eio.Path.t =
     let open Eio.Path in
     match session with
@@ -164,6 +178,65 @@ module Setup = struct
 
   let initial_msg_count ~history_items_prompt = List.length history_items_prompt
 
+  let moderator_session_id ~session ~prompt_file =
+    match session with
+    | Some (session : Session.t) -> session.id
+    | None -> prompt_file
+  ;;
+
+  let create_moderator ~env ~prompt_file ~session ~prompt_elements ~history_items ~tools =
+    let open Result.Let_syntax in
+    let%bind _, artifact =
+      Moderator_manager.Registry.of_elements
+        Moderator_manager.Registry.empty
+        prompt_elements
+    in
+    match artifact with
+    | None -> Ok (None, [])
+    | Some artifact ->
+      let snapshot =
+        Option.bind session ~f:(fun (session : Session.t) -> session.moderator_snapshot)
+      in
+      let session_id = moderator_session_id ~session ~prompt_file in
+      let capabilities = Moderation.Capabilities.default in
+      let%bind manager = Moderator_manager.create ~artifact ~capabilities ?snapshot () in
+      let moderator = Stream_moderator.{ manager; session_id; session_meta = `Null } in
+      let startup_event =
+        match snapshot with
+        | Some _ -> Moderation.Event.Session_resume
+        | None -> Session_start
+      in
+      let%bind outcome =
+        Moderator_manager.handle_event
+          manager
+          ~session_id
+          ~now_ms:(now_ms ~env)
+          ~history:history_items
+          ~available_tools:tools
+          ~session_meta:`Null
+          ~event:startup_event
+      in
+      let%bind drained =
+        if
+          List.exists outcome.runtime_requests ~f:(function
+            | Moderation.Runtime_request.End_session _ -> true
+            | Moderation.Runtime_request.Request_compaction -> false)
+        then Ok []
+        else
+          Moderator_manager.drain_internal_events
+            manager
+            ~session_id
+            ~now_ms:(now_ms ~env)
+            ~history:history_items
+            ~available_tools:tools
+            ~session_meta:`Null
+      in
+      let requests =
+        List.concat_map (outcome :: drained) ~f:(fun outcome -> outcome.runtime_requests)
+      in
+      Ok (Some moderator, requests)
+  ;;
+
   let init_model ~(session : Session.t option) ~history_items ~messages : Model.t =
     Model.create
       ~history_items
@@ -239,6 +312,7 @@ module Shutdown = struct
         ~export_file
         ~persist_mode
         ~session
+        ~runtime
         ~model
         ~cfg
         ~initial_msg_count
@@ -246,6 +320,15 @@ module Shutdown = struct
     =
     (* Helper: export conversation to ChatMarkdown at [target_path]. *)
     let do_export ~target_path () =
+      let moderator_snapshot =
+        match App_runtime.moderator_snapshot runtime with
+        | Ok moderator_snapshot -> moderator_snapshot
+        | Error msg ->
+          Log.emit
+            `Error
+            (Printf.sprintf "Failed to snapshot moderator state for export: %s" msg);
+          Option.bind session ~f:(fun (session : Session.t) -> session.moderator_snapshot)
+      in
       Export.archive
         ~env
         ~model
@@ -253,6 +336,7 @@ module Shutdown = struct
         ~target_path
         ~cfg
         ~initial_msg_count
+        ~moderator_snapshot
         ~session
     in
     (* ------------------------------------------------------------------ *)
@@ -321,7 +405,7 @@ module Shutdown = struct
             | None -> true))
     in
     if should_persist
-    then Session_persist.persist_snapshot env session model
+    then Session_persist.persist_snapshot env session runtime
     else Log.emit `Info "Skipping session persistence as per user request."
   ;;
 end
@@ -392,19 +476,43 @@ let run_chat
   let ctx = Setup.build_ctx ~env ~prompt_dir ~tool_dir:cwd ~cache in
   let declared_tools = Setup.declared_tools_of_elements prompt_elements in
   let tools, tool_tbl = Setup.build_tools_runtime ~sw:ui_sw ~ctx ~declared_tools in
-  let prompt_ctx : prompt_context = { cfg; tools; tool_tbl } in
   (* Convert prompt → initial history items extracted from the static prompt. *)
   let history_items_prompt = Setup.history_items_from_prompt ~ctx ~prompt_elements in
   (* If a persisted [session] was passed in, prefer its history – otherwise
      start from the prompt defaults. *)
   let history_items = Setup.choose_initial_history ~session ~history_items_prompt in
+  let moderator, startup_requests =
+    Setup.create_moderator
+      ~env
+      ~prompt_file
+      ~session
+      ~prompt_elements
+      ~history_items
+      ~tools
+    |> Result.ok_or_failwith
+  in
+  let prompt_ctx : prompt_context = { cfg; tools; tool_tbl; moderator } in
+  (* Convert prompt → initial history items extracted from the static prompt. *)
   let messages = Setup.initial_messages_of_history history_items in
   (* Number of history items contributed by the static prompt.  This is
      forwarded to export logic. *)
   let initial_msg_count = Setup.initial_msg_count ~history_items_prompt in
   (* Load persisted draft, if exists, now that [cursor_pos] is available *)
   let model = Setup.init_model ~session ~history_items ~messages in
-  let runtime = Runtime.create ~model in
+  let runtime = Runtime.create ?moderator ~model () in
+  App_runtime.refresh_messages runtime;
+  List.iter startup_requests ~f:(function
+    | Moderation.Runtime_request.Request_compaction ->
+      Eio.Stream.add internal_stream `Compact_requested
+    | Moderation.Runtime_request.End_session reason ->
+      runtime.halted_reason <- Some reason;
+      ignore
+        (Model.apply_patch
+           model
+           (Add_placeholder_message
+              { role = "system"
+              ; text = Printf.sprintf "Session ended by moderator: %s" reason
+              })));
   Model.rebuild_tool_output_index model;
   (* Start the Notty terminal – its [on_event] callback just pushes events
         into [ev_stream] so the UI stays single-threaded. *)
@@ -430,6 +538,7 @@ let run_chat
     ; cfg = prompt_ctx.cfg
     ; tools = prompt_ctx.tools
     ; tool_tbl = prompt_ctx.tool_tbl
+    ; moderator = prompt_ctx.moderator
     ; parallel_tool_calls
     ; history_compaction = false
     }
@@ -448,6 +557,7 @@ let run_chat
     ~export_file
     ~persist_mode
     ~session
+    ~runtime
     ~model
     ~cfg
     ~initial_msg_count

@@ -21,7 +21,8 @@ let moderator_snapshot () =
     ~script_id:"main"
     ~script_source_hash:"source-hash-1"
     ~current_state:(Snapshot.Record [ "count", Snapshot.Int 3 ])
-    ~queued_internal_events:[ Snapshot.Variant ("Internal_done", [ Snapshot.String "queued" ]) ]
+    ~queued_internal_events:
+      [ Snapshot.Variant ("Internal_done", [ Snapshot.String "queued" ]) ]
     ~halted:true
     ~overlay
     ()
@@ -120,7 +121,8 @@ let%expect_test "legacy V2 → latest upgrade" =
   let upgraded = Session.Legacy.upgrade_v2 legacy in
   let version_ok = Int.equal upgraded.version Session.current_version
   and id_ok = String.equal upgraded.id legacy.id
-  and prompt_copy_kept = Option.equal String.equal upgraded.local_prompt_copy legacy.local_prompt_copy
+  and prompt_copy_kept =
+    Option.equal String.equal upgraded.local_prompt_copy legacy.local_prompt_copy
   and moderator_snapshot_none = Option.is_none upgraded.moderator_snapshot in
   print_s
     [%sexp
@@ -148,10 +150,6 @@ let%expect_test "reset clears persisted moderator snapshot" =
   let reset_keep_history = Session.reset_keep_history session in
   let reset_clears = Option.is_none reset.moderator_snapshot in
   let reset_keep_history_clears = Option.is_none reset_keep_history.moderator_snapshot in
-  print_s
-    [%sexp
-      { reset_clears : bool
-      ; reset_keep_history_clears : bool
-      }];
+  print_s [%sexp { reset_clears : bool; reset_keep_history_clears : bool }];
   [%expect {| ((reset_clears true) (reset_keep_history_clears true)) |}]
 ;;

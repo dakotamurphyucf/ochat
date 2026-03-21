@@ -1,5 +1,7 @@
 open Core
 module CM = Prompt.Chat_markdown
+module Moderation = Moderation
+module Moderator_manager = Moderator_manager
 module Res = Openai.Responses
 module Output = Res.Tool_output.Output
 
@@ -16,6 +18,7 @@ type driver_pending_call =
   { seq : int
   ; call_id : string
   ; kind : driver_pending_call_kind
+  ; name : string
   ; promise : Openai.Responses.Tool_output.Output.t Eio.Promise.or_exn
   }
 
@@ -29,6 +32,21 @@ type stream_state =
   ; run_again : bool
   }
 
+type moderator =
+  { manager : Moderator_manager.t
+  ; session_id : string
+  ; session_meta : Jsonaf.t
+  }
+
+type moderated_tool_call =
+  { call_item : Res.Item.t
+  ; kind : Tool_call.Kind.t
+  ; name : string
+  ; payload : string
+  ; synthetic_result : Res.Tool_output.Output.t option
+  ; runtime_requests : Moderation.Runtime_request.t list
+  }
+
 type ctx =
   { env : Eio_unix.Stdenv.base
   ; sw : Eio.Switch.t
@@ -38,6 +56,8 @@ type ctx =
   ; temperature : float option
   ; max_output_tokens : int option
   ; reasoning : Openai.Responses.Request.Reasoning.t option
+  ; moderator : moderator option
+  ; on_runtime_request : Moderation.Runtime_request.t -> unit
   ; history_compaction : bool
   ; parallel_tool_calls : bool
   ; model : Openai.Responses.Request.model
@@ -61,6 +81,8 @@ type args =
   ; temperature : float option
   ; max_output_tokens : int option
   ; reasoning : Openai.Responses.Request.Reasoning.t option
+  ; moderator : moderator option
+  ; on_runtime_request : Moderation.Runtime_request.t -> unit
   ; history_compaction : bool
   ; parallel_tool_calls : bool
   ; meta_refine : bool
@@ -83,6 +105,293 @@ let derive_tools_tool_tbl ~tools ~tool_tbl =
   | _ ->
     let comp_tools, tbl = Ochat_function.functions [] in
     Tool.convert_tools comp_tools, tbl
+;;
+
+let input_role_of_string (role : string) : Res.Input_message.role =
+  match String.lowercase role with
+  | "system" -> Res.Input_message.System
+  | "user" -> Res.Input_message.User
+  | "assistant" -> Res.Input_message.Assistant
+  | "developer" -> Res.Input_message.Developer
+  | _ -> Res.Input_message.Assistant
+;;
+
+let input_item_of_message (message : Moderation.Message.t) : Res.Item.t =
+  let role = input_role_of_string message.role in
+  let _type =
+    match role with
+    | Res.Input_message.System -> "input_text"
+    | Res.Input_message.User -> "input_text"
+    | Res.Input_message.Assistant -> "output_text"
+    | Res.Input_message.Developer -> "input_text"
+  in
+  let content = [ Res.Input_message.Text { text = message.content; _type } ] in
+  Res.Item.Input_message
+    { role = input_role_of_string message.role; content; _type = "message" }
+;;
+
+let payload_of_jsonaf ~(kind : Tool_call.Kind.t) (payload : Jsonaf.t) : string =
+  match kind with
+  | Function -> Jsonaf.to_string payload
+  | Custom ->
+    (match payload with
+     | `String text -> text
+     | _ -> Jsonaf.to_string payload)
+;;
+
+type moderation_event_result =
+  { outer : Moderation.Outcome.t
+  ; drained : Moderation.Outcome.t list
+  }
+
+let report_runtime_requests
+      ~(on_runtime_request : Moderation.Runtime_request.t -> unit)
+      (result : moderation_event_result)
+  =
+  List.iter (result.outer :: result.drained) ~f:(fun outcome ->
+    List.iter outcome.runtime_requests ~f:on_runtime_request)
+;;
+
+let requests_end_session (outcome : Moderation.Outcome.t) =
+  List.exists outcome.runtime_requests ~f:(function
+    | Moderation.Runtime_request.End_session _ -> true
+    | Request_compaction -> false)
+;;
+
+let unexpected_tool_moderation ~(source : string) (outcomes : Moderation.Outcome.t list)
+  : (unit, string) result
+  =
+  match List.find_map outcomes ~f:(fun outcome -> outcome.tool_moderation) with
+  | None -> Ok ()
+  | Some action ->
+    Error
+      (Printf.sprintf
+         "%s returned an unexpected tool moderation action: %s"
+         source
+         ([%sexp_of: Moderation.Tool_moderation.t] action |> Sexp.to_string_hum))
+;;
+
+let handle_moderation_event
+      ~(moderator : moderator option)
+      ~(on_runtime_request : Moderation.Runtime_request.t -> unit)
+      ~available_tools
+      ~now_ms
+      ~history
+      ~(event : Moderation.Event.t)
+  : (moderation_event_result option, string) result
+  =
+  match moderator with
+  | None -> Ok None
+  | Some moderator ->
+    let open Result.Let_syntax in
+    let%bind outer =
+      Moderator_manager.handle_event
+        moderator.manager
+        ~session_id:moderator.session_id
+        ~now_ms
+        ~history
+        ~available_tools
+        ~session_meta:moderator.session_meta
+        ~event
+    in
+    let%map drained =
+      if requests_end_session outer
+      then Ok []
+      else
+        Moderator_manager.drain_internal_events
+          moderator.manager
+          ~session_id:moderator.session_id
+          ~now_ms
+          ~history
+          ~available_tools
+          ~session_meta:moderator.session_meta
+    in
+    let result = { outer; drained } in
+    report_runtime_requests ~on_runtime_request result;
+    Some result
+;;
+
+let handle_turn_event
+      ~(moderator : moderator option)
+      ~(on_runtime_request : Moderation.Runtime_request.t -> unit)
+      ~event
+      ~available_tools
+      ~now_ms
+      ~history
+  =
+  let open Result.Let_syntax in
+  let%bind result =
+    handle_moderation_event
+      ~moderator
+      ~on_runtime_request
+      ~event
+      ~available_tools
+      ~now_ms
+      ~history
+  in
+  match result with
+  | None -> Ok ()
+  | Some result ->
+    unexpected_tool_moderation
+      ~source:(Moderation.Phase.to_string (Moderation.Event.phase event))
+      (result.outer :: result.drained)
+;;
+
+let prepare_turn_inputs ~(moderator : moderator option) ~available_tools ~now_ms ~history =
+  let open Result.Let_syntax in
+  let%bind () =
+    handle_turn_event
+      ~moderator
+      ~on_runtime_request:(fun _ -> ())
+      ~event:Moderation.Event.Turn_start
+      ~available_tools
+      ~now_ms
+      ~history
+  in
+  match moderator with
+  | None -> Ok history
+  | Some moderator ->
+    Ok
+      (Moderator_manager.effective_messages moderator.manager history
+       |> List.map ~f:input_item_of_message)
+;;
+
+let finish_turn ~(moderator : moderator option) ~available_tools ~now_ms ~history =
+  handle_turn_event
+    ~moderator
+    ~on_runtime_request:(fun _ -> ())
+    ~event:Moderation.Event.Turn_end
+    ~available_tools
+    ~now_ms
+    ~history
+;;
+
+let moderate_tool_call
+      ~(moderator : moderator option)
+      ~available_tools
+      ~now_ms
+      ~history
+      ~(kind : Tool_call.Kind.t)
+      ~(name : string)
+      ~(payload : string)
+      ~(call_id : string)
+      ~(item_id : string option)
+  : (moderated_tool_call, string) result
+  =
+  let original_call_item =
+    Tool_call.call_item ~kind ~name ~payload ~call_id ~id:item_id
+  in
+  let history_with_call = history @ [ original_call_item ] in
+  let tool_call =
+    match Moderation.Tool_call.of_response_item original_call_item with
+    | None ->
+      failwith "Expected tool call item when moderating a pending tool invocation."
+    | Some tool_call -> tool_call
+  in
+  let open Result.Let_syntax in
+  let%bind moderation =
+    handle_moderation_event
+      ~moderator
+      ~on_runtime_request:(fun _ -> ())
+      ~available_tools
+      ~now_ms
+      ~history:history_with_call
+      ~event:(Moderation.Event.Pre_tool_call tool_call)
+  in
+  let%bind runtime_requests, action =
+    match moderation with
+    | None -> Ok ([], None)
+    | Some moderation ->
+      let%map () =
+        unexpected_tool_moderation ~source:"internal_event" moderation.drained
+      in
+      ( List.concat_map (moderation.outer :: moderation.drained) ~f:(fun outcome ->
+          outcome.runtime_requests)
+      , moderation.outer.tool_moderation )
+  in
+  Ok
+    (match action with
+     | None | Some Moderation.Tool_moderation.Approve ->
+       { call_item = original_call_item
+       ; kind
+       ; name
+       ; payload
+       ; synthetic_result = None
+       ; runtime_requests
+       }
+     | Some (Reject reason) ->
+       { call_item = original_call_item
+       ; kind
+       ; name
+       ; payload
+       ; synthetic_result = Some (Output.Text reason)
+       ; runtime_requests
+       }
+     | Some (Rewrite_args args) ->
+       let payload = payload_of_jsonaf ~kind args in
+       { call_item = Tool_call.call_item ~kind ~name ~payload ~call_id ~id:item_id
+       ; kind
+       ; name
+       ; payload
+       ; synthetic_result = None
+       ; runtime_requests
+       }
+     | Some (Redirect (redirected_name, args)) ->
+       let payload = payload_of_jsonaf ~kind args in
+       { call_item =
+           Tool_call.call_item ~kind ~name:redirected_name ~payload ~call_id ~id:item_id
+       ; kind
+       ; name = redirected_name
+       ; payload
+       ; synthetic_result = None
+       ; runtime_requests
+       })
+;;
+
+let handle_tool_result
+      ~(moderator : moderator option)
+      ~available_tools
+      ~now_ms
+      ~history
+      ~(name : string)
+      ~(kind : Tool_call.Kind.t)
+      ~(item : Res.Item.t)
+  : (Moderation.Runtime_request.t list, string) result
+  =
+  let tool_result =
+    match
+      Moderation.Tool_result.of_output_item
+        ~name
+        ~kind:
+          (match kind with
+           | Function -> Moderation.Tool_call.Function
+           | Custom -> Moderation.Tool_call.Custom)
+        item
+    with
+    | None -> failwith "Expected tool output item when handling a moderated tool result."
+    | Some tool_result -> tool_result
+  in
+  let open Result.Let_syntax in
+  let%bind moderation =
+    handle_moderation_event
+      ~moderator
+      ~on_runtime_request:(fun _ -> ())
+      ~available_tools
+      ~now_ms
+      ~history
+      ~event:(Moderation.Event.Post_tool_response tool_result)
+  in
+  match moderation with
+  | None -> Ok []
+  | Some moderation ->
+    let%bind () =
+      unexpected_tool_moderation
+        ~source:"post_tool_response"
+        (moderation.outer :: moderation.drained)
+    in
+    Ok
+      (List.concat_map (moderation.outer :: moderation.drained) ~f:(fun outcome ->
+         outcome.runtime_requests))
 ;;
 
 let log_parsing_error ~env ~datadir json exn =
@@ -171,6 +480,10 @@ let history_so_far
   else combined
 ;;
 
+let now_ms (env : Eio_unix.Stdenv.base) : int =
+  Eio.Time.now (Eio.Stdenv.clock env) *. 1000. |> Int.of_float
+;;
+
 let post_stream (c : ctx) ~sw ~(inputs : Openai.Responses.Item.t list) =
   Openai.Responses.post_response
     Openai.Responses.Stream
@@ -226,9 +539,10 @@ let add_pending
       (st : stream_state)
       ~(call_id : string)
       ~(kind : [ `Function | `Custom ])
+      ~(name : string)
       promise
   =
-  let pending = { seq = st.next_seq; call_id; kind; promise } in
+  let pending = { seq = st.next_seq; call_id; kind; name; promise } in
   { st with
     pending_calls_rev = pending :: st.pending_calls_rev
   ; next_seq = st.next_seq + 1
@@ -248,35 +562,53 @@ let schedule_function_done
   match Map.find st.func_info item_id with
   | None -> st
   | Some (name, call_id) ->
-    let st =
-      add_item
-        st
-        (Tool_call.call_item
-           ~kind:Tool_call.Kind.Function
-           ~name
-           ~payload:arguments
-           ~call_id
-           ~id:(Some item_id))
-    in
-    let hs = history_so_far ~history_compaction:c.history_compaction ~hist ~st in
-    let run_tool () =
-      Tool_call.run_tool
+    let moderated =
+      moderate_tool_call
+        ~moderator:c.moderator
+        ~available_tools:c.tools
+        ~now_ms:(now_ms c.env)
+        ~history:hist
         ~kind:Tool_call.Kind.Function
         ~name
         ~payload:arguments
         ~call_id
-        ~tool_tbl:c.tool_tbl
-        ~on_fork:
-          (Some
-             (fun ~call_id ~arguments ->
-               make_run_fork ~turn ~history_so_far:hs ~call_id ~arguments))
+        ~item_id:(Some item_id)
+      |> Result.ok_or_failwith
     in
-    let p = make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool in
-    add_pending st ~call_id ~kind:`Function p
+    List.iter moderated.runtime_requests ~f:c.on_runtime_request;
+    let st = add_item st moderated.call_item in
+    let name = moderated.name in
+    let arguments = moderated.payload in
+    let hs = history_so_far ~history_compaction:c.history_compaction ~hist ~st in
+    let run_tool () =
+      match moderated.synthetic_result with
+      | Some result -> result
+      | None ->
+        Tool_call.run_tool
+          ~kind:Tool_call.Kind.Function
+          ~name
+          ~payload:arguments
+          ~call_id
+          ~tool_tbl:c.tool_tbl
+          ~on_fork:
+            (Some
+               (fun ~call_id ~arguments ->
+                 make_run_fork ~turn ~history_so_far:hs ~call_id ~arguments))
+    in
+    let p =
+      match moderated.synthetic_result with
+      | Some result ->
+        let promise, resolver = Eio.Promise.create () in
+        Eio.Promise.resolve_ok resolver result;
+        promise
+      | None -> make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool
+    in
+    add_pending st ~call_id ~kind:`Function ~name p
 ;;
 
 let schedule_custom_done
       (c : ctx)
+      ~(hist : Openai.Responses.Item.t list)
       ~(st : stream_state)
       ~(item_id : string)
       ~(input : string)
@@ -285,27 +617,44 @@ let schedule_custom_done
   match Map.find st.func_info item_id with
   | None -> st
   | Some (name, call_id) ->
-    let st =
-      add_item
-        st
-        (Tool_call.call_item
-           ~kind:Tool_call.Kind.Custom
-           ~name
-           ~payload:input
-           ~call_id
-           ~id:(Some item_id))
-    in
-    let run_tool () =
-      Tool_call.run_tool
+    let moderated =
+      moderate_tool_call
+        ~moderator:c.moderator
+        ~available_tools:c.tools
+        ~now_ms:(now_ms c.env)
+        ~history:hist
         ~kind:Tool_call.Kind.Custom
         ~name
         ~payload:input
         ~call_id
-        ~tool_tbl:c.tool_tbl
-        ~on_fork:None
+        ~item_id:(Some item_id)
+      |> Result.ok_or_failwith
     in
-    let p = make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool in
-    add_pending st ~call_id ~kind:`Custom p
+    List.iter moderated.runtime_requests ~f:c.on_runtime_request;
+    let st = add_item st moderated.call_item in
+    let name = moderated.name in
+    let input = moderated.payload in
+    let run_tool () =
+      match moderated.synthetic_result with
+      | Some result -> result
+      | None ->
+        Tool_call.run_tool
+          ~kind:Tool_call.Kind.Custom
+          ~name
+          ~payload:input
+          ~call_id
+          ~tool_tbl:c.tool_tbl
+          ~on_fork:None
+    in
+    let p =
+      match moderated.synthetic_result with
+      | Some result ->
+        let promise, resolver = Eio.Promise.create () in
+        Eio.Promise.resolve_ok resolver result;
+        promise
+      | None -> make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool
+    in
+    add_pending st ~call_id ~kind:`Custom ~name p
 ;;
 
 let handle_added (st : stream_state) (item : Openai.Responses.Response_stream.Item.t) =
@@ -349,7 +698,7 @@ let fold_stream ~turn (c : ctx) ~(hist : Openai.Responses.Item.t list) ~sem stre
          schedule_function_done ~turn c ~hist ~st ~item_id ~arguments ~sem
        | Custom_tool_call_input_done { item_id; input; _ } ->
          c.on_event ev;
-         schedule_custom_done c ~st ~item_id ~input ~sem
+         schedule_custom_done c ~hist ~st ~item_id ~input ~sem
        | Function_call_arguments_delta _
        | Custom_tool_call_input_delta _
        | Reasoning_summary_text_delta _
@@ -361,7 +710,7 @@ let fold_stream ~turn (c : ctx) ~(hist : Openai.Responses.Item.t list) ~sem stre
     stream
 ;;
 
-let await_calls (c : ctx) (st : stream_state) =
+let await_calls (c : ctx) ~(hist : Res.Item.t list) (st : stream_state) =
   let sorted =
     List.sort (List.rev st.pending_calls_rev) ~compare:(fun a b ->
       Int.compare a.seq b.seq)
@@ -369,10 +718,31 @@ let await_calls (c : ctx) (st : stream_state) =
   List.foldi
     sorted
     ~init:st.new_items_rev
-    ~f:(fun i items_rev { seq = _; call_id; kind; promise } ->
+    ~f:(fun i items_rev { seq = _; call_id; kind; name; promise } ->
       let result = Eio.Promise.await_exn promise in
       let msg = read_system_event_msg ~i ~system_event:c.system_event in
       let result = augment_result_with_system_event ~result ~system_event_msg:msg in
+      let tool_kind =
+        match kind with
+        | `Function -> Tool_call.Kind.Function
+        | `Custom -> Tool_call.Kind.Custom
+      in
+      let candidate_item =
+        Tool_call.output_item ~kind:tool_kind ~call_id ~output:result
+      in
+      let history = List.append hist (List.rev (candidate_item :: items_rev)) in
+      let runtime_requests =
+        handle_tool_result
+          ~moderator:c.moderator
+          ~available_tools:c.tools
+          ~now_ms:(now_ms c.env)
+          ~history
+          ~name
+          ~kind:tool_kind
+          ~item:candidate_item
+        |> Result.ok_or_failwith
+      in
+      List.iter runtime_requests ~f:c.on_runtime_request;
       let item =
         emit_tool_output
           ~on_fn_out:c.on_fn_out
@@ -398,15 +768,29 @@ let run_turn (c : ctx) ~sw ~(history : Openai.Responses.Item.t list) =
   let sem = lazy (Eio.Semaphore.make 8) in
   let rec turn (hist : Openai.Responses.Item.t list) =
     let inputs =
+      prepare_turn_inputs
+        ~moderator:c.moderator
+        ~available_tools:c.tools
+        ~now_ms:(now_ms c.env)
+        ~history:hist
+      |> Result.ok_or_failwith
+    in
+    let inputs =
       if c.history_compaction
-      then Compact_history.collapse_read_file_history hist
-      else hist
+      then Compact_history.collapse_read_file_history inputs
+      else inputs
     in
     log_request c ~inputs;
     try
       let st = fold_stream ~turn c ~hist ~sem (post_stream c ~sw ~inputs) in
-      let new_items_rev = await_calls c st in
+      let new_items_rev = await_calls c ~hist st in
       let hist = List.append hist (List.rev new_items_rev) in
+      finish_turn
+        ~moderator:c.moderator
+        ~available_tools:c.tools
+        ~now_ms:(now_ms c.env)
+        ~history:hist
+      |> Result.ok_or_failwith;
       if st.run_again then turn hist else hist
     with
     | Openai.Responses.Response_stream_parsing_error (json, exn) ->
@@ -431,6 +815,8 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; temperature = a.temperature
     ; max_output_tokens = a.max_output_tokens
     ; reasoning = a.reasoning
+    ; moderator = a.moderator
+    ; on_runtime_request = a.on_runtime_request
     ; history_compaction = a.history_compaction
     ; parallel_tool_calls = a.parallel_tool_calls
     ; model = a.model
@@ -468,6 +854,8 @@ let run_completion_stream_in_memory_v1
       ?temperature
       ?max_output_tokens
       ?reasoning
+      ?moderator
+      ?(on_runtime_request = fun _ -> ())
       ?(history_compaction = false)
       ?(parallel_tool_calls = true)
       ?(meta_refine = false)
@@ -489,6 +877,8 @@ let run_completion_stream_in_memory_v1
     ; temperature
     ; max_output_tokens
     ; reasoning
+    ; moderator
+    ; on_runtime_request
     ; history_compaction
     ; parallel_tool_calls
     ; meta_refine

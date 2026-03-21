@@ -4,7 +4,7 @@ module Ctx = Chat_response.Ctx
 module CM = Prompt.Chat_markdown
 
 (* A dummy [run_agent] implementation for unit-testing. *)
-let stub_run_agent ~ctx:_ _prompt _items = "DUMMY"
+let stub_run_agent ?prompt_dir:_ ?session_id:_ ~ctx:_ _prompt _items = "DUMMY"
 
 let print_parse_chat_inputs ~dir xml =
   try
@@ -192,7 +192,8 @@ let%expect_test "parse_chat_inputs retains inline script and converter ignores i
   let elements =
     CM.parse_chat_inputs
       ~dir
-      "<script language=\"chatml\" kind=\"moderator\">let x = 1</script><user>Hello</user>"
+      "<script language=\"chatml\" kind=\"moderator\">let x = \
+       1</script><user>Hello</user>"
   in
   print_s [%sexp (elements : CM.top_level_elements list)];
   let items = Converter.to_items ~ctx ~run_agent:stub_run_agent elements in
@@ -224,7 +225,8 @@ let%expect_test "parse_chat_inputs resolves script src relative to the prompt di
   let elements =
     CM.parse_chat_inputs
       ~dir:prompt_dir
-      "<script language=\"chatml\" kind=\"moderator\" src=\"moderator.chatml\" /><user>Hello</user>"
+      "<script language=\"chatml\" kind=\"moderator\" src=\"moderator.chatml\" \
+       /><user>Hello</user>"
   in
   print_s [%sexp (elements : CM.top_level_elements list)];
   [%expect
@@ -245,10 +247,12 @@ let%expect_test "parse_chat_inputs rejects invalid script declarations" =
   List.iter
     [ "<script language=\"python\" kind=\"moderator\">let x = 1</script>"
     ; "<script language=\"chatml\" kind=\"worker\">let x = 1</script>"
-    ; "<script language=\"chatml\" kind=\"moderator\" src=\"moderator.chatml\">let x = 1</script>"
+    ; "<script language=\"chatml\" kind=\"moderator\" src=\"moderator.chatml\">let x = \
+       1</script>"
     ; "<script language=\"chatml\" kind=\"moderator\" extra=\"nope\">let x = 1</script>"
     ; "<script language=\"chatml\" kind=\"moderator\" src=\"missing.chatml\" />"
-    ; "<script language=\"chatml\" kind=\"moderator\">one</script><script language=\"chatml\" kind=\"moderator\">two</script>"
+    ; "<script language=\"chatml\" kind=\"moderator\">one</script><script \
+       language=\"chatml\" kind=\"moderator\">two</script>"
     ]
     ~f:(print_parse_chat_inputs ~dir);
   [%expect

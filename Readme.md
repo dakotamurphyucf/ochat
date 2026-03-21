@@ -47,6 +47,18 @@ The same `.md` definition can be executed in multiple hosts:
 The ChatMD language provides a rich set of features for prompt engineering in a modular way supporting all levels of complexity.
   - See the [language reference](docs-src/overview/chatmd-language.md)
 
+ChatMD prompts can also embed a single host-managed ChatML moderation script:
+
+- declare it with `<script language="chatml" kind="moderator" ...>`,
+- keep it invisible to the model request itself,
+- use it to prepend/append/replace/delete effective messages,
+- moderate tool calls by approving, rejecting, rewriting, or redirecting them,
+- and persist only its serializable runtime state between resumed sessions.
+
+Prompts without a `<script>` keep the old behavior: the shared drivers,
+`chat_tui`, export flow, and nested agent execution all fall back to the
+baseline non-moderated path.
+
 Ochat is implemented in OCaml, and provides tools for OCaml development, but the workflows themselves are **language‑agnostic** and ochat makes no assumptions about the types of applications the workflows target: you can use ochat to build workflows for any use case that benefits from LLMs + tools, and it puts no constraints on how simple or complex those workflows are.
 
 **LLM provider support (today): OpenAI only.** Ochat currently integrates with OpenAI for chat execution and embeddings. It uses the Responses API, so any model that supports that API scheme could be used. The architecture is intended to support additional providers, but those integrations are not implemented yet.
@@ -174,6 +186,103 @@ The response includes an entry for `hello` whose JSON schema is inferred from
 the ChatMD file; calling that tool runs your prompt and streams the result back
 to the client.
 
+### Example: moderated ChatMD prompt
+
+You can attach one ChatML moderator script to a prompt and keep it host-managed.
+The script is parsed, validated, compiled once per prompt load, and then
+instantiated per session by `chat_tui`, `ochat chat-completion`, nested
+`run_agent` calls, and MCP prompt wrappers.
+
+1. Create `prompts/review.chatmd`:
+
+```xml
+<config model="gpt-5.2" reasoning_effort="medium"/>
+
+<tool name="read_file"/>
+<tool name="apply_patch"/>
+
+<script language="chatml" kind="moderator" id="main">
+type state = { turns : int }
+type event =
+  [ `Session_start
+  | `Session_resume
+  | `Turn_start
+  | `Pre_tool_call(tool_call)
+  | `Post_tool_response(tool_result)
+  | `Turn_end
+  | `Queued(string)
+  ]
+
+let initial_state = { turns = 0 }
+
+let on_event : context -> state -> event -> state task =
+  fun ctx st ev ->
+    match ev with
+    | `Session_start ->
+      Task.bind(Turn.prepend_system("Review patches carefully before accepting them."), fun ignored ->
+      Task.pure(st))
+    | `Session_resume ->
+      Task.bind(Turn.prepend_system("This session was resumed; keep prior moderation state in mind."), fun ignored ->
+      Task.pure(st))
+    | `Turn_start ->
+      Task.bind(Runtime.emit(`Queued("reminder")), fun ignored ->
+      Task.pure(st))
+    | `Pre_tool_call(call) ->
+      (match call.name with
+       | "apply_patch" ->
+         Task.bind(Tool.rewrite_args(call.args), fun ignored ->
+         Task.pure(st))
+       | _ ->
+         Task.bind(Tool.approve(), fun ignored ->
+         Task.pure(st)))
+    | `Post_tool_response(_) ->
+      Task.pure(st)
+    | `Turn_end ->
+      Task.pure({ turns = st.turns + 1 })
+    | `Queued(_) ->
+      Task.bind
+        (Turn.append_message
+           ({ id = "moderation-note"
+            ; role = "assistant"
+            ; content = "Moderator reminder recorded for this turn."
+            ; meta = `Null
+            }),
+         fun ignored ->
+         Task.pure(st))
+</script>
+
+<developer>
+You are a careful code review assistant.
+</developer>
+
+<user>
+Inspect the current prompt and explain how moderation changes the effective
+request history before the next model turn.
+</user>
+```
+
+2. Run it in the TUI or CLI:
+
+```sh
+dune exec chat_tui -- -file prompts/review.chatmd
+```
+
+```sh
+ochat chat-completion \
+  -prompt-file prompts/review.chatmd \
+  -output-file .chatmd/review-run.chatmd
+```
+
+Notes:
+
+- exactly one moderator `<script>` is supported per prompt in v1,
+- `src="moderator.chatml"` is also supported if you want the script in a
+  separate file,
+- tool rejections produce synthetic tool outputs instead of executing the
+  underlying tool,
+- exported transcripts materialize moderation-visible inserts, deletions, and
+  halt markers explicitly.
+
 For a more advanced, end-to-end agent built from the same building
 blocks, see the
 [General Assistant – agent workflow](docs-src/guide/general-agent-workflow.md). This is the agent that was used to generate the example
@@ -300,13 +409,39 @@ Ochat is implemented in OCaml. Ochat intends to be language agnostic and the *wo
 
 When you run Ochat against an OCaml repository, the usual `dune build` / `dune runtest` loop becomes a high-signal feedback channel for LLM-generated edits: let an agent propose `apply_patch` diffs, run the build and tests, then feed compiler errors or failing expect tests back into the next turn.
 
-### ChatML (experimental)
+### ChatML (experimental, but integrated for moderation)
 
-The repository ships an experimental language called *ChatML*: a small, expression‑oriented ML dialect with Hindley–Milner type inference (Algorithm W) extended with row polymorphism for records and variants (see [language-spec](docs-src/guide/chatml-language-spec.md))
+The repository ships an experimental language called *ChatML*: a small,
+expression-oriented ML dialect with Hindley–Milner type inference (Algorithm W)
+extended with row polymorphism for records and variants (see
+[language-spec](docs-src/guide/chatml-language-spec.md)).
 
-The parser, type‑checker and runtime live under the `Chatml` modules and are documented under `docs-src/lib/chatml/` and `docs-src/guide/` (see [`language-spec`](docs-src/guide/chatml-language-spec.md), [`match-semantics`](docs-src/guide/chatml-match-semantics.md), [`chatml_lang`](docs-src/lib/chatml/chatml_lang.doc.md), [`chatml_parser`](docs-src/lib/chatml/chatml_parser.doc.md) and [`chatml_resolver`](docs-src/lib/chatml/chatml_resolver.doc.md)). Today it is exposed primarily via the experimental `dsl_script` binary and the `Chatml_*` library modules; it is not yet wired into ChatMD prompts or the main CLIs.
+The parser, type-checker and runtime live under the `Chatml` modules and are
+documented under `docs-src/lib/chatml/` and `docs-src/guide/` (see
+[`language-spec`](docs-src/guide/chatml-language-spec.md),
+[`match-semantics`](docs-src/guide/chatml-match-semantics.md),
+[`chatml_lang`](docs-src/lib/chatml/chatml_lang.doc.md),
+[`chatml_parser`](docs-src/lib/chatml/chatml_parser.doc.md) and
+[`chatml_resolver`](docs-src/lib/chatml/chatml_resolver.doc.md)).
 
-If you want “real code” examples (including expected types and evaluation results) see [examples](docs-src/guide/chatml-language-spec.md#207-tiny-workflow-engine), also the tests are a good starting point: [`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml) and [`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml).
+Today ChatML is integrated as the host-managed moderation layer for ChatMD:
+
+- a prompt may declare one `<script language="chatml" kind="moderator" ...>`,
+- the script runs through the shared moderation manager used by `chat_tui`,
+  file-backed drivers, nested agents, and MCP prompt-agent wrappers,
+- the host persists only serializable moderator state and queued internal
+  events,
+- prompts without a script still follow the baseline non-moderated path.
+
+Outside that moderation integration, ChatML also remains available through the
+experimental `dsl_script` binary and the `Chatml_*` library modules.
+
+If you want “real code” examples (including expected types and evaluation
+results) see [examples](docs-src/guide/chatml-language-spec.md#207-tiny-workflow-engine);
+the tests are also a good starting point:
+[`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml),
+[`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml), and the
+moderation-oriented tests under [`test/chat_response_*`](test/).
 
 ---
 
@@ -354,12 +489,7 @@ Planned and experimental directions include:
   type‑checker and runtime live under the `Chatml` modules and are documented
   under `docs-src/lib/chatml/` (see [`chatml_lang`](docs-src/lib/chatml/chatml_lang.doc.md),
   [`chatml_parser`](docs-src/lib/chatml/chatml_parser.doc.md) and
-  [`chatml_resolver`](docs-src/lib/chatml/chatml_resolver.doc.md)). For examples of the language in action, see [`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml) and [`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml). Today it is
-  exposed primarily via the experimental `dsl_script` binary and the
-  `Chatml_*` library modules; it is not yet wired into ChatMD prompts or the
-  main CLIs. The long‑term plan is to use ChatML as a safe scripting language
-  that agents can write and execute via a tool call, and can be embed inside ChatMD files for small,
-  deterministic pieces of logic. Since it is strongly typed with full type inference, it provides a simple way to express logic without sacrificing safety or auditability. You can provide code execution capablities with high confidence, and provide a powerful tool for agents to express complex logic 
+  [`chatml_resolver`](docs-src/lib/chatml/chatml_resolver.doc.md)). For examples of the language in action, see [`test/chatml_typechecker_test.ml`](test/chatml_typechecker_test.ml), [`test/chatml_runtime_test.ml`](test/chatml_runtime_test.ml), and the moderation-oriented tests under `test/chat_response_*`. Today ChatML is already wired into ChatMD prompts as the host-managed moderation layer via a single `<script language="chatml" kind="moderator" ...>` declaration, while still also being available through the experimental `dsl_script` binary and the `Chatml_*` library modules. The longer-term plan is to broaden that scripting role without sacrificing safety or auditability.
 
 - **Custom Ocaml functions as tools via Dune plugins**  \
   A planned direction is to expose custom OCaml

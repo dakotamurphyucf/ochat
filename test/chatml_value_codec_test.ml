@@ -1,7 +1,6 @@
 open Core
 open Expect_test_helpers_core
 open Chatml
-
 module Lang = Chatml_lang
 module Codec = Chatml_value_codec
 module Builtin_modules = Chatml_builtin_modules
@@ -88,9 +87,7 @@ let%expect_test "snapshot codec rejects runtime-only values with descriptive err
 let%expect_test "snapshot codec rejects duplicate record fields when decoding" =
   let snapshot =
     Codec.Snapshot.Record
-      [ "name", Codec.Snapshot.String "first"
-      ; "name", Codec.Snapshot.String "second"
-      ]
+      [ "name", Codec.Snapshot.String "first"; "name", Codec.Snapshot.String "second" ]
   in
   (match Codec.Snapshot.to_value snapshot with
    | Ok value -> print_endline (show_value value)

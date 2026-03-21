@@ -55,8 +55,22 @@
       Mcp_server_core.register_prompt core tool.name prompt;
     ]}
 *)
+val of_chatmd_file_with_run_agent
+  :  run_agent:
+       (?history_compaction:bool
+        -> ?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
+        -> ?session_id:string
+        -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+        -> string
+        -> Prompt.Chat_markdown.content_item list
+        -> string)
+  -> env:Eio_unix.Stdenv.base
+  -> core:Mcp_server_core.t
+  -> path:Eio.Fs.dir_ty Eio.Path.t
+  -> Mcp_types.Tool.t * Mcp_server_core.tool_handler * Mcp_server_core.prompt
+
 val of_chatmd_file
   :  env:Eio_unix.Stdenv.base
   -> core:Mcp_server_core.t
-  -> path:_ Eio.Path.t
+  -> path:Eio.Fs.dir_ty Eio.Path.t
   -> Mcp_types.Tool.t * Mcp_server_core.tool_handler * Mcp_server_core.prompt

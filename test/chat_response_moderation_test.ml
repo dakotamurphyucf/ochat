@@ -1,5 +1,4 @@
 open Core
-
 module Lang = Chatml.Chatml_lang
 module Moderation = Chat_response.Moderation
 module Res = Openai.Responses
@@ -51,8 +50,7 @@ let compile_session ~handlers (source : string) : Runtime.session =
 
 let print_messages (messages : Moderation.Message.t list) =
   List.iter messages ~f:(fun message ->
-    print_endline
-      (Printf.sprintf "%s %s %S" message.id message.role message.content))
+    print_endline (Printf.sprintf "%s %s %S" message.id message.role message.content))
 ;;
 
 let%expect_test "projection preserves stable host ids" =
@@ -86,7 +84,9 @@ let%expect_test "projection preserves stable host ids" =
         }
     ]
   in
-  let projection, messages = Moderation.Projection.project_history Moderation.Projection.empty history in
+  let projection, messages =
+    Moderation.Projection.project_history Moderation.Projection.empty history
+  in
   print_s [%sexp (projection : Moderation.Projection.t)];
   print_messages messages;
   let history =
@@ -131,9 +131,7 @@ let%expect_test "projection preserves stable host ids" =
       (List.map context.available_tools ~f:(fun tool -> tool.name, tool.description)
        : (string * string) list)];
   let call =
-    history
-    |> List.find_map ~f:Moderation.Tool_call.of_response_item
-    |> Option.value_exn
+    history |> List.find_map ~f:Moderation.Tool_call.of_response_item |> Option.value_exn
   in
   print_endline
     (show_value (Moderation.Event.to_value (Moderation.Event.Pre_tool_call call)));
@@ -169,11 +167,12 @@ let%expect_test "decode committed local effects into structured moderation outco
   in
   let effects =
     [ { Lang.op = "Turn.prepend_system"; args = [ Lang.VString "policy" ] }
-    ; { op = "Turn.append_message"; args = [ Moderation.Message.to_value appended_message ] }
+    ; { op = "Turn.append_message"
+      ; args = [ Moderation.Message.to_value appended_message ]
+      }
     ; { op = "Tool.rewrite_args"
       ; args =
-          [ Chatml.Chatml_value_codec.jsonaf_to_value
-              (`Object [ "mode", `String "safe" ])
+          [ Chatml.Chatml_value_codec.jsonaf_to_value (`Object [ "mode", `String "safe" ])
           ]
       }
     ; { op = "Runtime.request_compaction"; args = [] }
@@ -233,12 +232,10 @@ let%expect_test "capability registry adapts named model recipes" =
     }
   in
   let handlers =
-    Moderation.Capabilities.
-      runtime_handlers
-        { Moderation.Capabilities.default with
-          model_recipes =
-            Map.of_alist_exn (module String) [ "summarize", recipe ]
-        }
+    Moderation.Capabilities.runtime_handlers
+      { Moderation.Capabilities.default with
+        model_recipes = Map.of_alist_exn (module String) [ "summarize", recipe ]
+      }
   in
   let session = compile_session ~handlers script in
   (match

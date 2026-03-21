@@ -623,6 +623,10 @@ module Handlers = struct
   ;;
 
   module Export_session = struct
+    type prompt_source =
+      | Local_copy of string
+      | Prompt_file of string
+
     let acquire_lock_or_exit ~id ~lock_file =
       let acquired_lock =
         try
@@ -671,30 +675,76 @@ module Handlers = struct
           false)
     ;;
 
-    let load_prompt_contents ~env ~fs prompt_file =
-      let dir_for_prompt =
-        if Filename.is_absolute prompt_file then fs else Eio.Stdenv.cwd env
-      in
-      Option.value
-        (Option.try_with (fun () -> Io.load_doc ~dir:dir_for_prompt prompt_file))
-        ~default:""
+    let prompt_source (session : Session.t) =
+      match session.local_prompt_copy with
+      | Some filename -> Local_copy filename
+      | None -> Prompt_file session.prompt_file
     ;;
 
-    let prompt_parent_dir ~env ~fs prompt_file =
-      let base_dir =
-        if Filename.is_absolute prompt_file then fs else Eio.Stdenv.cwd env
-      in
-      Eio.Path.(base_dir / Filename.dirname prompt_file)
+    let prompt_contents ~env ~fs ~session_dir = function
+      | Local_copy filename ->
+        let path = Eio.Path.(session_dir / filename) in
+        Option.value (Option.try_with (fun () -> Eio.Path.load path)) ~default:""
+      | Prompt_file prompt_file ->
+        let dir_for_prompt =
+          if Filename.is_absolute prompt_file then fs else Eio.Stdenv.cwd env
+        in
+        Option.value
+          (Option.try_with (fun () -> Io.load_doc ~dir:dir_for_prompt prompt_file))
+          ~default:""
     ;;
 
-    let persist_full_history ~cwd ~prompt_file ~datadir ~history_items =
+    let prompt_dir ~env ~fs ~session_dir = function
+      | Local_copy filename -> Eio.Path.(session_dir / Filename.dirname filename)
+      | Prompt_file prompt_file ->
+        let base_dir =
+          if Filename.is_absolute prompt_file then fs else Eio.Stdenv.cwd env
+        in
+        Eio.Path.(base_dir / Filename.dirname prompt_file)
+    ;;
+
+    let initial_msg_count ~env ~prompt_dir ~prompt_xml =
+      try
+        let cache = Chat_response.Cache.create ~max_size:16 () in
+        let ctx =
+          Chat_response.Ctx.create
+            ~env
+            ~dir:prompt_dir
+            ~tool_dir:(Eio.Stdenv.cwd env)
+            ~cache
+        in
+        let elements =
+          Prompt.Chat_markdown.parse_chat_inputs ~dir:prompt_dir prompt_xml
+        in
+        Chat_response.Converter.to_items
+          ~ctx
+          ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:false)
+          elements
+        |> List.length
+      with
+      | exn ->
+        eprintf
+          "Warning: failed to compute prompt-derived history prefix for export: %s\n"
+          (Exn.to_string exn);
+        0
+    ;;
+
+    let persist_full_history
+          ~cwd
+          ~prompt_file
+          ~datadir
+          ~initial_msg_count
+          ~(moderator_snapshot : Session.Moderator_snapshot.t option)
+          ~history_items
+      =
       let module Config = Chat_response.Config in
       Chat_tui.Persistence.persist_session
         ~dir:cwd
         ~prompt_file
         ~datadir
         ~cfg:Config.default
-        ~initial_msg_count:0
+        ~initial_msg_count
+        ~moderator_snapshot
         ~history_items
     ;;
 
@@ -718,13 +768,13 @@ module Handlers = struct
       out_dir, dest_path, file_name, fs
     ;;
 
-    let write_prompt_file ~env ~fs ~prompt_file ~dest_path =
-      let prompt_contents = load_prompt_contents ~env ~fs prompt_file in
+    let write_prompt_file ~env ~fs ~session_dir ~source ~dest_path =
+      let prompt_contents = prompt_contents ~env ~fs ~session_dir source in
       Eio.Path.save ~create:(`Or_truncate 0o600) dest_path prompt_contents
     ;;
 
-    let copy_attachments ~env ~fs ~prompt_file ~session_dir ~datadir =
-      let prompt_dir = prompt_parent_dir ~env ~fs prompt_file in
+    let copy_attachments ~env ~fs ~source ~session_dir ~datadir =
+      let prompt_dir = prompt_dir ~env ~fs ~session_dir source in
       Chat_tui.Attachments.copy_all
         ~prompt_dir
         ~cwd:(Eio.Stdenv.cwd env)
@@ -738,19 +788,20 @@ module Handlers = struct
       let proceed = confirm_overwrite ~dest_path ~outfile in
       if proceed
       then (
+        let source = prompt_source session in
+        let prompt_xml = prompt_contents ~env ~fs ~session_dir:sdir source in
+        let prompt_dir = prompt_dir ~env ~fs ~session_dir:sdir source in
+        let initial_msg_count = initial_msg_count ~env ~prompt_dir ~prompt_xml in
         let cwd = out_dir in
         let datadir = Io.ensure_chatmd_dir ~cwd in
-        write_prompt_file ~env ~fs ~prompt_file:session.prompt_file ~dest_path;
-        copy_attachments
-          ~env
-          ~fs
-          ~prompt_file:session.prompt_file
-          ~session_dir:sdir
-          ~datadir;
+        write_prompt_file ~env ~fs ~session_dir:sdir ~source ~dest_path;
+        copy_attachments ~env ~fs ~source ~session_dir:sdir ~datadir;
         persist_full_history
           ~cwd
           ~prompt_file:file_name
           ~datadir
+          ~initial_msg_count
+          ~moderator_snapshot:session.moderator_snapshot
           ~history_items:session.history;
         printf "Session '%s' exported to %s\n" id outfile)
     ;;
@@ -893,12 +944,16 @@ module Handlers = struct
     List.map history ~f:history_item_as_chatmd |> String.concat ~sep:""
   ;;
 
-  let print_history_preview ~prompt_preview_max history =
+  let print_history_preview
+        ~prompt_preview_max
+        ~(moderator_snapshot : Session.Moderator_snapshot.t option)
+        history
+    =
     printf "History items (kept): %d\n" (List.length history);
     print_prompt_preview
       ~prompt_preview_max
       ~label:"History preview (as chatmd)"
-      (history_as_chatmd history)
+      (Chat_tui.Persistence.history_as_chatmd ~moderator_snapshot ~history_items:history)
   ;;
 
   let load_prompt_for_reset ~env prompt_file =
@@ -988,7 +1043,11 @@ module Handlers = struct
     print_prompt_plan ~env ~dir ~session ~prompt_preview_max ~new_prompt_file:prompt_file;
     match keep_history with
     | false -> ()
-    | true -> print_history_preview ~prompt_preview_max session.history
+    | true ->
+      print_history_preview
+        ~prompt_preview_max
+        ~moderator_snapshot:session.moderator_snapshot
+        session.history
   ;;
 
   let print_rebuild_plan ~env ~id ~prompt_preview_max =

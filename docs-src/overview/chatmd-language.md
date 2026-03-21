@@ -192,6 +192,82 @@ If a script lives in a separate file, the parsed prompt retains both the `src`
 path and the loaded source text so later compilation can report the original
 location clearly.
 
+### 3.5 Host-managed moderation lifecycle
+
+When a prompt includes a moderator `<script>`, ochat keeps the script
+host-managed:
+
+- the script is parsed and validated with the rest of the prompt,
+- it is compiled once per prompt load,
+- each chat session gets a fresh runtime instance,
+- resumed sessions restore only the serializable moderator snapshot,
+- the script itself is never turned into a model-visible message.
+
+Prompts without a `<script>` keep the baseline behavior. The shared drivers,
+`chat_tui`, export flow, and nested `run_agent` path all fall back to the
+ordinary non-moderated request assembly.
+
+The shared moderation vocabulary defines these phase names:
+
+- `session_start`
+- `session_resume`
+- `turn_start`
+- `message_appended`
+- `pre_tool_call`
+- `post_tool_response`
+- `turn_end`
+- `internal_event`
+
+Built-in drivers currently emit:
+
+- `session_start` for new moderated sessions,
+- `session_resume` when restoring a persisted moderator snapshot,
+- `turn_start` before each model request,
+- `pre_tool_call` before a tool executes,
+- `post_tool_response` after a tool output item is produced,
+- `turn_end` after a streamed turn completes,
+- `internal_event` while replaying queued moderator events FIFO.
+
+`message_appended` is part of the shared host vocabulary, but the shipped
+drivers do not currently emit it.
+
+### 3.6 Overlay, tool moderation, and persistence semantics
+
+Moderator scripts do not rewrite canonical OpenAI history in place. Instead the
+host keeps a durable overlay that can:
+
+- prepend synthetic system messages,
+- append synthetic messages,
+- replace projected messages by id,
+- delete projected messages by id,
+- halt the session with an explicit reason.
+
+That overlay is applied before the next moderated model turn to produce the
+effective request history. Export and preview flows materialize synthetic
+overlay entries explicitly so the saved ChatMD transcript stays human-readable.
+
+Tool moderation is also host-managed:
+
+- `Tool.approve()` keeps the call as-is,
+- `Tool.reject("reason")` skips execution and synthesizes a tool output item,
+- `Tool.rewrite_args(json)` changes the tool payload deterministically,
+- `Tool.redirect("other_tool", json)` rewrites both tool name and args.
+
+After every successful moderation event, the host replays queued internal
+events FIFO through phase `internal_event`, with a safety limit to avoid
+unbounded loops.
+
+Persisted moderator state is intentionally narrow:
+
+- current script state,
+- queued internal events,
+- halted flag,
+- host overlay snapshot,
+- script id and source hash used to validate restores.
+
+Only data-shaped ChatML values cross that persistence boundary. Closures, refs,
+builtins, modules, and tasks are rejected instead of being serialized.
+
 ---
 
 ## 4) `<config/>`

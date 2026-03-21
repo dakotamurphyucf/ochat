@@ -298,7 +298,8 @@ let decode_runtime_emit (args : Lang.value list) : (local_effect, string) result
       (Printf.sprintf "Runtime.emit: expected 1 argument(s), got %d" (List.length args))
 ;;
 
-let decode_runtime_request_compaction (args : Lang.value list) : (local_effect, string) result
+let decode_runtime_request_compaction (args : Lang.value list)
+  : (local_effect, string) result
   =
   match args with
   | [] -> Ok Request_compaction
@@ -690,7 +691,11 @@ let committed_local_effects (session : session) : Lang.eff list =
 ;;
 
 let queued_events (session : session) : Lang.value list = Queue.to_list session.queue
-let take_queued_event (session : session) : Lang.value option = Queue.dequeue session.queue
+
+let take_queued_event (session : session) : Lang.value option =
+  Queue.dequeue session.queue
+;;
+
 let is_halted (session : session) : bool = session.halted
 
 let restore

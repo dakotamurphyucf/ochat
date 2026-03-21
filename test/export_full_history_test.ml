@@ -56,6 +56,7 @@ let%expect_test "export includes previous history items" =
     ~datadir
     ~cfg:Config.default
     ~initial_msg_count:0
+    ~moderator_snapshot:None
     ~history_items;
   let exported = Io.load_doc ~dir:out_dir export_file in
   (* The assistant reply should appear in the exported ChatMarkdown. *)

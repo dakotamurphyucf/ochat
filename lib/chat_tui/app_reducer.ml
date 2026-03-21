@@ -105,6 +105,18 @@ let run (ctx : Context.t) =
   let cancelled = ctx.cancelled in
   let model = runtime.Runtime.model in
   let quit_via_esc = runtime.Runtime.quit_via_esc in
+  let add_system_notice text =
+    ignore (Model.apply_patch model (Add_placeholder_message { role = "system"; text }));
+    Redraw_throttle.request_redraw throttler
+  in
+  let handle_runtime_request request =
+    match request with
+    | Chat_response.Moderation.Runtime_request.Request_compaction ->
+      Queue.enqueue runtime.Runtime.pending Runtime.Compact
+    | Chat_response.Moderation.Runtime_request.End_session reason ->
+      runtime.Runtime.halted_reason <- Some reason;
+      add_system_notice (Printf.sprintf "Session ended by moderator: %s" reason)
+  in
   let max_input_drain_per_iteration = 64 in
   let typeahead_debounce_sw : Switch.t option ref = ref None in
   let typeahead_pending_request : typeahead_request option ref = ref None in
@@ -195,7 +207,11 @@ let run (ctx : Context.t) =
       | exception Typeahead_cancelled -> ())
   in
   let start_submit (submit_request : Runtime.submit_request) : unit =
-    App_submit.start ctx.submit submit_request
+    match runtime.Runtime.halted_reason with
+    | None -> App_submit.start ctx.submit submit_request
+    | Some reason ->
+      add_system_notice
+        (Printf.sprintf "Cannot submit: session ended by moderator (%s)." reason)
   in
   let start_compaction () : unit = App_compaction.start ctx.compaction in
   let maybe_start_next_pending () : unit =
@@ -350,6 +366,12 @@ let run (ctx : Context.t) =
          Stream_apply.apply_tool_output model throttler item;
          true
        | _ -> true)
+    | `Moderator_runtime_request (op_id, request) ->
+      (match runtime.Runtime.op with
+       | Some (Runtime.Streaming { id; sw = _ }) when Int.equal id op_id ->
+         handle_runtime_request request;
+         true
+       | _ -> true)
     | `Typeahead_started (op_id, sw) ->
       (match runtime.Runtime.typeahead_op with
        | Some (Runtime.Starting_typeahead { id }) when Int.equal id op_id ->
@@ -452,7 +474,7 @@ let run (ctx : Context.t) =
       else (
         runtime.Runtime.op <- None;
         Model.set_history_items model history';
-        Model.set_messages model (Conversation.of_history history');
+        App_runtime.refresh_messages runtime;
         Model.rebuild_tool_output_index model;
         Model.select_message model None;
         Model.set_auto_follow model true;
@@ -488,7 +510,7 @@ let run (ctx : Context.t) =
       then true
       else (
         runtime.Runtime.op <- None;
-        Stream_apply.replace_history model redraw_immediate items;
+        Stream_apply.replace_history runtime redraw_immediate items;
         maybe_start_next_pending ();
         true)
     | `Streaming_error (op_id, exn) ->
@@ -506,7 +528,7 @@ let run (ctx : Context.t) =
          | Some idx ->
            let hist_prefix = List.take (Model.history_items model) idx in
            Model.set_history_items model hist_prefix;
-           Model.set_messages model (Conversation.of_history hist_prefix);
+           App_runtime.refresh_messages runtime;
            Model.set_active_fork model None;
            Model.set_fork_start_index model None
          | None -> ());
@@ -610,7 +632,7 @@ let run (ctx : Context.t) =
         in
         let pruned = prune_trailing ~error:error_msg (Model.history_items model) in
         Model.set_history_items model pruned;
-        Model.set_messages model (Conversation.of_history pruned);
+        App_runtime.refresh_messages runtime;
         Model.rebuild_tool_output_index model;
         Model.clear_all_img_caches model;
         Placeholders.add_placeholder_stream_error model error_msg;

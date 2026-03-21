@@ -321,8 +321,9 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_fu
     in
     (* Fetch the agent prompt (local or remote) *)
     let prompt_xml = Fetch.get ~ctx agent ~is_local in
+    let prompt_dir = if is_local then Fetch.resolve_local_dir ~ctx agent else None in
     (* Delegate the heavy lifting to the provided [run_agent] callback. *)
-    run_agent ~ctx prompt_xml [ CM.Basic basic_item ]
+    run_agent ?prompt_dir ?session_id:(Some agent) ~ctx prompt_xml [ CM.Basic basic_item ]
   in
   Ochat_function.create_function
     (module M)

@@ -56,7 +56,9 @@ val of_declaration
   :  sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> run_agent:
-       (ctx:Eio_unix.Stdenv.base Ctx.t
+       (?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
+        -> ?session_id:string
+        -> ctx:Eio_unix.Stdenv.base Ctx.t
         -> string (* prompt XML *)
         -> Prompt.Chat_markdown.content_item list
         -> string (* assistant answer *))

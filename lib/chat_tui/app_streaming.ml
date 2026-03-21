@@ -12,6 +12,7 @@ module Context = struct
     ; cfg : Config.t
     ; tools : Req.Tool.t list
     ; tool_tbl : (string, string -> Res.Tool_output.Output.t) Core.Hashtbl.t
+    ; moderator : Chat_response.In_memory_stream.moderator option
     ; parallel_tool_calls : bool
     ; history_compaction : bool
     }
@@ -24,6 +25,7 @@ let start (ctx : Context.t) ~history ~op_id =
   let cfg = ctx.cfg in
   let tools = ctx.tools in
   let tool_tbl = ctx.tool_tbl in
+  let moderator = ctx.moderator in
   let datadir = ctx.shared.services.datadir in
   let prompt_cache_key = Option.map ctx.shared.services.session ~f:(fun s -> s.id) in
   let prompt_cache_retention =
@@ -51,6 +53,9 @@ let start (ctx : Context.t) ~history ~op_id =
       Eio.Stream.add internal_stream (`Stream_batch (op_id, evs))
     in
     let on_tool_out item = Eio.Stream.add internal_stream (`Tool_output (op_id, item)) in
+    let on_runtime_request request =
+      Eio.Stream.add internal_stream (`Moderator_runtime_request (op_id, request))
+    in
     Eio.Fiber.fork_daemon ~sw:streaming_sw (fun () ->
       let clock = Eio.Stdenv.clock env in
       let batch_ms =
@@ -109,6 +114,8 @@ let start (ctx : Context.t) ~history ~op_id =
                }))
         ?prompt_cache_key
         ?prompt_cache_retention
+        ?moderator
+        ~on_runtime_request
         ~history_compaction
         ?model:(Option.map cfg.model ~f:Req.model_of_str_exn)
         ~on_event

@@ -187,10 +187,7 @@ module Snapshot = struct
         | `Ok fields -> Ok (VRecord fields)
         | `Duplicate_key field ->
           Error
-            (Printf.sprintf
-               "%s: duplicate record field %S in ChatML snapshot"
-               path
-               field))
+            (Printf.sprintf "%s: duplicate record field %S in ChatML snapshot" path field))
     | Variant (tag, payload) ->
       payload
       |> List.mapi ~f:(fun index element ->

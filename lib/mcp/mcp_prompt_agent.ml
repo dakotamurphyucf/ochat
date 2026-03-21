@@ -26,7 +26,15 @@ let content_item_of_input (text : string) : CM.content_item =
   CM.Basic basic
 ;;
 
-let of_chatmd_file
+let of_chatmd_file_with_run_agent
+      ~(run_agent :
+         ?history_compaction:bool
+         -> ?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
+         -> ?session_id:string
+         -> ctx:Eio_unix.Stdenv.base Chat_response.Ctx.t
+         -> string
+         -> CM.content_item list
+         -> string)
       ~(env : Eio_unix.Stdenv.base)
       ~(core : Mcp_server_core.t)
       ~(path : _ Eio.Path.t)
@@ -40,6 +48,11 @@ let of_chatmd_file
   in
   let name = Filename.chop_extension filename in
   let prompt_xml = Eio.Path.load path in
+  let prompt_dir =
+    match Eio.Path.split path with
+    | None -> env#cwd
+    | Some (dir, _) -> dir
+  in
   (* For now we don’t attempt to extract a description from the XML.  A more
      sophisticated implementation could parse the <system> or first comment
      lines. *)
@@ -76,9 +89,11 @@ let of_chatmd_file
               @@ fun _sw ->
               let cache = Chat_response.Cache.create ~max_size:256 () in
               let ctx =
-                Chat_response.Ctx.create ~env ~dir:env#cwd ~cache ~tool_dir:env#cwd
+                Chat_response.Ctx.create ~env ~dir:prompt_dir ~cache ~tool_dir:env#cwd
               in
-              Chat_response.Driver.run_agent
+              run_agent
+                ?prompt_dir:(Some prompt_dir)
+                ?session_id:(Some name)
                 ~ctx
                 prompt_xml
                 [ content_item_of_input user_input ]
@@ -93,4 +108,19 @@ let of_chatmd_file
     | _ -> Error "arguments must be object"
   in
   tool_spec, handler, prompt
+;;
+
+let of_chatmd_file ~env ~core ~path =
+  of_chatmd_file_with_run_agent
+    ~run_agent:(fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
+      Chat_response.Driver.run_agent
+        ?history_compaction
+        ?prompt_dir
+        ?session_id
+        ~ctx
+        prompt
+        items)
+    ~env
+    ~core
+    ~path
 ;;

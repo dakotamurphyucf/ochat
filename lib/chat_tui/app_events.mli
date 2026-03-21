@@ -56,6 +56,7 @@ type internal_event =
   | `Stream of int * Openai.Responses.Response_stream.t
   | `Stream_batch of int * Openai.Responses.Response_stream.t list
   | `Tool_output of int * Openai.Responses.Item.t
+  | `Moderator_runtime_request of int * Chat_response.Moderation.Runtime_request.t
   | `Streaming_done of int * Openai.Responses.Item.t list
   | `Streaming_error of int * exn
   | `Typeahead_started of int * Eio.Switch.t

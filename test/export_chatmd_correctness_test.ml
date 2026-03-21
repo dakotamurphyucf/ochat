@@ -39,6 +39,7 @@ let%expect_test "export copies original prompt" =
     ~datadir
     ~cfg:Config.default
     ~initial_msg_count:0
+    ~moderator_snapshot:None
     ~history_items:[];
   (* Check that export file starts with the original prompt string *)
   let exported = Io.load_doc ~dir:out_dir file_name in

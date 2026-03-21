@@ -27,6 +27,8 @@ type prompt_context =
     (** Tools exposed to the assistant at runtime. *)
   ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t
     (** Mapping [tool_name -> implementation]. *)
+  ; moderator : Chat_response.In_memory_stream.moderator option
+    (** Optional shared moderator runtime for the session. *)
   }
 
 (** Persistence policy to use when the UI terminates.

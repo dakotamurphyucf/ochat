@@ -73,9 +73,10 @@ let apply_tool_output model throttler item =
   Redraw_throttle.request_redraw throttler
 ;;
 
-let replace_history model redraw_immediate items =
+let replace_history runtime redraw_immediate items =
+  let model = runtime.App_runtime.model in
   Model.set_history_items model items;
-  Model.set_messages model (Conversation.of_history (Model.history_items model));
+  App_runtime.refresh_messages runtime;
   Model.rebuild_tool_output_index model;
   redraw_immediate ()
 ;;

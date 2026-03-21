@@ -142,3 +142,23 @@ let get ~ctx url ~is_local = get_impl ~ctx url ~is_local ~cleanup_html:false
 (** [get_html ~ctx url ~is_local] is like {!get} but applies
     {!clean_html} to the result so that only human-readable text is kept. *)
 let get_html ~ctx url ~is_local = get_impl ~ctx url ~is_local ~cleanup_html:true
+
+let resolve_local_dir ~(ctx : _ Ctx.t) (url : string) : Eio.Fs.dir_ty Eio.Path.t option =
+  let resolve_if_exists base =
+    try
+      ignore (Io.load_doc ~dir:base url : string);
+      Some Eio.Path.(base / Filename.dirname url)
+    with
+    | _ -> None
+  in
+  match resolve_if_exists (Ctx.dir ctx) with
+  | Some dir -> Some dir
+  | None ->
+    let cwd = Eio.Stdenv.cwd (Ctx.env ctx) in
+    (match resolve_if_exists cwd with
+     | Some dir -> Some dir
+     | None ->
+       if Filename.is_relative url
+       then None
+       else Some Eio.Path.(Eio.Stdenv.fs (Ctx.env ctx) / Filename.dirname url))
+;;

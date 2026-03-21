@@ -1,5 +1,4 @@
 open! Core
-
 module Lang = Chatml.Chatml_lang
 module Runtime = Chatml_moderator_runtime
 module Res = Openai.Responses
@@ -324,8 +323,7 @@ module Event = struct
     | Turn_start -> Lang.VVariant ("Turn_start", [])
     | Message_appended message ->
       Lang.VVariant ("Message_appended", [ Message.to_value message ])
-    | Pre_tool_call call ->
-      Lang.VVariant ("Pre_tool_call", [ Tool_call.to_value call ])
+    | Pre_tool_call call -> Lang.VVariant ("Pre_tool_call", [ Tool_call.to_value call ])
     | Post_tool_response result ->
       Lang.VVariant ("Post_tool_response", [ Tool_result.to_value result ])
     | Turn_end -> Lang.VVariant ("Turn_end", [])
@@ -421,9 +419,7 @@ module Projection = struct
   let project_at (t : t) ~(position : int) (item : Res.Item.t) : t * Message.t * string =
     let id, next_generated_id = resolved_item_id t ~position item in
     let role, content = project_item_content item in
-    let message =
-      Message.create ~id ~role ~content ~meta:(Res.Item.jsonaf_of_t item)
-    in
+    let message = Message.create ~id ~role ~content ~meta:(Res.Item.jsonaf_of_t item) in
     { t with next_generated_id }, message, id
   ;;
 
@@ -460,8 +456,7 @@ module Projection = struct
     let projection, messages = project_history projection history in
     let available_tools = List.map available_tools ~f:Tool_desc.of_request_tool in
     let context =
-      Context.
-        { session_id; now_ms; phase; messages; available_tools; session_meta }
+      Context.{ session_id; now_ms; phase; messages; available_tools; session_meta }
     in
     projection, context
   ;;
@@ -578,8 +573,7 @@ module Outcome = struct
     match t.tool_moderation with
     | None -> Ok { t with tool_moderation = Some action }
     | Some _ ->
-      Error
-        "Expected at most one tool moderation action for a single host event."
+      Error "Expected at most one tool moderation action for a single host event."
   ;;
 
   let of_runtime_effects (effects : Runtime.local_effect list) : (t, string) result =
@@ -603,7 +597,8 @@ module Outcome = struct
         | Runtime.End_session reason ->
           Ok
             { acc with
-              runtime_requests = Runtime_request.End_session reason :: acc.runtime_requests
+              runtime_requests =
+                Runtime_request.End_session reason :: acc.runtime_requests
             }
         | Runtime.Emit_internal_event event ->
           Ok { acc with emitted_events = event :: acc.emitted_events })
@@ -638,8 +633,7 @@ module Capabilities = struct
     ; on_tool_call : name:string -> args:Jsonaf.t -> (tool_call_result, string) result
     ; on_tool_spawn : name:string -> args:Jsonaf.t -> (string, string) result
     ; model_recipes : model_recipe String.Map.t
-    ; on_schedule_after_ms :
-        delay_ms:int -> payload:Lang.value -> (string, string) result
+    ; on_schedule_after_ms : delay_ms:int -> payload:Lang.value -> (string, string) result
     ; on_schedule_cancel : id:string -> (unit, string) result
     }
 
@@ -650,8 +644,7 @@ module Capabilities = struct
     ; model_recipes = String.Map.empty
     ; on_schedule_after_ms =
         (fun ~delay_ms:_ ~payload:_ -> Error "Schedule.after_ms is not configured")
-    ; on_schedule_cancel =
-        (fun ~id:_ -> Error "Schedule.cancel is not configured")
+    ; on_schedule_cancel = (fun ~id:_ -> Error "Schedule.cancel is not configured")
     }
   ;;
 
@@ -704,8 +697,7 @@ module Capabilities = struct
           let%bind payload = json_args ~name:"Model.spawn" payload in
           recipe_handler.spawn ~payload)
     ; on_schedule_after_ms =
-        (fun _session ~delay_ms ~payload ->
-          t.on_schedule_after_ms ~delay_ms ~payload)
+        (fun _session ~delay_ms ~payload -> t.on_schedule_after_ms ~delay_ms ~payload)
     ; on_schedule_cancel = (fun _session ~id -> t.on_schedule_cancel ~id)
     }
   ;;

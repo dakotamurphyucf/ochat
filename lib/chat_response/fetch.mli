@@ -73,6 +73,19 @@ val get_html
   -> is_local:bool
   -> string
 
+(** [resolve_local_dir ~ctx path] returns the parent directory that would be
+    used to load the local document at [path], if it can be resolved through
+    the same search order as {!get}. *)
+val resolve_local_dir
+  :  ctx:
+       < cwd : Eio.Fs.dir_ty Eio.Path.t
+       ; fs : Eio.Fs.dir_ty Eio.Path.t
+       ; net : [> [> `Generic ] Eio.Net.ty ] Eio.Resource.t
+       ; .. >
+         Ctx.t
+  -> string
+  -> Eio.Fs.dir_ty Eio.Path.t option
+
 (** [tab_on_newline s] inserts two tab characters ("\t\t") every time a
     newline character is encountered in [s].  The transformation is
     purely cosmetic and is useful when embedding multi-line strings into

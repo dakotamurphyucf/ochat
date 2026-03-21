@@ -160,6 +160,28 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
+;; Chat-TUI persistence materialization tests
+;; ---------------------------------------------------------------------------
+
+(library
+ (name chat_tui_persistence_materialization_test)
+ (modules chat_tui_persistence_materialization_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  ochat.io
+  ochat.session
+  chat_tui
+  chat_response
+  chatmd
+  eio
+  eio_main
+  eio.unix)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+;; ---------------------------------------------------------------------------
 ;; Session reset tests
 ;; ---------------------------------------------------------------------------
 
@@ -281,6 +303,22 @@
  (name chat_tui_tool_metadata_test)
  (modules chat_tui_tool_metadata_test)
  (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_tui_moderation_test)
+ (modules chat_tui_moderation_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  notty
+  notty_scroll_box
+  chat_tui
+  chat_response
+  chatmd
+  ochat.session)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -583,6 +621,23 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name chat_response_agent_prompt_test)
+ (modules chat_response_agent_prompt_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_response
+  chatmd
+  eio
+  eio_main
+  eio.unix
+  ochat.mcp_prompt_agent
+  ochat.mcp_server_core)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
  (name chat_response_moderation_test)
  (modules chat_response_moderation_test)
  (libraries
@@ -607,6 +662,14 @@
   chatml
   chatml_builtin_modules
   ochat.session)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_response_in_memory_stream_test)
+ (modules chat_response_in_memory_stream_test)
+ (libraries core expect_test_helpers_core chat_response chatmd ochat.session)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

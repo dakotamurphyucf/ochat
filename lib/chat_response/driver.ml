@@ -1,7 +1,10 @@
 open Core
 module CM = Prompt.Chat_markdown
+module Moderation = Moderation
+module Moderator_manager = Moderator_manager
 module Res = Openai.Responses
 module Output = Res.Tool_output.Output
+module Stream_moderator = In_memory_stream
 
 (* --------------------------------------------------------------------------- *)
 (* Internal helper – record used for keeping track of running tool invocations *)
@@ -18,6 +21,265 @@ type driver_pending_call =
   ; kind : driver_pending_call_kind
   ; promise : Openai.Responses.Tool_output.Output.t Eio.Promise.or_exn
   }
+
+type appended_call =
+  { seq : int
+  ; kind : driver_pending_call_kind
+  }
+
+let now_ms (env : Eio_unix.Stdenv.base) : int =
+  Eio.Time.now (Eio.Stdenv.clock env) *. 1000. |> Int.of_float
+;;
+
+let has_script elements =
+  List.exists elements ~f:(function
+    | CM.Script _ -> true
+    | _ -> false)
+;;
+
+let has_end_session_request requests =
+  List.exists requests ~f:(function
+    | Moderation.Runtime_request.End_session _ -> true
+    | Request_compaction -> false)
+;;
+
+let create_moderator ~env ~session_id ~elements ~history ~available_tools
+  : (Stream_moderator.moderator option, string) result
+  =
+  let open Result.Let_syntax in
+  let%bind _, artifact =
+    Moderator_manager.Registry.of_elements Moderator_manager.Registry.empty elements
+  in
+  match artifact with
+  | None -> Ok None
+  | Some artifact ->
+    let capabilities = Moderation.Capabilities.default in
+    let%bind manager = Moderator_manager.create ~artifact ~capabilities () in
+    let moderator = Stream_moderator.{ manager; session_id; session_meta = `Null } in
+    let now_ms = now_ms env in
+    let%bind outcome =
+      Moderator_manager.handle_event
+        manager
+        ~session_id
+        ~now_ms
+        ~history
+        ~available_tools
+        ~session_meta:`Null
+        ~event:Moderation.Event.Session_start
+    in
+    let%bind drained =
+      if has_end_session_request outcome.runtime_requests
+      then Ok []
+      else
+        Moderator_manager.drain_internal_events
+          manager
+          ~session_id
+          ~now_ms
+          ~history
+          ~available_tools
+          ~session_meta:`Null
+    in
+    let requests =
+      List.concat_map (outcome :: drained) ~f:(fun outcome -> outcome.runtime_requests)
+    in
+    List.iter requests ~f:(fun request ->
+      Log.emit
+        `Info
+        (Printf.sprintf
+           "Ignoring moderator runtime request in shared driver: %s"
+           (Sexp.to_string_hum ([%sexp_of: Moderation.Runtime_request.t] request))));
+    Ok (Some moderator)
+;;
+
+let render_tool_output_text (output : Res.Tool_output.Output.t) =
+  match output with
+  | Text text -> text
+  | Content parts ->
+    parts
+    |> List.map ~f:(function
+      | Res.Tool_output.Output_part.Input_text { text } -> text
+      | Input_image { image_url; _ } -> Printf.sprintf "<image src=\"%s\" />" image_url)
+    |> String.concat ~sep:"\n"
+;;
+
+let append_output_message ~append (o : Res.Output_message.t) =
+  append
+    (Printf.sprintf
+       "<assistant id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</assistant>\n"
+       o.id
+       "RAW"
+       (Fetch.tab_on_newline
+          (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" "))
+       "RAW")
+;;
+
+let append_reasoning ~append (r : Res.Reasoning.t) =
+  let summaries =
+    List.map r.summary ~f:(fun s ->
+      Printf.sprintf "\n<summary>\n\t\t%s\n</summary>\n" (Fetch.tab_on_newline s.text))
+    |> String.concat ~sep:""
+  in
+  append
+    (Printf.sprintf
+       "\n<reasoning id=\"%s\">\n%s\n</reasoning>\n"
+       r.id
+       (Fetch.tab_on_newline summaries))
+;;
+
+let append_tool_call
+      ~append
+      ~save_doc
+      ~show_tool_call
+      ~(seq : int)
+      ~(kind : driver_pending_call_kind)
+      ~(name : string)
+      ~(payload : string)
+      ~(call_id : string)
+      ~(item_id : string option)
+  =
+  let item_id = Option.value item_id ~default:call_id in
+  let tool_call_url id = Printf.sprintf "%i.tool-call.%s.json" seq id in
+  let type_attr =
+    match kind with
+    | `Function -> ""
+    | `Custom -> " type=\"custom_tool_call\""
+  in
+  if show_tool_call
+  then
+    append
+      (Printf.sprintf
+         "\n\
+          <tool_call%s tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
+          \t%s|\n\
+          \t\t%s\n\
+          \t|%s\n\
+          </tool_call>\n"
+         type_attr
+         call_id
+         name
+         item_id
+         "RAW"
+         (Fetch.tab_on_newline payload)
+         "RAW")
+  else (
+    let content =
+      Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_url call_id)
+    in
+    append
+      (Printf.sprintf
+         "\n\
+          <tool_call%s tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
+          \t%s\n\
+          </tool_call>\n"
+         type_attr
+         call_id
+         name
+         item_id
+         (Fetch.tab_on_newline content));
+    save_doc (tool_call_url call_id) payload)
+;;
+
+let append_tool_output
+      ~append
+      ~save_doc
+      ~show_tool_call
+      ~(seq : int)
+      ~(kind : driver_pending_call_kind)
+      ~(call_id : string)
+      ~(output : Res.Tool_output.Output.t)
+  =
+  let result = render_tool_output_text output in
+  let tool_call_result_url id = Printf.sprintf "%i.tool-call-result.%s.json" seq id in
+  let type_attr =
+    match kind with
+    | `Function -> ""
+    | `Custom -> " type=\"custom_tool_call\""
+  in
+  if show_tool_call
+  then
+    append
+      (Printf.sprintf
+         "\n\
+          <tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\
+          \t%s|\n\
+          \t\t%s\n\
+          \t|%s\n\
+          </tool_response>\n"
+         type_attr
+         call_id
+         seq
+         "RAW"
+         (Fetch.tab_on_newline result)
+         "RAW")
+  else (
+    let content =
+      Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_result_url call_id)
+    in
+    append
+      (Printf.sprintf
+         "\n<tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\t%s\n</tool_response>\n"
+         type_attr
+         call_id
+         seq
+         (Fetch.tab_on_newline content));
+    save_doc (tool_call_result_url call_id) result)
+;;
+
+let append_generated_items ~append ~save_doc ~show_tool_call items =
+  let calls = Hashtbl.create (module String) in
+  let next_seq = ref 0 in
+  List.iter items ~f:(function
+    | Res.Item.Output_message o -> append_output_message ~append o
+    | Res.Item.Reasoning r -> append_reasoning ~append r
+    | Res.Item.Function_call fc ->
+      append_tool_call
+        ~append
+        ~save_doc
+        ~show_tool_call
+        ~seq:!next_seq
+        ~kind:`Function
+        ~name:fc.name
+        ~payload:fc.arguments
+        ~call_id:fc.call_id
+        ~item_id:fc.id;
+      Hashtbl.set calls ~key:fc.call_id ~data:{ seq = !next_seq; kind = `Function };
+      Int.incr next_seq
+    | Res.Item.Custom_tool_call tc ->
+      append_tool_call
+        ~append
+        ~save_doc
+        ~show_tool_call
+        ~seq:!next_seq
+        ~kind:`Custom
+        ~name:tc.name
+        ~payload:tc.input
+        ~call_id:tc.call_id
+        ~item_id:tc.id;
+      Hashtbl.set calls ~key:tc.call_id ~data:{ seq = !next_seq; kind = `Custom };
+      Int.incr next_seq
+    | Res.Item.Function_call_output out ->
+      Option.iter (Hashtbl.find calls out.call_id) ~f:(fun { seq; kind } ->
+        append_tool_output
+          ~append
+          ~save_doc
+          ~show_tool_call
+          ~seq
+          ~kind
+          ~call_id:out.call_id
+          ~output:out.output)
+    | Res.Item.Custom_tool_call_output out ->
+      Option.iter (Hashtbl.find calls out.call_id) ~f:(fun { seq; kind } ->
+        append_tool_output
+          ~append
+          ~save_doc
+          ~show_tool_call
+          ~seq
+          ~kind
+          ~call_id:out.call_id
+          ~output:out.output)
+    | Res.Item.Input_message _ | Res.Item.Web_search_call _ | Res.Item.File_search_call _
+      -> ())
+;;
 
 (*********************************************************************
   Driver – high-level entry points exposed to CLI & tools
@@ -134,6 +396,8 @@ type driver_pending_call =
 
 let rec run_agent
           ?(history_compaction = false)
+          ?prompt_dir
+          ?session_id
           ~(ctx : _ Ctx.t)
           (prompt_xml : string)
           (items : CM.content_item list)
@@ -142,7 +406,10 @@ let rec run_agent
   Eio.Switch.run
   @@ fun sw ->
   (* 1.  Extract individual components from the shared context *)
-  let dir = Ctx.dir ctx in
+  let dir = Option.value prompt_dir ~default:(Ctx.dir ctx) in
+  let ctx =
+    Ctx.create ~env:(Ctx.env ctx) ~dir ~tool_dir:(Ctx.tool_dir ctx) ~cache:(Ctx.cache ctx)
+  in
   (* 1.  Build the full agent XML by adding any inline user items. *)
   let msg =
     CM.User
@@ -161,7 +428,7 @@ let rec run_agent
   let elements = CM.parse_chat_inputs ~dir prompt_xml in
   (* 3.  Configuration (max_tokens, model, …) *)
   let cfg = Config.of_elements elements in
-  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call = _; id = _ } =
+  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call = _; id } =
     cfg
   in
   let model =
@@ -191,16 +458,44 @@ let rec run_agent
     Converter.to_items ~ctx ~run_agent:(run_agent ~history_compaction) (elements @ [ msg ])
   in
   let all_items =
-    Response_loop.run
-      ~ctx
-      ?temperature
-      ?max_output_tokens:max_tokens
-      ~tools:tools_req
-      ?reasoning
-      ~history_compaction
-      ~model
-      ~tool_tbl
-      init_items
+    if has_script elements
+    then (
+      let session_id =
+        Option.first_some id session_id |> Option.value ~default:"nested-agent"
+      in
+      let moderator =
+        create_moderator
+          ~env:(Ctx.env ctx)
+          ~session_id
+          ~elements
+          ~history:init_items
+          ~available_tools:tools_req
+        |> Result.ok_or_failwith
+      in
+      In_memory_stream.run_completion_stream_in_memory_v1
+        ~env:(Ctx.env ctx)
+        ~history:init_items
+        ~tools:(Some tools_req)
+        ~tool_tbl
+        ?temperature
+        ?max_output_tokens:max_tokens
+        ?reasoning
+        ?moderator
+        ~history_compaction
+        ~parallel_tool_calls:true
+        ~model
+        ())
+    else
+      Response_loop.run
+        ~ctx
+        ?temperature
+        ?max_output_tokens:max_tokens
+        ~tools:tools_req
+        ?reasoning
+        ~history_compaction
+        ~model
+        ~tool_tbl
+        init_items
   in
   (* 6.  Extract assistant messages and concatenate them. *)
   List.drop all_items (List.length init_items)
@@ -298,6 +593,7 @@ let run_completion
           ; model = model_opt
           ; reasoning_effort
           ; temperature
+          ; id
           ; _
           }
       =
@@ -309,6 +605,9 @@ let run_completion
             Some (Res.Request.Reasoning.Effort.of_str_exn eff)
         ; summary = Some Detailed
         })
+    in
+    let model =
+      Option.value_map model_opt ~default:Res.Request.Gpt4 ~f:Res.Request.model_of_str_exn
     in
     (* convert xml → items and fire first request *)
     let ctx = Ctx.create ~env ~dir:output_dir ~cache ~tool_dir:dir in
@@ -327,120 +626,71 @@ let run_completion
     let init_items =
       Converter.to_items ~ctx ~run_agent:(run_agent ~history_compaction:false) elements
     in
-    (* For the response loop we use a context bound to the .chatmd data folder so
-       that any tool-generated artefacts land in that directory. *)
-    let ctx_loop = Ctx.create ~env ~dir:datadir ~cache ~tool_dir:datadir in
-    let all_items =
-      Response_loop.run
-        ~ctx:ctx_loop
-        ?temperature
-        ?max_output_tokens:model_tokens
-        ~tools
-        ?reasoning
-        ~tool_tbl
-        ~model:
-          (Option.value_map
-             model_opt
-             ~default:Res.Request.Gpt4
-             ~f:Res.Request.model_of_str_exn)
-        init_items
-    in
     let append = Io.append_doc ~dir output_file in
-    List.iter
-      (List.drop all_items (List.length init_items))
-      ~f:(function
-        | Res.Item.Output_message o ->
-          append
-            (Printf.sprintf
-               "<assistant id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</assistant>\n"
-               o.id
-               "RAW"
-               (Fetch.tab_on_newline
-                  (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" "))
-               "RAW")
-        | Res.Item.Reasoning r ->
-          let summaries =
-            List.map r.summary ~f:(fun s ->
-              Printf.sprintf
-                "\n<summary>\n\t\t%s\n</summary>\n"
-                (Fetch.tab_on_newline s.text))
-            |> String.concat ~sep:""
-          in
-          print_endline "summaries";
-          print_endline summaries;
-          append
-            (Printf.sprintf
-               "\n<reasoning id=\"%s\">\n%s\n</reasoning>\n"
-               r.id
-               (Fetch.tab_on_newline summaries))
-        | Res.Item.Function_call fc ->
-          append
-            (Printf.sprintf
-               "\n\
-                <tool_call function_name=\"%s\" tool_call_id=\"%s\">\n\
-                %s\n\
-                </tool_call>\n"
-               fc.name
-               fc.call_id
-               fc.arguments)
-        | Res.Item.Custom_tool_call tc ->
-          append
-            (Printf.sprintf
-               "\n\
-                <tool_call type=\"custom_tool_call\" function_name=\"%s\" \
-                tool_call_id=\"%s\">\n\
-                %s\n\
-                </tool_call>\n"
-               tc.name
-               tc.call_id
-               tc.input)
-        | Res.Item.Function_call_output fco ->
-          let output =
-            match fco.output with
-            | Openai.Responses.Tool_output.Output.Text text -> text
-            | Content parts ->
-              parts
-              |> List.map ~f:(function
-                | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-                | Input_image { image_url; _ } ->
-                  Printf.sprintf "<image src=\"%s\" />" image_url)
-              |> String.concat ~sep:"\n"
-          in
-          append
-            (Printf.sprintf
-               "\n<tool_response tool_call_id=\"%s\">%s</tool_response>\n"
-               fco.call_id
-               output)
-        | Res.Item.Custom_tool_call_output tco ->
-          let output =
-            match tco.output with
-            | Openai.Responses.Tool_output.Output.Text text -> text
-            | Content parts ->
-              parts
-              |> List.map ~f:(function
-                | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-                | Input_image { image_url; _ } ->
-                  Printf.sprintf "<image src=\"%s\" />" image_url)
-              |> String.concat ~sep:"\n"
-          in
-          append
-            (Printf.sprintf
-               "\n\
-                <tool_response type=\"custom_tool_call\" \
-                tool_call_id=\"%s\">%s</tool_response>\n"
-               tco.call_id
-               output)
-        | Res.Item.Input_message _
-        | Res.Item.Web_search_call _
-        | Res.Item.File_search_call _ -> ());
-    (* stop if no new function calls were produced *)
-    if
-      List.exists all_items ~f:(function
-        | Res.Item.Function_call _ -> true
-        | Res.Item.Custom_tool_call _ -> true
-        | _ -> false)
-    then loop ()
-    else append "\n<user>\n\n</user>"
+    let save_doc name contents = Io.save_doc ~dir:datadir name contents in
+    if has_script elements
+    then (
+      let moderator =
+        create_moderator
+          ~env
+          ~session_id:(Option.value id ~default:output_file)
+          ~elements
+          ~history:init_items
+          ~available_tools:tools
+        |> Result.ok_or_failwith
+      in
+      let runtime_requests = ref [] in
+      let all_items =
+        In_memory_stream.run_completion_stream_in_memory_v1
+          ~env
+          ~datadir
+          ~history:init_items
+          ~tools:(Some tools)
+          ~tool_tbl
+          ?temperature
+          ?max_output_tokens:model_tokens
+          ?reasoning
+          ?moderator
+          ~on_runtime_request:(fun request ->
+            runtime_requests := request :: !runtime_requests)
+          ~parallel_tool_calls
+          ~meta_refine
+          ~model
+          ()
+      in
+      append_generated_items
+        ~append
+        ~save_doc
+        ~show_tool_call:true
+        (List.drop all_items (List.length init_items));
+      if not (has_end_session_request !runtime_requests) then append "\n<user>\n\n</user>")
+    else (
+      (* For the response loop we use a context bound to the .chatmd data folder so
+         that any tool-generated artefacts land in that directory. *)
+      let ctx_loop = Ctx.create ~env ~dir:datadir ~cache ~tool_dir:datadir in
+      let all_items =
+        Response_loop.run
+          ~ctx:ctx_loop
+          ?temperature
+          ?max_output_tokens:model_tokens
+          ~tools
+          ?reasoning
+          ~tool_tbl
+          ~model
+          init_items
+      in
+      append_generated_items
+        ~append
+        ~save_doc
+        ~show_tool_call:true
+        (List.drop all_items (List.length init_items));
+      if
+        List.exists all_items ~f:(function
+          | Res.Item.Function_call _ -> true
+          | Res.Item.Custom_tool_call _ -> true
+          | _ -> false)
+      then loop ()
+      else append "\n<user>\n\n</user>")
   in
   loop ();
   Cache.save ~file:cache_file cache
@@ -531,9 +781,7 @@ let run_completion_stream
   let elements = CM.parse_chat_inputs ~dir:output_dir xml in
   (* 1‑B • current config (max_tokens, model, …) *)
   let cfg = Config.of_elements elements in
-  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call; id = _ } =
-    cfg
-  in
+  let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call; id } = cfg in
   let model =
     Option.value_map model ~f:Res.Request.model_of_str_exn ~default:Res.Request.Gpt4
   in
@@ -562,40 +810,85 @@ let run_completion_stream
   let inputs =
     Converter.to_items ~ctx ~run_agent:(run_agent ~history_compaction) elements
   in
-  (* ─────────────────────── 1.  main recursive turn ────────────────────── *)
-  let rec turn inputs =
-    (* ────────────────── 2.  streaming callback state ─────────────────── *)
-    (* existing tables … *)
-    let new_items : Res.Item.t list ref = ref [] in
-    let add_item item = new_items := item :: !new_items in
-    let opened_msgs : (string, unit) Hashtbl.t = Hashtbl.create (module String)
-    and func_info : (string, string * string) Hashtbl.t = Hashtbl.create (module String)
-    and reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
-    let run_again = ref false in
-    let output_text_delta ~id txt =
-      if not (Hashtbl.mem opened_msgs id)
-      then (
-        append_doc (Printf.sprintf "\n<assistant id=\"%s\">\n\t%s|\n\t\t" id "RAW");
-        Hashtbl.set opened_msgs ~key:id ~data:());
-      append_doc (Fetch.tab_on_newline txt)
+  if has_script elements
+  then (
+    let save_doc name contents = Io.save_doc ~dir:datadir name contents in
+    let moderator =
+      create_moderator
+        ~env
+        ~session_id:(Option.value id ~default:output_file)
+        ~elements
+        ~history:inputs
+        ~available_tools:tools
+      |> Result.ok_or_failwith
     in
-    let close_message id =
-      if Hashtbl.mem opened_msgs id
-      then (
-        append_doc (Printf.sprintf "\n\t|%s\n</assistant>\n" "RAW");
-        (* remove the message from the opened list *)
-        Hashtbl.remove opened_msgs id)
+    let runtime_requests = ref [] in
+    let all_items =
+      In_memory_stream.run_completion_stream_in_memory_v1
+        ~env
+        ~datadir
+        ~history:inputs
+        ~on_event:(fun ev ->
+          log_event ev;
+          on_event ev)
+        ~tools:(Some tools)
+        ~tool_tbl
+        ?temperature
+        ?max_output_tokens:max_tokens
+        ?reasoning
+        ?moderator
+        ~on_runtime_request:(fun request ->
+          runtime_requests := request :: !runtime_requests)
+        ~history_compaction
+        ~parallel_tool_calls
+        ~meta_refine
+        ~model
+        ()
     in
-    let lt, gt = "<", ">" in
-    (* avoid raw “<tag>” in the output *)
-    let open_reasoning id =
-      append_doc
-        (Printf.sprintf "\n%sreasoning id=\"%s\"%s\n\t%ssummary%s\n\t\t" lt id gt lt gt)
-    in
-    let open_new_summary () = append_doc (Printf.sprintf "\n\t%ssummary%s\n\t\t" lt gt) in
-    let close_summary () = append_doc (Printf.sprintf "\n\t%s/summary%s" lt gt) in
-    let close_reasoning () = append_doc (Printf.sprintf "\n%s/reasoning%s\n" lt gt) in
-    (* -----------------------------------------------------------------
+    append_generated_items
+      ~append:append_doc
+      ~save_doc
+      ~show_tool_call
+      (List.drop all_items (List.length inputs));
+    if not (has_end_session_request !runtime_requests)
+    then append_doc "\n<user>\n\n</user>")
+  else (
+    (* ─────────────────────── 1.  main recursive turn ────────────────────── *)
+    let rec turn inputs =
+      (* ────────────────── 2.  streaming callback state ─────────────────── *)
+      (* existing tables … *)
+      let new_items : Res.Item.t list ref = ref [] in
+      let add_item item = new_items := item :: !new_items in
+      let opened_msgs : (string, unit) Hashtbl.t = Hashtbl.create (module String)
+      and func_info : (string, string * string) Hashtbl.t = Hashtbl.create (module String)
+      and reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
+      let run_again = ref false in
+      let output_text_delta ~id txt =
+        if not (Hashtbl.mem opened_msgs id)
+        then (
+          append_doc (Printf.sprintf "\n<assistant id=\"%s\">\n\t%s|\n\t\t" id "RAW");
+          Hashtbl.set opened_msgs ~key:id ~data:());
+        append_doc (Fetch.tab_on_newline txt)
+      in
+      let close_message id =
+        if Hashtbl.mem opened_msgs id
+        then (
+          append_doc (Printf.sprintf "\n\t|%s\n</assistant>\n" "RAW");
+          (* remove the message from the opened list *)
+          Hashtbl.remove opened_msgs id)
+      in
+      let lt, gt = "<", ">" in
+      (* avoid raw “<tag>” in the output *)
+      let open_reasoning id =
+        append_doc
+          (Printf.sprintf "\n%sreasoning id=\"%s\"%s\n\t%ssummary%s\n\t\t" lt id gt lt gt)
+      in
+      let open_new_summary () =
+        append_doc (Printf.sprintf "\n\t%ssummary%s\n\t\t" lt gt)
+      in
+      let close_summary () = append_doc (Printf.sprintf "\n\t%s/summary%s" lt gt) in
+      let close_reasoning () = append_doc (Printf.sprintf "\n%s/reasoning%s\n" lt gt) in
+      (* -----------------------------------------------------------------
        Parallel execution of tool calls
 
        When [parallel_tool_calls] is [true], each tool invocation is
@@ -604,354 +897,362 @@ let run_completion_stream
        collected and later appended **in the original call order** so
        that the ChatMarkdown document remains deterministic.
        ---------------------------------------------------------------- *)
-    (* Semaphore limiting concurrent invocations.  We create it lazily the
+      (* Semaphore limiting concurrent invocations.  We create it lazily the
        first time a tool call is encountered to avoid the (small) cost
        in turns without any tools. *)
-    let sem = lazy (Eio.Semaphore.make 8) in
-    (* Accumulates promises for running tool calls. *)
-    let pending_calls : driver_pending_call list ref = ref [] in
-    let handle_function_done ~item_id ~arguments =
-      match Hashtbl.find func_info item_id with
-      | None -> () (* should not happen *)
-      | Some (name, call_id) ->
-        (* Allocate a unique sequence number for deterministic ordering *)
-        let seq = !fn_id in
-        Int.incr fn_id;
-        (* ----------------------------------------------------------------- *)
-        (* 1.  Persist the tool_call request into the buffer / disk          *)
-        let tool_call_url id = Printf.sprintf "%i.tool-call.%s.json" seq id in
-        if show_tool_call
-        then
-          append_doc
-            (Printf.sprintf
-               "\n\
-                <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
-                \t%s|\n\
-                \t\t%s\n\
-                \t|%s\n\
-                </tool_call>\n"
-               call_id
-               name
-               item_id
-               "RAW"
-               (Fetch.tab_on_newline arguments)
-               "RAW")
-        else (
-          let content =
-            Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_url call_id)
-          in
-          append_doc
-            (Printf.sprintf
-               "\n\
-                <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
-                \t%s\n\
-                </tool_call>\n"
-               call_id
-               name
-               item_id
-               (Fetch.tab_on_newline content));
-          Io.save_doc ~dir:datadir (tool_call_url call_id) arguments);
-        (* 2.  Add the function_call item so the model sees the invocation *)
-        let fn_call_item =
-          Tool_call.call_item
-            ~kind:Tool_call.Kind.Function
-            ~name
-            ~payload:arguments
-            ~call_id
-            ~id:(Some item_id)
-        in
-        add_item fn_call_item;
-        (* 3.  Spawn the actual tool invocation in its own fiber           *)
-        let history_so_far =
-          if history_compaction
+      let sem = lazy (Eio.Semaphore.make 8) in
+      (* Accumulates promises for running tool calls. *)
+      let pending_calls : driver_pending_call list ref = ref [] in
+      let handle_function_done ~item_id ~arguments =
+        match Hashtbl.find func_info item_id with
+        | None -> () (* should not happen *)
+        | Some (name, call_id) ->
+          (* Allocate a unique sequence number for deterministic ordering *)
+          let seq = !fn_id in
+          Int.incr fn_id;
+          (* ----------------------------------------------------------------- *)
+          (* 1.  Persist the tool_call request into the buffer / disk          *)
+          let tool_call_url id = Printf.sprintf "%i.tool-call.%s.json" seq id in
+          if show_tool_call
           then
-            (* If history compaction is enabled, we only keep the latest
-               version of each file read by the model. *)
-            Compact_history.collapse_read_file_history
-            @@ List.append inputs (List.rev !new_items)
-          else List.append inputs (List.rev !new_items)
-        in
-        let run_tool () =
-          Tool_call.run_tool
-            ~kind:Tool_call.Kind.Function
-            ~name
-            ~payload:arguments
-            ~call_id
-            ~tool_tbl
-            ~on_fork:
-              (Some
-                 (fun ~call_id ~arguments ->
-                   Res.Tool_output.Output.Text
-                     (Fork.execute
-                        ~env
-                        ~history:history_so_far
-                        ~call_id
-                        ~arguments
-                        ~tools
-                        ~tool_tbl
-                        ~on_event
-                        ~on_fn_out:(fun _ -> ())
-                        ?temperature
-                        ?max_output_tokens:max_tokens
-                        ?reasoning
-                        ())))
-        in
-        let promise =
-          if not parallel_tool_calls
-          then (
-            (* Sequential fall-back – run immediately in the current fiber *)
-            let result = run_tool () in
-            (* Wrap result into an already-resolved promise so code below is
-               agnostic to the execution mode. *)
-            let pr, resv = Eio.Promise.create () in
-            Eio.Promise.resolve_ok resv result;
-            pr)
-          else
-            (* Parallel mode – fork a new fiber and run under the semaphore *)
-            Eio.Fiber.fork_promise ~sw (fun () ->
-              (* Acquire permit *)
-              let s = Lazy.force sem in
-              Eio.Semaphore.acquire s;
-              Fun.protect
-                ~finally:(fun () -> Eio.Semaphore.release s)
-                (fun () -> run_tool ()))
-        in
-        (* 4.  Record the pending call for later collection *)
-        pending_calls := { seq; call_id; kind = `Function; promise } :: !pending_calls;
-        run_again := true
-    in
-    let handle_custom_tool_call_done ~item_id ~input =
-      match Hashtbl.find func_info item_id with
-      | None -> ()
-      | Some (name, call_id) ->
-        let seq = !fn_id in
-        Int.incr fn_id;
-        let tool_call_url id = Printf.sprintf "%i.tool-call.%s.json" seq id in
-        if show_tool_call
-        then
-          append_doc
-            (Printf.sprintf
-               "\n\
-                <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
-                function_name=\"%s\" id=\"%s\">\n\
-                \t%s|\n\
-                \t\t%s\n\
-                \t|%s\n\
-                </tool_call>\n"
-               call_id
-               name
-               item_id
-               "RAW"
-               (Fetch.tab_on_newline input)
-               "RAW")
-        else (
-          let content =
-            Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_url call_id)
+            append_doc
+              (Printf.sprintf
+                 "\n\
+                  <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
+                  \t%s|\n\
+                  \t\t%s\n\
+                  \t|%s\n\
+                  </tool_call>\n"
+                 call_id
+                 name
+                 item_id
+                 "RAW"
+                 (Fetch.tab_on_newline arguments)
+                 "RAW")
+          else (
+            let content =
+              Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_url call_id)
+            in
+            append_doc
+              (Printf.sprintf
+                 "\n\
+                  <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
+                  \t%s\n\
+                  </tool_call>\n"
+                 call_id
+                 name
+                 item_id
+                 (Fetch.tab_on_newline content));
+            Io.save_doc ~dir:datadir (tool_call_url call_id) arguments);
+          (* 2.  Add the function_call item so the model sees the invocation *)
+          let fn_call_item =
+            Tool_call.call_item
+              ~kind:Tool_call.Kind.Function
+              ~name
+              ~payload:arguments
+              ~call_id
+              ~id:(Some item_id)
           in
-          append_doc
-            (Printf.sprintf
-               "\n\
-                <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
-                function_name=\"%s\" id=\"%s\">\n\
-                \t%s\n\
-                </tool_call>\n"
-               call_id
-               name
-               item_id
-               (Fetch.tab_on_newline content));
-          Io.save_doc ~dir:datadir (tool_call_url call_id) input);
-        let call_item : Res.Item.t =
-          Tool_call.call_item
-            ~kind:Tool_call.Kind.Custom
-            ~name
-            ~payload:input
-            ~call_id
-            ~id:(Some item_id)
-        in
-        add_item call_item;
-        let run_tool () =
-          Tool_call.run_tool
-            ~kind:Tool_call.Kind.Custom
-            ~name
-            ~payload:input
-            ~call_id
-            ~tool_tbl
-            ~on_fork:None
-        in
-        let promise =
-          if not parallel_tool_calls
-          then (
-            let result = run_tool () in
-            let pr, resv = Eio.Promise.create () in
-            Eio.Promise.resolve_ok resv result;
-            pr)
-          else
-            Eio.Fiber.fork_promise ~sw (fun () ->
-              let s = Lazy.force sem in
-              Eio.Semaphore.acquire s;
-              Fun.protect
-                ~finally:(fun () -> Eio.Semaphore.release s)
-                (fun () -> run_tool ()))
-        in
-        pending_calls := { seq; call_id; kind = `Custom; promise } :: !pending_calls;
-        run_again := true
-    in
-    let callback (ev : Res.Response_stream.t) =
-      (* For debugging purposes we still log every event. *)
-      log_event ev;
-      (* Internal book-keeping for writing the streamed response back into the
+          add_item fn_call_item;
+          (* 3.  Spawn the actual tool invocation in its own fiber           *)
+          let history_so_far =
+            if history_compaction
+            then
+              (* If history compaction is enabled, we only keep the latest
+               version of each file read by the model. *)
+              Compact_history.collapse_read_file_history
+              @@ List.append inputs (List.rev !new_items)
+            else List.append inputs (List.rev !new_items)
+          in
+          let run_tool () =
+            Tool_call.run_tool
+              ~kind:Tool_call.Kind.Function
+              ~name
+              ~payload:arguments
+              ~call_id
+              ~tool_tbl
+              ~on_fork:
+                (Some
+                   (fun ~call_id ~arguments ->
+                     Res.Tool_output.Output.Text
+                       (Fork.execute
+                          ~env
+                          ~history:history_so_far
+                          ~call_id
+                          ~arguments
+                          ~tools
+                          ~tool_tbl
+                          ~on_event
+                          ~on_fn_out:(fun _ -> ())
+                          ?temperature
+                          ?max_output_tokens:max_tokens
+                          ?reasoning
+                          ())))
+          in
+          let promise =
+            if not parallel_tool_calls
+            then (
+              (* Sequential fall-back – run immediately in the current fiber *)
+              let result = run_tool () in
+              (* Wrap result into an already-resolved promise so code below is
+               agnostic to the execution mode. *)
+              let pr, resv = Eio.Promise.create () in
+              Eio.Promise.resolve_ok resv result;
+              pr)
+            else
+              (* Parallel mode – fork a new fiber and run under the semaphore *)
+              Eio.Fiber.fork_promise ~sw (fun () ->
+                (* Acquire permit *)
+                let s = Lazy.force sem in
+                Eio.Semaphore.acquire s;
+                Fun.protect
+                  ~finally:(fun () -> Eio.Semaphore.release s)
+                  (fun () -> run_tool ()))
+          in
+          (* 4.  Record the pending call for later collection *)
+          pending_calls := { seq; call_id; kind = `Function; promise } :: !pending_calls;
+          run_again := true
+      in
+      let handle_custom_tool_call_done ~item_id ~input =
+        match Hashtbl.find func_info item_id with
+        | None -> ()
+        | Some (name, call_id) ->
+          let seq = !fn_id in
+          Int.incr fn_id;
+          let tool_call_url id = Printf.sprintf "%i.tool-call.%s.json" seq id in
+          if show_tool_call
+          then
+            append_doc
+              (Printf.sprintf
+                 "\n\
+                  <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
+                  function_name=\"%s\" id=\"%s\">\n\
+                  \t%s|\n\
+                  \t\t%s\n\
+                  \t|%s\n\
+                  </tool_call>\n"
+                 call_id
+                 name
+                 item_id
+                 "RAW"
+                 (Fetch.tab_on_newline input)
+                 "RAW")
+          else (
+            let content =
+              Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_url call_id)
+            in
+            append_doc
+              (Printf.sprintf
+                 "\n\
+                  <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
+                  function_name=\"%s\" id=\"%s\">\n\
+                  \t%s\n\
+                  </tool_call>\n"
+                 call_id
+                 name
+                 item_id
+                 (Fetch.tab_on_newline content));
+            Io.save_doc ~dir:datadir (tool_call_url call_id) input);
+          let call_item : Res.Item.t =
+            Tool_call.call_item
+              ~kind:Tool_call.Kind.Custom
+              ~name
+              ~payload:input
+              ~call_id
+              ~id:(Some item_id)
+          in
+          add_item call_item;
+          let run_tool () =
+            Tool_call.run_tool
+              ~kind:Tool_call.Kind.Custom
+              ~name
+              ~payload:input
+              ~call_id
+              ~tool_tbl
+              ~on_fork:None
+          in
+          let promise =
+            if not parallel_tool_calls
+            then (
+              let result = run_tool () in
+              let pr, resv = Eio.Promise.create () in
+              Eio.Promise.resolve_ok resv result;
+              pr)
+            else
+              Eio.Fiber.fork_promise ~sw (fun () ->
+                let s = Lazy.force sem in
+                Eio.Semaphore.acquire s;
+                Fun.protect
+                  ~finally:(fun () -> Eio.Semaphore.release s)
+                  (fun () -> run_tool ()))
+          in
+          pending_calls := { seq; call_id; kind = `Custom; promise } :: !pending_calls;
+          run_again := true
+      in
+      let callback (ev : Res.Response_stream.t) =
+        (* For debugging purposes we still log every event. *)
+        log_event ev;
+        (* Internal book-keeping for writing the streamed response back into the
          conversation buffer and executing tool calls. *)
-      (match ev with
-       (* ───────────────────────── assistant text ────────────────────── *)
-       | Res.Response_stream.Output_text_delta { item_id; delta; _ } ->
-         output_text_delta ~id:item_id delta
-       | Res.Response_stream.Output_item_done { item; _ } ->
-         (match item with
-          | Res.Response_stream.Item.Output_message om ->
-            add_item (Output_message om);
-            (* close an open message block, if any *)
-            close_message om.id
-          | Res.Response_stream.Item.Reasoning r ->
-            add_item (Reasoning r);
-            (* close an open reasoning block, if any *)
-            (match Hashtbl.find reasoning_state r.id with
-             | Some _ ->
-               close_summary ();
-               close_reasoning ();
-               Hashtbl.remove reasoning_state r.id
-             | None -> ())
-          | _ -> ())
-       (* ─────────────────────── reasoning deltas ────────────────────── *)
-       | Res.Response_stream.Reasoning_summary_text_delta
-           { item_id; delta; summary_index; _ } ->
-         (match Hashtbl.find reasoning_state item_id with
-          | None ->
-            (* first chunk for this reasoning item *)
-            open_reasoning item_id;
-            Hashtbl.set reasoning_state ~key:item_id ~data:summary_index
-          | Some current when current = summary_index -> () (* same summary → continue *)
-          | Some _ ->
-            (* moved to the next summary *)
-            close_summary ();
-            open_new_summary ();
-            Hashtbl.set reasoning_state ~key:item_id ~data:summary_index);
-         append_doc (Fetch.tab_on_newline delta)
-       (* ────────────────────── function calls etc. ──────────────────── *)
-       | Res.Response_stream.Output_item_added { item; _ } ->
-         (match item with
-          | Res.Response_stream.Item.Function_call fc ->
-            let idx = Option.value fc.id ~default:fc.call_id in
-            Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
-          | Res.Response_stream.Item.Custom_function tc ->
-            let idx = Option.value tc.id ~default:tc.call_id in
-            Hashtbl.set func_info ~key:idx ~data:(tc.name, tc.call_id)
-          | Res.Response_stream.Item.Reasoning r ->
-            (* first chunk for this reasoning item *)
-            open_reasoning r.id;
-            Hashtbl.set reasoning_state ~key:r.id ~data:0
-          | _ -> ())
-       | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
-         handle_function_done ~item_id ~arguments
-       | Res.Response_stream.Custom_tool_call_input_done { item_id; input; _ } ->
-         handle_custom_tool_call_done ~item_id ~input
-       | _ -> ());
-      on_event ev
-    in
-    let hist =
-      (* If [history_compaction] is enabled, we compact the history so that
+        (match ev with
+         (* ───────────────────────── assistant text ────────────────────── *)
+         | Res.Response_stream.Output_text_delta { item_id; delta; _ } ->
+           output_text_delta ~id:item_id delta
+         | Res.Response_stream.Output_item_done { item; _ } ->
+           (match item with
+            | Res.Response_stream.Item.Output_message om ->
+              add_item (Output_message om);
+              (* close an open message block, if any *)
+              close_message om.id
+            | Res.Response_stream.Item.Reasoning r ->
+              add_item (Reasoning r);
+              (* close an open reasoning block, if any *)
+              (match Hashtbl.find reasoning_state r.id with
+               | Some _ ->
+                 close_summary ();
+                 close_reasoning ();
+                 Hashtbl.remove reasoning_state r.id
+               | None -> ())
+            | _ -> ())
+         (* ─────────────────────── reasoning deltas ────────────────────── *)
+         | Res.Response_stream.Reasoning_summary_text_delta
+             { item_id; delta; summary_index; _ } ->
+           (match Hashtbl.find reasoning_state item_id with
+            | None ->
+              (* first chunk for this reasoning item *)
+              open_reasoning item_id;
+              Hashtbl.set reasoning_state ~key:item_id ~data:summary_index
+            | Some current when current = summary_index ->
+              () (* same summary → continue *)
+            | Some _ ->
+              (* moved to the next summary *)
+              close_summary ();
+              open_new_summary ();
+              Hashtbl.set reasoning_state ~key:item_id ~data:summary_index);
+           append_doc (Fetch.tab_on_newline delta)
+         (* ────────────────────── function calls etc. ──────────────────── *)
+         | Res.Response_stream.Output_item_added { item; _ } ->
+           (match item with
+            | Res.Response_stream.Item.Function_call fc ->
+              let idx = Option.value fc.id ~default:fc.call_id in
+              Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
+            | Res.Response_stream.Item.Custom_function tc ->
+              let idx = Option.value tc.id ~default:tc.call_id in
+              Hashtbl.set func_info ~key:idx ~data:(tc.name, tc.call_id)
+            | Res.Response_stream.Item.Reasoning r ->
+              (* first chunk for this reasoning item *)
+              open_reasoning r.id;
+              Hashtbl.set reasoning_state ~key:r.id ~data:0
+            | _ -> ())
+         | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
+           handle_function_done ~item_id ~arguments
+         | Res.Response_stream.Custom_tool_call_input_done { item_id; input; _ } ->
+           handle_custom_tool_call_done ~item_id ~input
+         | _ -> ());
+        on_event ev
+      in
+      let hist =
+        (* If [history_compaction] is enabled, we compact the history so that
          multiple calls to the same file are replaced with a single call
          that points to the latest file content. *)
-      if history_compaction
-      then Compact_history.collapse_read_file_history inputs
-      else inputs
-    in
-    (* ────────────────── 3.  fire request in stream mode ──────────────── *)
-    let stream =
-      Res.post_response
-        Res.Stream
-        ?max_output_tokens:max_tokens
-        ?temperature
-        ~tools
-        ~parallel_tool_calls
-        ?reasoning
-        ~model
-        ~dir:datadir
-        net
-        ~sw
-        ~inputs:hist
-    in
-    Seq.iter callback stream;
-    (* ----------------------------------------------------------------- *)
-    (*  Collect results from any pending tool invocations.  We enforce  *)
-    (*  deterministic ordering by iterating over them sorted by [seq].   *)
-    (* ----------------------------------------------------------------- *)
-    let sorted_calls =
-      List.sort !pending_calls ~compare:(fun a b -> Int.compare a.seq b.seq)
-    in
-    List.iter sorted_calls ~f:(fun { seq; call_id; kind; promise } ->
-      let result =
-        match Eio.Promise.await_exn promise with
-        | Openai.Responses.Tool_output.Output.Text t -> t
-        | Content parts ->
-          parts
-          |> List.map ~f:(function
-            | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-            | Input_image { image_url; _ } ->
-              Printf.sprintf "<image src=\"%s\" />" image_url)
-          |> String.concat ~sep:"\n"
+        if history_compaction
+        then Compact_history.collapse_read_file_history inputs
+        else inputs
       in
-      let tool_call_result_url id = Printf.sprintf "%i.tool-call-result.%s.json" seq id in
-      let type_attr =
-        match kind with
-        | `Function -> ""
-        | `Custom -> " type=\"custom_tool_call\""
+      (* ────────────────── 3.  fire request in stream mode ──────────────── *)
+      let stream =
+        Res.post_response
+          Res.Stream
+          ?max_output_tokens:max_tokens
+          ?temperature
+          ~tools
+          ~parallel_tool_calls
+          ?reasoning
+          ~model
+          ~dir:datadir
+          net
+          ~sw
+          ~inputs:hist
       in
-      if show_tool_call
-      then
-        append_doc
-          (Printf.sprintf
-             "\n\
-              <tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\
-              \t%s|\n\
-              \t\t%s\n\
-              \t|%s\n\
-              </tool_response>\n"
-             type_attr
-             call_id
-             seq
-             "RAW"
-             (Fetch.tab_on_newline result)
-             "RAW")
-      else (
-        let content =
-          Printf.sprintf "<doc src=\"./.chatmd/%s\" local>" (tool_call_result_url call_id)
+      Seq.iter callback stream;
+      (* ----------------------------------------------------------------- *)
+      (*  Collect results from any pending tool invocations.  We enforce  *)
+      (*  deterministic ordering by iterating over them sorted by [seq].   *)
+      (* ----------------------------------------------------------------- *)
+      let sorted_calls =
+        List.sort !pending_calls ~compare:(fun a b -> Int.compare a.seq b.seq)
+      in
+      List.iter sorted_calls ~f:(fun { seq; call_id; kind; promise } ->
+        let result =
+          match Eio.Promise.await_exn promise with
+          | Openai.Responses.Tool_output.Output.Text t -> t
+          | Content parts ->
+            parts
+            |> List.map ~f:(function
+              | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
+              | Input_image { image_url; _ } ->
+                Printf.sprintf "<image src=\"%s\" />" image_url)
+            |> String.concat ~sep:"\n"
         in
-        append_doc
-          (Printf.sprintf
-             "\n<tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\t%s\n</tool_response>\n"
-             type_attr
-             call_id
-             seq
-             (Fetch.tab_on_newline content));
-        Io.save_doc ~dir:datadir (tool_call_result_url call_id) result);
-      let kind : Tool_call.Kind.t =
-        match kind with
-        | `Function -> Tool_call.Kind.Function
-        | `Custom -> Tool_call.Kind.Custom
-      in
-      let out_item : Res.Item.t =
-        Tool_call.output_item ~kind ~call_id ~output:(Output.Text result)
-      in
-      add_item out_item);
-    (* make sure any dangling assistant block is closed *)
-    Hashtbl.iter_keys opened_msgs ~f:(fun id -> close_message id);
-    (* 4 • If no function call just happened, append empty user message.   *)
-    (* 4 • If a function call just happened, recurse for the next turn.   *)
-    if !run_again
-    then turn (List.append inputs (List.rev !new_items))
-    else append_doc "\n<user>\n\n</user>"
-  in
-  turn inputs;
+        let tool_call_result_url id =
+          Printf.sprintf "%i.tool-call-result.%s.json" seq id
+        in
+        let type_attr =
+          match kind with
+          | `Function -> ""
+          | `Custom -> " type=\"custom_tool_call\""
+        in
+        if show_tool_call
+        then
+          append_doc
+            (Printf.sprintf
+               "\n\
+                <tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\
+                \t%s|\n\
+                \t\t%s\n\
+                \t|%s\n\
+                </tool_response>\n"
+               type_attr
+               call_id
+               seq
+               "RAW"
+               (Fetch.tab_on_newline result)
+               "RAW")
+        else (
+          let content =
+            Printf.sprintf
+              "<doc src=\"./.chatmd/%s\" local>"
+              (tool_call_result_url call_id)
+          in
+          append_doc
+            (Printf.sprintf
+               "\n\
+                <tool_response%s tool_call_id=\"%s\" id=\"%d\">\n\
+                \t%s\n\
+                </tool_response>\n"
+               type_attr
+               call_id
+               seq
+               (Fetch.tab_on_newline content));
+          Io.save_doc ~dir:datadir (tool_call_result_url call_id) result);
+        let kind : Tool_call.Kind.t =
+          match kind with
+          | `Function -> Tool_call.Kind.Function
+          | `Custom -> Tool_call.Kind.Custom
+        in
+        let out_item : Res.Item.t =
+          Tool_call.output_item ~kind ~call_id ~output:(Output.Text result)
+        in
+        add_item out_item);
+      (* make sure any dangling assistant block is closed *)
+      Hashtbl.iter_keys opened_msgs ~f:(fun id -> close_message id);
+      (* 4 • If no function call just happened, append empty user message.   *)
+      (* 4 • If a function call just happened, recurse for the next turn.   *)
+      if !run_again
+      then turn (List.append inputs (List.rev !new_items))
+      else append_doc "\n<user>\n\n</user>"
+    in
+    turn inputs);
   Cache.save ~file:cache_file cache
 ;;
 

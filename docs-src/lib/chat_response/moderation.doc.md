@@ -35,6 +35,19 @@ The v1 phase vocabulary is fixed:
 `Moderation.Phase` keeps those names in one place so the host and the
 script runtime do not drift apart.
 
+The shipped drivers currently emit:
+
+- `session_start`
+- `session_resume`
+- `turn_start`
+- `pre_tool_call`
+- `post_tool_response`
+- `turn_end`
+- `internal_event`
+
+`message_appended` is part of the shared API surface but is not currently
+emitted by the built-in drivers.
+
 ### 2. Projection into ChatML `context`
 
 ChatML moderator scripts consume a simplified structural `context`
@@ -60,6 +73,14 @@ Instead, `Moderation.Overlay` defines:
   canonical model history,
 - an `apply` helper that computes the effective moderated message view.
 
+In practice this means:
+
+- canonical OpenAI history remains the audit trail returned by the model/tool loop,
+- moderated effective history is computed by applying the overlay before the
+  next request,
+- transcript export materializes overlay-derived synthetic entries explicitly
+  rather than rewriting canonical history in place.
+
 ### 4. Structured local effect decoding
 
 The runtime buffers committed local effects as generic ChatML
@@ -76,6 +97,16 @@ This design keeps local effects transactional: the host interprets them
 **after** a successful `handle_event`, instead of mutating driver state
 from runtime callbacks.
 
+Tool moderation outcomes are normalized to exactly one of:
+
+- approve,
+- reject with a synthetic tool output,
+- rewrite args,
+- redirect to a different tool name and payload.
+
+Conflicting tool moderation actions for one host event are treated as a host
+error.
+
 ### 5. Host capability registry
 
 `Moderation.Capabilities` defines the host-provided callbacks for:
@@ -90,6 +121,25 @@ from runtime callbacks.
 runtime.  The local transactional handlers intentionally stay at their
 runtime defaults because committed effects are decoded separately.
 
+Model calls are recipe-based: `Model.call("recipe", payload)` and
+`Model.spawn("recipe", payload)` use a host-registered recipe name rather than
+selecting an arbitrary provider model directly.
+
+## Persistence boundary
+
+The shared moderation manager persists only explicit, serializable moderator
+state:
+
+- script id,
+- script source hash,
+- current script state,
+- queued internal events,
+- halted flag,
+- host overlay snapshot.
+
+The snapshot codec rejects runtime-only ChatML values such as closures, refs,
+builtins, modules, and tasks.
+
 ## Typical flow
 
 1. Project canonical history into `Moderation.Context.t`.
@@ -97,7 +147,10 @@ runtime defaults because committed effects are decoded separately.
 3. Call `Chatml_moderator_runtime.handle_event`.
 4. Read committed local effects and decode them into
    `Moderation.Outcome.t`.
-5. Update the durable overlay snapshot and drain queued internal events.
+5. Update the durable overlay snapshot and drain queued internal events FIFO.
+
+If no moderator script is present, hosts skip this path entirely and keep the
+baseline non-moderated behavior.
 
 ## Related modules
 

@@ -57,20 +57,24 @@ val apply_stream_batch
     ]} *)
 val apply_tool_output : Model.t -> Redraw_throttle.t -> Openai.Responses.Item.t -> unit
 
-(** [replace_history model redraw_immediate items] replaces the model’s history
+(** [replace_history runtime redraw_immediate items] replaces the model’s history
     and derived transcript messages.
 
     This is typically used when streaming finishes and the authoritative list
     of items (including tool outputs) is known.
 
-    @param model UI model to mutate by replacing its history and rebuilding
-           derived fields such as [messages] and the tool-output index.
+    @param runtime UI runtime whose model should be updated using the shared
+           moderated-or-canonical visible history projection.
     @param redraw_immediate Callback used to render immediately after replacing
            the history.
     @param items Full OpenAI item list that should become the new history.
 
     Example:
     {[
-      Chat_tui.App_stream_apply.replace_history model redraw_immediate items
+      Chat_tui.App_stream_apply.replace_history runtime redraw_immediate items
     ]} *)
-val replace_history : Model.t -> (unit -> unit) -> Openai.Responses.Item.t list -> unit
+val replace_history
+  :  App_runtime.t
+  -> (unit -> unit)
+  -> Openai.Responses.Item.t list
+  -> unit

@@ -1,5 +1,4 @@
 open! Core
-
 module CM = Prompt.Chat_markdown
 module Moderation = Moderation
 module Runtime = Chatml_moderator_runtime
@@ -18,7 +17,10 @@ module Registry : sig
 
   (** [of_elements registry elements] compiles any moderator scripts declared
       by [elements]. *)
-  val of_elements : t -> CM.top_level_elements list -> (t * artifact option, string) result
+  val of_elements
+    :  t
+    -> CM.top_level_elements list
+    -> (t * artifact option, string) result
 
   val script_id : artifact -> string
   val source_hash : artifact -> string

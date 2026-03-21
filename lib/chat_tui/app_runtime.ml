@@ -1,5 +1,7 @@
 open Core
 open Eio.Std
+module Manager = Chat_response.Moderator_manager
+module Stream_moderator = Chat_response.In_memory_stream
 
 type op =
   | Streaming of
@@ -33,6 +35,8 @@ type t =
   { model : Model.t
   ; mutable op : op option
   ; mutable typeahead_op : typeahead_op option
+  ; moderator : Stream_moderator.moderator option
+  ; mutable halted_reason : string option
   ; pending : queued_action Queue.t
   ; quit_via_esc : bool ref
   ; mutable next_op_id : int
@@ -41,10 +45,32 @@ type t =
   ; mutable cancel_typeahead_on_start : bool
   }
 
-let create ~model =
+let visible_messages_of_history (t : t) (history : Openai.Responses.Item.t list)
+  : Types.message list
+  =
+  match t.moderator with
+  | None -> Conversation.of_history history
+  | Some moderator ->
+    Manager.effective_messages moderator.manager history
+    |> List.map ~f:(fun message -> message.role, message.content)
+;;
+
+let refresh_messages (t : t) : unit =
+  Model.set_messages t.model (visible_messages_of_history t (Model.history_items t.model))
+;;
+
+let moderator_snapshot (t : t) : (Session.Moderator_snapshot.t option, string) result =
+  match t.moderator with
+  | None -> Ok None
+  | Some moderator -> Result.map (Manager.snapshot moderator.manager) ~f:Option.some
+;;
+
+let create ?moderator ?halted_reason ~model () =
   { model
   ; op = None
   ; typeahead_op = None
+  ; moderator
+  ; halted_reason
   ; pending = Queue.create ()
   ; quit_via_esc = ref false
   ; next_op_id = 0

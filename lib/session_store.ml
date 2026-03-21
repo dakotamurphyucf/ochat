@@ -175,72 +175,72 @@ let reset_session ~env ~(id : id) ?prompt_file ?(keep_history = false) () : unit
     match read_snapshot_file snapshot with
     | None -> Core.eprintf "Error: session '%s' could not be loaded.\n" id
     | Some session ->
-    (* Create archive directory. *)
-    let archive_dir = dir / "archive" in
-    (match Eio.Path.is_directory archive_dir with
-     | true -> ()
-     | false -> Eio.Path.mkdir ~perm:0o700 archive_dir);
-    (* Generate timestamped file name. *)
-    let timestamp () : string =
-      let open Core in
-      let tm = Core_unix.localtime (Core_unix.time ()) in
-      Printf.sprintf
-        "%04d%02d%02d-%02d%02d"
-        (tm.tm_year + 1900)
-        (tm.tm_mon + 1)
-        tm.tm_mday
-        tm.tm_hour
-        tm.tm_min
-    in
-    let archived_snapshot =
-      archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp ())
-    in
-    (* Move the existing snapshot to the archive path (overwrite if needed). *)
-    (try Eio.Path.rename snapshot archived_snapshot with
-     | _ -> ());
-    (* Build a reset session value. *)
-    let session_reset =
-      if keep_history
-      then Session.reset_keep_history ?prompt_file session
-      else Session.reset ?prompt_file session
-    in
-    (* When [prompt_file] is provided, attempt to copy it into the session dir
+      (* Create archive directory. *)
+      let archive_dir = dir / "archive" in
+      (match Eio.Path.is_directory archive_dir with
+       | true -> ()
+       | false -> Eio.Path.mkdir ~perm:0o700 archive_dir);
+      (* Generate timestamped file name. *)
+      let timestamp () : string =
+        let open Core in
+        let tm = Core_unix.localtime (Core_unix.time ()) in
+        Printf.sprintf
+          "%04d%02d%02d-%02d%02d"
+          (tm.tm_year + 1900)
+          (tm.tm_mon + 1)
+          tm.tm_mday
+          tm.tm_hour
+          tm.tm_min
+      in
+      let archived_snapshot =
+        archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp ())
+      in
+      (* Move the existing snapshot to the archive path (overwrite if needed). *)
+      (try Eio.Path.rename snapshot archived_snapshot with
+       | _ -> ());
+      (* Build a reset session value. *)
+      let session_reset =
+        if keep_history
+        then Session.reset_keep_history ?prompt_file session
+        else Session.reset ?prompt_file session
+      in
+      (* When [prompt_file] is provided, attempt to copy it into the session dir
        (prompt.chatmd) to keep the self-contained copy up-to-date. *)
-    let session_reset =
-      match prompt_file with
-      | None -> session_reset
-      | Some pf ->
-        let copy_name = "prompt.chatmd" in
-        (match
-           Or_error.try_with (fun () ->
-             let contents = Io.load_doc ~dir:(fs env) pf in
-             let dst = dir / copy_name in
-             Eio.Path.save ~create:(`Or_truncate 0o600) dst contents)
-         with
-         | _ -> ());
-        { session_reset with local_prompt_copy = Some copy_name }
-    in
-    (* Save the new snapshot. *)
-    save ~env session_reset;
-    (* ------------------------------------------------------------------ *)
-    (*  Cache handling: remove cache unless [keep_history] is true.          *)
-    (* ------------------------------------------------------------------ *)
-    (match keep_history with
-     | true -> ()
-     | false ->
-       let chatmd_dir = dir / ".chatmd" in
-       let cache_file = Eio.Path.(chatmd_dir / "cache.bin") in
-       (try if Eio.Path.is_file cache_file then Eio.Path.unlink cache_file with
-        | _ -> ()));
-    (* Print confirmation summary. Uses [Core.printf] for simplicity. *)
-    let history_len_before = List.length session.history in
-    printf
-      "Session '%s' reset%s. Archived snapshot: %s (history %d → %d)\n"
-      id
-      (if keep_history then " (history retained)" else "")
-      (Eio.Path.native_exn archived_snapshot)
-      history_len_before
-      (List.length session_reset.history))
+      let session_reset =
+        match prompt_file with
+        | None -> session_reset
+        | Some pf ->
+          let copy_name = "prompt.chatmd" in
+          (match
+             Or_error.try_with (fun () ->
+               let contents = Io.load_doc ~dir:(fs env) pf in
+               let dst = dir / copy_name in
+               Eio.Path.save ~create:(`Or_truncate 0o600) dst contents)
+           with
+           | _ -> ());
+          { session_reset with local_prompt_copy = Some copy_name }
+      in
+      (* Save the new snapshot. *)
+      save ~env session_reset;
+      (* ------------------------------------------------------------------ *)
+      (*  Cache handling: remove cache unless [keep_history] is true.          *)
+      (* ------------------------------------------------------------------ *)
+      (match keep_history with
+       | true -> ()
+       | false ->
+         let chatmd_dir = dir / ".chatmd" in
+         let cache_file = Eio.Path.(chatmd_dir / "cache.bin") in
+         (try if Eio.Path.is_file cache_file then Eio.Path.unlink cache_file with
+          | _ -> ()));
+      (* Print confirmation summary. Uses [Core.printf] for simplicity. *)
+      let history_len_before = List.length session.history in
+      printf
+        "Session '%s' reset%s. Archived snapshot: %s (history %d → %d)\n"
+        id
+        (if keep_history then " (history retained)" else "")
+        (Eio.Path.native_exn archived_snapshot)
+        history_len_before
+        (List.length session_reset.history))
 ;;
 
 (*--------------------------------------------------------------------------*)
@@ -257,45 +257,45 @@ let rebuild_session ~env ~(id : id) () : unit =
     match read_snapshot_file snapshot with
     | None -> Core.eprintf "Error: session '%s' could not be loaded.\n" id
     | Some old_session ->
-    (* Archive old snapshot *)
-    let archive_dir = dir / "archive" in
-    (match Eio.Path.is_directory archive_dir with
-     | true -> ()
-     | false -> Eio.Path.mkdir ~perm:0o700 archive_dir);
-    let timestamp () : string =
-      let open Core in
-      let tm = Core_unix.localtime (Core_unix.time ()) in
-      Printf.sprintf
-        "%04d%02d%02d-%02d%02d"
-        (tm.tm_year + 1900)
-        (tm.tm_mon + 1)
-        tm.tm_mday
-        tm.tm_hour
-        tm.tm_min
-    in
-    let archived_snapshot =
-      archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp ())
-    in
-    (try Eio.Path.rename snapshot archived_snapshot with
-     | _ -> ());
-    (* Remove cache file *)
-    let chatmd_dir = dir / ".chatmd" in
-    let cache_file = chatmd_dir / "cache.bin" in
-    (try if Eio.Path.is_file cache_file then Eio.Path.unlink cache_file with
-     | _ -> ());
-    (* Create fresh session with same prompt info *)
-    let new_session =
-      Session.create
-        ~id
-        ~prompt_file:old_session.prompt_file
-        ?local_prompt_copy:old_session.local_prompt_copy
-        ()
-    in
-    save ~env new_session;
-    Core.printf
-      "Session '%s' rebuilt from prompt. Archived snapshot: %s\n"
-      id
-      (Eio.Path.native_exn archived_snapshot))
+      (* Archive old snapshot *)
+      let archive_dir = dir / "archive" in
+      (match Eio.Path.is_directory archive_dir with
+       | true -> ()
+       | false -> Eio.Path.mkdir ~perm:0o700 archive_dir);
+      let timestamp () : string =
+        let open Core in
+        let tm = Core_unix.localtime (Core_unix.time ()) in
+        Printf.sprintf
+          "%04d%02d%02d-%02d%02d"
+          (tm.tm_year + 1900)
+          (tm.tm_mon + 1)
+          tm.tm_mday
+          tm.tm_hour
+          tm.tm_min
+      in
+      let archived_snapshot =
+        archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp ())
+      in
+      (try Eio.Path.rename snapshot archived_snapshot with
+       | _ -> ());
+      (* Remove cache file *)
+      let chatmd_dir = dir / ".chatmd" in
+      let cache_file = chatmd_dir / "cache.bin" in
+      (try if Eio.Path.is_file cache_file then Eio.Path.unlink cache_file with
+       | _ -> ());
+      (* Create fresh session with same prompt info *)
+      let new_session =
+        Session.create
+          ~id
+          ~prompt_file:old_session.prompt_file
+          ?local_prompt_copy:old_session.local_prompt_copy
+          ()
+      in
+      save ~env new_session;
+      Core.printf
+        "Session '%s' rebuilt from prompt. Archived snapshot: %s\n"
+        id
+        (Eio.Path.native_exn archived_snapshot))
 ;;
 
 (*--------------------------------------------------------------------------*)

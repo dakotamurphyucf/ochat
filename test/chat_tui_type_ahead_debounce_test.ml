@@ -71,12 +71,13 @@ let with_reducer ~model f =
     { env; ui_sw; cwd; cache; datadir = cwd; session = None }
   in
   let shared : Chat_tui.App_context.Resources.t = { services; streams; ui } in
-  let runtime = Chat_tui.App_runtime.create ~model in
+  let runtime = Chat_tui.App_runtime.create ~model () in
   let streaming : Chat_tui.App_streaming.Context.t =
     { shared
     ; cfg = Chat_response.Config.default
     ; tools = []
     ; tool_tbl = Hashtbl.create (module String)
+    ; moderator = None
     ; parallel_tool_calls = true
     ; history_compaction = false
     }
