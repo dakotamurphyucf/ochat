@@ -493,6 +493,19 @@ let apply_op_to_motion ~(model : Model.t) ~(op : op) ~(motion : motion) ~(count 
       Model.set_mode model Model.Insert)
 ;;
 
+type mods = (Notty.Unescape.mods[@deriving sexp])
+
+let sexp_of_mods = function
+  | [] -> Sexp.Atom "[]"
+  | mods ->
+    Sexp.List
+      (List.map mods ~f:(fun m ->
+         match m with
+         | `Shift -> Sexp.Atom "Shift"
+         | `Ctrl -> Sexp.Atom "Ctrl"
+         | `Meta -> Sexp.Atom "Meta"))
+;;
+
 (* -------------------------------------------------------------------- *)
 (* Main Normal-mode key-handler                                          *)
 (* -------------------------------------------------------------------- *)
@@ -652,25 +665,6 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     let op = pending_op () in
     st := { !st with pending = Pending_find_prefix { dir = Backward; till = true; op } };
     Unhandled
-  (* Resolve f/F/t/T with next ASCII char *)
-  | `Key (`ASCII ch, mods) when List.is_empty mods ->
-    (match !st.pending with
-     | Pending_find_prefix { dir; till; op } ->
-       let n = take_count_default 1 in
-       let spec = { ch; dir; till } in
-       last_find := Some spec;
-       clear_state ();
-       (match op with
-        | Some op ->
-          apply_op_to_motion ~model ~op ~motion:(Find spec) ~count:n;
-          Redraw
-        | None ->
-          let s = Model.input_line model in
-          let pos0 = Model.cursor_pos model in
-          let pos = motion_target_for_nav ~s ~pos:pos0 ~motion:(Find spec) ~count:n in
-          Model.set_cursor_pos model pos;
-          Redraw)
-     | _ -> Unhandled)
   (* Repeat last find: ; forward, , reverse direction *)
   | `Key (`ASCII (';' as _k), mods) when List.is_empty mods ->
     (match !last_find with
@@ -983,5 +977,24 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
       Controller_register.set (String.sub s ~pos ~len:1);
       delete_range model ~first:pos ~last:(pos + 1));
     Redraw
+  (* Resolve f/F/t/T with next ASCII char *)
+  | `Key (`ASCII ch, mods) when List.is_empty mods ->
+    (match !st.pending with
+     | Pending_find_prefix { dir; till; op } ->
+       let n = take_count_default 1 in
+       let spec = { ch; dir; till } in
+       last_find := Some spec;
+       clear_state ();
+       (match op with
+        | Some op ->
+          apply_op_to_motion ~model ~op ~motion:(Find spec) ~count:n;
+          Redraw
+        | None ->
+          let s = Model.input_line model in
+          let pos0 = Model.cursor_pos model in
+          let pos = motion_target_for_nav ~s ~pos:pos0 ~motion:(Find spec) ~count:n in
+          Model.set_cursor_pos model pos;
+          Redraw)
+     | _ -> Unhandled)
   | _ -> Unhandled
 ;;

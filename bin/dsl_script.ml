@@ -540,6 +540,8 @@ let () =
 
         let st = on_event(cfg2, `AsyncEvent("ingest", "2302032323"))
         print(st)
+        let hash = hash_md5(describe(cfg1))
+        print(hash)
       |}
   in
   let env = BuiltinModules.create_default_env () in

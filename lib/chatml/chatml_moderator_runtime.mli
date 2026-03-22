@@ -101,6 +101,7 @@ type default_handlers =
   ; on_tool_spawn : session -> name:string -> args:value -> (string, string) result
   ; on_model_call : session -> recipe:string -> payload:value -> (value, string) result
   ; on_model_spawn : session -> recipe:string -> payload:value -> (string, string) result
+  ; on_process_run : session -> command:string -> args:value -> (string, string) result
   ; on_schedule_after_ms :
       session -> delay_ms:int -> payload:value -> (string, string) result
   ; on_schedule_cancel : session -> id:string -> (unit, string) result

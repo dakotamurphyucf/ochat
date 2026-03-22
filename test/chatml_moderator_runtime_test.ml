@@ -90,6 +90,7 @@ let external_ops_script =
           Task.bind(Model.spawn("model-bg", `Null), fun model_job ->
           Task.bind(Schedule.after_ms(50, `Tick), fun timer_id ->
           Task.bind(Schedule.cancel(timer_id), fun ignored_cancel ->
+          Task.bind(Process.run("cat", ["default.md"]), fun ignored_cancel ->
           Task.pure
             ({ last =
                  [ to_string(tool_result)
@@ -98,7 +99,7 @@ let external_ops_script =
                  , model_job
                  , timer_id
                  ]
-             })))))))
+             }))))))))
   |}
 ;;
 
@@ -172,6 +173,10 @@ let%expect_test "moderator runtime default external handlers" =
         (fun _session ~recipe ~payload ->
           actions := !actions @ [ "model_spawn " ^ recipe ^ " " ^ show_value payload ];
           Ok "model-job-1")
+    ; on_process_run =
+        (fun _session ~command ~args ->
+          actions := !actions @ [ "process_run " ^ command ^ " " ^ show_value args ];
+          Ok "process-job-1")
     ; on_schedule_after_ms =
         (fun _session ~delay_ms ~payload ->
           actions
@@ -205,7 +210,7 @@ let%expect_test "moderator runtime default external handlers" =
     queue=[]
     effects=[]
     halted=false
-    actions=[tool_call echo `String(payload); model_call classify `String(payload); tool_spawn tool-bg `Null; model_spawn model-bg `Null; schedule_after_ms 50 `Tick; schedule_cancel timer-1]
+    actions=[tool_call echo `String(payload); model_call classify `String(payload); tool_spawn tool-bg `Null; model_spawn model-bg `Null; schedule_after_ms 50 `Tick; schedule_cancel timer-1; process_run cat [|default.md|]]
     |}]
 ;;
 

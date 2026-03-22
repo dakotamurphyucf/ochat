@@ -77,6 +77,7 @@ let module_scheme (m : builtin_module) : ty =
 
 let option_ty (a : string) : ty = variant [ "None", TUnit; "Some", TVar a ]
 let task_ty (a : ty) : ty = TCon ("task", [ a ])
+let string_array_ty : ty = TArray TString
 
 let expect_task (name : string) : value -> task = function
   | VTask t -> t
@@ -282,6 +283,11 @@ let make_task_binary_spawn_builtin
     (fun lhs rhs -> VTask (TSpawn { op; args = [ lhs; rhs ] }))
 ;;
 
+let hash_string_md5 s =
+  let open Core.Md5 in
+  digest_string s |> to_hex
+;;
+
 let builtins : builtin list =
   [ make_unary_builtin
       "print"
@@ -336,6 +342,10 @@ let builtins : builtin list =
       "fail"
       (TFun ([ TString ], TVar "a"))
       (fun v -> failwith (expect_string "fail" v))
+  ; make_unary_builtin
+      "hash_md5"
+      (TFun ([ TString ], TString))
+      (fun v -> VString (expect_string "hash_md5" v |> hash_string_md5))
   ]
 ;;
 
@@ -1480,6 +1490,19 @@ let model_module : builtin_module =
   }
 ;;
 
+let process_module : builtin_module =
+  { name = "Process"
+  ; exports =
+      [ make_task_binary_spawn_builtin
+          "run"
+          TString
+          string_array_ty
+          TString
+          ~op:"Process.run"
+      ]
+  }
+;;
+
 let schedule_module : builtin_module =
   { name = "Schedule"
   ; exports =
@@ -1522,5 +1545,6 @@ let moderator_modules : builtin_module list =
   ; model_module
   ; schedule_module
   ; runtime_module
+  ; process_module
   ]
 ;;

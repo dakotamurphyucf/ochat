@@ -77,6 +77,8 @@ and default_handlers =
       session -> recipe:string -> payload:Lang.value -> (Lang.value, string) result
   ; on_model_spawn :
       session -> recipe:string -> payload:Lang.value -> (string, string) result
+  ; on_process_run :
+      session -> command:string -> args:Lang.value -> (string, string) result
   ; on_schedule_after_ms :
       session -> delay_ms:int -> payload:Lang.value -> (string, string) result
   ; on_schedule_cancel : session -> id:string -> (unit, string) result
@@ -161,6 +163,8 @@ let default_handlers : default_handlers =
   ; on_tool_moderation = (fun _session _action -> Ok ())
   ; on_tool_call = (fun _session ~name:_ ~args:_ -> Error "Tool.call is not configured")
   ; on_tool_spawn = (fun _session ~name:_ ~args:_ -> Error "Tool.spawn is not configured")
+  ; on_process_run =
+      (fun _session ~command:_ ~args:_ -> Error "Process.run is not configured")
   ; on_model_call =
       (fun _session ~recipe:_ ~payload:_ -> Error "Model.call is not configured")
   ; on_model_spawn =
@@ -512,6 +516,17 @@ let default_operations ?(handlers = default_handlers) () : op_def list =
           | Error msg -> Error msg
           | Ok recipe ->
             wrap_string_result (handlers.on_model_spawn session ~recipe ~payload))
+    }
+  ; { name = "Process.run"
+    ; kind = External_async
+    ; phase_check = allow_all_phases
+    ; perform =
+        with_binary "Process.run" (fun session command_value args_value ->
+          match expect_string_arg "Process.run" command_value with
+          | Error msg -> Error msg
+          | Ok command_value ->
+            wrap_string_result
+              (handlers.on_process_run session ~command:command_value ~args:args_value))
     }
   ; { name = "Schedule.after_ms"
     ; kind = External_async
