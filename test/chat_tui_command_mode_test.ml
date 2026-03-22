@@ -36,7 +36,8 @@ let%expect_test "toggle_mode cycles" =
       (match Chat_tui.Model.mode m with
        | Chat_tui.Model.Insert -> "Insert"
        | Chat_tui.Model.Normal -> "Normal"
-       | Chat_tui.Model.Cmdline -> "Cmd")
+       | Chat_tui.Model.Cmdline -> "Cmd"
+       | Chat_tui.Model.Search _ -> "Search")
   in
   show ();
   (* Initial *)
@@ -47,7 +48,7 @@ let%expect_test "toggle_mode cycles" =
   show ();
   (* After second toggle, back to Insert *)
   [%expect
-    {| 
+    {|
     Insert
     Normal
     Insert

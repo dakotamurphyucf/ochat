@@ -51,38 +51,46 @@ Notes:
 
 > Terminology: `Meta` is usually **Alt** (Linux terminals) or **Option** (macOS terminals).
 
-### Insert mode (typing mode)
-
-| Keys | Action |
-|---|---|
-| (type) | insert text |
-| `Enter` | insert newline in the draft |
-| `Meta+Enter` | **submit** the draft |
-| `Esc` (bare) | switch to **Normal** mode |
-| `↑ / ↓ / PageUp / PageDown` | scroll history (disables auto-follow) |
-| `Home / End` | jump history viewport top/bottom (End re-enables auto-follow) |
-| `Ctrl-l` | force a redraw (useful if your terminal got visually corrupted) |
-| `Ctrl-k / Ctrl-u / Ctrl-w` | kill to end-of-line / beginning-of-line / previous word |
-| `Ctrl-y` | yank (paste the last killed/copied text) |
-| `Meta-v` (or `Meta-s`) | toggle selection anchor in the draft |
-| `Ctrl-C / Ctrl-X` (selection active) | copy / cut selection |
-| `Ctrl-r` | toggle draft mode: **Plain** ⇄ **Raw XML** |
-
-**Important:** `Ctrl-C` copies only when a selection is active; otherwise it quits the TUI.
-On some terminals, `Alt-s` may arrive as the `ß` character; that also toggles the selection anchor.
-
-### Normal mode (Vim-ish commands over the draft + message selection)
+### Normal mode (Vim-ish commands over the draft + history tools)
 
 | Keys | Action |
 |---|---|
 | `i` | enter Insert mode |
+| `a` | append (move right one char if possible) and enter Insert mode |
+| `o / O` | open new line below / above and enter Insert mode |
 | `:` | enter command-line (Cmdline) mode |
-| `h j k l` | move cursor in the draft |
-| `w / b` | word motion forward/back (draft) |
-| `0 / $` | start/end of line (draft) |
-| `gg / G` | jump history viewport top / bottom |
+| `/ / ?` | search **message history** forward / backward |
+| `n / N` | repeat last history search forward / backward |
+| `h j k l` | move cursor in the draft (with counts: `10j`, `3l`, …) |
+| `w / b / e` | word motion forward/back/**end-of-word** (with counts: `3w`, `2b`, `4e`, …) |
+| `f{char}` | find next `{char}` on the current line |
+| `F{char}` | find previous `{char}` on the current line |
+| `t{char}` | move *till* next `{char}` (cursor lands just before it) |
+| `T{char}` | move *till* previous `{char}` (cursor lands just after it) |
+| `; / ,` | repeat last `f/F/t/T` forward / backward |
+| `0 / ^ / $` | start of line / **first non-blank** / end of line (draft) |
+| `gg / G` | go to first line / last line of the **draft buffer** (canonical Vim). Supports counts: `5gg`, `12G` |
+| `v` | toggle **Visual selection** (character-wise) in the draft |
+| `Esc` (selection active) | clear Visual selection (stay in Normal) |
+| `y` (selection active) | yank (copy) selection to the register; clears selection |
+| `d` (selection active) | delete selection (also yanks it); clears selection |
+| `c` (selection active) | change selection (delete + enter Insert); clears selection |
+| `↑ / ↓` | scroll history viewport (trackpad-friendly) |
+| `Ctrl-f / Ctrl-b` | page down/up history viewport |
+| `Ctrl-d / Ctrl-u` | half-page down/up history viewport |
 | `[` / `]` | move the **selected message** up / down |
+| `x` | delete character under cursor (**yanks it** to the register) |
+| `p / P` | paste after / before cursor from the register |
+| `y{motion}` | yank by motion (currently: `yw`, `yb`, `ye`, `y0`, `y^`, `y$`, plus find motions like `yf,`, `yT)`, `y2f/`) |
+| `d{motion}` | delete by motion (currently: `dw`, `db`, `de`, `d0`, `d^`, `d$`, plus find motions like `df"`, `dt>`) |
+| `c{motion}` | change by motion (currently: `cw`, `cb`, `ce`, `c0`, `c^`, `c$`, plus find motions like `ct)`, `cF:`) |
+| `yy / dd / cc` | yank / delete / change current line |
+| `u` | undo |
+| `Ctrl-r` | redo |
+| `r` | toggle draft mode: **Plain** ⇄ **Raw XML** *(note: differs from Vim’s replace-char)* |
 | `Esc` | cancel streaming (if in-flight) else “quit-via-ESC” path (see below) |
+
+---
 
 ### Cmdline (after typing `:` in Normal mode)
 
@@ -94,16 +102,30 @@ On some terminals, `Alt-s` may arrive as the `ß` character; that also toggles t
 | `:c` / `:cmp` / `:compact` | compact context |
 | `:d` / `:delete` | delete selected message |
 | `:e` / `:edit` | yank selected message into editor and switch to **Raw XML** |
+| `:noh` / `:nohlsearch` | clear last-search highlight *(currently may be slower on very large histories due to cache invalidation strategy)* |
+
+---
+
+### Search prompt mode (entered via `/` or `?` in Normal)
+
+| Keys | Action |
+|---|---|
+| (type) | edit the search query |
+| `Enter` | execute search: select matching message + scroll to it |
+| `Esc` | cancel search prompt |
+| `← / →` | move caret within query |
+| `Backspace` | delete previous character |
 
 ---
 
 ## Modes and the one subtle ESC behavior
 
-`chat_tui` has three editor modes:
+`chat_tui` has four editor modes:
 
 - **Insert:** you type into the draft buffer.
-- **Normal:** keys act like commands (Vim-ish) and you can select messages.
-- **Cmdline:** a `:` prompt for commands like `:compact` or `:edit`.
+- **Normal:** keys act like commands (Vim-ish) and you can navigate/search history.
+- **Cmdline:** a `:` prompt for commands like `:compact`, `:edit`, `:noh`.
+- **Search:** a `/` or `?` prompt to search message history.
 
 ### ESC is intentionally overloaded
 

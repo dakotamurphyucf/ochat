@@ -31,6 +31,9 @@
   controller_normal
   controller_shared
   controller_cmdline
+  controller_search
+  controller_history_search
+  controller_register
   redraw_throttle
   path_completion
   conversation

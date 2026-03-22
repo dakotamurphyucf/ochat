@@ -133,6 +133,10 @@ let execute_command model line : reaction =
           (* Enable Raw mode for safe editing as per design.*)
           Model.set_draft_mode model Model.Raw_xml;
           Redraw))
+  | "noh" | "nohlsearch" ->
+    Model.set_last_search_query model None;
+    Model.clear_all_img_caches model;
+    Redraw
   | _ -> Redraw
 ;;
 

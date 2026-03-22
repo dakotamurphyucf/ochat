@@ -63,6 +63,7 @@ let mode_to_string (m : Chat_tui.Model.editor_mode) : string =
   | Chat_tui.Model.Insert -> "Insert"
   | Chat_tui.Model.Normal -> "Normal"
   | Chat_tui.Model.Cmdline -> "Cmdline"
+  | Chat_tui.Model.Search _ -> "Search"
 ;;
 
 let%expect_test "hints are absent when there is no completion" =

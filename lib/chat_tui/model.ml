@@ -64,6 +64,10 @@ type t =
   ; mutable cmdline_cursor : int
   ; mutable active_fork : string option
   ; mutable fork_start_index : int option
+  ; mutable search_query : string
+  ; mutable search_cursor : int
+  ; mutable last_search_query : string option
+  ; mutable last_search_dir : search_dir option
   ; mutable typeahead_completion : typeahead_completion option
   ; mutable typeahead_preview_open : bool
   ; mutable typeahead_preview_scroll : int
@@ -71,10 +75,15 @@ type t =
   }
 [@@deriving fields ~getters ~setters]
 
+and search_dir =
+  | Forward
+  | Backward
+
 and editor_mode =
   | Insert
   | Normal
   | Cmdline
+  | Search of search_dir
 
 and draft_mode =
   | Plain
@@ -179,6 +188,10 @@ let create
   ; typeahead_preview_open = false
   ; typeahead_preview_scroll = 0
   ; typeahead_generation = 0
+  ; search_query = ""
+  ; search_cursor = 0
+  ; last_search_query = None
+  ; last_search_dir = None
   }
 ;;
 
@@ -202,6 +215,17 @@ let cmdline t = t.cmdline
 let cmdline_cursor t = t.cmdline_cursor
 let set_cmdline t s = t.cmdline <- s
 let set_cmdline_cursor t n = t.cmdline_cursor <- n
+let search_query t = t.search_query
+let search_cursor t = t.search_cursor
+let set_search_query t s = t.search_query <- s
+let set_search_cursor t n = t.search_cursor <- n
+let last_search_query t = t.last_search_query
+let last_search_dir t = t.last_search_dir
+
+let set_last_search t ~query ~dir =
+  t.last_search_query <- Some query;
+  t.last_search_dir <- Some dir
+;;
 
 (* ------------------------------------------------------------------------- *)
 (*  Type-ahead completion helpers                                             *)
@@ -214,6 +238,11 @@ let clear_typeahead t =
   t.typeahead_completion <- None;
   t.typeahead_preview_open <- false;
   t.typeahead_preview_scroll <- 0
+;;
+
+let clear_last_search t =
+  t.last_search_query <- None;
+  t.last_search_dir <- None
 ;;
 
 let typeahead_preview_open t = t.typeahead_preview_open
@@ -231,7 +260,7 @@ let typeahead_is_relevant t =
   | Insert, Some completion ->
     String.equal completion.base_input t.input_line
     && Int.equal completion.base_cursor t.cursor_pos
-  | (Normal | Cmdline), _ | Insert, None -> false
+  | (Normal | Cmdline | Search _), _ | Insert, None -> false
 ;;
 
 (* ------------------------------------------------------------------------- *)
@@ -291,7 +320,8 @@ let toggle_mode (t : t) : unit =
   <- (match t.mode with
       | Insert -> Normal
       | Normal -> Insert
-      | Cmdline -> Insert)
+      | Cmdline -> Insert
+      | Search _ -> Normal)
 ;;
 
 let set_draft_mode (t : t) (m : draft_mode) = t.draft_mode <- m

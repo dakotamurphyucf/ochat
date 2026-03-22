@@ -112,6 +112,10 @@ type t =
   ; mutable active_fork : string option
     (** Currently running fork tool call-id, if any. *)
   ; mutable fork_start_index : int option (** History length when fork started. *)
+  ; mutable search_query : string
+  ; mutable search_cursor : int
+  ; mutable last_search_query : string option
+  ; mutable last_search_dir : search_dir option
   ; mutable typeahead_completion : typeahead_completion option
   ; mutable typeahead_preview_open : bool
   ; mutable typeahead_preview_scroll : int
@@ -128,10 +132,15 @@ type t =
     • [Cmdline] – a ':' prompt is active at the bottom.  The content is kept
       in {!cmdline} / {!cmdline_cursor}.  Leaving the prompt returns to
       [Insert]. *)
+and search_dir =
+  | Forward
+  | Backward
+
 and editor_mode =
   | Insert
   | Normal
   | Cmdline
+  | Search of search_dir
 
 (** Draft representation of the {i scratch} buffer that will be sent to the
     assistant next.
@@ -239,6 +248,9 @@ val selection_anchor : t -> int option
     {!selection_anchor} to [None]. *)
 val clear_selection : t -> unit
 
+(** [clear_last_search t] clears the last search query and direction. *)
+val clear_last_search : t -> unit
+
 (** [set_selection_anchor t p] marks byte‐offset [p] as the start of a text
     selection.  Calling the function implicitly enables selection mode. *)
 val set_selection_anchor : t -> int -> unit
@@ -319,6 +331,9 @@ val fork_start_index : t -> int option
 
 (** [set_fork_start_index t idx] updates {!fork_start_index} to [idx]. *)
 val set_fork_start_index : t -> int option -> unit
+
+(** [set_last_search t ~query ~dir] updates {!last_search} to [query] and [dir]. *)
+val set_last_search : t -> query:string -> dir:search_dir -> unit
 
 (** {1 Undo / Redo helpers} *)
 

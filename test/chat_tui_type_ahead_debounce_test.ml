@@ -202,7 +202,8 @@ let%expect_test "Typeahead_done is ignored outside Insert mode (stale applicabil
       (match Chat_tui.Model.mode model with
        | Insert -> "Insert"
        | Normal -> "Normal"
-       | Cmdline -> "Cmdline");
+       | Cmdline -> "Cmdline"
+       | Search _ -> "Search");
     ignore (stop () : bool));
   [%expect {| applied=false mode=Normal |}]
 ;;

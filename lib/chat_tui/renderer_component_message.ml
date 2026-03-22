@@ -17,7 +17,7 @@ module Theme = struct
     | _ -> A.empty
   ;;
 
-  let selection_attr base = A.(base ++ st reverse)
+  let selection_attr base = A.(base ++ Styles.bg_gray 23)
 end
 
 let safe_string attr s =
@@ -33,6 +33,114 @@ module Roles = struct
   ;;
 
   let label_of_role (r : role) = r
+end
+
+module Search_highlight = struct
+  (* Apply a background only to substrings matching [query] within the
+     concatenated visible text of [spans]. Case-insensitive substring match. *)
+
+  let normalize s = String.lowercase s
+
+  let find_all ~haystack ~needle : (int * int) list =
+    if String.is_empty needle
+    then []
+    else (
+      let h = normalize haystack in
+      let n = normalize needle in
+      let nlen = String.length n in
+      let rec loop acc pos =
+        match String.substr_index h ~pos ~pattern:n with
+        | None -> List.rev acc
+        | Some i -> loop ((i, i + nlen) :: acc) (i + nlen)
+      in
+      loop [] 0)
+  ;;
+
+  let apply_to_spans
+        ~(query : string)
+        ~(hit_attr : Notty.A.t)
+        (spans : (A.t * string) list)
+    : (A.t * string) list
+    =
+    if String.is_empty (String.strip query)
+    then spans
+    else (
+      let rendered = spans |> List.map ~f:snd |> String.concat in
+      let ranges = find_all ~haystack:rendered ~needle:(String.strip query) in
+      if List.is_empty ranges
+      then spans
+      else (
+        (* ranges are sorted, non-overlapping (because we advance by needle length) *)
+        let ranges = ref ranges in
+        let take_ranges_for_segment ~seg_start ~seg_stop =
+          (* Consume from [ranges] those that intersect [seg_start, seg_stop). *)
+          let rec consume acc =
+            match !ranges with
+            | [] -> List.rev acc
+            | (a, b) :: tl ->
+              if b <= seg_start
+              then (
+                ranges := tl;
+                consume acc)
+              else if a >= seg_stop
+              then List.rev acc
+              else (
+                (* intersection exists; keep it but do not drop it entirely
+                   unless it ends within the segment. *)
+                let a' = Int.max a seg_start in
+                let b' = Int.min b seg_stop in
+                let acc = (a', b') :: acc in
+                if b <= seg_stop
+                then (
+                  ranges := tl;
+                  consume acc)
+                else List.rev acc)
+          in
+          consume []
+        in
+        let rec split_text ~base_attr ~global_off s =
+          let len = String.length s in
+          let seg_start = global_off in
+          let seg_stop = global_off + len in
+          let rs = take_ranges_for_segment ~seg_start ~seg_stop in
+          if List.is_empty rs
+          then [ base_attr, s ]
+          else (
+            (* Build pieces in increasing order *)
+            let rec build acc cursor = function
+              | [] ->
+                if cursor < seg_stop
+                then (
+                  let piece =
+                    String.sub s ~pos:(cursor - seg_start) ~len:(seg_stop - cursor)
+                  in
+                  List.rev ((base_attr, piece) :: acc))
+                else List.rev acc
+              | (a, b) :: tl ->
+                let acc =
+                  if cursor < a
+                  then (
+                    let piece =
+                      String.sub s ~pos:(cursor - seg_start) ~len:(a - cursor)
+                    in
+                    (base_attr, piece) :: acc)
+                  else acc
+                in
+                let hit_piece = String.sub s ~pos:(a - seg_start) ~len:(b - a) in
+                let acc = (A.(base_attr ++ hit_attr), hit_piece) :: acc in
+                build acc b tl
+            in
+            build [] seg_start rs)
+        in
+        let rec loop acc off = function
+          | [] -> List.rev acc
+          | (a, s) :: tl ->
+            let pieces = split_text ~base_attr:a ~global_off:off s in
+            let off = off + String.length s in
+            loop (List.rev_append pieces acc) off tl
+        in
+        loop [] 0 spans))
+  ;;
 end
 
 module Spans = struct
@@ -185,10 +293,11 @@ module Render_context = struct
     ; role : string
     ; tool_output : tool_output_kind option
     ; hi_engine : Highlight_tm_engine.t
+    ; search_query : string option
     }
 
-  let make ~width ~selected ~role ~tool_output ~hi_engine =
-    { width; selected; role; tool_output; hi_engine }
+  let make ~width ~selected ~role ~tool_output ~hi_engine ~search_query =
+    { width; selected; role; tool_output; hi_engine; search_query }
   ;;
 
   let prefix_first _t = ""
@@ -220,7 +329,16 @@ let suppress_markdown_delimiters (spans : Highlight_tm_engine.scoped_span list) 
 module Paint = struct
   open Render_context
 
-  let apply_selection (ctx : t) a = if ctx.selected then Theme.selection_attr a else a
+  let search_hit_attr = Styles.bg_gray 23
+
+  let apply_selection (ctx : t) a =
+    match ctx.selected, ctx.search_query with
+    | true, Some q when not (String.is_empty (String.strip q)) ->
+      (* In search mode: do NOT blanket-highlight the whole message *)
+      a
+    | true, _ -> Theme.selection_attr a
+    | false, _ -> a
+  ;;
 
   let first_prefix (ctx : t) ~(is_first : bool) =
     if is_first then prefix_first ctx else prefix_cont ctx
@@ -464,7 +582,14 @@ module Paint = struct
         List.map spans ~f:(fun (_a, s) -> dir_attr, s))
       else spans
     in
-    compress_adjacent_spans spans
+    let spans = compress_adjacent_spans spans in
+    let spans =
+      match ctx.selected, ctx.search_query with
+      | true, Some q when not (String.is_empty (String.strip q)) ->
+        Search_highlight.apply_to_spans ~query:q ~hit_attr:search_hit_attr spans
+      | _ -> spans
+    in
+    spans
   ;;
 
   let render_markdown (ctx : t) ~(is_first : bool) ~(para : string) : I.t list =
@@ -545,9 +670,16 @@ module Paint = struct
       let closing_spans =
         if String.is_empty closing then [] else [ base_attr, closing ]
       in
-      Some
-        (List.concat
-           [ name_spans; ws_spans; open_paren_spans; args_spans; closing_spans ])
+      let spans =
+        List.concat [ name_spans; ws_spans; open_paren_spans; args_spans; closing_spans ]
+      in
+      let spans =
+        match ctx.selected, ctx.search_query with
+        | true, Some q when not (String.is_empty (String.strip q)) ->
+          Search_highlight.apply_to_spans ~query:q ~hit_attr:search_hit_attr spans
+        | _ -> spans
+      in
+      Some spans
   ;;
 
   let render_paragraph (ctx : t) ~(is_first : bool) ~(para : string) : I.t list =
@@ -564,16 +696,23 @@ module Paint = struct
     Highlight_tm_engine.highlight_text ctx.hi_engine ~lang ~text
   ;;
 
-  let render_code_row ~selected ~w line_spans =
+  let render_code_row (ctx : t) ~selected ~w line_spans =
+    let selected =
+      match selected, ctx.search_query with
+      | true, Some q when not (String.is_empty (String.strip q)) ->
+        (* In search mode: do NOT blanket-highlight the whole message *)
+        false
+      | _ -> selected
+    in
     List.map line_spans ~f:(fun (a, s) ->
-      safe_string (if selected then A.(a ++ st reverse) else a) s)
+      safe_string (if selected then A.(a ++ Styles.bg_gray 23) else a) s)
     |> I.hcat
     |> I.hsnap ~align:`Left w
   ;;
 
   let render_code_content (ctx : t) ~w ~selected ~(lang : string option) ~(code : string) =
     highlight_lines ctx ~lang ~text:code
-    |> List.map ~f:(render_code_row ~selected ~w)
+    |> List.map ~f:(render_code_row ctx ~selected ~w)
     |> I.vcat
   ;;
 
@@ -673,7 +812,10 @@ module Message = struct
 
   let header_attr (ctx : Render_context.t) =
     let base_attr = Theme.attr_of_role ctx.role in
-    if ctx.selected then Theme.selection_attr base_attr else base_attr
+    match ctx.selected, ctx.search_query with
+    | true, Some q when not (String.is_empty (String.strip q)) -> base_attr
+    | true, _ -> Theme.selection_attr base_attr
+    | false, _ -> base_attr
   ;;
 
   let icon_of_role = function
@@ -827,12 +969,18 @@ module Message = struct
   ;;
 end
 
-let render_message ~width ~selected ~tool_output ~role ~text ~hi_engine =
-  let ctx = Render_context.make ~width ~selected ~role ~tool_output ~hi_engine in
+let render_message ~width ~selected ~tool_output ~role ~text ~hi_engine ?search_query () =
+  let search_query = Option.join search_query in
+  let ctx =
+    Render_context.make ~width ~selected ~role ~tool_output ~hi_engine ~search_query
+  in
   Message.render ctx (role, text)
 ;;
 
-let render_header_line ~width ~selected ~role ~hi_engine =
-  let ctx = Render_context.make ~width ~selected ~role ~tool_output:None ~hi_engine in
+let render_header_line ~width ~selected ~role ~hi_engine ?search_query () =
+  let search_query = Option.join search_query in
+  let ctx =
+    Render_context.make ~width ~selected ~role ~tool_output:None ~hi_engine ~search_query
+  in
   Message.render_header_line ctx
 ;;

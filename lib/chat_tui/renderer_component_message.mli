@@ -34,6 +34,8 @@ val render_message
   -> role:string
   -> text:string
   -> hi_engine:Highlight_tm_engine.t
+  -> ?search_query:string option
+  -> unit
   -> Notty.I.t
 
 (** [render_header_line ~width ~selected ~role ~hi_engine] renders just the header
@@ -51,6 +53,8 @@ val render_header_line
   -> selected:bool
   -> role:string
   -> hi_engine:Highlight_tm_engine.t
+  -> ?search_query:string option
+  -> unit
   -> Notty.I.t
 
 (** [should_drop_markdown_delimiter ~scopes ~text] returns [true] when a

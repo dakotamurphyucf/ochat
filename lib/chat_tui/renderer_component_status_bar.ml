@@ -13,6 +13,8 @@ let render ~width ~(model : Model.t) =
     | Insert -> "-- INSERT --"
     | Normal -> "-- NORMAL --"
     | Cmdline -> "-- CMD --"
+    | Search Forward -> "/" ^ Model.search_query model
+    | Search Backward -> "?" ^ Model.search_query model
   in
   let raw_txt =
     match Model.draft_mode model with

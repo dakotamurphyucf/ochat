@@ -83,6 +83,7 @@ let render_message_to_string
       ~role:"user"
       ~text
       ~hi_engine
+      ()
   in
   render_to_string ~w:width ~h:(Notty.I.height img) img
 ;;

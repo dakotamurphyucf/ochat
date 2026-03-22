@@ -69,12 +69,15 @@ let prompt_prefix_and_indent ~(model : Model.t) =
   | Insert | Normal ->
     let prefix = "> " in
     prefix, String.make (String.length prefix) ' '
+  | Search Forward -> "/", String.make 1 ' '
+  | Search Backward -> "?", String.make 1 ' '
 ;;
 
 let active_text_and_cursor ~(model : Model.t) =
   match Model.mode model with
   | Cmdline -> Model.cmdline model, Model.cmdline_cursor model
   | Insert | Normal -> Model.input_line model, Model.cursor_pos model
+  | Search _ -> Model.search_query model, Model.search_cursor model
 ;;
 
 let inside_width ~box_width = Int.max 0 (box_width - 2)
@@ -255,6 +258,7 @@ let byte_offset_at_col s ~col =
 let cursor_pos_after_vertical_move ~box_width ~(model : Model.t) ~dir =
   match Model.mode model with
   | Cmdline -> None
+  | Search _ -> None
   | Insert | Normal ->
     let ({ rows; cursor } : t) = layout_for_render ~box_width ~model in
     let target_row = cursor.row + dir in

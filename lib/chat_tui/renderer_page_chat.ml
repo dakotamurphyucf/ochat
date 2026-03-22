@@ -22,7 +22,7 @@ module Compose = struct
     let is_visible =
       match Model.mode model with
       | Insert -> Model.typeahead_is_relevant model && Model.typeahead_preview_open model
-      | Normal | Cmdline -> false
+      | Normal | Cmdline | Search _ -> false
     in
     if not is_visible
     then None
@@ -95,6 +95,17 @@ module Compose = struct
     let tool_outputs = Model.tool_output_by_index model in
     fun ~idx ~selected ((role, text) : message) ->
       let tool_output = Hashtbl.find tool_outputs idx in
+      let contains_ci ~needle haystack =
+        let n = String.lowercase (String.strip needle) in
+        if String.is_empty n
+        then false
+        else String.is_substring (String.lowercase haystack) ~substring:n
+      in
+      let search_query_for_this_message =
+        match selected, Model.last_search_query model with
+        | true, Some q when contains_ci ~needle:q text -> Some q
+        | _ -> None
+      in
       Renderer_component_message.render_message
         ~width:w
         ~selected
@@ -102,6 +113,8 @@ module Compose = struct
         ~role
         ~text
         ~hi_engine
+        ~search_query:search_query_for_this_message
+        ()
   ;;
 
   let history_img
@@ -133,7 +146,18 @@ module Compose = struct
     let selected =
       Option.value_map (Model.selected_msg model) ~default:false ~f:(Int.equal idx)
     in
-    Renderer_component_message.render_header_line ~width:w ~selected ~role ~hi_engine
+    let search_query =
+      match Model.mode model with
+      | Model.Search _ -> Some (Model.search_query model)
+      | _ -> None
+    in
+    Renderer_component_message.render_header_line
+      ~width:w
+      ~selected
+      ~role
+      ~hi_engine
+      ~search_query
+      ()
   ;;
 
   let sticky_header

@@ -17,7 +17,7 @@ let prompt_prefix_and_indent ~(model : Model.t) =
 
 let is_selection_active ~(model : Model.t) =
   match Model.mode model with
-  | Cmdline -> false
+  | Cmdline | Search _ -> false
   | _ -> Model.selection_active model
 ;;
 
