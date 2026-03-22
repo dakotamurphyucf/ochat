@@ -603,7 +603,7 @@ let rec unify (state : infer_state) lhs rhs =
         let env_l' = MuEnv.add env_l ~key:b1 ~data:id in
         let env_r' = MuEnv.add env_r ~key:b2 ~data:id in
         go env_l' env_r' body1 body2
-      (* Keep your equi-recursive rule for Mu vs non-Mu by unfolding one step. *)
+      (* Keep equi-recursive rule for Mu vs non-Mu by unfolding one step. *)
       | (Mu _ as mu), t | t, (Mu _ as mu) ->
         ensure_contractive_type mu;
         go env_l env_r (unfold_mu mu) t
@@ -682,44 +682,6 @@ let rec unify (state : infer_state) lhs rhs =
        | _ -> assert false)
   in
   go MuEnv.empty MuEnv.empty lhs rhs
-
-and unify_rows (state : infer_state) lhs rhs =
-  (* Convert both rows to a field-map plus a tail row var *)
-  let map_l, tail_l = merge_fields lhs in
-  let map_r, tail_r = merge_fields rhs in
-  (* Unify common labels, collect missing ones *)
-  let rec collect l r missing_l missing_r =
-    match l, r with
-    | (lbl_l, ty_l) :: tl, (lbl_r, ty_r) :: tr ->
-      (match String.compare lbl_l lbl_r with
-       | 0 ->
-         unify state ty_l ty_r;
-         collect tl tr missing_l missing_r
-       | c when c < 0 -> collect tl r missing_l (Env.add lbl_l ty_l missing_r)
-       | _ -> collect l tr (Env.add lbl_r ty_r missing_l) missing_r)
-    | [], [] -> missing_l, missing_r
-    | [], rest -> Env.of_list rest |> Env.merge missing_l, missing_r
-    | rest, [] -> missing_l, Env.of_list rest |> Env.merge missing_r
-  in
-  let missing_l, missing_r =
-    collect (Env.bindings map_l) (Env.bindings map_r) Env.empty Env.empty
-  in
-  match Env.is_empty missing_l, Env.is_empty missing_r with
-  | true, true -> unify state tail_l tail_r
-  | true, false -> unify state tail_r (Row (missing_r, tail_l))
-  | false, true -> unify state tail_l (Row (missing_l, tail_r))
-  | false, false ->
-    (match tail_l with
-     | Var ({ contents = Free _ } as tv) ->
-       let row_var = new_var state state.current_lvl in
-       unify state tail_r (Row (missing_r, row_var));
-       (* Ensure tv is still free, then bind. *)
-       (match !tv with
-        | Bound _ -> raise (Type_error "Recursive row types")
-        | _ -> ());
-       tv := Bound (Row (missing_l, row_var))
-     | Empty_row -> unify state tail_l (Row (missing_l, new_var state 0))
-     | _ -> assert false)
 
 (** --------------------------------------------------------------------- *)
 (** 8. Pretty printer for types (used in error messages)                   *)
@@ -1236,7 +1198,7 @@ let add_mono (env : tenv) x ty : tenv =
 let should_generalize_binding (ty : typ) : bool = not (has_recursive_type ty)
 
 let add_generalized (state : infer_state) (env : tenv) x ty : tenv =
-  (* Phase 5 rule: bindings whose type contains an explicit recursive type
+  (* bindings whose type contains an explicit recursive type
      are kept monomorphic.  We therefore skip HM generalization entirely for
      such bindings and store the checked type as-is. *)
   if not (should_generalize_binding ty)

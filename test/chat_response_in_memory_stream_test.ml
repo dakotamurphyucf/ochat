@@ -69,7 +69,12 @@ let moderator_of_source source =
   in
   let capabilities = Chat_response.Moderation.Capabilities.default in
   let manager = ok_or_fail (Manager.create ~artifact ~capabilities ()) in
-  Stream.{ manager; session_id = "session-1"; session_meta = `Null }
+  Stream.
+    { manager
+    ; session_id = "session-1"
+    ; session_meta = `Null
+    ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+    }
 ;;
 
 let moderator () = moderator_of_source moderator_source
@@ -93,6 +98,36 @@ let print_synthetic_result = function
     List.iter parts ~f:(function
       | Res.Tool_output.Output_part.Input_text { text } -> print_endline text
       | Input_image { image_url; _ } -> print_endline image_url)
+;;
+
+let print_effective_overlay_items (moderator : Stream.moderator) =
+  let items = Manager.effective_items moderator.manager [] in
+  List.iter items ~f:(fun item ->
+    let response_item =
+      ok_or_fail (Chat_response.Moderation.Item.to_response_item item)
+    in
+    match response_item with
+    | Res.Item.Output_message msg ->
+      let content =
+        List.map msg.content ~f:(fun part -> part.text) |> String.concat ~sep:"\n"
+      in
+      print_endline (Printf.sprintf "%s assistant %S" item.id content)
+    | Res.Item.Input_message msg ->
+      let role = Res.Input_message.role_to_string msg.role in
+      let content =
+        List.filter_map msg.content ~f:(function
+          | Res.Input_message.Text { text; _ } -> Some text
+          | Res.Input_message.Image { image_url; _ } ->
+            Some (Printf.sprintf "<image src=\"%s\" />" image_url))
+        |> String.concat ~sep:"\n"
+      in
+      print_endline (Printf.sprintf "%s %s %S" item.id role content)
+    | other ->
+      print_endline
+        (Printf.sprintf
+           "%s json %S"
+           item.id
+           (Jsonaf.to_string (Res.Item.jsonaf_of_t other))))
 ;;
 
 let%expect_test "prepare_turn_inputs keeps no-moderator history unchanged" =
@@ -173,15 +208,22 @@ let%expect_test "finish_turn records end-of-turn state changes" =
           ~now_ms:1
           ~history)
      : Res.Item.t list);
-  ok_or_fail
-    (Stream.finish_turn
-       ~moderator:(Some moderator)
-       ~available_tools:[]
-       ~now_ms:2
-       ~history);
+  let requests =
+    ok_or_fail
+      (Stream.finish_turn
+         ~moderator:(Some moderator)
+         ~available_tools:[]
+         ~now_ms:2
+         ~history)
+  in
+  print_runtime_requests requests;
   let snapshot = ok_or_fail (Manager.snapshot moderator.manager) in
   print_s [%sexp (snapshot.current_state : Session.Snapshot.t)];
-  [%expect {| (Record ((turn_count (Int 1)))) |}]
+  [%expect
+    {|
+    ()
+    (Record ((turn_count (Int 1))))
+    |}]
 ;;
 
 let%expect_test "moderate_tool_call can reject a tool call with a synthetic response" =
@@ -338,7 +380,8 @@ let%expect_test
     moderator_of_source
       {|
         type state = { seen : string array }
-        type event = [ `Post_tool_response(tool_result) | `Queued(string) ]
+        type event =
+          [ `Post_tool_response(tool_result) | `Queued(string) | `Item_appended(item) ]
 
         let initial_state = { seen = Array.make(0, "") }
 
@@ -349,13 +392,14 @@ let%expect_test
               Task.bind(Runtime.request_compaction(), fun ignored_compaction ->
               Task.bind(Runtime.emit(`Queued("later")), fun ignored_emit ->
               Task.pure({ seen = [ result.call_id ] })))
+            | `Item_appended(_) ->
+              Task.pure(st)
             | `Queued(_) ->
               Task.bind
                 (Turn.append_message
                    ({ id = "synthetic-queued"
-                    ; role = "assistant"
-                    ; content = "queued"
-                    ; meta = `Null
+                    ; value =
+                        Json.parse("{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"synthetic-queued\",\"content\":[{\"annotations\":[],\"text\":\"queued\",\"type\":\"output_text\"}],\"status\":\"completed\"}")
                     }),
                  fun ignored_turn ->
                  Task.pure(st))
@@ -379,9 +423,33 @@ let%expect_test
          ~item)
   in
   print_runtime_requests requests;
-  let messages = Manager.effective_messages moderator.manager [] in
-  List.iter messages ~f:(fun message ->
-    print_endline (Printf.sprintf "%s %s %S" message.id message.role message.content));
+  let items = Manager.effective_items moderator.manager [] in
+  List.iter items ~f:(fun item ->
+    let response_item =
+      ok_or_fail (Chat_response.Moderation.Item.to_response_item item)
+    in
+    match response_item with
+    | Res.Item.Output_message msg ->
+      let content =
+        List.map msg.content ~f:(fun part -> part.text) |> String.concat ~sep:"\n"
+      in
+      print_endline (Printf.sprintf "%s assistant %S" item.id content)
+    | Res.Item.Input_message msg ->
+      let role = Res.Input_message.role_to_string msg.role in
+      let content =
+        List.filter_map msg.content ~f:(function
+          | Res.Input_message.Text { text; _ } -> Some text
+          | Res.Input_message.Image { image_url; _ } ->
+            Some (Printf.sprintf "<image src=\"%s\" />" image_url))
+        |> String.concat ~sep:"\n"
+      in
+      print_endline (Printf.sprintf "%s %s %S" item.id role content)
+    | other ->
+      print_endline
+        (Printf.sprintf
+           "%s json %S"
+           item.id
+           (Jsonaf.to_string (Res.Item.jsonaf_of_t other))));
   [%expect
     {|
     (Request_compaction)
@@ -427,6 +495,63 @@ let%expect_test "handle_tool_result surfaces end-session requests without crashi
   [%expect {| ((End_session done)) |}]
 ;;
 
+let%expect_test "handle_tool_result emits item_appended for canonical tool-output items" =
+  let moderator =
+    moderator_of_source
+      {|
+        type state = { count : int }
+        type event =
+          [ `Item_appended(item)
+          | `Pre_tool_call(tool_call)
+          | `Post_tool_response(tool_result)
+          ]
+
+        let initial_state = { count = 0 }
+
+        let first_text : string array -> string =
+          fun parts ->
+            if Array.length(parts) == 0 then "" else Array.get(parts, 0)
+
+        let on_event : context -> state -> event -> state task =
+          fun ctx st ev ->
+            match ev with
+            | `Item_appended(item) ->
+              let summary = Item.id(item) ++ ":" ++ first_text(Item.text_parts(item)) in
+              Task.bind
+                (Turn.append_item(Item.output_text_message("seen-" ++ to_string(st.count), summary)),
+                 fun ignored_turn ->
+                 Task.pure({ count = st.count + 1 }))
+            | `Pre_tool_call(call) ->
+              Task.bind(Tool.approve(), fun ignored_tool ->
+              Task.pure(st))
+            | `Post_tool_response(result) ->
+              Task.pure(st)
+      |}
+  in
+  let output_item =
+    Chat_response.Tool_call.output_item
+      ~kind:Chat_response.Tool_call.Kind.Function
+      ~call_id:"call-1"
+      ~output:(Res.Tool_output.Output.Text "tool-result")
+  in
+  ignore
+    (ok_or_fail
+       (Stream.handle_tool_result
+          ~moderator:(Some moderator)
+          ~available_tools:[]
+          ~now_ms:2
+          ~history:[ output_item ]
+          ~name:"search"
+          ~kind:Chat_response.Tool_call.Kind.Function
+          ~item:output_item)
+     : Moderation.Runtime_request.t list);
+  print_effective_overlay_items moderator;
+  [%expect
+    {|
+    seen-0 assistant "host-message-1:tool-result"
+    |}]
+;;
+
 let%expect_test "conflicting tool moderation outcomes fail clearly" =
   let moderator =
     moderator_of_source
@@ -460,4 +585,41 @@ let%expect_test "conflicting tool moderation outcomes fail clearly" =
    | Ok _ -> print_endline "unexpected success"
    | Error msg -> print_endline msg);
   [%expect {| Expected at most one tool moderation action for a single host event. |}]
+;;
+
+let%expect_test "finish_turn surfaces request_turn emitted during turn_end" =
+  let moderator =
+    moderator_of_source
+      {|
+        type state = { seen : int }
+        type event = [ `Turn_end ]
+
+        let initial_state = { seen = 0 }
+
+        let on_event : context -> state -> event -> state task =
+          fun ctx st ev ->
+            match ev with
+            | `Turn_end ->
+              Task.bind(Runtime.request_turn(), fun ignored ->
+              Task.pure({ seen = 1 }))
+      |}
+  in
+  let history =
+    [ Res.Item.Input_message
+        { role = Res.Input_message.User
+        ; content = [ input_text "Hello" ]
+        ; _type = "message"
+        }
+    ]
+  in
+  let requests =
+    ok_or_fail
+      (Stream.finish_turn
+         ~moderator:(Some moderator)
+         ~available_tools:[]
+         ~now_ms:1
+         ~history)
+  in
+  print_runtime_requests requests;
+  [%expect {| (Request_turn) |}]
 ;;

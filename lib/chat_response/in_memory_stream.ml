@@ -36,6 +36,7 @@ type moderator =
   { manager : Moderator_manager.t
   ; session_id : string
   ; session_meta : Jsonaf.t
+  ; runtime_policy : Runtime_semantics.policy
   }
 
 type moderated_tool_call =
@@ -107,29 +108,6 @@ let derive_tools_tool_tbl ~tools ~tool_tbl =
     Tool.convert_tools comp_tools, tbl
 ;;
 
-let input_role_of_string (role : string) : Res.Input_message.role =
-  match String.lowercase role with
-  | "system" -> Res.Input_message.System
-  | "user" -> Res.Input_message.User
-  | "assistant" -> Res.Input_message.Assistant
-  | "developer" -> Res.Input_message.Developer
-  | _ -> Res.Input_message.Assistant
-;;
-
-let input_item_of_message (message : Moderation.Message.t) : Res.Item.t =
-  let role = input_role_of_string message.role in
-  let _type =
-    match role with
-    | Res.Input_message.System -> "input_text"
-    | Res.Input_message.User -> "input_text"
-    | Res.Input_message.Assistant -> "output_text"
-    | Res.Input_message.Developer -> "input_text"
-  in
-  let content = [ Res.Input_message.Text { text = message.content; _type } ] in
-  Res.Item.Input_message
-    { role = input_role_of_string message.role; content; _type = "message" }
-;;
-
 let payload_of_jsonaf ~(kind : Tool_call.Kind.t) (payload : Jsonaf.t) : string =
   match kind with
   | Function -> Jsonaf.to_string payload
@@ -155,7 +133,8 @@ let report_runtime_requests
 let requests_end_session (outcome : Moderation.Outcome.t) =
   List.exists outcome.runtime_requests ~f:(function
     | Moderation.Runtime_request.End_session _ -> true
-    | Request_compaction -> false)
+    | Request_compaction -> false
+    | Request_turn -> false)
 ;;
 
 let unexpected_tool_moderation ~(source : string) (outcomes : Moderation.Outcome.t list)
@@ -237,6 +216,60 @@ let handle_turn_event
       (result.outer :: result.drained)
 ;;
 
+let projected_appended_item (history : Res.Item.t list)
+  : (Moderation.Item.t, string) result
+  =
+  let _, items =
+    Moderation.Projection.project_history Moderation.Projection.empty history
+  in
+  match List.last items with
+  | Some item -> Ok item
+  | None -> Error "Expected appended history item when emitting moderation event."
+;;
+
+let handle_item_appended
+      ~(moderator : moderator option)
+      ~(on_runtime_request : Moderation.Runtime_request.t -> unit)
+      ~available_tools
+      ~now_ms
+      ~history
+  =
+  let open Result.Let_syntax in
+  match moderator with
+  | None -> Ok ()
+  | Some _ ->
+    let%bind item = projected_appended_item history in
+    handle_turn_event
+      ~moderator
+      ~on_runtime_request
+      ~event:(Moderation.Event.Item_appended item)
+      ~available_tools
+      ~now_ms
+      ~history
+;;
+
+let runtime_requests_of_moderation
+      ~(source : string)
+      (moderation : moderation_event_result option)
+  : (Moderation.Runtime_request.t list, string) result
+  =
+  match moderation with
+  | None -> Ok []
+  | Some moderation ->
+    let open Result.Let_syntax in
+    let outcomes = moderation.outer :: moderation.drained in
+    let%map () = unexpected_tool_moderation ~source outcomes in
+    List.concat_map outcomes ~f:(fun outcome -> outcome.runtime_requests)
+;;
+
+let moderation_requests_end_session (moderation : moderation_event_result option) : bool =
+  match moderation with
+  | None -> false
+  | Some moderation ->
+    List.exists (moderation.outer :: moderation.drained) ~f:(fun outcome ->
+      requests_end_session outcome)
+;;
+
 let prepare_turn_inputs ~(moderator : moderator option) ~available_tools ~now_ms ~history =
   let open Result.Let_syntax in
   let%bind () =
@@ -250,20 +283,21 @@ let prepare_turn_inputs ~(moderator : moderator option) ~available_tools ~now_ms
   in
   match moderator with
   | None -> Ok history
-  | Some moderator ->
-    Ok
-      (Moderator_manager.effective_messages moderator.manager history
-       |> List.map ~f:input_item_of_message)
+  | Some moderator -> Moderator_manager.effective_history moderator.manager history
 ;;
 
 let finish_turn ~(moderator : moderator option) ~available_tools ~now_ms ~history =
-  handle_turn_event
-    ~moderator
-    ~on_runtime_request:(fun _ -> ())
-    ~event:Moderation.Event.Turn_end
-    ~available_tools
-    ~now_ms
-    ~history
+  let open Result.Let_syntax in
+  let%bind moderation =
+    handle_moderation_event
+      ~moderator
+      ~on_runtime_request:(fun _ -> ())
+      ~event:Moderation.Event.Turn_end
+      ~available_tools
+      ~now_ms
+      ~history
+  in
+  runtime_requests_of_moderation ~source:"turn_end" moderation
 ;;
 
 let moderate_tool_call
@@ -381,17 +415,27 @@ let handle_tool_result
       ~history
       ~event:(Moderation.Event.Post_tool_response tool_result)
   in
-  match moderation with
-  | None -> Ok []
-  | Some moderation ->
-    let%bind () =
-      unexpected_tool_moderation
-        ~source:"post_tool_response"
-        (moderation.outer :: moderation.drained)
-    in
-    Ok
-      (List.concat_map (moderation.outer :: moderation.drained) ~f:(fun outcome ->
-         outcome.runtime_requests))
+  let%bind post_tool_requests =
+    runtime_requests_of_moderation ~source:"post_tool_response" moderation
+  in
+  let%bind item_appended =
+    match moderator with
+    | None -> Ok None
+    | Some _ when moderation_requests_end_session moderation -> Ok None
+    | Some _ ->
+      let%bind appended_item = projected_appended_item history in
+      handle_moderation_event
+        ~moderator
+        ~on_runtime_request:(fun _ -> ())
+        ~available_tools
+        ~now_ms
+        ~history
+        ~event:(Moderation.Event.Item_appended appended_item)
+  in
+  let%map item_appended_requests =
+    runtime_requests_of_moderation ~source:"message_appended" item_appended
+  in
+  post_tool_requests @ item_appended_requests
 ;;
 
 let log_parsing_error ~env ~datadir json exn =
@@ -466,6 +510,32 @@ let emit_tool_output
 
 let add_item (st : stream_state) (it : Openai.Responses.Item.t) =
   { st with new_items_rev = it :: st.new_items_rev }
+;;
+
+let history_with_new_items ~(hist : Res.Item.t list) (st : stream_state) : Res.Item.t list
+  =
+  List.append hist (List.rev st.new_items_rev)
+;;
+
+let append_history_item
+      ~(moderator : moderator option)
+      ~(on_runtime_request : Moderation.Runtime_request.t -> unit)
+      ~available_tools
+      ~now_ms
+      ~(hist : Res.Item.t list)
+      (st : stream_state)
+      (item : Res.Item.t)
+  : stream_state
+  =
+  let st = add_item st item in
+  handle_item_appended
+    ~moderator
+    ~on_runtime_request
+    ~available_tools
+    ~now_ms
+    ~history:(history_with_new_items ~hist st)
+  |> Result.ok_or_failwith;
+  st
 ;;
 
 let history_so_far
@@ -576,7 +646,16 @@ let schedule_function_done
       |> Result.ok_or_failwith
     in
     List.iter moderated.runtime_requests ~f:c.on_runtime_request;
-    let st = add_item st moderated.call_item in
+    let st =
+      append_history_item
+        ~moderator:c.moderator
+        ~on_runtime_request:c.on_runtime_request
+        ~available_tools:c.tools
+        ~now_ms:(now_ms c.env)
+        ~hist
+        st
+        moderated.call_item
+    in
     let name = moderated.name in
     let arguments = moderated.payload in
     let hs = history_so_far ~history_compaction:c.history_compaction ~hist ~st in
@@ -631,7 +710,16 @@ let schedule_custom_done
       |> Result.ok_or_failwith
     in
     List.iter moderated.runtime_requests ~f:c.on_runtime_request;
-    let st = add_item st moderated.call_item in
+    let st =
+      append_history_item
+        ~moderator:c.moderator
+        ~on_runtime_request:c.on_runtime_request
+        ~available_tools:c.tools
+        ~now_ms:(now_ms c.env)
+        ~hist
+        st
+        moderated.call_item
+    in
     let name = moderated.name in
     let input = moderated.payload in
     let run_tool () =
@@ -668,10 +756,31 @@ let handle_added (st : stream_state) (item : Openai.Responses.Response_stream.It
   | _ -> st
 ;;
 
-let handle_done (st : stream_state) (item : Openai.Responses.Response_stream.Item.t) =
+let handle_done
+      (c : ctx)
+      ~(hist : Res.Item.t list)
+      (st : stream_state)
+      (item : Openai.Responses.Response_stream.Item.t)
+  =
   match item with
-  | Output_message om -> add_item st (Openai.Responses.Item.Output_message om)
-  | Reasoning r -> add_item st (Openai.Responses.Item.Reasoning r)
+  | Output_message om ->
+    append_history_item
+      ~moderator:c.moderator
+      ~on_runtime_request:c.on_runtime_request
+      ~available_tools:c.tools
+      ~now_ms:(now_ms c.env)
+      ~hist
+      st
+      (Openai.Responses.Item.Output_message om)
+  | Reasoning r ->
+    append_history_item
+      ~moderator:c.moderator
+      ~on_runtime_request:c.on_runtime_request
+      ~available_tools:c.tools
+      ~now_ms:(now_ms c.env)
+      ~hist
+      st
+      (Openai.Responses.Item.Reasoning r)
   | _ -> st
 ;;
 
@@ -692,7 +801,7 @@ let fold_stream ~turn (c : ctx) ~(hist : Openai.Responses.Item.t list) ~sem stre
          handle_added st item
        | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
          c.on_event ev;
-         handle_done st item
+         handle_done c ~hist st item
        | Function_call_arguments_done { item_id; arguments; _ } ->
          c.on_event ev;
          schedule_function_done ~turn c ~hist ~st ~item_id ~arguments ~sem
@@ -766,7 +875,18 @@ let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
 
 let run_turn (c : ctx) ~sw ~(history : Openai.Responses.Item.t list) =
   let sem = lazy (Eio.Semaphore.make 8) in
-  let rec turn (hist : Openai.Responses.Item.t list) =
+  let request_turn_budget_max = 10 in
+  let rec turn_with_budget
+            (hist : Openai.Responses.Item.t list)
+            ~(request_turn_budget : int)
+    =
+    (* fold_stream needs a (history -> history) function; forked calls should not
+       consume the request_turn budget, so we reset it to 0 for those subcalls. *)
+    let turn_for_fork (fork_hist : Openai.Responses.Item.t list)
+      : Openai.Responses.Item.t list
+      =
+      turn_with_budget fork_hist ~request_turn_budget:0
+    in
     let inputs =
       prepare_turn_inputs
         ~moderator:c.moderator
@@ -782,23 +902,59 @@ let run_turn (c : ctx) ~sw ~(history : Openai.Responses.Item.t list) =
     in
     log_request c ~inputs;
     try
-      let st = fold_stream ~turn c ~hist ~sem (post_stream c ~sw ~inputs) in
+      let st = fold_stream ~turn:turn_for_fork c ~hist ~sem (post_stream c ~sw ~inputs) in
       let new_items_rev = await_calls c ~hist st in
       let hist = List.append hist (List.rev new_items_rev) in
-      finish_turn
-        ~moderator:c.moderator
-        ~available_tools:c.tools
-        ~now_ms:(now_ms c.env)
-        ~history:hist
-      |> Result.ok_or_failwith;
-      if st.run_again then turn hist else hist
+      let finish_requests =
+        finish_turn
+          ~moderator:c.moderator
+          ~available_tools:c.tools
+          ~now_ms:(now_ms c.env)
+          ~history:hist
+        |> Result.ok_or_failwith
+      in
+      (* Forward all turn_end requests to the embedding callback (TUI/driver). *)
+      List.iter finish_requests ~f:c.on_runtime_request;
+      let policy =
+        match c.moderator with
+        | None -> Runtime_semantics.default_policy
+        | Some m -> m.runtime_policy
+      in
+      let decision =
+        Runtime_semantics.decide_after_turn_end
+          ~policy
+          ~tool_followup:st.run_again
+          finish_requests
+      in
+      match decision.end_session_reason with
+      | Some _ ->
+        (* End_session always overrides continuation. *)
+        hist
+      | None ->
+        (match decision.continue with
+         | `Stop -> hist
+         | `Continue ->
+           if st.run_again
+           then
+             (* Tool-driven continuation resets the request_turn budget. *)
+             turn_with_budget hist ~request_turn_budget:0
+           else (
+             (* Continuation due to Request_turn consumes budget. *)
+             let next_budget = request_turn_budget + 1 in
+             if next_budget > request_turn_budget_max
+             then
+               failwith
+                 (Printf.sprintf
+                    "Exceeded maximum consecutive moderator-requested turns (%d)."
+                    request_turn_budget_max);
+             turn_with_budget hist ~request_turn_budget:next_budget))
     with
     | Openai.Responses.Response_stream_parsing_error (json, exn) ->
       log_parsing_error ~env:c.env ~datadir:c.datadir json exn;
       Eio.Time.sleep (Eio.Stdenv.clock c.env) 0.1;
       failwith (Core.Exn.to_string exn)
   in
-  turn history
+  turn_with_budget history ~request_turn_budget:0
 ;;
 
 let setup_ctx ~(sw : Eio.Switch.t) (a : args) =

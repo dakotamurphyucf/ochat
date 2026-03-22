@@ -4,6 +4,7 @@ type moderator =
   { manager : Moderator_manager.t
   ; session_id : string
   ; session_meta : Jsonaf.t
+  ; runtime_policy : Runtime_semantics.policy
   }
 
 type moderated_tool_call =
@@ -27,14 +28,16 @@ val prepare_turn_inputs
   -> (Openai.Responses.Item.t list, string) result
 
 (** [finish_turn ?moderator ~available_tools ~now_ms ~history] applies the
-    moderator [turn_end] hook after a streamed turn completes. Without a
-    moderator, it is a no-op. *)
+    moderator [turn_end] hook after a streamed turn completes and returns
+    surfaced runtime requests emitted during [turn_end] (including requests
+    produced by drained internal events). Without a moderator, it is a no-op
+    returning [[]]. *)
 val finish_turn
   :  moderator:moderator option
   -> available_tools:Openai.Responses.Request.Tool.t list
   -> now_ms:int
   -> history:Openai.Responses.Item.t list
-  -> (unit, string) result
+  -> (Moderation.Runtime_request.t list, string) result
 
 (** [moderate_tool_call ...] applies the [pre_tool_call] moderation hook and
     returns the effective tool invocation together with any surfaced runtime
@@ -53,8 +56,8 @@ val moderate_tool_call
   -> (moderated_tool_call, string) result
 
 (** [handle_tool_result ...] applies the [post_tool_response] moderation hook
-    for [item], drains queued internal events, and returns surfaced runtime
-    requests. *)
+    for [item], then emits [message_appended] for the canonical history item,
+    drains queued internal events, and returns surfaced runtime requests. *)
 val handle_tool_result
   :  moderator:moderator option
   -> available_tools:Openai.Responses.Request.Tool.t list
@@ -98,9 +101,11 @@ val handle_tool_result
            the model per request.
     @param reasoning Optional reasoning settings forwarded to the API.
     @param moderator Optional session-scoped moderator runtime. When present,
-           the driver applies [turn_start] before each model request and
-           [turn_end] after each streamed turn, using the moderator overlay to
-           compute the effective request history.
+           the driver applies [turn_start] before each model request,
+           [message_appended] as canonical history items are produced,
+           [pre_tool_call] and [post_tool_response] around tool execution,
+           and [turn_end] after each streamed turn, using the moderator
+           overlay to compute the effective request history.
     @param on_runtime_request Optional callback invoked for surfaced moderator
            runtime requests such as compaction or end-session notifications.
 

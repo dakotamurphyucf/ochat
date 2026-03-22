@@ -51,9 +51,13 @@ ChatMD prompts can also embed a single host-managed ChatML moderation script:
 
 - declare it with `<script language="chatml" kind="moderator" ...>`,
 - keep it invisible to the model request itself,
-- use it to prepend/append/replace/delete effective messages,
+- use it to prepend/append/replace/delete effective transcript items,
+- inspect and construct structured items through the `Item` builtin module,
 - moderate tool calls by approving, rejecting, rewriting, or redirecting them,
 - and persist only its serializable runtime state between resumed sessions.
+- request another ordinary model turn after `turn_end` via `Runtime.request_turn()`,
+- orchestrate additional model-backed work via `Model.call` and `Model.spawn`
+  (recipe names are host-defined).
 
 Prompts without a `<script>` keep the old behavior: the shared drivers,
 `chat_tui`, export flow, and nested agent execution all fall back to the
@@ -195,70 +199,189 @@ instantiated per session by `chat_tui`, `ochat chat-completion`, nested
 
 1. Create `prompts/review.chatmd`:
 
-```xml
+```md
 <config model="gpt-5.2" reasoning_effort="medium"/>
 
 <tool name="read_file"/>
 <tool name="apply_patch"/>
 
 <script language="chatml" kind="moderator" id="main">
-type state = { turns : int }
+
+(* Multi-step plan moderator script pattern:
+
+   Goal:
+   - Track a list of tasks (a “plan”)
+   - When the assistant finishes a task, request history compaction
+   - Append a new <user> message describing the next task
+   - Request another ordinary turn so the next task starts immediately
+
+   Conventions used by this script:
+   - The assistant must explicitly mark task completion by including a sentinel
+     string in its final assistant message for the task, e.g. "TASK_DONE".
+   - Compaction is a host request (some embeddings honor it automatically, others log it).
+   - Runtime.request_turn() is only called from Turn_end (allowed in v1).
+*)
+
+type task =
+  { title : string
+  ; prompt : string
+  }
+
+type state =
+  { tasks : task array
+  ; idx : int
+  ; next_id : int
+  }
+
 type event =
   [ `Session_start
   | `Session_resume
   | `Turn_start
+  | `Message_appended(item)
   | `Pre_tool_call(tool_call)
   | `Post_tool_response(tool_result)
   | `Turn_end
-  | `Queued(string)
+  | `Internal_event   (* not used directly here; internal events are raw values *)
   ]
 
-let initial_state = { turns = 0 }
+let initial_state : state =
+  { tasks =
+      [ { title = "Task 1: Inspect repo"
+        ; prompt =
+            "Inspect the repository. Summarize the relevant modules and identify risks."
+            ++ "\n\nWhen finished, print exactly: TASK_DONE"
+        }
+      , { title = "Task 2: Implement feature"
+        ; prompt =
+            "Implement the next change. Keep it small and testable."
+            ++ "\n\nWhen finished, print exactly: TASK_DONE"
+        }
+      , { title = "Task 3: Run tests + summarize"
+        ; prompt =
+            "Run dune build and the smallest relevant tests. Summarize results."
+            ++ "\n\nWhen finished, print exactly: TASK_DONE"
+        }
+      ]
+  ; idx = 0
+  ; next_id = 1
+  }
+
+let join_lines (xs : string array) : string =
+  let i = ref(0) in
+  let out = ref("") in
+  while !i < Array.length(xs) do
+    let line = Array.get(xs, !i) in
+    if String.is_empty(!out) then out := line else out := !out ++ "\n" ++ line;
+    i := !i + 1
+  done;
+  !out
+
+let last_assistant_text (ctx : context) : string =
+  (* Search from the end for an assistant-like item with text parts. *)
+  let i = ref(Array.length(ctx.items) - 1) in
+  let found = ref("") in
+  while !i >= 0 do
+    let it = ctx.items[!i] in
+    match Item.role(it) with
+    | `Some(role) ->
+      if String.equal(role, "assistant") then (
+        let parts = Item.text_parts(it) in
+        if Array.length(parts) > 0 then (
+          found := join_lines(parts);
+          i := -1
+        ) else (
+          i := !i - 1
+        )
+      ) else (
+        i := !i - 1
+      )
+    | `None ->
+      i := !i - 1
+  done;
+  !found
+
+let make_user_item (st : state) (text : string) : item =
+  let id = "plan-user-" ++ to_string(st.next_id) in
+  (* role is a string in Item.input_text_message(id, role, text) *)
+  Item.input_text_message(id, "user", text)
 
 let on_event : context -> state -> event -> state task =
   fun ctx st ev ->
     match ev with
     | `Session_start ->
-      Task.bind(Turn.prepend_system("Review patches carefully before accepting them."), fun ignored ->
-      Task.pure(st))
+      let* () =
+        Turn.prepend_system(
+          "This prompt uses a moderator-driven multi-step plan.\n"
+          ++ "- The assistant must print TASK_DONE when a task is complete.\n"
+          ++ "- After TASK_DONE, the moderator requests compaction, appends the next task as a user message, and requests another turn."
+        )
+      in
+      Task.pure(st)
+
     | `Session_resume ->
-      Task.bind(Turn.prepend_system("This session was resumed; keep prior moderation state in mind."), fun ignored ->
-      Task.pure(st))
-    | `Turn_start ->
-      Task.bind(Runtime.emit(`Queued("reminder")), fun ignored ->
-      Task.pure(st))
-    | `Pre_tool_call(call) ->
-      (match call.name with
-       | "apply_patch" ->
-         Task.bind(Tool.rewrite_args(call.args), fun ignored ->
-         Task.pure(st))
-       | _ ->
-         Task.bind(Tool.approve(), fun ignored ->
-         Task.pure(st)))
+      let user_text =
+      "Session resumed; continuing plan at idx=" ++ to_string(st.idx)
+      in
+      let user_item = make_user_item(st, user_text) in
+      let* () = Turn.append_item(user_item) in
+      Task.pure(st)
+
+    | `Turn_end ->
+      (* Only here (and internal_event) is Runtime.request_turn allowed in v1. *)
+      if st.idx >= Array.length(st.tasks) then
+        (* Plan already finished *)
+        Task.pure(st)
+      else (
+        let txt = last_assistant_text(ctx) in
+        if String.contains(String.trim(txt), "TASK_DONE") then (
+          let next_idx = st.idx + 1 in
+
+          if next_idx >= Array.length(st.tasks) then (
+            let* () = Runtime.request_compaction() in
+            let* () = Runtime.end_session("Plan completed: all tasks finished.") in
+            Task.pure({ st with idx = next_idx })
+          ) else (
+            let next_task = st.tasks[next_idx] in
+            let user_text =
+              "Next: " ++ next_task.title ++ "\n\n" ++ next_task.prompt
+            in
+            let user_item = make_user_item(st, user_text) in
+
+            (* Request compaction after each completed task. *)
+            let* () = Runtime.request_compaction() in
+
+            (* Append a new user message so the next turn has explicit instructions. *)
+            let* () = Turn.append_item(user_item) in
+            let payload =
+              agent_prompt_payload
+                ~prompt:"prompts/commit_message_agent.chatmd"
+                ~is_local:true
+                ~input:("Add the current changes in the repo and write a concise git commit message based on the changes")
+                ~session_id:(ctx.session_id ++ ":commit-msg")
+            in
+            let* res_ = Model.call("agent_prompt_v1", payload) in
+            
+            (* Ask the host to run one more ordinary turn now that we appended the next task. *)
+            let* () = Runtime.request_turn() in
+
+            Task.pure({ st with idx = next_idx; next_id = st.next_id + 1 })
+          )
+        ) else
+          Task.pure(st)
+      )
+
+    | `Turn_start
+    | `Message_appended(_)
+    | `Pre_tool_call(_)
     | `Post_tool_response(_) ->
       Task.pure(st)
-    | `Turn_end ->
-      Task.pure({ turns = st.turns + 1 })
-    | `Queued(_) ->
-      Task.bind
-        (Turn.append_message
-           ({ id = "moderation-note"
-            ; role = "assistant"
-            ; content = "Moderator reminder recorded for this turn."
-            ; meta = `Null
-            }),
-         fun ignored ->
-         Task.pure(st))
+         
 </script>
 
 <developer>
-You are a careful code review assistant.
+You are a careful code assistant.
 </developer>
 
-<user>
-Inspect the current prompt and explain how moderation changes the effective
-request history before the next model turn.
-</user>
 ```
 
 2. Run it in the TUI or CLI:
@@ -283,10 +406,62 @@ Notes:
 - exported transcripts materialize moderation-visible inserts, deletions, and
   halt markers explicitly.
 
+### Writing moderator scripts with `Item.*`
+
+Moderator scripts receive `ctx.items`, where each item has the shape:
+
+```ocaml
+type item =
+  { id : string
+  ; value : json
+  }
+```
+
+The `Item` module provides helpers so scripts do not need to hand-author raw
+JSON for common cases:
+
+- `Item.id(item)` returns the stable item id used by overlay operations
+- `Item.value(item)` returns the underlying structured JSON payload
+- `Item.kind(item)` reads the serialized item `"type"` field when present
+- `Item.role(item)` extracts a message role when the item has one
+- `Item.text_parts(item)` collects text fragments from common message-like items
+- `Item.input_text_message(id, role, text)` builds a structured input message
+- `Item.output_text_message(id, text)` builds a structured assistant message
+- `Item.create(id, value)` wraps arbitrary structured JSON as an item
+
+Example:
+
+```ocaml
+let first_text : string array -> string =
+  fun parts ->
+    if Array.length(parts) == 0 then "" else Array.get(parts, 0)
+
+let on_event : context -> state -> event -> state task =
+  fun ctx st ev ->
+    match ev with
+    | `Message_appended ->
+      let item = ctx.items[Array.length(ctx.items) - 1] in
+      let summary =
+        Item.id(item)
+        ++ ":"
+        ++ Option.get_or(Item.role(item), "unknown")
+        ++ ":"
+        ++ first_text(Item.text_parts(item))
+      in
+      Task.bind(Turn.append_item(Item.output_text_message("summary", summary)), fun ignored ->
+      Task.pure(st))
+    | _ ->
+      Task.pure(st)
+```
+
+Prefer `Turn.append_item`, `Turn.replace_item`, and `Turn.delete_item`.
+The older `append_message`, `replace_message`, and `delete_message` names are
+still accepted as aliases.
+
 For a more advanced, end-to-end agent built from the same building
 blocks, see the
 [General Assistant – agent workflow](docs-src/guide/general-agent-workflow.md). This is the agent that was used to generate the example
-recording at the top of this readme. Other examples located in [prompt-examples](prompt-examples/)
+recording at the top of this readme. Other examples located in [prompt-examples](prompt-examples/readme.md)
 
 ---
 
@@ -429,6 +604,18 @@ Today ChatML is integrated as the host-managed moderation layer for ChatMD:
 - a prompt may declare one `<script language="chatml" kind="moderator" ...>`,
 - the script runs through the shared moderation manager used by `chat_tui`,
   file-backed drivers, nested agents, and MCP prompt-agent wrappers,
+- moderator scripts receive `ctx.items` where each item is `{ id; value : json }`,
+- the moderator surface includes `Item.*` helpers plus `Turn.append_item`,
+  `Turn.replace_item`, and `Turn.delete_item` aliases,
+- moderator scripts can request another ordinary turn after `turn_end` via
+  `Runtime.request_turn()`,
+- moderator scripts can call host-registered model recipes via `Model.call` and
+  start background jobs via `Model.spawn`,
+- spawned model jobs deliver completion back to the moderator as internal events:
+  `Model_job_succeeded(job_id, recipe_name, result_json)` and
+  `Model_job_failed(job_id, recipe_name, message)`,
+- spawned job tracking is currently in-memory only (in-flight jobs are not
+  durably persisted across process restarts),
 - the host persists only serializable moderator state and queued internal
   events,
 - prompts without a script still follow the baseline non-moderated path.

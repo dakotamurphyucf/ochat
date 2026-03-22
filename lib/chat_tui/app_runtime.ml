@@ -51,8 +51,9 @@ let visible_messages_of_history (t : t) (history : Openai.Responses.Item.t list)
   match t.moderator with
   | None -> Conversation.of_history history
   | Some moderator ->
-    Manager.effective_messages moderator.manager history
-    |> List.map ~f:(fun message -> message.role, message.content)
+    Manager.effective_history moderator.manager history
+    |> Result.ok_or_failwith
+    |> Conversation.of_history
 ;;
 
 let refresh_messages (t : t) : unit =

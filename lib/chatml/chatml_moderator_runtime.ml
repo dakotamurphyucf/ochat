@@ -40,6 +40,7 @@ type local_effect =
   | Tool_moderation_effect of tool_moderation
   | Emit_internal_event of Lang.value
   | Request_compaction
+  | Request_turn
   | End_session of string
 
 type op_kind =
@@ -81,6 +82,7 @@ and default_handlers =
   ; on_schedule_cancel : session -> id:string -> (unit, string) result
   ; on_request_compaction : session -> (unit, string) result
   ; on_end_session : session -> reason:string -> (unit, string) result
+  ; on_request_turn : session -> (unit, string) result
   }
 
 and exec_ctx =
@@ -167,6 +169,7 @@ let default_handlers : default_handlers =
       (fun _session ~delay_ms:_ ~payload:_ -> Error "Schedule.after_ms is not configured")
   ; on_schedule_cancel = (fun _session ~id:_ -> not_configured "Schedule.cancel")
   ; on_request_compaction = (fun _session -> Ok ())
+  ; on_request_turn = (fun _session -> Ok ())
   ; on_end_session = (fun _session ~reason:_ -> Ok ())
   }
 ;;
@@ -322,6 +325,16 @@ let decode_runtime_end_session (args : Lang.value list) : (local_effect, string)
          (List.length args))
 ;;
 
+let decode_runtime_request_turn (args : Lang.value list) : (local_effect, string) result =
+  match args with
+  | [] -> Ok Request_turn
+  | _ ->
+    Error
+      (Printf.sprintf
+         "Runtime.request_turn: expected 0 argument(s), got %d"
+         (List.length args))
+;;
+
 let decode_local_effect (eff : Lang.eff) : (local_effect, string) result =
   match eff.op with
   | "Turn.prepend_system" ->
@@ -348,6 +361,7 @@ let decode_local_effect (eff : Lang.eff) : (local_effect, string) result =
       Tool_moderation_effect action)
   | "Runtime.emit" -> decode_runtime_emit eff.args
   | "Runtime.request_compaction" -> decode_runtime_request_compaction eff.args
+  | "Runtime.request_turn" -> decode_runtime_request_turn eff.args
   | "Runtime.end_session" -> decode_runtime_end_session eff.args
   | op -> Error (Printf.sprintf "Unknown moderator local effect '%s'" op)
 ;;
@@ -539,6 +553,13 @@ let default_operations ?(handlers = default_handlers) () : op_def list =
     ; perform =
         with_nullary "Runtime.request_compaction" (fun session ->
           wrap_unit_result (handlers.on_request_compaction session))
+    }
+  ; { name = "Runtime.request_turn"
+    ; kind = Local_transactional
+    ; phase_check = require_phases [ "turn_end"; "internal_event" ]
+    ; perform =
+        with_nullary "Runtime.request_turn" (fun session ->
+          wrap_unit_result (handlers.on_request_turn session))
     }
   ; { name = "Runtime.end_session"
     ; kind = Local_transactional
@@ -886,4 +907,14 @@ let handle_event (session : session) ~(context : Lang.value) ~(event : Lang.valu
            Queue.enqueue session.queue queued_event);
          if Option.is_some exec.end_session_requested then session.halted <- true;
          Ok ()))
+;;
+
+let enqueue_internal_event (session : session) (event : Lang.value)
+  : (unit, string) result
+  =
+  if session.halted
+  then Error "Session has ended"
+  else (
+    Queue.enqueue session.queue event;
+    Ok ())
 ;;

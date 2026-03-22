@@ -13,6 +13,7 @@ module Ctx = Chat_response.Ctx
 module Cache = Chat_response.Cache
 module Req = Res.Request
 module Runtime = App_runtime
+module Runtime_semantics = Chat_response.Runtime_semantics
 
 type input_event = App_events.input_event
 type internal_event = App_events.internal_event
@@ -109,13 +110,17 @@ let run (ctx : Context.t) =
     ignore (Model.apply_patch model (Add_placeholder_message { role = "system"; text }));
     Redraw_throttle.request_redraw throttler
   in
-  let handle_runtime_request request =
-    match request with
-    | Chat_response.Moderation.Runtime_request.Request_compaction ->
-      Queue.enqueue runtime.Runtime.pending Runtime.Compact
-    | Chat_response.Moderation.Runtime_request.End_session reason ->
+  let tui_policy =
+    { Runtime_semantics.default_policy with honor_request_compaction = true }
+  in
+  let handle_runtime_request (request : Chat_response.Moderation.Runtime_request.t) =
+    let requests = Runtime_semantics.collapse [ request ] in
+    if
+      tui_policy.honor_request_compaction && Runtime_semantics.request_compaction requests
+    then Queue.enqueue runtime.Runtime.pending Runtime.Compact;
+    Option.iter (Runtime_semantics.should_end_session requests) ~f:(fun reason ->
       runtime.Runtime.halted_reason <- Some reason;
-      add_system_notice (Printf.sprintf "Session ended by moderator: %s" reason)
+      add_system_notice (Printf.sprintf "Session ended by moderator: %s" reason))
   in
   let max_input_drain_per_iteration = 64 in
   let typeahead_debounce_sw : Switch.t option ref = ref None in

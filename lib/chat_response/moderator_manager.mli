@@ -62,10 +62,19 @@ val drain_internal_events
   -> session_meta:Jsonaf.t
   -> (Moderation.Outcome.t list, string) result
 
-(** [effective_messages t history] applies the durable moderator overlay to the
+(** [effective_items t history] applies the durable moderator overlay to the
     projected canonical history. *)
-val effective_messages : t -> Res.Item.t list -> Moderation.Message.t list
+val effective_items : t -> Res.Item.t list -> Moderation.Item.t list
+
+(** [effective_history t history] applies the durable moderator overlay and
+    reconstructs OpenAI response items for model input and downstream
+    consumers. *)
+val effective_history : t -> Res.Item.t list -> (Res.Item.t list, string) result
 
 (** [snapshot t] extracts the persisted moderator snapshot for the current
     runtime session. *)
 val snapshot : t -> (Session.Moderator_snapshot.t, string) result
+
+(** Enqueue an internal event into the moderator runtime queue for later replay
+    via {!drain_internal_events}. *)
+val enqueue_internal_event : t -> Chatml.Chatml_lang.value -> (unit, string) result

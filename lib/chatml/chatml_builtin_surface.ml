@@ -46,7 +46,7 @@ let core_type_aliases : builtin_type_alias list =
 ;;
 
 let moderator_type_aliases : builtin_type_alias list =
-  [ { name = "message"; body = Builtin_spec.message_ty }
+  [ { name = "item"; body = Builtin_spec.item_ty }
   ; { name = "tool_desc"; body = Builtin_spec.tool_desc_ty }
   ; { name = "tool_call"; body = Builtin_spec.tool_call_ty }
   ; { name = "tool_result"; body = Builtin_spec.tool_result_ty }

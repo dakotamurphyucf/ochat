@@ -37,18 +37,19 @@ module Phase : sig
   val of_string : string -> (t, string) result
 end
 
-module Message : sig
+module Item : sig
   type t =
     { id : string
-    ; role : string
-    ; content : string
-    ; meta : Jsonaf.t
+    ; value : Jsonaf.t
     }
   [@@deriving sexp]
 
-  val create : id:string -> role:string -> content:string -> meta:Jsonaf.t -> t
+  val create : id:string -> value:Jsonaf.t -> t
   val of_value : Lang.value -> (t, string) result
   val to_value : t -> Lang.value
+  val of_response_item : id:string -> Res.Item.t -> t
+  val to_response_item : t -> (Res.Item.t, string) result
+  val text_input_message : id:string -> role:Res.Input_message.role -> text:string -> t
 end
 
 module Tool_desc : sig
@@ -103,7 +104,7 @@ module Context : sig
     { session_id : string
     ; now_ms : int
     ; phase : Phase.t
-    ; messages : Message.t list
+    ; items : Item.t list
     ; available_tools : Tool_desc.t list
     ; session_meta : Jsonaf.t
     }
@@ -117,7 +118,7 @@ module Event : sig
     | Session_start
     | Session_resume
     | Turn_start
-    | Message_appended of Message.t
+    | Item_appended of Item.t
     | Pre_tool_call of Tool_call.t
     | Post_tool_response of Tool_result.t
     | Turn_end
@@ -135,8 +136,8 @@ module Projection : sig
   [@@deriving sexp, compare]
 
   val empty : t
-  val project_item : t -> Res.Item.t -> t * Message.t
-  val project_history : t -> Res.Item.t list -> t * Message.t list
+  val project_item : t -> Res.Item.t -> t * Item.t
+  val project_history : t -> Res.Item.t list -> t * Item.t list
 
   val project_context
     :  projection:t
@@ -152,30 +153,30 @@ end
 module Overlay : sig
   type replacement =
     { target_id : string
-    ; message : Message.t
+    ; item : Item.t
     }
   [@@deriving sexp]
 
   type op =
     | Prepend_system of string
-    | Append_message of Message.t
-    | Replace_message of replacement
-    | Delete_message of string
+    | Append_item of Item.t
+    | Replace_item of replacement
+    | Delete_item of string
     | Halt of string
   [@@deriving sexp]
 
   type t =
-    { prepended_system_messages : Message.t list
-    ; appended_messages : Message.t list
+    { prepended_system_items : Item.t list
+    ; appended_items : Item.t list
     ; replacements : replacement list
-    ; deleted_message_ids : string list
+    ; deleted_item_ids : string list
     ; halted_reason : string option [@jsonaf.option]
     }
   [@@deriving sexp]
 
   val empty : t
   val of_runtime_turn_effect : Runtime.turn_effect -> (op, string) result
-  val apply : t -> Message.t list -> Message.t list
+  val apply : t -> Item.t list -> Item.t list
 end
 
 module Tool_moderation : sig
@@ -192,6 +193,7 @@ end
 module Runtime_request : sig
   type t =
     | Request_compaction
+    | Request_turn
     | End_session of string
   [@@deriving sexp, compare]
 end

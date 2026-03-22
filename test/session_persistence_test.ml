@@ -1,19 +1,39 @@
 open Core
+module Value_codec = Chatml.Chatml_value_codec
+
+let snapshot_of_item (item : Openai.Responses.Item.t) : Session.Snapshot.t =
+  let value = Value_codec.jsonaf_to_value (Openai.Responses.Item.jsonaf_of_t item) in
+  match Value_codec.Snapshot.of_value value with
+  | Ok snapshot -> snapshot
+  | Error msg -> failwith msg
+;;
 
 let moderator_snapshot () =
   let module Snapshot = Session.Snapshot in
   let module Moderator = Session.Moderator_snapshot in
-  let message =
-    { Moderator.Message.id = "host-message-1"
-    ; role = "assistant"
-    ; content = "synthetic moderation output"
-    ; meta = Snapshot.Record [ "source", Snapshot.String "moderator" ]
+  let item =
+    { Moderator.Item.id = "host-message-1"
+    ; value =
+        snapshot_of_item
+          (Openai.Responses.Item.Output_message
+             { role = Openai.Responses.Output_message.Assistant
+             ; id = "host-message-1"
+             ; content =
+                 [ Openai.Responses.Output_message.
+                     { annotations = []
+                     ; text = "synthetic moderation output"
+                     ; _type = "output_text"
+                     }
+                 ]
+             ; status = "completed"
+             ; _type = "message"
+             })
     }
   in
   let overlay =
     { Moderator.Overlay.empty with
-      appended_messages = [ message ]
-    ; deleted_message_ids = [ "msg-1" ]
+      appended_items = [ item ]
+    ; deleted_item_ids = [ "msg-1" ]
     ; halted_reason = Some "done"
     }
   in

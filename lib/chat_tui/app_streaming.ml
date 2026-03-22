@@ -30,6 +30,7 @@ let start (ctx : Context.t) ~history ~op_id =
   let prompt_cache_key = Option.map ctx.shared.services.session ~f:(fun s -> s.id) in
   let prompt_cache_retention =
     match cfg.model with
+    | Some "gpt-5.4" -> Some "24h"
     | Some "gpt-5.2" -> Some "24h"
     | Some "gp5-5.1-codex-max" -> Some "24h"
     | Some "gpt-5.1" -> Some "24h"

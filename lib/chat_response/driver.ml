@@ -38,12 +38,43 @@ let has_script elements =
 ;;
 
 let has_end_session_request requests =
-  List.exists requests ~f:(function
-    | Moderation.Runtime_request.End_session _ -> true
-    | Request_compaction -> false)
+  Option.is_some (Runtime_semantics.should_end_session requests)
 ;;
 
-let create_moderator ~env ~session_id ~elements ~history ~available_tools
+let fetch_prompt ~ctx ~prompt ~is_local =
+  try
+    let xml = Fetch.get ~ctx prompt ~is_local in
+    let prompt_dir = if is_local then Fetch.resolve_local_dir ~ctx prompt else None in
+    Ok (xml, prompt_dir)
+  with
+  | exn -> Error (Exn.to_string exn)
+;;
+
+let capabilities_with_model_executor
+      ~(model_executor : Model_executor.t)
+      ~(session_id : string)
+      (capabilities : Moderation.Capabilities.t)
+  : Moderation.Capabilities.t
+  =
+  { capabilities with
+    model_recipes =
+      Map.of_alist_exn
+        (module String)
+        [ ( Model_executor.agent_prompt_v1_name
+          , Model_executor.recipe_agent_prompt_v1 model_executor ~session_id )
+        ]
+  }
+;;
+
+let create_moderator
+      ~env
+      ~session_id
+      ~elements
+      ~history
+      ~available_tools
+      ?(capabilities = Moderation.Capabilities.default)
+      ?(runtime_policy = Runtime_semantics.default_policy)
+      ()
   : (Stream_moderator.moderator option, string) result
   =
   let open Result.Let_syntax in
@@ -53,9 +84,10 @@ let create_moderator ~env ~session_id ~elements ~history ~available_tools
   match artifact with
   | None -> Ok None
   | Some artifact ->
-    let capabilities = Moderation.Capabilities.default in
     let%bind manager = Moderator_manager.create ~artifact ~capabilities () in
-    let moderator = Stream_moderator.{ manager; session_id; session_meta = `Null } in
+    let moderator =
+      Stream_moderator.{ manager; session_id; session_meta = `Null; runtime_policy }
+    in
     let now_ms = now_ms env in
     let%bind outcome =
       Moderator_manager.handle_event
@@ -463,6 +495,14 @@ let rec run_agent
       let session_id =
         Option.first_some id session_id |> Option.value ~default:"nested-agent"
       in
+      let exec_context : Model_executor.exec_context = { ctx; run_agent; fetch_prompt } in
+      let model_executor = Model_executor.create ~sw ~exec_context () in
+      let capabilities =
+        capabilities_with_model_executor
+          ~model_executor
+          ~session_id
+          Moderation.Capabilities.default
+      in
       let moderator =
         create_moderator
           ~env:(Ctx.env ctx)
@@ -470,8 +510,15 @@ let rec run_agent
           ~elements
           ~history:init_items
           ~available_tools:tools_req
+          ~capabilities
+          ()
         |> Result.ok_or_failwith
       in
+      Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
+        Model_executor.register_session
+          model_executor
+          ~session_id:m.session_id
+          ~manager:m.manager);
       In_memory_stream.run_completion_stream_in_memory_v1
         ~env:(Ctx.env ctx)
         ~history:init_items
@@ -630,17 +677,37 @@ let run_completion
     let save_doc name contents = Io.save_doc ~dir:datadir name contents in
     if has_script elements
     then (
-      let moderator =
-        create_moderator
-          ~env
-          ~session_id:(Option.value id ~default:output_file)
-          ~elements
-          ~history:init_items
-          ~available_tools:tools
-        |> Result.ok_or_failwith
-      in
+      let session_id = Option.value id ~default:output_file in
       let runtime_requests = ref [] in
       let all_items =
+        Eio.Switch.run
+        @@ fun sw ->
+        let exec_context : Model_executor.exec_context =
+          { ctx; run_agent; fetch_prompt }
+        in
+        let model_executor = Model_executor.create ~sw ~exec_context () in
+        let capabilities =
+          capabilities_with_model_executor
+            ~model_executor
+            ~session_id
+            Moderation.Capabilities.default
+        in
+        let moderator =
+          create_moderator
+            ~env
+            ~session_id
+            ~elements
+            ~history:init_items
+            ~available_tools:tools
+            ~capabilities
+            ()
+          |> Result.ok_or_failwith
+        in
+        Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
+          Model_executor.register_session
+            model_executor
+            ~session_id:m.session_id
+            ~manager:m.manager);
         In_memory_stream.run_completion_stream_in_memory_v1
           ~env
           ~datadir
@@ -813,15 +880,31 @@ let run_completion_stream
   if has_script elements
   then (
     let save_doc name contents = Io.save_doc ~dir:datadir name contents in
+    let session_id = Option.value id ~default:output_file in
+    let exec_context : Model_executor.exec_context = { ctx; run_agent; fetch_prompt } in
+    let model_executor = Model_executor.create ~sw ~exec_context () in
+    let capabilities =
+      capabilities_with_model_executor
+        ~model_executor
+        ~session_id
+        Moderation.Capabilities.default
+    in
     let moderator =
       create_moderator
         ~env
-        ~session_id:(Option.value id ~default:output_file)
+        ~session_id
         ~elements
         ~history:inputs
         ~available_tools:tools
+        ~capabilities
+        ()
       |> Result.ok_or_failwith
     in
+    Option.iter moderator ~f:(fun (m : In_memory_stream.moderator) ->
+      Model_executor.register_session
+        model_executor
+        ~session_id:m.session_id
+        ~manager:m.manager);
     let runtime_requests = ref [] in
     let all_items =
       In_memory_stream.run_completion_stream_in_memory_v1

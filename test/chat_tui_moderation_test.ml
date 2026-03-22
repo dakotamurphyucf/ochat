@@ -58,9 +58,8 @@ let moderator_script =
           Task.bind
             (Turn.append_message
                ({ id = "synthetic-1"
-                ; role = "assistant"
-                ; content = "queued"
-                ; meta = `Null
+                ; value =
+                    Json.parse("{\"type\":\"message\",\"role\":\"assistant\",\"id\":\"synthetic-1\",\"content\":[{\"annotations\":[],\"text\":\"queued\",\"type\":\"output_text\"}],\"status\":\"completed\"}")
                 }),
              fun ignored_turn ->
              Task.pure(st))
@@ -125,7 +124,11 @@ let%expect_test "runtime visible history reflects restored moderator snapshot" =
   let resumed_manager = create_manager ~snapshot () in
   let moderator =
     Chat_response.In_memory_stream.
-      { manager = resumed_manager; session_id = "session-1"; session_meta = `Null }
+      { manager = resumed_manager
+      ; session_id = "session-1"
+      ; session_meta = `Null
+      ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      }
   in
   let runtime = App_runtime.create ~model:(model_of_history history) ~moderator () in
   print_messages (App_runtime.visible_messages_of_history runtime history);
@@ -163,7 +166,11 @@ let%expect_test "runtime refresh_messages uses moderated visible history" =
      : Moderation.Outcome.t);
   let moderator =
     Chat_response.In_memory_stream.
-      { manager; session_id = "session-1"; session_meta = `Null }
+      { manager
+      ; session_id = "session-1"
+      ; session_meta = `Null
+      ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      }
   in
   let model = model_of_history history in
   let runtime = App_runtime.create ~model ~moderator () in
@@ -222,7 +229,11 @@ let%expect_test "runtime visible history reflects explicit session_resume modera
      : Moderation.Outcome.t);
   let moderator =
     Chat_response.In_memory_stream.
-      { manager = resumed_manager; session_id = "session-1"; session_meta = `Null }
+      { manager = resumed_manager
+      ; session_id = "session-1"
+      ; session_meta = `Null
+      ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      }
   in
   let runtime = App_runtime.create ~model:(model_of_history history) ~moderator () in
   print_messages (App_runtime.visible_messages_of_history runtime history);

@@ -364,10 +364,7 @@ let value_to_jsonaf (name : string) (value : value) : Jsonaf.t =
 
 let option_of (t : ty) : ty = variant [ "None", TUnit; "Some", t ]
 let json_option_ty : ty = option_of json_ty
-
-let message_ty : ty =
-  record [ "id", TString; "role", TString; "content", TString; "meta", json_ty ]
-;;
+let item_ty : ty = record [ "id", TString; "value", json_ty ]
 
 let tool_desc_ty : ty =
   record [ "name", TString; "description", TString; "input_schema", json_ty ]
@@ -384,7 +381,7 @@ let context_ty : ty =
     [ "session_id", TString
     ; "now_ms", TInt
     ; "phase", TString
-    ; "messages", TArray message_ty
+    ; "items", TArray item_ty
     ; "available_tools", TArray tool_desc_ty
     ; "session_meta", json_ty
     ]
@@ -441,6 +438,119 @@ let json_object_find_field (entries : value array) (key : string) : value option
 
 let mk_json_entry (key : string) (value : value) : value =
   VRecord (Map.of_alist_exn (module String) [ "key", VString key; "value", value ])
+;;
+
+let json_string_value (s : string) : value = VVariant ("String", [ VString s ])
+
+let json_array_value (values : value list) : value =
+  VVariant ("Array", [ VArray (Array.of_list values) ])
+;;
+
+let json_object_value (fields : (string * value) list) : value =
+  VVariant
+    ( "Object"
+    , [ VArray (Array.of_list_map fields ~f:(fun (key, value) -> mk_json_entry key value))
+      ] )
+;;
+
+let expect_record_field_value
+      (name : string)
+      (fields : value String.Map.t)
+      (field : string)
+  : value
+  =
+  match Map.find fields field with
+  | Some value -> value
+  | None -> failwith (Printf.sprintf "%s: expected field %S" name field)
+;;
+
+let expect_record_string_field
+      (name : string)
+      (fields : value String.Map.t)
+      (field : string)
+  : string
+  =
+  expect_record_field_value name fields field |> expect_string (name ^ "." ^ field)
+;;
+
+let expect_record_json_field
+      (name : string)
+      (fields : value String.Map.t)
+      (field : string)
+  : value
+  =
+  expect_record_field_value name fields field |> expect_json (name ^ "." ^ field)
+;;
+
+let expect_item_record (name : string) (v : value) : string * value =
+  let fields = expect_record name v in
+  let id = expect_record_string_field name fields "id" in
+  let item_value = expect_record_json_field name fields "value" in
+  id, item_value
+;;
+
+let string_option_value = function
+  | Some value -> VVariant ("Some", [ VString value ])
+  | None -> VVariant ("None", [])
+;;
+
+let json_string_payload = function
+  | VVariant ("String", [ VString s ]) -> Some s
+  | _ -> None
+;;
+
+let json_field_value (name : string) (json : value) (field : string) : value option =
+  match json_entries_payload name json with
+  | None -> None
+  | Some entries -> json_object_find_field entries field
+;;
+
+let text_values_of_parts (parts : value array) : value array =
+  Array.filter_map parts ~f:(fun part ->
+    json_field_value "Item.text_parts.part" part "text"
+    |> Option.bind ~f:json_string_payload
+    |> Option.map ~f:(fun text -> VString text))
+;;
+
+let output_text_values (output : value) : value array =
+  match json_string_payload output with
+  | Some text -> [| VString text |]
+  | None ->
+    (match json_field_value "Item.text_parts.output" output "parts" with
+     | Some parts_json ->
+       (match json_array_payload "Item.text_parts.output.parts" parts_json with
+        | Some parts -> text_values_of_parts parts
+        | None -> [||])
+     | None -> [||])
+;;
+
+let item_input_text_message_value ~(role : string) ~(text : string) : value =
+  json_object_value
+    [ "type", json_string_value "message"
+    ; "role", json_string_value role
+    ; ( "content"
+      , json_array_value
+          [ json_object_value
+              [ "type", json_string_value "input_text"; "text", json_string_value text ]
+          ] )
+    ]
+;;
+
+let item_output_text_message_value ~(id : string) ~(text : string) : value =
+  json_object_value
+    [ "type", json_string_value "message"
+    ; "role", json_string_value "assistant"
+    ; "id", json_string_value id
+    ; ( "content"
+      , json_array_value
+          [ json_object_value
+              [ "type", json_string_value "output_text"
+              ; "text", json_string_value text
+              ; "annotations", json_array_value []
+              ]
+          ] )
+    ; "status", json_string_value "completed"
+    ]
 ;;
 
 let json_module =
@@ -1206,6 +1316,84 @@ let log_module : builtin_module =
   }
 ;;
 
+let item_module : builtin_module =
+  { name = "Item"
+  ; exports =
+      [ make_binary_builtin
+          "create"
+          (TFun ([ TString; json_ty ], item_ty))
+          (fun id value ->
+             let id = expect_string "Item.create" id in
+             let value = expect_json "Item.create" value in
+             VRecord
+               (Map.of_alist_exn (module String) [ "id", VString id; "value", value ]))
+      ; make_unary_builtin
+          "id"
+          (TFun ([ item_ty ], TString))
+          (fun item ->
+             let id, _ = expect_item_record "Item.id" item in
+             VString id)
+      ; make_unary_builtin
+          "value"
+          (TFun ([ item_ty ], json_ty))
+          (fun item ->
+             let _, value = expect_item_record "Item.value" item in
+             value)
+      ; make_unary_builtin
+          "kind"
+          (TFun ([ item_ty ], option_of TString))
+          (fun item ->
+             let _, value = expect_item_record "Item.kind" item in
+             json_field_value "Item.kind" value "type"
+             |> Option.bind ~f:json_string_payload
+             |> string_option_value)
+      ; make_unary_builtin
+          "role"
+          (TFun ([ item_ty ], option_of TString))
+          (fun item ->
+             let _, value = expect_item_record "Item.role" item in
+             json_field_value "Item.role" value "role"
+             |> Option.bind ~f:json_string_payload
+             |> string_option_value)
+      ; make_unary_builtin
+          "text_parts"
+          (TFun ([ item_ty ], TArray TString))
+          (fun item ->
+             let _, value = expect_item_record "Item.text_parts" item in
+             match json_field_value "Item.text_parts" value "content" with
+             | Some content_json ->
+               (match json_array_payload "Item.text_parts.content" content_json with
+                | Some parts -> VArray (text_values_of_parts parts)
+                | None -> VArray [||])
+             | None ->
+               (match json_field_value "Item.text_parts" value "output" with
+                | Some output -> VArray (output_text_values output)
+                | None -> VArray [||]))
+      ; make_ternary_builtin
+          "input_text_message"
+          (TFun ([ TString; TString; TString ], item_ty))
+          (fun id role text ->
+             let id = expect_string "Item.input_text_message" id in
+             let role = expect_string "Item.input_text_message" role in
+             let text = expect_string "Item.input_text_message" text in
+             VRecord
+               (Map.of_alist_exn
+                  (module String)
+                  [ "id", VString id; "value", item_input_text_message_value ~role ~text ]))
+      ; make_binary_builtin
+          "output_text_message"
+          (TFun ([ TString; TString ], item_ty))
+          (fun id text ->
+             let id = expect_string "Item.output_text_message" id in
+             let text = expect_string "Item.output_text_message" text in
+             VRecord
+               (Map.of_alist_exn
+                  (module String)
+                  [ "id", VString id; "value", item_output_text_message_value ~id ~text ]))
+      ]
+  }
+;;
+
 let turn_module : builtin_module =
   { name = "Turn"
   ; exports =
@@ -1215,14 +1403,30 @@ let turn_module : builtin_module =
           TUnit
           ~op:"Turn.prepend_system"
       ; make_task_unary_perform_builtin
+          "append_item"
+          item_ty
+          TUnit
+          ~op:"Turn.append_message"
+      ; make_task_binary_perform_builtin
+          "replace_item"
+          TString
+          item_ty
+          TUnit
+          ~op:"Turn.replace_message"
+      ; make_task_unary_perform_builtin
+          "delete_item"
+          TString
+          TUnit
+          ~op:"Turn.delete_message"
+      ; make_task_unary_perform_builtin
           "append_message"
-          message_ty
+          item_ty
           TUnit
           ~op:"Turn.append_message"
       ; make_task_binary_perform_builtin
           "replace_message"
           TString
-          message_ty
+          item_ty
           TUnit
           ~op:"Turn.replace_message"
       ; make_task_unary_perform_builtin
@@ -1298,6 +1502,7 @@ let runtime_module : builtin_module =
           "request_compaction"
           TUnit
           ~op:"Runtime.request_compaction"
+      ; make_task_nullary_perform_builtin "request_turn" TUnit ~op:"Runtime.request_turn"
       ; make_task_unary_perform_builtin
           "end_session"
           TString
@@ -1310,5 +1515,12 @@ let runtime_module : builtin_module =
 let core_modules : builtin_module list = modules
 
 let moderator_modules : builtin_module list =
-  [ log_module; turn_module; tool_module; model_module; schedule_module; runtime_module ]
+  [ log_module
+  ; item_module
+  ; turn_module
+  ; tool_module
+  ; model_module
+  ; schedule_module
+  ; runtime_module
+  ]
 ;;

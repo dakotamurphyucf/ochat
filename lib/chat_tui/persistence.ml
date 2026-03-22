@@ -1,5 +1,6 @@
 open Core
 module Fetch = Chat_response.Fetch
+module Value_codec = Chatml.Chatml_value_codec
 module Res_item = Openai.Responses.Item
 module Config = Chat_response.Config
 module Moderator = Session.Moderator_snapshot
@@ -41,22 +42,76 @@ let generic_msg_as_chatmd ?id ~role content =
   Printf.sprintf "<msg role=%S%s>\n%s\n</msg>\n" role id_attr content
 ;;
 
-let moderation_message_as_chatmd (message : Moderator.Message.t) =
-  generic_msg_as_chatmd ~id:message.id ~role:message.role message.content
+let response_item_of_moderator_item (item : Moderator.Item.t) : Res_item.t option =
+  let open Result.Let_syntax in
+  let result =
+    let%bind value = Value_codec.Snapshot.to_value item.value in
+    match Value_codec.value_to_jsonaf_result value with
+    | Error msg -> Error msg
+    | Ok json ->
+      (try Ok (Res_item.t_of_jsonaf json) with
+       | exn -> Error (Exn.to_string exn))
+  in
+  Result.ok result
+;;
+
+let chatmd_of_response_item (item : Res_item.t) : string =
+  match item with
+  | Res_item.Input_message im ->
+    let role = Openai.Responses.Input_message.role_to_string im.role in
+    let content =
+      List.filter_map im.content ~f:(function
+        | Openai.Responses.Input_message.Text { text; _ } -> Some text
+        | _ -> None)
+      |> String.concat ~sep:""
+    in
+    (match role with
+     | "user" -> Printf.sprintf "<user>\n%s\n</user>\n" content
+     | "assistant" -> Printf.sprintf "<assistant>\n%s\n</assistant>\n" content
+     | "tool" -> Printf.sprintf "<tool_response>\n%s\n</tool_response>\n" content
+     | _ -> generic_msg_as_chatmd ~role content)
+  | Res_item.Output_message om ->
+    let text = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" " in
+    generic_msg_as_chatmd ~id:om.id ~role:"assistant" text
+  | Res_item.Function_call fc ->
+    generic_msg_as_chatmd
+      ?id:fc.id
+      ~role:"tool"
+      (Printf.sprintf "%s %s" fc.name fc.arguments)
+  | Res_item.Custom_tool_call tc ->
+    generic_msg_as_chatmd ?id:tc.id ~role:"tool" (Printf.sprintf "%s %s" tc.name tc.input)
+  | Res_item.Function_call_output out ->
+    generic_msg_as_chatmd ?id:out.id ~role:"tool" (to_persisted_string out.output)
+  | Res_item.Custom_tool_call_output out ->
+    generic_msg_as_chatmd ?id:out.id ~role:"tool" (to_persisted_string out.output)
+  | Res_item.Reasoning reasoning ->
+    let text =
+      List.map reasoning.summary ~f:(fun summary -> summary.text)
+      |> String.concat ~sep:" "
+    in
+    generic_msg_as_chatmd ~id:reasoning.id ~role:"assistant" text
+  | Res_item.Web_search_call call ->
+    generic_msg_as_chatmd ~id:call.id ~role:"assistant" "web_search"
+  | Res_item.File_search_call call ->
+    generic_msg_as_chatmd ~id:call.id ~role:"assistant" "file_search"
+;;
+
+let moderation_item_as_chatmd (item : Moderator.Item.t) =
+  match response_item_of_moderator_item item with
+  | Some response_item -> chatmd_of_response_item response_item
+  | None -> generic_msg_as_chatmd ~id:item.id ~role:"developer" "Invalid moderation item"
 ;;
 
 let moderation_replacement_as_chatmd (replacement : Moderator.Overlay.replacement) =
-  let content =
-    Printf.sprintf
-      "Moderator replaced message %S with a synthetic %s message:\n%s"
-      replacement.target_id
-      replacement.message.role
-      replacement.message.content
+  let rendered =
+    match response_item_of_moderator_item replacement.item with
+    | Some response_item -> chatmd_of_response_item response_item
+    | None -> "Invalid moderation item"
   in
   generic_msg_as_chatmd
     ~id:(Printf.sprintf "moderation-replacement-%s" replacement.target_id)
     ~role:"developer"
-    content
+    (Printf.sprintf "Moderator replaced item %S with:\n%s" replacement.target_id rendered)
 ;;
 
 let moderation_deletion_as_chatmd deleted_message_id =
@@ -79,12 +134,10 @@ let moderation_halt_as_chatmd reason =
 ;;
 
 let overlay_as_chatmd (overlay : Moderator.Overlay.t) =
-  let prepended =
-    List.map overlay.prepended_system_messages ~f:moderation_message_as_chatmd
-  in
-  let appended = List.map overlay.appended_messages ~f:moderation_message_as_chatmd in
+  let prepended = List.map overlay.prepended_system_items ~f:moderation_item_as_chatmd in
+  let appended = List.map overlay.appended_items ~f:moderation_item_as_chatmd in
   let replacements = List.map overlay.replacements ~f:moderation_replacement_as_chatmd in
-  let deletions = List.map overlay.deleted_message_ids ~f:moderation_deletion_as_chatmd in
+  let deletions = List.map overlay.deleted_item_ids ~f:moderation_deletion_as_chatmd in
   let halt =
     Option.to_list (Option.map overlay.halted_reason ~f:moderation_halt_as_chatmd)
   in

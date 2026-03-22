@@ -33,7 +33,7 @@ let context ~(phase : string) : L.value =
        [ "session_id", L.VString "session-1"
        ; "now_ms", L.VInt 123
        ; "phase", L.VString phase
-       ; "messages", L.VArray [||]
+       ; "items", L.VArray [||]
        ; "available_tools", L.VArray [||]
        ; "session_meta", json_null
        ])

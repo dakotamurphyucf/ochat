@@ -82,50 +82,43 @@ let jsonaf_of_snapshot ~name (snapshot : Snapshot.t) : (Jsonaf.t, string) result
   | Error msg -> Error (Printf.sprintf "%s: %s" name msg)
 ;;
 
-let persisted_message_of_message (message : Moderation.Message.t)
-  : (Session.Moderator_snapshot.Message.t, string) result
+let persisted_item_of_item (item : Moderation.Item.t)
+  : (Session.Moderator_snapshot.Item.t, string) result
   =
-  Result.map (snapshot_of_jsonaf message.meta) ~f:(fun meta ->
-    Session.Moderator_snapshot.Message.
-      { id = message.id; role = message.role; content = message.content; meta })
+  Result.map (snapshot_of_jsonaf item.value) ~f:(fun value ->
+    Session.Moderator_snapshot.Item.{ id = item.id; value })
 ;;
 
-let message_of_persisted (message : Session.Moderator_snapshot.Message.t)
-  : (Moderation.Message.t, string) result
+let item_of_persisted (item : Session.Moderator_snapshot.Item.t)
+  : (Moderation.Item.t, string) result
   =
   Result.map
-    (jsonaf_of_snapshot ~name:"moderator overlay message meta" message.meta)
-    ~f:(fun meta ->
-      Moderation.Message.create
-        ~id:message.id
-        ~role:message.role
-        ~content:message.content
-        ~meta)
+    (jsonaf_of_snapshot ~name:"moderator overlay item value" item.value)
+    ~f:(fun value -> Moderation.Item.create ~id:item.id ~value)
 ;;
 
 let persisted_overlay_of_overlay (overlay : Moderation.Overlay.t)
   : (Session.Moderator_snapshot.Overlay.t, string) result
   =
   let open Result.Let_syntax in
-  let%bind prepended_system_messages =
-    Result.all
-      (List.map overlay.prepended_system_messages ~f:persisted_message_of_message)
+  let%bind prepended_system_items =
+    Result.all (List.map overlay.prepended_system_items ~f:persisted_item_of_item)
   in
-  let%bind appended_messages =
-    Result.all (List.map overlay.appended_messages ~f:persisted_message_of_message)
+  let%bind appended_items =
+    Result.all (List.map overlay.appended_items ~f:persisted_item_of_item)
   in
   let%bind replacements =
     Result.all
       (List.map overlay.replacements ~f:(fun replacement ->
-         let%map message = persisted_message_of_message replacement.message in
-         Session.Moderator_snapshot.Overlay.{ target_id = replacement.target_id; message }))
+         let%map item = persisted_item_of_item replacement.item in
+         Session.Moderator_snapshot.Overlay.{ target_id = replacement.target_id; item }))
   in
   Ok
     Session.Moderator_snapshot.Overlay.
-      { prepended_system_messages
-      ; appended_messages
+      { prepended_system_items
+      ; appended_items
       ; replacements
-      ; deleted_message_ids = overlay.deleted_message_ids
+      ; deleted_item_ids = overlay.deleted_item_ids
       ; halted_reason = overlay.halted_reason
       }
 ;;
@@ -134,24 +127,24 @@ let overlay_of_persisted (overlay : Session.Moderator_snapshot.Overlay.t)
   : (Moderation.Overlay.t, string) result
   =
   let open Result.Let_syntax in
-  let%bind prepended_system_messages =
-    Result.all (List.map overlay.prepended_system_messages ~f:message_of_persisted)
+  let%bind prepended_system_items =
+    Result.all (List.map overlay.prepended_system_items ~f:item_of_persisted)
   in
-  let%bind appended_messages =
-    Result.all (List.map overlay.appended_messages ~f:message_of_persisted)
+  let%bind appended_items =
+    Result.all (List.map overlay.appended_items ~f:item_of_persisted)
   in
   let%bind replacements =
     Result.all
       (List.map overlay.replacements ~f:(fun replacement ->
-         let%map message = message_of_persisted replacement.message in
-         Moderation.Overlay.{ target_id = replacement.target_id; message }))
+         let%map item = item_of_persisted replacement.item in
+         Moderation.Overlay.{ target_id = replacement.target_id; item }))
   in
   Ok
     Moderation.Overlay.
-      { prepended_system_messages
-      ; appended_messages
+      { prepended_system_items
+      ; appended_items
       ; replacements
-      ; deleted_message_ids = overlay.deleted_message_ids
+      ; deleted_item_ids = overlay.deleted_item_ids
       ; halted_reason = overlay.halted_reason
       }
 ;;
@@ -164,13 +157,13 @@ let overlay_suffix (id : string) : int option =
 ;;
 
 let max_overlay_message_id (overlay : Moderation.Overlay.t) : int =
-  let messages =
-    overlay.prepended_system_messages
-    @ overlay.appended_messages
-    @ List.map overlay.replacements ~f:(fun replacement -> replacement.message)
+  let items =
+    overlay.prepended_system_items
+    @ overlay.appended_items
+    @ List.map overlay.replacements ~f:(fun replacement -> replacement.item)
   in
-  List.fold messages ~init:0 ~f:(fun acc message ->
-    match overlay_suffix message.id with
+  List.fold items ~init:0 ~f:(fun acc item ->
+    match overlay_suffix item.id with
     | None -> acc
     | Some value -> Int.max acc value)
 ;;
@@ -239,10 +232,10 @@ let create
     }
 ;;
 
-let next_overlay_message (t : t) ~(role : string) ~(content : string) =
+let next_overlay_item (t : t) ~(role : Res.Input_message.role) ~(content : string) =
   let id = Printf.sprintf "moderation-overlay-%d" t.next_overlay_message_id in
   t.next_overlay_message_id <- t.next_overlay_message_id + 1;
-  Moderation.Message.create ~id ~role ~content ~meta:`Null
+  Moderation.Item.text_input_message ~id ~role ~text:content
 ;;
 
 let update_replacements
@@ -257,24 +250,23 @@ let update_replacements
 let apply_overlay_op (t : t) (op : Moderation.Overlay.op) : unit =
   match op with
   | Moderation.Overlay.Prepend_system text ->
-    let message = next_overlay_message t ~role:"system" ~content:text in
+    let item = next_overlay_item t ~role:Res.Input_message.System ~content:text in
     t.overlay
     <- { t.overlay with
-         prepended_system_messages = t.overlay.prepended_system_messages @ [ message ]
+         prepended_system_items = t.overlay.prepended_system_items @ [ item ]
        }
-  | Append_message message ->
-    t.overlay
-    <- { t.overlay with appended_messages = t.overlay.appended_messages @ [ message ] }
-  | Replace_message replacement ->
+  | Append_item item ->
+    t.overlay <- { t.overlay with appended_items = t.overlay.appended_items @ [ item ] }
+  | Replace_item replacement ->
     t.overlay
     <- { t.overlay with
          replacements = update_replacements t.overlay.replacements replacement
        }
-  | Delete_message id ->
-    if not (List.mem t.overlay.deleted_message_ids id ~equal:String.equal)
+  | Delete_item id ->
+    if not (List.mem t.overlay.deleted_item_ids id ~equal:String.equal)
     then
       t.overlay
-      <- { t.overlay with deleted_message_ids = t.overlay.deleted_message_ids @ [ id ] }
+      <- { t.overlay with deleted_item_ids = t.overlay.deleted_item_ids @ [ id ] }
   | Halt reason -> t.overlay <- { t.overlay with halted_reason = Some reason }
 ;;
 
@@ -400,33 +392,16 @@ let drain_internal_events
     ~acc:[]
 ;;
 
-let effective_messages (t : t) (history : Res.Item.t list) : Moderation.Message.t list =
-  let projection, messages = Moderation.Projection.project_history t.projection history in
+let effective_items (t : t) (history : Res.Item.t list) : Moderation.Item.t list =
+  let projection, items = Moderation.Projection.project_history t.projection history in
   t.projection <- projection;
-  Moderation.Overlay.apply t.overlay messages
+  Moderation.Overlay.apply t.overlay items
 ;;
 
-let input_role_of_string (role : string) : Res.Input_message.role =
-  match String.lowercase role with
-  | "system" -> Res.Input_message.System
-  | "user" -> Res.Input_message.User
-  | "assistant" -> Res.Input_message.Assistant
-  | "developer" -> Res.Input_message.Developer
-  | _ -> Res.Input_message.Assistant
-;;
-
-let input_item_of_message (m : Moderation.Message.t) : Res.Item.t =
-  (* NOTE: adjust fields if your Openai.Responses.Input_message.Text record differs. *)
-  let role = input_role_of_string m.role in
-  let _type =
-    match role with
-    | Res.Input_message.System -> "input_text"
-    | Res.Input_message.User -> "input_text"
-    | Res.Input_message.Assistant -> "output_text"
-    | Res.Input_message.Developer -> "input_text"
-  in
-  let content = [ Res.Input_message.Text { text = m.content; _type } ] in
-  Res.Item.Input_message { role; content; _type = "message" }
+let effective_history (t : t) (history : Res.Item.t list)
+  : (Res.Item.t list, string) result
+  =
+  Result.all (List.map (effective_items t history) ~f:Moderation.Item.to_response_item)
 ;;
 
 let snapshot (t : t) : (Session.Moderator_snapshot.t, string) result =
@@ -447,4 +422,10 @@ let snapshot (t : t) : (Session.Moderator_snapshot.t, string) result =
     ; halted = Runtime.is_halted t.runtime
     ; overlay
     }
+;;
+
+let enqueue_internal_event (t : t) (event : Chatml.Chatml_lang.value)
+  : (unit, string) result
+  =
+  Runtime.enqueue_internal_event t.runtime event
 ;;

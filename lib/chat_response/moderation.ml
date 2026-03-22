@@ -59,40 +59,52 @@ module Phase = struct
   ;;
 end
 
-module Message = struct
+module Item = struct
   type t =
     { id : string
-    ; role : string
-    ; content : string
-    ; meta : Jsonaf.t
+    ; value : Jsonaf.t
     }
   [@@deriving sexp]
 
-  let create ~id ~role ~content ~meta = { id; role; content; meta }
+  let create ~id ~value = { id; value }
 
   let of_value (value : Lang.value) : (t, string) result =
     let open Result.Let_syntax in
     match value with
     | Lang.VRecord fields ->
-      let%bind id = Value_codec.expect_record_field "message" fields "id" in
-      let%bind role = Value_codec.expect_record_field "message" fields "role" in
-      let%bind content = Value_codec.expect_record_field "message" fields "content" in
-      let%bind meta = Value_codec.expect_record_field "message" fields "meta" in
-      let%bind id = Value_codec.expect_string "message.id" id in
-      let%bind role = Value_codec.expect_string "message.role" role in
-      let%bind content = Value_codec.expect_string "message.content" content in
-      let%bind meta = jsonaf_of_lang_value ~name:"message.meta" meta in
-      Ok { id; role; content; meta }
-    | _ -> Error "message: expected record value"
+      let%bind id = Value_codec.expect_record_field "item" fields "id" in
+      let%bind item_value = Value_codec.expect_record_field "item" fields "value" in
+      let%bind id = Value_codec.expect_string "item.id" id in
+      let%bind item_value = jsonaf_of_lang_value ~name:"item.value" item_value in
+      Ok { id; value = item_value }
+    | _ -> Error "item: expected record value"
   ;;
 
   let to_value (t : t) : Lang.value =
-    record_value
-      [ "id", Lang.VString t.id
-      ; "role", Lang.VString t.role
-      ; "content", Lang.VString t.content
-      ; "meta", lang_value_of_jsonaf t.meta
-      ]
+    record_value [ "id", Lang.VString t.id; "value", lang_value_of_jsonaf t.value ]
+  ;;
+
+  let of_response_item ~id (item : Res.Item.t) = { id; value = Res.Item.jsonaf_of_t item }
+
+  let to_response_item (t : t) : (Res.Item.t, string) result =
+    try Ok (Res.Item.t_of_jsonaf t.value) with
+    | exn ->
+      Error
+        (Printf.sprintf
+           "Failed to decode moderator item %S as OpenAI response item: %s"
+           t.id
+           (Exn.to_string exn))
+  ;;
+
+  let text_input_message ~id ~role ~text =
+    let item =
+      Res.Item.Input_message
+        { role
+        ; content = [ Res.Input_message.Text { text; _type = "input_text" } ]
+        ; _type = "message"
+        }
+    in
+    of_response_item ~id item
   ;;
 end
 
@@ -274,7 +286,7 @@ module Context = struct
     { session_id : string
     ; now_ms : int
     ; phase : Phase.t
-    ; messages : Message.t list
+    ; items : Item.t list
     ; available_tools : Tool_desc.t list
     ; session_meta : Jsonaf.t
     }
@@ -285,7 +297,7 @@ module Context = struct
       [ "session_id", Lang.VString t.session_id
       ; "now_ms", Lang.VInt t.now_ms
       ; "phase", Lang.VString (Phase.to_string t.phase)
-      ; "messages", Lang.VArray (Array.of_list_map t.messages ~f:Message.to_value)
+      ; "items", Lang.VArray (Array.of_list_map t.items ~f:Item.to_value)
       ; ( "available_tools"
         , Lang.VArray (Array.of_list_map t.available_tools ~f:Tool_desc.to_value) )
       ; "session_meta", lang_value_of_jsonaf t.session_meta
@@ -298,7 +310,7 @@ module Event = struct
     | Session_start
     | Session_resume
     | Turn_start
-    | Message_appended of Message.t
+    | Item_appended of Item.t
     | Pre_tool_call of Tool_call.t
     | Post_tool_response of Tool_result.t
     | Turn_end
@@ -309,7 +321,7 @@ module Event = struct
     | Session_start -> Phase.Session_start
     | Session_resume -> Phase.Session_resume
     | Turn_start -> Phase.Turn_start
-    | Message_appended _ -> Phase.Message_appended
+    | Item_appended _ -> Phase.Message_appended
     | Pre_tool_call _ -> Phase.Pre_tool_call
     | Post_tool_response _ -> Phase.Post_tool_response
     | Turn_end -> Phase.Turn_end
@@ -321,8 +333,7 @@ module Event = struct
     | Session_start -> Lang.VVariant ("Session_start", [])
     | Session_resume -> Lang.VVariant ("Session_resume", [])
     | Turn_start -> Lang.VVariant ("Turn_start", [])
-    | Message_appended message ->
-      Lang.VVariant ("Message_appended", [ Message.to_value message ])
+    | Item_appended item -> Lang.VVariant ("Item_appended", [ Item.to_value item ])
     | Pre_tool_call call -> Lang.VVariant ("Pre_tool_call", [ Tool_call.to_value call ])
     | Post_tool_response result ->
       Lang.VVariant ("Post_tool_response", [ Tool_result.to_value result ])
@@ -346,50 +357,6 @@ let natural_id_of_item (item : Res.Item.t) : string option =
   | Res.Item.File_search_call call -> Some call.id
   | Res.Item.Reasoning reasoning -> Some reasoning.id
   | Res.Item.Input_message _ -> None
-;;
-
-let render_input_content_item (item : Res.Input_message.content_item) : string =
-  match item with
-  | Res.Input_message.Text { text; _ } -> text
-  | Res.Input_message.Image { image_url; _ } ->
-    Printf.sprintf "<image src=\"%s\" />" image_url
-;;
-
-let render_output_content (content : Res.Output_message.content list) : string =
-  String.concat ~sep:"\n" (List.map content ~f:(fun part -> part.text))
-;;
-
-let string_of_input_role (role : Res.Input_message.role) : string =
-  match role with
-  | Res.Input_message.Assistant -> "assistant"
-  | Res.Input_message.User -> "user"
-  | Res.Input_message.System -> "system"
-  | Res.Input_message.Developer -> "developer"
-;;
-
-let render_file_search (call : Res.File_search_call.t) : string =
-  match call.queries with
-  | [] -> "file_search"
-  | queries -> "file_search: " ^ String.concat ~sep:", " queries
-;;
-
-let project_item_content (item : Res.Item.t) : string * string =
-  match item with
-  | Res.Item.Input_message msg ->
-    ( string_of_input_role msg.role
-    , String.concat ~sep:"\n" (List.map msg.content ~f:render_input_content_item) )
-  | Res.Item.Output_message msg -> "assistant", render_output_content msg.content
-  | Res.Item.Function_call call ->
-    "assistant", Printf.sprintf "%s %s" call.name call.arguments
-  | Res.Item.Custom_tool_call call ->
-    "assistant", Printf.sprintf "%s %s" call.name call.input
-  | Res.Item.Function_call_output out -> "tool", render_tool_output out.output
-  | Res.Item.Custom_tool_call_output out -> "tool", render_tool_output out.output
-  | Res.Item.Web_search_call call -> "assistant", Printf.sprintf "web_search %s" call.id
-  | Res.Item.File_search_call call -> "assistant", render_file_search call
-  | Res.Item.Reasoning reasoning ->
-    let summary = List.map reasoning.summary ~f:(fun part -> part.text) in
-    "assistant", String.concat ~sep:"\n" summary
 ;;
 
 let generated_id (next_generated_id : int) : string =
@@ -416,31 +383,30 @@ module Projection = struct
          id, t.next_generated_id + 1)
   ;;
 
-  let project_at (t : t) ~(position : int) (item : Res.Item.t) : t * Message.t * string =
+  let project_at (t : t) ~(position : int) (item : Res.Item.t) : t * Item.t * string =
     let id, next_generated_id = resolved_item_id t ~position item in
-    let role, content = project_item_content item in
-    let message = Message.create ~id ~role ~content ~meta:(Res.Item.jsonaf_of_t item) in
-    { t with next_generated_id }, message, id
+    let projected_item = Item.of_response_item ~id item in
+    { t with next_generated_id }, projected_item, id
   ;;
 
-  let project_item (t : t) (item : Res.Item.t) : t * Message.t =
+  let project_item (t : t) (item : Res.Item.t) : t * Item.t =
     let position = List.length t.item_ids in
-    let t, message, id = project_at t ~position item in
-    { t with item_ids = t.item_ids @ [ id ] }, message
+    let t, projected_item, id = project_at t ~position item in
+    { t with item_ids = t.item_ids @ [ id ] }, projected_item
   ;;
 
-  let project_history (t : t) (items : Res.Item.t list) : t * Message.t list =
+  let project_history (t : t) (items : Res.Item.t list) : t * Item.t list =
     let next_generated_id = ref t.next_generated_id in
     let ids_rev = ref [] in
-    let messages_rev = ref [] in
+    let items_rev = ref [] in
     List.iteri items ~f:(fun position item ->
       let snapshot = { item_ids = t.item_ids; next_generated_id = !next_generated_id } in
-      let snapshot, message, id = project_at snapshot ~position item in
+      let snapshot, projected_item, id = project_at snapshot ~position item in
       next_generated_id := snapshot.next_generated_id;
       ids_rev := id :: !ids_rev;
-      messages_rev := message :: !messages_rev);
+      items_rev := projected_item :: !items_rev);
     ( { item_ids = List.rev !ids_rev; next_generated_id = !next_generated_id }
-    , List.rev !messages_rev )
+    , List.rev !items_rev )
   ;;
 
   let project_context
@@ -453,10 +419,10 @@ module Projection = struct
         ~session_meta
     : t * Context.t
     =
-    let projection, messages = project_history projection history in
+    let projection, items = project_history projection history in
     let available_tools = List.map available_tools ~f:Tool_desc.of_request_tool in
     let context =
-      Context.{ session_id; now_ms; phase; messages; available_tools; session_meta }
+      Context.{ session_id; now_ms; phase; items; available_tools; session_meta }
     in
     projection, context
   ;;
@@ -465,32 +431,32 @@ end
 module Overlay = struct
   type replacement =
     { target_id : string
-    ; message : Message.t
+    ; item : Item.t
     }
   [@@deriving sexp]
 
   type op =
     | Prepend_system of string
-    | Append_message of Message.t
-    | Replace_message of replacement
-    | Delete_message of string
+    | Append_item of Item.t
+    | Replace_item of replacement
+    | Delete_item of string
     | Halt of string
   [@@deriving sexp]
 
   type t =
-    { prepended_system_messages : Message.t list
-    ; appended_messages : Message.t list
+    { prepended_system_items : Item.t list
+    ; appended_items : Item.t list
     ; replacements : replacement list
-    ; deleted_message_ids : string list
+    ; deleted_item_ids : string list
     ; halted_reason : string option [@jsonaf.option]
     }
   [@@deriving sexp]
 
   let empty =
-    { prepended_system_messages = []
-    ; appended_messages = []
+    { prepended_system_items = []
+    ; appended_items = []
     ; replacements = []
-    ; deleted_message_ids = []
+    ; deleted_item_ids = []
     ; halted_reason = None
     }
   ;;
@@ -498,30 +464,29 @@ module Overlay = struct
   let of_runtime_turn_effect (turn_effect : Runtime.turn_effect) : (op, string) result =
     match turn_effect with
     | Prepend_system text -> Ok (Prepend_system text)
-    | Append_message message ->
-      Result.map (Message.of_value message) ~f:(fun message -> Append_message message)
-    | Replace_message (target_id, message) ->
-      Result.map (Message.of_value message) ~f:(fun message ->
-        Replace_message { target_id; message })
-    | Delete_message id -> Ok (Delete_message id)
+    | Append_message item ->
+      Result.map (Item.of_value item) ~f:(fun item -> Append_item item)
+    | Replace_message (target_id, item) ->
+      Result.map (Item.of_value item) ~f:(fun item -> Replace_item { target_id; item })
+    | Delete_message id -> Ok (Delete_item id)
     | Halt reason -> Ok (Halt reason)
   ;;
 
-  let replacement_map (replacements : replacement list) : Message.t String.Map.t =
+  let replacement_map (replacements : replacement list) : Item.t String.Map.t =
     List.fold replacements ~init:String.Map.empty ~f:(fun acc replacement ->
-      Map.set acc ~key:replacement.target_id ~data:replacement.message)
+      Map.set acc ~key:replacement.target_id ~data:replacement.item)
   ;;
 
-  let apply (t : t) (messages : Message.t list) : Message.t list =
-    let deleted = Hash_set.of_list (module String) t.deleted_message_ids in
+  let apply (t : t) (items : Item.t list) : Item.t list =
+    let deleted = Hash_set.of_list (module String) t.deleted_item_ids in
     let replacements = replacement_map t.replacements in
     let canonical =
-      List.filter_map messages ~f:(fun message ->
-        if Hash_set.mem deleted message.id
+      List.filter_map items ~f:(fun item ->
+        if Hash_set.mem deleted item.id
         then None
-        else Some (Map.find replacements message.id |> Option.value ~default:message))
+        else Some (Map.find replacements item.id |> Option.value ~default:item))
     in
-    t.prepended_system_messages @ canonical @ t.appended_messages
+    t.prepended_system_items @ canonical @ t.appended_items
   ;;
 end
 
@@ -549,6 +514,7 @@ end
 module Runtime_request = struct
   type t =
     | Request_compaction
+    | Request_turn
     | End_session of string
   [@@deriving sexp, compare]
 end
@@ -593,6 +559,11 @@ module Outcome = struct
             { acc with
               runtime_requests =
                 Runtime_request.Request_compaction :: acc.runtime_requests
+            }
+        | Runtime.Request_turn ->
+          Ok
+            { acc with
+              runtime_requests = Runtime_request.Request_turn :: acc.runtime_requests
             }
         | Runtime.End_session reason ->
           Ok

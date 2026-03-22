@@ -38,7 +38,14 @@ val of_modules : Chatml_builtin_spec.builtin_module list -> surface
     outside moderator runtimes. *)
 val core_surface : surface
 
-(** A richer surface intended for moderator runtimes.  This layers the
-    capability modules and structural type aliases described in the
-    moderator-runtime design on top of {!core_surface}. *)
+(** A richer surface intended for moderator runtimes.
+
+    This layers the moderator capability modules on top of
+    {!core_surface}, including:
+
+    - [Item] helpers for structured transcript items,
+    - [Turn] item mutation helpers such as [append_item],
+      [replace_item], and [delete_item],
+    - and the structural aliases used by moderator entrypoints such as
+      [item] and [context]. *)
 val moderator_surface : surface

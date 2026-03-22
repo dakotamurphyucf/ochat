@@ -75,15 +75,22 @@ val modules : builtin_module list
 val core_modules : builtin_module list
 
 (** Capability modules intended for moderator runtimes, such as
-    [Log], [Turn], [Tool], [Model], [Schedule], and [Runtime]. *)
+    [Log], [Item], [Turn], [Tool], [Model], [Schedule], and [Runtime].
+
+    The [Item] module provides helpers for inspecting and constructing
+    structured transcript items, while [Turn] exposes item-oriented
+    mutation helpers such as [append_item], [replace_item], and
+    [delete_item] alongside legacy message aliases. *)
 val moderator_modules : builtin_module list
 
 (** Structural builtin type representing JSON values. *)
 val json_ty : ty
 
-(** Structural moderator-runtime record types used for builtin type
-    aliases. *)
-val message_ty : ty
+(** Structural moderator-runtime record type for transcript items.
+
+    Moderator scripts receive [ctx.items] values of this shape and can
+    pass them back through [Turn.*] mutation helpers. *)
+val item_ty : ty
 
 val tool_desc_ty : ty
 val tool_call_ty : ty

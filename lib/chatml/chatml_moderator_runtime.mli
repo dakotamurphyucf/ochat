@@ -30,7 +30,12 @@ type log_level =
   | Error_level
 
 (** Structured local turn mutations used by the default [Turn.*]
-    handlers. *)
+    handlers.
+
+    The public ChatML moderator surface prefers item-oriented names such
+    as [Turn.append_item], [Turn.replace_item], and [Turn.delete_item].
+    The legacy [*_message] builtin names remain as aliases and decode to
+    these same runtime constructors. *)
 type turn_effect =
   | Prepend_system of string
   | Append_message of value
@@ -53,6 +58,7 @@ type local_effect =
   | Tool_moderation_effect of tool_moderation
   | Emit_internal_event of value
   | Request_compaction
+  | Request_turn
   | End_session of string
 
 (** Runtime classification of task operations. *)
@@ -100,6 +106,7 @@ type default_handlers =
   ; on_schedule_cancel : session -> id:string -> (unit, string) result
   ; on_request_compaction : session -> (unit, string) result
   ; on_end_session : session -> reason:string -> (unit, string) result
+  ; on_request_turn : session -> (unit, string) result
   }
 
 (** Render a log level using the names expected by human-facing
@@ -201,3 +208,8 @@ val request_session_end : session -> reason:string -> (unit, string) result
     - commits buffered state/effects on success,
     - or rolls back local transactional buffers on failure. *)
 val handle_event : session -> context:value -> event:value -> (unit, string) result
+
+(** Enqueue an internal event for later delivery via the host's internal-event
+    replay mechanism. Unlike [Runtime.emit], this is host-driven and does not
+    require an active handler execution. *)
+val enqueue_internal_event : session -> value -> (unit, string) result

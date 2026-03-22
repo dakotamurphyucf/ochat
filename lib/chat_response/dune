@@ -8,6 +8,8 @@
   ctx
   driver
   in_memory_stream
+  model_executor
+  runtime_semantics
   fetch
   moderation
   moderator_manager

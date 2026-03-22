@@ -667,6 +667,21 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name chat_response_moderator_executor_test)
+ (modules chat_response_moderator_executor_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_response
+  chatmd
+  chatml
+  chatml_builtin_modules
+  ochat.session)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
  (name chat_response_in_memory_stream_test)
  (modules chat_response_in_memory_stream_test)
  (libraries core expect_test_helpers_core chat_response chatmd ochat.session)

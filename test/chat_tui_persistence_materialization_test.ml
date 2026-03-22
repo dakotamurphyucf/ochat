@@ -4,6 +4,7 @@ module Config = Chat_response.Config
 module Converter = Chat_response.Converter
 module Ctx = Chat_response.Ctx
 module Res = Openai.Responses
+module Value_codec = Chatml.Chatml_value_codec
 
 let stub_run_agent ?prompt_dir:_ ?session_id:_ ~ctx:_ _prompt _items = "DUMMY"
 
@@ -36,6 +37,13 @@ let summarize_items items =
     | item -> [%sexp ("other" : string), (Res.Item.sexp_of_t item : Sexp.t)])
 ;;
 
+let snapshot_of_item (item : Res.Item.t) : Session.Snapshot.t =
+  let value = Value_codec.jsonaf_to_value (Res.Item.jsonaf_of_t item) in
+  match Value_codec.Snapshot.of_value value with
+  | Ok snapshot -> snapshot
+  | Error msg -> failwith msg
+;;
+
 let%expect_test "persist_session materializes synthetic moderator messages" =
   let tmp_dir = temp_dir "persist_materialized_" in
   Eio_main.run
@@ -48,14 +56,26 @@ let%expect_test "persist_session materializes synthetic moderator messages" =
   let overlay =
     Session.Moderator_snapshot.Overlay.
       { empty with
-        appended_messages =
-          [ { Session.Moderator_snapshot.Message.id = "moderation-overlay-1"
-            ; role = "assistant"
-            ; content = "synthetic moderation output"
-            ; meta = Session.Snapshot.Unit
+        appended_items =
+          [ { Session.Moderator_snapshot.Item.id = "moderation-overlay-1"
+            ; value =
+                snapshot_of_item
+                  (Res.Item.Output_message
+                     { role = Res.Output_message.Assistant
+                     ; id = "moderation-overlay-1"
+                     ; content =
+                         [ Res.Output_message.
+                             { annotations = []
+                             ; text = "synthetic moderation output"
+                             ; _type = "output_text"
+                             }
+                         ]
+                     ; status = "completed"
+                     ; _type = "message"
+                     })
             }
           ]
-      ; deleted_message_ids = [ "msg-1" ]
+      ; deleted_item_ids = [ "msg-1" ]
       ; halted_reason = Some "done"
       }
   in

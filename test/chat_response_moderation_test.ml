@@ -24,6 +24,59 @@ let output_text (text : string) : Res.Output_message.content =
   { Res.Output_message.annotations = []; text; _type = "output_text" }
 ;;
 
+let printable_item (item : Moderation.Item.t) : string =
+  let response_item = ok_or_fail (Moderation.Item.to_response_item item) in
+  match response_item with
+  | Res.Item.Input_message msg ->
+    let role = Res.Input_message.role_to_string msg.role in
+    let content =
+      List.filter_map msg.content ~f:(function
+        | Res.Input_message.Text { text; _ } -> Some text
+        | Res.Input_message.Image { image_url; _ } ->
+          Some (Printf.sprintf "<image src=\"%s\" />" image_url))
+      |> String.concat ~sep:"\n"
+    in
+    Printf.sprintf "%s %s %S" item.id role content
+  | Res.Item.Output_message msg ->
+    let content =
+      List.map msg.content ~f:(fun part -> part.text) |> String.concat ~sep:"\n"
+    in
+    Printf.sprintf "%s assistant %S" item.id content
+  | Res.Item.Function_call call ->
+    Printf.sprintf
+      "%s assistant %S"
+      item.id
+      (Printf.sprintf "%s %s" call.name call.arguments)
+  | Res.Item.Custom_tool_call call ->
+    Printf.sprintf "%s assistant %S" item.id (Printf.sprintf "%s %s" call.name call.input)
+  | Res.Item.Function_call_output out ->
+    let content =
+      match out.output with
+      | Res.Tool_output.Output.Text text -> text
+      | Content parts ->
+        List.map parts ~f:(function
+          | Res.Tool_output.Output_part.Input_text { text } -> text
+          | Input_image { image_url; _ } ->
+            Printf.sprintf "<image src=\"%s\" />" image_url)
+        |> String.concat ~sep:"\n"
+    in
+    Printf.sprintf "%s tool %S" item.id content
+  | Res.Item.Custom_tool_call_output out ->
+    let content =
+      match out.output with
+      | Res.Tool_output.Output.Text text -> text
+      | Content parts ->
+        List.map parts ~f:(function
+          | Res.Tool_output.Output_part.Input_text { text } -> text
+          | Input_image { image_url; _ } ->
+            Printf.sprintf "<image src=\"%s\" />" image_url)
+        |> String.concat ~sep:"\n"
+    in
+    Printf.sprintf "%s tool %S" item.id content
+  | other ->
+    Printf.sprintf "%s json %S" item.id (Jsonaf.to_string (Res.Item.jsonaf_of_t other))
+;;
+
 let test_context ~(phase : string) : Lang.value =
   let session_meta = `Null |> Chatml.Chatml_value_codec.jsonaf_to_value in
   Lang.VRecord
@@ -32,7 +85,7 @@ let test_context ~(phase : string) : Lang.value =
        [ "session_id", Lang.VString "session-1"
        ; "now_ms", Lang.VInt 123
        ; "phase", Lang.VString phase
-       ; "messages", Lang.VArray [||]
+       ; "items", Lang.VArray [||]
        ; "available_tools", Lang.VArray [||]
        ; "session_meta", session_meta
        ])
@@ -48,9 +101,17 @@ let compile_session ~handlers (source : string) : Runtime.session =
        ~entrypoints:{ initial_state_name = "initial_state"; on_event_name = "on_event" })
 ;;
 
-let print_messages (messages : Moderation.Message.t list) =
-  List.iter messages ~f:(fun message ->
-    print_endline (Printf.sprintf "%s %s %S" message.id message.role message.content))
+let print_items (items : Moderation.Item.t list) =
+  List.iter items ~f:(fun item -> print_endline (printable_item item))
+;;
+
+let overlay_op_name (op : Moderation.Overlay.op) : string =
+  match op with
+  | Prepend_system _ -> "prepend_system"
+  | Append_item _ -> "append_item"
+  | Replace_item _ -> "replace_item"
+  | Delete_item _ -> "delete_item"
+  | Halt _ -> "halt"
 ;;
 
 let%expect_test "projection preserves stable host ids" =
@@ -84,11 +145,11 @@ let%expect_test "projection preserves stable host ids" =
         }
     ]
   in
-  let projection, messages =
+  let projection, items =
     Moderation.Projection.project_history Moderation.Projection.empty history
   in
   print_s [%sexp (projection : Moderation.Projection.t)];
-  print_messages messages;
+  print_items items;
   let history =
     history
     @ [ Res.Item.Input_message
@@ -98,9 +159,9 @@ let%expect_test "projection preserves stable host ids" =
           }
       ]
   in
-  let projection, messages = Moderation.Projection.project_history projection history in
+  let projection, items = Moderation.Projection.project_history projection history in
   print_s [%sexp (projection : Moderation.Projection.t)];
-  print_messages messages;
+  print_items items;
   let _, context =
     Moderation.Projection.project_context
       ~projection
@@ -158,30 +219,33 @@ let%expect_test "projection preserves stable host ids" =
 ;;
 
 let%expect_test "decode committed local effects into structured moderation outcome" =
-  let appended_message =
-    Moderation.Message.create
+  let appended_item =
+    Moderation.Item.of_response_item
       ~id:"host-synth-1"
-      ~role:"assistant"
-      ~content:"Synthetic"
-      ~meta:`Null
+      (Res.Item.Output_message
+         { role = Res.Output_message.Assistant
+         ; id = "host-synth-1"
+         ; content = [ output_text "Synthetic" ]
+         ; status = "completed"
+         ; _type = "message"
+         })
   in
   let effects =
     [ { Lang.op = "Turn.prepend_system"; args = [ Lang.VString "policy" ] }
-    ; { op = "Turn.append_message"
-      ; args = [ Moderation.Message.to_value appended_message ]
-      }
+    ; { op = "Turn.append_message"; args = [ Moderation.Item.to_value appended_item ] }
     ; { op = "Tool.rewrite_args"
       ; args =
           [ Chatml.Chatml_value_codec.jsonaf_to_value (`Object [ "mode", `String "safe" ])
           ]
       }
     ; { op = "Runtime.request_compaction"; args = [] }
+    ; { op = "Runtime.request_turn"; args = [] }
     ; { op = "Runtime.emit"; args = [ Lang.VVariant ("Ping", []) ] }
     ]
   in
   let decoded = ok_or_fail (Runtime.decode_local_effects effects) in
   let outcome = ok_or_fail (Moderation.Outcome.of_runtime_effects decoded) in
-  print_s [%sexp (outcome.overlay_ops : Moderation.Overlay.op list)];
+  print_s [%sexp (List.map outcome.overlay_ops ~f:overlay_op_name : string list)];
   print_s [%sexp (outcome.tool_moderation : Moderation.Tool_moderation.t option)];
   print_s [%sexp (outcome.runtime_requests : Moderation.Runtime_request.t list)];
   print_endline ("emitted=" ^ show_values outcome.emitted_events);
@@ -197,11 +261,9 @@ let%expect_test "decode committed local effects into structured moderation outco
    | Error msg -> print_endline msg);
   [%expect
     {|
-    ((Prepend_system policy)
-     (Append_message
-      ((id host-synth-1) (role assistant) (content Synthetic) (meta Null))))
+    (prepend_system append_item)
     ((Rewrite_args (Object ((mode (String safe))))))
-    (Request_compaction)
+    (Request_compaction Request_turn)
     emitted=[`Ping]
     Expected at most one tool moderation action for a single host event.
     |}]

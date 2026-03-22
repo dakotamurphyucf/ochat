@@ -15,7 +15,7 @@ Ochat tries hard to ensure the model sees exactly what’s in your ChatMD docume
 
 - **HTML comments are stripped**: `<!-- ... -->` is removed before parsing and never reaches the model.
 - **`<import/>` expands**: selected `<import src="..."/>` directives are replaced with the contents of the referenced file *at parse time*.
-- **`<script/>` stays host-managed**: top-level moderation scripts are parsed and validated, but they are not converted into model-visible request history.
+- **`<script/>` stays host-managed**: top-level moderation scripts are parsed, validated, and executed by the host. They are not converted into model-visible request history. Moderation can request another turn (`Runtime.request_turn`) and can run host-registered model recipes via `Model.call` / `Model.spawn` (with spawned-job completion reinjected as internal events).
 - **RAW blocks disable parsing**: `RAW| ... |RAW` is treated as literal text (no tag parsing inside).
 - **Optional meta-refine preprocessing**: if enabled, the prompt may be rewritten before parsing (see “Meta-refine” below).
 
@@ -223,13 +223,67 @@ Built-in drivers currently emit:
 - `session_start` for new moderated sessions,
 - `session_resume` when restoring a persisted moderator snapshot,
 - `turn_start` before each model request,
+- `message_appended` after a canonical transcript item is appended during the
+  streamed runtime,
 - `pre_tool_call` before a tool executes,
 - `post_tool_response` after a tool output item is produced,
 - `turn_end` after a streamed turn completes,
 - `internal_event` while replaying queued moderator events FIFO.
 
-`message_appended` is part of the shared host vocabulary, but the shipped
-drivers do not currently emit it.
+### 3.5.1 Runtime requests (host-visible)
+
+Moderator scripts can emit host-visible runtime requests:
+
+- `Runtime.request_turn()` requests that the host run **one more ordinary model turn** after the current turn completes.
+  - It is interpreted after `turn_end` handling finishes.
+  - Multiple requests collapse to a single continuation decision.
+  - `Runtime.end_session(...)` overrides `request_turn`.
+- `Runtime.request_compaction()` requests that the embedding compact history (if supported).
+  - This request does not itself force another model turn.
+- `Runtime.end_session(reason)` requests session termination.
+
+The shared drivers interpret these requests through an explicit runtime-semantics policy layer.
+
+
+### 3.5.2 Model recipes (`Model.call` / `Model.spawn`)
+
+Moderator scripts can call host-registered model recipes:
+
+- `Model.call(recipe_name, payload_json)` runs a host-defined recipe and returns structured JSON.
+- `Model.spawn(recipe_name, payload_json)` starts a background job and returns a stable job id immediately.
+
+Spawned model jobs deliver completion back to the moderator as internal events, using stable v1 tags:
+
+- `Model_job_succeeded(job_id, recipe_name, result_json)`
+- `Model_job_failed(job_id, recipe_name, message)`
+
+Note: the initial implementation may track spawned jobs in memory only; in-flight jobs are not durably persisted across process restarts.
+
+Moderator scripts receive `ctx.items`, where each item has the structural
+shape:
+
+```ocaml
+type item =
+  { id : string
+  ; value : json
+  }
+```
+
+The moderator surface also installs an `Item` helper module for common
+structured-item operations:
+
+- `Item.create(id, value)`
+- `Item.id(item)`
+- `Item.value(item)`
+- `Item.kind(item)`
+- `Item.role(item)`
+- `Item.text_parts(item)`
+- `Item.input_text_message(id, role, text)`
+- `Item.output_text_message(id, text)`
+
+`Turn.append_item`, `Turn.replace_item`, and `Turn.delete_item` are the
+preferred item-oriented mutation names. The older `*_message` names remain as
+aliases.
 
 ### 3.6 Overlay, tool moderation, and persistence semantics
 
@@ -237,9 +291,9 @@ Moderator scripts do not rewrite canonical OpenAI history in place. Instead the
 host keeps a durable overlay that can:
 
 - prepend synthetic system messages,
-- append synthetic messages,
-- replace projected messages by id,
-- delete projected messages by id,
+- append synthetic items,
+- replace projected items by id,
+- delete projected items by id,
 - halt the session with an explicit reason.
 
 That overlay is applied before the next moderated model turn to produce the
@@ -255,7 +309,7 @@ Tool moderation is also host-managed:
 
 After every successful moderation event, the host replays queued internal
 events FIFO through phase `internal_event`, with a safety limit to avoid
-unbounded loops.
+unbounded loops. Spawned model job completions (`Model.spawn`) are delivered using this same internal-event replay mechanism.
 
 Persisted moderator state is intentionally narrow:
 
@@ -537,4 +591,3 @@ Enable it via:
 - **Unterminated quoted attribute values fail**: e.g. `alt="...` without closing quote.
 - **Unterminated RAW blocks fail**: `RAW| ... |RAW` must be closed.
 - **Tag names are lowercase and case-sensitive**.
-

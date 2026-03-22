@@ -10,7 +10,19 @@ let ok_or_fail = function
 ;;
 
 let show_snapshot (snapshot : Session.Moderator_snapshot.t) =
-  print_s [%sexp (snapshot : Session.Moderator_snapshot.t)]
+  print_s
+    [%sexp
+      ([ "script_id", snapshot.script_id
+       ; "script_source_hash", snapshot.script_source_hash
+       ; ( "queued_internal_events"
+         , Int.to_string (List.length snapshot.queued_internal_events) )
+       ; ( "prepended_items"
+         , Int.to_string (List.length snapshot.overlay.prepended_system_items) )
+       ; "appended_items", Int.to_string (List.length snapshot.overlay.appended_items)
+       ; "replacements", Int.to_string (List.length snapshot.overlay.replacements)
+       ; "deleted_items", Int.to_string (List.length snapshot.overlay.deleted_item_ids)
+       ]
+       : (string * string) list)]
 ;;
 
 let input_text text = Openai.Responses.Input_message.Text { text; _type = "input_text" }
@@ -19,9 +31,73 @@ let output_text text =
   Openai.Responses.Output_message.{ annotations = []; text; _type = "output_text" }
 ;;
 
-let print_messages (messages : Moderation.Message.t list) =
-  List.iter messages ~f:(fun message ->
-    print_endline (Printf.sprintf "%s %s %S" message.id message.role message.content))
+let printable_item (item : Moderation.Item.t) : string =
+  let response_item = ok_or_fail (Moderation.Item.to_response_item item) in
+  match response_item with
+  | Openai.Responses.Item.Input_message msg ->
+    let role = Openai.Responses.Input_message.role_to_string msg.role in
+    let content =
+      List.filter_map msg.content ~f:(function
+        | Openai.Responses.Input_message.Text { text; _ } -> Some text
+        | Openai.Responses.Input_message.Image { image_url; _ } ->
+          Some (Printf.sprintf "<image src=\"%s\" />" image_url))
+      |> String.concat ~sep:"\n"
+    in
+    Printf.sprintf "%s %s %S" item.id role content
+  | Openai.Responses.Item.Output_message msg ->
+    let content =
+      List.map msg.content ~f:(fun part -> part.text) |> String.concat ~sep:"\n"
+    in
+    Printf.sprintf "%s assistant %S" item.id content
+  | Openai.Responses.Item.Function_call call ->
+    Printf.sprintf
+      "%s assistant %S"
+      item.id
+      (Printf.sprintf "%s %s" call.name call.arguments)
+  | Openai.Responses.Item.Custom_tool_call call ->
+    Printf.sprintf "%s assistant %S" item.id (Printf.sprintf "%s %s" call.name call.input)
+  | Openai.Responses.Item.Function_call_output out ->
+    let content =
+      match out.output with
+      | Openai.Responses.Tool_output.Output.Text text -> text
+      | Content parts ->
+        List.map parts ~f:(function
+          | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
+          | Input_image { image_url; _ } ->
+            Printf.sprintf "<image src=\"%s\" />" image_url)
+        |> String.concat ~sep:"\n"
+    in
+    Printf.sprintf "%s tool %S" item.id content
+  | Openai.Responses.Item.Custom_tool_call_output out ->
+    let content =
+      match out.output with
+      | Openai.Responses.Tool_output.Output.Text text -> text
+      | Content parts ->
+        List.map parts ~f:(function
+          | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
+          | Input_image { image_url; _ } ->
+            Printf.sprintf "<image src=\"%s\" />" image_url)
+        |> String.concat ~sep:"\n"
+    in
+    Printf.sprintf "%s tool %S" item.id content
+  | other ->
+    Printf.sprintf
+      "%s json %S"
+      item.id
+      (Jsonaf.to_string (Openai.Responses.Item.jsonaf_of_t other))
+;;
+
+let print_items (items : Moderation.Item.t list) =
+  List.iter items ~f:(fun item -> print_endline (printable_item item))
+;;
+
+let overlay_op_name (op : Moderation.Overlay.op) : string =
+  match op with
+  | Prepend_system _ -> "prepend_system"
+  | Append_item _ -> "append_item"
+  | Replace_item _ -> "replace_item"
+  | Delete_item _ -> "delete_item"
+  | Halt _ -> "halt"
 ;;
 
 let script_source =
@@ -39,15 +115,8 @@ let script_source =
           Task.bind(Runtime.emit(`Internal_done("queued")), fun ignored_emit ->
           Task.pure({ count = st.count + 1 })))
         | `Internal_done(_) ->
-          Task.bind
-            (Turn.append_message
-               ({ id = "synthetic-1"
-                ; role = "assistant"
-                ; content = "queued"
-                ; meta = `Null
-                }),
-             fun ignored_turn ->
-             Task.pure({ count = st.count + 1 }))
+          Task.bind(Turn.append_item(Item.output_text_message("synthetic-1", "queued")), fun ignored_turn ->
+          Task.pure({ count = st.count + 1 }))
   |}
 ;;
 
@@ -93,7 +162,7 @@ let%expect_test "manager snapshots, restores, and drains internal events" =
          ~session_meta:`Null
          ~event:Moderation.Event.Session_start)
   in
-  print_s [%sexp (outcome.overlay_ops : Moderation.Overlay.op list)];
+  print_s [%sexp (List.map outcome.overlay_ops ~f:overlay_op_name : string list)];
   let drained =
     ok_or_fail
       (Manager.drain_internal_events
@@ -106,11 +175,11 @@ let%expect_test "manager snapshots, restores, and drains internal events" =
   in
   print_s
     [%sexp
-      (List.map drained ~f:(fun outcome -> outcome.overlay_ops)
-       : Moderation.Overlay.op list list)];
-  let messages = Manager.effective_messages manager [] in
-  List.iter messages ~f:(fun message ->
-    print_endline (Printf.sprintf "%s %s %S" message.id message.role message.content));
+      (List.map drained ~f:(fun outcome ->
+         List.map outcome.overlay_ops ~f:overlay_op_name)
+       : string list list)];
+  let items = Manager.effective_items manager [] in
+  print_items items;
   let snapshot = ok_or_fail (Manager.snapshot manager) in
   show_snapshot snapshot;
   let restored = ok_or_fail (Manager.create ~artifact ~capabilities ~snapshot ()) in
@@ -118,33 +187,16 @@ let%expect_test "manager snapshots, restores, and drains internal events" =
   [%expect
     {|
     1
-    ((Prepend_system policy))
-    (((Append_message
-       ((id synthetic-1) (role assistant) (content queued) (meta Null)))))
+    (prepend_system)
+    ((append_item))
     moderation-overlay-1 system "policy"
     synthetic-1 assistant "queued"
-    ((script_id main) (script_source_hash c371fe2893a6ff72c1e3fddce9be73ee)
-     (current_state (Record ((count (Int 2))))) (queued_internal_events ())
-     (halted false)
-     (overlay
-      ((prepended_system_messages
-        (((id moderation-overlay-1) (role system) (content policy)
-          (meta (Variant Null ())))))
-       (appended_messages
-        (((id synthetic-1) (role assistant) (content queued)
-          (meta (Variant Null ())))))
-       (replacements ()) (deleted_message_ids ()) (halted_reason ()))))
-    ((script_id main) (script_source_hash c371fe2893a6ff72c1e3fddce9be73ee)
-     (current_state (Record ((count (Int 2))))) (queued_internal_events ())
-     (halted false)
-     (overlay
-      ((prepended_system_messages
-        (((id moderation-overlay-1) (role system) (content policy)
-          (meta (Variant Null ())))))
-       (appended_messages
-        (((id synthetic-1) (role assistant) (content queued)
-          (meta (Variant Null ())))))
-       (replacements ()) (deleted_message_ids ()) (halted_reason ()))))
+    ((script_id main) (script_source_hash 720bb598084b1f2609fb3ce5ac5d8787)
+     (queued_internal_events 0) (prepended_items 1) (appended_items 1)
+     (replacements 0) (deleted_items 0))
+    ((script_id main) (script_source_hash 720bb598084b1f2609fb3ce5ac5d8787)
+     (queued_internal_events 0) (prepended_items 1) (appended_items 1)
+     (replacements 0) (deleted_items 0))
     |}]
 ;;
 
@@ -160,7 +212,7 @@ let%expect_test "manager rejects mismatched persisted script metadata" =
    | Ok _ -> print_endline "unexpected success"
    | Error msg -> print_endline msg);
   [%expect
-    {| Moderator snapshot source hash "other-hash" does not match prompt source hash "c371fe2893a6ff72c1e3fddce9be73ee". |}]
+    {| Moderator snapshot source hash "other-hash" does not match prompt source hash "720bb598084b1f2609fb3ce5ac5d8787". |}]
 ;;
 
 let%expect_test "manager restores queued internal events from persisted snapshots" =
@@ -192,17 +244,17 @@ let%expect_test "manager restores queued internal events from persisted snapshot
   in
   print_s
     [%sexp
-      (List.map drained ~f:(fun outcome -> outcome.overlay_ops)
-       : Moderation.Overlay.op list list)];
-  print_messages (Manager.effective_messages restored []);
+      (List.map drained ~f:(fun outcome ->
+         List.map outcome.overlay_ops ~f:overlay_op_name)
+       : string list list)];
+  print_items (Manager.effective_items restored []);
   print_s
     [%sexp ((ok_or_fail (Manager.snapshot restored)).current_state : Session.Snapshot.t)];
   [%expect
     {|
     1
     1
-    (((Append_message
-       ((id synthetic-1) (role assistant) (content queued) (meta Null)))))
+    ((append_item))
     moderation-overlay-1 system "policy"
     synthetic-1 assistant "queued"
     (Record ((count (Int 2))))
@@ -238,22 +290,12 @@ let%expect_test "manager applies prepend, replace, delete, and append overlay op
           | `Turn_start ->
             Task.bind(Turn.prepend_system("policy"), fun ignored_prepend ->
             Task.bind
-              (Turn.replace_message
-                 ("msg-1",
-                  { id = "msg-1"
-                  ; role = "assistant"
-                  ; content = "rewritten"
-                  ; meta = `Null
-                  }),
+              (Turn.replace_item
+                 ("msg-1", Item.output_text_message("msg-1", "rewritten")),
                fun ignored_replace ->
-               Task.bind(Turn.delete_message("host-message-1"), fun ignored_delete ->
+               Task.bind(Turn.delete_item("host-message-1"), fun ignored_delete ->
                Task.bind
-                 (Turn.append_message
-                    ({ id = "synthetic-1"
-                     ; role = "assistant"
-                     ; content = "after"
-                     ; meta = `Null
-                     }),
+                 (Turn.append_item(Item.output_text_message("synthetic-1", "after")),
                   fun ignored_append ->
                   Task.pure(st)))))
     |}
@@ -276,12 +318,80 @@ let%expect_test "manager applies prepend, replace, delete, and append overlay op
           ~session_meta:`Null
           ~event:Moderation.Event.Turn_start)
      : Moderation.Outcome.t);
-  print_messages (Manager.effective_messages manager history);
+  print_items (Manager.effective_items manager history);
   [%expect
     {|
     moderation-overlay-1 system "policy"
     msg-1 assistant "rewritten"
     synthetic-1 assistant "after"
+    |}]
+;;
+
+let%expect_test "manager item helpers expose structured item accessors" =
+  let history =
+    [ Openai.Responses.Item.Input_message
+        { role = Openai.Responses.Input_message.User
+        ; content = [ input_text "Hello" ]
+        ; _type = "message"
+        }
+    ]
+  in
+  let source =
+    {|
+      type state = { seen : int }
+      type event = [ `Turn_start ]
+
+      let initial_state = { seen = 0 }
+
+      let first_text : string array -> string =
+        fun parts ->
+          if Array.length(parts) == 0 then "" else Array.get(parts, 0)
+
+      let on_event : context -> state -> event -> state task =
+        fun ctx st ev ->
+          match ev with
+          | `Turn_start ->
+            let item = ctx.items[0] in
+            let summary =
+              Item.id(item)
+              ++ ":"
+              ++ Option.get_or(Item.kind(item), "missing")
+              ++ ":"
+              ++ Option.get_or(Item.role(item), "missing")
+              ++ ":"
+              ++ first_text(Item.text_parts(item))
+            in
+            Task.bind(Turn.append_item(Item.create("copy-1", Item.value(item))), fun ignored_copy ->
+            Task.bind(Turn.append_item(Item.output_text_message("summary-1", summary)), fun ignored_summary ->
+            Task.bind(Turn.append_item(Item.input_text_message("summary-2", "system", "guard")), fun ignored_guard ->
+            Task.pure(st))))
+    |}
+  in
+  let script =
+    CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+  in
+  let artifact =
+    ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
+  in
+  let manager = ok_or_fail (Manager.create ~artifact ~capabilities ()) in
+  ignore
+    (ok_or_fail
+       (Manager.handle_event
+          manager
+          ~session_id:"session-1"
+          ~now_ms:1
+          ~history
+          ~available_tools:[]
+          ~session_meta:`Null
+          ~event:Moderation.Event.Turn_start)
+     : Moderation.Outcome.t);
+  print_items (Manager.effective_items manager history);
+  [%expect
+    {|
+    host-message-1 user "Hello"
+    copy-1 user "Hello"
+    summary-1 assistant "host-message-1:message:user:Hello"
+    summary-2 system "guard"
     |}]
 ;;
 
@@ -329,7 +439,7 @@ let%expect_test "manager rolls back overlay and state after failed moderation ta
    with
    | Ok _ -> print_endline "unexpected success"
    | Error msg -> print_endline msg);
-  print_messages (Manager.effective_messages manager history);
+  print_items (Manager.effective_items manager history);
   print_s
     [%sexp ((ok_or_fail (Manager.snapshot manager)).current_state : Session.Snapshot.t)];
   [%expect

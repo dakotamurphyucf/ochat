@@ -39,6 +39,7 @@ module Moderation = Chat_response.Moderation
 module Moderator_manager = Chat_response.Moderator_manager
 module Stream_moderator = Chat_response.In_memory_stream
 module Req = Res.Request
+module Runtime_semantics = Chat_response.Runtime_semantics
 
 (** Runtime artefacts derived from the chat prompt. *)
 type prompt_context =
@@ -184,7 +185,18 @@ module Setup = struct
     | None -> prompt_file
   ;;
 
-  let create_moderator ~env ~prompt_file ~session ~prompt_elements ~history_items ~tools =
+  let create_moderator
+        ?(capabilities = Moderation.Capabilities.default)
+        ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
+        ~model_executor
+        ~env
+        ~prompt_file
+        ~session
+        ~prompt_elements
+        ~history_items
+        ~tools
+        ()
+    =
     let open Result.Let_syntax in
     let%bind _, artifact =
       Moderator_manager.Registry.of_elements
@@ -198,9 +210,23 @@ module Setup = struct
         Option.bind session ~f:(fun (session : Session.t) -> session.moderator_snapshot)
       in
       let session_id = moderator_session_id ~session ~prompt_file in
-      let capabilities = Moderation.Capabilities.default in
+      let capabilities =
+        { capabilities with
+          model_recipes =
+            Map.of_alist_exn
+              (module String)
+              [ ( Chat_response.Model_executor.agent_prompt_v1_name
+                , Chat_response.Model_executor.recipe_agent_prompt_v1
+                    model_executor
+                    ~session_id )
+              ]
+        }
+      in
       let%bind manager = Moderator_manager.create ~artifact ~capabilities ?snapshot () in
-      let moderator = Stream_moderator.{ manager; session_id; session_meta = `Null } in
+      Chat_response.Model_executor.register_session model_executor ~session_id ~manager;
+      let moderator =
+        Stream_moderator.{ manager; session_id; session_meta = `Null; runtime_policy }
+      in
       let startup_event =
         match snapshot with
         | Some _ -> Moderation.Event.Session_resume
@@ -218,9 +244,8 @@ module Setup = struct
       in
       let%bind drained =
         if
-          List.exists outcome.runtime_requests ~f:(function
-            | Moderation.Runtime_request.End_session _ -> true
-            | Moderation.Runtime_request.Request_compaction -> false)
+          Option.is_some
+            (Chat_response.Runtime_semantics.should_end_session outcome.runtime_requests)
         then Ok []
         else
           Moderator_manager.drain_internal_events
@@ -410,6 +435,17 @@ module Shutdown = struct
   ;;
 end
 
+let fetch_prompt ~ctx ~prompt ~is_local =
+  try
+    let xml = Chat_response.Fetch.get ~ctx prompt ~is_local in
+    let prompt_dir =
+      if is_local then Chat_response.Fetch.resolve_local_dir ~ctx prompt else None
+    in
+    Ok (xml, prompt_dir)
+  with
+  | exn -> Error (Exn.to_string exn)
+;;
+
 (* ------------------------------------------------------------------------ *)
 (*  Main entry-point                                                         *)
 (* ------------------------------------------------------------------------ *)
@@ -474,6 +510,10 @@ let run_chat
   let prompt_elements = Setup.parse_prompt_elements ~dir:prompt_dir ~prompt_xml in
   let cfg = Setup.cfg_of_elements prompt_elements in
   let ctx = Setup.build_ctx ~env ~prompt_dir ~tool_dir:cwd ~cache in
+  let exec_context : Chat_response.Model_executor.exec_context =
+    { ctx; run_agent = Chat_response.Driver.run_agent; fetch_prompt }
+  in
+  let model_executor = Chat_response.Model_executor.create ~sw:ui_sw ~exec_context () in
   let declared_tools = Setup.declared_tools_of_elements prompt_elements in
   let tools, tool_tbl = Setup.build_tools_runtime ~sw:ui_sw ~ctx ~declared_tools in
   (* Convert prompt → initial history items extracted from the static prompt. *)
@@ -483,12 +523,14 @@ let run_chat
   let history_items = Setup.choose_initial_history ~session ~history_items_prompt in
   let moderator, startup_requests =
     Setup.create_moderator
+      ~model_executor
       ~env
       ~prompt_file
       ~session
       ~prompt_elements
       ~history_items
       ~tools
+      ()
     |> Result.ok_or_failwith
   in
   let prompt_ctx : prompt_context = { cfg; tools; tool_tbl; moderator } in
@@ -501,18 +543,23 @@ let run_chat
   let model = Setup.init_model ~session ~history_items ~messages in
   let runtime = Runtime.create ?moderator ~model () in
   App_runtime.refresh_messages runtime;
-  List.iter startup_requests ~f:(function
-    | Moderation.Runtime_request.Request_compaction ->
-      Eio.Stream.add internal_stream `Compact_requested
-    | Moderation.Runtime_request.End_session reason ->
-      runtime.halted_reason <- Some reason;
-      ignore
-        (Model.apply_patch
-           model
-           (Add_placeholder_message
-              { role = "system"
-              ; text = Printf.sprintf "Session ended by moderator: %s" reason
-              })));
+  let tui_policy =
+    { Runtime_semantics.default_policy with honor_request_compaction = true }
+  in
+  let startup_requests = Runtime_semantics.collapse startup_requests in
+  if
+    tui_policy.honor_request_compaction
+    && Runtime_semantics.request_compaction startup_requests
+  then Eio.Stream.add internal_stream `Compact_requested;
+  Option.iter (Runtime_semantics.should_end_session startup_requests) ~f:(fun reason ->
+    runtime.halted_reason <- Some reason;
+    ignore
+      (Model.apply_patch
+         model
+         (Add_placeholder_message
+            { role = "system"
+            ; text = Printf.sprintf "Session ended by moderator: %s" reason
+            })));
   Model.rebuild_tool_output_index model;
   (* Start the Notty terminal – its [on_event] callback just pushes events
         into [ev_stream] so the UI stays single-threaded. *)

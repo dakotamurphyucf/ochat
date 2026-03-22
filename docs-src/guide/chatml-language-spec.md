@@ -1041,29 +1041,7 @@ currently:
 - `array`
 - `task`
 
-### 10.2.2 Explicit recursive types
-
-Recursive types are represented internally using explicit recursive binders,
-conceptually of the form:
-
-```ocaml
-| Mu of string * typ
-| Rec_var of string
-```
-
-Recursive cycles therefore appear only through this checked representation,
-not through cyclic ordinary inference variables.
-
-Surface recursive types are introduced via named `type` declarations:
-
-```ocaml
-type expr = [ `Int(int) | `Add(expr, expr) ]
-```
-
-The typechecker elaborates those declarations into explicit internal
-recursive types and checks that they are contractive.
-
-### 10.2.3 Contractiveness
+### 10.2.2 Contractiveness
 
 Recursive type declarations must be **contractive**: self-reference must
 appear under a real constructor.
@@ -1168,33 +1146,6 @@ Recommended patterns:
 - ensure initialization helpers return the same shape on all paths
 - make field updates explicit on every branch
 
-#### Initialization example
-
-Avoid writing a helper whose branches return different record shapes unless
-both shapes already guarantee the fields you plan to read later.
-
-For example, the following shape-changing helper is not something the
-conservative join will strengthen:
-
-```ocaml
-let init_state st =
-  if st.inited then st else
-    { inited = true
-    ; autopilot = true
-    ; task_index = 0
-    ; task_count = 4
-    ; tasks = ...
-    }
-```
-
-In the copied regression tests, callers already provide a fully initialized
-state, so the recommended rewrite is simply:
-
-```ocaml
-let init_state st = st
-```
-
-This satisfies the join trivially because both paths are the same shape.
 
 #### Explicit field-update example
 
@@ -1875,6 +1826,16 @@ Model.call  : string -> json -> [ `Ok(json) | `Refused(string) | `Error(string) 
 Model.spawn : string -> json -> string task
 ```
 
+`Model.spawn` starts a host-managed background job and returns a stable job id.
+When that job completes (success or failure), the host reinjects a moderator internal
+event so scripts can react. The v1 completion event tags are:
+
+- `Model_job_succeeded(job_id, recipe_name, result_json)`
+- `Model_job_failed(job_id, recipe_name, message)`
+
+The initial implementation may track spawned jobs in memory only; in that case,
+in-flight jobs are not durably persisted across process restarts.
+
 The string argument is a host-defined recipe name, not an unrestricted raw
 provider/model identifier.
 
@@ -1892,11 +1853,24 @@ The event payload of `Schedule.after_ms` remains a raw ChatML value.
 ```ocaml
 Runtime.emit               : 'e -> unit task
 Runtime.request_compaction : unit -> unit task
+Runtime.request_turn       : unit -> unit task
 Runtime.end_session        : string -> unit task
 ```
 
 `Runtime.emit` buffers a raw ChatML event for later enqueueing on
 successful task completion.
+
+`Runtime.request_turn()` requests that the host run **one more ordinary model turn**
+after the current turn completes. In v1 it is only valid in phases:
+
+- `turn_end`
+- `internal_event`
+
+The host interprets this request after `turn_end` handling finishes; it does not
+directly invoke a side model call.
+
+Multiple `request_turn` effects emitted while handling one host event collapse to a
+single continuation decision. `Runtime.end_session(...)` overrides `request_turn`.
 
 ---
 
@@ -2649,11 +2623,9 @@ entrypoint type contract statically.
 `moderator_surface` installs the following builtin type aliases:
 
 ```ocaml
-type message =
+type item =
   { id : string
-  ; role : string
-  ; content : string
-  ; meta : json
+  ; value : json
   }
 
 type tool_desc =
@@ -2678,7 +2650,7 @@ type context =
   { session_id : string
   ; now_ms : int
   ; phase : string
-  ; messages : message array
+  ; items : item array
   ; available_tools : tool_desc array
   ; session_meta : json
   }
@@ -2686,6 +2658,36 @@ type context =
 
 These aliases are compile-time conveniences layered on top of ordinary
 structural record/variant typing.
+
+The moderator surface also installs an `Item` builtin module:
+
+```ocaml
+Item.create : string -> json -> item
+Item.id : item -> string
+Item.value : item -> json
+Item.kind : item -> string option
+Item.role : item -> string option
+Item.text_parts : item -> string array
+Item.input_text_message : string -> string -> string -> item
+Item.output_text_message : string -> string -> item
+```
+
+`Item.kind` inspects the serialized OpenAI response item `"type"` field when
+present. `Item.role` and `Item.text_parts` provide convenient access to common
+message-like item shapes without forcing scripts to hand-author raw JSON.
+
+The `Turn` module exposes item-oriented mutation helpers:
+
+```ocaml
+Turn.prepend_system : string -> unit task
+Turn.append_item : item -> unit task
+Turn.replace_item : string -> item -> unit task
+Turn.delete_item : string -> unit task
+Turn.halt : string -> unit task
+```
+
+Legacy `Turn.append_message`, `Turn.replace_message`, and
+`Turn.delete_message` names remain available as aliases.
 
 ### 21.7 Integrated host lifecycle
 
@@ -2731,13 +2733,12 @@ Current built-in host paths emit:
 - `session_start` for fresh moderated sessions,
 - `session_resume` when restoring a persisted moderator snapshot,
 - `turn_start` before each model request,
+- `message_appended` after a canonical transcript item is appended by the
+  streamed runtime,
 - `pre_tool_call` before tool execution,
 - `post_tool_response` after a tool output item is produced,
 - `turn_end` after a streamed assistant turn finishes,
 - `internal_event` while replaying queued emitted events.
-
-The `message_appended` phase is part of the shared API surface but is not
-currently emitted by the shipped drivers.
 
 ### 21.8 Effect requests
 
@@ -2827,12 +2828,21 @@ Current default behavior is intentionally conservative:
 - `Runtime.end_session` marks the session as ended on successful commit,
 - external integrations such as `Tool.call`, `Model.call`, and
   `Schedule.after_ms` fail with a clear `"… is not configured"` error unless
-  the host supplies handlers.
+  the host supplies handlers. 
+- `Runtime.request_turn` is a local transactional operation and is phase-restricted in v1
+(see above). It is surfaced to the host as a runtime request and interpreted by the
+host conversation loop after `turn_end`.
 
 Named model recipes are host-defined. `Model.call("recipe", payload)` and
 `Model.spawn("recipe", payload)` do not select arbitrary provider model names;
 they route through the host capability registry under a recipe name chosen by
 the embedder.
+
+The current embedding registers at least one recipe:
+
+- `agent_prompt_v1`
+
+Recipe names are not provider model identifiers; they route to host-defined behavior.
 
 ### 21.11 Commit/rollback semantics
 
@@ -2945,3 +2955,23 @@ but the default assembled operation set currently uses permissive
 All public moderation integration is optional. If a ChatMD prompt declares no
 moderator `<script>`, the shared drivers, `chat_tui`, export flow, and nested
 agent execution all use the baseline non-moderated behavior.
+
+
+### 21.17 Runtime requests and host continuation
+
+Moderator scripts may emit host-visible runtime requests:
+
+- `Runtime.request_turn()` → request one more ordinary turn after `turn_end`
+- `Runtime.request_compaction()` → request compaction (embedding-defined)
+- `Runtime.end_session(reason)` → request session termination
+
+Host behavior is embedding-defined, but the shared in-memory conversation loop applies
+the following precedence after a streamed turn ends:
+
+1. `end_session` terminates immediately and overrides continuation.
+2. Tool-driven follow-up (pending tool calls) continues.
+3. `request_turn` continues.
+4. Otherwise the loop stops.
+
+Multiple `request_turn` requests emitted while handling one host event collapse to a
+single continuation decision. `request_compaction` never forces another turn by itself.

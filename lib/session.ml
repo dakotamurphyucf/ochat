@@ -48,12 +48,10 @@ module Task = struct
 end
 
 module Moderator_snapshot = struct
-  module Message = struct
+  module Item = struct
     type t =
       { id : string
-      ; role : string
-      ; content : string
-      ; meta : Snapshot.t
+      ; value : Snapshot.t
       }
     [@@deriving bin_io, sexp]
   end
@@ -61,24 +59,24 @@ module Moderator_snapshot = struct
   module Overlay = struct
     type replacement =
       { target_id : string
-      ; message : Message.t
+      ; item : Item.t
       }
     [@@deriving bin_io, sexp]
 
     type t =
-      { prepended_system_messages : Message.t list
-      ; appended_messages : Message.t list
+      { prepended_system_items : Item.t list
+      ; appended_items : Item.t list
       ; replacements : replacement list
-      ; deleted_message_ids : string list
+      ; deleted_item_ids : string list
       ; halted_reason : string option
       }
     [@@deriving bin_io, sexp]
 
     let empty =
-      { prepended_system_messages = []
-      ; appended_messages = []
+      { prepended_system_items = []
+      ; appended_items = []
       ; replacements = []
-      ; deleted_message_ids = []
+      ; deleted_item_ids = []
       ; halted_reason = None
       }
     ;;
