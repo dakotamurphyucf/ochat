@@ -17,6 +17,7 @@ If you like tools like Claude Code or Codex, Ochat operates at a more fundamenta
 ## Contents
 
 - [Why Ochat exists](#why-ochat-exists)
+- [Design Principles](#design-principles)
 - [Ochat in one minute](#ochat-in-one-minute)
 - [What is Ochat?](#what-is-ochat)
 - [What makes Ochat different?](#what-makes-ochat-different)
@@ -54,6 +55,19 @@ With Ochat, prompts, tools, transcript state, and orchestration live in plain te
 - **run in the terminal, scripts, CI, or over MCP**
 
 The goal is simple: make agent workflows **explicit, inspectable, portable, and reproducible**.
+
+---
+
+## Design principles
+
+Ochat is built around a few core principles:
+
+- **Everything important should be inspectable**
+- **Workflows should be versionable**
+- **Agent runs should be reproducible**
+- **Tools should be explicit**
+- **Custom workflows should not depend on a single UI**
+- **Advanced orchestration should remain auditable**
 
 ---
 
@@ -220,7 +234,7 @@ If you do not already have an OCaml environment set up, start here:
 
 - [OCaml.org](https://ocaml.org)
 - [Install OCaml, opam, and the toolchain](https://ocaml.org/install#linux_mac_bsd)
-- [More in-depth installation documentation](https://ocaml.org/docs/installing-ocaml)
+- [More detailed installation guide](https://ocaml.org/docs/installing-ocaml)
 
 Ochat uses the standard OCaml tooling stack:
 - **opam** for package management and compiler switches
@@ -339,7 +353,7 @@ That means prompts, tool calls, results, and transcripts can all be version-cont
 Combine:
 - ChatMD prompt instructions
 - built-in tools
-- shell tools
+- shell wrappers
 - remote MCP tools
 - other agents mounted as tools
 
@@ -575,6 +589,9 @@ Review lib/example.ml and suggest a small safe improvement.
 </user>
 ```
 
+This example prepends a system instruction at session start, requiring the assistant to explain changes briefly before using `apply_patch`.
+
+
 Run it in the TUI or CLI:
 
 ```sh
@@ -708,6 +725,8 @@ For more on `ochat chat-completion` (flags, exit codes, ephemeral runs), see
 ---
 
 ## Architecture overview
+
+At a glance, Ochat treats workflows as text artifacts executed by a host runtime.
 
 ```text
                  ChatMD workflow file
