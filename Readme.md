@@ -14,6 +14,29 @@ If you like tools like Claude Code or Codex, Ochat operates at a more fundamenta
 
 ---
 
+## Contents
+
+- [Why Ochat exists](#why-ochat-exists)
+- [Ochat in one minute](#ochat-in-one-minute)
+- [What is Ochat?](#what-is-ochat)
+- [What makes Ochat different?](#what-makes-ochat-different)
+- [How Ochat compares](#how-ochat-compares)
+- [Who Ochat is for](#who-ochat-is-for)
+- [Quick start](#quick-start)
+- [What can I do with Ochat?](#what-can-i-do-with-ochat)
+- [Common use cases](#common-use-cases)
+- [First 10 minutes with Ochat](#first-10-minutes-with-ochat)
+- [Example ChatMD prompts](#example-chatmd-prompts)
+- [Build from source](#build-from-source-ocaml)
+- [Core concepts](#core-concepts)
+- [Architecture overview](#architecture-overview)
+- [Documentation](#documentation)
+- [OCaml integration](#ocaml-integration)
+- [Future directions](#future-directions)
+- [Project status](#project-status--expect-rapid-change)
+
+---
+
 ## Why Ochat exists
 
 Most LLM tools today either:
@@ -30,7 +53,7 @@ With Ochat, prompts, tools, transcript state, and orchestration live in plain te
 - **compose into larger workflows**
 - **run in the terminal, scripts, CI, or over MCP**
 
-The goal is simple: make agent workflows **explicit, portable, and reproducible**.
+The goal is simple: make agent workflows **explicit, inspectable, portable, and reproducible**.
 
 ---
 
@@ -135,7 +158,7 @@ It is a **text-first workflow toolkit** built around a few core ideas:
 
 ## How Ochat compares
 
-Ochat sits in a different part of the LLM tooling landscape than most agent tools.
+Ochat occupies a different niche in the LLM tooling landscape than most agent tools.
 
 ### Compared to coding-agent products
 Tools like **Claude Code**, **Codex-style CLIs**, or **Aider** are polished agent applications for working in a repo.
@@ -197,7 +220,7 @@ If you do not already have an OCaml environment set up, start here:
 
 - [OCaml.org](https://ocaml.org)
 - [Install OCaml, opam, and the toolchain](https://ocaml.org/install#linux_mac_bsd)
-- [More indepth explination of install proccess](https://ocaml.org/docs/installing-ocaml)
+- [More in-depth installation documentation](https://ocaml.org/docs/installing-ocaml)
 
 Ochat uses the standard OCaml tooling stack:
 - **opam** for package management and compiler switches
@@ -249,6 +272,57 @@ ochat chat-completion \
 ```
 
 The output file captures the run as a plain text artifact that you can inspect, diff, resume, or share.
+
+---
+
+## First 10 minutes with Ochat
+
+A simple way to get a feel for Ochat:
+
+1. **Set up OCaml tooling**  
+   If needed, install OCaml, opam, and the toolchain:
+   - [OCaml.org](https://ocaml.org)
+   - [Install guide](https://ocaml.org/install#linux_mac_bsd)
+
+2. **Build the project**
+   ```sh
+   opam switch create .
+   opam install . --deps-only
+   dune build
+   ```
+
+3. **Run a minimal prompt**
+   Create `prompts/hello.md` and run it in the TUI:
+   ```sh
+   dune exec chat_tui -- -file prompts/hello.md
+   ```
+
+4. **Try a tool-using prompt**
+   Run the refactor example:
+   ```sh
+   dune exec chat_tui -- -file prompts/refactor.md
+   ```
+
+5. **Inspect the workflow artifact**
+   Export or save the run and open the resulting `.md` / `.chatmd` file to see:
+   - the prompt
+   - the transcript
+   - tool calls and results
+   - the exact workflow state captured as text
+
+6. **Try a non-interactive run**
+   ```sh
+   ochat chat-completion \
+     -prompt-file prompts/hello.md \
+     -output-file .chatmd/hello-run.md
+   ```
+
+7. **Explore deeper features**
+   From there, try:
+   - agent-as-tool composition
+   - MCP export via `mcp_server`
+   - retrieval/indexing tools
+   - ChatML moderator scripts
 
 ---
 
@@ -336,56 +410,6 @@ Typical use cases include:
 
 ---
 
-## First 10 minutes with Ochat
-
-A simple way to get a feel for Ochat:
-
-1. **Set up OCaml tooling**  
-   If needed, install OCaml, opam, and the toolchain:
-   - [OCaml.org](https://ocaml.org)
-   - [Install guide](https://ocaml.org/install#linux_mac_bsd)
-
-2. **Build the project**
-   ```sh
-   opam switch create .
-   opam install . --deps-only
-   dune build
-   ```
-
-3. **Run a minimal prompt**
-   Create `prompts/hello.md` and run it in the TUI:
-   ```sh
-   dune exec chat_tui -- -file prompts/hello.md
-   ```
-
-4. **Try a tool-using prompt**
-   Run the refactor example:
-   ```sh
-   dune exec chat_tui -- -file prompts/refactor.md
-   ```
-
-5. **Inspect the workflow artifact**
-   Export or save the run and open the resulting `.md` / `.chatmd` file to see:
-   - the prompt
-   - the transcript
-   - tool calls and results
-   - the exact workflow state captured as text
-
-6. **Try a non-interactive run**
-   ```sh
-   ochat chat-completion \
-     -prompt-file prompts/hello.md \
-     -output-file .chatmd/hello-run.md
-   ```
-
-7. **Explore deeper features**
-   From there, try:
-   - agent-as-tool composition
-   - MCP export via `mcp_server`
-   - retrieval/indexing tools
-   - ChatML moderator scripts
-
----
 
 ## Example ChatMD prompts
 
