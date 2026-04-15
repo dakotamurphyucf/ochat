@@ -1917,7 +1917,7 @@ match e with | pat -> e
 { a = e; b = e }
 e.field
 { e with field = e }
-[e1, e2, e3]
+[e1, e2, e3]  
 arr[i]
 arr[i] <- v
 ref(e)

@@ -1,71 +1,188 @@
 
-# Ochat – toolkit for building custom AI agents, scripted LLM pipelines & vector search
+# Ochat – text-first toolkit for custom AI agents, LLM workflows, and vector search
 
-*Everything you need to prototype and run modern LLM workflows as plain files (implemented in OCaml).*
+**Build custom AI agents and scripted LLM workflows as plain text files.**
+
+Ochat is an **OCaml toolkit** for building **reproducible, composable, tool-using LLM workflows** without locking the workflow into a single UI or heavyweight framework.
+
+Instead of hiding prompts, tool permissions, transcript state, and orchestration inside an application, Ochat keeps them in **static, diffable files** that you can version-control, review, branch, and run in different hosts.
+
+If you like tools like Claude Code or Codex, Ochat operates at a more fundamental level: it gives you the building blocks to create **your own prompt packs, agents, and workflow systems**.
 
 <div>
 <a href="https://asciinema.org/a/gIelV4eAeA0LKvG7" target="_blank"><img height="700" width="900" src="https://asciinema.org/a/gIelV4eAeA0LKvG7.svg" /></a>
 </div>
 
+---
+
+## Why Ochat exists
+
+Most LLM tools today either:
+- hide workflows inside polished UIs,
+- require you to rebuild everything in a code-first framework, or
+- make prompts and agent state hard to inspect, reproduce, and evolve.
+
+Ochat exists to make LLM workflows feel more like **engineering artifacts**.
+
+With Ochat, prompts, tools, transcript state, and orchestration live in plain text files that you can:
+- **version-control**
+- **diff and review**
+- **branch and resume**
+- **compose into larger workflows**
+- **run in the terminal, scripts, CI, or over MCP**
+
+The goal is simple: make agent workflows **explicit, portable, and reproducible**.
+
+---
 
 ## What is Ochat?
 
 Ochat is a toolkit for building **agent workflows and orchestrations as static files**.
 
-If you like tools like Claude Code or Codex, Ochat is a more fundamental set of building blocks: instead of hard-coding the “agent application” into a single UI, you can implement something Claude Code‑like by shipping a *prompt pack* (a set of `.md` files) plus tools and running the agent using the terminal UI that the project provides.
+Its core format is **ChatMarkdown (ChatMD)**, a Markdown + XML dialect for defining and running agents. A single ChatMD file can contain:
 
-In Ochat, an agent is a `.md` file written in a Markdown + XML dialect called **ChatMarkdown (ChatMD)**. A single file is the whole program:
+- model and generation parameters
+- tool declarations and permissions
+- developer and user instructions
+- the full conversation history
+- tool calls and tool results
+- imported artifacts such as documents or images
+- optional host-managed scripting for orchestration and moderation
 
-- the model and generation parameters,
-- which tools the assistant is allowed to call,
-- the full conversation history (including tool calls and their results),
-- imported artefacts (documents/images) when needed.
+In Ochat, an agent is often just a `.md` file.
 
-The runtime does **not** depend on file extensions: any filename can contain ChatMD. We use `.md` by convention so editors render Markdown nicely and you get syntax highlighting.
+That file is not only a prompt — it can also be:
+- the execution log of a run,
+- a reusable workflow component,
+- a tool callable by another agent,
+- a portable artifact you can inspect and refine over time.
 
-Because everything is captured in text files, workflows are:
+Because everything is captured in text files, workflows become:
 
-- **reproducible** – the exact config and transcript are version‑controlled,
-- **diff‑able** – reviews show exactly what changed and what the model did,
-- **composable** – workflows can call other workflows (prompt‑as‑tool),
-- **portable** – prompts are plain text.
-- **editable** – you can open prompts in any text editor, IDE, or even a terminal.
-- **LLM-friendly** – the XML structure is easy for models to parse and generate.
-  - A ChatMD file can be embedded in prompts to other models.
-  - You can build agents that write or modify other agents dynamically.
-- **Defines multiple Git tools** – define multiple Git tools instead of a single `git` tool.
-  - Allows more granular control over Git operations.
-  - Controls which Git operations the agent can perform.
-  - Reduces the chance of incorrect Git commands due to more precise command definitions.
- 
-The same `.md` definition can be executed in multiple hosts:
+- **reproducible** – the exact config and transcript are version-controlled
+- **diffable** – reviews show exactly what changed and what the model did
+- **composable** – workflows can call other workflows (prompt-as-tool)
+- **portable** – prompts are plain text, not locked into one interface
+- **editable** – use any text editor, IDE, or terminal workflow
+- **LLM-friendly** – the XML structure is easy for models to parse and generate
 
-- the **terminal UI** (`chat_tui`) for interactive work,
-- **scripts and CI** via `ochat chat-completion`, and
-- a **remote MCP server** via `mcp_server`, so IDEs or other applications can call agents over stdio or HTTP/SSE.
+The same `.md` workflow definition can be executed in multiple hosts:
 
-The ChatMD language provides a rich set of features for prompt engineering in a modular way supporting all levels of complexity.
-  - See the [language reference](docs-src/overview/chatmd-language.md)
+- the **terminal UI** (`chat_tui`) for interactive work
+- **scripts and CI** via `ochat chat-completion`
+- a **remote MCP server** via `mcp_server`, so IDEs and other applications can call agents over stdio or HTTP/SSE
 
-ChatMD prompts can also embed a single host-managed ChatML moderation script:
+The ChatMD language provides a rich set of features for prompt engineering in a modular way, supporting workflows from simple prompts to more advanced orchestrations. See the [language reference](docs-src/overview/chatmd-language.md).
 
-- declare it with `<script language="chatml" kind="moderator" ...>`,
-- keep it invisible to the model request itself,
-- use it to prepend/append/replace/delete effective transcript items,
-- inspect and construct structured items through the `Item` builtin module,
-- moderate tool calls by approving, rejecting, rewriting, or redirecting them,
-- and persist only its serializable runtime state between resumed sessions.
-- request another ordinary model turn after `turn_end` via `Runtime.request_turn()`,
+ChatMD prompts can also embed a single host-managed **ChatML** moderation script:
+
+- declare it with `<script language="chatml" kind="moderator" ...>`
+- keep it invisible to the model request itself
+- prepend, append, replace, or delete effective transcript items
+- inspect and construct structured items through the `Item` builtin module
+- moderate tool calls by approving, rejecting, rewriting, or redirecting them
+- persist only serializable runtime state between resumed sessions
+- request another ordinary model turn after `turn_end` via `Runtime.request_turn()`
 - orchestrate additional model-backed work via `Model.call` and `Model.spawn`
-  (recipe names are host-defined).
 
-Prompts without a `<script>` keep the old behavior: the shared drivers,
-`chat_tui`, export flow, and nested agent execution all fall back to the
-baseline non-moderated path.
+Prompts without a `<script>` keep the baseline behavior: the shared drivers, `chat_tui`, export flow, and nested agent execution continue to work without the moderation layer.
 
-Ochat is implemented in OCaml, and provides tools for OCaml development, but the workflows themselves are **language‑agnostic** and ochat makes no assumptions about the types of applications the workflows target: you can use ochat to build workflows for any use case that benefits from LLMs + tools, and it puts no constraints on how simple or complex those workflows are.
+Ochat is implemented in **OCaml**, but the workflows themselves are **language-agnostic**. Tools exchange JSON, prompts are plain files, and the system makes no assumptions about the kinds of applications your workflows target.
 
-**LLM provider support (today): OpenAI only.** Ochat currently integrates with OpenAI for chat execution and embeddings. It uses the Responses API, so any model that supports that API scheme could be used. The architecture is intended to support additional providers, but those integrations are not implemented yet.
+> **Current provider support:** OpenAI only (via the Responses API).  
+> The architecture is designed to support additional providers in the future.
+
+---
+
+## What makes Ochat different?
+
+Ochat is not just:
+- a coding assistant,
+- a prompt playground,
+- an orchestration framework,
+- or an MCP wrapper.
+
+It is a **text-first workflow toolkit** built around a few core ideas:
+
+- **Prompt-as-program**  
+  A workflow can live in a single file that contains config, tools, transcript state, and execution artifacts.
+
+- **Transcript-as-artifact**  
+  Runs are inspectable, diffable, branchable, and resumable.
+
+- **Prompt packs instead of fixed apps**  
+  Build your own Claude Code/Codex-style workflows instead of being limited to a single built-in agent UX.
+
+- **Composable agents**  
+  Mount one prompt as a tool inside another workflow.
+
+- **Host-managed control logic**  
+  Use ChatML scripts to moderate tool calls, manage workflow state, and orchestrate multi-step behavior.
+
+- **Run anywhere**  
+  Use the same workflow in the TUI, the CLI, or through MCP.
+
+---
+
+## How Ochat compares
+
+Ochat sits in a different part of the LLM tooling landscape than most agent tools.
+
+### Compared to coding-agent products
+Tools like **Claude Code**, **Codex-style CLIs**, or **Aider** are polished agent applications for working in a repo.
+
+Ochat is more fundamental: it is a **toolkit for building your own agent workflows** as plain files. Instead of shipping a single hard-coded agent experience, Ochat lets you define prompts, tools, transcript state, and orchestration explicitly.
+
+### Compared to orchestration frameworks
+Frameworks like **LangGraph** and similar Python agent stacks are typically **code-first**: you build workflows in application code.
+
+Ochat is **artifact-first**: workflows live as **text files** that can be version-controlled, diffed, composed, resumed, and run in different hosts.
+
+### Compared to observability / prompt-management platforms
+Platforms like **LangSmith**, **PromptLayer**, or **Humanloop** focus on tracing, evaluation, and hosted prompt management.
+
+Ochat focuses on **authoring and running workflows locally as inspectable artifacts**. It is not primarily a dashboard or hosted prompt registry.
+
+### Compared to MCP tools
+MCP provides a protocol for exposing tools and resources to models and clients.
+
+Ochat supports MCP, but it is broader than that. It is a **workflow system** with:
+- ChatMD prompt files
+- transcript persistence
+- prompt-as-tool composition
+- host-managed scripting
+- TUI and CLI execution
+- local indexing and retrieval tools
+
+### The simplest way to think about it
+If other tools are:
+- **agent apps**
+- **Python orchestration frameworks**
+- **hosted observability platforms**
+- or **protocol/tool adapters**
+
+then Ochat is best thought of as:
+
+**a text-first toolkit for reproducible, composable LLM workflows**
+
+---
+
+## Comparison summary
+
+| Tool type | Typical model | How Ochat differs |
+|-----------|---------------|-------------------|
+| Coding agents | fixed end-user assistant | Ochat lets you build your own agent workflows |
+| Orchestration frameworks | workflows in code | Ochat defines workflows as plain files |
+| Prompt platforms | hosted dashboards | Ochat is local/artifact-first |
+| MCP tools | protocol/tool exposure | Ochat is a full workflow system that can also speak MCP |
+
+---
+
+## Why this matters
+
+As LLM workflows become more important, prompts, tools, transcript state, and orchestration increasingly need to behave like **real engineering artifacts**.
+
+Ochat is designed around that idea.
 
 ---
 
@@ -353,11 +470,11 @@ let on_event : context -> state -> event -> state task =
             (* Append a new user message so the next turn has explicit instructions. *)
             let* () = Turn.append_item(user_item) in
             let payload =
-              agent_prompt_payload
-                ~prompt:"prompts/commit_message_agent.chatmd"
-                ~is_local:true
-                ~input:("Add the current changes in the repo and write a concise git commit message based on the changes")
-                ~session_id:(ctx.session_id ++ ":commit-msg")
+              agent_prompt_payload(
+                "prompts/commit_message_agent.chatmd",
+                true,
+                "Add the current changes in the repo and write a concise git commit message based on the changes",
+                ctx.session_id ++ ":commit-msg")
             in
             let* res_ = Model.call("agent_prompt_v1", payload) in
             
@@ -374,6 +491,7 @@ let on_event : context -> state -> event -> state task =
     | `Message_appended(_)
     | `Pre_tool_call(_)
     | `Post_tool_response(_) ->
+    | `Internal_event ->
       Task.pure(st)
          
 </script>
