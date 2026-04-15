@@ -306,6 +306,87 @@ Because conversation state is stored in text files, you can export full runs, br
 
 ---
 
+
+## Common use cases
+
+Ochat is useful anywhere you want LLM workflows to be explicit, reproducible, and easy to evolve.
+
+Typical use cases include:
+
+- **Repo-aware coding assistants**  
+  Build agents that inspect a codebase, read files, propose patches, and run in a controlled local workflow.
+
+- **Documentation agents**  
+  Create prompts that summarize docs, update documentation, or answer questions over local documentation sets.
+
+- **Planning / review / test workflows**  
+  Compose multiple prompts into planning, implementation, review, and test stages.
+
+- **Prompt packs for internal tools**  
+  Define reusable sets of prompts and tools for domain-specific workflows without burying them inside a UI.
+
+- **Retrieval-grounded assistants**  
+  Index local docs or source trees and let prompts query them with natural language.
+
+- **CI and scripted runs**  
+  Run prompts non-interactively in scripts, CI jobs, or recurring automation tasks.
+
+- **MCP-exposed prompt tools**  
+  Publish prompts as MCP tools so IDEs and other hosts can call them over stdio or HTTP/SSE.
+
+---
+
+## First 10 minutes with Ochat
+
+A simple way to get a feel for Ochat:
+
+1. **Set up OCaml tooling**  
+   If needed, install OCaml, opam, and the toolchain:
+   - [OCaml.org](https://ocaml.org)
+   - [Install guide](https://ocaml.org/install#linux_mac_bsd)
+
+2. **Build the project**
+   ```sh
+   opam switch create .
+   opam install . --deps-only
+   dune build
+   ```
+
+3. **Run a minimal prompt**
+   Create `prompts/hello.md` and run it in the TUI:
+   ```sh
+   dune exec chat_tui -- -file prompts/hello.md
+   ```
+
+4. **Try a tool-using prompt**
+   Run the refactor example:
+   ```sh
+   dune exec chat_tui -- -file prompts/refactor.md
+   ```
+
+5. **Inspect the workflow artifact**
+   Export or save the run and open the resulting `.md` / `.chatmd` file to see:
+   - the prompt
+   - the transcript
+   - tool calls and results
+   - the exact workflow state captured as text
+
+6. **Try a non-interactive run**
+   ```sh
+   ochat chat-completion \
+     -prompt-file prompts/hello.md \
+     -output-file .chatmd/hello-run.md
+   ```
+
+7. **Explore deeper features**
+   From there, try:
+   - agent-as-tool composition
+   - MCP export via `mcp_server`
+   - retrieval/indexing tools
+   - ChatML moderator scripts
+
+---
+
 ## Example ChatMD prompts
 
 ### Example: minimal prompt
@@ -604,6 +685,37 @@ For more on `ochat chat-completion` (flags, exit codes, ephemeral runs), see
 
 ## Architecture overview
 
+```text
+                 ChatMD workflow file
+   ┌──────────────────────────────────────────────┐
+   │ config                                       │
+   │ tools                                        │
+   │ prompt messages                              │
+   │ transcript / tool calls / tool results       │
+   │ optional ChatML moderation script            │
+   └──────────────────────────────────────────────┘
+                           │
+                           ▼
+          ┌──────────────────────────────────┐
+          │ Host runtime                     │
+          │ - `chat_tui`                     │
+          │ - `ochat chat-completion`        │
+          │ - `mcp_server`                   │
+          └──────────────────────────────────┘
+              │                  │
+              ▼                  ▼
+      ┌───────────────┐   ┌──────────────────┐
+      │ Model backend │   │ Tool execution   │
+      │ OpenAI today  │   │ built-ins/shell/ │
+      │ more later    │   │ MCP/other agents │
+      └───────────────┘   └──────────────────┘
+              │                  │
+              └──────────┬───────┘
+                         ▼
+             Updated ChatMD transcript/state
+           (diffable, reproducible, resumable)
+```
+
 At a high level, Ochat has two layers:
 
 - **ChatMD** is the workflow document format  
@@ -622,6 +734,7 @@ A typical flow looks like this:
 6. Persist the resulting workflow state back as text artifacts
 
 This split keeps workflows inspectable while still allowing advanced control logic.
+
 
 ---
 
