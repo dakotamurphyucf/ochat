@@ -61,6 +61,8 @@
   notty_eio
   notty_scroll_box
   io
+  chatml
+  chatml_moderator_runtime
   chat_response
   chatmd
   meta_prompting

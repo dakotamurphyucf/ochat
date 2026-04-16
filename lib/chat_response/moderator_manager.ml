@@ -3,6 +3,8 @@ module CM = Prompt.Chat_markdown
 module Moderation = Moderation
 module Runtime = Chatml_moderator_runtime
 module Res = Openai.Responses
+module Builtin_spec = Chatml.Chatml_builtin_spec
+module Debug_log = Chatml.Chatml_debug_log
 module Value_codec = Chatml.Chatml_value_codec
 module Snapshot = Session.Snapshot
 
@@ -307,6 +309,11 @@ let handle_event
       ~(event : Moderation.Event.t)
   : (Moderation.Outcome.t, string) result
   =
+  let event_value = Moderation.Event.to_value event in
+  Debug_log.emitf
+    "[moderator-manager] handle_event session=%s event=%s"
+    session_id
+    (Builtin_spec.value_to_pretty_string event_value);
   let context =
     project_context
       t
@@ -329,6 +336,13 @@ let handle_event
   let%bind decoded = Runtime.decode_local_effects new_effects in
   let%map outcome = Moderation.Outcome.of_runtime_effects decoded in
   List.iter outcome.overlay_ops ~f:(apply_overlay_op t);
+  Debug_log.emitf
+    "[moderator-manager] handle_event_ok session=%s overlay_ops=%d runtime_requests=%d emitted_events=%d tool_moderation=%b"
+    session_id
+    (List.length outcome.overlay_ops)
+    (List.length outcome.runtime_requests)
+    (List.length outcome.emitted_events)
+    (Option.is_some outcome.tool_moderation);
   outcome
 ;;
 
@@ -349,6 +363,11 @@ let rec drain_loop
     match Runtime.take_queued_event t.runtime with
     | None -> Ok (List.rev acc)
     | Some event ->
+      Debug_log.emitf
+        "[moderator-manager] drain_internal_event session=%s event=%s remaining=%d"
+        session_id
+        (Builtin_spec.value_to_pretty_string event)
+        remaining;
       (match
          handle_event
            t

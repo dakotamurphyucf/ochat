@@ -61,6 +61,17 @@ val module_scheme : builtin_module -> ty
     and host tooling. *)
 val value_to_string : value -> string
 
+(** Render a runtime value using a multiline layout intended for logs and
+    debugging. *)
+val value_to_pretty_string : value -> string
+
+(** Configure the sink used by the core [print] builtin. When unset,
+    [print] falls back to stdout. *)
+val set_print_sink : (string -> unit) -> unit
+
+(** Restore the default stdout-backed behavior for [print]. *)
+val clear_print_sink : unit -> unit
+
 (** Task type constructor helper. *)
 val task_ty : ty -> ty
 

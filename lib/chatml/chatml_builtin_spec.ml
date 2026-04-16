@@ -2,6 +2,7 @@ open Core
 open Chatml_lang
 open Jsonaf
 module Eval = Chatml_eval
+module Debug_log = Chatml_debug_log
 module Value_codec = Chatml_value_codec
 
 type row =
@@ -155,6 +156,132 @@ let rec value_to_string (v : value) : string =
       Printf.sprintf "`%s(%s)" slug inside)
 ;;
 
+let indent depth = String.make depth ' '
+
+let indent_block depth text =
+  String.split_lines text
+  |> List.map ~f:(fun line -> indent depth ^ line)
+  |> String.concat ~sep:"\n"
+;;
+
+let compact_limit = 80
+
+let prefer_compact text =
+  not (String.mem text '\n') && String.length text <= compact_limit
+;;
+
+let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
+  let nested = value_to_pretty_string_with_depth ~depth:(depth + 1) in
+  let compact_nested value =
+    let compact = value_to_string value in
+    if prefer_compact compact then compact else nested value
+  in
+  let rec task_to_pretty_string ~depth (task : task) : string =
+    let nested_task = task_to_pretty_string ~depth:(depth + 1) in
+    let compact_task task =
+      let compact = value_to_string (VTask task) in
+      if prefer_compact compact then compact else nested_task task
+    in
+    let eff_to_pretty_string ~depth (eff : eff) =
+      let rendered_args =
+        match eff.args with
+        | [] -> "[]"
+        | args ->
+          let rendered =
+            List.map args ~f:(fun arg -> indent_block (depth + 1) (compact_nested arg))
+            |> String.concat ~sep:",\n"
+          in
+          "[\n" ^ rendered ^ "\n" ^ indent depth ^ "]"
+      in
+      "{\n"
+      ^ indent (depth + 1)
+      ^ "operation = "
+      ^ eff.op
+      ^ ";\n"
+      ^ indent (depth + 1)
+      ^ "args = "
+      ^ rendered_args
+      ^ "\n"
+      ^ indent depth
+      ^ "}"
+    in
+    match task with
+    | TPure value ->
+      "pure(\n" ^ indent_block (depth + 1) (compact_nested value) ^ "\n" ^ indent depth ^ ")"
+    | TBind (task, fn) ->
+      "bind(\n"
+      ^ indent_block (depth + 1) (compact_task task)
+      ^ ",\n"
+      ^ indent_block (depth + 1) (value_to_string fn)
+      ^ "\n"
+      ^ indent depth
+      ^ ")"
+    | TMap (task, fn) ->
+      "map(\n"
+      ^ indent_block (depth + 1) (compact_task task)
+      ^ ",\n"
+      ^ indent_block (depth + 1) (value_to_string fn)
+      ^ "\n"
+      ^ indent depth
+      ^ ")"
+    | TFail message -> "fail(" ^ message ^ ")"
+    | TCatch (task, fn) ->
+      "catch(\n"
+      ^ indent_block (depth + 1) (compact_task task)
+      ^ ",\n"
+      ^ indent_block (depth + 1) (value_to_string fn)
+      ^ "\n"
+      ^ indent depth
+      ^ ")"
+    | TPerform eff -> "perform(\n" ^ indent_block (depth + 1) (eff_to_pretty_string ~depth:(depth + 1) eff) ^ "\n" ^ indent depth ^ ")"
+    | TSpawn eff -> "spawn(\n" ^ indent_block (depth + 1) (eff_to_pretty_string ~depth:(depth + 1) eff) ^ "\n" ^ indent depth ^ ")"
+  in
+  match v with
+  | VInt _ | VFloat _ | VBool _ | VString _ | VRef _ | VModule _ | VClosure _ | VUnit
+  | VBuiltin _ -> value_to_string v
+  | VArray arr ->
+    if Array.length arr = 0
+    then "[||]"
+    else (
+      let contents =
+        Array.to_list arr
+        |> List.map ~f:(fun value -> indent_block (depth + 1) (compact_nested value))
+        |> String.concat ~sep:",\n"
+      in
+      "[|\n" ^ contents ^ "\n" ^ indent depth ^ "|]")
+  | VRecord fields ->
+    if Map.is_empty fields
+    then "{ }"
+    else (
+      let rendered_fields =
+        Map.to_alist fields
+        |> List.map ~f:(fun (key, value) ->
+          let rendered_value = compact_nested value in
+          if String.mem rendered_value '\n'
+          then
+            indent (depth + 1)
+            ^ key
+            ^ " =\n"
+            ^ indent_block (depth + 2) rendered_value
+          else indent (depth + 1) ^ key ^ " = " ^ rendered_value)
+        |> String.concat ~sep:";\n"
+      in
+      "{\n" ^ rendered_fields ^ "\n" ^ indent depth ^ "}")
+  | VTask task -> task_to_pretty_string ~depth task
+  | VVariant (slug, vals) ->
+    if List.is_empty vals
+    then Printf.sprintf "`%s" slug
+    else (
+      let inside =
+        vals
+        |> List.map ~f:(fun value -> indent_block (depth + 1) (compact_nested value))
+        |> String.concat ~sep:",\n"
+      in
+      Printf.sprintf "`%s(\n%s\n%s)" slug inside (indent depth))
+;;
+
+let value_to_pretty_string v = value_to_pretty_string_with_depth v
+
 let with_unary_arg (name : string) (f : value -> value) : value list -> value = function
   | [ arg ] -> f arg
   | _ -> failwith (Printf.sprintf "%s: expected exactly one argument" name)
@@ -288,12 +415,23 @@ let hash_string_md5 s =
   digest_string s |> to_hex
 ;;
 
+let print_sink_ref : (string -> unit) option ref = ref None
+
+let set_print_sink sink = print_sink_ref := Some sink
+let clear_print_sink () = print_sink_ref := None
+
+let emit_print line =
+  match !print_sink_ref with
+  | Some sink -> sink line
+  | None -> Printf.printf "%s\n%!" line
+;;
+
 let builtins : builtin list =
   [ make_unary_builtin
       "print"
       (TFun ([ TVar "a" ], TUnit))
       (fun v ->
-         Printf.printf "%s \n" (value_to_string v);
+         emit_print (value_to_string v);
          VUnit)
   ; make_unary_builtin
       "to_string"

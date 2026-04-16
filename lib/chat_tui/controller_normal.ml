@@ -517,6 +517,15 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     done
   in
   match ev with
+  | `Key (`ASCII 'r', mods) when List.is_empty mods ->
+    (* Toggle Raw-XML draft mode in Insert state. *)
+    let new_mode =
+      match Model.draft_mode model with
+      | Model.Plain -> Model.Raw_xml
+      | Model.Raw_xml -> Model.Plain
+    in
+    Model.set_draft_mode model new_mode;
+    Redraw
   (* -------------------------------------------------------------- *)
   (* Visual-mode (character-wise)                                    *)
   | `Key (`Escape, mods) when List.is_empty mods && Model.selection_active model ->

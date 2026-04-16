@@ -8,6 +8,7 @@
   chatml_slot_layout
   chatml_lexer
   chatml_parser
+  chatml_debug_log
   frame_env
   chatml_value_codec
   chatml_builtin_spec

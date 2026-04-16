@@ -40,6 +40,9 @@ module Moderator_manager = Chat_response.Moderator_manager
 module Stream_moderator = Chat_response.In_memory_stream
 module Req = Res.Request
 module Runtime_semantics = Chat_response.Runtime_semantics
+module Chatml_builtin_spec = Chatml.Chatml_builtin_spec
+module Chatml_debug_log = Chatml.Chatml_debug_log
+module Chatml_runtime = Chatml_moderator_runtime
 
 (** Runtime artefacts derived from the chat prompt. *)
 type prompt_context =
@@ -500,6 +503,66 @@ let run_chat
      [cwd] preserves the previous behaviour for ad-hoc one-off chats
      where no session is active. *)
   let datadir = Setup.init_datadir ~env ~cwd ~session in
+  let chatml_log_file = "chatml-runtime.log" in
+  let strip_leading_space text =
+    match String.chop_prefix text ~prefix:" " with
+    | Some stripped -> stripped
+    | None -> text
+  in
+  let classify_chatml_log_line line =
+    let parse_levelled prefix component =
+      match String.chop_prefix line ~prefix:(prefix ^ "[") with
+      | None -> None
+      | Some rest ->
+        (match String.lsplit2 rest ~on:']' with
+         | None -> None
+         | Some (level, message) ->
+           Some (component, Some level, strip_leading_space message))
+    in
+    match String.chop_prefix line ~prefix:"[chat_tui] " with
+    | Some message -> "chat_tui", None, message
+    | None ->
+      (match parse_levelled "[script-log]" "script_log" with
+       | Some parsed -> parsed
+       | None ->
+         (match parse_levelled "[chatml-log]" "chatml_log" with
+          | Some parsed -> parsed
+          | None ->
+            (match String.chop_prefix line ~prefix:"[chatml-runtime] " with
+             | Some message -> "chatml_runtime", None, message
+             | None ->
+               (match String.chop_prefix line ~prefix:"[moderator-manager] " with
+                | Some message -> "moderator_manager", None, message
+                | None ->
+                  (match String.chop_prefix line ~prefix:"[print] " with
+                   | Some message -> "print", None, message
+                   | None -> "chatml", None, line)))))
+  in
+  let append_chatml_log line =
+    let timestamp = Time_ns.to_string_utc (Time_ns.now ()) in
+    let component, level, message = classify_chatml_log_line line in
+    let fields =
+      [ Some ("timestamp", `String timestamp)
+      ; Some ("component", `String component)
+      ; Some ("message", `String message)
+      ; Some ("raw", `String line)
+      ; Option.map level ~f:(fun level -> "level", `String level)
+      ]
+      |> List.filter_map ~f:Fn.id
+    in
+    Io.log
+      ~dir:datadir
+      ~file:chatml_log_file
+      (Jsonaf.to_string (`Object fields) ^ "\n")
+  in
+  Chatml_builtin_spec.set_print_sink (fun text ->
+    append_chatml_log (Printf.sprintf "[print] %s" text));
+  Chatml_debug_log.set_sink append_chatml_log;
+  append_chatml_log
+    (Printf.sprintf
+       "[chat_tui] runtime_log_started prompt=%s session=%s"
+       prompt_file
+       (Option.value_map session ~default:"<none>" ~f:(fun (s : Session.t) -> s.id)));
   let cache = Setup.load_cache ~datadir in
   let services : App_context.Services.t = { env; ui_sw; cwd; cache; datadir; session } in
   (* Base directory of the prompt file – used for resolving relative paths in
@@ -514,6 +577,17 @@ let run_chat
     { ctx; run_agent = Chat_response.Driver.run_agent; fetch_prompt }
   in
   let model_executor = Chat_response.Model_executor.create ~sw:ui_sw ~exec_context () in
+  let moderator_capabilities =
+    { Moderation.Capabilities.default with
+      on_log =
+        (fun ~level ~message ->
+          Chatml_debug_log.emitf
+            "[script-log][%s] %s"
+            (Chatml_runtime.string_of_log_level level)
+            message;
+          Ok ())
+    }
+  in
   let declared_tools = Setup.declared_tools_of_elements prompt_elements in
   let tools, tool_tbl = Setup.build_tools_runtime ~sw:ui_sw ~ctx ~declared_tools in
   (* Convert prompt → initial history items extracted from the static prompt. *)
@@ -523,6 +597,7 @@ let run_chat
   let history_items = Setup.choose_initial_history ~session ~history_items_prompt in
   let moderator, startup_requests =
     Setup.create_moderator
+      ~capabilities:moderator_capabilities
       ~model_executor
       ~env
       ~prompt_file
@@ -608,6 +683,9 @@ let run_chat
     ~model
     ~cfg
     ~initial_msg_count
-    ()
+    ();
+  append_chatml_log "[chat_tui] runtime_log_finished";
+  Chatml_builtin_spec.clear_print_sink ();
+  Chatml_debug_log.clear_sink ()
 ;;
 (* Exit the program. *)
