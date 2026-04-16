@@ -40,6 +40,7 @@ module Moderator_manager = Chat_response.Moderator_manager
 module Stream_moderator = Chat_response.In_memory_stream
 module Req = Res.Request
 module Runtime_semantics = Chat_response.Runtime_semantics
+module Moderator_session_controller = Moderator_session_controller
 module Chatml_builtin_spec = Chatml.Chatml_builtin_spec
 module Chatml_debug_log = Chatml.Chatml_debug_log
 module Chatml_runtime = Chatml_moderator_runtime
@@ -191,6 +192,7 @@ module Setup = struct
   let create_moderator
         ?(capabilities = Moderation.Capabilities.default)
         ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
+        ?on_wakeup
         ~model_executor
         ~env
         ~prompt_file
@@ -226,7 +228,11 @@ module Setup = struct
         }
       in
       let%bind manager = Moderator_manager.create ~artifact ~capabilities ?snapshot () in
-      Chat_response.Model_executor.register_session model_executor ~session_id ~manager;
+      Chat_response.Model_executor.register_session
+        ?on_wakeup
+        model_executor
+        ~session_id
+        ~manager;
       let moderator =
         Stream_moderator.{ manager; session_id; session_meta = `Null; runtime_policy }
       in
@@ -259,10 +265,7 @@ module Setup = struct
             ~available_tools:tools
             ~session_meta:`Null
       in
-      let requests =
-        List.concat_map (outcome :: drained) ~f:(fun outcome -> outcome.runtime_requests)
-      in
-      Ok (Some moderator, requests)
+      Ok (Some moderator, outcome :: drained)
   ;;
 
   let init_model ~(session : Session.t option) ~history_items ~messages : Model.t =
@@ -490,10 +493,7 @@ let run_chat
   (* Two event queues: terminal input events must not be backpressured by internal traffic. *)
   let input_stream : input_event Eio.Stream.t = Eio.Stream.create 4096 in
   let internal_stream : internal_event Eio.Stream.t = Eio.Stream.create 1024 in
-  let system_event = Eio.Stream.create 10 in
-  let streams : App_context.Streams.t =
-    { input = input_stream; internal = internal_stream; system = system_event }
-  in
+  let streams : App_context.Streams.t = { input = input_stream; internal = internal_stream } in
   (* Load the chat prompt and initialise the model. *)
   let cwd = Eio.Stdenv.cwd env in
   (* Determine the directory used to store runtime artefacts (cache,
@@ -577,6 +577,11 @@ let run_chat
     { ctx; run_agent = Chat_response.Driver.run_agent; fetch_prompt }
   in
   let model_executor = Chat_response.Model_executor.create ~sw:ui_sw ~exec_context () in
+  let moderator_session_id = Setup.moderator_session_id ~session ~prompt_file in
+  let wakeup_is_active = ref true in
+  let on_moderator_wakeup () =
+    if !wakeup_is_active then Eio.Stream.add internal_stream `Moderator_wakeup
+  in
   let moderator_capabilities =
     { Moderation.Capabilities.default with
       on_log =
@@ -595,7 +600,7 @@ let run_chat
   (* If a persisted [session] was passed in, prefer its history – otherwise
      start from the prompt defaults. *)
   let history_items = Setup.choose_initial_history ~session ~history_items_prompt in
-  let moderator, startup_requests =
+  let moderator, startup_outcomes =
     Setup.create_moderator
       ~capabilities:moderator_capabilities
       ~model_executor
@@ -605,6 +610,7 @@ let run_chat
       ~prompt_elements
       ~history_items
       ~tools
+      ~on_wakeup:on_moderator_wakeup
       ()
     |> Result.ok_or_failwith
   in
@@ -621,21 +627,19 @@ let run_chat
   let tui_policy =
     { Runtime_semantics.default_policy with honor_request_compaction = true }
   in
-  let startup_requests = Runtime_semantics.collapse startup_requests in
-  if
-    tui_policy.honor_request_compaction
-    && Runtime_semantics.request_compaction startup_requests
-  then Eio.Stream.add internal_stream `Compact_requested;
-  Option.iter (Runtime_semantics.should_end_session startup_requests) ~f:(fun reason ->
-    runtime.halted_reason <- Some reason;
-    ignore
-      (Model.apply_patch
-         model
-         (Add_placeholder_message
-            { role = "system"
-            ; text = Printf.sprintf "Session ended by moderator: %s" reason
-            })));
-  Model.rebuild_tool_output_index model;
+  let apply_startup_outcome (outcome : Moderator_session_controller.t) =
+    if outcome.request_refresh then App_runtime.refresh_messages runtime;
+    List.iter outcome.internal_events_to_enqueue ~f:(Eio.Stream.add internal_stream);
+    Option.iter outcome.halt_reason ~f:(fun reason -> runtime.halted_reason <- Some reason);
+    List.iter outcome.system_notices ~f:(fun text ->
+      ignore
+        (Runtime.add_system_notice_once runtime ~key:("system:" ^ text) text : bool));
+  in
+  Moderator_session_controller.of_outcomes
+    ~policy:tui_policy
+    ~turn_request:(Schedule Runtime.Idle_followup)
+    startup_outcomes
+  |> apply_startup_outcome;
   (* Start the Notty terminal – its [on_event] callback just pushes events
         into [ev_stream] so the UI stays single-threaded. *)
   Notty_eio.Term.run ~input:env#stdin ~output:env#stdout ~mouse:false ~on_event:(fun ev ->
@@ -653,7 +657,14 @@ let run_chat
   redraw ();
   (* Start the periodic scheduler to coalesce frequent updates. *)
   Ui.spawn_throttler ~env ~sw:ui_sw ~throttler;
-  let ui : App_context.Ui.t = { term; throttler; redraw; redraw_immediate } in
+  let ui : App_context.Ui.t =
+    { term
+    ; size = (fun () -> Notty_eio.Term.size term)
+    ; throttler
+    ; redraw
+    ; redraw_immediate
+    }
+  in
   let shared : App_context.Resources.t = { services; streams; ui } in
   let streaming : Streaming_submit.Context.t =
     { shared
@@ -661,16 +672,29 @@ let run_chat
     ; tools = prompt_ctx.tools
     ; tool_tbl = prompt_ctx.tool_tbl
     ; moderator = prompt_ctx.moderator
+    ; safe_point_input = Some (Runtime.safe_point_input_source runtime)
     ; parallel_tool_calls
     ; history_compaction = false
     }
   in
-  let submit : App_submit.Context.t = { runtime; streaming } in
+  let start_streaming ~history ~op_id =
+    Fiber.fork ~sw:ui_sw (fun () -> App_streaming.start streaming ~history ~op_id)
+  in
+  let submit : App_submit.Context.t = { runtime; streaming; start_streaming } in
   let compaction : App_compaction.Context.t = { shared; runtime } in
   let reducer_ctx : App_reducer.Context.t =
     { runtime; shared; submit; compaction; cancelled = Streaming_submit.Cancelled }
   in
-  let quit_via_esc = App_reducer.run reducer_ctx in
+  let unregister_moderator_wakeup () =
+    wakeup_is_active := false;
+    Option.iter moderator ~f:(fun _ ->
+      Chat_response.Model_executor.unregister_session_wakeup
+        model_executor
+        ~session_id:moderator_session_id)
+  in
+  let quit_via_esc =
+    Fun.protect ~finally:unregister_moderator_wakeup (fun () -> App_reducer.run reducer_ctx)
+  in
   Shutdown.shutdown
     ~env
     ~term

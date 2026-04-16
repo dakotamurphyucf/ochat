@@ -43,7 +43,15 @@ val recipe_agent_prompt_v1
 
 (** Register the moderator manager responsible for [session_id] so spawned model
     jobs can be reinjected as internal events. *)
-val register_session : t -> session_id:string -> manager:Moderator_manager.t -> unit
+val register_session
+  :  ?on_wakeup:(unit -> unit)
+  -> t
+  -> session_id:string
+  -> manager:Moderator_manager.t
+  -> unit
+
+(** Remove any registered wakeup callback for [session_id]. *)
+val unregister_session_wakeup : t -> session_id:string -> unit
 
 (** Await completion of a spawned job (test utility). *)
 val await_job : t -> job_id:string -> (unit, string) result

@@ -521,10 +521,14 @@ let add_history_item (model : t) (item : Openai.Responses.Item.t) =
   model
 ;;
 
-let rebuild_tool_output_index (model : t) : unit =
+let rebuild_tool_output_index_for_items
+      (model : t)
+      (items : Openai.Responses.Item.t list)
+  : unit
+  =
   Hashtbl.clear model.tool_output_by_index;
   let call_info_by_id = Hashtbl.create (module String) in
-  List.iter model.history_items ~f:(function
+  List.iter items ~f:(function
     | Res_item.Function_call fc ->
       let name = fc.name in
       let path =
@@ -543,7 +547,7 @@ let rebuild_tool_output_index (model : t) : unit =
       Hashtbl.set call_info_by_id ~key:tc.call_id ~data:(name, path)
     | _ -> ());
   let idx = ref 0 in
-  List.iter model.history_items ~f:(fun it ->
+  List.iter items ~f:(fun it ->
     match Conversation.pair_of_item it with
     | None -> ()
     | Some _msg ->
@@ -566,4 +570,16 @@ let rebuild_tool_output_index (model : t) : unit =
          Hashtbl.set model.tool_output_by_index ~key:!idx ~data:kind
        | _ -> ());
       incr idx)
+;;
+
+let rebuild_tool_output_index model =
+  rebuild_tool_output_index_for_items model model.history_items
+;;
+
+let clamp_selected_message (model : t) : unit =
+  let message_count = List.length model.messages in
+  match selected_msg model with
+  | None -> ()
+  | Some _ when message_count = 0 -> select_message model None
+  | Some idx -> select_message model (Some (Int.min (message_count - 1) idx))
 ;;

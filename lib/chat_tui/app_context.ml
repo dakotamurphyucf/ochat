@@ -1,6 +1,7 @@
 module Ui = struct
   type t =
     { term : Notty_eio.Term.t
+    ; size : unit -> int * int
     ; throttler : Redraw_throttle.t
     ; redraw : unit -> unit
     ; redraw_immediate : unit -> unit
@@ -11,7 +12,6 @@ module Streams = struct
   type t =
     { input : App_events.input_event Eio.Stream.t
     ; internal : App_events.internal_event Eio.Stream.t
-    ; system : string Eio.Stream.t
     }
 end
 

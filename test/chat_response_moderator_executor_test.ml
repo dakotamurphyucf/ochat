@@ -2,6 +2,7 @@ open! Core
 module CM = Prompt.Chat_markdown
 module Cache = Chat_response.Cache
 module Ctx = Chat_response.Ctx
+module Manager = Chat_response.Moderator_manager
 module Model_executor = Chat_response.Model_executor
 module Moderation = Chat_response.Moderation
 module Lang = Chatml.Chatml_lang
@@ -134,6 +135,38 @@ type job_state =
   ]
 [@@deriving sexp]
 
+let ok_or_fail = function
+  | Ok value -> value
+  | Error msg -> failwith msg
+;;
+
+let moderator_artifact () =
+  let script =
+    CM.
+      { id = "main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source =
+          Inline
+            {|
+              type state = { count : int }
+              type event = [ `Session_start ]
+
+              let initial_state = { count = 0 }
+
+              let on_event : context -> state -> event -> state task =
+                fun ctx st ev ->
+                  match ev with
+                  | `Session_start -> Task.pure({ count = st.count + 1 })
+            |}
+      }
+  in
+  let _, compiled =
+    ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script)
+  in
+  compiled
+;;
+
 let%expect_test "spawn completion encodes stable internal event variants" =
   Eio_main.run
   @@ fun env ->
@@ -179,5 +212,83 @@ let%expect_test "spawn completion encodes stable internal event variants" =
        ((recipe (String agent_prompt_v1)) (prompt (String <prompt/>))
         (is_local False) (session_id (String nested-session))
         (final_text (String ok)) (terminated_normally True)))))
+    |}]
+;;
+
+let%expect_test "spawn completion wakes registered session and unregister is inert" =
+  Eio_main.run
+  @@ fun env ->
+  Eio.Switch.run
+  @@ fun sw ->
+  let cwd = Eio.Stdenv.cwd env in
+  let tmp = Eio.Path.(cwd / "_tmp_model_spawn_wakeup") in
+  Eio.Path.mkdirs ~perm:0o700 tmp;
+  let cache = Cache.load ~file:Eio.Path.(tmp / "cache.bin") ~max_size:10 () in
+  let ctx = Ctx.create ~env ~dir:tmp ~tool_dir:tmp ~cache in
+  let exec_context : Model_executor.exec_context =
+    { ctx
+    ; run_agent =
+        (fun ?history_compaction:_
+          ?prompt_dir:_
+          ?session_id:_
+          ~ctx:_
+          _prompt_xml
+          _items -> "ok")
+    ; fetch_prompt = (fun ~ctx:_ ~prompt ~is_local:_ -> Ok (prompt, None))
+    }
+  in
+  let executor = Model_executor.create ~sw ~exec_context () in
+  let manager =
+    ok_or_fail
+      (Manager.create
+         ~artifact:(moderator_artifact ())
+         ~capabilities:Moderation.Capabilities.default
+         ())
+  in
+  let wakeups = ref 0 in
+  Model_executor.register_session
+    executor
+    ~session_id:"sess-1"
+    ~manager
+    ~on_wakeup:(fun () -> wakeups := !wakeups + 1);
+  let recipe = Model_executor.recipe_agent_prompt_v1 executor ~session_id:"sess-1" in
+  let payload =
+    `Object
+      [ "prompt", `String "<prompt/>"
+      ; "input", `String "hi"
+      ; "session_id", `String "nested-session"
+      ]
+  in
+  let job_id_1 = recipe.spawn ~payload |> Result.ok_or_failwith in
+  Model_executor.await_job executor ~job_id:job_id_1 |> Result.ok_or_failwith;
+  let queued_after_first =
+    ok_or_fail (Manager.snapshot manager) |> fun snapshot ->
+    List.length snapshot.Session.Moderator_snapshot.queued_internal_events
+  in
+  let wakeups_after_first = !wakeups in
+  print_s
+    [%sexp
+      ([ "wakeups", Int.to_string wakeups_after_first
+       ; "queued_after_first", Int.to_string queued_after_first
+       ]
+       : (string * string) list)];
+  Model_executor.unregister_session_wakeup executor ~session_id:"sess-1";
+  let job_id_2 = recipe.spawn ~payload |> Result.ok_or_failwith in
+  Model_executor.await_job executor ~job_id:job_id_2 |> Result.ok_or_failwith;
+  let queued_after_second =
+    ok_or_fail (Manager.snapshot manager) |> fun snapshot ->
+    List.length snapshot.Session.Moderator_snapshot.queued_internal_events
+  in
+  let wakeups_after_second = !wakeups in
+  print_s
+    [%sexp
+      ([ "wakeups", Int.to_string wakeups_after_second
+       ; "queued_after_second", Int.to_string queued_after_second
+       ]
+       : (string * string) list)];
+  [%expect
+    {|
+    ((wakeups 1) (queued_after_first 1))
+    ((wakeups 1) (queued_after_second 2))
     |}]
 ;;

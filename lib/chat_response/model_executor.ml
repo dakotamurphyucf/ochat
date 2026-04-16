@@ -41,6 +41,7 @@ type t =
   ; next_job_id : int ref
   ; max_spawned_jobs : int
   ; sessions : Moderator_manager.t String.Table.t
+  ; session_wakeups : (unit -> unit) String.Table.t
   }
 
 type job_state =
@@ -58,13 +59,39 @@ let create ~sw ~exec_context ?(max_spawned_jobs = 100) () =
   ; next_job_id = ref 1
   ; max_spawned_jobs
   ; sessions = String.Table.create ()
+  ; session_wakeups = String.Table.create ()
   }
 ;;
 
-let register_session (t : t) ~(session_id : string) ~(manager : Moderator_manager.t)
+let notify_session_wakeup (t : t) ~(session_id : string) : unit =
+  match Hashtbl.find t.session_wakeups session_id with
+  | None -> ()
+  | Some on_wakeup ->
+    (try on_wakeup () with
+     | exn ->
+       Log.emit
+         `Error
+         (Printf.sprintf
+            "Model-executor session wakeup failed for %s: %s"
+            session_id
+            (Exn.to_string exn)))
+;;
+
+let unregister_session_wakeup (t : t) ~(session_id : string) : unit =
+  Hashtbl.remove t.session_wakeups session_id
+;;
+
+let register_session
+      ?on_wakeup
+      (t : t)
+      ~(session_id : string)
+      ~(manager : Moderator_manager.t)
   : unit
   =
   Hashtbl.set t.sessions ~key:session_id ~data:manager;
+  (match on_wakeup with
+   | None -> unregister_session_wakeup t ~session_id
+   | Some on_wakeup -> Hashtbl.set t.session_wakeups ~key:session_id ~data:on_wakeup);
   (* Deliver any already-completed undelivered jobs for this session. *)
   Hashtbl.iteri t.jobs ~f:(fun ~key:job_id ~data:job ->
     if String.equal job.session_id session_id && not job.delivered
@@ -91,7 +118,9 @@ let register_session (t : t) ~(session_id : string) ~(manager : Moderator_manage
       | None -> ()
       | Some event ->
         (match Moderator_manager.enqueue_internal_event manager event with
-         | Ok () -> job.delivered <- true
+         | Ok () ->
+           job.delivered <- true;
+           notify_session_wakeup t ~session_id
          | Error _ -> ())))
 ;;
 
@@ -140,7 +169,9 @@ let deliver_if_possible (t : t) ~(job_id : string) (job : job) : unit =
        | None -> ()
        | Some event ->
          (match Moderator_manager.enqueue_internal_event manager event with
-          | Ok () -> job.delivered <- true
+          | Ok () ->
+            job.delivered <- true;
+            notify_session_wakeup t ~session_id:job.session_id
           | Error _ -> ())))
 ;;
 

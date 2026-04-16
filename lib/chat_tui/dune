@@ -40,6 +40,7 @@
   snippet
   app_runtime
   app_events
+  moderator_session_controller
   app_context
   app_submit
   app_compaction

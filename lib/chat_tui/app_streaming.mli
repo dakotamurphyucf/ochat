@@ -32,7 +32,7 @@ exception Cancelled
     Example:
     {[
       let streams : Chat_tui.App_context.Streams.t =
-        { input; internal; system }
+        { input; internal }
       in
       let services : Chat_tui.App_context.Services.t =
         { env; ui_sw; cwd; cache; datadir; session }
@@ -44,6 +44,7 @@ exception Cancelled
         ; tools
         ; tool_tbl
         ; moderator = None
+        ; safe_point_input = None
         ; parallel_tool_calls = true
         ; history_compaction = true
         }
@@ -58,6 +59,7 @@ module Context : sig
     ; tools : Openai.Responses.Request.Tool.t list
     ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Core.Hashtbl.t
     ; moderator : Chat_response.In_memory_stream.moderator option
+    ; safe_point_input : Chat_response.In_memory_stream.Safe_point_input.t option
     ; parallel_tool_calls : bool
     ; history_compaction : bool
     }

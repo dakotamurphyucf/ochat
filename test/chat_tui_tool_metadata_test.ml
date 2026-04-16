@@ -316,6 +316,90 @@ let%expect_test "rebuild_tool_output_index classifies history items" =
     |}]
 ;;
 
+let%expect_test
+    "rebuild_tool_output_index_for_items aligns tool metadata with moderated visible history"
+  =
+  let module Model = Chat_tui.Model in
+  let module Types = Chat_tui.Types in
+  let module Res = Openai.Responses in
+  let module Item = Res.Item in
+  let fc_read : Res.Function_call.t =
+    { name = "read_file"
+    ; arguments = "{\"file\": \"foo.txt\"}"
+    ; call_id = "hist-read"
+    ; _type = "function_call"
+    ; id = None
+    ; status = Some "completed"
+    }
+  in
+  let fco_read : Res.Function_call_output.t =
+    { output = Res.Tool_output.Output.Text "contents"
+    ; call_id = fc_read.call_id
+    ; _type = "function_call_output"
+    ; id = None
+    ; status = Some "completed"
+    }
+  in
+  let visible_history =
+    [ Item.Input_message
+        { role = Res.Input_message.System
+        ; content = [ Res.Input_message.Text { text = "policy"; _type = "input_text" } ]
+        ; _type = "message"
+        }
+    ; Item.Function_call fc_read
+    ; Item.Function_call_output fco_read
+    ]
+  in
+  let scroll_box = Notty_scroll_box.create Notty.I.empty in
+  let model =
+    Model.create
+      ~history_items:[]
+      ~messages:(Chat_tui.Conversation.of_history visible_history)
+      ~input_line:""
+      ~auto_follow:true
+      ~msg_buffers:(Hashtbl.create (module String))
+      ~function_name_by_id:(Hashtbl.create (module String))
+      ~reasoning_idx_by_id:(Hashtbl.create (module String))
+      ~tool_output_by_index:(Hashtbl.create (module Int))
+      ~tasks:[]
+      ~kv_store:(Hashtbl.create (module String))
+      ~fetch_sw:None
+      ~scroll_box
+      ~cursor_pos:0
+      ~selection_anchor:None
+      ~mode:Model.Insert
+      ~draft_mode:Model.Plain
+      ~selected_msg:None
+      ~undo_stack:[]
+      ~redo_stack:[]
+      ~cmdline:""
+      ~cmdline_cursor:0
+  in
+  Model.rebuild_tool_output_index_for_items model visible_history;
+  let tbl = Model.tool_output_by_index model in
+  List.iter [ 0; 1; 2 ] ~f:(fun idx ->
+    match Hashtbl.find tbl idx with
+    | None -> Printf.printf "%d: none\n" idx
+    | Some kind ->
+      (match kind with
+       | Types.Read_file { path } ->
+         Printf.printf "%d: Read_file path=%s\n" idx (Option.value path ~default:"<none>")
+       | Types.Read_directory { path } ->
+         Printf.printf
+           "%d: Read_directory path=%s\n"
+           idx
+           (Option.value path ~default:"<none>")
+       | Types.Apply_patch -> Printf.printf "%d: Apply_patch\n" idx
+       | Types.Other { name } ->
+         Printf.printf "%d: Other name=%s\n" idx (Option.value name ~default:"<none>")));
+  [%expect
+    {|
+      0: none
+      1: none
+      2: Read_file path=foo.txt
+    |}]
+;;
+
 let%expect_test "lang_of_path maps common extensions" =
   let open Chat_tui.Renderer in
   let cases =

@@ -183,6 +183,127 @@ let%expect_test "runtime refresh_messages uses moderated visible history" =
     |}]
 ;;
 
+let%expect_test "runtime refresh_messages reindexes tool metadata for moderated history" =
+  let fc : Res.Function_call.t =
+    { name = "read_file"
+    ; arguments = "{\"file\": \"foo.txt\"}"
+    ; call_id = "call-1"
+    ; _type = "function_call"
+    ; id = None
+    ; status = Some "completed"
+    }
+  in
+  let fco : Res.Function_call_output.t =
+    { output = Res.Tool_output.Output.Text "contents"
+    ; call_id = fc.call_id
+    ; _type = "function_call_output"
+    ; id = None
+    ; status = Some "completed"
+    }
+  in
+  let history = [ Res.Item.Function_call fc; Res.Item.Function_call_output fco ] in
+  let manager = create_manager () in
+  ignore
+    (ok_or_fail
+       (Manager.handle_event
+          manager
+          ~session_id:"session-1"
+          ~now_ms:1
+          ~history
+          ~available_tools:[]
+          ~session_meta:`Null
+          ~event:Moderation.Event.Session_start)
+     : Moderation.Outcome.t);
+  let moderator =
+    Chat_response.In_memory_stream.
+      { manager
+      ; session_id = "session-1"
+      ; session_meta = `Null
+      ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      }
+  in
+  let model = model_of_history history in
+  let runtime = App_runtime.create ~model ~moderator () in
+  App_runtime.refresh_messages runtime;
+  print_messages (Chat_tui.Model.messages model);
+  let tool_outputs = Chat_tui.Model.tool_output_by_index model in
+  List.iter [ 0; 1; 2 ] ~f:(fun idx ->
+    match Hashtbl.find tool_outputs idx with
+    | None -> Printf.printf "%d: none\n" idx
+    | Some (Chat_tui.Types.Read_file { path }) ->
+      Printf.printf "%d: Read_file path=%s\n" idx (Option.value path ~default:"<none>")
+    | Some Chat_tui.Types.Apply_patch -> Printf.printf "%d: Apply_patch\n" idx
+    | Some (Chat_tui.Types.Read_directory { path }) ->
+      Printf.printf "%d: Read_directory path=%s\n" idx (Option.value path ~default:"<none>")
+    | Some (Chat_tui.Types.Other { name }) ->
+      Printf.printf "%d: Other name=%s\n" idx (Option.value name ~default:"<none>"));
+  [%expect
+    {|
+    system "policy"
+    tool "read_file({\"file\": \"foo.txt\"})"
+    tool_output "contents"
+    0: none
+    1: none
+    2: Read_file path=foo.txt
+    |}]
+;;
+
+let%expect_test "runtime refresh_messages clamps selected message after moderated refresh" =
+  let history =
+    [ Res.Item.Input_message
+        { role = Res.Input_message.User
+        ; content = [ input_text "Hello" ]
+        ; _type = "message"
+        }
+    ]
+  in
+  let manager = create_manager () in
+  ignore
+    (ok_or_fail
+       (Manager.handle_event
+          manager
+          ~session_id:"session-1"
+          ~now_ms:1
+          ~history
+          ~available_tools:[]
+          ~session_meta:`Null
+          ~event:Moderation.Event.Session_start)
+     : Moderation.Outcome.t);
+  let moderator =
+    Chat_response.In_memory_stream.
+      { manager
+      ; session_id = "session-1"
+      ; session_meta = `Null
+      ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      }
+  in
+  let model = model_of_history history in
+  Chat_tui.Model.select_message model (Some 10);
+  let runtime = App_runtime.create ~model ~moderator () in
+  App_runtime.refresh_messages runtime;
+  print_s [%sexp (Chat_tui.Model.selected_msg model : int option)];
+  [%expect {| (1) |}]
+;;
+
+let%expect_test "runtime add_system_notice_once suppresses duplicate notices" =
+  let model = model_of_history [] in
+  let runtime = App_runtime.create ~model () in
+  ignore
+    (App_runtime.add_system_notice_once
+       runtime
+       ~key:"system:Session ended by moderator: done"
+       "Session ended by moderator: done"
+     : bool);
+  ignore
+    (App_runtime.add_system_notice_once
+       runtime
+       ~key:"system:Session ended by moderator: done"
+       "Session ended by moderator: done"
+     : bool);
+  print_messages (Chat_tui.Model.messages model);
+  [%expect {| system "Session ended by moderator: done" |}]
+;;
+
 let%expect_test "runtime visible history reflects explicit session_resume moderation" =
   let history =
     [ Res.Item.Input_message

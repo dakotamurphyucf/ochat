@@ -52,6 +52,22 @@ type submit_request =
   ; draft_mode : Model.draft_mode
   }
 
+(** Why the session controller wants to start a turn. *)
+type turn_start_reason =
+  | User_submit
+  | Moderator_request
+  | Idle_followup
+
+(** A user-authored steering note captured during an active turn. *)
+type deferred_user_note = { text : string }
+
+(** Session-controller state that sits above the foreground operation state. *)
+type session_controller_state =
+  { mutable moderator_dirty : bool
+  ; deferred_user_notes : deferred_user_note Core.Queue.t
+  ; mutable pending_turn_request : turn_start_reason option
+  }
+
 (** Work that was requested while another operation is running. *)
 type queued_action =
   | Submit of submit_request
@@ -63,6 +79,9 @@ type t =
   ; mutable op : op option
   ; mutable typeahead_op : typeahead_op option
   ; moderator : Chat_response.In_memory_stream.moderator option
+  ; session_controller : session_controller_state
+  ; shown_notice_keys : string Core.Hash_set.t
+  ; mutable active_turn_start_reason : turn_start_reason option
   ; mutable halted_reason : string option
   ; pending : queued_action Core.Queue.t
   ; quit_via_esc : bool ref
@@ -79,6 +98,11 @@ type t =
     (** Records a cancellation request that arrived while the state was
         [Starting_typeahead]. *)
   }
+
+val visible_history_items_of_history
+  :  t
+  -> Openai.Responses.Item.t list
+  -> Openai.Responses.Item.t list
 
 val visible_messages_of_history : t -> Openai.Responses.Item.t list -> Types.message list
 val refresh_messages : t -> unit
@@ -110,3 +134,29 @@ val create
 
     @param t Runtime container whose internal counter should advance. *)
 val alloc_op_id : t -> int
+
+val has_active_turn : t -> bool
+val has_active_op : t -> bool
+val is_idle : t -> bool
+val may_start_turn_now : t -> bool
+val is_moderator_dirty : t -> bool
+val has_pending_turn_request : t -> bool
+val string_of_turn_start_reason : turn_start_reason -> string
+val active_turn_start_reason : t -> turn_start_reason option
+val mark_moderator_dirty : t -> unit
+val clear_moderator_dirty : t -> unit
+val request_turn_start : t -> turn_start_reason -> unit
+val clear_pending_turn_request : t -> unit
+val dequeue_pending_turn_request : t -> turn_start_reason option
+val set_active_turn_start_reason : t -> turn_start_reason -> unit
+val clear_active_turn_start_reason : t -> unit
+val add_placeholder_message : t -> role:string -> text:string -> unit
+val add_system_notice : t -> string -> unit
+val add_system_notice_once : t -> key:string -> string -> bool
+val enqueue_deferred_user_note : t -> submit_request -> bool
+val has_deferred_user_notes : t -> bool
+val dequeue_deferred_user_notes : t -> deferred_user_note list
+val render_deferred_user_note : deferred_user_note -> string
+val render_deferred_user_notes : deferred_user_note list -> string option
+val consume_deferred_user_notes_for_safe_point : t -> string option
+val safe_point_input_source : t -> Chat_response.In_memory_stream.Safe_point_input.t

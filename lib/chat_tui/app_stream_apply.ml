@@ -77,6 +77,5 @@ let replace_history runtime redraw_immediate items =
   let model = runtime.App_runtime.model in
   Model.set_history_items model items;
   App_runtime.refresh_messages runtime;
-  Model.rebuild_tool_output_index model;
   redraw_immediate ()
 ;;

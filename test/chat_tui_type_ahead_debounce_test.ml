@@ -53,17 +53,19 @@ let with_reducer ~model f =
   let internal_stream : Chat_tui.App_events.internal_event Eio.Stream.t =
     Eio.Stream.create 128
   in
-  let system_stream : string Eio.Stream.t = Eio.Stream.create 16 in
-  let streams : Chat_tui.App_context.Streams.t =
-    { input = input_stream; internal = internal_stream; system = system_stream }
-  in
+  let streams : Chat_tui.App_context.Streams.t = { input = input_stream; internal = internal_stream } in
   let redraw () = () in
   let throttler =
     Chat_tui.Redraw_throttle.create ~fps:60. ~enqueue_redraw:(fun () -> ())
   in
   let dummy_term : Notty_eio.Term.t = Obj.magic 0 in
   let ui : Chat_tui.App_context.Ui.t =
-    { term = dummy_term; throttler; redraw; redraw_immediate = redraw }
+    { term = dummy_term
+    ; size = (fun () -> 80, 24)
+    ; throttler
+    ; redraw
+    ; redraw_immediate = redraw
+    }
   in
   let cwd = Eio.Stdenv.cwd env in
   let cache = Chat_response.Cache.create ~max_size:1 () in
@@ -78,11 +80,14 @@ let with_reducer ~model f =
     ; tools = []
     ; tool_tbl = Hashtbl.create (module String)
     ; moderator = None
+    ; safe_point_input = Some (Chat_tui.App_runtime.safe_point_input_source runtime)
     ; parallel_tool_calls = true
     ; history_compaction = false
     }
   in
-  let submit : Chat_tui.App_submit.Context.t = { runtime; streaming } in
+  let submit : Chat_tui.App_submit.Context.t =
+    { runtime; streaming; start_streaming = (fun ~history:_ ~op_id:_ -> ()) }
+  in
   let compaction : Chat_tui.App_compaction.Context.t = { shared; runtime } in
   let ctx : Chat_tui.App_reducer.Context.t =
     { runtime; shared; submit; compaction; cancelled = Chat_tui.App_streaming.Cancelled }

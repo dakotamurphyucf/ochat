@@ -13,6 +13,7 @@ module Context = struct
     ; tools : Req.Tool.t list
     ; tool_tbl : (string, string -> Res.Tool_output.Output.t) Core.Hashtbl.t
     ; moderator : Chat_response.In_memory_stream.moderator option
+    ; safe_point_input : Chat_response.In_memory_stream.Safe_point_input.t option
     ; parallel_tool_calls : bool
     ; history_compaction : bool
     }
@@ -21,11 +22,11 @@ end
 let start (ctx : Context.t) ~history ~op_id =
   let env = ctx.shared.services.env in
   let internal_stream = ctx.shared.streams.internal in
-  let system_event = ctx.shared.streams.system in
   let cfg = ctx.cfg in
   let tools = ctx.tools in
   let tool_tbl = ctx.tool_tbl in
   let moderator = ctx.moderator in
+  let safe_point_input = ctx.safe_point_input in
   let datadir = ctx.shared.services.datadir in
   let prompt_cache_key = Option.map ctx.shared.services.session ~f:(fun s -> s.id) in
   let prompt_cache_retention =
@@ -104,7 +105,7 @@ let start (ctx : Context.t) ~history ~op_id =
         ~history
         ~tools:(Some tools)
         ~tool_tbl
-        ~system_event
+        ?safe_point_input
         ?temperature:cfg.temperature
         ?max_output_tokens:cfg.max_tokens
         ?reasoning:

@@ -14,6 +14,7 @@ module Cache = Chat_response.Cache
 module Req = Res.Request
 module Runtime = App_runtime
 module Runtime_semantics = Chat_response.Runtime_semantics
+module Moderator_session_controller = Moderator_session_controller
 
 type input_event = App_events.input_event
 type internal_event = App_events.internal_event
@@ -99,7 +100,6 @@ let run (ctx : Context.t) =
   let term = ui.term in
   let input_stream = streams.input in
   let internal_stream = streams.internal in
-  let system_event = streams.system in
   let throttler = ui.throttler in
   let redraw_immediate = ui.redraw_immediate in
   let redraw = ui.redraw in
@@ -107,20 +107,71 @@ let run (ctx : Context.t) =
   let model = runtime.Runtime.model in
   let quit_via_esc = runtime.Runtime.quit_via_esc in
   let add_system_notice text =
-    ignore (Model.apply_patch model (Add_placeholder_message { role = "system"; text }));
+    Runtime.add_system_notice runtime text;
     Redraw_throttle.request_redraw throttler
   in
+  let now_ms () = Eio.Time.now clock *. 1000. |> Int.of_float in
   let tui_policy =
     { Runtime_semantics.default_policy with honor_request_compaction = true }
   in
+  let apply_moderator_outcome (outcome : Moderator_session_controller.t) =
+    if outcome.request_refresh then App_runtime.refresh_messages runtime;
+    List.iter outcome.internal_events_to_enqueue ~f:(Eio.Stream.add internal_stream);
+    Option.iter outcome.halt_reason ~f:(fun reason ->
+      runtime.Runtime.halted_reason <- Some reason);
+    let added_notice = ref false in
+    List.iter outcome.system_notices ~f:(fun text ->
+      if Runtime.add_system_notice_once runtime ~key:("system:" ^ text) text
+      then added_notice := true);
+    if outcome.request_refresh || !added_notice
+    then Redraw_throttle.request_redraw throttler;
+    not (List.is_empty outcome.internal_events_to_enqueue)
+  in
+  let active_turn_policy =
+    { tui_policy with honor_request_turn = false }
+  in
   let handle_runtime_request (request : Chat_response.Moderation.Runtime_request.t) =
-    let requests = Runtime_semantics.collapse [ request ] in
-    if
-      tui_policy.honor_request_compaction && Runtime_semantics.request_compaction requests
-    then Queue.enqueue runtime.Runtime.pending Runtime.Compact;
-    Option.iter (Runtime_semantics.should_end_session requests) ~f:(fun reason ->
-      runtime.Runtime.halted_reason <- Some reason;
-      add_system_notice (Printf.sprintf "Session ended by moderator: %s" reason))
+    Moderator_session_controller.of_runtime_request
+      ~policy:active_turn_policy
+      ~turn_request:Ignore
+      request
+    |> ignore
+  in
+  let handle_moderator_drain_error msg =
+    Runtime.clear_moderator_dirty runtime;
+    Placeholders.add_placeholder_stream_error
+      model
+      (Printf.sprintf "Moderator background drain failed: %s" msg);
+    Redraw_throttle.request_redraw throttler
+  in
+  let drain_moderator_if_idle () =
+    if not (Runtime.is_idle runtime)
+    then false
+    else (
+      match runtime.Runtime.moderator with
+      | None ->
+        Runtime.clear_moderator_dirty runtime;
+        false
+      | Some moderator ->
+        (match
+           Moderator_session_controller.drain_internal_events
+             ~moderator
+             ~now_ms:(now_ms ())
+             ~history:(Model.history_items model)
+             ~available_tools:ctx.submit.streaming.tools
+             ~turn_request:(Schedule Runtime.Idle_followup)
+         with
+         | Ok outcome ->
+           Runtime.clear_moderator_dirty runtime;
+           apply_moderator_outcome outcome
+         | Error msg ->
+           handle_moderator_drain_error msg;
+           false))
+  in
+  let handle_idle_safe_point () =
+    if Runtime.is_moderator_dirty runtime && Runtime.is_idle runtime
+    then drain_moderator_if_idle ()
+    else false
   in
   let max_input_drain_per_iteration = 64 in
   let typeahead_debounce_sw : Switch.t option ref = ref None in
@@ -213,10 +264,32 @@ let run (ctx : Context.t) =
   in
   let start_submit (submit_request : Runtime.submit_request) : unit =
     match runtime.Runtime.halted_reason with
-    | None -> App_submit.start ctx.submit submit_request
+    | None ->
+      Runtime.clear_pending_turn_request runtime;
+      App_submit.start ctx.submit submit_request
     | Some reason ->
       add_system_notice
         (Printf.sprintf "Cannot submit: session ended by moderator (%s)." reason)
+  in
+  let start_turn_from_session reason : unit =
+    match runtime.Runtime.halted_reason with
+    | None -> App_submit.start_from_current_session ctx.submit ~reason
+    | Some halted_reason ->
+      Runtime.clear_pending_turn_request runtime;
+      add_system_notice
+        (Printf.sprintf
+           "Cannot start follow-up turn: session ended by moderator (%s)."
+           halted_reason)
+  in
+  let maybe_start_pending_turn () : unit =
+    if Runtime.has_active_op runtime
+    then ()
+    else (
+      match Runtime.dequeue_pending_turn_request runtime with
+      | None -> ()
+      | Some reason ->
+        if Option.is_none runtime.Runtime.halted_reason
+        then start_turn_from_session reason)
   in
   let start_compaction () : unit = App_compaction.start ctx.compaction in
   let maybe_start_next_pending () : unit =
@@ -226,7 +299,8 @@ let run (ctx : Context.t) =
       (match Queue.dequeue runtime.Runtime.pending with
        | None -> ()
        | Some (Runtime.Submit submit_request) -> start_submit submit_request
-       | Some Runtime.Compact -> start_compaction ())
+       | Some Runtime.Compact -> start_compaction ());
+      maybe_start_pending_turn ()
   in
   let rec handle_cancel_or_quit () : bool =
     match runtime.Runtime.op with
@@ -343,6 +417,14 @@ let run (ctx : Context.t) =
       Redraw_throttle.on_redraw_handled throttler;
       redraw ();
       true
+    | `Moderator_wakeup ->
+      Runtime.mark_moderator_dirty runtime;
+      ignore (drain_moderator_if_idle () : bool);
+      true
+    | `Start_turn reason ->
+      Runtime.request_turn_start runtime reason;
+      maybe_start_next_pending ();
+      true
     | `Streaming_started (op_id, sw) ->
       (match runtime.Runtime.op with
        | Some (Runtime.Starting_streaming { id }) when Int.equal id op_id ->
@@ -441,9 +523,8 @@ let run (ctx : Context.t) =
     | `Submit_requested submit_request ->
       (match runtime.Runtime.op with
        | Some (Runtime.Streaming _ | Runtime.Starting_streaming _) ->
-         let user_msg = String.strip submit_request.Runtime.text in
-         let msg = sprintf "This is a Note From the User:\n%s" user_msg in
-         Eio.Stream.add system_event msg;
+         if Runtime.enqueue_deferred_user_note runtime submit_request
+         then Log.emit `Debug "Queued deferred steering note for the next safe point.";
          Redraw_throttle.request_redraw throttler;
          true
        | Some _ ->
@@ -480,11 +561,10 @@ let run (ctx : Context.t) =
         runtime.Runtime.op <- None;
         Model.set_history_items model history';
         App_runtime.refresh_messages runtime;
-        Model.rebuild_tool_output_index model;
         Model.select_message model None;
         Model.set_auto_follow model true;
         Redraw_throttle.request_redraw throttler;
-        maybe_start_next_pending ();
+        if not (handle_idle_safe_point ()) then maybe_start_next_pending ();
         true)
     | `Compaction_error (op_id, exn) ->
       let is_current =
@@ -502,7 +582,7 @@ let run (ctx : Context.t) =
            Placeholders.add_placeholder_stream_error model "Compaction cancelled."
          | _ -> Placeholders.add_placeholder_stream_error model "Compaction failed.");
         Redraw_throttle.request_redraw throttler;
-        maybe_start_next_pending ();
+        if not (handle_idle_safe_point ()) then maybe_start_next_pending ();
         true)
     | `Streaming_done (op_id, items) ->
       let is_current =
@@ -515,8 +595,9 @@ let run (ctx : Context.t) =
       then true
       else (
         runtime.Runtime.op <- None;
+        Runtime.clear_active_turn_start_reason runtime;
         Stream_apply.replace_history runtime redraw_immediate items;
-        maybe_start_next_pending ();
+        if not (handle_idle_safe_point ()) then maybe_start_next_pending ();
         true)
     | `Streaming_error (op_id, exn) ->
       let is_current =
@@ -529,6 +610,7 @@ let run (ctx : Context.t) =
       then true
       else (
         runtime.Runtime.op <- None;
+        Runtime.clear_active_turn_start_reason runtime;
         (match Model.fork_start_index model with
          | Some idx ->
            let hist_prefix = List.take (Model.history_items model) idx in
@@ -638,11 +720,9 @@ let run (ctx : Context.t) =
         let pruned = prune_trailing ~error:error_msg (Model.history_items model) in
         Model.set_history_items model pruned;
         App_runtime.refresh_messages runtime;
-        Model.rebuild_tool_output_index model;
-        Model.clear_all_img_caches model;
         Placeholders.add_placeholder_stream_error model error_msg;
         Redraw_throttle.request_redraw throttler;
-        maybe_start_next_pending ();
+        if not (handle_idle_safe_point ()) then maybe_start_next_pending ();
         true)
   and drain_input_events acc remaining =
     if remaining = 0

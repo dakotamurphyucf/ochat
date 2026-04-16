@@ -52,6 +52,8 @@ type typeahead_done =
 type internal_event =
   [ `Resize
   | `Redraw
+  | `Moderator_wakeup
+  | `Start_turn of App_runtime.turn_start_reason
   | `Streaming_started of int * Eio.Switch.t
   | `Stream of int * Openai.Responses.Response_stream.t
   | `Stream_batch of int * Openai.Responses.Response_stream.t list

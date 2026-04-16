@@ -1,5 +1,9 @@
 open! Core
 
+module Safe_point_input : sig
+  type t = { consume : unit -> string option }
+end
+
 type moderator =
   { manager : Moderator_manager.t
   ; session_id : string
@@ -16,22 +20,37 @@ type moderated_tool_call =
   ; runtime_requests : Moderation.Runtime_request.t list
   }
 
-(** [prepare_turn_inputs ?moderator ~available_tools ~now_ms ~history] applies
-    the moderator [turn_start] hook and returns the effective request history
-    for the next model call. Without a moderator, it returns [history]
-    unchanged. *)
+(** [prepare_turn_inputs ?safe_point_input ?moderator ~available_tools ~now_ms ~history]
+    applies the explicit turn-start safe point before the next model call.
+
+    The helper:
+    {ol
+    {- runs the moderator [turn_start] hook;}
+    {- drains queued moderator internal events at the turn-start boundary;}
+    {- computes effective request history through the moderator overlay; and}
+    {- appends any transient safe-point input to the request only after the
+       turn-start boundary has decided the turn may proceed.}}
+
+    Deferred safe-point input is request-only: it is not appended to canonical
+    history items.
+
+    Without a moderator, [history] is forwarded unchanged unless
+    [?safe_point_input] yields extra request text. *)
 val prepare_turn_inputs
   :  moderator:moderator option
+  -> ?safe_point_input:Safe_point_input.t
   -> available_tools:Openai.Responses.Request.Tool.t list
   -> now_ms:int
   -> history:Openai.Responses.Item.t list
+  -> unit
   -> (Openai.Responses.Item.t list, string) result
 
 (** [finish_turn ?moderator ~available_tools ~now_ms ~history] applies the
-    moderator [turn_end] hook after a streamed turn completes and returns
-    surfaced runtime requests emitted during [turn_end] (including requests
-    produced by drained internal events). Without a moderator, it is a no-op
-    returning [[]]. *)
+    explicit end-of-turn safe point after a streamed turn completes.
+
+    The helper runs the moderator [turn_end] hook, then drains queued
+    moderator internal events before returning surfaced runtime requests.
+    Without a moderator, it is a no-op returning [[]]. *)
 val finish_turn
   :  moderator:moderator option
   -> available_tools:Openai.Responses.Request.Tool.t list
@@ -55,9 +74,11 @@ val moderate_tool_call
   -> item_id:string option
   -> (moderated_tool_call, string) result
 
-(** [handle_tool_result ...] applies the [post_tool_response] moderation hook
-    for [item], then emits [message_appended] for the canonical history item,
-    drains queued internal events, and returns surfaced runtime requests. *)
+(** [handle_tool_result ...] applies the post-tool safe point for [item].
+
+    The helper runs [post_tool_response], emits [message_appended] for the
+    canonical tool output when appropriate, drains queued moderator internal
+    events at that safe point, and returns surfaced runtime requests. *)
 val handle_tool_result
   :  moderator:moderator option
   -> available_tools:Openai.Responses.Request.Tool.t list
@@ -136,7 +157,7 @@ val run_completion_stream_in_memory_v1
   -> ?history_compaction:bool
   -> ?parallel_tool_calls:bool
   -> ?meta_refine:bool
-  -> ?system_event:string Eio.Stream.t
+  -> ?safe_point_input:Safe_point_input.t
   -> ?model:Openai.Responses.Request.model
   -> ?prompt_cache_key:string
   -> ?prompt_cache_retention:string

@@ -83,6 +83,17 @@ let print_runtime_requests requests =
   print_s [%sexp (requests : Moderation.Runtime_request.t list)]
 ;;
 
+let one_shot_safe_point_input text =
+  let remaining = ref (Some text) in
+  Stream.Safe_point_input.
+    { consume =
+        (fun () ->
+           let next = !remaining in
+           remaining := None;
+           next)
+    }
+;;
+
 let print_tool_call = function
   | Res.Item.Function_call call ->
     print_endline (Printf.sprintf "function %s %s" call.name call.arguments)
@@ -148,7 +159,7 @@ let%expect_test "prepare_turn_inputs keeps no-moderator history unchanged" =
   in
   let items =
     ok_or_fail
-      (Stream.prepare_turn_inputs ~moderator:None ~available_tools:[] ~now_ms:1 ~history)
+      (Stream.prepare_turn_inputs ~moderator:None ~available_tools:[] ~now_ms:1 ~history ())
   in
   print_items items;
   [%expect
@@ -173,13 +184,42 @@ let%expect_test "prepare_turn_inputs applies moderator overlay before request" =
          ~moderator:(Some (moderator ()))
          ~available_tools:[]
          ~now_ms:1
-         ~history)
+         ~history
+         ())
   in
   print_items items;
   [%expect
     {|
     input system "policy"
     input user "Hello"
+    |}]
+;;
+
+let%expect_test "prepare_turn_inputs appends safe-point input after overlay history" =
+  let history =
+    [ Res.Item.Input_message
+        { role = Res.Input_message.User
+        ; content = [ input_text "Hello" ]
+        ; _type = "message"
+        }
+    ]
+  in
+  let items =
+    ok_or_fail
+      (Stream.prepare_turn_inputs
+         ~moderator:(Some (moderator ()))
+         ~safe_point_input:(one_shot_safe_point_input "safe-point")
+         ~available_tools:[]
+         ~now_ms:1
+         ~history
+         ())
+  in
+  print_items items;
+  [%expect
+    {|
+    input system "policy"
+    input user "Hello"
+    input system "safe-point"
     |}]
 ;;
 
@@ -206,7 +246,8 @@ let%expect_test "finish_turn records end-of-turn state changes" =
           ~moderator:(Some moderator)
           ~available_tools:[]
           ~now_ms:1
-          ~history)
+          ~history
+          ())
      : Res.Item.t list);
   let requests =
     ok_or_fail
@@ -223,6 +264,50 @@ let%expect_test "finish_turn records end-of-turn state changes" =
     {|
     ()
     (Record ((turn_count (Int 1))))
+    |}]
+;;
+
+let%expect_test "turn_end leaves deferred safe-point input for the next turn start" =
+  let history =
+    [ Res.Item.Input_message
+        { role = Res.Input_message.User
+        ; content = [ input_text "Hello" ]
+        ; _type = "message"
+        }
+    ]
+  in
+  let remaining = ref [ "later" ] in
+  let safe_point_input =
+    Stream.Safe_point_input.
+      { consume =
+          (fun () ->
+             match !remaining with
+             | [] -> None
+             | text :: rest ->
+               remaining := rest;
+               Some text)
+      }
+  in
+  ignore
+    (ok_or_fail
+       (Stream.finish_turn ~moderator:None ~available_tools:[] ~now_ms:1 ~history)
+     : Moderation.Runtime_request.t list);
+  print_s [%sexp (List.length !remaining : int)];
+  ignore
+    (ok_or_fail
+       (Stream.prepare_turn_inputs
+          ~moderator:None
+          ~safe_point_input
+          ~available_tools:[]
+          ~now_ms:2
+          ~history
+          ())
+     : Res.Item.t list);
+  print_s [%sexp (List.length !remaining : int)];
+  [%expect
+    {|
+    1
+    0
     |}]
 ;;
 

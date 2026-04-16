@@ -475,6 +475,19 @@ val add_history_item : t -> Openai.Responses.Item.t -> t
     outputs incrementally via the [Set_function_output] patch. *)
 val rebuild_tool_output_index : t -> unit
 
+(** [rebuild_tool_output_index_for_items t items] recomputes
+    {!tool_output_by_index} from [items].
+
+    Use this when the visible transcript is projected from moderator-visible
+    history rather than directly from canonical {!history_items}. *)
+val rebuild_tool_output_index_for_items : t -> Openai.Responses.Item.t list -> unit
+
+(** [clamp_selected_message t] keeps {!selected_msg} within the bounds of
+    {!messages}.
+
+    If there are no visible messages, the selection is cleared. *)
+val clamp_selected_message : t -> unit
+
 (** {1 Rendering cache helpers}
 
     Low-level helpers for the renderer.  Callers outside the rendering path

@@ -43,6 +43,10 @@ module Context : sig
   type t =
     { runtime : App_runtime.t
     ; streaming : App_streaming.Context.t
+    ; start_streaming
+        : history:Openai.Responses.Item.t list
+       -> op_id:int
+       -> unit
     }
 end
 
@@ -71,3 +75,12 @@ end
     ]}
 *)
 val start : Context.t -> request -> unit
+
+(** [start_from_current_session ctx ~reason] starts a turn from the current
+    canonical session history without appending a new user item first.
+
+    This is used for moderator-requested or idle/background follow-up turns
+    that should continue from the current session state.
+
+    @param reason Why the session controller decided to launch the turn. *)
+val start_from_current_session : Context.t -> reason:App_runtime.turn_start_reason -> unit

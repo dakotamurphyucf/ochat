@@ -129,7 +129,9 @@ ChatMD prompts can also embed a single host-managed **ChatML** moderation script
 - moderate tool calls by approving, rejecting, rewriting, or redirecting them
 - persist only serializable runtime state between resumed sessions
 - request another ordinary model turn after `turn_end` via `Runtime.request_turn()`
+- schedule idle follow-up turns after background internal events or startup work
 - orchestrate additional model-backed work via `Model.call` and `Model.spawn`
+- defer user steering submitted during streaming until a safe model-input boundary
 
 Prompts without a `<script>` keep the baseline behavior: the shared drivers, `chat_tui`, export flow, and nested agent execution continue to work without the moderation layer.
 
@@ -555,11 +557,10 @@ type event =
   [ `Session_start
   | `Session_resume
   | `Turn_start
-  | `Message_appended(item)
+  | `Item_appended(item)
   | `Pre_tool_call(tool_call)
   | `Post_tool_response(tool_result)
   | `Turn_end
-  | `Internal_event
   ]
 
 let initial_state : state =
@@ -641,8 +642,7 @@ let first_text : string array -> string =
 let on_event : context -> state -> event -> state task =
   fun ctx st ev ->
     match ev with
-    | `Message_appended ->
-      let item = ctx.items[Array.length(ctx.items) - 1] in
+    | `Item_appended(item) ->
       let summary =
         Item.id(item)
         ++ ":"
@@ -659,6 +659,66 @@ let on_event : context -> state -> event -> state task =
 Prefer `Turn.append_item`, `Turn.replace_item`, and `Turn.delete_item`.
 The older `append_message`, `replace_message`, and `delete_message` names are
 still accepted as aliases.
+
+### Runtime semantics in `chat_tui`
+
+When a prompt runs in `chat_tui`, moderation is split across three layers:
+
+- `Moderator_manager` owns durable moderator state, overlay state, and queued
+  internal events.
+- `In_memory_stream` owns one active model/tool turn.
+- `chat_tui` owns the session controller that drains wakeups while idle,
+  refreshes visible transcript state, and schedules follow-up turns without
+  creating fake user messages.
+
+The visible transcript in the UI is a projection of canonical history through
+the moderator overlay. During streaming, `chat_tui` still applies token and
+tool patches directly for responsiveness, then reprojects the visible
+transcript at safe points such as:
+
+- idle/background moderator drains,
+- the end of a streamed turn,
+- the end of compaction,
+- startup or resume moderation.
+
+Two host behaviors are especially important:
+
+1. **Idle async wakeups**
+
+   Background producers such as `Model.spawn` completions may enqueue moderator
+   internal events while no turn is active. The host wakes the session
+   controller, drains those internal events, refreshes visible transcript
+   state, and may schedule an idle follow-up turn if the moderator requests
+   one.
+
+2. **Deferred steering notes**
+
+   If the user submits steering text while a turn is already streaming, the
+   host does not splice a new canonical user message into the in-flight model
+   request. Instead it stores a deferred steering note and injects it only at
+   the next safe model-input boundary. This preserves the current reasoning and
+   tool workflow while still letting the user steer the next request.
+
+An end-to-end idle async completion looks like this:
+
+1. a moderator script previously calls `Model.spawn(...)`
+2. the spawned job finishes and is reinjected as an internal event
+3. the idle `chat_tui` session receives a moderator wakeup
+4. the reducer drains queued internal events through `Moderator_manager`
+5. any overlay changes are reprojected into the visible transcript
+6. if the moderator emitted `Runtime.request_turn()`, the host starts one more
+   ordinary turn from the current session state
+
+An end-to-end deferred-steering flow during a tool run looks like this:
+
+1. the assistant is in the middle of a streamed turn or tool workflow
+2. the user submits steering text
+3. the host records a deferred steering note instead of appending a canonical
+   user item mid-turn
+4. the current turn reaches a safe point and eventually completes
+5. the next request is prepared from moderator-effective history
+6. the deferred steering note is appended as transient system input for that
+   request only
 
 ---
 
@@ -777,6 +837,19 @@ A typical flow looks like this:
 6. Persist the resulting workflow state back as text artifacts
 
 This split keeps workflows inspectable while still allowing advanced control logic.
+
+For moderated interactive sessions, the host runtime has a more specific role
+split:
+
+- `Moderator_manager` keeps durable moderator state, overlay state, halted
+  state, and queued internal events.
+- `In_memory_stream` executes one active completion/tool-followup loop at a
+  time and handles explicit safe points such as turn start, post-tool-result,
+  and turn end.
+- `chat_tui` runs a single-threaded session controller over its reducer loop.
+  That controller reacts to moderator wakeups while idle, defers wakeups while
+  a turn is active, refreshes visible transcript state from moderator-effective
+  history at safe points, and starts follow-up turns only when the UI is idle.
 
 
 ---

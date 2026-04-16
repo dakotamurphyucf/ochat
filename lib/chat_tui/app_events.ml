@@ -15,6 +15,8 @@ type typeahead_done =
 type internal_event =
   [ `Resize
   | `Redraw
+  | `Moderator_wakeup
+  | `Start_turn of App_runtime.turn_start_reason
   | `Streaming_started of int * Switch.t
   | `Stream of int * Res_stream.t
   | `Stream_batch of int * Res_stream.t list

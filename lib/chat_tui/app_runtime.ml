@@ -27,6 +27,19 @@ type submit_request =
   ; draft_mode : Model.draft_mode
   }
 
+type turn_start_reason =
+  | User_submit
+  | Moderator_request
+  | Idle_followup
+
+type deferred_user_note = { text : string }
+
+type session_controller_state =
+  { mutable moderator_dirty : bool
+  ; deferred_user_notes : deferred_user_note Queue.t
+  ; mutable pending_turn_request : turn_start_reason option
+  }
+
 type queued_action =
   | Submit of submit_request
   | Compact
@@ -36,6 +49,9 @@ type t =
   ; mutable op : op option
   ; mutable typeahead_op : typeahead_op option
   ; moderator : Stream_moderator.moderator option
+  ; session_controller : session_controller_state
+  ; shown_notice_keys : String.Hash_set.t
+  ; mutable active_turn_start_reason : turn_start_reason option
   ; mutable halted_reason : string option
   ; pending : queued_action Queue.t
   ; quit_via_esc : bool ref
@@ -45,19 +61,29 @@ type t =
   ; mutable cancel_typeahead_on_start : bool
   }
 
-let visible_messages_of_history (t : t) (history : Openai.Responses.Item.t list)
-  : Types.message list
+let visible_history_items_of_history (t : t) (history : Openai.Responses.Item.t list)
+  : Openai.Responses.Item.t list
   =
   match t.moderator with
-  | None -> Conversation.of_history history
+  | None -> history
   | Some moderator ->
     Manager.effective_history moderator.manager history
     |> Result.ok_or_failwith
-    |> Conversation.of_history
+;;
+
+let visible_messages_of_history (t : t) (history : Openai.Responses.Item.t list)
+  : Types.message list
+  =
+  visible_history_items_of_history t history |> Conversation.of_history
 ;;
 
 let refresh_messages (t : t) : unit =
-  Model.set_messages t.model (visible_messages_of_history t (Model.history_items t.model))
+  let history = Model.history_items t.model in
+  let visible_history = visible_history_items_of_history t history in
+  Model.set_messages t.model (Conversation.of_history visible_history);
+  Model.rebuild_tool_output_index_for_items t.model visible_history;
+  Model.clamp_selected_message t.model;
+  Model.clear_all_img_caches t.model
 ;;
 
 let moderator_snapshot (t : t) : (Session.Moderator_snapshot.t option, string) result =
@@ -71,6 +97,13 @@ let create ?moderator ?halted_reason ~model () =
   ; op = None
   ; typeahead_op = None
   ; moderator
+  ; session_controller =
+      { moderator_dirty = false
+      ; deferred_user_notes = Queue.create ()
+      ; pending_turn_request = None
+      }
+  ; shown_notice_keys = Hash_set.create (module String)
+  ; active_turn_start_reason = None
   ; halted_reason
   ; pending = Queue.create ()
   ; quit_via_esc = ref false
@@ -85,4 +118,112 @@ let alloc_op_id t =
   let id = t.next_op_id in
   t.next_op_id <- id + 1;
   id
+;;
+
+let has_active_turn t =
+  match t.op with
+  | Some (Streaming _ | Starting_streaming _) -> true
+  | Some (Compacting _ | Starting_compaction _)
+  | None -> false
+;;
+
+let has_active_op t = Option.is_some t.op
+let is_idle t = not (has_active_op t)
+let may_start_turn_now t = is_idle t && Option.is_none t.halted_reason
+let is_moderator_dirty t = t.session_controller.moderator_dirty
+let has_pending_turn_request t = Option.is_some t.session_controller.pending_turn_request
+let string_of_turn_start_reason = function
+  | User_submit -> "user_submit"
+  | Moderator_request -> "moderator_request"
+  | Idle_followup -> "idle_followup"
+;;
+
+let active_turn_start_reason t = t.active_turn_start_reason
+let mark_moderator_dirty t = t.session_controller.moderator_dirty <- true
+let clear_moderator_dirty t = t.session_controller.moderator_dirty <- false
+
+let request_turn_start t reason =
+  t.session_controller.pending_turn_request <- Some reason
+;;
+
+let clear_pending_turn_request t =
+  t.session_controller.pending_turn_request <- None
+;;
+
+let dequeue_pending_turn_request t =
+  let pending_turn_request = t.session_controller.pending_turn_request in
+  t.session_controller.pending_turn_request <- None;
+  pending_turn_request
+;;
+
+let set_active_turn_start_reason t reason =
+  t.active_turn_start_reason <- Some reason
+;;
+
+let clear_active_turn_start_reason t =
+  t.active_turn_start_reason <- None
+;;
+
+let add_placeholder_message t ~role ~text =
+  ignore (Model.apply_patch t.model (Add_placeholder_message { role; text }))
+;;
+
+let add_system_notice t text =
+  add_placeholder_message t ~role:"system" ~text
+;;
+
+let add_system_notice_once t ~key text =
+  if Hash_set.mem t.shown_notice_keys key
+  then false
+  else (
+    Hash_set.add t.shown_notice_keys key;
+    add_system_notice t text;
+    true)
+;;
+
+let enqueue_deferred_user_note t (submit_request : submit_request) =
+  let text = String.strip submit_request.text in
+  if String.is_empty text
+  then false
+  else (
+    Queue.enqueue t.session_controller.deferred_user_notes { text };
+    true)
+;;
+
+let has_deferred_user_notes t =
+  not (Queue.is_empty t.session_controller.deferred_user_notes)
+;;
+
+let dequeue_deferred_user_notes t =
+  let rec loop acc =
+    match Queue.dequeue t.session_controller.deferred_user_notes with
+    | None -> List.rev acc
+    | Some note -> loop (note :: acc)
+  in
+  loop []
+;;
+
+let render_deferred_user_note ({ text } : deferred_user_note) =
+  Printf.sprintf "This is a Note From the User:\n%s" text
+;;
+
+let render_deferred_user_notes (notes : deferred_user_note list) =
+  match notes with
+  | [] -> None
+  | notes ->
+    Some
+      (List.map notes ~f:(fun note ->
+         Printf.sprintf
+           "\n<system-reminder>\n%s\n</system-reminder>\n"
+           (render_deferred_user_note note))
+       |> String.concat ~sep:"")
+;;
+
+let consume_deferred_user_notes_for_safe_point t =
+  dequeue_deferred_user_notes t |> render_deferred_user_notes
+;;
+
+let safe_point_input_source t =
+  Stream_moderator.Safe_point_input.
+    { consume = (fun () -> consume_deferred_user_notes_for_safe_point t) }
 ;;

@@ -218,6 +218,10 @@ The shared moderation vocabulary defines these phase names:
 - `turn_end`
 - `internal_event`
 
+In ChatML scripts, the event constructor exposed for appended canonical items is
+`Item_appended(item)`. The host phase name remains `message_appended`, but
+script authors should pattern-match on `Item_appended`.
+
 Built-in drivers currently emit:
 
 - `session_start` for new moderated sessions,
@@ -230,6 +234,32 @@ Built-in drivers currently emit:
 - `turn_end` after a streamed turn completes,
 - `internal_event` while replaying queued moderator events FIFO.
 
+For moderated `chat_tui` sessions, this lifecycle is split across three host
+layers:
+
+- `Moderator_manager` owns durable moderator state, overlay state, halted
+  state, and queued internal events.
+- `In_memory_stream` owns one active model/tool turn and handles explicit safe
+  points such as turn start, post-tool-result, and turn end.
+- `chat_tui` owns the session controller that reacts to idle wakeups, defers
+  wakeups during active turns, refreshes the visible transcript from effective
+  history at safe points, and starts follow-up turns only when the UI is idle.
+
+The visible transcript shown by `chat_tui` is not raw canonical history. It is
+the current canonical history projected through the moderator overlay. During
+streaming the UI may still apply token and tool patches directly for
+responsiveness, but safe-point refreshes reproject the visible transcript from
+effective history after moderation-visible changes.
+
+The current safe points are:
+
+- startup / resume moderation,
+- turn-start request preparation,
+- post-tool-result continuation,
+- turn end,
+- idle/background moderator drains in `chat_tui`,
+- compaction completion in `chat_tui`.
+
 ### 3.5.1 Runtime requests (host-visible)
 
 Moderator scripts can emit host-visible runtime requests:
@@ -238,11 +268,32 @@ Moderator scripts can emit host-visible runtime requests:
   - It is interpreted after `turn_end` handling finishes.
   - Multiple requests collapse to a single continuation decision.
   - `Runtime.end_session(...)` overrides `request_turn`.
+  - In `chat_tui`, the same request can also schedule an idle follow-up turn
+    after startup work or an idle internal-event drain, as long as no turn is
+    already active.
 - `Runtime.request_compaction()` requests that the embedding compact history (if supported).
   - This request does not itself force another model turn.
 - `Runtime.end_session(reason)` requests session termination.
 
 The shared drivers interpret these requests through an explicit runtime-semantics policy layer.
+
+### 3.5.1a Deferred steering notes and safe-point input
+
+When the user submits steering text while a turn is already streaming in
+`chat_tui`, the host does not inject a new canonical user message into the
+in-flight request. Instead it records a **deferred steering note** in
+session-controller state.
+
+That deferred steering note is applied only at the next safe model-input
+boundary. Concretely:
+
+- it remains outside canonical transcript history,
+- it survives until the next safe-point request preparation,
+- it is appended as transient system input for that request only,
+- it never rewrites tool output history in place.
+
+This preserves the in-flight reasoning/tool workflow while still letting the
+user steer the next request.
 
 
 ### 3.5.2 Model recipes (`Model.call` / `Model.spawn`)
@@ -310,6 +361,35 @@ Tool moderation is also host-managed:
 After every successful moderation event, the host replays queued internal
 events FIFO through phase `internal_event`, with a safety limit to avoid
 unbounded loops. Spawned model job completions (`Model.spawn`) are delivered using this same internal-event replay mechanism.
+
+In `chat_tui`, queued internal events can surface while the UI is otherwise
+idle. Background producers may enqueue work and register a wakeup callback; the
+session controller drains that queued work at an idle safe point, refreshes the
+visible transcript if overlay state changed, and may schedule a follow-up turn
+when the moderator requests one.
+
+An end-to-end idle async completion currently looks like this:
+
+1. a moderator script calls `Model.spawn(...)`
+2. the background job finishes and is converted into `Model_job_succeeded(...)`
+   or `Model_job_failed(...)`
+3. the host enqueues that internal event into `Moderator_manager`
+4. the idle `chat_tui` reducer receives a moderator wakeup
+5. `chat_tui` drains queued internal events, refreshes visible transcript state
+   from effective history, and applies any notices or halted state updates
+6. if the moderator emitted `Runtime.request_turn()`, `chat_tui` starts one
+   more ordinary turn from the current session state
+
+An end-to-end non-interrupting steering flow currently looks like this:
+
+1. the assistant is already in a streamed turn or tool workflow
+2. the user submits steering text
+3. `chat_tui` records a deferred steering note instead of appending a canonical
+   user message mid-turn
+4. the current turn reaches a safe point and eventually completes
+5. the next request is prepared from moderator-effective history
+6. the deferred steering note is appended as transient system input for that
+   next request only
 
 Persisted moderator state is intentionally narrow:
 
