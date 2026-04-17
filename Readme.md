@@ -299,6 +299,7 @@ A simple way to get a feel for Ochat:
    If needed, install OCaml, opam, and the toolchain:
    - [OCaml.org](https://ocaml.org)
    - [Install guide](https://ocaml.org/install#linux_mac_bsd)
+   - [VSCode one click install walkthrough via OCaml Platform plugin](https://tarides.com/blog/2026-04-16-vscode-walkthrough-installing-ocaml-in-1-click/?utm_source=dlvr.it&utm_medium=linkedin)
 
 2. **Build the project**
    ```sh
