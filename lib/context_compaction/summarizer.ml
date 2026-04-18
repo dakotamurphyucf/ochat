@@ -101,7 +101,7 @@ Here's an example of how your output should be structured:
 </summary>
 
 <important-details>
-[Important details to include verbatim that are provided in a assistant message]
+[Important details / snippets that should be included verbatim]
 </important-details>
 </example>
 
@@ -112,7 +112,8 @@ Please provide your Detailed summary based on the conversation so far, following
 - You must assume that the user will not remember any details from this conversation, so you must ensure that your summary is detailed and complete.
 - Think about information that the user might want to reference in the future, and ensure that it is included in your summary.
 - you should be going for 70% compression of the conversation, so you must be thorough and complete in your analysis.
-- if the assistant provides a section <important-details></important-details>, ensure that it is included in your summary verbatim along with your own summary.
+- provide a section <important-details></important-details> whose contents should include any critical details or snippets that should be included verbatim.
+  Use your own judgement to determine what is critical and what can be omitted based on the conversation so far. An example would be a final draft of a proposal or report that was not saved and is relevant to the current conversation.
 |}
 ;;
 
@@ -216,7 +217,7 @@ let summarise
              ~sw
              ~max_output_tokens:100000
              ~temperature:0.3
-             ~model:(Request.Unknown "gpt-5.2")
+             ~model:(Request.Unknown "gpt-5.4")
              ~verbosity:"high"
              ~dir
              net

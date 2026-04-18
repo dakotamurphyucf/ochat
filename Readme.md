@@ -137,8 +137,9 @@ Prompts without a `<script>` keep the baseline behavior: the shared drivers, `ch
 
 Ochat is implemented in **OCaml**, but the workflows themselves are **language-agnostic**. Tools exchange JSON, prompts are plain files, and the system makes no assumptions about the kinds of applications your workflows target.
 
-> **Current provider support:** OpenAI only (via the Responses API).  
+> **Current provider support:** nativley uses OpenAI Responses API format.  
 > The architecture is designed to support additional providers in the future.
+> To use other providers right now you can use a [proxy-server](https://docs.litellm.ai/) and set the enviorment url API_URL to the proxy url
 
 ---
 
@@ -812,7 +813,8 @@ At a glance, Ochat treats workflows as text artifacts executed by a host runtime
       │ Model backend │   │ Tool execution   │
       │ OpenAI today  │   │ built-ins/shell/ │
       │ more later    │   │ MCP/other agents │
-      └───────────────┘   └──────────────────┘
+      │ or use proxy  │   └──────────────────┘ 
+      └───────────────┘          │
               │                  │
               └──────────┬───────┘
                          ▼
@@ -972,6 +974,7 @@ Planned and experimental directions include:
 
 - **Additional LLM providers**  
   Today Ochat integrates with OpenAI; future work is intended to support additional backends while keeping ChatMD and tool contracts stable.
+  You can use a proxy server that maps the Openai api Response endpoint format to your preferred providers format. Example: [LiteLLm](https://docs.litellm.ai/) and set the enviorment url API_URL to the proxy url. 
 
 - **Broader ChatML scripting roles**  
   ChatML is currently focused on moderation and orchestration; the longer-term plan is to broaden that scripting role without sacrificing safety or auditability.

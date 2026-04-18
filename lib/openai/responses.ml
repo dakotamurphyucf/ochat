@@ -7,6 +7,8 @@ open Jsonaf.Export
 (** [api_key] is the API key for the OpenAI API. *)
 let api_key = Sys.getenv "OPENAI_API_KEY" |> Option.value ~default:""
 
+let api_url = Sys.getenv "API_URL" |> Option.value ~default:"api.openai.com"
+
 module Input_message = struct
   type role =
     | User [@name "user"]
@@ -1649,7 +1651,6 @@ let post_response
     ~sw
     net
     ~inputs ->
-  let host = "api.openai.com" in
   let stream =
     match res_typ with
     | Default -> false
@@ -1684,7 +1685,9 @@ let post_response
       ()
   in
   let json = Jsonaf.to_string @@ Request.jsonaf_of_t input in
-  let post json f = post ~net ~host ~sw ~headers ~path:"/v1/responses" (Raw f) json in
+  let post json f =
+    post ~net ~host:api_url ~sw ~headers ~path:"/v1/responses" (Raw f) json
+  in
   post json
   @@ fun res ->
   let _, reader = res in

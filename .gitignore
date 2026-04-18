@@ -27,3 +27,4 @@ script/
 out/
 meta-prompt/
 markdown/
+litellm_config.yaml

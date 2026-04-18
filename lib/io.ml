@@ -157,14 +157,12 @@ module Net = struct
     =
     fun res_typ ~net ~host ~headers ~path ~sw body ->
     let client = Client.make ~https:(Some (https ~authenticator:null_auth)) net in
-    let res, body =
-      Client.post
-        ~sw
-        ~body:(Body.of_string body)
-        ~headers
-        client
-        (Uri.make ~scheme:"https" ~path ~host ())
+    let uri =
+      match Uri.of_string (Printf.sprintf "%s%s" host path) with
+      | uri when Uri.scheme uri |> Option.is_some -> uri
+      | _ -> Uri.make ~scheme:"https" ~path ~host ()
     in
+    let res, body = Client.post ~sw ~body:(Body.of_string body) ~headers client uri in
     match res_typ with
     | Default -> (Eio.Buf_read.(parse_exn take_all) body ~max_size:Int.max_value : a)
     | Raw f -> f (res, body)
