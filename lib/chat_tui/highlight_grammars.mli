@@ -66,9 +66,15 @@ val add_diff : Highlight_tm_loader.registry -> unit Or_error.t
         filename separately;}
     {- per-file operation headers such as ["*** Add File:"],
        ["*** Update File:"], and ["*** Delete File:"];}
-    {- numbered snippet lines of the form ["  42 | code"], highlighting the
-       numeric margin and delegating the right-hand side to the Diff grammar
-       via ["source.diff"].}}
+    {- update summary and anchor lines such as
+       ["Update of file successful. 2 insertions, 1 deletion, 1 hunk."]
+       and ["@ scope[2]: let render value ="];}
+    {- hunk labels such as ["[hunk 1/2]"];}
+    {- compact snippet lines of the form
+       ["o:  42 n:  42 | code"] and
+       ["o:   - n:  42 | +code"], plus replacement markers such as
+       ["o:   - n:   - | ~ replaced by ~"], highlighting the compact
+       old/new margin and the right-hand diff marker/content.}}
 
     This is intended for internal tooling rather than general-purpose patch
     files.

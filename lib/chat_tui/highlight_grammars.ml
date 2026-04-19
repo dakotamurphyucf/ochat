@@ -299,11 +299,52 @@ let ochat_apply_patch_tm_json =
     { "name": "meta.header.ochatpatch.file-op",
       "match": "^\\*\\*\\* (Add|Update|Delete) File: .*$"
     },
-    { "name": "meta.ochatpatch.snippet",
-      "match": "^(\\s*\\d+\\s*\\|\\s*)(.*)$",
+    { "name": "meta.ochatpatch.status",
+      "match": "^(Addition|Deletion|Move|Update) of file successful(?:\\..*)?$"
+    },
+    { "name": "meta.ochatpatch.hunk",
+      "match": "^(\\[hunk\\s+\\d+/\\d+\\])$"
+    },
+    { "name": "meta.ochatpatch.anchor",
+      "match": "^(@ scope\\[[0-9]+\\]:\\s+)(.*)$",
+      "captures": {
+        "1": { "name": "keyword.control.ochatpatch" },
+        "2": { "name": "entity.name.section.ochatpatch" }
+      }
+    },
+    { "name": "meta.ochatpatch.snippet.separator",
+      "match": "^(o:\\s*-\\s+n:\\s*-\\s+\\|\\s+)(\\.\\.\\.\\s+\\d+\\s+unchanged\\s+lines?\\s+\\.\\.\\.)$",
       "captures": {
         "1": { "name": "constant.numeric.line-number.ochatpatch" },
-        "2": { "name": "markup.inserted.ochatpatch" }
+        "2": { "name": "comment.line.ochatpatch" }
+      }
+    },
+    { "name": "meta.ochatpatch.snippet.replacement",
+      "match": "^(o:\\s*-\\s+n:\\s*-\\s+\\|\\s+)(~ replaced by ~)$",
+      "captures": {
+        "1": { "name": "constant.numeric.line-number.ochatpatch" },
+        "2": { "name": "markup.changed.diff" }
+      }
+    },
+    { "name": "meta.ochatpatch.snippet.deleted",
+      "match": "^(o:\\s*\\d+\\s+n:\\s*-\\s+\\|\\s+)(-.*)$",
+      "captures": {
+        "1": { "name": "constant.numeric.line-number.ochatpatch" },
+        "2": { "name": "markup.deleted.diff" }
+      }
+    },
+    { "name": "meta.ochatpatch.snippet.inserted",
+      "match": "^(o:\\s*-\\s+n:\\s*\\d+\\s+\\|\\s+)(\\+.*)$",
+      "captures": {
+        "1": { "name": "constant.numeric.line-number.ochatpatch" },
+        "2": { "name": "markup.inserted.diff" }
+      }
+    },
+    { "name": "meta.ochatpatch.snippet.context",
+      "match": "^(o:\\s*\\d+\\s+n:\\s*\\d+\\s+\\|\\s+)(\\s.*)$",
+      "captures": {
+        "1": { "name": "constant.numeric.line-number.ochatpatch" },
+        "2": { "name": "text.diff.context" }
       }
     },
     { "include": "source.diff" }

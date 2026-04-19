@@ -85,9 +85,13 @@ val error_to_string : Apply_patch_error.t -> string
 
      – the literal string {e "Done!"} (kept for API compatibility);
      – a list of [(path, snippet)] pairs, one per affected file.
-       Each [snippet] shows a small **line-numbered** window around the
-       modified hunk(s) and is handy for logging or chat-ops
-       confirmations.
+       Delete actions return a short success message.  Short added
+       files include a line-numbered preview.  Update actions return a
+       per-file summary grouped into nearby hunks with compact
+       [o:]/[n:] old/new line labels, [hunk n/y] labels, structural
+       scope lines, replacement markers, one unchanged context line,
+       and omitted-line separators, which is handy for logging or
+       chat-ops confirmations.
 
      @param text Patch text delimited by {[*** Begin Patch]} / {[*** End Patch]}.
      @param open_fn Read callback used for [Update] and [Delete] actions.

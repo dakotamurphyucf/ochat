@@ -95,9 +95,13 @@ returns a tuple:
 
 * The literal string `"Done!"` – kept for API compatibility with the
   reference implementation.
-* A list of `(path, snippet)` pairs, one for every affected file.  Each
-  *snippet* shows a small, **line-numbered** window around the modified
-  hunks and is convenient for logging or chat-ops style confirmations.
+* A list of `(path, snippet)` pairs, one for every affected file.
+  Delete actions return a short success message.  Short added files
+  include a line-numbered preview.  Update actions return a summary
+  line plus nearby hunks with compact `o:`/`n:` old/new line labels,
+  `[hunk n/y]` labels, structural scope lines, replacement markers,
+  one unchanged context line, and omitted-line separators, which is
+  convenient for logging or chat-ops style confirmations.
 
 If anything goes wrong a `Diff_error` is raised (see above).
 

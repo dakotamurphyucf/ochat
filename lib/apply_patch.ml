@@ -602,61 +602,737 @@ let apply_commit (c : commit) ~write_fn ~remove_fn =
 
 (* Success snippet generation *)
 
-let rec common_prefix_len l1 l2 idx =
-  match l1, l2 with
-  | h1 :: t1, h2 :: t2 when String.equal h1 h2 -> common_prefix_len t1 t2 (idx + 1)
-  | _ -> idx
+type diff_op =
+  | Context_line of
+      { old_line_number : int
+      ; new_line_number : int
+      ; text : string
+      }
+  | Added_line of
+      { new_line_number : int
+      ; text : string
+      }
+  | Deleted_line of
+      { old_line_number : int
+      ; text : string
+      }
+
+type occurrence =
+  { count : int
+  ; index : int
+  }
+
+let format_line_number = function
+  | Some line_number -> Printf.sprintf "%4d" line_number
+  | None -> "   -"
 ;;
 
-let rec common_suffix_len l1 l2 count =
-  match l1, l2 with
-  | [], _ | _, [] -> count
-  | _ ->
-    (match List.last l1, List.last l2 with
-     | Some h1, Some h2 when String.equal h1 h2 ->
-       common_suffix_len (List.drop_last_exn l1) (List.drop_last_exn l2) (count + 1)
-     | _ -> count)
+let format_diff_line = function
+  | Context_line { old_line_number; new_line_number; text } ->
+    Printf.sprintf
+      "o:%s n:%s |  %s"
+      (format_line_number (Some old_line_number))
+      (format_line_number (Some new_line_number))
+      text
+  | Added_line { new_line_number; text } ->
+    Printf.sprintf
+      "o:%s n:%s | +%s"
+      (format_line_number None)
+      (format_line_number (Some new_line_number))
+      text
+  | Deleted_line { old_line_number; text } ->
+    Printf.sprintf
+      "o:%s n:%s | -%s"
+      (format_line_number (Some old_line_number))
+      (format_line_number None)
+      text
+;;
+
+let diff_table old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop =
+  let old_count = old_stop - old_start in
+  let new_count = new_stop - new_start in
+  let table = Array.make_matrix ~dimx:(old_count + 1) ~dimy:(new_count + 1) 0 in
+  for old_idx = old_count - 1 downto 0 do
+    for new_idx = new_count - 1 downto 0 do
+      table.(old_idx).(new_idx)
+      <- (if String.equal old_lines.(old_start + old_idx) new_lines.(new_start + new_idx)
+          then 1 + table.(old_idx + 1).(new_idx + 1)
+          else Int.max table.(old_idx + 1).(new_idx) table.(old_idx).(new_idx + 1))
+    done
+  done;
+  table
+;;
+
+let rec lcs_diff_ops
+          old_lines
+          new_lines
+          table
+          ~old_start
+          ~old_stop
+          ~new_start
+          ~new_stop
+          ~old_idx
+          ~new_idx
+          acc
+  =
+  let old_count = old_stop - old_start in
+  let new_count = new_stop - new_start in
+  if old_idx = old_count && new_idx = new_count
+  then List.rev acc
+  else if old_idx = old_count
+  then
+    lcs_diff_ops
+      old_lines
+      new_lines
+      table
+      ~old_start
+      ~old_stop
+      ~new_start
+      ~new_stop
+      ~old_idx
+      ~new_idx:(new_idx + 1)
+      (Added_line
+         { new_line_number = new_start + new_idx + 1
+         ; text = new_lines.(new_start + new_idx)
+         }
+       :: acc)
+  else if new_idx = new_count
+  then
+    lcs_diff_ops
+      old_lines
+      new_lines
+      table
+      ~old_start
+      ~old_stop
+      ~new_start
+      ~new_stop
+      ~old_idx:(old_idx + 1)
+      ~new_idx
+      (Deleted_line
+         { old_line_number = old_start + old_idx + 1
+         ; text = old_lines.(old_start + old_idx)
+         }
+       :: acc)
+  else if String.equal old_lines.(old_start + old_idx) new_lines.(new_start + new_idx)
+  then
+    lcs_diff_ops
+      old_lines
+      new_lines
+      table
+      ~old_start
+      ~old_stop
+      ~new_start
+      ~new_stop
+      ~old_idx:(old_idx + 1)
+      ~new_idx:(new_idx + 1)
+      (Context_line
+         { old_line_number = old_start + old_idx + 1
+         ; new_line_number = new_start + new_idx + 1
+         ; text = new_lines.(new_start + new_idx)
+         }
+       :: acc)
+  else if table.(old_idx + 1).(new_idx) >= table.(old_idx).(new_idx + 1)
+  then
+    lcs_diff_ops
+      old_lines
+      new_lines
+      table
+      ~old_start
+      ~old_stop
+      ~new_start
+      ~new_stop
+      ~old_idx:(old_idx + 1)
+      ~new_idx
+      (Deleted_line
+         { old_line_number = old_start + old_idx + 1
+         ; text = old_lines.(old_start + old_idx)
+         }
+       :: acc)
+  else
+    lcs_diff_ops
+      old_lines
+      new_lines
+      table
+      ~old_start
+      ~old_stop
+      ~new_start
+      ~new_stop
+      ~old_idx
+      ~new_idx:(new_idx + 1)
+      (Added_line
+         { new_line_number = new_start + new_idx + 1
+         ; text = new_lines.(new_start + new_idx)
+         }
+       :: acc)
+;;
+
+let lcs_diff_range old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop =
+  let table = diff_table old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop in
+  lcs_diff_ops
+    old_lines
+    new_lines
+    table
+    ~old_start
+    ~old_stop
+    ~new_start
+    ~new_stop
+    ~old_idx:0
+    ~new_idx:0
+    []
+;;
+
+let addition_preview_limit = 20
+let replacement_marker_line = "o:   - n:   - | ~ replaced by ~"
+
+let separator_line unchanged_count =
+  let suffix = if unchanged_count = 1 then "line" else "lines" in
+  Printf.sprintf
+    "o:%s n:%s | ... %d unchanged %s ..."
+    "   -"
+    "   -"
+    unchanged_count
+    suffix
+;;
+
+let hunk_label_line index total = Printf.sprintf "[hunk %d/%d]" index total
+;;
+
+let count_description count noun =
+  let suffix = if count = 1 then noun else noun ^ "s" in
+  Printf.sprintf "%d %s" count suffix
+;;
+
+let max_scope_anchors = 2
+
+type anchor_kind =
+  | Container
+  | Declaration
+  | Section
+;;
+
+let container_anchor_prefixes =
+  [ "module "
+  ; "class "
+  ; "interface "
+  ; "struct "
+  ; "trait "
+  ; "impl "
+  ; "namespace "
+  ; "package "
+  ; "protocol "
+  ; "enum "
+  ; "record "
+  ]
+;;
+
+let declaration_anchor_prefixes =
+  [ "let "
+  ; "let%"
+  ; "and "
+  ; "type "
+  ; "exception "
+  ; "val "
+  ; "def "
+  ; "fn "
+  ; "func "
+  ; "function "
+  ; "method "
+  ; "sub "
+  ; "proc "
+  ]
+;;
+
+let section_anchor_prefixes = [ "# "; "## "; "### "; "#### " ]
+
+let anchor_modifiers =
+  [ "export "
+  ; "default "
+  ; "public "
+  ; "private "
+  ; "protected "
+  ; "static "
+  ; "async "
+  ; "abstract "
+  ; "final "
+  ; "virtual "
+  ; "inline "
+  ; "extern "
+  ; "constexpr "
+  ; "pub "
+  ; "override "
+  ; "sealed "
+  ; "internal "
+  ; "open "
+  ]
+;;
+
+let control_flow_prefixes =
+  [ "if "
+  ; "for "
+  ; "while "
+  ; "switch "
+  ; "catch "
+  ; "else"
+  ; "do "
+  ; "try"
+  ; "match "
+  ; "with "
+  ; "when "
+  ]
+;;
+
+let starts_with_any prefixes text =
+  List.exists prefixes ~f:(fun prefix -> String.is_prefix text ~prefix)
+;;
+
+let count_leading_whitespace line =
+  String.take_while line ~f:Char.is_whitespace |> String.length
+;;
+
+let rec strip_anchor_modifiers text =
+  match List.find anchor_modifiers ~f:(fun prefix -> String.is_prefix text ~prefix) with
+  | None -> text
+  | Some prefix ->
+    String.drop_prefix text (String.length prefix) |> String.lstrip |> strip_anchor_modifiers
+;;
+
+let is_function_like_signature text =
+  let stripped = String.rstrip text in
+  String.is_substring stripped ~substring:"("
+  && String.is_substring stripped ~substring:")"
+  && (String.is_suffix stripped ~suffix:"{"
+      || String.is_suffix stripped ~suffix:":"
+      || String.is_suffix stripped ~suffix:"=>")
+  && not (starts_with_any control_flow_prefixes stripped)
+;;
+
+let classify_anchor_line line =
+  let stripped = String.strip line in
+  let normalized = strip_anchor_modifiers stripped in
+  if String.is_empty stripped
+  then None
+  else if starts_with_any section_anchor_prefixes stripped
+  then Some (Section, stripped)
+  else if starts_with_any container_anchor_prefixes normalized
+  then Some (Container, stripped)
+  else if starts_with_any declaration_anchor_prefixes normalized || is_function_like_signature normalized
+  then Some (Declaration, stripped)
+  else None
+;;
+
+let rec collect_scope_anchors lines index anchors current_indent =
+  if index < 0 || List.length anchors = max_scope_anchors
+  then anchors
+  else (
+    match classify_anchor_line lines.(index) with
+    | None -> collect_scope_anchors lines (index - 1) anchors current_indent
+    | Some (kind, text) ->
+      let indent = count_leading_whitespace lines.(index) in
+      let should_take =
+        List.is_empty anchors
+        || indent < current_indent
+        ||
+        match kind with
+        | Container | Section -> true
+        | Declaration -> false
+      in
+      if should_take && not (List.mem anchors text ~equal:String.equal)
+      then
+        collect_scope_anchors
+          lines
+          (index - 1)
+          (text :: anchors)
+          (Int.min current_indent indent)
+      else collect_scope_anchors lines (index - 1) anchors current_indent)
+;;
+
+let anchor_lines texts =
+  List.mapi texts ~f:(fun idx text -> Printf.sprintf "@ scope[%d]: %s" (idx + 1) text)
+;;
+
+let line_number_of_diff_op = function
+  | Context_line { new_line_number; _ } -> new_line_number
+  | Added_line { new_line_number; _ } -> new_line_number
+  | Deleted_line { old_line_number; _ } -> old_line_number
+;;
+
+let is_change = function
+  | Context_line _ -> false
+  | Added_line _ | Deleted_line _ -> true
+;;
+
+let update_occurrence occurrences line index =
+  let data =
+    match Map.find occurrences line with
+    | None -> { count = 1; index }
+    | Some data -> { count = data.count + 1; index = data.index }
+  in
+  Map.set occurrences ~key:line ~data
+;;
+
+let occurrences lines ~start ~stop =
+  let occurrences = ref String.Map.empty in
+  for index = start to stop - 1 do
+    occurrences := update_occurrence !occurrences lines.(index) index
+  done;
+  !occurrences
+;;
+
+let unique_matching_pairs old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop =
+  let old_occurrences = occurrences old_lines ~start:old_start ~stop:old_stop in
+  let new_occurrences = occurrences new_lines ~start:new_start ~stop:new_stop in
+  Map.fold old_occurrences ~init:[] ~f:(fun ~key ~data acc ->
+    match data, Map.find new_occurrences key with
+    | { count = 1; index = old_index }, Some { count = 1; index = new_index } ->
+      (old_index, new_index) :: acc
+    | _ -> acc)
+  |> List.sort ~compare:(fun (old_index1, _) (old_index2, _) ->
+    Int.compare old_index1 old_index2)
+;;
+
+let longest_increasing_pairs pairs =
+  let pairs = Array.of_list pairs in
+  let pair_count = Array.length pairs in
+  if pair_count = 0
+  then []
+  else (
+    let lengths = Array.create ~len:pair_count 1 in
+    let previous = Array.create ~len:pair_count None in
+    for index = 0 to pair_count - 1 do
+      for previous_index = 0 to index - 1 do
+        let _, previous_new_index = pairs.(previous_index) in
+        let _, new_index = pairs.(index) in
+        if
+          previous_new_index < new_index && lengths.(previous_index) + 1 > lengths.(index)
+        then (
+          lengths.(index) <- lengths.(previous_index) + 1;
+          previous.(index) <- Some previous_index)
+      done
+    done;
+    let best_index =
+      Array.foldi lengths ~init:0 ~f:(fun index best_index length ->
+        if length > lengths.(best_index) then index else best_index)
+    in
+    let rec backtrack index acc =
+      match previous.(index) with
+      | None -> pairs.(index) :: acc
+      | Some previous_index -> backtrack previous_index (pairs.(index) :: acc)
+    in
+    backtrack best_index [])
+;;
+
+let common_prefix_length old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop =
+  let limit = Int.min (old_stop - old_start) (new_stop - new_start) in
+  let rec loop offset =
+    if offset = limit
+    then offset
+    else if String.equal old_lines.(old_start + offset) new_lines.(new_start + offset)
+    then loop (offset + 1)
+    else offset
+  in
+  loop 0
+;;
+
+let common_suffix_length old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop =
+  let limit = Int.min (old_stop - old_start) (new_stop - new_start) in
+  let rec loop offset =
+    if offset = limit
+    then offset
+    else if
+      String.equal old_lines.(old_stop - offset - 1) new_lines.(new_stop - offset - 1)
+    then loop (offset + 1)
+    else offset
+  in
+  loop 0
+;;
+
+let context_range old_lines new_lines ~old_start ~new_start ~length =
+  List.init length ~f:(fun offset ->
+    Context_line
+      { old_line_number = old_start + offset + 1
+      ; new_line_number = new_start + offset + 1
+      ; text = new_lines.(new_start + offset)
+      })
+;;
+
+let added_range new_lines ~new_start ~new_stop =
+  List.init (new_stop - new_start) ~f:(fun offset ->
+    Added_line
+      { new_line_number = new_start + offset + 1; text = new_lines.(new_start + offset) })
+;;
+
+let deleted_range old_lines ~old_start ~old_stop =
+  List.init (old_stop - old_start) ~f:(fun offset ->
+    Deleted_line
+      { old_line_number = old_start + offset + 1; text = old_lines.(old_start + offset) })
+;;
+
+let rec patience_diff_range old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop =
+  if old_start = old_stop
+  then added_range new_lines ~new_start ~new_stop
+  else if new_start = new_stop
+  then deleted_range old_lines ~old_start ~old_stop
+  else (
+    let prefix_length =
+      common_prefix_length old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop
+    in
+    let old_start = old_start + prefix_length in
+    let new_start = new_start + prefix_length in
+    let suffix_length =
+      common_suffix_length old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop
+    in
+    let old_stop = old_stop - suffix_length in
+    let new_stop = new_stop - suffix_length in
+    let prefix =
+      context_range
+        old_lines
+        new_lines
+        ~old_start:(old_start - prefix_length)
+        ~new_start:(new_start - prefix_length)
+        ~length:prefix_length
+    in
+    let suffix =
+      context_range
+        old_lines
+        new_lines
+        ~old_start:old_stop
+        ~new_start:new_stop
+        ~length:suffix_length
+    in
+    let middle =
+      if old_start = old_stop
+      then added_range new_lines ~new_start ~new_stop
+      else if new_start = new_stop
+      then deleted_range old_lines ~old_start ~old_stop
+      else (
+        let anchors =
+          unique_matching_pairs
+            old_lines
+            new_lines
+            ~old_start
+            ~old_stop
+            ~new_start
+            ~new_stop
+          |> longest_increasing_pairs
+        in
+        if List.is_empty anchors
+        then lcs_diff_range old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop
+        else
+          patience_diff_with_anchors
+            old_lines
+            new_lines
+            ~old_stop
+            ~new_stop
+            anchors
+            ~old_start
+            ~new_start)
+    in
+    List.concat [ prefix; middle; suffix ])
+
+and patience_diff_with_anchors
+      old_lines
+      new_lines
+      ~old_stop
+      ~new_stop
+      anchors
+      ~old_start
+      ~new_start
+  =
+  match anchors with
+  | [] ->
+    patience_diff_range old_lines new_lines ~old_start ~old_stop ~new_start ~new_stop
+  | (old_anchor, new_anchor) :: rest ->
+    let before =
+      patience_diff_range
+        old_lines
+        new_lines
+        ~old_start
+        ~old_stop:old_anchor
+        ~new_start
+        ~new_stop:new_anchor
+    in
+    let anchor =
+      Context_line
+        { old_line_number = old_anchor + 1
+        ; new_line_number = new_anchor + 1
+        ; text = new_lines.(new_anchor)
+        }
+    in
+    let after =
+      patience_diff_with_anchors
+        old_lines
+        new_lines
+        ~old_stop
+        ~new_stop
+        rest
+        ~old_start:(old_anchor + 1)
+        ~new_start:(new_anchor + 1)
+    in
+    List.concat [ before; [ anchor ]; after ]
+;;
+
+let hunk_ranges ops ~context_lines =
+  let changed_indexes =
+    Array.foldi ops ~init:[] ~f:(fun idx acc op ->
+      if is_change op then idx :: acc else acc)
+    |> List.rev
+  in
+  let last_index = Array.length ops - 1 in
+  let rec loop ranges current = function
+    | [] ->
+      (match current with
+       | Some current -> List.rev (current :: ranges)
+       | None -> List.rev ranges)
+    | idx :: rest ->
+      let next_range =
+        Int.max 0 (idx - context_lines), Int.min last_index (idx + context_lines)
+      in
+      (match current with
+       | None -> loop ranges (Some next_range) rest
+       | Some (start_idx, end_idx) ->
+         let next_start, next_end = next_range in
+         if next_start <= end_idx + 1
+         then loop ranges (Some (start_idx, Int.max end_idx next_end)) rest
+         else loop ((start_idx, end_idx) :: ranges) (Some next_range) rest)
+  in
+  loop [] None changed_indexes
+;;
+
+let unchanged_count_between ops ~prev_end ~next_start =
+  let count = ref 0 in
+  for idx = prev_end + 1 to next_start - 1 do
+    match ops.(idx) with
+    | Context_line _ -> count := !count + 1
+    | Added_line _ | Deleted_line _ -> ()
+  done;
+  !count
+;;
+
+let range_ops ops (start_idx, end_idx) =
+  List.init (end_idx - start_idx + 1) ~f:(fun offset -> ops.(start_idx + offset))
+;;
+
+let range_anchor ops (start_idx, end_idx) ~old_lines ~new_lines =
+  let rec loop index =
+    if index > end_idx
+    then []
+    else (
+      match ops.(index) with
+      | Context_line _ -> loop (index + 1)
+      | Added_line { new_line_number; _ } ->
+        collect_scope_anchors new_lines (new_line_number - 1) [] Int.max_value
+      | Deleted_line { old_line_number; _ } ->
+        collect_scope_anchors old_lines (old_line_number - 1) [] Int.max_value)
+  in
+  loop start_idx
+;;
+
+let render_hunk_lines lines =
+  let rec loop saw_deletion = function
+    | [] -> []
+    | (Added_line _ as line) :: rest when saw_deletion ->
+      replacement_marker_line :: format_diff_line line :: loop false rest
+    | (Deleted_line _ as line) :: rest -> format_diff_line line :: loop true rest
+    | line :: rest -> format_diff_line line :: loop false rest
+  in
+  loop false lines
+;;
+
+let render_range ops range ~old_lines ~new_lines =
+  let anchor = range_anchor ops range ~old_lines ~new_lines |> anchor_lines in
+  let lines = range_ops ops range |> render_hunk_lines in
+  List.append anchor lines
+;;
+
+let update_summary_line (data : file_change) lines ~hunk_count =
+  let insertions =
+    List.count lines ~f:(function
+      | Added_line _ -> true
+      | _ -> false)
+  in
+  let deletions =
+    List.count lines ~f:(function
+      | Deleted_line _ -> true
+      | _ -> false)
+  in
+  let label = if Option.is_some data.move_path then "Move" else "Update" in
+  Printf.sprintf
+    "%s of file successful. %s, %s, %s."
+    label
+    (count_description insertions "insertion")
+    (count_description deletions "deletion")
+    (count_description hunk_count "hunk")
+;;
+
+let format_changed_lines (data : file_change) lines ~old_lines ~new_lines =
+  let ops = Array.of_list lines in
+  let ranges = hunk_ranges ops ~context_lines:1 in
+  let summary = update_summary_line data lines ~hunk_count:(List.length ranges) in
+  let total_hunks = List.length ranges in
+  let rec loop previous_range hunk_index acc = function
+    | [] -> List.rev acc
+    | range :: rest ->
+      let acc =
+        match previous_range with
+        | Some (_, prev_end) ->
+          let next_start, _ = range in
+          let omitted = unchanged_count_between ops ~prev_end ~next_start in
+          if omitted > 0 then separator_line omitted :: acc else acc
+        | None -> acc
+      in
+      let rendered_range = render_range ops range ~old_lines ~new_lines in
+      let acc =
+        List.rev_append
+          (hunk_label_line hunk_index total_hunks :: rendered_range)
+          acc
+      in
+      loop (Some range) (hunk_index + 1) acc rest
+  in
+  summary :: loop None 1 [] ranges |> fun lines -> String.concat ~sep:"\n" lines
+;;
+
+let add_snippet data =
+  let lines = Option.value_exn data.new_text |> String.split_lines in
+  if List.length lines > addition_preview_limit
+  then "Addition of file successful."
+  else (
+    let preview =
+      List.mapi lines ~f:(fun idx line ->
+        format_diff_line (Added_line { new_line_number = idx + 1; text = line }))
+      |> String.concat ~sep:"\n"
+    in
+    String.concat ~sep:"\n" [ "Addition of file successful."; preview ])
+;;
+
+let update_snippet data =
+  let old_lines = Option.value_exn data.old_text |> String.split_lines |> Array.of_list in
+  let new_lines = Option.value_exn data.new_text |> String.split_lines |> Array.of_list in
+  let diff_ops =
+    patience_diff_range
+      old_lines
+      new_lines
+      ~old_start:0
+      ~old_stop:(Array.length old_lines)
+      ~new_start:0
+      ~new_stop:(Array.length new_lines)
+  in
+  match List.exists diff_ops ~f:is_change with
+  | false ->
+    if Option.is_some data.move_path
+    then "Move of file successful."
+    else "Update of file successful."
+  | true -> format_changed_lines data diff_ops ~old_lines ~new_lines
 ;;
 
 let generate_snippets (commit : commit) ~(_orig : string String.Map.t)
   : (string * string) list
   =
-  let context = 0 in
   Map.fold commit.changes ~init:[] ~f:(fun ~key:path ~data acc ->
     let snippet =
       match data.kind with
-      | Add ->
-        let lines = Option.value_exn data.new_text |> String.split_lines in
-        lines
-        |> List.mapi ~f:(fun idx line -> Printf.sprintf "%4d | +%s" (idx + 1) line)
-        |> String.concat ~sep:"\n"
-      | Delete ->
-        let lines = Option.value_exn data.old_text |> String.split_lines in
-        lines
-        |> List.mapi ~f:(fun idx line -> Printf.sprintf "%4d | -%s" (idx + 1) line)
-        |> String.concat ~sep:"\n"
-      | Update ->
-        let old_lines = Option.value_exn data.old_text |> String.split_lines in
-        let new_lines = Option.value_exn data.new_text |> String.split_lines in
-        let prefix_len = common_prefix_len old_lines new_lines 0 in
-        let suffix_len =
-          common_suffix_len
-            (List.drop old_lines prefix_len)
-            (List.drop new_lines prefix_len)
-            0
-        in
-        let first_changed = prefix_len in
-        let last_changed_new = List.length new_lines - suffix_len - 1 in
-        let start_line = Int.max 0 (first_changed - context) in
-        let end_line = Int.min (List.length new_lines - 1) (last_changed_new + context) in
-        List.init (end_line - start_line + 1) ~f:(fun i -> i + start_line)
-        |> List.map ~f:(fun idx ->
-          let line = List.nth_exn new_lines idx in
-          let prefix_char =
-            if idx >= first_changed && idx <= last_changed_new then '+' else ' '
-          in
-          Printf.sprintf "%4d | %c%s" (idx + 1) prefix_char line)
-        |> String.concat ~sep:"\n"
+      | Add -> add_snippet data
+      | Delete -> "Deletion of file successful."
+      | Update -> update_snippet data
     in
     (path, snippet) :: acc)
   |> List.rev

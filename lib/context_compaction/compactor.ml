@@ -88,7 +88,6 @@ let compact_history ~env ~(history : Openai.Responses.Item.t list)
   =
   (* Always protect against unexpected crashes. *)
   try
-    let cfg = Config.load () in
     (* Keep only messages deemed relevant.  We do not attempt an exact token
        budget at this stage – the upcoming property tests approximate one
        token per character. *)
@@ -112,17 +111,15 @@ let compact_history ~env ~(history : Openai.Responses.Item.t list)
     (* Generate summary – this is an expensive call but runs once per
        compaction request. *)
     let summary =
-      S.summarise ~relevant_items ~env
-      |> fun s ->
-      String.prefix s cfg.context_limit
-      |> sprintf
-           "<system-reminder>This is a message from the system that we compacted the \
-            conversation history from a previous session.\n\
-            Here is a summary of the session that you saved:\n\
-            %s\n\
-            Remember this is not a message from the user, but a system reminder that you \
-            should not respond to.\n\
-            </system-reminder>"
+      sprintf
+        "<system-reminder>This is a message from the system that we compacted the \
+         conversation history from a previous session.\n\
+         Here is a summary of the session that you saved:\n\
+         %s\n\
+         Remember this is not a message from the user, but a system reminder that you \
+         should not respond to.\n\
+         </system-reminder>"
+        (S.summarise ~relevant_items ~env)
     in
     Log.emit `Info
     @@ sprintf

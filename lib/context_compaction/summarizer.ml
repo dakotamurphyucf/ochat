@@ -9,20 +9,8 @@ let prompt =
 Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, architectural decisions, assistant outputs, and any other context that would be essential for continuing development work without losing context.
 
-Before providing your final summary, wrap your analysis of the conversation in <analysis> tags to organize your thoughts with a rough outline of the main themes of the conversation and a detailed analysis of each section. In your analysis process:
-
-1. Chronologically analyze each message and section of the conversation. For each section thoroughly identify:
-   - The user's explicit requests and intents
-   - Your approach to addressing the user's requests and your responses
-   - Key decisions, technical concepts and code patterns
-   - Specific details like:
-     - file names
-     - full code snippets
-     - function signatures
-     - file edits
-     - analysis outputs
-  - Errors that were ran into in the conversation and how they were fixed
-  - Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
+Before providing your final summary, wrap your analysis of the conversation in <analysis> tags to have a rough outline of the main themes of the conversation and an analysis of each section. In your analysis process:
+1. Chronologically analyze each message and section of the conversation.
 2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
 
 Your Detailed summary should include the following sections:
@@ -44,7 +32,7 @@ Here's an example of how your output should be structured:
 
 <example>
 <analysis>
-[Chronological analysis of the conversation, ensuring all points are covered thoroughly and accurately. You must be overly detailed and precise in your analysis]
+[Chronological analysis of the conversation, ensuring all points are covered thoroughly and accurately. You must be detailed and precise in your analysis]
 </analysis>
 
 <summary>
@@ -114,6 +102,8 @@ Please provide your Detailed summary based on the conversation so far, following
 - you should be going for 70% compression of the conversation, so you must be thorough and complete in your analysis.
 - provide a section <important-details></important-details> whose contents should include any critical details or snippets that should be included verbatim.
   Use your own judgement to determine what is critical and what can be omitted based on the conversation so far. An example would be a final draft of a proposal or report that was not saved and is relevant to the current conversation.
+- do not duplicate information in analysis and summary sections.
+- analysis is to analyze the theme and trajectory of the conversation and where it is going; summary is to provide a concise overview of the conversation, including key points and any critical details that should be included verbatim.
 |}
 ;;
 
@@ -209,6 +199,7 @@ let summarise
       ; mk_input "user" (sprintf "<conversation>%s</conversation>" transcript)
       ]
     in
+    let reasoning = Request.Reasoning.{ effort = None; summary = None } in
     (try
        let response =
          Eio.Switch.run (fun sw ->
@@ -218,8 +209,8 @@ let summarise
              ~max_output_tokens:100000
              ~temperature:0.3
              ~model:(Request.Unknown "gpt-5.4")
-             ~verbosity:"high"
              ~dir
+             ~reasoning
              net
              ~inputs)
        in
