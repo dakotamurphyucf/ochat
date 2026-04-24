@@ -43,6 +43,10 @@ type moderator =
   ; runtime_policy : Runtime_semantics.policy
   }
 
+type pending_ui_request = Moderator_manager.pending_ui_request =
+  | Ask_text of { prompt : string }
+  | Ask_choice of { prompt : string; choices : string array }
+
 type moderated_tool_call =
   { call_item : Res.Item.t
   ; kind : Tool_call.Kind.t
@@ -51,6 +55,14 @@ type moderated_tool_call =
   ; synthetic_result : Res.Tool_output.Output.t option
   ; runtime_requests : Moderation.Runtime_request.t list
   }
+
+let pending_ui_request (moderator : moderator) =
+  Moderator_manager.pending_ui_request moderator.manager
+;;
+
+let resume_ui_request (moderator : moderator) ~response =
+  Moderator_manager.resume_ui_request moderator.manager ~response
+;;
 
 type prepared_turn =
   { inputs : Res.Item.t list
@@ -188,6 +200,15 @@ let run_moderation_event
       ~f:Option.some
 ;;
 
+let ensure_not_waiting_on_ui (moderator : moderator option) : (unit, string) result =
+  match moderator with
+  | None -> Ok ()
+  | Some moderator ->
+    (match pending_ui_request moderator with
+     | None -> Ok ()
+     | Some _ -> Error "Session is waiting for UI input.")
+;;
+
 type safe_point =
   | Turn_start_boundary
   | Post_tool_result_boundary
@@ -212,6 +233,7 @@ let drain_moderator_safe_point
   | None -> Ok []
   | Some moderator ->
     Moderator_manager.drain_internal_events
+      ~max_events:moderator.runtime_policy.budget.max_internal_event_drain
       moderator.manager
       ~session_id:moderator.session_id
       ~now_ms
@@ -251,6 +273,7 @@ let handle_item_appended
         ~history
         ~event:(Moderation.Event.Item_appended item)
     in
+    let%bind () = ensure_not_waiting_on_ui moderator in
     let outcomes = outcomes_to_list outer ~drained:[] in
     report_runtime_requests ~on_runtime_request outcomes;
     unexpected_tool_moderation
@@ -303,6 +326,7 @@ let prepare_turn_request
       ~history
   =
   let open Result.Let_syntax in
+  let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind outer =
     run_moderation_event
       ~moderator
@@ -311,6 +335,7 @@ let prepare_turn_request
       ~history
       ~event:Moderation.Event.Turn_start
   in
+  let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind drained =
     drain_moderator_safe_point
       ~moderator
@@ -362,6 +387,7 @@ let prepare_turn_inputs
 
 let finish_turn ~(moderator : moderator option) ~available_tools ~now_ms ~history =
   let open Result.Let_syntax in
+  let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind outer =
     run_moderation_event
       ~moderator
@@ -370,6 +396,7 @@ let finish_turn ~(moderator : moderator option) ~available_tools ~now_ms ~histor
       ~now_ms
       ~history
   in
+  let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind drained =
     drain_moderator_safe_point
       ~moderator
@@ -393,6 +420,8 @@ let moderate_tool_call
       ~(item_id : string option)
   : (moderated_tool_call, string) result
   =
+  let open Result.Let_syntax in
+  let%bind () = ensure_not_waiting_on_ui moderator in
   let original_call_item =
     Tool_call.call_item ~kind ~name ~payload ~call_id ~id:item_id
   in
@@ -403,7 +432,6 @@ let moderate_tool_call
       failwith "Expected tool call item when moderating a pending tool invocation."
     | Some tool_call -> tool_call
   in
-  let open Result.Let_syntax in
   let%bind outer =
     run_moderation_event
       ~moderator
@@ -412,6 +440,7 @@ let moderate_tool_call
       ~history:history_with_call
       ~event:(Moderation.Event.Pre_tool_call tool_call)
   in
+  let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind runtime_requests, action =
     match outer with
     | None -> Ok ([], None)
@@ -467,6 +496,8 @@ let handle_tool_result
       ~(item : Res.Item.t)
   : (Moderation.Runtime_request.t list, string) result
   =
+  let open Result.Let_syntax in
+  let%bind () = ensure_not_waiting_on_ui moderator in
   let tool_result =
     match
       Moderation.Tool_result.of_output_item
@@ -480,7 +511,6 @@ let handle_tool_result
     | None -> failwith "Expected tool output item when handling a moderated tool result."
     | Some tool_result -> tool_result
   in
-  let open Result.Let_syntax in
   let%bind outer =
     run_moderation_event
       ~moderator
@@ -489,6 +519,7 @@ let handle_tool_result
       ~history
       ~event:(Moderation.Event.Post_tool_response tool_result)
   in
+  let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind item_appended =
     match moderator, outer with
     | None, _ -> Ok None
@@ -502,6 +533,7 @@ let handle_tool_result
         ~history
         ~event:(Moderation.Event.Item_appended appended_item)
   in
+  let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind drained =
     drain_moderator_safe_point
       ~moderator
@@ -916,7 +948,6 @@ let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
 
 let run_turn (c : ctx) ~sw ~(history : Openai.Responses.Item.t list) =
   let sem = lazy (Eio.Semaphore.make 8) in
-  let request_turn_budget_max = 10 in
   let rec turn_with_budget
             (hist : Openai.Responses.Item.t list)
             ~(request_turn_budget : int)
@@ -981,13 +1012,12 @@ let run_turn (c : ctx) ~sw ~(history : Openai.Responses.Item.t list) =
              if st.run_again
              then turn_with_budget hist ~request_turn_budget:0
              else (
-               let next_budget = request_turn_budget + 1 in
-               if next_budget > request_turn_budget_max
-               then
-                 failwith
-                   (Printf.sprintf
-                      "Exceeded maximum consecutive moderator-requested turns (%d)."
-                      request_turn_budget_max);
+               let next_budget =
+                 Runtime_semantics.next_self_triggered_turn_budget
+                   ~policy
+                   ~request_turn_budget
+                 |> Result.ok_or_failwith
+               in
                turn_with_budget hist ~request_turn_budget:next_budget))
     with
     | Openai.Responses.Response_stream_parsing_error (json, exn) ->

@@ -69,3 +69,9 @@ let moderator_surface : surface =
     ; type_aliases = moderator_type_aliases
     }
 ;;
+
+let ui_moderator_surface : surface =
+  merge
+    moderator_surface
+    { empty with modules = [ Builtin_spec.ui_module; Builtin_spec.approval_module ] }
+;;

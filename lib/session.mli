@@ -52,6 +52,11 @@ end
 module Snapshot = Chatml.Chatml_value_codec.Snapshot
 
 module Moderator_snapshot : sig
+  (** Persisted moderator runtime state and durable overlay data.
+
+      For the restore and effective-history semantics that use this snapshot,
+      see [docs-src/chatml-safe-point-and-effective-history.md]. *)
+
   module Item : sig
     type t =
       { id : string

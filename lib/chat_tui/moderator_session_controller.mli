@@ -1,5 +1,19 @@
 open! Core
 
+(** Structured host/session-controller outcomes for moderated `chat_tui`
+    sessions.
+
+    The broader host contract for how these outcomes are consumed is documented
+    in [docs-src/chatml-host-session-controller-contract.md].
+
+    The Phase 2 budget contract for host-side follow-up, pause, and idle-drain
+    policy is documented in [docs-src/chatml-budget-policy.md].
+
+    The Phase 3 UI-only approval contract keeps approval waiting in this same
+    host-owned layer: while a pending approval is visible, the controller
+    suppresses idle drains and automatic follow-up turns for that session
+    until the pending request is resumed or dropped. *)
+
 (** How request-turn runtime requests should be interpreted by the session
     controller. *)
 type turn_request =
@@ -15,13 +29,17 @@ type turn_request =
     {- Compaction requests remain visible even when [End_session] is present.}
     {- Pure runtime requests do not by themselves require a message refresh;
        callers can refresh separately when other moderator-visible state
-       changes.}} *)
+       changes.}}
+
+    Phase 2 adds additional host-side suppression precedence for bounded-turn
+    policy as documented in [docs-src/chatml-budget-policy.md]. *)
 type t =
   { request_refresh : bool
   ; request_compact : bool
   ; request_turn : App_runtime.turn_start_reason option
   ; halt_reason : string option
   ; system_notices : string list
+  ; internal_events_remain : bool
   ; internal_events_to_enqueue : App_events.internal_event list
   }
 

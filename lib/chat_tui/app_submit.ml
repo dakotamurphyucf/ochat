@@ -120,6 +120,7 @@ let apply_turn_start_effects ~model ~screen_size ~throttler =
 
 let begin_streaming_turn
       ~(runtime : Runtime.t)
+      ~(now_ms : int)
       ~reason
       ~history
       ~start_streaming
@@ -127,6 +128,7 @@ let begin_streaming_turn
   let op_id = Runtime.alloc_op_id runtime in
   runtime.Runtime.op <- Some (Runtime.Starting_streaming { id = op_id });
   runtime.Runtime.cancel_streaming_on_start <- false;
+  Runtime.note_started_turn runtime ~now_ms ~reason;
   Runtime.set_active_turn_start_reason runtime reason;
   Log.emit
     `Debug
@@ -139,6 +141,7 @@ let begin_streaming_turn
 
 let start_from_current_session_with_screen_size
       (ctx : Context.t)
+      ~now_ms
       ~screen_size
       ~reason
   =
@@ -146,12 +149,21 @@ let start_from_current_session_with_screen_size
   let throttler = ctx.streaming.shared.ui.throttler in
   apply_turn_start_effects ~model:runtime.Runtime.model ~screen_size ~throttler;
   let history = Model.history_items runtime.Runtime.model in
-  begin_streaming_turn ~runtime ~reason ~history ~start_streaming:ctx.start_streaming
+  begin_streaming_turn
+    ~runtime
+    ~now_ms
+    ~reason
+    ~history
+    ~start_streaming:ctx.start_streaming
 ;;
 
 let start_from_current_session (ctx : Context.t) ~reason =
   let screen_size = ctx.streaming.shared.ui.size () in
-  start_from_current_session_with_screen_size ctx ~screen_size ~reason
+  let now_ms =
+    Eio.Time.now (Eio.Stdenv.clock ctx.streaming.shared.services.env) *. 1000.
+    |> Int.of_float
+  in
+  start_from_current_session_with_screen_size ctx ~now_ms ~screen_size ~reason
 ;;
 
 let start (ctx : Context.t) (submit_request : request) =
@@ -243,7 +255,11 @@ let%test_unit "start_from_current_session preserves canonical history" =
   let runtime = Runtime.create ~model () in
   let started_turns = ref None in
   let ctx = context_for_tests runtime started_turns in
-  start_from_current_session_with_screen_size ctx ~screen_size:(80, 24) ~reason:Runtime.Idle_followup;
+  start_from_current_session_with_screen_size
+    ctx
+    ~now_ms:0
+    ~screen_size:(80, 24)
+    ~reason:Runtime.Idle_followup;
   [%test_result: int] (List.length (Model.history_items model)) ~expect:1;
   [%test_result: string option]
     (Option.map (Runtime.active_turn_start_reason runtime) ~f:Runtime.string_of_turn_start_reason)
@@ -264,7 +280,17 @@ let%test_unit "start preserves submit append semantics" =
   let runtime = Runtime.create ~model () in
   let started_turns = ref None in
   let ctx = context_for_tests runtime started_turns in
-  start ctx { Runtime.text = "Hello"; draft_mode = Model.Plain };
+  apply_user_submit_effects
+    ~cwd:(Obj.magic 0)
+    ~env:(Obj.magic 0)
+    ~cache:(Chat_response.Cache.create ~max_size:1 ())
+    ~model
+    ~submit_request:{ Runtime.text = "Hello"; draft_mode = Model.Plain };
+  start_from_current_session_with_screen_size
+    ctx
+    ~now_ms:0
+    ~screen_size:(80, 24)
+    ~reason:Runtime.User_submit;
   [%test_result: int] (List.length (Model.history_items model)) ~expect:1;
   [%test_result: string option]
     (Option.map (Runtime.active_turn_start_reason runtime) ~f:Runtime.string_of_turn_start_reason)

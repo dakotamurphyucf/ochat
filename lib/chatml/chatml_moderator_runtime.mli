@@ -10,7 +10,17 @@
 
     The runtime is intentionally generic: embedders provide concrete
     handlers for tool/model/scheduling integration while the module
-    supplies the common execution model. *)
+    supplies the common execution model.
+
+    The optional UI-only notification and ask-user capability layer is
+    documented in [docs-src/chatml-ui-host-capabilities.md]. It remains an
+    explicit host capability rather than a generic assumption of every
+    moderator runtime embedding.
+
+    Approval suspension is exposed through a host-visible pending-request and
+    resume boundary. While UI input is pending, ordinary [handle_event]
+    progression is blocked and the suspended handler remains uncommitted until
+    resume succeeds. *)
 
 open Chatml.Chatml_lang
 module Builtin_surface = Chatml.Chatml_builtin_surface
@@ -21,6 +31,11 @@ type compiled_script
 (** Per-session runtime instance holding durable state and execution
     queues. *)
 type session
+
+(** Host-visible pending UI approval request for a suspended live session. *)
+type pending_ui_request =
+  | Ask_text of { prompt : string }
+  | Ask_choice of { prompt : string; choices : string array }
 
 (** Diagnostic log level used by the default [Log.*] operation family. *)
 type log_level =
@@ -56,6 +71,7 @@ type tool_moderation =
 type local_effect =
   | Turn_effect of turn_effect
   | Tool_moderation_effect of tool_moderation
+  | Ui_notification of string
   | Emit_internal_event of value
   | Request_compaction
   | Request_turn
@@ -97,6 +113,7 @@ type default_handlers =
   { on_log : session -> level:log_level -> message:string -> (unit, string) result
   ; on_turn_effect : session -> turn_effect -> (unit, string) result
   ; on_tool_moderation : session -> tool_moderation -> (unit, string) result
+  ; on_ui_notify : session -> message:string -> (unit, string) result
   ; on_tool_call : session -> name:string -> args:value -> (value, string) result
   ; on_tool_spawn : session -> name:string -> args:value -> (string, string) result
   ; on_model_call : session -> recipe:string -> payload:value -> (value, string) result
@@ -143,6 +160,9 @@ val compile_script
   -> unit
   -> (compiled_script, string) result
 
+(** Surface recorded on a compiled script artifact. *)
+val compiled_surface : compiled_script -> Builtin_surface.surface
+
 (** Instantiate a compiled script in a fresh per-session environment and
     load the configured entrypoints. *)
 val instantiate_session
@@ -156,6 +176,9 @@ val current_state : session -> value
 
 (** Current phase while a handler is actively running, if any. *)
 val current_phase : session -> string option
+
+(** Pending UI approval request for a suspended session, if one exists. *)
+val pending_ui_request : session -> pending_ui_request option
 
 (** Local transactional effects buffered during the current handler
     execution. *)
@@ -209,6 +232,9 @@ val request_session_end : session -> reason:string -> (unit, string) result
     - commits buffered state/effects on success,
     - or rolls back local transactional buffers on failure. *)
 val handle_event : session -> context:value -> event:value -> (unit, string) result
+
+(** Resume a suspended UI approval request with a host-supplied response. *)
+val resume_ui_request : session -> response:string -> (unit, string) result
 
 (** Enqueue an internal event for later delivery via the host's internal-event
     replay mechanism. Unlike [Runtime.emit], this is host-driven and does not

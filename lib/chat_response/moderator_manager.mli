@@ -13,12 +13,17 @@ module Registry : sig
 
   (** [compile_script registry script] returns the cached compiled artifact for
       [script] or compiles it once and caches the result. *)
-  val compile_script : t -> CM.script -> (t * artifact, string) result
+  val compile_script
+    :  ?surface:Chatml.Chatml_builtin_surface.surface
+    -> t
+    -> CM.script
+    -> (t * artifact, string) result
 
   (** [of_elements registry elements] compiles any moderator scripts declared
       by [elements]. *)
   val of_elements
-    :  t
+    :  ?surface:Chatml.Chatml_builtin_surface.surface
+    -> t
     -> CM.top_level_elements list
     -> (t * artifact option, string) result
 
@@ -27,6 +32,10 @@ module Registry : sig
 end
 
 type t
+
+type pending_ui_request = Runtime.pending_ui_request =
+  | Ask_text of { prompt : string }
+  | Ask_choice of { prompt : string; choices : string array }
 
 (** [create ~artifact ~capabilities ?snapshot ()] instantiates a fresh runtime
     session for [artifact], optionally restoring persisted durable state. *)
@@ -49,6 +58,18 @@ val handle_event
   -> session_meta:Jsonaf.t
   -> event:Moderation.Event.t
   -> (Moderation.Outcome.t, string) result
+
+(** [pending_ui_request t] exposes the current live-session approval request,
+    if the runtime is suspended waiting for UI input. *)
+val pending_ui_request : t -> pending_ui_request option
+
+(** [resume_ui_request t ~response] resumes the suspended moderator execution
+    with [response] and returns any newly committed moderation outcomes from
+    that resumed execution. *)
+val resume_ui_request
+  :  t
+  -> response:string
+  -> (Moderation.Outcome.t list, string) result
 
 (** [drain_internal_events t ...] replays queued internal events FIFO through
     phase [internal_event], stopping after [max_events]. *)

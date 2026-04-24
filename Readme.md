@@ -613,6 +613,10 @@ For a richer end-to-end example, see:
 
 ### Writing moderator scripts with `Item.*`
 
+By default, moderator scripts get the `Item`, `Tool_call`, and `Context`
+helper modules on the installed moderator surface, so common transcript,
+tool-call, and context queries do not need raw record or JSON plumbing.
+
 Moderator scripts receive `ctx.items`, where each item has the shape:
 
 ```ocaml
@@ -630,9 +634,38 @@ JSON for common cases:
 - `Item.kind(item)` reads the serialized item `"type"` field when present
 - `Item.role(item)` extracts a message role when the item has one
 - `Item.text_parts(item)` collects text fragments from common message-like items
+- `Item.text(item)` returns the first text fragment when one is present
 - `Item.input_text_message(id, role, text)` builds a structured input message
 - `Item.output_text_message(id, text)` builds a structured assistant message
+- `Item.user_text(id, text)`, `Item.assistant_text(id, text)`,
+  `Item.system_text(id, text)`, and `Item.notice(id, text)` are convenience
+  constructors over those message shapes
+- `Item.is_user(item)`, `Item.is_assistant(item)`, `Item.is_system(item)`,
+  `Item.is_tool_call(item)`, and `Item.is_tool_result(item)` are predicate
+  helpers over the serialized role/kind fields
 - `Item.create(id, value)` wraps arbitrary structured JSON as an item
+
+The default moderator surface also exposes pure inspector helpers for tool
+calls and the current moderation context:
+
+- `Tool_call.arg(call, name)` returns the raw JSON argument when it is present
+- `Tool_call.arg_string(call, name)`, `Tool_call.arg_bool(call, name)`, and
+  `Tool_call.arg_array(call, name)` return `Option.none()` when the argument is
+  missing or has the wrong JSON shape
+- `Tool_call.is_named(call, name)` and `Tool_call.is_one_of(call, names)` match
+  against the serialized tool name using exact string equality
+- `Context.last_item(ctx)`, `Context.last_user_item(ctx)`,
+  `Context.last_assistant_item(ctx)`, `Context.last_system_item(ctx)`,
+  `Context.last_tool_call(ctx)`, and `Context.last_tool_result(ctx)` return the
+  last matching item in `ctx.items`
+- `Context.find_item(ctx, id)` uses exact item-id equality
+- `Context.items_since_last_user_turn(ctx)` and
+  `Context.items_since_last_assistant_turn(ctx)` return the suffix beginning at
+  the matching boundary item, or the full item list when no such boundary
+  exists
+- `Context.items_by_role(ctx, role)` uses exact role-string equality
+- `Context.find_tool(ctx, name)` and `Context.has_tool(ctx, name)` inspect
+  `ctx.available_tools` using exact tool-name equality
 
 Example:
 
@@ -662,6 +695,20 @@ Prefer `Turn.append_item`, `Turn.replace_item`, and `Turn.delete_item`.
 The older `append_message`, `replace_message`, and `delete_message` names are
 still accepted as aliases.
 
+Additional Phase 1 script helpers:
+
+- `Turn.replace_or_append(target_id_opt, item)` replaces when
+  `target_id_opt` is `Option.some(id)` and appends when it is
+  `Option.none()`
+- `Turn.append_notice(text)` appends a synthetic system notice item using a
+  stable `system:`-prefixed id derived from the notice text
+- `Model.call_text(recipe, text)` is shorthand for
+  `Model.call(recipe, `String(text))`
+- `Model.call_json(recipe, payload)` is a named alias for
+  `Model.call(recipe, payload)` when the payload is already structured JSON
+- `Model.spawn_text(recipe, text)` is shorthand for
+  `Model.spawn(recipe, `String(text))`
+
 ### Runtime semantics in `chat_tui`
 
 When a prompt runs in `chat_tui`, moderation is split across three layers:
@@ -682,6 +729,43 @@ transcript at safe points such as:
 - the end of a streamed turn,
 - the end of compaction,
 - startup or resume moderation.
+
+For the concrete host/session-controller contract behind those behaviors, see
+[ChatML host session-controller contract](docs-src/chatml-host-session-controller-contract.md).
+
+For the canonical safe-point and effective-history semantics behind request
+preparation, overlay projection, deferred steering, restore, and visible
+history refresh, see
+[ChatML safe-point and effective-history semantics](docs-src/chatml-safe-point-and-effective-history.md).
+
+For a consolidated overview of the moderator runtime layers, builtin surfaces,
+event types, helper modules, runtime requests, internal events, and UI-only
+capabilities, see
+[ChatML moderator runtime guide](docs-src/guide/chatml-moderator-runtime.md).
+
+For the concrete budget contract that bounds self-triggered turns, idle
+internal-event drains, automatic follow-up scheduling, and the ownership of
+`max_spawned_jobs`, see
+[ChatML budget policy](docs-src/chatml-budget-policy.md).
+
+For the end-to-end async completion and wakeup path behind `Model.spawn`,
+queued moderator internal events, idle drains, and the current `Job` deferral,
+see
+[ChatML async completion lifecycle](docs-src/chatml-async-completion-lifecycle.md).
+
+For the optional UI-only notification and ask-user capability layer used by
+interactive hosts such as `chat_tui`, see
+[ChatML UI host capabilities](docs-src/chatml-ui-host-capabilities.md).
+
+That UI layer adds `Ui.notify`, `Approval.ask_text`, and
+`Approval.ask_choice` only on the dedicated UI surface.
+`Ui.notify` is a host-local notice path: it does not mutate canonical history
+and does not append transcript items automatically. The `Approval.ask_*` flow
+is live-session-only: it pauses the current script, exposes one pending UI
+request to the host, and resumes the same script execution from that call site
+when the UI submits a validated response. It is not the same as deferred
+safe-point steering input, and pending approvals are not persisted across
+restart or snapshot restore.
 
 Two host behaviors are especially important:
 
@@ -854,6 +938,9 @@ split:
   a turn is active, refreshes visible transcript state from moderator-effective
   history at safe points, and starts follow-up turns only when the UI is idle.
 
+The concrete Phase 2 articulation of that host layer lives in
+[docs-src/chatml-host-session-controller-contract.md](docs-src/chatml-host-session-controller-contract.md).
+
 
 ---
 
@@ -869,6 +956,12 @@ Deep-dive docs live under `docs-src/`. Key entry points:
 - [Search, indexing & code intelligence](docs-src/guide/search-and-indexing.md)
 - [Meta-prompting & Prompt Factory](docs-src/lib/meta_prompting.doc.md)
 - [Real-world example session: updating the tools docs](real-world-example-session/update-tool-docs/readme.md)
+- [ChatML moderator runtime guide](docs-src/guide/chatml-moderator-runtime.md)
+- [ChatML host session-controller contract](docs-src/chatml-host-session-controller-contract.md)
+- [ChatML safe-point and effective-history semantics](docs-src/chatml-safe-point-and-effective-history.md)
+- [ChatML budget policy](docs-src/chatml-budget-policy.md)
+- [ChatML async completion lifecycle](docs-src/chatml-async-completion-lifecycle.md)
+- [ChatML UI host capabilities](docs-src/chatml-ui-host-capabilities.md)
 
 ---
 
@@ -946,7 +1039,26 @@ Today ChatML is integrated primarily as the host-managed moderation layer for Ch
 - moderator scripts can call host-registered model recipes via `Model.call`
 - moderator scripts can spawn background model jobs via `Model.spawn`
 
+For the concrete async reinjection, wakeup, and safe-boundary lifecycle behind
+`Model.spawn`, see
+[ChatML async completion lifecycle](docs-src/chatml-async-completion-lifecycle.md).
+
 Outside that moderation integration, ChatML is also available through the experimental `dsl_script` binary and the `Chatml_*` library modules.
+
+Phase 1 also exposes clearer OCaml entrypoints for embedders:
+
+- `Chatml_runtime` is the public runtime wrapper over
+  `Chatml_moderator_runtime`
+- `Chat_response.Chatml_moderation` is the structured moderation vocabulary
+  wrapper over `Moderation`
+- `Chat_response.Chatml_moderator` is the durable effective-history and
+  snapshot boundary over `Moderator_manager`
+- `Chat_response.Chatml_turn_driver` is the public safe-point and turn-input
+  helper layer over `In_memory_stream`
+
+The older module names still exist as implementation anchors inside the
+libraries, but new embedder-facing code should prefer the wrapper modules
+above.
 
 For more details, see:
 - [`docs-src/guide/chatml-language-spec.md`](docs-src/guide/chatml-language-spec.md)

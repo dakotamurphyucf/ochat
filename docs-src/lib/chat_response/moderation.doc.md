@@ -2,6 +2,11 @@
 
 Shared host-side moderation helpers for ChatML-enabled chat drivers.
 
+For the canonical safe-point and effective-history narrative, see
+[`docs-src/chatml-safe-point-and-effective-history.md`](../../chatml-safe-point-and-effective-history.md).
+This page keeps the module-level summary short and points there for the full
+boundary semantics.
+
 ## Overview
 
 `Moderation` is the bridge between two data models:
@@ -44,9 +49,10 @@ The shipped drivers currently emit:
 - `post_tool_response`
 - `turn_end`
 - `internal_event`
+- `message_appended` for canonical tool-output items at the post-tool boundary
 
-`message_appended` is part of the shared API surface but is not currently
-emitted by the built-in drivers.
+`message_appended` remains part of the shared API surface even though the
+built-in drivers do not currently emit it for every canonical append path.
 
 ### 2. Projection into ChatML `context`
 
@@ -61,6 +67,10 @@ record.  `Moderation.Projection` turns canonical
 The projection layer also assigns **stable host message ids** to history
 items that do not already carry one.  The snapshot type is explicit so a
 later task can persist it alongside the rest of moderator state.
+
+The full distinction between canonical history, effective history, and visible
+history is documented in
+[`docs-src/chatml-safe-point-and-effective-history.md`](../../chatml-safe-point-and-effective-history.md).
 
 ### 3. Durable overlay snapshot
 
@@ -80,6 +90,9 @@ In practice this means:
   next request,
 - transcript export materializes overlay-derived synthetic entries explicitly
   rather than rewriting canonical history in place.
+
+The new guide linked above is the canonical place for the full safe-point and
+projection story.
 
 ### 4. Structured local effect decoding
 

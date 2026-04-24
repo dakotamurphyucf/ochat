@@ -42,6 +42,7 @@ module Req = Res.Request
 module Runtime_semantics = Chat_response.Runtime_semantics
 module Moderator_session_controller = Moderator_session_controller
 module Chatml_builtin_spec = Chatml.Chatml_builtin_spec
+module Chatml_builtin_surface = Chatml.Chatml_builtin_surface
 module Chatml_debug_log = Chatml.Chatml_debug_log
 module Chatml_runtime = Chatml_moderator_runtime
 
@@ -205,6 +206,7 @@ module Setup = struct
     let open Result.Let_syntax in
     let%bind _, artifact =
       Moderator_manager.Registry.of_elements
+        ~surface:Chatml_builtin_surface.ui_moderator_surface
         Moderator_manager.Registry.empty
         prompt_elements
     in

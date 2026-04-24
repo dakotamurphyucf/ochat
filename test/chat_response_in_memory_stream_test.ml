@@ -1,5 +1,7 @@
 open Core
 module CM = Prompt.Chat_markdown
+module Builtin_surface = Chatml.Chatml_builtin_surface
+module Lang = Chatml.Chatml_lang
 module Manager = Chat_response.Moderator_manager
 module Moderation = Chat_response.Moderation
 module Res = Openai.Responses
@@ -60,24 +62,38 @@ let moderator_source =
   |}
 ;;
 
-let moderator_of_source source =
+let show_pending_ui_request = function
+  | None -> "none"
+  | Some (Manager.Ask_text { prompt }) -> "ask_text " ^ prompt
+  | Some (Manager.Ask_choice { prompt; choices }) ->
+    "ask_choice "
+    ^ prompt
+    ^ " ["
+    ^ String.concat ~sep:", " (Array.to_list choices)
+    ^ "]"
+;;
+
+let moderator_of_source
+      ?(surface = Chatml.Chatml_builtin_surface.moderator_surface)
+      ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
+      source
+  =
   let script =
     CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
   in
   let artifact =
-    ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
+    ok_or_fail (Manager.Registry.compile_script ~surface Manager.Registry.empty script) |> snd
   in
   let capabilities = Chat_response.Moderation.Capabilities.default in
   let manager = ok_or_fail (Manager.create ~artifact ~capabilities ()) in
-  Stream.
-    { manager
-    ; session_id = "session-1"
-    ; session_meta = `Null
-    ; runtime_policy = Chat_response.Runtime_semantics.default_policy
-    }
+  Stream.{ manager; session_id = "session-1"; session_meta = `Null; runtime_policy }
 ;;
 
 let moderator () = moderator_of_source moderator_source
+
+let runtime_policy_with_budget budget =
+  { Chat_response.Runtime_semantics.default_policy with budget }
+;;
 
 let print_runtime_requests requests =
   print_s [%sexp (requests : Moderation.Runtime_request.t list)]
@@ -264,6 +280,247 @@ let%expect_test "finish_turn records end-of-turn state changes" =
     {|
     ()
     (Record ((turn_count (Int 1))))
+    |}]
+;;
+
+let%expect_test "self-triggered turn budget advances up to the configured limit" =
+  let budget =
+    { Chat_response.Runtime_semantics.default_budget_policy with max_self_triggered_turns = 2 }
+  in
+  let policy = runtime_policy_with_budget budget in
+  let first =
+    Chat_response.Runtime_semantics.next_self_triggered_turn_budget
+      ~policy
+      ~request_turn_budget:0
+  in
+  let second =
+    Chat_response.Runtime_semantics.next_self_triggered_turn_budget
+      ~policy
+      ~request_turn_budget:1
+  in
+  let third =
+    Chat_response.Runtime_semantics.next_self_triggered_turn_budget
+      ~policy
+      ~request_turn_budget:2
+  in
+  print_s [%sexp (first : (int, string) result)];
+  print_s [%sexp (second : (int, string) result)];
+  print_s [%sexp (third : (int, string) result)];
+  [%expect
+    {|
+    (Ok 1)
+    (Ok 2)
+    (Error "Exceeded maximum consecutive moderator-requested turns (2).")
+    |}]
+;;
+
+let%expect_test "default self-triggered turn budget preserves the old limit" =
+  let policy = Chat_response.Runtime_semantics.default_policy in
+  let tenth =
+    Chat_response.Runtime_semantics.next_self_triggered_turn_budget
+      ~policy
+      ~request_turn_budget:9
+  in
+  let eleventh =
+    Chat_response.Runtime_semantics.next_self_triggered_turn_budget
+      ~policy
+      ~request_turn_budget:10
+  in
+  print_s [%sexp (tenth : (int, string) result)];
+  print_s [%sexp (eleventh : (int, string) result)];
+  [%expect
+    {|
+    (Ok 10)
+    (Error "Exceeded maximum consecutive moderator-requested turns (10).")
+    |}]
+;;
+
+let%expect_test "finish_turn caps internal-event drain using the configured policy limit" =
+  let runtime_policy =
+    runtime_policy_with_budget
+      { Chat_response.Runtime_semantics.default_budget_policy with max_internal_event_drain = 2 }
+  in
+  let moderator =
+    moderator_of_source
+      ~runtime_policy
+      {|
+        type state = { seen : int }
+        type event = [ `Turn_end | `Queued(string) ]
+
+        let initial_state = { seen = 0 }
+
+        let on_event : context -> state -> event -> state task =
+          fun ctx st ev ->
+            match ev with
+            | `Turn_end -> Task.pure(st)
+            | `Queued(text) ->
+              Task.bind
+                (Turn.append_item(Item.output_text_message("queued-" ++ to_string(st.seen), text)),
+                 fun ignored_turn ->
+                 Task.pure({ seen = st.seen + 1 }))
+      |}
+  in
+  ok_or_fail
+    (Manager.enqueue_internal_event moderator.manager (Lang.VVariant ("Queued", [ Lang.VString "one" ])));
+  ok_or_fail
+    (Manager.enqueue_internal_event moderator.manager (Lang.VVariant ("Queued", [ Lang.VString "two" ])));
+  ok_or_fail
+    (Manager.enqueue_internal_event
+       moderator.manager
+       (Lang.VVariant ("Queued", [ Lang.VString "three" ])));
+  let requests =
+    ok_or_fail
+      (Stream.finish_turn
+         ~moderator:(Some moderator)
+         ~available_tools:[]
+         ~now_ms:1
+         ~history:[])
+  in
+  print_runtime_requests requests;
+  print_effective_overlay_items moderator;
+  let queued_after_drain =
+    ok_or_fail (Manager.snapshot moderator.manager)
+    |> fun snapshot -> List.length snapshot.Session.Moderator_snapshot.queued_internal_events
+  in
+  print_endline (Printf.sprintf "queued_after_drain=%d" queued_after_drain);
+  [%expect
+    {|
+    ()
+    queued-0 assistant "one"
+    queued-1 assistant "two"
+    queued_after_drain=1
+    |}]
+;;
+
+let%expect_test
+    "approval suspension blocks turn-driver progression, keeps queued work pending, and is not persisted"
+  =
+  let source =
+    {|
+      type state = { approved : string }
+      type event = [ `Turn_start | `Queued(string) ]
+
+      let initial_state = { approved = "" }
+
+      let on_event : context -> state -> event -> state task =
+        fun ctx st ev ->
+          match ev with
+          | `Turn_start ->
+            Task.bind(Runtime.emit(`Queued("buffered")), fun ignored_emit ->
+            Task.bind(Approval.ask_text("continue?"), fun answer ->
+            Task.pure({ approved = answer })))
+          | `Queued(text) ->
+            Task.bind
+              (Turn.append_item(Item.output_text_message("queued-" ++ text, text)),
+               fun ignored_turn ->
+               Task.pure(st))
+    |}
+  in
+  let moderator =
+    moderator_of_source
+      ~surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
+      source
+  in
+  (match
+     Stream.prepare_turn_inputs
+       ~moderator:(Some moderator)
+       ~available_tools:[]
+       ~now_ms:1
+       ~history:[]
+       ()
+   with
+   | Ok _ -> print_endline "unexpected prepare_turn_inputs success"
+   | Error msg -> print_endline msg);
+  print_endline
+    ("pending=" ^ show_pending_ui_request (Manager.pending_ui_request moderator.manager));
+  let pending_snapshot = ok_or_fail (Manager.snapshot moderator.manager) in
+  print_s [%sexp (pending_snapshot.current_state : Session.Snapshot.t)];
+  print_endline
+    (Printf.sprintf
+       "pending_snapshot_queue=%d"
+       (List.length pending_snapshot.queued_internal_events));
+  ok_or_fail
+    (Manager.enqueue_internal_event
+       moderator.manager
+       (Lang.VVariant ("Queued", [ Lang.VString "host" ])));
+  let queued_while_pending = ok_or_fail (Manager.snapshot moderator.manager) in
+  print_endline
+    (Printf.sprintf
+       "queued_while_pending=%d"
+       (List.length queued_while_pending.queued_internal_events));
+  (match
+     Stream.finish_turn
+       ~moderator:(Some moderator)
+       ~available_tools:[]
+       ~now_ms:2
+       ~history:[]
+   with
+   | Ok _ -> print_endline "unexpected finish_turn success"
+   | Error msg -> print_endline msg);
+  let resumed =
+    ok_or_fail (Manager.resume_ui_request moderator.manager ~response:" approved ")
+  in
+  print_s [%sexp (List.length resumed : int)];
+  let resumed_snapshot = ok_or_fail (Manager.snapshot moderator.manager) in
+  print_s [%sexp (resumed_snapshot.current_state : Session.Snapshot.t)];
+  print_endline
+    (Printf.sprintf
+       "queued_after_resume=%d"
+       (List.length resumed_snapshot.queued_internal_events));
+  ignore
+    (ok_or_fail
+       (Manager.drain_internal_events
+          moderator.manager
+          ~session_id:"session-1"
+          ~now_ms:3
+          ~history:[]
+          ~available_tools:[]
+          ~session_meta:`Null)
+     : Moderation.Outcome.t list);
+  print_effective_overlay_items moderator;
+  let restored =
+    let script =
+      CM.{ id = "main"; language = "chatml"; kind = "moderator"; source = Inline source }
+    in
+    let artifact =
+      ok_or_fail
+        (Manager.Registry.compile_script
+           ~surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
+           Manager.Registry.empty
+           script)
+      |> snd
+    in
+    ok_or_fail
+      (Manager.create
+         ~artifact
+         ~capabilities:Chat_response.Moderation.Capabilities.default
+         ~snapshot:pending_snapshot
+         ())
+  in
+  print_endline
+    ("restored_pending=" ^ show_pending_ui_request (Manager.pending_ui_request restored));
+  let restored_snapshot = ok_or_fail (Manager.snapshot restored) in
+  print_s [%sexp (restored_snapshot.current_state : Session.Snapshot.t)];
+  print_endline
+    (Printf.sprintf
+       "restored_queue=%d"
+       (List.length restored_snapshot.queued_internal_events));
+  [%expect
+    {|
+    Session is waiting for UI input.
+    pending=ask_text continue?
+    (Record ((approved (String ""))))
+    pending_snapshot_queue=0
+    queued_while_pending=1
+    Session is waiting for UI input.
+    1
+    (Record ((approved (String approved))))
+    queued_after_resume=2
+    queued-host assistant "host"
+    queued-buffered assistant "buffered"
+    restored_pending=none
+    (Record ((approved (String ""))))
+    restored_queue=0
     |}]
 ;;
 

@@ -2,6 +2,7 @@ open Core
 open Eio.Std
 
 module App_runtime = Chat_tui.App_runtime
+module Builtin_surface = Chatml.Chatml_builtin_surface
 module CM = Prompt.Chat_markdown
 module Lang = Chatml.Chatml_lang
 module Manager = Chat_response.Moderator_manager
@@ -95,6 +96,7 @@ let model_job_moderator_script =
 ;;
 
 let artifact ?(source = moderator_script) () =
+  let surface = Chatml.Chatml_builtin_surface.moderator_surface in
   let script =
     CM.
       { id = "main"
@@ -103,14 +105,29 @@ let artifact ?(source = moderator_script) () =
       ; source = Inline source
       }
   in
-  ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
+  ok_or_fail (Manager.Registry.compile_script ~surface Manager.Registry.empty script) |> snd
 ;;
 
-let create_moderator ?source () =
+let create_moderator
+      ?source
+      ?(surface = Chatml.Chatml_builtin_surface.moderator_surface)
+      ?(runtime_policy = Chat_response.Runtime_semantics.default_policy)
+      ()
+  =
   let manager =
     ok_or_fail
       (Manager.create
-         ~artifact:(artifact ?source ())
+         ~artifact:
+           (let script =
+              CM.
+                { id = "main"
+                ; language = "chatml"
+                ; kind = "moderator"
+                ; source = Inline (Option.value source ~default:moderator_script)
+                }
+            in
+            ok_or_fail (Manager.Registry.compile_script ~surface Manager.Registry.empty script)
+            |> snd)
          ~capabilities:Moderation.Capabilities.default
          ())
   in
@@ -118,8 +135,46 @@ let create_moderator ?source () =
     { manager
     ; session_id = "session-1"
     ; session_meta = `Null
-    ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+    ; runtime_policy
     }
+;;
+
+let runtime_policy_with_budget budget =
+  { Chat_response.Runtime_semantics.default_policy with budget }
+;;
+
+let approval_ask_text_script =
+  {|
+    type state = { approved : string }
+    type event = [ `Queued(string) ]
+
+    let initial_state = { approved = "" }
+
+    let on_event : context -> state -> event -> state task =
+      fun ctx st ev ->
+        match ev with
+        | `Queued(prompt) ->
+          Task.bind(Approval.ask_text(prompt), fun answer ->
+          Task.bind(Turn.append_item(Item.output_text_message("approved-1", answer)), fun ignored_turn ->
+          Task.pure({ approved = answer })))
+  |}
+;;
+
+let approval_ask_choice_script =
+  {|
+    type state = { approved : string }
+    type event = [ `Queued ]
+
+    let initial_state = { approved = "" }
+
+    let on_event : context -> state -> event -> state task =
+      fun ctx st ev ->
+        match ev with
+        | `Queued ->
+          Task.bind(Approval.ask_choice("Pick one", ["yes", "no"]), fun answer ->
+          Task.bind(Turn.append_item(Item.output_text_message("choice-1", answer)), fun ignored_turn ->
+          Task.pure({ approved = answer })))
+  |}
 ;;
 
 let enqueue_queued_event moderator text =
@@ -357,6 +412,257 @@ let%expect_test "wakeup during active turn is deferred until safe point" =
     |}]
 ;;
 
+let%expect_test "automatic follow-up turns stop at the configured host limit" =
+  let history = [ user_message "Hello" ] in
+  let model = model_of_history history in
+  let runtime_policy =
+    runtime_policy_with_budget
+      { Chat_response.Runtime_semantics.default_budget_policy with max_followup_turns = 1 }
+  in
+  let moderator = create_moderator ~runtime_policy () in
+  let started_turns = ref [] in
+  with_reducer
+    ~model
+    ~moderator
+    ~start_streaming:(fun ~history ~op_id -> started_turns := (op_id, history) :: !started_turns)
+    (fun ~runtime ~send_internal ~pump_until ~stop ->
+       send_internal (`Start_turn App_runtime.Idle_followup);
+       pump_until (fun () -> List.length !started_turns = 1);
+       let first_op_id, _ = List.hd_exn !started_turns in
+       send_internal (`Streaming_done (first_op_id, history));
+       pump_until (fun () -> Option.is_none runtime.App_runtime.op);
+       send_internal (`Start_turn App_runtime.Idle_followup);
+       pump_until (fun () ->
+         Hash_set.mem runtime.App_runtime.shown_notice_keys "budget:max-followup-turns");
+       print_endline
+         (Printf.sprintf
+            "started=%d history=%d notice=%b pending=%b"
+            (List.length !started_turns)
+            (List.length (Chat_tui.Model.history_items model))
+            (Hash_set.mem
+               runtime.App_runtime.shown_notice_keys
+               "budget:max-followup-turns")
+            (Option.is_some runtime.App_runtime.session_controller.pending_turn_request));
+       ignore (stop () : bool));
+  [%expect {| started=1 history=1 notice=true pending=false |}]
+;;
+
+let%expect_test "approval ask_text resumes without appending a fake user item and then restores normal submit" =
+  let model = model_of_history [] in
+  let moderator =
+    create_moderator
+      ~surface:Builtin_surface.ui_moderator_surface
+      ~source:approval_ask_text_script
+      ()
+  in
+  let started_turns = ref [] in
+  enqueue_queued_event moderator "continue?";
+  with_reducer
+    ~model
+    ~moderator
+    ~start_streaming:(fun ~history ~op_id -> started_turns := (op_id, history) :: !started_turns)
+    (fun ~runtime ~send_internal ~pump_until ~stop ->
+       send_internal `Moderator_wakeup;
+       pump_until (fun () -> App_runtime.has_pending_approval runtime);
+       print_messages (Chat_tui.Model.messages model);
+       print_endline
+         (Printf.sprintf
+            "pending=%s history=%d"
+            (Option.value_map
+               (App_runtime.pending_approval runtime)
+               ~default:"none"
+               ~f:(fun approval -> App_runtime.render_pending_approval approval))
+            (List.length (Chat_tui.Model.history_items model)));
+       send_internal (`Submit_requested { App_runtime.text = " approved "; draft_mode = Chat_tui.Model.Plain });
+       pump_until (fun () -> not (App_runtime.has_pending_approval runtime));
+       print_messages (Chat_tui.Model.messages model);
+       print_endline
+         (Printf.sprintf
+            "after_approval history=%d started=%d"
+            (List.length (Chat_tui.Model.history_items model))
+            (List.length !started_turns));
+       send_internal (`Submit_requested { App_runtime.text = "hello"; draft_mode = Chat_tui.Model.Plain });
+       pump_until (fun () ->
+         List.length (Chat_tui.Model.history_items model) = 1
+         && List.length !started_turns = 1);
+       print_messages (Chat_tui.Model.messages model);
+       print_endline
+         (Printf.sprintf
+            "after_submit history=%d started=%d reason=%s"
+            (List.length (Chat_tui.Model.history_items model))
+            (List.length !started_turns)
+            (Option.value_map
+               (App_runtime.active_turn_start_reason runtime)
+               ~default:"<none>"
+               ~f:string_of_turn_reason));
+       ignore (stop () : bool));
+  [%expect
+    {|
+    system "Approval requested: continue?"
+    pending=Approval requested: continue? history=0
+    assistant "approved"
+    after_approval history=0 started=0
+    assistant "approved"
+    user "hello"
+    assistant "(thinking\226\128\166)"
+    after_submit history=1 started=1 reason=user_submit
+    |}]
+;;
+
+let%expect_test "approval ask_choice keeps the prompt active until a valid choice is submitted" =
+  let model = model_of_history [] in
+  let moderator =
+    create_moderator
+      ~surface:Builtin_surface.ui_moderator_surface
+      ~source:approval_ask_choice_script
+      ()
+  in
+  let started_turns = ref [] in
+  ok_or_fail
+    (Manager.enqueue_internal_event
+       moderator.Chat_response.In_memory_stream.manager
+       (Lang.VVariant ("Queued", [])));
+  with_reducer
+    ~model
+    ~moderator
+    ~start_streaming:(fun ~history ~op_id -> started_turns := (op_id, history) :: !started_turns)
+    (fun ~runtime ~send_internal ~pump_until ~stop ->
+       send_internal `Moderator_wakeup;
+       pump_until (fun () -> App_runtime.has_pending_approval runtime);
+       print_messages (Chat_tui.Model.messages model);
+       send_internal (`Submit_requested { App_runtime.text = "maybe"; draft_mode = Chat_tui.Model.Plain });
+       pump_until (fun () -> List.length (Chat_tui.Model.messages model) = 2);
+       print_messages (Chat_tui.Model.messages model);
+       print_endline
+         (Printf.sprintf
+            "pending=%b history=%d started=%d"
+            (App_runtime.has_pending_approval runtime)
+            (List.length (Chat_tui.Model.history_items model))
+            (List.length !started_turns));
+       send_internal (`Submit_requested { App_runtime.text = " yes "; draft_mode = Chat_tui.Model.Plain });
+       pump_until (fun () -> not (App_runtime.has_pending_approval runtime));
+       print_messages (Chat_tui.Model.messages model);
+       print_endline
+         (Printf.sprintf
+            "pending=%b history=%d started=%d"
+            (App_runtime.has_pending_approval runtime)
+            (List.length (Chat_tui.Model.history_items model))
+            (List.length !started_turns));
+       ignore (stop () : bool));
+  [%expect
+    {|
+    system "Approval requested: Pick one\nChoices: yes, no"
+    system "Approval requested: Pick one\nChoices: yes, no"
+    system "Please answer with one of the listed choices before continuing."
+    pending=true history=0 started=0
+    assistant "yes"
+    pending=false history=0 started=0
+    |}]
+;;
+
+let%expect_test "automatic follow-up turns respect the sliding-window rate limit" =
+  let history = [ user_message "Hello" ] in
+  let model = model_of_history history in
+  let runtime_policy =
+    runtime_policy_with_budget
+      { Chat_response.Runtime_semantics.default_budget_policy with
+        max_followup_turns = 10
+      ; turn_rate_limit = Some { max_turns = 1; window_ms = 60_000 }
+      }
+  in
+  let moderator = create_moderator ~runtime_policy () in
+  let started_turns = ref [] in
+  with_reducer
+    ~model
+    ~moderator
+    ~start_streaming:(fun ~history ~op_id -> started_turns := (op_id, history) :: !started_turns)
+    (fun ~runtime ~send_internal ~pump_until ~stop ->
+       send_internal (`Start_turn App_runtime.Moderator_request);
+       pump_until (fun () -> List.length !started_turns = 1);
+       let first_op_id, _ = List.hd_exn !started_turns in
+       send_internal (`Streaming_done (first_op_id, history));
+       pump_until (fun () -> Option.is_none runtime.App_runtime.op);
+       send_internal (`Start_turn App_runtime.Idle_followup);
+       pump_until (fun () ->
+         Hash_set.mem runtime.App_runtime.shown_notice_keys "budget:turn-rate-limit");
+       print_endline
+         (Printf.sprintf
+            "started=%d rate_notice=%b"
+            (List.length !started_turns)
+            (Hash_set.mem runtime.App_runtime.shown_notice_keys "budget:turn-rate-limit"));
+       ignore (stop () : bool));
+  [%expect {| started=1 rate_notice=true |}]
+;;
+
+let%expect_test "Pause_followup_turns suppresses automatic follow-up scheduling" =
+  let history = [ user_message "Hello" ] in
+  let model = model_of_history history in
+  let runtime_policy =
+    runtime_policy_with_budget
+      { Chat_response.Runtime_semantics.default_budget_policy with
+        pause_conditions = [ Chat_response.Runtime_semantics.Pause_followup_turns ]
+      }
+  in
+  let moderator = create_moderator ~runtime_policy () in
+  let started_turns = ref [] in
+  with_reducer
+    ~model
+    ~moderator
+    ~start_streaming:(fun ~history ~op_id -> started_turns := (op_id, history) :: !started_turns)
+    (fun ~runtime ~send_internal ~pump_until ~stop ->
+       send_internal (`Start_turn App_runtime.Idle_followup);
+       pump_until (fun () ->
+         Hash_set.mem runtime.App_runtime.shown_notice_keys "budget:pause-followup-turns");
+       print_endline
+         (Printf.sprintf
+            "started=%d notice=%b history=%d"
+            (List.length !started_turns)
+            (Hash_set.mem
+               runtime.App_runtime.shown_notice_keys
+               "budget:pause-followup-turns")
+            (List.length (Chat_tui.Model.history_items model)));
+       ignore (stop () : bool));
+  [%expect {| started=0 notice=true history=1 |}]
+;;
+
+let%expect_test "Pause_internal_event_drains leaves queued events pending while idle" =
+  let history = [ user_message "Hello" ] in
+  let model = model_of_history history in
+  let runtime_policy =
+    runtime_policy_with_budget
+      { Chat_response.Runtime_semantics.default_budget_policy with
+        pause_conditions = [ Chat_response.Runtime_semantics.Pause_internal_event_drains ]
+      }
+  in
+  let moderator = create_moderator ~runtime_policy () in
+  enqueue_queued_event moderator "background";
+  with_reducer
+    ~model
+    ~moderator
+    (fun ~runtime ~send_internal ~pump_until ~stop ->
+       send_internal `Moderator_wakeup;
+       pump_until (fun () ->
+         Hash_set.mem
+           runtime.App_runtime.shown_notice_keys
+           "budget:pause-internal-event-drains");
+       let queued =
+         ok_or_fail (Manager.snapshot moderator.manager)
+         |> fun snapshot ->
+         List.length snapshot.Session.Moderator_snapshot.queued_internal_events
+       in
+       print_endline
+         (Printf.sprintf
+            "dirty=%b queued=%d notice=%b history=%d"
+            (App_runtime.is_moderator_dirty runtime)
+            queued
+            (Hash_set.mem
+               runtime.App_runtime.shown_notice_keys
+               "budget:pause-internal-event-drains")
+            (List.length (Chat_tui.Model.history_items model)));
+       ignore (stop () : bool));
+  [%expect {| dirty=true queued=1 notice=true history=1 |}]
+;;
+
 let%expect_test "background model completion surfaces while idle without user action" =
   let history = [ user_message "Hello" ] in
   let model = model_of_history history in
@@ -451,6 +757,51 @@ let%expect_test "submit while streaming queues a deferred safe-point note" =
     </system-reminder>
 
     remaining=false history=1
+    |}]
+;;
+
+let%expect_test "deferred note survives when follow-up turns are paused" =
+  let history = [ user_message "Hello" ] in
+  let model = model_of_history history in
+  let runtime_policy =
+    runtime_policy_with_budget
+      { Chat_response.Runtime_semantics.default_budget_policy with
+        pause_conditions = [ Chat_response.Runtime_semantics.Pause_followup_turns ]
+      }
+  in
+  let moderator = create_moderator ~runtime_policy () in
+  with_reducer ~model ~moderator (fun ~runtime ~send_internal ~pump_until ~stop ->
+    runtime.App_runtime.op <- Some (App_runtime.Starting_streaming { id = 7 });
+    send_internal
+      (`Submit_requested
+          { text = "Use ripgrep after the current turn"
+          ; draft_mode = Chat_tui.Model.Plain
+          });
+    pump_until (fun () -> App_runtime.has_deferred_user_notes runtime);
+    send_internal (`Start_turn App_runtime.Idle_followup);
+    pump_until (fun () ->
+      Hash_set.mem runtime.App_runtime.shown_notice_keys "budget:pause-followup-turns");
+    send_internal (`Streaming_done (7, history));
+    pump_until (fun () -> Option.is_none runtime.App_runtime.op);
+    let safe_point_input = App_runtime.safe_point_input_source runtime in
+    let rendered = safe_point_input.consume () |> Option.value ~default:"<none>" in
+    print_endline rendered;
+    print_endline
+      (Printf.sprintf
+         "remaining=%b notice=%b pending=%b"
+         (App_runtime.has_deferred_user_notes runtime)
+         (Hash_set.mem runtime.App_runtime.shown_notice_keys "budget:pause-followup-turns")
+         (Option.is_some runtime.App_runtime.session_controller.pending_turn_request));
+    ignore (stop () : bool));
+  [%expect
+    {|
+
+    <system-reminder>
+    This is a Note From the User:
+    Use ripgrep after the current turn
+    </system-reminder>
+
+    remaining=false notice=true pending=false
     |}]
 ;;
 

@@ -54,6 +54,14 @@
  (preprocess
   (pps ppx_jane)))
 
+(library
+ (name chatml_runtime)
+ (public_name ochat.chatml_runtime)
+ (modules chatml_runtime)
+ (libraries core chatml chatml_moderator_runtime)
+ (preprocess
+  (pps ppx_jane)))
+
 (menhir
  (modules chatml_parser)
  (flags --table --dump))

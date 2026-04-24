@@ -637,13 +637,30 @@ let expect_item_record (name : string) (v : value) : string * value =
   id, item_value
 ;;
 
-let string_option_value = function
-  | Some value -> VVariant ("Some", [ VString value ])
+let expect_string_option (name : string) : value -> string option = function
+  | VVariant ("None", []) -> None
+  | VVariant ("Some", [ value ]) -> Some (expect_string (name ^ ".some") value)
+  | _ -> failwith (Printf.sprintf "%s: expected `None or `Some(string)" name)
+;;
+
+let item_record_value ~(id : string) ~(value : value) : value =
+  VRecord (Map.of_alist_exn (module String) [ "id", VString id; "value", value ])
+;;
+
+let option_value = function
+  | Some value -> VVariant ("Some", [ value ])
   | None -> VVariant ("None", [])
 ;;
 
+let string_option_value value = Option.map value ~f:(fun value -> VString value) |> option_value
+
 let json_string_payload = function
   | VVariant ("String", [ VString s ]) -> Some s
+  | _ -> None
+;;
+
+let json_bool_payload = function
+  | VVariant ("Bool", [ VBool value ]) -> Some value
   | _ -> None
 ;;
 
@@ -670,6 +687,28 @@ let output_text_values (output : value) : value array =
         | Some parts -> text_values_of_parts parts
         | None -> [||])
      | None -> [||])
+;;
+
+let item_text_values (name : string) (value : value) : value array =
+  match json_field_value name value "content" with
+  | Some content_json ->
+    (match json_array_payload (name ^ ".content") content_json with
+     | Some parts -> text_values_of_parts parts
+     | None -> [||])
+  | None ->
+    (match json_field_value name value "output" with
+     | Some output -> output_text_values output
+     | None -> [||])
+;;
+
+let first_string_option_value (values : value array) : value =
+  values
+  |> Array.to_list
+  |> List.hd
+  |> Option.bind ~f:(function
+    | VString text -> Some text
+    | _ -> None)
+  |> string_option_value
 ;;
 
 let item_input_text_message_value ~(role : string) ~(text : string) : value =
@@ -699,6 +738,78 @@ let item_output_text_message_value ~(id : string) ~(text : string) : value =
           ] )
     ; "status", json_string_value "completed"
     ]
+;;
+
+let notice_item_id (text : string) : string = "system:" ^ text
+
+let item_notice_value ~(text : string) : value =
+  item_record_value
+    ~id:(notice_item_id text)
+    ~value:(item_input_text_message_value ~role:"system" ~text)
+;;
+
+let item_notice_record_value ~(id : string) ~(text : string) : value =
+  item_record_value ~id ~value:(item_input_text_message_value ~role:"system" ~text)
+;;
+
+let expect_tool_call_name (name : string) (value : value) : string =
+  let fields = expect_record name value in
+  expect_record_string_field name fields "name"
+;;
+
+let expect_tool_call_args (name : string) (value : value) : value =
+  let fields = expect_record name value in
+  expect_record_json_field name fields "args"
+;;
+
+let expect_context_items (name : string) (value : value) : value array =
+  let fields = expect_record name value in
+  expect_record_field_value name fields "items" |> expect_array (name ^ ".items")
+;;
+
+let expect_context_available_tools (name : string) (value : value) : value array =
+  let fields = expect_record name value in
+  expect_record_field_value name fields "available_tools"
+  |> expect_array (name ^ ".available_tools")
+;;
+
+let item_role_string (name : string) (item : value) : string option =
+  let _, value = expect_item_record name item in
+  json_field_value name value "role" |> Option.bind ~f:json_string_payload
+;;
+
+let item_kind_string (name : string) (item : value) : string option =
+  let _, value = expect_item_record name item in
+  json_field_value name value "type" |> Option.bind ~f:json_string_payload
+;;
+
+let tool_desc_name (name : string) (tool : value) : string =
+  let fields = expect_record name tool in
+  expect_record_string_field name fields "name"
+;;
+
+let last_matching_value (values : value array) ~(f : value -> bool) : value option =
+  let rec loop index =
+    if index < 0
+    then None
+    else if f values.(index)
+    then Some values.(index)
+    else loop (index - 1)
+  in
+  loop (Array.length values - 1)
+;;
+
+let values_since_last_matching (values : value array) ~(f : value -> bool) : value array =
+  let rec find index =
+    if index < 0
+    then None
+    else if f values.(index)
+    then Some index
+    else find (index - 1)
+  in
+  match find (Array.length values - 1) with
+  | None -> Array.copy values
+  | Some index -> Array.sub values ~pos:index ~len:(Array.length values - index)
 ;;
 
 let json_module =
@@ -1473,8 +1584,7 @@ let item_module : builtin_module =
           (fun id value ->
              let id = expect_string "Item.create" id in
              let value = expect_json "Item.create" value in
-             VRecord
-               (Map.of_alist_exn (module String) [ "id", VString id; "value", value ]))
+             item_record_value ~id ~value)
       ; make_unary_builtin
           "id"
           (TFun ([ item_ty ], TString))
@@ -1508,15 +1618,13 @@ let item_module : builtin_module =
           (TFun ([ item_ty ], TArray TString))
           (fun item ->
              let _, value = expect_item_record "Item.text_parts" item in
-             match json_field_value "Item.text_parts" value "content" with
-             | Some content_json ->
-               (match json_array_payload "Item.text_parts.content" content_json with
-                | Some parts -> VArray (text_values_of_parts parts)
-                | None -> VArray [||])
-             | None ->
-               (match json_field_value "Item.text_parts" value "output" with
-                | Some output -> VArray (output_text_values output)
-                | None -> VArray [||]))
+             VArray (item_text_values "Item.text_parts" value))
+      ; make_unary_builtin
+          "text"
+          (TFun ([ item_ty ], option_of TString))
+          (fun item ->
+             let _, value = expect_item_record "Item.text" item in
+             item_text_values "Item.text" value |> first_string_option_value)
       ; make_ternary_builtin
           "input_text_message"
           (TFun ([ TString; TString; TString ], item_ty))
@@ -1524,20 +1632,101 @@ let item_module : builtin_module =
              let id = expect_string "Item.input_text_message" id in
              let role = expect_string "Item.input_text_message" role in
              let text = expect_string "Item.input_text_message" text in
-             VRecord
-               (Map.of_alist_exn
-                  (module String)
-                  [ "id", VString id; "value", item_input_text_message_value ~role ~text ]))
+             item_record_value ~id ~value:(item_input_text_message_value ~role ~text))
       ; make_binary_builtin
           "output_text_message"
           (TFun ([ TString; TString ], item_ty))
           (fun id text ->
              let id = expect_string "Item.output_text_message" id in
              let text = expect_string "Item.output_text_message" text in
-             VRecord
-               (Map.of_alist_exn
-                  (module String)
-                  [ "id", VString id; "value", item_output_text_message_value ~id ~text ]))
+             item_record_value ~id ~value:(item_output_text_message_value ~id ~text))
+      ; make_binary_builtin
+          "user_text"
+          (TFun ([ TString; TString ], item_ty))
+          (fun id text ->
+             let id = expect_string "Item.user_text" id in
+             let text = expect_string "Item.user_text" text in
+             item_record_value ~id ~value:(item_input_text_message_value ~role:"user" ~text))
+      ; make_binary_builtin
+          "assistant_text"
+          (TFun ([ TString; TString ], item_ty))
+          (fun id text ->
+             let id = expect_string "Item.assistant_text" id in
+             let text = expect_string "Item.assistant_text" text in
+             item_record_value ~id ~value:(item_output_text_message_value ~id ~text))
+      ; make_binary_builtin
+          "system_text"
+          (TFun ([ TString; TString ], item_ty))
+          (fun id text ->
+             let id = expect_string "Item.system_text" id in
+             let text = expect_string "Item.system_text" text in
+             item_record_value ~id ~value:(item_input_text_message_value ~role:"system" ~text))
+      ; make_binary_builtin
+          "notice"
+          (TFun ([ TString; TString ], item_ty))
+          (fun id text ->
+             let id = expect_string "Item.notice" id in
+             let text = expect_string "Item.notice" text in
+             item_notice_record_value ~id ~text)
+      ; make_unary_builtin
+          "is_user"
+          (TFun ([ item_ty ], TBool))
+          (fun item ->
+             let _, value = expect_item_record "Item.is_user" item in
+             let role =
+               json_field_value "Item.is_user" value "role"
+               |> Option.bind ~f:json_string_payload
+               |> Option.value ~default:""
+             in
+             VBool (String.equal role "user"))
+      ; make_unary_builtin
+          "is_assistant"
+          (TFun ([ item_ty ], TBool))
+          (fun item ->
+             let _, value = expect_item_record "Item.is_assistant" item in
+             let role =
+               json_field_value "Item.is_assistant" value "role"
+               |> Option.bind ~f:json_string_payload
+               |> Option.value ~default:""
+             in
+             VBool (String.equal role "assistant"))
+      ; make_unary_builtin
+          "is_system"
+          (TFun ([ item_ty ], TBool))
+          (fun item ->
+             let _, value = expect_item_record "Item.is_system" item in
+             let role =
+               json_field_value "Item.is_system" value "role"
+               |> Option.bind ~f:json_string_payload
+               |> Option.value ~default:""
+             in
+             VBool (String.equal role "system"))
+      ; make_unary_builtin
+          "is_tool_call"
+          (TFun ([ item_ty ], TBool))
+          (fun item ->
+             let _, value = expect_item_record "Item.is_tool_call" item in
+             let kind =
+               json_field_value "Item.is_tool_call" value "type"
+               |> Option.bind ~f:json_string_payload
+             in
+             VBool
+               (Option.value_map kind ~default:false ~f:(function
+                  | "function_call" | "custom_tool_call" -> true
+                  | _ -> false)))
+      ; make_unary_builtin
+          "is_tool_result"
+          (TFun ([ item_ty ], TBool))
+          (fun item ->
+             let _, value = expect_item_record "Item.is_tool_result" item in
+             let kind =
+               json_field_value "Item.is_tool_result" value "type"
+               |> Option.bind ~f:json_string_payload
+             in
+             VBool
+               (Option.value_map kind ~default:false ~f:(function
+                  | "function_call_output" | "custom_tool_call_output" -> true
+                  | _ -> false)))
       ]
   }
 ;;
@@ -1566,6 +1755,22 @@ let turn_module : builtin_module =
           TString
           TUnit
           ~op:"Turn.delete_message"
+      ; make_binary_builtin
+          "replace_or_append"
+          (TFun ([ option_of TString; item_ty ], task_ty TUnit))
+          (fun target_id item ->
+             let op, args =
+               match expect_string_option "Turn.replace_or_append" target_id with
+               | Some target_id -> "Turn.replace_message", [ VString target_id; item ]
+               | None -> "Turn.append_message", [ item ]
+             in
+             VTask (TPerform { op; args }))
+      ; make_unary_builtin
+          "append_notice"
+          (TFun ([ TString ], task_ty TUnit))
+          (fun text ->
+             let text = expect_string "Turn.append_notice" text in
+             VTask (TPerform { op = "Turn.append_message"; args = [ item_notice_value ~text ] }))
       ; make_task_unary_perform_builtin
           "append_message"
           item_ty
@@ -1614,6 +1819,192 @@ let tool_module : builtin_module =
   }
 ;;
 
+let tool_call_module : builtin_module =
+  { name = "Tool_call"
+  ; exports =
+      [ make_binary_builtin
+          "arg"
+          (TFun ([ tool_call_ty; TString ], json_option_ty))
+          (fun tool_call key ->
+             let key = expect_string "Tool_call.arg" key in
+             let args = expect_tool_call_args "Tool_call.arg" tool_call in
+             json_field_value "Tool_call.arg" args key |> option_value)
+      ; make_binary_builtin
+          "arg_string"
+          (TFun ([ tool_call_ty; TString ], option_of TString))
+          (fun tool_call key ->
+             let key = expect_string "Tool_call.arg_string" key in
+             let args = expect_tool_call_args "Tool_call.arg_string" tool_call in
+             json_field_value "Tool_call.arg_string" args key
+             |> Option.bind ~f:json_string_payload
+             |> string_option_value)
+      ; make_binary_builtin
+          "arg_bool"
+          (TFun ([ tool_call_ty; TString ], option_of TBool))
+          (fun tool_call key ->
+             let key = expect_string "Tool_call.arg_bool" key in
+             let args = expect_tool_call_args "Tool_call.arg_bool" tool_call in
+             json_field_value "Tool_call.arg_bool" args key
+             |> Option.bind ~f:json_bool_payload
+             |> Option.map ~f:(fun value -> VBool value)
+             |> option_value)
+      ; make_binary_builtin
+          "arg_array"
+          (TFun ([ tool_call_ty; TString ], option_of (TArray json_ty)))
+          (fun tool_call key ->
+             let key = expect_string "Tool_call.arg_array" key in
+             let args = expect_tool_call_args "Tool_call.arg_array" tool_call in
+             json_field_value "Tool_call.arg_array" args key
+             |> Option.bind ~f:(json_array_payload "Tool_call.arg_array")
+             |> Option.map ~f:(fun value -> VArray value)
+             |> option_value)
+      ; make_binary_builtin
+          "is_named"
+          (TFun ([ tool_call_ty; TString ], TBool))
+          (fun tool_call expected_name ->
+             let actual_name = expect_tool_call_name "Tool_call.is_named" tool_call in
+             let expected_name = expect_string "Tool_call.is_named" expected_name in
+             VBool (String.equal actual_name expected_name))
+      ; make_binary_builtin
+          "is_one_of"
+          (TFun ([ tool_call_ty; TArray TString ], TBool))
+          (fun tool_call expected_names ->
+             let actual_name = expect_tool_call_name "Tool_call.is_one_of" tool_call in
+             let expected_names =
+               expect_array "Tool_call.is_one_of" expected_names
+               |> Array.map ~f:(expect_string "Tool_call.is_one_of")
+             in
+             VBool (Array.mem expected_names actual_name ~equal:String.equal))
+      ]
+  }
+;;
+
+let context_module : builtin_module =
+  { name = "Context"
+  ; exports =
+      [ make_unary_builtin
+          "last_item"
+          (TFun ([ context_ty ], option_of item_ty))
+          (fun context ->
+             let items = expect_context_items "Context.last_item" context in
+             if Array.is_empty items
+             then option_value None
+             else option_value (Some items.(Array.length items - 1)))
+      ; make_unary_builtin
+          "last_user_item"
+          (TFun ([ context_ty ], option_of item_ty))
+          (fun context ->
+             expect_context_items "Context.last_user_item" context
+             |> last_matching_value ~f:(fun item ->
+               Option.value (item_role_string "Context.last_user_item" item) ~default:""
+               |> String.equal "user")
+             |> option_value)
+      ; make_unary_builtin
+          "last_assistant_item"
+          (TFun ([ context_ty ], option_of item_ty))
+          (fun context ->
+             expect_context_items "Context.last_assistant_item" context
+             |> last_matching_value ~f:(fun item ->
+               Option.value
+                 (item_role_string "Context.last_assistant_item" item)
+                 ~default:""
+               |> String.equal "assistant")
+             |> option_value)
+      ; make_unary_builtin
+          "last_system_item"
+          (TFun ([ context_ty ], option_of item_ty))
+          (fun context ->
+             expect_context_items "Context.last_system_item" context
+             |> last_matching_value ~f:(fun item ->
+               Option.value (item_role_string "Context.last_system_item" item) ~default:""
+               |> String.equal "system")
+             |> option_value)
+      ; make_unary_builtin
+          "last_tool_call"
+          (TFun ([ context_ty ], option_of item_ty))
+          (fun context ->
+             expect_context_items "Context.last_tool_call" context
+             |> last_matching_value ~f:(fun item ->
+               match item_kind_string "Context.last_tool_call" item with
+               | Some "function_call" | Some "custom_tool_call" -> true
+               | _ -> false)
+             |> option_value)
+      ; make_unary_builtin
+          "last_tool_result"
+          (TFun ([ context_ty ], option_of item_ty))
+          (fun context ->
+             expect_context_items "Context.last_tool_result" context
+             |> last_matching_value ~f:(fun item ->
+               match item_kind_string "Context.last_tool_result" item with
+               | Some "function_call_output" | Some "custom_tool_call_output" -> true
+               | _ -> false)
+             |> option_value)
+      ; make_binary_builtin
+          "find_item"
+          (TFun ([ context_ty; TString ], option_of item_ty))
+          (fun context id ->
+             let id = expect_string "Context.find_item" id in
+             expect_context_items "Context.find_item" context
+             |> Array.find ~f:(fun item ->
+               let item_id, _ = expect_item_record "Context.find_item" item in
+               String.equal item_id id)
+             |> option_value)
+      ; make_unary_builtin
+          "items_since_last_user_turn"
+          (TFun ([ context_ty ], TArray item_ty))
+          (fun context ->
+             expect_context_items "Context.items_since_last_user_turn" context
+             |> values_since_last_matching ~f:(fun item ->
+               Option.value
+                 (item_role_string "Context.items_since_last_user_turn" item)
+                 ~default:""
+               |> String.equal "user")
+             |> fun items -> VArray items)
+      ; make_unary_builtin
+          "items_since_last_assistant_turn"
+          (TFun ([ context_ty ], TArray item_ty))
+          (fun context ->
+             expect_context_items "Context.items_since_last_assistant_turn" context
+             |> values_since_last_matching ~f:(fun item ->
+               Option.value
+                 (item_role_string "Context.items_since_last_assistant_turn" item)
+                 ~default:""
+               |> String.equal "assistant")
+             |> fun items -> VArray items)
+      ; make_binary_builtin
+          "items_by_role"
+          (TFun ([ context_ty; TString ], TArray item_ty))
+          (fun context role ->
+             let role = expect_string "Context.items_by_role" role in
+             expect_context_items "Context.items_by_role" context
+             |> Array.filter ~f:(fun item ->
+               Option.value (item_role_string "Context.items_by_role" item) ~default:""
+               |> String.equal role)
+             |> fun items -> VArray items)
+      ; make_binary_builtin
+          "find_tool"
+          (TFun ([ context_ty; TString ], option_of tool_desc_ty))
+          (fun context name ->
+             let name = expect_string "Context.find_tool" name in
+             expect_context_available_tools "Context.find_tool" context
+             |> Array.find ~f:(fun tool ->
+               String.equal (tool_desc_name "Context.find_tool" tool) name)
+             |> option_value)
+      ; make_binary_builtin
+          "has_tool"
+          (TFun ([ context_ty; TString ], TBool))
+          (fun context name ->
+             let name = expect_string "Context.has_tool" name in
+             let has_tool =
+               expect_context_available_tools "Context.has_tool" context
+               |> Array.exists ~f:(fun tool ->
+                 String.equal (tool_desc_name "Context.has_tool" tool) name)
+             in
+             VBool has_tool)
+      ]
+  }
+;;
+
 let model_module : builtin_module =
   { name = "Model"
   ; exports =
@@ -1623,7 +2014,31 @@ let model_module : builtin_module =
           json_ty
           model_call_result_ty
           ~op:"Model.call"
+      ; make_binary_builtin
+          "call_text"
+          (TFun ([ TString; TString ], task_ty model_call_result_ty))
+          (fun recipe text ->
+             let recipe = expect_string "Model.call_text" recipe in
+             let text = expect_string "Model.call_text" text in
+             VTask
+               (TPerform
+                  { op = "Model.call"; args = [ VString recipe; json_string_value text ] }))
+      ; make_task_binary_perform_builtin
+          "call_json"
+          TString
+          json_ty
+          model_call_result_ty
+          ~op:"Model.call"
       ; make_task_binary_spawn_builtin "spawn" TString json_ty TString ~op:"Model.spawn"
+      ; make_binary_builtin
+          "spawn_text"
+          (TFun ([ TString; TString ], task_ty TString))
+          (fun recipe text ->
+             let recipe = expect_string "Model.spawn_text" recipe in
+             let text = expect_string "Model.spawn_text" text in
+             VTask
+               (TSpawn
+                  { op = "Model.spawn"; args = [ VString recipe; json_string_value text ] }))
       ]
   }
 ;;
@@ -1673,11 +2088,37 @@ let runtime_module : builtin_module =
   }
 ;;
 
+let ui_module : builtin_module =
+  { name = "Ui"
+  ; exports = [ make_task_unary_perform_builtin "notify" TString TUnit ~op:"Ui.notify" ]
+  }
+;;
+
+let approval_module : builtin_module =
+  { name = "Approval"
+  ; exports =
+      [ make_task_unary_perform_builtin
+          "ask_text"
+          TString
+          TString
+          ~op:"Approval.ask_text"
+      ; make_task_binary_perform_builtin
+          "ask_choice"
+          TString
+          (TArray TString)
+          TString
+          ~op:"Approval.ask_choice"
+      ]
+  }
+;;
+
 let core_modules : builtin_module list = modules
 
 let moderator_modules : builtin_module list =
   [ log_module
   ; item_module
+  ; tool_call_module
+  ; context_module
   ; turn_module
   ; tool_module
   ; model_module

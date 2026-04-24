@@ -4,6 +4,7 @@ module Moderation = Moderation
 module Runtime = Chatml_moderator_runtime
 module Res = Openai.Responses
 module Builtin_spec = Chatml.Chatml_builtin_spec
+module Builtin_surface = Chatml.Chatml_builtin_surface
 module Debug_log = Chatml.Chatml_debug_log
 module Value_codec = Chatml.Chatml_value_codec
 module Snapshot = Session.Snapshot
@@ -28,18 +29,39 @@ module Registry = struct
 
   let source_hash (source_text : string) = Md5.digest_string source_text |> Md5.to_hex
 
-  let compile_script (t : t) (script : CM.script) : (t * artifact, string) result =
-    let source_hash = source_hash (source_text script) in
-    match Map.find t source_hash with
-    | Some artifact -> Ok (t, artifact)
-    | None ->
-      Runtime.compile_script ~source:(source_text script) ()
-      |> Result.map ~f:(fun compiled ->
-        let artifact = { script_id = script.id; source_hash; compiled } in
-        Map.set t ~key:source_hash ~data:artifact, artifact)
+  let surface_key (surface : Builtin_surface.surface) =
+    let names values ~f =
+      values |> List.map ~f |> List.sort ~compare:String.compare |> String.concat ~sep:","
+    in
+    String.concat
+      ~sep:";"
+      [ "globals:" ^ names surface.globals ~f:(fun builtin -> builtin.name)
+      ; "modules:" ^ names surface.modules ~f:(fun builtin_module -> builtin_module.name)
+      ; "aliases:" ^ names surface.type_aliases ~f:(fun alias -> alias.name)
+      ]
   ;;
 
-  let of_elements (t : t) (elements : CM.top_level_elements list)
+  let compile_script
+        ?(surface = Builtin_surface.moderator_surface)
+        (t : t)
+        (script : CM.script)
+    : (t * artifact, string) result
+    =
+    let source_hash = source_hash (source_text script) in
+    let key = source_hash ^ "|" ^ surface_key surface in
+    match Map.find t key with
+    | Some artifact -> Ok (t, artifact)
+    | None ->
+      Runtime.compile_script ~surface ~source:(source_text script) ()
+      |> Result.map ~f:(fun compiled ->
+        let artifact = { script_id = script.id; source_hash; compiled } in
+        Map.set t ~key ~data:artifact, artifact)
+  ;;
+
+  let of_elements
+        ?(surface = Builtin_surface.moderator_surface)
+        (t : t)
+        (elements : CM.top_level_elements list)
     : (t * artifact option, string) result
     =
     List.fold
@@ -50,7 +72,7 @@ module Registry = struct
         let%bind registry, artifact = acc in
         match element with
         | CM.Script script ->
-          let%map registry, compiled = compile_script registry script in
+          let%map registry, compiled = compile_script ~surface registry script in
           registry, Some compiled
         | _ -> Ok (registry, artifact))
   ;;
@@ -67,6 +89,10 @@ type t =
   ; mutable processed_effect_count : int
   ; mutable next_overlay_message_id : int
   }
+
+type pending_ui_request = Runtime.pending_ui_request =
+  | Ask_text of { prompt : string }
+  | Ask_choice of { prompt : string; choices : string array }
 
 let entrypoints =
   Runtime.{ initial_state_name = "initial_state"; on_event_name = "on_event" }
@@ -189,7 +215,12 @@ let create
   : (t, string) result
   =
   let handlers = Moderation.Capabilities.runtime_handlers capabilities in
-  let config = Runtime.default_runtime_config ~handlers () in
+  let config =
+    Runtime.default_runtime_config
+      ~surface:(Runtime.compiled_surface artifact.compiled)
+      ~handlers
+      ()
+  in
   let open Result.Let_syntax in
   let%bind runtime = Runtime.instantiate_session config artifact.compiled ~entrypoints in
   let%bind overlay, next_overlay_message_id =
@@ -299,6 +330,19 @@ let new_committed_effects (t : t) : Chatml.Chatml_lang.eff list =
   List.drop (Runtime.committed_local_effects t.runtime) t.processed_effect_count
 ;;
 
+let committed_outcome (t : t) : (Moderation.Outcome.t option, string) result =
+  let open Result.Let_syntax in
+  let new_effects = new_committed_effects t in
+  t.processed_effect_count <- t.processed_effect_count + List.length new_effects;
+  match new_effects with
+  | [] -> Ok None
+  | _ ->
+    let%bind decoded = Runtime.decode_local_effects new_effects in
+    let%map outcome = Moderation.Outcome.of_runtime_effects decoded in
+    List.iter outcome.overlay_ops ~f:(apply_overlay_op t);
+    Some outcome
+;;
+
 let handle_event
       (t : t)
       ~session_id
@@ -331,11 +375,8 @@ let handle_event
       ~context:(Moderation.Context.to_value context)
       ~event:(Moderation.Event.to_value event)
   in
-  let new_effects = new_committed_effects t in
-  t.processed_effect_count <- t.processed_effect_count + List.length new_effects;
-  let%bind decoded = Runtime.decode_local_effects new_effects in
-  let%map outcome = Moderation.Outcome.of_runtime_effects decoded in
-  List.iter outcome.overlay_ops ~f:(apply_overlay_op t);
+  let%map outcome = committed_outcome t in
+  let outcome = Option.value outcome ~default:Moderation.Outcome.empty in
   Debug_log.emitf
     "[moderator-manager] handle_event_ok session=%s overlay_ops=%d runtime_requests=%d emitted_events=%d tool_moderation=%b"
     session_id
@@ -344,6 +385,17 @@ let handle_event
     (List.length outcome.emitted_events)
     (Option.is_some outcome.tool_moderation);
   outcome
+;;
+
+let pending_ui_request (t : t) : pending_ui_request option =
+  Runtime.pending_ui_request t.runtime
+;;
+
+let resume_ui_request (t : t) ~response : (Moderation.Outcome.t list, string) result =
+  let open Result.Let_syntax in
+  let%bind () = Runtime.resume_ui_request t.runtime ~response in
+  let%map outcome = committed_outcome t in
+  Option.to_list outcome
 ;;
 
 let rec drain_loop
@@ -358,7 +410,9 @@ let rec drain_loop
   : (Moderation.Outcome.t list, string) result
   =
   if remaining = 0
-  then Error "Exceeded moderator internal event replay limit."
+  then Ok (List.rev acc)
+  else if Option.is_some (pending_ui_request t)
+  then Error "Session is waiting for UI input."
   else (
     match Runtime.take_queued_event t.runtime with
     | None -> Ok (List.rev acc)

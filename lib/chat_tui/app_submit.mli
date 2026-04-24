@@ -6,7 +6,11 @@
     request.  This module owns those submit-specific steps.
 
     The helper is intentionally stateful: it mutates the supplied {!Model.t}
-    and uses {!Chat_tui.App_runtime.t} to record that streaming is starting. *)
+    and uses {!Chat_tui.App_runtime.t} to record that streaming is starting.
+
+    The follow-up-turn handoff described in
+    [docs-src/chatml-host-session-controller-contract.md] is implemented
+    through {!start_from_current_session}. *)
 
 (** Captured editor state at the time of submission. *)
 type request = App_runtime.submit_request

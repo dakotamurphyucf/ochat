@@ -11,6 +11,9 @@
   model_executor
   runtime_semantics
   fetch
+  chatml_turn_driver
+  chatml_moderator
+  chatml_moderation
   moderation
   moderator_manager
   tool_call
@@ -28,6 +31,7 @@
   functions
   chatmd
   chatml
+  chatml_runtime
   chatml_moderator_runtime
   session
   lru_cache

@@ -110,12 +110,18 @@ let run (ctx : Context.t) =
     Runtime.add_system_notice runtime text;
     Redraw_throttle.request_redraw throttler
   in
+  let add_system_notice_once ~key text =
+    if Runtime.add_system_notice_once runtime ~key text
+    then Redraw_throttle.request_redraw throttler
+  in
   let now_ms () = Eio.Time.now clock *. 1000. |> Int.of_float in
   let tui_policy =
     { Runtime_semantics.default_policy with honor_request_compaction = true }
   in
+  let sync_pending_approval () = Runtime.sync_pending_approval runtime in
   let apply_moderator_outcome (outcome : Moderator_session_controller.t) =
-    if outcome.request_refresh then App_runtime.refresh_messages runtime;
+    let pending_changed = sync_pending_approval () in
+    if outcome.request_refresh || pending_changed then App_runtime.refresh_messages runtime;
     List.iter outcome.internal_events_to_enqueue ~f:(Eio.Stream.add internal_stream);
     Option.iter outcome.halt_reason ~f:(fun reason ->
       runtime.Runtime.halted_reason <- Some reason);
@@ -123,7 +129,7 @@ let run (ctx : Context.t) =
     List.iter outcome.system_notices ~f:(fun text ->
       if Runtime.add_system_notice_once runtime ~key:("system:" ^ text) text
       then added_notice := true);
-    if outcome.request_refresh || !added_notice
+    if outcome.request_refresh || pending_changed || !added_notice
     then Redraw_throttle.request_redraw throttler;
     not (List.is_empty outcome.internal_events_to_enqueue)
   in
@@ -144,10 +150,47 @@ let run (ctx : Context.t) =
       (Printf.sprintf "Moderator background drain failed: %s" msg);
     Redraw_throttle.request_redraw throttler
   in
+  let handle_pending_approval_block () =
+    Runtime.mark_moderator_dirty runtime;
+    if sync_pending_approval ()
+    then (
+      App_runtime.refresh_messages runtime;
+      Redraw_throttle.request_redraw throttler)
+  in
+  let validation_notice_of_pending_approval = function
+    | Runtime.Ask_text _ -> "Please enter a response before continuing."
+    | Runtime.Ask_choice _ ->
+      "Please answer with one of the listed choices before continuing."
+  in
+  let handle_approval_resume_error pending_approval msg =
+    let notice =
+      match pending_approval, msg with
+      | Runtime.Ask_text _, "Approval.ask_text requires a non-empty response."
+      | ( Runtime.Ask_choice _
+        , "Approval.ask_choice response must match one of the declared choices." ) ->
+        validation_notice_of_pending_approval pending_approval
+      | Runtime.Ask_choice _, _
+      | Runtime.Ask_text _, _ -> Printf.sprintf "Approval response failed: %s" msg
+    in
+    let pending_changed = sync_pending_approval () in
+    if pending_changed then App_runtime.refresh_messages runtime;
+    add_system_notice notice;
+    if pending_changed then Redraw_throttle.request_redraw throttler
+  in
   let drain_moderator_if_idle () =
     if not (Runtime.is_idle runtime)
     then false
-    else (
+    else if Runtime.has_pending_approval runtime
+    then false
+    else
+      let policy = Runtime.runtime_policy runtime in
+      if Runtime.should_pause_internal_event_drains ~policy
+      then (
+        add_system_notice_once
+          ~key:"budget:pause-internal-event-drains"
+          "Automatic moderator idle drains are paused by budget policy.";
+        false)
+      else (
       match runtime.Runtime.moderator with
       | None ->
         Runtime.clear_moderator_dirty runtime;
@@ -162,10 +205,14 @@ let run (ctx : Context.t) =
              ~turn_request:(Schedule Runtime.Idle_followup)
          with
          | Ok outcome ->
-           Runtime.clear_moderator_dirty runtime;
+           if outcome.internal_events_remain
+           then Runtime.mark_moderator_dirty runtime
+           else Runtime.clear_moderator_dirty runtime;
            apply_moderator_outcome outcome
          | Error msg ->
-           handle_moderator_drain_error msg;
+           if String.equal msg "Session is waiting for UI input."
+           then handle_pending_approval_block ()
+           else handle_moderator_drain_error msg;
            false))
   in
   let handle_idle_safe_point () =
@@ -282,7 +329,7 @@ let run (ctx : Context.t) =
            halted_reason)
   in
   let maybe_start_pending_turn () : unit =
-    if Runtime.has_active_op runtime
+    if Runtime.has_active_op runtime || Runtime.has_pending_approval runtime
     then ()
     else (
       match Runtime.dequeue_pending_turn_request runtime with
@@ -295,12 +342,31 @@ let run (ctx : Context.t) =
   let maybe_start_next_pending () : unit =
     match runtime.Runtime.op with
     | Some _ -> ()
+    | None when Runtime.has_pending_approval runtime -> ()
     | None ->
       (match Queue.dequeue runtime.Runtime.pending with
        | None -> ()
        | Some (Runtime.Submit submit_request) -> start_submit submit_request
        | Some Runtime.Compact -> start_compaction ());
       maybe_start_pending_turn ()
+  in
+  let resume_pending_approval
+        (pending_approval : Runtime.pending_approval)
+        (submit_request : Runtime.submit_request)
+    =
+    match Runtime.resume_pending_approval runtime ~response:submit_request.Runtime.text with
+    | Error msg ->
+      handle_approval_resume_error pending_approval msg;
+      true
+    | Ok outcomes ->
+      let controller_outcome =
+        Moderator_session_controller.of_outcomes
+          ~policy:tui_policy
+          ~turn_request:(Schedule Runtime.Moderator_request)
+          outcomes
+      in
+      if not (apply_moderator_outcome controller_outcome) then maybe_start_next_pending ();
+      true
   in
   let rec handle_cancel_or_quit () : bool =
     match runtime.Runtime.op with
@@ -422,7 +488,20 @@ let run (ctx : Context.t) =
       ignore (drain_moderator_if_idle () : bool);
       true
     | `Start_turn reason ->
-      Runtime.request_turn_start runtime reason;
+      let policy = Runtime.runtime_policy runtime in
+      (match
+         Runtime.decide_automatic_turn
+           ~policy
+           ~followup_turns_started_since_user_submit:
+             runtime.Runtime.session_controller.started_followup_turns_since_user_submit
+           ~started_followup_turn_timestamps_ms:
+             runtime.Runtime.session_controller.started_followup_turn_timestamps_ms
+           ~now_ms:(now_ms ())
+           ~reason
+       with
+       | Runtime.Allow_automatic_turn -> Runtime.request_turn_start runtime reason
+       | Runtime.Suppress_automatic_turn { notice_key; notice_text } ->
+         add_system_notice_once ~key:notice_key notice_text);
       maybe_start_next_pending ();
       true
     | `Streaming_started (op_id, sw) ->
@@ -521,7 +600,10 @@ let run (ctx : Context.t) =
          | _ -> Log.emit `Warn (sprintf "Type-ahead error: %s" (Exn.to_string exn)));
         true)
     | `Submit_requested submit_request ->
-      (match runtime.Runtime.op with
+      (match Runtime.pending_approval runtime with
+       | Some pending_approval -> resume_pending_approval pending_approval submit_request
+       | None ->
+         (match runtime.Runtime.op with
        | Some (Runtime.Streaming _ | Runtime.Starting_streaming _) ->
          if Runtime.enqueue_deferred_user_note runtime submit_request
          then Log.emit `Debug "Queued deferred steering note for the next safe point.";
@@ -533,7 +615,7 @@ let run (ctx : Context.t) =
          true
        | None ->
          start_submit submit_request;
-         true)
+         true))
     | `Compact_requested ->
       Queue.enqueue runtime.Runtime.pending Runtime.Compact;
       maybe_start_next_pending ();

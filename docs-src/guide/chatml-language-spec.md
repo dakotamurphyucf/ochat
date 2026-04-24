@@ -1496,15 +1496,19 @@ and structural type aliases.
 Additional builtin modules:
 
 - `Log`
+- `Item`
+- `Tool_call`
+- `Context`
 - `Turn`
 - `Tool`
 - `Model`
+- `Process`
 - `Schedule`
 - `Runtime`
 
 Additional builtin type aliases:
 
-- `message`
+- `item`
 - `tool_desc`
 - `tool_call`
 - `tool_result`
@@ -1512,6 +1516,18 @@ Additional builtin type aliases:
 
 Each builtin module is a `VModule` value at runtime and is typed as a
 record of its exports by the typechecker.
+
+#### 13.2.2.1 `ui_moderator_surface`
+
+`ui_moderator_surface` extends `moderator_surface` with UI-only capability
+modules:
+
+- `Ui`
+- `Approval`
+
+This surface is intended for interactive hosts that support host-local
+notifications and live approval pause/resume behavior. The default
+`moderator_surface` remains non-UI.
 
 ### 13.2.3 `Task` module
 
@@ -1773,9 +1789,8 @@ Users can always access module exports through qualified access (Array.length(xs
 
 ### 13.4 Moderator capability modules
 
-The following modules are available in `moderator_surface` and are intended
-for host-interpreted task-based moderation logic rather than ordinary core
-evaluation-only scripts.
+The following effectful modules are available in `moderator_surface` or, for
+UI-only features, `ui_moderator_surface`.
 
 Their exported functions return task values and are interpreted by the host
 runtime operation registry.
@@ -1795,15 +1810,20 @@ These are diagnostic operations observed by the host runtime.
 
 ```ocaml
 Turn.prepend_system  : string -> unit task
-Turn.append_message  : message -> unit task
-Turn.replace_message : string -> message -> unit task
-Turn.delete_message  : string -> unit task
+Turn.append_item     : item -> unit task
+Turn.replace_item    : string -> item -> unit task
+Turn.delete_item     : string -> unit task
+Turn.replace_or_append : [ `None | `Some(string) ] -> item -> unit task
+Turn.append_notice   : string -> unit task
 Turn.halt            : string -> unit task
 ```
 
 These describe local turn-overlay style mutations. The current runtime
 records them as local transactional effects and leaves the concrete overlay
 semantics to host handlers.
+
+The legacy `append_message`, `replace_message`, and `delete_message` builtin
+names remain available as aliases.
 
 #### 13.4.3 `Tool`
 
@@ -1839,7 +1859,16 @@ in-flight jobs are not durably persisted across process restarts.
 The string argument is a host-defined recipe name, not an unrestricted raw
 provider/model identifier.
 
-#### 13.4.5 `Schedule`
+#### 13.4.5 `Process`
+
+```ocaml
+Process.run : string -> string array -> string task
+```
+
+`Process.run` is a host-managed external operation. Hosts may reject or omit
+this capability entirely.
+
+#### 13.4.6 `Schedule`
 
 ```ocaml
 Schedule.after_ms : int -> 'e -> string task
@@ -1848,7 +1877,7 @@ Schedule.cancel   : string -> unit task
 
 The event payload of `Schedule.after_ms` remains a raw ChatML value.
 
-#### 13.4.6 `Runtime`
+#### 13.4.7 `Runtime`
 
 ```ocaml
 Runtime.emit               : 'e -> unit task
@@ -1871,6 +1900,30 @@ directly invoke a side model call.
 
 Multiple `request_turn` effects emitted while handling one host event collapse to a
 single continuation decision. `Runtime.end_session(...)` overrides `request_turn`.
+
+#### 13.4.8 `Ui`
+
+`Ui` is available only on `ui_moderator_surface`.
+
+```ocaml
+Ui.notify : string -> unit task
+```
+
+`Ui.notify` emits a host-local notice. It does not mutate canonical history
+and does not append transcript items automatically.
+
+#### 13.4.9 `Approval`
+
+`Approval` is available only on `ui_moderator_surface`.
+
+```ocaml
+Approval.ask_text   : string -> string task
+Approval.ask_choice : string -> string array -> string task
+```
+
+These operations suspend the current live script execution and later resume
+that same execution with a validated response supplied by the host. They do
+not append fake canonical user items automatically.
 
 ---
 
@@ -2728,6 +2781,17 @@ The shared moderation vocabulary defines these phase names:
 - `turn_end`
 - `internal_event`
 
+The script-visible event constructors are:
+
+- `` `Session_start ``
+- `` `Session_resume ``
+- `` `Turn_start ``
+- `` `Item_appended(item) ``
+- `` `Pre_tool_call(tool_call) ``
+- `` `Post_tool_response(tool_result) ``
+- `` `Turn_end ``
+- and user-defined internal variants delivered through the internal-event path
+
 Current built-in host paths emit:
 
 - `session_start` for fresh moderated sessions,
@@ -2784,6 +2848,8 @@ The public entrypoints are:
 compile_script
 instantiate_session
 handle_event
+pending_ui_request
+resume_ui_request
 ```
 
 The repository's shared moderation integration layers this runtime under
@@ -2818,7 +2884,8 @@ default_runtime_config
 ```
 
 This default registry understands the standard moderator modules
-(`Log`/`Turn`/`Tool`/`Model`/`Schedule`/`Runtime`).
+(`Log`/`Turn`/`Tool`/`Model`/`Process`/`Schedule`/`Runtime`) and, when the
+UI surface is installed, the `Ui` and `Approval` operations.
 
 Current default behavior is intentionally conservative:
 
@@ -2859,6 +2926,16 @@ On successful completion of the returned task:
 - local transactional effects are committed in execution order,
 - buffered emitted events are appended to the session queue,
 - a pending end-session request halts the session.
+
+If execution suspends on `Approval.ask_text` or `Approval.ask_choice`:
+
+- the current handler does not commit,
+- buffered local transactional effects remain uncommitted,
+- buffered emitted events remain uncommitted,
+- the session continues to expose the last committed state,
+- a host-visible `pending_ui_request` becomes available,
+- and ordinary `handle_event` progression remains blocked until the host calls
+  `resume_ui_request`.
 
 On task failure:
 
@@ -2924,6 +3001,10 @@ The persisted snapshot contains:
 - serializable queued internal events
 - halted flag
 - host overlay snapshot
+
+Pending UI approval state is intentionally not part of this snapshot. A
+partially suspended approval is live-session-only and cannot be restored from
+persisted moderator state.
 
 Only data-shaped ChatML values cross this boundary. The snapshot codec rejects
 closures, refs, builtins, modules, and tasks.

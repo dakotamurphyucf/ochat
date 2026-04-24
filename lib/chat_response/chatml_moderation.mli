@@ -1,28 +1,11 @@
 open! Core
+
 module Lang = Chatml.Chatml_lang
-module Runtime = Chatml_moderator_runtime
+module Runtime = Chatml_runtime
 module Res = Openai.Responses
 
-(** Shared host-side moderation types and adapters.
-
-    This module sits between driver history/tool data and the generic
-    {!module:Chatml_moderator_runtime}.  It defines:
-
-    - the v1 lifecycle phase vocabulary,
-    - projection helpers from {!Openai.Responses.Item.t} to ChatML
-      moderator [context] records,
-    - a durable overlay snapshot shape,
-    - structured interpretation of committed moderator local effects, and
-    - host capability adapters for tool/model/scheduler callbacks.
-
-    Embedders should keep local transactional effects transactional:
-    instead of mutating driver state from runtime callbacks, read
-    {!Runtime.committed_local_effects}, decode them with
-    {!Runtime.decode_local_effects}, and interpret the resulting
-    structured outcomes after {!Runtime.handle_event} succeeds. *)
-
 module Phase : sig
-  type t =
+  type t = Moderation.Phase.t =
     | Session_start
     | Session_resume
     | Turn_start
@@ -38,7 +21,7 @@ module Phase : sig
 end
 
 module Item : sig
-  type t =
+  type t = Moderation.Item.t =
     { id : string
     ; value : Jsonaf.t
     }
@@ -49,11 +32,25 @@ module Item : sig
   val to_value : t -> Lang.value
   val of_response_item : id:string -> Res.Item.t -> t
   val to_response_item : t -> (Res.Item.t, string) result
-  val text_input_message : id:string -> role:Res.Input_message.role -> text:string -> t
+  val kind : t -> string option
+  val role : t -> string option
+  val text_parts : t -> string list
+  val text : t -> string option
+  val input_text_message : id:string -> role:string -> text:string -> t
+  val output_text_message : id:string -> text:string -> t
+  val user_text : id:string -> string -> t
+  val assistant_text : id:string -> string -> t
+  val system_text : id:string -> string -> t
+  val notice : id:string -> text:string -> t
+  val is_user : t -> bool
+  val is_assistant : t -> bool
+  val is_system : t -> bool
+  val is_tool_call : t -> bool
+  val is_tool_result : t -> bool
 end
 
 module Tool_desc : sig
-  type t =
+  type t = Moderation.Tool_desc.t =
     { name : string
     ; description : string
     ; input_schema : Jsonaf.t
@@ -65,12 +62,12 @@ module Tool_desc : sig
 end
 
 module Tool_call : sig
-  type kind =
+  type kind = Moderation.Tool_call.kind =
     | Function
     | Custom
   [@@deriving sexp, compare]
 
-  type t =
+  type t = Moderation.Tool_call.t =
     { id : string
     ; name : string
     ; args : Jsonaf.t
@@ -82,10 +79,16 @@ module Tool_call : sig
 
   val of_response_item : Res.Item.t -> t option
   val to_value : t -> Lang.value
+  val arg : t -> string -> Jsonaf.t option
+  val arg_string : t -> string -> string option
+  val arg_bool : t -> string -> bool option
+  val arg_array : t -> string -> Jsonaf.t list option
+  val is_named : t -> string -> bool
+  val is_one_of : t -> string list -> bool
 end
 
 module Tool_result : sig
-  type t =
+  type t = Moderation.Tool_result.t =
     { call_id : string
     ; name : string
     ; result : Jsonaf.t
@@ -100,7 +103,7 @@ module Tool_result : sig
 end
 
 module Context : sig
-  type t =
+  type t = Moderation.Context.t =
     { session_id : string
     ; now_ms : int
     ; phase : Phase.t
@@ -111,10 +114,22 @@ module Context : sig
   [@@deriving sexp]
 
   val to_value : t -> Lang.value
+  val last_item : t -> Item.t option
+  val last_user_item : t -> Item.t option
+  val last_assistant_item : t -> Item.t option
+  val last_system_item : t -> Item.t option
+  val last_tool_call : t -> Item.t option
+  val last_tool_result : t -> Item.t option
+  val find_item : t -> id:string -> Item.t option
+  val items_since_last_user_turn : t -> Item.t list
+  val items_since_last_assistant_turn : t -> Item.t list
+  val items_by_role : t -> role:string -> Item.t list
+  val find_tool : t -> name:string -> Tool_desc.t option
+  val has_tool : t -> name:string -> bool
 end
 
 module Event : sig
-  type t =
+  type t = Moderation.Event.t =
     | Session_start
     | Session_resume
     | Turn_start
@@ -129,7 +144,7 @@ module Event : sig
 end
 
 module Projection : sig
-  type t =
+  type t = Moderation.Projection.t =
     { item_ids : string list
     ; next_generated_id : int
     }
@@ -151,13 +166,13 @@ module Projection : sig
 end
 
 module Overlay : sig
-  type replacement =
+  type replacement = Moderation.Overlay.replacement =
     { target_id : string
     ; item : Item.t
     }
   [@@deriving sexp]
 
-  type op =
+  type op = Moderation.Overlay.op =
     | Prepend_system of string
     | Append_item of Item.t
     | Replace_item of replacement
@@ -165,7 +180,7 @@ module Overlay : sig
     | Halt of string
   [@@deriving sexp]
 
-  type t =
+  type t = Moderation.Overlay.t =
     { prepended_system_items : Item.t list
     ; appended_items : Item.t list
     ; replacements : replacement list
@@ -175,12 +190,12 @@ module Overlay : sig
   [@@deriving sexp]
 
   val empty : t
-  val of_runtime_turn_effect : Runtime.turn_effect -> (op, string) result
+  val of_turn_effect : Runtime.turn_effect -> (op, string) result
   val apply : t -> Item.t list -> Item.t list
 end
 
 module Tool_moderation : sig
-  type t =
+  type t = Moderation.Tool_moderation.t =
     | Approve
     | Reject of string
     | Rewrite_args of Jsonaf.t
@@ -191,7 +206,7 @@ module Tool_moderation : sig
 end
 
 module Runtime_request : sig
-  type t =
+  type t = Moderation.Runtime_request.t =
     | Request_compaction
     | Request_turn
     | End_session of string
@@ -199,7 +214,7 @@ module Runtime_request : sig
 end
 
 module Outcome : sig
-  type t =
+  type t = Moderation.Outcome.t =
     { overlay_ops : Overlay.op list
     ; tool_moderation : Tool_moderation.t option
     ; ui_notifications : string list
@@ -212,23 +227,23 @@ module Outcome : sig
 end
 
 module Capabilities : sig
-  type tool_call_result =
+  type tool_call_result = Moderation.Capabilities.tool_call_result =
     | Tool_ok of Jsonaf.t
     | Tool_error of string
   [@@deriving sexp]
 
-  type model_call_result =
+  type model_call_result = Moderation.Capabilities.model_call_result =
     | Model_ok of Jsonaf.t
     | Model_refused of string
     | Model_error of string
   [@@deriving sexp]
 
-  type model_recipe =
+  type model_recipe = Moderation.Capabilities.model_recipe =
     { call : payload:Jsonaf.t -> (model_call_result, string) result
     ; spawn : payload:Jsonaf.t -> (string, string) result
     }
 
-  type t =
+  type t = Moderation.Capabilities.t =
     { on_log : level:Runtime.log_level -> message:string -> (unit, string) result
     ; on_ui_notify : message:string -> (unit, string) result
     ; on_tool_call : name:string -> args:Jsonaf.t -> (tool_call_result, string) result
@@ -239,12 +254,5 @@ module Capabilities : sig
     }
 
   val default : t
-
-  (** [runtime_handlers t] builds the external/diagnostic callback bundle
-      passed to {!Runtime.default_runtime_config}.
-
-      Local transactional effects intentionally keep their default no-op
-      handlers; callers should instead inspect committed effects after a
-      successful {!Runtime.handle_event}. *)
   val runtime_handlers : t -> Runtime.default_handlers
 end

@@ -1,6 +1,8 @@
 open Core
 module App_runtime = Chat_tui.App_runtime
+module Builtin_surface = Chatml.Chatml_builtin_surface
 module CM = Prompt.Chat_markdown
+module Controller = Chat_tui.Moderator_session_controller
 module Manager = Chat_response.Moderator_manager
 module Moderation = Chat_response.Moderation
 module Res = Openai.Responses
@@ -78,6 +80,68 @@ let artifact () =
   ok_or_fail (Manager.Registry.compile_script Manager.Registry.empty script) |> snd
 ;;
 
+let ui_notify_artifact () =
+  let script =
+    CM.
+      { id = "ui-main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source =
+          Inline
+            {|
+              type state = int
+              type event = [ `Session_start ]
+
+              let initial_state = 0
+
+              let on_event : context -> int -> event -> int task =
+                fun ctx st ev ->
+                  match ev with
+                  | `Session_start ->
+                    Task.bind(Ui.notify("watch this"), fun ignored_notify ->
+                    Task.pure(st + 1))
+            |}
+      }
+  in
+  ok_or_fail
+    (Manager.Registry.compile_script
+       ~surface:Builtin_surface.ui_moderator_surface
+       Manager.Registry.empty
+       script)
+  |> snd
+;;
+
+let approval_prompt_artifact () =
+  let script =
+    CM.
+      { id = "approval-main"
+      ; language = "chatml"
+      ; kind = "moderator"
+      ; source =
+          Inline
+            {|
+              type state = int
+              type event = [ `Session_start ]
+
+              let initial_state = 0
+
+              let on_event : context -> int -> event -> int task =
+                fun ctx st ev ->
+                  match ev with
+                  | `Session_start ->
+                    Task.bind(Approval.ask_text("continue?"), fun answer ->
+                    Task.pure(st + 1))
+            |}
+      }
+  in
+  ok_or_fail
+    (Manager.Registry.compile_script
+       ~surface:Builtin_surface.ui_moderator_surface
+       Manager.Registry.empty
+       script)
+  |> snd
+;;
+
 let create_manager ?snapshot () =
   let artifact = artifact () in
   let capabilities = Moderation.Capabilities.default in
@@ -87,6 +151,90 @@ let create_manager ?snapshot () =
 let print_messages messages =
   List.iter messages ~f:(fun (role, text) ->
     print_endline (Printf.sprintf "%s %S" role text))
+;;
+
+let%expect_test "Ui.notify becomes a visible notice without mutating canonical history" =
+  let manager =
+    ok_or_fail
+      (Manager.create
+         ~artifact:(ui_notify_artifact ())
+         ~capabilities:Moderation.Capabilities.default
+         ())
+  in
+  let outcome =
+    ok_or_fail
+      (Manager.handle_event
+         manager
+         ~session_id:"session-1"
+         ~now_ms:1
+         ~history:[]
+         ~available_tools:[]
+         ~session_meta:`Null
+         ~event:Moderation.Event.Session_start)
+  in
+  let controller_outcome =
+    Controller.of_outcomes
+      ~policy:Chat_response.Runtime_semantics.default_policy
+      ~turn_request:Controller.Ignore
+      [ outcome ]
+  in
+  let model = model_of_history [] in
+  let runtime = App_runtime.create ~model () in
+  List.iter controller_outcome.system_notices ~f:(fun text ->
+    ignore (App_runtime.add_system_notice_once runtime ~key:("system:" ^ text) text : bool));
+  print_s [%sexp (outcome.ui_notifications : string list)];
+  print_messages (Chat_tui.Model.messages model);
+  print_s [%sexp (List.length (Chat_tui.Model.history_items model) : int)];
+  [%expect
+    {|
+    ("watch this")
+    system "watch this"
+    0
+    |}]
+;;
+
+let%expect_test "pending approval prompt is visible without mutating canonical history" =
+  let manager =
+    ok_or_fail
+      (Manager.create
+         ~artifact:(approval_prompt_artifact ())
+         ~capabilities:Moderation.Capabilities.default
+         ())
+  in
+  ignore
+    (ok_or_fail
+       (Manager.handle_event
+          manager
+          ~session_id:"session-1"
+          ~now_ms:1
+          ~history:[]
+          ~available_tools:[]
+          ~session_meta:`Null
+          ~event:Moderation.Event.Session_start)
+     : Moderation.Outcome.t);
+  let moderator =
+    Chat_response.In_memory_stream.
+      { manager
+      ; session_id = "session-1"
+      ; session_meta = `Null
+      ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      }
+  in
+  let model = model_of_history [] in
+  let runtime = App_runtime.create ~model ~moderator () in
+  App_runtime.refresh_messages runtime;
+  print_s
+    [%sexp
+      (Option.map (App_runtime.pending_approval runtime) ~f:App_runtime.render_pending_approval
+       : string option)];
+  print_messages (Chat_tui.Model.messages model);
+  print_s [%sexp (List.length (Chat_tui.Model.history_items model) : int)];
+  [%expect
+    {|
+    ("Approval requested: continue?")
+    system "Approval requested: continue?"
+    0
+    |}]
 ;;
 
 let%expect_test "runtime visible history reflects restored moderator snapshot" =

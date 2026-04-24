@@ -523,6 +523,7 @@ module Outcome = struct
   type t =
     { overlay_ops : Overlay.op list
     ; tool_moderation : Tool_moderation.t option
+    ; ui_notifications : string list
     ; runtime_requests : Runtime_request.t list
     ; emitted_events : Lang.value list
     }
@@ -530,6 +531,7 @@ module Outcome = struct
   let empty =
     { overlay_ops = []
     ; tool_moderation = None
+    ; ui_notifications = []
     ; runtime_requests = []
     ; emitted_events = []
     }
@@ -554,6 +556,8 @@ module Outcome = struct
         | Runtime.Tool_moderation_effect action ->
           let%bind action = Tool_moderation.of_runtime action in
           add_tool_moderation acc action
+        | Runtime.Ui_notification message ->
+          Ok { acc with ui_notifications = message :: acc.ui_notifications }
         | Runtime.Request_compaction ->
           Ok
             { acc with
@@ -576,6 +580,7 @@ module Outcome = struct
     in
     { overlay_ops = List.rev outcome.overlay_ops
     ; tool_moderation = outcome.tool_moderation
+    ; ui_notifications = List.rev outcome.ui_notifications
     ; runtime_requests = List.rev outcome.runtime_requests
     ; emitted_events = List.rev outcome.emitted_events
     }
@@ -601,6 +606,7 @@ module Capabilities = struct
 
   type t =
     { on_log : level:Runtime.log_level -> message:string -> (unit, string) result
+    ; on_ui_notify : message:string -> (unit, string) result
     ; on_tool_call : name:string -> args:Jsonaf.t -> (tool_call_result, string) result
     ; on_tool_spawn : name:string -> args:Jsonaf.t -> (string, string) result
     ; model_recipes : model_recipe String.Map.t
@@ -610,6 +616,7 @@ module Capabilities = struct
 
   let default =
     { on_log = (fun ~level:_ ~message:_ -> Ok ())
+    ; on_ui_notify = (fun ~message:_ -> Ok ())
     ; on_tool_call = (fun ~name:_ ~args:_ -> Error "Tool.call is not configured")
     ; on_tool_spawn = (fun ~name:_ ~args:_ -> Error "Tool.spawn is not configured")
     ; model_recipes = String.Map.empty
@@ -643,6 +650,7 @@ module Capabilities = struct
     in
     { Runtime.default_handlers with
       on_log = (fun _session ~level ~message -> t.on_log ~level ~message)
+    ; on_ui_notify = (fun _session ~message -> t.on_ui_notify ~message)
     ; on_tool_call =
         (fun _session ~name ~args ->
           let open Result.Let_syntax in

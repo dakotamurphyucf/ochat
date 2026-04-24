@@ -1,5 +1,14 @@
 open! Core
 
+(** Internal turn-driver implementation for moderated in-memory streams.
+
+    The preferred public wrapper is {!Chat_response.Chatml_turn_driver}. For
+    the canonical safe-point and effective-history semantics, see
+    [docs-src/chatml-safe-point-and-effective-history.md].
+
+    The Phase 2 bounded-turn contract that this module enforces in part is
+    documented in [docs-src/chatml-budget-policy.md]. *)
+
 module Safe_point_input : sig
   type t = { consume : unit -> string option }
 end
@@ -11,6 +20,10 @@ type moderator =
   ; runtime_policy : Runtime_semantics.policy
   }
 
+type pending_ui_request = Moderator_manager.pending_ui_request =
+  | Ask_text of { prompt : string }
+  | Ask_choice of { prompt : string; choices : string array }
+
 type moderated_tool_call =
   { call_item : Openai.Responses.Item.t
   ; kind : Tool_call.Kind.t
@@ -19,6 +32,13 @@ type moderated_tool_call =
   ; synthetic_result : Openai.Responses.Tool_output.Output.t option
   ; runtime_requests : Moderation.Runtime_request.t list
   }
+
+val pending_ui_request : moderator -> pending_ui_request option
+
+val resume_ui_request
+  :  moderator
+  -> response:string
+  -> (Moderation.Outcome.t list, string) result
 
 (** [prepare_turn_inputs ?safe_point_input ?moderator ~available_tools ~now_ms ~history]
     applies the explicit turn-start safe point before the next model call.
@@ -126,7 +146,9 @@ val handle_tool_result
            [message_appended] as canonical history items are produced,
            [pre_tool_call] and [post_tool_response] around tool execution,
            and [turn_end] after each streamed turn, using the moderator
-           overlay to compute the effective request history.
+           overlay to compute the effective request history. The Phase 2 budget
+           contract for self-triggered turn limits and internal-event drain
+           limits is documented in [docs-src/chatml-budget-policy.md].
     @param on_runtime_request Optional callback invoked for surfaced moderator
            runtime requests such as compaction or end-session notifications.
 

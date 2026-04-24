@@ -94,6 +94,14 @@ val core_modules : builtin_module list
     [delete_item] alongside legacy message aliases. *)
 val moderator_modules : builtin_module list
 
+(** UI-only capability module documented by the Phase 3 host-capability
+    contract. *)
+val ui_module : builtin_module
+
+(** UI-only approval module documented by the Phase 3 host-capability
+    contract. *)
+val approval_module : builtin_module
+
 (** Structural builtin type representing JSON values. *)
 val json_ty : ty
 

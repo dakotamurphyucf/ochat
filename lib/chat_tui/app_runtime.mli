@@ -11,7 +11,22 @@
     The types are intentionally low-level because multiple helper modules
     coordinate via mutable fields.  Treat this module as internal
     plumbing; it is exposed primarily to keep {!Chat_tui.App} small and to
-    support white-box tests of the event loop. *)
+    support white-box tests of the event loop.
+
+    For the Phase 2 host/session-controller contract that explains how this
+    state is used, see
+    [docs-src/chatml-host-session-controller-contract.md].
+
+    The Phase 2 budget policy that constrains follow-up scheduling, idle
+    drains, and one-time budget notices in this layer is documented in
+    [docs-src/chatml-budget-policy.md].
+
+    The optional Phase 3 UI-only notification and ask-user capability layer
+    that reuses this module's notice, input-capture, wakeup, and follow-up
+    anchors is documented in [docs-src/chatml-ui-host-capabilities.md].
+    That live-session-only approval flow reuses the ordinary composer and
+    submit path, blocks ordinary session progression while input is pending,
+    and does not persist suspended approvals in the moderator snapshot. *)
 
 (** A currently running (or about-to-run) background operation. *)
 type op =
@@ -61,11 +76,27 @@ type turn_start_reason =
 (** A user-authored steering note captured during an active turn. *)
 type deferred_user_note = { text : string }
 
-(** Session-controller state that sits above the foreground operation state. *)
+type pending_approval = Chat_response.In_memory_stream.pending_ui_request =
+  | Ask_text of { prompt : string }
+  | Ask_choice of { prompt : string; choices : string array }
+
+type automatic_turn_decision =
+  | Allow_automatic_turn
+  | Suppress_automatic_turn of
+      { notice_key : string
+      ; notice_text : string
+      }
+
+(** Session-controller state that sits above the foreground operation state.
+
+    Phase 2 budget bookkeeping for follow-up turns and rate limiting belongs in
+    this host-owned layer; see [docs-src/chatml-budget-policy.md]. *)
 type session_controller_state =
   { mutable moderator_dirty : bool
   ; deferred_user_notes : deferred_user_note Core.Queue.t
   ; mutable pending_turn_request : turn_start_reason option
+  ; mutable started_followup_turns_since_user_submit : int
+  ; mutable started_followup_turn_timestamps_ms : int list
   }
 
 (** Work that was requested while another operation is running. *)
@@ -83,6 +114,7 @@ type t =
   ; shown_notice_keys : string Core.Hash_set.t
   ; mutable active_turn_start_reason : turn_start_reason option
   ; mutable halted_reason : string option
+  ; mutable pending_approval : pending_approval option
   ; pending : queued_action Core.Queue.t
   ; quit_via_esc : bool ref
     (** [true] iff the user hit [Esc] while idle, causing the app to exit. *)
@@ -139,17 +171,39 @@ val has_active_turn : t -> bool
 val has_active_op : t -> bool
 val is_idle : t -> bool
 val may_start_turn_now : t -> bool
+val runtime_policy : t -> Chat_response.Runtime_semantics.policy
 val is_moderator_dirty : t -> bool
 val has_pending_turn_request : t -> bool
+val pending_approval : t -> pending_approval option
+val has_pending_approval : t -> bool
 val string_of_turn_start_reason : turn_start_reason -> string
 val active_turn_start_reason : t -> turn_start_reason option
+val should_pause_internal_event_drains
+  :  policy:Chat_response.Runtime_semantics.policy
+  -> bool
+
+val decide_automatic_turn
+  :  policy:Chat_response.Runtime_semantics.policy
+  -> followup_turns_started_since_user_submit:int
+  -> started_followup_turn_timestamps_ms:int list
+  -> now_ms:int
+  -> reason:turn_start_reason
+  -> automatic_turn_decision
+
 val mark_moderator_dirty : t -> unit
 val clear_moderator_dirty : t -> unit
 val request_turn_start : t -> turn_start_reason -> unit
 val clear_pending_turn_request : t -> unit
 val dequeue_pending_turn_request : t -> turn_start_reason option
+val note_started_turn : t -> now_ms:int -> reason:turn_start_reason -> unit
 val set_active_turn_start_reason : t -> turn_start_reason -> unit
 val clear_active_turn_start_reason : t -> unit
+val render_pending_approval : pending_approval -> string
+val sync_pending_approval : t -> bool
+val resume_pending_approval
+  :  t
+  -> response:string
+  -> (Chat_response.Moderation.Outcome.t list, string) result
 val add_placeholder_message : t -> role:string -> text:string -> unit
 val add_system_notice : t -> string -> unit
 val add_system_notice_once : t -> key:string -> string -> bool

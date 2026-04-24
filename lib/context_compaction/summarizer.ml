@@ -6,12 +6,10 @@ open! Core
 
 let prompt =
   {|
-Your task is to create a detailed summary of the conversation so far, paying close attention to the user's explicit requests and your previous actions.
+You will be given a conversation history of an llm conversation and your task is to compact it to save on context space by creating a concise summary that captures the user's intent and key technical details, paying close attention to the user's explicit requests and your previous actions.
 This summary should be thorough in capturing technical details, code patterns, architectural decisions, assistant outputs, and any other context that would be essential for continuing development work without losing context.
 
-Before providing your final summary, wrap your analysis of the conversation in <analysis> tags to have a rough outline of the main themes of the conversation and an analysis of each section. In your analysis process:
-1. Chronologically analyze each message and section of the conversation.
-2. Double-check for technical accuracy and completeness, addressing each required element thoroughly.
+Before providing your final summary, wrap your analysis of the conversation in <analysis> tags to have a rough outline of the main themes of the conversation and an analysis of each section.
 
 Your Detailed summary should include the following sections:
 
@@ -20,8 +18,8 @@ Your Detailed summary should include the following sections:
 3. Files and Code Sections: Enumerate specific files and code sections examined, modified, or created. Pay special attention to the most recent messages and include full code snippets where applicable and include a summary of why this file read or edit is important.
 4. Errors and fixes: List all errors that you ran into, and how you fixed them. Pay special attention to specific user feedback that you received, especially if the user told you to do something differently.
 5. Problem Solving: Document problems solved and any ongoing troubleshooting efforts.
-6. All user messages: List ALL user messages. These are critical for understanding the users' feedback and changing intent.
-7. All relevant assistant messages: List ALL assistant messages. These are critical for understanding the assistant's responses and actions. Please ensure you are thorough and complete. If you outputted anything significant, it should be included here in detail.
+6. Abride version of All relevant user messages: List ALL user messages. These are critical for understanding the users' feedback and changing intent.
+7. Abride valid_float_lexemAll relevant assistant messages: List ALL assistant messages. These are critical for understanding the assistant's responses and actions. Please ensure you are thorough and complete. If you outputted anything significant, it should be included here in detail.
 8. Pending Tasks: Outline any pending tasks that you have explicitly been asked to work on.
 9. Current Work: Describe in detail precisely what was being worked on immediately before this summary request, paying special attention to the most recent messages from both user and assistant. Include file names and code snippets where applicable.
 10. Optional Next Step: List the next step that you will take that is related to the most recent work you were doing. IMPORTANT: ensure that this step is DIRECTLY in line with the task you were working on immediately before this summary request. If your last task was concluded, then only list next steps if they are explicitly in line with the current context such as todo list.
@@ -94,16 +92,30 @@ Here's an example of how your output should be structured:
 </example>
 
 Please provide your Detailed summary based on the conversation so far, following this structure and ensuring precision and thoroughness in your response.
-- You must ensure that your summary contains any all the relevant information needed to pick up where you left off.
+- You must ensure that your summary contains any all the relevant information needed to pick up where you left off in the most condensed manner possible.
 - You will not be able to remember any information from this conversation after this summary is provided, so ensure that you capture all relevant information.
 - If you do not save relevant information in this summary, you will not be able to continue the conversation effectively and that is not acceptable.
-- You must assume that the user will not remember any details from this conversation, so you must ensure that your summary is detailed and complete.
-- Think about information that the user might want to reference in the future, and ensure that it is included in your summary.
-- you should be going for 70% compression of the conversation, so you must be thorough and complete in your analysis.
+- You must assume that the user will not remember any details from this conversation, so you must ensure that your summary optimally is condensed but still complete.
+- Think about information that the user or agent might want to reference in the future, and ensure that it is included in your summary.
+- you should be going for 90% compression of the conversation, so you must be thorough and complete in your analysis but be consise in your phrasing.
 - provide a section <important-details></important-details> whose contents should include any critical details or snippets that should be included verbatim.
   Use your own judgement to determine what is critical and what can be omitted based on the conversation so far. An example would be a final draft of a proposal or report that was not saved and is relevant to the current conversation.
 - do not duplicate information in analysis and summary sections.
-- analysis is to analyze the theme and trajectory of the conversation and where it is going; summary is to provide a concise overview of the conversation, including key points and any critical details that should be included verbatim.
+
+conversation with inputs of the kind:
+```
+<user>
+<system-reminder>This is a message from the system that we compacted the conversation history from a previous session.
+Here is a summary of the session that you saved:
+<analysis></analysis>
+<summary></summary>
+<important-details></important-details>
+</system-reminder>
+</user>
+```
+are compactions from previous conversations with the user.
+
+
 |}
 ;;
 
