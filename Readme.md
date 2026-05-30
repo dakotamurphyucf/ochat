@@ -140,6 +140,11 @@ Ochat is implemented in **OCaml**, but the workflows themselves are **language-a
 > **Current provider support:** nativley uses OpenAI Responses API format.  
 > The architecture is designed to support additional providers in the future.
 > To use other providers right now you can use a [proxy-server](https://docs.litellm.ai/) and set the enviorment url API_URL to the proxy url
+> For a governed OpenAI-compatible endpoint, set `API_URL=https://api.tuningengines.com/v1`
+> and use a Tuning Engines inference key as the OpenAI API key. Ochat still
+> owns the ChatMD workflow, tools, transcript state, and MCP surface; Tuning
+> Engines adds centralized model access, tenant policy, traces, approvals, and
+> usage reporting.
 
 ---
 
@@ -1087,6 +1092,9 @@ Planned and experimental directions include:
 - **Additional LLM providers**  
   Today Ochat integrates with OpenAI; future work is intended to support additional backends while keeping ChatMD and tool contracts stable.
   You can use a proxy server that maps the Openai api Response endpoint format to your preferred providers format. Example: [LiteLLm](https://docs.litellm.ai/) and set the enviorment url API_URL to the proxy url. 
+  For a governed OpenAI-compatible proxy, `API_URL=https://api.tuningengines.com/v1`
+  can route the same workflow through Tuning Engines while Ochat keeps owning
+  the local workflow artifact and tool execution.
 
 - **Broader ChatML scripting roles**  
   ChatML is currently focused on moderation and orchestration; the longer-term plan is to broaden that scripting role without sacrificing safety or auditability.
