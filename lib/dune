@@ -6,6 +6,14 @@
  (preprocess
   (pps ppx_jane)))
 
+(library
+ (name history_entry)
+ (public_name ochat.history_entry)
+ (modules history_entry)
+ (libraries core jsonaf openai)
+ (preprocess
+  (pps ppx_jane)))
+
 ;; ---------------------------------------------------------------------------
 ;; Session persistence (prompt sessions)
 ;; ---------------------------------------------------------------------------
@@ -15,7 +23,15 @@
  (public_name ochat.session)
  (modules session session_store)
  (wrapped false)
- (libraries core core_unix eio eio.unix openai bin_prot_utils_eio chatml)
+ (libraries
+  core
+  core_unix
+  eio
+  eio.unix
+  openai
+  bin_prot_utils_eio
+  chatml
+  history_entry)
  (preprocess
   (pps ppx_jane)))
 
@@ -226,6 +242,7 @@
   piaf
   package_index
   apply_patch
+  uutf
   meta_prompting)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

@@ -110,3 +110,13 @@ as internal implementation detail:
 If you are extending the UI, start by reading `App.run_chat` and
 `App_reducer.run` to understand how events are sequenced.
 
+## Shell startup and services
+
+`run_chat` includes shell manifest security/authorization and registry
+instantiation in the startup barrier. The UI is not user-submittable until the
+history, moderator state, shell registry, approval broker, and immutable Shell
+Security snapshot agree on one session state.
+
+App wires the approval broker to internal wakeups, creates the management
+service, restores/persists typed shell state, and closes approval/process/audit
+resources under the owning Eio switch.

@@ -70,6 +70,25 @@ val load_or_create
     Returns [None] when the snapshot is missing or unreadable. *)
 val read_existing : env:Eio_unix.Stdenv.base -> id:id -> Session.t option
 
+(** [read_current_file path] decodes the current V5 schema and falls back
+    through every supported legacy schema. Legacy snapshots are returned as
+    V5 values with empty shell security state. *)
+val read_current_file : Bin_prot_utils_eio.path -> (Session.t, Error.t) result
+
+type staged_v4_read =
+  | Missing
+  | Loaded of Session.V4.t
+  | Unreadable of Error.t
+
+(** [read_staged_v4_file path] decodes [path] by trying V4 through V0 without
+    modifying it. *)
+val read_staged_v4_file : Bin_prot_utils_eio.path -> (Session.V4.t, Error.t) result
+
+(** [read_staged_v4 ~env ~id] distinguishes a missing snapshot from an
+    existing snapshot that cannot be decoded. It tries V4, V3, V2, V1, and V0
+    in that order and never writes the snapshot. *)
+val read_staged_v4 : env:Eio_unix.Stdenv.base -> id:id -> staged_v4_read
+
 (** [save ~env session] atomically writes [session] to
      [<session-dir>/snapshot.bin] while holding an advisory lock file
      (`snapshot.bin.lock`).  The program exits with status 1 when the

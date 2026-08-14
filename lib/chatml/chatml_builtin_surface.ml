@@ -1,4 +1,4 @@
-open Core
+open! Core
 module Builtin_spec = Chatml_builtin_spec
 
 type builtin_type_alias =
@@ -61,6 +61,14 @@ let core_surface : surface =
   }
 ;;
 
+let shell_core_surface =
+  { core_surface with
+    globals =
+      List.filter core_surface.globals ~f:(fun builtin ->
+        not (String.equal builtin.Builtin_spec.name "print"))
+  }
+;;
+
 let moderator_surface : surface =
   merge
     core_surface
@@ -74,4 +82,43 @@ let ui_moderator_surface : surface =
   merge
     moderator_surface
     { empty with modules = [ Builtin_spec.ui_module; Builtin_spec.approval_module ] }
+;;
+
+let shell_context_surface =
+  merge
+    shell_core_surface
+    { globals = []
+    ; modules = [ Builtin_spec.shell_context_module ]
+    ; type_aliases =
+        [ { name = "shell_context"; body = Builtin_spec.shell_context_ty }
+        ; { name = "shell_policy"; body = Builtin_spec.shell_policy_ty }
+        ]
+    }
+;;
+
+let shell_surface action_module =
+  merge shell_context_surface { empty with modules = [ action_module ] }
+;;
+
+let shell_matcher_surface = shell_surface Builtin_spec.match_module
+let shell_reviewer_surface = shell_surface Builtin_spec.review_module
+let shell_before_interceptor_surface = shell_surface Builtin_spec.intercept_module
+let shell_after_interceptor_surface =
+  merge
+    shell_core_surface
+    { globals = []
+    ; modules = [ Builtin_spec.result_module ]
+    ; type_aliases = [ { name = "shell_result"; body = Builtin_spec.shell_result_ty } ]
+    }
+;;
+
+let shell_effect_surface = shell_surface Builtin_spec.effect_module
+
+let shell_audit_surface =
+  merge
+    shell_core_surface
+    { globals = []
+    ; modules = [ Builtin_spec.audit_filter_module ]
+    ; type_aliases = [ { name = "shell_audit"; body = Builtin_spec.shell_audit_ty } ]
+    }
 ;;

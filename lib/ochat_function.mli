@@ -1,4 +1,4 @@
-(** GPT function helpers for the OpenAI Chat Completions API.
+(** Tool-definition and execution helpers.
 
     OpenAI models can invoke so-called [tools] (also called [functions]) when
     the user or the assistant requests a structured action.  Each tool is
@@ -49,6 +49,93 @@
     ]}
 *)
 
+module Progress : sig
+  (** Transient display progress. It is not canonical history and does not
+      replace the runner's single final output. Text must be valid UTF-8. *)
+  type channel =
+    [ `Assistant
+    | `Reasoning
+    | `Stdout
+    | `Stderr
+    | `Activity
+    ]
+
+  type update =
+    | Append of string
+    | Replace of string
+    (** Requested display update: append channel text, or replace the latest
+      replaceable update on that channel. *)
+
+  type t =
+    { channel : channel
+    ; update : update
+    }
+end
+
+module Trace : sig
+  type outcome =
+    | Returned
+    | Raised
+    | Cancelled
+
+  type tool_kind =
+    [ `Function
+    | `Custom
+    ]
+
+  type t =
+    | Tool_started of
+        { call_id : string
+        ; name : string
+        ; kind : tool_kind
+        ; payload : string
+        }
+    | Tool_progress of
+        { call_id : string
+        ; progress : Progress.t
+        }
+    | Tool_finished of
+        { call_id : string
+        ; outcome : outcome
+        ; output : Openai.Responses.Tool_output.Output.t option
+        }
+    (** Structured transient activity produced by a tool running inside an
+      observed Agent. Returned outputs are non-authoritative display
+      projections; the runner return remains the canonical output. *)
+end
+
+module Invocation : sig
+  type t
+
+  (** [silent] discards progress and reports that the invocation is unobserved. *)
+  val silent : t
+
+  (** [create emit] creates an observed invocation.
+
+      {!emit} calls the callback synchronously. Exceptions are suppressed so
+      observers cannot affect tool execution. A callback shared by independent
+      invocations must be concurrency-safe and return promptly. *)
+  val create : (Progress.t -> unit) -> t
+
+  (** [create_with_trace ~progress ~trace] observes textual progress and
+      structured nested-tool activity. Observer exceptions are suppressed. *)
+  val create_with_trace : progress:(Progress.t -> unit) -> trace:(Trace.t -> unit) -> t
+
+  (** [emit t progress] synchronously sends transient [progress] to [t]'s
+      observer. Silent invocations discard it; observer exceptions are
+      suppressed. *)
+  val emit : t -> Progress.t -> unit
+
+  (** [emit_trace t trace] synchronously sends structured transient activity.
+      Silent invocations discard it and observer exceptions are suppressed. *)
+  val emit_trace : t -> Trace.t -> unit
+
+  (** [is_observed t] is [true] when [t] was created with {!create}. *)
+  val is_observed : t -> bool
+end
+
+type runner = invocation:Invocation.t -> string -> Openai.Responses.Tool_output.Output.t
+
 module type Def = sig
   (** Declarative description of a tool.  The module is never instantiated –
       its values act as a compile-time record. *)
@@ -90,22 +177,20 @@ module type Def = sig
   val input_of_string : string -> input
 end
 
-(** Concrete handle to a registered tool.  [info] – JSON description passed to
-    OpenAI.  [run] – OCaml implementation executed when the tool is invoked.
+(** Registered tool.
 
-    The record is exposed – downstream code frequently needs direct access to
-    [run], e.g. to dispatch the model’s callback.  Feel free to treat the type
-    as mutable if necessary, but do **not** modify [info] fields after the
-    value has been passed to OpenAI. *)
+    [info] is the descriptor exposed to the model. [run] executes silently and
+    returns only the canonical final output. [run_with_progress] additionally
+    accepts an invocation for transient display progress. *)
 type t =
   { info : Openai.Completions.tool
   ; run : string -> Openai.Responses.Tool_output.Output.t
+  ; run_with_progress : runner
   }
 
 (** [create_function (module D) ?strict impl] couples the declarative module
     [D] with the OCaml implementation [impl].  The resulting [t] can be
-    included in the tool list passed to
-    {!Openai.Completions.post_chat_completion}.
+    included in a model request's tool list.
 
     [strict] mirrors the field described in OpenAI docs: when [true] (the
     default) the model must supply exactly the schema; when [false] additional
@@ -116,11 +201,26 @@ val create_function
   -> ('a -> Openai.Responses.Tool_output.Output.t)
   -> t
 
+(** [create_streaming_function (module D) ?strict impl] registers [impl] as a
+    progress-capable tool.
+
+    Arguments are decoded before [impl] is called. [impl] may emit transient
+    display progress and must return exactly one canonical final output. Every
+    progress payload must be independently valid UTF-8. [run] is equivalent to
+    [run_with_progress ~invocation:Invocation.silent], and observer failures do
+    not alter the returned output. *)
+val create_streaming_function
+  :  (module Def with type input = 'a)
+  -> ?strict:bool
+  -> (invocation:Invocation.t -> 'a -> Openai.Responses.Tool_output.Output.t)
+  -> t
+
 (** [functions ts] converts a list of registered tools [ts] into:
     • the JSON metadata required by the API call; and
     • a lookup table mapping [name] → [implementation], convenient for serving
-      the subsequent call. *)
-val functions
-  :  t list
-  -> Openai.Completions.tool list
-     * (string, string -> Openai.Responses.Tool_output.Output.t) Core.Hashtbl.t
+      the subsequent call.
+
+    Tool names must be unique.
+
+    @raise Core.Hashtbl.Duplicate_key if two tools expose the same name *)
+val functions : t list -> Openai.Completions.tool list * (string, runner) Core.Hashtbl.t

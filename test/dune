@@ -1,4 +1,151 @@
 (library
+ (name chatmd_shell_parser_test)
+ (modules chatmd_shell_parser_test)
+ (libraries core eio eio_main chatmd ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name shell_access_phase1_test)
+ (modules shell_access_phase1_test)
+ (libraries core core_unix eio eio_main ochat.shell_access)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name shell_access_phase2_test)
+ (modules shell_access_phase2_test)
+ (libraries core eio eio_main ochat.shell_access)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatmd_shell_manifest_test)
+ (modules chatmd_shell_manifest_test)
+ (libraries core eio eio_main chatmd ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatmd_shell_phase2_test)
+ (modules chatmd_shell_phase2_test)
+ (libraries
+  core
+  eio
+  eio_main
+  chatmd
+  ochat.shell_runtime
+  ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatmd_shell_phase3_test)
+ (modules chatmd_shell_phase3_test)
+ (libraries
+  core
+  eio
+  eio_main
+  chatml
+  chatml_runtime
+  chatml_host_runtime
+  chatml_moderator_runtime
+  chatmd
+  ochat.shell_runtime
+  ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatmd_shell_phase4_test)
+ (modules chatmd_shell_phase4_test)
+ (libraries
+  core
+  eio
+  eio_main
+  chatmd
+  ochat.shell_runtime
+  ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatmd_shell_phase5_test)
+ (modules chatmd_shell_phase5_test)
+ (libraries
+  core
+  core_unix
+  eio
+  eio_main
+  base64
+  mirage-crypto-ec
+  notty
+  notty_eio
+  chatmd
+  chat_tui
+  ochat.session
+  ochat.shell_access
+  ochat.shell_runtime
+  ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(executable
+ (name shell_hook_fixture)
+ (modules shell_hook_fixture)
+ (libraries core eio eio_main jsonaf))
+
+(test
+ (name hook_worker_integration_test)
+ (modules hook_worker_integration_test)
+ (libraries core core_unix eio eio_main ochat.shell_access ochat.shell_runtime)
+ (action (run %{test} %{exe:shell_hook_fixture.exe}))
+ (preprocess
+  (pps ppx_jane)))
+
+(library
+ (name shell_runtime_phase1_test)
+ (modules shell_runtime_phase1_test)
+ (libraries
+  core
+  eio
+  eio_main
+  chatmd
+  ochat.shell_access
+  ochat.shell_runtime
+  ochat.chatmd_shell_spec)
+ (inline_tests
+  (deps
+   (source_tree ../lib/chat_response)
+   (source_tree ../lib/chat_tui)
+   (source_tree ../lib/shell_runtime)))
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_response_shell_tool_test)
+ (modules chat_response_shell_tool_test)
+ (libraries
+  core
+  eio
+  eio_main
+  chatmd
+  chat_response
+  ochat.shell_runtime
+  ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
  (name filter_file_test)
  (modules filter_file_test)
  (libraries core expect_test_helpers_core filter_file)
@@ -15,6 +162,14 @@
  (name webpage_markdown_test)
  (modules webpage_markdown_test)
  (libraries core expect_test_helpers_core ochat.webpage_markdown)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name ochat_function_progress_test)
+ (modules ochat_function_progress_test)
+ (libraries core expect_test_helpers_core ochat_function chat_response)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -163,48 +318,6 @@
 ;; Chat-TUI persistence materialization tests
 ;; ---------------------------------------------------------------------------
 
-(library
- (name chat_tui_persistence_materialization_test)
- (modules chat_tui_persistence_materialization_test)
- (libraries
-  core
-  expect_test_helpers_core
-  ochat.io
-  ochat.session
-  chat_tui
-  chat_response
-  chatmd
-  eio
-  eio_main
-  eio.unix)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-;; ---------------------------------------------------------------------------
-;; Chat-TUI moderator wakeup reducer tests
-;; ---------------------------------------------------------------------------
-
-(library
- (name chat_tui_moderator_wakeup_test)
- (modules chat_tui_moderator_wakeup_test)
- (libraries
-  core
-  expect_test_helpers_core
-  chat_tui
-  chat_response
-  chatmd
-  chatml
-  eio
-  eio_main
-  eio.unix
-  notty
-  notty_eio
-  notty_scroll_box)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
 ;; ---------------------------------------------------------------------------
 ;; Session reset tests
 ;; ---------------------------------------------------------------------------
@@ -287,25 +400,21 @@
 ;; Chat-TUI – Parallel tool-call buffer integration test
 ;; ---------------------------------------------------------------------------
 
-(library
- (name chat_tui_parallel_tool_calls_test)
- (modules chat_tui_parallel_tool_calls_test)
- (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Agent page rendering and model tests
+;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Agent page controller tests
+;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – App streaming batching tests
+;; ---------------------------------------------------------------------------
 
 ;; ---------------------------------------------------------------------------
 ;; Chat-TUI – Redraw throttle unit tests
 ;; ---------------------------------------------------------------------------
-
-(library
- (name chat_tui_redraw_throttle_test)
- (modules chat_tui_redraw_throttle_test)
- (libraries core expect_test_helpers_core chat_tui)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
 ;; Chat-TUI – Sanitize/Wrap pipeline tests
@@ -323,53 +432,13 @@
 ;; Chat-TUI – Tool metadata and language inference tests
 ;; ---------------------------------------------------------------------------
 
-(library
- (name chat_tui_tool_metadata_test)
- (modules chat_tui_tool_metadata_test)
- (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-(library
- (name chat_tui_moderation_test)
- (modules chat_tui_moderation_test)
- (libraries
-  core
-  expect_test_helpers_core
-  notty
-  notty_scroll_box
-  chat_tui
-  chat_response
-  chatmd
-  ochat.session)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
 ;; ---------------------------------------------------------------------------
 ;; Chat-TUI – Tool rendering smoke tests
 ;; ---------------------------------------------------------------------------
 
-(library
- (name chat_tui_tool_render_test)
- (modules chat_tui_tool_render_test)
- (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
 ;; ---------------------------------------------------------------------------
 ;; Chat-TUI – Type-ahead tests (no async)
 ;; ---------------------------------------------------------------------------
-
-(library
- (name chat_tui_type_ahead_test)
- (modules chat_tui_type_ahead_test)
- (libraries core expect_test_helpers_core notty notty_scroll_box chat_tui)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
 ;; Chat-TUI – Highlight engine scope-preserving API tests
@@ -396,40 +465,20 @@
   (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
-;; Chat-TUI – Markdown marker suppression tests
+;; Chat-TUI – Bundled highlight grammar tests
 ;; ---------------------------------------------------------------------------
 
-(library
- (name chat_tui_markdown_marker_suppression_test)
- (modules chat_tui_markdown_marker_suppression_test)
- (libraries core expect_test_helpers_core notty chat_tui)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Runtime highlight grammar discovery tests
+;; ---------------------------------------------------------------------------
+
+;; ---------------------------------------------------------------------------
+;; Chat-TUI – Markdown marker suppression tests
+;; ---------------------------------------------------------------------------
 
 ;; ---------------------------------------------------------------------------
 ;; Chat-TUI – Type-ahead reducer debounce / stale-result tests
 ;; ---------------------------------------------------------------------------
-
-(library
- (name chat_tui_type_ahead_debounce_test)
- (modules chat_tui_type_ahead_debounce_test)
- (libraries
-  core
-  expect_test_helpers_core
-  eio
-  eio_main
-  eio.unix
-  notty
-  notty_eio
-  notty_scroll_box
-  openai
-  chat_response
-  ochat.session
-  chat_tui)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
 
 ;; ---------------------------------------------------------------------------
 ;; OAuth dynamic client registration tests
@@ -450,93 +499,6 @@
   ochat.mcp_client
   ochat.mcp_server_core
   ochat.mcp_server_http
-  ochat.mcp_types)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-;; ---------------------------------------------------------------------------
-;; MCP server integration test (real HTTP server)
-;; ---------------------------------------------------------------------------
-
-(library
- (name mcp_server_integration_test)
- (modules mcp_server_integration_test)
- (libraries
-  core
-  expect_test_helpers_core
-  eio
-  eio_main
-  eio.mock
-  eio.unix
-  ochat.mcp_server_core
-  ochat.mcp_server_http
-  ochat.mcp_client
-  ochat.mcp_types
-  piaf)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-;; ---------------------------------------------------------------------------
-;; MCP transport – HTTP SSE & Session-ID tests
-;; ---------------------------------------------------------------------------
-
-(library
- (name mcp_transport_http_sse_test)
- (modules mcp_transport_http_sse_test)
- (libraries
-  core
-  expect_test_helpers_core
-  eio
-  eio_main
-  eio.mock
-  eio.unix
-  piaf
-  uri
-  ochat.mcp_transport)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-;; ---------------------------------------------------------------------------
-;; MCP transport – HTTP implementation tests
-;; ---------------------------------------------------------------------------
-
-(library
- (name mcp_transport_http_test)
- (modules mcp_transport_http_test)
- (libraries
-  core
-  expect_test_helpers_core
-  eio
-  eio_main
-  eio.mock
-  eio.unix
-  piaf
-  uri
-  ochat.mcp_transport)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-;; ---------------------------------------------------------------------------
-;; MCP client tests over HTTP transport
-;; ---------------------------------------------------------------------------
-
-(library
- (name mcp_client_http_test)
- (modules mcp_client_http_test)
- (libraries
-  core
-  expect_test_helpers_core
-  eio
-  eio_main
-  eio.mock
-  eio.unix
-  piaf
-  uri
-  ochat.mcp_client
   ochat.mcp_types)
  (inline_tests)
  (preprocess
@@ -610,113 +572,10 @@
  (preprocess
   (pps ppx_jane ppx_expect)))
 
-;; ---------------------------------------------------------------------------
-;; Session persistence tests
-;; ---------------------------------------------------------------------------
-
-(library
- (name session_persistence_test)
- (modules session_persistence_test)
- (libraries
-  core
-  expect_test_helpers_core
-  eio
-  eio_main
-  eio.unix
-  ochat.session)
- ;; Inline expect tests
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-(library
- (name chat_response_converter_test)
- (modules chat_response_converter_test)
- (libraries
-  core
-  expect_test_helpers_core
-  chat_response
-  eio
-  eio_main
-  eio.mock
-  eio.unix)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-(library
- (name chat_response_agent_prompt_test)
- (modules chat_response_agent_prompt_test)
- (libraries
-  core
-  expect_test_helpers_core
-  chat_response
-  chatmd
-  eio
-  eio_main
-  eio.unix
-  ochat.mcp_prompt_agent
-  ochat.mcp_server_core)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-(library
- (name chat_response_moderation_test)
- (modules chat_response_moderation_test)
- (libraries
-  core
-  expect_test_helpers_core
-  chat_response
-  chatml
-  chatml_builtin_modules
-  chatml_moderator_runtime)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-(library
- (name chat_response_moderator_manager_test)
- (modules chat_response_moderator_manager_test)
- (libraries
-  core
-  expect_test_helpers_core
-  chat_response
-  chatmd
-  chatml
-  chatml_builtin_modules
-  ochat.session)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-(library
- (name chat_response_moderator_executor_test)
- (modules chat_response_moderator_executor_test)
- (libraries
-  core
-  expect_test_helpers_core
-  chat_response
-  chatmd
-  chatml
-  chatml_builtin_modules
-  ochat.session)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
 (library
  (name chat_response_budget_policy_test)
  (modules chat_response_budget_policy_test)
  (libraries core expect_test_helpers_core chat_response chat_tui)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-(library
- (name chat_response_in_memory_stream_test)
- (modules chat_response_in_memory_stream_test)
- (libraries core expect_test_helpers_core chat_response chatmd chatml ochat.session)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
@@ -733,14 +592,6 @@
  (name chatml_runtime_test)
  (modules chatml_runtime_test)
  (libraries core chatml chatml_resolver chatml_builtin_modules)
- (inline_tests)
- (preprocess
-  (pps ppx_jane ppx_expect)))
-
-(library
- (name chatml_moderator_runtime_test)
- (modules chatml_moderator_runtime_test)
- (libraries core chatml chatml_builtin_modules chatml_moderator_runtime)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

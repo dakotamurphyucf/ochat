@@ -1,34 +1,26 @@
 (** Conversation summariser used by {!module:Context_compaction}.
 
-    A compaction cycle starts with {!module:Relevance_judge}
-    selecting a subset of the chat history that must survive.  This
-    module converts that list of {!module:Openai.Responses.Item}
-    values into a **single textual summary** that subsequently
-    replaces the original messages.  The aim is to reduce token usage
-    without losing critical context for the next model call.
+    This module renders an ordered list of {!module:Openai.Responses.Item}
+    values and asks the Responses API for a textual summary. Multipart
+    message content is preserved in order.
 
     Two execution modes are supported:
 
     • {e Online} – triggered when an [OPENAI_API_KEY] is available and
       a capability-based *Eio* environment is provided.  In this mode
-      {!Openai.Responses.post_response} is invoked with a handcrafted
-      system prompt (see the [prompt] constant in
-      {!file:summarizer.ml}).  The call uses model [`Gpt4_1`], a
-      temperature of 0.3 and a generous [max_output_tokens] limit of
-      100_000 to avoid premature truncation.
+      {!Openai.Responses.post_response} is invoked with the developer
+      prompt in [summarizer.ml] and a generous [max_output_tokens] limit.
+      Parsing failures receive three total attempts. If the whole-history
+      request exhausts those attempts, the compactable history is split once
+      into two ordered halves. The first result is rolling context for the
+      second request.
 
     • {e Offline stub} – activated whenever the API key or the
-      environment is missing, or if the online call throws.  We shove
-      the conversation transcript through a 2 000-character truncate
-      and return the result verbatim.  This deterministic path is
-      just for unit tests.
+      environment is missing. The first 2,000 bytes of the rendered
+      transcript are returned for deterministic tests.
 
-    All errors are handled internally; the public API is synchronous
-    and exception-free.
-
-    Tool outputs that contain image parts are preserved in the transcript using
-    a lightweight HTML placeholder of the form [<image src="..."/>] so that the
-    summariser can at least acknowledge their presence. *)
+    Input and tool-output images are preserved using a lightweight HTML
+    placeholder of the form [<image src="..."/>]. *)
 
 open! Core
 
@@ -40,17 +32,23 @@ open! Core
       must survive compaction.  Items may originate from the user, the
       assistant, or be function/tool-call artefacts.
 
-    • [env] – optional {!Eio_unix.Stdenv.base}.  Passing [None]
-      unequivocally selects the offline stub.  When [Some], the online
-      path is attempted (and silently downgraded to the stub on any
-      failure).
+    • [env] – optional {!Eio_unix.Stdenv.base}. Passing [None]
+      unequivocally selects the offline stub.
 
-    Returns an UTF-8 encoded string safe for direct injection into a
-    system or developer message.
+    Online failure is returned explicitly.
 
-    @raise Never – all internal failures are converted into the stub
-           output. *)
+    @raise Eio.Cancel.Cancelled if the operation is cancelled. *)
 val summarise
   :  relevant_items:Openai.Responses.Item.t list
   -> env:Eio_unix.Stdenv.base option
-  -> string
+  -> (string, exn) result
+
+module For_testing : sig
+  val render_transcript : Openai.Responses.Item.t list -> string
+
+  val summarise_with
+    :  sleep:(float -> unit)
+    -> request:(Openai.Responses.Item.t list -> string)
+    -> relevant_items:Openai.Responses.Item.t list
+    -> (string, exn) result
+end

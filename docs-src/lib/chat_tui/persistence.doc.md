@@ -116,4 +116,11 @@ the whole folder preserves consistency.
    transcript in an invalid state.  Practical experience shows this to be rare
    enough not to warrant a full journalling system.
 
+### Shell security state
+
+ChatMarkdown export is a semantic transcript artifact and does not encode all
+security state. The binary session snapshot is authoritative for exact
+manifest grants, command approval grants, ChatML shell extension snapshots,
+last audit sequence, and interrupted request metadata. Exported tool output is
+already bounded, terminal-sanitized, and secret-redacted.
 

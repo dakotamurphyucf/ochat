@@ -157,6 +157,7 @@ module Output_message : sig
     ; id : string
     ; content : content list
     ; status : string
+    ; phase : string option
     ; _type : string
     }
   [@@deriving jsonaf, sexp, bin_io]
@@ -960,6 +961,23 @@ exception Response_stream_parsing_error of Jsonaf.t * exn
     Carries the offending JSON payload and the exception raised by the decoder. *)
 exception Response_parsing_error of Jsonaf.t * exn
 
+(** Raised when the streaming endpoint returns a top-level API error payload. *)
+exception Response_stream_api_error of Jsonaf.t
+
+(** Raised when a stream reports failure, incompleteness, an error event, or
+    another event after successful completion. *)
+exception Response_stream_terminal_error of Response_stream.t
+
+(** Raised when a stream reaches EOF or [[DONE]] before
+    {!Response_stream.Response_completed}. *)
+exception Response_stream_terminated_without_completion
+
+(** [validate_response_stream events] returns [events] lazily while requiring
+    exactly one successful terminal response. Failure, incomplete, and error
+    events raise {!Response_stream_terminal_error}; termination without
+    completion raises {!Response_stream_terminated_without_completion}. *)
+val validate_response_stream : Response_stream.t Seq.t -> Response_stream.t Seq.t
+
 (** [post_response response_type ?max_output_tokens ?temperature ?tools ?model
     ?parallel_tool_calls ?reasoning ~dir net ~inputs] sends [inputs] to the
     [/v1/responses] endpoint using the capability-safe network handle
@@ -970,10 +988,10 @@ exception Response_parsing_error of Jsonaf.t * exn
     • {!Default} blocks until the server returns the final JSON object
       and then parses it as {!Response.t}.
 
-    • [Stream cb] establishes a Server-Sent Events connection and
-      invokes [cb] for every incremental {!Response_stream.t} event.
-      The function returns [()] once the stream terminates normally or
-      raises an exception on the first error.
+    • {!Stream} establishes a Server-Sent Events connection and returns a lazy
+      sequence of incremental {!Response_stream.t} events. Consuming the
+      sequence blocks until events arrive and raises on transport, API, or
+      decoding errors.
 
     {2 Parameters}
 
@@ -1010,24 +1028,29 @@ exception Response_parsing_error of Jsonaf.t * exn
       value and the underlying error.
     • {!Response_parsing_error} when the final JSON payload cannot be decoded
       as {!Response.t}.
+    • {!Response_stream_api_error} when the endpoint returns a top-level
+      streaming API error.
     • Any network or TLS exception thrown by [cohttp-eio].
 
     {2 Example}
 
     {[
       (* Stream the assistant’s answer token-by-token. *)
-      let print_stream = function
-        | Openai.Responses.Response_stream.Output_text_delta { delta; _ } ->
-          Format.printf "%s%!" delta
-        | _ -> ()
-      in
-
-      Openai.Responses.post_response
-        (Openai.Responses.Stream print_stream)
+      let events =
+        Openai.Responses.post_response
+        Openai.Responses.Stream
         ~temperature:0.7
         ~dir:(Eio.Stdenv.cwd env)
+        ~sw
         net
         ~inputs:[ my_message ]
+      in
+      Seq.iter
+        (function
+          | Openai.Responses.Response_stream.Output_text_delta { delta; _ } ->
+            Format.printf "%s%!" delta
+          | _ -> ())
+        events
     ]} *)
 val post_response
   :  'a response_type

@@ -5,7 +5,7 @@ let sexp_of_doc doc = [%sexp (doc : Chatmd_ast.node list)]
 let parse_and_report str =
   let lexbuf = Lexing.from_string str in
   try
-    let doc = Chatmd_parser.document Chatmd_lexer.token lexbuf in
+    let doc = Chatmd_parser.document (Chatmd_lexer.create ()) lexbuf in
     print_s (sexp_of_doc doc)
   with
   | exn -> printf "ERR: %s\n" (Exn.to_string exn)

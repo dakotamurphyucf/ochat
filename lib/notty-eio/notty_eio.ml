@@ -24,14 +24,20 @@ module Term = struct
     ; obuf : Buffer.t (* Pending output *)
     ; cleanup : (unit -> unit) Queue.t (* Actions to perform on release *)
     ; mutable need_resize : bool
+    ; resize_changed : Eio.Condition.t
     ; mutable hook : Eio.Switch.hook
     }
 
-  let write t =
+  let write ?(synchronized = false) t =
     Tmachine.output t.trm t.obuf;
-    let out = Buffer.contents t.obuf in
+    let payload = Buffer.contents t.obuf in
     (* XXX There goes 0copy. :/ *)
     Buffer.clear t.obuf;
+    let out =
+      if synchronized
+      then String.concat "" [ "\027[?2026h"; payload; "\027[?2026l" ]
+      else payload
+    in
     Eio.Flow.copy_string out t.output
   ;;
 
@@ -61,17 +67,33 @@ module Term = struct
     write t
   ;;
 
+  let present t ~image ~cursor =
+    Tmachine.image t.trm image;
+    Tmachine.cursor t.trm cursor;
+    write ~synchronized:true t
+  ;;
+
   let set_size t dim = Tmachine.set_size t.trm dim
   let size t = Tmachine.size t.trm
 
   let on_resize t () =
-    (* todo: send a notification to the main event loop too *)
-    t.need_resize <- true
+    t.need_resize <- true;
+    Eio.Condition.broadcast t.resize_changed
   ;;
 
   let with_cleanup t (`Revert fn) = Queue.add fn t.cleanup
 
-  let rec input_events ~on_event t =
+  let await_input_or_resize ~input_fd t =
+    Fiber.first
+      (fun () ->
+         Eio.Condition.loop_no_mutex t.resize_changed (fun () ->
+           if t.need_resize then Some `Resize else None))
+      (fun () ->
+         Eio_unix.await_readable input_fd;
+         `Input)
+  ;;
+
+  let rec input_events ~input_fd ~on_event t =
     if t.need_resize
     then (
       t.need_resize <- false;
@@ -84,10 +106,13 @@ module Term = struct
       | #Unescape.event as r -> on_event r
       | `End -> raise End_of_file
       | `Await ->
-        let len = Eio.Flow.single_read t.input t.ibuf in
-        let ibuf = Cstruct.to_bytes t.ibuf ~len in
-        Unescape.input t.iparse ibuf 0 len);
-    input_events ~on_event t
+        (match await_input_or_resize ~input_fd t with
+         | `Resize -> ()
+         | `Input ->
+           let len = Eio.Flow.single_read t.input t.ibuf in
+           let ibuf = Cstruct.to_bytes t.ibuf ~len in
+           Unescape.input t.iparse ibuf 0 len));
+    input_events ~input_fd ~on_event t
   ;;
 
   let run ?(nosig = true) ?(mouse = true) ?(bpaste = true) ~input ~output ~on_event fn =
@@ -108,6 +133,7 @@ module Term = struct
       ; hook = Eio.Switch.null_hook
       ; cleanup = Queue.create ()
       ; need_resize = false
+      ; resize_changed = Eio.Condition.create ()
       }
     in
     t.hook <- Switch.on_release_cancellable sw (fun () -> release t);
@@ -115,7 +141,7 @@ module Term = struct
     with_cleanup t @@ Notty_unix.Private.set_winch_handler (on_resize t);
     Eio_unix.Fd.use_exn "winsize" (Eio_unix.Resource.fd output) (fun output_fd ->
       Notty_unix.winsize output_fd |> Option.iter (set_size t));
-    Fiber.fork_daemon ~sw (fun () -> input_events ~on_event t);
+    Fiber.fork_daemon ~sw (fun () -> input_events ~input_fd ~on_event t);
     fn t
   ;;
 end

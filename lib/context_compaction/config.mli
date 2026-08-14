@@ -13,9 +13,9 @@
     combination of the following keys:
 
     {ul
-    {- ["context_limit"] – maximum number of tokens that the relevance
-       judge is allowed to inspect before deciding which messages to
-       keep.  Defaults to {!default.context_limit}.}
+    {- ["context_limit"] – reserved context-budget setting. It is not used
+       to size compaction requests because bytes are not model tokens.
+       Defaults to {!default.context_limit}.}
     {- ["relevance_threshold"] – minimum score (in the inclusive range
        {{:https://en.wikipedia.org/wiki/Unit_interval} [0.0, 1.0]}) a
        message has to achieve in order to survive filtering.  Defaults
@@ -53,9 +53,7 @@
     @canonical Context_compaction.Config *)
 
 type t =
-  { context_limit : int
-    (** Maximum number of tokens that can be considered when
-            computing relevance. *)
+  { context_limit : int (** Reserved context-budget setting. *)
   ; relevance_threshold : float
     (** Messages with a relevance score **≥** this threshold are
             preserved. *)

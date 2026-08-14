@@ -148,20 +148,11 @@ let goto_last_line_start (model : Model.t) =
 (* -------------------------------------------------------------------- *)
 
 let scroll_by_lines (model : Model.t) ~term delta =
-  let screen_w, screen_h = Notty_eio.Term.size term in
-  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
-  let scroll_height = layout.scroll_height in
-  Scroll_box.scroll_by (Model.scroll_box model) ~height:scroll_height delta;
-  if
-    Scroll_box.max_scroll (Model.scroll_box model) ~height:scroll_height
-    = Scroll_box.scroll (Model.scroll_box model)
-  then Model.set_auto_follow model true
+  Controller_shared.scroll_history ~mode:"normal" ~model ~term delta
 ;;
 
 let page_size ~term (model : Model.t) =
-  let screen_w, screen_h = Notty_eio.Term.size term in
-  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
-  layout.scroll_height
+  Controller_shared.history_viewport_height ~model ~term
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -304,6 +295,7 @@ type state =
 
 let st : state ref = ref { pending = None_pending; count = None }
 let clear_state () = st := { pending = None_pending; count = None }
+let cancel_pending = clear_state
 let last_find : find_spec option ref = ref None
 
 let push_digit (d : int) =
@@ -583,61 +575,56 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     Redraw
   | `Key (`ASCII 'n', mods) when List.is_empty mods ->
     clear_state ();
-    if Controller_history_search.repeat_last ~model ~term ~reverse:false
-    then Redraw
-    else Unhandled
+    Option.value
+      (Controller_history_search.repeat_last ~model ~term ~reverse:false)
+      ~default:Unhandled
   | `Key (`ASCII 'N', mods) when List.is_empty mods ->
     clear_state ();
-    if Controller_history_search.repeat_last ~model ~term ~reverse:true
-    then Redraw
-    else Unhandled
+    Option.value
+      (Controller_history_search.repeat_last ~model ~term ~reverse:true)
+      ~default:Unhandled
   (* -------------------------------------------------------------- *)
   (* ArrowUp/Down scroll history (preference)                        *)
   | `Key (`Arrow `Up, mods) when List.is_empty mods ->
     clear_state ();
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term (-1);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-1)).changed
   | `Key (`Arrow `Down, mods) when List.is_empty mods ->
     clear_state ();
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term 1;
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term 1).changed
   | `Key (`Arrow `Down, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
     clear_state ();
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term 1;
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term 1).changed
   | `Key (`Arrow `Up, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
     clear_state ();
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term (-1);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-1)).changed
   (* Ctrl-f/b/d/u page/half-page history scrolling *)
   | `Key (`ASCII ('b' | 'B'), [ `Ctrl ]) ->
     clear_state ();
-    Model.set_auto_follow model false;
     let ps = page_size ~term model in
-    scroll_by_lines model ~term (-ps);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-ps)).changed
   | `Key (`ASCII ('f' | 'F'), [ `Ctrl ]) ->
     clear_state ();
-    Model.set_auto_follow model false;
     let ps = page_size ~term model in
-    scroll_by_lines model ~term ps;
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term ps).changed
   | `Key (`ASCII ('u' | 'U'), [ `Ctrl ]) ->
     clear_state ();
-    Model.set_auto_follow model false;
     let ps = page_size ~term model / 2 in
-    scroll_by_lines model ~term (-Int.max 1 ps);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-Int.max 1 ps)).changed
   | `Key (`ASCII ('d' | 'D'), [ `Ctrl ]) ->
     clear_state ();
-    Model.set_auto_follow model false;
     let ps = page_size ~term model / 2 in
-    scroll_by_lines model ~term (Int.max 1 ps);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (Int.max 1 ps)).changed
+  | `Mouse (`Press (`Scroll dir), (_x, _y), _mods) ->
+    clear_state ();
+    (match dir with
+     | `Up -> Chat_scrolled (scroll_by_lines model ~term (-1)).changed
+     | `Down -> Chat_scrolled (scroll_by_lines model ~term 1).changed)
+  | `Key (`Home, _) ->
+    clear_state ();
+    Prepare_chat_destination Earlier_conversation
+  | `Key (`End, _) ->
+    clear_state ();
+    Prepare_chat_destination Latest_conversation
   (* -------------------------------------------------------------- *)
   (* Cursor vertical move within editor (Meta/Shift + arrows)         *)
   | `Key (`Arrow `Up, mods) when List.mem mods `Meta ~equal:Poly.equal ->

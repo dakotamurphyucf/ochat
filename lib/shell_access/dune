@@ -1,0 +1,5 @@
+(library
+ (name shell_access)
+ (public_name ochat.shell_access)
+ (modules shell_access shell_access_v2)
+ (libraries core core_unix digestif eio eio.unix jsonaf optint re))

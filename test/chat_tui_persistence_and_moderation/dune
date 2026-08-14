@@ -1,0 +1,51 @@
+(library
+ (name chat_tui_persistence_materialization_test)
+ (modules chat_tui_persistence_materialization_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  ochat.io
+  ochat.session
+  chat_tui
+  chat_response
+  chatmd
+  eio
+  eio_main
+  eio.unix)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_tui_persistence_materialization_identity_test)
+ (modules chat_tui_persistence_materialization_identity_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_tui
+  chat_response
+  chatmd
+  openai
+  ochat.history_entry
+  eio
+  eio_main
+  eio.unix)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_tui_moderation_test)
+ (modules chat_tui_moderation_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  notty
+  notty_scroll_box
+  chat_tui
+  chat_response
+  chatmd
+  ochat.session)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

@@ -1,0 +1,13 @@
+(library
+ (name chat_tui_identity_safe_interactions_test)
+ (modules chat_tui_identity_safe_interactions_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  notty
+  notty_scroll_box
+  chat_tui
+  openai)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

@@ -2,8 +2,8 @@
 
 This document describes the **implementation module** of the
 `ochat` command-line application that ships with this repository.  The
-public-facing manual of the tool (sub-command synopsis, usage examples,
-etc.) lives in [`docs-src/bin/ochat.doc.md`](ochat.doc.md); the goal here is to
+public-facing entry points and examples are listed in the
+[README binaries section](../../Readme.md#binaries); the goal here is to
 explain **how** the OCaml code wires everything together and to provide a
 reference for maintainers.
 
@@ -146,11 +146,37 @@ separately in [`docs-src/lib/io.doc.md`](../lib/io.doc.md).
 
 ---
 
-## 5  Related modules
+## 5  `ochat shell` subcommands
+
+The top-level `shell` group provides non-executing inspection and security
+management:
+
+```text
+ochat shell inspect CHATMD [-canonical]
+ochat shell audit validate PATH
+ochat shell audit replay PATH
+ochat shell audit request PATH REQUEST_ID
+ochat shell grants list SESSION_ID
+ochat shell grants explain SESSION_ID GRANT_ID
+ochat shell grants revoke SESSION_ID GRANT_ID [-reason TEXT] -confirm
+ochat shell manifest-grants list SESSION_ID
+ochat shell manifest-grants explain SESSION_ID GRANT_ID
+ochat shell manifest-grants revoke SESSION_ID GRANT_ID [-reason TEXT] -confirm
+ochat shell interrupted list SESSION_ID
+```
+
+Inspection compiles and reports requested/live authority but grants nothing and
+executes no command. Audit replay validates/reconstructs events without rerun.
+Grant revocation refuses to mutate state without `-confirm` and appends a
+management audit event. Output is non-secret/redacted.
+
+See [`docs-src/cli/shell-runtime-management.md`](../cli/shell-runtime-management.md).
+
+## 6  Related modules
 
 * [`Indexer`](../lib/indexer.doc.md) – building the corpus
 * [`Vector_db`](../lib/vector_db.doc.md) – hybrid retrieval engine
-* [`Chat_response.Driver`](../lib/chat_response.doc.md) – chatmd runtime
+* [`Chat_response.Driver`](../lib/chat_response/driver.doc.md) – ChatMD runtime
 * [`Odoc_snippet`](../lib/odoc_snippet.doc.md) – Markdown chunking logic
 
 ---

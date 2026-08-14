@@ -1,0 +1,14 @@
+(library
+ (name session_persistence_and_legacy_migration_test)
+ (modules session_persistence_and_legacy_migration_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.unix
+  ochat.session
+  ochat.history_entry)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

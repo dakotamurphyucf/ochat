@@ -74,6 +74,7 @@ let create_moderator
       ~available_tools
       ?(capabilities = Moderation.Capabilities.default)
       ?(runtime_policy = Runtime_semantics.default_policy)
+      ?on_process_run
       ()
   : (Stream_moderator.moderator option, string) result
   =
@@ -84,7 +85,9 @@ let create_moderator
   match artifact with
   | None -> Ok None
   | Some artifact ->
-    let%bind manager = Moderator_manager.create ~artifact ~capabilities () in
+    let%bind manager =
+      Moderator_manager.create ~artifact ~capabilities ?on_process_run ()
+    in
     let moderator =
       Stream_moderator.{ manager; session_id; session_meta = `Null; runtime_policy }
     in
@@ -123,6 +126,71 @@ let create_moderator
     Ok (Some moderator)
 ;;
 
+let create_moderator_entries
+      ~env
+      ~session_id
+      ~elements
+      ~allocator
+      ~history
+      ~available_tools
+      ?(capabilities = Moderation.Capabilities.default)
+      ?(runtime_policy = Runtime_semantics.default_policy)
+      ?on_process_run
+      ()
+  =
+  let open Result.Let_syntax in
+  let%bind _, artifact =
+    Moderator_manager.Registry.of_elements Moderator_manager.Registry.empty elements
+  in
+  match artifact with
+  | None -> Ok None
+  | Some artifact ->
+    let%bind manager =
+      Moderator_manager.create_entries
+        ~artifact
+        ~capabilities
+        ~allocator
+        ?on_process_run
+        ()
+    in
+    let moderator =
+      Stream_moderator.{ manager; session_id; session_meta = `Null; runtime_policy }
+    in
+    let now_ms = now_ms env in
+    let%bind outcome =
+      Moderator_manager.handle_event_entries
+        manager
+        ~session_id
+        ~now_ms
+        ~history
+        ~available_tools
+        ~session_meta:`Null
+        ~event:Moderation.Event.Session_start
+    in
+    let%bind drained =
+      if has_end_session_request outcome.runtime_requests
+      then Ok []
+      else
+        Moderator_manager.drain_internal_events_entries
+          manager
+          ~session_id
+          ~now_ms
+          ~history
+          ~available_tools
+          ~session_meta:`Null
+    in
+    let requests =
+      List.concat_map (outcome :: drained) ~f:(fun outcome -> outcome.runtime_requests)
+    in
+    List.iter requests ~f:(fun request ->
+      Log.emit
+        `Info
+        (Printf.sprintf
+           "Ignoring moderator runtime request in shared driver: %s"
+           (Sexp.to_string_hum ([%sexp_of: Moderation.Runtime_request.t] request))));
+    Ok (Some moderator)
+;;
+
 let render_tool_output_text (output : Res.Tool_output.Output.t) =
   match output with
   | Text text -> text
@@ -135,10 +203,17 @@ let render_tool_output_text (output : Res.Tool_output.Output.t) =
 ;;
 
 let append_output_message ~append (o : Res.Output_message.t) =
+  let phase_input =
+    match o.phase with
+    | None -> ""
+    | Some p -> Printf.sprintf " phase=\"%s\"" p
+  in
   append
     (Printf.sprintf
-       "<assistant id=\"%s\">\n\t%s|\n\t\t%s\n\t|%s\n</assistant>\n"
+       "<assistant id=\"%s\" status=\"%s\"%s>\n\t%s|\n\t\t%s\n\t|%s\n</assistant>\n"
        o.id
+       o.status
+       phase_input
        "RAW"
        (Fetch.tab_on_newline
           (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" "))
@@ -426,10 +501,104 @@ let append_generated_items ~append ~save_doc ~show_tool_call items =
     This helper is primarily used by the *fork* tool to let the model
     spawn sub-agents without leaving the main conversation context. *)
 
+type agent_observer = Agent_response_loop.observer =
+  { on_event : Res.Response_stream.t -> unit
+  ; on_tool_execution : Tool_execution_event.t -> unit
+  }
+
+let agent_allocator_namespace =
+  let next = Atomic.make 0 in
+  fun session_id ->
+    let sequence = Atomic.fetch_and_add next 1 in
+    Printf.sprintf "%s/agent-%d" session_id sequence
+;;
+
+let create_history_entries ~allocator items =
+  List.map items ~f:(History_entry.create ~allocator)
+  |> Result.all
+  |> Result.ok_or_failwith
+;;
+
+let extension_entries ~prefix entries =
+  let prefix_length = List.length prefix in
+  let retained, extension = List.split_n entries prefix_length in
+  let is_same_prefix =
+    List.equal
+      (fun left right ->
+         History_entry.Id.equal (History_entry.id left) (History_entry.id right))
+      prefix
+      retained
+  in
+  if is_same_prefix
+  then extension
+  else failwith "Response execution did not preserve the initial history prefix"
+;;
+
+let run_entries
+      ~ctx
+      ~allocator
+      ?temperature
+      ?max_output_tokens
+      ?tools
+      ?reasoning
+      ?history_compaction
+      ?response_dir
+      ?observer
+      ?on_sourced_event
+      ?source
+      ?parent_call_id
+      ?post
+      ?post_stream
+      ~model
+      ~tool_tbl
+      history
+  =
+  match observer with
+  | None ->
+    Response_loop.run_entries
+      ~ctx
+      ~allocator
+      ?temperature
+      ?max_output_tokens
+      ?tools
+      ?reasoning
+      ?history_compaction
+      ?response_dir
+      ?post
+      ~model
+      ~tool_tbl
+      history
+  | Some observer ->
+    Agent_response_loop.run_entries
+      ~ctx
+      ~allocator
+      ?temperature
+      ?max_output_tokens
+      ?tools
+      ?reasoning
+      ?history_compaction
+      ?response_dir
+      ?on_sourced_event
+      ?source
+      ?parent_call_id
+      ~model
+      ~tool_tbl
+      ~observer
+      ?post_stream
+      history
+;;
+
 let rec run_agent
           ?(history_compaction = false)
           ?prompt_dir
           ?session_id
+          ?response_dir
+          ?observer
+          ?(on_sourced_event = fun _ -> ())
+          ?source
+          ?parent_call_id
+          ?(shell_manifest_authorizer = Shell_runtime.Manifest_authorizer.deny)
+          ?(shell_approval_provider = Shell_runtime.Approval_broker.None_available)
           ~(ctx : _ Ctx.t)
           (prompt_xml : string)
           (items : CM.content_item list)
@@ -439,6 +608,7 @@ let rec run_agent
   @@ fun sw ->
   (* 1.  Extract individual components from the shared context *)
   let dir = Option.value prompt_dir ~default:(Ctx.dir ctx) in
+  let response_dir = Option.value response_dir ~default:(Ctx.dir ctx) in
   let ctx =
     Ctx.create ~env:(Ctx.env ctx) ~dir ~tool_dir:(Ctx.tool_dir ctx) ~cache:(Ctx.cache ctx)
   in
@@ -450,6 +620,9 @@ let rec run_agent
       ; name = None
       ; id = None
       ; status = None
+      ; phase = None
+      ; ochat_history_id = None
+      ; source_context = None
       ; function_call = None
       ; tool_call = None
       ; tool_call_id = None
@@ -457,7 +630,8 @@ let rec run_agent
       }
   in
   (* 2.  Parse the merged document into structured elements. *)
-  let elements = CM.parse_chat_inputs ~dir prompt_xml in
+  let prompt_source = Option.value session_id ~default:"<nested-agent>" in
+  let elements = CM.parse_chat_inputs ~source:prompt_source ~dir prompt_xml in
   (* 3.  Configuration (max_tokens, model, …) *)
   let cfg = Config.of_elements elements in
   let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call = _; id } =
@@ -471,23 +645,74 @@ let rec run_agent
       Res.Request.Reasoning.
         { effort = Some (Effort.of_str_exn eff); summary = Some Summary.Detailed })
   in
-  (* 4.  Collect tool declarations inside the agent prompt. *)
-  let declared_tools =
-    List.filter_map elements ~f:(function
-      | CM.Tool t -> Some t
-      | _ -> None)
+  let runtime_session_id =
+    Option.first_some id session_id |> Option.value ~default:"nested-agent"
   in
-  (* Convert user-declared tools → functions – use the real CWD so that any
-     file references inside the tool behave like shell commands. *)
-  let tools : Ochat_function.t list =
-    List.concat_map declared_tools ~f:(fun decl ->
-      Tool.of_declaration ~sw ~ctx ~run_agent:(run_agent ~history_compaction) decl)
+  let host =
+    Agent_runtime.host
+      ~env:(Ctx.env ctx)
+      ~workspace:(Ctx.tool_dir ctx)
+      ~tool_dir:(Ctx.tool_dir ctx)
+      ~prompt_dir:dir
+      ~session_dir:response_dir
+      ~cache_dir:response_dir
+      ~home:(Agent_runtime.default_home (Ctx.env ctx))
+      ~session_id:runtime_session_id
+      ~resource_runner:(Sys.getenv "OCHAT_SHELL_RESOURCE_RUNNER")
+      ~prompt_elements:elements
+    |> Result.map_error ~f:(fun diagnostics ->
+      List.map diagnostics ~f:Agent_runtime.diagnostic_to_string
+      |> String.concat ~sep:"\n")
+    |> Result.ok_or_failwith
   in
+  let agent_runtime =
+    Agent_runtime.create
+      ~sw
+      ~ctx
+      ~host
+      ~platform:(Agent_runtime.platform ())
+      ~prompt_elements:elements
+      ~manifest_authorizer:shell_manifest_authorizer
+      ~approval_provider:shell_approval_provider
+      ~approval_store:(Shell_access.Approval.create_store ())
+      ~run_agent:(fun ?prompt_dir ?session_id ?observer ~source ~ctx prompt items ->
+        run_agent
+          ~history_compaction
+          ?prompt_dir
+          ?session_id
+          ?observer
+          ~source
+          ~response_dir
+          ~shell_manifest_authorizer
+          ~shell_approval_provider
+          ~ctx
+          prompt
+          items)
+      ()
+    |> Result.map_error ~f:(fun diagnostics ->
+      List.map diagnostics ~f:Agent_runtime.diagnostic_to_string
+      |> String.concat ~sep:"\n")
+    |> Result.ok_or_failwith
+  in
+  let tools = agent_runtime.functions in
   let comp_tools, tool_tbl = Ochat_function.functions tools in
   let tools_req = Tool.convert_tools comp_tools in
   (* 5.  Convert XML ‑> API items and enter the execute loop to handle function calls. *)
   let init_items =
-    Converter.to_items ~ctx ~run_agent:(run_agent ~history_compaction) (elements @ [ msg ])
+    Converter.to_items
+      ~ctx
+      ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+        run_agent
+          ~history_compaction
+          ?prompt_dir
+          ?session_id
+          ~response_dir
+          ~shell_manifest_authorizer
+          ~shell_approval_provider
+          ~ctx
+          prompt
+          items)
+      (elements @ [ msg ])
   in
   let all_items =
     if has_script elements
@@ -495,7 +720,23 @@ let rec run_agent
       let session_id =
         Option.first_some id session_id |> Option.value ~default:"nested-agent"
       in
-      let exec_context : Model_executor.exec_context = { ctx; run_agent; fetch_prompt } in
+      let exec_context : Model_executor.exec_context =
+        { ctx
+        ; run_agent =
+            (fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
+              run_agent
+                ?history_compaction
+                ?prompt_dir
+                ?session_id
+                ~response_dir
+                ~shell_manifest_authorizer
+                ~shell_approval_provider
+                ~ctx
+                prompt
+                items)
+        ; fetch_prompt
+        }
+      in
       let model_executor = Model_executor.create ~sw ~exec_context () in
       let capabilities =
         capabilities_with_model_executor
@@ -503,14 +744,27 @@ let rec run_agent
           ~session_id
           Moderation.Capabilities.default
       in
+      let allocator =
+        let namespace =
+          match source with
+          | Some source -> session_id ^ "/" ^ source
+          | None -> agent_allocator_namespace session_id
+        in
+        History_entry.Allocator.create ~namespace ~next_sequence:0
+        |> Result.ok_or_failwith
+      in
+      let init_entries = create_history_entries ~allocator init_items in
       let moderator =
-        create_moderator
+        let on_process_run = Agent_runtime.moderator_process_handler agent_runtime in
+        create_moderator_entries
           ~env:(Ctx.env ctx)
           ~session_id
           ~elements
-          ~history:init_items
+          ~allocator
+          ~history:init_entries
           ~available_tools:tools_req
           ~capabilities
+          ?on_process_run
           ()
         |> Result.ok_or_failwith
       in
@@ -519,33 +773,64 @@ let rec run_agent
           model_executor
           ~session_id:m.session_id
           ~manager:m.manager);
-      In_memory_stream.run_completion_stream_in_memory_v1
+      In_memory_stream.run_completion_stream_in_memory_entries
         ~env:(Ctx.env ctx)
-        ~history:init_items
+        ~datadir:response_dir
+        ~allocator
+        ~history:init_entries
         ~tools:(Some tools_req)
         ~tool_tbl
         ?temperature
         ?max_output_tokens:max_tokens
         ?reasoning
         ?moderator
+        ?on_event:(Option.map observer ~f:(fun observer -> observer.on_event))
+        ~on_sourced_event
+        ?source
+        ?parent_call_id
+        ?on_tool_execution:
+          (Option.map observer ~f:(fun observer -> observer.on_tool_execution))
         ~history_compaction
         ~parallel_tool_calls:true
         ~model
-        ())
-    else
-      Response_loop.run
-        ~ctx
-        ?temperature
-        ?max_output_tokens:max_tokens
-        ~tools:tools_req
-        ?reasoning
-        ~history_compaction
-        ~model
-        ~tool_tbl
-        init_items
+        ()
+      |> History_entry.items)
+    else (
+      let session_id =
+        Option.first_some id session_id |> Option.value ~default:"nested-agent"
+      in
+      let allocator =
+        let namespace =
+          match source with
+          | Some source -> session_id ^ "/" ^ source
+          | None -> agent_allocator_namespace session_id
+        in
+        History_entry.Allocator.create ~namespace ~next_sequence:0
+        |> Result.ok_or_failwith
+      in
+      let init_entries = create_history_entries ~allocator init_items in
+      let all_entries =
+        run_entries
+          ~ctx
+          ~allocator
+          ?temperature
+          ?max_output_tokens:max_tokens
+          ~tools:tools_req
+          ?reasoning
+          ~history_compaction
+          ~response_dir
+          ?observer
+          ~on_sourced_event
+          ?source
+          ?parent_call_id
+          ~model
+          ~tool_tbl
+          init_entries
+      in
+      extension_entries ~prefix:init_entries all_entries |> History_entry.items)
   in
   (* 6.  Extract assistant messages and concatenate them. *)
-  List.drop all_items (List.length init_items)
+  (if has_script elements then List.drop all_items (List.length init_items) else all_items)
   |> List.filter_map ~f:(function
     | Res.Item.Output_message o ->
       Some (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
@@ -671,7 +956,18 @@ let run_completion
     let tools = Tool.convert_tools comp_tools in
     (* Reuse earlier [ctx] for conversion to items. *)
     let init_items =
-      Converter.to_items ~ctx ~run_agent:(run_agent ~history_compaction:false) elements
+      Converter.to_items
+        ~ctx
+        ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+          run_agent
+            ~history_compaction:false
+            ?prompt_dir
+            ?session_id
+            ~response_dir:datadir
+            ~ctx
+            prompt
+            items)
+        elements
     in
     let append = Io.append_doc ~dir output_file in
     let save_doc name contents = Io.save_doc ~dir:datadir name contents in
@@ -683,7 +979,19 @@ let run_completion
         Eio.Switch.run
         @@ fun sw ->
         let exec_context : Model_executor.exec_context =
-          { ctx; run_agent; fetch_prompt }
+          { ctx
+          ; run_agent =
+              (fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
+                run_agent
+                  ?history_compaction
+                  ?prompt_dir
+                  ?session_id
+                  ~response_dir:datadir
+                  ~ctx
+                  prompt
+                  items)
+          ; fetch_prompt
+          }
         in
         let model_executor = Model_executor.create ~sw ~exec_context () in
         let capabilities =
@@ -692,12 +1000,20 @@ let run_completion
             ~session_id
             Moderation.Capabilities.default
         in
+        let allocator =
+          History_entry.Allocator.create
+            ~namespace:(session_id ^ "/blocking")
+            ~next_sequence:0
+          |> Result.ok_or_failwith
+        in
+        let init_entries = create_history_entries ~allocator init_items in
         let moderator =
-          create_moderator
+          create_moderator_entries
             ~env
             ~session_id
             ~elements
-            ~history:init_items
+            ~allocator
+            ~history:init_entries
             ~available_tools:tools
             ~capabilities
             ()
@@ -708,10 +1024,11 @@ let run_completion
             model_executor
             ~session_id:m.session_id
             ~manager:m.manager);
-        In_memory_stream.run_completion_stream_in_memory_v1
+        In_memory_stream.run_completion_stream_in_memory_entries
           ~env
           ~datadir
-          ~history:init_items
+          ~allocator
+          ~history:init_entries
           ~tools:(Some tools)
           ~tool_tbl
           ?temperature
@@ -724,40 +1041,39 @@ let run_completion
           ~meta_refine
           ~model
           ()
+        |> extension_entries ~prefix:init_entries
+        |> History_entry.items
       in
-      append_generated_items
-        ~append
-        ~save_doc
-        ~show_tool_call:true
-        (List.drop all_items (List.length init_items));
+      append_generated_items ~append ~save_doc ~show_tool_call:true all_items;
       if not (has_end_session_request !runtime_requests) then append "\n<user>\n\n</user>")
     else (
       (* For the response loop we use a context bound to the .chatmd data folder so
          that any tool-generated artefacts land in that directory. *)
       let ctx_loop = Ctx.create ~env ~dir:datadir ~cache ~tool_dir:datadir in
-      let all_items =
-        Response_loop.run
+      let allocator =
+        History_entry.Allocator.create
+          ~namespace:(Option.value id ~default:output_file ^ "/blocking")
+          ~next_sequence:0
+        |> Result.ok_or_failwith
+      in
+      let init_entries = create_history_entries ~allocator init_items in
+      let all_entries =
+        run_entries
           ~ctx:ctx_loop
+          ~allocator
           ?temperature
           ?max_output_tokens:model_tokens
           ~tools
           ?reasoning
           ~tool_tbl
           ~model
-          init_items
+          init_entries
       in
-      append_generated_items
-        ~append
-        ~save_doc
-        ~show_tool_call:true
-        (List.drop all_items (List.length init_items));
-      if
-        List.exists all_items ~f:(function
-          | Res.Item.Function_call _ -> true
-          | Res.Item.Custom_tool_call _ -> true
-          | _ -> false)
-      then loop ()
-      else append "\n<user>\n\n</user>")
+      let generated =
+        extension_entries ~prefix:init_entries all_entries |> History_entry.items
+      in
+      append_generated_items ~append ~save_doc ~show_tool_call:true generated;
+      append "\n<user>\n\n</user>")
   in
   loop ();
   Cache.save ~file:cache_file cache
@@ -797,9 +1113,16 @@ let run_completion_stream
       ~env
       ?prompt_file
       ?(on_event : Openai.Responses.Response_stream.t -> unit = fun _ -> ())
+      ?(on_history_event : History_stream_event.t -> unit = fun _ -> ())
+      ?(on_sourced_event : Sourced_response_event.t -> unit = fun _ -> ())
+      ?(on_history_tool_out : History_entry.t -> unit = fun _ -> ())
+      ?post_stream
+      ?(on_final_history : History_entry.t list -> unit = fun _ -> ())
       ?(parallel_tool_calls = true)
       ?(meta_refine = false)
       ?(history_compaction = false)
+      ?(shell_manifest_authorizer = Shell_runtime.Manifest_authorizer.deny)
+      ?(shell_approval_provider = Shell_runtime.Approval_broker.None_available)
       ~output_file
       ()
   =
@@ -845,7 +1168,7 @@ let run_completion_stream
   (* 1‑B • parse the XML into ChatMarkdown elements *)
   (* Use [output_dir] as the base for <import/> and local document paths
      inside the prompt. *)
-  let elements = CM.parse_chat_inputs ~dir:output_dir xml in
+  let elements = CM.parse_chat_inputs ~source:output_file ~dir:output_dir xml in
   (* 1‑B • current config (max_tokens, model, …) *)
   let cfg = Config.of_elements elements in
   let CM.{ max_tokens; model; reasoning_effort; temperature; show_tool_call; id } = cfg in
@@ -861,27 +1184,94 @@ let run_completion_stream
      relative paths in <doc src="…">, <import>, or nested agent prompts are
      resolved against the folder that contains [output_file]. *)
   let ctx = Ctx.create ~env ~dir:output_dir ~cache ~tool_dir:(Eio.Stdenv.cwd env) in
-  (* Tools declared inside the prompt should behave as if executed from the
-     user’s shell, therefore we build a context whose [dir] is the real CWD. *)
-  let user_decl_tools =
-    List.filter_map elements ~f:(function
-      | CM.Tool t -> Some t
-      | _ -> None)
-    |> List.concat_map ~f:(fun decl ->
-      Tool.of_declaration ~sw ~ctx ~run_agent:(run_agent ~history_compaction) decl)
+  let runtime_session_id = Option.value id ~default:output_file in
+  let host =
+    Agent_runtime.host
+      ~env
+      ~workspace:cwd
+      ~tool_dir:(Ctx.tool_dir ctx)
+      ~prompt_dir:output_dir
+      ~session_dir:datadir
+      ~cache_dir:datadir
+      ~home:(Agent_runtime.default_home env)
+      ~session_id:runtime_session_id
+      ~resource_runner:(Sys.getenv "OCHAT_SHELL_RESOURCE_RUNNER")
+      ~prompt_elements:elements
+    |> Result.map_error ~f:(fun diagnostics ->
+      List.map diagnostics ~f:Agent_runtime.diagnostic_to_string
+      |> String.concat ~sep:"\n")
+    |> Result.ok_or_failwith
+  in
+  let agent_runtime =
+    Agent_runtime.create
+      ~sw
+      ~ctx
+      ~host
+      ~platform:(Agent_runtime.platform ())
+      ~prompt_elements:elements
+      ~manifest_authorizer:shell_manifest_authorizer
+      ~approval_provider:shell_approval_provider
+      ~approval_store:(Shell_access.Approval.create_store ())
+      ~run_agent:(fun ?prompt_dir ?session_id ?observer ~source ~ctx prompt items ->
+        run_agent
+          ~history_compaction
+          ?prompt_dir
+          ?session_id
+          ?observer
+          ~source
+          ~response_dir:datadir
+          ~shell_manifest_authorizer
+          ~shell_approval_provider
+          ~ctx
+          prompt
+          items)
+      ()
+    |> Result.map_error ~f:(fun diagnostics ->
+      List.map diagnostics ~f:Agent_runtime.diagnostic_to_string
+      |> String.concat ~sep:"\n")
+    |> Result.ok_or_failwith
   in
   (* 1-C • tools / functions – only tools declared by user *)
-  let comp_tools, tool_tbl = Ochat_function.functions user_decl_tools in
+  let comp_tools, tool_tbl = Ochat_function.functions agent_runtime.functions in
   let tools = Tool.convert_tools comp_tools in
   (* 1-D • initial request items *)
   let inputs =
-    Converter.to_items ~ctx ~run_agent:(run_agent ~history_compaction) elements
+    Converter.to_items
+      ~ctx
+      ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+        run_agent
+          ~history_compaction
+          ?prompt_dir
+          ?session_id
+          ~response_dir:datadir
+          ~shell_manifest_authorizer
+          ~shell_approval_provider
+          ~ctx
+          prompt
+          items)
+      elements
   in
   if has_script elements
   then (
     let save_doc name contents = Io.save_doc ~dir:datadir name contents in
     let session_id = Option.value id ~default:output_file in
-    let exec_context : Model_executor.exec_context = { ctx; run_agent; fetch_prompt } in
+    let exec_context : Model_executor.exec_context =
+      { ctx
+      ; run_agent =
+          (fun ?history_compaction ?prompt_dir ?session_id ~ctx prompt items ->
+            run_agent
+              ?history_compaction
+              ?prompt_dir
+              ?session_id
+              ~response_dir:datadir
+              ~shell_manifest_authorizer
+              ~shell_approval_provider
+              ~ctx
+              prompt
+              items)
+      ; fetch_prompt
+      }
+    in
     let model_executor = Model_executor.create ~sw ~exec_context () in
     let capabilities =
       capabilities_with_model_executor
@@ -889,14 +1279,22 @@ let run_completion_stream
         ~session_id
         Moderation.Capabilities.default
     in
+    let allocator =
+      History_entry.Allocator.create ~namespace:(session_id ^ "/stream") ~next_sequence:0
+      |> Result.ok_or_failwith
+    in
+    let input_entries = create_history_entries ~allocator inputs in
     let moderator =
-      create_moderator
+      let on_process_run = Agent_runtime.moderator_process_handler agent_runtime in
+      create_moderator_entries
         ~env
         ~session_id
         ~elements
-        ~history:inputs
+        ~allocator
+        ~history:input_entries
         ~available_tools:tools
         ~capabilities
+        ?on_process_run
         ()
       |> Result.ok_or_failwith
     in
@@ -907,13 +1305,17 @@ let run_completion_stream
         ~manager:m.manager);
     let runtime_requests = ref [] in
     let all_items =
-      In_memory_stream.run_completion_stream_in_memory_v1
+      In_memory_stream.run_completion_stream_in_memory_entries
         ~env
         ~datadir
-        ~history:inputs
+        ~allocator
+        ~history:input_entries
         ~on_event:(fun ev ->
           log_event ev;
           on_event ev)
+        ~on_history_event
+        ~on_sourced_event
+        ~on_history_tool_out
         ~tools:(Some tools)
         ~tool_tbl
         ?temperature
@@ -926,7 +1328,9 @@ let run_completion_stream
         ~parallel_tool_calls
         ~meta_refine
         ~model
+        ?post_stream
         ()
+      |> History_entry.items
     in
     append_generated_items
       ~append:append_doc
@@ -936,14 +1340,39 @@ let run_completion_stream
     if not (has_end_session_request !runtime_requests)
     then append_doc "\n<user>\n\n</user>")
   else (
+    let allocator =
+      History_entry.Allocator.create
+        ~namespace:(Option.value id ~default:output_file ^ "/stream")
+        ~next_sequence:0
+      |> Result.ok_or_failwith
+    in
+    let registry = History_stream_event.Registry.create ~allocator in
+    let inputs = create_history_entries ~allocator inputs in
     (* ─────────────────────── 1.  main recursive turn ────────────────────── *)
     let rec turn inputs =
+      let scope = History_stream_event.Registry.create_scope registry in
       (* ────────────────── 2.  streaming callback state ─────────────────── *)
       (* existing tables … *)
-      let new_items : Res.Item.t list ref = ref [] in
-      let add_item item = new_items := item :: !new_items in
+      let new_items : History_entry.t list ref = ref [] in
+      let add_item item =
+        let id =
+          History_stream_event.Registry.find_item registry ~source:None item ~scope
+          |> Option.value_or_thunk ~default:(fun () ->
+            History_entry.Allocator.allocate allocator |> Result.ok_or_failwith)
+        in
+        let entry = History_entry.create_with_id ~id item in
+        if
+          not
+            (List.exists !new_items ~f:(fun existing ->
+               History_entry.Id.equal (History_entry.id existing) (History_entry.id entry)))
+        then new_items := entry :: !new_items;
+        entry
+      in
       let opened_msgs : (string, unit) Hashtbl.t = Hashtbl.create (module String)
       and func_info : (string, string * string) Hashtbl.t = Hashtbl.create (module String)
+      and function_completions : (string, string) Hashtbl.t =
+        Hashtbl.create (module String)
+      and custom_completions : (string, string) Hashtbl.t = Hashtbl.create (module String)
       and reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
       let run_again = ref false in
       let output_text_delta ~id txt =
@@ -989,6 +1418,9 @@ let run_completion_stream
       let handle_function_done ~item_id ~arguments =
         match Hashtbl.find func_info item_id with
         | None -> () (* should not happen *)
+        | Some (name, call_id)
+          when List.exists !pending_calls ~f:(fun pending ->
+                 String.equal pending.call_id call_id) -> ()
         | Some (name, call_id) ->
           (* Allocate a unique sequence number for deterministic ordering *)
           let seq = !fn_id in
@@ -1036,15 +1468,15 @@ let run_completion_stream
               ~call_id
               ~id:(Some item_id)
           in
-          add_item fn_call_item;
+          ignore (add_item fn_call_item : History_entry.t);
           (* 3.  Spawn the actual tool invocation in its own fiber           *)
-          let history_so_far =
+          let history_entries_so_far =
             if history_compaction
             then
               (* If history compaction is enabled, we only keep the latest
                version of each file read by the model. *)
-              Compact_history.collapse_read_file_history
-              @@ List.append inputs (List.rev !new_items)
+              Compact_history.collapse_read_file_entries
+                (List.append inputs (List.rev !new_items))
             else List.append inputs (List.rev !new_items)
           in
           let run_tool () =
@@ -1056,21 +1488,31 @@ let run_completion_stream
               ~tool_tbl
               ~on_fork:
                 (Some
-                   (fun ~call_id ~arguments ->
+                   (fun ~invocation:_ ~call_id ~arguments ->
+                     let invocation_id = Fork.Invocation_id.create () in
+                     let child_allocator =
+                       Fork.allocator
+                         ~parent_namespace:(History_entry.Allocator.namespace allocator)
+                         invocation_id
+                     in
                      Res.Tool_output.Output.Text
-                       (Fork.execute
+                       (Fork.execute_entries
                           ~env
-                          ~history:history_so_far
+                          ~allocator:child_allocator
+                          ~history:history_entries_so_far
+                          ~invocation_id
                           ~call_id
                           ~arguments
                           ~tools
                           ~tool_tbl
                           ~on_event
+                          ~on_sourced_event
                           ~on_fn_out:(fun _ -> ())
                           ?temperature
                           ?max_output_tokens:max_tokens
                           ?reasoning
                           ())))
+              ()
           in
           let promise =
             if not parallel_tool_calls
@@ -1099,6 +1541,9 @@ let run_completion_stream
       let handle_custom_tool_call_done ~item_id ~input =
         match Hashtbl.find func_info item_id with
         | None -> ()
+        | Some (name, call_id)
+          when List.exists !pending_calls ~f:(fun pending ->
+                 String.equal pending.call_id call_id) -> ()
         | Some (name, call_id) ->
           let seq = !fn_id in
           Int.incr fn_id;
@@ -1144,7 +1589,7 @@ let run_completion_stream
               ~call_id
               ~id:(Some item_id)
           in
-          add_item call_item;
+          ignore (add_item call_item : History_entry.t);
           let run_tool () =
             Tool_call.run_tool
               ~kind:Tool_call.Kind.Custom
@@ -1153,6 +1598,7 @@ let run_completion_stream
               ~call_id
               ~tool_tbl
               ~on_fork:None
+              ()
           in
           let promise =
             if not parallel_tool_calls
@@ -1173,6 +1619,8 @@ let run_completion_stream
           run_again := true
       in
       let callback (ev : Res.Response_stream.t) =
+        History_stream_event.observe registry ~scope ~source:None ev
+        |> Option.iter ~f:on_history_event;
         (* For debugging purposes we still log every event. *)
         log_event ev;
         (* Internal book-keeping for writing the streamed response back into the
@@ -1184,11 +1632,11 @@ let run_completion_stream
          | Res.Response_stream.Output_item_done { item; _ } ->
            (match item with
             | Res.Response_stream.Item.Output_message om ->
-              add_item (Output_message om);
+              ignore (add_item (Output_message om) : History_entry.t);
               (* close an open message block, if any *)
               close_message om.id
             | Res.Response_stream.Item.Reasoning r ->
-              add_item (Reasoning r);
+              ignore (add_item (Reasoning r) : History_entry.t);
               (* close an open reasoning block, if any *)
               (match Hashtbl.find reasoning_state r.id with
                | Some _ ->
@@ -1218,46 +1666,82 @@ let run_completion_stream
            (match item with
             | Res.Response_stream.Item.Function_call fc ->
               let idx = Option.value fc.id ~default:fc.call_id in
-              Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id)
+              Hashtbl.set func_info ~key:idx ~data:(fc.name, fc.call_id);
+              Hashtbl.find function_completions idx
+              |> Option.iter ~f:(fun arguments ->
+                handle_function_done ~item_id:idx ~arguments)
             | Res.Response_stream.Item.Custom_function tc ->
               let idx = Option.value tc.id ~default:tc.call_id in
-              Hashtbl.set func_info ~key:idx ~data:(tc.name, tc.call_id)
+              Hashtbl.set func_info ~key:idx ~data:(tc.name, tc.call_id);
+              Hashtbl.find custom_completions idx
+              |> Option.iter ~f:(fun input ->
+                handle_custom_tool_call_done ~item_id:idx ~input)
             | Res.Response_stream.Item.Reasoning r ->
               (* first chunk for this reasoning item *)
               open_reasoning r.id;
               Hashtbl.set reasoning_state ~key:r.id ~data:0
+            | Res.Response_stream.Item.Output_message m ->
+              let phase_input =
+                match m.phase with
+                | None -> ""
+                | Some p -> Printf.sprintf " phase=\"%s\"" p
+              in
+              append_doc
+                (Printf.sprintf
+                   "\n<assistant id=\"%s\"%s>\n\t%s|\n\t\t"
+                   m.id
+                   phase_input
+                   "RAW");
+              Hashtbl.set opened_msgs ~key:m.id ~data:()
             | _ -> ())
          | Res.Response_stream.Function_call_arguments_done { item_id; arguments; _ } ->
+           (match Hashtbl.find function_completions item_id with
+            | Some existing when not (String.equal existing arguments) ->
+              failwithf "Conflicting completion for streamed tool item %s" item_id ()
+            | Some _ -> ()
+            | None -> Hashtbl.set function_completions ~key:item_id ~data:arguments);
            handle_function_done ~item_id ~arguments
          | Res.Response_stream.Custom_tool_call_input_done { item_id; input; _ } ->
+           (match Hashtbl.find custom_completions item_id with
+            | Some existing when not (String.equal existing input) ->
+              failwithf "Conflicting completion for streamed tool item %s" item_id ()
+            | Some _ -> ()
+            | None -> Hashtbl.set custom_completions ~key:item_id ~data:input);
            handle_custom_tool_call_done ~item_id ~input
          | _ -> ());
         on_event ev
       in
-      let hist =
+      let request_entries =
         (* If [history_compaction] is enabled, we compact the history so that
          multiple calls to the same file are replaced with a single call
          that points to the latest file content. *)
         if history_compaction
-        then Compact_history.collapse_read_file_history inputs
+        then Compact_history.collapse_read_file_entries inputs
         else inputs
       in
+      let hist = History_entry.items request_entries in
       (* ────────────────── 3.  fire request in stream mode ──────────────── *)
-      let stream =
-        Res.post_response
-          Res.Stream
-          ?max_output_tokens:max_tokens
-          ?temperature
-          ~tools
-          ~parallel_tool_calls
-          ?reasoning
-          ~model
-          ~dir:datadir
-          net
-          ~sw
-          ~inputs:hist
+      let events =
+        In_memory_stream.For_testing.retry_stream_start
+          ~sleep:(Eio.Time.sleep (Eio.Stdenv.clock env))
+          (fun () ->
+             match post_stream with
+             | Some post -> post ~sw ~inputs:hist
+             | None ->
+               Res.post_response
+                 Res.Stream
+                 ?max_output_tokens:max_tokens
+                 ?temperature
+                 ~tools
+                 ~parallel_tool_calls
+                 ?reasoning
+                 ~model
+                 ~dir:datadir
+                 net
+                 ~sw
+                 ~inputs:hist)
       in
-      Seq.iter callback stream;
+      Seq.iter callback events;
       (* ----------------------------------------------------------------- *)
       (*  Collect results from any pending tool invocations.  We enforce  *)
       (*  deterministic ordering by iterating over them sorted by [seq].   *)
@@ -1326,19 +1810,22 @@ let run_completion_stream
         let out_item : Res.Item.t =
           Tool_call.output_item ~kind ~call_id ~output:(Output.Text result)
         in
-        add_item out_item);
+        ignore
+          (History_stream_event.Registry.tool_output registry ~scope ~source:None ~call_id
+           : History_entry.Id.t);
+        let entry = add_item out_item in
+        on_history_tool_out entry);
       (* make sure any dangling assistant block is closed *)
       Hashtbl.iter_keys opened_msgs ~f:(fun id -> close_message id);
       (* 4 • If no function call just happened, append empty user message.   *)
       (* 4 • If a function call just happened, recurse for the next turn.   *)
       if !run_again
       then turn (List.append inputs (List.rev !new_items))
-      else append_doc "\n<user>\n\n</user>"
+      else (
+        append_doc "\n<user>\n\n</user>";
+        List.append inputs (List.rev !new_items))
     in
-    turn inputs);
+    let history = turn inputs in
+    on_final_history history);
   Cache.save ~file:cache_file cache
-;;
-
-let run_completion_stream_in_memory_v1 =
-  In_memory_stream.run_completion_stream_in_memory_v1
 ;;

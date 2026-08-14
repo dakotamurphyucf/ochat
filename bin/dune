@@ -25,6 +25,7 @@
   ochat_function
   chat_completion
   chat_response
+  ochat.shell_runtime
   apply_patch
   bm25
   nottui)
@@ -178,3 +179,10 @@
  (libraries core core_unix.command_unix ochat.chat_tui)
  (preprocess
   (pps ppx_jane)))
+
+(executable
+ (package ochat)
+ (name ochat_shell_resource_runner)
+ (public_name ochat-shell-resource-runner)
+ (modules ochat_shell_resource_runner)
+ (libraries core core_unix))

@@ -12,10 +12,18 @@
     The variant is intentionally {e closed}; future extensions must be
     handled explicitly and cannot be pattern-matched against implicitly. *)
 
+type chat_destination =
+  | Earlier_conversation
+  | Search_result of Projected_message.Id.t
+  | Latest_conversation
+
 type reaction =
   | Redraw
   (** Visible state changed – redraw the Notty viewport before waiting for
       the next event. *)
+  | Refresh_messages
+  (** Canonical history changed – rebuild the effective Chat projection
+      before redrawing. *)
   | Submit_input
   (** User finalised the prompt (Meta + Enter) – assemble an OpenAI request
       from the input buffer and append a {i pending} entry to the
@@ -34,6 +42,21 @@ type reaction =
   | Quit
   (** Immediate termination request (Ctrl-C / `q`).  The caller should shut
       down resources and exit the main loop. *)
+  | Chat_scrolled of bool
+  (** A conversation-history scroll was consumed. The payload is [true] when
+      the visible viewport moved and therefore requires a redraw. *)
+  | Prepare_chat_destination of chat_destination
+  (** A nonlocal history destination requires asynchronous exact corridor
+      preparation before it can be shown. *)
+  | Shell_approval_response of
+      string * Shell_runtime.Approval_broker.ui_response
+  (** Resolve the active shell approval modal without touching the composer. *)
+  | Shell_grant_revoke_requested of int * string
+  (** Confirm revocation of the selected persisted grant. *)
+  | Shell_management_refresh_requested of int
+  (** Open Shell Security and refresh its durable management data. *)
+  | Moderator_input_response of string
+  (** Resolve the active moderator interaction without touching the composer. *)
   | Unhandled
   (** The controller chose not to handle the event – propagate it to the
       next layer (e.g. a global key-binding handler). *)

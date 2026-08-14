@@ -1,5 +1,4 @@
 open! Core
-
 module App_runtime = Chat_tui.App_runtime
 module Runtime_semantics = Chat_response.Runtime_semantics
 
@@ -13,16 +12,16 @@ let%expect_test "default policy exposes the Phase 2 budget defaults" =
   let budget = Runtime_semantics.default_policy.budget in
   print_s
     [%sexp
-      ( [ "max_self_triggered_turns", Int.to_string budget.max_self_triggered_turns
-        ; "max_followup_turns", Int.to_string budget.max_followup_turns
-        ; "max_internal_event_drain", Int.to_string budget.max_internal_event_drain
-        ; ( "turn_rate_limit"
-          , (match budget.turn_rate_limit with
-             | None -> "none"
-             | Some rate_limit ->
-               Printf.sprintf "%d/%d" rate_limit.max_turns rate_limit.window_ms) )
-        ]
-        : (string * string) list )];
+      ([ "max_self_triggered_turns", Int.to_string budget.max_self_triggered_turns
+       ; "max_followup_turns", Int.to_string budget.max_followup_turns
+       ; "max_internal_event_drain", Int.to_string budget.max_internal_event_drain
+       ; ( "turn_rate_limit"
+         , match budget.turn_rate_limit with
+           | None -> "none"
+           | Some rate_limit ->
+             Printf.sprintf "%d/%d" rate_limit.max_turns rate_limit.window_ms )
+       ]
+       : (string * string) list)];
   [%expect
     {|
     ((max_self_triggered_turns 10) (max_followup_turns 1)
@@ -32,8 +31,7 @@ let%expect_test "default policy exposes the Phase 2 budget defaults" =
     [%sexp
       (List.map budget.pause_conditions ~f:(function
          | Runtime_semantics.Pause_followup_turns -> "pause_followup_turns"
-         | Runtime_semantics.Pause_internal_event_drains ->
-           "pause_internal_event_drains")
+         | Runtime_semantics.Pause_internal_event_drains -> "pause_internal_event_drains")
        : string list)];
   [%expect {| () |}]
 ;;
@@ -121,8 +119,6 @@ let%expect_test "pause-internal-event-drains is checked independently" =
         }
     }
   in
-  print_s
-    [%sexp
-      (App_runtime.should_pause_internal_event_drains ~policy : bool)];
+  print_s [%sexp (App_runtime.should_pause_internal_event_drains ~policy : bool)];
   [%expect {| true |}]
 ;;

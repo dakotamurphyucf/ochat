@@ -131,46 +131,45 @@ When to use:
 
 ---
 
-## Shell-command wrappers – the 30-second custom tool
+## ChatMD shell runtimes and tools
 
-Shell wrappers expose a specific command as a function-callable tool:
+Shell tools bind a model-visible schema to a named, manifest-authorized
+runtime. The runtime controls resolution, effects, capabilities, sandboxing,
+allow/ask/deny policy, approvals, hooks, limits, secrets, and audit.
+
+For a narrow operation, use a fixed tool:
 
 ```xml
-<tool name="git_ls_files"
-      command="git ls-files --exclude=docs/"
-      description="Show files tracked by git except docs/"/>
+<shell_access id="readonly" extends="builtin:workspace-readonly@1"/>
+<tool name="git_status" type="shell" mode="fixed" runtime="readonly">
+  <command program="git"><arg value="status"/><arg value="--short"/></command>
+  <arguments mode="none"/>
+</tool>
 ```
 
-Security note:
+For general agent commands, prefer structured argv:
 
-- A `<tool command="…"/>` wrapper runs the specified binary with the full privileges of the current user.
-- Only mount shell wrappers in trusted environments, or inside a container/sandbox.
+```xml
+<shell_access id="development" extends="builtin:workspace-development@1"/>
+<tool name="shell" type="shell" mode="structured" runtime="development"
+      rationale="required" result="structured"/>
+```
 
-Code-accurate behavior:
+Fixed and structured model strings remain literal argv; semicolons, quotes,
+substitutions, redirection characters, and spaces do not gain shell-control
+meaning. Additional explicit modes are:
 
-1. The tool input schema is always:
-   ```json
-   { "arguments": ["..."] }
-   ```
-2. The declared command is executed as:
-   ```sh
-   <command> <arguments...>
-   ```
-3. stdout and stderr are captured (combined) and returned as text.
+- `chain`: pipelines and `;`, `&&`, `||` through a conservative grammar;
+- `raw`: a model-supplied script for one fixed shell executable;
+- `script`: a fixed hashed script file plus literal arguments.
 
-Operational limits (important in practice):
+Unsupported structured/chain syntax is an error, never an implicit raw shell.
+Legacy `<tool command="...">` declarations are desugared into fixed shell
+tools and use the same centralized runtime path.
 
-- Hard timeout: **60 seconds**
-- Output is truncated to a bounded size (currently ~10k characters) to avoid flooding context
-- Command parsing is intentionally simple:
-  - `%20` in `command="..."` is decoded to a space
-  - the command string is split on whitespace (do not rely on shell quoting/escaping)
-
-Design guidelines:
-
-- Prefer idempotent/read-only wrappers when possible.
-- Pin non-negotiable flags directly into `command="…"`.
-- Use clear, verb-based tool names (`git_pull`, `docker_ps`, `rg_search`) so the model can choose correctly.
+See [ChatMD shell tools](chatmd-shell-tools.md), the
+[security guide](../guide/chatmd-shell-security.md), and
+[worked examples](../guide/chatmd-shell-examples.md).
 
 ---
 
@@ -239,4 +238,3 @@ There are multiple extension routes depending on how you want to ship capabiliti
 4. **Embedding ochat as a library**: register arbitrary `Ochat_function.t` values directly in your host program.
 
 Important note: a plain ChatMD declaration `<tool name="…"/>` (without `command=`, `agent=`, or `mcp_server=`) is treated as a **built-in**. Unknown built-in names are rejected unless you add them to ochat’s built-in dispatcher or expose them via MCP.
-

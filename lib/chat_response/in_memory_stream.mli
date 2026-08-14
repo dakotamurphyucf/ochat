@@ -10,8 +10,20 @@ open! Core
     documented in [docs-src/chatml-budget-policy.md]. *)
 
 module Safe_point_input : sig
-  type t = { consume : unit -> string option }
+  type t =
+    { consume_entries : unit -> History_entry.t list
+    ; consume_compatibility_text : unit -> string option
+    }
 end
+
+type post_stream =
+  sw:Eio.Switch.t
+  -> inputs:Openai.Responses.Item.t list
+  -> Openai.Responses.Response_stream.t Seq.t
+
+(** Raised when an OpenAI stream emits no next event before its idle
+    deadline. Each received event resets the deadline. *)
+exception Openai_stream_idle_timeout of float
 
 type moderator =
   { manager : Moderator_manager.t
@@ -22,7 +34,10 @@ type moderator =
 
 type pending_ui_request = Moderator_manager.pending_ui_request =
   | Ask_text of { prompt : string }
-  | Ask_choice of { prompt : string; choices : string array }
+  | Ask_choice of
+      { prompt : string
+      ; choices : string array
+      }
 
 type moderated_tool_call =
   { call_item : Openai.Responses.Item.t
@@ -48,14 +63,16 @@ val resume_ui_request
     {- runs the moderator [turn_start] hook;}
     {- drains queued moderator internal events at the turn-start boundary;}
     {- computes effective request history through the moderator overlay; and}
-    {- appends any transient safe-point input to the request only after the
+    {- appends any compatibility-only safe-point text to the request after the
        turn-start boundary has decided the turn may proceed.}}
 
-    Deferred safe-point input is request-only: it is not appended to canonical
-    history items.
+    [consume_entries] is used by the entry-native streaming loop after tool
+    outputs complete; those entries are canonical and are sent on the next
+    provider turn. [consume_compatibility_text] remains a request-only adapter
+    for embedders using this raw helper.
 
     Without a moderator, [history] is forwarded unchanged unless
-    [?safe_point_input] yields extra request text. *)
+    [?safe_point_input] yields compatibility request text. *)
 val prepare_turn_inputs
   :  moderator:moderator option
   -> ?safe_point_input:Safe_point_input.t
@@ -109,13 +126,13 @@ val handle_tool_result
   -> item:Openai.Responses.Item.t
   -> (Moderation.Runtime_request.t list, string) result
 
-(** [run_completion_stream_in_memory_v1 ~env ~history ~tools ()] streams a
-    ChatMarkdown conversation **held entirely in memory**.
+(** [run_completion_stream_in_memory_entries ~env ~allocator ~history
+    ~tools ()] streams a canonical conversation held entirely in memory.
 
     Compared to {!run_completion_stream} this helper:
 
-    • Accepts an explicit [history] (list of {!Openai.Responses.Item.t})
-      instead of reading a `.chatmd` file from disk.
+    • Accepts an explicit identity-bearing [history] instead of reading a
+      `.chatmd` file from disk.
     • Returns the *complete* history after all assistant turns and tool
       calls have been resolved.
     • Never touches the filesystem except for the persistent cache under
@@ -126,12 +143,18 @@ val handle_tool_result
 
     • [?on_event] – invoked for each streaming event received from the
       OpenAI API (token deltas, item completions, …). Defaults to a no-op.
+      Ordinary callback exceptions are suppressed.
+    • [?on_sourced_event] – receives the same transient events with source
+      attribution. It is isolated independently from [?on_event], and ordinary
+      callback exceptions are suppressed.
     • [?on_fn_out] – executed after each tool call completes, allowing the
-      caller to react to side-effects without waiting for the final
-      assistant answer.
+      caller to react to side-effects without waiting for the final assistant
+      answer. This and [?on_tool_out] are canonical publication callbacks;
+      their exceptions propagate.
 
     @param env      Standard Eio runtime environment.
-    @param history  Initial conversation state.
+    @param allocator Sole allocator for newly accepted canonical occurrences.
+    @param history  Initial canonical conversation state.
     @param tools    Compile-time list of tool definitions visible to the
                     model.  Pass [[]] for none.
     @param tool_tbl Optional lookup table generated from [tools].  The
@@ -162,15 +185,20 @@ val handle_tool_result
 
     @raise Any exception bubbled-up by the OpenAI client or user-supplied
            tool functions.  The function does **not** swallow errors. *)
-val run_completion_stream_in_memory_v1
+val run_completion_stream_in_memory_entries
   :  env:Eio_unix.Stdenv.base
   -> ?datadir:Eio.Fs.dir_ty Eio.Path.t
-  -> history:Openai.Responses.Item.t list
+  -> allocator:History_entry.Allocator.t
+  -> history:History_entry.t list
   -> ?on_event:(Openai.Responses.Response_stream.t -> unit)
+  -> ?on_sourced_event:(Sourced_response_event.t -> unit)
+  -> ?on_history_event:(History_stream_event.t -> unit)
   -> ?on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
   -> ?on_tool_out:(Openai.Responses.Item.t -> unit)
+  -> ?on_history_tool_out:(History_entry.t -> unit)
+  -> ?on_tool_execution:(Tool_execution_event.t -> unit)
   -> tools:Openai.Responses.Request.Tool.t list option
-  -> ?tool_tbl:(string, string -> Openai.Responses.Tool_output.Output.t) Hashtbl.t
+  -> ?tool_tbl:(string, Ochat_function.runner) Hashtbl.t
   -> ?temperature:float
   -> ?max_output_tokens:int
   -> ?reasoning:Openai.Responses.Request.Reasoning.t
@@ -183,5 +211,42 @@ val run_completion_stream_in_memory_v1
   -> ?model:Openai.Responses.Request.model
   -> ?prompt_cache_key:string
   -> ?prompt_cache_retention:string
+  -> ?post_stream:post_stream
+  -> ?source:string
+  -> ?parent_call_id:string
   -> unit
-  -> Openai.Responses.Item.t list
+  -> History_entry.t list
+(** [run_completion_stream_in_memory_entries ~allocator ~history ...] uses
+    [allocator] as the sole source of canonical IDs. Each identity-bearing
+    stream callback is emitted only after its ID has been reserved, and the
+    same ID appears in the returned history. Tool-call and tool-output entries
+    remain distinct despite sharing a provider [call_id]. *)
+
+module For_testing : sig
+  (** [retry_stream_start ~sleep create_stream] retries parsing failures raised
+      before the first event is available. Once an event is published, later
+      failures propagate rather than replaying visible output. *)
+  val retry_stream_start : sleep:(float -> unit) -> (unit -> 'a Seq.t) -> 'a Seq.t
+
+  (** [with_stream_idle_timeout ~clock ~seconds events] times out each wait for
+      the next event independently. *)
+  val with_stream_idle_timeout
+    :  clock:_ Eio.Time.clock
+    -> seconds:float
+    -> 'a Seq.t
+    -> 'a Seq.t
+
+  (** [notify_each observers value] invokes every observer despite ordinary
+      observer failures. Eio cancellation propagates. *)
+  val notify_each : ('a -> unit) list -> 'a -> unit
+
+  (** [emit_tool_output] exposes canonical callback behavior for regression
+      tests. Callback exceptions propagate. *)
+  val emit_tool_output
+    :  on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
+    -> on_tool_out:(Openai.Responses.Item.t -> unit)
+    -> kind:[ `Function | `Custom ]
+    -> call_id:string
+    -> result:Openai.Responses.Tool_output.Output.t
+    -> Openai.Responses.Item.t
+end

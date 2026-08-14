@@ -61,14 +61,56 @@ open Chatmd_parser
 (* [pending_token] and serve it on the very next invocation.                *)
 (*--------------------------------------------------------------------------*)
 
-let pending_token : Chatmd_parser.token option ref = ref None
+type state =
+  { mutable pending_token : Chatmd_parser.token option
+  ; mutable depth : int
+  ; mutable shell_scope_depths : int list
+  ; scratch : Buffer.t
+  }
+
+let create_state () =
+  { pending_token = None
+  ; depth = 0
+  ; shell_scope_depths = []
+  ; scratch = Buffer.create 256
+  }
 
 (*--------------------------------------------------------------------------*)
 (* Helpers                                                                  *)
 (*--------------------------------------------------------------------------*)
 
-let is_recognised (name : string) : bool =
-  Option.is_some (tag_of_string_opt name)
+let is_shell_scope state = not (List.is_empty state.shell_scope_depths)
+
+let tag_of_string_in_state state name =
+  match tag_of_string_opt name with
+  | Some (Shell_element _) when not (is_shell_scope state) -> None
+  | tag -> tag
+
+let is_recognised state name = Option.is_some (tag_of_string_in_state state name)
+
+let tag_of_string_exn state name =
+  Option.value_exn (tag_of_string_in_state state name)
+
+let is_shell_tool attrs =
+  List.Assoc.find attrs "type" ~equal:String.equal
+  |> Option.value_map ~default:false ~f:(Option.value_map ~default:false ~f:(String.equal "shell"))
+
+let is_shell_root tag attrs =
+  match tag with
+  | Shell_access -> true
+  | Tool -> is_shell_tool attrs
+  | _ -> false
+
+let enter_element state tag attrs =
+  state.depth <- state.depth + 1;
+  if is_shell_root tag attrs
+  then state.shell_scope_depths <- state.depth :: state.shell_scope_depths
+
+let leave_element state =
+  (match state.shell_scope_depths with
+   | depth :: rest when Int.equal depth state.depth -> state.shell_scope_depths <- rest
+   | _ -> ());
+  state.depth <- Int.max 0 (state.depth - 1)
 
 (* Parse attribute list contained in the raw string *)
 (* ------------------------------------------------------------------ *)
@@ -232,10 +274,6 @@ let dissect (raw : string) : string * attribute list * bool =
   | None -> body, [] , self_closing
 
 (* The buffer into which we accumulate the raw text of an unknown tag *)
-let scratch_buf = Buffer.create 256
-
-
-
 (*--------------------------------------------------------------------------*)
 (* Lexer rules                                                              *)
 (*--------------------------------------------------------------------------*)
@@ -243,7 +281,7 @@ let scratch_buf = Buffer.create 256
 
 let ws = [' ' '\t' '\r' '\n']+
 
-rule token_inner = parse
+rule token_inner state = parse
   (*--------------------------------------------------------------------*)
   (* Raw text block – everything between RAW| and |RAW is returned verbatim as
      a single TEXT token, with *no* lexical analysis of the enclosed
@@ -262,8 +300,8 @@ rule token_inner = parse
   (* Opening RAW delimiter – optional leading horizontal or vertical
      whitespace is permitted, but we also accept the delimiter directly
      after arbitrary text. *)
-  | [' ' '\t' '\r' '\n']* "RAW|" { Buffer.clear scratch_buf; raw_block lexbuf }
-  | "RAW|"                            { Buffer.clear scratch_buf; raw_block lexbuf }
+  | [' ' '\t' '\r' '\n']* "RAW|" { Buffer.clear state.scratch; raw_block state lexbuf }
+  | "RAW|"                            { Buffer.clear state.scratch; raw_block state lexbuf }
 
   (* RAW opener preceded by in-line text – we split the token stream into two   *)
   (* events: the leading text as a TEXT token (returned now) and the token      *)
@@ -275,21 +313,21 @@ rule token_inner = parse
          trailing "RAW|" forms the leading TEXT token. *)
       let txt_len = String.length raw_prefix_delim - 4 (* len "RAW|" *) in
       let prefix = String.sub raw_prefix_delim ~pos:0 ~len:txt_len in
-      Buffer.clear scratch_buf;
-      let next_tok = raw_block lexbuf in
-      pending_token := Some next_tok;
+      Buffer.clear state.scratch;
+      let next_tok = raw_block state lexbuf in
+      state.pending_token <- Some next_tok;
       TEXT prefix
     }
 
  
 
-  | "<!--"                     { comment lexbuf; token_inner lexbuf }
+  | "<!--"                     { comment lexbuf; token_inner state lexbuf }
 
   (* self‐closing recognised tag, e.g. <img .../>                     *)
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* "/>" as raw_tag {
       let name, attrs, _ = dissect raw_tag in
-      if is_recognised name then
-        let tag = tag_of_string name in
+      if is_recognised state name then
+        let tag = tag_of_string_exn state name in
         SELF (tag, attrs)
       else
         TEXT raw_tag
@@ -298,8 +336,9 @@ rule token_inner = parse
   (* normal start tag                                                 *)
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* '>' as raw_tag {
       let name, attrs, _ = dissect raw_tag in
-      if is_recognised name then
-        let tag = tag_of_string name in
+      if is_recognised state name then
+        let tag = tag_of_string_exn state name in
+        enter_element state tag attrs;
         START (tag, attrs)
       else
         (* Unknown tag – emit the *opening* tag verbatim as TEXT so that the
@@ -321,8 +360,10 @@ rule token_inner = parse
   | "</" ['a'-'z''A'-'Z''_']+ [^'>' ]* '>' as raw_tag {
       let len = String.length raw_tag in
       let name = String.sub raw_tag ~pos:2 ~len:(len - 3) in
-      if is_recognised name then
-        END (tag_of_string name)
+      if is_recognised state name then
+        let tag = tag_of_string_exn state name in
+        leave_element state;
+        END tag
       else
         TEXT raw_tag
     }
@@ -357,49 +398,49 @@ rule token_inner = parse
 (* Helper rule – skip an entire unknown element and return a single TEXT   *)
 (*--------------------------------------------------------------------------*)
 
-and skip_unknown name depth = parse
+and skip_unknown state name depth = parse
   | "</" ['a'-'z''A'-'Z''_']+ [^'>' ]* '>' as raw_tag {
-      Buffer.add_string scratch_buf raw_tag;
+      Buffer.add_string state.scratch raw_tag;
       let len = String.length raw_tag in
       let closing_name = String.sub raw_tag ~pos:2 ~len:(len - 3) in
       let depth = if String.equal closing_name name then depth - 1 else depth in
       if depth = 0 then (
-        let txt = Buffer.contents scratch_buf in
-        Buffer.clear scratch_buf;
+        let txt = Buffer.contents state.scratch in
+        Buffer.clear state.scratch;
         TEXT txt
-      ) else skip_unknown name depth lexbuf
+      ) else skip_unknown state name depth lexbuf
     }
 
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* "/>" as raw_tag {
-      Buffer.add_string scratch_buf raw_tag;
-      skip_unknown name depth lexbuf
+      Buffer.add_string state.scratch raw_tag;
+      skip_unknown state name depth lexbuf
     }
 
   | '<' ['a'-'z''A'-'Z''_'] [^'>' ]* '>' as raw_tag {
-      Buffer.add_string scratch_buf raw_tag;
+      Buffer.add_string state.scratch raw_tag;
       let open_name, _, self = dissect raw_tag in
       let depth = if (not self) && String.equal open_name name then depth + 1 else depth in
-      skip_unknown name depth lexbuf
+      skip_unknown state name depth lexbuf
     }
 
-  | '<' { Buffer.add_string scratch_buf "<"; skip_unknown name depth lexbuf }
+  | '<' { Buffer.add_string state.scratch "<"; skip_unknown state name depth lexbuf }
 
-  | [^ '<' ]+ as chunk { Buffer.add_string scratch_buf chunk; skip_unknown name depth lexbuf }
+  | [^ '<' ]+ as chunk { Buffer.add_string state.scratch chunk; skip_unknown state name depth lexbuf }
 
   | eof { failwithf "Unterminated unknown tag <%s>" name () }
 
-and raw_block = parse
+and raw_block state = parse
   (* Terminating delimiter *)
   | "|RAW" {
-      let txt = Buffer.contents scratch_buf in
-      Buffer.clear scratch_buf;
+      let txt = Buffer.contents state.scratch in
+      Buffer.clear state.scratch;
       TEXT txt
     }
 
   (* Any character – accumulate and continue *)
   | _ as c {
-      Buffer.add_char scratch_buf c;
-      raw_block lexbuf
+      Buffer.add_char state.scratch c;
+      raw_block state lexbuf
     }
 
   | eof { failwith "Unterminated raw block RAW| ... |RAW" }
@@ -427,10 +468,12 @@ and comment = parse
     tokens in succession can do so transparently.  Apart from this tiny
     buffer, the function is stateless and re-entrant. *)
 {
-let token lexbuf =
-  match !pending_token with
+let create () =
+  let state = create_state () in
+  fun lexbuf ->
+  match state.pending_token with
   | Some tok ->
-      pending_token := None;
+      state.pending_token <- None;
       tok
-  | None -> token_inner lexbuf
+  | None -> token_inner state lexbuf
 }

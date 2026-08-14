@@ -59,16 +59,18 @@ context to pick up the conversation where it left off.
 
 ## Public Interface
 
-### `compact_history`
+### `compact_entries`
 
 ```ocaml
-val compact_history :
+val compact_entries :
+  allocator:History_entry.Allocator.t ->
   env:Eio_unix.Stdenv.base option ->
-  history:Openai.Responses.Item.t list ->
-  Openai.Responses.Item.t list
+  history:History_entry.t list ->
+  (History_entry.t list, exn) result
 ```
 
-Compacts `history` as described above.
+Transactionally compacts canonical history. Retained entries preserve their
+IDs and one new reminder ID is allocated only after summarization succeeds.
 
 **Parameters**
 
@@ -76,12 +78,11 @@ Compacts `history` as described above.
   Provide this when you want the summariser to call the OpenAI API.  Pass
   `None` in offline contexts; the pipeline switches to deterministic
   stubs.
-* `history` – full conversation transcript to compact.
+* `allocator` – live session allocator for the new reminder occurrence.
+* `history` – canonical conversation transcript to compact.
 
-**Returns** a list of `Openai.Responses.Item.t` that is either one or two
-elements long and always starts with the original first item.
-
-**Never raises.**
+**Returns** `Ok compacted` on success or `Error exn` without modifying the
+original history. Cancellation is re-raised as `Eio.Cancel.Cancelled`.
 
 ---
 
@@ -92,10 +93,10 @@ elements long and always starts with the original first item.
 ```ocaml
 open Context_compaction
 
-let send_request ~env history fresh_user_msg =
-  let compacted = Compactor.compact_history ~env:(Some env) ~history in
-  let request_history = compacted @ [ fresh_user_msg ] in
-  Openai.Client.chat_completion ~history:request_history
+let send_request ~env ~allocator history fresh_user_entry =
+  match Compactor.compact_entries ~allocator ~env:(Some env) ~history with
+  | Ok compacted -> send_to_llm (compacted @ [ fresh_user_entry ])
+  | Error error -> report_error error
 ```
 
 ### Offline unit tests
@@ -103,8 +104,12 @@ let send_request ~env history fresh_user_msg =
 ```ocaml
 let%expect_test "compaction keeps summary under limit" =
   let history = (* synthetic transcript … *) in
-  let compacted = Compactor.compact_history ~env:None ~history in
-  assert (List.length compacted <= 2);
+  let compacted =
+    Compactor.compact_entries ~allocator ~env:None ~history
+    |> Result.ok
+    |> Option.value_exn
+  in
+  assert (List.length compacted >= 1);
   ();;
 ```
 

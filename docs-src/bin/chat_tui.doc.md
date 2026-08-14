@@ -167,6 +167,27 @@ This is exactly what the `chat_tui` binary does under the hood.
 
 ## 6 Limitations & notes
 
+## Shell runtime authorization and management
+
+`--authorize-shell-manifest` authorizes exactly the canonical shell manifest
+compiled from the interactive prompt for the current process. Without an
+authorizer, shell manifests fail closed before tools are exposed. The flag does
+not create global path trust and cannot be used with selector commands that do
+not enter the interactive UI.
+
+Inside the TUI, `:shell` opens the Shell Security page. It presents effective
+runtime posture, persisted command grants, read-only audit replay, and
+interrupted requests. Shell approval is a local modal with once, exact-session,
+optional prefix-session, and optional durable-exact scopes; manifest and host
+policy limit the available choices. Escape cancels/denies the request without
+quitting.
+
+Session snapshots persist typed shell manifest grants, command grants, ChatML
+extension snapshots, last audit sequence, and interrupted metadata. Reset
+clears shell trust by default, and in-flight processes are never resumed.
+
+See [the full TUI guide](../guide/chat_tui.md#shell-approvals-and-shell-security).
+
 * **Single window** – each execution manages one conversation.  Run
   multiple instances for parallel chats.
 * **Unix-only** – relies on `Eio_main` and `Notty`, therefore does not

@@ -59,6 +59,17 @@ let find_grammar_by_lang_tag (t : registry) (lang : string) : TmLanguage.grammar
   let candidates : string list =
     match lower with
     | "ocaml" | "ml" | "mli" -> [ "OCaml"; "source.ocaml"; "ml"; "mli" ]
+    | "python" | "py" | "pyw" | "pyi" ->
+      [ "Python"; "source.python"; "python"; "py"; "pyw"; "pyi" ]
+    | "rust" | "rs" -> [ "Rust"; "source.rust"; "rust"; "rs" ]
+    | "javascript" | "js" | "mjs" | "cjs" ->
+      [ "source.js"; "JavaScript (with React support)"; "javascript"; "js"; "mjs"; "cjs" ]
+    | "jsx" | "javascriptreact" ->
+      [ "source.js.jsx"; "JavaScript (with React support)"; "jsx"; "javascriptreact" ]
+    | "typescript" | "ts" | "mts" | "cts" ->
+      [ "source.ts"; "TypeScript"; "typescript"; "ts"; "mts"; "cts" ]
+    | "tsx" | "typescriptreact" ->
+      [ "source.tsx"; "TypeScriptReact"; "tsx"; "typescriptreact" ]
     | "dune" | "dune-project" | "dune-workspace" ->
       [ "Dune"; "source.dune"; "dune"; "dune-project"; "dune-workspace" ]
     | "opam" -> [ "OPAM"; "source.opam"; "opam" ]
@@ -73,6 +84,7 @@ let find_grammar_by_lang_tag (t : registry) (lang : string) : TmLanguage.grammar
       ; "md"
       ; "gfm"
       ]
+    | "chatmd" | "xml" -> [ "html"; "source.html" ]
     | other -> [ other; "source." ^ other ]
   in
   let rec try_find = function

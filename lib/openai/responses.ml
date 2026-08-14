@@ -197,6 +197,7 @@ module Output_message = struct
     ; id : string
     ; content : content list
     ; status : string
+    ; phase : string option [@jsonaf.option]
     ; _type : string [@key "type"]
     }
   [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
@@ -408,7 +409,7 @@ module Reasoning = struct
     ; id : string
     ; status : string option [@jsonaf.option]
     }
-  [@@deriving jsonaf, sexp, bin_io]
+  [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
 end
 
 module Text = struct
@@ -992,8 +993,8 @@ end
 module Incomplete_details = struct
   type t =
     { reason : string option
-    ; model_output_start : int option
-    ; tokens : int option
+    ; model_output_start : int option [@jsonaf.option]
+    ; tokens : int option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
 end
@@ -1618,6 +1619,30 @@ type _ response_type =
 
 exception Response_stream_parsing_error of Jsonaf.t * exn
 exception Response_parsing_error of Jsonaf.t * exn
+exception Response_stream_api_error of Jsonaf.t
+exception Response_stream_terminal_error of Response_stream.t
+exception Response_stream_terminated_without_completion
+
+let validate_response_stream stream =
+  let rec loop completed stream () =
+    match Seq.uncons stream with
+    | None ->
+      if completed then Seq.Nil else raise Response_stream_terminated_without_completion
+    | Some (event, rest) ->
+      (match event with
+       | Response_stream.Response_completed _ ->
+         if completed
+         then raise (Response_stream_terminal_error event)
+         else Seq.Cons (event, loop true rest)
+       | Response_incomplete _ | Response_failed _ | Error _ ->
+         raise (Response_stream_terminal_error event)
+       | _ ->
+         if completed
+         then raise (Response_stream_terminal_error event)
+         else Seq.Cons (event, loop false rest))
+  in
+  loop false stream
+;;
 
 let post_response
   : type a.
@@ -1711,19 +1736,23 @@ let post_response
     in
     (match json_result with
      | Ok _ ->
+       Io.log
+         ~dir
+         ~file:"raw-openai-response.txt"
+         (Printf.sprintf "Error parsing JSON from line: %s" data);
        raise (Response_parsing_error (Jsonaf.of_string data, Failure "Error in response"))
      | Error _ -> (Response.t_of_jsonaf @@ Jsonaf.of_string @@ data : a))
   | Stream ->
     let reader = Eio.Buf_read.of_flow reader ~max_size:Int.max_value in
     let lines = Buf_read.lines reader in
-    let stream = Eio.Stream.create Int.max_value in
+    let stream = Eio.Stream.create 256 in
     let cb input = Eio.Stream.add stream input in
     let rec loop seq =
       match Seq.uncons seq with
       | None -> cb `Done
       | Some (line, seq) ->
         (* Log the raw response line to a file for debugging purposes *)
-        Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n");
+        (* Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n"); *)
         let json_result =
           Jsonaf.parse line
           |> Result.bind ~f:(fun json ->
@@ -1735,7 +1764,8 @@ let post_response
          | Ok _ ->
            print_endline "Received error:";
            print_endline line;
-           failwith line
+           Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n");
+           raise (Response_stream_api_error (Jsonaf.of_string line))
          | Error _ ->
            let line =
              String.concat
@@ -1764,6 +1794,13 @@ let post_response
                           "Error parsing JSON from line: %s"
                           (Core.Exn.to_string ex));
                      print_endline line;
+                     (* Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n"); *)
+                     (* Io.log
+                       ~dir
+                       ~file:"raw-openai-streaming-response.txt"
+                       (Printf.sprintf
+                          "Error parsing JSON from line: %s"
+                          (Core.Exn.to_string ex)); *)
                      raise (Response_stream_parsing_error (json, ex)))
                 | Error _ -> None)
            in
@@ -1779,11 +1816,15 @@ let post_response
               cb (`Val choice);
               loop seq))
     in
-    (Fiber.fork ~sw @@ fun () -> loop lines);
+    (Fiber.fork ~sw
+     @@ fun () ->
+     try loop lines with
+     | ex -> cb (`Error ex));
     let rec loop_stream () =
       match Stream.take stream with
       | `Done -> fun () -> Seq.Nil
+      | `Error ex -> raise ex
       | `Val value -> fun () -> Seq.Cons (value, loop_stream ())
     in
-    loop_stream ()
+    validate_response_stream (loop_stream ())
 ;;

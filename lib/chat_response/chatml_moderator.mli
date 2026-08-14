@@ -52,7 +52,10 @@ type t = Moderator_manager.t
 
 type pending_ui_request = Moderator_manager.pending_ui_request =
   | Ask_text of { prompt : string }
-  | Ask_choice of { prompt : string; choices : string array }
+  | Ask_choice of
+      { prompt : string
+      ; choices : string array
+      }
 
 (** [create ~artifact ~capabilities ?snapshot ()] instantiates a moderator
     session backed by the current runtime, optionally restoring
@@ -61,6 +64,11 @@ type pending_ui_request = Moderator_manager.pending_ui_request =
 val create
   :  artifact:Registry.artifact
   -> capabilities:Moderation.Capabilities.t
+  -> ?on_process_run:
+       (Chatml_host_runtime.session
+        -> command:string
+        -> args:Chatml.Chatml_lang.value
+        -> (string, string) result)
   -> ?snapshot:Session.Moderator_snapshot.t
   -> unit
   -> (t, string) result
@@ -85,10 +93,7 @@ val pending_ui_request : t -> pending_ui_request option
 (** [resume_ui_request t ~response] resumes the suspended moderator execution
     with [response] and returns any newly committed outcomes from that resumed
     execution. *)
-val resume_ui_request
-  :  t
-  -> response:string
-  -> (Moderation.Outcome.t list, string) result
+val resume_ui_request : t -> response:string -> (Moderation.Outcome.t list, string) result
 
 (** [drain_internal_events t ...] replays queued internal events FIFO through
     phase [internal_event], returning one {!Chatml_moderation.Outcome.t} per

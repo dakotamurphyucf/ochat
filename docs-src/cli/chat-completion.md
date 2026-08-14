@@ -112,5 +112,27 @@ the final ChatMD document directly to the console while still giving the
 runtime a valid *file descriptor* to append to — a requirement of the current
 implementation.
 
+## 6 Shell-enabled batch runs
+
+If a prompt declares `<shell_access>`, ochat compiles the canonical manifest,
+applies administrative/trust/signature policy, authorizes its exact digest,
+and instantiates every referenced runtime before publishing tools or sending
+the first model request. Missing authorization fails closed; batch execution
+never silently switches to direct spawn.
+
+Preflight without executing commands:
+
+```console
+$ ochat shell inspect prompts/ci-agent.chatmd -canonical
+```
+
+CI prompts should use pinned noninteractive runtimes with a complete allowlist
+and no UI reviewer. A request reaching `ask` without an available reviewer is
+denied or returned as a configured error.
+
+Shell output enters the transcript only after bounds, UTF-8 validation,
+terminal sanitization, secret redaction, and output interceptors. See
+[`ochat shell` runtime management](shell-runtime-management.md) and the
+[shell security guide](../guide/chatmd-shell-security.md).
 
 

@@ -1,0 +1,31 @@
+(library
+ (name chat_response_converter_test)
+ (modules chat_response_converter_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_response
+  eio
+  eio_main
+  eio.mock
+  eio.unix)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_response_agent_prompt_test)
+ (modules chat_response_agent_prompt_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_response
+  chatmd
+  eio
+  eio_main
+  eio.unix
+  ochat.mcp_prompt_agent
+  ochat.mcp_server_core)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

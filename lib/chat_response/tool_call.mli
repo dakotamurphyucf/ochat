@@ -13,8 +13,15 @@ val run_tool
   -> name:string
   -> payload:string
   -> call_id:string
-  -> tool_tbl:(string, string -> Res.Tool_output.Output.t) Base.Hashtbl.t
-  -> on_fork:(call_id:string -> arguments:string -> Res.Tool_output.Output.t) option
+  -> tool_tbl:(string, Ochat_function.runner) Base.Hashtbl.t
+  -> on_fork:
+       (invocation:Ochat_function.Invocation.t
+        -> call_id:string
+        -> arguments:string
+        -> Res.Tool_output.Output.t)
+         option
+  -> ?on_tool_execution:(Tool_execution_event.t -> unit)
+  -> unit
   -> Openai.Responses.Tool_output.Output.t
 
 val call_item

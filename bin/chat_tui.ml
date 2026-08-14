@@ -25,6 +25,8 @@
                [--export-file FILE]
                [--reset-session NAME [--prompt-file FILE] [--keep-history]]
                [--rebuild-from-prompt NAME]
+               [--textmate-grammar FILE]...
+               [--authorize-shell-manifest]
                [--parallel-tool-calls | --no-parallel-tool-calls]
                [--auto-persist | --no-persist]
     v}
@@ -58,6 +60,10 @@
         finishes, save the full transcript to the given file.
 
     • *Runtime behaviour*:
+      – [--textmate-grammar FILE] · load an additional TextMate grammar before
+                                    starting the TUI; may be repeated.
+      – [--authorize-shell-manifest] · authorize the exact canonical shell
+        manifest compiled from the prompt for this process only.
       – [--parallel-tool-calls] / [--no-parallel-tool-calls] · toggle parallel
         execution of function-callable tools.
       – [--auto-persist] / [--no-persist] · control whether the snapshot is
@@ -136,6 +142,9 @@ let help_output_texts_prompt =
         - override: --config FILE
         - debug: --print-effective-args
       The file is parsed as whitespace-separated arguments (one or more per line).
+    • Custom TextMate grammars are discovered from repeated
+      --textmate-grammar flags, OCHAT_GRAMMAR_DIR, and
+      $XDG_CONFIG_HOME/ochat/grammars (or ~/.config/ochat/grammars).
     • Some flags are mode-specific:
         - --export-file only applies to interactive mode.
         - --prompt-file only applies to --reset-session.
@@ -193,6 +202,8 @@ let help_output_texts_prompt =
                                  --new-session.
     [--session-info NAME]      . Display metadata for session NAME (prompt path,
                                  timestamps, history length, …) and exit.
+    [--textmate-grammar FILE]  . Load an additional TextMate grammar before
+                                 starting the TUI. May be repeated.
     [-file FILE]               . Prompt file (ChatMarkdown/Markdown) used to seed
                                  the interactive session. Also used to derive the
                                  default session ID when neither --session nor
@@ -412,6 +423,8 @@ Notes:
   • Some flags are mode-specific:
       - --export-file only applies to interactive mode.
       - --prompt-file only applies to --reset-session.
+      - --authorize-shell-manifest only applies to interactive mode and grants
+        one-process authorization to the exact compiled manifest.
       - --parallel-tool-calls / --no-parallel-tool-calls and
         --auto-persist / --no-persist only apply to interactive mode.
   • For scripting, --list-sessions and --session-info support JSON output
@@ -445,6 +458,7 @@ Ask AI subcommand (ask ai questions about using chat-tui):
 
 Interactive mode:
   chat-tui [-file FILE] [--session NAME | --new-session]
+           [--authorize-shell-manifest]
 
 Run with --help for full flag documentation.
 |}
@@ -464,9 +478,16 @@ let run_in_env
       ?export_file
       ~persist_mode
       ~parallel_tool_calls
+      ~textmate_grammar_files
+      ~authorize_shell_manifest
       ()
   =
   let session = load_session ~env ~prompt_file ?id:session_id ~new_session () in
+  let shell_manifest_authorizer =
+    if authorize_shell_manifest
+    then Shell_runtime.Manifest_authorizer.assume_authorized
+    else Shell_runtime.Manifest_authorizer.deny
+  in
   Chat_tui.App.run_chat
     ~env
     ~prompt_file
@@ -474,6 +495,8 @@ let run_in_env
     ?export_file
     ~persist_mode
     ~parallel_tool_calls
+    ~textmate_grammar_files
+    ~shell_manifest_authorizer
     ()
 ;;
 
@@ -516,6 +539,8 @@ let run
       ?export_file
       ?(persist_mode : Chat_tui.App.persist_mode = `Ask)
       ?(parallel_tool_calls = true)
+      ?(textmate_grammar_files = [])
+      ?(authorize_shell_manifest = false)
       ~prompt_file
       ()
   =
@@ -528,6 +553,8 @@ let run
       ?export_file
       ~persist_mode
       ~parallel_tool_calls
+      ~textmate_grammar_files
+      ~authorize_shell_manifest
       ())
 ;;
 
@@ -718,7 +745,14 @@ module Handlers = struct
         in
         Chat_response.Converter.to_items
           ~ctx
-          ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:false)
+          ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+            Chat_response.Driver.run_agent
+              ~history_compaction:false
+              ?prompt_dir
+              ?session_id
+              ~ctx
+              prompt
+              items)
           elements
         |> List.length
       with
@@ -732,20 +766,19 @@ module Handlers = struct
     let persist_full_history
           ~cwd
           ~prompt_file
-          ~datadir
           ~initial_msg_count
           ~(moderator_snapshot : Session.Moderator_snapshot.t option)
-          ~history_items
+          ~history
       =
-      let module Config = Chat_response.Config in
-      Chat_tui.Persistence.persist_session
+      let checkpoint =
+        List.take history initial_msg_count |> Chat_tui.Persistence.Checkpoint.of_entries
+      in
+      Chat_tui.Persistence.persist_entries
         ~dir:cwd
         ~prompt_file
-        ~datadir
-        ~cfg:Config.default
-        ~initial_msg_count
+        ~checkpoint
         ~moderator_snapshot
-        ~history_items
+        ~history
     ;;
 
     let read_session ~env ~id =
@@ -799,10 +832,9 @@ module Handlers = struct
         persist_full_history
           ~cwd
           ~prompt_file:file_name
-          ~datadir
           ~initial_msg_count
-          ~moderator_snapshot:session.moderator_snapshot
-          ~history_items:session.history;
+          ~moderator_snapshot:session.moderator_state.legacy_snapshot
+          ~history:session.history;
         printf "Session '%s' exported to %s\n" id outfile)
     ;;
   end
@@ -833,117 +865,6 @@ module Handlers = struct
     printf "%s:\n%s\n" label contents
   ;;
 
-  let input_message_as_chatmd (im : Openai.Responses.Input_message.t) =
-    let role = Openai.Responses.Input_message.role_to_string im.role in
-    let content =
-      List.filter_map im.content ~f:(function
-        | Openai.Responses.Input_message.Text { text; _ } -> Some text
-        | _ -> None)
-      |> String.concat ~sep:""
-    in
-    match role with
-    | "user" -> Printf.sprintf "<user>\n%s\n</user>\n" content
-    | "assistant" -> Printf.sprintf "<assistant>\n%s\n</assistant>\n" content
-    | "tool" -> Printf.sprintf "<tool_response>\n%s\n</tool_response>\n" content
-    | _ -> Printf.sprintf "<msg role=\"%s\">\n%s\n</msg>\n" role content
-  ;;
-
-  let output_message_as_chatmd (om : Openai.Responses.Output_message.t) =
-    let text = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" " in
-    Printf.sprintf "\n<assistant id=\"%s\">\nRAW|\n%s\n|RAW\n</assistant>\n" om.id text
-  ;;
-
-  let reasoning_as_chatmd (r : Openai.Responses.Reasoning.t) =
-    let summaries =
-      List.map r.summary ~f:(fun s ->
-        Printf.sprintf "\n<summary>\n%s\n</summary>\n" s.text)
-      |> String.concat ~sep:""
-    in
-    Printf.sprintf "\n<reasoning id=\"%s\">%s\n</reasoning>\n" r.id summaries
-  ;;
-
-  let tool_output_as_chatmd_string = function
-    | Openai.Responses.Tool_output.Output.Text text -> text
-    | Content cont ->
-      List.map cont ~f:(function
-        | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-        | Input_image { image_url; _ } -> Printf.sprintf "<img src=\"%s\" />" image_url)
-      |> String.concat ~sep:"\n"
-  ;;
-
-  let function_call_as_chatmd (fc : Openai.Responses.Function_call.t) =
-    Printf.sprintf
-      "\n\
-       <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
-       %s|\n\
-       %s\n\
-       |%s\n\
-       </tool_call>\n"
-      fc.call_id
-      fc.name
-      (Option.value fc.id ~default:fc.call_id)
-      "RAW"
-      fc.arguments
-      "RAW"
-  ;;
-
-  let custom_tool_call_as_chatmd (tc : Openai.Responses.Custom_tool_call.t) =
-    Printf.sprintf
-      "\n\
-       <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" function_name=\"%s\" \
-       id=\"%s\">\n\
-       %s|\n\
-       %s\n\
-       |%s\n\
-       </tool_call>\n"
-      tc.call_id
-      tc.name
-      (Option.value tc.id ~default:tc.call_id)
-      "RAW"
-      tc.input
-      "RAW"
-  ;;
-
-  let function_call_output_as_chatmd (fco : Openai.Responses.Function_call_output.t) =
-    Printf.sprintf
-      "<tool_response tool_call_id=\"%s\">\nRAW|\n%s\n|RAW\n</tool_response>\n"
-      fco.call_id
-      (tool_output_as_chatmd_string fco.output)
-  ;;
-
-  let custom_tool_call_output_as_chatmd (tco : Openai.Responses.Custom_tool_call_output.t)
-    =
-    Printf.sprintf
-      "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\">\n\
-       RAW|\n\
-       %s\n\
-       |RAW\n\
-       </tool_response>\n"
-      tco.call_id
-      (tool_output_as_chatmd_string tco.output)
-  ;;
-
-  let other_item_as_chatmd item =
-    let sexp = Sexp.to_string_hum (Openai.Responses.Item.sexp_of_t item) in
-    Printf.sprintf "<item>\n%s\n</item>\n" sexp
-  ;;
-
-  let history_item_as_chatmd = function
-    | Openai.Responses.Item.Input_message im -> input_message_as_chatmd im
-    | Openai.Responses.Item.Output_message om -> output_message_as_chatmd om
-    | Openai.Responses.Item.Function_call fc -> function_call_as_chatmd fc
-    | Openai.Responses.Item.Custom_tool_call tc -> custom_tool_call_as_chatmd tc
-    | Openai.Responses.Item.Function_call_output fco -> function_call_output_as_chatmd fco
-    | Openai.Responses.Item.Custom_tool_call_output tco ->
-      custom_tool_call_output_as_chatmd tco
-    | Openai.Responses.Item.Reasoning r -> reasoning_as_chatmd r
-    | item -> other_item_as_chatmd item
-  ;;
-
-  let history_as_chatmd history =
-    List.map history ~f:history_item_as_chatmd |> String.concat ~sep:""
-  ;;
-
   let print_history_preview
         ~prompt_preview_max
         ~(moderator_snapshot : Session.Moderator_snapshot.t option)
@@ -953,7 +874,7 @@ module Handlers = struct
     print_prompt_preview
       ~prompt_preview_max
       ~label:"History preview (as chatmd)"
-      (Chat_tui.Persistence.history_as_chatmd ~moderator_snapshot ~history_items:history)
+      (Chat_tui.Persistence.history_entries_as_chatmd ~moderator_snapshot ~history)
   ;;
 
   let load_prompt_for_reset ~env prompt_file =
@@ -1046,7 +967,7 @@ module Handlers = struct
     | true ->
       print_history_preview
         ~prompt_preview_max
-        ~moderator_snapshot:session.moderator_snapshot
+        ~moderator_snapshot:session.moderator_state.legacy_snapshot
         session.history
   ;;
 
@@ -1098,6 +1019,8 @@ module Handlers = struct
         ~export_file
         ~persist_mode
         ~parallel_tool_calls
+        ~textmate_grammar_files
+        ~authorize_shell_manifest
     =
     run
       ?session_id
@@ -1105,6 +1028,8 @@ module Handlers = struct
       ?export_file
       ~persist_mode
       ~parallel_tool_calls
+      ~textmate_grammar_files
+      ~authorize_shell_manifest
       ~prompt_file
       ()
   ;;
@@ -1284,6 +1209,8 @@ module Cli = struct
     ; reset_keep_history : bool
     ; parallel_tool_calls : bool
     ; no_parallel_tool_calls : bool
+    ; textmate_grammar_files : string list
+    ; authorize_shell_manifest : bool
     ; no_persist : bool
     ; auto_persist : bool
     ; rebuild_session_id : string option
@@ -1323,6 +1250,8 @@ module Cli = struct
         ; export_file : string option
         ; persist_mode : Chat_tui.App.persist_mode
         ; parallel_tool_calls : bool
+        ; textmate_grammar_files : string list
+        ; authorize_shell_manifest : bool
         }
 
   type selector =
@@ -1422,6 +1351,10 @@ module Cli = struct
     then
       Or_error.error_string
         "Error: --no-persist and --auto-persist are mutually exclusive."
+    else if t.authorize_shell_manifest && not (List.is_empty (selectors t))
+    then
+      Or_error.error_string
+        "Error: --authorize-shell-manifest can only be used in interactive mode."
     else if
       t.dry_run
       && Option.is_none t.reset_session_id
@@ -1462,6 +1395,8 @@ module Cli = struct
       ; export_file = t.export_file
       ; persist_mode
       ; parallel_tool_calls
+      ; textmate_grammar_files = t.textmate_grammar_files
+      ; authorize_shell_manifest = t.authorize_shell_manifest
       }
   ;;
 
@@ -1538,6 +1473,8 @@ let run_action (action : Cli.action) =
       ; export_file
       ; persist_mode
       ; parallel_tool_calls
+      ; textmate_grammar_files
+      ; authorize_shell_manifest
       } ->
     Handlers.handle_interactive
       ~prompt_file
@@ -1546,6 +1483,8 @@ let run_action (action : Cli.action) =
       ~export_file
       ~persist_mode
       ~parallel_tool_calls
+      ~textmate_grammar_files
+      ~authorize_shell_manifest
   | _ -> Env.with_env (fun env -> run_env_action ~env action)
 ;;
 
@@ -1657,6 +1596,20 @@ let raw_flags_param =
         ~doc:
           "Disable parallel execution of callable tools during interactive runs (forces \
            sequential evaluation)."
+    and textmate_grammar_files =
+      flag
+        "--textmate-grammar"
+        (listed string)
+        ~doc:
+          "FILE Load an additional TextMate grammar before starting the TUI. May be \
+           repeated. Explicit files are loaded before automatically discovered grammars."
+    and authorize_shell_manifest =
+      flag
+        "--authorize-shell-manifest"
+        no_arg
+        ~doc:
+          "Authorize the exact canonical shell manifest compiled from the prompt for \
+           this interactive process. Without this flag, shell manifests fail closed."
     and no_persist =
       flag
         "--no-persist"
@@ -1712,6 +1665,8 @@ let raw_flags_param =
      ; reset_keep_history
      ; parallel_tool_calls
      ; no_parallel_tool_calls
+     ; textmate_grammar_files
+     ; authorize_shell_manifest
      ; no_persist
      ; auto_persist
      ; rebuild_session_id

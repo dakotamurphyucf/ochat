@@ -73,12 +73,26 @@ type turn_start_reason =
   | Moderator_request
   | Idle_followup
 
-(** A user-authored steering note captured during an active turn. *)
-type deferred_user_note = { text : string }
+(** A canonical user entry captured during an active turn. *)
+type deferred_user_note = { entry : History_entry.t }
 
-type pending_approval = Chat_response.In_memory_stream.pending_ui_request =
+type moderator_approval = Chat_response.In_memory_stream.pending_ui_request =
   | Ask_text of { prompt : string }
-  | Ask_choice of { prompt : string; choices : string array }
+  | Ask_choice of
+      { prompt : string
+      ; choices : string array
+      }
+
+type pending_input =
+  | Moderator of moderator_approval
+  | Shell of Shell_runtime.Approval_broker.ui_request
+
+type moderator_startup_state =
+  | Starting
+  | Ready
+  | Failed of string
+  (** Tracks whether the moderator's session-start transaction has committed.
+    User turns and compaction remain deferred unless the state is [Ready]. *)
 
 type automatic_turn_decision =
   | Allow_automatic_turn
@@ -93,6 +107,8 @@ type automatic_turn_decision =
     this host-owned layer; see [docs-src/chatml-budget-policy.md]. *)
 type session_controller_state =
   { mutable moderator_dirty : bool
+  ; mutable pending_overlay_revision : int option
+  ; mutable projected_overlay_revision : int
   ; deferred_user_notes : deferred_user_note Core.Queue.t
   ; mutable pending_turn_request : turn_start_reason option
   ; mutable started_followup_turns_since_user_submit : int
@@ -104,17 +120,39 @@ type queued_action =
   | Submit of submit_request
   | Compact
 
+type startup_render_state =
+  { mutable config : Chat_render_worker_runtime.Config.t
+  ; domain_mgr : Eio.Domain_manager.ty Eio.Resource.t
+  ; code_cache_capacity : int
+  ; mutable generation : int
+  ; mutable cancel : bool Atomic.t
+  ; mutable snapshot : Chat_startup_render.snapshot option
+  ; mutable jobs : Chat_message_render_job.t list
+  }
+
+type startup_render =
+  | Synchronous
+  | Warming of startup_render_state
+
 (** Runtime container used by the app reducer and its helper modules. *)
 type t =
   { model : Model.t
+  ; chat_render_worker : Chat_render_worker.t option
+  ; history_allocator : History_entry.Allocator.t
+  ; agent_page_kind_by_name :
+      Chat_response.Tool_execution_event.agent_page_kind Core.String.Table.t
   ; mutable op : op option
   ; mutable typeahead_op : typeahead_op option
   ; moderator : Chat_response.In_memory_stream.moderator option
+  ; shell_approval_broker : Shell_runtime.Approval_broker.t option
+  ; approval_store : Shell_runtime.Approval_store.t option
+  ; session_state : Session.t ref option
   ; session_controller : session_controller_state
   ; shown_notice_keys : string Core.Hash_set.t
   ; mutable active_turn_start_reason : turn_start_reason option
   ; mutable halted_reason : string option
-  ; mutable pending_approval : pending_approval option
+  ; mutable moderator_startup_state : moderator_startup_state
+  ; mutable pending_input : pending_input option
   ; pending : queued_action Core.Queue.t
   ; quit_via_esc : bool ref
     (** [true] iff the user hit [Esc] while idle, causing the app to exit. *)
@@ -129,16 +167,30 @@ type t =
   ; mutable cancel_typeahead_on_start : bool
     (** Records a cancellation request that arrived while the state was
         [Starting_typeahead]. *)
+  ; mutable pending_agent_toggle : int option
+    (** Streaming operation whose first tool call should open Agent because
+        Ctrl-G was pressed before its [Started] event reached the reducer. *)
+  ; mutable startup_render : startup_render
+    (** One-time initial transcript cache warming. [Synchronous] is terminal:
+        detached Chat rendering cannot be restarted. *)
+  ; mutable startup_render_metrics : Jsonaf.t option
+  ; mutable startup_render_started_at : Core.Time_ns.t option
   }
 
-val visible_history_items_of_history
-  :  t
-  -> Openai.Responses.Item.t list
-  -> Openai.Responses.Item.t list
-
-val visible_messages_of_history : t -> Openai.Responses.Item.t list -> Types.message list
-val refresh_messages : t -> unit
+val visible_history_items_of_history : t -> History_entry.t list -> History_entry.t list
+val visible_messages_of_history : t -> History_entry.t list -> Types.message list
+val refresh_messages : ?viewport_height:int -> t -> Model.projection_damage
+val startup_render_is_warming : t -> bool
+val complete_startup_render : t -> unit
 val moderator_snapshot : t -> (Session.Moderator_snapshot.t option, string) result
+
+(** [validate_moderator_allocator ~moderator ~history_allocator] verifies that
+    the moderator and Chat-TUI runtime commit entries through the same
+    allocator. *)
+val validate_moderator_allocator
+  :  moderator:Chat_response.In_memory_stream.moderator option
+  -> history_allocator:History_entry.Allocator.t
+  -> (unit, string) result
 
 (** [create ?moderator ?halted_reason ~model ()] creates a fresh runtime container for [model].
 
@@ -146,6 +198,10 @@ val moderator_snapshot : t -> (Session.Moderator_snapshot.t option, string) resu
 
     The returned value starts with no active operation, an empty pending queue,
     and a fresh operation id counter.
+
+    When [moderator] is present, it must use the same allocator passed through
+    [history_allocator]. [moderator_startup_state] must be [Starting] when the
+    host has created a moderator whose session-start event is still running.
 
     Example:
     {[
@@ -155,9 +211,79 @@ val moderator_snapshot : t -> (Session.Moderator_snapshot.t option, string) resu
 val create
   :  ?moderator:Chat_response.In_memory_stream.moderator
   -> ?halted_reason:string
+  -> ?chat_render_worker:Chat_render_worker.t
+  -> ?history_allocator:History_entry.Allocator.t
+  -> ?shell_approval_broker:Shell_runtime.Approval_broker.t
+  -> ?approval_store:Shell_runtime.Approval_store.t
+  -> ?session_state:Session.t ref
+  -> ?moderator_startup_state:moderator_startup_state
+  -> ?agent_page_classifications:
+       (string * Chat_response.Tool_execution_event.agent_page_kind) list
   -> model:Model.t
   -> unit
   -> t
+
+val agent_page_kind
+  :  t
+  -> name:string
+  -> Chat_response.Tool_execution_event.agent_page_kind option
+
+(** [submit_initial_target_width_batches t] selects and submits visible,
+    directional, and guard target-width batches for the current preparation.
+    Result acceptance and publication are handled separately. *)
+val submit_initial_target_width_batches : t -> unit
+
+(** [reprioritize_target_width_batches t] nonblockingly reranks and admits
+    bounded target-width work around the current exact corridor viewport. *)
+val reprioritize_target_width_batches : t -> unit
+
+(** [submit_destination_target_width_batches t] submits bounded visible-first
+    work around the current stable nonlocal destination. *)
+val submit_destination_target_width_batches : t -> unit
+
+(** [pump_target_width_completion t] fills currently available worker slots
+    with unresolved target-width rows in visible-first then background order.
+    It never blocks or submits beyond worker capacity. *)
+val pump_target_width_completion : t -> unit
+
+(** [cancel_current_target_width_preparation t] cancels the current worker
+    generation and discards its isolated model state. Active exact rendering
+    remains unchanged. *)
+val cancel_current_target_width_preparation : t -> unit
+
+val arm_startup_render
+  :  t
+  -> domain_mgr:Eio.Domain_manager.ty Eio.Resource.t
+  -> config:Chat_render_worker_runtime.Config.t
+  -> code_cache_capacity:int
+  -> unit
+
+val begin_startup_render
+  :  t
+  -> (int
+     * Eio.Domain_manager.ty Eio.Resource.t
+     * Chat_render_worker_runtime.Config.t
+     * int
+     * bool Atomic.t
+     * Chat_startup_render.snapshot option
+     * Chat_message_render_job.t list)
+       option
+
+val update_startup_render_config : t -> Chat_render_worker_runtime.Config.t -> unit
+val close_startup_render : t -> unit
+val complete_startup_render : t -> unit
+
+(** [record_startup_publication t ~publication_latency] adds loader lifetime
+    and exact-publication latency to the opt-in startup rendering metrics. *)
+val record_startup_publication : t -> publication_latency:Core.Time_ns.Span.t -> unit
+
+val startup_render_accepts : t -> generation:int -> Chat_startup_render.snapshot -> bool
+
+(** [startup_render_generation_is_current t generation] returns [true] when
+    [generation] identifies the active aggregate startup render. *)
+val startup_render_generation_is_current : t -> int -> bool
+
+val startup_render_metrics : t -> Jsonaf.t option
 
 (** [alloc_op_id t] allocates a fresh operation id.
 
@@ -167,17 +293,46 @@ val create
     @param t Runtime container whose internal counter should advance. *)
 val alloc_op_id : t -> int
 
+(** [toggle_pending_agent t] toggles pending Agent-page intent for the current
+    streaming operation. It returns [false] when no stream is active. *)
+val toggle_pending_agent : t -> bool
+
+(** [consume_pending_agent t ~op_id] consumes matching pending intent. *)
+val consume_pending_agent : t -> op_id:int -> bool
+
+(** [clear_pending_agent t ~op_id] clears matching pending intent. *)
+val clear_pending_agent : t -> op_id:int -> unit
+
 val has_active_turn : t -> bool
 val has_active_op : t -> bool
 val is_idle : t -> bool
+
+(** [may_start_turn_now t] returns [true] only when no foreground operation is
+    active, moderator startup has committed, and the session is not halted. *)
 val may_start_turn_now : t -> bool
+
+val moderator_startup_state : t -> moderator_startup_state
+val is_moderator_starting : t -> bool
+val is_moderator_startup_ready : t -> bool
+
+(** [complete_moderator_startup t] releases deferred actions after the reducer
+    has applied every startup outcome. *)
+val complete_moderator_startup : t -> unit
+
+(** [fail_moderator_startup t message] fails startup closed. Deferred actions
+    must be discarded before accepting further session work. *)
+val fail_moderator_startup : t -> string -> unit
+
 val runtime_policy : t -> Chat_response.Runtime_semantics.policy
 val is_moderator_dirty : t -> bool
+val pending_overlay_revision : t -> int option
+val projected_overlay_revision : t -> int
 val has_pending_turn_request : t -> bool
-val pending_approval : t -> pending_approval option
-val has_pending_approval : t -> bool
+val pending_input : t -> pending_input option
+val has_pending_input : t -> bool
 val string_of_turn_start_reason : turn_start_reason -> string
 val active_turn_start_reason : t -> turn_start_reason option
+
 val should_pause_internal_event_drains
   :  policy:Chat_response.Runtime_semantics.policy
   -> bool
@@ -192,25 +347,51 @@ val decide_automatic_turn
 
 val mark_moderator_dirty : t -> unit
 val clear_moderator_dirty : t -> unit
+
+(** [note_overlay_revision t revision] records [revision] when it is newer than
+    the visible projection. *)
+val note_overlay_revision : t -> int -> unit
+
+(** [refresh_pending_overlay t] reprojects once to the latest pending revision
+    when [t] is idle. *)
+val refresh_pending_overlay : ?viewport_height:int -> t -> Model.projection_damage option
+
+(** [note_current_overlay_projected t] records that the current projection
+    already includes the moderator's installed overlay revision. *)
+val note_current_overlay_projected : t -> unit
+
 val request_turn_start : t -> turn_start_reason -> unit
 val clear_pending_turn_request : t -> unit
 val dequeue_pending_turn_request : t -> turn_start_reason option
 val note_started_turn : t -> now_ms:int -> reason:turn_start_reason -> unit
 val set_active_turn_start_reason : t -> turn_start_reason -> unit
 val clear_active_turn_start_reason : t -> unit
-val render_pending_approval : pending_approval -> string
-val sync_pending_approval : t -> bool
-val resume_pending_approval
+val render_pending_input : pending_input -> string
+val sync_pending_input : t -> bool
+
+val resume_pending_input
   :  t
   -> response:string
   -> (Chat_response.Moderation.Outcome.t list, string) result
+
+val respond_shell_approval
+  :  t
+  -> Shell_runtime.Approval_broker.ui_request
+  -> Shell_runtime.Approval_broker.ui_response
+  -> (unit, Shell_runtime.Approval_broker.error) result
+
+val respond_shell_approval_by_id
+  :  t
+  -> id:string
+  -> Shell_runtime.Approval_broker.ui_response
+  -> (unit, Shell_runtime.Approval_broker.error) result
+
+val cancel_pending_input : t -> unit
 val add_placeholder_message : t -> role:string -> text:string -> unit
 val add_system_notice : t -> string -> unit
 val add_system_notice_once : t -> key:string -> string -> bool
-val enqueue_deferred_user_note : t -> submit_request -> bool
+val enqueue_deferred_user_note : t -> submit_request -> (bool, string) result
 val has_deferred_user_notes : t -> bool
 val dequeue_deferred_user_notes : t -> deferred_user_note list
 val render_deferred_user_note : deferred_user_note -> string
-val render_deferred_user_notes : deferred_user_note list -> string option
-val consume_deferred_user_notes_for_safe_point : t -> string option
 val safe_point_input_source : t -> Chat_response.In_memory_stream.Safe_point_input.t

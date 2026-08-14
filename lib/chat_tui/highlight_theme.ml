@@ -117,20 +117,34 @@ let github_dark_rules : rule list =
   ; { prefix = "string"; attr = Styles.(fg_hex "#9ECBFF") }
   ; { prefix = "string.regexp"; attr = Styles.(fg_hex "#DBEDFF") }
   ; { prefix = "source.regexp"; attr = Styles.(fg_hex "#DBEDFF") }
-  ; { prefix = "string.regexp constant.character.escape"
-    ; attr = Styles.(fg_hex "#85E89D" ++ bold)
-    }
   ; { prefix = "keyword"; attr = Styles.(fg_hex "#F97583") }
   ; { prefix = "keyword.operator"; attr = Styles.(fg_hex "#D1D5DA") }
+  ; { prefix = "storage"; attr = Styles.(fg_hex "#F97583") }
+  ; { prefix = "storage.type.string.python"; attr = Styles.(fg_hex "#9ECBFF") }
+  ; { prefix = "storage.type.format.python"; attr = Styles.(fg_hex "#85E89D" ++ bold) }
   ; { prefix = "constant.numeric"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "constant.character.format.placeholder"
+    ; attr = Styles.(fg_hex "#85E89D" ++ bold)
+    }
   ; { prefix = "constant"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "support"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "support.class.component"; attr = Styles.(fg_hex "#B392F0") }
   ; { prefix = "support.constant"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "support.variable"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "meta.property-name"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "meta.object-literal.key"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "meta.module-reference"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "entity.name.function"; attr = Styles.(fg_hex "#B392F0") }
+  ; { prefix = "entity.name.function.decorator.python"
+    ; attr = Styles.(fg_hex "#B392F0" ++ italic)
+    }
+  ; { prefix = "entity.name.function.macro.rust"
+    ; attr = Styles.(fg_hex "#B392F0" ++ bold)
+    }
   ; { prefix = "entity.name.type"; attr = Styles.(fg_hex "#B392F0") }
+  ; { prefix = "entity.name.type.lifetime.rust"
+    ; attr = Styles.(fg_hex "#FFAB70" ++ italic)
+    }
   ; { prefix = "entity"; attr = Styles.(fg_hex "#B392F0") }
   ; { prefix = "entity.name"; attr = Styles.(fg_hex "#B392F0") }
   ; { prefix = "entity.name.tag"; attr = Styles.(fg_hex "#85E89D") }
@@ -139,6 +153,8 @@ let github_dark_rules : rule list =
   ; { prefix = "variable.language"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "variable.other.constant"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "variable.other.enummember"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "variable.other.property"; attr = Styles.(fg_hex "#79B8FF") }
+  ; { prefix = "variable.other.readwrite.alias"; attr = Styles.(fg_hex "#79B8FF") }
   ; { prefix = "variable.other"; attr = Styles.(fg_hex "#E1E4E8") }
   ; { prefix = "variable"; attr = Styles.(fg_hex "#FFAB70") }
   ; { prefix = "punctuation"; attr = Styles.(fg_hex "#D1D5DA") }
@@ -432,4 +448,33 @@ let%test_unit "attr_of_scopes_golden_scope_order_irrelevant" =
   let trie2 = attr_of_scopes github_dark ~scopes:scopes_permuted in
   if not (Notty.A.equal trie1 trie2)
   then failwith "attr_of_scopes should not depend on scope order"
+;;
+
+let%test_unit "github_dark styles VS Code declaration scopes as keywords" =
+  let expected = Styles.fg_hex "#F97583" in
+  [ "storage.type.function.python"
+  ; "storage.modifier.mut.rust"
+  ; "storage.modifier.async.ts"
+  ]
+  |> List.iter ~f:(fun scope ->
+    let got = attr_of_scopes github_dark ~scopes:[ scope ] in
+    if not (Notty.A.equal got expected)
+    then failwithf "unexpected declaration style for %s" scope ())
+;;
+
+let%test_unit "github_dark distinguishes language-specific semantic scopes" =
+  let cases =
+    [ "support.class.component.tsx", Styles.fg_hex "#B392F0"
+    ; ("entity.name.function.decorator.python", Styles.(fg_hex "#B392F0" ++ italic))
+    ; ("entity.name.function.macro.rust", Styles.(fg_hex "#B392F0" ++ bold))
+    ; ("entity.name.type.lifetime.rust", Styles.(fg_hex "#FFAB70" ++ italic))
+    ; ( "constant.character.format.placeholder.other.python"
+      , Styles.(fg_hex "#85E89D" ++ bold) )
+    ; "variable.other.readwrite.alias.ts", Styles.fg_hex "#79B8FF"
+    ]
+  in
+  List.iter cases ~f:(fun (scope, expected) ->
+    let got = attr_of_scopes github_dark ~scopes:[ scope ] in
+    if not (Notty.A.equal got expected)
+    then failwithf "unexpected semantic style for %s" scope ())
 ;;

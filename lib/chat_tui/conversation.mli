@@ -49,3 +49,28 @@ val pair_of_item : Res_item.t -> message option
     elements that cannot be rendered.  The original order is preserved
     so the resulting list aligns with the OpenAI response indices. *)
 val of_history : Res_item.t list -> message list
+
+type projection
+
+val project_entries : History_entry.t list -> projection
+
+val project_effective_entries
+  :  Chat_response.Moderation.Effective_entry.t list
+  -> projection
+
+val rows : projection -> Projected_message.t list
+val messages : projection -> message list
+val index_of_id : projection -> Projected_message.Id.t -> int option
+
+val append_pending_approval
+  :  projection
+  -> local_id:string
+  -> text:string
+  -> (projection, string) result
+
+val append_placeholder
+  :  projection
+  -> local_id:string
+  -> kind:string
+  -> message
+  -> (projection, string) result

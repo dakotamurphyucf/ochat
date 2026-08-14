@@ -40,24 +40,29 @@ let%expect_test "export includes previous history items" =
   let history_items : Res.Item.t list =
     [ Res.Item.Input_message user_msg; Res.Item.Output_message assistant_msg ]
   in
+  let allocator =
+    History_entry.Allocator.create ~namespace:"export-full-history" ~next_sequence:0
+    |> Result.ok_or_failwith
+  in
+  let history =
+    List.map history_items ~f:(History_entry.create ~allocator)
+    |> Result.all
+    |> Result.ok_or_failwith
+  in
   Eio_main.run
   @@ fun env ->
   let fs = Eio.Stdenv.fs env in
   let out_dir = Eio.Path.(fs / tmp_dir) in
   (* Ensure destination exists and has a .chatmd directory. *)
-  let datadir = Io.ensure_chatmd_dir ~cwd:out_dir in
   (* Copy prompt to export file. *)
   let export_file = "export.chatmd" in
   Io.save_doc ~dir:out_dir export_file prompt_content;
-  let module Config = Chat_response.Config in
-  Chat_tui.Persistence.persist_session
+  Chat_tui.Persistence.persist_entries
     ~dir:out_dir
     ~prompt_file:export_file
-    ~datadir
-    ~cfg:Config.default
-    ~initial_msg_count:0
+    ~checkpoint:(Chat_tui.Persistence.Checkpoint.empty ())
     ~moderator_snapshot:None
-    ~history_items;
+    ~history;
   let exported = Io.load_doc ~dir:out_dir export_file in
   (* The assistant reply should appear in the exported ChatMarkdown. *)
   let contains_assistant = String.is_substring exported ~substring:"Hello back!" in

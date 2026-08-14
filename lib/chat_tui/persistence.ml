@@ -2,7 +2,6 @@ open Core
 module Fetch = Chat_response.Fetch
 module Value_codec = Chatml.Chatml_value_codec
 module Res_item = Openai.Responses.Item
-module Config = Chat_response.Config
 module Moderator = Session.Moderator_snapshot
 
 let write_user_message ~dir ~file message =
@@ -40,6 +39,124 @@ let generic_msg_as_chatmd ?id ~role content =
     | Some id -> Printf.sprintf " id=%S" id
   in
   Printf.sprintf "<msg role=%S%s>\n%s\n</msg>\n" role id_attr content
+;;
+
+let history_id_attribute id =
+  Printf.sprintf " ochat-history-id=%S" (History_entry.Id.to_string id)
+;;
+
+let history_entry_as_chatmd entry =
+  let history_id = history_id_attribute (History_entry.id entry) in
+  match History_entry.item entry with
+  | Res_item.Input_message message ->
+    let role = Openai.Responses.Input_message.role_to_string message.role in
+    let content =
+      List.map message.content ~f:(function
+        | Openai.Responses.Input_message.Text { text; _ } ->
+          Printf.sprintf "RAW|\n%s\n|RAW" text
+        | Image { image_url; _ } -> Printf.sprintf "<img src=%S />" image_url)
+      |> String.concat ~sep:""
+    in
+    Printf.sprintf "<msg role=%S%s>\n%s\n</msg>\n" role history_id content
+  | Res_item.Output_message message ->
+    let content =
+      List.map message.content ~f:(fun content -> content.text) |> String.concat ~sep:" "
+    in
+    Printf.sprintf
+      "<assistant id=%S status=%S%s>\nRAW|\n%s\n|RAW\n</assistant>\n"
+      message.id
+      message.status
+      history_id
+      content
+  | Res_item.Function_call call ->
+    Printf.sprintf
+      "<tool_call function_name=%S tool_call_id=%S%s%s>\nRAW|\n%s\n|RAW\n</tool_call>\n"
+      call.name
+      call.call_id
+      (Option.value_map call.id ~default:"" ~f:(Printf.sprintf " id=%S"))
+      history_id
+      call.arguments
+  | Res_item.Custom_tool_call call ->
+    Printf.sprintf
+      "<tool_call type=\"custom_tool_call\" function_name=%S tool_call_id=%S%s%s>\n\
+       RAW|\n\
+       %s\n\
+       |RAW\n\
+       </tool_call>\n"
+      call.name
+      call.call_id
+      (Option.value_map call.id ~default:"" ~f:(Printf.sprintf " id=%S"))
+      history_id
+      call.input
+  | Res_item.Function_call_output output ->
+    Printf.sprintf
+      "<tool_response tool_call_id=%S%s>\nRAW|\n%s\n|RAW\n</tool_response>\n"
+      output.call_id
+      history_id
+      (to_persisted_string output.output)
+  | Res_item.Custom_tool_call_output output ->
+    Printf.sprintf
+      "<tool_response type=\"custom_tool_call\" tool_call_id=%S%s>\n\
+       RAW|\n\
+       %s\n\
+       |RAW\n\
+       </tool_response>\n"
+      output.call_id
+      history_id
+      (to_persisted_string output.output)
+  | Res_item.Reasoning reasoning ->
+    let summaries =
+      List.map reasoning.summary ~f:(fun summary ->
+        Printf.sprintf
+          "<summary type=%S>RAW|\n%s\n|RAW</summary>"
+          summary._type
+          summary.text)
+      |> String.concat ~sep:""
+    in
+    Printf.sprintf
+      "<reasoning id=%S%s%s>%s</reasoning>\n"
+      reasoning.id
+      (Option.value_map reasoning.status ~default:"" ~f:(Printf.sprintf " status=%S"))
+      history_id
+      summaries
+  | Res_item.Web_search_call call ->
+    Printf.sprintf "<msg role=\"assistant\" id=%S%s>web_search</msg>\n" call.id history_id
+  | Res_item.File_search_call call ->
+    Printf.sprintf
+      "<msg role=\"assistant\" id=%S%s>file_search</msg>\n"
+      call.id
+      history_id
+;;
+
+let canonical_entries_as_chatmd history =
+  List.map history ~f:history_entry_as_chatmd |> String.concat ~sep:""
+;;
+
+module Checkpoint = struct
+  type t = string Hashtbl.M(History_entry.Id).t
+
+  let empty () = Hashtbl.create (module History_entry.Id)
+
+  let fingerprint entry =
+    History_entry.item entry |> Openai.Responses.Item.sexp_of_t |> Sexp.to_string_mach
+  ;;
+
+  let of_entries entries =
+    let checkpoint = empty () in
+    List.iter entries ~f:(fun entry ->
+      Hashtbl.set checkpoint ~key:(History_entry.id entry) ~data:(fingerprint entry));
+    checkpoint
+  ;;
+
+  let contains_unchanged t entry =
+    Hashtbl.find t (History_entry.id entry)
+    |> Option.exists ~f:(String.equal (fingerprint entry))
+  ;;
+end
+
+let entries_after_checkpoint checkpoint history =
+  List.filter history ~f:(fun entry ->
+    not (Checkpoint.contains_unchanged checkpoint entry))
 ;;
 
 let response_item_of_moderator_item (item : Moderator.Item.t) : Res_item.t option =
@@ -129,7 +246,7 @@ let moderation_deletion_as_chatmd deleted_message_id =
 let moderation_halt_as_chatmd reason =
   generic_msg_as_chatmd
     ~id:"moderation-halt"
-    ~role:"system"
+    ~role:"developer"
     (Printf.sprintf "Session ended by moderator: %s" reason)
 ;;
 
@@ -144,288 +261,24 @@ let overlay_as_chatmd (overlay : Moderator.Overlay.t) =
   String.concat ~sep:"" (prepended @ appended @ replacements @ deletions @ halt)
 ;;
 
-let history_as_chatmd
-      ~(moderator_snapshot : Moderator.t option)
-      ~(history_items : Res_item.t list)
-  =
-  let buf = Buffer.create 4096 in
-  let append s = Buffer.add_string buf s in
-  let fn_id = ref 0 in
-  let tool_call_index_by_id = Hashtbl.create (module String) in
-  List.iter history_items ~f:(function
-    | Res_item.Input_message im ->
-      let role = Openai.Responses.Input_message.role_to_string im.role in
-      let content =
-        List.filter_map im.content ~f:(function
-          | Openai.Responses.Input_message.Text { text; _ } -> Some text
-          | _ -> None)
-        |> String.concat ~sep:""
-      in
-      (match role with
-       | "user" -> append (Printf.sprintf "<user>\n%s\n</user>\n" content)
-       | "assistant" -> append (Printf.sprintf "<assistant>\n%s\n</assistant>\n" content)
-       | "tool" ->
-         append (Printf.sprintf "<tool_response>\n%s\n</tool_response>\n" content)
-       | _ -> append (generic_msg_as_chatmd ~role content))
-    | Res_item.Output_message om ->
-      let text = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" " in
-      append
-        (Printf.sprintf
-           "\n<assistant id=\"%s\">\nRAW|\n%s\n|RAW\n</assistant>\n"
-           om.id
-           text)
-    | Res_item.Function_call fc ->
-      let idx =
-        match Hashtbl.find tool_call_index_by_id fc.call_id with
-        | Some i -> i
-        | None ->
-          let i = !fn_id in
-          Hashtbl.set tool_call_index_by_id ~key:fc.call_id ~data:i;
-          Int.incr fn_id;
-          i
-      in
-      append
-        (Printf.sprintf
-           "<tool_call function_name=\"%s\" tool_call_id=\"%s\" id=\"%s\"><doc \
-            src=\"./.chatmd/%i.tool-call.%s.json\" local/></tool_call>\n"
-           fc.name
-           fc.call_id
-           (Option.value fc.id ~default:fc.call_id)
-           idx
-           fc.call_id)
-    | Res_item.Custom_tool_call tc ->
-      let idx =
-        match Hashtbl.find tool_call_index_by_id tc.call_id with
-        | Some i -> i
-        | None ->
-          let i = !fn_id in
-          Hashtbl.set tool_call_index_by_id ~key:tc.call_id ~data:i;
-          Int.incr fn_id;
-          i
-      in
-      append
-        (Printf.sprintf
-           "<tool_call type=\"custom_tool_call\" function_name=\"%s\" \
-            tool_call_id=\"%s\" id=\"%s\"><doc src=\"./.chatmd/%i.tool-call.%s.json\" \
-            local/></tool_call>\n"
-           tc.name
-           tc.call_id
-           (Option.value tc.id ~default:tc.call_id)
-           idx
-           tc.call_id)
-    | Res_item.Function_call_output fco ->
-      (match Hashtbl.find tool_call_index_by_id fco.call_id with
-       | None ->
-         append
-           (Printf.sprintf
-              "<tool_response tool_call_id=\"%s\">\nRAW|\n%s\n|RAW\n</tool_response>\n"
-              fco.call_id
-              (to_persisted_string fco.output))
-       | Some idx ->
-         append
-           (Printf.sprintf
-              "<tool_response tool_call_id=\"%s\"><doc \
-               src=\"./.chatmd/%i.tool-call-result.%s.json\" local/></tool_response>\n"
-              fco.call_id
-              idx
-              fco.call_id))
-    | Res_item.Custom_tool_call_output tco ->
-      (match Hashtbl.find tool_call_index_by_id tco.call_id with
-       | None ->
-         append
-           (Printf.sprintf
-              "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\">\n\
-               RAW|\n\
-               %s\n\
-               |RAW\n\
-               </tool_response>\n"
-              tco.call_id
-              (to_persisted_string tco.output))
-       | Some idx ->
-         append
-           (Printf.sprintf
-              "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\"><doc \
-               src=\"./.chatmd/%i.tool-call-result.%s.json\" local/></tool_response>\n"
-              tco.call_id
-              idx
-              tco.call_id))
-    | Res_item.Reasoning r ->
-      let summaries =
-        List.map r.summary ~f:(fun s ->
-          Printf.sprintf "\n<summary>\n%s\n</summary>\n" s.text)
-        |> String.concat ~sep:""
-      in
-      append (Printf.sprintf "\n<reasoning id=\"%s\">%s\n</reasoning>\n" r.id summaries)
-    | _ -> ());
-  Option.iter moderator_snapshot ~f:(fun (snapshot : Moderator.t) ->
-    append (overlay_as_chatmd snapshot.overlay));
-  Buffer.contents buf
+let history_entries_as_chatmd ~moderator_snapshot ~history =
+  let canonical = canonical_entries_as_chatmd history in
+  let overlay =
+    Option.value_map moderator_snapshot ~default:"" ~f:(fun snapshot ->
+      overlay_as_chatmd snapshot.Moderator.overlay)
+  in
+  canonical ^ overlay
 ;;
 
-let persist_session
-      ~(dir : _ Eio.Path.t)
-      ~(prompt_file : string)
-      ~(datadir : _ Eio.Path.t)
-      ~(cfg : Config.t)
-      ~(initial_msg_count : int)
-      ~(moderator_snapshot : Moderator.t option)
-      ~(history_items : Res_item.t list)
+let persist_entries
+      ~dir
+      ~prompt_file
+      ~(checkpoint : Checkpoint.t)
+      ~moderator_snapshot
+      ~history
   =
-  let buf = Buffer.create 4096 in
-  let append s = Buffer.add_string buf s in
-  let fn_id = ref 0 in
-  let tool_call_index_by_id = Hashtbl.create (module String) in
-  let new_messages = List.drop history_items initial_msg_count in
-  List.iter new_messages ~f:(function
-    | Res_item.Input_message im ->
-      let role = Openai.Responses.Input_message.role_to_string im.role in
-      let content =
-        List.filter_map im.content ~f:(function
-          | Openai.Responses.Input_message.Text { text; _ } -> Some text
-          | _ -> None)
-        |> String.concat ~sep:""
-      in
-      (match role with
-       | "user" -> append (Printf.sprintf "<user>\n%s\n</user>\n" content)
-       | "assistant" -> append (Printf.sprintf "<assistant>\n%s\n</assistant>\n" content)
-       | "tool" ->
-         append (Printf.sprintf "<tool_response>\n%s\n</tool_response>\n" content)
-       | _ -> append (Printf.sprintf "<msg role=\"%s\">\n%s\n</msg>\n" role content))
-    | Res_item.Output_message om ->
-      let text = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" " in
-      append
-        (Printf.sprintf
-           "\n<assistant id=\"%s\">\nRAW|\n%s\n|RAW\n</assistant>\n"
-           om.id
-           text)
-    | Res_item.Function_call fc ->
-      let idx =
-        match Hashtbl.find tool_call_index_by_id fc.call_id with
-        | Some i -> i
-        | None ->
-          let i = !fn_id in
-          Hashtbl.set tool_call_index_by_id ~key:fc.call_id ~data:i;
-          Int.incr fn_id;
-          i
-      in
-      if cfg.show_tool_call
-      then
-        append
-          (Printf.sprintf
-             "\n\
-              <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
-              %s|\n\
-              %s\n\
-              |%s\n\
-              </tool_call>\n"
-             fc.call_id
-             fc.name
-             (Option.value fc.id ~default:fc.call_id)
-             "RAW"
-             fc.arguments
-             "RAW")
-      else (
-        let filename = Printf.sprintf "%i.tool-call.%s.json" idx fc.call_id in
-        Io.save_doc ~dir:datadir filename fc.arguments;
-        append
-          (Printf.sprintf
-             "<tool_call function_name=\"%s\" tool_call_id=\"%s\" id=\"%s\"><doc \
-              src=\"./.chatmd/%s\" local/></tool_call>\n"
-             fc.name
-             fc.call_id
-             (Option.value fc.id ~default:fc.call_id)
-             filename))
-    | Res_item.Custom_tool_call tc ->
-      let idx =
-        match Hashtbl.find tool_call_index_by_id tc.call_id with
-        | Some i -> i
-        | None ->
-          let i = !fn_id in
-          Hashtbl.set tool_call_index_by_id ~key:tc.call_id ~data:i;
-          Int.incr fn_id;
-          i
-      in
-      if cfg.show_tool_call
-      then
-        append
-          (Printf.sprintf
-             "\n\
-              <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" \
-              function_name=\"%s\" id=\"%s\">\n\
-              %s|\n\
-              %s\n\
-              |%s\n\
-              </tool_call>\n"
-             tc.call_id
-             tc.name
-             (Option.value tc.id ~default:tc.call_id)
-             "RAW"
-             tc.input
-             "RAW")
-      else (
-        let filename = Printf.sprintf "%i.tool-call.%s.json" idx tc.call_id in
-        Io.save_doc ~dir:datadir filename tc.input;
-        append
-          (Printf.sprintf
-             "<tool_call type=\"custom_tool_call\" function_name=\"%s\" \
-              tool_call_id=\"%s\" id=\"%s\"><doc src=\"./.chatmd/%s\" local/></tool_call>\n"
-             tc.name
-             tc.call_id
-             (Option.value tc.id ~default:tc.call_id)
-             filename))
-    | Res_item.Function_call_output fco ->
-      (match Hashtbl.find tool_call_index_by_id fco.call_id with
-       | None -> ()
-       | Some idx ->
-         if cfg.show_tool_call
-         then
-           append
-             (Printf.sprintf
-                "<tool_response tool_call_id=\"%s\">\nRAW|\n%s\n|RAW\n</tool_response>\n"
-                fco.call_id
-                (to_persisted_string fco.output))
-         else (
-           let filename = Printf.sprintf "%i.tool-call-result.%s.json" idx fco.call_id in
-           Io.save_doc ~dir:datadir filename (to_persisted_string fco.output);
-           append
-             (Printf.sprintf
-                "<tool_response tool_call_id=\"%s\"><doc src=\"./.chatmd/%s\" \
-                 local/></tool_response>\n"
-                fco.call_id
-                filename)))
-    | Res_item.Custom_tool_call_output tco ->
-      (match Hashtbl.find tool_call_index_by_id tco.call_id with
-       | None -> ()
-       | Some idx ->
-         if cfg.show_tool_call
-         then
-           append
-             (Printf.sprintf
-                "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\">\n\
-                 RAW|\n\
-                 %s\n\
-                 |RAW\n\
-                 </tool_response>\n"
-                tco.call_id
-                (to_persisted_string tco.output))
-         else (
-           let filename = Printf.sprintf "%i.tool-call-result.%s.json" idx tco.call_id in
-           Io.save_doc ~dir:datadir filename (to_persisted_string tco.output);
-           append
-             (Printf.sprintf
-                "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\"><doc \
-                 src=\"./.chatmd/%s\" local/></tool_response>\n"
-                tco.call_id
-                filename)))
-    | Res_item.Reasoning r ->
-      let summaries =
-        List.map r.summary ~f:(fun s ->
-          Printf.sprintf "\n<summary>\n%s\n</summary>\n" s.text)
-        |> String.concat ~sep:""
-      in
-      append (Printf.sprintf "\n<reasoning id=\"%s\">%s\n</reasoning>\n" r.id summaries)
-    | _ -> ());
-  Option.iter moderator_snapshot ~f:(fun (snapshot : Moderator.t) ->
-    append (overlay_as_chatmd snapshot.overlay));
-  Io.append_doc ~dir prompt_file (Buffer.contents buf)
+  let suffix = entries_after_checkpoint checkpoint history in
+  let rendered = history_entries_as_chatmd ~moderator_snapshot ~history:suffix in
+  let existing = Io.load_doc ~dir prompt_file |> String.rstrip in
+  Io.save_doc ~dir prompt_file (existing ^ "\n" ^ rendered)
 ;;

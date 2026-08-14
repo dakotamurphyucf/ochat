@@ -99,10 +99,8 @@ let%expect_test "update snippet includes multi-level generic anchors" =
   let initial_fs =
     [ ( "demo.py"
       , String.concat_lines
-          [ "class Report:"
-          ; "    def render(self, value):"
-          ; "        return str(value)"
-          ] )
+          [ "class Report:"; "    def render(self, value):"; "        return str(value)" ]
+      )
     ]
   in
   let patch =
@@ -263,11 +261,7 @@ let%expect_test "update snippet supports go package and function scopes" =
 let%expect_test "update snippet supports c and c++ style signatures" =
   let initial_fs =
     [ ( "demo.c"
-      , String.concat_lines
-          [ "int render_total(int total) {"
-          ; "  return total;"
-          ; "}"
-          ] )
+      , String.concat_lines [ "int render_total(int total) {"; "  return total;"; "}" ] )
     ; ( "demo.cpp"
       , String.concat_lines
           [ "class ReportService {"
@@ -299,10 +293,14 @@ let%expect_test "update snippet supports c and c++ style signatures" =
 @@
 *** End Patch|}
   in
-  let status_c, snippets_c = apply_patch_in_memory ~patch_text:patch_c ~files:initial_fs in
+  let status_c, snippets_c =
+    apply_patch_in_memory ~patch_text:patch_c ~files:initial_fs
+  in
   print_endline status_c;
   List.iter snippets_c ~f:(fun (path, snippet) -> printf ">>> %s\n%s\n" path snippet);
-  let status_cpp, snippets_cpp = apply_patch_in_memory ~patch_text:patch_cpp ~files:initial_fs in
+  let status_cpp, snippets_cpp =
+    apply_patch_in_memory ~patch_text:patch_cpp ~files:initial_fs
+  in
   print_endline status_cpp;
   List.iter snippets_cpp ~f:(fun (path, snippet) -> printf ">>> %s\n%s\n" path snippet);
   [%expect

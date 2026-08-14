@@ -12,15 +12,44 @@
 
 open Core
 
-(** [add_ocaml reg] adds an OCaml grammar (scopeName = ["source.ocaml"]) to
-    [reg]. The function first tries vendored grammars
-    [lib/chat_tui/grammars/ocaml.json] and
-    [lib/chat_tui/grammars/ocaml.tmLanguage.json]; if neither is available or
-    valid it falls back to a small embedded grammar.
+(** [add_ocaml reg] adds the bundled OCaml grammar
+    (scopeName = ["source.ocaml"]) to [reg].
 
-    @return [Ok ()] on success, or [Error _] if all attempts to load a valid
-    grammar fail. *)
+    The grammar is embedded at compile time, so loading does not depend on
+    the process working directory.
+
+    @return [Ok ()] on success, or [Error _] if the embedded grammar cannot
+    be parsed or converted. *)
 val add_ocaml : Highlight_tm_loader.registry -> unit Or_error.t
+
+(** [add_python reg] adds the bundled VS Code Python grammar and its regular
+    expression companion grammar (scope names ["source.python"] and
+    ["source.regexp.python"]) to [reg].
+
+    @return [Ok ()] on success, or [Error _] if the embedded grammar cannot
+    be parsed or converted. *)
+val add_python : Highlight_tm_loader.registry -> unit Or_error.t
+
+(** [add_rust reg] adds the bundled Rust grammar
+    (scopeName = ["source.rust"]) to [reg].
+
+    @return [Ok ()] on success, or [Error _] if the embedded grammar cannot
+    be parsed or converted. *)
+val add_rust : Highlight_tm_loader.registry -> unit Or_error.t
+
+(** [add_javascript reg] adds the bundled VS Code JavaScript and JSX grammars
+    (scope names ["source.js"] and ["source.js.jsx"]) to [reg].
+
+    @return [Ok ()] on success, or [Error _] if the embedded grammar cannot
+    be parsed or converted. *)
+val add_javascript : Highlight_tm_loader.registry -> unit Or_error.t
+
+(** [add_typescript reg] adds the bundled VS Code TypeScript and TSX grammars
+    (scope names ["source.ts"] and ["source.tsx"]) to [reg].
+
+    @return [Ok ()] on success, or [Error _] if the embedded grammar cannot
+    be parsed or converted. *)
+val add_typescript : Highlight_tm_loader.registry -> unit Or_error.t
 
 (** [add_dune reg] adds a Dune grammar (scopeName = ["source.dune"]) to
     [reg]. The grammar is embedded in the binary and covers typical
@@ -91,15 +120,15 @@ val add_ochat_apply_patch : Highlight_tm_loader.registry -> unit Or_error.t
     be parsed or converted. *)
 val add_json : Highlight_tm_loader.registry -> unit Or_error.t
 
-(** [add_markdown reg] adds a Markdown grammar (scopeName = ["source.gfm"]) to
-    [reg] by loading [lib/chat_tui/grammars/markdown.tmLanguage.json]. The
-    grammar is intended for GitHub-flavoured Markdown and is used for both
-    prose paragraphs and fenced code blocks.
+(** [add_markdown reg] adds the bundled Markdown grammar
+    (scopeName = ["text.html.markdown"]) to [reg]. The grammar is intended
+    for GitHub-flavoured Markdown and is used for prose paragraphs.
 
-    @return [Ok ()] on success, or [Error _] if the file cannot be read,
-    parsed, or converted to a valid grammar. There is currently no embedded
-    fallback; callers that ignore errors will see Markdown rendered as
-    plain text. *)
+    The grammar is embedded at compile time, so loading does not depend on
+    the process working directory.
+
+    @return [Ok ()] on success, or [Error _] if the embedded grammar cannot
+    be parsed or converted. *)
 val add_markdown : Highlight_tm_loader.registry -> unit Or_error.t
 
 (** Add a minimal HTML grammar and a shim for [text.html.derivative].

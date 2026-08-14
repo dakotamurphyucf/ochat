@@ -8,11 +8,8 @@
     {1 Design goals}
 
     - *Side-effect minimisation* – the primary result of every helper is a
-      list of {!Types.patch} values.  A small amount of internal
-      book-keeping on the supplied {!Model.t} (e.g. toggling
-      {!Model.active_fork}) is still required.  These mutations are confined
-      to metadata fields and never alter the immutable message history that
-      is expressed via patches.
+      list of {!Types.patch} values. Tool and reasoning metadata updates are
+      confined to model metadata and never alter canonical history.
 
     - *Single responsibility* – this module is the _only_ place that knows
       how to interpret the many concrete variants of
@@ -56,18 +53,14 @@ module Res_stream = Openai.Responses.Response_stream
     • {!Types.Set_function_output} – stores [out.output] under the final
       message id so that the renderer can display the tool response.
 
-    Additionally, if the call belonged to a *fork* (the assistant’s internal
-    concurrency primitive) the helper clears
-    {!Model.active_fork}/{!Model.fork_start_index} so that new messages are
-    rendered using the default appearance again.
-
-    @param model State snapshot that may receive fork-book-keeping updates.
+    @param model State snapshot used for tool metadata.
     @param out   Completed function-call record received from the OpenAI API.
-
-    @side_effect Mutates [model.active_fork] and [model.fork_start_index] to
-                 clear the special *fork* colour-coding once the call
-                 finishes. *)
-val handle_fn_out : model:Model.t -> Res.Function_call_output.t -> Types.patch list
+*)
+val handle_fn_out
+  :  model:Model.t
+  -> ?entry_id:History_entry.Id.t
+  -> Res.Function_call_output.t
+  -> Types.patch list
 
 (** [handle_tool_out ~model item] is like {!handle_fn_out} but accepts the
     full history item.
@@ -79,14 +72,16 @@ val handle_fn_out : model:Model.t -> Res.Function_call_output.t -> Types.patch l
 
     All other items yield [\[\]].
 
-    @param model Mutable UI state used for fork bookkeeping.
+    @param model Mutable UI state used for tool metadata.
     @param item  History item that may carry tool output.
+*)
+val handle_tool_out
+  :  model:Model.t
+  -> ?entry_id:History_entry.Id.t
+  -> Res.Item.t
+  -> Types.patch list
 
-    @side_effect May clear {!Model.active_fork}/{!Model.fork_start_index} if the
-                 output corresponds to the active fork call. *)
-val handle_tool_out : model:Model.t -> Res.Item.t -> Types.patch list
-
-(** [handle_event ~model ev] converts a single incremental streaming event
+(** [handle_event ~model ?parent_call_id ev] converts a single incremental streaming event
     into a list of patches.
 
     The implementation understands (and therefore potentially produces
@@ -116,14 +111,18 @@ val handle_tool_out : model:Model.t -> Res.Item.t -> Types.patch list
     patches when a more complex update – e.g. buffer initialisation *and*
     delta append – is required.
 
-    @param model Mutable UI state used for ancillary book-keeping (forks and
-                 reasoning indices).
+    @param model Mutable UI state used for ancillary tool metadata and
+                 reasoning indices.
+    @param parent_call_id Fork source attribution. Fork events use role
+           ["fork"]; outer events preserve their ordinary roles.
     @param ev    Single streaming event decoded from JSON.
-
-    @side_effect May update {!Model.active_fork} and
-                 {!Model.fork_start_index}.  All other state changes are
-                 delivered as patches. *)
-val handle_event : model:Model.t -> Res_stream.t -> Types.patch list
+*)
+val handle_event
+  :  model:Model.t
+  -> ?parent_call_id:string option
+  -> ?entry_id:History_entry.Id.t
+  -> Res_stream.t
+  -> Types.patch list
 
 (** [handle_events ~model evs] folds {!handle_event} over [evs] and
     concatenates the resulting patch lists.  It exists purely for
@@ -138,4 +137,8 @@ val handle_event : model:Model.t -> Res_stream.t -> Types.patch list
 
     It does not introduce additional side-effects beyond those already
     performed by {!handle_event}. *)
-val handle_events : model:Model.t -> Res_stream.t list -> Types.patch list
+val handle_events
+  :  model:Model.t
+  -> ?parent_call_id:string option
+  -> Res_stream.t list
+  -> Types.patch list

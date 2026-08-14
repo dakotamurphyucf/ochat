@@ -234,6 +234,7 @@ and convert_msg ~ctx ~run_agent (m : CM.msg) : Res.Item.t =
       ; id = Option.value ~default:"" m.id
       ; status = Option.value m.status ~default:"completed"
       ; _type = "message"
+      ; phase = None
       ; content = [ { annotations = []; text; _type = "output_text" } ]
       }
   | `Tool ->
@@ -346,6 +347,7 @@ and convert_assistant_msg ~ctx ~run_agent (m : CM.assistant_msg) : Res.Item.t =
       ; id
       ; status = Option.value status ~default:"completed"
       ; _type = "message"
+      ; phase = m.phase
       ; content = [ { annotations = []; text; _type = "output_text" } ]
       }
   | None, None ->
@@ -458,5 +460,62 @@ let to_items ~ctx ~run_agent (els : CM.top_level_elements list) : Res.Item.t lis
     | CM.Reasoning r -> Some (convert_reasoning r)
     | CM.Config _ -> None
     | CM.Tool _ -> None
-    | CM.Script _ -> None)
+    | CM.Shell_runtime _ -> None
+    | CM.Moderator_runtime _ -> None
+    | CM.Script _ | CM.Shell_script _ -> None)
+;;
+
+type identity_bearing_item =
+  { item : Res.Item.t
+  ; history_id : History_entry.Id.t option
+  ; source_index : int
+  ; source_context : string option
+  }
+
+let history_id = function
+  | CM.Msg message
+  | CM.System message
+  | CM.Developer message
+  | CM.User message
+  | CM.Assistant message
+  | CM.Tool_call message
+  | CM.Tool_response message -> message.ochat_history_id
+  | CM.Reasoning reasoning -> reasoning.ochat_history_id
+  | CM.Config _
+  | CM.Tool _
+  | CM.Shell_runtime _
+  | CM.Moderator_runtime _
+  | CM.Script _
+  | CM.Shell_script _ -> None
+;;
+
+let source_context = function
+  | CM.Msg message
+  | CM.System message
+  | CM.Developer message
+  | CM.User message
+  | CM.Assistant message
+  | CM.Tool_call message
+  | CM.Tool_response message -> message.source_context
+  | CM.Reasoning reasoning -> reasoning.source_context
+  | CM.Config _
+  | CM.Tool _
+  | CM.Shell_runtime _
+  | CM.Moderator_runtime _
+  | CM.Script _
+  | CM.Shell_script _ -> None
+;;
+
+let to_identity_bearing_items ~ctx ~run_agent elements =
+  List.filter_mapi elements ~f:(fun source_index element ->
+    match to_items ~ctx ~run_agent [ element ] with
+    | [] -> None
+    | [ item ] ->
+      Some
+        { item
+        ; history_id = history_id element
+        ; source_index
+        ; source_context = source_context element
+        }
+    | _ -> failwith "one prompt element produced multiple response items")
 ;;

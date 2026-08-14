@@ -3,7 +3,7 @@
  (public_name ochat.context_compaction)
  ;; Initial scaffold – modules will be added in later steps
  (modules config relevance_judge summarizer compactor)
- (libraries core eio jsonaf ochat.meta_prompting ochat.openai)
+ (libraries core eio jsonaf ochat.meta_prompting ochat.openai history_entry)
  (preprocess
   (pps ppx_jane)))
 
@@ -17,7 +17,13 @@
   relevance_judge_expect
   summarizer_expect
   compactor_expect)
- (libraries core expect_test_helpers_core context_compaction eio eio_main)
+ (libraries
+  core
+  expect_test_helpers_core
+  context_compaction
+  history_entry
+  eio
+  eio_main)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

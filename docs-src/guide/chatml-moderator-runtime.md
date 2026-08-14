@@ -375,11 +375,12 @@ Runtime.end_session        : string -> unit task
 
 There are three related transcript views:
 
-- **canonical history**: the durable transcript stored by the host;
-- **effective history**: canonical history projected through the durable
-  moderator overlay;
-- **visible history**: the host/UI presentation derived from effective
-  history.
+- **canonical history**: durable `History_entry.t` occurrences stored by the
+  host, each with an application-owned ID;
+- **effective entries**: canonical history projected through the durable
+  moderator overlay with canonical/inserted/replacement provenance;
+- **visible rows**: the host/UI presentation derived from effective entries,
+  with stable row IDs and revision numbers.
 
 `Turn.*` operations do not directly rewrite canonical history. They update a
 durable overlay that can:
@@ -390,8 +391,14 @@ durable overlay that can:
 - delete projected items by id,
 - halt the session with a reason.
 
-Before the next model request, the host computes effective history by applying
-that overlay to the projected canonical history.
+Replacement preserves the target canonical ID; insertions allocate new host
+IDs; deletion records a tombstone. Before the next model request, the host
+computes effective entries and unwraps only their OpenAI payloads at the
+provider boundary.
+
+Committed overlay batches carry a monotonic revision and immutable operation
+facts. Interactive hosts may observe those commits immediately, but they
+reproject visible rows only at foreground-operation safe points.
 
 ## Safe-point and runtime semantics
 
@@ -567,3 +574,23 @@ Use these focused documents when you need more detail on one topic:
 - [ChatML budget policy](../chatml-budget-policy.md)
 - [ChatML UI host capabilities](../chatml-ui-host-capabilities.md)
 - [ChatML language specification](chatml-language-spec.md)
+
+## Shell runtime integration
+
+`Process.run` is installed only when ChatMD declares:
+
+```xml
+<moderator_runtime shell_runtime="moderator-processes"/>
+```
+
+The operation creates structured argv and routes through the same immutable
+shell registry used by agent tools: resolver/fingerprint, effects,
+administrative and manifest policy, capabilities, approval, interceptors,
+backend, limits, output finalization, and audit. There is no moderator-only
+direct-spawn path. Without a binding, `Process.run` is unavailable.
+
+Shell-specific script kinds (`shell_matcher`, `shell_reviewer`,
+`shell_before_interceptor`, `shell_after_interceptor`,
+`shell_effect_analyzer`, and `shell_audit_filter`) use purpose-built surfaces
+and do not inherit moderator `Process`, `Model`, `Tool`, filesystem, network,
+or UI capabilities. See the [shell extension guide](chatmd-shell-extensions.md).

@@ -23,6 +23,74 @@ module Res = Openai.Responses
 *)
 module Output = Res.Tool_output.Output
 
+module Invocation_id = struct
+  type t = string
+
+  let next = Atomic.make 0
+
+  let create () =
+    let sequence = Atomic.fetch_and_add next 1 in
+    Printf.sprintf "fork-invocation-%d" sequence
+  ;;
+
+  let to_string t = t
+end
+
+let create_allocator ~parent_namespace invocation_id =
+  History_entry.Allocator.create
+    ~namespace:(parent_namespace ^ "/" ^ Invocation_id.to_string invocation_id)
+    ~next_sequence:0
+  |> Result.ok_or_failwith
+;;
+
+let allocator = create_allocator
+
+let instruction_item ~arguments ~call_id =
+  let input = Definitions.Fork.input_of_string arguments in
+  let arg_str = String.concat ~sep:" " input.arguments in
+  let instruction_text =
+    Printf.sprintf
+      {|SYSTEM MESSAGE – Forked Agent
+
+You are an **isolated clone** of the main assistant.  Your internal state will be *discarded* once you hand control back and merge with the parent.  Only the information you explicitly place in the *PERSIST* section will survive.
+
+Primary task inside the fork
+• Execute:
+  command - `%s`
+  arguments - `%s`
+
+You may leverage every available tool (except the [fork] tool), read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.
+
+Return exactly **one** assistant message in this template:
+
+```
+===RESULT===
+<Exhaustive narrative of EVERYTHING you did – reasoning, obstacles, fixes, validation, code patches (use fenced blocks), logs, etc.>
+
+===PERSIST===
+<Consise ≤20 bullet points capturing facts, artefacts, follow-ups, or warnings the parent must retain. Bullets can be as detailed as needed, but should be succinct>
+```
+
+Best-practice reminders (GPT-4.1 / O3):
+• Think step-by-step internally; *write* that reasoning in RESULT for auditability.
+• Perform a quick self-check before replying; note unresolved issues in PERSIST.
+• Avoid filler phrases like “let’s think step-by-step”.  Just reason and write.
+
+Call-ID: %s
+|}
+      input.command
+      arg_str
+      call_id
+  in
+  Res.Item.Function_call_output
+    { output = Res.Tool_output.Output.Text instruction_text
+    ; call_id
+    ; _type = "function_call_output"
+    ; id = None
+    ; status = None
+    }
+;;
+
 (* -------------------------------------------------------------------- *)
 (*  Helper: build a system/input message instructing the forked agent.   *)
 (* -------------------------------------------------------------------- *)
@@ -33,19 +101,22 @@ module Output = Res.Tool_output.Output
 
 let rec run_stream
           ~(env : Eio_unix.Stdenv.base)
-          ~(initial_history : Res.Item.t list)
+          ~(allocator : History_entry.Allocator.t)
+          ~(initial_history : History_entry.t list)
           ~(tools : Res.Request.Tool.t list)
-          ~(tool_tbl :
-             (string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t)
+          ~(tool_tbl : (string, Ochat_function.runner) Base.Hashtbl.t)
           ~(on_event : Res.Response_stream.t -> unit)
+          ~(on_sourced_event : Sourced_response_event.t -> unit)
+          ~(on_tool_execution : Tool_execution_event.t -> unit)
           ~(on_fn_out : Res.Function_call_output.t -> unit)
           ~(call_id_parent : string)
+          ~(invocation_id : Invocation_id.t)
           ~(output_buffer : Buffer.t)
           ?temperature
           ?max_output_tokens
           ?reasoning
           ()
-  : Res.Item.t list
+  : History_entry.t list
   =
   let net = env#net in
   let cwd = Eio.Stdenv.cwd env in
@@ -56,7 +127,7 @@ let rec run_stream
   (* ------------------------------------------------------------------ *)
   (* Recursive turn function                                             *)
   (* ------------------------------------------------------------------ *)
-  let rec turn (hist : Res.Item.t list) : Res.Item.t list =
+  let rec turn (hist : History_entry.t list) : History_entry.t list =
     (* Tables for tracking function calls and reasoning items. *)
     let module Tool_call_kind = struct
       type t =
@@ -68,8 +139,11 @@ let rec run_stream
       Hashtbl.create (module String)
     in
     let reasoning_state : (string, int) Hashtbl.t = Hashtbl.create (module String) in
-    let new_items : Res.Item.t list ref = ref [] in
-    let add_item it = new_items := it :: !new_items in
+    let new_entries : History_entry.t list ref = ref [] in
+    let add_item item =
+      let entry = History_entry.create ~allocator item |> Result.ok_or_failwith in
+      new_entries := entry :: !new_entries
+    in
     let run_again = ref false in
     (* Execute a tool once its arguments have been streamed. *)
     let handle_function_done ~item_id ~arguments =
@@ -87,21 +161,38 @@ let rec run_stream
             ~tool_tbl
             ~on_fork:
               (Some
-                 (fun ~call_id ~arguments ->
+                 (fun ~invocation ~call_id ~arguments ->
+                   let trace =
+                     Agent_trace.create
+                       ~emit:(Ochat_function.Invocation.emit invocation)
+                       ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
+                   in
+                   let child_invocation_id = Invocation_id.create () in
+                   let child_allocator =
+                     create_allocator
+                       ~parent_namespace:(History_entry.Allocator.namespace allocator)
+                       child_invocation_id
+                   in
                    Openai.Responses.Tool_output.Output.Text
-                     (execute
+                     (execute_entries
                         ~env
                         ~history:hist
+                        ~allocator:child_allocator
+                        ~invocation_id:child_invocation_id
                         ~call_id
                         ~arguments
                         ~tools
                         ~tool_tbl
                         ~on_event
+                        ~on_sourced_event
+                        ~on_tool_execution:(Agent_trace.on_tool_execution trace)
                         ~on_fn_out
                         ?temperature
                         ?max_output_tokens
                         ?reasoning
                         ())))
+            ~on_tool_execution
+            ()
         in
         let fn_call_item : Res.Item.t =
           Tool_call.call_item
@@ -115,7 +206,13 @@ let rec run_stream
           Tool_call.function_call_output ~call_id ~output:result
         in
         let fn_out_item = Res.Item.Function_call_output fn_out in
-        new_items := fn_out_item :: fn_call_item :: !new_items;
+        let fn_call_entry =
+          History_entry.create ~allocator fn_call_item |> Result.ok_or_failwith
+        in
+        let fn_out_entry =
+          History_entry.create ~allocator fn_out_item |> Result.ok_or_failwith
+        in
+        new_entries := fn_out_entry :: fn_call_entry :: !new_entries;
         run_again := true;
         fn_out
     in
@@ -131,6 +228,8 @@ let rec run_stream
             ~call_id
             ~tool_tbl
             ~on_fork:None
+            ~on_tool_execution
+            ()
         in
         let tool_call_item : Res.Item.t =
           Tool_call.call_item
@@ -144,7 +243,13 @@ let rec run_stream
           Tool_call.custom_tool_call_output ~call_id ~output:result
         in
         let tool_out_item = Res.Item.Custom_tool_call_output tool_out in
-        new_items := tool_out_item :: tool_call_item :: !new_items;
+        let tool_call_entry =
+          History_entry.create ~allocator tool_call_item |> Result.ok_or_failwith
+        in
+        let tool_out_entry =
+          History_entry.create ~allocator tool_out_item |> Result.ok_or_failwith
+        in
+        new_entries := tool_out_entry :: tool_call_entry :: !new_entries;
         run_again := true
     in
     (* Streaming callback – forwards to caller while building history. *)
@@ -200,7 +305,12 @@ let rec run_stream
          display fork activity.  The TUI will distinguish forked events by
          monitoring whether a fork tool call with [call_id_parent] is
          currently outstanding. *)
-      on_event ev
+      on_event ev;
+      on_sourced_event
+        (Sourced_response_event.fork
+           ~invocation_id:(Invocation_id.to_string invocation_id)
+           ~parent_call_id:call_id_parent
+           ev)
     in
     Eio.Switch.run
     @@ fun sw ->
@@ -214,13 +324,13 @@ let rec run_stream
         ?reasoning
         ~parallel_tool_calls:true
         net
-        ~inputs:hist
+        ~inputs:(History_entry.items hist)
         ~tools
         ~sw
         ~model:Res.Request.O3
     in
     Seq.iter stream_cb stream;
-    let next_hist = hist @ List.rev !new_items in
+    let next_hist = hist @ List.rev !new_entries in
     if !run_again then turn next_hist else next_hist
   in
   (* turn start *)
@@ -229,175 +339,69 @@ let rec run_stream
   Cache.save ~file:cache_file cache;
   full
 
-(* -------------------------------------------------------------------- *)
-(*  Main [execute] entry point                                           *)
-(* -------------------------------------------------------------------- *)
-
-(* ------------------------------------------------------------------ *)
-(*  Implementation of [execute] – relies on [run_stream].               *)
-(* ------------------------------------------------------------------ *)
-
-(** [execute ~env ~history ~call_id ~arguments ~tools ~tool_tbl …] runs a
-    *fork* session to completion and returns the assistant’s final text
-    reply.
-
-    Under the hood the helper:
-
-    1. Adds a synthetic [`Function_call_output`] that explains the fork
-       protocol to the clone.
-    2. Delegates the actual conversation to {!run_stream} so that nested
-       function calls keep working.
-    3. Concatenates the assistant messages produced after the initial
-       history and returns the merged string to the parent loop.
-
-    The function is synchronous – callers will block until the forked
-    agent finishes or the outer OpenAI request reaches its token limit.
-  *)
-and execute
-      ~(env : Eio_unix.Stdenv.base)
-      ~(history : Res.Item.t list)
-      ~(call_id : string)
-      ~(arguments : string)
-      ~(tools : Res.Request.Tool.t list)
-      ~(tool_tbl :
-         (string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t)
-      ~(on_event : Res.Response_stream.t -> unit)
-      ~(on_fn_out : Res.Function_call_output.t -> unit)
+and execute_entries
+      ~env
+      ~allocator
+      ~history
+      ~invocation_id
+      ~call_id
+      ~arguments
+      ~tools
+      ~tool_tbl
+      ~on_event
+      ?on_sourced_event
+      ?on_tool_execution
+      ~on_fn_out
       ?temperature
       ?max_output_tokens
       ?reasoning
       ()
-  : string
   =
-  let input = Definitions.Fork.input_of_string arguments in
-  let command = input.command in
-  let argv = input.arguments in
-  let arg_str = String.concat ~sep:" " argv in
-  let instruction_text =
-    Printf.sprintf
-      {|SYSTEM MESSAGE – Forked Agent
-
-You are an **isolated clone** of the main assistant.  Your internal state will be *discarded* once you hand control back and merge with the parent.  Only the information you explicitly place in the *PERSIST* section will survive.
-
-Primary task inside the fork
-• Execute:
-  command - `%s`
-  arguments - `%s`
-
-You may leverage every available tool (except the [fork] tool), read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.
-
-Return exactly **one** assistant message in this template:
-
-```
-===RESULT===
-<Exhaustive narrative of EVERYTHING you did – reasoning, obstacles, fixes, validation, code patches (use fenced blocks), logs, etc.>
-
-===PERSIST===
-<Consise ≤20 bullet points capturing facts, artefacts, follow-ups, or warnings the parent must retain. Bullets can be as detailed as needed, but should be succinct>
-```
-
-Best-practice reminders (GPT-4.1 / O3):
-• Think step-by-step internally; *write* that reasoning in RESULT for auditability.
-• Perform a quick self-check before replying; note unresolved issues in PERSIST.
-• Avoid filler phrases like “let’s think step-by-step”.  Just reason and write.
-
-Call-ID: %s
-|}
-      command
-      arg_str
-      call_id
+  let instruction =
+    History_entry.create ~allocator (instruction_item ~arguments ~call_id)
+    |> Result.ok_or_failwith
   in
-  (* Inject the instruction as a Function_call_output so the clone is aware
-     it is a forked agent and what command to run. *)
-  let instruction_fn_out : Res.Function_call_output.t =
-    { output = Res.Tool_output.Output.Text instruction_text
-    ; call_id
-    ; _type = "function_call_output"
-    ; id = None
-    ; status = None
-    }
-  in
-  let instruction_item = Res.Item.Function_call_output instruction_fn_out in
-  let clone_history = history @ [ instruction_item ] in
-  (* Buffer to accumulate and stream progress back to parent *)
-  let output_buffer = Stdlib.Buffer.create 256 in
+  let clone_history = history @ [ instruction ] in
+  let output_buffer = Buffer.create 256 in
   let full_history =
     run_stream
       ~env
+      ~allocator
       ~initial_history:clone_history
       ~tools
       ~tool_tbl
       ~on_event
+      ~on_sourced_event:(Option.value on_sourced_event ~default:(fun _ -> ()))
+      ~on_tool_execution:(Option.value on_tool_execution ~default:(fun _ -> ()))
       ~on_fn_out
       ~call_id_parent:call_id
+      ~invocation_id
       ~output_buffer
       ?temperature
       ?max_output_tokens
       ?reasoning
       ()
   in
-  let new_items = List.drop full_history (List.length clone_history) in
-  let assistant_msgs =
-    List.filter_map new_items ~f:(function
-      | Res.Item.Output_message om ->
-        Some (List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
-      | _ -> None)
+  let clone_ids =
+    List.map clone_history ~f:History_entry.id
+    |> Hash_set.of_list (module History_entry.Id)
   in
-  let final_reply = String.concat ~sep:"\n" assistant_msgs in
-  (* Return the final reply; the parent driver will create the definitive
-     Function_call_output once [execute] returns. *)
-  final_reply
+  List.filter full_history ~f:(fun entry ->
+    not (Hash_set.mem clone_ids (History_entry.id entry)))
+  |> List.filter_map ~f:(fun entry ->
+    match History_entry.item entry with
+    | Res.Item.Output_message message ->
+      Some
+        (List.map message.content ~f:(fun content -> content.text)
+         |> String.concat ~sep:" ")
+    | _ -> None)
+  |> String.concat ~sep:"\n"
 ;;
 
-let history ~history ~arguments call_id =
-  let input = Definitions.Fork.input_of_string arguments in
-  let command = input.command in
-  let argv = input.arguments in
-  let arg_str = String.concat ~sep:" " argv in
-  let instruction_text =
-    Printf.sprintf
-      {|SYSTEM MESSAGE – Forked Agent
-
-You are an **isolated clone** of the main assistant.  Your internal state will be *discarded* once you hand control back and merge with the parent.  Only the information you explicitly place in the *PERSIST* section will survive.
-
-Primary task inside the fork
-• Execute:
-  command - `%s`
-  arguments - `%s`
-
-You may leverage every available tool (except the [fork] tool), read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.
-
-Return exactly **one** assistant message in this template:
-
-```
-===RESULT===
-<Exhaustive narrative of EVERYTHING you did – reasoning, obstacles, fixes, validation, code patches (use fenced blocks), logs, etc.>
-
-===PERSIST===
-<Consise ≤20 bullet points capturing facts, artefacts, follow-ups, or warnings the parent must retain. Bullets can be as detailed as needed, but should be succinct>
-```
-
-Best-practice reminders (GPT-4.1 / O3):
-• Think step-by-step internally; *write* that reasoning in RESULT for auditability.
-• Perform a quick self-check before replying; note unresolved issues in PERSIST.
-• Avoid filler phrases like “let’s think step-by-step”.  Just reason and write.
-
-Call-ID: %s
-|}
-      command
-      arg_str
-      call_id
+let history_entries ~allocator ~history:entries ~arguments ~call_id =
+  let instruction =
+    History_entry.create ~allocator (instruction_item ~arguments ~call_id)
+    |> Result.ok_or_failwith
   in
-  (* Inject the instruction as a Function_call_output so the clone is aware
-     it is a forked agent and what command to run. *)
-  let instruction_fn_out : Res.Function_call_output.t =
-    { output = Res.Tool_output.Output.Text instruction_text
-    ; call_id
-    ; _type = "function_call_output"
-    ; id = None
-    ; status = None
-    }
-  in
-  let instruction_item = Res.Item.Function_call_output instruction_fn_out in
-  history @ [ instruction_item ]
+  entries @ [ instruction ]
 ;;

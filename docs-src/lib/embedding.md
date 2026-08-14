@@ -6,25 +6,29 @@ and for building search indices.
 
 ## Driving ChatMD conversations from OCaml
 
-`Chat_response.Driver.run_completion_stream_in_memory_v1` is the main entry
-point when you want to execute a ChatMarkdown conversation entirely in memory
-without touching a `.chatmd` file on disk:
+`Chat_response.In_memory_stream.run_completion_stream_in_memory_entries` is
+the identity-bearing entry point when you want to execute a conversation
+entirely in memory. The embedding owns one allocator for the run and keeps the
+returned `History_entry.t list` as canonical history:
 
 ```ocaml
-let run ~env ~history =
-  Chat_response.Driver.run_completion_stream_in_memory_v1
+let run ~env ~allocator ~history =
+  Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
     ~env
+    ~allocator
     ~history
     ~tools:None
-    ~model:`Gpt4o
     ()
 ```
 
 The function takes an `Eio_unix.Stdenv.base` `env` and an
-`Openai.Responses.Item.t list` `history`, streams tokens as they arrive, and
-returns the updated history. It handles tool discovery and caching for you and
-persists a shared agent cache under a `.chatmd/cache.bin` directory chosen by
-the caller (CLI, TUI, tests).
+identity-bearing history, streams events as they arrive, and returns the
+updated canonical history. Existing IDs are retained and new assistant/tool
+occurrences use the supplied allocator. Use `History_entry.items` only when
+projecting payloads to a provider API.
+
+`run_completion_stream_in_memory_v1` remains a raw-item compatibility adapter;
+new session-owning embeddings should not use it as their canonical store.
 
 If you want to manage that cache yourself, use `Chat_response.Cache`:
 

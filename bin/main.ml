@@ -297,6 +297,528 @@ let html_to_markdown_command =
        Io.console_log ~stdout:env#stdout @@ sprintf "%s" markdown)
 ;;
 
+let print_audit_errors errors =
+  List.iter errors ~f:(fun (error : Shell_runtime.Audit_replay.error) ->
+    eprintf
+      "%s%s: %s\n"
+      error.code
+      (Option.value_map error.line ~default:"" ~f:(sprintf " line=%d"))
+      error.message)
+;;
+
+let load_audit env path =
+  Shell_runtime.Audit_replay.load_rotated ~fs:(Eio.Stdenv.fs env) ~path
+;;
+
+let print_shell_diagnostics diagnostics =
+  List.iter diagnostics ~f:(fun diagnostic ->
+    eprintf "%s\n" (Chat_response.Agent_runtime.diagnostic_to_string diagnostic))
+;;
+
+let signature_summary status =
+  match status.Shell_runtime.Manifest_security.signature_key_id with
+  | None -> "unsigned; accepted by administrative policy"
+  | Some key_id ->
+    sprintf
+      "verified; key=%s%s"
+      key_id
+      (Option.value_map status.signature_issuer ~default:"" ~f:(fun issuer ->
+         "; issuer=" ^ issuer))
+;;
+
+let shell_inspect_command =
+  Command.basic
+    ~summary:"Inspect requested/live shell authority without authorizing or executing it."
+    (let%map_open path = anon ("CHATMD" %: string)
+     and canonical =
+       flag "-canonical" no_arg ~doc:" Print the canonical requested manifest JSON"
+     in
+     fun () ->
+       run_main (fun env ->
+         let fs = Eio.Stdenv.fs env in
+         let prompt = Eio.Path.(fs / path) |> Eio.Path.load in
+         let dir = Eio.Path.(fs / Filename.dirname path) in
+         let elements = Prompt.Chat_markdown.parse_chat_inputs ~source:path ~dir prompt in
+         match
+           Chat_response.Agent_runtime.inspect_shell
+             ~env
+             ~platform:(Chat_response.Agent_runtime.platform ())
+             ~prompt_elements:elements
+         with
+         | Error diagnostics ->
+           print_shell_diagnostics diagnostics;
+           Core.exit 1
+         | Ok inspection ->
+           let manifest = inspection.manifest in
+           printf "requested manifest: %s\n" manifest.sha256;
+           printf "live manifest:      %s\n" manifest.sha256;
+           printf "administrative:     %s\n" inspection.administrative_policy.source;
+           printf
+             "signature:          %s\n"
+             (signature_summary inspection.security_status);
+           printf
+             "trusted sources:    %d\n"
+             (List.length inspection.security_status.trusted_sources);
+           printf "live runtimes:      %d\n" (List.length inspection.live_runtimes);
+           List.iter inspection.live_runtimes ~f:(fun runtime ->
+             printf
+               "  %s  profile=%s\n"
+               (Chatmd_shell_spec.Shell_spec.Runtime_id.to_string runtime.id)
+               (Option.value runtime.resolved_profile ~default:"custom"));
+           if canonical then printf "\n%s\n" manifest.canonical_json))
+;;
+
+let shell_audit_validate_command =
+  Command.basic
+    ~summary:"Validate a shell audit JSONL file and its integrity chain."
+    (let%map_open path = anon ("PATH" %: string) in
+     fun () ->
+       run_main (fun env ->
+         match load_audit env path with
+         | Error errors ->
+           print_audit_errors errors;
+           Core.exit 1
+         | Ok events ->
+           (match Shell_runtime.Audit_replay.validate events with
+            | Error errors ->
+              print_audit_errors errors;
+              Core.exit 1
+            | Ok () -> printf "valid audit log: %d events\n" (List.length events))))
+;;
+
+let shell_audit_replay_command =
+  Command.basic
+    ~summary:"Render a read-only shell audit timeline."
+    (let%map_open path = anon ("PATH" %: string) in
+     fun () ->
+       run_main (fun env ->
+         match load_audit env path with
+         | Error errors ->
+           print_audit_errors errors;
+           Core.exit 1
+         | Ok events ->
+           List.iter events ~f:(fun event ->
+             printf "%s\n" (Shell_runtime.Audit_replay.render_event event))))
+;;
+
+let shell_audit_request_command =
+  Command.basic
+    ~summary:"Reconstruct one shell request from an audit log without executing it."
+    (let%map_open path = anon ("PATH" %: string)
+     and request_id = anon ("REQUEST_ID" %: string) in
+     fun () ->
+       run_main (fun env ->
+         match load_audit env path with
+         | Error errors ->
+           print_audit_errors errors;
+           Core.exit 1
+         | Ok events ->
+           (match Shell_runtime.Audit_replay.request events ~request_id with
+            | Error error ->
+              print_audit_errors [ error ];
+              Core.exit 1
+            | Ok request ->
+              printf "%s\n" (Shell_runtime.Audit_replay.render_request request))))
+;;
+
+let shell_audit_command =
+  Command.group
+    ~summary:"Validate and replay shell runtime audit logs."
+    [ "validate", shell_audit_validate_command
+    ; "replay", shell_audit_replay_command
+    ; "request", shell_audit_request_command
+    ]
+;;
+
+let load_shell_session env id =
+  match Session_store.read_existing ~env ~id with
+  | Some session -> session
+  | None ->
+    eprintf "Session not found or unreadable: %s\n" id;
+    Core.exit 1
+;;
+
+let grant_scope = function
+  | Session.Shell_state.Approval_scope.Exact_session -> "exact-session"
+  | Prefix_session { prefix } -> "prefix-session(" ^ String.concat ~sep:" " prefix ^ ")"
+  | Durable_exact -> "durable-exact"
+;;
+
+let grant_status grant =
+  match grant.Session.Shell_state.Approval_grant.revoked_at_ns with
+  | Some _ -> "revoked"
+  | None ->
+    let now = Time_ns.now () |> Time_ns.to_int63_ns_since_epoch |> Int63.to_int64 in
+    if Option.exists grant.expires_at_ns ~f:(Int64.( < ) now) then "expired" else "active"
+;;
+
+let shell_grants_list_command =
+  Command.basic
+    ~summary:"List persisted shell approval grants for a session."
+    (let%map_open session_id = anon ("SESSION_ID" %: string) in
+     fun () ->
+       run_main (fun env ->
+         let session = load_shell_session env session_id in
+         let grants = session.Session.shell_state.approval_grants in
+         if List.is_empty grants
+         then printf "No persisted shell approval grants.\n"
+         else
+           List.iter grants ~f:(fun grant ->
+             printf
+               "%s  %-16s  %-14s  runtime=%s  command=%s\n"
+               grant.grant_id
+               (grant_scope grant.scope)
+               (grant_status grant)
+               grant.runtime_id
+               (String.prefix grant.command_sha256 16))))
+;;
+
+let find_grant session grant_id =
+  List.find session.Session.shell_state.approval_grants ~f:(fun grant ->
+    String.equal grant.Session.Shell_state.Approval_grant.grant_id grant_id)
+;;
+
+let shell_grants_explain_command =
+  Command.basic
+    ~summary:"Explain the non-secret identity and bindings of one shell grant."
+    (let%map_open session_id = anon ("SESSION_ID" %: string)
+     and grant_id = anon ("GRANT_ID" %: string) in
+     fun () ->
+       run_main (fun env ->
+         let session = load_shell_session env session_id in
+         match find_grant session grant_id with
+         | None ->
+           eprintf "Unknown shell grant: %s\n" grant_id;
+           Core.exit 1
+         | Some grant ->
+           printf
+             "grant: %s\n\
+              status: %s\n\
+              scope: %s\n\
+              runtime: %s\n\
+              manifest: %s\n\
+              command: %s\n\
+              executable: %s\n\
+              cwd: %s\n\
+              environment: %s\n\
+              stdin: %s (%d bytes)\n\
+              script: %s\n\
+              session binding: %s\n\
+              user binding: %s\n\
+              host binding: %s\n\
+              reviewer: %s\n\
+              created ns: %Ld\n\
+              expires ns: %s\n\
+              last used ns: %s\n"
+             grant.grant_id
+             (grant_status grant)
+             (grant_scope grant.scope)
+             grant.runtime_id
+             grant.manifest_sha256
+             grant.command_sha256
+             grant.executable_sha256
+             grant.cwd_sha256
+             grant.environment_sha256
+             (Option.value grant.stdin_sha256 ~default:"none")
+             grant.stdin_bytes
+             (Option.value grant.script_sha256 ~default:"none")
+             (Option.value grant.session_id ~default:"none")
+             (Option.value grant.user_id ~default:"none")
+             (Option.value grant.host_id ~default:"none")
+             grant.reviewer.source
+             grant.created_at_ns
+             (Option.value_map grant.expires_at_ns ~default:"none" ~f:Int64.to_string)
+             (Option.value_map grant.last_used_at_ns ~default:"never" ~f:Int64.to_string)))
+;;
+
+let shell_grants_revoke_command =
+  Command.basic
+    ~summary:"Revoke a persisted shell grant and append a chained audit event."
+    (let%map_open session_id = anon ("SESSION_ID" %: string)
+     and grant_id = anon ("GRANT_ID" %: string)
+     and reason = flag "-reason" (optional string) ~doc:"TEXT Revocation reason"
+     and confirm = flag "-confirm" no_arg ~doc:" Confirm the revocation mutation" in
+     fun () ->
+       if not confirm
+       then (
+         eprintf "Refusing to revoke without -confirm.\n";
+         Core.exit 2);
+       run_main (fun env ->
+         let session = load_shell_session env session_id in
+         let grant =
+           match find_grant session grant_id with
+           | Some grant -> grant
+           | None ->
+             eprintf "Unknown shell grant: %s\n" grant_id;
+             Core.exit 1
+         in
+         let state = ref session in
+         let persist updated =
+           try
+             Session_store.save ~env updated;
+             Ok ()
+           with
+           | exn -> Error (Core.Exn.to_string exn)
+         in
+         let store =
+           Shell_runtime.Approval_store.session
+             ~session:state
+             ~persist
+             ~bindings:{ user_id = None; host_id = None }
+         in
+         (match
+            Shell_runtime.Approval_store.revoke
+              store
+              ~now:(Time_ns.now ())
+              ~grant_id
+              ~reason
+          with
+          | Error error ->
+            eprintf "%s: %s\n" error.code error.message;
+            Core.exit 1
+          | Ok () -> ());
+         let audit_path =
+           Filename.concat (Session_store.rel_path session_id) ".chatmd/shell-audit.jsonl"
+         in
+         match
+           Shell_runtime.Audit_sink.append_management_event
+             ~env
+             ~path:audit_path
+             ~session_id:(Some session_id)
+             ~runtime_id:grant.runtime_id
+             ~manifest_sha256:grant.manifest_sha256
+             ~request_id:("grant-revoke:" ^ grant_id)
+             ~event:"grant_revoked"
+             ~fields:
+               [ "grant_id", `String grant_id
+               ; "scope", `String (grant_scope grant.scope)
+               ; "reason", `String (Option.value reason ~default:"revoked by user")
+               ]
+         with
+         | Error error ->
+           eprintf
+             "Grant was revoked, but audit persistence failed (%s): %s\n"
+             error.code
+             error.message;
+           Core.exit 1
+         | Ok sequence ->
+           let shell_state =
+             { !state.Session.shell_state with last_audit_sequence = Some sequence }
+           in
+           let updated = { !state with shell_state } in
+           Session_store.save ~env updated;
+           state := updated;
+           printf "Revoked grant %s (audit sequence %Ld).\n" grant_id sequence))
+;;
+
+let shell_grants_command =
+  Command.group
+    ~summary:"Inspect, explain, and revoke persisted shell grants."
+    [ "list", shell_grants_list_command
+    ; "explain", shell_grants_explain_command
+    ; "revoke", shell_grants_revoke_command
+    ]
+;;
+
+let manifest_grant_status grant =
+  match grant.Session.Shell_state.Manifest_grant.revoked_at_ns with
+  | Some _ -> "revoked"
+  | None ->
+    let now = Time_ns.now () |> Time_ns.to_int63_ns_since_epoch |> Int63.to_int64 in
+    if Option.exists grant.expires_at_ns ~f:(Int64.( < ) now) then "expired" else "active"
+;;
+
+let find_manifest_grant session grant_id =
+  List.find session.Session.shell_state.manifest_grants ~f:(fun grant ->
+    String.equal grant.Session.Shell_state.Manifest_grant.grant_id grant_id)
+;;
+
+let shell_manifest_grants_list_command =
+  Command.basic
+    ~summary:"List exact canonical manifest grants for a session."
+    (let%map_open session_id = anon ("SESSION_ID" %: string) in
+     fun () ->
+       run_main (fun env ->
+         let session = load_shell_session env session_id in
+         let grants = session.Session.shell_state.manifest_grants in
+         if List.is_empty grants
+         then printf "No persisted shell manifest grants.\n"
+         else
+           List.iter grants ~f:(fun grant ->
+             printf
+               "%s  %-8s  manifest=%s  source=%s\n"
+               grant.grant_id
+               (manifest_grant_status grant)
+               (String.prefix grant.manifest_sha256 16)
+               (String.prefix grant.source_sha256 16))))
+;;
+
+let shell_manifest_grants_explain_command =
+  Command.basic
+    ~summary:"Explain one exact canonical manifest grant."
+    (let%map_open session_id = anon ("SESSION_ID" %: string)
+     and grant_id = anon ("GRANT_ID" %: string) in
+     fun () ->
+       run_main (fun env ->
+         let session = load_shell_session env session_id in
+         match find_manifest_grant session grant_id with
+         | None ->
+           eprintf "Unknown shell manifest grant: %s\n" grant_id;
+           Core.exit 1
+         | Some grant ->
+           printf
+             "grant: %s\n\
+              status: %s\n\
+              manifest: %s\n\
+              source root: %s\n\
+              source digest: %s\n\
+              repository: %s\n\
+              signer: %s\n\
+              issuer: %s\n\
+              session binding: %s\n\
+              user binding: %s\n\
+              host binding: %s\n\
+              encoding schema: %d\n\
+              builtin versions: %s\n\
+              imports: %s\n"
+             grant.grant_id
+             (manifest_grant_status grant)
+             grant.manifest_sha256
+             grant.canonical_source_root
+             grant.source_sha256
+             (Option.value grant.repository_identity ~default:"none")
+             (Option.value grant.signer ~default:"none")
+             (Option.value grant.issuer ~default:"none")
+             (Option.value grant.session_id ~default:"none")
+             (Option.value grant.user_id ~default:"none")
+             (Option.value grant.host_id ~default:"none")
+             grant.schema_version
+             (List.map grant.builtin_versions ~f:(fun (id, version) -> id ^ "=" ^ version)
+              |> String.concat ~sep:", ")
+             (List.map grant.imported_source_sha256 ~f:(fun (file, digest) ->
+                file ^ "=" ^ String.prefix digest 16)
+              |> String.concat ~sep:", ")))
+;;
+
+let shell_manifest_grants_revoke_command =
+  Command.basic
+    ~summary:"Revoke an exact canonical manifest grant."
+    (let%map_open session_id = anon ("SESSION_ID" %: string)
+     and grant_id = anon ("GRANT_ID" %: string)
+     and reason = flag "-reason" (optional string) ~doc:"TEXT Revocation reason"
+     and confirm = flag "-confirm" no_arg ~doc:" Confirm the revocation mutation" in
+     fun () ->
+       if not confirm
+       then (
+         eprintf "Refusing to revoke without -confirm.\n";
+         Core.exit 2);
+       run_main (fun env ->
+         let session = load_shell_session env session_id in
+         let grant =
+           match find_manifest_grant session grant_id with
+           | Some grant -> grant
+           | None ->
+             eprintf "Unknown shell manifest grant: %s\n" grant_id;
+             Core.exit 1
+         in
+         let state = ref session in
+         let persist updated =
+           try
+             Session_store.save ~env updated;
+             Ok ()
+           with
+           | exn -> Error (Core.Exn.to_string exn)
+         in
+         (match
+            Shell_runtime.Manifest_grant_store.revoke
+              ~session:state
+              ~persist
+              ~grant_id
+              ~reason
+          with
+          | Error message ->
+            eprintf "%s\n" message;
+            Core.exit 1
+          | Ok () -> ());
+         let audit_path =
+           Filename.concat (Session_store.rel_path session_id) ".chatmd/shell-audit.jsonl"
+         in
+         match
+           Shell_runtime.Audit_sink.append_management_event
+             ~env
+             ~path:audit_path
+             ~session_id:(Some session_id)
+             ~runtime_id:"manifest"
+             ~manifest_sha256:grant.manifest_sha256
+             ~request_id:("manifest-grant-revoke:" ^ grant_id)
+             ~event:"manifest_grant_revoked"
+             ~fields:
+               [ "grant_id", `String grant_id
+               ; "reason", `String (Option.value reason ~default:"revoked by user")
+               ]
+         with
+         | Error error ->
+           eprintf
+             "Manifest grant was revoked, but audit persistence failed (%s): %s\n"
+             error.code
+             error.message;
+           Core.exit 1
+         | Ok sequence ->
+           let shell_state =
+             { !state.Session.shell_state with last_audit_sequence = Some sequence }
+           in
+           let updated = { !state with shell_state } in
+           Session_store.save ~env updated;
+           printf "Revoked manifest grant %s (audit sequence %Ld).\n" grant_id sequence))
+;;
+
+let shell_manifest_grants_command =
+  Command.group
+    ~summary:"Inspect and revoke exact canonical shell manifest grants."
+    [ "list", shell_manifest_grants_list_command
+    ; "explain", shell_manifest_grants_explain_command
+    ; "revoke", shell_manifest_grants_revoke_command
+    ]
+;;
+
+let shell_interrupted_list_command =
+  Command.basic
+    ~summary:"List interrupted shell requests; requests are never resumed."
+    (let%map_open session_id = anon ("SESSION_ID" %: string) in
+     fun () ->
+       run_main (fun env ->
+         let session = load_shell_session env session_id in
+         let requests = session.Session.shell_state.interrupted_requests in
+         if List.is_empty requests
+         then printf "No interrupted shell requests.\n"
+         else
+           List.iter requests ~f:(fun request ->
+             printf
+               "%s  runtime=%s  retryable=%b  reason=%s\n  %s\n"
+               request.request_id
+               request.runtime_id
+               request.retryable
+               request.reason
+               request.redacted_command)))
+;;
+
+let shell_interrupted_command =
+  Command.group
+    ~summary:"Inspect interrupted requests without resuming execution."
+    [ "list", shell_interrupted_list_command ]
+;;
+
+let shell_command =
+  Command.group
+    ~summary:"Inspect and manage ChatMD shell runtimes."
+    [ "audit", shell_audit_command
+    ; "grants", shell_grants_command
+    ; "inspect", shell_inspect_command
+    ; "manifest-grants", shell_manifest_grants_command
+    ; "interrupted", shell_interrupted_command
+    ]
+;;
+
 (** [main_command] is the top-level {!Command.group} executed by the [ochat]
     binary.  It merely delegates to the sub-commands documented above.
 
@@ -315,6 +837,7 @@ let main_command =
     ; "tokenize", tokenize_command
     ; "html-to-markdown", html_to_markdown_command
     ; "h2md", html_to_markdown_command
+    ; "shell", shell_command
     ]
 ;;
 

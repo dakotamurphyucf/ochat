@@ -1,7 +1,7 @@
 # Fork – drive a nested *assistant clone*
 
 `lib/chat_response/Fork` provides the *runtime* implementation of the
-`fork` GPT-4 tool defined in [`lib/definitions.ml`](../definitions.ml#module-Fork).
+`fork` GPT-4 tool defined in [`lib/definitions.ml`](../../../lib/definitions.ml).
 
 The tool allows the assistant to spawn a fully-featured **child agent**
 that inherits the entire conversation context, available tools and file
@@ -112,10 +112,10 @@ let grep_todo () =
   coherent, incremental output in the tool-call block it already uses to
   display progress.
 
-* **Recursive forks** are fully supported because `tool_tbl` must expose
-  an entry named `fork` that points back to `Fork.execute` itself.  The
-  helper detects such nested invocation and delegates again rather than
-  spawning a fresh process.
+* **Recursive forks** use `Fork.execute_entries` with an invocation-scoped
+  allocator. Parent entries retain their IDs, child-created entries remain
+  isolated, and recursive dispatch does not require a legacy self-reference
+  in `tool_tbl`.
 
 * A deliberately **tiny cache** (1 000 entries) is instantiated for each
   level of recursion.  This keeps memory usage in check even for deep
@@ -125,8 +125,8 @@ let grep_todo () =
 
 ## Known limitations
 
-1. The function is blocking.  Long-running forks will stall the parent
-   fiber unless the caller runs `execute` in its own domain.
+1. The function is blocking. Long-running forks should run in a dedicated
+   fiber managed by the caller.
 2. Each fork adds one level of OpenAI completion overhead: streaming
    events must traverse the stack from the model to the fork, then to
    the parent UI.
@@ -134,4 +134,10 @@ let grep_todo () =
    the parent to the nested request.  Adding a cancellation token is on
    the roadmap.
 
+## Nested shell runtimes
 
+A nested ChatMD agent compiles and authorizes its effective shell manifest
+through the same `Agent_runtime` constructor as a top-level agent. Host
+administrative ceilings always apply. Manifest and command grants match only
+when their complete source/runtime/session identity permits reuse; opening a
+nested prompt does not implicitly inherit broader parent shell authority.

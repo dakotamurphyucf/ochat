@@ -59,10 +59,13 @@
 
 {[
 | Redraw         – visible state changed; re-render the UI
+| Refresh_messages – canonical history changed; rebuild the effective projection
 | Submit_input   – draft is ready; send it to the assistant
 | Cancel_or_quit – ESC; cancel streaming or quit if idle
 | Compact_context – user requested context compaction
 | Quit           – immediate termination (Ctrl-C / 'q')
+| Chat_scrolled  – history scroll consumed; payload reports visible movement
+| Prepare_chat_destination – asynchronously prepare a nonlocal exact viewport
 | Unhandled      – event not recognised; try other handlers
 ]}
 
@@ -71,6 +74,9 @@
 
 type reaction = Controller_types.reaction =
   | Redraw (** The event modified the visible state – caller should refresh. *)
+  | Refresh_messages
+  (** Canonical history changed – caller should rebuild the effective Chat
+      projection before rendering. *)
   | Submit_input (** User pressed Meta+Enter to submit the prompt. *)
   | Cancel_or_quit
   (** ESC request – cancel a running request via {!Eio.Switch.fail} when a
@@ -82,6 +88,17 @@ type reaction = Controller_types.reaction =
   | Quit
   (** Immediate quit (Ctrl-C / q).  The main loop should terminate the Notty
       session, release resources and exit. *)
+  | Chat_scrolled of bool
+  (** A conversation-history scroll was consumed. The payload is [true] when
+      the visible viewport moved and therefore requires a redraw. *)
+  | Prepare_chat_destination of Controller_types.chat_destination
+  (** A nonlocal history destination requires asynchronous exact corridor
+      preparation before it can be shown. *)
+  | Shell_approval_response of
+      string * Shell_runtime.Approval_broker.ui_response
+  | Shell_grant_revoke_requested of int * string
+  | Shell_management_refresh_requested of int
+  | Moderator_input_response of string
   | Unhandled
   (** Controller didn’t deal with the event – propagate it to higher-level
       handlers or ignore it. *)
@@ -123,9 +140,13 @@ type reaction = Controller_types.reaction =
       | Quit -> exit 0
       | Unhandled -> ()
       | Compact_context -> Context_compaction.request ()
+      | Refresh_messages | Chat_scrolled _ | Prepare_chat_destination _ -> ()
     ]} *)
 val handle_key
   :  model:Model.t
   -> term:Notty_eio.Term.t
   -> Notty.Unescape.event
   -> reaction
+
+(** [is_ctrl_g ev] recognizes modifier-aware Ctrl-G and terminal BEL. *)
+val is_ctrl_g : Notty.Unescape.event -> bool

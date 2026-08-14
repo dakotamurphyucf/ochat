@@ -303,4 +303,10 @@ been rendered).
    enforced at the type level yet.  Care must be taken when introducing new
    patch constructors that manipulate the message list.
 
+## Shell page and modal state
+
+`pages.shell_security` is isolated from Chat history/layout caches. It owns its
+snapshot, tab, scroll box, stable grant/audit selections, management load
+generation, shell approval modal, grant revocation modal, and moderator modal.
+Opening or editing an overlay therefore does not invalidate message rendering.
 

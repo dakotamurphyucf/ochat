@@ -58,31 +58,97 @@ let default_id_of_prompt (prompt_file : string) : string =
   Core.Md5.(digest_string prompt_file |> to_hex)
 ;;
 
-let read_snapshot_file (snapshot : Bin_prot_utils_eio.path) : Session.t option =
-  let try_read module_ upgrade_fn =
-    Or_error.try_with (fun () ->
-      let value = Bin_prot_utils_eio.read_bin_prot module_ snapshot in
-      upgrade_fn value)
+type staged_v4_read =
+  | Missing
+  | Loaded of Session.V4.t
+  | Unreadable of Error.t
+
+let read_staged_v4_file snapshot =
+  let errors = ref [] in
+  let attempt name read =
+    match Or_error.try_with read with
+    | Ok value -> Some value
+    | Error error ->
+      errors := Error.tag error ~tag:name :: !errors;
+      None
   in
-  match Or_error.try_with (fun () -> Session.Io.File.read snapshot) with
-  | Ok session -> Some session
-  | Error _ ->
-    (match try_read (module Session.Legacy.V2) Session.Legacy.upgrade_v2 with
-     | Ok session -> Some session
-     | Error _ ->
-       (match try_read (module Session.Legacy.V1) Session.Legacy.upgrade_v1 with
-        | Ok session -> Some session
-        | Error _ ->
-          (match try_read (module Session.Legacy.V0) Session.Legacy.upgrade_v0 with
-           | Ok session -> Some session
-           | Error _ -> None)))
+  let validate session =
+    match Session.V4.validate session with
+    | Ok () -> session
+    | Error error -> failwith error
+  in
+  match attempt "V4" (fun () -> Session.V4.Io.File.read snapshot |> validate) with
+  | Some session -> Ok session
+  | None ->
+    let migrate name module_ upgrade =
+      attempt name (fun () ->
+        match Bin_prot_utils_eio.read_bin_prot module_ snapshot |> upgrade with
+        | Ok session -> session
+        | Error error -> failwith error)
+    in
+    (match migrate "V3" (module Session.Legacy.V3) Session.V4.of_v3 with
+     | Some session -> Ok session
+     | None ->
+       (match migrate "V2" (module Session.Legacy.V2) Session.V4.of_v2 with
+        | Some session -> Ok session
+        | None ->
+          (match migrate "V1" (module Session.Legacy.V1) Session.V4.of_v1 with
+           | Some session -> Ok session
+           | None ->
+             (match migrate "V0" (module Session.Legacy.V0) Session.V4.of_v0 with
+              | Some session -> Ok session
+              | None ->
+                Or_error.error_s
+                  [%sexp
+                    "snapshot is unreadable as V4, V3, V2, V1, or V0"
+                  , (!errors : Error.t list)]))))
+;;
+
+let read_current_file snapshot =
+  let validate session =
+    match Session.V5.validate session with
+    | Ok () -> session
+    | Error error -> failwith error
+  in
+  match
+    Or_error.try_with (fun () ->
+      Session.V5.Io.File.read snapshot |> validate |> Session.of_v5)
+  with
+  | Ok session -> Ok session
+  | Error v5_error ->
+    Result.map_error
+      (Result.map (read_staged_v4_file snapshot) ~f:(fun v4 ->
+         Session.V5.of_v4 v4 |> Session.of_v5))
+      ~f:(fun legacy_error ->
+        Error.create_s
+          [%sexp
+            "snapshot is unreadable as V5 or a supported legacy schema"
+          , { v5_error : Error.t; legacy_error : Error.t }])
+;;
+
+let read_staged_v4 ~env ~(id : id) =
+  let dir = path ~env id in
+  let snapshot = Eio.Path.(dir / "snapshot.bin") in
+  if not (Eio.Path.is_file snapshot)
+  then Missing
+  else (
+    match read_staged_v4_file snapshot with
+    | Ok session -> Loaded session
+    | Error error -> Unreadable error)
 ;;
 
 let read_existing ~env ~(id : id) : Session.t option =
   let dir = path ~env id in
   let snapshot = Eio.Path.(dir / "snapshot.bin") in
-  if Eio.Path.is_file snapshot then read_snapshot_file snapshot else None
+  if not (Eio.Path.is_file snapshot)
+  then None
+  else (
+    match read_current_file snapshot with
+    | Ok session -> Some session
+    | Error _ -> None)
 ;;
+
+let read_snapshot_file = read_current_file
 
 let load_or_create ~env ~prompt_file ?id ?(new_session = false) () : Session.t =
   (* Decide the session identifier to use.
@@ -119,9 +185,9 @@ let load_or_create ~env ~prompt_file ?id ?(new_session = false) () : Session.t =
   (* Decide whether to load an existing snapshot or create a new one. *)
   if (not new_session) && Eio.Path.is_file snapshot
   then (
-    match read_snapshot_file snapshot with
-    | Some s -> s
-    | None -> newly_created_session ())
+    match read_current_file snapshot with
+    | Ok session -> session
+    | Error error -> Error.raise error)
   else newly_created_session ()
 ;;
 
@@ -173,8 +239,12 @@ let reset_session ~env ~(id : id) ?prompt_file ?(keep_history = false) () : unit
   else (
     (* Read current snapshot. *)
     match read_snapshot_file snapshot with
-    | None -> Core.eprintf "Error: session '%s' could not be loaded.\n" id
-    | Some session ->
+    | Error error ->
+      Core.eprintf
+        "Error: session '%s' could not be loaded: %s\n"
+        id
+        (Error.to_string_hum error)
+    | Ok session ->
       (* Create archive directory. *)
       let archive_dir = dir / "archive" in
       (match Eio.Path.is_directory archive_dir with
@@ -255,8 +325,12 @@ let rebuild_session ~env ~(id : id) () : unit =
   then Core.eprintf "Error: session '%s' not found.\n" id
   else (
     match read_snapshot_file snapshot with
-    | None -> Core.eprintf "Error: session '%s' could not be loaded.\n" id
-    | Some old_session ->
+    | Error error ->
+      Core.eprintf
+        "Error: session '%s' could not be loaded: %s\n"
+        id
+        (Error.to_string_hum error)
+    | Ok old_session ->
       (* Archive old snapshot *)
       let archive_dir = dir / "archive" in
       (match Eio.Path.is_directory archive_dir with
@@ -324,9 +398,7 @@ let list ~env : (id * string) list =
         (match Eio.Path.is_file snapshot with
          | false -> None
          | true ->
-           (try
-              let session = Option.value_exn (read_snapshot_file snapshot) in
-              Some (entry, session.prompt_file)
-            with
-            | _ -> None))))
+           (match read_snapshot_file snapshot with
+            | Ok session -> Some (entry, session.prompt_file)
+            | Error _ -> None))))
 ;;

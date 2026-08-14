@@ -7,27 +7,51 @@
   highlight_theme
   highlight_tm_engine
   highlight_tm_loader
+  highlight_grammar_discovery
   highlight_grammars
   highlight_registry
   renderer_highlight_engine
+  live_scroll_trace
   markdown_fences
   types
   chat_page_layout
+  agent_page_selector
+  agent_page_layout
+  shell_security_page_state
   input_display
+  renderer_virtual_list
+  chat_message_render_job
+  projected_message
+  history_chunk
+  prepared_corridor
   model
+  shell_security_snapshot
+  shell_management_service
   renderer_component_history
   renderer_component_input_box
   renderer_component_message
+  chat_render_worker_runtime
+  chat_startup_render
+  chat_render_worker
+  renderer_component_loader
   renderer_component_status_bar
   renderer_lang
   renderer_page_chat
+  renderer_page_agent
+  renderer_shell_security_palette
+  renderer_shell_border
+  renderer_page_shell_security
+  renderer_shell_approval
   renderer_pages
   renderer
   persistence
+  history_materialization
   stream
   cmd
   controller
   controller_types
+  controller_agent
+  controller_shell_security
   controller_normal
   controller_shared
   controller_cmdline
@@ -65,11 +89,23 @@
   chatml
   chatml_moderator_runtime
   chat_response
+  ochat.shell_runtime
   chatmd
   meta_prompting
   ochat.notty_scroll_box
   ochat.session
+  ochat.history_entry
   context_compaction)
  (preprocess
-  (pps ppx_jane))
+  (pps ppx_jane ppx_blob))
+ (preprocessor_deps
+  grammars/ocaml.json
+  grammars/vscode/python.json
+  grammars/vscode/python-regexp.json
+  grammars/vscode/rust.json
+  grammars/vscode/javascript.json
+  grammars/vscode/javascript-react.json
+  grammars/vscode/typescript.json
+  grammars/vscode/typescript-react.json
+  grammars/markdown.tmLanguage.json)
  (inline_tests))

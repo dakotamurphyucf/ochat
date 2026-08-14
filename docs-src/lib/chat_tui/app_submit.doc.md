@@ -8,7 +8,7 @@ user hits enter:
    - append to the transcript/history,
    - clear the editor and scroll to bottom (including clearing any type-ahead
      completion/preview state),
-   - insert a `(thinking…)` placeholder, and
+   - mark assistant activity as thinking, and
    - request a redraw.
 2. Spawn the streaming worker (asynchronously):
    - allocate an operation id and mark runtime as `Starting_streaming`,

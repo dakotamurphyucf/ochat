@@ -1,12 +1,12 @@
 open! Core
 module Lang = Chatml.Chatml_lang
-module Runtime = Chatml_moderator_runtime
+module Runtime = Chatml_host_runtime
 module Res = Openai.Responses
 
 (** Shared host-side moderation types and adapters.
 
     This module sits between driver history/tool data and the generic
-    {!module:Chatml_moderator_runtime}.  It defines:
+    {!module:Chatml_host_runtime}.  It defines:
 
     - the v1 lifecycle phase vocabulary,
     - projection helpers from {!Openai.Responses.Item.t} to ChatML
@@ -150,6 +150,74 @@ module Projection : sig
     -> t * Context.t
 end
 
+module Entry_projection : sig
+  val project_item : History_entry.t -> Item.t
+  val project_history : History_entry.t list -> Item.t list
+
+  val project_context
+    :  session_id:string
+    -> now_ms:int
+    -> phase:Phase.t
+    -> history:History_entry.t list
+    -> available_tools:Res.Request.Tool.t list
+    -> session_meta:Jsonaf.t
+    -> Context.t
+end
+
+module Effective_entry : sig
+  type provenance =
+    | Canonical
+    | Moderator_inserted of { change_id : int }
+    | Moderator_replacement of
+        { target_id : History_entry.Id.t
+        ; change_id : int
+        }
+  [@@deriving sexp]
+
+  type t =
+    { entry : History_entry.t
+    ; provenance : provenance
+    }
+  [@@deriving sexp]
+end
+
+module Identity_overlay : sig
+  type inserted =
+    { entry : History_entry.t
+    ; change_id : int
+    ; script_label : string option
+    }
+  [@@deriving sexp]
+
+  type replacement =
+    { target_id : History_entry.Id.t
+    ; item : Res.Item.t
+    ; change_id : int
+    ; script_label : string option
+    }
+  [@@deriving sexp]
+
+  type tombstone =
+    { target_id : History_entry.Id.t
+    ; change_id : int
+    }
+  [@@deriving sexp]
+
+  type t =
+    { revision : int
+    ; next_change_id : int
+    ; prepended_items : inserted list
+    ; appended_items : inserted list
+    ; replacements : replacement list
+    ; tombstones : tombstone list
+    ; halted_reason : string option
+    }
+  [@@deriving sexp]
+
+  val empty : t
+  val apply : t -> History_entry.t list -> Effective_entry.t list
+end
+
 module Overlay : sig
   type replacement =
     { target_id : string
@@ -177,6 +245,46 @@ module Overlay : sig
   val empty : t
   val of_runtime_turn_effect : Runtime.turn_effect -> (op, string) result
   val apply : t -> Item.t list -> Item.t list
+end
+
+module Overlay_change : sig
+  type insertion_position =
+    | Prepended
+    | Appended
+
+  type operation =
+    | Inserted of
+        { entry_id : History_entry.Id.t
+        ; change_id : int
+        ; position : insertion_position
+        ; script_label : string option
+        }
+    | Replaced of
+        { target_id : History_entry.Id.t
+        ; change_id : int
+        ; script_label : string option
+        }
+    | Deleted of
+        { target_id : History_entry.Id.t
+        ; change_id : int
+        }
+    | Halted of
+        { reason : string
+        ; change_id : int
+        }
+
+  type t =
+    { revision : int
+    ; operations : operation list
+    ; affected_entry_ids : History_entry.Id.t list
+    ; allocated_inserted_ids : History_entry.Id.t list
+    ; script_id : string
+    ; script_source_hash : string
+    ; phase : Phase.t
+    ; visible_history_changed : bool
+    }
+
+  val revision : t -> int
 end
 
 module Tool_moderation : sig

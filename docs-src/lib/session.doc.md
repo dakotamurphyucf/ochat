@@ -202,3 +202,13 @@ let () = Eio_main.run @@ fun env ->
 
 *Module version&nbsp;>=* `current_version` **`%= {Session.current_version}`**.
 
+## Typed shell security state
+
+The current snapshot schema stores `shell_state` separately from conversation
+and moderator extension strings. It includes exact manifest grants, command
+approval grants, source/manifest-bound ChatML extension snapshots, last audit
+sequence, and redacted interrupted-request metadata.
+
+Migration from every older version initializes empty shell trust. Reset clears
+session shell grants and extension state by default. History never implies
+approval, and an in-flight process is never resumed from a snapshot.

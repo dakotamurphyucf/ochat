@@ -1,49 +1,41 @@
 open Core
 
-let ocaml_tm_json =
-  {|{
-  "name": "OCaml",
-  "scopeName": "source.ocaml",
-  "fileTypes": ["ml", "mli"],
-  "patterns": [
-    { "name": "comment.block.documentation.ocaml", "begin": "\\(\\*\\*", "end": "\\*\\)" },
-    { "name": "comment.block.ocaml", "begin": "\\(\\*", "end": "\\*\\)" },
-    { "name": "string.quoted.double.ocaml", "begin": "\"", "end": "\"", "patterns": [
-      { "name": "constant.character.escape.ocaml", "match": "\\\\." }
-    ]},
-    { "name": "constant.character.ocaml", "match": "'([^'\\\\]|\\\\.)'" },
-    { "name": "variable.language.type-parameter.ocaml", "match": "\\B'[a-z_][a-z0-9_]*" },
-    { "name": "meta.annotation.ocaml", "match": "\\[@@?[^\\]]+\\]" },
-    { "name": "meta.extension.ocaml", "match": "\\[%[^\\]]+\\]" },
-    { "name": "entity.name.type.ocaml", "match": "\\b[A-Z][A-Za-z0-9_']*\\b" },
-    { "name": "keyword.control.ocaml", "match": "\\b(let|rec|in|and|match|with|function|type|module|module\\s+type|open|include|struct|sig|end|if|then|else|fun|try|raise|exception|of|val|mutable|class|object|inherit|method|virtual|constraint|new|as|do|done|downto|for|to|while|when)\\b" },
-    { "name": "constant.numeric.ocaml", "match": "\\b(0[xX][0-9A-Fa-f_]+|0[oO][0-7_]+|0[bB][01_]+|[0-9][0-9_]*(\\.[0-9_]+)?([eE][+-]?[0-9_]+)?)\\b" },
-    { "name": "operator.ocaml", "match": "::|:=|->|<-|\\|\\||&&|\\+\\.|-\\.|\\*\\.|/\\.|\\+|-|\\*|/|=|<>|>=|<=|>|<|@|\\^|;" },
-    { "name": "variable.parameter.label.ocaml", "match": "[~?][a-z_][a-z0-9_]*:" },
-    { "name": "entity.name.type.variant.ocaml", "match": "`[A-Za-z_][A-Za-z0-9_']*" },
-    { "name": "constant.language.ocaml", "match": "\\b(true|false)\\b|\\(\\)" },
-    { "match": "\\blet\\s+(?:rec\\s+)?([a-z_][A-Za-z0-9_']*)", "captures": { "1": { "name": "entity.name.function.ocaml" } } },
-    { "name": "punctuation.bracket.ocaml", "match": "[()\\[\\]{}:,]" }
-  ]
-}
-|}
+let ocaml_tm_json = [%blob "grammars/ocaml.json"]
+let markdown_tm_json = [%blob "grammars/markdown.tmLanguage.json"]
+let python_tm_json = [%blob "grammars/vscode/python.json"]
+let python_regexp_tm_json = [%blob "grammars/vscode/python-regexp.json"]
+let rust_tm_json = [%blob "grammars/vscode/rust.json"]
+let javascript_tm_json = [%blob "grammars/vscode/javascript.json"]
+let javascript_react_tm_json = [%blob "grammars/vscode/javascript-react.json"]
+let typescript_tm_json = [%blob "grammars/vscode/typescript.json"]
+let typescript_react_tm_json = [%blob "grammars/vscode/typescript-react.json"]
+
+let add_embedded_grammar (reg : Highlight_tm_loader.registry) contents : unit Or_error.t =
+  let open Or_error.Let_syntax in
+  let%bind json = Jsonaf.parse contents in
+  Highlight_tm_loader.add_grammar_jsonaf reg json
 ;;
 
-let add_ocaml (reg : Highlight_tm_loader.registry) : unit Or_error.t =
+let add_ocaml reg = add_embedded_grammar reg ocaml_tm_json
+
+let add_python reg =
   let open Or_error.Let_syntax in
-  let add_file path =
-    let%bind contents = Or_error.try_with (fun () -> In_channel.read_all path) in
-    let%bind json = Jsonaf.parse contents in
-    Highlight_tm_loader.add_grammar_jsonaf reg json
-  in
-  match add_file "lib/chat_tui/grammars/ocaml.json" with
-  | Ok () -> Ok ()
-  | Error _ ->
-    (match add_file "lib/chat_tui/grammars/ocaml.tmLanguage.json" with
-     | Ok () -> Ok ()
-     | Error _ ->
-       let%bind json = Jsonaf.parse ocaml_tm_json in
-       Highlight_tm_loader.add_grammar_jsonaf reg json)
+  let%bind () = add_embedded_grammar reg python_regexp_tm_json in
+  add_embedded_grammar reg python_tm_json
+;;
+
+let add_rust reg = add_embedded_grammar reg rust_tm_json
+
+let add_javascript reg =
+  let open Or_error.Let_syntax in
+  let%bind () = add_embedded_grammar reg javascript_tm_json in
+  add_embedded_grammar reg javascript_react_tm_json
+;;
+
+let add_typescript reg =
+  let open Or_error.Let_syntax in
+  let%bind () = add_embedded_grammar reg typescript_tm_json in
+  add_embedded_grammar reg typescript_react_tm_json
 ;;
 
 let dune_tm_json =
@@ -118,7 +110,7 @@ let shell_tm_json =
     { "name": "entity.name.keyword.function.shell", "match": "\\b(grep|tee|ls|mkdir)\\b" },
     { "name": "entity.name.keyword.echo.shell", "match": "\\b(echo)\\b" },
     { "name": "entity.name.type.shell", "match": "[A-Za-z0-9][A-Za-z0-9_-]*" }
-    
+
   ]
 }
 |}
@@ -181,13 +173,7 @@ let add_json (reg : Highlight_tm_loader.registry) : unit Or_error.t =
 ;;
 
 let add_markdown (reg : Highlight_tm_loader.registry) : unit Or_error.t =
-  let open Or_error.Let_syntax in
-  let add_file path =
-    let%bind contents = Or_error.try_with (fun () -> In_channel.read_all path) in
-    let%bind json = Jsonaf.parse contents in
-    Highlight_tm_loader.add_grammar_jsonaf reg json
-  in
-  add_file "lib/chat_tui/grammars/markdown.tmLanguage.json"
+  add_embedded_grammar reg markdown_tm_json
 ;;
 
 (* A very small, self-contained HTML grammar good enough for tag/attribute
@@ -198,6 +184,7 @@ let html_basic_tm_json =
   {|{
   "name": "HTML",
   "scopeName": "text.html.basic",
+  "fileTypes": ["html", "htm", "chatmd"],
   "patterns": [
     { "include": "#comment" },
     { "include": "#tag" },
@@ -213,16 +200,15 @@ let html_basic_tm_json =
     },
     "entity": { "match": "&[A-Za-z0-9#]+;", "name": "constant.character.entity.html" },
     "tag": {
-      "begin": "<(/)?(?=[A-Za-z])",
+      "begin": "<(/)?([A-Za-z][A-Za-z0-9:-]*)",
       "beginCaptures": {
-        "0": {"name": "punctuation.definition.tag.begin.html"},
-        "1": {"name": "punctuation.definition.tag.begin.html"}
+        "1": {"name": "punctuation.definition.tag.begin.html"},
+        "2": {"name": "entity.name.tag.html"}
       },
       "end": ">",
       "endCaptures":   {"0": {"name": "punctuation.definition.tag.end.html"}},
       "name": "meta.tag.inline.any.html",
       "patterns": [
-        { "match": "[A-Za-z][A-Za-z0-9:-]*", "name": "entity.name.tag.html" },
         { "include": "#attributes" },
         { "match": "/", "name": "punctuation.definition.tag.end.html" }
       ]
@@ -249,6 +235,7 @@ let html_basic_tm_json =
       ]
     }
   }
+}
 |}
 ;;
 
@@ -260,25 +247,14 @@ let html_derivative_shim_tm_json =
   "name": "HTML (derivative shim)",
   "scopeName": "text.html.derivative",
   "patterns": [ { "include": "text.html.basic" } ]
+}
 |}
 ;;
 
 let add_html (reg : Highlight_tm_loader.registry) : unit Or_error.t =
   let open Or_error.Let_syntax in
-  (* Try to load a vendored HTML grammar if present; otherwise fall back to
-     the built-in minimal grammar above. *)
-  let add_file path =
-    let%bind contents = Or_error.try_with (fun () -> In_channel.read_all path) in
-    let%bind json = Jsonaf.parse contents in
-    Highlight_tm_loader.add_grammar_jsonaf reg json
-  in
-  let%bind () =
-    match add_file "lib/chat_tui/grammars/html.tmLanguage.json" with
-    | Ok () -> Ok ()
-    | Error _ ->
-      let%bind json = Jsonaf.parse html_basic_tm_json in
-      Highlight_tm_loader.add_grammar_jsonaf reg json
-  in
+  let%bind json = Jsonaf.parse html_basic_tm_json in
+  let%bind () = Highlight_tm_loader.add_grammar_jsonaf reg json in
   let%bind shim = Jsonaf.parse html_derivative_shim_tm_json in
   Highlight_tm_loader.add_grammar_jsonaf reg shim
 ;;
@@ -288,6 +264,15 @@ let ochat_apply_patch_tm_json =
   "name": "ochat-apply-patch",
   "scopeName": "source.ochat-apply-patch",
   "patterns": [
+    { "name": "meta.ochatpatch.boundary.begin",
+      "match": "^\\*\\*\\* Begin Patch$"
+    },
+    { "name": "meta.ochatpatch.boundary.end",
+      "match": "^\\*\\*\\* End Patch$"
+    },
+    { "name": "meta.ochatpatch.eof",
+      "match": "^\\*\\*\\* End of File$"
+    },
     { "name": "meta.header.ochatpatch",
       "match": "^(┏━\\[\\s*)([^]]+)(\\s*\\].*)$",
       "captures": {
@@ -297,7 +282,24 @@ let ochat_apply_patch_tm_json =
       }
     },
     { "name": "meta.header.ochatpatch.file-op",
-      "match": "^\\*\\*\\* (Add|Update|Delete) File: .*$"
+      "match": "^\\*\\*\\* (Add|Update|Delete) File: (.+)$",
+      "captures": {
+        "1": { "name": "keyword.control.ochatpatch" },
+        "2": { "name": "entity.name.filename.ochatpatch" }
+      }
+    },
+    { "name": "meta.header.ochatpatch.move",
+      "match": "^\\*\\*\\* Move to: (.+)$",
+      "captures": {
+        "1": { "name": "entity.name.filename.ochatpatch" }
+      }
+    },
+    { "name": "meta.ochatpatch.change-context",
+      "match": "^(@@)(?:\\s+(.*))?$",
+      "captures": {
+        "1": { "name": "keyword.control.ochatpatch" },
+        "2": { "name": "entity.name.section.ochatpatch" }
+      }
     },
     { "name": "meta.ochatpatch.status",
       "match": "^(Addition|Deletion|Move|Update) of file successful(?:\\..*)?$"
@@ -347,6 +349,9 @@ let ochat_apply_patch_tm_json =
         "2": { "name": "text.diff.context" }
       }
     },
+    { "name": "markup.inserted.ochatpatch", "match": "^\\+.*$" },
+    { "name": "markup.deleted.ochatpatch", "match": "^-.*$" },
+    { "name": "text.diff.context.ochatpatch", "match": "^ .*$" },
     { "include": "source.diff" }
   ]
 }

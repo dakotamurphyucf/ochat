@@ -7,6 +7,13 @@
   converter
   ctx
   driver
+  agent_response_loop
+  agent_trace
+  tool_execution_event
+  tool_executor
+  sourced_response_event
+  history_stream_event
+  utf8_ingest
   in_memory_stream
   model_executor
   runtime_semantics
@@ -18,11 +25,14 @@
   moderator_manager
   tool_call
   response_loop
+  shell_tool
+  agent_runtime
   tool
   fork
   compact_history)
  (libraries
   core
+  core_unix
   openai
   jsonaf
   io
@@ -41,9 +51,12 @@
   lwd
   eio
   eio.unix
+  uutf
   mcp_tool
   mcp_client
   mcp_types
-  webpage_markdown)
+  webpage_markdown
+  history_entry
+  ochat.shell_runtime)
  (preprocess
   (pps ppx_jane ppx_jsonaf_conv)))

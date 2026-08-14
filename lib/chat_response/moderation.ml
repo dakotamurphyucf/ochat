@@ -1,6 +1,6 @@
 open! Core
 module Lang = Chatml.Chatml_lang
-module Runtime = Chatml_moderator_runtime
+module Runtime = Chatml_host_runtime
 module Res = Openai.Responses
 module Value_codec = Chatml.Chatml_value_codec
 
@@ -428,6 +428,122 @@ module Projection = struct
   ;;
 end
 
+module Entry_projection = struct
+  let project_item entry =
+    Item.of_response_item
+      ~id:(History_entry.id entry |> History_entry.Id.to_string)
+      (History_entry.item entry)
+  ;;
+
+  let project_history entries = List.map entries ~f:project_item
+
+  let project_context ~session_id ~now_ms ~phase ~history ~available_tools ~session_meta =
+    Context.
+      { session_id
+      ; now_ms
+      ; phase
+      ; items = project_history history
+      ; available_tools = List.map available_tools ~f:Tool_desc.of_request_tool
+      ; session_meta
+      }
+  ;;
+end
+
+module Effective_entry = struct
+  type provenance =
+    | Canonical
+    | Moderator_inserted of { change_id : int }
+    | Moderator_replacement of
+        { target_id : History_entry.Id.t
+        ; change_id : int
+        }
+  [@@deriving sexp]
+
+  type t =
+    { entry : History_entry.t
+    ; provenance : provenance
+    }
+  [@@deriving sexp]
+end
+
+module Identity_overlay = struct
+  type inserted =
+    { entry : History_entry.t
+    ; change_id : int
+    ; script_label : string option
+    }
+  [@@deriving sexp]
+
+  type replacement =
+    { target_id : History_entry.Id.t
+    ; item : Res.Item.t
+    ; change_id : int
+    ; script_label : string option
+    }
+  [@@deriving sexp]
+
+  type tombstone =
+    { target_id : History_entry.Id.t
+    ; change_id : int
+    }
+  [@@deriving sexp]
+
+  type t =
+    { revision : int
+    ; next_change_id : int
+    ; prepended_items : inserted list
+    ; appended_items : inserted list
+    ; replacements : replacement list
+    ; tombstones : tombstone list
+    ; halted_reason : string option
+    }
+  [@@deriving sexp]
+
+  let empty =
+    { revision = 0
+    ; next_change_id = 0
+    ; prepended_items = []
+    ; appended_items = []
+    ; replacements = []
+    ; tombstones = []
+    ; halted_reason = None
+    }
+  ;;
+
+  let apply t entries =
+    let deleted = List.map t.tombstones ~f:(fun tombstone -> tombstone.target_id) in
+    let replacement id =
+      List.find t.replacements ~f:(fun replacement ->
+        History_entry.Id.equal replacement.target_id id)
+    in
+    let inserted ({ entry; change_id; _ } : inserted) =
+      Effective_entry.{ entry; provenance = Moderator_inserted { change_id } }
+    in
+    let canonical =
+      List.filter_map entries ~f:(fun entry ->
+        let id = History_entry.id entry in
+        if List.mem deleted id ~equal:History_entry.Id.equal
+        then None
+        else (
+          match replacement id with
+          | None -> Some Effective_entry.{ entry; provenance = Canonical }
+          | Some replacement ->
+            Some
+              Effective_entry.
+                { entry = History_entry.with_item entry replacement.item
+                ; provenance =
+                    Moderator_replacement
+                      { target_id = replacement.target_id
+                      ; change_id = replacement.change_id
+                      }
+                }))
+    in
+    List.map t.prepended_items ~f:inserted
+    @ canonical
+    @ List.map t.appended_items ~f:inserted
+  ;;
+end
+
 module Overlay = struct
   type replacement =
     { target_id : string
@@ -488,6 +604,46 @@ module Overlay = struct
     in
     t.prepended_system_items @ canonical @ t.appended_items
   ;;
+end
+
+module Overlay_change = struct
+  type insertion_position =
+    | Prepended
+    | Appended
+
+  type operation =
+    | Inserted of
+        { entry_id : History_entry.Id.t
+        ; change_id : int
+        ; position : insertion_position
+        ; script_label : string option
+        }
+    | Replaced of
+        { target_id : History_entry.Id.t
+        ; change_id : int
+        ; script_label : string option
+        }
+    | Deleted of
+        { target_id : History_entry.Id.t
+        ; change_id : int
+        }
+    | Halted of
+        { reason : string
+        ; change_id : int
+        }
+
+  type t =
+    { revision : int
+    ; operations : operation list
+    ; affected_entry_ids : History_entry.Id.t list
+    ; allocated_inserted_ids : History_entry.Id.t list
+    ; script_id : string
+    ; script_source_hash : string
+    ; phase : Phase.t
+    ; visible_history_changed : bool
+    }
+
+  let revision t = t.revision
 end
 
 module Tool_moderation = struct

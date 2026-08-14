@@ -1,4 +1,4 @@
-open Core
+open! Core
 open Chatml_lang
 open Jsonaf
 module Eval = Chatml_eval
@@ -79,6 +79,102 @@ let module_scheme (m : builtin_module) : ty =
 let option_ty (a : string) : ty = variant [ "None", TUnit; "Some", TVar a ]
 let task_ty (a : ty) : ty = TCon ("task", [ a ])
 let string_array_ty : ty = TArray TString
+
+let option_of_ty ty = variant [ "None", TUnit; "Some", ty ]
+let string_option_ty = option_of_ty TString
+
+let shell_executable_ty =
+  record
+    [ "requested", TString
+    ; "path", TString
+    ; "canonical_path", TString
+    ; "trusted", TBool
+    ; "sha256", TString
+    ]
+;;
+
+let shell_capabilities_ty =
+  record
+    [ "read_roots", string_array_ty
+    ; "write_roots", string_array_ty
+    ; "network", TBool
+    ; "child_processes", TBool
+    ; "arbitrary_code", TBool
+    ; "privilege_change", TBool
+    ; "sandbox", TString
+    ]
+;;
+
+let shell_policy_match_ty =
+  record [ "rule_id", TString; "action", TString; "reason", string_option_ty ]
+;;
+
+let shell_policy_ty =
+  record
+    [ "version", TString
+    ; "action", TString
+    ; "reason", TString
+    ; "matches", TArray shell_policy_match_ty
+    ]
+;;
+
+let shell_context_ty =
+  record
+    [ "version", TString
+    ; "phase", TString
+    ; "request_id", TString
+    ; "runtime_id", TString
+    ; "manifest_sha256", TString
+    ; "argv", string_array_ty
+    ; "executable", shell_executable_ty
+    ; "cwd", TString
+    ; "origin", TString
+    ; "request_kind", TString
+    ; "stdin_kind", TString
+    ; "stdin_sha256", string_option_ty
+    ; "stdin_bytes", TInt
+    ; "script_sha256", string_option_ty
+    ; "script_preview", string_option_ty
+    ; "effects", string_array_ty
+    ; "capabilities", shell_capabilities_ty
+    ; "session_id", string_option_ty
+    ; "policy", option_of_ty shell_policy_ty
+    ]
+;;
+
+let shell_result_ty =
+  record
+    [ "version", TString
+    ; "phase", TString
+    ; "argv", string_array_ty
+    ; "status_kind", TString
+    ; "status_code", TInt
+    ; "stdout", TString
+    ; "stderr", TString
+    ; "stdout_truncated", TBool
+    ; "stderr_truncated", TBool
+    ; "intercepted_by", string_option_ty
+    ; "untrusted_output", TBool
+    ]
+;;
+
+let shell_audit_field_ty = record [ "name", TString; "value", TString ]
+
+let shell_audit_ty =
+  record
+    [ "version", TString
+    ; "phase", TString
+    ; "sequence", TString
+    ; "timestamp", TFloat
+    ; "session_id", string_option_ty
+    ; "runtime_id", TString
+    ; "manifest_sha256", TString
+    ; "request_id", TString
+    ; "plan_id", string_option_ty
+    ; "event", TString
+    ; "fields", TArray shell_audit_field_ty
+    ]
+;;
 
 let expect_task (name : string) : value -> task = function
   | VTask t -> t
@@ -167,7 +263,7 @@ let indent_block depth text =
 let compact_limit = 80
 
 let prefer_compact text =
-  not (String.mem text '\n') && String.length text <= compact_limit
+  (not (String.mem text '\n')) && String.length text <= compact_limit
 ;;
 
 let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
@@ -207,7 +303,11 @@ let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
     in
     match task with
     | TPure value ->
-      "pure(\n" ^ indent_block (depth + 1) (compact_nested value) ^ "\n" ^ indent depth ^ ")"
+      "pure(\n"
+      ^ indent_block (depth + 1) (compact_nested value)
+      ^ "\n"
+      ^ indent depth
+      ^ ")"
     | TBind (task, fn) ->
       "bind(\n"
       ^ indent_block (depth + 1) (compact_task task)
@@ -233,11 +333,28 @@ let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
       ^ "\n"
       ^ indent depth
       ^ ")"
-    | TPerform eff -> "perform(\n" ^ indent_block (depth + 1) (eff_to_pretty_string ~depth:(depth + 1) eff) ^ "\n" ^ indent depth ^ ")"
-    | TSpawn eff -> "spawn(\n" ^ indent_block (depth + 1) (eff_to_pretty_string ~depth:(depth + 1) eff) ^ "\n" ^ indent depth ^ ")"
+    | TPerform eff ->
+      "perform(\n"
+      ^ indent_block (depth + 1) (eff_to_pretty_string ~depth:(depth + 1) eff)
+      ^ "\n"
+      ^ indent depth
+      ^ ")"
+    | TSpawn eff ->
+      "spawn(\n"
+      ^ indent_block (depth + 1) (eff_to_pretty_string ~depth:(depth + 1) eff)
+      ^ "\n"
+      ^ indent depth
+      ^ ")"
   in
   match v with
-  | VInt _ | VFloat _ | VBool _ | VString _ | VRef _ | VModule _ | VClosure _ | VUnit
+  | VInt _
+  | VFloat _
+  | VBool _
+  | VString _
+  | VRef _
+  | VModule _
+  | VClosure _
+  | VUnit
   | VBuiltin _ -> value_to_string v
   | VArray arr ->
     if Array.length arr = 0
@@ -258,11 +375,7 @@ let rec value_to_pretty_string_with_depth ?(depth = 0) (v : value) : string =
         |> List.map ~f:(fun (key, value) ->
           let rendered_value = compact_nested value in
           if String.mem rendered_value '\n'
-          then
-            indent (depth + 1)
-            ^ key
-            ^ " =\n"
-            ^ indent_block (depth + 2) rendered_value
+          then indent (depth + 1) ^ key ^ " =\n" ^ indent_block (depth + 2) rendered_value
           else indent (depth + 1) ^ key ^ " = " ^ rendered_value)
         |> String.concat ~sep:";\n"
       in
@@ -374,6 +487,148 @@ let make_task_binary_perform_builtin
     (fun lhs rhs -> VTask (TPerform { op; args = [ lhs; rhs ] }))
 ;;
 
+let shell_field name field scheme =
+  make_unary_builtin
+    name
+    (TFun ([ shell_context_ty ], scheme))
+    (function
+      | VRecord fields ->
+        Map.find fields field
+        |> Option.value_or_thunk ~default:(fun () ->
+          failwith (Printf.sprintf "Shell.%s: missing context field %s" name field))
+      | _ -> failwith (Printf.sprintf "Shell.%s: expected shell_context" name))
+;;
+
+let shell_context_module =
+  { name = "Shell"
+  ; exports =
+      [ shell_field "request_id" "request_id" TString
+      ; shell_field "runtime_id" "runtime_id" TString
+      ; shell_field "manifest_sha256" "manifest_sha256" TString
+      ; shell_field "argv" "argv" string_array_ty
+      ; shell_field "executable" "executable" shell_executable_ty
+      ; shell_field "cwd" "cwd" TString
+      ; shell_field "origin" "origin" TString
+      ; shell_field "request_kind" "request_kind" TString
+      ; shell_field "stdin_kind" "stdin_kind" TString
+      ; shell_field "stdin_sha256" "stdin_sha256" string_option_ty
+      ; shell_field "stdin_bytes" "stdin_bytes" TInt
+      ; shell_field "script_sha256" "script_sha256" string_option_ty
+      ; shell_field "script_preview" "script_preview" string_option_ty
+      ; shell_field "effects" "effects" string_array_ty
+      ; shell_field "capabilities" "capabilities" shell_capabilities_ty
+      ; shell_field "session_id" "session_id" string_option_ty
+      ; shell_field "policy" "policy" (option_of_ty shell_policy_ty)
+      ]
+  }
+;;
+
+let match_module =
+  { name = "Match"
+  ; exports =
+      [ make_task_unary_perform_builtin "yes" TString TUnit ~op:"Match.yes"
+      ; make_task_unary_perform_builtin "no" TString TUnit ~op:"Match.no"
+      ]
+  }
+;;
+
+let review_module =
+  { name = "Review"
+  ; exports =
+      [ make_task_nullary_perform_builtin "approve" TUnit ~op:"Review.approve"
+      ; make_task_unary_perform_builtin
+          "approve_for"
+          TString
+          TUnit
+          ~op:"Review.approve_for"
+      ; make_task_unary_perform_builtin "deny" TString TUnit ~op:"Review.deny"
+      ; make_task_unary_perform_builtin
+          "rewrite"
+          string_array_ty
+          TUnit
+          ~op:"Review.rewrite"
+      ; make_task_nullary_perform_builtin "defer" TUnit ~op:"Review.defer"
+      ]
+  }
+;;
+
+let intercept_module =
+  { name = "Intercept"
+  ; exports =
+      [ make_task_nullary_perform_builtin "continue" TUnit ~op:"Intercept.continue"
+      ; make_task_unary_perform_builtin
+          "rewrite"
+          string_array_ty
+          TUnit
+          ~op:"Intercept.rewrite"
+      ; make_task_binary_perform_builtin
+          "respond"
+          TString
+          TString
+          TUnit
+          ~op:"Intercept.respond"
+      ; make_task_unary_perform_builtin "reject" TString TUnit ~op:"Intercept.reject"
+      ]
+  }
+;;
+
+let result_module =
+  { name = "Result"
+  ; exports =
+      [ make_task_nullary_perform_builtin "keep" TUnit ~op:"Result.keep"
+      ; make_task_binary_perform_builtin
+          "replace"
+          TString
+          TString
+          TUnit
+          ~op:"Result.replace"
+      ; make_task_unary_perform_builtin
+          "reject_disclosure"
+          TString
+          TUnit
+          ~op:"Result.reject_disclosure"
+      ]
+  }
+;;
+
+let effect_module =
+  { name = "Effect"
+  ; exports =
+      [ make_task_unary_perform_builtin "add" TString TUnit ~op:"Effect.add"
+      ; make_task_unary_perform_builtin
+          "replace"
+          string_array_ty
+          TUnit
+          ~op:"Effect.replace"
+      ; make_task_unary_perform_builtin "read_path" TString TUnit ~op:"Effect.read_path"
+      ; make_task_unary_perform_builtin "write_path" TString TUnit ~op:"Effect.write_path"
+      ; make_task_nullary_perform_builtin "network" TUnit ~op:"Effect.network"
+      ; make_task_nullary_perform_builtin
+          "child_processes"
+          TUnit
+          ~op:"Effect.child_processes"
+      ; make_task_nullary_perform_builtin
+          "arbitrary_code"
+          TUnit
+          ~op:"Effect.arbitrary_code"
+      ; make_task_nullary_perform_builtin
+          "privilege_change"
+          TUnit
+          ~op:"Effect.privilege_change"
+      ]
+  }
+;;
+
+let audit_filter_module =
+  { name = "Audit"
+  ; exports =
+      [ make_task_nullary_perform_builtin "keep" TUnit ~op:"Audit.keep"
+      ; make_task_unary_perform_builtin "drop_field" TString TUnit ~op:"Audit.drop_field"
+      ; make_task_unary_perform_builtin "replace" TString TUnit ~op:"Audit.replace"
+      ]
+  }
+;;
+
 let make_task_nullary_spawn_builtin (name : string) (result_ty : ty) ~(op : string)
   : builtin
   =
@@ -416,7 +671,6 @@ let hash_string_md5 s =
 ;;
 
 let print_sink_ref : (string -> unit) option ref = ref None
-
 let set_print_sink sink = print_sink_ref := Some sink
 let clear_print_sink () = print_sink_ref := None
 
@@ -652,7 +906,9 @@ let option_value = function
   | None -> VVariant ("None", [])
 ;;
 
-let string_option_value value = Option.map value ~f:(fun value -> VString value) |> option_value
+let string_option_value value =
+  Option.map value ~f:(fun value -> VString value) |> option_value
+;;
 
 let json_string_payload = function
   | VVariant ("String", [ VString s ]) -> Some s
@@ -801,11 +1057,7 @@ let last_matching_value (values : value array) ~(f : value -> bool) : value opti
 
 let values_since_last_matching (values : value array) ~(f : value -> bool) : value array =
   let rec find index =
-    if index < 0
-    then None
-    else if f values.(index)
-    then Some index
-    else find (index - 1)
+    if index < 0 then None else if f values.(index) then Some index else find (index - 1)
   in
   match find (Array.length values - 1) with
   | None -> Array.copy values
@@ -1646,7 +1898,9 @@ let item_module : builtin_module =
           (fun id text ->
              let id = expect_string "Item.user_text" id in
              let text = expect_string "Item.user_text" text in
-             item_record_value ~id ~value:(item_input_text_message_value ~role:"user" ~text))
+             item_record_value
+               ~id
+               ~value:(item_input_text_message_value ~role:"user" ~text))
       ; make_binary_builtin
           "assistant_text"
           (TFun ([ TString; TString ], item_ty))
@@ -1660,7 +1914,9 @@ let item_module : builtin_module =
           (fun id text ->
              let id = expect_string "Item.system_text" id in
              let text = expect_string "Item.system_text" text in
-             item_record_value ~id ~value:(item_input_text_message_value ~role:"system" ~text))
+             item_record_value
+               ~id
+               ~value:(item_input_text_message_value ~role:"system" ~text))
       ; make_binary_builtin
           "notice"
           (TFun ([ TString; TString ], item_ty))
@@ -1770,7 +2026,9 @@ let turn_module : builtin_module =
           (TFun ([ TString ], task_ty TUnit))
           (fun text ->
              let text = expect_string "Turn.append_notice" text in
-             VTask (TPerform { op = "Turn.append_message"; args = [ item_notice_value ~text ] }))
+             VTask
+               (TPerform
+                  { op = "Turn.append_message"; args = [ item_notice_value ~text ] }))
       ; make_task_unary_perform_builtin
           "append_message"
           item_ty
@@ -2038,7 +2296,9 @@ let model_module : builtin_module =
              let text = expect_string "Model.spawn_text" text in
              VTask
                (TSpawn
-                  { op = "Model.spawn"; args = [ VString recipe; json_string_value text ] }))
+                  { op = "Model.spawn"
+                  ; args = [ VString recipe; json_string_value text ]
+                  }))
       ]
   }
 ;;
@@ -2097,11 +2357,7 @@ let ui_module : builtin_module =
 let approval_module : builtin_module =
   { name = "Approval"
   ; exports =
-      [ make_task_unary_perform_builtin
-          "ask_text"
-          TString
-          TString
-          ~op:"Approval.ask_text"
+      [ make_task_unary_perform_builtin "ask_text" TString TString ~op:"Approval.ask_text"
       ; make_task_binary_perform_builtin
           "ask_choice"
           TString

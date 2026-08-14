@@ -37,82 +37,35 @@
     returned by {!Eio.Path.with_open_out}. *)
 val write_user_message : dir:Eio.Fs.dir_ty Eio.Path.t -> file:string -> string -> unit
 
-(** [history_as_chatmd ?moderator_snapshot ~history_items] renders
-    [history_items] as ChatMarkdown.
-
-    When [moderator_snapshot] is provided, the rendering appends explicit
-    synthetic ChatMarkdown-visible entries derived from the persisted
-    moderator overlay so exported transcripts and previews surface the same
-    synthetic inserts, replacements, deletions, and halt reason that a
-    resumed session would carry in its moderator snapshot. *)
-val history_as_chatmd
+(** [history_entries_as_chatmd ~moderator_snapshot ~history] renders canonical
+    entries with a distinct [ochat-history-id] attribute. Ordinary
+    ChatMarkdown remains a semantic export; the binary V4 snapshot is
+    authoritative for fields that ChatMarkdown cannot represent. *)
+val history_entries_as_chatmd
   :  moderator_snapshot:Session.Moderator_snapshot.t option
-  -> history_items:Openai.Responses.Item.t list
+  -> history:History_entry.t list
   -> string
 
-(** [persist_session ~dir ~prompt_file ~datadir ~cfg ~initial_msg_count
-    ?moderator_snapshot ~history_items] appends every *new* item in
-    [history_items] to the transcript file [prompt_file] located under
-    [dir].
+module Checkpoint : sig
+  type t
 
-    "New" means entries whose list index is {>=} [initial_msg_count].  Earlier
-    items are assumed to be already present on disk.
+  val empty : unit -> t
+  val of_entries : History_entry.t list -> t
+end
 
-    {1 Serialisation rules}
+(** [entries_after_checkpoint checkpoint history] selects entries by stable
+    identity and payload revision rather than list position. Retained unchanged
+    entries are omitted; new IDs and identity-preserving replacements are
+    returned. *)
+val entries_after_checkpoint
+  :  Checkpoint.t
+  -> History_entry.t list
+  -> History_entry.t list
 
-    • *User / assistant / tool* messages become their corresponding
-      ChatMarkdown blocks (`<user>…`, `<assistant>…`, `<tool_response>…`).
-
-    • *Function / tool calls* (variants
-      {!Openai.Responses.Item.Function_call} and
-      {!Openai.Responses.Item.Function_call_output}) are handled in two
-      mutually exclusive ways depending on [cfg.show_tool_call]:
-
-      – When [true], the full JSON arguments / result is embedded inline
-        between `RAW|` pipes so human readers can expand the details without
-        leaving the file.
-
-      – When [false] (the default) the payload is stored in a separate file
-        `{N}.{call_id}.json` inside [datadir] – typically
-        [$HOME/.chatmd] – and referenced through a `<doc src="./.chatmd/..."`>
-        tag.  This keeps the main transcript readable even when the tool
-        exchanges multi-kilobyte JSON blobs.
-
-    • *Reasoning summaries* become `<reasoning>` blocks with nested
-      `<summary>` children.
-
-    • When [moderator_snapshot] is provided, overlay-derived synthetic
-      transcript entries are appended after the canonical history suffix so
-      exports remain explicit about moderation-visible inserts, replacements,
-      deletions, and halt state.
-
-    The helper is {b append-only}: it never rewrites or deletes existing data
-    and therefore preserves the original chronological order of the
-    conversation.
-
-    {1 Example}
-
-    {[
-      (* Append assistant response and tool output to the transcript. *)
-      Chat_tui.Persistence.persist_session
-        ~dir:(Eio.Stdenv.cwd env)
-        ~prompt_file:"prompt.chatmd"
-        ~datadir:(Io.ensure_chatmd_dir ~cwd:(Eio.Stdenv.cwd env))
-        ~cfg
-        ~initial_msg_count:List.length already_serialised
-        ~history_items:new_history
-    ]}
-
-    @param cfg The active configuration record controlling formatting
-           choices.  Only [show_tool_call] is inspected.
-    @raise Failure Never – errors are reported synchronously via the Eio
-           exception hierarchy. *)
-val persist_session
+val persist_entries
   :  dir:Eio.Fs.dir_ty Eio.Path.t
   -> prompt_file:string
-  -> datadir:Eio.Fs.dir_ty Eio.Path.t
-  -> cfg:Chat_response.Config.t
-  -> initial_msg_count:int
+  -> checkpoint:Checkpoint.t
   -> moderator_snapshot:Session.Moderator_snapshot.t option
-  -> history_items:Openai.Responses.Item.t list
+  -> history:History_entry.t list
   -> unit

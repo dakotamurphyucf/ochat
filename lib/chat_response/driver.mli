@@ -1,7 +1,7 @@
 (** High-level orchestration helpers for ChatMarkdown conversations.
 
     The [Driver] module bridges a user-editable {.chatmd} document and the
-    OpenAI *chat/completions* API.  It bundles prompt parsing, caching,
+    OpenAI Responses API. It bundles prompt parsing, caching,
     tool discovery and the recursive response loop into a few convenience
     wrappers that can be reused by the CLI, the TUI and nested agents.
 
@@ -18,12 +18,24 @@
       existing conversation.  Used internally by the [fork] tool but also
       available to power-users.
 
-    • {!val:run_completion_stream_in_memory_v1} – like
-      {!val:run_completion_stream} but works on an in-memory history instead
-      of a file.  Mainly used by the TUI component.
+    Identity-bearing in-memory callers use
+    {!In_memory_stream.run_completion_stream_in_memory_entries} with a
+    caller-owned allocator and canonical history.
 *)
 
 open! Core
+
+(** Observer for transient nested-agent activity.
+
+    [on_event] receives nested Responses stream events in consumption order.
+    [on_tool_execution] receives nested tool lifecycle and progress events.
+    Observer failures are suppressed and cannot alter the final result.
+    Callbacks shared by independent invocations must be concurrency-safe and
+    return promptly. *)
+type agent_observer = Agent_response_loop.observer =
+  { on_event : Openai.Responses.Response_stream.t -> unit
+  ; on_tool_execution : Tool_execution_event.t -> unit
+  }
 
 (** [run_agent ~ctx prompt_xml items] evaluates a *nested agent* inside the current conversation.
 
@@ -47,15 +59,54 @@ open! Core
            reads of the same file so that only the *latest* version is
            forwarded to the nested agent.  This helps keep token usage
            under control when the agent spawns long chains of tool calls.
+
+    @param observer Optional sink for transient nested model and tool activity.
+           Ordinary prompts use the streaming response loop only in observed
+           mode; omitting it preserves the legacy blocking path. Observation
+           does not change the single returned final text.
+
+    @param response_dir Directory for raw Responses artifacts. TUI callers
+           should pass their session data directory. It defaults to the
+           current context directory for compatibility.
 *)
 val run_agent
   :  ?history_compaction:bool
   -> ?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
   -> ?session_id:string
+  -> ?response_dir:Eio.Fs.dir_ty Eio.Path.t
+  -> ?observer:agent_observer
+  -> ?on_sourced_event:(Sourced_response_event.t -> unit)
+  -> ?source:string
+  -> ?parent_call_id:string
+  -> ?shell_manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> ?shell_approval_provider:Shell_runtime.Approval_broker.provider
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> string (** ^ XML source of the agent prompt *)
   -> Prompt.Chat_markdown.content_item list (** ^ Inline user items        *)
   -> string
+
+(** [run_entries ~ctx ~allocator ~model ~tool_tbl history] runs blocking or
+    observed response execution over canonical entries. The caller owns
+    [allocator]; raw payloads exist only at provider request boundaries. *)
+val run_entries
+  :  ctx:< clock : _ Eio.Time.clock ; net : _ Eio.Net.t ; .. > Ctx.t
+  -> allocator:History_entry.Allocator.t
+  -> ?temperature:float
+  -> ?max_output_tokens:int
+  -> ?tools:Openai.Responses.Request.Tool.t list
+  -> ?reasoning:Openai.Responses.Request.Reasoning.t
+  -> ?history_compaction:bool
+  -> ?response_dir:Eio.Fs.dir_ty Eio.Path.t
+  -> ?observer:agent_observer
+  -> ?on_sourced_event:(Sourced_response_event.t -> unit)
+  -> ?source:string
+  -> ?parent_call_id:string
+  -> ?post:Response_loop.post
+  -> ?post_stream:Agent_response_loop.post_stream
+  -> model:Openai.Responses.Request.model
+  -> tool_tbl:(string, Ochat_function.runner) Base.Hashtbl.t
+  -> History_entry.t list
+  -> History_entry.t list
 
 (** [run_completion ~env ?prompt_file ?parallel_tool_calls ~output_file ()] performs a synchronous, file-based completion.
 
@@ -134,9 +185,16 @@ val run_completion_stream
   :  env:Eio_unix.Stdenv.base
   -> ?prompt_file:string
   -> ?on_event:(Openai.Responses.Response_stream.t -> unit)
+  -> ?on_history_event:(History_stream_event.t -> unit)
+  -> ?on_sourced_event:(Sourced_response_event.t -> unit)
+  -> ?on_history_tool_out:(History_entry.t -> unit)
+  -> ?post_stream:In_memory_stream.post_stream
+  -> ?on_final_history:(History_entry.t list -> unit)
   -> ?parallel_tool_calls:bool
   -> ?meta_refine:bool
   -> ?history_compaction:bool
+  -> ?shell_manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> ?shell_approval_provider:Shell_runtime.Approval_broker.provider
   -> output_file:string
   -> unit
   -> unit
@@ -161,6 +219,11 @@ val run_completion_stream
     • [?on_fn_out] – executed after each tool call completes, allowing the
       caller to react to side-effects without waiting for the final
       assistant answer.
+    • [?on_sourced_event] – receives stream events with outer/fork source
+      attribution.
+    • [?on_tool_out] – receives canonical tool-output history items.
+    • [?on_tool_execution] – receives transient start, progress, and terminal
+      events. These values are never canonical history.
 
     @param env      Standard Eio runtime environment.
     @param history  Initial conversation state.
@@ -190,26 +253,3 @@ val run_completion_stream
 
     @raise Any exception bubbled-up by the OpenAI client or user-supplied
            tool functions.  The function does **not** swallow errors. *)
-val run_completion_stream_in_memory_v1
-  :  env:Eio_unix.Stdenv.base
-  -> ?datadir:Eio.Fs.dir_ty Eio.Path.t
-  -> history:Openai.Responses.Item.t list
-  -> ?on_event:(Openai.Responses.Response_stream.t -> unit)
-  -> ?on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
-  -> ?on_tool_out:(Openai.Responses.Item.t -> unit)
-  -> tools:Openai.Responses.Request.Tool.t list option
-  -> ?tool_tbl:(string, string -> Openai.Responses.Tool_output.Output.t) Hashtbl.t
-  -> ?temperature:float
-  -> ?max_output_tokens:int
-  -> ?reasoning:Openai.Responses.Request.Reasoning.t
-  -> ?moderator:In_memory_stream.moderator
-  -> ?on_runtime_request:(Moderation.Runtime_request.t -> unit)
-  -> ?history_compaction:bool
-  -> ?parallel_tool_calls:bool
-  -> ?meta_refine:bool
-  -> ?safe_point_input:In_memory_stream.Safe_point_input.t
-  -> ?model:Openai.Responses.Request.model
-  -> ?prompt_cache_key:string
-  -> ?prompt_cache_retention:string
-  -> unit
-  -> Openai.Responses.Item.t list

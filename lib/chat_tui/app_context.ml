@@ -5,6 +5,9 @@ module Ui = struct
     ; throttler : Redraw_throttle.t
     ; redraw : unit -> unit
     ; redraw_immediate : unit -> unit
+    ; latest_frame_generation : unit -> int
+    ; resize_and_redraw : size:int * int -> layout:Chat_page_layout.t -> unit
+    ; render_current_with_layout : size:int * int -> layout:Chat_page_layout.t -> unit
     }
 end
 
@@ -12,6 +15,7 @@ module Streams = struct
   type t =
     { input : App_events.input_event Eio.Stream.t
     ; internal : App_events.internal_event Eio.Stream.t
+    ; redraw : unit Eio.Stream.t
     }
 end
 

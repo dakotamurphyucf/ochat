@@ -11,15 +11,43 @@
     {!Chat_tui.Model.Chat_page_state.t}:
 
     {ul
-    {- a per-message image cache keyed by message index;}
+    {- a per-message image cache keyed by stable projected row ID and revision;}
     {- cached per-message heights and their prefix sums used to translate
        scroll offsets into visible indices.}}
 
-    The module does {b not} modify the scroll offset itself; it reads the
-    current scroll position from {!Chat_tui.Model.scroll_box}. *)
+    The module may correct the Chat scroll offset to preserve a manual viewport
+    anchor as estimates become exact or to satisfy a pending search reveal. *)
 
-(** [render ~model ~width ~height ~messages ~selected_idx ~render_message] renders
-    the transcript into a single image.
+type render_plan =
+  { image : Notty.I.t
+  ; viewport : Renderer_virtual_list.Viewport.t
+  ; top_visible_idx : int option
+  ; prefetch_indices : int list
+  }
+
+type rendered =
+  | Ready of Notty.I.t
+  | Pending of Notty.I.t
+
+(** [initialize_geometry ~geometry ~messages ~width] reconciles provisional
+    row geometry with [messages] without rendering rows. *)
+val initialize_geometry
+  :  geometry:Renderer_virtual_list.Geometry.t
+  -> messages:Types.message array
+  -> width:int
+  -> unit
+
+(** [prefetch_candidate_indices ~model ~viewport ~height] returns estimated
+    off-screen indices covering three viewports in the current scroll
+    direction and one viewport behind, nearest first. *)
+val prefetch_candidate_indices
+  :  model:Model.t
+  -> viewport:Renderer_virtual_list.Viewport.t
+  -> height:int
+  -> int list
+
+(** [render ~model ~width ~height ~messages ~selected_idx ~render_message]
+    measures the demanded region and returns a coherent render plan.
 
     @param model Mutable model holding caches and the current scroll position.
     @param width Target width in terminal cells. The returned image is
@@ -35,34 +63,50 @@
     When [selected_idx] is set, the selected variant of the corresponding
     message is computed lazily and cached.
 
-    The returned image includes transparent padding above and below the visible
-    block so that its logical height matches the full transcript height. *)
+    The image includes transparent padding above and below the visible block
+    so that its logical height matches the provisional transcript height.
+    Visible items always have exact rich-rendered geometry. *)
 val render
   :  model:Model.t
   -> width:int
   -> height:int
-  -> messages:Types.message list
+  -> messages:Types.message array
   -> selected_idx:int option
   -> render_message:(idx:int -> selected:bool -> Types.message -> Notty.I.t)
-  -> Notty.I.t
+  -> render_plan
 
-(** [top_visible_index ~model ~scroll_height ~messages] returns the index of the
-    first message whose {e header} is sufficiently below the top of the visible
-    scroll window.
+(** [render_with_anchor ~initial_anchor ...] behaves like {!render}, but uses
+    an anchor captured from compatible transcript geometry before a global
+    presentation invalidation such as a width change. *)
+val render_with_anchor
+  :  initial_anchor:Renderer_virtual_list.Anchor.t
+  -> model:Model.t
+  -> width:int
+  -> height:int
+  -> messages:Types.message array
+  -> selected_idx:int option
+  -> render_message:(idx:int -> selected:bool -> Types.message -> Notty.I.t)
+  -> render_plan
 
-    The chat page uses this to implement a one-row “sticky” header: while the
-    header of the first fully visible message is scrolled off-screen, the
-    sticky header repeats it. When the real header is still visible in the top
-    couple of rows, the function returns [None] to avoid duplicating the label.
-
-    @param model Source of the current scroll offset (and cached heights).
-    @param scroll_height Height of the scroll viewport, in terminal cells.
-    @param messages Transcript to analyse.
-
-    Returns [None] when [messages] is empty or when the cache arrays are
-    missing/stale. *)
-val top_visible_index
+val render_async
   :  model:Model.t
-  -> scroll_height:int
-  -> messages:Types.message list
-  -> int option
+  -> width:int
+  -> height:int
+  -> messages:Types.message array
+  -> selected_idx:int option
+  -> render_message:(idx:int -> selected:bool -> Types.message -> rendered)
+  -> render_plan
+
+(** [render_async] and [render_async_with_anchor] keep [Pending] placeholders
+    outside the rich-image cache and leave their geometry provisional.
+    This lower-level API remains available for detached tests. The production
+    Chat viewport uses {!render} so visible messages are always full fidelity. *)
+val render_async_with_anchor
+  :  initial_anchor:Renderer_virtual_list.Anchor.t
+  -> model:Model.t
+  -> width:int
+  -> height:int
+  -> messages:Types.message array
+  -> selected_idx:int option
+  -> render_message:(idx:int -> selected:bool -> Types.message -> rendered)
+  -> render_plan

@@ -1,6 +1,5 @@
 open Core
 open Eio.Std
-open Types
 module Model = Model
 module Redraw_throttle = Redraw_throttle
 module Runtime = App_runtime
@@ -11,11 +10,6 @@ module Context = struct
     ; runtime : Runtime.t
     }
 end
-
-let add_placeholder_compact_message (model : Model.t) : unit =
-  let patch = Add_placeholder_message { role = "assistant"; text = "(compacting…)" } in
-  ignore (Model.apply_patch model patch)
-;;
 
 let start (ctx : Context.t) =
   let env = ctx.shared.services.env in
@@ -28,7 +22,7 @@ let start (ctx : Context.t) =
   let op_id = Runtime.alloc_op_id runtime in
   runtime.Runtime.op <- Some (Runtime.Starting_compaction { id = op_id });
   runtime.Runtime.cancel_compaction_on_start <- false;
-  add_placeholder_compact_message model;
+  Model.set_activity model (Some Model.Compacting);
   Log.emit `Info "Compacting history items…";
   Redraw_throttle.request_redraw throttler;
   let history_snapshot = Model.history_items model in
@@ -36,10 +30,15 @@ let start (ctx : Context.t) =
     match session with
     | None -> None
     | Some s ->
+      let s =
+        Option.value_map runtime.Runtime.session_state ~default:s ~f:(fun state -> !state)
+      in
       Some
         Session.
           { s with
             history = history_snapshot
+          ; next_history_sequence =
+              History_entry.Allocator.next_sequence runtime.Runtime.history_allocator
           ; tasks = Model.tasks model
           ; kv_store = Hashtbl.to_alist (Model.kv_store model)
           }
@@ -54,10 +53,12 @@ let start (ctx : Context.t) =
        | Some s ->
          Session_store.save ~env s
          (* Session_store.reset_session ~env ~id:s.id ~keep_history:false () *));
-      Context_compaction.Compactor.compact_history
+      Context_compaction.Compactor.compact_entries
+        ~allocator:runtime.Runtime.history_allocator
         ~env:(Some env)
         ~history:history_snapshot
     with
-    | history' -> Eio.Stream.add internal_stream (`Compaction_done (op_id, history'))
+    | Ok history' -> Eio.Stream.add internal_stream (`Compaction_done (op_id, history'))
+    | Error exn -> Eio.Stream.add internal_stream (`Compaction_error (op_id, exn))
     | exception exn -> Eio.Stream.add internal_stream (`Compaction_error (op_id, exn)))
 ;;

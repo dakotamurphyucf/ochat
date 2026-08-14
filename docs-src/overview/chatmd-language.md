@@ -15,7 +15,10 @@ Ochat tries hard to ensure the model sees exactly what’s in your ChatMD docume
 
 - **HTML comments are stripped**: `<!-- ... -->` is removed before parsing and never reaches the model.
 - **`<import/>` expands**: selected `<import src="..."/>` directives are replaced with the contents of the referenced file *at parse time*.
-- **`<script/>` stays host-managed**: top-level moderation scripts are parsed, validated, and executed by the host. They are not converted into model-visible request history. Moderation can request another turn (`Runtime.request_turn`) and can run host-registered model recipes via `Model.call` / `Model.spawn` (with spawned-job completion reinjected as internal events).
+- **Runtime declarations stay host-managed**: top-level `<script>`,
+  `<shell_access>`, and `<moderator_runtime>` declarations are parsed,
+  validated, and executed by the host. They are not converted into
+  model-visible request history.
 - **RAW blocks disable parsing**: `RAW| ... |RAW` is treated as literal text (no tag parsing inside).
 - **Optional meta-refine preprocessing**: if enabled, the prompt may be rewritten before parsing (see “Meta-refine” below).
 
@@ -32,11 +35,19 @@ ChatMD is **not** general HTML/XML. It recognises a **closed set of lowercase ta
 These are the tag names ChatMD recognises (lowercase, case-sensitive):
 
 - Message / transcript structure: `msg`, `user`, `assistant`, `system`, `developer`
-- Host-managed moderation: `script`
+- Host-managed runtime declarations: `script`, `shell_access`, `moderator_runtime`
 - Tools / tool trace: `tool`, `tool_call`, `tool_response`
 - Inline helpers: `doc`, `img`, `agent`, `import`
 - Reasoning: `reasoning`, `summary`
 - Configuration: `config`
+
+Inside `<shell_access>` and `<tool type="shell">`, the lexer additionally
+recognizes a strict nested shell vocabulary for capabilities, resolver,
+environment, limits, backends, policy/matchers, approvals/reviewers,
+interceptors, effect analysis, secrets, audit, and fixed-command children.
+These nodes are built by the normal ChatMD parser and validated by the shell
+declaration layer. Unknown shell children/attributes are errors rather than
+literal message text.
 
 ### 1.1 Top-level rule (important)
 
@@ -134,7 +145,7 @@ Hello.
 | Element | Purpose | Notes / key attributes |
 |---|---|---|
 | `<config .../>` | Model and generation parameters | Optional. If multiple appear, the **first `<config/>` wins**. Flag attribute: `show_tool_call`. |
-| `<tool .../>` | Declare tools available to the assistant | Builtin, shell, agent-backed, or MCP-backed. Exactly one of `command`, `agent`, `mcp_server` may appear. |
+| `<tool .../>` | Declare tools available to the assistant | Builtin, long/compact shell, agent-backed, or MCP-backed. |
 | `<user>...</user>` | User message | The most common input block. |
 | `<assistant>...</assistant>` | Assistant message | Usually written by ochat into the transcript. Often uses RAW blocks for faithful round-tripping. |
 | `<system>...</system>` | System message | High-priority instructions. |
@@ -143,7 +154,9 @@ Hello.
 | `<tool_call ...>...</tool_call>` | Tool invocation record | Typically written by ochat; see “Tool calls & tool responses”. |
 | `<tool_response ...>...</tool_response>` | Tool output record | Typically written by ochat; see “Tool calls & tool responses”. |
 | `<reasoning ...>...</reasoning>` | Reasoning record | Typically written by reasoning-capable models; requires `id` if authored manually. |
-| `<script ...>...</script>` / `<script ... src="..." />` | Host-managed moderation script | Top-level only. In v1, only `language="chatml"` and `kind="moderator"` are valid. |
+| `<script ...>...</script>` / `<script ... src="..." />` | Host-managed ChatML script | Top-level only. Supports moderator and shell extension kinds. |
+| `<shell_access ...>...</shell_access>` | Named shell runtime | Strict host-only configuration; never model history. |
+| `<moderator_runtime shell_runtime="..."/>` | Moderator process binding | Routes `Process.run` through a named shell runtime. |
 
 ### 3.3 Inline content helpers (only inside message bodies)
 
@@ -158,14 +171,14 @@ These tags are recognised by the parser, but they are primarily meaningful **ins
 
 ### 3.4 `<script>` moderation declarations
 
-`<script>` declares a host-managed moderation program. The script is retained in
+`<script>` declares a host-managed ChatML program. The script is retained in
 the typed prompt model, but it is not sent to the model as a message.
 
-V1 supports exactly one script per prompt, and it must use:
-
-- `language="chatml"`
-- `kind="moderator"`
-- optional `id="..."` (defaults to `main`)
+Every script uses `language="chatml"` and a unique ID. Supported kinds are
+`moderator`, `shell_matcher`, `shell_reviewer`,
+`shell_before_interceptor`, `shell_after_interceptor`,
+`shell_effect_analyzer`, and `shell_audit_filter`. A prompt may contain many
+shell scripts, but at most one conversation moderator is selected.
 
 Supported forms:
 
@@ -185,8 +198,9 @@ Validation rules:
 - `src="..."` is loaded during prompt parsing, so missing files fail early.
 - Relative `src` paths resolve against the prompt directory passed to
   `parse_chat_inputs`.
-- More than one moderator script in a single prompt is an error.
-- Extra attributes are rejected in v1.
+- Duplicate script IDs are errors even when kinds differ.
+- More than one selected moderator script is an error.
+- Extra attributes are rejected.
 
 If a script lives in a separate file, the parsed prompt retains both the `src`
 path and the loaded source text so later compilation can report the original
@@ -451,6 +465,19 @@ ChatMD supports four tool “shapes”:
 <tool name="rg" command="rg" description="ripgrep search"/>
 ```
 
+This compact form is desugared into a fixed shell tool. Full shell tools bind
+to a named runtime and support fixed, structured, conservative chain, raw, and
+script-file modes:
+
+```xml
+<shell_access id="development" extends="builtin:workspace-development@1"/>
+<tool name="shell" type="shell" mode="structured" runtime="development"/>
+```
+
+The runtime is compiled and authorized before the tool is exposed. See the
+[shell runtime reference](chatmd-shell-runtime.md) and
+[shell tool reference](chatmd-shell-tools.md).
+
 ### 5.3 Agent-backed tools (prompt-as-tool)
 
 ```xml
@@ -465,7 +492,9 @@ ChatMD supports four tool “shapes”:
 
 ### 5.5 Validation rules (important)
 
-- Exactly one of these attributes may be present: `command`, `agent`, `mcp_server`.
+- Legacy non-long-form declarations use exactly one of `command`, `agent`, or
+  `mcp_server`. Long-form shell tools use `type="shell"`, `mode`, `runtime`,
+  and mode-specific attributes/children.
 - For builtin/shell/agent tools, `name="..."` must be non-empty.
 - For MCP tools:
   - `name="..."` selects a single tool name, **or**
@@ -671,3 +700,11 @@ Enable it via:
 - **Unterminated quoted attribute values fail**: e.g. `alt="...` without closing quote.
 - **Unterminated RAW blocks fail**: `RAW| ... |RAW` must be closed.
 - **Tag names are lowercase and case-sensitive**.
+- **Shell configuration is strict**: unknown/duplicate runtime sections,
+  unresolved references, import/inheritance cycles, unsupported features or
+  profiles, missing required backends, rejected manifests, and administrative
+  ceiling violations fail before dependent tools are published. There is no
+  fallback to direct execution.
+
+For the complete shell grammar and diagnostics, see
+[ChatMD shell runtime reference](chatmd-shell-runtime.md).

@@ -21,10 +21,24 @@ let render ~width ~(model : Model.t) =
     | Model.Raw_xml -> " -- RAW --"
     | Model.Plain -> ""
   in
-  let text =
-    let base = mode_txt ^ raw_txt in
-    if Model.typeahead_is_relevant model then base ^ "  " ^ hint_text else base
+  let base = I.string bar_attr (mode_txt ^ raw_txt) in
+  let activity =
+    match Renderer_component_loader.status_text model with
+    | None -> I.empty
+    | Some text ->
+      I.hcat
+        [ I.string bar_attr "  "
+        ; Renderer_component_loader.render
+            ~base_attr:bar_attr
+            ~frame:(Model.animation_frame model)
+            text
+        ]
+  in
+  let hint =
+    if Model.typeahead_is_relevant model
+    then I.string bar_attr ("  " ^ hint_text)
+    else I.empty
   in
   let width = Int.max 0 width in
-  I.string bar_attr text |> I.hsnap ~align:`Left width
+  I.hcat [ base; activity; hint ] |> I.hsnap ~align:`Left width
 ;;

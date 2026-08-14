@@ -1,5 +1,4 @@
 open! Core
-
 module Moderation = Chatml_moderation
 module Res = Openai.Responses
 
@@ -19,7 +18,10 @@ type t = Moderator_manager.t
 
 type pending_ui_request = Moderator_manager.pending_ui_request =
   | Ask_text of { prompt : string }
-  | Ask_choice of { prompt : string; choices : string array }
+  | Ask_choice of
+      { prompt : string
+      ; choices : string array
+      }
 
 let create = Moderator_manager.create
 let handle_event = Moderator_manager.handle_event

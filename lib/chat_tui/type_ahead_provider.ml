@@ -78,7 +78,7 @@ Constraints:
   little lamb
   </example>
 - You must ensure lines do not exceed 80 characters. Insert a newline character if necessary.
-- You must favor keeping completions short; if no completion is appropriate, return an empty string.
+- You must favor keeping completions short;
 |}
 ;;
 
@@ -96,7 +96,7 @@ let complete_suffix ~sw ~env ~dir ~(cfg : Chat_response.Config.t) ~messages ~dra
     let net = Eio.Stdenv.net env in
     (* let temperature = Option.value cfg.temperature ~default:0.2 in *)
     let max_output_tokens = 200 in
-    let model = Req.Unknown "gpt-5.4-mini" in
+    let model = Req.Unknown "gpt-5.6-luna" in
     (* Option.map cfg.model ~f:Req.model_of_str_exn in *)
     let reasoning = Req.Reasoning.{ effort = Some Low; summary = None } in
     let completion_context = render_history_for_prompt messages in
@@ -122,24 +122,35 @@ let complete_suffix ~sw ~env ~dir ~(cfg : Chat_response.Config.t) ~messages ~dra
       Res.Item.Input_message msg
     in
     let inputs =
-      [ mk_input Res.Input_message.System completion_system_prompt
+      [ mk_input Res.Input_message.Developer completion_system_prompt
       ; mk_input Res.Input_message.User user_prompt
       ]
     in
+    Io.log ~dir ~file:"type-ahead-out.txt" ("here" ^ "\n");
     let ({ Res.Response.output; _ } : Res.Response.t) =
-      Eio.Switch.run (fun sw ->
-        Res.post_response
-          Res.Default
-          ~max_output_tokens (* ~temperature *)
-          ~verbosity:"low"
-          ~tools:[]
-          ~model
-          ?reasoning:(Some reasoning)
+      match
+        Eio.Switch.run (fun sw ->
+          Res.post_response
+            Res.Default
+            ~max_output_tokens (* ~temperature *)
+            ~verbosity:"low"
+            ~tools:[]
+            ~model
+            ?reasoning:(Some reasoning)
+            ~dir
+            net
+            ~sw
+            ~inputs)
+      with
+      | v -> v
+      | exception exn ->
+        Io.log
           ~dir
-          net
-          ~sw
-          ~inputs)
+          ~file:"type-ahead-out.txt"
+          (Printf.sprintf "Error typeahead: %s" (Core.Exn.to_string exn));
+        raise exn
     in
+    Io.log ~dir ~file:"type-ahead-out.txt" ("here" ^ "\n");
     let rec find_text = function
       | [] -> ""
       | Res.Item.Output_message om :: _ ->
@@ -149,6 +160,7 @@ let complete_suffix ~sw ~env ~dir ~(cfg : Chat_response.Config.t) ~messages ~dra
       | _ :: tl -> find_text tl
     in
     let raw = find_text output in
+    Io.log ~dir ~file:"type-ahead-out.txt" (raw ^ "\n");
     raw
     |> fun s ->
     String.substr_replace_all s ~pattern:cursor_marker ~with_:""

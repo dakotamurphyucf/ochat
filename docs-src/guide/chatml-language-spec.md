@@ -3056,3 +3056,20 @@ the following precedence after a streamed turn ends:
 
 Multiple `request_turn` requests emitted while handling one host event collapse to a
 single continuation decision. `request_compaction` never forces another turn by itself.
+
+## 22. Ochat shell-runtime embedding
+
+In an ochat moderator host, `Process.run` is not a generic spawn primitive. It
+is available only when `<moderator_runtime shell_runtime="..."/>` binds the
+moderator to a compiled ChatMD shell runtime. Calls use structured argv and the
+same resolution, effects, capability, policy, approval, sandbox, output, and
+audit path as shell tools.
+
+Ochat also embeds ChatML through purpose-built shell surfaces for matchers,
+reviewers, before/after interceptors, effect analyzers, and audit filters. Each
+surface imports versioned typed values and only the actions required by that
+kind. It does not inherit moderator capability modules. Stateful instances use
+transactional commit/rollback, Eio serialization, resource budgets, and
+source/manifest-bound snapshots.
+
+See [ChatMD shell extensions](chatmd-shell-extensions.md).

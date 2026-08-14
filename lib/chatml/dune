@@ -42,9 +42,9 @@
   (pps ppx_jane)))
 
 (library
- (name chatml_moderator_runtime)
- (public_name ochat.chatml_moderator_runtime)
- (modules chatml_moderator_runtime)
+ (name chatml_host_runtime)
+ (public_name ochat.chatml_host_runtime)
+ (modules chatml_host_runtime)
  (libraries
   core
   chatml
@@ -55,10 +55,18 @@
   (pps ppx_jane)))
 
 (library
+ (name chatml_moderator_runtime)
+ (public_name ochat.chatml_moderator_runtime)
+ (modules chatml_moderator_runtime)
+ (libraries chatml_host_runtime)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
  (name chatml_runtime)
  (public_name ochat.chatml_runtime)
  (modules chatml_runtime)
- (libraries core chatml chatml_moderator_runtime)
+ (libraries chatml_host_runtime)
  (preprocess
   (pps ppx_jane)))
 

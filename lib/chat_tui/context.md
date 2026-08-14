@@ -54,7 +54,7 @@ Central, *side-effect free* module shared by all others.  Defines:
   – `Set_function_name` / `Set_function_output` (tool call meta)  
   – `Update_reasoning_idx` (track which reasoning summary we are on)  
   – `Add_user_message` (immediately after submit)  
-  – `Add_placeholder_message` ("(thinking…)" or error placeholder).  
+  – `Add_placeholder_message` (transient error or status message).
 • Open variant `cmd` – describes **effectful** actions triggered by the UI.
   Implemented constructors are `Persist_session`, `Start_streaming` and
   `Cancel_streaming`; more are expected to land once tool-invocation from the
@@ -204,7 +204,7 @@ High-level entry point used by `bin/chat_tui.ml`:
        – append `Add_user_message` patch  
        – reset draft buffer / cursor  
        – enable auto-follow and scroll to bottom  
-       – insert UI placeholder “(thinking…)”.  
+       – mark assistant activity as thinking.
    • A new fibre is forked under a fresh `streaming_sw` switch and stored in
      `Model.fetch_sw` so it can be cancelled later.  Inside that fibre
      `handle_submit` calls
@@ -277,7 +277,7 @@ all newly received messages are written back to disk.
 
 1. User types in the composer; `Controller` updates `Model.input_line`.  
 2. On Meta-Enter → `Submit_input` is emitted.  The main loop
-   – queues a placeholder “(thinking…)” assistant message,  
+   – marks assistant activity as thinking,
    – empties the draft editor, and  
    – spawns a background fibre that runs `Chat_response.Driver.run_completion_stream_in_memory_v1`.
 3. The driver turns the static prompt+history into an HTTP request and feeds
@@ -334,4 +334,3 @@ never accessed concurrently, eliminating races despite the mutable model.
 This document should be updated whenever the Chat-TUI architecture changes
 or new modules are added.  Think of it as the “map” that lets future
 contributors navigate the UI code quickly.
-

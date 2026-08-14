@@ -61,6 +61,11 @@ Canonical history is the durable session transcript stored as
 `Session.history` and, during an active `chat_tui` run, as
 `Model.history_items`.
 
+Each occurrence is a `History_entry.t` with an application-owned
+`History_entry.Id`. That ID is independent from an OpenAI provider item ID, a
+tool `call_id`, moderation change provenance, and the row index currently used
+by virtual-list geometry.
+
 This is the audit trail returned by the normal model/tool loop. Moderator
 scripts do not rewrite canonical history in place. Instead they request overlay
 operations that are stored separately in the moderator snapshot.
@@ -70,15 +75,12 @@ operations that are stored separately in the moderator snapshot.
 Effective history is the canonical history after moderator projection and
 overlay application.
 
-The public boundary for this is `Chat_response.Chatml_moderator.effective_history`.
-The current implementation lives in `Moderator_manager.effective_history`,
-which:
-
-1. projects canonical `Openai.Responses.Item.t list` into structured
-   moderation items via `Moderation.Projection.project_history`;
-2. applies the durable overlay via `Moderation.Overlay.apply`; and
-3. reconstructs `Openai.Responses.Item.t list` values for downstream model
-   input and consumers.
+The identity-bearing boundary is
+`Moderator_manager.effective_entries`. It applies the durable overlay to
+canonical entries and returns effective entries with explicit canonical,
+inserted, or replacement provenance. Provider requests project only the
+effective entry payloads to `Openai.Responses.Item.t list` at the transport
+boundary.
 
 This is the history view used by `Chat_response.Chatml_turn_driver` when it
 prepares the next request after the relevant turn boundary has run.
@@ -87,15 +89,17 @@ prepares the next request after the relevant turn boundary has run.
 
 Visible history is the host/UI view derived from effective history.
 
-In `chat_tui`, `App_runtime.refresh_messages` recomputes visible transcript
-state from `Manager.effective_history`, then rebuilds message buffers and tool
-output indexes from that projected view.
+In `chat_tui`, `App_runtime.refresh_messages` recomputes identity-bearing
+`Projected_message.t` rows from `Manager.effective_entries`, then reconciles
+selection, render revisions, caches, and tool metadata by stable row ID.
+Indexes are derived coordinates used only by current layout and traversal.
 
 This preserves the distinction:
 
 - canonical history is the durable source transcript;
-- effective history is the moderator-shaped request/downstream view;
-- visible history is the host presentation of effective history.
+- effective entries are the moderator-shaped request/downstream view with
+  provenance;
+- visible rows are the host presentation of effective entries.
 
 ## Overlay application is the transcript-shaping mechanism
 
@@ -128,7 +132,7 @@ boundaries.
 
 | Boundary | Public entrypoint | Current anchors | Current behavior |
 |---|---|---|---|
-| Turn start | `Chat_response.Chatml_turn_driver.prepare_turn_inputs` | `In_memory_stream.prepare_turn_inputs` / `prepare_turn_request` | Runs `turn_start`, drains queued internal events at the turn-start boundary, computes effective history, then appends transient safe-point input only if the turn is still allowed to proceed. |
+| Turn start | `Chat_response.Chatml_turn_driver.prepare_turn_inputs` | `In_memory_stream.prepare_turn_inputs` / `prepare_turn_request` | Runs `turn_start`, drains queued internal events at the turn-start boundary, computes effective history, then appends compatibility-only request text if the turn is still allowed to proceed. Canonical queued user entries are appended after pending tool outputs by the entry-native loop. |
 | Pre-tool-call | `Chat_response.Chatml_turn_driver.moderate_tool_call` | `In_memory_stream.moderate_tool_call` | Adds the pending tool call to temporary history, runs `pre_tool_call`, and returns the approved, rejected, rewritten, or redirected tool invocation. |
 | Post-tool-response | `Chat_response.Chatml_turn_driver.handle_tool_result` | `In_memory_stream.handle_tool_result` | Runs `post_tool_response`, emits `item_appended` for the canonical tool output when appropriate, then drains queued internal events at the post-tool boundary. |
 | Turn end | `Chat_response.Chatml_turn_driver.finish_turn` | `In_memory_stream.finish_turn` | Runs `turn_end`, drains queued internal events at the end-of-turn boundary, and surfaces runtime requests. |
@@ -144,11 +148,14 @@ Turn start is the explicit request-preparation safe point. The turn driver:
 2. drains queued moderator internal events at `Turn_start_boundary`;
 3. computes effective history through
    `Chat_response.Chatml_moderator.effective_history`; and
-4. appends deferred safe-point input only after the boundary has decided the
+4. appends compatibility-only request text after the boundary has decided the
    turn may proceed.
 
-This ordering matters: deferred steering is added only to the outgoing request
-view, not to canonical history.
+During an active tool loop, Chat-TUI steering is different: the host allocates
+a canonical user entry immediately, waits for pending tool outputs, appends
+queued entries in FIFO order, emits `item_appended` moderation, and sends the
+same entries on the next provider turn. This prevents a user message from
+splitting a tool call/output pair and preserves its ID in final history.
 
 ### Pre-tool-call
 
@@ -262,18 +269,19 @@ persist suspended approvals.
 
 ## Durable state and restore semantics
 
-`Session.Moderator_snapshot.t` is the durable restore boundary for moderator
-state. It stores:
+The production restore boundary is
+`Session.Moderator_state.Identity_snapshot.t`. It stores:
 
 - `script_id`;
 - `script_source_hash`;
 - `current_state`;
 - `queued_internal_events`;
 - `halted`; and
-- the durable overlay snapshot.
+- the identity overlay revision, next change ID, inserted entry IDs,
+  replacements, and tombstones.
 
-`Chat_response.Chatml_moderator.snapshot` extracts that persisted payload
-without changing the session schema.
+`Moderator_manager.identity_snapshot` extracts that persisted payload.
+Snapshots are rejected while approval execution is suspended.
 
 On restore, the moderator manager validates:
 
@@ -286,8 +294,9 @@ This is why snapshot restore is both durable and compatibility-checked. A
 snapshot is only valid for the same compiled moderator script identity and
 source hash.
 
-Session persistence in `chat_tui` stores the moderator snapshot alongside
-canonical session history, tasks, and key/value metadata. On startup,
+Session persistence in `chat_tui` stores the identity snapshot alongside
+canonical identity-bearing history, its next unused sequence, tasks, and
+key/value metadata. On startup,
 `chat_tui` uses the presence of that snapshot to decide between
 `session_start` and `session_resume`.
 
@@ -379,3 +388,20 @@ The current idle wakeup flow is:
 This is the boundary where safe-point semantics meet host scheduling policy:
 the runtime surfaces requests, but the host still decides when idle work or
 follow-up turns are allowed to run.
+
+## Shell approval and output boundaries
+
+Manifest authorization, command approval, grant management, and shell
+extension state are host runtime state, not canonical/effective/model-visible
+history. Waiting for shell approval is suspension, not deferred steering. A
+shell approval response does not become a user item.
+
+No command result enters canonical history until stdout/stderr have passed
+bounds, UTF-8 handling, terminal-control removal, secret redaction, configured
+after-interceptors, and repeated finalization. Raw process chunks do not enter
+effective history or moderator input.
+
+Startup/resume restores source- and manifest-matching data-shaped shell
+extension snapshots only after manifest authorization and registry creation.
+The UI does not accept the first user turn while that startup barrier is
+incomplete, so shell initialization cannot race request history.

@@ -1,0 +1,7 @@
+(library
+ (name chat_tui_initial_render_lifecycle_test)
+ (modules chat_tui_initial_render_lifecycle_test)
+ (libraries core eio eio_main notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane)))

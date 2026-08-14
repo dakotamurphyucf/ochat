@@ -5,8 +5,8 @@ big picture and provides examples that are inconvenient to keep in the
 source file.
 
 ## Overview
-`Tool` converts a ChatMarkdown [`<tool …/>`](../chatmd/README.md) element
-into a [`Ochat_function.t`](../../ochat_function/ochat_function.mli) – the
+`Tool` converts a ChatMarkdown [`<tool …/>`](../../overview/chatmd-language.md) element
+into an [`Ochat_function.t`](../../../lib/ochat_function.mli) – the
 structure expected by the {i function-calling} variant of OpenAI’s
 chat/completions endpoint.
 
@@ -138,3 +138,15 @@ prompt reflects the new tool list.
   returns the full list.
 * Timeout (60 s) and output cap (100 KiB) are hard-coded.
 
+## Shell declarations
+
+Shell tools are a distinct declaration variant. `Tool.of_declaration` receives
+an already-instantiated `Shell_runtime.Registry`; it does not tokenize command
+strings, compile manifests, open files, or choose host authority at invocation
+time. Fixed, structured, chain, raw, and script-file adapters validate their
+mode-specific JSON, then call the named runtime and return finalized safe
+results.
+
+Legacy command declarations are parser-only compatibility values immediately
+desugared to fixed shell tools. The older warning above applies to legacy
+helpers, not to the manifest-authorized shell runtime path.

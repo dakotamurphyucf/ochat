@@ -58,3 +58,12 @@ Triggering behaviour (high level):
   - when no relevant completion exists, the reducer treats it as “open preview
     and fetch now”, triggering an immediate completion request.
 
+## Shell events and UI ownership
+
+The reducer is the only owner that applies shell approval changes, management
+refreshes, audit pages, grant revocations, and Shell Security snapshot updates
+to the model. Blocking I/O runs in Eio workers and reports generation-tagged
+events. Stale results cannot overwrite newer state.
+
+Approval responses never enter the normal submit/history path. Grant
+revocation updates typed session state and appends a management audit event.

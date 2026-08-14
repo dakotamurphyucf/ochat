@@ -30,10 +30,18 @@ module Scroll_box = Notty_scroll_box
    truth in [Controller_types]. *)
 type reaction = Controller_types.reaction =
   | Redraw
+  | Refresh_messages
   | Submit_input
   | Cancel_or_quit
   | Compact_context
   | Quit
+  | Chat_scrolled of bool
+  | Prepare_chat_destination of Controller_types.chat_destination
+  | Shell_approval_response of
+      string * Shell_runtime.Approval_broker.ui_response
+  | Shell_grant_revoke_requested of int * string
+  | Shell_management_refresh_requested of int
+  | Moderator_input_response of string
   | Unhandled
 
 let close_preview (model : Model.t) = Model.set_typeahead_preview_open model false
@@ -347,20 +355,11 @@ let indent_line (model : Model.t) ~amount =
 (* -------------------------------------------------------------------- *)
 
 let scroll_by_lines (model : Model.t) ~term delta =
-  let screen_w, screen_h = Notty_eio.Term.size term in
-  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
-  let scroll_height = layout.scroll_height in
-  Scroll_box.scroll_by (Model.scroll_box model) ~height:scroll_height delta;
-  if
-    Scroll_box.max_scroll (Model.scroll_box model) ~height:scroll_height
-    = Scroll_box.scroll (Model.scroll_box model)
-  then Model.set_auto_follow model true
+  Controller_shared.scroll_history ~mode:"insert" ~model ~term delta
 ;;
 
 let page_size ~term (model : Model.t) =
-  let screen_w, screen_h = Notty_eio.Term.size term in
-  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
-  layout.scroll_height
+  Controller_shared.history_viewport_height ~model ~term
 ;;
 
 let input_page_size ~term (model : Model.t) =
@@ -590,13 +589,9 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
       model.auto_follow := false;
       scroll_by_lines model ~term (-1);
       Redraw) *)
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term (-1);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-1)).changed
   | `Key (`Arrow `Up, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term (-1);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-1)).changed
   (* ----------------------------------------------------------------- *)
   (*  Cursor vertical move within editor (Ctrl-Up / Ctrl-Down)          *)
   | `Key (`Arrow `Up, mods) when List.mem mods `Meta ~equal:Poly.equal ->
@@ -733,25 +728,15 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
       model.auto_follow := false;
       scroll_by_lines model ~term 1;
       Redraw) *)
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term 1;
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term 1).changed
   | `Key (`Arrow `Down, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term 1;
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term 1).changed
   (* ----------------------------------------------------------------- *)
   (* Duplicate current line (Meta+Shift+Up / Meta+Shift+Down)           *)
   | `Mouse (`Press (`Scroll dir), (_x, _y), _mods) ->
     (match dir with
-     | `Up ->
-       Model.set_auto_follow model false;
-       scroll_by_lines model ~term (-1);
-       Redraw
-     | `Down ->
-       Model.set_auto_follow model false;
-       scroll_by_lines model ~term 1;
-       Redraw)
+     | `Up -> Chat_scrolled (scroll_by_lines model ~term (-1)).changed
+     | `Down -> Chat_scrolled (scroll_by_lines model ~term 1).changed)
   | `Key (`Arrow `Up, mods)
     when List.mem mods `Meta ~equal:Poly.equal && List.mem mods `Shift ~equal:Poly.equal
     ->
@@ -778,25 +763,13 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     indent_line model ~amount:(-2);
     Redraw
   | `Key (`Page `Up, _) ->
-    Model.set_auto_follow model false;
     let ps = page_size ~term model in
-    scroll_by_lines model ~term (-ps);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-ps)).changed
   | `Key (`Page `Down, _) ->
-    Model.set_auto_follow model false;
     let ps = page_size ~term model in
-    scroll_by_lines model ~term ps;
-    Redraw
-  | `Key (`Home, _) ->
-    Model.set_auto_follow model false;
-    Scroll_box.scroll_to_top (Model.scroll_box model);
-    Redraw
-  | `Key (`End, _) ->
-    Model.set_auto_follow model true;
-    let screen_w, screen_h = Notty_eio.Term.size term in
-    let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
-    Scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:layout.scroll_height;
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term ps).changed
+  | `Key (`Home, _) -> Prepare_chat_destination Earlier_conversation
+  | `Key (`End, _) -> Prepare_chat_destination Latest_conversation
   | `Key (`Enter, []) ->
     (* Literal newline inside the input buffer *)
     dismiss_typeahead model;
@@ -815,7 +788,7 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
 (*  Top-level dispatcher that selects the keymap by [Model.mode].         *)
 (* -------------------------------------------------------------------- *)
 
-let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
+let handle_chat_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   match Model.mode model with
   | Insert ->
     (match ev with
@@ -852,4 +825,26 @@ let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
      | _ -> Controller_normal.handle_key_normal ~model ~term ev)
   | Cmdline -> Controller_cmdline.handle_key_cmdline ~model ~term ev
   | Search _ -> Controller_search.handle_key_search ~model ~term ev
+;;
+
+let is_ctrl_g = function
+  | `Key (`ASCII ('g' | 'G'), [ `Ctrl ]) | `Key (`ASCII '\007', []) -> true
+  | _ -> false
+;;
+
+let open_agent model =
+  if List.is_empty (Model.active_agent_calls model)
+  then Unhandled
+  else (
+    Controller_normal.cancel_pending ();
+    Model.set_active_page model Model.Page_id.Agent;
+    Redraw)
+;;
+
+let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
+  match Model.shell_interaction_id model, Model.active_page model with
+  | Some _, _ -> Controller_shell_security.handle_key ~model ~term ev
+  | None, Agent -> Controller_agent.handle_key ~model ~term ev
+  | None, Shell_security -> Controller_shell_security.handle_key ~model ~term ev
+  | None, Chat -> if is_ctrl_g ev then open_agent model else handle_chat_key ~model ~term ev
 ;;

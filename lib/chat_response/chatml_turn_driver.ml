@@ -1,11 +1,13 @@
 open! Core
-
 module Moderation = Chatml_moderation
 module Moderator = Chatml_moderator
 module Res = Openai.Responses
 
 module Safe_point_input = struct
-  type t = In_memory_stream.Safe_point_input.t = { consume : unit -> string option }
+  type t = In_memory_stream.Safe_point_input.t =
+    { consume_entries : unit -> History_entry.t list
+    ; consume_compatibility_text : unit -> string option
+    }
 end
 
 type moderator =
@@ -17,7 +19,10 @@ type moderator =
 
 type pending_ui_request = Moderator.pending_ui_request =
   | Ask_text of { prompt : string }
-  | Ask_choice of { prompt : string; choices : string array }
+  | Ask_choice of
+      { prompt : string
+      ; choices : string array
+      }
 
 type moderated_tool_call =
   { call_item : Res.Item.t
@@ -28,7 +33,8 @@ type moderated_tool_call =
   ; runtime_requests : Moderation.Runtime_request.t list
   }
 
-let to_in_memory_moderator ({ manager; session_id; session_meta; runtime_policy } : moderator)
+let to_in_memory_moderator
+      ({ manager; session_id; session_meta; runtime_policy } : moderator)
   : In_memory_stream.moderator
   =
   { manager; session_id; session_meta; runtime_policy }
@@ -37,8 +43,8 @@ let to_in_memory_moderator ({ manager; session_id; session_meta; runtime_policy 
 let map_moderator moderator = Option.map moderator ~f:to_in_memory_moderator
 
 let of_in_memory_moderated_tool_call
-      ({ call_item; kind; name; payload; synthetic_result; runtime_requests }
-        : In_memory_stream.moderated_tool_call)
+      ({ call_item; kind; name; payload; synthetic_result; runtime_requests } :
+        In_memory_stream.moderated_tool_call)
   : moderated_tool_call
   =
   { call_item; kind; name; payload; synthetic_result; runtime_requests }
@@ -52,8 +58,7 @@ let resume_ui_request (moderator : moderator) ~response =
   In_memory_stream.resume_ui_request (to_in_memory_moderator moderator) ~response
 ;;
 
-let prepare_turn_inputs ~moderator ?safe_point_input ~available_tools ~now_ms ~history ()
-  =
+let prepare_turn_inputs ~moderator ?safe_point_input ~available_tools ~now_ms ~history () =
   In_memory_stream.prepare_turn_inputs
     ~moderator:(map_moderator moderator)
     ?safe_point_input

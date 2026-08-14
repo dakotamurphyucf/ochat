@@ -115,3 +115,14 @@ val tool_desc_ty : ty
 val tool_call_ty : ty
 val tool_result_ty : ty
 val context_ty : ty
+val shell_context_ty : ty
+val shell_policy_ty : ty
+val shell_result_ty : ty
+val shell_audit_ty : ty
+val shell_context_module : builtin_module
+val match_module : builtin_module
+val review_module : builtin_module
+val intercept_module : builtin_module
+val result_module : builtin_module
+val effect_module : builtin_module
+val audit_filter_module : builtin_module

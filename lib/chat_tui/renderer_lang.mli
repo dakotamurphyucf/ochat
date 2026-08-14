@@ -8,6 +8,12 @@
     Current mappings:
     {ul
     {- [".ml"], [".mli"] → ["ocaml"]}
+    {- [".py"], [".pyw"], [".pyi"] → ["python"]}
+    {- [".rs"] → ["rust"]}
+    {- [".js"], [".mjs"], [".cjs"] → ["javascript"]}
+    {- [".jsx"] → ["jsx"]}
+    {- [".ts"], [".mts"], [".cts"] → ["typescript"]}
+    {- [".tsx"] → ["tsx"]}
     {- [".md"] → ["markdown"]}
     {- [".json"] → ["json"]}
     {- [".sh"] → ["bash"]}}

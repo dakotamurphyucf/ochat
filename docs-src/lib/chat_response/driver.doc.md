@@ -19,7 +19,7 @@ conversation.chatmd   ─► Driver.run_completion                ─► updated
 
 (nested <agent/> prompts) ─► Driver.run_agent ─► assistant text (string)
 
-(purely in-memory)      ─► Driver.run_completion_stream_in_memory_v1
+(purely in-memory)      ─► In_memory_stream.run_completion_stream_in_memory_entries
 ```
 
 ## 2 · Public API
@@ -29,7 +29,7 @@ conversation.chatmd   ─► Driver.run_completion                ─► updated
 | `run_completion` | Blocking, single-turn helper – read `.chatmd`, execute model, append answer. |
 | `run_completion_stream` | Streaming variant used by the TUI – fires callbacks on every delta. |
 | `run_agent` | Evaluate a self-contained `<agent>` prompt inside the current conversation. |
-| `run_completion_stream_in_memory_v1` | Headless helper working on an in-memory history. |
+| `In_memory_stream.run_completion_stream_in_memory_entries` | Identity-bearing helper working on canonical in-memory history. |
 
 ### Optional flags shared by several helpers
 
@@ -52,8 +52,8 @@ Driver.run_completion
 * Appends `prompt_file` once (if given) to `output_file`.
 * Parses the resulting XML buffer with `Prompt.Chat_markdown`.
 * Extracts configuration (`<config/>`) and declared tools (`<tool/>`).
-* Converts the prompt to `Openai.Responses.Item.t list` via `Converter`.
-* Recursively calls `Response_loop.run` until;   
+* Converts the prompt to canonical `History_entry.t` values.
+* Recursively calls `Response_loop.run_entries` until;
   – no pending function calls remain; or   
   – the model produced a plain assistant answer.
 * Renders assistant messages, reasoning blocks and tool-call artefacts
@@ -99,11 +99,12 @@ spawns a recursive response loop and returns all assistant messages as a
 single concatenated string.  It is primarily used by the built-in `fork`
 tool.
 
-### 2.4 `run_completion_stream_in_memory_v1`
+### 2.4 Identity-bearing in-memory execution
 
-Variant of `run_completion_stream` that never reads or writes the
-filesystem – ideal for unit tests or back-end services that keep the
-complete history in a database.
+`In_memory_stream.run_completion_stream_in_memory_entries` takes a
+caller-owned allocator and canonical `History_entry.t list`. Existing entries
+retain their IDs and newly accepted assistant and tool-output occurrences
+receive IDs from that allocator.
 
 ## 3 · Implementation Highlights
 
@@ -180,11 +181,18 @@ assert (String.equal assistant_answer "Hello")
 let initial_history = [] in
 
 Eio_main.run @@ fun env ->
+  let allocator =
+    History_entry.Allocator.create
+      ~namespace:"example"
+      ~next_sequence:0
+    |> Result.get_ok
+  in
   let history' =
-    Driver.run_completion_stream_in_memory_v1
+    In_memory_stream.run_completion_stream_in_memory_entries
       ~env
+      ~allocator
       ~history:initial_history
-      ~tools:[]
+      ~tools:None
       ()
   in
   Format.printf "History length = %d\n" (List.length history')
@@ -197,9 +205,9 @@ Eio_main.run @@ fun env ->
   outputs.
 * **Error recovery** – transient network failures result in a restart of
   the whole turn; finer-grained retry logic could be implemented.
-* **API stability** – the suffix `_v1` in
-  `run_completion_stream_in_memory_v1` signals that the signature may
-  change in the future.
+* **Provider payload migration** – canonical entries currently wrap OpenAI
+  response items; a later migration can change the payload without changing
+  application-owned history identity.
 
 ## 6 · Related modules
 
@@ -219,3 +227,15 @@ Eio_main.run @@ fun env ->
 © The Ochat authors – released under the same licence as the source
 code.  Feel free to copy-edit.
 
+## Shell runtime orchestration
+
+`Chat_response.Agent_runtime` now centralizes shell manifest compilation,
+administrative/trust/signature checks, exact manifest authorization, immutable
+registry instantiation, and declared-tool construction for main driver,
+nested-agent, and TUI paths. A shell tool is never published with a missing or
+unauthorized runtime.
+
+Moderator `Process.run` receives the registry adapter, model reviewers receive
+the configured completion callback, and session-backed approval/audit state is
+owned by the surrounding execution context. There is no production fallback to
+`Custom_command_runner.run` or another direct-spawn path.

@@ -1,9 +1,9 @@
 (** Local (synchronous) effects of a user submit, plus spawning the streaming worker.
 
     When the user hits enter, the UI applies immediate local updates
-    (append the user message, clear the editor, show a "(thinking…)"
-    placeholder, request a redraw) and then spawns the asynchronous OpenAI
-    request.  This module owns those submit-specific steps.
+    (append the user message, clear the editor, mark assistant activity as
+    thinking, request a redraw) and then spawns the asynchronous OpenAI request.
+    This module owns those submit-specific steps.
 
     The helper is intentionally stateful: it mutates the supplied {!Model.t}
     and uses {!Chat_tui.App_runtime.t} to record that streaming is starting.
@@ -47,10 +47,7 @@ module Context : sig
   type t =
     { runtime : App_runtime.t
     ; streaming : App_streaming.Context.t
-    ; start_streaming
-        : history:Openai.Responses.Item.t list
-       -> op_id:int
-       -> unit
+    ; start_streaming : history:History_entry.t list -> op_id:int -> unit
     }
 end
 
@@ -61,7 +58,7 @@ end
     {ul
     {- moves the draft into the transcript (as plain text or raw XML); }
     {- clears the editor and scrolls to the bottom; }
-    {- injects an assistant placeholder message; }
+    {- marks assistant activity as thinking; }
     {- marks the runtime as [Starting_streaming]; and }
     {- forks a fibre that runs the streaming worker and reports results via the
        internal event stream.}}

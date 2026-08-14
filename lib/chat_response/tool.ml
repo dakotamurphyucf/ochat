@@ -42,6 +42,15 @@
 
 open Core
 module CM = Prompt.Chat_markdown
+
+let agent_page_classification (decl : CM.tool) =
+  match decl with
+  | CM.Agent { name; _ } -> Some (name, Tool_execution_event.Subagent)
+  | CM.Custom { name; _ } -> Some (name, Tool_execution_event.Shell_script)
+  | CM.Shell { name; _ } -> Some (name, Tool_execution_event.Shell_script)
+  | CM.Builtin _ | CM.Mcp _ -> None
+;;
+
 module Res = Openai.Responses
 
 (*------------------------------------------------------------------*)
@@ -120,137 +129,6 @@ let convert_tools (ts : Openai.Completions.tool list) : Res.Request.Tool.t list 
     | _ -> Res.Request.Tool.Function { name; description; parameters; strict; type_ })
 ;;
 
-(*--- 4-b.  Custom shell command tool --------------------------------*)
-
-(** [custom_fn ~env decl] wraps a `{<tool command="…"/>}` element into a
-    callable {!Ochat_function.t}.
-
-    Input schema
-    {[
-      {
-        "arguments": string array   (* Command-line arguments *)
-      }
-    ]}
-
-    The function spawns the declared command inside the Eio sandbox,
-    feeds it the provided arguments, then returns the concatenated
-    *stdout* and *stderr* streams.
-
-    Invariants & safeguards
-    • Hard timeout of {b 60 s}.  The process is killed afterwards.
-    • Output is truncated to at most {b 100 KiB} to avoid flooding the
-      model context.
-
-    Use this backend only for {e quick experiments}.  Prefer dedicated
-    OCaml helpers or remote MCP tools in production. *)
-let custom_fn ~env (c : CM.custom_tool) : Ochat_function.t =
-  let CM.{ name; description; command } = c in
-  let module M : Ochat_function.Def with type input = string list = struct
-    type input = string list
-
-    let name = name
-    let type_ = "function"
-
-    let description : string option =
-      match description with
-      | Some desc ->
-        Some
-          (String.concat
-             [ "Run a "
-             ; command
-             ; " shell command with arguments, and returns its output.\n"
-             ; desc
-             ])
-      | None ->
-        Some
-          (String.concat
-             [ "Run a "
-             ; command
-             ; " shell command with arguments, and returns its output"
-             ])
-    ;;
-
-    let parameters : Jsonaf.t =
-      `Object
-        [ "type", `String "object"
-        ; ( "properties"
-          , `Object
-              [ ( "arguments"
-                , `Object
-                    [ "type", `String "array"
-                    ; "items", `Object [ "type", `String "string" ]
-                    ] )
-              ] )
-        ; "required", `Array [ `String "arguments" ]
-        ; "additionalProperties", `False
-        ]
-    ;;
-
-    let input_of_string s : input =
-      let j = Jsonaf.of_string s in
-      j
-      |> Jsonaf.member_exn "arguments"
-      |> Jsonaf.list_exn
-      |> List.map ~f:Jsonaf.string_exn
-    ;;
-  end
-  in
-  let fp (params : string list) : string =
-    let proc_mgr = Eio.Stdenv.process_mgr env in
-    Eio.Switch.run
-    @@ fun sw ->
-    (* 1.  Pipe for capturing stdout & stderr. *)
-    let r, w = Eio.Process.pipe ~sw proc_mgr in
-    let cmdline = command |> String.substr_replace_all ~pattern:"%20" ~with_:" " in
-    (* Split on whitespace – rudimentary, but sufficient for Phase-1. *)
-    let cmd_list =
-      if String.is_empty cmdline
-      then invalid_arg "custom_fn: empty command line"
-      else
-        String.split_on_chars ~on:[ ' '; Char.of_int_exn 32 ] cmdline
-        |> List.filter ~f:(fun s -> not (String.is_empty s))
-    in
-    (* 2.  Check that the command is not empty. *)
-    (* 2.  Spawn the child process with the provided command and parameters. *)
-    (* Note: we use [Eio.Process.spawn] to run the command, which captures
-       stdout and stderr into the pipe [w]. *)
-    (* Note: we use [Eio.Buf_read.parse_exn] to read the output from the pipe. *)
-    match
-      Eio.Process.spawn ~sw proc_mgr ~stdout:w ~stderr:w (List.append cmd_list params)
-    with
-    | exception ex ->
-      let err_msg = Fmt.str "error running %s command: %a" command Eio.Exn.pp ex in
-      Eio.Flow.close w;
-      err_msg
-    | _child ->
-      Eio.Flow.close w;
-      (match Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all r with
-       | res ->
-         let max_len = 10000 in
-         let res =
-           if String.length res > max_len
-           then String.append (String.sub res ~pos:0 ~len:max_len) " ...truncated"
-           else if String.is_empty res
-           then "Command output is empty"
-           else res
-         in
-         res
-       | exception ex -> Fmt.str "error running %s command: %a" command Eio.Exn.pp ex)
-  in
-  (* timeout functioin eio *)
-  let fp x =
-    try Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 180.0 (fun () -> fp x) with
-    | Eio.Time.Timeout ->
-      Printf.sprintf "timeout running command %s" (String.concat ~sep:" " x)
-  in
-  (* Create the Ochat_function.t using the module M and the function fp. *)
-  (* Note: we use [Ochat_function.create_function] to create the function. *)
-  (* Note: we use [module M] to specify the module type for the function. *)
-  Ochat_function.create_function
-    (module M)
-    (fun args -> Res.Tool_output.Output.Text (fp args))
-;;
-
 (*--- 4-c.  Agent tool → Ochat_function.t ------------------------------*)
 
 (** [agent_fn ~ctx ~run_agent spec] wraps a nested ChatMarkdown
@@ -307,7 +185,7 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_fu
     ;;
   end
   in
-  let run (user_msg : string) : string =
+  let run ~source ?observer (user_msg : string) : string =
     (* Build a basic content item from the provided user input. *)
     let basic_item : CM.basic_content_item =
       { type_ = "text"
@@ -323,11 +201,35 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_fu
     let prompt_xml = Fetch.get ~ctx agent ~is_local in
     let prompt_dir = if is_local then Fetch.resolve_local_dir ~ctx agent else None in
     (* Delegate the heavy lifting to the provided [run_agent] callback. *)
-    run_agent ?prompt_dir ?session_id:(Some agent) ~ctx prompt_xml [ CM.Basic basic_item ]
+    run_agent
+      ?prompt_dir
+      ?session_id:(Some agent)
+      ?observer
+      ~source
+      ~ctx
+      prompt_xml
+      [ CM.Basic basic_item ]
   in
-  Ochat_function.create_function
+  Ochat_function.create_streaming_function
     (module M)
-    (fun args -> Res.Tool_output.Output.Text (run args))
+    (fun ~invocation args ->
+       let source = Fork.Invocation_id.create () |> Fork.Invocation_id.to_string in
+       let observer =
+         if Ochat_function.Invocation.is_observed invocation
+         then (
+           let trace =
+             Agent_trace.create
+               ~emit:(Ochat_function.Invocation.emit invocation)
+               ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
+           in
+           Some
+             Agent_response_loop.
+               { on_event = Agent_trace.on_event trace
+               ; on_tool_execution = Agent_trace.on_tool_execution trace
+               })
+         else None
+       in
+       Res.Tool_output.Output.Text (run ~source ?observer args))
 ;;
 
 (** [mcp_tool ~sw ~ctx decl] resolves a `{<tool mcp_server="…"/>}`
@@ -443,7 +345,7 @@ let mcp_tool
     @raise Failure if the declaration references an unknown built-in
            tool name.
 *)
-let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
+let of_declaration ?shell_registry ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
   : Ochat_function.t list
   =
   match decl with
@@ -478,7 +380,24 @@ let of_declaration ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
      | "import_image" -> [ Functions.import_image ~dir:(Ctx.tool_dir ctx) ]
      | "meta_refine" -> [ Functions.meta_refine ~env:(Ctx.env ctx) ]
      | other -> failwithf "Unknown built-in tool: %s" other ())
-  | CM.Custom c -> [ custom_fn ~env:(Ctx.env ctx) c ]
+  | CM.Custom tool ->
+    failwithf
+      "Legacy shell tool %S must be constructed through Agent_runtime"
+      tool.name
+      ()
+  | CM.Shell tool ->
+    (match shell_registry with
+     | None ->
+       failwithf
+         "Shell tool %S references runtime %S, but the shell runtime registry is not \
+          instantiated"
+         tool.name
+         tool.runtime
+         ()
+     | Some registry ->
+       (match Shell_tool.create registry tool with
+        | Ok tool -> [ tool ]
+        | Error error -> failwithf "%s: %s" error.code error.message ()))
   | CM.Agent agent_spec -> [ agent_fn ~ctx ~run_agent agent_spec ]
   | CM.Mcp mcp -> mcp_tool ~sw ~ctx mcp
 ;;

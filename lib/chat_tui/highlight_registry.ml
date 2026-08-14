@@ -1,37 +1,56 @@
 open Core
 
-let reg_lazy : Highlight_tm_loader.registry Lazy.t =
-  lazy
-    (let r = Highlight_tm_loader.create_registry () in
-     (match Highlight_grammars.add_ocaml r with
-      | Ok () -> ()
-      | Error e -> printf "failed to load OCaml grammar: %s\n" (Error.to_string_hum e));
-     (match Highlight_grammars.add_dune r with
-      | Ok () -> ()
-      | Error e -> printf "failed to load Dune grammar: %s\n" (Error.to_string_hum e));
-     (match Highlight_grammars.add_opam r with
-      | Ok () -> ()
-      | Error e -> printf "failed to load OPAM grammar: %s\n" (Error.to_string_hum e));
-     (match Highlight_grammars.add_shell r with
-      | Ok () -> ()
-      | Error e -> printf "failed to load Shell grammar: %s\n" (Error.to_string_hum e));
-     (match Highlight_grammars.add_diff r with
-      | Ok () -> ()
-      | Error e -> printf "failed to load Diff grammar: %s\n" (Error.to_string_hum e));
-     (match Highlight_grammars.add_ochat_apply_patch r with
-      | Ok () -> ()
-      | Error e ->
-        printf "failed to load ochat-apply-patch grammar: %s\n" (Error.to_string_hum e));
-     (match Highlight_grammars.add_json r with
-      | Ok () -> ()
-      | Error e -> printf "failed to load JSON grammar: %s\n" (Error.to_string_hum e));
-     (match Highlight_grammars.add_html r with
-      | Ok () -> ()
-      | Error e -> printf "failed to load HTML grammar: %s\n" (Error.to_string_hum e));
-     (match Highlight_grammars.add_markdown r with
-      | Ok () -> ()
-      | Error e -> printf "failed to load Markdown grammar: %s\n" (Error.to_string_hum e));
-     r)
+let load name add registry =
+  match add registry with
+  | Ok () -> ()
+  | Error error ->
+    printf "failed to load %s grammar: %s\n" name (Error.to_string_hum error)
 ;;
 
-let get () = Lazy.force reg_lazy
+let create () =
+  let registry = Highlight_tm_loader.create_registry () in
+  [ "OCaml", Highlight_grammars.add_ocaml
+  ; "Python", Highlight_grammars.add_python
+  ; "Rust", Highlight_grammars.add_rust
+  ; "JavaScript", Highlight_grammars.add_javascript
+  ; "TypeScript", Highlight_grammars.add_typescript
+  ; "Dune", Highlight_grammars.add_dune
+  ; "OPAM", Highlight_grammars.add_opam
+  ; "Shell", Highlight_grammars.add_shell
+  ; "Diff", Highlight_grammars.add_diff
+  ; "ochat-apply-patch", Highlight_grammars.add_ochat_apply_patch
+  ; "JSON", Highlight_grammars.add_json
+  ; "HTML", Highlight_grammars.add_html
+  ; "Markdown", Highlight_grammars.add_markdown
+  ]
+  |> List.iter ~f:(fun (name, add) -> load name add registry);
+  registry
+;;
+
+let create_with_sources sources =
+  let registry = create () in
+  List.fold_result sources ~init:registry ~f:(fun registry source ->
+    Highlight_tm_loader.add_grammar_jsonaf
+      registry
+      (Highlight_grammar_discovery.Source.json source)
+    |> Result.map ~f:(fun () -> registry))
+;;
+
+let current = ref None
+let current_generation = ref 0
+
+let get () =
+  match !current with
+  | Some registry -> registry
+  | None ->
+    let registry = create () in
+    current := Some registry;
+    registry
+;;
+
+let replace registry =
+  current := Some registry;
+  Int.incr current_generation
+;;
+
+let generation () = !current_generation

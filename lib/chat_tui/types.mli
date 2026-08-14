@@ -10,9 +10,6 @@
     • {b Chat transcript} – {!role} and {!message} model the OpenAI chat
       schema.
 
-    • {b Streaming support} – {!msg_buffer} accumulates partial assistant
-      output while the HTTP connection is still open.
-
     • {b Elm-style orchestration} – controllers emit {!cmd} values to
       request impure work (persistence, network calls, cancellation).  The
       pure part of the app applies {!patch} records to transform the
@@ -48,17 +45,6 @@ type tool_output_kind =
   | Read_file of { path : string option }
   | Read_directory of { path : string option }
   | Other of { name : string option }
-
-(** Streaming-time buffer.  While we receive deltas from the OpenAI API we
-    accumulate partial output in [buf] and remember the target index [index]
-    into {!Chat_tui.Model.messages} so the UI can update incrementally. *)
-type msg_buffer =
-  { buf : Buffer.t (** Mutable accumulator for the streaming text. *)
-  ; index : int
-    (** Zero-based index into {!Chat_tui.Model.messages} where the fully
-        assembled assistant message will be stored once streaming
-        finishes. *)
-  }
 
 (** Commands produced by the pure controller and executed by a side-effecting
     runner.
@@ -101,6 +87,12 @@ type patch =
       { id : string
       ; name : string
       } (** Record the function [name] associated with streaming buffer [id]. *)
+  | Associate_tool_call of
+      { item_id : string
+      ; call_id : string
+      }
+  (** Associate a streaming tool-call buffer with its canonical [call_id] for
+      transient lifecycle decoration in the Chat renderer. *)
   | Set_function_output of
       { id : string
       ; output : string

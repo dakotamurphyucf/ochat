@@ -74,8 +74,9 @@ Key paths:
   cancel streaming, start context compaction, or quit.
 
 - **Streaming events** – `handle_submit` starts
-  `Chat_response.Driver.run_completion_stream_in_memory_v1` in a fresh
-  `Eio.Switch.t`. All OpenAI streaming events and tool outputs are pushed
+  `Chat_response.In_memory_stream.run_completion_stream_in_memory_entries`
+  with the session allocator and canonical history. Streaming events and
+  tool outputs are pushed
   into a _local_ `Eio.Stream.t` which is consumed by a background batching
   fiber:
 
@@ -105,8 +106,8 @@ Context compaction is handled separately: when the user triggers the
 `run_chat` spawns a background fiber that:
 
 1. Optionally archives the current `Session.t` via `Session_store`.
-2. Invokes `Context_compaction.Compactor.compact_history` on the current
-   `Model.history_items`.
+2. Invokes `Context_compaction.Compactor.compact_entries` on the current
+   canonical `Model.history_items`.
 3. Replaces the model's history, messages, and tool-output index with the
    compacted version and requests a redraw.
 
@@ -128,8 +129,8 @@ Runtime artefacts derived from the static ChatMarkdown prompt:
 
 - `cfg` – behavioural settings such as model, temperature, max tokens and
   optional reasoning configuration. Built from `Chat_response.Config`.
-- `tools` – list of tool descriptors passed to
-  `Chat_response.Driver.run_completion_stream_in_memory_v1`.
+- `tools` – list of tool descriptors passed to the identity-bearing
+  in-memory stream driver.
 - `tool_tbl` – mapping from tool name to an OCaml implementation
   (`string -> string`) produced by `Ochat_function.functions`. When the
   model issues a tool call, its JSON payload is dispatched through this
@@ -153,21 +154,10 @@ Persistence policy for the **session snapshot** at the end of `run_chat`:
 
 The policy is ignored when `?session` is `None`.
 
-### Placeholder helpers
+### Error placeholders
 
-These helpers are small convenience functions used by the app to surface
-state to the user. They all operate on `Chat_tui.Model.t` via the
+Errors are surfaced in the transcript through the
 `Chat_tui.Types.Add_placeholder_message` patch.
-
-#### `add_placeholder_thinking_message`
-
-```ocaml
-val add_placeholder_thinking_message : Model.t -> unit
-```
-
-Append a transient `("assistant", "(thinking…)")` message to the model so
-the user gets immediate visual feedback after submitting a prompt. The
-placeholder is overwritten once the first streaming tokens arrive.
 
 #### `add_placeholder_stream_error`
 
@@ -178,17 +168,6 @@ val add_placeholder_stream_error : Model.t -> string -> unit
 `add_placeholder_stream_error model msg` appends a one-shot `("error",
 msg)` message. It is used when streaming fails so that fatal conditions are
 visible in the transcript instead of only appearing in logs.
-
-#### `add_placeholder_compact_message`
-
-```ocaml
-val add_placeholder_compact_message : Model.t -> unit
-```
-
-Append a temporary `("assistant", "(compacting…)")` message while
-background context compaction is running. Once compaction finishes (either
-successfully or with an error), this stub is effectively replaced by a more
-informative status message.
 
 ### Snapshot persistence
 
@@ -242,8 +221,7 @@ Responsibilities:
   `Model.auto_follow`.
 - Scroll the history viewport so the submitted message is visible (using
   the current terminal height from `Notty_eio.Term.size`).
-- Inject a transient `("assistant", "(thinking…)")` placeholder via
-  `add_placeholder_thinking_message`.
+- Mark assistant activity as thinking.
 - Enqueue a `\`Redraw` event on `ev_stream` so the renderer can refresh
   the screen.
 
@@ -274,9 +252,9 @@ Key details:
 - A fresh `Eio.Switch.t` is created and stored in `Model.fetch_sw` so that
   `Esc` can cancel the in-flight request via `Eio.Switch.fail`.
 - Streaming is driven by
-  `Chat_response.Driver.run_completion_stream_in_memory_v1`, which operates
-  entirely on an in-memory chat history and a `tools` list derived from the
-  prompt.
+  `Chat_response.In_memory_stream.run_completion_stream_in_memory_entries`,
+  which operates on canonical `History_entry.t list` and a `tools` list
+  derived from the prompt.
 - Two callbacks are installed:
   - `on_event` – receives `Response_stream.t` events and pushes them into a
     local `Eio.Stream.t` as `` `Stream ``.
@@ -290,9 +268,8 @@ Key details:
   events from `ev_stream`, turns them into `Types.patch` values via
   `Chat_tui.Stream`, and applies them to the model.
 - When the driver finishes successfully, `handle_submit` emits a single
-  `` `Replace_history `` event with the updated
-  `Openai.Responses.Item.t list`, and `run_chat` replaces the model's
-  `history_items` and `messages` accordingly.
+  `Streaming_done` event with the updated `History_entry.t list`, and
+  `run_chat` replaces canonical history and rebuilds the effective projection.
 
 Error handling:
 
@@ -306,14 +283,14 @@ Error handling:
   - appends an error placeholder via `add_placeholder_stream_error` before
     requesting a redraw.
 
-The `history_compaction` flag is forwarded to
-`Chat_response.Driver.run_completion_stream_in_memory_v1`. When `true`, the
+The `history_compaction` flag is forwarded to the identity-bearing in-memory
+stream driver. When `true`, the
 driver collapses redundant file-read entries in the history before sending
 requests to the model, reducing token usage on long conversations that
 repeatedly read the same documents.
 
 The separate user-triggered context compaction (via
-`Context_compaction.Compactor.compact_history`) is handled entirely inside
+`Context_compaction.Compactor.compact_entries`) is handled entirely inside
 `run_chat`.
 
 ### High-level entry point
@@ -450,3 +427,14 @@ restricted environment.
 - `Session` / `Session_store` – persistent session representation and
   filesystem wiring.
 
+## Shell runtime integration
+
+Application startup includes canonical shell manifest security checks, exact
+authorization, runtime registry instantiation, approval-broker wiring, and the
+immutable Shell Security snapshot before ordinary submission is enabled.
+Shell management/audit I/O runs in Eio workers; generation-tagged immutable
+results return to the reducer, the only owner of UI model mutation.
+
+Approval, revocation, and moderator modals are post-render overlays. Shell
+Security is a separate page with independent scroll state, so these additions
+do not mutate Chat history or invalidate its row-render cache.

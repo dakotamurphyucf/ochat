@@ -4,7 +4,7 @@
 
 Ochat is an **OCaml toolkit** for building **reproducible, composable, tool-using LLM workflows** without locking the workflow into a single UI or heavyweight framework.
 
-Instead of hiding prompts, tool permissions, transcript state, and orchestration inside an application, Ochat keeps them in **static, diffable files** that you can version-control, review, branch, and run in different hosts.
+Instead of hiding prompts, tool permissions, shell authority, transcript state, and orchestration inside an application, Ochat keeps them in **static, diffable files** that you can version-control, review, branch, and run in different hosts.
 
 If you like tools like Claude Code or Codex, Ochat operates at a more fundamental level: it gives you the building blocks to create **your own prompt packs, agents, and workflow systems**.
 
@@ -68,13 +68,14 @@ Ochat is built around a few core principles:
 - **Tools should be explicit**
 - **Custom workflows should not depend on a single UI**
 - **Advanced orchestration should remain auditable**
+- **Shell authority should be explicit, inspectable, and fail closed**
 
 ---
 
 ## Ochat in one minute
 
 - A workflow is usually a `.md` file written in **ChatMarkdown (ChatMD)**.
-- That file can contain the prompt, model config, tool permissions, transcript, and execution artifacts.
+- That file can contain the prompt, model config, tool permissions, shell runtime authority, transcript, and execution artifacts.
 - The same workflow can run in the TUI, the CLI, or over MCP.
 - Workflows can call tools, other workflows, and an optional host-managed **ChatML** script.
 - Because everything is stored as text, runs are diffable, reproducible, resumable, and easy to version-control.
@@ -94,6 +95,8 @@ Its core format is **ChatMarkdown (ChatMD)**, a Markdown + XML dialect for defin
 - tool calls and tool results
 - imported artifacts such as documents or images
 - optional host-managed scripting for orchestration and moderation
+- named shell runtimes with capabilities, policy, approvals, sandboxing,
+  interceptors, secrets, limits, and audit
 
 In Ochat, an agent is often just a `.md` file.
 
@@ -114,13 +117,24 @@ Because everything is captured in text files, workflows become:
 
 The same `.md` workflow definition can be executed in multiple hosts:
 
-- the **terminal UI** (`chat_tui`) for interactive work
+- the **terminal UI** (`chat_tui`) for interactive work, with a canonical Chat
+  page and a transient Agent page for live tool progress
 - **scripts and CI** via `ochat chat-completion`
 - a **remote MCP server** via `mcp_server`, so IDEs and other applications can call agents over stdio or HTTP/SSE
 
 The ChatMD language provides a rich set of features for prompt engineering in a modular way, supporting workflows from simple prompts to more advanced orchestrations. See the [language reference](docs-src/overview/chatmd-language.md).
 
-ChatMD prompts can also embed a single host-managed **ChatML** moderation script:
+ChatMD can also be the source of truth for a shell-capable agent harness. A
+`<shell_access>` declaration requests exact process authority; ochat resolves
+imports and built-in profiles into a canonical manifest, applies host ceilings,
+authorizes that manifest, and only then publishes fixed, structured, chain,
+raw, or script-file tools. See the
+[shell runtime reference](docs-src/overview/chatmd-shell-runtime.md) and
+[security guide](docs-src/guide/chatmd-shell-security.md).
+
+ChatMD prompts can also embed one active host-managed **ChatML** moderation
+script. Shell runtimes may independently declare multiple typed ChatML extension
+scripts for matching, review, interception, effect analysis, and audit filtering:
 
 - declare it with `<script language="chatml" kind="moderator" ...>`
 - keep it invisible to the model request itself
@@ -131,7 +145,8 @@ ChatMD prompts can also embed a single host-managed **ChatML** moderation script
 - request another ordinary model turn after `turn_end` via `Runtime.request_turn()`
 - schedule idle follow-up turns after background internal events or startup work
 - orchestrate additional model-backed work via `Model.call` and `Model.spawn`
-- defer user steering submitted during streaming until a safe model-input boundary
+- accept canonical user steering during streaming and append it after pending
+  tool outputs at the next safe model-input boundary
 
 Prompts without a `<script>` keep the baseline behavior: the shared drivers, `chat_tui`, export flow, and nested agent execution continue to work without the moderation layer.
 
@@ -140,6 +155,13 @@ Ochat is implemented in **OCaml**, but the workflows themselves are **language-a
 > **Current provider support:** nativley uses OpenAI Responses API format.  
 > The architecture is designed to support additional providers in the future.
 > To use other providers right now you can use a [proxy-server](https://docs.litellm.ai/) and set the enviorment url API_URL to the proxy url
+
+Runtime conversation state is identity-bearing: each canonical occurrence has
+an application-owned `History_entry.Id`. OpenAI item IDs and tool `call_id`
+values remain transport/correlation metadata. Moderator-effective entries add
+provenance without rewriting canonical identity, while Chat-TUI rows retain
+stable IDs and use indexes only for current layout geometry. Provider request
+APIs receive raw OpenAI items only through an explicit payload projection.
 
 ---
 
@@ -167,6 +189,11 @@ It is a **text-first workflow toolkit** built around a few core ideas:
 
 - **Host-managed control logic**  
   Use ChatML scripts to moderate tool calls, manage workflow state, and orchestrate multi-step behavior.
+
+- **Manifest-bound shell authority**
+  Configure structured commands, conservative chains, reviewed raw shells,
+  sandboxing, policy, approvals, custom hooks, redaction, and audit directly in
+  ChatMD. Security-relevant changes invalidate prior authorization.
 
 - **Run anywhere**  
   Use the same workflow in the TUI, the CLI, or through MCP.
@@ -290,6 +317,38 @@ ochat chat-completion \
 
 The output file captures the run as a plain text artifact that you can inspect, diff, resume, or share.
 
+### 5. Add safe shell access
+
+For a read-oriented repository agent, add a named runtime and fixed tool:
+
+```xml
+<shell_access id="readonly" extends="builtin:workspace-readonly@1"/>
+
+<tool name="search" type="shell" mode="fixed" runtime="readonly">
+  <command program="rg"><arg value="--json"/></command>
+  <arguments mode="required" min_count="1"/>
+</tool>
+```
+
+Inspect the expanded authority before running it:
+
+```sh
+ochat shell inspect prompts/hello.md -canonical
+```
+
+Interactive shell manifests fail closed unless authorized. For a one-process
+interactive grant:
+
+```sh
+dune exec chat_tui -- -file prompts/hello.md --authorize-shell-manifest
+```
+
+For intentionally unrestricted local execution, ochat also ships
+`builtin:yolo@1`. YOLO grants the model the user’s local process privileges,
+uses direct execution, and disables command approvals. Read the
+[YOLO security notes](docs-src/guide/chatmd-shell-security.md#yolo-profile)
+before using it.
+
 ---
 
 ## First 10 minutes with Ochat
@@ -320,6 +379,10 @@ A simple way to get a feel for Ochat:
    ```sh
    dune exec chat_tui -- -file prompts/refactor.md
    ```
+   While a tool is active, press `Ctrl-G` to inspect live progress. Use `j/k`
+   to switch calls, arrows (`Ctrl`-arrows in terminals that encode trackpad
+   gestures that way) or the trackpad to scroll output, and `Ctrl-G` or `Esc`
+   to return to Chat.
 
 5. **Inspect the workflow artifact**
    Export or save the run and open the resulting `.md` / `.chatmd` file to see:
@@ -341,6 +404,7 @@ A simple way to get a feel for Ochat:
    - MCP export via `mcp_server`
    - retrieval/indexing tools
    - ChatML moderator scripts
+   - manifest-authorized ChatMD shell runtimes
 
 ---
 
@@ -357,7 +421,8 @@ That means prompts, tool calls, results, and transcripts can all be version-cont
 Combine:
 - ChatMD prompt instructions
 - built-in tools
-- shell wrappers
+- fixed, structured, chain, raw, and script-file shell tools backed by named
+  runtimes
 - remote MCP tools
 - other agents mounted as tools
 
@@ -370,6 +435,8 @@ Built-in tools include capabilities such as:
 - image import via `import_image`
 
 See [Tools – built-ins, custom helpers & MCP](docs-src/overview/tools.md).
+For shell-specific schemas and safety behavior, see
+[ChatMD shell tools](docs-src/overview/chatmd-shell-tools.md).
 
 ### Compose agents into prompt packs
 Build Claude Code/Codex-style applications out of multiple prompts:
@@ -497,6 +564,9 @@ dune exec chat_tui -- -file prompts/refactor.md
 From there you can ask the assistant to rename a function, extract a helper, or
 update documentation. It will use `read_dir` and `read_file` to inspect the
 code, then generate `apply_patch` diffs and apply them.
+
+Press `Ctrl-G` while tools are active to open the Agent live view without
+pausing the Chat stream or tool execution.
 
 ---
 
@@ -730,6 +800,71 @@ transcript at safe points such as:
 - the end of compaction,
 - startup or resume moderation.
 
+Long-running foreground work is shown in the status bar with an animated
+snake shimmer that eases as it grows across the whole label, then falls away
+from the beginning toward the end. It remains active for the complete
+assistant turn, changes from
+“Thinking” to “Writing” as assistant text arrives, uses “Working” while tool
+calls are emitted or run, and stops only when the final turn completion or error is reduced.
+Context compaction uses the same animation loop with a separate “Compacting”
+label.
+
+Chat displays an animated startup barrier while an aggregate background
+operation partitions the initial transcript across two domains using
+domain-local TextMate registries and caches. The UI validates one ordered
+immutable result batch and atomically publishes exact geometry before enabling
+interaction.
+
+The detached render service remains available for resizing. A cached recent
+width restores immediately. For an uncached width, Chat keeps the active exact
+width isolated while workers prepare a bounded target-width corridor in
+16-row batches. The `Resizing` snake barrier is replaced atomically by an exact
+`Corridor`; nearby scrolling is cache-only and clamps at prepared boundaries
+without replaying rejected movement. Home, End, and off-corridor search results
+prepare a bounded destination asynchronously. Background batches then complete
+the transcript and promote it to globally exact `Warm` state.
+
+Width-independent semantic preparation and highlighted spans survive width
+changes and exact-width eviction; only wrapping, row images, heights, chunks,
+and geometry are width-specific. The UI domain exclusively owns model,
+geometry, anchors, publication, redraws, and terminal presentation. Workers
+own immutable jobs and private bounded caches. Newer resize generations and
+incompatible history replacements cancel stale work. An isolated failure is
+retried once; exhausted work shows the resize barrier and uses synchronous
+full relayout as the last resort. At most three complete recent widths and one
+preparing width are retained; production worker admission is bounded to 64
+queued jobs plus two workers, with 128 entries in each worker-local cache.
+
+Fully warm history uses exact row geometry and
+a chunked complete image, so arbitrary scrolling avoids virtual-list
+measurement and convergence. Chunk metadata is keyed by stable row identity,
+revision, and displayed selection variant, so ordinary updates rebuild only
+the affected 64-row chunks through a row-to-chunk index rather than rescanning
+the transcript. Structurally identical terminal frames and unchanged cursors
+are not presented again. While reviewing older history, exact
+viewport-damage classification suppresses terminal redraws for streaming
+changes below the viewport while preserving redraws for visible or preceding
+rows. Moderator/canonical reprojection uses the same damage classification.
+Loader animation also pauses during manual review.
+This isolation—not an assumption that TextMate internals are thread-safe—
+provides domain safety. See
+[Chat-TUI guide](docs-src/guide/chat_tui.md#tuning-responsiveness-optional).
+
+Startup diagnostics are disabled by default. Set
+`OCHAT_TUI_STARTUP_TIMING=1` for phase timings on stderr, and set
+`OCHAT_TUI_RENDER_METRICS=1` for one shutdown JSON record containing
+`startup_loader_duration_ms` and `publication_latency_ms`. For
+unusually large histories, use these diagnostics to distinguish worker render
+cost from final exact-history publication cost. Startup uses two fixed
+background domains and has no per-row UI event queue.
+
+Set `OCHAT_TUI_SCROLL_TRACE=1` for `chat-tui-scroll-trace.jsonl`. Resize
+records include observation/settlement, exact-width lookup, first exact
+corridor readiness, full-width completion, frame submission/presentation,
+worker retry, and synchronous fallback. The first-corridor and full-completion
+timestamps are separate so visible readiness is distinguishable from
+background completion.
+
 For the concrete host/session-controller contract behind those behaviors, see
 [ChatML host session-controller contract](docs-src/chatml-host-session-controller-contract.md).
 
@@ -848,13 +983,28 @@ For more on `ochat chat-completion` (flags, exit codes, ephemeral runs), see
 ## Core concepts
 
 - **ChatMarkdown (ChatMD)**  
-  A Markdown + XML dialect that stores model config, tool declarations, and the full conversation (including tool calls, reasoning traces, and imported artifacts) in a single `.md` file. See the [language reference](docs-src/overview/chatmd-language.md).
+  A Markdown + XML dialect that stores model config, tool declarations,
+  requested shell authority, and the full conversation (including tool calls,
+  reasoning traces, and imported artifacts) in a single `.md` file. See the
+  [language reference](docs-src/overview/chatmd-language.md).
 
 - **Tools**  
-  Functions the model can call, described by explicit JSON schemas. They can be built-ins, shell wrappers, other ChatMD agents, or remote MCP tools. See [Tools – built-ins, custom helpers & MCP](docs-src/overview/tools.md).
+  Functions the model can call, described by explicit JSON schemas. They can
+  be built-ins, manifest-authorized shell tools, other ChatMD agents, or remote
+  MCP tools. See [Tools – built-ins, custom helpers & MCP](docs-src/overview/tools.md).
+
+- **Shell runtime manifest**
+  The deterministic expansion of runtime declarations, imports, profiles,
+  tools, scripts, paths, limits, policy, and security settings. Authorization
+  binds to its SHA-256 digest rather than only a prompt path.
 
 - **chat_tui**  
-  A Notty-based terminal UI for editing and running `.md` files. It turns each prompt into a terminal application with streaming output, persistent sessions, and export/branch workflows. See the [chat_tui guide](docs-src/guide/chat_tui.md).
+  A Notty-based terminal UI for editing and running `.md` files. Its Chat page
+  keeps the canonical streaming transcript and editor, while its transient
+  Agent page shows live progress from active tools, while the Shell Security
+  page manages runtime posture, approvals, grants, audit, and interrupted
+  requests. It also supports persistent sessions and export/branch workflows.
+  See the [chat_tui guide](docs-src/guide/chat_tui.md).
 
 - **CLI and helpers**  
   Binaries like `ochat`, `md-index`, and `md-search` provide script-friendly entry points for running prompts and building/querying indexes.
@@ -881,7 +1031,7 @@ At a glance, Ochat treats workflows as text artifacts executed by a host runtime
    │ tools                                        │
    │ prompt messages                              │
    │ transcript / tool calls / tool results       │
-   │ optional ChatML moderation script            │
+   │ shell runtime manifest + ChatML scripts       │
    └──────────────────────────────────────────────┘
                            │
                            ▼
@@ -894,7 +1044,7 @@ At a glance, Ochat treats workflows as text artifacts executed by a host runtime
               │                  │
               ▼                  ▼
       ┌───────────────┐   ┌──────────────────┐
-      │ Model backend │   │ Tool execution   │
+      │ Model backend │   │ Authorized tools │
       │ OpenAI today  │   │ built-ins/shell/ │
       │ more later    │   │ MCP/other agents │
       │ or use proxy  │   └──────────────────┘ 
@@ -914,11 +1064,15 @@ At a high level, Ochat has two layers:
 - **ChatML** is the optional host-managed scripting layer  
   It adds workflow logic such as moderation, transcript editing, policy enforcement, and multi-step orchestration.
 
+- **ChatMD shell runtime** is the process-authority layer
+  It compiles strict declarations into a canonical manifest and immutable
+  runtime registry before exposing any shell-backed tool.
+
 A typical flow looks like this:
 
 1. Load a ChatMD file
-2. Parse config, tools, transcript, and optional script
-3. Run it in a host (`chat_tui`, CLI, or MCP)
+2. Parse config, tools, transcript, runtime declarations, and scripts
+3. Compile and authorize any shell manifest, then run it in a host
 4. Let the model call tools and produce output
 5. Optionally let a ChatML moderator inspect/modify the effective transcript or tool flow
 6. Persist the resulting workflow state back as text artifacts
@@ -937,6 +1091,8 @@ split:
   That controller reacts to moderator wakeups while idle, defers wakeups while
   a turn is active, refreshes visible transcript state from moderator-effective
   history at safe points, and starts follow-up turns only when the UI is idle.
+  Tool lifecycle/progress events update transient Agent-page state separately
+  from canonical transcript and persistence events.
 
 The concrete Phase 2 articulation of that host layer lives in
 [docs-src/chatml-host-session-controller-contract.md](docs-src/chatml-host-session-controller-contract.md).
@@ -950,6 +1106,13 @@ Deep-dive docs live under `docs-src/`. Key entry points:
 
 - [ChatMarkdown language reference](docs-src/overview/chatmd-language.md)
 - [Built-in tools & custom tools](docs-src/overview/tools.md)
+- [ChatMD shell runtime reference](docs-src/overview/chatmd-shell-runtime.md)
+- [ChatMD shell tool declarations](docs-src/overview/chatmd-shell-tools.md)
+- [Shell runtime security](docs-src/guide/chatmd-shell-security.md)
+- [Shell extensions](docs-src/guide/chatmd-shell-extensions.md)
+- [Shell persistence and audit](docs-src/guide/chatmd-shell-persistence-and-audit.md)
+- [Shell runtime examples](docs-src/guide/chatmd-shell-examples.md)
+- [`ochat shell` management CLI](docs-src/cli/shell-runtime-management.md)
 - [chat_tui guide & key bindings](docs-src/guide/chat_tui.md)
 - [`ochat chat-completion` CLI](docs-src/cli/chat-completion.md)
 - [MCP server & protocol details](docs-src/bin/mcp_server.doc.md)
@@ -970,7 +1133,7 @@ Deep-dive docs live under `docs-src/`. Key entry points:
 | Binary | Purpose | Example |
 |--------|---------|---------|
 | `chat_tui` (`chat-tui`) | interactive TUI | `chat_tui -file notes.md` |
-| `ochat` | misc CLI (index, query, tokenise …) | `ochat query -vector-db-folder _index -query-text "tail-rec map"` |
+| `ochat` | prompt, index, query, and shell-runtime management CLI | `ochat shell inspect agent.chatmd` |
 | `mcp_server` | serve prompts & tools over JSON-RPC / SSE | `mcp_server --http 8080` |
 | `mp-refine-run` | refine prompts via recursive meta-prompting | `mp-refine-run -task-file task.md -input-file draft.md` |
 | `md-index` / `md-search` | Markdown → index / search | `md-index --root docs`; `md-search --query "streams"` |
@@ -984,7 +1147,7 @@ Run any binary with `-help` for details.
 
 ```text
 bin/         – chat_tui, mcp_server, ochat …
-lib/         – re-usable libraries (chatmd, functions, vector_db …)
+lib/         – reusable libraries, including chatmd, chatmd_shell_spec, shell_access, shell_runtime, functions, and vector_db
 docs-src/    – Markdown docs rendered by odoc & included here
 prompts/     – sample ChatMD prompts served by the MCP server
 dune-project – dune metadata

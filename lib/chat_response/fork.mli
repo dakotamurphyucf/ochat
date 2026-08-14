@@ -18,6 +18,18 @@
 (*  Public API                                                           *)
 (* -------------------------------------------------------------------- *)
 
+module Invocation_id : sig
+  type t
+
+  val create : unit -> t
+  val to_string : t -> string
+end
+
+(** [allocator ~parent_namespace invocation_id] creates an isolated child
+    allocator. The invocation identity is distinct from provider IDs and tool
+    [call_id]. *)
+val allocator : parent_namespace:string -> Invocation_id.t -> History_entry.Allocator.t
+
 (** [execute env history call_id arguments tools tool_tbl on_event on_fn_out ()]
     runs a forked agent to completion and returns its final reply.
 
@@ -61,32 +73,25 @@
     agent has either terminated normally or the OpenAI request hit its
     server-side token limit.
 
-    Example – spawning a grep helper:
-    {[
-      let reply =
-        Fork.execute
-          ~env
-          ~history:items
-          ~call_id:"42"
-          ~arguments:{|
-            { "command": "grep", "arguments": ["-n", "let", "*.ml"] }
-          |}
-          ~tools
-          ~tool_tbl
-          ~on_event:(fun _ -> ())
-          ~on_fn_out:(fun _ -> ())
-          ()
-      in
-      print_endline reply
-    ]} *)
-val execute
+    Child execution is identity-bearing; parent entries retain their IDs and
+    child-created entries use the invocation allocator. *)
+
+(** [execute_entries] runs a child over a projection of [history]. Parent
+    entries remain unchanged and child activity is scoped by [invocation_id].
+    The child history is isolated; only the returned text becomes parent
+    canonical state. *)
+val execute_entries
   :  env:Eio_unix.Stdenv.base
-  -> history:Openai.Responses.Item.t list
+  -> allocator:History_entry.Allocator.t
+  -> history:History_entry.t list
+  -> invocation_id:Invocation_id.t
   -> call_id:string
   -> arguments:string
   -> tools:Openai.Responses.Request.Tool.t list
-  -> tool_tbl:(string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t
+  -> tool_tbl:(string, Ochat_function.runner) Base.Hashtbl.t
   -> on_event:(Openai.Responses.Response_stream.t -> unit)
+  -> ?on_sourced_event:(Sourced_response_event.t -> unit)
+  -> ?on_tool_execution:(Tool_execution_event.t -> unit)
   -> on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
   -> ?temperature:float
   -> ?max_output_tokens:int
@@ -94,15 +99,11 @@ val execute
   -> unit
   -> string
 
-(** [history ~history ~arguments call_id] injects the synthetic
-    *instruction* [function_call_output] item used by {!execute} at the
-    end of [history] and returns the resulting list.
-
-    This helper is primarily intended for unit-tests that need to verify
-    the exact message sequence fed to the OpenAI client without running a
-    full completion. *)
-val history
-  :  history:Openai.Responses.Item.t list
+(** [history_entries ~allocator ~history ~arguments ~call_id] preserves the
+    parent entries and appends one child-owned synthetic instruction entry. *)
+val history_entries
+  :  allocator:History_entry.Allocator.t
+  -> history:History_entry.t list
   -> arguments:string
-  -> string
-  -> Openai.Responses.Item.t list
+  -> call_id:string
+  -> History_entry.t list

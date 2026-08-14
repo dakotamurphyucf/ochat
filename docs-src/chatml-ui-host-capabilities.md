@@ -270,3 +270,17 @@ Use these documents together:
 
 The runtime guide gives the consolidated picture. This document stays focused
 on the UI-only additions layered on top of the default moderator runtime.
+
+## Shell approval is a separate host capability
+
+Moderator `Approval.ask_text` / `ask_choice` and shell command approval share
+host suspension and modal infrastructure, but they are different protocols.
+Shell approval carries executable identity, effects, policy matches,
+runtime/manifest identity, and permitted grant scopes; it can create or use
+persisted security grants. Moderator approval returns script input and has no
+authority to approve a shell command.
+
+When both are pending, shell approval has priority. Neither interaction is a
+canonical user message. See the
+[TUI guide](guide/chat_tui.md#shell-approvals-and-shell-security) and
+[shell security guide](guide/chatmd-shell-security.md).

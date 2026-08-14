@@ -20,7 +20,7 @@ extensions, so any `.md` can be a ChatMarkdown prompt.
 `chat_tui` is designed for the “draft → run → iterate” loop:
 
 - **Multi-line drafts without accidental sends:** `Enter` inserts a newline; **`Meta+Enter` submits**.
-- **Streaming output in one place:** assistant text, tool calls, and tool outputs stream into the history viewport.
+- **Two live pages:** Chat keeps the canonical transcript and editor; Agent shows transient progress from active tools.
 - **Vim-ish interaction:** Insert / Normal / Cmdline modes, plus message selection and yank/edit/resubmit.
 - **Sessions you can resume/branch/export:** persistent snapshots under `$HOME/.ochat/sessions/<id>`.
 - **Manual context compaction:** `:compact` produces a concise summary so long chats stay usable.
@@ -88,7 +88,54 @@ Notes:
 | `u` | undo |
 | `Ctrl-r` | redo |
 | `r` | toggle draft mode: **Plain** ⇄ **Raw XML** *(note: differs from Vim’s replace-char)* |
+| `Ctrl-g` | open the Agent page when at least one tool call is active |
 | `Esc` | cancel streaming (if in-flight) else “quit-via-ESC” path (see below) |
+
+---
+
+## Chat, Agent, and Shell Security pages
+
+The **Chat page** contains the canonical transcript, history viewport, status
+bar, and draft editor. The **Agent page** is a transient live view of tool calls
+that are executing now. The **Shell Security page** shows effective runtime
+authority, persisted grants, audit replay, and interrupted requests. Press
+`Ctrl-g` for Agent while calls are active, or run `:shell` for Shell Security.
+Starting a call does not switch pages automatically.
+
+The Agent header and selector list calls in start order. Tool names are not
+unique, so the selector also shows a shortened call ID. Use:
+
+| Keys | Agent-page action |
+|---|---|
+| `j / k` | select the next / previous call |
+| `↓ / ↑` or `Ctrl-↓ / Ctrl-↑` | scroll the selected call's output one row (trackpad-friendly; encoding depends on the terminal) |
+| `PageDown / PageUp` or `Ctrl-f / Ctrl-b` | scroll the selected call's output by a page |
+| `Home / End` | scroll to the beginning / end |
+| `Ctrl-g` or `Esc` | return to Chat |
+
+Chat and Agent have independent scroll positions. Switching pages does not
+pause, cancel, or restart the outer assistant stream or any tool. Assistant
+deltas continue accumulating on Chat while Agent is visible.
+
+Every executing tool shows start and finish lifecycle activity. Tools that emit
+intermediate values additionally show channel-labelled assistant, reasoning,
+stdout, stderr, or activity text. ChatMD agents used as tools expose nested
+assistant/reasoning deltas and nested-tool activity. Process-backed custom
+tools expose their combined command output while the process runs. One-shot
+tools, including MCP calls, may show lifecycle only because they emit no
+intermediate values. MCP server notifications are not correlated to individual
+requests in this view.
+
+Returned, raised, and cancelled calls disappear immediately. `Returned` means
+the runner returned normally; its final text may still describe a
+tool-defined error. Finishing an unselected call preserves the current
+selection and page. Finishing the selected call repairs selection for any
+surviving calls and returns to Chat; finishing the final call also returns to
+Chat.
+
+Live Agent activity is display-only. It never enters conversation history,
+moderation input, persistence, or future model requests. Each tool still
+produces one final canonical output through the existing Chat transcript path.
 
 ---
 
@@ -103,6 +150,7 @@ Notes:
 | `:d` / `:delete` | delete selected message |
 | `:e` / `:edit` | yank selected message into editor and switch to **Raw XML** |
 | `:noh` / `:nohlsearch` | clear last-search highlight *(currently may be slower on very large histories due to cache invalidation strategy)* |
+| `:shell` | open Shell Security and refresh its management snapshot |
 
 ---
 
@@ -120,7 +168,8 @@ Notes:
 
 ## Modes and the one subtle ESC behavior
 
-`chat_tui` has four editor modes:
+`chat_tui` has two pages and four Chat-editor modes. Agent is a page, not an
+editor mode:
 
 - **Insert:** you type into the draft buffer.
 - **Normal:** keys act like commands (Vim-ish) and you can navigate/search history.
@@ -135,9 +184,12 @@ This is the most important behavior to learn:
 - **Normal + `Esc`** → “cancel or quit”:
   - if a response is streaming: **cancel** the in-flight request
   - otherwise: triggers the “quit-via-ESC” shutdown path (which changes export prompting)
+- **Agent page + `Esc`** → return to Chat without cancelling.
 
 Practical tip:
 - To cancel while you’re typing in Insert: press `Esc` (go Normal), then `Esc` again (cancel).
+- If Agent is visible, first press `Esc` to return to Chat, then use the
+  existing Chat-page cancellation sequence.
 
 ---
 
@@ -177,8 +229,34 @@ Use cases:
 ### Submitting
 
 - `Meta+Enter` (Insert) or `:w` (Cmdline) submits the draft.
-- The UI inserts a brief “(thinking…)” placeholder immediately, then replaces it with streaming tokens.
+- The status bar displays an animated “Thinking” activity until output begins.
 - Auto-follow is enabled on submit so new output stays visible.
+- Outer assistant deltas continue updating Chat while tool lifecycle/progress
+  updates the transient Agent page. Only completed tool outputs enter the
+  canonical transcript.
+- Incremental assistant, reasoning-summary, and tool-input events update the
+  main Chat model before completion and request a throttled redraw. The default
+  transport batch window is 12 ms and the default UI target is 30 FPS.
+- Tool-call arguments are highlighted as JSON without altering the streamed
+  `name(arguments)` text. Complete nested values receive JSON token styling;
+  incomplete argument streams remain visible and are restyled as additional
+  tokens arrive.
+- Built-in `apply_patch` output uses the `ochat-apply-patch` highlighter for
+  raw V4A patches and formatted success/hunk output. File operations, moves,
+  `@@` selectors, additions, deletions, context, and begin/end markers have
+  distinct syntax scopes. Both patch-only and status-plus-patch output select
+  this path.
+- Each wait for the next OpenAI stream event has a 600-second idle deadline.
+  Set `OCHAT_OPENAI_IDLE_TIMEOUT_SECONDS` to a positive number of seconds to
+  override it, up to one hour. Every received event resets the deadline, and
+  later model/tool turns have independent deadlines, so responsive agentic
+  workflows may continue without a whole-operation timeout. Provider error,
+  incompleteness, malformed termination, idle timeout, and cancellation are
+  surfaced as streaming errors instead of leaving the session indefinitely
+  busy.
+- Manual scrolling preserves the stable top row while streamed content is
+  remeasured. Auto-follow recomputes the bottom offset from current geometry,
+  so row growth and terminal resize do not reuse a stale scroll position.
 
 ### “Note From the User” while streaming
 
@@ -239,6 +317,16 @@ Notes:
 
 ## Persistent sessions (resume / branch / reset / export)
 
+Session snapshots store identity-bearing canonical history. Every logical
+occurrence has an application-owned `History_entry.Id`; provider item IDs and
+tool `call_id` values remain transport/correlation metadata. The snapshot also
+stores the next unused history sequence so resume, reset, compaction, and
+moderator insertion cannot reuse an ID.
+
+ChatMarkdown export may include `ochat-history-id`, but it is a semantic export
+format rather than a claim of lossless snapshot round-tripping. The binary
+session snapshot remains authoritative for full runtime state.
+
 Sessions are stored under:
 
 ```text
@@ -282,6 +370,7 @@ Use:
 | `--export-file FILE` | set export destination on normal quit |
 | `--parallel-tool-calls` / `--no-parallel-tool-calls` | toggle parallel execution of tool calls |
 | `--auto-persist` / `--no-persist` | control snapshot persistence on exit |
+| `--authorize-shell-manifest` | authorize the exact compiled shell manifest for this interactive process |
 
 ---
 
@@ -312,6 +401,80 @@ filtering are not fully wired in the current implementation.
 
 ---
 
+## Shell approvals and Shell Security
+
+When a command reaches policy action `ask`, `chat_tui` opens a centered local
+approval modal over the current page. The modal is not a conversation message
+and does not mutate the draft or canonical history. It displays a redacted
+command, runtime/executable identity, cwd, inferred effects, matching policy,
+model rationale, available scopes, and queued-request count. Press `i` for
+details and `m` for additional scope choices.
+
+Approval keys:
+
+| Key | Action |
+|---|---|
+| `1` | approve this execution once |
+| `2` or `s` | exact command for this session, when offered |
+| `3` or `p` | selected command prefix for this session, when expanded/offered |
+| `4` | durable exact approval, when expanded/offered |
+| `m` | show/hide additional scopes |
+| `i` | show/hide technical details |
+| `d` or `n` | enter an explicit denial reason |
+| `Enter` | confirm selected choice or denial text |
+| `Esc` | cancel and deny this request without quitting the session |
+
+Prefix and durable choices require a separate confirmation step. The manifest
+and administrative policy determine which scopes are enabled; the UI never
+offers a broader scope. Parallel tool calls queue approval requests
+deterministically. A pending shell approval has priority over moderator
+text/choice input so ordinary submission cannot race or corrupt transcript
+state.
+
+Open Shell Security with `:shell`. Tabs are:
+
+- **Overview:** requested/live manifest digests, administrative policy,
+  signature, audit, grant counts, and interrupted count.
+- **Runtimes:** effective profile, sandbox, network, and audit posture.
+- **Grants:** persisted command grants and revocation.
+- **Audit:** integrity status, recent requests, and a non-executing timeline.
+- **Interrupted:** redacted requests that were not completed. They are never
+  resumed; retry creates and authorizes a new request.
+
+Page keys:
+
+| Key | Action |
+|---|---|
+| `Esc` | return to Chat |
+| `h/l`, left/right, or `Tab` | change tab |
+| `j/k` or up/down | select or scroll |
+| `PageUp` / `PageDown` | page scroll |
+| `r` | refresh management/audit data |
+| `x` on Grants | open revocation confirmation |
+
+Revocation is persisted asynchronously and appends a chained management audit
+event. Audit loading/replay is read-only and never executes a command.
+
+Shell Security has independent selection and scroll state. Opening it,
+refreshing it, or closing it does not rebuild or mutate Chat history. Approval
+and moderator interactions are post-render overlays, so they do not invalidate
+message-layout caches. Management workers return immutable generation-tagged
+results; only the UI domain applies current generations.
+
+The shell UI uses a centralized modern 256-color palette built with
+`Highlight_styles` hex constructors. Borders and critical behavior remain
+readable when a terminal reduces color fidelity or Unicode border support.
+A persistent red warning banner appears when a YOLO profile is active.
+
+`--authorize-shell-manifest` is a one-process interactive authorization for
+the exact canonical manifest. A security-relevant edit changes the digest and
+requires new authorization. It is not global path trust and is rejected for
+noninteractive selector commands.
+
+See the [shell security guide](chatmd-shell-security.md),
+[persistence/audit guide](chatmd-shell-persistence-and-audit.md), and
+[`ochat shell` CLI](../cli/shell-runtime-management.md).
+
 ## Terminal & troubleshooting
 
 ### “Meta” / Alt / Option key confusion
@@ -328,13 +491,82 @@ $ dune exec key_dump --
 - Cursor positioning is derived from **byte offsets** in the input buffer; wide Unicode glyphs may
   misalign the cursor with what you see on screen.
 - Mouse input is disabled in `chat_tui` (keyboard-driven UI).
+- Agent shows active calls only; completed calls are removed rather than kept
+  as a second transcript.
 
 ### Tuning responsiveness (optional)
 
-Two environment variables influence how frequently the UI redraws while streaming:
+Startup uses an animated barrier and one aggregate two-domain render. Ordinary
+input is discarded until exact history is atomically published.
+
+The detached render service remains active for width changes. A recent exact
+width restores immediately. An uncached width follows:
+
+```text
+Warm(active width)
+→ Resizing(target preparation and snake barrier)
+→ Corridor(exact bounded target-width range)
+→ Warm(globally exact target width)
+```
+
+The active exact width and one preparing width are isolated. Workers receive
+immutable generation-tagged row jobs and own private TextMate and 128-entry
+render caches. The UI domain alone owns model mutation, geometry, anchors,
+scrolling, cache publication, redraws, and terminal presentation.
+
+Initial target work uses 16-row batches and a bounded directional policy:
+five viewport heights toward travel and three on the guard side. Visible work
+has priority over directional, guard, and background work. Corridor scrolling
+is cache-only and clamps at exact prepared boundaries; rejected movement is
+discarded. Home, End, and off-corridor search reveal prepare a bounded
+destination asynchronously with an explanatory loader.
+
+Background batches continue after the first exact corridor. Once all current
+stable row IDs and revisions are exact, Chat builds the complete chunk root,
+removes corridor restrictions, and retains the width in a three-entry recent
+width LRU. Width-independent prepared semantics and highlight spans survive
+width eviction. Production admits at most 64 queued jobs plus two workers and
+retains one preparing width. A failed row is retried once; exhausted failure
+uses a visible resize barrier before synchronous full relayout.
+
+The following environment variables tune or diagnose responsiveness:
 
 - `OCHAT_TUI_FPS` – target frames-per-second for redraw throttling (default: 30).
 - `OCHAT_STREAM_BATCH_MS` – batch window (ms) for coalescing streaming events (default: ~12ms, clamped to 1–50ms).
+- `OCHAT_GRAMMAR_DIR` – additional TextMate grammar directories scanned after
+  the first frame; workers rebuild isolated grammar runtimes for the new
+  generation.
+- `OCHAT_WRAP_SLOP_CELLS` – extra cells searched for a nearby whitespace wrap
+  point.
+- `OCHAT_TUI_STARTUP_TIMING` – when nonempty and not `0`, print startup phase
+  timings to stderr. Disabled by default.
+- `OCHAT_TUI_RENDER_METRICS` – when nonempty and not `0`, print one JSON object
+  at shutdown with `startup_loader_duration_ms` and
+  `publication_latency_ms`. Disabled by default.
+- `OCHAT_TUI_SCROLL_TRACE` – when nonempty, write bounded history/resize JSONL
+  diagnostics to the active TUI data directory. Resize records distinguish
+  observation, settlement, first exact corridor readiness, complete-width
+  readiness, frame presentation, retry, and synchronous fallback.
+
+For unusually large histories, compare startup metrics separately from the
+resize trace. The timestamps for `resize_first_corridor_ready` and
+`resize_full_completion_ready` distinguish visible readiness from background
+completion.
+
+### Manual resize verification
+
+1. Drag the terminal width repeatedly and verify only the newest width appears.
+2. Scroll nearby immediately after the corridor appears; movement stays exact
+   and stops cleanly at prepared boundaries.
+3. Use Home, End, and search reveal outside the corridor; each shows a
+   destination loader and lands at the requested placement.
+4. Stream assistant/tool output while resizing; current content remains
+   authoritative and no stale or mixed-width row appears.
+5. Resize back to three recently used widths and verify direct restoration.
+6. Verify the cursor is hidden during `Resizing` and restored after the exact
+   `Corridor` frame is presented.
+7. Enable `OCHAT_TUI_SCROLL_TRACE=1` and confirm first-corridor and
+   full-completion events are both recorded.
 
 ### Ask AI subcommand (ask AI questions about using chat-tui):
 

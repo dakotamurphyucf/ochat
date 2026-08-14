@@ -67,6 +67,12 @@ let backspace model =
     Model.set_cmdline_cursor model (pos - 1))
 ;;
 
+let add_rejection_notice model text =
+  ignore
+    (Model.apply_patch model (Types.Add_placeholder_message { role = "system"; text })
+     : Model.t)
+;;
+
 (** [execute_command m line] evaluates the normalized [line] (without the
     leading ':') and returns the resulting {!reaction}.  The function is
     case-insensitive and trims surrounding whitespace before matching.
@@ -100,42 +106,38 @@ let execute_command model line : reaction =
   | "w" -> Submit_input
   | "wq" -> Quit
   | "c" | "cmp" | "compact" -> Compact_context
+  | "shell" | "security" ->
+    Model.set_active_page model Model.Page_id.Shell_security;
+    Shell_management_refresh_requested (Model.begin_shell_management_load model)
   | "delete" | "d" ->
-    (match Model.selected_msg model with
-     | None -> Redraw
-     | Some sel_idx ->
-       let msgs = Model.messages model in
-       if Int.(sel_idx < 0) || Int.(sel_idx >= List.length msgs)
-       then Redraw
-       else (
-         let new_msgs = List.filteri msgs ~f:(fun i _ -> Int.(i <> sel_idx)) in
-         Model.set_messages model new_msgs;
-         let new_history =
-           Model.history_items model |> List.filteri ~f:(fun i _ -> Int.(i <> sel_idx))
-         in
-         Model.set_history_items model new_history;
-         (* Adjust selection to previous message or None *)
-         let new_len = List.length new_msgs in
-         if Int.(new_len = 0)
-         then Model.select_message model None
-         else Model.select_message model (Some (Int.min (new_len - 1) sel_idx));
-         Redraw))
+    (match Model.delete_selected_canonical_entry model with
+     | `Deleted -> Refresh_messages
+     | `Rejected message ->
+       add_rejection_notice model message;
+       Redraw)
   | "edit" | "e" ->
-    (match Model.selected_msg model with
-     | None -> Redraw
-     | Some sel_idx ->
-       (match List.nth (Model.messages model) sel_idx with
-        | None -> Redraw
-        | Some (_role, txt) ->
+    (match Model.selected_projected_row model with
+     | None ->
+       add_rejection_notice model "No projected row is selected.";
+       Redraw
+     | Some row ->
+       (match row.Projected_message.source with
+        | Canonical _ ->
+          let _, txt = row.message in
           Model.set_input_line model txt;
           Model.set_cursor_pos model (String.length txt);
           Model.set_mode model Model.Insert;
-          (* Enable Raw mode for safe editing as per design.*)
-          Model.set_draft_mode model Model.Raw_xml;
+          Model.set_draft_mode model Model.Plain;
+          Redraw
+        | Moderator_inserted _
+        | Moderator_replacement _
+        | Streaming _
+        | Pending_approval _
+        | Placeholder _ ->
+          add_rejection_notice model "Cannot edit a noncanonical projected row.";
           Redraw))
   | "noh" | "nohlsearch" ->
-    Model.set_last_search_query model None;
-    Model.clear_all_img_caches model;
+    Model.clear_last_search model;
     Redraw
   | _ -> Redraw
 ;;

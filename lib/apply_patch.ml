@@ -795,7 +795,6 @@ let separator_line unchanged_count =
 ;;
 
 let hunk_label_line index total = Printf.sprintf "[hunk %d/%d]" index total
-;;
 
 let count_description count noun =
   let suffix = if count = 1 then noun else noun ^ "s" in
@@ -808,7 +807,6 @@ type anchor_kind =
   | Container
   | Declaration
   | Section
-;;
 
 let container_anchor_prefixes =
   [ "module "
@@ -893,7 +891,9 @@ let rec strip_anchor_modifiers text =
   match List.find anchor_modifiers ~f:(fun prefix -> String.is_prefix text ~prefix) with
   | None -> text
   | Some prefix ->
-    String.drop_prefix text (String.length prefix) |> String.lstrip |> strip_anchor_modifiers
+    String.drop_prefix text (String.length prefix)
+    |> String.lstrip
+    |> strip_anchor_modifiers
 ;;
 
 let is_function_like_signature text =
@@ -915,7 +915,9 @@ let classify_anchor_line line =
   then Some (Section, stripped)
   else if starts_with_any container_anchor_prefixes normalized
   then Some (Container, stripped)
-  else if starts_with_any declaration_anchor_prefixes normalized || is_function_like_signature normalized
+  else if
+    starts_with_any declaration_anchor_prefixes normalized
+    || is_function_like_signature normalized
   then Some (Declaration, stripped)
   else None
 ;;
@@ -1282,9 +1284,7 @@ let format_changed_lines (data : file_change) lines ~old_lines ~new_lines =
       in
       let rendered_range = render_range ops range ~old_lines ~new_lines in
       let acc =
-        List.rev_append
-          (hunk_label_line hunk_index total_hunks :: rendered_range)
-          acc
+        List.rev_append (hunk_label_line hunk_index total_hunks :: rendered_range) acc
       in
       loop (Some range) (hunk_index + 1) acc rest
   in

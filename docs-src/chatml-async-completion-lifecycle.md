@@ -325,3 +325,12 @@ This document does not:
 - make `Process.run` or `Schedule.after_ms` use the `Model_executor` path;
 - or define a new host scheduler outside the existing session-controller
   contract.
+
+## Shell-backed `Process.run`
+
+Moderator `Process.run` is routed through the named ChatMD shell runtime bound
+by `<moderator_runtime>`. It is not an independent executor. Resolution,
+fingerprinting, effects, capability/policy checks, approval suspension,
+interceptors, backend, limits, and audit all run through the shell registry.
+Cancellation kills/reaps owned processes under the Eio switch. Background
+completion cannot mutate the immutable command plan already in flight.

@@ -299,7 +299,7 @@ and run_agent prompt items ~dir ~net ~cache =
     let name = func.name in
     let f = Hashtbl.find_exn tbl name in
     let res =
-      match f func.arguments with
+      match f ~invocation:Ochat_function.Invocation.silent func.arguments with
       | Openai.Responses.Tool_output.Output.Text t -> t
       | _ -> "Unsupported output type"
     in
@@ -403,7 +403,7 @@ let run_completion ~env ~output_file ~prompt_file =
                  let name = Hashtbl.find_exn func_name key in
                  let f = Hashtbl.find_exn tbl name in
                  let res =
-                   match f data with
+                   match f ~invocation:Ochat_function.Invocation.silent data with
                    | Openai.Responses.Tool_output.Output.Text t -> t
                    | _ -> "Unsupported output type"
                  in

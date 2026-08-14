@@ -7,6 +7,13 @@ on the TUI or writing integration tests.
 
 ---
 
+## Shell Security routing
+
+The top-level controller routes an active shell approval modal before page or
+composer keys. When no modal is active, the Shell Security page delegates to
+`Controller_shell_security`. `:shell` changes pages and requests an async
+management refresh. These reactions never edit the draft or canonical history.
+
 ## 1  Purpose & Architecture
 
 `Controller` is the *central* event handler of the terminal UI.  The main loop
@@ -214,5 +221,4 @@ let rec main_loop term model =
    Adding more is straightforward once a clear demand arises.
 
 ---
-
 

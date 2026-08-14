@@ -77,3 +77,11 @@ val moderator_surface : surface
     This extends {!moderator_surface} with the [Ui] and [Approval]
     modules while leaving the default non-UI moderator surface unchanged. *)
 val ui_moderator_surface : surface
+
+val shell_context_surface : surface
+val shell_matcher_surface : surface
+val shell_reviewer_surface : surface
+val shell_before_interceptor_surface : surface
+val shell_after_interceptor_surface : surface
+val shell_effect_surface : surface
+val shell_audit_surface : surface

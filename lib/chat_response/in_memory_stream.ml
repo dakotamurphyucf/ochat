@@ -5,6 +5,11 @@ module Moderator_manager = Moderator_manager
 module Res = Openai.Responses
 module Output = Res.Tool_output.Output
 
+type post_stream =
+  sw:Eio.Switch.t
+  -> inputs:Openai.Responses.Item.t list
+  -> Openai.Responses.Response_stream.t Seq.t
+
 (* --------------------------------------------------------------------------- *)
 (* Internal helper – record used for keeping track of running tool invocations *)
 (* --------------------------------------------------------------------------- *)
@@ -24,13 +29,27 @@ type driver_pending_call =
 
 module SM = Map.M (String)
 
+type tool_info =
+  { name : string
+  ; call_id : string
+  ; kind : driver_pending_call_kind
+  }
+
+type tool_completion =
+  | Function_done of string
+  | Custom_done of string
+
 module Safe_point_input = struct
-  type t = { consume : unit -> string option }
+  type t =
+    { consume_entries : unit -> History_entry.t list
+    ; consume_compatibility_text : unit -> string option
+    }
 end
 
 type stream_state =
-  { func_info : (string * string) SM.t
-  ; new_items_rev : Openai.Responses.Item.t list
+  { func_info : tool_info SM.t
+  ; tool_completions : tool_completion SM.t
+  ; new_entries_rev : History_entry.t list
   ; pending_calls_rev : driver_pending_call list
   ; next_seq : int
   ; run_again : bool
@@ -45,7 +64,10 @@ type moderator =
 
 type pending_ui_request = Moderator_manager.pending_ui_request =
   | Ask_text of { prompt : string }
-  | Ask_choice of { prompt : string; choices : string array }
+  | Ask_choice of
+      { prompt : string
+      ; choices : string array
+      }
 
 type moderated_tool_call =
   { call_item : Res.Item.t
@@ -74,7 +96,7 @@ type ctx =
   ; sw : Eio.Switch.t
   ; datadir : Eio.Fs.dir_ty Eio.Path.t
   ; tools : Openai.Responses.Request.Tool.t list
-  ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Hashtbl.t
+  ; tool_tbl : (string, Ochat_function.runner) Hashtbl.t
   ; temperature : float option
   ; max_output_tokens : int option
   ; reasoning : Openai.Responses.Request.Reasoning.t option
@@ -87,19 +109,38 @@ type ctx =
   ; prompt_cache_retention : string option
   ; safe_point_input : Safe_point_input.t option
   ; on_event : Openai.Responses.Response_stream.t -> unit
+  ; on_sourced_event : Sourced_response_event.t -> unit
+  ; on_history_event : History_stream_event.t -> unit
+  ; on_history_tool_out : History_entry.t -> unit
+  ; allocator : History_entry.Allocator.t
+  ; registry : History_stream_event.Registry.t
+  ; mutable scope : int
+  ; source : string option
+  ; parent_call_id : string option
   ; on_fn_out : Openai.Responses.Function_call_output.t -> unit
   ; on_tool_out : Openai.Responses.Item.t -> unit
+  ; on_tool_execution : (Tool_execution_event.t -> unit) option
+  ; injected_post_stream :
+      (sw:Eio.Switch.t
+       -> inputs:Openai.Responses.Item.t list
+       -> Openai.Responses.Response_stream.t Seq.t)
+        option
   }
 
 type args =
   { env : Eio_unix.Stdenv.base
   ; datadir : Eio.Fs.dir_ty Eio.Path.t option
-  ; history : Openai.Responses.Item.t list
+  ; history : History_entry.t list
   ; on_event : Openai.Responses.Response_stream.t -> unit
+  ; on_sourced_event : Sourced_response_event.t -> unit
+  ; on_history_event : History_stream_event.t -> unit
   ; on_fn_out : Openai.Responses.Function_call_output.t -> unit
   ; on_tool_out : Openai.Responses.Item.t -> unit
+  ; on_history_tool_out : History_entry.t -> unit
+  ; allocator : History_entry.Allocator.t
+  ; on_tool_execution : (Tool_execution_event.t -> unit) option
   ; tools : Openai.Responses.Request.Tool.t list option
-  ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Hashtbl.t option
+  ; tool_tbl : (string, Ochat_function.runner) Hashtbl.t option
   ; temperature : float option
   ; max_output_tokens : int option
   ; reasoning : Openai.Responses.Request.Reasoning.t option
@@ -112,6 +153,13 @@ type args =
   ; model : Openai.Responses.Request.model
   ; prompt_cache_key : string option
   ; prompt_cache_retention : string option
+  ; injected_post_stream :
+      (sw:Eio.Switch.t
+       -> inputs:Openai.Responses.Item.t list
+       -> Openai.Responses.Response_stream.t Seq.t)
+        option
+  ; source : string option
+  ; parent_call_id : string option
   }
 
 let derive_datadir ~env = function
@@ -200,6 +248,28 @@ let run_moderation_event
       ~f:Option.some
 ;;
 
+let run_moderation_event_entries
+      ~(moderator : moderator option)
+      ~available_tools
+      ~now_ms
+      ~history
+      ~(event : Moderation.Event.t)
+  =
+  match moderator with
+  | None -> Ok None
+  | Some moderator ->
+    Result.map
+      (Moderator_manager.handle_event_entries
+         moderator.manager
+         ~session_id:moderator.session_id
+         ~now_ms
+         ~history
+         ~available_tools
+         ~session_meta:moderator.session_meta
+         ~event)
+      ~f:Option.some
+;;
+
 let ensure_not_waiting_on_ui (moderator : moderator option) : (unit, string) result =
   match moderator with
   | None -> Ok ()
@@ -242,6 +312,27 @@ let drain_moderator_safe_point
       ~session_meta:moderator.session_meta
 ;;
 
+let drain_moderator_safe_point_entries
+      ~(moderator : moderator option)
+      ~available_tools
+      ~now_ms
+      ~history
+      ~(safe_point : safe_point)
+  =
+  let _ = safe_point in
+  match moderator with
+  | None -> Ok []
+  | Some moderator ->
+    Moderator_manager.drain_internal_events_entries
+      ~max_events:moderator.runtime_policy.budget.max_internal_event_drain
+      moderator.manager
+      ~session_id:moderator.session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta:moderator.session_meta
+;;
+
 let projected_appended_item (history : Res.Item.t list)
   : (Moderation.Item.t, string) result
   =
@@ -251,6 +342,40 @@ let projected_appended_item (history : Res.Item.t list)
   match List.last items with
   | Some item -> Ok item
   | None -> Error "Expected appended history item when emitting moderation event."
+;;
+
+let projected_appended_entry history =
+  match List.last history with
+  | None -> Error "Expected appended history entry when emitting moderation event."
+  | Some entry -> Ok (Moderation.Entry_projection.project_item entry)
+;;
+
+let handle_item_appended_entries
+      ~(moderator : moderator option)
+      ~(on_runtime_request : Moderation.Runtime_request.t -> unit)
+      ~available_tools
+      ~now_ms
+      ~history
+  =
+  let open Result.Let_syntax in
+  match moderator with
+  | None -> Ok ()
+  | Some _ ->
+    let%bind item = projected_appended_entry history in
+    let%bind outer =
+      run_moderation_event_entries
+        ~moderator
+        ~available_tools
+        ~now_ms
+        ~history
+        ~event:(Moderation.Event.Item_appended item)
+    in
+    let%bind () = ensure_not_waiting_on_ui moderator in
+    let outcomes = outcomes_to_list outer ~drained:[] in
+    report_runtime_requests ~on_runtime_request outcomes;
+    unexpected_tool_moderation
+      ~source:(Moderation.Phase.to_string Moderation.Phase.Message_appended)
+      outcomes
 ;;
 
 let handle_item_appended
@@ -310,12 +435,44 @@ let append_safe_point_input ~(safe_point : safe_point) ~inputs ~safe_point_input
   match safe_point_input with
   | None -> inputs
   | Some (safe_point_input : Safe_point_input.t) ->
-    let text = safe_point_input.consume () in
+    let text = safe_point_input.consume_compatibility_text () in
     log_safe_point_input_consumed ~safe_point text;
     (match text with
      | None -> inputs
      | Some text when String.is_empty text -> inputs
      | Some text -> inputs @ [ make_safe_point_input_item text ])
+;;
+
+let consume_safe_point_entries ~(safe_point : safe_point) = function
+  | None -> []
+  | Some (safe_point_input : Safe_point_input.t) ->
+    let entries = safe_point_input.consume_entries () in
+    if not (List.is_empty entries)
+    then
+      Log.emit
+        `Debug
+        (Printf.sprintf
+           "Consumed %d deferred canonical entries at %s"
+           (List.length entries)
+           (string_of_safe_point safe_point));
+    entries
+;;
+
+let now_ms (env : Eio_unix.Stdenv.base) : int =
+  Eio.Time.now (Eio.Stdenv.clock env) *. 1000. |> Int.of_float
+;;
+
+let append_deferred_entries (c : ctx) ~(history : History_entry.t list) entries =
+  List.fold entries ~init:history ~f:(fun history entry ->
+    let history = history @ [ entry ] in
+    handle_item_appended_entries
+      ~moderator:c.moderator
+      ~on_runtime_request:c.on_runtime_request
+      ~available_tools:c.tools
+      ~now_ms:(now_ms c.env)
+      ~history
+    |> Result.ok_or_failwith;
+    history)
 ;;
 
 let prepare_turn_request
@@ -356,13 +513,77 @@ let prepare_turn_request
   let inputs =
     if Option.is_some (Runtime_semantics.should_end_session runtime_requests)
     then inputs
-    else
-      append_safe_point_input
-        ~safe_point:Turn_start_boundary
-        ~inputs
-        ~safe_point_input
+    else append_safe_point_input ~safe_point:Turn_start_boundary ~inputs ~safe_point_input
   in
   { inputs; runtime_requests }
+;;
+
+let prepare_turn_request_entries
+      ~(moderator : moderator option)
+      ~(safe_point_input : Safe_point_input.t option)
+      ~available_tools
+      ~now_ms
+      ~history
+  =
+  let open Result.Let_syntax in
+  let%bind () = ensure_not_waiting_on_ui moderator in
+  let%bind outer =
+    run_moderation_event_entries
+      ~moderator
+      ~available_tools
+      ~now_ms
+      ~history
+      ~event:Moderation.Event.Turn_start
+  in
+  let%bind () = ensure_not_waiting_on_ui moderator in
+  let%bind drained =
+    drain_moderator_safe_point_entries
+      ~moderator
+      ~available_tools
+      ~now_ms
+      ~history
+      ~safe_point:Turn_start_boundary
+  in
+  let outcomes = outcomes_to_list outer ~drained in
+  let%bind runtime_requests =
+    runtime_requests_of_outcomes_result ~source:"turn_start" outcomes
+  in
+  let inputs =
+    match moderator with
+    | None -> History_entry.items history
+    | Some moderator ->
+      Moderator_manager.effective_history_entries moderator.manager history
+      |> History_entry.items
+  in
+  let inputs =
+    if Option.is_some (Runtime_semantics.should_end_session runtime_requests)
+    then inputs
+    else append_safe_point_input ~safe_point:Turn_start_boundary ~inputs ~safe_point_input
+  in
+  Ok { inputs; runtime_requests }
+;;
+
+let finish_turn_entries ~(moderator : moderator option) ~available_tools ~now_ms ~history =
+  let open Result.Let_syntax in
+  let%bind () = ensure_not_waiting_on_ui moderator in
+  let%bind outer =
+    run_moderation_event_entries
+      ~moderator
+      ~event:Moderation.Event.Turn_end
+      ~available_tools
+      ~now_ms
+      ~history
+  in
+  let%bind () = ensure_not_waiting_on_ui moderator in
+  let%bind drained =
+    drain_moderator_safe_point_entries
+      ~moderator
+      ~available_tools
+      ~now_ms
+      ~history
+      ~safe_point:Turn_end_boundary
+  in
+  runtime_requests_of_outcomes_result ~source:"turn_end" (outcomes_to_list outer ~drained)
 ;;
 
 let prepare_turn_inputs
@@ -375,12 +596,7 @@ let prepare_turn_inputs
   =
   let open Result.Let_syntax in
   let%map prepared =
-    prepare_turn_request
-      ~moderator
-      ~safe_point_input
-      ~available_tools
-      ~now_ms
-      ~history
+    prepare_turn_request ~moderator ~safe_point_input ~available_tools ~now_ms ~history
   in
   prepared.inputs
 ;;
@@ -444,8 +660,7 @@ let moderate_tool_call
   let%bind runtime_requests, action =
     match outer with
     | None -> Ok ([], None)
-    | Some outer ->
-      Ok (outer.runtime_requests, outer.tool_moderation)
+    | Some outer -> Ok (outer.runtime_requests, outer.tool_moderation)
   in
   Ok
     (match action with
@@ -543,7 +758,8 @@ let handle_tool_result
       ~safe_point:Post_tool_result_boundary
   in
   let outcomes =
-    outcomes_to_list outer ~drained:(outcomes_to_list item_appended ~drained) in
+    outcomes_to_list outer ~drained:(outcomes_to_list item_appended ~drained)
+  in
   runtime_requests_of_outcomes_result ~source:"post_tool_response" outcomes
 ;;
 
@@ -583,53 +799,93 @@ let emit_tool_output
     item
 ;;
 
-let add_item (st : stream_state) (it : Openai.Responses.Item.t) =
-  { st with new_items_rev = it :: st.new_items_rev }
-;;
-
-let history_with_new_items ~(hist : Res.Item.t list) (st : stream_state) : Res.Item.t list
-  =
-  List.append hist (List.rev st.new_items_rev)
-;;
+let add_entry st entry = { st with new_entries_rev = entry :: st.new_entries_rev }
+let history_with_new_entries ~hist st = List.append hist (List.rev st.new_entries_rev)
 
 let append_history_item
+      (c : ctx)
       ~(moderator : moderator option)
       ~(on_runtime_request : Moderation.Runtime_request.t -> unit)
       ~available_tools
       ~now_ms
-      ~(hist : Res.Item.t list)
+      ~(hist : History_entry.t list)
       (st : stream_state)
       (item : Res.Item.t)
   : stream_state
   =
-  let st = add_item st item in
-  handle_item_appended
-    ~moderator
-    ~on_runtime_request
-    ~available_tools
-    ~now_ms
-    ~history:(history_with_new_items ~hist st)
-  |> Result.ok_or_failwith;
-  st
+  let id =
+    History_stream_event.Registry.find_item
+      c.registry
+      ~scope:c.scope
+      ~source:c.source
+      item
+    |> Option.value_or_thunk ~default:(fun () ->
+      History_entry.Allocator.allocate c.allocator |> Result.ok_or_failwith)
+  in
+  let is_finalized =
+    List.exists st.new_entries_rev ~f:(fun entry ->
+      History_entry.Id.equal (History_entry.id entry) id)
+  in
+  if is_finalized
+  then st
+  else (
+    let st = add_entry st (History_entry.create_with_id ~id item) in
+    handle_item_appended_entries
+      ~moderator
+      ~on_runtime_request
+      ~available_tools
+      ~now_ms
+      ~history:(history_with_new_entries ~hist st)
+    |> Result.ok_or_failwith;
+    st)
 ;;
 
-let history_so_far
-      ~history_compaction
-      ~(hist : Openai.Responses.Item.t list)
-      ~(st : stream_state)
+let history_so_far ~history_compaction ~(hist : History_entry.t list) ~(st : stream_state)
   =
-  let items_so_far = List.rev st.new_items_rev in
+  let items_so_far = List.rev st.new_entries_rev in
   let combined = List.append hist items_so_far in
   if history_compaction
-  then Compact_history.collapse_read_file_history combined
+  then Compact_history.collapse_read_file_entries combined
   else combined
 ;;
 
-let now_ms (env : Eio_unix.Stdenv.base) : int =
-  Eio.Time.now (Eio.Stdenv.clock env) *. 1000. |> Int.of_float
+let request_items_so_far ~history_compaction ~hist ~st =
+  let entries = history_so_far ~history_compaction ~hist ~st in
+  History_entry.items entries
 ;;
 
-let post_stream (c : ctx) ~sw ~(inputs : Openai.Responses.Item.t list) =
+exception Openai_stream_idle_timeout of float
+
+let openai_stream_idle_timeout () =
+  let configured =
+    Option.first_some
+      (Sys.getenv "OCHAT_OPENAI_IDLE_TIMEOUT_SECONDS")
+      (Sys.getenv "OCHAT_STREAM_TIMEOUT_SECONDS")
+  in
+  match configured with
+  | None -> 600.
+  | Some value ->
+    (match Float.of_string value with
+     | seconds when Float.is_finite seconds && Float.(seconds > 0.) ->
+       Float.min 3600. seconds
+     | _ -> 600.
+     | exception _ -> 600.)
+;;
+
+let with_stream_idle_timeout ~clock ~seconds stream =
+  let rec next stream () =
+    let node =
+      try Eio.Time.with_timeout_exn clock seconds (fun () -> stream ()) with
+      | Eio.Time.Timeout -> raise (Openai_stream_idle_timeout seconds)
+    in
+    match node with
+    | Seq.Nil -> Seq.Nil
+    | Seq.Cons (event, rest) -> Seq.Cons (event, next rest)
+  in
+  next stream
+;;
+
+let provider_post_stream (c : ctx) ~sw ~(inputs : Openai.Responses.Item.t list) =
   Openai.Responses.post_response
     Openai.Responses.Stream
     ?max_output_tokens:c.max_output_tokens
@@ -644,6 +900,12 @@ let post_stream (c : ctx) ~sw ~(inputs : Openai.Responses.Item.t list) =
     ~sw
     c.env#net
     ~inputs
+;;
+
+let post_stream (c : ctx) ~sw ~inputs =
+  match c.injected_post_stream with
+  | Some post -> post ~sw ~inputs
+  | None -> provider_post_stream c ~sw ~inputs
 ;;
 
 let make_tool_promise
@@ -665,12 +927,62 @@ let make_tool_promise
       Fun.protect ~finally:(fun () -> Eio.Semaphore.release s) f)
 ;;
 
-let make_run_fork ~turn ~history_so_far ~call_id ~arguments =
+let notify_each observers value =
+  List.iter observers ~f:(fun observer ->
+    try observer value with
+    | Eio.Cancel.Cancelled _ as exn -> raise exn
+    | _ -> ())
+;;
+
+let report_event (c : ctx) event =
+  let history_event =
+    History_stream_event.observe c.registry ~scope:c.scope ~source:c.source event
+  in
+  Option.iter history_event ~f:c.on_history_event;
+  notify_each [ c.on_event ] event;
+  notify_each
+    [ c.on_sourced_event ]
+    { entry_id = Option.map history_event ~f:(fun event -> event.entry_id)
+    ; invocation_id = c.source
+    ; parent_call_id = c.parent_call_id
+    ; event
+    }
+;;
+
+let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~arguments =
+  let invocation_id = Fork.Invocation_id.create () in
+  let child_allocator =
+    Fork.allocator
+      ~parent_namespace:(History_entry.Allocator.namespace ctx.allocator)
+      invocation_id
+  in
+  let child_registry = History_stream_event.Registry.create ~allocator:child_allocator in
+  let trace =
+    Agent_trace.create
+      ~emit:(Ochat_function.Invocation.emit invocation)
+      ~emit_trace:(Ochat_function.Invocation.emit_trace invocation)
+  in
+  let child_ctx =
+    { ctx with
+      allocator = child_allocator
+    ; registry = child_registry
+    ; source = Some (Fork.Invocation_id.to_string invocation_id)
+    ; parent_call_id = Some call_id
+    ; on_event =
+        (fun event -> notify_each [ ctx.on_event; Agent_trace.on_event trace ] event)
+    ; on_tool_execution = Some (Agent_trace.on_tool_execution trace)
+    }
+  in
   let res =
-    turn @@ Fork.history ~history:(List.append history_so_far []) ~arguments call_id
+    turn child_ctx
+    @@ Fork.history_entries
+         ~allocator:child_allocator
+         ~history:history_so_far
+         ~arguments
+         ~call_id
   in
   let txt =
-    [ List.last_exn res ]
+    [ History_entry.item (List.last_exn res) ]
     |> List.filter_map ~f:(function
       | Res.Item.Output_message o ->
         Some (List.map o.content ~f:(fun c -> c.text) |> String.concat ~sep:" ")
@@ -698,7 +1010,7 @@ let add_pending
 let schedule_function_done
       ~turn
       (c : ctx)
-      ~(hist : Openai.Responses.Item.t list)
+      ~(hist : History_entry.t list)
       ~(st : stream_state)
       ~(item_id : string)
       ~(arguments : string)
@@ -706,13 +1018,18 @@ let schedule_function_done
   =
   match Map.find st.func_info item_id with
   | None -> st
-  | Some (name, call_id) ->
+  | Some { kind = `Custom; _ } ->
+    failwithf "Function completion conflicts with custom tool item %s" item_id ()
+  | Some { name = _; call_id; kind = `Function }
+    when List.exists st.pending_calls_rev ~f:(fun pending ->
+           String.equal pending.call_id call_id) -> st
+  | Some { name; call_id; kind = `Function } ->
     let moderated =
       moderate_tool_call
         ~moderator:c.moderator
         ~available_tools:c.tools
         ~now_ms:(now_ms c.env)
-        ~history:hist
+        ~history:(History_entry.items hist)
         ~kind:Tool_call.Kind.Function
         ~name
         ~payload:arguments
@@ -723,6 +1040,7 @@ let schedule_function_done
     List.iter moderated.runtime_requests ~f:c.on_runtime_request;
     let st =
       append_history_item
+        c
         ~moderator:c.moderator
         ~on_runtime_request:c.on_runtime_request
         ~available_tools:c.tools
@@ -744,10 +1062,18 @@ let schedule_function_done
           ~payload:arguments
           ~call_id
           ~tool_tbl:c.tool_tbl
+          ?on_tool_execution:c.on_tool_execution
           ~on_fork:
             (Some
-               (fun ~call_id ~arguments ->
-                 make_run_fork ~turn ~history_so_far:hs ~call_id ~arguments))
+               (fun ~invocation ~call_id ~arguments ->
+                 make_run_fork
+                   ~turn
+                   ~ctx:c
+                   ~history_so_far:hs
+                   ~invocation
+                   ~call_id
+                   ~arguments))
+          ()
     in
     let p =
       match moderated.synthetic_result with
@@ -762,7 +1088,7 @@ let schedule_function_done
 
 let schedule_custom_done
       (c : ctx)
-      ~(hist : Openai.Responses.Item.t list)
+      ~(hist : History_entry.t list)
       ~(st : stream_state)
       ~(item_id : string)
       ~(input : string)
@@ -770,13 +1096,18 @@ let schedule_custom_done
   =
   match Map.find st.func_info item_id with
   | None -> st
-  | Some (name, call_id) ->
+  | Some { kind = `Function; _ } ->
+    failwithf "Custom completion conflicts with function tool item %s" item_id ()
+  | Some { name = _; call_id; kind = `Custom }
+    when List.exists st.pending_calls_rev ~f:(fun pending ->
+           String.equal pending.call_id call_id) -> st
+  | Some { name; call_id; kind = `Custom } ->
     let moderated =
       moderate_tool_call
         ~moderator:c.moderator
         ~available_tools:c.tools
         ~now_ms:(now_ms c.env)
-        ~history:hist
+        ~history:(History_entry.items hist)
         ~kind:Tool_call.Kind.Custom
         ~name
         ~payload:input
@@ -787,6 +1118,7 @@ let schedule_custom_done
     List.iter moderated.runtime_requests ~f:c.on_runtime_request;
     let st =
       append_history_item
+        c
         ~moderator:c.moderator
         ~on_runtime_request:c.on_runtime_request
         ~available_tools:c.tools
@@ -808,6 +1140,8 @@ let schedule_custom_done
           ~call_id
           ~tool_tbl:c.tool_tbl
           ~on_fork:None
+          ?on_tool_execution:c.on_tool_execution
+          ()
     in
     let p =
       match moderated.synthetic_result with
@@ -820,26 +1154,39 @@ let schedule_custom_done
     add_pending st ~call_id ~kind:`Custom ~name p
 ;;
 
-let handle_added (st : stream_state) (item : Openai.Responses.Response_stream.Item.t) =
-  match item with
-  | Function_call fc ->
-    let idx = Option.value fc.id ~default:fc.call_id in
-    { st with func_info = Map.set st.func_info ~key:idx ~data:(fc.name, fc.call_id) }
-  | Custom_function tc ->
-    let idx = Option.value tc.id ~default:tc.call_id in
-    { st with func_info = Map.set st.func_info ~key:idx ~data:(tc.name, tc.call_id) }
-  | _ -> st
+let add_tool_info st ~item_id info =
+  match Map.find st.func_info item_id with
+  | None -> { st with func_info = Map.set st.func_info ~key:item_id ~data:info }
+  | Some existing
+    when String.equal existing.name info.name
+         && String.equal existing.call_id info.call_id
+         && Poly.equal existing.kind info.kind -> st
+  | Some _ -> failwithf "Conflicting metadata for streamed tool item %s" item_id ()
+;;
+
+let record_completion st ~item_id completion =
+  match Map.find st.tool_completions item_id, completion with
+  | None, _ ->
+    { st with
+      tool_completions = Map.set st.tool_completions ~key:item_id ~data:completion
+    }
+  | Some (Function_done existing), Function_done completion
+    when String.equal existing completion -> st
+  | Some (Custom_done existing), Custom_done completion
+    when String.equal existing completion -> st
+  | Some _, _ -> failwithf "Conflicting completion for streamed tool item %s" item_id ()
 ;;
 
 let handle_done
       (c : ctx)
-      ~(hist : Res.Item.t list)
+      ~(hist : History_entry.t list)
       (st : stream_state)
       (item : Openai.Responses.Response_stream.Item.t)
   =
   match item with
   | Output_message om ->
     append_history_item
+      c
       ~moderator:c.moderator
       ~on_runtime_request:c.on_runtime_request
       ~available_tools:c.tools
@@ -849,6 +1196,7 @@ let handle_done
       (Openai.Responses.Item.Output_message om)
   | Reasoning r ->
     append_history_item
+      c
       ~moderator:c.moderator
       ~on_runtime_request:c.on_runtime_request
       ~available_tools:c.tools
@@ -859,10 +1207,11 @@ let handle_done
   | _ -> st
 ;;
 
-let fold_stream ~turn (c : ctx) ~(hist : Openai.Responses.Item.t list) ~sem stream =
+let fold_stream ~turn (c : ctx) ~(hist : History_entry.t list) ~sem stream =
   let st0 =
     { func_info = Map.empty (module String)
-    ; new_items_rev = []
+    ; tool_completions = Map.empty (module String)
+    ; new_entries_rev = []
     ; pending_calls_rev = []
     ; next_seq = 0
     ; run_again = false
@@ -870,39 +1219,79 @@ let fold_stream ~turn (c : ctx) ~(hist : Openai.Responses.Item.t list) ~sem stre
   in
   Seq.fold_left
     (fun st ev ->
+       report_event c ev;
        match ev with
        | Openai.Responses.Response_stream.Output_item_added { item; _ } ->
-         c.on_event ev;
-         handle_added st item
+         (match item with
+          | Function_call fc ->
+            let item_id = Option.value fc.id ~default:fc.call_id in
+            let st =
+              add_tool_info
+                st
+                ~item_id
+                { name = fc.name; call_id = fc.call_id; kind = `Function }
+            in
+            (match Map.find st.tool_completions item_id with
+             | Some (Function_done arguments) ->
+               schedule_function_done ~turn c ~hist ~st ~item_id ~arguments ~sem
+             | Some (Custom_done _) ->
+               failwithf
+                 "Function metadata conflicts with custom completion %s"
+                 item_id
+                 ()
+             | None -> st)
+          | Custom_function tc ->
+            let item_id = Option.value tc.id ~default:tc.call_id in
+            let st =
+              add_tool_info
+                st
+                ~item_id
+                { name = tc.name; call_id = tc.call_id; kind = `Custom }
+            in
+            (match Map.find st.tool_completions item_id with
+             | Some (Custom_done input) ->
+               schedule_custom_done c ~hist ~st ~item_id ~input ~sem
+             | Some (Function_done _) ->
+               failwithf
+                 "Custom metadata conflicts with function completion %s"
+                 item_id
+                 ()
+             | None -> st)
+          | _ -> st)
        | Openai.Responses.Response_stream.Output_item_done { item; _ } ->
-         c.on_event ev;
          handle_done c ~hist st item
        | Function_call_arguments_done { item_id; arguments; _ } ->
-         c.on_event ev;
+         let st = record_completion st ~item_id (Function_done arguments) in
          schedule_function_done ~turn c ~hist ~st ~item_id ~arguments ~sem
        | Custom_tool_call_input_done { item_id; input; _ } ->
-         c.on_event ev;
+         let st = record_completion st ~item_id (Custom_done input) in
          schedule_custom_done c ~hist ~st ~item_id ~input ~sem
        | Function_call_arguments_delta _
        | Custom_tool_call_input_delta _
        | Reasoning_summary_text_delta _
-       | Output_text_delta _ ->
-         c.on_event ev;
-         st
+       | Output_text_delta _ -> st
        | _ -> st)
     st0
     stream
 ;;
 
-let await_calls (c : ctx) ~(hist : Res.Item.t list) (st : stream_state) =
+let retry_stream_start ~sleep create_stream =
+  Response_loop.For_testing.retry_request ~sleep ~f:(fun () ->
+    let stream = create_stream () in
+    match stream () with
+    | Seq.Nil -> Seq.empty
+    | Seq.Cons (event, rest) -> fun () -> Seq.Cons (event, rest))
+;;
+
+let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
   let sorted =
     List.sort (List.rev st.pending_calls_rev) ~compare:(fun a b ->
       Int.compare a.seq b.seq)
   in
   List.foldi
     sorted
-    ~init:st.new_items_rev
-    ~f:(fun _ items_rev { seq = _; call_id; kind; name; promise } ->
+    ~init:st.new_entries_rev
+    ~f:(fun _ entries_rev { seq = _; call_id; kind; name; promise } ->
       let result = Eio.Promise.await_exn promise in
       let tool_kind =
         match kind with
@@ -912,7 +1301,17 @@ let await_calls (c : ctx) ~(hist : Res.Item.t list) (st : stream_state) =
       let candidate_item =
         Tool_call.output_item ~kind:tool_kind ~call_id ~output:result
       in
-      let history = List.append hist (List.rev (candidate_item :: items_rev)) in
+      let id =
+        History_stream_event.Registry.tool_output
+          c.registry
+          ~scope:c.scope
+          ~source:c.source
+          ~call_id
+      in
+      let candidate_entry = History_entry.create_with_id ~id candidate_item in
+      let history =
+        History_entry.items (List.append hist (List.rev (candidate_entry :: entries_rev)))
+      in
       let runtime_requests =
         handle_tool_result
           ~moderator:c.moderator
@@ -933,7 +1332,9 @@ let await_calls (c : ctx) ~(hist : Res.Item.t list) (st : stream_state) =
           ~call_id
           ~result
       in
-      item :: items_rev)
+      c.on_history_tool_out candidate_entry;
+      ignore (item : Res.Item.t);
+      candidate_entry :: entries_rev)
 ;;
 
 let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
@@ -946,21 +1347,22 @@ let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
           : string * Openai.Responses.Item.t list)])
 ;;
 
-let run_turn (c : ctx) ~sw ~(history : Openai.Responses.Item.t list) =
+let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
   let sem = lazy (Eio.Semaphore.make 8) in
   let rec turn_with_budget
-            (hist : Openai.Responses.Item.t list)
+            (c : ctx)
+            (hist : History_entry.t list)
             ~(request_turn_budget : int)
     =
     (* fold_stream needs a (history -> history) function; forked calls should not
        consume the request_turn budget, so we reset it to 0 for those subcalls. *)
-    let turn_for_fork (fork_hist : Openai.Responses.Item.t list)
-      : Openai.Responses.Item.t list
+    let turn_for_fork (fork_ctx : ctx) (fork_hist : History_entry.t list)
+      : History_entry.t list
       =
-      turn_with_budget fork_hist ~request_turn_budget:0
+      turn_with_budget fork_ctx fork_hist ~request_turn_budget:0
     in
     let prepared =
-      prepare_turn_request
+      prepare_turn_request_entries
         ~moderator:c.moderator
         ~safe_point_input:c.safe_point_input
         ~available_tools:c.tools
@@ -973,59 +1375,62 @@ let run_turn (c : ctx) ~sw ~(history : Openai.Responses.Item.t list) =
     then hist
     else (
       let inputs = prepared.inputs in
-      let inputs =
-        if c.history_compaction
-        then Compact_history.collapse_read_file_history inputs
-        else inputs
-      in
       log_request c ~inputs;
-      try
-        let st = fold_stream ~turn:turn_for_fork c ~hist ~sem (post_stream c ~sw ~inputs) in
-        let new_items_rev = await_calls c ~hist st in
-        let hist = List.append hist (List.rev new_items_rev) in
-        let finish_requests =
-          finish_turn
-            ~moderator:c.moderator
-            ~available_tools:c.tools
-            ~now_ms:(now_ms c.env)
-            ~history:hist
-          |> Result.ok_or_failwith
-        in
-        List.iter finish_requests ~f:c.on_runtime_request;
-        let policy =
-          match c.moderator with
-          | None -> Runtime_semantics.default_policy
-          | Some m -> m.runtime_policy
-        in
-        let decision =
-          Runtime_semantics.decide_after_turn_end
-            ~policy
-            ~tool_followup:st.run_again
-            finish_requests
-        in
-        match decision.end_session_reason with
-        | Some _ -> hist
-        | None ->
-          (match decision.continue with
-           | `Stop -> hist
-           | `Continue ->
-             if st.run_again
-             then turn_with_budget hist ~request_turn_budget:0
-             else (
-               let next_budget =
-                 Runtime_semantics.next_self_triggered_turn_budget
-                   ~policy
-                   ~request_turn_budget
-                 |> Result.ok_or_failwith
-               in
-               turn_with_budget hist ~request_turn_budget:next_budget))
-    with
-    | Openai.Responses.Response_stream_parsing_error (json, exn) ->
-      log_parsing_error ~env:c.env ~datadir:c.datadir json exn;
-      Eio.Time.sleep (Eio.Stdenv.clock c.env) 0.1;
-      failwith (Core.Exn.to_string exn))
+      c.scope <- History_stream_event.Registry.create_scope c.registry;
+      let events =
+        retry_stream_start
+          ~sleep:(Eio.Time.sleep (Eio.Stdenv.clock c.env))
+          (fun () ->
+             post_stream c ~sw ~inputs
+             |> with_stream_idle_timeout
+                  ~clock:(Eio.Stdenv.clock c.env)
+                  ~seconds:(openai_stream_idle_timeout ()))
+      in
+      let st = fold_stream ~turn:turn_for_fork c ~hist ~sem events in
+      let new_entries_rev = await_calls c ~hist st in
+      let hist = List.append hist (List.rev new_entries_rev) in
+      let deferred_entries =
+        consume_safe_point_entries ~safe_point:Turn_start_boundary c.safe_point_input
+      in
+      let hist = append_deferred_entries c ~history:hist deferred_entries in
+      let finish_requests =
+        finish_turn_entries
+          ~moderator:c.moderator
+          ~available_tools:c.tools
+          ~now_ms:(now_ms c.env)
+          ~history:hist
+        |> Result.ok_or_failwith
+      in
+      List.iter finish_requests ~f:c.on_runtime_request;
+      let policy =
+        match c.moderator with
+        | None -> Runtime_semantics.default_policy
+        | Some m -> m.runtime_policy
+      in
+      let decision =
+        Runtime_semantics.decide_after_turn_end
+          ~policy
+          ~tool_followup:(st.run_again || not (List.is_empty deferred_entries))
+          finish_requests
+      in
+      match decision.end_session_reason with
+      | Some _ -> hist
+      | None ->
+        (match decision.continue with
+         | `Stop -> hist
+         | `Continue ->
+           if st.run_again || not (List.is_empty deferred_entries)
+           then turn_with_budget c hist ~request_turn_budget:0
+           else (
+             let next_budget =
+               Runtime_semantics.next_self_triggered_turn_budget
+                 ~policy
+                 ~request_turn_budget
+               |> Result.ok_or_failwith
+             in
+             turn_with_budget c hist ~request_turn_budget:next_budget)))
   in
-  turn_with_budget history ~request_turn_budget:0
+  turn_with_budget root_ctx history ~request_turn_budget:0
 ;;
 
 let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
@@ -1051,14 +1456,24 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; prompt_cache_retention = a.prompt_cache_retention
     ; safe_point_input = a.safe_point_input
     ; on_event = a.on_event
+    ; on_sourced_event = a.on_sourced_event
+    ; on_history_event = a.on_history_event
+    ; on_history_tool_out = a.on_history_tool_out
+    ; allocator = a.allocator
+    ; registry = History_stream_event.Registry.create ~allocator:a.allocator
+    ; scope = 0
+    ; source = a.source
+    ; parent_call_id = a.parent_call_id
     ; on_fn_out = a.on_fn_out
     ; on_tool_out = a.on_tool_out
+    ; on_tool_execution = a.on_tool_execution
+    ; injected_post_stream = a.injected_post_stream
     }
   in
   c, cache_file, cache
 ;;
 
-let run_completion_stream_in_memory_v1_impl (a : args) : Openai.Responses.Item.t list =
+let run_completion_stream_in_memory_entries_impl (a : args) : History_entry.t list =
   if a.meta_refine then Caml_unix.putenv "OCHAT_META_REFINE" "1";
   Eio.Switch.run
   @@ fun sw ->
@@ -1068,14 +1483,18 @@ let run_completion_stream_in_memory_v1_impl (a : args) : Openai.Responses.Item.t
   full_history
 ;;
 
-(* MAIN definition <= 25 lines (signature is long but body is tiny) *)
-let run_completion_stream_in_memory_v1
+let run_completion_stream_in_memory_entries
       ~env
       ?datadir
-      ~(history : Openai.Responses.Item.t list)
+      ~allocator
+      ~(history : History_entry.t list)
       ?(on_event = fun _ -> ())
+      ?(on_sourced_event = fun _ -> ())
+      ?(on_history_event = fun _ -> ())
       ?(on_fn_out = fun _ -> ())
       ?(on_tool_out = fun _ -> ())
+      ?(on_history_tool_out = fun _ -> ())
+      ?on_tool_execution
       ~tools
       ?tool_tbl
       ?temperature
@@ -1090,28 +1509,50 @@ let run_completion_stream_in_memory_v1
       ?(model = Openai.Responses.Request.O3)
       ?prompt_cache_key
       ?prompt_cache_retention
+      ?post_stream
+      ?source
+      ?parent_call_id
       ()
   =
-  run_completion_stream_in_memory_v1_impl
-    { env
-    ; datadir
-    ; history
-    ; on_event
-    ; on_fn_out
-    ; on_tool_out
-    ; tools
-    ; tool_tbl
-    ; temperature
-    ; max_output_tokens
-    ; reasoning
-    ; moderator
-    ; on_runtime_request
-    ; history_compaction
-    ; parallel_tool_calls
-    ; meta_refine
-    ; safe_point_input
-    ; model
-    ; prompt_cache_key
-    ; prompt_cache_retention
-    }
+  let entries =
+    run_completion_stream_in_memory_entries_impl
+      { env
+      ; datadir
+      ; history
+      ; on_event
+      ; on_sourced_event
+      ; on_history_event
+      ; on_fn_out
+      ; on_tool_out
+      ; on_history_tool_out
+      ; allocator
+      ; on_tool_execution
+      ; tools
+      ; tool_tbl
+      ; temperature
+      ; max_output_tokens
+      ; reasoning
+      ; moderator
+      ; on_runtime_request
+      ; history_compaction
+      ; parallel_tool_calls
+      ; meta_refine
+      ; safe_point_input
+      ; model
+      ; prompt_cache_key
+      ; prompt_cache_retention
+      ; injected_post_stream = post_stream
+      ; source
+      ; parent_call_id
+      }
+  in
+  History_entry.validate ~allocator entries |> Result.ok_or_failwith;
+  entries
 ;;
+
+module For_testing = struct
+  let with_stream_idle_timeout = with_stream_idle_timeout
+  let retry_stream_start = retry_stream_start
+  let notify_each = notify_each
+  let emit_tool_output = emit_tool_output
+end

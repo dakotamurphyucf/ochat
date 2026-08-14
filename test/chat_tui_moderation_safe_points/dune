@@ -1,0 +1,19 @@
+(library
+ (name chat_tui_moderation_safe_points_test)
+ (modules chat_tui_moderation_safe_points_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_tui
+  chat_response
+  chatmd
+  chatml
+  eio
+  eio_main
+  eio.unix
+  notty
+  notty_eio
+  notty_scroll_box)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

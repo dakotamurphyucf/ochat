@@ -34,3 +34,12 @@ active.
 
 This module is not intended to be consumed by applications directly.
 
+## Shell pending input and management generations
+
+Runtime pending input is ordered with shell approval before moderator input.
+The shell broker queue wakes the reducer without touching the composer or
+history. Responses are addressed by request ID so cancellation and parallel
+tool completion can repair/close the active modal atomically.
+
+Audit loads and grant mutations use explicit generations. Workers return
+immutable results; stale generations are discarded before model mutation.

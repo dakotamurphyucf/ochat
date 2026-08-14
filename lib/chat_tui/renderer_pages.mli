@@ -1,10 +1,8 @@
 (** Page router for the TUI renderer.
 
-    The renderer is structured as a small “page” framework so that future
-    full-screen pages can reuse common components (input box, status bar,
-    highlighting engine) while providing page-specific layouts.
-
-    Currently only {!Chat_tui.Model.Page_id.Chat} exists. *)
+    Chat and Agent pages own independent scroll state. Chat renders the
+    canonical transcript and editor; Agent renders transient active tool calls
+    without mutating hidden Chat state. *)
 
 (** [page_of_model model] returns the active page to render.
 
@@ -17,6 +15,6 @@ val page_of_model : Model.t -> Model.Page_id.t
     @param size Terminal size [(width, height)] in cells.
     @param model Current UI state and caches.
 
-    Returns [(img, (cx, cy))] where [(cx, cy)] is the absolute cursor position
-    for the input box. *)
+    Returns [(img, cursor)]. On Chat, [cursor] is the absolute input cursor.
+    The non-editable Agent page returns [(0, 0)]. *)
 val render : size:int * int -> model:Model.t -> Notty.I.t * (int * int)

@@ -67,9 +67,9 @@ the generic ChatML runtime:
 3. **Visible-history refresh**
 
    The host owns the user-visible transcript projection. In `chat_tui`,
-   `App_runtime.refresh_messages` rebuilds messages from moderator-effective
-   history, rebuilds tool-output indexes, clamps selection, and clears image
-   caches.
+   `App_runtime.refresh_messages` reconciles stable projected row IDs from
+   moderator-effective entries, rebuilds ID-keyed tool metadata, and preserves
+   selection and render state for surviving rows.
 
 4. **Follow-up turn scheduling**
 
@@ -80,8 +80,10 @@ the generic ChatML runtime:
 5. **Deferred steering**
 
    If the user submits steering text while a turn is already streaming, the
-   host records that note separately and injects it only at the next safe
-   model-input boundary. It does not append a fake canonical user item.
+   host immediately allocates a canonical user entry and holds it until the
+   current tool outputs have completed. The host then appends queued entries
+   in FIFO order, emits `item_appended` moderation for each entry, and includes
+   them in the next model request.
 
 6. **Compaction execution**
 
@@ -105,6 +107,8 @@ The current `chat_tui` contract is embodied by
 ```ocaml
 type session_controller_state =
   { mutable moderator_dirty : bool
+  ; mutable pending_overlay_revision : int option
+  ; mutable projected_overlay_revision : int
   ; deferred_user_notes : deferred_user_note Queue.t
   ; mutable pending_turn_request : turn_start_reason option
   }
@@ -113,7 +117,9 @@ type session_controller_state =
 Conceptually, those fields correspond to:
 
 - pending background moderator work,
-- deferred request-only user steering,
+- the newest committed overlay awaiting a safe-point projection,
+- the newest overlay revision represented by visible rows,
+- deferred canonical user entries awaiting the next safe request boundary,
 - and one pending follow-up turn request.
 
 ## Event and action vocabulary
@@ -126,7 +132,7 @@ Each name maps directly to current `chat_tui` anchors.
 | `mark_dirty` | `App_runtime.mark_moderator_dirty` | Marks that moderator wakeup work is pending. It does not itself drain internal events. |
 | `drain_internal_events_if_idle` | `Moderator_session_controller.drain_internal_events` plus the idle-drain path in `app_reducer` | Replays queued internal events only when the host is idle, then surfaces refresh, compaction, follow-up-turn, halt, notice, and internal-event outcomes. |
 | `schedule_turn` | `App_runtime.request_turn_start` plus `App_submit.start_from_current_session` | Records a pending follow-up turn reason, then starts a turn later from the current canonical session state without appending a new user item. |
-| `defer_user_note` | `App_runtime.enqueue_deferred_user_note` plus `consume_deferred_user_notes_for_safe_point` | Stores user steering submitted during streaming and exposes it only through safe-point input consumption. |
+| `defer_user_note` | `App_runtime.enqueue_deferred_user_note` plus `safe_point_input_source` | Allocates and stores canonical user entries submitted during streaming, then consumes them in FIFO order after pending tool outputs and before the next provider request. |
 | `refresh_visible_history` | `App_runtime.refresh_messages` | Reprojects visible transcript state from moderator-effective history after moderator-visible changes. |
 | `run_compaction` | compaction path orchestrated by `app_reducer` and `App_compaction.start` | Queues compaction behind foreground work, runs it as host-owned background work, replaces canonical history on success, and refreshes visible history before more work continues. |
 
@@ -148,10 +154,14 @@ Moderator wakeups are drained only when no foreground operation is active.
 Wakeups that arrive during streaming or compaction are represented by
 `moderator_dirty` and handled later at an idle safe point.
 
-### Deferred steering stays request-only
+### Deferred steering remains canonical
 
-Deferred user notes are safe-point input only. They are not appended to
-canonical history and are not spliced into an in-flight request.
+Deferred user notes are allocated once as canonical entries. They are not
+spliced into an already-issued provider request or inserted between a tool call
+and its output. They are appended after pending tool outputs and retain the
+same IDs in the next request and final history. A submission accepted after
+the driver's last queue drain is adopted by completion handling and schedules
+a follow-up turn rather than being stranded.
 
 ### Approval waiting blocks ordinary session progression
 
@@ -162,9 +172,10 @@ the session resumes from the pending approval.
 
 ### Refresh after moderator-visible changes
 
-When moderator-visible overlay state changes, the host refreshes visible
-history from effective history. Pure runtime requests alone do not imply a
-refresh.
+Committed overlay changes carry a monotonic revision. The host records the
+newest revision immediately, but refreshes visible rows from effective entries
+only at an idle or operation-completion safe point. Pure runtime requests alone
+do not imply a refresh.
 
 ### Follow-up scheduling is host policy
 
@@ -213,7 +224,7 @@ boundaries.
 ### Turn-start safe point
 
 `Chat_response.Chatml_turn_driver.prepare_turn_inputs` applies the explicit
-turn-start boundary. Deferred steering is consumed here as request-only input
+turn-start boundary. Compatibility-only text may be consumed here as request input
 after the turn-start decision has been made.
 
 ### Post-tool safe point
@@ -301,11 +312,11 @@ after host actions that replace canonical history, such as compaction.
 
 In `chat_tui`, `App_runtime.refresh_messages` is the concrete anchor. It:
 
-- computes moderator-effective history,
-- rebuilds visible messages,
-- rebuilds tool-output indexes,
-- clamps selection,
-- and clears image caches.
+- computes moderator-effective entries and provenance,
+- reconciles stable projected row IDs and revisions,
+- rebuilds ID-keyed tool metadata,
+- preserves a surviving selected ID or chooses the nearest survivor,
+- and invalidates only changed row caches and heights.
 
 ## Compaction contract
 
@@ -338,3 +349,23 @@ This contract intentionally does not define:
 It exists to document the host layer that already ships today, so later work on
 budget policy, safe-point docs, and async lifecycle can refer to one concrete
 contract instead of rediscovering behavior from `chat_tui` internals.
+
+## Shell interaction extension
+
+The controller also owns host-local shell approval suspension:
+
+- startup manifest authorization and shell registry instantiation complete
+  before the session accepts ordinary user submission;
+- pending shell approval blocks ordinary progression and has priority over
+  moderator text/choice input;
+- approval response, cancellation, and denial do not append a canonical user
+  message;
+- parallel approval requests queue deterministically and wake the reducer;
+- command output becomes history only after complete output finalization;
+- shell management workers return immutable generation-tagged snapshots and
+  stale generations are ignored by the UI domain;
+- interrupted metadata may persist, but process execution and old immutable
+  plans never resume.
+
+These rules prevent asynchronous startup or management work from changing the
+effective history behind an already accepted user request.

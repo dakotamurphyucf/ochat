@@ -6,6 +6,13 @@ While the implementation follows an Elm-style _model–view–update_ architectu
 
 ---
 
+## Shell UI commands and pages
+
+The model/page vocabulary includes `Shell_security`. Controller reactions
+include approval responses, management refresh, grant revocation, and
+moderator-input responses. Shell approval carries a request ID and typed broker
+response so it cannot be confused with ordinary composer submission.
+
 ## 1 Chat Transcript Helpers
 
 | Type | Purpose |
@@ -88,7 +95,7 @@ let submit (state : Model.t) ~(run : cmd -> unit) () =
 | `Set_function_output  { id; output }` | Store the raw return value of the function call. |
 | `Update_reasoning_idx { id; idx }` | Track the last reasoning summary index emitted for buffer `id` so the UI can insert line breaks neatly. |
 | `Add_user_message     { text }` | Insert the user’s prompt into `history_items` **and** `messages`. |
-| `Add_placeholder_message { role; text }` | Display a transient placeholder such as “(thinking…)”. Not persisted. |
+| `Add_placeholder_message { role; text }` | Display a transient message such as an error notice. Not persisted. |
 
 ### Example – applying a patch
 
@@ -138,6 +145,5 @@ let cfg = Chat_tui.Types.default_settings ()
 * `cmd` carries raw `(unit -> unit)` thunks — error handling and resource management must be implemented by the interpreter.
 
 ---
-
 
 

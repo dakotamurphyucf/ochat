@@ -1,3 +1,5 @@
+exception Compaction_cancelled
+
 (** Main event loop for the terminal UI.
 
     {!Chat_tui.App_reducer.run} is the central "reducer" loop that consumes
@@ -48,3 +50,23 @@ module Context : sig
 end
 
 val run : Context.t -> bool
+
+module For_testing : sig
+  val commit_startup_results
+    :  model:Model.t
+    -> Chat_message_render_job.result list
+    -> bool
+
+  (** [finish_startup_progress ~runtime ~size] publishes ready startup work or
+      synchronously materializes an aborted startup. Returns [true] exactly
+      when it transitions the model to [Warm]. *)
+  val finish_startup_progress : runtime:App_runtime.t -> size:int * int -> bool
+end
+
+module Cancellation_repair : sig
+  val repair
+    :  allocator:History_entry.Allocator.t
+    -> error:string
+    -> History_entry.t list
+    -> (History_entry.t list, string) result
+end

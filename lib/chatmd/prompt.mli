@@ -74,6 +74,8 @@ module Chat_markdown : sig
     ; id : string
     ; status : string option
     ; _type : string (* always "reasoning" *)
+    ; ochat_history_id : History_entry.Id.t option
+    ; source_context : string option
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
@@ -92,6 +94,9 @@ module Chat_markdown : sig
     ; name : string option [@jsonaf.option]
     ; id : string option [@jsonaf.option]
     ; status : string option [@jsonaf.option]
+    ; phase : string option [@jsonaf.option]
+    ; ochat_history_id : History_entry.Id.t option [@jsonaf.option]
+    ; source_context : string option [@jsonaf.option]
     ; function_call : function_call option [@jsonaf.option]
     ; tool_call : tool_call option [@jsonaf.option]
     ; tool_call_id : string option [@jsonaf.option]
@@ -113,6 +118,7 @@ module Chat_markdown : sig
     { name : string
     ; description : string option
     ; command : string
+    ; source : Chatmd_shell_spec.Source_ref.t
     }
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
@@ -137,6 +143,7 @@ module Chat_markdown : sig
   type tool =
     | Builtin of string
     | Custom of custom_tool
+    | Shell of Chatmd_shell_spec.Shell_tool_spec.t
     | Agent of agent_tool
     | Mcp of mcp_tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
@@ -181,7 +188,10 @@ module Chat_markdown : sig
     | Config of config
     | Reasoning of reasoning
     | Tool of tool
+    | Shell_runtime of Chatmd_shell_spec.Shell_spec.t
+    | Moderator_runtime of Chatmd_shell_spec.Manifest_compiler.moderator_runtime
     | Script of script
+    | Shell_script of Chatmd_shell_spec.Chatmd_script_spec.t
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (** [parse_chat_inputs ~dir raw] tokenises, parses and normalises the
@@ -214,7 +224,8 @@ module Chat_markdown : sig
       @raise Failure  If the source is not valid ChatMarkdown or if an
                       imported resource cannot be read. *)
   val parse_chat_inputs
-    :  dir:Eio.Fs.dir_ty Eio.Path.t
+    :  ?source:string
+    -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> string
     -> top_level_elements list
 end
@@ -226,7 +237,7 @@ end
 
 module Metadata : sig
   (** [add elt ~key ~value] attaches the metadata pair [(key, value)] to
-      [elt].  If the same [key] already exists it is appended 
+      [elt].  If the same [key] already exists it is appended
       (i.e. multiple values per key are allowed).  The call mutates a
       global in-memory table; it has no effect on serialisation. *)
   val add : Chat_markdown.top_level_elements -> key:string -> value:string -> unit

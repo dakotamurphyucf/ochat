@@ -14,11 +14,18 @@ module Theme = struct
     | "system" -> Styles.fg_hex "#C7CCD8"
     | "tool_output" -> Styles.fg_hex "#8BD649"
     | "error" -> A.(Styles.fg_hex "#FF5370" ++ st reverse)
+    | role when String.is_suffix role ~suffix:" Agent" -> Styles.fg_hex "#13A3F2"
     | _ -> A.empty
   ;;
 
   let selection_attr base = A.(base ++ Styles.bg_gray 23)
 end
+
+let tool_call_status = function
+  | Ochat_function.Trace.Returned -> Styles.fg_green, "✓ Returned"
+  | Raised -> Styles.fg_red, "✗ Raised"
+  | Cancelled -> Styles.fg_yellow, "⊘ Cancelled"
+;;
 
 let safe_string attr s =
   match I.string attr s with
@@ -148,6 +155,8 @@ module Spans = struct
   type line = run list
 end
 
+module Render_job = Chat_message_render_job
+
 module Wrap = struct
   open Spans
 
@@ -205,6 +214,31 @@ module Wrap = struct
   let wrap_runs ~limit (runs : run list) : line list =
     if limit <= 0 then [ runs ] else loop ~limit [] [] 0 runs
   ;;
+
+  let first_width = function
+    | [] -> 0
+    | (_, text) :: _ ->
+      Option.value_map (next_piece text 0) ~default:0 ~f:(fun (piece, _) ->
+        width_of_text piece)
+  ;;
+
+  let layout_plan lines =
+    let widths =
+      List.map lines ~f:(fun line ->
+        List.sum (module Int) line ~f:(fun (_, text) -> width_of_text text))
+    in
+    let min_width = List.max_elt widths ~compare:Int.compare |> Option.value ~default:0 in
+    let rec boundary_limits acc = function
+      | line :: (next_line :: _ as rest) ->
+        let width = List.sum (module Int) line ~f:(fun (_, text) -> width_of_text text) in
+        let next_width = first_width next_line in
+        let acc = if next_width <= 0 then acc else (width + next_width - 1) :: acc in
+        boundary_limits acc rest
+      | [] | [ _ ] -> acc
+    in
+    let max_width = boundary_limits [] lines |> List.min_elt ~compare:Int.compare in
+    Render_job.Layout_plan.{ min_width; max_width }
+  ;;
 end
 
 module Blocks = struct
@@ -223,85 +257,52 @@ module Blocks = struct
   ;;
 end
 
-module Code_cache2 = struct
-  type role_class =
-    | Toollike
-    | Userlike
+module Code_cache = Render_job.Code_cache
+module Highlight_cache = Render_job.Highlight_cache
+module Prepared = Render_job.Prepared_message
+module Prepared_cache = Render_job.Prepared_cache
+module Wrapped_cache = Render_job.Wrapped_cache
 
-  let bucket_size = 8
+let shared_code_cache = Code_cache.create ~capacity:128
+let shared_highlight_cache = Highlight_cache.create ~capacity:128
+let shared_prepared_cache = Prepared_cache.create ~capacity:128
+let shared_wrapped_cache = Wrapped_cache.create ~capacity:256
 
-  let bucket_for_width w =
-    if w <= 0 then 0 else (w + bucket_size - 1) / bucket_size * bucket_size
-  ;;
-
-  let role_tag = function
-    | Toollike -> 'T'
-    | Userlike -> 'U'
-  ;;
-
-  let key ~klass ~lang ~digest ~wb =
-    let l = Option.value lang ~default:"-" in
-    String.concat
-      [ String.of_char (role_tag klass); "|"; l; "|"; digest; "|"; Int.to_string wb ]
-  ;;
-
-  type entry =
-    { mutable last_used : int
-    ; img : I.t
-    }
-
-  let capacity = 128
-  let tbl : (string, entry) Hashtbl.t = Hashtbl.create (module String)
-  let tick = ref 0
-
-  let get ~klass ~lang ~digest ~wb =
-    incr tick;
-    let k = key ~klass ~lang ~digest ~wb in
-    match Hashtbl.find tbl k with
-    | None -> None
-    | Some e ->
-      e.last_used <- !tick;
-      Some e.img
-  ;;
-
-  let evict_if_needed () =
-    if Hashtbl.length tbl > capacity
-    then (
-      let oldest =
-        Hashtbl.fold tbl ~init:None ~f:(fun ~key ~data acc ->
-          match acc with
-          | None -> Some (key, data.last_used)
-          | Some (_k, t) -> if data.last_used < t then Some (key, data.last_used) else acc)
-      in
-      match oldest with
-      | None -> ()
-      | Some (k, _) -> Hashtbl.remove tbl k)
-  ;;
-
-  let set ~klass ~lang ~digest ~wb img =
-    incr tick;
-    let k = key ~klass ~lang ~digest ~wb in
-    Hashtbl.set tbl ~key:k ~data:{ last_used = !tick; img };
-    evict_if_needed ()
-  ;;
-end
+let clear_code_cache () =
+  Code_cache.clear shared_code_cache;
+  Highlight_cache.clear shared_highlight_cache;
+  Prepared_cache.clear shared_prepared_cache;
+  Wrapped_cache.clear shared_wrapped_cache
+;;
 
 module Render_context = struct
   type t =
     { width : int
-    ; selected : bool
     ; role : string
     ; tool_output : tool_output_kind option
-    ; hi_engine : Highlight_tm_engine.t
-    ; search_query : string option
+    ; runtime : Render_job.Runtime.t
+    ; grammar_generation : int
+    ; tool_call_outcome : Ochat_function.Trace.outcome option
+    ; mutable layout_plan : Render_job.Layout_plan.t
     }
 
-  let make ~width ~selected ~role ~tool_output ~hi_engine ~search_query =
-    { width; selected; role; tool_output; hi_engine; search_query }
+  let make ~width ~role ~tool_output ~runtime ~grammar_generation ~tool_call_outcome =
+    { width
+    ; role
+    ; tool_output
+    ; runtime
+    ; grammar_generation
+    ; tool_call_outcome
+    ; layout_plan = Render_job.Layout_plan.unconstrained
+    }
   ;;
 
   let prefix_first _t = ""
   let prefix_cont _t = ""
+
+  let note_layout_plan t plan =
+    t.layout_plan <- Render_job.Layout_plan.intersect t.layout_plan plan
+  ;;
 end
 
 let lang_of_path = Renderer_lang.lang_of_path
@@ -329,17 +330,6 @@ let suppress_markdown_delimiters (spans : Highlight_tm_engine.scoped_span list) 
 module Paint = struct
   open Render_context
 
-  let search_hit_attr = Styles.bg_gray 23
-
-  let apply_selection (ctx : t) a =
-    match ctx.selected, ctx.search_query with
-    | true, Some q when not (String.is_empty (String.strip q)) ->
-      (* In search mode: do NOT blanket-highlight the whole message *)
-      a
-    | true, _ -> Theme.selection_attr a
-    | false, _ -> a
-  ;;
-
   let first_prefix (ctx : t) ~(is_first : bool) =
     if is_first then prefix_first ctx else prefix_cont ctx
   ;;
@@ -347,16 +337,34 @@ module Paint = struct
   let cont_prefix (ctx : t) = prefix_cont ctx
   let paragraph_limit (ctx : t) = Int.max 1 (ctx.width - String.length (prefix_first ctx))
 
-  let render_runs (ctx : t) ~(is_first : bool) (runs : Spans.run list) : I.t list =
+  let render_runs (ctx : t) ~(is_first : bool) (runs : Spans.run list)
+    : Render_job.Layout.line list
+    =
     let limit = paragraph_limit ctx in
-    let wrapped = Wrap.wrap_runs ~limit runs in
+    let key =
+      let text = List.map runs ~f:snd |> String.concat in
+      String.concat
+        ~sep:"|"
+        [ ctx.role
+        ; Int.to_string limit
+        ; Md5.(to_hex (digest_string text))
+        ; Int.to_string (Stdlib.Hashtbl.hash runs)
+        ]
+    in
+    let wrapped =
+      match Render_job.Runtime.wrapped_cache ctx.runtime with
+      | None -> Wrap.wrap_runs ~limit runs
+      | Some cache ->
+        (match Wrapped_cache.find cache key with
+         | Some wrapped -> wrapped
+         | None ->
+           let wrapped = Wrap.wrap_runs ~limit runs in
+           Wrapped_cache.set cache key wrapped;
+           wrapped)
+    in
+    Render_context.note_layout_plan ctx (Wrap.layout_plan wrapped);
     let render_line ~pref line_runs =
-      let content_img =
-        List.map line_runs ~f:(fun (a, s) -> safe_string (apply_selection ctx a) s)
-        |> I.hcat
-      in
-      Notty.Infix.(safe_string A.empty pref <|> content_img)
-      |> I.hsnap ~align:`Left ctx.width
+      (if String.is_empty pref then [] else [ A.empty, pref ]) @ line_runs
     in
     match wrapped with
     | [] -> []
@@ -557,12 +565,47 @@ module Paint = struct
     |> List.rev
   ;;
 
-  let markdown_spans (ctx : t) ~(para : string) : (A.t * string) list =
+  let markdown_spans
+        (ctx : t)
+        ~(para : string)
+        ~(fallback_spans : (A.t * string) list option)
+    =
     let lines, info =
-      Highlight_tm_engine.highlight_text_with_scopes_with_info
-        ctx.hi_engine
-        ~lang:(Some "markdown")
-        ~text:para
+      let theme_generation = Render_job.Runtime.theme_generation ctx.runtime in
+      let grammar_generation = Render_job.Runtime.grammar_generation ctx.runtime in
+      match Render_job.Runtime.highlight_cache ctx.runtime with
+      | None ->
+        Highlight_tm_engine.highlight_text_with_scopes_with_info_interruptible
+          (Render_job.Runtime.hi_engine ctx.runtime)
+          ~is_cancelled:(Render_job.Runtime.is_cancelled ctx.runtime)
+          ~lang:(Some "markdown")
+          ~text:para
+      | Some cache ->
+        (match
+           Highlight_cache.find_scoped
+             cache
+             ~theme_generation
+             ~grammar_generation
+             ~lang:(Some "markdown")
+             ~text:para
+         with
+         | Some result -> result
+         | None ->
+           let result =
+             Highlight_tm_engine.highlight_text_with_scopes_with_info_interruptible
+               (Render_job.Runtime.hi_engine ctx.runtime)
+               ~is_cancelled:(Render_job.Runtime.is_cancelled ctx.runtime)
+               ~lang:(Some "markdown")
+               ~text:para
+           in
+           Highlight_cache.set_scoped
+             cache
+             ~theme_generation
+             ~grammar_generation
+             ~lang:(Some "markdown")
+             ~text:para
+             result;
+           result)
     in
     let spans =
       match info.Highlight_tm_engine.fallback with
@@ -572,7 +615,7 @@ module Paint = struct
         |> flatten_highlighted_lines
         |> List.map ~f:(fun s -> s.attr, s.text)
       | Some _ ->
-        let spans = fallback_markdown_spans para in
+        let spans = Option.value fallback_spans ~default:(fallback_markdown_spans para) in
         if List.is_empty spans then [ A.empty, para ] else spans
     in
     let spans =
@@ -583,21 +626,15 @@ module Paint = struct
       else spans
     in
     let spans = compress_adjacent_spans spans in
-    let spans =
-      match ctx.selected, ctx.search_query with
-      | true, Some q when not (String.is_empty (String.strip q)) ->
-        Search_highlight.apply_to_spans ~query:q ~hit_attr:search_hit_attr spans
-      | _ -> spans
-    in
     spans
   ;;
 
-  let render_markdown (ctx : t) ~(is_first : bool) ~(para : string) : I.t list =
-    let blank = I.hsnap ~align:`Left ctx.width (I.string A.empty "") in
+  let render_markdown (ctx : t) ~(is_first : bool) ~(para : string) ?fallback_spans () =
+    let blank = [] in
     if String.is_empty para
     then [ blank ]
     else (
-      let spans = markdown_spans ctx ~para in
+      let spans = markdown_spans ctx ~para ~fallback_spans in
       if List.is_empty spans then [ blank ] else spans |> render_runs ctx ~is_first)
   ;;
 
@@ -649,9 +686,9 @@ module Paint = struct
             Some (name, ws_after_name, args, closing)))
   ;;
 
-  let tool_call_spans (ctx : t) ~(para : string) : (A.t * string) list option =
+  let rec tool_call_spans (ctx : t) ~(para : string) ?parts () =
     let base_attr = Theme.attr_of_role ctx.role in
-    match tool_call_parts para with
+    match Option.value parts ~default:(tool_call_parts para) with
     | None -> None
     | Some (name, ws_after_name, args, closing) ->
       let tool_name_attr = Styles.(base_attr ++ bold ++ fg_hex "#FFCC66") in
@@ -660,65 +697,100 @@ module Paint = struct
         if String.is_empty ws_after_name then [] else [ base_attr, ws_after_name ]
       in
       let open_paren_spans = [ base_attr, "(" ] in
-      let args_spans =
+      let args_lines =
         if String.is_empty args
-        then []
-        else
-          Highlight_tm_engine.highlight_text ctx.hi_engine ~lang:(Some "json") ~text:args
-          |> List.concat
+        then [ [] ]
+        else highlight_lines ctx ~lang:(Some "json") ~text:args
       in
-      let closing_spans =
-        if String.is_empty closing then [] else [ base_attr, closing ]
+      let lines =
+        match args_lines with
+        | [] ->
+          [ List.concat
+              [ name_spans
+              ; ws_spans
+              ; open_paren_spans
+              ; (if String.is_empty closing then [] else [ base_attr, closing ])
+              ]
+          ]
+        | first :: rest ->
+          let first = List.concat [ name_spans; ws_spans; open_paren_spans; first ] in
+          let lines = first :: rest in
+          if String.is_empty closing
+          then lines
+          else
+            List.rev lines
+            |> (function
+             | [] -> [ [ base_attr, closing ] ]
+             | last :: previous -> List.rev ((last @ [ base_attr, closing ]) :: previous))
       in
-      let spans =
-        List.concat [ name_spans; ws_spans; open_paren_spans; args_spans; closing_spans ]
-      in
-      let spans =
-        match ctx.selected, ctx.search_query with
-        | true, Some q when not (String.is_empty (String.strip q)) ->
-          Search_highlight.apply_to_spans ~query:q ~hit_attr:search_hit_attr spans
-        | _ -> spans
-      in
-      Some spans
+      Some lines
+
+  and highlight_lines (ctx : t) ~(lang : string option) ~(text : string) =
+    let theme_generation = Render_job.Runtime.theme_generation ctx.runtime in
+    let grammar_generation = Render_job.Runtime.grammar_generation ctx.runtime in
+    match Render_job.Runtime.highlight_cache ctx.runtime with
+    | None ->
+      Highlight_tm_engine.highlight_text_interruptible
+        (Render_job.Runtime.hi_engine ctx.runtime)
+        ~is_cancelled:(Render_job.Runtime.is_cancelled ctx.runtime)
+        ~lang
+        ~text
+    | Some cache ->
+      (match
+         Highlight_cache.find_plain
+           cache
+           ~theme_generation
+           ~grammar_generation
+           ~lang
+           ~text
+       with
+       | Some lines -> lines
+       | None ->
+         let lines =
+           Highlight_tm_engine.highlight_text_interruptible
+             (Render_job.Runtime.hi_engine ctx.runtime)
+             ~is_cancelled:(Render_job.Runtime.is_cancelled ctx.runtime)
+             ~lang
+             ~text
+         in
+         Highlight_cache.set_plain
+           cache
+           ~theme_generation
+           ~grammar_generation
+           ~lang
+           ~text
+           lines;
+         lines)
   ;;
 
-  let render_paragraph (ctx : t) ~(is_first : bool) ~(para : string) : I.t list =
-    let is_tool_call = String.equal ctx.role "tool" && Option.is_none ctx.tool_output in
-    if (not is_tool_call) || String.is_empty para
-    then render_markdown ctx ~is_first ~para
-    else (
-      match tool_call_spans ctx ~para with
-      | None -> render_markdown ctx ~is_first ~para
-      | Some spans -> spans |> render_runs ctx ~is_first)
+  let code_lines (ctx : t) ~(lang : string option) ~(code : string) =
+    String.split_lines code
+    |> List.map ~f:(fun line ->
+      if String.is_empty line
+      then []
+      else highlight_lines ctx ~lang ~text:line |> List.concat)
   ;;
 
-  let highlight_lines (ctx : t) ~(lang : string option) ~(text : string) =
-    Highlight_tm_engine.highlight_text ctx.hi_engine ~lang ~text
-  ;;
-
-  let render_code_row (ctx : t) ~selected ~w line_spans =
-    let selected =
-      match selected, ctx.search_query with
-      | true, Some q when not (String.is_empty (String.strip q)) ->
-        (* In search mode: do NOT blanket-highlight the whole message *)
-        false
-      | _ -> selected
+  let render_paragraph
+        (ctx : t)
+        ~(is_first : bool)
+        ~(para : string)
+        ?fallback_spans
+        ~(parts : (string * string * string * string) option)
+        ()
+    =
+    let is_tool_call =
+      (String.equal ctx.role "tool" || String.is_suffix ctx.role ~suffix:" Agent")
+      && Option.is_none ctx.tool_output
     in
-    List.map line_spans ~f:(fun (a, s) ->
-      safe_string (if selected then A.(a ++ Styles.bg_gray 23) else a) s)
-    |> I.hcat
-    |> I.hsnap ~align:`Left w
-  ;;
-
-  let render_code_content (ctx : t) ~w ~selected ~(lang : string option) ~(code : string) =
-    highlight_lines ctx ~lang ~text:code
-    |> List.map ~f:(render_code_row ctx ~selected ~w)
-    |> I.vcat
-  ;;
-
-  let prefix_attr (ctx : t) =
-    Theme.attr_of_role ctx.role
-    |> fun a -> if ctx.selected then Theme.selection_attr a else a
+    if (not is_tool_call) || String.is_empty para
+    then render_markdown ctx ~is_first ~para ?fallback_spans ()
+    else (
+      match tool_call_spans ctx ~para ~parts () with
+      | None -> render_markdown ctx ~is_first ~para ?fallback_spans ()
+      | Some lines ->
+        List.concat_mapi lines ~f:(fun index spans ->
+          render_runs ctx ~is_first:(is_first && Int.equal index 0) spans))
   ;;
 
   let render_code_block_no_space
@@ -728,47 +800,44 @@ module Paint = struct
         ~(lang : string option)
         ~(code : string)
     =
-    highlight_lines ctx ~lang ~text:code
+    code_lines ctx ~lang ~code
     |> List.mapi ~f:(fun i line_spans ->
       let pref = if Int.equal i 0 then first_pref else indent in
-      let content_img =
-        List.map line_spans ~f:(fun (a, s) ->
-          safe_string (if ctx.selected then A.(a ++ st reverse) else a) s)
-        |> I.hcat
-      in
-      Notty.Infix.(safe_string (prefix_attr ctx) pref <|> content_img)
-      |> I.hsnap ~align:`Left ctx.width)
+      (if String.is_empty pref then [] else [ Theme.attr_of_role ctx.role, pref ])
+      @ line_spans)
   ;;
 
   let cached_code_content
         (ctx : t)
-        ~(klass : Code_cache2.role_class)
+        ~(role_class : Code_cache.role_class)
         ~(lang : string option)
         ~(code : string)
         ~(content_w_first : int)
     =
-    if ctx.selected
-    then render_code_content ctx ~w:content_w_first ~selected:true ~lang ~code
-    else (
-      let bucket = Code_cache2.bucket_for_width content_w_first in
-      let digest =
-        Md5.(to_hex (digest_string (Option.value lang ~default:"-" ^ "\x00" ^ code)))
-      in
-      match Code_cache2.get ~klass ~lang ~digest ~wb:bucket with
-      | Some img -> img
-      | None ->
-        let img = render_code_content ctx ~w:bucket ~selected:false ~lang ~code in
-        Code_cache2.set ~klass ~lang ~digest ~wb:bucket img;
-        img)
-  ;;
-
-  let prefix_image (ctx : t) ~(first_pref : string) ~(indent : string) ~height =
-    let base_attr = prefix_attr ctx in
-    let row0 = safe_string base_attr first_pref in
-    let rowi = safe_string base_attr indent in
-    if height <= 0
-    then I.empty
-    else I.vcat (row0 :: List.init (height - 1) ~f:(fun _ -> rowi))
+    match Render_job.Runtime.code_cache ctx.runtime with
+    | None -> code_lines ctx ~lang ~code
+    | Some cache ->
+      (match
+         Code_cache.find
+           cache
+           ~role_class
+           ~grammar_generation:ctx.grammar_generation
+           ~lang
+           ~code
+           ~width:content_w_first
+       with
+       | Some lines -> lines
+       | None ->
+         let lines = code_lines ctx ~lang ~code in
+         Code_cache.set
+           cache
+           ~role_class
+           ~grammar_generation:ctx.grammar_generation
+           ~lang
+           ~code
+           ~width:content_w_first
+           lines;
+         lines)
   ;;
 
   let render_code_block
@@ -776,8 +845,8 @@ module Paint = struct
         ~(is_first : bool)
         ~(lang : string option)
         ~(code : string)
-        ~(klass : Code_cache2.role_class)
-    : I.t list
+        ~(role_class : Code_cache.role_class)
+    : Render_job.Layout.line list
     =
     let first_pref0 = prefix_first ctx in
     let indent = prefix_cont ctx in
@@ -786,11 +855,13 @@ module Paint = struct
     if content_w_first <= 0
     then render_code_block_no_space ctx ~first_pref ~indent ~lang ~code
     else (
-      let content_img = cached_code_content ctx ~klass ~lang ~code ~content_w_first in
-      let prefix_img =
-        prefix_image ctx ~first_pref ~indent ~height:(I.height content_img)
+      let content_lines =
+        cached_code_content ctx ~role_class ~lang ~code ~content_w_first
       in
-      [ Notty.Infix.(prefix_img <|> content_img) |> I.hsnap ~align:`Left ctx.width ])
+      List.mapi content_lines ~f:(fun index line ->
+        let prefix = if Int.equal index 0 then first_pref else indent in
+        (if String.is_empty prefix then [] else [ Theme.attr_of_role ctx.role, prefix ])
+        @ line))
   ;;
 end
 
@@ -810,14 +881,6 @@ module Message = struct
     else text
   ;;
 
-  let header_attr (ctx : Render_context.t) =
-    let base_attr = Theme.attr_of_role ctx.role in
-    match ctx.selected, ctx.search_query with
-    | true, Some q when not (String.is_empty (String.strip q)) -> base_attr
-    | true, _ -> Theme.selection_attr base_attr
-    | false, _ -> base_attr
-  ;;
-
   let icon_of_role = function
     | "assistant" -> "💡 "
     | "user" -> "🙋 "
@@ -828,6 +891,7 @@ module Message = struct
     | "tool_output" -> "📬 "
     | "fork" -> "🌿 "
     | "error" -> "❌ "
+    | role when String.is_suffix role ~suffix:" Agent" -> "🛠  "
     | _ -> ""
   ;;
 
@@ -837,16 +901,16 @@ module Message = struct
     else String.mapi s ~f:(fun i c -> if Int.equal i 0 then Char.uppercase c else c)
   ;;
 
-  let render_header_line (ctx : Render_context.t) : I.t =
+  let render_header_line (ctx : Render_context.t) : Render_job.Layout.line =
     let icon = icon_of_role ctx.role in
     let label = Roles.label_of_role ctx.role |> capitalise_first in
-    safe_string (header_attr ctx) (icon ^ label) |> I.hsnap ~align:`Left ctx.width
+    [ Theme.attr_of_role ctx.role, icon ^ label ]
   ;;
 
   let render_paras (ctx : Render_context.t) ~(first_row : bool ref) ~(text : string) =
     String.split_lines text
     |> List.concat_map ~f:(fun para ->
-      let rs = Paint.render_paragraph ctx ~is_first:!first_row ~para in
+      let rs = Paint.render_paragraph ctx ~is_first:!first_row ~para ~parts:None () in
       if not (List.is_empty rs) then first_row := false;
       rs)
   ;;
@@ -854,66 +918,171 @@ module Message = struct
   let render_code
         (ctx : Render_context.t)
         ~(first_row : bool ref)
-        ~(klass : Code_cache2.role_class)
+        ~(role_class : Code_cache.role_class)
         ~(advance_first : bool)
         ~(lang : string option)
         ~(code : string)
     =
-    let rs = Paint.render_code_block ctx ~is_first:!first_row ~lang ~code ~klass in
+    let rs = Paint.render_code_block ctx ~is_first:!first_row ~lang ~code ~role_class in
     if advance_first && not (List.is_empty rs) then first_row := false;
     rs
   ;;
 
   let render_body_default (ctx : Render_context.t) ~(role : string) ~(text : string)
-    : I.t list
+    : Render_job.Layout.line list
     =
     let blocks = Blocks.of_message_text text in
     let first_row = ref true in
     List.concat_map blocks ~f:(function
-      | Blocks.Text s | Blocks.Code { lang = Some "html"; code = s } ->
-        render_paras ctx ~first_row ~text:s
+      | Blocks.Text s -> render_paras ctx ~first_row ~text:s
       | Blocks.Code { lang; code } ->
-        let klass =
-          if Roles.is_toollike role then Code_cache2.Toollike else Code_cache2.Userlike
+        let role_class =
+          if Roles.is_toollike role then Code_cache.Toollike else Code_cache.Userlike
         in
         render_code
           ctx
           ~first_row
-          ~klass
+          ~role_class
           ~advance_first:(not (Roles.is_toollike role))
           ~lang
           ~code)
   ;;
 
-  let split_status_and_patch (lines : string list) =
-    let rec loop acc = function
-      | [] -> List.rev acc, []
-      | ("" as l) :: rest -> List.rev (l :: acc), rest
-      | l :: rest -> loop (l :: acc) rest
-    in
-    loop [] lines
+  let is_patch_start line =
+    let line = String.strip line in
+    List.exists
+      [ "*** Begin Patch"
+      ; "*** Add File: "
+      ; "*** Update File: "
+      ; "*** Delete File: "
+      ; "*** Move to: "
+      ; "┏━["
+      ]
+      ~f:(fun prefix -> String.is_prefix line ~prefix)
   ;;
 
-  let render_body_apply_patch (ctx : Render_context.t) ~(role : string) ~(text : string)
-    : I.t list
-    =
-    let status_lines, patch_lines = String.split_lines text |> split_status_and_patch in
-    let first_row = ref true in
-    let status_rows =
-      List.concat_map status_lines ~f:(fun para -> render_paras ctx ~first_row ~text:para)
+  let split_status_and_patch (lines : string list) =
+    let status, patch = List.split_while lines ~f:(Fn.non is_patch_start) in
+    let status =
+      List.rev status
+      |> List.drop_while ~f:(fun line -> String.is_empty (String.strip line))
+      |> List.rev
     in
-    let patch_rows =
-      match patch_lines with
-      | [] -> []
-      | _ ->
-        let code = String.concat ~sep:"\n" patch_lines in
-        let klass =
-          if Roles.is_toollike role then Code_cache2.Toollike else Code_cache2.Userlike
+    status, patch
+  ;;
+
+  let prepare_paragraph text =
+    { Prepared.text
+    ; fallback_spans = Paint.fallback_markdown_spans text
+    ; tool_call_parts = Paint.tool_call_parts text
+    }
+  ;;
+
+  let prepare_paragraphs text = String.split_lines text |> List.map ~f:prepare_paragraph
+
+  let prepare_default ~role text =
+    let is_tool_call =
+      String.equal role "tool" || String.is_suffix role ~suffix:" Agent"
+    in
+    match if is_tool_call then Paint.tool_call_parts text else None with
+    | Some _ -> [ Prepared.Text [ prepare_paragraph text ] ]
+    | None ->
+      Blocks.of_message_text text
+      |> List.map ~f:(function
+        | Blocks.Text text -> Prepared.Text (prepare_paragraphs text)
+        | Blocks.Code { lang; code } -> Prepared.Code { lang; code })
+  ;;
+
+  let prepare_body ~role ~tool_output text =
+    match tool_output with
+    | Some Apply_patch ->
+      let status_lines, patch_lines = String.split_lines text |> split_status_and_patch in
+      let patch =
+        match patch_lines with
+        | [] -> None
+        | _ -> Some (String.concat ~sep:"\n" patch_lines)
+      in
+      Prepared.Apply_patch { status = List.map status_lines ~f:prepare_paragraph; patch }
+    | Some (Read_file { path = Some path }) ->
+      (match lang_of_path path with
+       | Some lang when not (String.equal lang "markdown") ->
+         Prepared.Read_file { lang; code = text }
+       | None | Some _ -> Prepared.Default (prepare_default ~role text))
+    | None | Some (Read_file { path = None } | Read_directory _ | Other _) ->
+      Prepared.Default (prepare_default ~role text)
+  ;;
+
+  let prepare ~role ~text ~tool_output =
+    let text = Util.sanitize ~strip:false text |> sanitize_developer role in
+    { Prepared.role; text; body = prepare_body ~role ~tool_output text }
+  ;;
+
+  let render_prepared_paragraph ctx ~first_row paragraph =
+    let is_tool_call =
+      (String.equal ctx.role "tool" || String.is_suffix ctx.role ~suffix:" Agent")
+      && Option.is_none ctx.tool_output
+    in
+    let rows =
+      if is_tool_call && Option.is_some paragraph.Prepared.tool_call_parts
+      then
+        Paint.render_paragraph
+          ctx
+          ~is_first:!first_row
+          ~para:paragraph.text
+          ~fallback_spans:paragraph.fallback_spans
+          ~parts:paragraph.tool_call_parts
+          ()
+      else
+        Paint.render_markdown
+          ctx
+          ~is_first:!first_row
+          ~para:paragraph.text
+          ~fallback_spans:paragraph.fallback_spans
+          ()
+    in
+    if not (List.is_empty rows) then first_row := false;
+    rows
+  ;;
+
+  let render_prepared_default ctx ~role blocks =
+    let first_row = ref true in
+    List.concat_map blocks ~f:(function
+      | Prepared.Text paragraphs ->
+        List.concat_map paragraphs ~f:(render_prepared_paragraph ctx ~first_row)
+      | Prepared.Code { lang; code } ->
+        let role_class =
+          if Roles.is_toollike role then Code_cache.Toollike else Code_cache.Userlike
         in
         render_code
           ctx
           ~first_row
-          ~klass
+          ~role_class
+          ~advance_first:(not (Roles.is_toollike role))
+          ~lang
+          ~code)
+  ;;
+
+  let render_body_apply_patch
+        (ctx : Render_context.t)
+        ~(role : string)
+        ~(status : Prepared.paragraph list)
+        ~(patch : string option)
+    =
+    let first_row = ref true in
+    let status_rows =
+      List.concat_map status ~f:(render_prepared_paragraph ctx ~first_row)
+    in
+    let patch_rows =
+      match patch with
+      | None -> []
+      | Some code ->
+        let role_class =
+          if Roles.is_toollike role then Code_cache.Toollike else Code_cache.Userlike
+        in
+        render_code
+          ctx
+          ~first_row
+          ~role_class
           ~advance_first:true
           ~lang:(Some "ochat-apply-patch")
           ~code
@@ -921,66 +1090,257 @@ module Message = struct
     status_rows @ patch_rows
   ;;
 
-  let render_body_read_file
-        (ctx : Render_context.t)
-        ~(role : string)
-        ~(text : string)
-        ~(path : string option)
-    : I.t list
+  let blank_row (_ctx : Render_context.t) = []
+  let gap_row (_ctx : Render_context.t) = [ A.empty, " " ]
+
+  let render_body_rows (ctx : Render_context.t) (prepared : Prepared.t) =
+    match prepared.body with
+    | Default blocks -> render_prepared_default ctx ~role:prepared.role blocks
+    | Apply_patch { status; patch } ->
+      render_body_apply_patch ctx ~role:prepared.role ~status ~patch
+    | Read_file { lang; code } ->
+      let role_class =
+        if Roles.is_toollike prepared.role
+        then Code_cache.Toollike
+        else Code_cache.Userlike
+      in
+      Paint.render_code_block ctx ~is_first:true ~lang:(Some lang) ~code ~role_class
+  ;;
+
+  let render_prepared (ctx : Render_context.t) (prepared : Prepared.t)
+    : Render_job.Layout.line list
     =
-    match path with
-    | None -> render_body_default ctx ~role ~text
-    | Some p ->
-      (match lang_of_path p with
-       | None -> render_body_default ctx ~role ~text
-       | Some "markdown" -> render_body_default ctx ~role ~text
-       | Some lang ->
-         let klass =
-           if Roles.is_toollike role then Code_cache2.Toollike else Code_cache2.Userlike
-         in
-         Paint.render_code_block ctx ~is_first:true ~lang:(Some lang) ~code:text ~klass)
-  ;;
-
-  let blank_row (ctx : Render_context.t) =
-    I.hsnap ~align:`Left ctx.width (I.string A.empty "")
-  ;;
-
-  let gap_row (ctx : Render_context.t) =
-    I.hsnap ~align:`Left ctx.width (I.string A.empty " ")
-  ;;
-
-  let render_body_rows (ctx : Render_context.t) ~(role : string) ~(text : string) =
-    match ctx.tool_output with
-    | Some Apply_patch -> render_body_apply_patch ctx ~role ~text
-    | Some (Read_file { path }) -> render_body_read_file ctx ~role ~text ~path
-    | _ -> render_body_default ctx ~role ~text
-  ;;
-
-  let render (ctx : Render_context.t) ((role, text) : message) : I.t =
-    let text = Util.sanitize ~strip:false text |> sanitize_developer role in
-    let trimmed = String.strip text in
+    let trimmed = String.strip prepared.text in
     if String.is_empty trimmed
-    then I.empty
+    then []
     else (
-      let body_rows = render_body_rows ctx ~role ~text in
-      I.vcat
-        ((blank_row ctx :: render_header_line ctx :: blank_row ctx :: body_rows)
-         @ [ gap_row ctx ]))
+      let body_rows = render_body_rows ctx prepared in
+      let status_rows =
+        match ctx.tool_call_outcome with
+        | None -> []
+        | Some outcome ->
+          let attr, text = tool_call_status outcome in
+          [ [ attr, text ] ]
+      in
+      ((blank_row ctx :: render_header_line ctx :: blank_row ctx :: body_rows)
+       @ status_rows)
+      @ [ gap_row ctx ])
+  ;;
+
+  let render ctx ((role, text) : message) =
+    prepare ~role ~text ~tool_output:ctx.tool_output |> render_prepared ctx
   ;;
 end
 
-let render_message ~width ~selected ~tool_output ~role ~text ~hi_engine ?search_query () =
-  let search_query = Option.join search_query in
-  let ctx =
-    Render_context.make ~width ~selected ~role ~tool_output ~hi_engine ~search_query
+let split_lines_by_lengths lines runs =
+  let lengths =
+    List.map lines ~f:(fun line ->
+      List.sum (module Int) line ~f:(fun (_, text) -> String.length text))
   in
-  Message.render ctx (role, text)
+  let rec take_bytes remaining taken runs =
+    match remaining, runs with
+    | 0, _ -> List.rev taken, runs
+    | _, [] -> List.rev taken, []
+    | remaining, ((attr, text) as run) :: rest ->
+      let length = String.length text in
+      if length <= remaining
+      then take_bytes (remaining - length) (run :: taken) rest
+      else (
+        let left = String.prefix text remaining in
+        let right = String.drop_prefix text remaining in
+        List.rev ((attr, left) :: taken), (attr, right) :: rest)
+  in
+  List.fold_map lengths ~init:runs ~f:(fun runs length ->
+    let line, runs = take_bytes length [] runs in
+    runs, line)
+  |> snd
+;;
+
+let apply_overlay_to_lines ~selected ~search_query lines =
+  match selected, search_query with
+  | true, Some query when not (String.is_empty (String.strip query)) ->
+    let highlighted =
+      Search_highlight.apply_to_spans
+        ~query
+        ~hit_attr:(Styles.bg_gray 23)
+        (List.concat lines)
+    in
+    split_lines_by_lengths lines highlighted
+  | true, _ ->
+    List.map lines ~f:(List.map ~f:(fun (attr, text) -> Theme.selection_attr attr, text))
+  | false, _ -> lines
+;;
+
+let image_of_lines ~width lines =
+  List.map lines ~f:(fun line ->
+    match line with
+    | [] -> I.void width 1
+    | line ->
+      List.map line ~f:(fun (attr, text) -> safe_string attr text)
+      |> I.hcat
+      |> I.hsnap ~align:`Left width)
+  |> I.vcat
+;;
+
+let apply_overlay ~selected ~search_query (layout : Render_job.Layout.t) =
+  apply_overlay_to_lines ~selected ~search_query layout.lines
+  |> image_of_lines ~width:layout.width
+;;
+
+let render_detached ~(runtime : Render_job.Runtime.t) (job : Render_job.t) =
+  let key = job.key in
+  if not (Int.equal key.theme_generation (Render_job.Runtime.theme_generation runtime))
+  then invalid_arg "render_detached: theme generation mismatch";
+  if
+    not (Int.equal key.grammar_generation (Render_job.Runtime.grammar_generation runtime))
+  then invalid_arg "render_detached: grammar generation mismatch";
+  Option.iter job.semantic_seed ~f:(fun seed ->
+    Option.iter (Render_job.Runtime.prepared_cache runtime) ~f:(fun cache ->
+      Prepared_cache.set
+        cache
+        ~row_id:key.row_id
+        ~row_revision:key.row_revision
+        ~role:key.role
+        ~text:key.text
+        ~tool_output:key.tool_output
+        seed.prepared);
+    Option.iter (Render_job.Runtime.highlight_cache runtime) ~f:(fun cache ->
+      List.iter seed.highlights ~f:(Highlight_cache.install cache)));
+  let ctx =
+    Render_context.make
+      ~width:key.width
+      ~role:key.role
+      ~tool_output:key.tool_output
+      ~runtime
+      ~grammar_generation:key.grammar_generation
+      ~tool_call_outcome:key.tool_call_outcome
+  in
+  let prepared, lines, highlights =
+    let prepared =
+      match Render_job.Runtime.prepared_cache runtime with
+      | None -> Message.prepare ~role:key.role ~text:key.text ~tool_output:key.tool_output
+      | Some cache ->
+        (match
+           Prepared_cache.find
+             cache
+             ~row_id:key.row_id
+             ~row_revision:key.row_revision
+             ~role:key.role
+             ~text:key.text
+             ~tool_output:key.tool_output
+         with
+         | Some prepared -> prepared
+         | None ->
+           let prepared =
+             Message.prepare ~role:key.role ~text:key.text ~tool_output:key.tool_output
+           in
+           Prepared_cache.set
+             cache
+             ~row_id:key.row_id
+             ~row_revision:key.row_revision
+             ~role:key.role
+             ~text:key.text
+             ~tool_output:key.tool_output
+             prepared;
+           prepared)
+    in
+    let lines, highlights =
+      match Render_job.Runtime.highlight_cache runtime with
+      | None -> Message.render_prepared ctx prepared, []
+      | Some cache ->
+        Highlight_cache.capture cache (fun () -> Message.render_prepared ctx prepared)
+    in
+    prepared, lines, highlights
+  in
+  let layout = Render_job.Layout.{ width = key.width; lines } in
+  let image = image_of_lines ~width:key.width lines in
+  Render_job.result job ~prepared ~layout ~image ~highlights ~layout_plan:ctx.layout_plan
+;;
+
+let render_synchronously ~hi_engine (job : Render_job.t) =
+  let runtime =
+    Render_job.Runtime.create
+      ~hi_engine
+      ~theme_generation:job.Render_job.key.theme_generation
+      ~grammar_generation:job.key.grammar_generation
+      ~code_cache:shared_code_cache
+      ~highlight_cache:shared_highlight_cache
+      ~prepared_cache:shared_prepared_cache
+      ~wrapped_cache:shared_wrapped_cache
+      ()
+  in
+  render_detached ~runtime job
+;;
+
+let install_highlights highlights =
+  List.iter highlights ~f:(Highlight_cache.install shared_highlight_cache)
+;;
+
+let install_prepared ~row_id ~row_revision ~role ~text ~tool_output prepared =
+  Prepared_cache.set
+    shared_prepared_cache
+    ~row_id
+    ~row_revision
+    ~role
+    ~text
+    ~tool_output
+    prepared
+;;
+
+let render_message
+      ~width
+      ~selected
+      ~tool_output
+      ~role
+      ~text
+      ~hi_engine
+      ?search_query
+      ?tool_call_outcome
+      ()
+  =
+  let row_id =
+    Projected_message.Id.local ~namespace:"standalone-render" ~local_id:"message"
+    |> Result.ok_or_failwith
+  in
+  let job =
+    Render_job.create
+      ~transcript_generation:0
+      ~row_id
+      ~row_revision:0
+      ~message_index:(-1)
+      ~message_revision:0
+      ~width
+      ~role
+      ~text
+      ~tool_output
+      ~tool_call_outcome
+      ~theme_generation:0
+      ~grammar_generation:0
+      ~geometry_generation:0
+      ~request_generation:0
+      ~render_generation:0
+      ~submission_generation:0
+      ~semantic_seed:None
+      ~priority:Visible
+  in
+  let result = render_synchronously ~hi_engine job in
+  apply_overlay ~selected ~search_query:(Option.join search_query) result.layout
 ;;
 
 let render_header_line ~width ~selected ~role ~hi_engine ?search_query () =
+  let runtime =
+    Render_job.Runtime.create ~hi_engine ~theme_generation:0 ~grammar_generation:0 ()
+  in
   let search_query = Option.join search_query in
   let ctx =
-    Render_context.make ~width ~selected ~role ~tool_output:None ~hi_engine ~search_query
+    Render_context.make
+      ~width
+      ~role
+      ~tool_output:None
+      ~runtime
+      ~grammar_generation:0
+      ~tool_call_outcome:None
   in
-  Message.render_header_line ctx
+  let layout = Render_job.Layout.{ width; lines = [ Message.render_header_line ctx ] } in
+  apply_overlay ~selected ~search_query layout
 ;;

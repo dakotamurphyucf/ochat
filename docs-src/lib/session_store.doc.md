@@ -174,3 +174,10 @@ let () = Eio_main.run @@ fun env ->
 *Happy hacking!*  
 *The Ochat team*
 
+## Shell-state persistence
+
+`Session_store` persists the versioned shell state with the rest of the binary
+snapshot under existing lock/atomic save rules. Durable command stores may
+also use separate integrity-protected atomic files. Reset/archive operations
+preserve evidence according to the session operation but create no inferred
+trust when rebuilding from older snapshots or prompt history.

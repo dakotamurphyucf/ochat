@@ -111,6 +111,16 @@ relies on:
 * `Io.load_doc` – load a file as a string.
 * `Io.ensure_chatmd_dir` – lazily create the hidden `.chatmd` cache.
 
-Refer to [`io.mli`](../io.mli) for details.
+Refer to [`io.mli`](../../../lib/io.mli) for details.
 
+## Shell declaration dispatch
 
+`Prompt.Chat_markdown` exposes compatibility-facing top-level variants for
+shell runtimes, shell tools, shell ChatML scripts, and moderator runtime
+bindings. It delegates strict nested conversion/serialization to focused
+ChatMD modules and keeps source provenance through import expansion.
+
+Manifest compilation, authorization, filesystem probing, and live runtime
+instantiation are deliberately outside `prompt.ml`; they belong to
+`Chatmd_shell_spec` and `Shell_runtime`. This keeps the already-large Prompt
+module a dispatch/assembly boundary pending a broader future refactor.

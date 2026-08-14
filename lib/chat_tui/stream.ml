@@ -5,10 +5,8 @@ open Types
 (*  Helper                                                                    *)
 (* ------------------------------------------------------------------------- *)
 
-let role_for_event (model : Model.t) ~(default : string) : string =
-  match Model.active_fork model with
-  | Some _ -> "fork"
-  | None -> default
+let role_for_event ~(parent_call_id : string option) ~(default : string) : string =
+  if Option.is_some parent_call_id then "fork" else default
 ;;
 
 let read_file_path_of_arguments (json_string : string) : string option =
@@ -31,10 +29,8 @@ let update_tool_output_metadata_if_present
   match Hashtbl.find (Model.msg_buffers model) call_id with
   | None -> ()
   | Some b ->
-    if Hashtbl.mem (Model.tool_output_by_index model) b.index
-    then (
-      Hashtbl.set (Model.tool_output_by_index model) ~key:b.index ~data:kind;
-      Model.invalidate_img_cache_index model ~idx:b.index)
+    if Option.is_some (Model.tool_output_for_row model ~id:b.row_id)
+    then ignore (Model.set_tool_output_kind_for_row model ~id:b.row_id kind : bool)
 ;;
 
 module Res = Openai.Responses
@@ -52,29 +48,33 @@ let tool_output_to_string (out : Res.Tool_output.Output.t) : string =
     |> String.concat ~sep:"\n"
 ;;
 
+let copy_tool_metadata ~(model : Model.t) ~call_id ~id =
+  Hashtbl.find (Model.function_name_by_id model) call_id
+  |> Option.iter ~f:(fun name ->
+    Hashtbl.set (Model.function_name_by_id model) ~key:id ~data:name);
+  Hashtbl.find (Model.tool_path_by_call_id model) call_id
+  |> Option.iter ~f:(fun path ->
+    Hashtbl.set (Model.tool_path_by_call_id model) ~key:id ~data:path)
+;;
+
 (* ------------------------------------------------------------------------- *)
 (*  Main translation function                                               *)
 (* ------------------------------------------------------------------------- *)
-let handle_fn_out ~(model : Model.t) (out : Res.Function_call_output.t) : Types.patch list
+let handle_fn_out ~(model : Model.t) ?entry_id (out : Res.Function_call_output.t)
+  : Types.patch list
   =
   let _mod = model in
-  (match Model.active_fork model with
-   | Some call_id when String.equal call_id out.call_id ->
-     Model.set_active_fork model None;
-     Model.set_fork_start_index model None
-   | _ -> ());
   let output = tool_output_to_string out.output in
-  [ Set_function_output { id = out.call_id; output } ]
+  let id = Option.value_map entry_id ~default:out.call_id ~f:History_entry.Id.to_string in
+  copy_tool_metadata ~model ~call_id:out.call_id ~id;
+  [ Set_function_output { id; output } ]
 ;;
 
-let handle_tool_out ~(model : Model.t) (item : Res.Item.t) : Types.patch list =
+let handle_tool_out ~(model : Model.t) ?entry_id (item : Res.Item.t) : Types.patch list =
   let mk ~call_id ~output =
-    (match Model.active_fork model with
-     | Some active_call_id when String.equal active_call_id call_id ->
-       Model.set_active_fork model None;
-       Model.set_fork_start_index model None
-     | _ -> ());
-    [ Set_function_output { id = call_id; output = tool_output_to_string output } ]
+    let id = Option.value_map entry_id ~default:call_id ~f:History_entry.Id.to_string in
+    copy_tool_metadata ~model ~call_id ~id;
+    [ Set_function_output { id; output = tool_output_to_string output } ]
   in
   match item with
   | Res.Item.Function_call_output out -> mk ~call_id:out.call_id ~output:out.output
@@ -82,13 +82,19 @@ let handle_tool_out ~(model : Model.t) (item : Res.Item.t) : Types.patch list =
   | _ -> []
 ;;
 
-let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
+let handle_event ~(model : Model.t) ?(parent_call_id = None) ?entry_id (ev : Res_stream.t)
+  : Types.patch list
+  =
+  let buffer_id provider_id =
+    Option.value_map entry_id ~default:provider_id ~f:History_entry.Id.to_string
+  in
   match ev with
   (* --------------------------------------------------------------------- *)
   (* Assistant text delta                                                   *)
   (* --------------------------------------------------------------------- *)
   | Res_stream.Output_text_delta { item_id; delta; _ } ->
-    let role = role_for_event model ~default:"assistant" in
+    let item_id = buffer_id item_id in
+    let role = role_for_event ~parent_call_id ~default:"assistant" in
     let patches = ref [] in
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
@@ -101,7 +107,8 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
     (match item with
      | Item_stream.Function_call fc ->
        let patches = ref [] in
-       let idx = Option.value fc.id ~default:fc.call_id in
+       let provider_id = Option.value fc.id ~default:fc.call_id in
+       let idx = buffer_id provider_id in
        Hashtbl.set (Model.call_id_by_item_id model) ~key:idx ~data:fc.call_id;
        Hashtbl.set (Model.function_name_by_id model) ~key:fc.call_id ~data:fc.name;
        Hashtbl.set (Model.function_name_by_id model) ~key:idx ~data:fc.name;
@@ -127,21 +134,20 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
             ~kind:Types.Apply_patch
         | _ -> ());
        let is_fork = String.equal fc.name "fork" in
-       let role = if is_fork then "fork" else role_for_event model ~default:"tool" in
+       let role =
+         if is_fork then "fork" else role_for_event ~parent_call_id ~default:"tool"
+       in
        if not (Hashtbl.mem (Model.msg_buffers model) idx)
        then patches := Ensure_buffer { id = idx; role } :: !patches;
+       patches := Associate_tool_call { item_id = idx; call_id = fc.call_id } :: !patches;
        patches := Set_function_name { id = fc.call_id; name = fc.name } :: !patches;
        patches := Set_function_name { id = idx; name = fc.name } :: !patches;
        patches := Append_text { id = idx; role; text = fc.name ^ "(" } :: !patches;
-       (* Track active fork so subsequent deltas are coloured appropriately *)
-       if is_fork
-       then (
-         Model.set_active_fork model (Some fc.call_id);
-         Model.set_fork_start_index model (Some (List.length (Model.history_items model))));
        List.rev !patches
      | Item_stream.Custom_function tc ->
        let patches = ref [] in
-       let idx = Option.value tc.id ~default:tc.call_id in
+       let provider_id = Option.value tc.id ~default:tc.call_id in
+       let idx = buffer_id provider_id in
        Hashtbl.set (Model.call_id_by_item_id model) ~key:idx ~data:tc.call_id;
        Hashtbl.set (Model.function_name_by_id model) ~key:tc.call_id ~data:tc.name;
        Hashtbl.set (Model.function_name_by_id model) ~key:idx ~data:tc.name;
@@ -166,35 +172,39 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
             ~call_id:tc.call_id
             ~kind:Types.Apply_patch
         | _ -> ());
-       let role = role_for_event model ~default:"tool" in
+       let role = role_for_event ~parent_call_id ~default:"tool" in
        if not (Hashtbl.mem (Model.msg_buffers model) idx)
        then patches := Ensure_buffer { id = idx; role } :: !patches;
+       patches := Associate_tool_call { item_id = idx; call_id = tc.call_id } :: !patches;
        patches := Set_function_name { id = tc.call_id; name = tc.name } :: !patches;
        patches := Set_function_name { id = idx; name = tc.name } :: !patches;
        patches := Append_text { id = idx; role; text = tc.name ^ "(" } :: !patches;
        List.rev !patches
      | Item_stream.Reasoning r ->
-       if Hashtbl.mem (Model.msg_buffers model) r.id
+       let id = buffer_id r.id in
+       if Hashtbl.mem (Model.msg_buffers model) id
        then []
-       else [ Ensure_buffer { id = r.id; role = "reasoning" } ]
+       else [ Ensure_buffer { id; role = "reasoning" } ]
      | Item_stream.Output_message om ->
-       let role = role_for_event model ~default:"assistant" in
+       let id = buffer_id om.id in
+       let role = role_for_event ~parent_call_id ~default:"assistant" in
        let txt = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" " in
        let patches =
-         if Hashtbl.mem (Model.msg_buffers model) om.id
+         if Hashtbl.mem (Model.msg_buffers model) id
          then []
-         else [ Ensure_buffer { id = om.id; role } ]
+         else [ Ensure_buffer { id; role } ]
        in
-       patches @ [ Append_text { id = om.id; role; text = txt } ]
+       patches @ [ Append_text { id; role; text = txt } ]
      | _ -> [])
   (* --------------------------------------------------------------------- *)
   (* Reasoning summaries                                                    *)
   (* --------------------------------------------------------------------- *)
   | Res_stream.Reasoning_summary_text_delta { item_id; delta; summary_index; _ } ->
+    let item_id = buffer_id item_id in
     (* Append reasoning summaries verbatim; do not inject extra newlines between
        summary segments – the renderer handles reflow. *)
     let patches = ref [] in
-    let role = role_for_event model ~default:"reasoning" in
+    let role = role_for_event ~parent_call_id ~default:"reasoning" in
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
     patches := Update_reasoning_idx { id = item_id; idx = summary_index } :: !patches;
@@ -204,6 +214,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
   (* Function call argument streaming                                       *)
   (* --------------------------------------------------------------------- *)
   | Res_stream.Function_call_arguments_delta { item_id; delta; _ } ->
+    let item_id = buffer_id item_id in
     let _buf_empty =
       match Hashtbl.find (Model.msg_buffers model) item_id with
       | Some b -> Buffer.length b.buf = 0
@@ -215,12 +226,14 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
         ~default:"tool"
     in
     let patches = ref [] in
-    let role = role_for_event model ~default:"tool" in
+    let role = role_for_event ~parent_call_id ~default:"tool" in
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
     patches := Append_text { id = item_id; role; text = delta } :: !patches;
     List.rev !patches
   | Res_stream.Function_call_arguments_done { arguments; item_id; _ } ->
+    let provider_item_id = item_id in
+    let item_id = buffer_id provider_item_id in
     let _buf_empty =
       match Hashtbl.find (Model.msg_buffers model) item_id with
       | Some b -> Buffer.length b.buf = 0
@@ -232,7 +245,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
         ~default:"tool"
     in
     let patches = ref [] in
-    let role = role_for_event model ~default:"tool" in
+    let role = role_for_event ~parent_call_id ~default:"tool" in
     let call_id =
       match Hashtbl.find (Model.call_id_by_item_id model) item_id with
       | Some cid -> cid
@@ -262,6 +275,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
     patches := Append_text { id = item_id; role; text = ")" } :: !patches;
     List.rev !patches
   | Res_stream.Custom_tool_call_input_delta { item_id; delta; _ } ->
+    let item_id = buffer_id item_id in
     let _buf_empty =
       match Hashtbl.find (Model.msg_buffers model) item_id with
       | Some b -> Buffer.length b.buf = 0
@@ -273,12 +287,14 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
         ~default:"tool"
     in
     let patches = ref [] in
-    let role = role_for_event model ~default:"tool" in
+    let role = role_for_event ~parent_call_id ~default:"tool" in
     if not (Hashtbl.mem (Model.msg_buffers model) item_id)
     then patches := Ensure_buffer { id = item_id; role } :: !patches;
     patches := Append_text { id = item_id; role; text = delta } :: !patches;
     List.rev !patches
   | Res_stream.Custom_tool_call_input_done { input; item_id; _ } ->
+    let provider_item_id = item_id in
+    let item_id = buffer_id provider_item_id in
     let _buf_empty =
       match Hashtbl.find (Model.msg_buffers model) item_id with
       | Some b -> Buffer.length b.buf = 0
@@ -290,7 +306,7 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
         ~default:"tool"
     in
     let patches = ref [] in
-    let role = role_for_event model ~default:"tool" in
+    let role = role_for_event ~parent_call_id ~default:"tool" in
     let call_id =
       match Hashtbl.find (Model.call_id_by_item_id model) item_id with
       | Some cid -> cid
@@ -325,6 +341,8 @@ let handle_event ~(model : Model.t) (ev : Res_stream.t) : Types.patch list =
   | _ -> []
 ;;
 
-let handle_events ~(model : Model.t) (evs : Res_stream.t list) : Types.patch list =
-  List.concat_map evs ~f:(handle_event ~model)
+let handle_events ~(model : Model.t) ?(parent_call_id = None) (evs : Res_stream.t list)
+  : Types.patch list
+  =
+  List.concat_map evs ~f:(handle_event ~model ~parent_call_id)
 ;;

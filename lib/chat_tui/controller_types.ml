@@ -11,10 +11,18 @@
     various specialised controller modules (normal mode, command-line mode,
     etc.).  No other values are exposed here. *)
 
+type chat_destination =
+  | Earlier_conversation
+  | Search_result of Projected_message.Id.t
+  | Latest_conversation
+
 type reaction =
   | Redraw
   (** Visible state changed – caller must redraw the Notty viewport before
         waiting for the next event. *)
+  | Refresh_messages
+  (** Canonical history changed – caller must rebuild the effective Chat
+      projection before redrawing. *)
   | Submit_input
   (** User finalised the prompt – typically pressing [Meta+Enter].  The
         caller should
@@ -34,6 +42,17 @@ type reaction =
 
         The caller should cleanly shut down all resources and return from the
         main loop. *)
+  | Chat_scrolled of bool
+  (** A conversation-history scroll was consumed. The payload is [true] when
+      the visible viewport moved and therefore requires a redraw. *)
+  | Prepare_chat_destination of chat_destination
+  (** A nonlocal history destination requires asynchronous exact corridor
+      preparation before it can be shown. *)
+  | Shell_approval_response of
+      string * Shell_runtime.Approval_broker.ui_response
+  | Shell_grant_revoke_requested of int * string
+  | Shell_management_refresh_requested of int
+  | Moderator_input_response of string
   | Unhandled
   (** The controller ignored the event; propagate it to the next handler
         (e.g. a global key-binding layer). *)

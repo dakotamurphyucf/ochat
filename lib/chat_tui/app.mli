@@ -25,7 +25,7 @@ type prompt_context =
   { cfg : Chat_response.Config.t (** Behavioural settings (temperature, …) *)
   ; tools : Openai.Responses.Request.Tool.t list
     (** Tools exposed to the assistant at runtime. *)
-  ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t
+  ; tool_tbl : (string, Ochat_function.runner) Base.Hashtbl.t
     (** Mapping [tool_name -> implementation]. *)
   ; moderator : Chat_response.In_memory_stream.moderator option
     (** Optional shared moderator runtime for the session. *)
@@ -41,6 +41,11 @@ type persist_mode =
   | `Never
   | `Ask
   ]
+
+module For_testing : sig
+  val should_warm_history_before_redraw : runtime:App_runtime.t -> model:Model.t -> bool
+  val cursor_for_frame : model:Model.t -> int * int -> (int * int) option
+end
 
 (** Boot the TUI and block until the user terminates the program.
 
@@ -70,6 +75,18 @@ type persist_mode =
            written back on exit.  Defaults to [`Ask].
     @param parallel_tool_calls Allow multiple tool calls to run in parallel
            (default: [true]).
+    @param textmate_grammar_files Explicit TextMate grammar JSON files to load
+           before terminal initialization. Directories from
+           [OCHAT_GRAMMAR_DIR] and the default
+           [$XDG_CONFIG_HOME/ochat/grammars] directory are scanned after the
+           first frame and trigger a cache-invalidating redraw. Invalid
+           explicit files stop startup; invalid discovered files produce
+           warnings.
+    @param shell_manifest_authorizer Authorizes the exact canonical shell
+           manifest before any shell tool is exposed. The default rejects
+           manifests.
+    @param shell_approval_provider Supplies command-level approval decisions.
+           The default uses the TUI's fiber-friendly approval broker.
 
     Starting the UI from an executable:
     {[
@@ -99,5 +116,8 @@ val run_chat
   -> ?export_file:string
   -> ?persist_mode:persist_mode
   -> ?parallel_tool_calls:bool
+  -> ?textmate_grammar_files:string list
+  -> ?shell_manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> ?shell_approval_provider:Shell_runtime.Approval_broker.provider
   -> unit
   -> unit

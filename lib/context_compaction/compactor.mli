@@ -1,56 +1,46 @@
 (** Conversation–history compactor.
 
-    [Compactor] glues together {!module:Context_compaction.Config},
-    {!module:Context_compaction.Relevance_judge}, and
-    {!module:Context_compaction.Summarizer}.  Its sole purpose is to trim a
+    [Compactor] combines {!module:Context_compaction.Config} and
+    {!module:Context_compaction.Summarizer}. Its purpose is to trim a
     potentially long chat transcript down to a size that comfortably fits
     within the LLM’s context window while keeping the essence of the
     conversation intact.
 
-    The default pipeline is deliberately lightweight – no tokeniser is
-    needed and the function always finishes in {e O(n)} time where [n] is the
-    number of messages:
+    The pipeline:
 
     {ol
-    {- Load user overrides via {!Config.load}.}
-    {- Convert each {!Openai.Responses.Item} to plain text and retain only
-      those whose importance score, as judged by
-      {!Relevance_judge.is_relevant}, meets or exceeds
-      {!Config.relevance_threshold}.}
-    {- Pass the retained sub-sequence to {!Summarizer.summarise} and truncate
-      the resulting summary to {!Config.context_limit} characters – the
-      rule-of-thumb {e 1 char ≈ 1 token} has proven robust enough in
-      practice.}
-    {- Return a new history consisting of the original first item (to keep
-      the system prompt) plus **at most one** additional [`system`] message
-      containing the summary.}}
+    {- Prunes retained user-role compaction reminders to the newest ten.}
+    {- Passes that history to {!Summarizer.summarise}.}
+    {- Returns the original System and Developer items, the retained previous
+       reminders, and one new user-role reminder.}}
 
-    The entire pipeline is exception-safe: any internal failure causes the
-    function to fall back to the identity transformation and return the
-    original [history].
+    The pipeline returns errors explicitly so callers can retain the original
+    history transactionally.
 
     {1 Typical usage}
 
     {[
       let compacted =
-        Context_compaction.Compactor.compact_history
-          ~env:(Some stdenv)   (* pass Eio capabilities when available *)
+        Context_compaction.Compactor.compact_entries
+          ~allocator
+          ~env:(Some stdenv)
           ~history
       in
-      send_to_llm (compacted @ new_user_messages)
+      Result.iter compacted ~f:(fun history ->
+        send_to_llm (history @ new_user_messages))
     ]}
     *)
 
 open! Core
 
-(** [compact_history ~env ~history] returns a condensed replacement for
-    [history].
+(** [compact_entries ~allocator ~env ~history] returns a condensed replacement for
+    [history], or an error without modifying [history].
 
-    The result is guaranteed to:
+    A successful result:
     {ul
-    {- start with the original first item;}
-    {- contain {e at most} one additional [`system`] message with a summary;}
-    {- respect {!Config.context_limit} (character budget).}}
+    {- preserves original System and Developer items verbatim;}
+    {- retains at most ten previous compaction reminders;}
+    {- appends exactly one new compaction reminder.}}
 
     Parameters
     {ul
@@ -59,8 +49,28 @@ open! Core
        offline stubs.}
     {- [history] – full conversation transcript to be compacted.}}
 
-    Never raises – on error the original [history] is returned verbatim. *)
-val compact_history
-  :  env:Eio_unix.Stdenv.base option
-  -> history:Openai.Responses.Item.t list
-  -> Openai.Responses.Item.t list
+    @raise Eio.Cancel.Cancelled if the operation is cancelled. *)
+val compact_entries
+  :  allocator:History_entry.Allocator.t
+  -> env:Eio_unix.Stdenv.base option
+  -> history:History_entry.t list
+  -> (History_entry.t list, exn) result
+(** [compact_entries ~allocator ~env ~history] transactionally compacts
+    canonical history. Retained entries keep their IDs. Exactly one new
+    reminder ID is allocated after summarization succeeds. *)
+
+module For_testing : sig
+  val process_current_entries
+    :  History_entry.t list
+    -> History_entry.t list * History_entry.t list * History_entry.t list
+
+  val compact_entries_with
+    :  summarise:
+         (relevant_items:Openai.Responses.Item.t list
+          -> env:Eio_unix.Stdenv.base option
+          -> (string, exn) result)
+    -> allocator:History_entry.Allocator.t
+    -> env:Eio_unix.Stdenv.base option
+    -> history:History_entry.t list
+    -> (History_entry.t list, exn) result
+end

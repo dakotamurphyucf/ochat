@@ -143,6 +143,16 @@ type info =
     ]} *)
 val highlight_text : t -> lang:string option -> text:string -> span list list
 
+(** [highlight_text_interruptible t ~is_cancelled ~lang ~text] behaves like
+    {!highlight_text}, but raises [Exit] between tokenized lines when
+    [is_cancelled ()] is true. *)
+val highlight_text_interruptible
+  :  t
+  -> is_cancelled:(unit -> bool)
+  -> lang:string option
+  -> text:string
+  -> span list list
+
 (** Like {!highlight_text} but preserves TextMate scope information per
     segment. This is intended for callers that need to filter output based on
     scopes (e.g. removing markdown delimiter punctuation) before collapsing to
@@ -169,6 +179,13 @@ val highlight_text_with_info
 (** Like {!highlight_text_with_info}, but returns scope-preserving spans. *)
 val highlight_text_with_scopes_with_info
   :  t
+  -> lang:string option
+  -> text:string
+  -> scoped_span list list * info
+
+val highlight_text_with_scopes_with_info_interruptible
+  :  t
+  -> is_cancelled:(unit -> bool)
   -> lang:string option
   -> text:string
   -> scoped_span list list * info

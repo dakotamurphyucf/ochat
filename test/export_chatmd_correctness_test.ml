@@ -31,16 +31,12 @@ let%expect_test "export copies original prompt" =
   let original = Io.load_doc ~dir:fs prompt_path in
   Io.save_doc ~dir:out_dir file_name original;
   (* Persist nothing – history empty *)
-  let datadir = Io.ensure_chatmd_dir ~cwd:out_dir in
-  let module Config = Chat_response.Config in
-  Chat_tui.Persistence.persist_session
+  Chat_tui.Persistence.persist_entries
     ~dir:out_dir
     ~prompt_file:file_name
-    ~datadir
-    ~cfg:Config.default
-    ~initial_msg_count:0
+    ~checkpoint:(Chat_tui.Persistence.Checkpoint.empty ())
     ~moderator_snapshot:None
-    ~history_items:[];
+    ~history:[];
   (* Check that export file starts with the original prompt string *)
   let exported = Io.load_doc ~dir:out_dir file_name in
   let preserved = String.is_prefix exported ~prefix:prompt_content in

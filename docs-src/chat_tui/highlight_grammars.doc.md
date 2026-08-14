@@ -72,20 +72,24 @@ and pass `reg` to `Highlight_tm_engine.with_registry`.
 
 | Function | Scope name(s) | Typical language tags / extensions | Notes |
 |---------|----------------|-------------------------------------|-------|
-| `add_ocaml` | `source.ocaml` | `ocaml`, `ml`, `mli` | Tries vendored grammar JSON, then falls back to a small embedded grammar. |
+| `add_ocaml` | `source.ocaml` | `ocaml`, `ml`, `mli` | Embeds the vendored grammar at compile time. |
+| `add_python` | `source.python`, `source.regexp.python` | `python`, `py`, `pyw`, `pyi` | Embeds the VS Code Python grammar bundle. |
+| `add_rust` | `source.rust` | `rust`, `rs` | Embeds the VS Code Rust grammar. |
+| `add_javascript` | `source.js`, `source.js.jsx` | `javascript`, `js`, `mjs`, `cjs`, `jsx` | Embeds distinct VS Code JavaScript and JSX grammars. |
+| `add_typescript` | `source.ts`, `source.tsx` | `typescript`, `ts`, `mts`, `cts`, `tsx` | Embeds distinct VS Code TypeScript and TSX grammars. |
 | `add_dune` | `source.dune` | `dune`, `dune-project`, `dune-workspace` | Embedded grammar for Dune files. |
 | `add_opam` | `source.opam` | `opam` | Embedded grammar for `.opam` manifests. |
 | `add_shell` | `source.shell` | `sh`, `bash` | Embedded grammar for POSIX shell/Bash. |
 | `add_diff` | `source.diff` | `diff`, `patch` | Embedded grammar highlighting headers and line prefixes. |
 | `add_json` | `source.json` | `json` | Embedded grammar for JSON structures. |
-| `add_markdown` | `source.gfm` | `md`, `markdown`, `gfm` | Loads a vendored GitHub-flavoured Markdown grammar from disk. |
+| `add_markdown` | `source.gfm` | `md`, `markdown`, `gfm` | Embeds a vendored GitHub-flavoured Markdown grammar at compile time. |
 | `add_html` | `text.html.basic`, `text.html.derivative` | `html`, inline HTML in markdown | Uses a minimal embedded grammar unless a vendored TextMate HTML grammar is present. |
 | `add_ochat_apply_patch` | `source.ochat-apply-patch` | internal | Grammar tuned for `ochat`'s `apply_patch` tool output, recognising the banner header, per-file operations (Add/Update/Delete), numbered snippet lines, and delegating inner hunks to the Diff grammar. |
 
 All functions share the same contract:
 
-- they **mutate** the supplied registry by adding one grammar (or, for
-  `add_html`, two related grammars);
+- they **mutate** the supplied registry by adding one or more related
+  grammars;
 - they return `Ok ()` on success;
 - they return `Error _` if no valid grammar could be installed.
 
