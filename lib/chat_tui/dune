@@ -29,6 +29,7 @@
   shell_management_service
   renderer_component_history
   renderer_component_input_box
+  renderer_json_highlight
   renderer_component_message
   chat_render_worker_runtime
   chat_startup_render

@@ -154,6 +154,31 @@ let%test_unit "detached rendering matches synchronous message formatting" =
   check_parity ~text:"malformed \xFF text" ()
 ;;
 
+let%test_unit "tool call arguments retain JSON syntax attributes" =
+  let text =
+    {|shell({"script":"set -eu\nDOC_DIR=$(opam var eio:doc)\nprintf 'doc_dir=%s\\n' \"$DOC_DIR\"","rationale":"Locate Eio documentation.","retry":false})|}
+  in
+  let render hi_engine =
+    let job = create_job ~width:160 ~role:"tool" ~text () in
+    Chat_tui.Renderer_component_message.render_synchronously ~hi_engine job
+  in
+  let has_attr result expected text =
+    let spans = List.concat result.Job.layout.lines in
+    List.exists spans ~f:(fun (attr, span_text) ->
+      Notty.A.equal attr expected && String.is_substring span_text ~substring:text)
+  in
+  let key_attr = Chat_tui.Highlight_styles.fg_hex "#B392F0" in
+  let string_attr = Chat_tui.Highlight_styles.fg_hex "#9ECBFF" in
+  let registered = render (Chat_tui.Renderer_highlight_engine.get ()) in
+  let fallback =
+    render
+      (Chat_tui.Highlight_tm_engine.create ~theme:Chat_tui.Highlight_theme.github_dark)
+  in
+  List.iter [ registered; fallback ] ~f:(fun result ->
+    assert (has_attr result key_attr "script");
+    assert (has_attr result string_attr "set -eu"))
+;;
+
 let%test_unit "detached result repeats stale-work identity" =
   let job =
     create_job

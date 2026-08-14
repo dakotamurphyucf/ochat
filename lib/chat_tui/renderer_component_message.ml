@@ -697,11 +697,7 @@ module Paint = struct
         if String.is_empty ws_after_name then [] else [ base_attr, ws_after_name ]
       in
       let open_paren_spans = [ base_attr, "(" ] in
-      let args_lines =
-        if String.is_empty args
-        then [ [] ]
-        else highlight_lines ctx ~lang:(Some "json") ~text:args
-      in
+      let args_lines = if String.is_empty args then [ [] ] else json_lines ctx args in
       let lines =
         match args_lines with
         | [] ->
@@ -761,6 +757,13 @@ module Paint = struct
            ~text
            lines;
          lines)
+
+  and json_lines ctx text =
+    let lines = highlight_lines ctx ~lang:(Some "json") ~text in
+    let has_syntax_attributes =
+      List.exists lines ~f:(List.exists ~f:(fun (attr, _) -> not (A.equal attr A.empty)))
+    in
+    if has_syntax_attributes then lines else Renderer_json_highlight.highlight text
   ;;
 
   let code_lines (ctx : t) ~(lang : string option) ~(code : string) =
