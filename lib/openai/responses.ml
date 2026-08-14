@@ -1752,7 +1752,7 @@ let post_response
       | None -> cb `Done
       | Some (line, seq) ->
         (* Log the raw response line to a file for debugging purposes *)
-        (* Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n"); *)
+        Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n");
         let json_result =
           Jsonaf.parse line
           |> Result.bind ~f:(fun json ->
@@ -1795,12 +1795,12 @@ let post_response
                           (Core.Exn.to_string ex));
                      print_endline line;
                      (* Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n"); *)
-                     (* Io.log
+                     Io.log
                        ~dir
                        ~file:"raw-openai-streaming-response.txt"
                        (Printf.sprintf
                           "Error parsing JSON from line: %s"
-                          (Core.Exn.to_string ex)); *)
+                          (Core.Exn.to_string ex));
                      raise (Response_stream_parsing_error (json, ex)))
                 | Error _ -> None)
            in

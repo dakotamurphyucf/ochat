@@ -439,6 +439,23 @@ let run registry runtime (tool : S.t) prepared_script input =
     |> render_result tool
 ;;
 
+let error_output error =
+  `Object
+    [ "error", `Object [ "code", `String error.code; "message", `String error.message ] ]
+  |> Jsonaf.to_string
+  |> fun text -> Res.Tool_output.Output.Text text
+;;
+
+let run_tool registry runtime tool prepared_script serialized_input =
+  try
+    serialized_input
+    |> input_of_string
+    |> run registry runtime tool prepared_script
+    |> fun text -> Res.Tool_output.Output.Text text
+  with
+  | Tool_error error -> error_output error
+;;
+
 let create_exn registry (tool : S.t) =
   match Shell_runtime.Registry.runtime registry tool.S.runtime with
   | None ->
@@ -458,21 +475,20 @@ let create_exn registry (tool : S.t) =
                  ^ tool.name))
       | Fixed _ | Structured | Chain | Raw _ -> None
     in
-    let module Definition : Ochat_function.Def with type input = input = struct
-      type nonrec input = input
+    let module Definition : Ochat_function.Def with type input = string = struct
+      type input = string
 
       let name = tool.name
       let type_ = "function"
       let description = model_description tool
       let parameters = schema tool
-      let input_of_string = input_of_string
+      let input_of_string input = input
     end
     in
     Ok
       (Ochat_function.create_streaming_function
          (module Definition)
-         (fun ~invocation:_ input ->
-            Res.Tool_output.Output.Text (run registry runtime tool prepared_script input)))
+         (fun ~invocation:_ input -> run_tool registry runtime tool prepared_script input))
 ;;
 
 let create registry tool =

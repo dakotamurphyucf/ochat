@@ -90,6 +90,12 @@ let output_text = function
   | _ -> failwith "expected text tool output"
 ;;
 
+let error_fields output =
+  let error = Jsonaf.of_string output |> Jsonaf.member_exn "error" in
+  ( Jsonaf.member_exn "code" error |> Jsonaf.string_exn
+  , Jsonaf.member_exn "message" error |> Jsonaf.string_exn )
+;;
+
 let shell_function registry name =
   let specification = Shell_runtime.Registry.tool registry name |> Option.value_exn in
   match Chat_response.Shell_tool.create registry specification with
@@ -261,6 +267,42 @@ let%expect_test "fixed arguments remain literal argv" =
   [%expect
     {| safe; /bin/false $(printf injected)
     |}]
+;;
+
+let%expect_test "shell validation errors return stable code and message output" =
+  Eio_main.run
+  @@ fun env ->
+  Eio.Switch.run
+  @@ fun sw ->
+  let root = Eio.Path.(Eio.Stdenv.cwd env / "_build" / "shell-tool-test") in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 root;
+  let function_ = shell_function (registry env sw root) "fixed_echo" in
+  let code, message =
+    function_.run {|{"arguments":[],"script":"forbidden"}|} |> output_text |> error_fields
+  in
+  printf "%s: %s\n" code message;
+  [%expect {| shell.tool_field_forbidden: script is not valid for this mode |}]
+;;
+
+let%expect_test "shell executor errors return stable code and message output" =
+  Eio_main.run
+  @@ fun env ->
+  Eio.Switch.run
+  @@ fun sw ->
+  let root = Eio.Path.(Eio.Stdenv.cwd env / "_build" / "shell-tool-test") in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 root;
+  let function_ = shell_function (registry env sw root) "structured_cat" in
+  let code, message =
+    function_.run
+      {|{"program":"definitely-missing-shell-tool-executable","arguments":[],"stdin":""}|}
+    |> output_text
+    |> error_fields
+  in
+  printf
+    "code=%s message=%b\n"
+    code
+    (String.is_substring message ~substring:"definitely-missing-shell-tool-executable");
+  [%expect {| code=resolution_error message=true |}]
 ;;
 
 let%expect_test "structured mode passes stdin without a shell hop" =

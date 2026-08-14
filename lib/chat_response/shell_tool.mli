@@ -14,7 +14,11 @@ type error =
 
     The published model description always includes a mode-aware input,
     result, and runtime-security contract. A non-empty ChatMD [description]
-    is appended as additional tool guidance. *)
+    is appended as additional tool guidance.
+
+    Expected invocation failures return JSON tool output containing stable
+    [error.code] and safe [error.message] fields. Cancellation and unexpected
+    host exceptions retain their normal exception semantics. *)
 val create
   :  Shell_runtime.Registry.t
   -> Chatmd_shell_spec.Shell_tool_spec.t

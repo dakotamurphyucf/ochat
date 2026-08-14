@@ -269,9 +269,19 @@ let dissect (raw : string) : string * attribute list * bool =
     then String.sub raw ~pos:1 ~len:(len - 3) (* drop <   /> *)
     else String.sub raw ~pos:1 ~len:(len - 2) (* drop <   >  *)
   in
-  match String.lsplit2 body ~on:' ' with
-  | Some (name, attrs_str) -> name, parse_attrs attrs_str, self_closing
-  | None -> body, [] , self_closing
+  let rec first_whitespace index =
+    if index >= String.length body
+    then None
+    else if Char.is_whitespace body.[index]
+    then Some index
+    else first_whitespace (index + 1)
+  in
+  match first_whitespace 0 with
+  | Some index ->
+    let name = String.prefix body index in
+    let attrs_str = String.drop_prefix body (index + 1) in
+    name, parse_attrs attrs_str, self_closing
+  | None -> body, [], self_closing
 
 (* The buffer into which we accumulate the raw text of an unknown tag *)
 (*--------------------------------------------------------------------------*)

@@ -478,6 +478,22 @@ denial, unavailable approval, hook protocol failure, sandbox/spawn failure,
 timeouts, bounds, audit failure, cancellation, and nonzero behavior selected by
 the tool.
 
+Expected shell-tool invocation failures are returned to the model as structured
+JSON text instead of aborting response streaming:
+
+```json
+{
+  "error": {
+    "code": "idle_timed_out",
+    "message": "request was idle for 60.000s"
+  }
+}
+```
+
+The stable code supports programmatic recovery while the safe message explains
+the failure. Host cancellation and unexpected host exceptions retain their
+normal runtime behavior.
+
 Diagnostics use stable `shell.*` categories, safe messages, source paths where
 available, and redaction markers. Exception text is not a public protocol.
 

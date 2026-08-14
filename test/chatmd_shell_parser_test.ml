@@ -273,6 +273,50 @@ let equal_tool_ignoring_source
   Spec.Shell_tool_spec.equal { left with source = right.source } right
 ;;
 
+let%expect_test "multiline shell tags use XML whitespace after element names" =
+  Eio_main.run
+  @@ fun env ->
+  let elements =
+    CM.parse_chat_inputs
+      ~source:"multiline.chatmd"
+      ~dir:(Eio.Stdenv.cwd env)
+      {|<shell_access id="local-tools" extends="builtin:yolo@1" cwd="${workspace}"/>
+        <tool
+          name="ocaml-type-search"
+          type="shell"
+          mode="fixed"
+          runtime="local-tools"
+          description="Search OCaml documentation.">
+          <command program="sherlodoc">
+            <arg value="search"/>
+          </command>
+          <arguments
+            mode="required"
+            min_count="1"
+            max_count="1"/>
+        </tool>|}
+  in
+  List.iter elements ~f:(function
+    | CM.Shell_runtime runtime ->
+      printf "runtime=%s\n" (Spec.Shell_spec.Runtime_id.to_string runtime.id)
+    | CM.Tool (CM.Shell tool) ->
+      (match tool.mode with
+       | Fixed { model_arguments; _ } ->
+         printf
+           "tool=%s description=%s min=%d max=%d\n"
+           tool.name
+           (Option.value_exn tool.description)
+           (Option.value_exn model_arguments.min_count)
+           (Option.value_exn model_arguments.max_count)
+       | Structured | Chain | Raw _ | Script_file _ -> failwith "expected fixed tool")
+    | _ -> failwith "expected shell declarations");
+  [%expect
+    {|
+    runtime=local-tools
+    tool=ocaml-type-search description=Search OCaml documentation. min=1 max=1
+    |}]
+;;
+
 let%expect_test "shell declarations serialize without semantic loss" =
   Eio_main.run
   @@ fun env ->
