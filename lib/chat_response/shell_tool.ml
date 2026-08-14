@@ -136,6 +136,100 @@ let schema (tool : S.t) =
     ]
 ;;
 
+let fixed_target = function
+  | S.Compact command -> sprintf "the fixed shell command %S" command
+  | Argv { program = Some program; executable_ref = _; arguments = _ } ->
+    sprintf "the fixed executable %S" program
+  | Argv { program = None; executable_ref = Some executable_ref; arguments = _ } ->
+    sprintf "the fixed executable reference %S" executable_ref
+  | Argv { program = None; executable_ref = None; arguments = _ } ->
+    "the configured fixed shell command"
+;;
+
+let fixed_arguments_description (arguments : S.arguments) =
+  match arguments.mode with
+  | No_arguments -> "It accepts no model-supplied arguments."
+  | Optional_arguments ->
+    "When needed, pass additional literal argv elements in `arguments`."
+  | Required_arguments -> "Pass the required literal argv elements in `arguments`."
+;;
+
+let mode_description (tool : S.t) =
+  match tool.mode with
+  | Fixed { command; model_arguments } ->
+    sprintf
+      "Run %s through the configured shell runtime. %s"
+      (fixed_target command)
+      (fixed_arguments_description model_arguments)
+  | Structured ->
+    "Run one executable directly through the configured shell runtime. Set `program` to \
+     the executable and `arguments` to its argv elements. Arguments are passed literally \
+     without an implicit shell."
+  | Chain ->
+    "Run a parsed shell command chain through the configured shell runtime. Set \
+     `command` to the complete command chain; supported pipelines and sequencing or \
+     conditional operators are parsed into structured commands before execution."
+  | Raw _ ->
+    "Run raw shell source through the configured shell executable. Set `script` to the \
+     complete shell source text."
+  | Script_file script ->
+    sprintf
+      "Run the configured script file %S after its source and executable identities are \
+       verified. When needed, pass additional literal argv elements in `arguments`."
+      (Chatmd_shell_spec.Path_expr.to_string script.script)
+;;
+
+let stdin_description = function
+  | S.No_stdin -> ""
+  | Optional_stdin -> "Optional standard input may be supplied in `stdin`."
+  | Required_stdin -> "Supply the required standard input in `stdin`."
+;;
+
+let rationale_description = function
+  | S.No_rationale -> ""
+  | Optional_rationale ->
+    "An optional execution rationale may be supplied in `rationale`."
+  | Required_rationale -> "Supply an execution rationale in `rationale`."
+;;
+
+let result_description (tool : S.t) =
+  let output =
+    match tool.result with
+    | Combined -> "Returns finalized stdout followed by finalized stderr."
+    | Stdout -> "Returns finalized stdout; stderr remains diagnostic output."
+    | Structured_result ->
+      "Returns a structured JSON result containing status, sanitized output, runtime \
+       identity, and per-command metadata."
+  in
+  let nonzero =
+    match tool.nonzero with
+    | Result -> "Nonzero exits are returned as normal tool results."
+    | Error -> "A nonzero exit is returned as a tool error."
+  in
+  output ^ " " ^ nonzero
+;;
+
+let default_description (tool : S.t) =
+  [ mode_description tool
+  ; stdin_description tool.stdin
+  ; rationale_description tool.rationale
+  ; result_description tool
+  ; "Execution is governed by the configured runtime's command policy, approvals, \
+     sandboxing, resource limits, interceptors, output sanitization, secret redaction, \
+     and audit settings."
+  ]
+  |> List.filter ~f:(Fn.non String.is_empty)
+  |> String.concat ~sep:" "
+;;
+
+let model_description (tool : S.t) =
+  let default = default_description tool in
+  match Option.map tool.description ~f:String.strip with
+  | Some custom when not (String.is_empty custom) ->
+    Some (default ^ "\n\nAdditional tool guidance: " ^ custom)
+  | None | Some _ -> Some default
+;;
+
 let require_some code message = function
   | Some value -> value
   | None -> fail code message
@@ -241,7 +335,9 @@ let chain_request input =
 ;;
 
 let raw_request runtime source (spec : S.raw_shell) input =
-  let script = require_some "shell.tool_script_required" "script is required" input.script in
+  let script =
+    require_some "shell.tool_script_required" "script is required" input.script
+  in
   let executable =
     match Shell_runtime.Runtime.resolve_path runtime ~source spec.executable with
     | Ok path -> path
@@ -367,7 +463,7 @@ let create_exn registry (tool : S.t) =
 
       let name = tool.name
       let type_ = "function"
-      let description = tool.description
+      let description = model_description tool
       let parameters = schema tool
       let input_of_string = input_of_string
     end
@@ -376,8 +472,7 @@ let create_exn registry (tool : S.t) =
       (Ochat_function.create_streaming_function
          (module Definition)
          (fun ~invocation:_ input ->
-            Res.Tool_output.Output.Text
-              (run registry runtime tool prepared_script input)))
+            Res.Tool_output.Output.Text (run registry runtime tool prepared_script input)))
 ;;
 
 let create registry tool =

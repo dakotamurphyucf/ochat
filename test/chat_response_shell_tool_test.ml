@@ -169,6 +169,84 @@ let runtime_function runtime name =
     String.equal function_.Ochat_function.info.function_.name name)
 ;;
 
+let request_description function_ =
+  match Chat_response.Tool.convert_tools [ function_.Ochat_function.info ] with
+  | [ Openai.Responses.Request.Tool.Function { description = Some description; _ } ] ->
+    description
+  | [ Function { description = None; _ } ] ->
+    failwith "expected a model-visible description"
+  | [ Custom_function _ ] -> failwith "expected a function tool"
+  | _ -> failwith "expected exactly one tool"
+;;
+
+let description_source =
+  {|<shell_access id="yolo" extends="builtin:yolo@1"/>
+    <tool name="described_fixed" type="shell" mode="fixed" runtime="yolo"
+      command="/bin/echo" description="Print a caller-provided value."/>
+    <tool name="described_structured" type="shell" mode="structured" runtime="yolo"/>
+    <tool name="described_chain" type="shell" mode="chain" runtime="yolo"/>
+    <tool name="described_raw" type="shell" mode="raw" runtime="yolo"
+      executable="/bin/sh"/>
+    <tool name="described_script" type="shell" mode="script" runtime="yolo"
+      script="description-tool.sh" interpreter="/bin/sh"/>
+    <tool name="described_legacy" command="/bin/printf"
+      description="Format a caller-provided value."/>|}
+;;
+
+let%expect_test "shell modes publish default descriptions and append ChatMD guidance" =
+  Eio_main.run
+  @@ fun env ->
+  Eio.Switch.run
+  @@ fun sw ->
+  let root = Eio.Path.(Eio.Stdenv.cwd env / "_build" / "shell-tool-description") in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 root;
+  Eio.Path.save
+    ~create:(`Or_truncate 0o700)
+    Eio.Path.(root / "description-tool.sh")
+    "printf description\n";
+  let runtime =
+    agent_runtime
+      env
+      sw
+      root
+      description_source
+      Shell_runtime.Manifest_authorizer.assume_authorized
+      Shell_runtime.Approval_broker.Assume_approved
+    |> agent_runtime_or_fail
+  in
+  let check name mode_text custom_text =
+    let description = runtime_function runtime name |> request_description in
+    printf
+      "%s mode=%b security=%b custom=%b\n"
+      name
+      (String.is_substring description ~substring:mode_text)
+      (String.is_substring description ~substring:"command policy")
+      (Option.value_map
+         custom_text
+         ~default:
+           (not (String.is_substring description ~substring:"Additional tool guidance:"))
+         ~f:(fun custom ->
+           String.is_substring
+             description
+             ~substring:("Additional tool guidance: " ^ custom)))
+  in
+  check "described_fixed" "fixed shell command" (Some "Print a caller-provided value.");
+  check "described_structured" "one executable directly" None;
+  check "described_chain" "parsed shell command chain" None;
+  check "described_raw" "raw shell source" None;
+  check "described_script" "source and executable identities" None;
+  check "described_legacy" "fixed shell command" (Some "Format a caller-provided value.");
+  [%expect
+    {|
+    described_fixed mode=true security=true custom=true
+    described_structured mode=true security=true custom=true
+    described_chain mode=true security=true custom=true
+    described_raw mode=true security=true custom=true
+    described_script mode=true security=true custom=true
+    described_legacy mode=true security=true custom=true
+    |}]
+;;
+
 let%expect_test "fixed arguments remain literal argv" =
   Eio_main.run
   @@ fun env ->

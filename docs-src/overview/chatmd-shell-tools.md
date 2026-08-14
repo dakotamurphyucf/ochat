@@ -36,6 +36,42 @@ See also:
 Tool names must be unique in a model request. The referenced runtime is fully
 compiled and authorized before the tool is published.
 
+### Model-visible descriptions
+
+Every published shell tool receives a built-in, mode-aware description even
+when the declaration omits `description`. The built-in text tells the model:
+
+- whether the tool runs a fixed command, one structured executable, a parsed
+  command chain, raw shell source, or a verified script file;
+- which model-controlled fields to provide, including `arguments`, `program`,
+  `command`, `script`, `stdin`, and `rationale` when applicable;
+- how output and nonzero exits are returned; and
+- that execution remains governed by the runtime's configured policy,
+  approvals, sandboxing, limits, interceptors, sanitization, secret redaction,
+  and audit settings.
+
+The optional `description` attribute adds task-specific instructions; it does
+not replace the built-in usage contract. The final model-visible description
+is composed as:
+
+```text
+<built-in mode and runtime guidance>
+
+Additional tool guidance: <description attribute>
+```
+
+For example:
+
+```xml
+<tool name="search" type="shell" mode="fixed" runtime="readonly"
+  command="rg --json"
+  description="Search repository text and prefer concise patterns."/>
+```
+
+The model sees both the fixed-command input contract and the additional search
+guidance. This description affects only how the tool is presented to the
+model; it grants no authority and cannot widen runtime policy.
+
 Defaults:
 
 - `stdin="none"`

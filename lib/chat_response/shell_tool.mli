@@ -10,7 +10,11 @@ type error =
 
 (** [create registry tool] creates a shell function for any supported mode,
     bound to the exact authorized registry manifest. Script files are loaded
-    and fingerprinted before the function is published. *)
+    and fingerprinted before the function is published.
+
+    The published model description always includes a mode-aware input,
+    result, and runtime-security contract. A non-empty ChatMD [description]
+    is appended as additional tool guidance. *)
 val create
   :  Shell_runtime.Registry.t
   -> Chatmd_shell_spec.Shell_tool_spec.t
