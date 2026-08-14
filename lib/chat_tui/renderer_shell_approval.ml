@@ -4,8 +4,36 @@ module P = Renderer_shell_security_palette
 module B = Renderer_shell_border
 module S = Model.Shell_security_page_state
 
-let safe attr text = I.string attr (Util.sanitize ~strip:true text)
-let row ~width attr text = safe attr text |> I.hsnap ~align:`Left width
+let safe attr text = I.string attr (Util.sanitize ~strip:false text)
+
+let opaque ~width background image =
+  let width = Int.max 0 width in
+  let foreground = I.hsnap ~align:`Left width image in
+  let background = I.string background (String.make width ' ') in
+  I.(foreground </> background)
+;;
+
+let row ?(background = P.surface) ~width attr text =
+  safe A.(background ++ attr) text |> opaque ~width background
+;;
+
+let wrapped_rows ?background ~width ?(prefix = "") attr text =
+  let limit = Int.max 1 (width - String.length prefix) in
+  let lines =
+    Util.sanitize ~strip:true text
+    |> Util.wrap_line ~limit
+    |> function
+    | [] -> [ "" ]
+    | lines -> lines
+  in
+  List.map lines ~f:(fun line -> row ?background ~width attr (prefix ^ line))
+;;
+
+let modal_width screen_width =
+  let available = Int.max 1 (screen_width - 4) in
+  let responsive = Int.max 78 (screen_width * 3 / 4) in
+  Int.min available (Int.min 120 responsive)
+;;
 
 let choice_enabled request = function
   | choice ->
@@ -46,20 +74,23 @@ let choices (modal : S.approval_modal) =
 
 let border_line ~width left fill right =
   let middle = String.concat (List.init (Int.max 0 (width - 2)) ~f:(fun _ -> fill)) in
-  row ~width P.border (left ^ middle ^ right)
+  safe P.outline (left ^ middle ^ right) |> I.hsnap ~align:`Left width
 ;;
 
 let framed ~width body =
   let border = B.current () in
+  let inner = Int.max 0 (width - 4) in
   I.vcat
     ([ border_line ~width border.top_left border.horizontal border.top_right ]
      @ List.map body ~f:(fun image ->
+       let image = opaque ~width:inner P.surface image in
        I.hcat
-         [ safe P.border (border.vertical ^ " ")
+         [ safe P.outline border.vertical
+         ; I.string P.surface " "
          ; image
-         ; safe P.border (" " ^ border.vertical)
-         ]
-       |> I.hsnap ~align:`Left width)
+         ; I.string P.surface " "
+         ; safe P.outline border.vertical
+         ])
      @ [ border_line ~width border.bottom_left border.horizontal border.bottom_right ])
 ;;
 
@@ -76,6 +107,24 @@ let request_kind = function
   | Shell_access.Context.Structured -> "structured"
   | Script_file -> "script file"
   | Raw_shell -> "raw shell"
+;;
+
+let heading ~inner context =
+  let title = "Shell command needs approval" in
+  let risk = risk_label context in
+  let gap = Int.max 1 (inner - String.length title - String.length risk) in
+  row ~width:inner P.title (title ^ String.make gap ' ' ^ risk)
+;;
+
+let detail_rows ~inner details =
+  List.concat_map details ~f:(fun (label, value) ->
+    row ~width:inner P.secondary label
+    :: wrapped_rows ~width:inner ~prefix:"  " P.primary value)
+;;
+
+let command_rows ~inner command =
+  row ~background:P.elevated ~width:inner P.secondary "  Command"
+  :: wrapped_rows ~background:P.elevated ~width:inner ~prefix:"  " P.primary command
 ;;
 
 let choose_body ~inner (modal : S.approval_modal) =
@@ -96,52 +145,39 @@ let choose_body ~inner (modal : S.approval_modal) =
     ]
   in
   let details =
-    if not modal.details_expanded
-    then []
-    else
-      detail_lines
-      |> List.concat_map ~f:(fun (label, value) ->
-        [ row ~width:inner P.secondary label; row ~width:inner P.primary ("  " ^ value) ])
+    if not modal.details_expanded then [] else detail_rows ~inner detail_lines
   in
   let more =
     if modal.more_options
     then
-      [ row
-          ~width:inner
-          P.amber
-          "Broader grants require exact identity checks and can be revoked."
-      ; row
+      wrapped_rows
+        ~width:inner
+        P.amber
+        "Broader grants require exact identity checks and can be revoked."
+      @ wrapped_rows
           ~width:inner
           P.secondary
           "Prefix uses the current argv as its prefix; durable survives restart."
-      ]
     else []
   in
-  [ row
-      ~width:inner
-      P.title
-      (sprintf
-         "Shell command needs approval                         %s"
-         (risk_label context))
+  [ heading ~inner context
   ; row
       ~width:inner
       P.secondary
       (sprintf "Request %s · %d waiting" request.id modal.queue_count)
   ; row ~width:inner P.surface ""
-  ; row ~width:inner P.secondary "Command"
-  ; row ~width:inner P.primary ("  " ^ approval.display_command)
-  ; row ~width:inner P.secondary (sprintf "%s · %s" context.cwd effects)
-  ; row ~width:inner P.surface ""
   ]
+  @ command_rows ~inner approval.display_command
+  @ wrapped_rows ~width:inner P.secondary (sprintf "%s · %s" context.cwd effects)
+  @ [ row ~width:inner P.surface "" ]
   @ details
   @ [ row ~width:inner P.surface ""; choices modal |> I.hsnap ~align:`Left inner ]
   @ more
-  @ [ row ~width:inner P.surface ""
-    ; row
-        ~width:inner
-        P.secondary
-        "Enter approve   d deny   m more options   i details   Esc deny"
-    ]
+  @ [ row ~width:inner P.surface "" ]
+  @ wrapped_rows
+      ~width:inner
+      P.secondary
+      "Enter approve   d deny   m more options   i details   Esc deny"
 ;;
 
 let confirmation_body ~inner (modal : S.approval_modal) =
@@ -174,8 +210,7 @@ let confirmation_body ~inner (modal : S.approval_modal) =
   ; row ~width:inner P.amber description
   ; row ~width:inner P.surface ""
   ]
-  @ List.concat_map scope_lines ~f:(fun (label, value) ->
-    [ row ~width:inner P.secondary label; row ~width:inner P.primary ("  " ^ value) ])
+  @ detail_rows ~inner scope_lines
   @ [ row ~width:inner P.surface ""
     ; row ~width:inner P.secondary "Enter confirm trust   Esc go back"
     ]
@@ -304,7 +339,7 @@ let position_origin ~screen_width ~screen_height modal_image =
 ;;
 
 let cursor ~size:(screen_width, screen_height) ~model =
-  let width = Int.max 1 (Int.min 78 (screen_width - 2)) in
+  let width = modal_width screen_width in
   match Model.shell_approval_modal model with
   | Some ({ stage = S.Deny_reason editor; _ } as modal) ->
     let left, top = position_origin ~screen_width ~screen_height (card ~width modal) in
@@ -329,19 +364,19 @@ let overlay ~size:(screen_width, screen_height) ~model base =
        (match Model.moderator_modal model with
         | None -> base
         | Some modal ->
-          let width = Int.max 1 (Int.min 78 (screen_width - 2)) in
+          let width = modal_width screen_width in
           let positioned =
             moderator_card ~width modal |> position ~screen_width ~screen_height
           in
           I.(positioned </> base))
      | Some modal ->
-       let width = Int.max 1 (Int.min 78 (screen_width - 2)) in
+       let width = modal_width screen_width in
        let positioned =
          grant_revoke_card ~width modal |> position ~screen_width ~screen_height
        in
        I.(positioned </> base))
   | Some modal ->
-    let width = Int.max 1 (Int.min 78 (screen_width - 2)) in
+    let width = modal_width screen_width in
     let modal_image = card ~width modal in
     let positioned = position ~screen_width ~screen_height modal_image in
     I.(positioned </> base)

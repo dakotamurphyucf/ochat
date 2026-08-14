@@ -4,6 +4,7 @@ val background : Notty.A.t
 val surface : Notty.A.t
 val elevated : Notty.A.t
 val border : Notty.A.t
+val outline : Notty.A.t
 val primary : Notty.A.t
 val secondary : Notty.A.t
 val blue : Notty.A.t

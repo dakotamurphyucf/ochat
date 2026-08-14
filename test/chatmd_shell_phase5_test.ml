@@ -745,6 +745,48 @@ let make_model () =
     ~cmdline_cursor:0
 ;;
 
+let render_image ~width ~height image =
+  let buffer = Buffer.create (width * height) in
+  Notty.Render.to_buffer buffer Notty.Cap.dumb (0, 0) (width, height) image;
+  Buffer.contents buffer
+;;
+
+let approval_with_command command =
+  let request = approval_ui_request () in
+  let approval = { request.request with display_command = command } in
+  { request with request = approval }
+;;
+
+let modal_interior line =
+  let line = String.substr_replace_all line ~pattern:"│" ~with_:"|" in
+  match String.index line '|', String.rindex line '|' with
+  | Some left, Some right when right > left ->
+    Some (String.sub line ~pos:(left + 1) ~len:(right - left - 1))
+  | None, _ | _, None | Some _, Some _ -> None
+;;
+
+let%test_unit "approval modal is opaque and wraps wide commands" =
+  let width, height = 140, 32 in
+  let model = make_model () in
+  let command =
+    "printf first-segment && printf second-segment && printf third-segment && printf \
+     fourth-segment && printf final-tail-marker"
+  in
+  Chat_tui.Model.open_shell_approval_modal
+    model
+    ~request:(approval_with_command command)
+    ~queue_count:1;
+  let base_row = Notty.I.string Notty.A.empty (String.make width '@') in
+  let base = Notty.I.vcat (List.init height ~f:(fun _ -> base_row)) in
+  let rendered =
+    Chat_tui.Renderer_shell_approval.overlay ~size:(width, height) ~model base
+    |> render_image ~width ~height
+  in
+  let modal_lines = String.split_lines rendered |> List.filter_map ~f:modal_interior in
+  assert (String.is_substring rendered ~substring:"final-tail-marker");
+  assert (not (List.exists modal_lines ~f:(fun line -> String.contains line '@')))
+;;
+
 let%test_unit "shell page and modal preserve draft; broad grants require confirmation" =
   let model = make_model () in
   let draft =
