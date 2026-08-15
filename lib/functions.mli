@@ -49,6 +49,21 @@ val add_line_numbers : string -> string
 
 (** {1 Filesystem helpers} *)
 
+type read_file_root =
+  { id : string
+  ; path : Eio.Fs.dir_ty Eio.Path.t
+  ; description : string option
+  }
+
+(** [read_file_root ~id ~path ?description ()] defines one named directory
+    exposed by a scoped [read_file] tool. *)
+val read_file_root
+  :  id:string
+  -> path:Eio.Fs.dir_ty Eio.Path.t
+  -> ?description:string
+  -> unit
+  -> read_file_root
+
 (** Register the [`read_file`] tool.
 
     • **Schema** – expects an argument object with:
@@ -56,6 +71,7 @@ val add_line_numbers : string -> string
       {ul
       {- [file] (string) – path to read (preferred field);}
       {- [path] (string) – legacy alias accepted by the decoder;}
+      {- [root] (string, optional) – named root for scoped readers;}
       {- [offset] (int, optional) – 0-based line offset to start reading from;}
       {- [line_count] (int, optional) – number of lines to return.}}
 
@@ -68,6 +84,20 @@ val add_line_numbers : string -> string
       The tool refuses to read binary files (best-effort heuristic) and returns
       a human-readable error message instead. *)
 val get_contents : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
+
+(** [get_contents_scoped ~fs ~dir ~roots ?description ()] registers a
+    [read_file] tool restricted to canonical descendants of [roots]. Relative
+    paths without a named root resolve against [dir] and must still be inside
+    one of [roots]. The generated tool description and JSON schema enumerate
+    every root identifier and its resolved native path. Root and target paths
+    are canonicalized so symlinks cannot escape the configured directories. *)
+val get_contents_scoped
+  :  fs:Eio.Fs.dir_ty Eio.Path.t
+  -> dir:Eio.Fs.dir_ty Eio.Path.t
+  -> roots:read_file_root list
+  -> ?description:string
+  -> unit
+  -> Ochat_function.t
 
 (** Register the [`get_url_content`] tool.
 

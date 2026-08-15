@@ -43,99 +43,348 @@ let is_binary_file ~dir path =
   not (is_text content)
 ;;
 
-let get_contents ~dir : Ochat_function.t =
-  let f (path, offset, line_count) =
-    let read () =
-      if is_binary_file ~dir path
-      then
-        failwith
-          (Printf.sprintf
-             "Refusing to read binary file: %s"
-             Eio.Path.(native_exn (dir / path)));
-      Eio.Path.with_open_in Eio.Path.(dir / path)
-      @@ fun flow ->
-      try
-        let r = Eio.Buf_read.of_flow flow ~max_size:1_000_000 in
-        let total_bytes_limit = 380_928 in
-        let taken_bytes = ref 0 in
-        let truncated = ref false in
-        let start_line_0 = Option.value ~default:0 offset in
-        let requested_count = line_count in
-        let current_line_0 = ref 0 in
-        let returned_lines = ref 0 in
-        let total_lines_in_file = ref 0 in
-        let collected = ref [] in
-        let push_line s =
-          collected := s :: !collected;
-          incr returned_lines
-        in
-        (* Read the whole file as a line stream once so we can compute total lines
+type read_file_root =
+  { id : string
+  ; path : Eio.Fs.dir_ty Eio.Path.t
+  ; description : string option
+  }
+
+type read_file_input =
+  { file : string
+  ; root : string option
+  ; offset : int option
+  ; line_count : int option
+  }
+
+let read_file_root ~id ~path ?description () = { id; path; description }
+
+let read_file_input_of_string value =
+  let json = Jsonaf.of_string value in
+  let file =
+    Option.first_some (Jsonaf.member "file" json) (Jsonaf.member "path" json)
+    |> Option.map ~f:Jsonaf.string_exn
+    |> Option.value ~default:""
+  in
+  { file
+  ; root = Option.map (Jsonaf.member "root" json) ~f:Jsonaf.string_exn
+  ; offset = Option.map (Jsonaf.member "offset" json) ~f:Jsonaf.int_exn
+  ; line_count = Option.map (Jsonaf.member "line_count" json) ~f:Jsonaf.int_exn
+  }
+;;
+
+let read_file_parameters roots =
+  let root_property =
+    match roots with
+    | [] -> []
+    | roots ->
+      [ ( "root"
+        , `Object
+            [ "type", `String "string"
+            ; "enum", `Array (List.map roots ~f:(fun root -> `String root.id))
+            ; ( "description"
+              , `String
+                  "Named allowed root. Omit to resolve file relative to ochat's launch \
+                   directory; the resulting path must still be inside an allowed root." )
+            ] )
+      ]
+  in
+  `Object
+    [ "type", `String "object"
+    ; ( "properties"
+      , `Object
+          ([ ( "file"
+             , `Object
+                 [ "type", `String "string"
+                 ; ( "description"
+                   , `String
+                       "Path to an existing regular UTF-8 text file. When root is \
+                        provided, this path must be relative to that root." )
+                 ] )
+           ; ( "offset"
+             , `Object
+                 [ "type", `String "integer"
+                 ; "minimum", `Number "0"
+                 ; ( "description"
+                   , `String
+                       "Optional 0-based line offset. Omit it to start at the first line."
+                   )
+                 ] )
+           ; ( "line_count"
+             , `Object
+                 [ "type", `String "integer"
+                 ; "minimum", `Number "0"
+                 ; ( "description"
+                   , `String
+                       "Optional maximum number of lines to return. Omit it to return \
+                        the rest of the file, subject to internal output limits." )
+                 ] )
+           ]
+           @ root_property) )
+    ; "required", `Array [ `String "file" ]
+    ; "additionalProperties", `False
+    ]
+;;
+
+let root_description root =
+  let suffix =
+    Option.value_map root.description ~default:"" ~f:(fun value -> " — " ^ value)
+  in
+  sprintf "- %s: %s%s" root.id (Eio.Path.native_exn root.path) suffix
+;;
+
+let read_file_description roots custom =
+  let base =
+    "Reads a UTF-8 text file and returns a line-range header followed by its contents.\n\
+     Relative file paths without root are resolved against the directory where ochat was \
+     launched.\n\n\
+     Parameters:\n\
+     - file: Path to the file to read.\n\
+     - offset: Optional 0-based line offset. Omit it to start at line 0.\n\
+     - line_count: Optional maximum number of lines to return. Omit it to return the \
+     rest of the file, subject to internal output limits."
+  in
+  let roots =
+    match roots with
+    | [] -> ""
+    | roots ->
+      "\n\nAllowed roots:\n"
+      ^ String.concat ~sep:"\n" (List.map roots ~f:root_description)
+      ^ "\n\n\
+         To select a named root, pass root and a relative file path. Absolute paths are \
+         accepted only when they remain inside an allowed root. Paths resolved from the \
+         launch directory must also remain inside an allowed root."
+  in
+  base ^ roots ^ Option.value_map custom ~default:"" ~f:(fun value -> "\n\n" ^ value)
+;;
+
+let is_binary_path path =
+  Eio.Path.with_open_in path
+  @@ fun flow ->
+  Eio.Buf_read.parse_exn ~max_size:1_000_000 Eio.Buf_read.take_all flow |> is_text |> not
+;;
+
+let read_file_contents ~display_path path offset line_count =
+  let read () =
+    if is_binary_path path
+    then
+      failwith
+        (Printf.sprintf "Refusing to read binary file: %s" (Eio.Path.native_exn path));
+    Eio.Path.with_open_in path
+    @@ fun flow ->
+    try
+      let r = Eio.Buf_read.of_flow flow ~max_size:1_000_000 in
+      let total_bytes_limit = 380_928 in
+      let taken_bytes = ref 0 in
+      let truncated = ref false in
+      let start_line_0 = Option.value ~default:0 offset in
+      let requested_count = line_count in
+      let current_line_0 = ref 0 in
+      let returned_lines = ref 0 in
+      let total_lines_in_file = ref 0 in
+      let collected = ref [] in
+      let push_line s =
+        collected := s :: !collected;
+        incr returned_lines
+      in
+      (* Read the whole file as a line stream once so we can compute total lines
            and also return the requested slice, while still honoring the byte cap. *)
-        let lines = r |> Eio.Buf_read.(seq line) in
-        Seq.iter
-          (fun s ->
-             (* Always count total lines, even if we don't return them. *)
-             incr total_lines_in_file;
-             let this_line_0 = !current_line_0 in
-             incr current_line_0;
-             let should_consider =
-               this_line_0 >= start_line_0
-               &&
-               match requested_count with
-               | None -> true
-               | Some n -> !returned_lines < Int.max 0 n
-             in
-             if should_consider
-             then
-               if
-                 (* Enforce byte limit while building returned payload *)
-                 !taken_bytes < total_bytes_limit
-               then (
-                 taken_bytes := !taken_bytes + String.length s;
-                 if !taken_bytes <= total_bytes_limit
-                 then push_line s
-                 else truncated := true)
+      let lines = r |> Eio.Buf_read.(seq line) in
+      Seq.iter
+        (fun s ->
+           (* Always count total lines, even if we don't return them. *)
+           incr total_lines_in_file;
+           let this_line_0 = !current_line_0 in
+           incr current_line_0;
+           let should_consider =
+             this_line_0 >= start_line_0
+             &&
+             match requested_count with
+             | None -> true
+             | Some n -> !returned_lines < Int.max 0 n
+           in
+           if should_consider
+           then
+             if
+               (* Enforce byte limit while building returned payload *)
+               !taken_bytes < total_bytes_limit
+             then (
+               taken_bytes := !taken_bytes + String.length s;
+               if !taken_bytes <= total_bytes_limit
+               then push_line s
                else truncated := true)
-          lines;
-        let result_body = List.rev !collected |> String.concat ~sep:"\n" in
-        let header =
-          (* ripgrep-like header: file:START-END:
+             else truncated := true)
+        lines;
+      let result_body = List.rev !collected |> String.concat ~sep:"\n" in
+      let header =
+        (* ripgrep-like header: file:START-END:
              Keep the first line in "file:line:..." shape so terminals can linkify it.
              Put extra metadata on a second line that won't interfere with link selection. *)
-          let start_1 = start_line_0 + 1 in
-          let end_1 =
-            (* If we returned 0 lines, show an empty range as START-START (1-based). *)
-            if !returned_lines = 0 then start_1 else start_line_0 + !returned_lines
-          in
-          Printf.sprintf
-            "%s:%d-%d:\n[total_lines=%d]\n"
-            path
-            start_1
-            end_1
-            !total_lines_in_file
+        let start_1 = start_line_0 + 1 in
+        let end_1 =
+          (* If we returned 0 lines, show an empty range as START-START (1-based). *)
+          if !returned_lines = 0 then start_1 else start_line_0 + !returned_lines
         in
-        let result = header ^ result_body in
-        if !truncated
-        then (
-          let remaining_lines =
-            Int.max 0 (!total_lines_in_file - (start_line_0 + !returned_lines))
-          in
-          Printf.sprintf
-            "%s\n\n---\n[File truncated: %d more lines not shown]"
-            result
-            remaining_lines)
-        else result
-      with
-      | Eio.Exn.Io _ as ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
-    in
-    match read () with
-    | res -> res
-    | exception ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
+        Printf.sprintf
+          "%s:%d-%d:\n[total_lines=%d]\n"
+          display_path
+          start_1
+          end_1
+          !total_lines_in_file
+      in
+      let result = header ^ result_body in
+      if !truncated
+      then (
+        let remaining_lines =
+          Int.max 0 (!total_lines_in_file - (start_line_0 + !returned_lines))
+        in
+        Printf.sprintf
+          "%s\n\n---\n[File truncated: %d more lines not shown]"
+          result
+          remaining_lines)
+      else result
+    with
+    | Eio.Exn.Io _ as ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
+  in
+  match read () with
+  | res -> res
+  | exception ex -> Fmt.str "error running read_file: %a" Eio.Exn.pp ex
+;;
+
+let create_read_file ~description ~parameters resolve =
+  let module M : Ochat_function.Def with type input = read_file_input = struct
+    type input = read_file_input
+
+    let name = "read_file"
+    let type_ = "function"
+    let description = Some description
+    let parameters = parameters
+    let input_of_string = read_file_input_of_string
+  end
   in
   Ochat_function.create_function
-    (module Definitions.Get_contents)
+    (module M)
     ~strict:false
-    (fun args -> Output.Text (f args))
+    (fun input ->
+       let input_error =
+         if Option.exists input.offset ~f:(fun value -> value < 0)
+         then Some "offset must be non-negative"
+         else if Option.exists input.line_count ~f:(fun value -> value < 0)
+         then Some "line_count must be non-negative"
+         else None
+       in
+       match input_error with
+       | Some message -> Output.Text ("error running read_file: " ^ message)
+       | None ->
+         (match resolve input with
+          | Error message -> Output.Text ("error running read_file: " ^ message)
+          | Ok (display_path, path) ->
+            Output.Text
+              (read_file_contents ~display_path path input.offset input.line_count)))
+;;
+
+let get_contents ~dir : Ochat_function.t =
+  let resolve input = Ok (input.file, Eio.Path.(dir / input.file)) in
+  create_read_file
+    ~description:(read_file_description [] None)
+    ~parameters:(read_file_parameters [])
+    resolve
+;;
+
+type canonical_read_root =
+  { configured : read_file_root
+  ; canonical_path : string
+  }
+
+let absolute_native_path path =
+  let native = Eio.Path.native_exn path in
+  if Filename.is_relative native
+  then Filename.concat (Stdlib.Sys.getcwd ()) native
+  else native
+;;
+
+let canonical_read_root ~fs configured =
+  { configured
+  ; canonical_path =
+      Shell_access.Path_util.canonical ~fs (absolute_native_path configured.path)
+  }
+;;
+
+let path_is_under ~root path =
+  String.equal root path
+  || String.is_prefix
+       path
+       ~prefix:(if String.equal root "/" then "/" else root ^ Filename.dir_sep)
+;;
+
+let candidate_path ~fs ~dir roots input =
+  match input.root with
+  | None ->
+    Ok
+      (if Filename.is_relative input.file
+       then Eio.Path.(dir / input.file)
+       else Eio.Path.(fs / input.file))
+  | Some id ->
+    (match List.find roots ~f:(fun root -> String.equal root.configured.id id) with
+     | None -> Error (sprintf "unknown root %S" id)
+     | Some root when not (Filename.is_relative input.file) ->
+       Error "file must be relative when root is provided"
+     | Some root -> Ok Eio.Path.(root.configured.path / input.file))
+;;
+
+let regular_file path =
+  match Eio.Path.kind ~follow:true path with
+  | `Regular_file -> Ok ()
+  | `Not_found -> Error "file does not exist"
+  | ( `Unknown
+    | `Fifo
+    | `Character_special
+    | `Directory
+    | `Block_device
+    | `Symbolic_link
+    | `Socket ) as kind ->
+    Error (Fmt.str "refusing non-regular file (%a)" Eio.File.Stat.pp_kind kind)
+;;
+
+let scoped_resolver ~fs ~dir roots input =
+  if String.is_empty input.file
+  then Error "file must not be empty"
+  else if String.mem input.file '\000'
+  then Error "file must not contain NUL"
+  else
+    Result.bind (candidate_path ~fs ~dir roots input) ~f:(fun candidate ->
+      Result.try_with (fun () ->
+        Shell_access.Path_util.canonical ~fs (absolute_native_path candidate))
+      |> Result.map_error ~f:Exn.to_string
+      |> Result.bind ~f:(fun canonical_path ->
+        if
+          not
+            (List.exists roots ~f:(fun root ->
+               path_is_under ~root:root.canonical_path canonical_path))
+        then Error "requested file is outside the configured read roots"
+        else (
+          let path = Eio.Path.(fs / canonical_path) in
+          Result.map (regular_file path) ~f:(fun () -> input.file, path))))
+;;
+
+let get_contents_scoped ~fs ~dir ~roots ?description () =
+  if List.is_empty roots then invalid_arg "get_contents_scoped: roots must not be empty";
+  List.iter roots ~f:(fun root ->
+    if String.is_empty (String.strip root.id)
+    then invalid_arg "get_contents_scoped: root ids must not be empty");
+  (match
+     List.find_a_dup (List.map roots ~f:(fun root -> root.id)) ~compare:String.compare
+   with
+   | None -> ()
+   | Some id -> invalid_argf "get_contents_scoped: duplicate root id %S" id ());
+  let canonical_roots = List.map roots ~f:(canonical_read_root ~fs) in
+  let description_roots =
+    List.map canonical_roots ~f:(fun root ->
+      { root.configured with path = Eio.Path.(fs / root.canonical_path) })
+  in
+  create_read_file
+    ~description:(read_file_description description_roots description)
+    ~parameters:(read_file_parameters roots)
+    (scoped_resolver ~fs ~dir canonical_roots)
 ;;
 
 let append_to_file ~dir : Ochat_function.t =

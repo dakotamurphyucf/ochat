@@ -38,11 +38,15 @@ below.
 | Name | Purpose | Source |
 |------|---------|--------|
 | `echo` | Returns the supplied text verbatim. | Internal demo helper |
-| `apply_patch` | Apply a textual V4A diff/patch to the repository. | [`Functions.apply_patch`](../lib/functions/functions.doc.md) |
-| `read_dir` | List the contents of a directory. | [`Functions.read_dir`](../lib/functions/functions.doc.md) |
-| `get_contents` | Read a file and return its contents. | [`Functions.get_contents`](../lib/functions/functions.doc.md) |
-| `webpage_to_markdown` | Download a web page and convert it to Markdown. | [`Functions.webpage_to_markdown`](../lib/functions/functions.doc.md) |
-| `meta_refine` | Refine a *meta-prompt* using LLM-backed heuristics. | [`Functions.meta_refine`](../lib/functions/functions.doc.md) |
+| `apply_patch` | Apply a textual V4A diff/patch to the repository. | [`Functions.apply_patch`](../lib/functions.doc.md) |
+| `read_dir` | List the contents of a directory. | [`Functions.read_dir`](../lib/functions.doc.md) |
+| `get_contents` | Read a file and return its contents. | [`Functions.get_contents`](../lib/functions.doc.md) |
+| `webpage_to_markdown` | Download a web page and convert it to Markdown. | [`Functions.webpage_to_markdown`](../lib/functions.doc.md) |
+| `meta_refine` | Refine a *meta-prompt* using LLM-backed heuristics. | [`Functions.meta_refine`](../lib/functions.doc.md) |
+
+The MCP server registers its `get_contents` tool directly from the OCaml
+library. Nested `<read>` roots in a ChatMD prompt configure that prompt's
+agent-side `read_file` tool; they do not alter this server-wide MCP tool.
 
 Every prompt file discovered under the directory referenced by
 `$MCP_PROMPTS_DIR` (or `./prompts` when the variable is unset) is also
@@ -278,4 +282,3 @@ they terminate automatically when the main service shuts down.
 ---
 
 © The documentation is released into the public domain.  No warranties.
-

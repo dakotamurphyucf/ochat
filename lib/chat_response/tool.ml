@@ -2,16 +2,18 @@
 
     This module turns a ChatMarkdown [`<tool …/>`] declaration into a
     runtime {!Ochat_function.t} that can be submitted to the *OpenAI
-    function-calling API*.  The helper covers **four** independent
+    function-calling API*.  The helper covers **five** independent
     back-ends:
 
     1. {b Built-ins} – OCaml functions hard-coded in {!Functions}
        (e.g. ["apply_patch"], ["fork"], …).
-    2. {b Custom shell commands} – `{<tool command="grep" …/>}` wrappers
+    2. {b Scoped file readers} – configured [`read_file`] roots resolved
+       through the live host filesystem capabilities.
+    3. {b Custom shell commands} – `{<tool command="grep" …/>}` wrappers
        that spawn an arbitrary process inside the Eio sandbox.
-    3. {b Agent prompts} – nested ChatMarkdown agents executed through
+    4. {b Agent prompts} – nested ChatMarkdown agents executed through
        the same driver stack.
-    4. {b Remote MCP tools} – functions discovered dynamically over the
+    5. {b Remote MCP tools} – functions discovered dynamically over the
        Model-Context-Protocol network.
 
     The public surface is intentionally small – only the dispatcher
@@ -48,7 +50,7 @@ let agent_page_classification (decl : CM.tool) =
   | CM.Agent { name; _ } -> Some (name, Tool_execution_event.Subagent)
   | CM.Custom { name; _ } -> Some (name, Tool_execution_event.Shell_script)
   | CM.Shell { name; _ } -> Some (name, Tool_execution_event.Shell_script)
-  | CM.Builtin _ | CM.Mcp _ -> None
+  | CM.Builtin _ | CM.Read_file _ | CM.Mcp _ -> None
 ;;
 
 module Res = Openai.Responses
@@ -345,7 +347,40 @@ let mcp_tool
     @raise Failure if the declaration references an unknown built-in
            tool name.
 *)
-let of_declaration ?shell_registry ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
+let read_file_root host source (root : Chatmd_read_file_spec.Root.t) =
+  match Shell_runtime.Host.resolve_existing_directory host ~source root.path with
+  | Ok path -> Functions.read_file_root ~id:root.id ~path ?description:root.description ()
+  | Error error -> failwithf "[%s] %s" error.code error.message ()
+;;
+
+let configured_read_file host ctx (specification : Chatmd_read_file_spec.t) =
+  let roots =
+    List.map specification.roots ~f:(read_file_root host specification.source)
+  in
+  Functions.get_contents_scoped
+    ~fs:(Eio.Stdenv.fs (Ctx.env ctx))
+    ~dir:(Ctx.tool_dir ctx)
+    ~roots
+    ?description:specification.description
+    ()
+;;
+
+let default_read_file ctx =
+  let root =
+    Functions.read_file_root
+      ~id:"cwd"
+      ~path:(Ctx.tool_dir ctx)
+      ~description:"ochat launch directory"
+      ()
+  in
+  Functions.get_contents_scoped
+    ~fs:(Eio.Stdenv.fs (Ctx.env ctx))
+    ~dir:(Ctx.tool_dir ctx)
+    ~roots:[ root ]
+    ()
+;;
+
+let of_declaration ?shell_registry ?host ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.tool)
   : Ochat_function.t list
   =
   match decl with
@@ -355,7 +390,7 @@ let of_declaration ?shell_registry ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.to
      | "read_dir" -> [ Functions.read_dir ~dir:(Ctx.tool_dir ctx) ]
      | "append_to_file" -> [ Functions.append_to_file ~dir:(Ctx.tool_dir ctx) ]
      | "find_and_replace" -> [ Functions.find_and_replace ~dir:(Ctx.tool_dir ctx) ]
-     | "get_contents" | "read_file" -> [ Functions.get_contents ~dir:(Ctx.tool_dir ctx) ]
+     | "get_contents" | "read_file" -> [ default_read_file ctx ]
      | "webpage_to_markdown" ->
        [ Functions.webpage_to_markdown
            ~env:(Ctx.env ctx)
@@ -380,6 +415,14 @@ let of_declaration ?shell_registry ~sw ~(ctx : _ Ctx.t) ~run_agent (decl : CM.to
      | "import_image" -> [ Functions.import_image ~dir:(Ctx.tool_dir ctx) ]
      | "meta_refine" -> [ Functions.meta_refine ~env:(Ctx.env ctx) ]
      | other -> failwithf "Unknown built-in tool: %s" other ())
+  | CM.Read_file specification ->
+    let host =
+      Option.value_or_thunk host ~default:(fun () ->
+        failwith
+          "Configured read_file declarations require a live shell host for path \
+           resolution")
+    in
+    [ configured_read_file host ctx specification ]
   | CM.Custom tool ->
     failwithf
       "Legacy shell tool %S must be constructed through Agent_runtime"

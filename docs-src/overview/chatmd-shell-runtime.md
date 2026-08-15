@@ -177,6 +177,13 @@ Unknown variables are fatal. Expansion happens before canonicalization and
 manifest hashing. Ordinary attributes do not perform arbitrary `${env:KEY}`
 substitution; use explicit environment and secret declarations.
 
+Configured [`read_file`](tools.md#configuring-read_file-roots) roots use the
+same path-expression variables. In `chat-tui` and `ochat chat-completion`,
+`${workspace}` and `${tool_dir}` are the process launch directory,
+`${prompt_dir}` is the root prompt directory, and `${source_dir}` follows the
+file containing the declaration. The host may supply different values when
+Ochat is embedded as a library.
+
 ## `<shell_access>` root
 
 ```xml

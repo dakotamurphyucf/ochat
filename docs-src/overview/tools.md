@@ -34,7 +34,8 @@ Tools are **opt-in**: the model can only call what your prompt declares via `<to
 This set covers most real-world sessions (codebase navigation, retrieval, and safe edits):
 
 - **`apply_patch`** – atomic multi-file edits in a structured patch format.
-- **`read_file`** *(declare as `read_file` or `get_contents`)* – safe file reads with truncation + optional offset.
+- **`read_file`** *(declare as `read_file` or `get_contents`)* – root-scoped
+  text reads with truncation and optional line ranges.
 - **`read_directory`** *(declare as `read_dir`)* – list directory entries without guessing paths.
 - **`webpage_to_markdown`** – ingest web pages and GitHub blob URLs as Markdown.
 - **`index_markdown_docs` + `markdown_search`** – semantic search over project Markdown docs.
@@ -55,7 +56,7 @@ Some tools have **declaration aliases** for compatibility.
 |---|---|---|---|
 | `apply_patch` | `apply_patch` | repo | Apply an atomic V4A patch (adds/updates/deletes/moves text files). |
 | `read_dir` | `read_directory` | fs | List directory entries (non-recursive) as newline-delimited text. |
-| `read_file` **or** `get_contents` | `read_file` | fs | Read a UTF-8 text file with truncation and optional `offset`. Refuses binary files. |
+| `read_file` **or** `get_contents` | `read_file` | fs | Read a regular UTF-8 text file confined to configured roots, with truncation and optional `offset`/`line_count`. |
 | `append_to_file` | `append_to_file` | fs | Append text to a file (inserts a newline before the appended content). |
 | `find_and_replace` | `find_and_replace` | fs | Replace an exact substring in a file (single or all occurrences). |
 | `webpage_to_markdown` | `webpage_to_markdown` | web | Download a page and convert it to Markdown (includes a GitHub blob fast-path). |
@@ -73,10 +74,147 @@ Some tools have **declaration aliases** for compatibility.
 - **Naming/aliases**:
   - declaring `<tool name="read_dir"/>` exposes a tool the model calls as `read_directory`.
   - declaring `<tool name="get_contents"/>` exposes a tool the model calls as `read_file`.
+- **`read_file` default root**: a self-closing declaration permits reads only
+  beneath the directory from which ochat was launched. Relative `file` values
+  resolve from that launch directory.
+- **`read_file` line ranges**: `offset` is an optional non-negative, 0-based
+  line offset. `line_count` is an optional non-negative maximum number of
+  lines; omitting it returns the rest of the file subject to output limits.
 - **`read_file` truncation**: reads up to ~380,928 bytes and appends `---` + `[File truncated]` when it stops early.
 - **`read_file` binary refusal**: binary-like content is rejected to avoid polluting context.
 - **`append_to_file` always appends** (it does not deduplicate).
 - **`find_and_replace` with `all=false` and multiple matches** returns an error string advising to use `apply_patch`.
+
+### Configuring `read_file` roots
+
+The short form grants read access beneath ochat's launch directory:
+
+```xml
+<tool name="read_file"/>
+```
+
+It is equivalent to an implicit root named `cwd` at `${tool_dir}`. A normal
+model call can omit `root`:
+
+```json
+{"file":"lib/driver.ml","offset":0,"line_count":200}
+```
+
+Use nested `<read/>` elements when an agent needs a different or broader set
+of readable directories:
+
+```xml
+<tool
+  name="read_file"
+  description="Prefer the docs root when answering documentation questions.">
+  <read id="source" path="lib" description="OCaml implementation files"/>
+  <read id="docs" path="${workspace}/docs-src" description="Project documentation"/>
+  <read id="package-docs" path="${home}/.opam/default/doc"
+        description="Installed OCaml package documentation"/>
+</tool>
+```
+
+Relative root paths such as `lib` are relative to `${tool_dir}`, the directory
+from which ochat was launched. Root paths may also use `${workspace}`,
+`${prompt_dir}`, `${source_dir}`, `${session_dir}`, `${cache_dir}`, or
+`${home}`. Every configured root must exist and be a directory when the agent
+runtime starts; otherwise startup fails before the tool is exposed.
+
+| Variable | Resolves to |
+|---|---|
+| `${workspace}` | Workspace selected by the host. In the shipped TUI and batch runner this is the launch directory. |
+| `${tool_dir}` | Tool working directory selected by the host. In the shipped TUI and batch runner this is also the launch directory. |
+| `${prompt_dir}` | Directory containing the root ChatMD prompt. |
+| `${source_dir}` | Directory containing the file where this declaration appears, including an imported file. |
+| `${session_dir}` | Directory owned by the current persisted session. |
+| `${cache_dir}` | Ochat cache directory. |
+| `${home}` | Current user's home directory. |
+
+For example, if ochat is launched in `/work/project` with
+`-file /work/prompts/agent.md`, `${workspace}` and `${tool_dir}` resolve to
+`/work/project`, while `${prompt_dir}` resolves to `/work/prompts`. Moving a
+prompt file does not silently change its workspace authority.
+
+For a named root, the model passes the root ID and a relative path:
+
+```json
+{"root":"docs","file":"overview/tools.md","offset":0,"line_count":160}
+```
+
+The accepted arguments are:
+
+| Argument | Required | Meaning |
+|---|---:|---|
+| `file` | yes | File path. It must be relative when `root` is present. `path` is accepted as a legacy alias. |
+| `root` | no | One configured root ID. The generated schema restricts it to the declared IDs. |
+| `offset` | no | Non-negative, 0-based line offset. Defaults to the first line. |
+| `line_count` | no | Non-negative maximum number of lines. Omit it to read the remainder, subject to the byte limit. |
+
+The generated tool description sent to the model is assembled at startup. It
+lists every root ID, its resolved absolute native path, and its optional description,
+then appends the custom `description` from `<tool>`. The JSON schema also gives
+`root` an enum containing exactly the configured IDs. This means an agent can
+discover how each mounted root should be used without relying on a separate
+system-prompt convention.
+
+If `root` is omitted, a relative `file` still resolves from ochat's launch
+directory and is accepted only if its canonical path is inside one of the
+configured roots. Absolute `file` paths are accepted under the same rule. If
+`root` is supplied, `file` must be relative to that root.
+
+Root and requested paths are canonicalized before enforcement. `..` traversal
+and symlinks cannot escape an allowed root. The target must be an existing
+regular file; directories, sockets, FIFOs, devices, and binary-like files are
+rejected.
+
+To grant read access to the entire host filesystem, configure `/` explicitly:
+
+```xml
+<tool name="read_file" description="Read any regular text file on this computer.">
+  <read id="computer" path="/" description="Host filesystem root"/>
+</tool>
+```
+
+Then either form is valid:
+
+```json
+{"file":"/etc/hosts"}
+{"root":"computer","file":"etc/hosts"}
+```
+
+This is unrestricted read authority for regular text files visible to the
+ochat process. It does not bypass operating-system permissions, but it can
+expose credentials, source code, configuration, and other sensitive data to
+the model and provider. Prefer narrow named roots whenever possible.
+
+#### Diagnosing root resolution
+
+The resolved absolute paths listed in the model-visible tool description are
+the quickest way to verify a configuration. With ochat launched from
+`/Users/alice/project`, this declaration:
+
+```xml
+<tool name="read_file">
+  <read id="cwd" path="${workspace}"/>
+</tool>
+```
+
+must advertise `cwd: /Users/alice/project`, and this call reads
+`/Users/alice/project/lib/parser.ml`:
+
+```json
+{"root":"cwd","file":"lib/parser.ml"}
+```
+
+If the intended project is not advertised, change the directory before
+starting ochat. There is currently no `chat-tui` or `chat-completion`
+workspace flag. A missing configured directory is a startup error; a missing
+requested file is a tool-call error.
+
+This ChatMD configuration affects the built-in `read_file` function exposed
+by the agent runtime. It does not reconfigure the separately registered
+`Functions.get_contents` tool used by the standalone MCP server or by custom
+OCaml embeddings.
 
 #### Library-only helpers (not mountable as ChatMD built-ins by default)
 

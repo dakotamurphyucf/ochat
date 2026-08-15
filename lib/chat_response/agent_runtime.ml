@@ -122,6 +122,9 @@ let declaration_sources declarations =
   List.map declarations.runtimes ~f:(fun runtime -> runtime.S.source)
   @ List.map declarations.shell_tools ~f:(fun tool -> tool.source)
   @ List.map declarations.legacy_tools ~f:(fun tool -> tool.source)
+  @ List.filter_map declarations.tools ~f:(function
+    | CM.Read_file specification -> Some specification.source
+    | Builtin _ | Custom _ | Shell _ | Agent _ | Mcp _ -> None)
 ;;
 
 let add_source_dir ~env (source_dirs, errors) source =
@@ -391,13 +394,15 @@ let create_shell_function registry name =
     |> Result.map_error ~f:(fun error -> diagnostic error.code error.message)
 ;;
 
-let functions_of_tool ~sw ~ctx ~run_agent shell_registry = function
+let functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry = function
   | CM.Custom tool ->
     Option.value_exn shell_registry
     |> fun registry ->
     create_shell_function registry tool.name |> Result.map ~f:List.return
   | declaration ->
-    (try Ok (Tool.of_declaration ?shell_registry ~sw ~ctx ~run_agent declaration) with
+    (try
+       Ok (Tool.of_declaration ?shell_registry ~host ~sw ~ctx ~run_agent declaration)
+     with
      | exn -> Error (diagnostic "agent.tool_construction_failed" (Exn.to_string exn)))
 ;;
 
@@ -415,8 +420,8 @@ let validate_functions functions =
       [ diagnostic "agent.duplicate_tool_name" ("duplicate exposed tool name: " ^ name) ]
 ;;
 
-let build_functions ~sw ~ctx ~run_agent shell_registry tools =
-  List.map tools ~f:(functions_of_tool ~sw ~ctx ~run_agent shell_registry)
+let build_functions ~sw ~ctx ~host ~run_agent shell_registry tools =
+  List.map tools ~f:(functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry)
   |> Result.all
   |> Result.map ~f:List.concat
   |> Result.map_error ~f:List.return
@@ -471,7 +476,7 @@ let create
            ~persist_extension_snapshots
            declarations)
         ~f:(fun (shell_registry, shell_manifest, shell_security_status) ->
-          build_functions ~sw ~ctx ~run_agent shell_registry declarations.tools
+          build_functions ~sw ~ctx ~host ~run_agent shell_registry declarations.tools
           |> Result.map ~f:(fun functions ->
             { functions
             ; classifications = classifications declarations.tools

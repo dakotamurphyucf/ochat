@@ -112,7 +112,36 @@ the final ChatMD document directly to the console while still giving the
 runtime a valid *file descriptor* to append to — a requirement of the current
 implementation.
 
-## 6 Shell-enabled batch runs
+## 6 Root-scoped file reads
+
+The batch runner sets `${workspace}` and `${tool_dir}` to its process launch
+directory. `${prompt_dir}` is the directory containing `-prompt-file`, so a
+prompt stored elsewhere does not change the workspace. Launch the command
+from the project the agent should read:
+
+```console
+$ cd /work/project
+$ ochat chat-completion \
+    -prompt-file /work/prompts/reviewer.chatmd \
+    -output-file .chatmd/review.chatmd
+```
+
+The prompt may expose one or more roots:
+
+```xml
+<tool name="read_file">
+  <read id="project" path="${workspace}" description="Repository under review"/>
+  <read id="docs" path="${source_dir}/reference" description="Prompt-pack reference files"/>
+</tool>
+```
+
+Configured roots are validated before the first model request. The generated
+tool metadata tells the model each root's resolved absolute path and accepts
+`file`, optional `root`, optional `offset`, and optional `line_count`.
+Requests remain canonically confined to a declared root. See
+[configuring `read_file` roots](../overview/tools.md#configuring-read_file-roots).
+
+## 7 Shell-enabled batch runs
 
 If a prompt declares `<shell_access>`, ochat compiles the canonical manifest,
 applies administrative/trust/signature policy, authorizes its exact digest,
@@ -134,5 +163,4 @@ Shell output enters the transcript only after bounds, UTF-8 validation,
 terminal sanitization, secret redaction, and output interceptors. See
 [`ochat shell` runtime management](shell-runtime-management.md) and the
 [shell security guide](../guide/chatmd-shell-security.md).
-
 

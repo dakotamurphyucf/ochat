@@ -428,7 +428,7 @@ Combine:
 
 Built-in tools include capabilities such as:
 - repo-safe editing via `apply_patch`
-- filesystem access via `read_dir` and `read_file`
+- filesystem access via `read_dir` and root-scoped `read_file`
 - web ingestion via `webpage_to_markdown`
 - retrieval over docs via `index_markdown_docs` and `markdown_search`
 - retrieval over OCaml code via `index_ocaml_code` and `query_vector_db`
@@ -437,6 +437,35 @@ Built-in tools include capabilities such as:
 See [Tools – built-ins, custom helpers & MCP](docs-src/overview/tools.md).
 For shell-specific schemas and safety behavior, see
 [ChatMD shell tools](docs-src/overview/chatmd-shell-tools.md).
+
+`read_file` defaults to the directory from which ochat was launched. A ChatMD
+file can instead declare any number of named roots, and those roots are
+included dynamically in the tool description and JSON schema sent to the
+model:
+
+```xml
+<tool name="read_file" description="Use docs for manuals and source for code.">
+  <read id="source" path="lib" description="Project OCaml source"/>
+  <read id="docs" path="${workspace}/docs-src" description="Project documentation"/>
+  <read id="opam-docs" path="${home}/.opam/default/doc"
+        description="Installed package documentation"/>
+</tool>
+```
+
+The self-closing form creates a root named `cwd` at `${tool_dir}`. In
+`chat-tui` and `ochat chat-completion`, `${workspace}` and `${tool_dir}` are
+the process launch directory, not the prompt file's directory; launch ochat
+from the project that should be the workspace. `${prompt_dir}` names the root
+prompt directory and `${source_dir}` names the file containing a declaration.
+
+The model calls the tool with `file`, optional `root`, and optional
+non-negative `offset` and `line_count` values. Ochat resolves each root to an
+absolute path and includes its ID, path, description, and exact root enum in
+the tool metadata sent to the model. Requested paths are canonicalized,
+remain confined beneath a configured root, and must identify regular text
+files. An explicit root with `path="/"` grants read access across the host
+filesystem subject to operating-system permissions. See
+[configuring `read_file` roots](docs-src/overview/tools.md#configuring-read_file-roots).
 
 ### Compose agents into prompt packs
 Build Claude Code/Codex-style applications out of multiple prompts:

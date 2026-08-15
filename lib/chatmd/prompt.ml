@@ -121,6 +121,7 @@ module Chat_content = struct
 
   type tool =
     | Builtin of string
+    | Read_file of Chatmd_read_file_spec.t
     | Custom of custom_tool
     | Shell of Chatmd_shell_spec.Shell_tool_spec.t
     | Agent of agent_tool
@@ -433,6 +434,7 @@ module Chat_markdown = struct
     | Tool t ->
       (match t with
        | Builtin name -> Printf.sprintf "<tool name=\"%s\" />" name
+       | Read_file specification -> Chatmd_read_file_declaration.serialize specification
        | Custom { name; description; command; source = _ } ->
          let desc_attr =
            match description with
@@ -789,6 +791,15 @@ module Chat_markdown = struct
           | None, None, None ->
             if String.is_empty name
             then failwith "Tool name cannot be empty."
+            else if String.equal name "read_file" || String.equal name "get_contents"
+            then (
+              match Chatmd_read_file_declaration.parse ~source:source_ref node with
+              | Ok specification -> Tool (Read_file specification)
+              | Error diagnostics ->
+                failwith
+                  (String.concat
+                     ~sep:"; "
+                     (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
             else Tool (Builtin name))
       | Element (Shell_access, _, _) ->
         (match Chatmd_shell_declaration.parse_runtime ~source:source_ref node with
@@ -871,7 +882,9 @@ module Chat_markdown = struct
         | _ -> moderators, shell_scripts)
     in
     let moderator_ids = List.map moderators ~f:(fun script -> script.id) in
-    (match Chatmd_script_declaration.validate_prompt_registry ~moderator_ids shell_scripts with
+    (match
+       Chatmd_script_declaration.validate_prompt_registry ~moderator_ids shell_scripts
+     with
      | Ok () -> ()
      | Error diagnostics -> script_error diagnostics);
     elements

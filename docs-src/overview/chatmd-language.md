@@ -450,7 +450,7 @@ See the “Tool calls & tool responses” section for exact layouts.
 
 `<tool/>` declarations define what actions the assistant is allowed to take.
 
-ChatMD supports four tool “shapes”:
+ChatMD supports five tool “shapes”:
 
 ### 5.1 Built-in tools
 
@@ -459,7 +459,65 @@ ChatMD supports four tool “shapes”:
 <tool name="apply_patch"/>
 ```
 
-### 5.2 Shell tools (wrap trusted commands)
+`read_file` also has a structured built-in form for declaring named readable
+roots:
+
+```xml
+<tool name="read_file" description="Read project source and documentation.">
+  <read id="source" path="lib" description="Relative to ochat's launch directory"/>
+  <read id="docs" path="${workspace}/docs-src" description="Project docs"/>
+</tool>
+```
+
+The self-closing form defaults to one `cwd` root at `${tool_dir}`. Relative
+`<read path="..."/>` values also use `${tool_dir}`. The model-visible
+`read_file` schema gains an optional `root` enum containing the declared IDs,
+and its generated description includes every resolved root path and root
+description. A custom tool `description` is appended to that generated usage
+guidance.
+
+Calls with `root` use a path relative to that named root:
+
+```json
+{"root":"docs","file":"overview/tools.md","offset":0,"line_count":100}
+```
+
+Without `root`, relative paths resolve from the ochat launch directory.
+Relative and absolute requests are accepted only when the canonical target is
+inside a configured root. Targets must be existing regular text files.
+Explicit `<read id="computer" path="/"/>` grants host-wide read access subject
+to operating-system permissions. See the [tools reference](tools.md#configuring-read_file-roots)
+for complete semantics and security guidance.
+
+### 5.2 Configured `read_file` roots
+
+Each nested `<read/>` has these attributes:
+
+| Attribute | Required | Meaning |
+|---|---:|---|
+| `id` | yes | Unique model-visible root selector. |
+| `path` | yes | Existing directory path or standard path expression. |
+| `description` | no | Usage guidance included in the tool description sent to the model. |
+
+The parent `<tool name="read_file">` accepts an optional `description`. The
+compatibility name `get_contents` accepts the same structure but still exposes
+the model-visible function name `read_file`.
+
+The standard variables accepted in `path` are `${workspace}`, `${tool_dir}`,
+`${prompt_dir}`, `${source_dir}`, `${session_dir}`, `${cache_dir}`, and
+`${home}`. In the shipped TUI and batch runner, `${workspace}` and
+`${tool_dir}` are the directory from which the process was launched;
+`${prompt_dir}` is independently derived from the root prompt file. Unknown
+variables are fatal. All roots must resolve to existing directories before
+the first model request.
+
+`read_file` calls accept `file`, optional `root`, optional non-negative
+`offset`, and optional non-negative `line_count`. Root paths and requested
+files are canonicalized before confinement checks, so `..` and symlinks
+cannot escape the declared roots. The full runtime behavior is documented in
+the [tools reference](tools.md#configuring-read_file-roots).
+
+### 5.3 Shell tools (wrap trusted commands)
 
 ```xml
 <tool name="rg" command="rg" description="ripgrep search"/>
@@ -478,24 +536,26 @@ The runtime is compiled and authorized before the tool is exposed. See the
 [shell runtime reference](chatmd-shell-runtime.md) and
 [shell tool reference](chatmd-shell-tools.md).
 
-### 5.3 Agent-backed tools (prompt-as-tool)
+### 5.4 Agent-backed tools (prompt-as-tool)
 
 ```xml
 <tool name="triage" agent="prompts/triage.chatmd" local description="Triage a bug report"/>
 ```
 
-### 5.4 MCP-backed tools (import tools from an MCP server)
+### 5.5 MCP-backed tools (import tools from an MCP server)
 
 ```xml
 <tool mcp_server="https://tools.acme.dev" includes="weather,stock_ticker" strict/>
 ```
 
-### 5.5 Validation rules (important)
+### 5.6 Validation rules (important)
 
 - Legacy non-long-form declarations use exactly one of `command`, `agent`, or
   `mcp_server`. Long-form shell tools use `type="shell"`, `mode`, `runtime`,
   and mode-specific attributes/children.
 - For builtin/shell/agent tools, `name="..."` must be non-empty.
+- Configured `read_file` roots require non-empty, unique `id` values and an
+  existing directory `path`. Only nested `<read/>` elements are accepted.
 - For MCP tools:
   - `name="..."` selects a single tool name, **or**
   - `include="a,b"` / `includes="a,b"` selects a comma-separated list, **or**

@@ -76,6 +76,12 @@ module Limits : sig
   val default : t
 end
 
+module Path_util : sig
+  (** [canonical ~fs path] resolves an existing absolute path, including every
+      symbolic link component. *)
+  val canonical : fs:Eio.Fs.dir_ty Eio.Path.t -> string -> string
+end
+
 module Capabilities : sig
   type sandbox =
     | Required
@@ -337,11 +343,7 @@ module Approval : sig
       callbacks are omitted it uses a process-local memory store. Callback
       errors fail closed and are reported as execution errors. *)
   val create_store
-    :  ?lookup:
-         (now:float
-          -> session_id:string option
-          -> identity
-          -> (bool, string) result)
+    :  ?lookup:(now:float -> session_id:string option -> identity -> (bool, string) result)
     -> ?remember:
          (session_id:string option
           -> identity

@@ -10,6 +10,8 @@
   chatmd_import_expansion
   chatmd_script_declaration
   chatmd_moderator_runtime_declaration
+  chatmd_read_file_spec
+  chatmd_read_file_declaration
   chatmd_shell_declaration
   chatmd_shell_serialization
   prompt)

@@ -142,6 +142,7 @@ module Chat_markdown : sig
 
   type tool =
     | Builtin of string
+    | Read_file of Chatmd_read_file_spec.t
     | Custom of custom_tool
     | Shell of Chatmd_shell_spec.Shell_tool_spec.t
     | Agent of agent_tool

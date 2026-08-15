@@ -45,6 +45,35 @@ Notes:
 - If `-file` is omitted, the default prompt file is `./prompts/interactive.md`.
 - The prompt file may be any filename; `.md` is fine.
 
+### Workspace and `read_file` roots
+
+The directory where `chat-tui` is launched is the configured `${workspace}`
+and `${tool_dir}` for the agent. The location of `-file` does not change that
+workspace; it sets `${prompt_dir}` instead. Start the TUI from the project the
+agent should operate on:
+
+```console
+$ cd /work/my-project
+$ chat-tui -file /work/prompts/coding-agent.md
+```
+
+A prompt can then give the model named read-only mounts:
+
+```xml
+<tool name="read_file" description="Use project for source and opam for package docs.">
+  <read id="project" path="${workspace}" description="Current project"/>
+  <read id="opam" path="${home}/.opam/default/doc"
+        description="Installed package documentation"/>
+</tool>
+```
+
+The tool description and JSON schema sent to the model contain the resolved
+absolute paths and valid root IDs. Calls may use, for example,
+`{"root":"project","file":"lib/main.ml","offset":0,"line_count":200}`.
+Every root must exist at startup. See the
+[tools reference](../overview/tools.md#configuring-read_file-roots) for path
+variables, confinement rules, and host-wide access.
+
 ---
 
 ## Muscle-memory cheat sheet (high signal)

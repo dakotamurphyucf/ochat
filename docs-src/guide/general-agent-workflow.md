@@ -24,7 +24,11 @@ At a high level, the agent:
 <tool name="apply_patch" />
 <tool name="append_to_file" />
 <tool name="find_and_replace" />
-<tool name="read_file" />
+<tool name="read_file" description="Read project files and installed package docs.">
+  <read id="project" path="${workspace}" description="Current project workspace"/>
+  <read id="package-docs" path="${home}/.opam/default/doc"
+        description="Installed OCaml package documentation"/>
+</tool>
 <tool mcp_server="stdio:npx @gongrzhe/server-gmail-autoauth-mcp" include="search_emails,draft_email,send_email,read_email" />
 
 <import src="./git-tools.md" local />
@@ -144,6 +148,11 @@ Notes:
   cover a wide range of use cases (web research, file manipulation, email
   handling, git operations). The model can pick and choose the right tool for
   the job.
+- **Root-scoped file reads** – the `read_file` declaration mounts the launch
+  workspace and package documentation under distinct model-visible IDs. Ochat
+  resolves the paths at startup, puts the IDs and absolute paths in the tool
+  schema and description, and confines every read to those roots. Launch this
+  prompt from the project that should become `${workspace}`.
 - **High-level instructions** – the prompt provides clear directives on when and how to
   use tools, as well as anti-hallucination safeguards to ensure the model
   behaves correctly. But it remains flexible enough to handle diverse tasks and provides an override mechanism via
@@ -161,6 +170,5 @@ To adapt it:
   
 - swap Brave Search and Gmail Autoauth for other MCP servers by changing the `mcp_server`
   attribute.
-
 
 

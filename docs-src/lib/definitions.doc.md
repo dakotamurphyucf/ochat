@@ -52,7 +52,7 @@ Below is a concise reference.  For the *exact* JSON schema consult the
 
 | Tool | `input` OCaml type | Synopsis |
 |------|--------------------|----------|
-| **Get_contents** | `(string * int option * int option)` | Read a local file with optional offset and line count |
+| **Get_contents** | `(string * int option * int option)` | Static metadata/decoder for the legacy single-directory `read_file` helper |
 | **Meta_refine** | `(string * string)` | Refine a prompt via Recursive Meta-Prompting (prompt + task) |
 | **Index_markdown_docs** | `(string * string * string * string option)` | Build a vector DB from a directory of Markdown docs |
 | **Markdown_search** | `(string * int option * string option * string option)` | Semantic search over Markdown indices |
@@ -77,8 +77,11 @@ Below is a concise reference.  For the *exact* JSON schema consult the
 * Decoders vary in strictness. Some `input_of_string` implementations are
   intentionally lenient (e.g. accepting legacy field names); callers should
   still treat decoding as fallible and surface graceful errors to users.
+* Configured ChatMD `read_file` roots need metadata generated from resolved
+  runtime paths, so they do not use `Definitions.Get_contents` directly.
+  `Functions.get_contents_scoped` creates the dynamic description, root enum,
+  decoder, and implementation together.
 * The catalogue is opinionated and targets the needs of the Ochat
   agent in this repository.  Feel free to fork and extend.
-
 
 

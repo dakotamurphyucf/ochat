@@ -64,14 +64,14 @@ open Chatmd_parser
 type state =
   { mutable pending_token : Chatmd_parser.token option
   ; mutable depth : int
-  ; mutable shell_scope_depths : int list
+  ; mutable structured_scope_depths : int list
   ; scratch : Buffer.t
   }
 
 let create_state () =
   { pending_token = None
   ; depth = 0
-  ; shell_scope_depths = []
+  ; structured_scope_depths = []
   ; scratch = Buffer.create 256
   }
 
@@ -79,11 +79,11 @@ let create_state () =
 (* Helpers                                                                  *)
 (*--------------------------------------------------------------------------*)
 
-let is_shell_scope state = not (List.is_empty state.shell_scope_depths)
+let is_structured_scope state = not (List.is_empty state.structured_scope_depths)
 
 let tag_of_string_in_state state name =
   match tag_of_string_opt name with
-  | Some (Shell_element _) when not (is_shell_scope state) -> None
+  | Some (Shell_element _) when not (is_structured_scope state) -> None
   | tag -> tag
 
 let is_recognised state name = Option.is_some (tag_of_string_in_state state name)
@@ -95,20 +95,26 @@ let is_shell_tool attrs =
   List.Assoc.find attrs "type" ~equal:String.equal
   |> Option.value_map ~default:false ~f:(Option.value_map ~default:false ~f:(String.equal "shell"))
 
-let is_shell_root tag attrs =
+let is_read_file_tool attrs =
+  List.Assoc.find attrs "name" ~equal:String.equal
+  |> Option.value_map ~default:false ~f:(Option.value_map ~default:false ~f:(fun name ->
+    String.equal name "read_file" || String.equal name "get_contents"))
+
+let is_structured_root tag attrs =
   match tag with
   | Shell_access -> true
-  | Tool -> is_shell_tool attrs
+  | Tool -> is_shell_tool attrs || is_read_file_tool attrs
   | _ -> false
 
 let enter_element state tag attrs =
   state.depth <- state.depth + 1;
-  if is_shell_root tag attrs
-  then state.shell_scope_depths <- state.depth :: state.shell_scope_depths
+  if is_structured_root tag attrs
+  then state.structured_scope_depths <- state.depth :: state.structured_scope_depths
 
 let leave_element state =
-  (match state.shell_scope_depths with
-   | depth :: rest when Int.equal depth state.depth -> state.shell_scope_depths <- rest
+  (match state.structured_scope_depths with
+   | depth :: rest when Int.equal depth state.depth ->
+     state.structured_scope_depths <- rest
    | _ -> ());
   state.depth <- Int.max 0 (state.depth - 1)
 

@@ -185,6 +185,52 @@ let request_description function_ =
   | _ -> failwith "expected exactly one tool"
 ;;
 
+let%expect_test "agent runtime resolves read_file roots and publishes their guidance" =
+  Eio_main.run
+  @@ fun env ->
+  Eio.Switch.run
+  @@ fun sw ->
+  let root = Eio.Path.(Eio.Stdenv.cwd env / "_build" / "read-file-agent-runtime") in
+  let source_root = Eio.Path.(root / "lib") in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 source_root;
+  Eio.Path.save
+    ~create:(`Or_truncate 0o600)
+    Eio.Path.(source_root / "value.ml")
+    "let value = 42";
+  let runtime =
+    agent_runtime
+      env
+      sw
+      root
+      {|<tool name="read_file" description="Use source for implementation files.">
+          <read id="source" path="lib" description="OCaml source"/>
+        </tool>|}
+      Shell_runtime.Manifest_authorizer.assume_authorized
+      Shell_runtime.Approval_broker.Assume_approved
+    |> agent_runtime_or_fail
+  in
+  let function_ = runtime_function runtime "read_file" in
+  let description = request_description function_ in
+  let output = function_.run {|{"root":"source","file":"value.ml"}|} |> output_text in
+  let source_root_native = Eio.Path.native_exn source_root in
+  let source_root_absolute =
+    if Filename.is_relative source_root_native
+    then Filename.concat (Stdlib.Sys.getcwd ()) source_root_native
+    else source_root_native
+  in
+  printf
+    "description=%b %b %b\noutput=%b\n"
+    (String.is_substring description ~substring:"source:")
+    (String.is_substring description ~substring:source_root_absolute)
+    (String.is_substring description ~substring:"Use source for implementation files.")
+    (String.is_substring output ~substring:"let value = 42");
+  [%expect
+    {|
+    description=true true true
+    output=true
+    |}]
+;;
+
 let description_source =
   {|<shell_access id="yolo" extends="builtin:yolo@1"/>
     <tool name="described_fixed" type="shell" mode="fixed" runtime="yolo"

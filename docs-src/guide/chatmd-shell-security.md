@@ -106,6 +106,23 @@ directory unless they explicitly use a standard variable. `path_env` includes
 the environment key and resolved path in the manifest; a missing required key
 is fatal.
 
+These roots authorize filesystem effects made by processes launched through a
+shell runtime. They are independent of the built-in model-facing `read_file`
+tool:
+
+```xml
+<tool name="read_file">
+  <read id="source" path="${workspace}/lib"/>
+</tool>
+```
+
+Nested `<tool><read/></tool>` roots determine what `read_file` can return to
+the model. Nested `<shell_access><capabilities><read/></capabilities>` roots
+determine what a spawned process may read. Declaring either one does not grant
+the other. Configure both when an agent needs direct file inspection and shell
+commands over the same tree. See
+[configuring `read_file` roots](../overview/tools.md#configuring-read_file-roots).
+
 ### Process powers
 
 - `network` allows a backend to expose networking.

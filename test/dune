@@ -7,6 +7,14 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name read_file_roots_test)
+ (modules read_file_roots_test)
+ (libraries core core_unix eio eio_main ochat.functions)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
  (name shell_access_phase1_test)
  (modules shell_access_phase1_test)
  (libraries core core_unix eio eio_main ochat.shell_access)

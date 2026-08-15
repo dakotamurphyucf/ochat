@@ -64,6 +64,7 @@ val agent_page_classification
            tool name. *)
 val of_declaration
   :  ?shell_registry:Shell_runtime.Registry.t
+  -> ?host:Shell_runtime.Host.t
   -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> run_agent:

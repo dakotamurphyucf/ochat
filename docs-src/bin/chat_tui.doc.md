@@ -139,7 +139,12 @@ session later.
 3. Finally it invokes `Chat_tui.App.run_chat` with the chosen prompt
    file.  Control is handed over to the TUI engine; the wrapper will
    not return until the user quits (`/quit` or *Ctrl-c*).
-4. When the **meta-refine** toggle is active (either via the `/meta_refine`
+4. The process current working directory becomes both `${workspace}` and
+   `${tool_dir}` for ChatMD path expressions. The root prompt's directory is
+   `${prompt_dir}`. Consequently, a configured `<tool name="read_file">`
+   reads relative to the launch directory unless its nested `<read>` uses
+   another explicit path expression. There is no separate workspace flag.
+5. When the **meta-refine** toggle is active (either via the `/meta_refine`
    command or the *Ctrl-r* shortcut) the draft message is first passed through
    [`Recursive_mp.refine`].  The TUI previews the resulting **diff** – additions
    in green, deletions in red – so that you can confirm or cancel before the

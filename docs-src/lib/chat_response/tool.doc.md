@@ -10,11 +10,12 @@ into an [`Ochat_function.t`](../../../lib/ochat_function.mli) – the
 structure expected by the {i function-calling} variant of OpenAI’s
 chat/completions endpoint.
 
-Internally the helper recognises {b four} back-ends:
+Internally the helper recognises five declaration paths:
 
 | Kind | XML snippet | Runtime representation |
 |------|-------------|------------------------|
 | Built-in | `<tool name="fork"/>` | OCaml function from {!module:Functions} |
+| Scoped reader | `<tool name="read_file"><read id="src" path="lib"/></tool>` | Dynamic {!Functions.get_contents_scoped} function |
 | Shell wrapper | `<tool command="grep" name="grep"/>` | `Eio.Process.spawn` |
 | Agent | `<tool agent="./sentiment.chatmd" name="sentiment"/>` | Recursively runs driver |
 | MCP remote | `<tool mcp_server="https://tools.acme.com" name="sum"/>` | `Mcp_client` over HTTP |
@@ -30,7 +31,7 @@ canonical specification):
 | `custom_fn` | Wrap an arbitrary shell command so that it can be invoked through the function-calling API. | `env` – Eio standard environment; `command` – binary to execute; `name`/`description` – exposed to the model. |
 | `agent_fn` | Run a nested ChatMarkdown agent prompt from within the current conversation. | `ctx` – shared execution context; `run_agent` – callback that starts a fresh driver. |
 | `mcp_tool` | Convert an `<tool mcp_server="…"/>` declaration into one `Ochat_function.t` per remote tool, using a 5-minute TTL-LRU cache and passive invalidation via server notifications. | `sw` – parent switch; `ctx` – execution context; `mcp_server` – URI of the MCP endpoint. |
-| `of_declaration` | Single front-door dispatcher that maps any `<tool …/>` element to its runtime implementation (may return several functions). | `sw`, `ctx`, `run_agent`, `decl`. |
+| `of_declaration` | Single front-door dispatcher that maps any `<tool …/>` element to its runtime implementation (may return several functions). | optional `shell_registry` and `host`; `sw`, `ctx`, `run_agent`, `decl`. |
 
 The next section drills deeper into signatures, invariants, and
 example invocations.
@@ -93,6 +94,8 @@ remote tool becomes an individual function.
 
 ```ocaml
 val of_declaration :
+  ?shell_registry:Shell_runtime.Registry.t ->
+  ?host:Shell_runtime.Host.t ->
   sw:Eio.Switch.t ->
   ctx:_ Ctx.t ->
   run_agent:(ctx:_ Ctx.t -> string -> CM.content list -> string) ->
@@ -102,6 +105,14 @@ val of_declaration :
 
 Central dispatcher used by {!module:chat_response.driver} and
 {!module:chat_response.converter}.  See in-code docs for full details.
+
+For `CM.Read_file`, the dispatcher resolves ChatMD path expressions with the
+optional runtime `host`, validates that every root is an existing directory,
+and creates a scoped reader. The generated model description contains root
+IDs, resolved absolute paths, root descriptions, and any parent tool
+description; the JSON schema contains the exact root enum. A configured
+reader requires `host`; the self-closing compatibility form uses the current
+context's tool directory directly.
 
 
 ## Usage example

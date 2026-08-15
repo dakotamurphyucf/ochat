@@ -437,6 +437,67 @@ let%expect_test "legacy custom tools remain compatibility declarations" =
   [%expect {| legacy compat printf ok |}]
 ;;
 
+let%expect_test "read_file declarations parse named roots and preserve defaults" =
+  Eio_main.run
+  @@ fun env ->
+  let dir = Eio.Stdenv.cwd env in
+  let print = function
+    | CM.Tool (CM.Read_file specification) ->
+      printf "description=%s\n" (Option.value specification.description ~default:"none");
+      List.iter specification.roots ~f:(fun root ->
+        printf
+          "%s=%s (%s)\n"
+          root.id
+          (Chatmd_shell_spec.Path_expr.to_string root.path)
+          (Option.value root.description ~default:"none"))
+    | _ -> failwith "expected read_file declaration"
+  in
+  CM.parse_chat_inputs
+    ~source:"agent.chatmd"
+    ~dir
+    {|<tool name="read_file" description="Read approved files">
+        <read id="source" path="lib" description="OCaml source"/>
+        <read id="computer" path="/" description="Whole computer"/>
+      </tool>|}
+  |> List.iter ~f:print;
+  CM.parse_chat_inputs ~source:"agent.chatmd" ~dir {|<tool name="read_file"/>|}
+  |> List.iter ~f:print;
+  [%expect
+    {|
+    description=Read approved files
+    source=${tool_dir}/lib (OCaml source)
+    computer=/ (Whole computer)
+    description=none
+    cwd=${tool_dir} (ochat launch directory)
+    |}]
+;;
+
+let%expect_test "read_file declarations reject invalid nested roots" =
+  Eio_main.run
+  @@ fun env ->
+  let dir = Eio.Stdenv.cwd env in
+  let parse source =
+    try
+      ignore (CM.parse_chat_inputs ~source:"agent.chatmd" ~dir source);
+      print_endline "accepted"
+    with
+    | Failure message -> print_endline message
+  in
+  parse
+    {|<tool name="read_file">
+        <read id="same" path="lib"/>
+        <read id="same" path="docs-src"/>
+      </tool>|};
+  parse {|<tool name="read_file"><read id=" " path="lib"/></tool>|};
+  parse {|<tool name="read_file"><command program="cat"/></tool>|};
+  [%expect
+    {|
+    error[read_file.duplicate_root] at tool.read: duplicate root id: same
+    error[read_file.invalid_root_id] at tool.read.0.id: root id is empty
+    error[read_file.unexpected_child] at tool: only <read> roots are allowed
+    |}]
+;;
+
 let%expect_test "moderator runtime uses strict ChatMD parsing" =
   Eio_main.run
   @@ fun env ->

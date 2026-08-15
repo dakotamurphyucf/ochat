@@ -50,7 +50,8 @@ capabilities (e.g. sandboxed directories).
 
 | Tool                               | JSON `name`      | Category    | Synopsis |
 |------------------------------------|------------------|-------------|----------|
-| `get_contents`                     | `read_file`      | filesystem  | Return (part of) the UTF-8 contents of a given file with metadata header. |
+| `get_contents`                     | `read_file`      | filesystem  | Return (part of) a UTF-8 file relative to one capability directory. |
+| `get_contents_scoped`              | `read_file`      | filesystem  | Read regular text files confined to named canonical directory roots. |
 | `apply_patch`                      | `apply_patch`    | filesystem  | Apply an Ochat diff to the workspace. |
 | `append_to_file`                   | `append_to_file` | filesystem  | Append text to a file (creates it if missing). |
 | `find_and_replace`                 | `find_and_replace` | filesystem | In-place string substitution (first or all matches). |
@@ -94,6 +95,50 @@ Notes:
   ```
 
 - Binary files are rejected (best-effort heuristic).
+
+For ChatMD-style named roots, construct `read_file_root` values and register
+`get_contents_scoped`:
+
+```ocaml
+let project =
+  Functions.read_file_root
+    ~id:"project"
+    ~path:project_dir
+    ~description:"Project source"
+    ()
+in
+let packages =
+  Functions.read_file_root
+    ~id:"packages"
+    ~path:package_docs
+    ~description:"Installed package documentation"
+    ()
+in
+let read =
+  Functions.get_contents_scoped
+    ~fs:(Eio.Stdenv.fs env)
+    ~dir:cwd
+    ~roots:[ project; packages ]
+    ~description:"Prefer packages for dependency questions."
+    ()
+in
+ignore read
+```
+
+The scoped schema requires `file`, accepts optional `root`, `offset`, and
+`line_count`, and enumerates the valid root IDs. Its description lists each
+root's resolved absolute native path and optional description, followed by the
+caller-supplied description. Without `root`, a relative path resolves from
+`dir` but must still be inside one root. With `root`, `file` must be relative
+to that root. Absolute paths are accepted only without `root` and only inside
+a root.
+
+Roots and targets are canonicalized before confinement checks, preventing
+`..` and symlink escapes. Roots must be existing directories; targets must be
+existing regular, non-binary-like files. `offset` and `line_count` must be
+non-negative. The simpler `get_contents ~dir` remains available to library
+callers and the standalone MCP server; ChatMD root declarations are lowered
+to `get_contents_scoped` by `Chat_response.Tool`.
 
 ### 2 . `get_url_content`
 
@@ -226,4 +271,3 @@ refine """You are ChatGPT, a large language model trained by OpenAI."""
 ---
 
 © 2025 – Ochat example documentation
-

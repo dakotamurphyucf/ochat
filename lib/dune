@@ -242,6 +242,7 @@
   piaf
   package_index
   apply_patch
+  shell_access
   uutf
   meta_prompting)
  (preprocess
