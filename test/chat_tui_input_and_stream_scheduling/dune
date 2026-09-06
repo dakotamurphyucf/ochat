@@ -64,6 +64,7 @@
  (name chat_tui_type_ahead_debounce_test)
  (modules chat_tui_type_ahead_debounce_test)
  (libraries
+  eio.mock
   core
   expect_test_helpers_core
   eio

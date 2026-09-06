@@ -5,6 +5,7 @@ open! Core
 type sourced_node =
   { node : Chatmd_ast.node
   ; source : Chatmd_shell_spec.Source_ref.t
+  ; source_node : Source_loader.source
   }
 
 (** Legacy attribute accepted when reading previously serialized messages. *)
@@ -15,6 +16,8 @@ val source_attribute : string
     source file, source directory, digest, and optional namespace. *)
 val expand
   :  parse:(string -> Chatmd_ast.document)
+  -> loader:Source_loader.t
+  -> root_source:Source_loader.source
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> file:string
   -> source:string

@@ -339,7 +339,7 @@ let%expect_test "runtime visible history reflects restored moderator snapshot" =
     [%sexp (Option.is_some (ok_or_fail (App_runtime.moderator_snapshot runtime)) : bool)];
   [%expect
     {|
-    system "policy"
+    developer "policy"
     user "Hello"
     assistant "queued"
     true
@@ -387,7 +387,7 @@ let%expect_test "runtime refresh_messages uses moderated visible history" =
   print_messages (Chat_tui.Model.messages model);
   [%expect
     {|
-    system "policy"
+    developer "policy"
     user "Hello"
     |}]
 ;;
@@ -457,7 +457,7 @@ let%expect_test "runtime refresh_messages reindexes tool metadata for moderated 
       Printf.printf "%d: Other name=%s\n" idx (Option.value name ~default:"<none>"));
   [%expect
     {|
-    system "policy"
+    developer "policy"
     tool "read_file({\"file\": \"foo.txt\"})"
     tool_output "contents"
     0: none
@@ -594,8 +594,8 @@ let%expect_test "runtime visible history reflects explicit session_resume modera
        (Chat_tui.Model.history_items runtime.model));
   [%expect
     {|
-    system "policy"
-    system "resumed"
+    developer "policy"
+    developer "resumed"
     user "Hello"
     assistant "queued"
     |}]

@@ -1,100 +1,72 @@
-# `mp-refine-run`
+# mp-refine-run: generate and improve prompts
 
-Recursive meta-prompt refinement from the command line
+Use this command to generate prompt packs or refine an existing prompt/tool
+description. It offers local template generation, online prompt-factory work,
+and classic recursive meta-prompting—not a single fixed refinement strategy.
 
----
+## Start here
 
-## 1  Purpose
+With Ochat installed, write a task description in `task.md`:
 
-`mp-refine-run` is a developer utility that repeatedly improves a draft
-LLM prompt via **recursive meta-prompting**.  It is the CLI counterpart of
-the higher-level OCaml helpers exposed by [`Mp_flow`](../../lib/meta_prompting/mp_flow.ml).
-Instead of calling the library directly you can simply pass two Markdown
-files and let the tool handle the optimisation loop, evaluator calls, model
-selection and logging.
-
-Typical scenarios include:
-
-* turning a textual task description into a high-quality *system prompt*;
-* refining an existing prompt based on reward-model feedback;
-* iteratively polishing OpenAI *function-calling* tool descriptions.
-
-## 2  Quick start
-
-Generate a brand-new assistant prompt:
-
-```bash
-$ mp-refine-run -task-file task.md > prompt.txt
+```sh
+mp-refine-run -task-file task.md -output-file generated-prompt.md
 ```
 
-Update an existing tool description and append the refined version in-place:
+The default strategy may call models and incur charges. To use the local
+template factory without model calls:
 
-```bash
-$ mp-refine-run \
-    -task-file translator_task.md \
-    -input-file  draft_tool.md     \
-    -output-file draft_tool.md     \
-    -action      update            \
-    -prompt-type tool
+```sh
+mp-refine-run -task-file task.md -meta-factory true -output-file local-pack.md
 ```
 
-## 3  Command-line reference
+Output is **appended**, not replaced, when `-output-file` is supplied. Use a
+fresh file for a separate result. Without that flag, output goes to stdout.
 
-| Flag               | Description                                                               |
-|--------------------|---------------------------------------------------------------------------|
-| `-task-file FILE`  | Markdown file that describes **what** you want the model to do.            |
-| `-input-file FILE` | Draft prompt to start the refinement loop with (optional).                |
-| `-output-file FILE`| If provided, the refined prompt is **appended** to the given file.         |
-| `-action ACTION`   | `generate` (default) \| `update` – maps to `Context.Generate/Update`.     |
-| `-prompt-type TYPE`| `general` (default) \| `tool` – switches evaluator rubric and templates.  |
+## Options
 
-All flags except `-task-file` are optional.  Omitting `-output-file` prints
-the prompt to *stdout*.
+| Flag | Default | Meaning |
+|---|---|---|
+| `-task-file FILE` | Absent | Task description. Recommended; despite the help saying required, the parser accepts omission and uses empty task text. |
+| `-input-file FILE` | Absent | Existing prompt to iterate; absence selects creation paths. |
+| `-output-file FILE` | Absent | Append result to this file; otherwise print it. |
+| `-action generate\|update` | `generate` | Action supplied to the recursive flow. |
+| `-prompt-type general\|tool` | `general` | Select general/tool behavior where the selected strategy distinguishes it. |
+| `-meta-factory BOOL` | `false` | Local template factory; takes precedence over the other strategy flags. |
+| `-meta-factory-online BOOL` | `true` | Enable online factory strategy. |
+| `-classic-rmp BOOL` | `false` | Disable online factory mode; does not override `-meta-factory true`. |
 
-## 4  How it works (high-level)
+These booleans take explicit `true` or `false` arguments.
 
-1. The two input files are read by `Io.load_doc` so that path capabilities
-   are respected.
-2. Flag values are turned into the corresponding `Context` variants.
-3. Depending on `-prompt-type` either `Mp_flow.first_flow` (general) or
-   `Mp_flow.tool_flow` (tool) is invoked.
-4. `Mp_flow` runs a fixed-length iterative loop:
-   * A *proposer* LLM (default **GPT-4o**) rewrites the prompt.
-   * A reward model evaluates the candidate using the rubric selected in
-     step 2.
-   * A Thompson bandit keeps the statistically best candidate so far.
-5. The final prompt is returned to the CLI layer and persisted / printed.
+## Strategy selection
 
-All network IO happens inside `Io.run_main`, which wraps `Eio_main.run` and
-initialises the Mirage-crypto RNG required by `tls-eio`.
+1. With `-meta-factory true`, call `Prompt_factory.create_pack` without an
+   input file or `iterate_pack` with one. This is local template generation.
+2. Otherwise online mode is enabled only if `-meta-factory-online true` and
+   `-classic-rmp false`.
+3. With no input file and online mode enabled, try
+   `Prompt_factory_online.create_pack_online` with the GPT-5 model constructor.
+   If it returns no result, fall back to the general recursive flow with online
+   factory mode disabled.
+4. Other cases select `Mp_flow.first_flow` or `tool_flow` according to prompt
+   type, passing the chosen online setting.
 
-## 5  Environment variables
+For example, refine a tool description using the classic strategy:
 
-* `OPENAI_API_KEY` – required so that the helper libraries can call the OpenAI
-  HTTP endpoints.
+```sh
+mp-refine-run -task-file task.md -input-file draft-tool.md \
+  -prompt-type tool -action update -classic-rmp true \
+  -output-file refined-tool.md
+```
 
-## 6  Exit codes
+The binary does not expose a universal iteration, model, or spending-cap flag.
+Review the selected library strategy before automating paid runs. Invalid
+action/type values explicitly exit 1; parsing, file, or provider failures may
+also exit nonzero. There is no documented fixed 20,000-token truncation contract.
 
-| Code | Meaning                                     |
-|------|---------------------------------------------|
-| 0    | Success                                     |
-| 1    | Invalid flag value (unknown action / type)  |
+## References
 
-## 7  Known limitations
-
-* The reward-model RPCs are synchronous and may take several seconds for
-  large prompts.
-* Very large tasks or prompt bodies (> 20 000 tokens) will be truncated by
-  the OpenAI back-end.
-* The program intentionally appends to `-output-file` instead of overwriting
-  it – remember to clear the file if you only want to keep the most recent
-  result.
-
-## 8  See also
-
-* [`Mp_flow`](../../lib/meta_prompting/mp_flow.ml) – implementation details of
-  the refinement loop.
-* `mp-prompt` – interactive REPL for rapid experimentation with meta-prompting.
-* `odoc-search` – semantic search over OCaml documentation, often used as an
-  auxiliary tool during prompt engineering.
-
+- [Meta-prompting library](../lib/meta_prompting.doc.md): evaluators and recursive flows.
+- [Prompt factory](../meta_prompting/templates.doc.md): prompt-pack templates.
+- [Provider environment](../agent-server/environment.md): component-specific settings.
+- [Implementation](../../bin/mp_refine_run.ml): exact strategy dispatch.
+- [Command index](README.md).

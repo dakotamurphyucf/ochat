@@ -160,10 +160,8 @@ module Chat_page_state : sig
       {!pages} under [pages.chat]. *)
   type t =
     { scroll_box : Notty_scroll_box.t
-    ; mutable msg_img_cache :
-        (Projected_message.Id.t, msg_img_cache) Base.Hashtbl.t
-    ; msg_semantic_cache :
-        (Projected_message.Id.t, msg_semantic_cache) Base.Hashtbl.t
+    ; mutable msg_img_cache : (Projected_message.Id.t, msg_img_cache) Base.Hashtbl.t
+    ; msg_semantic_cache : (Projected_message.Id.t, msg_semantic_cache) Base.Hashtbl.t
     ; mutable active_history_width : int option
     ; mutable preparing_width : preparing_width option
     ; geometry : Renderer_virtual_list.Geometry.t
@@ -189,6 +187,7 @@ end
 module Agent_page_state : sig
   type progress_entry
   type render_block
+
   type render_block_view =
     | Invocation of
         { name : string
@@ -199,12 +198,13 @@ module Agent_page_state : sig
     | Waiting
     | Progress of progress_entry
     | Status of Ochat_function.Trace.outcome
+
   type call
   type t
 
-  val empty : unit -> t
   (** [empty ()] creates state with no calls or selection and an independent
       scroll box that follows new output from the bottom. *)
+  val empty : unit -> t
 end
 
 module Shell_security_page_state = Shell_security_page_state
@@ -273,12 +273,10 @@ type t =
   ; function_name_by_id : (string, string) Base.Hashtbl.t
   ; reasoning_idx_by_id : (string, int ref) Base.Hashtbl.t
   ; tool_output_by_index : (int, Types.tool_output_kind) Base.Hashtbl.t
-  ; tool_output_by_id
-      : (Projected_message.Id.t, Types.tool_output_kind) Base.Hashtbl.t
+  ; tool_output_by_id : (Projected_message.Id.t, Types.tool_output_kind) Base.Hashtbl.t
   ; call_id_by_item_id : (string, string) Base.Hashtbl.t
   ; tool_call_id_by_id : (Projected_message.Id.t, string) Base.Hashtbl.t
-  ; tool_call_outcome_by_call_id
-      : (string, Ochat_function.Trace.outcome) Base.Hashtbl.t
+  ; tool_call_outcome_by_call_id : (string, Ochat_function.Trace.outcome) Base.Hashtbl.t
   ; tool_path_by_call_id : (string, string option) Base.Hashtbl.t
   ; mutable active_page : Page_id.t
   ; pages : Pages.t
@@ -302,10 +300,13 @@ type t =
   ; mutable typeahead_completion : typeahead_completion option
   ; mutable typeahead_preview_open : bool
   ; mutable typeahead_preview_scroll : int
+  ; mutable typeahead_context_epoch : int
+  ; mutable typeahead_status : string option
   ; mutable typeahead_generation : int
   ; mutable activity : activity option
   ; mutable animation_frame : int
   ; mutable normal_input_enabled : bool
+  ; mutable connection_status : Connection_status.t option
   ; projected : Projected_state.t
   }
 [@@deriving fields ~getters ~setters]
@@ -345,9 +346,10 @@ val set_chat_materialization_corridor : t -> unit
 val set_chat_materialization_warm : t -> unit
 val chat_materialization : t -> Chat_page_state.materialization
 val normal_input_is_enabled : t -> bool
-val set_normal_input_enabled : t -> bool -> unit
+
 (** [normal_input_is_enabled t] returns [true] after the first exact Corridor
     or Warm frame completes terminal presentation. *)
+val set_normal_input_enabled : t -> bool -> unit
 
 (** Width materialization keeps the currently displayable exact width separate
     from one generation-scoped target width. [Resizing] displays a loader while
@@ -366,11 +368,14 @@ val restore_width : t -> width:int -> bool
 val reusable_layout_width : t -> width:int -> int option
 val restore_layout_width : t -> source_width:int -> width:int -> bool
 
-val width_preparation : t -> Chat_page_state.preparing_width option
 (** [width_preparation t] returns the current generation-scoped target-width
     preparation. Stale transcript or render generations are cleared and return
     [None]. *)
+val width_preparation : t -> Chat_page_state.preparing_width option
 
+(** [start_width_preparation t ...] replaces any previous target-width
+    preparation without changing active exact-width rendering state. At most
+    one preparation exists, and stale generations cannot publish. *)
 val start_width_preparation
   :  t
   -> request_generation:int
@@ -380,64 +385,51 @@ val start_width_preparation
   -> grammar_generation:int
   -> anchor:Resize_anchor.t
   -> unit
-(** [start_width_preparation t ...] replaces any previous target-width
-    preparation without changing active exact-width rendering state. At most
-    one preparation exists, and stale generations cannot publish. *)
 
-val width_preparation_request_generation
-  : Chat_page_state.preparing_width -> int
-
+val width_preparation_request_generation : Chat_page_state.preparing_width -> int
 val width_preparation_target_width : Chat_page_state.preparing_width -> int
-
-val width_preparation_terminal_size
-  : Chat_page_state.preparing_width -> int * int
+val width_preparation_terminal_size : Chat_page_state.preparing_width -> int * int
 
 val width_preparation_layout
-  : Chat_page_state.preparing_width -> Chat_page_state.preparation_layout
+  :  Chat_page_state.preparing_width
+  -> Chat_page_state.preparation_layout
 
-val width_preparation_generations
-  : Chat_page_state.preparing_width -> int * int
-
-val width_preparation_highlight_generations
-  : Chat_page_state.preparing_width -> int * int
+val width_preparation_generations : Chat_page_state.preparing_width -> int * int
+val width_preparation_highlight_generations : Chat_page_state.preparing_width -> int * int
 
 val width_preparation_status
-  : Chat_page_state.preparing_width -> Chat_page_state.width_preparation_status
+  :  Chat_page_state.preparing_width
+  -> Chat_page_state.width_preparation_status
 
 val width_preparation_active_geometry
   :  Chat_page_state.preparing_width
   -> Renderer_virtual_list.Geometry.Snapshot.t
 
 val width_preparation_scroll_direction
-  : Chat_page_state.preparing_width -> scroll_direction
+  :  Chat_page_state.preparing_width
+  -> scroll_direction
 
-val width_preparation_anchor
-  : Chat_page_state.preparing_width -> Resize_anchor.t
+val width_preparation_anchor : Chat_page_state.preparing_width -> Resize_anchor.t
 
-val width_preparation_viewport_intent
-  : t -> Chat_page_state.preparing_width -> int * bool
 (** [width_preparation_viewport_intent t preparation] resolves the captured
     stable anchor to [(requested_scroll, follow_bottom)] without mutating the
     active scroll box. *)
+val width_preparation_viewport_intent : t -> Chat_page_state.preparing_width -> int * bool
 
 val width_preparation_row_count : Chat_page_state.preparing_width -> int
+val width_preparation_exact_row_count : t -> Chat_page_state.preparing_width -> int
 
-val width_preparation_exact_row_count
-  : t -> Chat_page_state.preparing_width -> int
-
-val width_preparation_is_exact
-  : t -> Chat_page_state.preparing_width -> bool
 (** [width_preparation_is_exact t preparation] validates that every current
     stable row and revision has exact output at the target width. *)
+val width_preparation_is_exact : t -> Chat_page_state.preparing_width -> bool
 
-val invalidate_width_preparation_row
-  : t -> id:Projected_message.Id.t -> unit
 (** [invalidate_width_preparation_row t ~id] removes only [id]'s target-width
     output and its derived batch/chunk readiness. *)
+val invalidate_width_preparation_row : t -> id:Projected_message.Id.t -> unit
 
-val reconcile_width_preparation : t -> unit
 (** [reconcile_width_preparation t] retains only target rows whose stable ID,
     revision, role, text, and width remain current after projection changes. *)
+val reconcile_width_preparation : t -> unit
 
 val find_width_preparation_row
   :  t
@@ -445,23 +437,18 @@ val find_width_preparation_row
   -> id:Projected_message.Id.t
   -> msg_img_cache option
 
+(** [set_width_preparation_row t ...] records an exact target-width row
+    without modifying the active image cache or geometry. *)
 val set_width_preparation_row
   :  t
   -> request_generation:int
   -> id:Projected_message.Id.t
   -> msg_img_cache
   -> bool
-(** [set_width_preparation_row t ...] records an exact target-width row
-    without modifying the active image cache or geometry. *)
 
-val mark_width_preparation_complete
-  : t -> request_generation:int -> bool
-
-val mark_width_preparation_batch
-  : t -> request_generation:int -> batch_index:int -> bool
-
-val mark_width_preparation_chunk
-  : t -> request_generation:int -> chunk_index:int -> bool
+val mark_width_preparation_complete : t -> request_generation:int -> bool
+val mark_width_preparation_batch : t -> request_generation:int -> batch_index:int -> bool
+val mark_width_preparation_chunk : t -> request_generation:int -> chunk_index:int -> bool
 
 val set_width_preparation_partial_chunk
   :  t
@@ -478,22 +465,31 @@ val set_width_preparation_corridors
   -> bool
 
 val width_preparation_batch_is_ready
-  : t -> request_generation:int -> batch_index:int -> bool
+  :  t
+  -> request_generation:int
+  -> batch_index:int
+  -> bool
 
 val width_preparation_chunk_is_ready
-  : t -> request_generation:int -> chunk_index:int -> bool
+  :  t
+  -> request_generation:int
+  -> chunk_index:int
+  -> bool
 
 val width_preparation_corridors
   :  Chat_page_state.preparing_width
   -> History_chunk.Range.t option * History_chunk.Range.t option
 
 val width_preparation_destination
-  : Chat_page_state.preparing_width -> Chat_page_state.Destination.t option
+  :  Chat_page_state.preparing_width
+  -> Chat_page_state.Destination.t option
 
-val width_preparation_destination_is_current
-  : t -> Chat_page_state.preparing_width -> bool
 (** [width_preparation_destination_is_current t preparation] returns whether
     the stable destination and captured revision still identify a current row. *)
+val width_preparation_destination_is_current
+  :  t
+  -> Chat_page_state.preparing_width
+  -> bool
 
 val set_width_preparation_destination
   :  t
@@ -501,51 +497,48 @@ val set_width_preparation_destination
   -> Chat_page_state.Destination.t option
   -> bool
 
-val publish_width_preparation_corridor
-  : t -> request_generation:int -> bool
 (** [publish_width_preparation_corridor t ~request_generation] atomically
     promotes a fully prepared visible corridor into active target-width
     caches, coherent partial geometry, scroll state, and corridor history. *)
+val publish_width_preparation_corridor : t -> request_generation:int -> bool
 
-val promote_width_preparation_rows
-  : t -> request_generation:int -> bool
 (** [promote_width_preparation_rows t ~request_generation] installs every
     validated target row and globally exact geometry without changing
     materialization or constructing the complete history root. *)
+val promote_width_preparation_rows : t -> request_generation:int -> bool
 
-val finish_width_preparation_promotion
-  : t -> request_generation:int -> bool
 (** [finish_width_preparation_promotion t ~request_generation] transitions a
     complete exact target cache to [Warm], clears corridor restrictions, and
     retains the width in the recent-width LRU. *)
+val finish_width_preparation_promotion : t -> request_generation:int -> bool
 
 val clear_width_preparation
   :  t
   -> request_generation:int
   -> Chat_page_state.preparing_width option
 
-val cancel_width_preparation
-  : t -> request_generation:int -> bool
 (** [cancel_width_preparation t ~request_generation] atomically discards the
     matching preparation without changing active rendering state. *)
+val cancel_width_preparation : t -> request_generation:int -> bool
+
 val row_viewport_relation
   :  t
   -> viewport_height:int
   -> id:Projected_message.Id.t
   -> viewport_relation
 
-val relation_at_index
-  : t -> viewport_height:int -> index:int -> viewport_relation
 (** [relation_at_index t ~viewport_height ~index] classifies a current row
     using exact-prefix reasoning even when distant geometry is estimated. *)
+val relation_at_index : t -> viewport_height:int -> index:int -> viewport_relation
 
 val buffer_row_id : t -> string -> Projected_message.Id.t option
 val mark_history_row_dirty : t -> id:Projected_message.Id.t -> unit
 val mark_all_history_chunks_dirty : t -> unit
 val take_dirty_history_chunks : t -> int list
-val has_dirty_history_chunks : t -> bool
+
 (** [has_dirty_history_chunks t] returns [true] when history chunks are pending
     recomposition. *)
+val has_dirty_history_chunks : t -> bool
 
 val defer_dirty_history_chunks : t -> int list -> unit
 val projection_damage_requires_redraw : projection_damage -> bool
@@ -579,7 +572,9 @@ val reconcile_projected_messages_with_damage
            metadata onto current layout indexes.
     @param tasks Session task list.
     @param kv_store Mutable key/value store for ad-hoc metadata.
-    @param fetch_sw Optional switch used to cancel in-flight background fetches.
+    @param fetch_sw Compatibility field. Current legacy streaming switches
+           belong to [App_runtime.op]; agent-mode cancellation belongs to the
+           session client.
     @param scroll_box Scroll box backing the history viewport.
     @param cursor_pos Byte offset of the caret inside [input_line] (or the active
            buffer).
@@ -617,20 +612,26 @@ val create
 
 (** Convenience accessors – added on demand. *)
 
-val activity : t -> activity option
 (** [activity t] returns the long-running operation currently presented in
     the UI. Runtime operation state remains authoritative. *)
+val activity : t -> activity option
 
-val set_activity : t -> activity option -> unit
 (** [set_activity t activity] changes the presented long-running operation
     and resets its animation. Setting the current activity again preserves the
     current animation frame. *)
+val set_activity : t -> activity option -> unit
 
-val animation_frame : t -> int
 (** [animation_frame t] returns the current loader frame. *)
+val animation_frame : t -> int
 
-val advance_animation_frame : t -> unit
 (** [advance_animation_frame t] advances the loader animation by one frame. *)
+val advance_animation_frame : t -> unit
+
+(** [connection_status t] is presentation-only client connection state. *)
+val connection_status : t -> Connection_status.t option
+
+(** [set_connection_status t status] changes only local presentation state. *)
+val set_connection_status : t -> Connection_status.t option -> unit
 
 (** [active_page t] indicates which full-screen page is currently shown.
     Initially this is always {!Page_id.Chat}. *)
@@ -646,36 +647,35 @@ val shell_security_tab : t -> Shell_security_page_state.tab
 val set_shell_security_tab : t -> Shell_security_page_state.tab -> unit
 val shell_security_scroll_box : t -> Notty_scroll_box.t
 val shell_approval_modal : t -> Shell_security_page_state.approval_modal option
-val shell_grant_revoke_modal
-  : t -> Shell_security_page_state.grant_revoke_modal option
+val shell_grant_revoke_modal : t -> Shell_security_page_state.grant_revoke_modal option
 val moderator_modal : t -> Shell_security_page_state.moderator_modal option
 val selected_shell_grant_id : t -> string option
 val move_shell_grant_selection : t -> int -> unit
+
 val open_shell_approval_modal
   :  t
   -> request:Shell_runtime.Approval_broker.ui_request
   -> queue_count:int
   -> unit
+
 val close_shell_approval_modal : t -> unit
 val open_shell_grant_revoke_modal : t -> unit
 val close_shell_grant_revoke_modal : t -> unit
 val mark_shell_grant_revoking : t -> generation:int -> grant_id:string -> unit
-val fail_shell_grant_revoke
-  : t -> generation:int -> grant_id:string -> string -> unit
-val open_moderator_modal
-  :  t
-  -> Chat_response.In_memory_stream.pending_ui_request
-  -> unit
+val fail_shell_grant_revoke : t -> generation:int -> grant_id:string -> string -> unit
+val open_moderator_modal : t -> Chat_response.In_memory_stream.pending_ui_request -> unit
 val close_moderator_modal : t -> unit
 val set_moderator_validation_error : t -> string option -> unit
 val shell_audit_load_state : t -> Shell_security_page_state.audit_load_state
 val selected_shell_audit_request_id : t -> string option
 val begin_shell_management_load : t -> int
+
 val finish_shell_management_load
   :  t
   -> generation:int
   -> Shell_security_page_state.audit_page
   -> bool
+
 val fail_shell_management_load : t -> generation:int -> string -> bool
 val move_shell_audit_selection : t -> int -> unit
 val set_shell_approval_choice : t -> Shell_security_page_state.approval_choice -> unit
@@ -689,20 +689,29 @@ val shell_interaction_uses_cursor : t -> bool
     the authoritative location for chat-only scroll state and render
     caches. *)
 val chat_page : t -> Chat_page_state.t
+
 val agent_page : t -> Agent_page_state.t
 
 (** [scroll_box t] is the chat page's scroll box used by history
     virtualisation and scrolling commands. *)
 val scroll_box : t -> Notty_scroll_box.t
+
 val agent_scroll_box : t -> Notty_scroll_box.t
-val agent_auto_follow : t -> bool
+
 (** [agent_auto_follow t] is [true] while Agent output remains pinned to the
     bottom as progress arrives. *)
+val agent_auto_follow : t -> bool
 
-val set_agent_auto_follow : t -> bool -> unit
 (** [set_agent_auto_follow t enabled] changes only the Agent page's follow
     behavior and never affects Chat scrolling. *)
+val set_agent_auto_follow : t -> bool -> unit
 
+(** [agent_call_started t ~call_id ~name ~kind ~payload ~agent_page_kind] adds
+    a transient Agent-page call. [payload] is the exact function arguments or
+    custom-tool input.
+    It preserves start order and selects the first call without opening Agent.
+    Duplicate active IDs return [true] idempotently without replacing
+    metadata. Terminal IDs return [false]. Canonical history is unchanged. *)
 val agent_call_started
   :  t
   -> call_id:string
@@ -711,18 +720,7 @@ val agent_call_started
   -> payload:string
   -> agent_page_kind:Chat_response.Tool_execution_event.agent_page_kind
   -> bool
-(** [agent_call_started t ~call_id ~name ~kind ~payload ~agent_page_kind] adds
-    a transient Agent-page call. [payload] is the exact function arguments or
-    custom-tool input.
-    It preserves start order and selects the first call without opening Agent.
-    Duplicate active IDs return [true] idempotently without replacing
-    metadata. Terminal IDs return [false]. Canonical history is unchanged. *)
 
-val agent_call_progress
-  :  t
-  -> call_id:string
-  -> Ochat_function.Progress.t
-  -> bool
 (** [agent_call_progress t ~call_id progress] updates an active call without
     changing canonical history. Unknown or terminal calls return [false].
 
@@ -731,35 +729,36 @@ val agent_call_progress
     or creates one. Retention is bounded to 1,000,000 bytes per call and
     16,000,000 bytes globally; oldest progress is discarded first and retained
     oversized text is a valid UTF-8 suffix. *)
+val agent_call_progress : t -> call_id:string -> Ochat_function.Progress.t -> bool
 
-val agent_call_trace : t -> call_id:string -> Ochat_function.Trace.t -> bool
 (** [agent_call_trace t ~call_id trace] updates structured nested-tool
     activity under the active outer call. Unknown outer or nested call IDs are
     rejected. Structured traces remain transient and never modify history. *)
+val agent_call_trace : t -> call_id:string -> Ochat_function.Trace.t -> bool
 
+(** [agent_call_finished t ~call_id ~outcome ~output] marks a current-operation
+    call terminal and retains it for display until {!clear_agent_calls}.
+    Selection and active page remain unchanged. Duplicate/unknown completions,
+    restarts, progress, and traces for terminal calls are rejected. [output] is
+    a non-authoritative transient projection. *)
 val agent_call_finished
   :  t
   -> call_id:string
   -> outcome:Ochat_function.Trace.outcome
   -> output:Openai.Responses.Tool_output.Output.t option
   -> bool
-(** [agent_call_finished t ~call_id ~outcome ~output] marks a current-operation
-    call terminal and retains it for display until {!clear_agent_calls}.
-    Selection and active page remain unchanged. Duplicate/unknown completions,
-    restarts, progress, and traces for terminal calls are rejected. [output] is
-    a non-authoritative transient projection. *)
 
-val clear_agent_calls : t -> unit
 (** [clear_agent_calls t] clears current-operation Agent calls and transient
     Chat tool-completion decorations, resets Agent scrolling, then activates
     Chat. Canonical history is unchanged. *)
+val clear_agent_calls : t -> unit
 
-val active_agent_calls : t -> Agent_page_state.call list
 (** [active_agent_calls t] returns calls in accepted start order. *)
+val active_agent_calls : t -> Agent_page_state.call list
 
-val selected_agent_call : t -> Agent_page_state.call option
 (** [selected_agent_call t] returns the selected active call. It is [None]
     exactly when no calls are active. *)
+val selected_agent_call : t -> Agent_page_state.call option
 
 val select_next_agent_call : t -> unit
 val select_previous_agent_call : t -> unit
@@ -767,63 +766,66 @@ val agent_call_id : Agent_page_state.call -> string
 val agent_call_name : Agent_page_state.call -> string
 val agent_call_kind : Agent_page_state.call -> [ `Function | `Custom ]
 val agent_call_payload : Agent_page_state.call -> string
+
 val agent_call_agent_page_kind
   :  Agent_page_state.call
   -> Chat_response.Tool_execution_event.agent_page_kind
+
 val agent_call_start_order : Agent_page_state.call -> int
+
+(** [agent_call_progress_entries call] returns retained display entries from
+    oldest to newest. *)
 val agent_call_progress_entries
   :  Agent_page_state.call
   -> Agent_page_state.progress_entry list
-(** [agent_call_progress_entries call] returns retained display entries from
-    oldest to newest. *)
 
-val agent_call_is_truncated : Agent_page_state.call -> bool
 (** [agent_call_is_truncated call] remains [true] after any progress is
     discarded to satisfy a retention limit. *)
-val agent_call_outcome
-  :  Agent_page_state.call
-  -> Ochat_function.Trace.outcome option
+val agent_call_is_truncated : Agent_page_state.call -> bool
+
+val agent_call_outcome : Agent_page_state.call -> Ochat_function.Trace.outcome option
+
 val agent_call_output
   :  Agent_page_state.call
   -> Openai.Responses.Tool_output.Output.t option
+
 val progress_entry_text_view
   :  Agent_page_state.progress_entry
   -> (Ochat_function.Progress.channel * string) option
 
-val progress_entry_text : Agent_page_state.progress_entry -> string
 (** [progress_entry_text entry] returns text used by aggregate tests and
     diagnostics. Nested tool entries include their payload, progress, and
     transient returned output. *)
+val progress_entry_text : Agent_page_state.progress_entry -> string
 
+(** The entry views expose either a text message or a structured nested tool
+    invocation with its ordered progress and terminal display projection. *)
 val progress_entry_tool_view
   :  Agent_page_state.progress_entry
   -> (string
-      * string
-      * Ochat_function.Trace.tool_kind
-      * string
-      * (Ochat_function.Progress.channel * string) list
-      * Ochat_function.Trace.outcome option
-      * Openai.Responses.Tool_output.Output.t option)
+     * string
+     * Ochat_function.Trace.tool_kind
+     * string
+     * (Ochat_function.Progress.channel * string) list
+     * Ochat_function.Trace.outcome option
+     * Openai.Responses.Tool_output.Output.t option)
        option
-(** The entry views expose either a text message or a structured nested tool
-    invocation with its ordered progress and terminal display projection. *)
 
-val agent_call_render_blocks
-  :  Agent_page_state.call
-  -> Agent_page_state.render_block list
 (** [agent_call_render_blocks call] returns stable-ID display blocks in document
     order. Revisions change only when the corresponding rendered content
     changes. *)
+val agent_call_render_blocks : Agent_page_state.call -> Agent_page_state.render_block list
 
 val agent_render_block_id : Agent_page_state.render_block -> int
 val agent_render_block_revision : Agent_page_state.render_block -> int
+
 val agent_render_block_view
   :  Agent_page_state.render_block
   -> Agent_page_state.render_block_view
 
-val prepare_agent_render_width : Agent_page_state.call -> width:int -> unit
 (** [prepare_agent_render_width call ~width] invalidates wrapping-dependent
     caches only when [width] changes. *)
+val prepare_agent_render_width : Agent_page_state.call -> width:int -> unit
 
 val find_agent_render_cache
   :  Agent_page_state.call
@@ -836,19 +838,16 @@ val set_agent_render_cache
   -> image:Notty.I.t
   -> unit
 
-val prune_agent_render_cache
-  :  Agent_page_state.call
-  -> block_ids:int list
-  -> unit
-
+val prune_agent_render_cache : Agent_page_state.call -> block_ids:int list -> unit
 val agent_render_block_ids : Agent_page_state.call -> int array
 val agent_render_block_revisions : Agent_page_state.call -> int array
-val agent_render_geometry
-  :  Agent_page_state.call
-  -> Renderer_virtual_list.Geometry.t
+val agent_render_geometry : Agent_page_state.call -> Renderer_virtual_list.Geometry.t
 val agent_render_heights : Agent_page_state.call -> int array
 val agent_render_prefix : Agent_page_state.call -> int array
 
+(** The render-cache helpers support Agent message virtualization. Callers
+    outside the Agent renderer and deterministic renderer tests should not
+    mutate them. *)
 val set_agent_render_geometry
   :  Agent_page_state.call
   -> block_ids:int array
@@ -856,9 +855,6 @@ val set_agent_render_geometry
   -> heights:int array
   -> prefix:int array
   -> unit
-(** The render-cache helpers support Agent message virtualization. Callers
-    outside the Agent renderer and deterministic renderer tests should not
-    mutate them. *)
 
 (** [selected_msg t] resolves the stable selected projected-row ID to its
     current zero-based render index. The returned value is an ephemeral layout
@@ -871,7 +867,8 @@ val input_line : t -> string
 
 (** [cursor_pos t] is the {e byte} index of the caret inside
     {!input_line}.  The value is always between [0] and
-    [String.length (input_line t)]. *)
+    [String.length (input_line t)]. Cursor setters align valid UTF-8 to extended
+    grapheme boundaries. *)
 val cursor_pos : t -> int
 
 (** [selection_anchor t] is the position at which the current selection
@@ -895,59 +892,60 @@ val selection_active : t -> bool
 (** [messages t] returns the list of renderable messages in top-down order.
     Each element is a [(role, text)] pair as defined in {!Types.message}. *)
 val messages : t -> message list
-val set_messages : t -> message list -> unit
-(** [set_messages t messages] structurally replaces visible Chat messages. *)
 
-val reconcile_messages : t -> message list -> unit
+(** [set_messages t messages] structurally replaces visible Chat messages. *)
+val set_messages : t -> message list -> unit
+
 (** [reconcile_messages t messages] replaces visible Chat messages while
     retaining compatible prefix caches and geometry. When Chat is manually
     scrolled, it remaps the top-row anchor by stable row ID, falling back to
     message occurrence only for legacy projections, and restores that semantic
     position in the new transcript. *)
+val reconcile_messages : t -> message list -> unit
 
+(** [reconcile_projected_messages t ~rows ~messages] atomically replaces an
+    identity-bearing projection. When manually scrolled, it captures the
+    stable row and within-row viewport anchor before either rows or geometry
+    change, then restores it after both projections reconcile. *)
 val reconcile_projected_messages
   :  t
   -> rows:Projected_message.t list
   -> messages:message list
   -> unit
-(** [reconcile_projected_messages t ~rows ~messages] atomically replaces an
-    identity-bearing projection. When manually scrolled, it captures the
-    stable row and within-row viewport anchor before either rows or geometry
-    change, then restores it after both projections reconcile. *)
 
-val capture_resize_anchor : t -> viewport_height:int -> Resize_anchor.t
 (** [capture_resize_anchor t ~viewport_height] captures bottom-follow intent or
     the stable projected row identity, revision, intra-row offset, and screen
     placement of a manual viewport. *)
+val capture_resize_anchor : t -> viewport_height:int -> Resize_anchor.t
 
+(** [restore_resize_anchor t ~viewport_height anchor] resolves [anchor] against
+    the current projection and geometry on the UI domain. Removed or revised
+    rows are repaired to the nearest unchanged captured neighbor, preferring
+    the older neighbor at equal distance. *)
 val restore_resize_anchor
   :  t
   -> viewport_height:int
   -> Resize_anchor.t
   -> Resize_anchor.resolution
-(** [restore_resize_anchor t ~viewport_height anchor] resolves [anchor] against
-    the current projection and geometry on the UI domain. Removed or revised
-    rows are repaired to the nearest unchanged captured neighbor, preferring
-    the older neighbor at equal distance. *)
 
-val render_messages : t -> message array
 (** [render_messages t] is the array-backed Chat rendering projection. It
     shares message strings with {!messages} and supports constant-time
     viewport lookup. *)
+val render_messages : t -> message array
 
-val transcript_generation : t -> int
 (** [transcript_generation t] changes whenever the visible transcript is
     structurally replaced or extended. *)
+val transcript_generation : t -> int
 
-val message_revision : t -> idx:int -> int option
 (** [message_revision t ~idx] identifies render-affecting content at [idx]
     within the current transcript generation. Detached render results must
     match both identities before the UI reducer may commit them. *)
+val message_revision : t -> idx:int -> int option
 
-val render_generation : t -> int
 (** [render_generation t] changes whenever visible message structure, text, or
     rendering metadata changes. Startup background warming aborts when this
     value changes. *)
+val render_generation : t -> int
 
 (** [tasks t] returns the list of tasks currently associated with the
     session. *)
@@ -966,18 +964,12 @@ val kv_store : t -> (string, string) Base.Hashtbl.t
     rendering of built-in tools (for example, path-aware styling for
     [read_file]). *)
 val tool_output_by_index : t -> (int, Types.tool_output_kind) Base.Hashtbl.t
-val tool_output_for_row
-  :  t
-  -> id:Projected_message.Id.t
-  -> Types.tool_output_kind option
 
-val set_tool_output_kind
-  :  t
-  -> idx:int
-  -> Types.tool_output_kind
-  -> bool
+val tool_output_for_row : t -> id:Projected_message.Id.t -> Types.tool_output_kind option
+
 (** [set_tool_output_kind t ~idx kind] updates render metadata and its message
     revision when [kind] changes. It returns whether state changed. *)
+val set_tool_output_kind : t -> idx:int -> Types.tool_output_kind -> bool
 
 val set_tool_output_kind_for_row
   :  t
@@ -985,83 +977,84 @@ val set_tool_output_kind_for_row
   -> Types.tool_output_kind
   -> bool
 
+(** [mark_tool_call_finished t ~call_id ~outcome] records transient completion
+    metadata for the corresponding Chat tool-call message. It never changes
+    message text or canonical history. *)
 val mark_tool_call_finished
   :  t
   -> call_id:string
   -> outcome:Ochat_function.Trace.outcome
   -> bool
-(** [mark_tool_call_finished t ~call_id ~outcome] records transient completion
-    metadata for the corresponding Chat tool-call message. It never changes
-    message text or canonical history. *)
 
-val tool_call_outcome_for_message
-  :  t
-  -> idx:int
-  -> Ochat_function.Trace.outcome option
 (** [tool_call_outcome_for_message t ~idx] returns transient terminal metadata
     for a Chat tool-call message index. *)
+val tool_call_outcome_for_message : t -> idx:int -> Ochat_function.Trace.outcome option
 
 val tool_call_outcome_for_row
   :  t
   -> id:Projected_message.Id.t
   -> Ochat_function.Trace.outcome option
 
-val clear_tool_call_outcomes : t -> unit
 (** [clear_tool_call_outcomes t] clears transient Chat completion decorations
     and invalidates Chat rendering caches. Canonical messages and history are
     unchanged. *)
+val clear_tool_call_outcomes : t -> unit
 
 (** [auto_follow t] is the auto-scroll flag.  When [true] the view follows
     new incoming messages automatically; otherwise the scroll position stays
     unchanged. *)
 val auto_follow : t -> bool
 
-val chat_max_scroll : t -> viewport_height:int -> int
 (** [chat_max_scroll t ~viewport_height] returns the authoritative bottom
     offset from virtual history geometry. *)
+val chat_max_scroll : t -> viewport_height:int -> int
 
-val prepared_row_range : t -> History_chunk.Range.t option
 (** [prepared_row_range t] returns the exact row range published by the
     active corridor. *)
+val prepared_row_range : t -> History_chunk.Range.t option
 
-val prepared_scroll_interval
-  : t -> viewport_height:int -> (int * int) option
 (** [prepared_scroll_interval t ~viewport_height] returns the inclusive
     scroll interval whose complete viewport lies in the active exact
     corridor. *)
+val prepared_scroll_interval : t -> viewport_height:int -> (int * int) option
 
-val prepared_boundary_distances
-  : t -> viewport_height:int -> prepared_boundary_distances option
 (** [prepared_boundary_distances t ~viewport_height] returns the current
     viewport's distance in terminal rows from each exact corridor boundary. *)
+val prepared_boundary_distances
+  :  t
+  -> viewport_height:int
+  -> prepared_boundary_distances option
 
-val requested_scroll_is_prepared
-  : t -> viewport_height:int -> requested_scroll:int -> bool
 (** [requested_scroll_is_prepared t ~viewport_height ~requested_scroll] is
     [true] when the requested complete viewport lies in the active corridor. *)
+val requested_scroll_is_prepared
+  :  t
+  -> viewport_height:int
+  -> requested_scroll:int
+  -> bool
 
+(** [reveal_prepared_row t ...] positions an already exact corridor row
+    without rendering. It returns [false] when the destination viewport is
+    outside the published corridor. *)
 val reveal_prepared_row
   :  t
   -> viewport_height:int
   -> id:Projected_message.Id.t
   -> placement:Chat_page_state.Destination.placement
   -> bool
-(** [reveal_prepared_row t ...] positions an already exact corridor row
-    without rendering. It returns [false] when the destination viewport is
-    outside the published corridor. *)
 
-val scroll_chat : t -> viewport_height:int -> int -> chat_scroll_result
 (** [scroll_chat t ~viewport_height delta] applies a geometry-only scroll.
     Corridor movement is clamped to the exact published interval; Warm
     movement retains whole-history behavior. Rejected movement is discarded. *)
+val scroll_chat : t -> viewport_height:int -> int -> chat_scroll_result
 
-val scroll_chat_by : t -> viewport_height:int -> int -> bool
 (** [scroll_chat_by t ~viewport_height delta] scrolls against virtual history
     geometry and enables auto-follow only at the current bottom. *)
+val scroll_chat_by : t -> viewport_height:int -> int -> bool
 
-val follow_chat_bottom : t -> viewport_height:int -> unit
 (** [follow_chat_bottom t ~viewport_height] enables auto-follow and commits
     the geometry-derived bottom offset. *)
+val follow_chat_bottom : t -> viewport_height:int -> unit
 
 (** {1 Command-mode helpers} *)
 
@@ -1096,9 +1089,9 @@ val set_cmdline_cursor : t -> int -> unit
 (** [set_last_search t ~query ~dir] updates {!last_search} to [query] and [dir]. *)
 val set_last_search : t -> query:string -> dir:search_dir -> unit
 
-val selected_render_revision : t -> string
 (** [selected_render_revision t] identifies search-dependent selected-message
     rendering state for image-cache validation. *)
+val selected_render_revision : t -> string
 
 val chat_scroll_direction : t -> scroll_direction
 val set_chat_scroll_direction : t -> scroll_direction -> unit
@@ -1108,6 +1101,10 @@ val set_chat_scroll_direction : t -> scroll_direction -> unit
 (** [push_undo t] stores the current [input_line] / [cursor_pos] pair at the
     top of the undo ring.  Any redo history is cleared. *)
 val push_undo : t -> unit
+
+(** [with_edit_checkpoint t f] records one changed draft per editor action,
+    unless [f] already changed the undo stack. New edits invalidate redo. *)
+val with_edit_checkpoint : t -> (unit -> 'a) -> 'a
 
 (** [undo t] reverts the most recent change to the prompt.  Returns [true]
     when a state was restored, [false] if the stack was empty. *)
@@ -1121,7 +1118,7 @@ val redo : t -> bool
     Type-ahead completion augments the prompt editor with a single-candidate
     suffix:
     {ul
-    {- the reducer triggers background requests (debounced after edits) and
+    {- the shared typeahead adapter triggers opt-in background requests and
        publishes results into {!typeahead_completion};}
     {- the controller handles key bindings to accept/dismiss completions and to
        open/scroll/close the preview popup; and}
@@ -1302,24 +1299,26 @@ val find_img_cache
 (** [set_img_cache t ~id entry] stores [entry] for the projected row [id]. *)
 val set_img_cache : t -> id:Projected_message.Id.t -> msg_img_cache -> unit
 
+(** [find_cached_width_row t ~width ~id ~revision] returns an exact row from
+    active state or a retained width snapshot without changing active state. *)
 val find_cached_width_row
   :  t
   -> width:int
   -> id:Projected_message.Id.t
   -> revision:int
   -> msg_img_cache option
-(** [find_cached_width_row t ~width ~id ~revision] returns an exact row from
-    active state or a retained width snapshot without changing active state. *)
 
+(** [find_compatible_layout_row t ~width ~id ~revision] returns a current row
+    whose layout plan proves unchanged wrap boundaries at [width]. *)
 val find_compatible_layout_row
   :  t
   -> width:int
   -> id:Projected_message.Id.t
   -> revision:int
   -> msg_img_cache option
-(** [find_compatible_layout_row t ~width ~id ~revision] returns a current row
-    whose layout plan proves unchanged wrap boundaries at [width]. *)
 
+(** [find_semantic_cache t ...] returns a width-independent prepared message
+    and worker-produced highlight bindings for the current row revision. *)
 val find_semantic_cache
   :  t
   -> id:Projected_message.Id.t
@@ -1328,8 +1327,6 @@ val find_semantic_cache
   -> text:string
   -> tool_output:Types.tool_output_kind option
   -> msg_semantic_cache option
-(** [find_semantic_cache t ...] returns a width-independent prepared message
-    and worker-produced highlight bindings for the current row revision. *)
 
 (** [commit_render_result t result] validates [result] against current
     transcript, width, message metadata, selection, and search state, then
@@ -1339,20 +1336,19 @@ val find_semantic_cache
     transition. It returns [false] for stale results. *)
 val commit_render_result : t -> Chat_message_render_job.result -> bool
 
+(** [commit_width_preparation_result t ... result] stores width-specific output
+    only after validating the current preparation and row identity. A stale
+    width may still contribute current immutable semantic products. *)
 val commit_width_preparation_result
   :  t
   -> theme_generation:int
   -> grammar_generation:int
   -> Chat_message_render_job.result
   -> bool
-(** [commit_width_preparation_result t ... result] stores width-specific output
-    only after validating the current preparation and row identity. A stale
-    width may still contribute current immutable semantic products. *)
 
 (** [take_and_clear_dirty_height_rows t] returns and clears projected row IDs
     and revisions whose heights may be stale. *)
-val take_and_clear_dirty_height_rows
-  : t -> (Projected_message.Id.t * int) list
+val take_and_clear_dirty_height_rows : t -> (Projected_message.Id.t * int) list
 
 (** [msg_heights t] are the cached rendered heights (in cells) for the chat
     transcript at {!active_history_width}. *)
@@ -1361,18 +1357,13 @@ val msg_heights : t -> int array
 (** [height_prefix t] are prefix sums of {!msg_heights}. *)
 val height_prefix : t -> int array
 
-val chat_render_geometry : t -> Renderer_virtual_list.Geometry.t
 (** [chat_render_geometry t] is the shared virtual-list geometry used by the
     Chat renderer. *)
+val chat_render_geometry : t -> Renderer_virtual_list.Geometry.t
 
-val set_chat_render_geometry
-  :  t
-  -> heights:int array
-  -> prefix:int array
-  -> unit
 (** [set_chat_render_geometry t ~heights ~prefix] atomically replaces coherent
     Chat message geometry. *)
-
+val set_chat_render_geometry : t -> heights:int array -> prefix:int array -> unit
 
 (** {1 Staged identity-bearing Chat projection} *)
 
@@ -1380,8 +1371,7 @@ val projected_rows : t -> Projected_message.t array
 val projected_messages : t -> Types.message list
 val projected_index : t -> id:Projected_message.Id.t -> int option
 val projected_row : t -> id:Projected_message.Id.t -> Projected_message.t option
-val render_row_identity
-  : t -> idx:int -> (Projected_message.Id.t * int) option
+val render_row_identity : t -> idx:int -> (Projected_message.Id.t * int) option
 val render_index_by_id : t -> id:Projected_message.Id.t -> int option
 val reconcile_projected_rows : t -> Projected_message.t list -> unit
 val selected_projected_id : t -> Projected_message.Id.t option
@@ -1390,6 +1380,5 @@ val request_projected_reveal : t -> id:Projected_message.Id.t -> unit
 val take_projected_reveal_request : t -> Projected_message.Id.t option
 val set_projected_height : t -> id:Projected_message.Id.t -> height:int -> unit
 val projected_height : t -> id:Projected_message.Id.t -> int option
-
 val selected_projected_row : t -> Projected_message.t option
 val delete_selected_canonical_entry : t -> [ `Deleted | `Rejected of string ]

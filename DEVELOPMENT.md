@@ -1,5 +1,25 @@
 # Local OCaml documentation & search workflows
 
+## Current agent-server and documentation workflow
+
+Start at [the documentation index](docs-src/README.md) and
+[agent-core embedding](docs-src/agent-server/embedding.md). Build current hosts with
+`dune build bin/chat_tui.exe bin/ochat_agent_server.exe bin/ochat_agent_stdio.exe`.
+Installed names are `chat-tui`, `ochat-agent-server`, and `ochat-agent-stdio`.
+The old `mcp_server` prompt-serving host is deprecated; maintained MCP tools are
+not. Prefer the new daemon tutorials for remote agent sessions.
+
+Use `dune build @agent-docs-check` for offline documentation validation and
+`dune runtest` for normal tests. E2E/load/soak/live-provider/manual tiers remain
+explicit; see [testing](docs-src/agent-server/testing.md). The architecture and
+implementation specs now live in `docs-src/design/`.
+
+Markdown guides are not automatically rendered by odoc. To index all repository
+prose, use `docs-src` rather than only `docs-src/lib`; indexing may call an embedding
+provider and is not part of offline docs validation. The API/odoc indexing workflow
+below is separate. Core is the standard library; new application I/O uses Eio.
+
+
 This document explains how to set up a development environment in which
 **all installed libraries in the current opam switch** and this project’s
 own documentation are searchable via:
@@ -488,11 +508,10 @@ local OCaml libraries and this repository:
 4. **Build HTML-doc search** with
    `odoc-index --root "$OPAM_SWITCH_PREFIX/var/cache/odig/html/"`.
 
-5. **Build Markdown-doc search** with `md-index --root docs-src/lib --name …`.
+5. **Build Markdown-doc search** with `md-index --root docs-src --name …`.
 
 6. **Smoke-test** with `odoc-search`, `md-search`, and `sherlodoc search`.
 
 Once these steps are part of your regular workflow (e.g. after `opam
 upgrade` or significant doc changes), contributors and tools will always
 have up‑to‑date local documentation they can search semantically.
-

@@ -55,6 +55,10 @@ val create
 val id : t -> string
 val spec : t -> Chatmd_shell_spec.Shell_spec.t
 val executor_config : t -> Shell_access.Executor.config
+
+(** [redact t value] applies the runtime's configured secret filter. *)
+val redact : t -> string -> string
+
 val max_stdin_bytes : t -> int
 val executable : t -> string -> executable option
 val environment_value : t -> string -> string option

@@ -25,8 +25,8 @@ open Eio
 
     Start a heartbeat fiber that periodically reports custom metrics:
     {[
-      let probe () = [ "connections", `Int (Connection_pool.size pool) ] in
-      Log.heartbeat ~sw ~clock:Eio.Stdenv.clock ~interval:60.0 ~probe ()
+      let probe () = [ "connections", Jsonaf.Export.jsonaf_of_int 0 ] in
+      Log.heartbeat ~sw ~clock:(Eio.Stdenv.clock env) ~interval:60.0 ~probe ()
     ]}
 *)
 (**************************************************************************)
@@ -62,8 +62,8 @@ let now_float () = Unix.gettimeofday ()
 
       Parameters:
       • [ctx] – additional fields to merge into the JSON object.  The list
-        is concatenated *before* the built-in base fields so that, if you
-        really want to shadow e.g. ["level"], you still can.
+        is concatenated before the built-in base fields. Duplicate keys are
+        retained, not reliably overridden; avoid reserved field names.
       • [lvl] – log severity.
       • [msg] – human-oriented short message.
 
@@ -77,11 +77,14 @@ let now_float () = Unix.gettimeofday ()
         [Obj.magic] is safe because the runtime guarantees the id to fit
         in a machine word.
 
-      All writes are protected by a global {!Eio.Mutex.t} so that each call
-      results in exactly one line in the file [run.log].  The file is
-      opened in append mode with permissions 0644.
+      All writes are protected by a global {!Eio.Mutex.t}; each successful
+      call appends one line to [run.log]. The file is created with
+      requested permissions 0644 (subject to umask); existing permissions remain.
 
-      The function never raises.  *)
+      Channel writes are blocking. Filesystem, serialization and cancellation
+      failures propagate; this is not a best-effort or durable audit sink.
+      The mutex only serializes independent writes, with no shared in-memory
+      state to poison on failure. Partial log lines are still possible. *)
 let emit ?(ctx = []) lvl msg =
   let base : (string * J.t) list =
     [ "ts", jsonaf_of_float (now_float ())
@@ -92,7 +95,7 @@ let emit ?(ctx = []) lvl msg =
     ]
   in
   let obj = `Object (ctx @ base) in
-  Eio.Mutex.use_rw ~protect:false lock (fun () ->
+  Eio.Mutex.use_ro lock (fun () ->
     Out_channel.with_file ~append:true ~perm:0o644 "run.log" ~f:(fun oc ->
       Out_channel.output_string oc (J.to_string obj);
       Out_channel.output_char oc '\n';
@@ -104,9 +107,8 @@ let emit ?(ctx = []) lvl msg =
       [ctx] and include an extra field [duration_ms] on success.
 
       The helper is intended for quick, ad-hoc instrumentation – you get a
-      trace for free without allocating an explicit span id.  Nested calls
-      produce nested JSON objects that can later be correlated by a
-      consumer such as OpenTelemetry or a simple `jq` script.
+      trace without allocating an explicit span id. Nested calls produce
+      separate flat records, not nested JSON objects or automatic parent IDs.
 
       Behaviour:
       • Emits [`Debug] "{name}_start" immediately.
@@ -115,7 +117,8 @@ let emit ?(ctx = []) lvl msg =
         [`Debug] "{name}_end" with an additional [duration_ms] key.
       • On exception, logs [`Error] "{name}_error" and re-raises.
 
-      The function is exception-transparent – it never catches silently. *)
+      Logging failures can prevent the callback, replace its return value or
+      mask its exception. *)
 let with_span ?ctx name f =
   emit ?ctx `Debug (name ^ "_start");
   let t0 = now_float () in
@@ -141,9 +144,9 @@ let with_span ?ctx name f =
       • [probe] – user function returning a list of extra JSON fields for
         the current heartbeat.
 
-      The function returns immediately; the fiber runs until [sw] is
-      finished or uncaught exceptions propagate (which will cancel the
-      fiber).  *)
+      The first probe/log occurs before the first sleep. The daemon fiber is
+      cancelled when the parent switch finishes; uncaught probe/log errors
+      propagate to that switch. *)
 let heartbeat ~sw ~clock ~interval ~probe () =
   Fiber.fork_daemon ~sw (fun () ->
     let rec loop () =

@@ -1,5 +1,10 @@
 # `Chat_response.Moderation`
 
+Agent hosts apply moderator state/effects at actor-owned safe points. Connected clients render the projection; the old file-backed controller remains a separate host. See current orchestration for durable jobs/schedules.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 Shared host-side moderation helpers for ChatML-enabled chat drivers.
 
 For the canonical safe-point and effective-history narrative, see

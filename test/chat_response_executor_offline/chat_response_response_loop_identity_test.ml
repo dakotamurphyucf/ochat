@@ -335,6 +335,45 @@ let%expect_test "fork history retains parent IDs and allocates one child instruc
   [%expect {| (true true reused-call 1 1) |}]
 ;;
 
+let fork_instruction_text () =
+  let invocation_id = Chat_response.Fork.Invocation_id.create () in
+  let allocator = Chat_response.Fork.allocator ~parent_namespace:"prompt" invocation_id in
+  let entries =
+    Chat_response.Fork.history_entries
+      ~allocator
+      ~history:[]
+      ~arguments:{|{"command":"inspect","arguments":["one"]}|}
+      ~call_id:"prompt-contract"
+  in
+  match History_entry.item (List.last_exn entries) with
+  | Res.Item.Function_call_output { output = Output.Text text; _ } -> text
+  | _ -> failwith "Expected textual fork instruction"
+;;
+
+let%expect_test "fork prompt returns all assistant text without PERSIST extraction" =
+  let text = fork_instruction_text () in
+  List.iter
+    [ "All new assistant-message text is returned to the parent as tool output"
+    ; "PERSIST is a summary convention, not an extraction boundary."
+    ; "Your child history is not merged into the parent history."
+    ; "Live progress may also be visible to the user."
+    ]
+    ~f:(fun substring -> print_s [%sexp (String.is_substring text ~substring : bool)]);
+  print_s
+    [%sexp
+      (String.is_substring
+         text
+         ~substring:"Only the information you explicitly place in the *PERSIST* section"
+       : bool)];
+  [%expect
+    {|
+    true
+    true
+    true
+    true
+    false |}]
+;;
+
 let%expect_test "repeated call IDs get distinct fork invocation identities" =
   let first = Chat_response.Fork.Invocation_id.create () in
   let second = Chat_response.Fork.Invocation_id.create () in

@@ -16,10 +16,14 @@ let attribute = function
   | Error diagnostic -> fail diagnostic
 ;;
 
-let load_source ~dir ~source path =
-  try Io.load_doc ~dir path with
-  | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-  | _ ->
+let load_source ~loader ~source_node ~source path =
+  match
+    let open Result.Let_syntax in
+    let%bind resolved = Source_loader.resolve loader ~base:source_node ~reference:path in
+    Source_loader.read loader resolved
+  with
+  | Ok contents -> contents
+  | Error _ ->
     fail
       (D.error
          ~source
@@ -28,7 +32,7 @@ let load_source ~dir ~source path =
          (sprintf "failed to load ChatML script %S relative to the prompt directory" path))
 ;;
 
-let source ~dir ~source attributes inline_source =
+let source ~loader ~source_node ~source attributes inline_source =
   match attribute (Chatmd_attributes.optional attributes "src") with
   | Some path when not (String.is_empty inline_source) ->
     fail
@@ -44,7 +48,8 @@ let source ~dir ~source attributes inline_source =
          ~path:[ "script"; "src" ]
          ~code:"chatmd.script_empty_source"
          "script src cannot be empty")
-  | Some path -> S.Src { path; source_text = load_source ~dir ~source path }
+  | Some path ->
+    S.Src { path; source_text = load_source ~loader ~source_node ~source path }
   | None when String.is_empty inline_source ->
     fail
       (D.error
@@ -77,11 +82,7 @@ let script_id source attributes kind =
 ;;
 
 let limit_error source name message =
-  D.error
-    ~source
-    ~path:[ "script"; name ]
-    ~code:"chatmd.script_invalid_limit"
-    message
+  D.error ~source ~path:[ "script"; name ] ~code:"chatmd.script_invalid_limit" message
 ;;
 
 let positive_int source attributes name default =
@@ -125,7 +126,7 @@ let limits source attributes =
   }
 ;;
 
-let parse ~dir ~source:source_ref ~attributes ~inline_source =
+let parse ~dir:_ ~loader ~source_node ~source:source_ref ~attributes ~inline_source =
   result (fun () ->
     let attributes =
       Chatmd_attributes.create
@@ -158,7 +159,9 @@ let parse ~dir ~source:source_ref ~attributes ~inline_source =
            "only language=chatml is supported");
     let kind_name = attribute (Chatmd_attributes.required attributes "kind") in
     let kind = S.kind_of_string source_ref kind_name |> attribute in
-    let source = source ~dir ~source:source_ref attributes inline_source in
+    let source =
+      source ~loader ~source_node ~source:source_ref attributes inline_source
+    in
     let source_text =
       match source with
       | S.Inline value | S.Src { source_text = value; _ } -> value

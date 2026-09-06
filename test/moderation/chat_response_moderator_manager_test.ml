@@ -189,7 +189,7 @@ let%expect_test "manager snapshots, restores, and drains internal events" =
     1
     (prepend_system)
     ((append_item))
-    moderation-overlay-1 system "policy"
+    moderation-overlay-1 developer "policy"
     synthetic-1 assistant "queued"
     ((script_id main) (script_source_hash 720bb598084b1f2609fb3ce5ac5d8787)
      (queued_internal_events 0) (prepended_items 1) (appended_items 1)
@@ -255,7 +255,7 @@ let%expect_test "manager restores queued internal events from persisted snapshot
     1
     1
     ((append_item))
-    moderation-overlay-1 system "policy"
+    moderation-overlay-1 developer "policy"
     synthetic-1 assistant "queued"
     (Record ((count (Int 2))))
     |}]
@@ -322,7 +322,7 @@ let%expect_test "manager applies prepend, replace, delete, and append overlay op
   print_items (Manager.effective_items manager history);
   [%expect
     {|
-    moderation-overlay-1 system "policy"
+    moderation-overlay-1 developer "policy"
     msg-1 assistant "rewritten"
     synthetic-1 assistant "after"
     |}]
@@ -392,7 +392,7 @@ let%expect_test "manager item helpers expose structured item accessors" =
     host-message-1 user "Hello"
     copy-1 user "Hello"
     summary-1 assistant "host-message-1:message:user:Hello"
-    summary-2 system "guard"
+    summary-2 developer "guard"
     |}]
 ;;
 
@@ -508,6 +508,9 @@ let%expect_test "entry moderation preserves target identity and persists provena
           ~event:Moderation.Event.Turn_start)
      : Moderation.Outcome.t);
   let effective = Manager.effective_entries manager history in
+  (match History_entry.item (List.hd_exn effective).entry with
+   | Openai.Responses.Item.Input_message { role = Developer; _ } -> ()
+   | _ -> failwith "identity-based prepend must emit a developer instruction");
   List.iter effective ~f:(fun effective ->
     print_s
       [%sexp

@@ -1015,6 +1015,263 @@ module Secret_filter = struct
   ;;
 end
 
+module Sanitized_stream = struct
+  type terminal =
+    | Ground
+    | Escape
+    | Intermediate
+    | Csi
+    | Control_string
+    | String_escape
+
+  type t =
+    { filter : Secret_filter.t
+    ; max_secret : int
+    ; on_output : string -> unit
+    ; mutable terminal : terminal
+    ; mutable utf8_pending : string
+    ; mutable output_pending : string
+    ; mutable secret_pending : string
+    ; mutable covered : int
+    ; mutable redacting : bool
+    ; mutable remaining : int
+    ; mutable closed : bool
+    }
+
+  let terminal_byte state character =
+    let code = Char.to_int character in
+    match state, character with
+    | Ground, '\027' -> Escape, false
+    | Ground, ('\n' | '\r' | '\t') -> Ground, true
+    | Ground, _ -> Ground, code >= 0x20 && code <> 0x7f
+    | Escape, '[' -> Csi, false
+    | Escape, (']' | 'P' | 'X' | '^' | '_') -> Control_string, false
+    | (Escape | Intermediate), _ when code >= 0x20 && code <= 0x2f -> Intermediate, false
+    | (Escape | Intermediate), _ -> Ground, false
+    | Csi, '\027' -> Escape, false
+    | Csi, _ -> (if code >= 0x40 && code <= 0x7e then Ground else Csi), false
+    | Control_string, '\007' -> Ground, false
+    | Control_string, '\027' -> String_escape, false
+    | Control_string, _ -> Control_string, false
+    | String_escape, '\\' -> Ground, false
+    | String_escape, '\027' -> String_escape, false
+    | String_escape, _ -> Control_string, false
+  ;;
+
+  let terminal t text =
+    let output = Buffer.create (String.length text) in
+    String.iter text ~f:(fun character ->
+      let state, keep = terminal_byte t.terminal character in
+      t.terminal <- state;
+      if keep then Buffer.add_char output character);
+    Buffer.contents output
+  ;;
+
+  let is_unsafe_unicode code =
+    (code >= 0x80 && code <= 0x9f)
+    || (code >= 0x202a && code <= 0x202e)
+    || (code >= 0x2066 && code <= 0x2069)
+  ;;
+
+  let utf8_width character =
+    match Char.to_int character with
+    | code when code >= 0xc2 && code <= 0xdf -> 2
+    | code when code >= 0xe0 && code <= 0xef -> 3
+    | code when code >= 0xf0 && code <= 0xf4 -> 4
+    | _ -> 1
+  ;;
+
+  let utf8 text ~eof =
+    let output = Buffer.create (String.length text) in
+    let rec loop index =
+      if index = String.length text
+      then Buffer.contents output, ""
+      else if (not eof) && index + utf8_width text.[index] > String.length text
+      then Buffer.contents output, String.drop_prefix text index
+      else (
+        let decoded = Stdlib.String.get_utf_8_uchar text index in
+        let length = Stdlib.Uchar.utf_decode_length decoded in
+        if not (Stdlib.Uchar.utf_decode_is_valid decoded)
+        then Buffer.add_string output "\239\191\189"
+        else if
+          not
+            (is_unsafe_unicode
+               (Stdlib.Uchar.to_int (Stdlib.Uchar.utf_decode_uchar decoded)))
+        then Buffer.add_substring output text ~pos:index ~len:length;
+        loop (index + length))
+    in
+    loop 0
+  ;;
+
+  let is_plain text =
+    Stdlib.String.is_valid_utf_8 text
+    && String.for_all text ~f:(fun character ->
+      let code = Char.to_int character in
+      (code >= 0x20 && code <> 0x7f)
+      || Char.equal character '\n'
+      || Char.equal character '\r'
+      || Char.equal character '\t')
+    && String.equal (fst (utf8 text ~eof:true)) text
+  ;;
+
+  let replacement_support (filter : Secret_filter.t) =
+    let boundary_is_safe character =
+      List.for_all filter.secrets ~f:(fun secret ->
+        not (String.contains secret character))
+    in
+    if
+      List.exists filter.secrets ~f:(fun secret ->
+        String.is_substring filter.replacement ~substring:secret)
+    then Error "streaming replacement must not contain a configured secret"
+    else if
+      (not (List.is_empty filter.secrets))
+      && (String.is_empty filter.replacement
+          || (not (boundary_is_safe filter.replacement.[0]))
+          || not
+               (boundary_is_safe
+                  filter.replacement.[String.length filter.replacement - 1]))
+    then
+      Error "streaming replacement needs leading/trailing bytes absent from every secret"
+    else Ok ()
+  ;;
+
+  let support (filter : Secret_filter.t) ~max_bytes =
+    if max_bytes <= 0
+    then Error "streaming output budget must be positive"
+    else if
+      List.exists filter.secrets ~f:(fun secret ->
+        (not (is_plain secret)) || String.length secret > max_bytes)
+    then Error "streaming secrets must be plain UTF-8 and fit the output budget"
+    else if
+      (not (is_plain filter.replacement)) || String.length filter.replacement > max_bytes
+    then Error "streaming replacement must be plain UTF-8 and fit the output budget"
+    else replacement_support filter
+  ;;
+
+  let create ~secret_filter ~max_bytes ~on_output =
+    Result.map (support secret_filter ~max_bytes) ~f:(fun () ->
+      { filter = secret_filter
+      ; max_secret =
+          List.fold secret_filter.secrets ~init:1 ~f:(fun length secret ->
+            Int.max length (String.length secret))
+      ; on_output
+      ; terminal = Ground
+      ; utf8_pending = ""
+      ; output_pending = ""
+      ; secret_pending = ""
+      ; covered = 0
+      ; redacting = false
+      ; remaining = max_bytes
+      ; closed = false
+      })
+  ;;
+
+  let prefix_length text limit =
+    let rec loop index =
+      if index >= String.length text
+      then index
+      else (
+        let decoded = Stdlib.String.get_utf_8_uchar text index in
+        let next = index + Stdlib.Uchar.utf_decode_length decoded in
+        if next > limit then index else loop next)
+    in
+    loop 0
+  ;;
+
+  let deliver t text =
+    let rec loop index =
+      if index < String.length text && t.remaining > 0
+      then (
+        let rest = String.drop_prefix text index in
+        let length = prefix_length rest (Int.min 4096 t.remaining) in
+        if length = 0
+        then t.remaining <- 0
+        else (
+          t.remaining <- t.remaining - length;
+          t.on_output (String.prefix rest length);
+          loop (index + length)))
+    in
+    loop 0
+  ;;
+
+  let match_length t text index =
+    List.fold t.filter.secrets ~init:0 ~f:(fun longest secret ->
+      if
+        index + String.length secret <= String.length text
+        && String.is_substring_at text ~pos:index ~substring:secret
+      then Int.max longest (String.length secret)
+      else longest)
+  ;;
+
+  let flush t output ~eof =
+    let complete, pending = utf8 (t.output_pending ^ Buffer.contents output) ~eof in
+    Buffer.clear output;
+    t.output_pending <- pending;
+    deliver t complete
+  ;;
+
+  let redact_byte t output text index =
+    t.covered <- Int.max t.covered (match_length t text index);
+    if t.covered > 0
+    then (
+      if (not t.redacting) && t.remaining > 0
+      then Buffer.add_string output t.filter.replacement;
+      t.redacting <- true;
+      t.covered <- t.covered - 1)
+    else (
+      t.redacting <- false;
+      if t.remaining > 0 then Buffer.add_char output text.[index]);
+    if Buffer.length output >= 4096 then flush t output ~eof:false
+  ;;
+
+  let redact t text ~eof =
+    let output = Buffer.create 4096 in
+    let rec loop index =
+      if
+        index = String.length text
+        || ((not eof) && index + t.max_secret > String.length text)
+      then (
+        t.secret_pending <- String.drop_prefix text index;
+        flush t output ~eof)
+      else (
+        redact_byte t output text index;
+        loop (index + 1))
+    in
+    loop 0
+  ;;
+
+  let process t text ~eof =
+    let normalized, pending = utf8 (t.utf8_pending ^ terminal t text) ~eof in
+    t.utf8_pending <- pending;
+    redact t (t.secret_pending ^ normalized) ~eof
+  ;;
+
+  let feed t text =
+    let rec loop index =
+      if (not t.closed) && index < String.length text
+      then (
+        let length = Int.min 4096 (String.length text - index) in
+        process t (String.sub text ~pos:index ~len:length) ~eof:false;
+        loop (index + length))
+    in
+    loop 0
+  ;;
+
+  let discard t =
+    t.closed <- true;
+    t.utf8_pending <- "";
+    t.output_pending <- "";
+    t.secret_pending <- ""
+  ;;
+
+  let finish t =
+    if not t.closed
+    then (
+      process t "" ~eof:true;
+      discard t)
+  ;;
+end
+
 module Stable_hash = struct
   let add_part buffer part =
     Buffer.add_string buffer (Int.to_string (String.length part));
@@ -1191,15 +1448,11 @@ module Approval = struct
       Option.value lookup ~default:(fun ~now ~session_id identity ->
         Ok (is_approved_in grants ~now ~session_id identity))
     in
-    let remember =
-      Option.value remember ~default:(remember_in grants)
-    in
+    let remember = Option.value remember ~default:(remember_in grants) in
     { lookup; remember }
   ;;
 
-  let is_approved store ~now ~session_id identity =
-    store.lookup ~now ~session_id identity
-  ;;
+  let is_approved store ~now ~session_id identity = store.lookup ~now ~session_id identity
 
   let remember store ~session_id identity scope reviewer =
     store.remember ~session_id identity scope reviewer
@@ -1451,8 +1704,7 @@ module Audit = struct
     | Rejected (context, _) -> context
     | Approval_requested request
     | Approval_answered (request, _)
-    | Reviewer_completed (request, _, _) ->
-      request.Approval.context
+    | Reviewer_completed (request, _, _) -> request.Approval.context
   ;;
 
   let plan_id = function
@@ -1747,7 +1999,11 @@ module Backend = struct
   ;;
 
   let external_ ~name ~wrapper ~confinement ~accept_declared_confinement atoms =
-    let command_count = List.count atoms ~f:(function Command_argv -> true | _ -> false) in
+    let command_count =
+      List.count atoms ~f:(function
+        | Command_argv -> true
+        | _ -> false)
+    in
     if not (Int.equal command_count 1)
     then Error "external backend requires exactly one command_argv atom"
     else
@@ -1766,14 +2022,20 @@ module Backend = struct
               Result.bind (Resolver.verify ~fs wrapper) ~f:(fun () ->
                 let target = plan.Execution_plan.context.executable.canonical_path in
                 let argv = target :: plan.context.command.arguments in
-                let argv = wrapper.canonical_path :: List.concat_map atoms ~f:(expand_atom plan argv) in
-                Ok { executable = wrapper.canonical_path; argv; environment = plan.environment }))
+                let argv =
+                  wrapper.canonical_path
+                  :: List.concat_map atoms ~f:(expand_atom plan argv)
+                in
+                Ok
+                  { executable = wrapper.canonical_path
+                  ; argv
+                  ; environment = plan.environment
+                  }))
         }
   ;;
 
   let prepare t ~fs plan = t.prepare_fn fs plan
   let simulate t = t.simulate_fn
-
   let sandboxed t = t.eligible_for_required
 
   module For_testing = struct
@@ -1836,6 +2098,19 @@ module Request = struct
 end
 
 module Executor = struct
+  type progress =
+    { channel : [ `Stdout | `Stderr ]
+    ; text : string
+    }
+
+  type streaming =
+    { stdout : Sanitized_stream.t
+    ; stderr : Sanitized_stream.t
+    ; combined : Sanitized_stream.t
+    ; sources : Sanitized_stream.t String.Table.t
+    ; mutex : Eio.Mutex.t
+    }
+
   type config =
     { env : Eio_unix.Stdenv.base
     ; fs : Eio.Fs.dir_ty Eio.Path.t
@@ -1861,6 +2136,8 @@ module Executor = struct
     ; audit_sequence : int Atomic.t
     ; session_id : string option
     ; pipefail : bool
+    ; streaming : streaming option
+    ; stream_stdout : bool
     }
 
   type invocation =
@@ -2087,7 +2364,114 @@ module Executor = struct
     ; audit_sequence
     ; session_id
     ; pipefail
+    ; streaming = None
+    ; stream_stdout = true
     }
+  ;;
+
+  let streaming_support config =
+    if
+      List.exists config.interceptors ~f:(fun interceptor ->
+        Option.is_some interceptor.Interceptor.after)
+    then Error "sanitized streaming does not support after-interceptors"
+    else
+      Sanitized_stream.support
+        config.secret_filter
+        ~max_bytes:config.limits.max_total_bytes
+  ;;
+
+  let observe on_progress progress =
+    Eio.Fiber.check ();
+    (try on_progress progress with
+     | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+     | _ -> ());
+    Eio.Fiber.check ()
+  ;;
+
+  let stream_channel config ~total ~combined maximum =
+    let remaining = ref maximum in
+    let on_output text =
+      let channel_limited = !remaining <= !total in
+      let total_limited = !total <= !remaining in
+      let length = Sanitized_stream.prefix_length text (Int.min !remaining !total) in
+      remaining := !remaining - length;
+      total := !total - length;
+      if length < String.length text
+      then (
+        if channel_limited then remaining := 0;
+        if total_limited then total := 0);
+      if length > 0 then Sanitized_stream.feed combined (String.prefix text length)
+    in
+    Sanitized_stream.create
+      ~secret_filter:config.secret_filter
+      ~max_bytes:config.limits.max_total_bytes
+      ~on_output
+    |> Result.ok_or_failwith
+  ;;
+
+  let streaming_state config on_progress =
+    let total = ref config.limits.max_total_bytes in
+    let combined =
+      Sanitized_stream.create
+        ~secret_filter:config.secret_filter
+        ~max_bytes:config.limits.max_total_bytes
+        ~on_output:(fun text -> observe on_progress { channel = `Stdout; text })
+      |> Result.ok_or_failwith
+    in
+    { stdout = stream_channel config ~total ~combined config.limits.max_stdout_bytes
+    ; stderr = stream_channel config ~total ~combined config.limits.max_stderr_bytes
+    ; combined
+    ; sources = String.Table.create ()
+    ; mutex = Eio.Mutex.create ()
+    }
+  ;;
+
+  let stream_key id channel =
+    id
+    ^
+    match channel with
+    | `Stdout -> ":stdout"
+    | `Stderr -> ":stderr"
+  ;;
+
+  let stream_source config streaming id channel =
+    Hashtbl.find_or_add streaming.sources (stream_key id channel) ~default:(fun () ->
+      let merged =
+        match channel with
+        | `Stdout -> streaming.stdout
+        | `Stderr -> streaming.stderr
+      in
+      Sanitized_stream.create
+        ~secret_filter:config.secret_filter
+        ~max_bytes:config.limits.max_total_bytes
+        ~on_output:(Sanitized_stream.feed merged)
+      |> Result.ok_or_failwith)
+  ;;
+
+  let stream_feed config id channel text =
+    Option.iter config.streaming ~f:(fun streaming ->
+      Eio.Mutex.use_rw ~protect:false streaming.mutex
+      @@ fun () ->
+      if config.stream_stdout || Poly.equal channel `Stderr
+      then Sanitized_stream.feed (stream_source config streaming id channel) text)
+  ;;
+
+  let stream_finish config id channel =
+    Option.iter config.streaming ~f:(fun streaming ->
+      Eio.Mutex.use_rw ~protect:false streaming.mutex
+      @@ fun () ->
+      let key = stream_key id channel in
+      Option.iter (Hashtbl.find streaming.sources key) ~f:Sanitized_stream.finish;
+      Hashtbl.remove streaming.sources key)
+  ;;
+
+  let publish_result config id (result : Interceptor.command_result) =
+    List.iter
+      [ `Stdout, result.stdout; `Stderr, result.stderr ]
+      ~f:(fun (channel, text) ->
+        stream_feed config id channel text;
+        stream_finish config id channel);
+    result
   ;;
 
   let select_backend config =
@@ -2367,9 +2751,9 @@ module Executor = struct
               Execution_error (Denied ("approval lookup failed: " ^ error)))
           in
           if
-            (match previously_approved with
-             | Ok approved -> approved
-             | Error exn -> raise exn)
+            match previously_approved with
+            | Ok approved -> approved
+            | Error exn -> raise exn
           then true
           else (
             let request =
@@ -2399,7 +2783,8 @@ module Executor = struct
                 try
                   match reviewer_with_metadata, reviewer with
                   | Some reviewer, _ -> reviewer request
-                  | None, Some reviewer -> Approval.{ response = reviewer request; metadata = None }
+                  | None, Some reviewer ->
+                    Approval.{ response = reviewer request; metadata = None }
                   | None, None -> assert false
                 with
                 | exn ->
@@ -2433,8 +2818,7 @@ module Executor = struct
                   | Ok () -> ()
                   | Error error ->
                     raise
-                      (Execution_error
-                         (Denied ("approval persistence failed: " ^ error))));
+                      (Execution_error (Denied ("approval persistence failed: " ^ error))));
                  true
                | Deny reason -> raise (Execution_error (Denied reason))
                | Rewrite rewritten -> raise (Rewrite_requested rewritten)))
@@ -2532,8 +2916,13 @@ module Executor = struct
             (Cstruct.to_string (Cstruct.sub scratch 0 (Int.min count remaining)));
         if capture.seen > limit then capture.truncated <- true;
         emit config (Audit.Output (plan.id, plan.context, channel, count));
+        stream_feed
+          config
+          plan.id
+          channel
+          (Cstruct.to_string (Cstruct.sub scratch 0 count));
         loop ()
-      | exception End_of_file -> ()
+      | exception End_of_file -> stream_finish config plan.id channel
     in
     loop ()
   ;;
@@ -2574,114 +2963,118 @@ module Executor = struct
     try
       Eio.Switch.run
       @@ fun sw ->
-    let count = List.length stages in
-    let edges =
-      List.init (Int.max 0 (count - 1)) ~f:(fun _ -> Eio.Process.pipe ~sw manager)
-    in
-    let stderr_pipes = List.init count ~f:(fun _ -> Eio.Process.pipe ~sw manager) in
-    let final_stdout = Eio.Process.pipe ~sw manager in
-    let children =
-      List.mapi stages ~f:(fun index stage ->
-        verify_plan config stage.plan;
-        let stdin_pipe =
-          if Int.equal index 0 then None else Some (fst (List.nth_exn edges (index - 1)))
-        in
-        let stdin_flow =
-          match stdin_pipe with
-          | None -> Eio.Flow.string_source stdin
-          | Some source -> (source :> Eio.Flow.source_ty Eio.Resource.t)
-        in
-        let stdout_flow =
-          if Int.equal index (count - 1)
-          then snd final_stdout
-          else snd (List.nth_exn edges index)
-        in
-        let stderr_flow = snd (List.nth_exn stderr_pipes index) in
-        try
-          let child =
-            Eio.Process.spawn
-              ~sw
-              manager
-              ?cwd:config.cwd_path
-              ~env:stage.spawn.environment
-              ~executable:stage.spawn.executable
-              ~stdin:stdin_flow
-              ~stdout:stdout_flow
-              ~stderr:stderr_flow
-              stage.spawn.argv
-          in
-          emit
-            config
-            (Audit.Started
-               (stage.plan.id, stage.plan.context, Some (Eio.Process.pid child)));
-          Option.iter stdin_pipe ~f:Eio.Flow.close;
-          Eio.Flow.close stdout_flow;
-          Eio.Flow.close stderr_flow;
-          child
-        with
-        | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
-        | exn -> raise (Execution_error (Spawn_error (Exn.to_string exn))))
-    in
-    let stdout_capture = create_capture config.limits.max_stdout_bytes in
-    let stderr_captures =
-      List.init count ~f:(fun _ -> create_capture config.limits.max_stderr_bytes)
-    in
-    let statuses = Array.create ~len:count (`Exited 127) in
-    let total = ref 0 in
-    let last_activity = ref (Eio.Time.now (Eio.Stdenv.clock config.env)) in
-    Option.iter config.limits.idle_time_seconds ~f:(fun idle ->
-      Eio.Fiber.fork_daemon ~sw (fun () ->
-        let rec watch () =
-          Eio.Time.sleep (Eio.Stdenv.clock config.env) (Float.min 0.25 (idle /. 4.));
-          let elapsed = Eio.Time.now (Eio.Stdenv.clock config.env) -. !last_activity in
-          if Float.(elapsed > idle) then raise (Idle_timeout idle) else watch ()
-        in
-        watch ()));
-    let readers =
-      (fun () ->
-        read_capture
-          config
-          ~plan:(List.last_exn stages).plan
-          ~channel:`Stdout
-          ~limit:config.limits.max_stdout_bytes
-          ~total
-          ~last_activity
-          (fst final_stdout)
-          stdout_capture)
-      :: List.mapi stderr_pipes ~f:(fun index (source, _sink) () ->
-        read_capture
-          config
-          ~plan:(List.nth_exn stages index).plan
-          ~channel:`Stderr
-          ~limit:config.limits.max_stderr_bytes
-          ~total
-          ~last_activity
-          source
-          (List.nth_exn stderr_captures index))
-    in
-    let waiters =
-      List.mapi children ~f:(fun index child () ->
-        let status = Eio.Process.await child in
-        statuses.(index) <- status;
-        let plan = (List.nth_exn stages index).plan in
-        emit config (Audit.Finished (plan.id, plan.context, status)))
-    in
-    Eio.Fiber.all (readers @ waiters);
-    List.mapi stages ~f:(fun index stage ->
-      let stdout =
-        if Int.equal index (count - 1) then Buffer.contents stdout_capture.buffer else ""
+      let count = List.length stages in
+      let edges =
+        List.init (Int.max 0 (count - 1)) ~f:(fun _ -> Eio.Process.pipe ~sw manager)
       in
-      let stderr_capture = List.nth_exn stderr_captures index in
-      { Interceptor.command = stage.plan.context.command
-      ; executable = Some stage.plan.context.executable
-      ; status = statuses.(index)
-      ; stdout
-      ; stderr = Buffer.contents stderr_capture.buffer
-      ; stdout_truncated = Int.equal index (count - 1) && stdout_capture.truncated
-      ; stderr_truncated = stderr_capture.truncated
-      ; intercepted_by = None
-      ; untrusted_output = true
-      })
+      let stderr_pipes = List.init count ~f:(fun _ -> Eio.Process.pipe ~sw manager) in
+      let final_stdout = Eio.Process.pipe ~sw manager in
+      let children =
+        List.mapi stages ~f:(fun index stage ->
+          verify_plan config stage.plan;
+          let stdin_pipe =
+            if Int.equal index 0
+            then None
+            else Some (fst (List.nth_exn edges (index - 1)))
+          in
+          let stdin_flow =
+            match stdin_pipe with
+            | None -> Eio.Flow.string_source stdin
+            | Some source -> (source :> Eio.Flow.source_ty Eio.Resource.t)
+          in
+          let stdout_flow =
+            if Int.equal index (count - 1)
+            then snd final_stdout
+            else snd (List.nth_exn edges index)
+          in
+          let stderr_flow = snd (List.nth_exn stderr_pipes index) in
+          try
+            let child =
+              Eio.Process.spawn
+                ~sw
+                manager
+                ?cwd:config.cwd_path
+                ~env:stage.spawn.environment
+                ~executable:stage.spawn.executable
+                ~stdin:stdin_flow
+                ~stdout:stdout_flow
+                ~stderr:stderr_flow
+                stage.spawn.argv
+            in
+            emit
+              config
+              (Audit.Started
+                 (stage.plan.id, stage.plan.context, Some (Eio.Process.pid child)));
+            Option.iter stdin_pipe ~f:Eio.Flow.close;
+            Eio.Flow.close stdout_flow;
+            Eio.Flow.close stderr_flow;
+            child
+          with
+          | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+          | exn -> raise (Execution_error (Spawn_error (Exn.to_string exn))))
+      in
+      let stdout_capture = create_capture config.limits.max_stdout_bytes in
+      let stderr_captures =
+        List.init count ~f:(fun _ -> create_capture config.limits.max_stderr_bytes)
+      in
+      let statuses = Array.create ~len:count (`Exited 127) in
+      let total = ref 0 in
+      let last_activity = ref (Eio.Time.now (Eio.Stdenv.clock config.env)) in
+      Option.iter config.limits.idle_time_seconds ~f:(fun idle ->
+        Eio.Fiber.fork_daemon ~sw (fun () ->
+          let rec watch () =
+            Eio.Time.sleep (Eio.Stdenv.clock config.env) (Float.min 0.25 (idle /. 4.));
+            let elapsed = Eio.Time.now (Eio.Stdenv.clock config.env) -. !last_activity in
+            if Float.(elapsed > idle) then raise (Idle_timeout idle) else watch ()
+          in
+          watch ()));
+      let readers =
+        (fun () ->
+          read_capture
+            config
+            ~plan:(List.last_exn stages).plan
+            ~channel:`Stdout
+            ~limit:config.limits.max_stdout_bytes
+            ~total
+            ~last_activity
+            (fst final_stdout)
+            stdout_capture)
+        :: List.mapi stderr_pipes ~f:(fun index (source, _sink) () ->
+          read_capture
+            config
+            ~plan:(List.nth_exn stages index).plan
+            ~channel:`Stderr
+            ~limit:config.limits.max_stderr_bytes
+            ~total
+            ~last_activity
+            source
+            (List.nth_exn stderr_captures index))
+      in
+      let waiters =
+        List.mapi children ~f:(fun index child () ->
+          let status = Eio.Process.await child in
+          statuses.(index) <- status;
+          let plan = (List.nth_exn stages index).plan in
+          emit config (Audit.Finished (plan.id, plan.context, status)))
+      in
+      Eio.Fiber.all (readers @ waiters);
+      List.mapi stages ~f:(fun index stage ->
+        let stdout =
+          if Int.equal index (count - 1)
+          then Buffer.contents stdout_capture.buffer
+          else ""
+        in
+        let stderr_capture = List.nth_exn stderr_captures index in
+        { Interceptor.command = stage.plan.context.command
+        ; executable = Some stage.plan.context.executable
+        ; status = statuses.(index)
+        ; stdout
+        ; stderr = Buffer.contents stderr_capture.buffer
+        ; stdout_truncated = Int.equal index (count - 1) && stdout_capture.truncated
+        ; stderr_truncated = stderr_capture.truncated
+        ; intercepted_by = None
+        ; untrusted_output = true
+        })
       |> List.map ~f:(finalize_result config)
     with
     | exn ->
@@ -2689,8 +3082,12 @@ module Executor = struct
       raise exn
   ;;
 
-  let run_stage config ~stdin = function
-    | Synthetic_stage result -> result
+  let run_stage config ~stdin ~publish_stdout stage =
+    let config =
+      if publish_stdout then config else { config with stream_stdout = false }
+    in
+    match stage with
+    | Synthetic_stage result -> publish_result config (fresh_id ()) result
     | Simulated_stage { plan; backend; simulate } ->
       emit config (Audit.Started (plan.id, plan.context, None));
       (try
@@ -2698,18 +3095,21 @@ module Executor = struct
          | Error error -> raise (Execution_error (Spawn_error error))
          | Ok simulated ->
            emit config (Audit.Finished (plan.id, plan.context, simulated.status));
-           finalize_result
-             config
-             { command = plan.context.command
-             ; executable = Some plan.context.executable
-             ; status = simulated.status
-             ; stdout = simulated.stdout
-             ; stderr = simulated.stderr
-             ; stdout_truncated = false
-             ; stderr_truncated = false
-             ; intercepted_by = Some (Backend.name backend)
-             ; untrusted_output = true
-             }
+           let result =
+             finalize_result
+               config
+               { command = plan.context.command
+               ; executable = Some plan.context.executable
+               ; status = simulated.status
+               ; stdout = simulated.stdout
+               ; stderr = simulated.stderr
+               ; stdout_truncated = false
+               ; stderr_truncated = false
+               ; intercepted_by = Some (Backend.name backend)
+               ; untrusted_output = true
+               }
+           in
+           publish_result config plan.id result
        with
        | exn ->
          emit_termination config [ plan ] exn;
@@ -2741,7 +3141,9 @@ module Executor = struct
       let rec loop stdin results = function
         | [] -> List.rev results
         | stage :: rest ->
-          let result = run_stage config ~stdin stage in
+          let result =
+            run_stage config ~stdin ~publish_stdout:(List.is_empty rest) stage
+          in
           loop result.stdout (result :: results) rest
       in
       loop stdin [] stages)
@@ -2940,6 +3342,38 @@ module Executor = struct
     | Total_output_limit bytes -> Error (Output_limit_exceeded bytes)
     | Eio.Time.Timeout -> Error (Timed_out config.limits.wall_time_seconds)
     | Eio.Cancel.Cancelled _ as exn -> raise exn
+  ;;
+
+  let discard_streaming streaming =
+    Hashtbl.iter streaming.sources ~f:Sanitized_stream.discard;
+    Hashtbl.clear streaming.sources;
+    Sanitized_stream.discard streaming.stdout;
+    Sanitized_stream.discard streaming.stderr;
+    Sanitized_stream.discard streaming.combined
+  ;;
+
+  let run_streaming config invocation ~on_progress =
+    match streaming_support config with
+    | Error reason -> Error (Interceptor_rejected reason)
+    | Ok () ->
+      let streaming = streaming_state config on_progress in
+      Exn.protect
+        ~f:(fun () ->
+          try
+            Eio.Time.with_timeout_exn
+              (Eio.Stdenv.clock config.env)
+              config.limits.wall_time_seconds
+              (fun () ->
+                 match run { config with streaming = Some streaming } invocation with
+                 | Error _ as error -> error
+                 | Ok result ->
+                   Sanitized_stream.finish streaming.stdout;
+                   Sanitized_stream.finish streaming.stderr;
+                   Sanitized_stream.finish streaming.combined;
+                   Ok result)
+          with
+          | Eio.Time.Timeout -> Error (Timed_out config.limits.wall_time_seconds))
+        ~finally:(fun () -> discard_streaming streaming)
   ;;
 
   let error_to_string = function

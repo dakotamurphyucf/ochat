@@ -91,6 +91,10 @@ val inspection : t -> inspection
 val runtime : t -> string -> Runtime.t option
 val tool : t -> string -> Chatmd_shell_spec.Shell_tool_spec.t option
 
+(** [redact_tool_input t ~tool_name value] redacts a shell tool payload with
+    the exact runtime bound to that tool. Unknown tools remain unchanged. *)
+val redact_tool_input : t -> tool_name:string -> string -> string
+
 (** [script t name] returns the script and executable identities captured
     before tool publication. *)
 val script : t -> string -> script option

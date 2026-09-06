@@ -17,13 +17,6 @@ type op =
   | Starting_streaming of { id : int }
   | Starting_compaction of { id : int }
 
-type typeahead_op =
-  | Typeahead of
-      { sw : Switch.t
-      ; id : int
-      }
-  | Starting_typeahead of { id : int }
-
 type submit_request =
   { text : string
   ; draft_mode : Model.draft_mode
@@ -94,7 +87,6 @@ type t =
   ; agent_page_kind_by_name :
       Chat_response.Tool_execution_event.agent_page_kind String.Table.t
   ; mutable op : op option
-  ; mutable typeahead_op : typeahead_op option
   ; moderator : Stream_moderator.moderator option
   ; shell_approval_broker : Shell_broker.t option
   ; approval_store : Shell_runtime.Approval_store.t option
@@ -110,7 +102,6 @@ type t =
   ; mutable next_op_id : int
   ; mutable cancel_streaming_on_start : bool
   ; mutable cancel_compaction_on_start : bool
-  ; mutable cancel_typeahead_on_start : bool
   ; mutable pending_agent_toggle : int option
   ; mutable startup_render : startup_render
   ; mutable startup_render_metrics : Jsonaf.t option
@@ -319,7 +310,6 @@ let create
   ; history_allocator
   ; agent_page_kind_by_name = String.Table.of_alist_exn agent_page_classifications
   ; op = None
-  ; typeahead_op = None
   ; moderator
   ; shell_approval_broker
   ; approval_store
@@ -345,7 +335,6 @@ let create
   ; next_op_id = 0
   ; cancel_streaming_on_start = false
   ; cancel_compaction_on_start = false
-  ; cancel_typeahead_on_start = false
   ; pending_agent_toggle = None
   ; startup_render = Synchronous
   ; startup_render_metrics = None
@@ -785,9 +774,9 @@ let sync_pending_input t =
     Model.set_shell_security_snapshot
       t.model
       { snapshot with
-        manifest_grants = (!state).Session.shell_state.manifest_grants
-      ; grants = (!state).Session.shell_state.approval_grants
-      ; interrupted_requests = (!state).shell_state.interrupted_requests
+        manifest_grants = !state.Session.shell_state.manifest_grants
+      ; grants = !state.Session.shell_state.approval_grants
+      ; interrupted_requests = !state.shell_state.interrupted_requests
       });
   let moderator_request =
     Option.bind t.moderator ~f:Stream_moderator.pending_ui_request
@@ -801,7 +790,8 @@ let sync_pending_input t =
     match next, t.shell_approval_broker with
     | Some (Shell request), Some broker ->
       let previous_queue_count =
-        Option.map (Model.shell_approval_modal t.model) ~f:(fun modal -> modal.queue_count)
+        Option.map (Model.shell_approval_modal t.model) ~f:(fun modal ->
+          modal.queue_count)
       in
       let queue_count = Shell_broker.pending_count broker in
       Model.open_shell_approval_modal t.model ~request ~queue_count;

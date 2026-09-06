@@ -72,7 +72,7 @@ let ml_vecs  = Vector_db.Vec.read_vectors_from_disk (cwd / "_index/vectors.ml.bi
 
 ## API overview
 
-### [`index`](../indexer.mli)
+### [`index`](../../lib/indexer.mli)
 
 Signature (simplified):
 
@@ -113,17 +113,17 @@ files have been flushed to disk.
                                                └──────────────┘           └──────────────┘
 ```
 
-1. **File walk** – [`collect_ocaml_files`](../indexer.ml) enumerates the
+1. **File walk** – [`collect_ocaml_files`](../../lib/indexer.ml) enumerates the
    source tree.
 2. **Parsing** – [`Ocaml_parser`](ocaml_parser.doc.md) extracts doc
    strings and source locations.
-3. **Chunking** – [`handle_job`](../indexer.ml#L22) merges consecutive
+3. **Chunking** – [`handle_job`](../../lib/indexer.ml#L22) merges consecutive
    doc strings into 64–320-token snippets.
-4. **Embedding** – [`get_vectors`](../indexer.ml#L97) calls OpenAI; long
+4. **Embedding** – [`get_vectors`](../../lib/indexer.ml#L97) calls OpenAI; long
    documents are window/stride-sliced.
 5. **Persistence** – vectors and BM-25 indices are written via
-   [`Vector_db.Vec.write_vectors_to_disk`](../vector_db.mli) and
-   [`Bm25.write_to_disk`](../bm25.mli).
+   [`Vector_db.Vec.write_vectors_to_disk`](../../lib/vector_db.mli) and
+   [`Bm25.write_to_disk`](../../lib/bm25.mli).
 
 ---
 
@@ -138,7 +138,7 @@ files have been flushed to disk.
 | `window_tokens` / `stride_tokens` | Sliding-window parameters for long docs.         |
 
 The last four constants live near the top of
-[`indexer.ml`](../indexer.ml) – tweak and recompile.
+[`indexer.ml`](../../lib/indexer.ml) – tweak and recompile.
 
 ---
 
@@ -168,5 +168,4 @@ The last four constants live near the top of
 3. **Transitive library references** – `indexer.ml` currently relies on
    transitive `dune` dependencies (`Io`, `Bm25`).  Future versions will
    list them explicitly.
-
 

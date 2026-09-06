@@ -19,6 +19,7 @@ val default_home : Eio_unix.Stdenv.base -> Eio.Fs.dir_ty Eio.Path.t
 type t =
   { functions : Ochat_function.t list
   ; classifications : (string * Tool_execution_event.agent_page_kind) list
+  ; shell_tool_names : String.Set.t
   ; shell_registry : Shell_runtime.Registry.t option
   ; shell_manifest : Chatmd_shell_spec.Manifest.t option
   ; shell_admin_policy : Shell_runtime.Admin_policy.t option

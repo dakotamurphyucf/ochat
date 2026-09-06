@@ -15,7 +15,7 @@ exception Compaction_cancelled
 
     Separately, the reducer also manages a background type-ahead completion
     worker (see {!Chat_tui.Type_ahead_provider}).  Type-ahead work is tracked
-    by {!Chat_tui.App_runtime.typeahead_op} and is {b independent} of
+    by {!Chat_tui.Type_ahead_controller} and is {b independent} of
     streaming/compaction:
     {ul
     {- it can run while a stream is in flight;}
@@ -49,7 +49,7 @@ module Context : sig
     }
 end
 
-val run : Context.t -> bool
+val run : ?typeahead_config:Type_ahead_config.t -> Context.t -> bool
 
 module For_testing : sig
   val commit_startup_results

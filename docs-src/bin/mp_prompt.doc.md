@@ -1,5 +1,10 @@
 # mp_prompt – Recursive Meta-Prompting on the command-line
 
+Historical source note: `bin/mp_prompt.ml` exists but is not registered in the
+current `bin/dune`, so `mp-prompt` is not an installed executable. The usage
+below describes that source, not a supported current launch command. Use
+[mp-refine-run](mp_refine_run.doc.md) for the maintained refinement CLI.
+
 `mp_prompt` is a **thin wrapper** around
 [`Chat_response.Driver.run_completion_stream`](../../lib/chat_response/driver.mli)
 that exposes the Recursive Meta-Prompting pipeline as a standalone CLI tool.
@@ -70,4 +75,3 @@ share the exact same behaviour.
 ---
 
 *Document last updated: 2025-07-28*
-

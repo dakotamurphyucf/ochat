@@ -52,20 +52,27 @@ let memory ?(initial = []) ~bindings () =
   { mutex = Eio.Mutex.create (); backend = memory_backend initial; bindings }
 ;;
 
-let session ~session ~persist ~bindings =
-  let read () = Ok (!session).Session.shell_state.approval_grants in
+let create ~load ~commit ~bindings =
   let mutate update =
-    Result.bind (read ()) ~f:(fun grants ->
-      Result.bind (update grants) ~f:(fun (approval_grants, result) ->
-        let shell_state = { (!session).shell_state with approval_grants } in
-        let updated = { !session with shell_state } in
-        match persist updated with
-        | Error message -> error "shell.approval_session_write_failed" message
-        | Ok () ->
-          session := updated;
-          Ok result))
+    Result.bind (load ()) ~f:(fun grants ->
+      Result.bind (update grants) ~f:(fun (updated, result) ->
+        Result.map (commit updated) ~f:(fun () -> result)))
   in
-  { mutex = Eio.Mutex.create (); backend = { read; mutate }; bindings }
+  { mutex = Eio.Mutex.create (); backend = { read = load; mutate }; bindings }
+;;
+
+let session ~session ~persist ~bindings =
+  let load () = Ok !session.Session.shell_state.approval_grants in
+  let commit approval_grants =
+    let shell_state = { !session.shell_state with approval_grants } in
+    let updated = { !session with shell_state } in
+    match persist updated with
+    | Error message -> error "shell.approval_session_write_failed" message
+    | Ok () ->
+      session := updated;
+      Ok ()
+  in
+  create ~load ~commit ~bindings
 ;;
 
 module Durable_file = struct
@@ -79,7 +86,6 @@ module Durable_file = struct
   end
 
   let version = 1
-
   let payload grants = Sexp.to_string_mach ([%sexp_of: grant list] grants)
 
   let mac integrity_key grants =
@@ -90,7 +96,8 @@ module Durable_file = struct
   let verify ~integrity_key data =
     if not (Int.equal data.Data.version version)
     then error "shell.approval_file_version" "unsupported approval-store version"
-    else if Option.equal String.equal data.payload_hmac_sha256 (mac integrity_key data.grants)
+    else if
+      Option.equal String.equal data.payload_hmac_sha256 (mac integrity_key data.grants)
     then Ok data.grants
     else error "shell.approval_file_integrity" "approval-store integrity check failed"
   ;;
@@ -101,8 +108,7 @@ module Durable_file = struct
     then Ok []
     else
       protect "shell.approval_file_read_failed" (fun () ->
-        Bin_prot_utils_eio.read_bin_prot (module Data) file
-        |> verify ~integrity_key)
+        Bin_prot_utils_eio.read_bin_prot (module Data) file |> verify ~integrity_key)
       |> Result.join
   ;;
 
@@ -124,9 +130,7 @@ module Durable_file = struct
           | _ -> ())
         (fun () ->
            Eio.Switch.run (fun sw ->
-             let flow =
-               Eio.Path.open_out ~sw ~create:(`Exclusive 0o600) temporary
-             in
+             let flow = Eio.Path.open_out ~sw ~create:(`Exclusive 0o600) temporary in
              Eio.Flow.copy_string (encoded ~integrity_key grants) flow;
              if durable then Eio.File.sync flow);
            Eio.Path.rename temporary destination))
@@ -144,10 +148,7 @@ module Durable_file = struct
         Eio.Time.sleep clock 0.01;
         loop (remaining - 1)
       | Error error ->
-        Error
-          { code = "shell.approval_file_locked"
-          ; message = Error.to_string_hum error
-          }
+        Error { code = "shell.approval_file_locked"; message = Error.to_string_hum error }
     in
     loop 200
   ;;
@@ -172,11 +173,9 @@ let durable_file ~env ~path ?integrity_key ?(durable = true) ~bindings () =
   let fs = Eio.Stdenv.fs env in
   let read = Durable_file.read ~fs ~path ~integrity_key in
   Result.map (read ()) ~f:(fun _ ->
-    let mutate
-      : 'a.
-        (grant list -> (grant list * 'a, error) result) -> ('a, error) result
-      = fun update ->
-        Durable_file.mutate ~env ~fs ~path ~integrity_key ~durable update
+    let mutate : 'a. (grant list -> (grant list * 'a, error) result) -> ('a, error) result
+      =
+      fun update -> Durable_file.mutate ~env ~fs ~path ~integrity_key ~durable update
     in
     { mutex = Eio.Mutex.create (); backend = { read; mutate }; bindings })
 ;;
@@ -187,14 +186,10 @@ let request_kind = function
   | Raw_shell -> Raw_shell
 ;;
 
-let ns_since_epoch time =
-  Time_ns.to_int63_ns_since_epoch time |> Int63.to_int64
-;;
+let ns_since_epoch time = Time_ns.to_int63_ns_since_epoch time |> Int63.to_int64
 
 let ns_of_unix_seconds seconds =
-  Time_ns.Span.of_sec seconds
-  |> Time_ns.of_span_since_epoch
-  |> ns_since_epoch
+  Time_ns.Span.of_sec seconds |> Time_ns.of_span_since_epoch |> ns_since_epoch
 ;;
 
 let active ~now (grant : grant) =
@@ -208,10 +203,7 @@ let same_binding expected actual =
     Option.exists actual ~f:(String.equal expected))
 ;;
 
-let same_identity
-      (grant : grant)
-      (identity : Shell_access.Approval.identity)
-  =
+let same_identity (grant : grant) (identity : Shell_access.Approval.identity) =
   String.equal grant.manifest_sha256 identity.Shell_access.Approval.manifest_sha256
   && String.equal grant.runtime_id identity.runtime_id
   && Poly.equal grant.request_kind (request_kind identity.request_kind)
@@ -223,11 +215,7 @@ let same_identity
   && Option.equal String.equal grant.script_sha256 identity.script_sha256
 ;;
 
-let scope_matches
-      (grant : grant)
-      ~session_id
-      (identity : Shell_access.Approval.identity)
-  =
+let scope_matches (grant : grant) ~session_id (identity : Shell_access.Approval.identity) =
   match grant.Persisted.scope with
   | Scope.Exact_session ->
     Option.equal String.equal grant.session_id session_id
@@ -235,16 +223,10 @@ let scope_matches
   | Prefix_session { prefix } ->
     Option.equal String.equal grant.session_id session_id
     && List.is_prefix identity.argv ~prefix ~equal:String.equal
-  | Durable_exact ->
-    String.equal grant.command_sha256 identity.command_hash
+  | Durable_exact -> String.equal grant.command_sha256 identity.command_hash
 ;;
 
-let matches
-      t
-      ~now
-      ~session_id
-      (identity : Shell_access.Approval.identity)
-      (grant : grant)
+let matches t ~now ~session_id (identity : Shell_access.Approval.identity) (grant : grant)
   =
   active ~now grant
   && same_binding grant.user_id t.bindings.user_id
@@ -274,7 +256,10 @@ let scope_and_expiry = function
   | Exact_session { expires_at } ->
     Some (Scope.Exact_session, Option.map expires_at ~f:ns_of_unix_seconds, None)
   | Prefix_session { prefix; expires_at } ->
-    Some (Scope.Prefix_session { prefix }, Option.map expires_at ~f:ns_of_unix_seconds, Some prefix)
+    Some
+      ( Scope.Prefix_session { prefix }
+      , Option.map expires_at ~f:ns_of_unix_seconds
+      , Some prefix )
   | Durable_exact { expires_at } ->
     Some (Scope.Durable_exact, Option.map expires_at ~f:ns_of_unix_seconds, None)
 ;;
@@ -330,8 +315,7 @@ let remember t ~now ~session_id identity scope metadata =
   match make_grant t ~now ~session_id identity scope metadata with
   | None -> Ok ()
   | Some grant ->
-    with_lock t (fun () ->
-      t.backend.mutate (fun grants -> Ok (grant :: grants, ())))
+    with_lock t (fun () -> t.backend.mutate (fun grants -> Ok (grant :: grants, ())))
 ;;
 
 let revoke t ~now ~grant_id ~reason =
@@ -339,7 +323,7 @@ let revoke t ~now ~grant_id ~reason =
     t.backend.mutate (fun grants ->
       if not (List.exists grants ~f:(fun grant -> String.equal grant.grant_id grant_id))
       then error "shell.approval_grant_not_found" ("unknown grant: " ^ grant_id)
-      else
+      else (
         let revoked_at_ns = Some (ns_since_epoch now) in
         let updated =
           List.map grants ~f:(fun grant ->
@@ -347,7 +331,7 @@ let revoke t ~now ~grant_id ~reason =
             then { grant with revoked_at_ns; revocation_reason = reason }
             else grant)
         in
-        Ok (updated, ())))
+        Ok (updated, ()))))
 ;;
 
 let list t = with_lock t t.backend.read
@@ -355,7 +339,11 @@ let list t = with_lock t t.backend.read
 let executor_store t =
   Shell_access.Approval.create_store
     ~lookup:(fun ~now ~session_id identity ->
-      lookup t ~now:(Time_ns.of_span_since_epoch (Time_ns.Span.of_sec now)) ~session_id identity
+      lookup
+        t
+        ~now:(Time_ns.of_span_since_epoch (Time_ns.Span.of_sec now))
+        ~session_id
+        identity
       |> Result.map ~f:Option.is_some
       |> Result.map_error ~f:(fun error -> error.message))
     ~remember:(fun ~session_id identity scope metadata ->

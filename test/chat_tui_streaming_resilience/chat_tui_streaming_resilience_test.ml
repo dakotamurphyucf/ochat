@@ -72,6 +72,36 @@ let completion sequence =
 
 let consume stream = Seq.iter (fun _ -> ()) stream
 
+let%expect_test "response queue returns the current event without reading ahead" =
+  let reads = ref 0 in
+  let sequence =
+    Res.For_testing.response_sequence (fun () ->
+      Int.incr reads;
+      if !reads = 1
+      then `Val (event 0 "first")
+      else failwith "next event is not available")
+  in
+  [%test_eq: int] !reads 0;
+  let next =
+    match sequence () with
+    | Seq.Cons (received, next) ->
+      assert (
+        Sexp.equal
+          ([%sexp_of: Res.Response_stream.t] received)
+          ([%sexp_of: Res.Response_stream.t] (event 0 "first")));
+      next
+    | Seq.Nil -> failwith "event was lost"
+  in
+  [%test_eq: int] !reads 1;
+  (match next () with
+   | _ -> failwith "queue failure was swallowed"
+   | exception Failure message -> print_endline message);
+  [%test_eq: int] !reads 2;
+  let empty = Res.For_testing.response_sequence (fun () -> `Done) in
+  assert (Seq.is_empty empty);
+  [%expect {| next event is not available |}]
+;;
+
 let%expect_test "response stream requires one successful terminal event" =
   let show events =
     try

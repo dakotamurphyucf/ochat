@@ -1,0 +1,7 @@
+(library
+ (name agent_administration_test)
+ (modules agent_administration_test)
+ (libraries core eio eio_main mirage-crypto-rng.unix
+  ochat.agent_server ochat.agent_client ochat.agent_session ochat.agent_protocol)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

@@ -4,6 +4,7 @@
  (wrapped false)
  (modules
   chatmd_ast
+  source_loader
   chatmd_lexer
   chatmd_parser
   chatmd_attributes

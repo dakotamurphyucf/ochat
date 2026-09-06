@@ -2,15 +2,16 @@
 
 > Catalogue of *tool* specifications exposed by the Ochat OCaml agent.
 
-This module is **data-only** – it does *not* carry any behaviour.  Each
-sub-module is an implementation of `Ochat_function.Def`, a small record
-type that mirrors what the OpenAI Function-calling API expects:
+This module contains metadata and input decoders, not tool execution. Each
+sub-module implements `Ochat_function.Def`, pairing metadata with an input
+decoder:
 
 ```ocaml
-module type Ochat_function.Def = sig
+module type Def = sig
   type input
 
   val name            : string          (* Unique identifier *)
+  val type_           : string          (* function or custom *)
   val description     : string option   (* Shown to the LLM *)
   val parameters      : Jsonaf.t        (* JSON-schema of `input` *)
   val input_of_string : string -> input (* Decoder used by runtime *)
@@ -30,18 +31,21 @@ model and later re-hydrate the call into a strongly-typed value.
 2. Implement the runtime logic:
 
    ```ocaml
-   let run url = Webpage_markdown.fetch url in
-   let tool = Ochat_function.create_function (module Definitions.Webpage_to_markdown) run
+   let register run =
+     Ochat_function.create_function (module Definitions.Webpage_to_markdown)
+       (fun url -> Openai.Responses.Tool_output.Output.Text (run url))
    ```
 3. Aggregate the tools and pass their **metadata** to the OpenAI API:
 
    ```ocaml
-   let function_info, dispatch_table = Ochat_function.functions [ tool ] in
-   openai_request ~tools:function_info |> ignore;
+   let bundle tool = Ochat_function.functions [ tool ]
    ```
 
 4. When the API returns `{ "name": "webpage_to_markdown", "arguments": ... }`
-   look up the entry in `dispatch_table` and execute it.
+   look up the entry in `dispatch_table` and execute it with
+   `~invocation:Ochat_function.Invocation.silent`, or an observed invocation.
+   Runners return typed text/content output, not plain strings. See the
+   [complete custom-tool example](gpt_function.doc.md#runnable-offline-example).
 
 ---
 
@@ -83,5 +87,3 @@ Below is a concise reference.  For the *exact* JSON schema consult the
   decoder, and implementation together.
 * The catalogue is opinionated and targets the needs of the Ochat
   agent in this repository.  Feel free to fork and extend.
-
-

@@ -131,5 +131,5 @@ let fetch_token
     @ Option.value_map scope ~default:[] ~f:(fun s -> [ "scope", s ])
   in
   let* json = Oauth2_http.post_form ~env ~sw token_uri params in
-  Ok Tok.{ (Tok.t_of_jsonaf json) with obtained_at = Eio.Time.now (Eio.Stdenv.clock env) }
+  Tok.of_response_json ~obtained_at:(Eio.Time.now (Eio.Stdenv.clock env)) json
 ;;

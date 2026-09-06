@@ -60,6 +60,7 @@ let load_map env : (string, Credential.t, String.comparator_witness) Map.t =
        | `Duplicate_key _ -> Map.empty (module String))
     | _ -> Map.empty (module String)
   with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
   | _ -> Map.empty (module String)
 ;;
 
@@ -78,6 +79,7 @@ let save_map ~env map : unit =
   in
   Eio.Path.save ~create:(`Or_truncate 0o600) path_tmp json_obj;
   try Eio.Path.rename path_tmp path_final with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
   | _ -> ()
 ;;
 

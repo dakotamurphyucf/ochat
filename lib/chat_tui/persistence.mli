@@ -1,11 +1,11 @@
 (** Persistence helpers for ChatMarkdown transcripts.
 
-    This module is responsible for keeping the *disk* representation of a chat
-    session in sync with the in-memory conversation state.  All file I/O –
-    writing user input, appending assistant responses, and off-loading bulky
-    tool call payloads – funnels through the two functions below.  The helper
-    sticks to the {{!module:Eio}Eio} capability style: callers must pass an
-    explicit directory capability instead of relying on ambient authority. *)
+    Render canonical entries and optional moderator overlays for legacy
+    transcript export. Checkpoints select stable IDs and payload changes,
+    not list offsets. This is not the native/daemon durable session store.
+    Tool text is serialized without universal truncation, terminal sanitization
+    or secret redaction; callers own export authorization and privacy policy.
+    Filesystem operations use the supplied Eio directory capability. *)
 
 (** [write_user_message ~dir ~file msg] updates the *last* [`<user>`] element
     of the ChatMarkdown document [file].
@@ -33,13 +33,13 @@
     escapes the text – callers are expected to sanitise user input up-front if
     necessary.
 
-    The operation is atomic with respect to the underlying [Eio.Path] flow
-    returned by {!Eio.Path.with_open_out}. *)
+    This reads and rewrites the complete file. It is not an atomic replacement
+    or a concurrent-writer-safe operation. *)
 val write_user_message : dir:Eio.Fs.dir_ty Eio.Path.t -> file:string -> string -> unit
 
 (** [history_entries_as_chatmd ~moderator_snapshot ~history] renders canonical
     entries with a distinct [ochat-history-id] attribute. Ordinary
-    ChatMarkdown remains a semantic export; the binary V4 snapshot is
+    ChatMarkdown remains a semantic export; the binary session snapshot is
     authoritative for fields that ChatMarkdown cannot represent. *)
 val history_entries_as_chatmd
   :  moderator_snapshot:Session.Moderator_snapshot.t option
@@ -62,6 +62,11 @@ val entries_after_checkpoint
   -> History_entry.t list
   -> History_entry.t list
 
+(** [persist_entries ~dir ~prompt_file ~checkpoint ~moderator_snapshot ~history]
+    renders new or changed entries and the supplied overlay, then rewrites the
+    file with its previous text followed by that rendering. The checkpoint is
+    not advanced. This is not an idempotent save, deletion synchronization,
+    transactional append, or tool-output redaction boundary. *)
 val persist_entries
   :  dir:Eio.Fs.dir_ty Eio.Path.t
   -> prompt_file:string

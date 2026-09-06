@@ -77,7 +77,7 @@ module Item = struct
         let role = Res.Input_message.Assistant in
         Moderation.Item.text_input_message ~id ~role ~text |> fun item -> item.value
       | "system" ->
-        let role = Res.Input_message.System in
+        let role = Res.Input_message.Developer in
         Moderation.Item.text_input_message ~id ~role ~text |> fun item -> item.value
       | "developer" ->
         let role = Res.Input_message.Developer in
@@ -108,7 +108,12 @@ module Item = struct
   let notice ~id ~text = system_text ~id text
   let is_user t = String.equal (Option.value (role t) ~default:"") "user"
   let is_assistant t = String.equal (Option.value (role t) ~default:"") "assistant"
-  let is_system t = String.equal (Option.value (role t) ~default:"") "system"
+
+  let is_system t =
+    match role t with
+    | Some ("system" | "developer") -> true
+    | _ -> false
+  ;;
 
   let is_tool_call t =
     match kind t with

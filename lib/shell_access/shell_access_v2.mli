@@ -283,6 +283,40 @@ module Secret_filter : sig
   val redact_command : t -> Command.t -> string
 end
 
+module Sanitized_stream : sig
+  type t
+
+  (** [support filter ~max_bytes] checks the conservative literal-filter subset.
+      Secrets and replacement must be valid UTF-8, unchanged by control removal,
+      and no longer than the positive byte budget. With nonempty secrets, the
+      replacement must be nonempty, contain no secret, and have first and last
+      bytes absent from every secret. Empty secrets are ignored by [Secret_filter]. *)
+  val support : Secret_filter.t -> max_bytes:int -> (unit, string) Result.t
+
+  (** [create ~secret_filter ~max_bytes ~on_output] creates a bounded, incremental
+      sanitizer, not an authorization boundary. Calls must be serialized.
+      Observer chunks are valid UTF-8, at most 4096 bytes, and together no larger
+      than [max_bytes]. Matching holds undecidable suffixes across arbitrary input
+      chunks; overlapping and adjacent secret matches share one replacement. *)
+  val create
+    :  secret_filter:Secret_filter.t
+    -> max_bytes:int
+    -> on_output:(string -> unit)
+    -> (t, string) Result.t
+
+  (** [feed t bytes] removes terminal controls, normalizes invalid UTF-8, then
+      redacts literals before emitting safe prefixes. Decoder and terminal state
+      belong to one source; independent sources must not share this state. *)
+  val feed : t -> string -> unit
+
+  (** [finish t] flushes the final safe suffix and closes the stream. *)
+  val finish : t -> unit
+
+  (** [discard t] closes the stream without emitting pending bytes. Use on failure
+      and cancellation. Subsequent [feed], [finish], and [discard] are no-ops. *)
+  val discard : t -> unit
+end
+
 module Approval : sig
   type identity =
     { manifest_sha256 : string
@@ -549,6 +583,11 @@ end
 module Executor : sig
   type config
 
+  type progress =
+    { channel : [ `Stdout | `Stderr ]
+    ; text : string
+    }
+
   type invocation =
     { request : Request.t
     ; input : Input.t
@@ -610,6 +649,35 @@ module Executor : sig
   (** [run config invocation] authorizes and executes [invocation]. Supplied
       input is bounded and included in approval identity before execution. *)
   val run : config -> invocation -> (result, error) Result.t
+
+  (** [streaming_support config] rejects every after-interceptor and filters
+      outside {!Sanitized_stream.support}, using the total-output byte budget.
+      Check at tool registration; [run_streaming] checks again before execution. *)
+  val streaming_support : config -> (unit, string) Result.t
+
+  (** [run_streaming config invocation ~on_progress] preserves [run]'s canonical
+      result and authorization path while emitting sanitized native pipe reads
+      after authorization. Simulated and substitute results emit only after
+      finalization. Each source has independent decoding and redaction state;
+      merged channels are redacted again across sources and sequential commands.
+      A final combined disclosure filter prevents stdout/stderr concatenation
+      from reconstructing secrets. All progress uses [`Stdout], including stderr;
+      channel separation is intentionally unavailable for transient progress.
+      Intermediate pipeline stdout is not published. Progress spans selected
+      commands, unlike canonical stdout, which is the last command's output.
+
+      Progress has separate invocation-wide channel/total limits, never exceeds
+      configured bounds, and may be more conservatively redacted than the final
+      result. Final-tail delivery is inside the invocation wall deadline.
+      Pending suffixes are discarded on failure or cancellation; already
+      emitted safe progress cannot be retracted. Observer calls are serialized.
+      Ordinary observer exceptions are ignored; Eio cancellation and timeout
+      propagate. No raw-output callback or after-interceptor bypass is exposed. *)
+  val run_streaming
+    :  config
+    -> invocation
+    -> on_progress:(progress -> unit)
+    -> (result, error) Result.t
 
   val error_to_string : error -> string
 end

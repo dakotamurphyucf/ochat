@@ -1,0 +1,53 @@
+(library
+ (name agent_session)
+ (public_name ochat.agent_session)
+ (modules
+  workspace_definition
+  workspace_catalog
+  workspace_instance
+  workspace_resolver
+  runtime_paths
+  workspace_lease
+  workspace_cleanup
+  prompt_definition
+  prompt_revision
+  prompt_revision_builder
+  prompt_catalog
+  security_grant
+  session_state
+  compaction_archive
+  administration
+  session_delta
+  mailbox
+  subscriber
+  history_id_source
+  history_codec
+  chatmd_export
+  durable_event_log
+  live_event_buffer
+  active_calls
+  operation_worker
+  turn_worker
+  runtime_builder
+  permission_reviewer
+  permission_policy
+  session_transition
+  session_actor
+  memory_backend
+  session_persistence
+  quota_key
+  quota_manager
+  start_queue)
+ (libraries
+  core
+  digestif
+  eio
+  eio.unix
+  ochat.agent_protocol
+  ochat.agent_store
+  chatmd
+  chat_response
+  context_compaction
+  ochat.chatmd_shell_spec)
+ (preprocess
+  (pps ppx_jane)))

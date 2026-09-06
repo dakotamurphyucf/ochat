@@ -226,6 +226,7 @@ module Chat_markdown : sig
                       imported resource cannot be read. *)
   val parse_chat_inputs
     :  ?source:string
+    -> ?source_loader:Source_loader.t
     -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> string
     -> top_level_elements list

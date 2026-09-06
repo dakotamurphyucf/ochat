@@ -1,0 +1,12 @@
+<config model="gpt-5.6-sol"/>
+<developer>When asked for the working directory, use the working_directory tool.
+No other commands are available.</developer>
+<shell_access id="readonly" extends="builtin:workspace-readonly@1">
+  <policy default="deny" merge="replace">
+    <rule id="pwd-only" action="allow"><basename value="pwd"/></rule>
+  </policy>
+</shell_access>
+<tool name="working_directory" type="shell" mode="fixed" runtime="readonly">
+  <command program="/bin/pwd"/>
+  <arguments mode="none"/>
+</tool>

@@ -1,8 +1,38 @@
 # ChatMD shell runtime examples
 
-These examples show complete use cases and the runtime behavior that matters
-for security. Replace illustrative hashes and paths before use. Inspect every
-manifest with `ochat shell inspect FILE -canonical` before authorizing it.
+Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
+The declaration language is shared, but bootstrap grants, approvers, persistence
+owners and management commands differ. `--authorize-shell-manifest` is a legacy
+local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
+management does not accept daemon IDs as a way to select daemon state.
+
+These declaration patterns illustrate complete use cases, but many are partial
+deployment inputs with external files, hashes or platform prerequisites. They are
+not seventeen ready-to-run scripts. The documentation checker parses every XML
+block; it does not execute deployment commands or synthesize absent dependencies.
+The [tracked narrow shell prompt](../examples/agent-server/shell/pwd.chatmd) is the
+self-contained manifest-compilation example. Replace illustrative paths/hashes
+and inspect every full manifest before authorizing it.
+
+| Example | Additional prerequisites / intended boundary |
+|---|---|
+| 1 Repository search | Installed trusted `rg`, readable repository, supported read-only backend. |
+| 2 Builds/tests | Installed Dune/opam environment, writable build roots, approver for ask rules. |
+| 3 Git status | Git and repository; no model-controlled command arguments. |
+| 4 Deployment shell | Real sandbox, reviewed deployment roots and private token; never run as a docs smoke. |
+| 5 Python interceptor | Referenced safe wrapper and permitted hook runtime. |
+| 6 Output sanitizer | Installed executable sanitizer and identity pin. |
+| 7 Network API | Explicit network authority and privately supplied secret. |
+| 8 Model reviewer | Configured reviewer agent/provider and human fallback host. |
+| 9 Compliance audit | Required audit sink/storage policy; protect sensitive records. |
+| 10 Imported library | Create the referenced files/namespaces; imports are not bundled by this fragment. |
+| 11 Moderator process | Explicit moderator/runtime association and host Process.run handler. |
+| 12 Sandbox wrapper | Installed reviewed external wrapper; declared confinement is not automatically verified. |
+| 13 Direct development | Explicit unsandboxed authority and reviewer policy, not read-root OS confinement. |
+| 14 YOLO | Broad process authority; may be prohibited by administration; not a recommended default. |
+| 15 Backend unavailable | Expected fail-closed example, not an instruction to insert direct fallback. |
+| 16 Recursive interceptor | Expected cycle/reentrancy failure. |
+| 17 Administrative ceiling | Expected rejection; an approval cannot override the ceiling. |
 
 ## 1. Read-only repository search
 

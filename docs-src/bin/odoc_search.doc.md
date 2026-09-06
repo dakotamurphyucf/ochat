@@ -20,18 +20,18 @@ Typical use-cases include:
 
 ## 2  How it works
 
-1. The query text is embedded with OpenAI's *text-embedding-ada-002* model and
-   L²-normalised.
+1. The query text is embedded with the configured model (default
+   `text-embedding-3-large`). See [embedding configuration](../guide/search-and-indexing.md#embedding-configuration).
 2. If `--package` is **not** provided the coarse
    [`package_index.binio`](../../lib/package_index.mli) is consulted to retain
-   only the *k* packages whose blurbs are closest to the query.  This avoids
+   five packages whose blurbs are closest to the query, independently of `-k`. This avoids
    loading vectors for thousands of packages when only a handful are needed.
-3. For each selected package:
-   * `vectors.binio` is deserialised into an array of `Vector_db.Vec.t`;
-   * `bm25.binio` is loaded if present.
-4. All vectors are concatenated into a single `Owl.Mat.t` corpus and queried
-   with `Vector_db.query_hybrid`, using the weight supplied via `--beta` to
-   interpolate cosine similarity and BM25.
+   If the coarse index is absent or returns no candidates, directory entries
+   are considered instead.
+3. For each selected package, `vectors.binio` is loaded; unreadable vector
+   files are skipped.
+4. All vectors are concatenated into a single corpus and queried with
+   `Vector_db.query`. The active CLI path is dense-only; it does not load BM25.
 5. Result identifiers are resolved to the Markdown bodies shipped by
    `odoc-index` and printed to *stdout* in the following format:
 
@@ -50,15 +50,10 @@ Typical use-cases include:
 | `--package PKG`     | Limit search to a single OPAM package.                      |
 | `--index DIR`       | Root directory of the index (default `.odoc_index`).        |
 | `-k INT`            | Maximum number of hits to return (default 5).               |
-| `--beta FLOAT`      | Interpolation factor between dense and lexical retrieval.   |
+| `--beta FLOAT`      | Parsed (default 0.25), but unused by the active dense-only CLI path. |
 
-The interpolation obeys the following equation:
-
-```math
-score = (1 - β) · cosine + β · bm25
-```
-
-`β = 0` means **dense-only** search; `β = 1` means **BM25-only**.
+The source retains an unused hybrid helper. Passing `--beta 1` does not switch
+the current command to lexical-only search.
 
 ## 4  Examples
 
@@ -91,19 +86,23 @@ is separated by a horizontal rule (`---`).
 
 ## 6  Environment variables
 
-`odoc-search` delegates embedding generation to the [OpenAI API] and therefore
-requires the standard `OPENAI_API_KEY` variable to be present.  No network
-requests are issued when the key is missing – the program exits with an error
-instead.
+Real embeddings use `OPENAI_API_KEY`, `EMBEDDINGS_HOST`, and `EMBEDDINGS_MODEL`.
+Missing/empty credentials or any present `OPENAI_EMBEDDINGS_STUB` select
+128-dimensional test vectors instead of a provider call. They are not useful
+semantic embeddings; do not mix them with a live-model index.
 
 ## 7  Known limitations
 
 * **Memory footprint** – the whole embedding corpus is loaded into RAM.  Very
   large indexes (> 500 MB) may not fit on machines with limited memory.
-* **Cold-start latency** – the first query embeds the text and loads the
-  vectors which may take a few seconds, but subsequent queries are quick.
+* **Per-invocation work** – each CLI process embeds its query and loads vectors;
+  it does not retain an in-memory cache for the next CLI invocation.
 * **No incremental updates** – rebuilding the index is currently the only way
   to incorporate new packages or documentation.
+
+An empty/missing query explicitly exits 1. No vectors prints a diagnostic and
+returns success; parse/runtime errors may exit nonzero. Success does not imply
+every selected index was readable or that there were any hits.
 
 ## 8  Related tools
 
@@ -111,4 +110,3 @@ instead.
 * `md-search` – performs the same style of search over a Markdown-only index.
 
 [OpenAI API]: https://platform.openai.com/docs/api-reference/embeddings
-

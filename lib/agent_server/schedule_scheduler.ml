@@ -1,0 +1,178 @@
+open! Core
+
+type t =
+  { closed : bool Atomic.t
+  ; mutable busy : Session_registry.entry list
+  }
+
+let failure message = Agent_protocol.Error.create Interrupted ~message ~retryable:false ()
+
+let is_overdue schedule timestamp =
+  Agent_protocol.Timestamp.compare schedule.Agent_protocol.Schedule.next_due_at timestamp
+  <= 0
+;;
+
+let is_scheduled = function
+  | Agent_protocol.Schedule.Scheduled -> true
+  | Delivering | Delivered | Cancelled | Failed _ -> false
+;;
+
+let rec reconcile_schedule entry startup_time (schedule : Agent_protocol.Schedule.t) =
+  match schedule.status with
+  | Agent_protocol.Schedule.Delivering ->
+    (match
+       Agent_session.Session_actor.retry_schedule
+         entry.Session_registry.actor
+         ~schedule_id:schedule.id
+         ~generation:schedule.generation
+     with
+     | Ok schedule -> reconcile_schedule entry startup_time schedule
+     | Error error -> Error error)
+  | Scheduled when is_overdue schedule startup_time ->
+    (match schedule.misfire with
+     | Deliver_once_immediately -> Ok ()
+     | Skip_if_expired ->
+       Agent_session.Session_actor.skip_schedule
+         entry.Session_registry.actor
+         ~schedule_id:schedule.id
+         ~generation:schedule.generation
+       |> Result.map ~f:(fun (_ : Agent_protocol.Schedule.t) -> ())
+     | Fail ->
+       Agent_session.Session_actor.fail_schedule
+         entry.actor
+         ~schedule_id:schedule.id
+         ~generation:schedule.generation
+         (failure "schedule expired while the daemon was unavailable")
+       |> Result.map ~f:(fun (_ : Agent_protocol.Schedule.t) -> ()))
+  | Scheduled | Delivered | Cancelled | Failed _ -> Ok ()
+;;
+
+let reconcile_entry startup_time entry =
+  Result.bind
+    (Agent_session.Session_actor.state entry.Session_registry.actor)
+    ~f:(fun state ->
+      List.fold_result state.schedules ~init:() ~f:(fun () schedule ->
+        reconcile_schedule entry startup_time schedule))
+;;
+
+let reconcile_recovered ~registry ~startup_time =
+  Session_registry.entries registry
+  |> List.fold_result ~init:() ~f:(fun () entry -> reconcile_entry startup_time entry)
+;;
+
+let fail_claim entry schedule error =
+  ignore
+    (Agent_session.Session_actor.fail_schedule
+       entry.Session_registry.actor
+       ~schedule_id:schedule.Agent_protocol.Schedule.id
+       ~generation:schedule.generation
+       error
+     : (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result)
+;;
+
+let unload_if_stopped entry observed =
+  if
+    match observed with
+    | Agent_protocol.Session.Stopped -> true
+    | Queued_for_slot
+    | Starting
+    | Recovering
+    | Idle
+    | Running_turn _
+    | Compacting _
+    | Waiting_for_permission _
+    | Stopping
+    | Failed _ -> false
+  then
+    ignore
+      (Runtime_owner.unload entry.Session_registry.runtime
+       : (unit, Agent_protocol.Error.t) result)
+;;
+
+let drain_idle_moderator entry =
+  ignore
+    (Runtime_owner.drain_idle_moderator entry.Session_registry.runtime
+     : (bool, Agent_protocol.Error.t) result)
+;;
+
+let deliver_claimed entry observed (schedule : Agent_protocol.Schedule.t) =
+  match
+    Runtime_owner.enqueue_internal_event entry.Session_registry.runtime schedule.payload
+  with
+  | Error error ->
+    fail_claim entry schedule error;
+    unload_if_stopped entry observed
+  | Ok moderator_snapshot ->
+    (match
+       Agent_session.Session_actor.complete_schedule
+         entry.actor
+         ~schedule_id:schedule.id
+         ~generation:schedule.generation
+         ~moderator_snapshot
+     with
+     | Ok _ -> ()
+     | Error error -> fail_claim entry schedule error);
+    drain_idle_moderator entry;
+    unload_if_stopped entry observed
+;;
+
+let claim entry observed (schedule : Agent_protocol.Schedule.t) =
+  match
+    Agent_session.Session_actor.claim_schedule
+      entry.Session_registry.actor
+      ~schedule_id:schedule.Agent_protocol.Schedule.id
+      ~generation:schedule.generation
+  with
+  | Ok (Some schedule) -> deliver_claimed entry observed schedule
+  | Ok None | Error _ -> ()
+;;
+
+let process_entry now entry =
+  match Agent_session.Session_actor.state entry.Session_registry.actor with
+  | Error _ -> ()
+  | Ok state ->
+    List.iter state.schedules ~f:(fun (schedule : Agent_protocol.Schedule.t) ->
+      if is_scheduled schedule.status && is_overdue schedule now
+      then claim entry state.lifecycle.observed schedule);
+    drain_idle_moderator entry
+;;
+
+let timestamp clock =
+  Eio.Time.now clock
+  |> Time_ns.Span.of_sec
+  |> Time_ns.of_span_since_epoch
+  |> Agent_protocol.Timestamp.of_time_ns
+;;
+
+let dispatch_entry t sw now entry =
+  if not (List.mem t.busy entry ~equal:phys_equal)
+  then (
+    t.busy <- entry :: t.busy;
+    Eio.Fiber.fork ~sw (fun () ->
+      Exn.protect
+        ~f:(fun () -> if not (Atomic.get t.closed) then process_entry now entry)
+        ~finally:(fun () ->
+          t.busy <- List.filter t.busy ~f:(fun active -> not (phys_equal active entry)))))
+;;
+
+let process t sw clock registry =
+  let now = timestamp clock in
+  Session_registry.entries registry |> List.iter ~f:(dispatch_entry t sw now)
+;;
+
+let rec run t sw clock registry =
+  if not (Atomic.get t.closed)
+  then (
+    process t sw clock registry;
+    Eio.Time.sleep clock 0.05;
+    run t sw clock registry)
+;;
+
+let start ~sw ~clock ~registry =
+  let t = { closed = Atomic.make false; busy = [] } in
+  Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
+  t
+;;
+
+let close t = Atomic.set t.closed true
+let is_running t = not (Atomic.get t.closed)

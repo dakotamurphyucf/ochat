@@ -1,5 +1,10 @@
 # `Chat_response.Fetch`
 
+Daemon pinned artifacts preserve supported static relative nested-agent sources and imports. Absolute/dynamically computed source paths remain external dependencies; use source provenance rather than the connected client's cwd.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 Asynchronous helpers for turning a *URL* – either a local path or an
 `http(s)` address – into the textual representation expected by the
 ChatMarkdown → OpenAI pipeline.
@@ -85,4 +90,3 @@ ChatMarkdown blocks where correct indentation is required (e.g.
   used by *Fetch*.
 * [`Chat_response.Converter`](./converter.doc.md) for the module that
   consumes *Fetch* to build OpenAI request payloads.
-

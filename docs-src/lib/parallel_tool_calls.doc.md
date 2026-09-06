@@ -1,127 +1,62 @@
-# Parallel Tool Calls
+# Parallel tool calls
 
-`parallel_tool_calls` is an opt-in feature that lets the runtime dispatch
-several tool calls **concurrently** instead of serially.  When enabled it can
-dramatically improve latency for workflows that invoke slow external tools, at
-the cost of a slightly more complex execution model.
+Ochat can run callable tools concurrently, but provider permission to propose
+multiple calls and host execution concurrency are different controls.
 
----
+## Quick-start
 
-## 1 · Quick-start
+In the legacy file-backed TUI:
 
-```bash
-# Enable at the CLI …
-chat_tui --parallel-tool-calls …
-
-# …or via environment variable (same effect, lower precedence)
-export OCHAT_PARALLEL_TOOL_CALLS=1
+```sh
+chat-tui --no-config -file agents/explorer.chatmd --parallel-tool-calls
+chat-tui --no-config -file agents/explorer.chatmd --no-parallel-tool-calls
 ```
 
-If neither the flag nor the environment variable is set, tool calls are
-executed **one-by-one** – the legacy behaviour.
+Parallel execution defaults on. These flags select legacy mode unless another
+host is explicitly selected; native `--local` and daemon-connected modes reject
+them. Supplying both flags is an error. There is no
+`OCHAT_PARALLEL_TOOL_CALLS` environment setting or `--max-parallel` CLI flag.
+See [host selection](../bin/chat_tui.doc.md).
 
----
+## Provider messages and execution
 
-## 2 · JSON schema overview
+The Responses protocol carries `Function_call` and `Custom_tool_call` items.
+A provider request's `parallel_tool_calls` setting does not by itself create
+concurrent execution. Non-streaming `Response_loop.run_entries` requests
+parallel-call support but resolves its returned calls with ordinary sequential
+`List.map`.
 
-When a model message contains more than one entry inside
-`choices[].message.tool_calls`, the scheduler interprets it as *potentially
-parallelisable*:
+The legacy and shared in-memory streaming adapters use Eio promises and a
+semaphore of eight for ordinary parallel callable tools. This is an internal
+per-loop limit, not a global limit on all nested agents or jobs. Special paths
+such as forks have their own ownership. Agent-host jobs also obey the separate
+[capacity controls](../agent-server/chatml-orchestration.md).
+Disabling legacy parallel execution runs an ordinary call synchronously.
 
-```jsonc
-{
-  "choices": [
-    {
-      "message": {
-        "role": "assistant",
-        "tool_calls": [
-          { "id": "a1", "type": "function", "name": "search",   "arguments": {/*…*/} },
-          { "id": "b2", "type": "function", "name": "download", "arguments": {/*…*/} }
-        ]
-      }
-    }
-  ]
-}
-```
+## Ordering and cancellation
 
-With `--parallel-tool-calls` **both** `search` and `download` are launched in
-their own fibers, and their individual completions are streamed back as soon
-as they arrive.
+Tools may overlap and progress events may interleave. Final tool outputs are
+collected in their assigned call sequence, not completion order. The next
+foreground model request waits for that collection; a fast tool completing does
+not mean the assistant can already react while a slower sibling is pending.
+ChatML background jobs are a separate orchestration mechanism.
 
-Invariants:
+Each output retains its provider call correlation and application-owned history
+identity. Cancellation or failure can prevent execution or leave external effects
+uncertain. There is **no at-least-once or exactly-once tool execution guarantee**.
+Do not automatically retry irreversible tools based only on missing output.
 
-* Each `tool_calls[i]` keeps its original `id`.
-* The driver guarantees **at-least-once** execution of every call.
-* Partial results are forwarded through the regular streaming channel the
-  moment a tool finishes.
+## Limitations & caveats
 
----
+Tools writing shared resources must coordinate those effects themselves.
+Concurrency is not filesystem isolation. Permission/moderator gates, shell
+runtime limits and cancellation still apply. Stream idle deadlines are not
+universal total-turn or per-tool deadlines.
 
-## 3 · CLI flag reference
+## Reference implementation
 
-Flag                   | Effect
------------------------|-------------------------------------------
-`--parallel-tool-calls`| Enables the concurrent scheduler (default: on).
-`--max-parallel` *N*   | Upper-bounds concurrency (default: number of logical CPUs).
-
-If the flag is provided multiple times the last occurrence wins.
-
----
-
-## 4 · Limitations & caveats
-
-1. **Side-effects** – tools that mutate shared resources (files, DB rows …)
-   must implement their own locking strategy.
-2. **Non-determinism** – completion order is *not* deterministic; do **not**
-   rely on a fixed sequence of deltas.
-3. **Resource pressure** – launching a large number of heavy processes can
-   starve the host; tune `--max-parallel` if needed.
-4. **Timeout semantics** – the global request timeout still applies; slow
-   calls can block faster ones if the timeout is hit.
-5. **Debugging** – logs interleave; prefix each log line with the call `id`
-   to retain readability.
-
----
-
-## 5 · Reference implementation
-
-The feature spans two primary modules:
-
-* **`chat_response.Driver`** – owns the concurrent scheduler, result
-  aggregation and failure handling.
-* **`chat_tui.Stream`** – consumes live deltas and keeps the UI responsive
-  while tools are still running.
-
-For deep-dive API documentation run:
-
-```bash
-dune build @doc
-xdg-open _build/default/_doc/_html/index.html
-```
-
-Both modules are thoroughly annotated; feel free to explore them for
-implementation details.
-
----
-
-## 6 · Example session
-
-```
-$ chat_tui --parallel-tool-calls
-> Assistant: I will perform two actions.
-> (tool a1:search)   …started
-> (tool b2:download) …started
-> (tool a1:search)   …finished (120 ms)
-> Assistant: Search results received, analysing…
-> (tool b2:download) …finished (410 ms)
-> Assistant: All tasks complete 🎉
-```
-
-Notice how the assistant already reacts to the search results while the file
-download is still in flight.
-
----
-
-Happy hacking!  Feedback and questions welcome on the project issue tracker or
-in the `#ochat` Matrix room.
-
+- [Shared streaming adapter](../../lib/chat_response/in_memory_stream.ml):
+  `make_tool_promise`, `await_calls`.
+- [File-backed streaming driver](../../lib/chat_response/driver.ml).
+- [Non-streaming loop](../../lib/chat_response/response_loop.ml).
+- [TUI stream presentation](../../lib/chat_tui/stream.ml).

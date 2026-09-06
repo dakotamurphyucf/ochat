@@ -24,7 +24,7 @@ for the complete public opam archive).  Persistence relies on the fast
 | `build_and_save` | Convenience `build` → `save` combo |
 
 See the inline interface documentation in
-[`package_index.mli`](./package_index.mli) for complete type signatures.
+[`package_index.mli`](../../lib/package_index.mli) for complete type signatures.
 
 ---
 
@@ -121,4 +121,3 @@ Expected output (with the toy index built above):
 ---
 
 *Last updated: <!--DATE-->*
-

@@ -1,5 +1,11 @@
 # mcp_server – MCP registry wrapper binary
 
+Compatibility scope: this page describes the deprecated MCP host that exposes
+ChatMD prompts as agents. New session servers use the [Ochat agent protocol](../agent-server/README.md).
+This deprecation does **not** apply to MCP-backed tools declared in ChatMD or
+their maintained client/type/transport libraries. Existing compatibility behavior
+below is retained; the new daemon does not require redesigning this server.
+
 `mcp_server` launches an instance of the in-memory registry from
 [`Mcp_server_core`](../lib/mcp/mcp_server_core.doc.md), registers a small set
 of built-in tools and turns every `*.chatmd` prompt file in the *prompts*
@@ -132,7 +138,9 @@ Registers the `read_dir` tool.  Arguments:
 
 * `path` – file-system path; may be relative to the server’s working directory.
 
-The response is a JSON array listing the directory contents.
+The handler returns a JSON string containing newline-separated directory entries,
+not a JSON array. Filesystem failures are also returned as text (prefixed with
+`error running read_directory:`), rather than as structured handler errors.
 
 ### `register_builtin_get_contents`
 

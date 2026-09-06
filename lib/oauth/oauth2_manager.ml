@@ -13,7 +13,7 @@
       instantly.
     • Refreshing the token whenever fewer than 60 s remain before expiry.
 
-    The helper is entirely {b exception-free}.  All recoverable error paths
+    Eio cancellation propagates. All recoverable error paths
     return [Error msg] where [msg] provides a short, human-readable
     diagnostic.
 
@@ -29,22 +29,13 @@
     {1 Quick start}
 
     {[
-      Eio_main.run @@ fun env ->
-        Eio.Switch.run @@ fun sw ->
-          match
-            Oauth2_manager.get
-              ~env ~sw
-              ~issuer:"https://auth.example"
-              (Client_secret
-                 { id     = "my-service"
-                 ; secret = Sys.getenv_exn "CLIENT_SECRET"
-                 ; scope  = Some "openid profile"
-                 })
-          with
-          | Error msg -> Format.eprintf "Token error: %s@." msg
-          | Ok tok ->
-              Format.printf "Bearer %s@." tok.access_token
+      let authenticate env sw secret =
+        Oauth2_manager.get ~env ~sw ~issuer:"https://auth.example"
+          (Oauth2_manager.Client_secret
+             { id = "my-service"; secret; scope = Some "openid profile" })
     ]}
+
+    Inspect the result without logging tokens or secrets.
 *)
 
 open Core
@@ -59,6 +50,22 @@ module Result = struct
 end
 
 module Tok = Oauth2_types.Token
+
+(** Credentials used by {!get}, {!obtain}, and {!refresh_access_token}. *)
+type creds =
+  | Client_secret of
+      { id : string
+      ; secret : string
+      ; scope : string option
+      }
+  | Pkce of { client_id : string }
+
+(** {ul
+    {- [`Client_secret] — confidential clients possessing a private
+       [client_secret] and therefore eligible for the *client-credentials*
+       grant.  Provide [scope] to narrow the issued privileges.}
+    {- [`Pkce] — public clients (desktop / CLI) that must perform the
+       browser-based PKCE flow.} } *)
 
 (** [cache_dir ()] yields the directory used to persist token JSON files.
 
@@ -80,14 +87,20 @@ let cache_dir () : string =
      | None -> Filename.concat "." ".cache/ocamlochat/tokens")
 ;;
 
-(** [cache_file issuer] maps an [issuer] base URL to the absolute path of
-      its token cache file.  The issuer string is hashed with MD5 so that
-      extremely long or non-filesystem-safe URLs do not break on exotic
-      platforms.  The file is named [<md5>.json] and always lives under
-      [cache_dir ()]. *)
-let cache_file issuer =
-  let digest = Md5.digest_string issuer |> Md5.to_hex in
-  Filename.concat (cache_dir ()) (digest ^ ".json")
+let cache_file issuer creds =
+  let identity =
+    match creds with
+    | Client_secret { id; secret; scope } ->
+      [%sexp
+        ("client_credentials" : string)
+      , (id : string)
+      , (secret : string)
+      , (scope : string option)]
+    | Pkce { client_id } -> [%sexp ("pkce" : string), (client_id : string)]
+  in
+  let encoded = Sexp.to_string_mach [%sexp (issuer : string), (identity : Sexp.t)] in
+  let digest = Digestif.SHA256.(digest_string encoded |> to_hex) in
+  Filename.concat (cache_dir ()) ("v2-" ^ digest ^ ".json")
 ;;
 
 (*────────────────────────  Metadata retrieval with fallback  ─────────────*)
@@ -126,22 +139,19 @@ let fetch_metadata ~env ~sw ~(issuer : string)
     (* Attempt to parse the metadata from the JSON response *)
     (* If parsing fails, fall back to a basic metadata structure *)
     (try Ok (Oauth2_types.Metadata.t_of_jsonaf json) with
+     | Eio.Cancel.Cancelled _ as exn -> raise exn
      | _ -> Ok (fallback_metadata ~issuer))
-  | Error err ->
-    if true then failwith err;
-    (* If the request fails, fall back to a basic metadata structure *)
-    (* This is useful for servers that do not support the well-known endpoint *)
-    Ok (fallback_metadata ~issuer)
+  | Error _ -> Ok (fallback_metadata ~issuer)
 ;;
 
-(** [load ~env issuer] attempts to read a previously cached token for
+(** [load ~env issuer creds] attempts to read a previously cached token for
       [issuer].  For security the file must be readable and writable {b only}
       by the current user; otherwise [Error "insecure_token_cache_permissions"]
       is returned.  Any other I/O or decoding error yields
       [Error "token_cache_read"]. *)
-let load ~env issuer : (Tok.t, string) Result.t =
+let load ~env issuer creds : (Tok.t, string) Result.t =
   let fs = Eio.Stdenv.fs env in
-  let rel = cache_file issuer in
+  let rel = cache_file issuer creds in
   let path = Eio.Path.(fs / rel) in
   try
     let stats = Eio.Path.stat ~follow:true path in
@@ -151,50 +161,43 @@ let load ~env issuer : (Tok.t, string) Result.t =
       let s = Eio.Path.load path in
       Ok (Tok.t_of_jsonaf (Jsonaf.of_string s)))
   with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
   | _ -> Error "token_cache_read"
 ;;
 
-(** [store ~env issuer tok] atomically writes [tok] to disk using
-      [`Or_truncate 0o600] permissions.  Errors are swallowed on purpose –
-      the function is best-effort and should never crash the application. *)
-let store ~env issuer tok =
+let temporary_sequence = Atomic.make 0
+
+let write_token ~env issuer creds tok =
+  let fs = Eio.Stdenv.fs env in
+  let final = Eio.Path.(fs / cache_file issuer creds) in
+  let serial = Atomic.fetch_and_add temporary_sequence 1 in
+  let suffix = sprintf ".%d.%d.tmp" (Core_unix.getpid () |> Pid.to_int) serial in
+  let temporary = Eio.Path.(fs / (cache_file issuer creds ^ suffix)) in
+  let owned = ref false in
+  Fun.protect
+    (fun () ->
+       Eio.Path.with_open_out ~create:(`Exclusive 0o600) temporary (fun flow ->
+         owned := true;
+         Eio.Flow.copy_string (Jsonaf.to_string (Tok.jsonaf_of_t tok)) flow);
+       Eio.Path.rename temporary final)
+    ~finally:(fun () ->
+      if !owned
+      then
+        Eio.Cancel.protect (fun () ->
+          try Eio.Path.unlink temporary with
+          | _ -> ()))
+;;
+
+let store ~env issuer creds tok =
   try
     Io.mkdir ~exists_ok:true ~dir:(Eio.Stdenv.fs env) (cache_dir ());
-    let fs = Eio.Stdenv.fs env in
-    let tmp = cache_file issuer ^ ".tmp" in
-    let final = cache_file issuer in
-    let tmp_path = Eio.Path.(fs / tmp) in
-    let final_path = Eio.Path.(fs / final) in
-    (* Ensure the directory exists *)
-    (* Write temporary file with strict permissions *)
-    Eio.Path.save
-      ~create:(`Or_truncate 0o600)
-      tmp_path
-      (Jsonaf.to_string (Tok.jsonaf_of_t tok));
-    (try Eio.Path.rename tmp_path final_path with
-     | _ -> ());
-    ()
+    write_token ~env issuer creds tok
   with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
   | _ -> ()
 ;;
 
 (*────────────────────────  Refresh token flow  ─────────────────────────*)
-
-(** Credentials used by {!get}, {!obtain}, and {!refresh_access_token}. *)
-type creds =
-  | Client_secret of
-      { id : string
-      ; secret : string
-      ; scope : string option
-      }
-  | Pkce of { client_id : string }
-
-(** {ul
-    {- [`Client_secret] — confidential clients possessing a private
-       [client_secret] and therefore eligible for the *client-credentials*
-       grant.  Provide [scope] to narrow the issued privileges.}
-    {- [`Pkce] — public clients (desktop / CLI) that must perform the
-       browser-based PKCE flow.} } *)
 
 (** [refresh_access_token ~env ~sw ~issuer creds tok] exchanges
       [tok.refresh_token] for a fresh access token.
@@ -206,40 +209,25 @@ type creds =
 
       Returned tokens are stamped with the current wall-clock time so that
       {!Oauth2_types.Token.is_expired} works reliably. *)
-let refresh_access_token ~env ~sw ~issuer creds (tok : Tok.t) : (Tok.t, string) Result.t =
+let refresh_endpoint ~env ~sw ~issuer = function
+  | Client_secret { id; secret; scope = _ } ->
+    Ok (issuer ^ "/token", [ "client_id", id; "client_secret", secret ])
+  | Pkce { client_id } ->
+    Result.map (fetch_metadata ~env ~sw ~issuer) ~f:(fun meta ->
+      meta.token_endpoint, [ "client_id", client_id ])
+;;
+
+let refresh_access_token ~env ~sw ~issuer creds (tok : Tok.t) =
   match tok.refresh_token with
   | None -> Error "no_refresh_token"
   | Some refresh_token ->
     let open Result.Let_syntax in
-    (match creds with
-     | Client_secret { id; secret; scope = _ } ->
-       let params =
-         [ "grant_type", "refresh_token"
-         ; "refresh_token", refresh_token
-         ; "client_id", id
-         ; "client_secret", secret
-         ]
-       in
-       let* json = Oauth2_http.post_form ~env ~sw (issuer ^ "/token") params in
-       Ok
-         Tok.
-           { (Tok.t_of_jsonaf json) with
-             obtained_at = Eio.Time.now (Eio.Stdenv.clock env)
-           }
-     | Pkce { client_id } ->
-       let* meta = fetch_metadata ~env ~sw ~issuer in
-       let params =
-         [ "grant_type", "refresh_token"
-         ; "refresh_token", refresh_token
-         ; "client_id", client_id
-         ]
-       in
-       let* json = Oauth2_http.post_form ~env ~sw meta.token_endpoint params in
-       Ok
-         Tok.
-           { (Tok.t_of_jsonaf json) with
-             obtained_at = Eio.Time.now (Eio.Stdenv.clock env)
-           })
+    let* endpoint, credentials = refresh_endpoint ~env ~sw ~issuer creds in
+    let params =
+      [ "grant_type", "refresh_token"; "refresh_token", refresh_token ] @ credentials
+    in
+    let* json = Oauth2_http.post_form ~env ~sw endpoint params in
+    Tok.of_response_json ~obtained_at:(Eio.Time.now (Eio.Stdenv.clock env)) json
 ;;
 
 (** [obtain ~env ~sw issuer creds] performs the initial grant:
@@ -275,13 +263,9 @@ let obtain ~env ~sw issuer = function
       ~redirect_uri:redirect
 ;;
 
-(* PKCE flow not yet supported in the lightweight OAuth client – return an
-     explicit error so callers can fall back to the headless
-     client-credentials grant. *)
-(* | _ -> Error "PKCE flow not supported in this build" *)
-
-(** [get ~env ~sw ~issuer creds] is the main entry-point.  It guarantees
-      that the returned token is valid for at least 60 seconds.
+(** [get ~env ~sw ~issuer creds] is the main entry-point.  It reuses cached tokens only
+      while they pass the 60-second expiry margin. Newly acquired tokens use
+      the lifetime supplied by the issuer.
 
       Workflow:
       {ol
@@ -292,13 +276,10 @@ let obtain ~env ~sw issuer = function
       {- Persist the brand-new token with [store] before returning.}
       }
 
-      All failure cases bubble up as [Error msg].  The helper never raises
-      exceptions. *)
-let get ~env ~sw ~issuer creds : (Tok.t, string) Result.t =
-  match load ~env issuer with
-  | Ok tok when not (Tok.is_expired tok) ->
-    let () = store ~env issuer tok in
-    Ok tok
+      Operational failures return [Error msg]. Eio cancellation propagates. *)
+let get_unprotected ~env ~sw ~issuer creds : (Tok.t, string) Result.t =
+  match load ~env issuer creds with
+  | Ok tok when not (Tok.is_expired tok) -> Ok tok
   | Ok tok ->
     (* Token expired – attempt refresh first *)
     (let open Result.Let_syntax in
@@ -306,18 +287,22 @@ let get ~env ~sw ~issuer creds : (Tok.t, string) Result.t =
      if Tok.is_expired refreshed
      then Error "refresh_yielded_expired_token"
      else (
-       store ~env issuer refreshed;
+       store ~env issuer creds refreshed;
        Ok refreshed))
     |> (function
      | Ok t -> Ok t
      | Error _ ->
        let open Result.Let_syntax in
        let* tok = obtain ~env ~sw issuer creds in
-       let () = store ~env issuer tok in
+       let () = store ~env issuer creds tok in
        Ok tok)
   | Error _ ->
     let open Result.Let_syntax in
     let* tok = obtain ~env ~sw issuer creds in
-    let () = store ~env issuer tok in
+    let () = store ~env issuer creds tok in
     Ok tok
+;;
+
+let get ~env ~sw ~issuer creds =
+  Oauth2_http.protect (fun () -> get_unprotected ~env ~sw ~issuer creds)
 ;;

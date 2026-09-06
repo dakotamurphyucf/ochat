@@ -535,10 +535,12 @@ module Chat_markdown = struct
     |> failwith
   ;;
 
-  let parse_script ~dir ~source_ref ~attrs ~children =
+  let parse_script ~dir ~loader ~source_node ~source_ref ~attrs ~children =
     match
       Chatmd_script_declaration.parse
         ~dir
+        ~loader
+        ~source_node
         ~source:source_ref
         ~attributes:attrs
         ~inline_source:(script_body_of_children children)
@@ -574,7 +576,7 @@ module Chat_markdown = struct
   ;;
 
   (* Convert AST nodes into internal chat elements before exposing top-level values. *)
-  let parse_chat_element ~dir ~source_ref node =
+  let parse_chat_element ~dir ~loader ~source_node ~source_ref node =
     let source_context = source_ref.Chatmd_shell_spec.Source_ref.file in
     tree node ~f:(fun node children ->
       match node with
@@ -647,7 +649,8 @@ module Chat_markdown = struct
         let show_tool_call = Hashtbl.mem tbl "show_tool_call" in
         let id = Hashtbl.find tbl "id" in
         Config { max_tokens; model; reasoning_effort; temperature; show_tool_call; id }
-      | Element (Script, attrs, _) -> parse_script ~dir ~source_ref ~attrs ~children
+      | Element (Script, attrs, _) ->
+        parse_script ~dir ~loader ~source_node ~source_ref ~attrs ~children
       | Element (Summary, attrs, _) ->
         let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
         let typ =
@@ -711,6 +714,13 @@ module Chat_markdown = struct
         in
         let agent_url = Option.value url_attr ~default:"" in
         let agent_is_local = List.exists attr ~f:(fun (nm, _) -> String.(nm = "local")) in
+        let agent_url =
+          if agent_is_local
+          then
+            Source_loader.agent_reference loader ~base:source_node ~reference:agent_url
+            |> Result.ok_or_failwith
+          else agent_url
+        in
         Agent (agent_url, agent_is_local, children)
       | Element (Tool, attrs, _) ->
         let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
@@ -754,7 +764,17 @@ module Chat_markdown = struct
             let agent_url = String.strip agent_url in
             if String.is_empty agent_url then failwith "Tool agent URL cannot be empty.";
             let description = Option.map description ~f:String.strip in
-            Tool (Agent { name; description; agent = agent_url; is_local })
+            let agent =
+              if is_local
+              then
+                Source_loader.agent_reference
+                  loader
+                  ~base:source_node
+                  ~reference:agent_url
+                |> Result.ok_or_failwith
+              else agent_url
+            in
+            Tool (Agent { name; description; agent; is_local })
           | None, None, Some mcp_uri ->
             let mcp_uri = String.strip mcp_uri in
             if String.is_empty mcp_uri
@@ -890,21 +910,35 @@ module Chat_markdown = struct
     elements
   ;;
 
-  let parse_chat_inputs ?source ~dir (xml_content : string) : top_level_elements list =
+  let parse_chat_inputs ?source ?source_loader ~dir (xml_content : string) =
+    let source_file = Option.value source ~default:"<prompt>" in
+    let loader =
+      Option.value source_loader ~default:(Source_loader.filesystem ~root:dir)
+    in
+    let root_source =
+      Source_loader.root loader ~file:source_file |> Result.ok_or_failwith
+    in
     let xml_content = Meta_prompting.Preprocessor.preprocess xml_content in
     let document = parse xml_content in
     let expanded =
       Chatmd_import_expansion.expand
         ~parse
+        ~loader
+        ~root_source
         ~dir
-        ~file:(Option.value source ~default:"<prompt>")
+        ~file:source_file
         ~source:xml_content
         document
     in
     let chat_elements = chat_elements expanded in
     let parsed_elements =
       List.map chat_elements ~f:(fun sourced ->
-        parse_chat_element ~dir ~source_ref:sourced.source sourced.node)
+        parse_chat_element
+          ~dir
+          ~loader
+          ~source_node:sourced.source_node
+          ~source_ref:sourced.source
+          sourced.node)
     in
     of_chat_elements parsed_elements |> validate_scripts
   ;;

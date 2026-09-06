@@ -111,8 +111,11 @@ type audit_load_state =
   | Audit_loaded of audit_page
   | Audit_failed of string
 
+(** Retain independent page and audit-list scroll positions. Audit selection
+    reveals offscreen rows without repositioning an already-visible selection. *)
 type t =
   { scroll_box : Notty_scroll_box.t
+  ; audit_list_scroll_box : Notty_scroll_box.t
   ; mutable tab : tab
   ; mutable snapshot : snapshot
   ; mutable selected_grant_id : string option

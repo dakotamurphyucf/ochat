@@ -4,8 +4,25 @@ module P = Renderer_shell_security_palette
 module B = Renderer_shell_border
 module S = Model.Shell_security_page_state
 
-let safe attr text = I.string attr (Util.sanitize ~strip:true text)
+let safe attr text =
+  Util.sanitize ~strip:false text
+  |> String.split ~on:'\n'
+  |> String.concat ~sep:" "
+  |> I.string attr
+;;
+
 let row ~width attr text = safe attr text |> I.hsnap ~align:`Left width
+
+let wrapped ~width attr text =
+  let width = Int.max 1 width in
+  String.split_lines text
+  |> List.concat_map ~f:(fun line ->
+    let image = safe attr line in
+    List.init
+      (Int.max 1 ((I.width image + width - 1) / width))
+      ~f:(fun index -> I.hcrop (index * width) 0 image |> I.hsnap ~align:`Left width))
+  |> I.vcat
+;;
 
 let tabs =
   [ S.Overview, "Overview", "Overview"
@@ -129,7 +146,10 @@ let audit_request_summary ~width ~selected request =
       (sprintf
          "%s %s  %s  %s"
          marker
-         (String.prefix request.S.request_id 18)
+         (Option.value_map
+            (List.last request.S.events)
+            ~default:request.request_id
+            ~f:(fun event -> sprintf "#%Ld %s" event.sequence request.request_kind))
          request.runtime_id
          request.result)
   ; row
@@ -156,11 +176,17 @@ let audit_timeline ~width request =
     request.events
     |> List.map ~f:(fun event -> sprintf "  %Ld  %s" event.S.sequence event.name)
   in
-  section ~width "Selected request · non-executing replay" (metadata @ events)
+  I.vcat
+    (row ~width P.title "Selected request · non-executing replay"
+     :: List.map
+          ((sprintf "Request ID       %s" request.request_id :: metadata) @ events)
+          ~f:(wrapped ~width P.primary))
 ;;
 
-let loaded_audit ~width ~selected page =
-  let status =
+let audit_status ~width page =
+  section
+    ~width
+    "Audit status"
     [ sprintf "Path             %s" page.S.path
     ; sprintf "Integrity        %s" page.integrity
     ; sprintf "Requests         %d" page.total_requests
@@ -168,30 +194,53 @@ let loaded_audit ~width ~selected page =
         "Last sequence    %s"
         (Option.value_map page.last_sequence ~default:"none" ~f:Int64.to_string)
     ]
-  in
-  let requests =
-    page.requests
-    |> List.concat_map ~f:(fun request ->
-      audit_request_summary
-        ~width
-        ~selected:(Option.exists selected ~f:(String.equal request.request_id))
-        request
-      @ [ row ~width P.background "" ])
-  in
-  let selected_request =
-    Option.bind selected ~f:(fun id ->
-      List.find page.requests ~f:(fun request -> String.equal request.request_id id))
-  in
-  I.vcat
-    ([ section ~width "Audit status" status
-     ; section ~width "Recent requests · newest first · maximum 200" []
-     ]
-     @ requests
-     @ Option.value_map selected_request ~default:[] ~f:(fun request ->
-       [ audit_timeline ~width request ]))
 ;;
 
-let audit ~width ~selected state snapshot =
+let audit_requests ~width ~selected page =
+  page.S.requests
+  |> List.concat_map ~f:(fun request ->
+    audit_request_summary
+      ~width
+      ~selected:(Option.exists selected ~f:(String.equal request.request_id))
+      request
+    @ [ row ~width P.background "" ])
+  |> I.vcat
+;;
+
+let audit_prefix ~width ~selected page =
+  let selected_request =
+    Option.bind selected ~f:(fun id ->
+      List.find page.S.requests ~f:(fun request -> String.equal request.request_id id))
+  in
+  I.vcat
+    ([ audit_status ~width page ]
+     @ Option.value_map selected_request ~default:[] ~f:(fun request ->
+       [ audit_timeline ~width request; row ~width P.background "" ])
+     @ [ section ~width "Loaded requests · j/k selection · newest first" [] ])
+;;
+
+let reveal_audit_selection scroll_box ~height ~selected page =
+  Notty_scroll_box.clamp_scroll scroll_box ~height;
+  Option.bind selected ~f:(fun id ->
+    List.findi page.S.requests ~f:(fun _ request -> String.equal request.request_id id))
+  |> Option.iter ~f:(fun (index, _) ->
+    let start = index * 3 in
+    let offset = Notty_scroll_box.scroll scroll_box in
+    if start < offset
+    then Notty_scroll_box.scroll_to scroll_box start
+    else if start + 3 > offset + height
+    then Notty_scroll_box.scroll_to scroll_box (start + 3 - height))
+;;
+
+let loaded_audit ~width ~height ~scroll_box ~selected page =
+  let prefix = audit_prefix ~width ~selected page in
+  let list_height = Int.max 3 ((height - I.height prefix) / 3 * 3) in
+  Notty_scroll_box.set_content scroll_box (audit_requests ~width ~selected page);
+  reveal_audit_selection scroll_box ~height:list_height ~selected page;
+  I.vcat [ prefix; Notty_scroll_box.render scroll_box ~width ~height:list_height ]
+;;
+
+let audit ~width ~height ~scroll_box ~selected state snapshot =
   match state with
   | S.Audit_not_loaded ->
     section ~width "Audit and replay" [ snapshot.S.audit_status; "Press r to load." ]
@@ -202,7 +251,7 @@ let audit ~width ~selected state snapshot =
       [ "Loading and validating the durable audit chain…" ]
   | Audit_failed message ->
     section ~width "Audit unavailable" [ message; "Press r to retry." ]
-  | Audit_loaded page -> loaded_audit ~width ~selected page
+  | Audit_loaded page -> loaded_audit ~width ~height ~scroll_box ~selected page
 ;;
 
 let interrupted ~width snapshot =
@@ -219,12 +268,28 @@ let interrupted ~width snapshot =
     |> section ~width "Interrupted requests"
 ;;
 
-let content ~width ~selected_grant ~audit_state ~selected_audit tab snapshot =
+let content
+      ~width
+      ~height
+      ~audit_scroll_box
+      ~selected_grant
+      ~audit_state
+      ~selected_audit
+      tab
+      snapshot
+  =
   match tab with
   | S.Overview -> overview ~width snapshot
   | Runtimes -> runtimes ~width snapshot
   | Grants -> grants ~width ~selected:selected_grant snapshot
-  | Audit -> audit ~width ~selected:selected_audit audit_state snapshot
+  | Audit ->
+    audit
+      ~width
+      ~height
+      ~scroll_box:audit_scroll_box
+      ~selected:selected_audit
+      audit_state
+      snapshot
   | Interrupted -> interrupted ~width snapshot
 ;;
 
@@ -272,7 +337,15 @@ let render ~size:(width, height) ~model =
   let footer = row ~width P.elevated footer_text in
   let viewport_height = Int.max 0 (height - I.height header - 1) in
   let body =
-    content ~width:inner_width ~selected_grant ~audit_state ~selected_audit tab snapshot
+    content
+      ~width:inner_width
+      ~height:viewport_height
+      ~audit_scroll_box:(Model.shell_security_page model).audit_list_scroll_box
+      ~selected_grant
+      ~audit_state
+      ~selected_audit
+      tab
+      snapshot
     |> I.pad ~l:2
   in
   let scroll_box = Model.shell_security_scroll_box model in

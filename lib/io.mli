@@ -31,8 +31,9 @@ val ( / ) : ([> Fs.dir_ty ] as 'a) Path.t -> string -> 'a Path.t
     [`('a, string) result`].
 
     • Returns [Ok (f ())] when no exception is raised.
-    • Returns [Error msg] if [f] raises, using {!Eio.Exn.pp} to format
-      the exception.
+    • Returns [Error msg] if [f] raises, including cancellation, using
+      {!Eio.Exn.pp} to format the exception. Do not use this helper where
+      cancellation must propagate unchanged.
 
     Handy at API boundaries where callers prefer a result type over
     exceptions. *)
@@ -42,8 +43,7 @@ val to_res : (unit -> 'a) -> ('a, string) result
 
     The function opens (or creates with mode [0o600]) the target file
     in append mode and writes the string {i verbatim} (no newline is
-    added).  Using {!Eio.Path.with_open_out} makes the operation
-    atomic with respect to other fibres in the current process.
+    added). This does not guarantee whole-message atomicity across fibers.
 
     Default [file] is {b "./logs.txt"}. *)
 val log : dir:Eio.Fs.dir_ty Eio.Path.t -> ?file:string -> string -> unit
@@ -56,25 +56,24 @@ val console_log : stdout:[> Flow.sink_ty ] Resource.t -> string -> unit
 (** Overwrite a file with [contents].
 
     [save_doc ~dir file contents] is a convenience wrapper around
-    [Eio.Path.save ~create:(`Or_truncate 0o777)].  The whole string is
+    [Eio.Path.save ~create:(`Or_truncate 0o600)].  The whole string is
     written in one go and the file is truncated beforehand if it
     exists.
 
-    Note that permissions [0o777] mimic the behaviour of the original
-    code but may be too permissive for security-sensitive contexts. *)
+    Existing permissions are not changed. This is not atomic replacement. *)
 val save_doc : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string -> unit
 
 (** Append [contents] to an existing file.
 
     Behaviour is the same as {!save_doc} except that data is added at
     the end of the file instead of overwriting it.  A new file is
-    created with mode [0o777] when missing. *)
+    created with requested mode [0o600] when missing. *)
 val append_doc : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string -> unit
 
 (** Read a whole file into a string. *)
 val load_doc : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string
 
-(** Delete a file if it exists. *)
+(** [delete_doc ~dir file] unlinks [file], raising if it is missing. *)
 val delete_doc : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> unit
 
 (** Create a sub-directory.
@@ -128,7 +127,7 @@ module Net : sig
 
   (** Perform an HTTPS POST request.
 
-      [post ty ~net ~host ~headers ~path body] opens a TLS connection to
+      [post ty ~net ~host ~headers ~path ~sw body] opens a TLS connection to
       [host], sends [body] to [path] and decodes the response according
       to [ty]. *)
   val post
@@ -184,17 +183,18 @@ end
     {b Usage}
 
     {[
-      module Pool = Io.Task_pool (struct
-        type input  = int
-        type output = int
-        let dm     = domain_mgr
-        let stream = Eio.Stream.create 0
-        let sw     = switch
-        let handler x = x * x
-      end)
-
-      let () = Pool.spawn "square" in
-      assert (Pool.submit 11 = 121)
+      let square_example env =
+        Eio.Switch.run (fun sw ->
+          let module Pool = Io.Task_pool (struct
+            type input = int
+            type output = int
+            let dm = Eio.Stdenv.domain_mgr env
+            let stream = Eio.Stream.create 0
+            let sw = sw
+            let handler x = x * x
+          end) in
+          Pool.spawn "square";
+          assert (Pool.submit 11 = 121))
     ]} *)
 module Task_pool : functor (C : Task_pool_config) -> sig
   (** Start a new worker domain.  The function returns immediately. *)
@@ -252,6 +252,8 @@ module Base64 : sig
 
   (** [file_to_data_uri ~dir file] loads [file] from [dir], Base-64
       encodes its contents and prefixes the result with the proper MIME
-      type deduced from the extension. *)
+      type deduced from the extension (unknown extensions default to
+      [image/jpeg]). The helper prints filename/extension/MIME diagnostics
+      to stdout; it is not suitable for silent protocol output. *)
   val file_to_data_uri : dir:Eio.Fs.dir_ty Eio.Path.t -> string -> string
 end

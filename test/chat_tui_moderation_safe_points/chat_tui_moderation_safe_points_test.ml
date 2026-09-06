@@ -1293,7 +1293,7 @@ let%expect_test "user submission waits for startup overlay before beginning a tu
   [%expect
     {|
     before history=0 started=false queued=1
-    system "startup policy"
+    developer "startup policy"
     user "hello"
     after history=1 effective=2 state=ready
     |}]

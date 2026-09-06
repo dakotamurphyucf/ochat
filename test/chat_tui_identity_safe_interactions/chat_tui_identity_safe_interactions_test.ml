@@ -164,7 +164,7 @@ let reasoning =
     { id = "reasoning"; summary = []; status = None; _type = "reasoning" }
 ;;
 
-let%expect_test "delete is ID-addressed and noncanonical command rejection is visible" =
+let%expect_test "delete requests a canonical ID without mutation and rejects transient rows" =
   let entry_a = History_entry.create_with_id ~id:(history_id 0) (output_message "a") in
   let hidden = History_entry.create_with_id ~id:(history_id 2) reasoning in
   let entry_b = History_entry.create_with_id ~id:(history_id 1) (output_message "b") in
@@ -189,18 +189,22 @@ let%expect_test "delete is ID-addressed and noncanonical command rejection is vi
   Model.reconcile_messages model [ notice.message; a.message; b.message ];
   Model.select_projected model (Some b.id);
   let delete_reaction = Chat_tui.Controller_cmdline.execute_command model "delete" in
-  ignore
-    (Chat_tui.App_runtime.refresh_messages (Chat_tui.App_runtime.create ~model ())
-     : Chat_tui.Model.projection_damage);
+  let requested_id =
+    match delete_reaction with
+    | Chat_tui.Controller_types.Delete_history id -> Some (History_entry.Id.to_string id)
+    | _ -> None
+  in
   let remaining =
     Model.history_items model
     |> List.map ~f:(fun entry -> History_entry.Id.to_string (History_entry.id entry))
   in
-  let remaining_row = row 0 "a" in
-  Model.reconcile_projected_rows model [ notice; remaining_row ];
-  Model.reconcile_messages model [ notice.message; remaining_row.message ];
+  Model.reconcile_projected_rows model [ notice; b; a ];
+  Model.reconcile_messages model [ notice.message; b.message; a.message ];
   Model.select_projected model (Some notice.id);
-  ignore (Chat_tui.Controller_cmdline.execute_command model "delete");
+  assert
+    (Poly.equal
+       (Chat_tui.Controller_cmdline.execute_command model "delete")
+       Chat_tui.Controller_types.Redraw);
   let last_message =
     List.last (Model.messages model)
     |> Option.map ~f:(fun (role, text) -> role ^ ": " ^ text)
@@ -208,13 +212,15 @@ let%expect_test "delete is ID-addressed and noncanonical command rejection is vi
   print_s
     [%sexp
       (( remaining
-       , Poly.equal delete_reaction Chat_tui.Controller_types.Refresh_messages
+       , requested_id
        , last_message
        , List.length (Model.history_items model) )
-       : string list * bool * string option * int)];
+       : string list * string option * string option * int)];
   [%expect
     {|
-    ((21:identity-interactions:0 21:identity-interactions:2) true
-     ("system: Cannot delete a transient UI row.") 2)
+    ((21:identity-interactions:0 21:identity-interactions:2
+      21:identity-interactions:1)
+     (21:identity-interactions:1)
+     ("system: Select a canonical history entry to delete.") 3)
     |}]
 ;;

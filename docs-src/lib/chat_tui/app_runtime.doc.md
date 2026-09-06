@@ -12,8 +12,7 @@ modules.
 - `op` — the currently active operation:
   - `Streaming { sw; id }` / `Starting_streaming { id }`
   - `Compacting { sw; id }` / `Starting_compaction { id }`
-- `typeahead_op` — the currently active type-ahead completion operation:
-  - `Typeahead { sw; id }` / `Starting_typeahead { id }`
+
 - `submit_request` — a snapshot of the editor at submit time:
   - `text` and `Model.draft_mode`
 - `queued_action` — work queued while another operation is running:
@@ -28,9 +27,8 @@ modules.
 - Cancellation during the `Starting_*` phase is recorded in
   `cancel_*_on_start` because the worker switch is not yet available.
 
-Type-ahead completion uses the same “starting” pattern, but is tracked
-independently in `typeahead_op` so it can run while streaming/compaction is
-active.
+Typeahead no longer uses runtime operation fields. Both TUI loops delegate
+its lifecycle to [the shared coordinator](type_ahead_provider.doc.md).
 
 This module is not intended to be consumed by applications directly.
 

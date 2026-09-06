@@ -7,7 +7,11 @@ open! Core
     [docs-src/chatml-safe-point-and-effective-history.md].
 
     The Phase 2 bounded-turn contract that this module enforces in part is
-    documented in [docs-src/chatml-budget-policy.md]. *)
+    documented in [docs-src/chatml-budget-policy.md].
+
+    Forked turns keep child history, moderator boundaries and input queues
+    isolated from the root. They forward source-attributed live events and
+    tool progress, but only the completed tool result enters root history. *)
 
 module Safe_point_input : sig
   type t =
@@ -141,9 +145,9 @@ val handle_tool_result
 
     Optional callbacks mirror the streaming variant:
 
-    • [?on_event] – invoked for each streaming event received from the
-      OpenAI API (token deltas, item completions, …). Defaults to a no-op.
-      Ordinary callback exceptions are suppressed.
+    • [?on_event] – receives published streaming events (token deltas,
+      item completions, …), subject to the tool-argument delivery contract
+      below. Defaults to a no-op. Ordinary callback exceptions are suppressed.
     • [?on_sourced_event] – receives the same transient events with source
       attribution. It is isolated independently from [?on_event], and ordinary
       callback exceptions are suppressed.
@@ -151,6 +155,17 @@ val handle_tool_result
       caller to react to side-effects without waiting for the final assistant
       answer. This and [?on_tool_out] are canonical publication callbacks;
       their exceptions propagate.
+
+    Tool-argument delivery to [on_event], [on_sourced_event] and
+    [on_history_event] is completion-only, even with the identity redactor.
+    Function/custom tool items are announced with empty arguments/input;
+    incremental argument/input fragments are withheld so a configured secret
+    cannot be reconstructed across published chunks. Each argument/input
+    completion publishes its fully redacted payload as one synthetic delta,
+    followed by the redacted completion event. Missing tool metadata produces
+    [<redacted>] instead of exposing an unfilterable completion payload.
+    Assistant text and reasoning deltas retain incremental delivery. Display
+    redaction does not replace the input used for tool execution.
 
     @param env      Standard Eio runtime environment.
     @param allocator Sole allocator for newly accepted canonical occurrences.
@@ -189,14 +204,19 @@ val run_completion_stream_in_memory_entries
   :  env:Eio_unix.Stdenv.base
   -> ?datadir:Eio.Fs.dir_ty Eio.Path.t
   -> allocator:History_entry.Allocator.t
+  -> ?id_source:History_entry.Id_source.t
   -> history:History_entry.t list
   -> ?on_event:(Openai.Responses.Response_stream.t -> unit)
   -> ?on_sourced_event:(Sourced_response_event.t -> unit)
   -> ?on_history_event:(History_stream_event.t -> unit)
+  -> ?on_history_item_appended:(History_entry.t -> unit)
   -> ?on_fn_out:(Openai.Responses.Function_call_output.t -> unit)
   -> ?on_tool_out:(Openai.Responses.Item.t -> unit)
   -> ?on_history_tool_out:(History_entry.t -> unit)
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
+  -> ?authorize_tool:
+       (kind:Tool_call.Kind.t -> name:string -> payload:string -> call_id:string -> unit)
+  -> ?redact_tool_payload:(name:string -> string -> string)
   -> tools:Openai.Responses.Request.Tool.t list option
   -> ?tool_tbl:(string, Ochat_function.runner) Hashtbl.t
   -> ?temperature:float
@@ -214,13 +234,27 @@ val run_completion_stream_in_memory_entries
   -> ?post_stream:post_stream
   -> ?source:string
   -> ?parent_call_id:string
+  -> ?sw:Eio.Switch.t
   -> unit
   -> History_entry.t list
 (** [run_completion_stream_in_memory_entries ~allocator ~history ...] uses
-    [allocator] as the sole source of canonical IDs. Each identity-bearing
+    [id_source] as the source of canonical IDs when supplied and otherwise
+    adapts [allocator]. Each identity-bearing
     stream callback is emitted only after its ID has been reserved, and the
     same ID appears in the returned history. Tool-call and tool-output entries
     remain distinct despite sharing a provider [call_id]. *)
+
+(** [handle_item_appended_entries ...] notifies the moderator about the final
+    already-committed entry in [history]. Hosts call it once for a newly
+    submitted user entry before starting a turn. It preserves canonical
+    history, applies moderator projections, and reports runtime requests. *)
+val handle_item_appended_entries
+  :  moderator:moderator option
+  -> on_runtime_request:(Moderation.Runtime_request.t -> unit)
+  -> available_tools:Openai.Responses.Request.Tool.t list
+  -> now_ms:int
+  -> history:History_entry.t list
+  -> (unit, string) result
 
 module For_testing : sig
   (** [retry_stream_start ~sleep create_stream] retries parsing failures raised

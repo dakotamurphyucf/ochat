@@ -526,6 +526,16 @@ let manifest (t : t) = t.manifest
 let inspection (t : t) = t.inspection
 let runtime (t : t) id = Map.find t.runtimes id
 let tool (t : t) name = Map.find t.tools name
+
+let redact_tool_input t ~tool_name value =
+  match tool t tool_name with
+  | None -> value
+  | Some tool ->
+    (match runtime t tool.T.runtime with
+     | None -> value
+     | Some runtime -> Runtime.redact runtime value)
+;;
+
 let script (t : t) name = Map.find t.scripts name
 let runtimes (t : t) = Map.data t.runtimes
 let tools (t : t) = Map.data t.tools

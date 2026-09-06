@@ -24,6 +24,12 @@
 
 open! Core
 
+val grouped_items : Openai.Responses.Item.t list -> Openai.Responses.Item.t list list
+(** Keeps calls and their corresponding outputs together for relevance selection. *)
+
+val render_transcript : Openai.Responses.Item.t list -> string
+(** Renders the textual transcript supplied to the summarizer. *)
+
 (** [summarise ~relevant_items ~env] synthesises a concise summary of
     [relevant_items].
 

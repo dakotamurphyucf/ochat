@@ -1,214 +1,88 @@
-# `Session` – Persistent chat conversation state
+# Session — legacy persistent conversation state
 
 ## Overview
 
-`Session` groups together every piece of information that the *ochat*
-assistant needs in order to resume a dialogue that spans several
-invocations of the program:
-
-* the *prompt file* that boot-straps the conversation;
-* the full list of messages exchanged with OpenAI (`History.t`);
-* a lightweight per-session **task list** (think micro TODOs);
-* an open-ended **key/value store** for feature flags or UI state;
-* the root of a *virtual file system* (VFS) used by plug-ins and
-  on-the-fly generated artefacts.
-
-Serialisation uses the `bin_io` format together with a tiny *schema
-version* prefix.  When the OCaml data type evolves the module keeps
-backward compatibility by providing *upgrade functions* under
-`Session.Legacy` and bumping `Session.current_version`.
-
-All helpers are *pure* – actual file I/O is delegated to
-`Session.Io.File` which wraps the
-[`Bin_prot_utils_eio`](bin_prot_utils_eio.doc.md) primitives so that the
-usual `Eio` buffering and permissions apply.
-
-The implementation does **not** do any locking; callers are responsible
-for serialising access if they share a session between concurrent
-domains/fibres.
-
----
+This record serves the [file-backed compatibility host](prompt_session.doc.md).
+Daemon sessions use [actor-owned storage](../agent-server/operations.md).
+Current schema V5 carries canonical history, allocator state, tasks, moderator
+state, shell state, prompt metadata and VFS/key-value bookkeeping. Neither a
+record nor a snapshot is a running-process continuation.
 
 ## Quick API reference (simplified)
 
-```ocaml
-module Session : sig
-  val current_version : int
-
-  module History : sig
-    type t = Openai.Responses.Item.t list
-  end
-
-  module Task : sig
-    type state = Pending | In_progress | Done
-    type t
-    val create : ?id:string -> ?state:state -> title:string -> unit -> t
-  end
-
-  type t
-
-  val create
-    :  ?id:string
-    -> prompt_file:string
-    -> ?local_prompt_copy:string
-    -> ?history:History.t
-    -> ?tasks:Task.t list
-    -> ?kv_store:(string * string) list
-    -> ?vfs_root:string
-    -> unit
-    -> t
-
-  val reset              : ?prompt_file:string -> t -> t
-  val reset_keep_history : ?prompt_file:string -> t -> t
-
-  module Io : sig
-    module File : sig
-      val read  : Eio.Fs.dir_ty Eio.Path.t -> t
-      val write : Eio.Fs.dir_ty Eio.Path.t -> t -> unit
-    end
-  end
-end
-```
-
----
+See the [exact interface](../../lib/session.mli).
+`Session.History.t = History_entry.t list`, not raw provider items.
+The public record includes `next_history_sequence`, `moderator_state` and
+`shell_state` in addition to history and prompt metadata. Allocate new
+occurrences consistently with the session namespace and high-water mark;
+`Session.allocator` and `Session.validate` expose that contract.
 
 ## Detailed semantics
 
 ### Creation
 
-```ocaml
-val create
-  :  ?id:string
-  -> prompt_file:string
-  -> ?local_prompt_copy:string
-  -> ?history:History.t
-  -> ?tasks:Task.t list
-  -> ?kv_store:(string * string) list
-  -> ?vfs_root:string
-  -> unit
-  -> t
-```
-
-* `id` – 32-character hexadecimal digest.  When omitted a fresh ID is
-  generated from the current wall-clock time combined with PRNG bits.
-* `prompt_file` – absolute or project-relative path of the file that was
-  fed to the model before the very first user message.
-* `local_prompt_copy` – optional *relative* path to a copy of the
-  prompt inside the session directory.  Useful when the original file
-  lives outside of version control.
-* `history` / `tasks` / `kv_store` – initial values, defaulting to the
-  empty list.
-* `vfs_root` – name of the top-level directory that tools should treat
-  as the root of the virtual file system; defaults to `"vfs"`.
-
-The function is *pure*: it only constructs an OCaml value.  Persist it
-explicitly via `Session.Io.File.write` if you need durability.
-
+`create ~prompt_file ()` defaults history/tasks/key-value data to empty and
+VFS root to `vfs`. Optional arguments seed prompt copy, allocator, moderator
+and shell state; consult the interface rather than constructing an old record
+shape. Omitted IDs are time/PRNG-derived MD5 strings, not credentials.
+Construction performs no file I/O, but default ID generation is not pure.
 
 ### Resetting a session
 
-`reset` and `reset_keep_history` return a *copy* of the supplied record
-so the original value remains usable.
-
-| Function | Effect on history              | Prompt path update |
-| -------- | ------------------------------ | ------------------ |
-| `reset`  | cleared (restarts the chat)    | honour arg         |
-| `reset_keep_history` | preserved           | honour arg         |
-
-Both functions keep the *id*, *tasks*, *kv_store* and *vfs_root*
-unchanged.
-
+`reset` clears history, moderator and shell state. `reset_keep_history` retains
+history but still clears moderator/shell state. Both preserve identity, tasks,
+key/value data, VFS root and allocator high-water mark. Optional prompt_file
+changes the recorded path. Neither function writes files or executes the prompt.
 
 ### Task helpers
 
-`Task.create` mirrors `Session.create` in the way it synthesises default
-values and computes a stable identifier.  The life-cycle enumeration is
-deliberately minimal – callers are free to attach richer semantics via
-the key/value store.
-
+Tasks have string IDs, titles and Pending/In_progress/Done states. They are
+bookkeeping, not the daemon job scheduler or permission grants.
 
 ### File I/O
 
-```ocaml
-module Session.Io.File : sig
-  val read  : Eio.Fs.dir_ty Eio.Path.t -> Session.t
-  val write : Eio.Fs.dir_ty Eio.Path.t -> Session.t -> unit
-end
-```
+Direct `Session.Io.File.read` decodes only the current binary shape.
+Use `Session_store.read_current_file` for migration-aware V5–V0 loading.
+Supported migration is not arbitrary forward/downgrade compatibility.
 
-• `write path v` serialises `v` using `Bin_prot.Utils.bin_dump` with a
-  header – the file is created with `0600` permissions or truncated if
-  it already exists.
-
-• `read path` reverses the process and *automatically upgrades* the
-  value through all intermediary versions until it matches the latest
-  schema (the operation cannot fail as long as the input comes from a
-  previous `Session.write`).
-
-Both functions run inside an `Eio` context and therefore take a typed
-[`Eio.Path.t`](https://ocaml.github.io/eio/eio/Eio/Path/index.html)
-value.
-
-
----
+Direct `Session.Io.File.write` serializes and truncates in place; it is not an
+atomic or locked save. For compatibility-host publication, use
+`Session_store.save`, which adds exclusive save locking and temporary-file
+rename. Both use Eio and requested mode 0600 for new files.
 
 ## Examples
 
 ### 1. Start a new session and save it
 
 ```ocaml
-open Eio.Std
-
-let () = Eio_main.run @@ fun env ->
-  let prompt = "prompts/system.txt" in
-  let session = Session.create ~prompt_file:prompt () in
-
-  let dir = Eio.Stdenv.cwd env in
-  let snapshot = Eio.Path.(dir / "snapshot.bin") in
-  Session.Io.File.write snapshot session
+let create_and_save env prompt_file =
+  let session = Session.create ~prompt_file () in
+  Session_store.save ~env session
 ```
+
+Handle the returned Result; directory setup may raise.
 
 ### 2. Load an old snapshot and begin a fresh chat
 
 ```ocaml
-open Eio.Std
-
-let () = Eio_main.run @@ fun env ->
-  let dir = Eio.Stdenv.cwd env in
-  let snap = Eio.Path.(dir / "snapshot.bin") in
-
-  let session = Session.Io.File.read snap in
-
-  (* Forget previous messages but keep bookkeeping info *)
-  let session = Session.reset ~prompt_file:"prompts/v2.txt" session in
-
-  Session.Io.File.write snap session
+let load_and_reset path =
+  Core.Result.map (Session_store.read_current_file path)
+    ~f:(Session.reset ~prompt_file:"agents/revised.chatmd")
 ```
 
----
+This returns new in-memory state without overwriting the original.
+Archive/back up before persisting a reset.
 
 ## Limitations
 
-1. **Concurrency** – the module is agnostic to multi-threading.  Protect
-   access with a mutex if you plan to share a `Session.t` between
-   domains.
-2. **Forward compatibility** – upgrading works only *forwards* (old →
-   new).  Downgrading a snapshot created by a newer binary is *not*
-   supported.
-3. **Large histories** – everything is kept in memory; very long chats
-   will increase RAM usage proportionally.
-
----
-
-*Module version&nbsp;>=* `current_version` **`%= {Session.current_version}`**.
+The record supplies no concurrency control. Save-time locks do not coordinate
+separate live legacy TUIs or merge concurrent histories. History is held in
+memory. Binary formats require supported migrations and may include sensitive
+payloads. Use daemon sessions for shared, durable background execution.
 
 ## Typed shell security state
 
-The current snapshot schema stores `shell_state` separately from conversation
-and moderator extension strings. It includes exact manifest grants, command
-approval grants, source/manifest-bound ChatML extension snapshots, last audit
-sequence, and redacted interrupted-request metadata.
-
-Migration from every older version initializes empty shell trust. Reset clears
-session shell grants and extension state by default. History never implies
-approval, and an in-flight process is never resumed from a snapshot.
+Shell state includes manifest/command grants, source-bound extension snapshots,
+audit sequence and interrupted-request metadata. Older versions migrate with
+empty shell trust. History alone never grants approval; reset clears trust and
+an in-flight process is not resumed from its snapshot.

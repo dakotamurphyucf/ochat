@@ -5,6 +5,8 @@ open! Core
 
 val parse
   :  dir:Eio.Fs.dir_ty Eio.Path.t
+  -> loader:Source_loader.t
+  -> source_node:Source_loader.source
   -> source:Chatmd_shell_spec.Source_ref.t
   -> attributes:Chatmd_ast.attribute list
   -> inline_source:string

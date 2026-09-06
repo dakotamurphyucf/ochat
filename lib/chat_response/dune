@@ -28,6 +28,7 @@
   shell_tool
   agent_runtime
   tool
+  mcp_discovery_cache
   fork
   compact_history)
  (libraries

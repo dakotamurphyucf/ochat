@@ -335,6 +335,11 @@ let identity_overlay_of_snapshot (snapshot : Session.Moderator_state.Identity_sn
     }
 ;;
 
+let effective_entries_of_snapshot snapshot history =
+  Result.map (identity_overlay_of_snapshot snapshot) ~f:(fun overlay ->
+    Moderation.Identity_overlay.apply overlay history)
+;;
+
 let create_entries
       ~(artifact : Registry.artifact)
       ~(capabilities : Moderation.Capabilities.t)
@@ -420,7 +425,7 @@ let update_replacements
 let apply_overlay_op (t : t) (op : Moderation.Overlay.op) : unit =
   match op with
   | Moderation.Overlay.Prepend_system text ->
-    let item = next_overlay_item t ~role:Res.Input_message.System ~content:text in
+    let item = next_overlay_item t ~role:Res.Input_message.Developer ~content:text in
     t.overlay
     <- { t.overlay with
          prepended_system_items = t.overlay.prepended_system_items @ [ item ]
@@ -562,7 +567,7 @@ let prepare_identity_ops t ~phase ops =
           inserted_ids_rev := id :: !inserted_ids_rev;
           let item =
             Res.Item.Input_message
-              { role = Res.Input_message.System
+              { role = Res.Input_message.Developer
               ; content = [ Res.Input_message.Text { text; _type = "input_text" } ]
               ; _type = "message"
               }

@@ -195,7 +195,29 @@ let load_or_create ~env ~prompt_file ?id ?(new_session = false) () : Session.t =
 (*  Persistence – write snapshot                                            *)
 (*--------------------------------------------------------------------------*)
 
-let save ~env (session : Session.t) : unit =
+let snapshot_sequence = Atomic.make 0
+
+let write_snapshot_atomic dir session =
+  let serial = Atomic.fetch_and_add snapshot_sequence 1 in
+  let name = sprintf "snapshot.%d.%d.tmp" (Core_unix.getpid () |> Pid.to_int) serial in
+  let temporary = Eio.Path.(dir / name) in
+  let owned = ref false in
+  let buffer = Bin_prot.Utils.bin_dump ~header:true Session.bin_writer_t session in
+  Fun.protect
+    (fun () ->
+       Eio.Path.with_open_out ~create:(`Exclusive 0o600) temporary (fun flow ->
+         owned := true;
+         Eio.Flow.write flow [ Cstruct.of_bigarray buffer ]);
+       Eio.Path.rename temporary Eio.Path.(dir / "snapshot.bin"))
+    ~finally:(fun () ->
+      if !owned
+      then
+        Eio.Cancel.protect (fun () ->
+          try Eio.Path.unlink temporary with
+          | _ -> ()))
+;;
+
+let save ~env (session : Session.t) =
   let dir = ensure_dir ~env session.id in
   let ( / ) = Eio.Path.( / ) in
   (*------------------------------------------------------------------*)
@@ -208,22 +230,24 @@ let save ~env (session : Session.t) : unit =
     Eio.Path.save ~create:(`Exclusive 0o600) lock ""
   in
   let release_lock () =
-    try Eio.Path.unlink lock with
-    | _ -> ()
+    Eio.Cancel.protect (fun () ->
+      try Eio.Path.unlink lock with
+      | _ -> ())
   in
-  (try acquire_lock () with
-   | _ ->
-     Core.eprintf
-       "Error: session '%s' is currently locked by another process.\n"
-       session.id;
-     exit 1);
-  protectx
-    ()
-    ~finally:(fun () -> release_lock ())
-    ~f:(fun () ->
-      let snapshot = dir / "snapshot.bin" in
-      Session.Io.File.write snapshot session)
+  match Or_error.try_with acquire_lock with
+  | Error error ->
+    Or_error.error_s
+      [%sexp
+        "unable to acquire legacy session snapshot lock"
+      , { session_id = (session.id : string); error : Error.t }]
+  | Ok () ->
+    protectx
+      ()
+      ~finally:(fun () -> release_lock ())
+      ~f:(fun () -> Or_error.try_with (fun () -> write_snapshot_atomic dir session))
 ;;
+
+let save_exn ~env session = save ~env session |> Or_error.ok_exn
 
 (*--------------------------------------------------------------------------*)
 (*  Reset / archive                                                          *)
@@ -291,7 +315,7 @@ let reset_session ~env ~(id : id) ?prompt_file ?(keep_history = false) () : unit
           { session_reset with local_prompt_copy = Some copy_name }
       in
       (* Save the new snapshot. *)
-      save ~env session_reset;
+      save_exn ~env session_reset;
       (* ------------------------------------------------------------------ *)
       (*  Cache handling: remove cache unless [keep_history] is true.          *)
       (* ------------------------------------------------------------------ *)
@@ -365,7 +389,7 @@ let rebuild_session ~env ~(id : id) () : unit =
           ?local_prompt_copy:old_session.local_prompt_copy
           ()
       in
-      save ~env new_session;
+      save_exn ~env new_session;
       Core.printf
         "Session '%s' rebuilt from prompt. Archived snapshot: %s\n"
         id

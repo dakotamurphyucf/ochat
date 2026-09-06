@@ -133,6 +133,81 @@ let run_entry_stream
   allocator, history
 ;;
 
+let fork_test_events () =
+  let added, done_ =
+    stream_function_call
+      ~output_index:0
+      ~item_id:"fork-item"
+      ~call_id:"fork-test"
+      ~arguments:{|{"command":"inspect","arguments":[]}|}
+  in
+  let added =
+    match added with
+    | Res.Response_stream.Output_item_added ({ item = Function_call call; _ } as event) ->
+      Res.Response_stream.Output_item_added
+        { event with item = Function_call { call with name = "fork" } }
+    | _ -> assert false
+  in
+  [ [ added; done_ ]
+  ; stream_message ~output_index:0 ~item_id:"child" "child-only"
+  ; stream_message ~output_index:0 ~item_id:"root" "root-final"
+  ]
+;;
+
+let%expect_test "fork cannot publish child history or consume the root deferred queue" =
+  Eio_main.run (fun env ->
+    let allocator =
+      History_entry.Allocator.create ~namespace:"fork-root" ~next_sequence:0
+      |> Result.ok_or_failwith
+    in
+    let initial = input_entry allocator in
+    let deferred = input_entry allocator in
+    let pending = ref [ deferred ] in
+    let consumes = ref 0 in
+    let safe_point_input : Stream.Safe_point_input.t =
+      { consume_entries =
+          (fun () ->
+            Int.incr consumes;
+            let entries = !pending in
+            pending := [];
+            entries)
+      ; consume_compatibility_text = (fun () -> None)
+      }
+    in
+    let responses = Queue.of_list (fork_test_events ()) in
+    let requests = ref [] in
+    let committed = ref [] in
+    let post_stream ~sw:_ ~inputs =
+      requests := inputs :: !requests;
+      Queue.dequeue_exn responses |> Stdlib.List.to_seq
+    in
+    let history =
+      Stream.run_completion_stream_in_memory_entries
+        ~env
+        ~allocator
+        ~history:[ initial ]
+        ~safe_point_input
+        ~on_history_item_appended:(fun entry -> committed := entry :: !committed)
+        ~tools:(Some [])
+        ~tool_tbl:(String.Table.create ())
+        ~post_stream
+        ()
+    in
+    [%test_eq: int] (List.length !requests) 3;
+    [%test_eq: int] !consumes 2;
+    assert (
+      List.for_all !committed ~f:(fun entry ->
+        String.equal (History_entry.Id.namespace (History_entry.id entry)) "fork-root"));
+    [%test_eq: string list]
+      (List.map history ~f:entry_kind)
+      [ "input"; "function-call"; "function-output"; "input"; "message" ];
+    assert (
+      History_entry.Id.equal
+        (History_entry.id (List.nth_exn history 3))
+        (History_entry.id deferred)));
+  [%expect {| |}]
+;;
+
 let print_items (items : Res.Item.t list) =
   List.iter items ~f:(function
     | Res.Item.Input_message message ->
@@ -324,7 +399,7 @@ let%expect_test "prepare_turn_inputs applies moderator overlay before request" =
   print_items items;
   [%expect
     {|
-    input system "policy"
+    input developer "policy"
     input user "Hello"
     |}]
 ;;
@@ -351,9 +426,9 @@ let%expect_test "prepare_turn_inputs appends safe-point input after overlay hist
   print_items items;
   [%expect
     {|
-    input system "policy"
+    input developer "policy"
     input user "Hello"
-    input system "safe-point"
+    input developer "safe-point"
     |}]
 ;;
 
@@ -1551,4 +1626,210 @@ let%expect_test "file-backed stream exposes final canonical message identity" =
        : bool)
     , (List.map history ~f:entry_kind : string list)];
   [%expect {| (3 true (input message)) |}]
+;;
+
+module Redaction_probe = struct
+  type t =
+    { direct : Res.Response_stream.t Queue.t
+    ; sourced : Res.Response_stream.t Queue.t
+    ; correlated : Res.Response_stream.t Queue.t
+    ; executed : string Queue.t
+    }
+
+  let secret = "unit-secret-boundary"
+  let payload = {|{"text":"unit-secret-boundary"}|}
+  let safe_payload = {|{"text":"<redacted>"}|}
+
+  let redact ~name:_ value =
+    String.substr_replace_all value ~pattern:secret ~with_:"<redacted>"
+  ;;
+
+  let create () =
+    { direct = Queue.create ()
+    ; sourced = Queue.create ()
+    ; correlated = Queue.create ()
+    ; executed = Queue.create ()
+    }
+  ;;
+
+  let event_payload = function
+    | Res.Response_stream.Output_item_added { item = Function_call call; _ } ->
+      Some call.arguments
+    | Output_item_added { item = Custom_function call; _ } -> Some call.input
+    | Function_call_arguments_delta event -> Some event.delta
+    | Function_call_arguments_done event -> Some event.arguments
+    | Custom_tool_call_input_delta event -> Some event.delta
+    | Custom_tool_call_input_done event -> Some event.input
+    | _ -> None
+  ;;
+
+  let payloads events = Queue.to_list events |> List.filter_map ~f:event_payload
+  let observers t = [ t.direct; t.sourced; t.correlated ]
+
+  let with_directory env f =
+    let name = sprintf "redaction-unit-%08x" (Random.int 0x3fffffff) in
+    let directory = Eio.Path.(Eio.Stdenv.cwd env / name) in
+    Eio.Path.mkdir ~perm:0o700 directory;
+    Exn.protect
+      ~f:(fun () -> f directory)
+      ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true directory)
+  ;;
+
+  let tool_table t =
+    let table = String.Table.create () in
+    Hashtbl.set table ~key:"echo" ~data:(fun ~invocation:_ input ->
+      Queue.enqueue t.executed input;
+      Res.Tool_output.Output.Text "executed");
+    table
+  ;;
+
+  let run t env directory post_stream =
+    let allocator =
+      History_entry.Allocator.create ~namespace:"redaction-unit" ~next_sequence:0
+      |> Result.ok_or_failwith
+    in
+    Stream.run_completion_stream_in_memory_entries
+      ~env
+      ~datadir:directory
+      ~allocator
+      ~history:[ input_entry allocator ]
+      ~tools:(Some [])
+      ~tool_tbl:(tool_table t)
+      ~parallel_tool_calls:false
+      ~redact_tool_payload:redact
+      ~post_stream
+      ~on_event:(Queue.enqueue t.direct)
+      ~on_sourced_event:(fun event -> Queue.enqueue t.sourced event.event)
+      ~on_history_event:(fun event -> Queue.enqueue t.correlated event.event)
+      ()
+  ;;
+
+  let partial_added added prefix =
+    match added with
+    | Res.Response_stream.Output_item_added event ->
+      let item =
+        match event.item with
+        | Function_call call ->
+          Res.Response_stream.Item.Function_call { call with arguments = prefix }
+        | Custom_function call -> Custom_function { call with input = prefix }
+        | _ -> assert false
+      in
+      Res.Response_stream.Output_item_added { event with item }
+    | _ -> assert false
+  ;;
+
+  let delta kind text =
+    match kind with
+    | `Function ->
+      Res.Response_stream.Function_call_arguments_delta
+        { item_id = "redaction-item"
+        ; output_index = 0
+        ; delta = text
+        ; type_ = "response.function_call_arguments.delta"
+        }
+    | `Custom ->
+      Res.Response_stream.Custom_tool_call_input_delta
+        { item_id = "redaction-item"
+        ; output_index = 0
+        ; delta = text
+        ; type_ = "response.custom_tool_call_input.delta"
+        }
+  ;;
+
+  let events kind =
+    let added, done_ =
+      match kind with
+      | `Function ->
+        stream_function_call
+          ~output_index:0
+          ~item_id:"redaction-item"
+          ~call_id:"redaction-call"
+          ~arguments:payload
+      | `Custom ->
+        stream_custom_call
+          ~output_index:0
+          ~item_id:"redaction-item"
+          ~call_id:"redaction-call"
+          ~input:payload
+    in
+    let prefix_length = String.substr_index_exn payload ~pattern:secret + 5 in
+    let added = partial_added added (String.prefix payload prefix_length) in
+    let chunks =
+      String.drop_prefix payload prefix_length
+      |> String.to_list
+      |> List.map ~f:(fun ch -> delta kind (String.of_char ch))
+    in
+    added :: chunks, done_
+  ;;
+
+  let require_withheld t =
+    List.iter (observers t) ~f:(fun events ->
+      assert (List.for_all (payloads events) ~f:String.is_empty))
+  ;;
+
+  let provider t kind ~abort =
+    let fragments, done_ = events kind in
+    let first = ref true in
+    fun ~sw:_ ~inputs:_ ->
+      if not !first
+      then
+        Stdlib.List.to_seq
+          (stream_message ~output_index:0 ~item_id:"redaction-message" "done")
+      else (
+        first := false;
+        let tail () =
+          require_withheld t;
+          if abort then failwith "redaction-probe-aborted";
+          Seq.Cons (done_, Seq.empty)
+        in
+        Seq.append (Stdlib.List.to_seq fragments) tail)
+  ;;
+
+  let check_completed t history =
+    let expected = [ ""; safe_payload; safe_payload ] in
+    assert (List.equal String.equal (Queue.to_list t.executed) [ payload ]);
+    List.iter (observers t) ~f:(fun events ->
+      assert (List.equal String.equal (payloads events) expected));
+    List.iter history ~f:(fun entry ->
+      match History_entry.item entry with
+      | Res.Item.Function_call call -> assert (String.equal call.arguments safe_payload)
+      | Custom_tool_call call -> assert (String.equal call.input safe_payload)
+      | _ -> ())
+  ;;
+
+  let complete env directory kind =
+    let t = create () in
+    let history = run t env directory (provider t kind ~abort:false) in
+    check_completed t history
+  ;;
+
+  let abort env directory kind =
+    let t = create () in
+    (match run t env directory (provider t kind ~abort:true) with
+     | exception Failure message when String.equal message "redaction-probe-aborted" -> ()
+     | _ -> failwith "expected provider abort");
+    require_withheld t;
+    assert (Queue.is_empty t.executed)
+  ;;
+end
+
+let%expect_test
+    "function/custom redaction withholds fragments and preserves executable input"
+  =
+  Eio_main.run (fun env ->
+    Redaction_probe.with_directory env (fun directory ->
+      List.iter [ `Function; `Custom ] ~f:(Redaction_probe.complete env directory)));
+  print_s
+    [%sexp
+      "function/custom: completion-only, all observers redacted, raw execution preserved"];
+  [%expect
+    {| "function/custom: completion-only, all observers redacted, raw execution preserved" |}]
+;;
+
+let%expect_test "aborted function/custom argument streams publish no secret fragments" =
+  Eio_main.run (fun env ->
+    Redaction_probe.with_directory env (fun directory ->
+      List.iter [ `Function; `Custom ] ~f:(Redaction_probe.abort env directory)));
+  print_s [%sexp "function/custom: abort withheld arguments and did not execute"];
+  [%expect {| "function/custom: abort withheld arguments and did not execute" |}]
 ;;

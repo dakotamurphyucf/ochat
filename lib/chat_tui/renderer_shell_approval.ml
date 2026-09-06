@@ -4,7 +4,13 @@ module P = Renderer_shell_security_palette
 module B = Renderer_shell_border
 module S = Model.Shell_security_page_state
 
-let safe attr text = I.string attr (Util.sanitize ~strip:false text)
+let safe attr text =
+  Util.sanitize ~strip:false text
+  |> String.map ~f:(function
+    | '\n' -> ' '
+    | c -> c)
+  |> I.string attr
+;;
 
 let opaque ~width background image =
   let width = Int.max 0 width in
@@ -17,16 +23,19 @@ let row ?(background = P.surface) ~width attr text =
   safe A.(background ++ attr) text |> opaque ~width background
 ;;
 
+let wrapped_lines ~limit text =
+  Util.sanitize ~strip:true text
+  |> String.split ~on:'\n'
+  |> List.concat_map ~f:(fun line ->
+    match Util.wrap_line ~limit line with
+    | [] -> [ "" ]
+    | lines -> lines)
+;;
+
 let wrapped_rows ?background ~width ?(prefix = "") attr text =
   let limit = Int.max 1 (width - String.length prefix) in
-  let lines =
-    Util.sanitize ~strip:true text
-    |> Util.wrap_line ~limit
-    |> function
-    | [] -> [ "" ]
-    | lines -> lines
-  in
-  List.map lines ~f:(fun line -> row ?background ~width attr (prefix ^ line))
+  wrapped_lines ~limit text
+  |> List.map ~f:(fun line -> row ?background ~width attr (prefix ^ line))
 ;;
 
 let modal_width screen_width =
@@ -302,13 +311,12 @@ let moderator_body ~inner (modal : S.moderator_modal) =
       , moderator_choices ~inner modal choices
         @ [ row ~width:inner P.secondary "j/k select   Enter submit" ] )
   in
-  [ row ~width:inner P.blue heading
-  ; row ~width:inner P.primary prompt
-  ; row ~width:inner P.surface ""
-  ]
+  [ row ~width:inner P.blue heading ]
+  @ wrapped_rows ~width:inner P.primary prompt
+  @ [ row ~width:inner P.surface "" ]
   @ interaction
   @ Option.value_map modal.validation_error ~default:[] ~f:(fun message ->
-    [ row ~width:inner P.surface ""; row ~width:inner P.red message ])
+    [ row ~width:inner P.surface "" ] @ wrapped_rows ~width:inner P.red message)
 ;;
 
 let moderator_card ~width modal =
@@ -348,11 +356,17 @@ let cursor ~size:(screen_width, screen_height) ~model =
   | None ->
     (match Model.shell_grant_revoke_modal model, Model.moderator_modal model with
      | Some _, _ | None, None -> None
-     | None, Some ({ request = Chat_response.In_memory_stream.Ask_text _; _ } as modal) ->
+     | ( None
+       , Some
+           ({ request = Chat_response.In_memory_stream.Ask_text { prompt }; _ } as modal)
+       ) ->
        let left, top =
          position_origin ~screen_width ~screen_height (moderator_card ~width modal)
        in
-       Some (left + 4 + modal.cursor, top + 5)
+       let prompt_rows =
+         List.length (wrapped_lines ~limit:(Int.max 1 (width - 4)) prompt)
+       in
+       Some (left + 4 + modal.cursor, top + 4 + prompt_rows)
      | None, Some { request = Ask_choice _; _ } -> None)
 ;;
 

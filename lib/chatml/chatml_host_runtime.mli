@@ -56,6 +56,8 @@ type log_level =
     these same runtime constructors. *)
 type turn_effect =
   | Prepend_system of string
+  (** Request a prepended developer instruction. The legacy effect name remains
+      compatible with existing ChatML scripts. *)
   | Append_message of value
   | Replace_message of string * value
   | Delete_message of string

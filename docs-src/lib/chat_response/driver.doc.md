@@ -1,5 +1,10 @@
 # Driver – ChatMarkdown Orchestration Layer
 
+This shared/file-backed driver remains supported. New local and daemon agent hosts compose actor-owned runtime workers instead of giving the connected TUI ownership of persisted session state.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 `lib/chat_response/driver.ml`
 
 ---

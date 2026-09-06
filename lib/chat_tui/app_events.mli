@@ -13,41 +13,18 @@ open Core
     id does not match the currently active operation, which makes it safe for
     cancelled worker fibres to race with new work.
 
-    Type-ahead completion uses the same pattern: a background worker publishes
-    [`Typeahead_started] with its switch, then eventually reports
-    [`Typeahead_done] / [`Typeahead_error].  The reducer additionally validates
-    a completion against a snapshot (generation, base input, base cursor) so a
-    stale suggestion cannot be applied after further editing. *)
+    Type-ahead uses {!Type_ahead_controller} events and checks attachment identity,
+    context epoch, generation, draft and cursor at admission and completion. *)
 
 (** Raw terminal events (keypresses, paste start/end, ...). *)
 type input_event = Notty.Unescape.event
 
+(** Input ownership advertised by a presented terminal frame. *)
 type input_capability =
   | Disabled
   | Normal
   | Interaction of string
 [@@deriving sexp_of, compare, equal]
-(** Input ownership advertised by a presented terminal frame. *)
-
-(** Payload emitted when a type-ahead request completes successfully.
-
-    The fields form a snapshot of the editor at the time the request was
-    started:
-    {ul
-    {- [generation] is {!Chat_tui.Model.typeahead_generation} when the request was
-       launched.}
-    {- [base_input] is the full draft buffer.}
-    {- [base_cursor] is the cursor position (byte offset) within [base_input].}
-    {- [text] is the suggested suffix to insert at [base_cursor].}}
-
-    The reducer compares these fields to the current model state and applies
-    the completion only when it is still applicable. *)
-type typeahead_done =
-  { generation : int
-  ; base_input : string
-  ; base_cursor : int
-  ; text : string
-  }
 
 type shell_grant_revoke_outcome =
   { grants : Session.Shell_state.Approval_grant.persisted list
@@ -62,7 +39,7 @@ type shell_grant_revoke_outcome =
     {ul
     {- [`Streaming_*] – assistant streaming request lifecycle.}
     {- [`Compaction_*] – history compaction lifecycle.}
-    {- [`Typeahead_*] – type-ahead completion lifecycle.}}
+    {- [`Typeahead] – type-ahead completion lifecycle.}}
 *)
 type internal_event =
   [ `Resize
@@ -98,9 +75,7 @@ type internal_event =
   | `Moderator_runtime_request of int * Chat_response.Moderation.Runtime_request.t
   | `Streaming_done of int * History_entry.t list
   | `Streaming_error of int * exn
-  | `Typeahead_started of int * Eio.Switch.t
-  | `Typeahead_done of int * typeahead_done
-  | `Typeahead_error of int * exn
+  | `Typeahead of Type_ahead_controller.event
   | `Submit_requested of App_runtime.submit_request
   | `Compact_requested
   | `Compaction_started of int * Eio.Switch.t

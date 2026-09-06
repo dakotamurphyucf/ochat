@@ -1,5 +1,11 @@
 # `Mcp_server_http` – Streamable HTTP transport
 
+Compatibility scope: this page describes the deprecated MCP host that exposes
+ChatMD prompts as agents. New session servers use the [Ochat agent protocol](../../agent-server/README.md).
+This deprecation does **not** apply to MCP-backed tools declared in ChatMD or
+their maintained client/type/transport libraries. Existing compatibility behavior
+below is retained; the new daemon does not require redesigning this server.
+
 `Mcp_server_http` exposes the in-memory registry implemented by
 [`Mcp_server_core`](./mcp_server_core.doc.md) over plain HTTP.  The design is
 optimised for *streaming* in both directions: requests are standard
@@ -112,4 +118,3 @@ source.onmessage = (ev) => {
   must be reachable from the outside.
 * Replay of missed SSE events by `Last-Event-ID` is **not** implemented –
   clients are expected to tolerate duplicates.
-

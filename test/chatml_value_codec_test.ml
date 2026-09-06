@@ -94,3 +94,35 @@ let%expect_test "snapshot codec rejects duplicate record fields when decoding" =
    | Error msg -> print_endline msg);
   [%expect {| root: duplicate record field "name" in ChatML snapshot |}]
 ;;
+
+let%expect_test "snapshot JSON encoding preserves arbitrary ChatML variants" =
+  let snapshot =
+    Codec.Snapshot.Variant
+      ( "Tick"
+      , [ Record [ "count", Int 3; "ready", Bool true ]
+        ; Array [ String "payload"; Unit; Float 1.5 ]
+        ] )
+  in
+  let encoded = Codec.Snapshot.to_jsonaf snapshot in
+  let decoded = Codec.Snapshot.of_jsonaf encoded in
+  print_s
+    [%sexp
+      { encoded_is_object =
+          ((match encoded with
+            | `Object _ -> true
+            | `Null | `True | `False | `String _ | `Number _ | `Array _ -> false)
+           : bool)
+      ; round_trip = (decoded : (Codec.Snapshot.t, string) result)
+      }];
+  [%expect
+    {|
+    ((encoded_is_object true)
+     (round_trip (
+       Ok (
+         Variant Tick (
+           (Record (
+             (count (Int  3))
+             (ready (Bool true))))
+           (Array ((String payload) Unit (Float 1.5))))))))
+    |}]
+;;

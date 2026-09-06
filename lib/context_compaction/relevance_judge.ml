@@ -84,6 +84,7 @@ Your output:
         in
         Some (Float.max 0.0 (Float.min 1.0 reward))
       with
+      | Eio.Cancel.Cancelled _ as exn -> raise exn
       | _ -> None)
   ;;
 
@@ -127,6 +128,7 @@ let score_relevance ?env (_cfg : Config.t) ~prompt =
   (* Delegate to the evaluator; guard against unexpected exceptions so
      that the compaction pipeline never crashes the host application. *)
   try E.evaluate ?env (Lazy.force evaluator) prompt with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
   | _ -> 0.5
 ;;
 

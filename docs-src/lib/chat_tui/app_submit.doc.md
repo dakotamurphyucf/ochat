@@ -15,7 +15,7 @@ user hits enter:
    - fork a fibre that runs the OpenAI streaming request and reports back via
      `internal_stream`.
 
-The asynchronous worker itself is supplied as a callback (`handle_submit`)
+The asynchronous worker itself is supplied as a callback (`start_streaming`)
 so that `Chat_tui.App` can partially apply configuration and tool runtime.
 
 ## Where it is used
@@ -28,7 +28,13 @@ so that `Chat_tui.App` can partially apply configuration and tool runtime.
 
 ## Notes on raw-XML drafts
 
-When `Model.draft_mode = Raw_xml`, the draft is parsed with the ChatMarkdown
-parser. This supports rich inputs and can produce history items that include
-tool calls.
-
+When `Model.draft_mode = Raw_xml`, this legacy path parses ChatMD and converts
+the first `<user>` message, including its inline helpers. It does not append
+arbitrary tool calls or an entire transcript. A draft not starting with `<` is
+wrapped in `<user>`. Malformed/no-user input becomes a recoverable local error:
+canonical history remains unchanged, no turn starts, and the rejected draft and
+its Plain/Raw mode are restored when the editor is empty. If a newer draft is
+already present, it is retained and the notice includes the rejected text.
+The same recovery applies to deferred submissions. Cancellation propagates
+instead of being displayed as validation failure. Native/daemon admission uses
+the actor's typed error contract.

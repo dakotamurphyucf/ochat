@@ -1,5 +1,11 @@
 # ChatMD shell runtime implementation architecture
 
+Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
+The declaration language is shared, but bootstrap grants, approvers, persistence
+owners and management commands differ. `--authorize-shell-manifest` is a legacy
+local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
+management does not accept daemon IDs as a way to select daemon state.
+
 This guide is for contributors. It describes current package boundaries and
 security invariants; it is not a future implementation roadmap.
 

@@ -1,78 +1,46 @@
-# `Chat_tui.Controller_types`
+# Chat_tui.Controller_types
 
-Shared reaction type used by every *controller* in the Chat-TUI code-base.
+Share ordinary OCaml variant types between controller modules without cyclic
+dependencies. These are not polymorphic variants or the agent wire protocol.
 
----
+## Module purpose
 
-## 1  Module purpose
+`reaction` describes what the host must do after an input event.
+`chat_destination` distinguishes `Earlier_conversation`,
+`Search_result of Projected_message.Id.t`, and `Latest_conversation`.
 
-`Controller_types` exists only to declare the polymorphic variant:
+## Reaction constructors
 
-```ocaml
-type reaction =
-  | Redraw
-  | Submit_input
-  | Cancel_or_quit
-  | Compact_context
-  | Quit
-  | Unhandled
-```
+| Constructor | Host responsibility |
+|---|---|
+| Redraw | Present changed UI state |
+| Refresh_messages | Rebuild effective projection after local canonical history change |
+| Submit_input | Admit the draft through the selected host |
+| Cancel_or_quit | Cancel active work or exit when idle; resolve pending permission appropriately |
+| Compact_context | Request history compaction |
+| Delete_history of History_entry.Id.t | Request authoritative deletion of a canonical occurrence and its matching tool pair |
+| Quit | Close host/client resources and restore terminal |
+| Chat_scrolled of bool | Redraw only when consumed scrolling changed the viewport |
+| Prepare_chat_destination of chat_destination | Prepare an exact off-corridor destination asynchronously |
+| Shell_approval_response of string * Approval_broker.ui_response | Resolve matching legacy shell approval |
+| Shell_grant_revoke_requested of int * string | Start generation-tagged grant revocation |
+| Shell_management_refresh_requested of int | Refresh generation-tagged security state |
+| Moderator_input_response of string | Resolve current moderator interaction/agent permission choice |
+| Unhandled | Ignore or pass to outer handling, including enabled typeahead admission |
 
-Placing the type in its own compilation unit avoids cyclic build
-dependencies between `Chat_tui.Controller` (the main dispatcher) and the
-mode-specific sub-controllers defined in the same directory.  All modules
-agree on *exactly* the same variant, yet none of them has to `include` or
-re-define it.
+The exact qualified payload types are in the
+[interface](../../../lib/chat_tui/controller_types.mli).
+`Types.cmd` is a separate thunk-carrying command type; do not confuse it with
+controller reactions.
 
-## 2  `reaction` constructors
+## Host integration
 
-| Variant | Meaning | Typical caller action |
-|---------|---------|-----------------------|
-| `Redraw` | The visible model state changed. | Invoke `Renderer.render` and refresh the Notty viewport. |
-| `Submit_input` | The user finished editing the prompt (⌥⇧-Enter in normal mode). | Assemble an OpenAI request from the current input buffer, append a *pending* message bubble to the conversation view, and spawn the network fiber. |
-| `Cancel_or_quit` | The *Escape* key was pressed.  If a request is running, cancel it; otherwise fall back to `Quit`. | `Eio.Switch.fail` the fetch fiber *or* terminate the app. |
-| `Compact_context` | User explicitly triggered conversation summarisation.  The controller wants the main loop to compact historical messages to free token budget. | Call `Context_compaction.Compactor.run`, replace the elided messages with the summary, then redraw. |
-| `Quit` | Immediate termination (Ctrl-C, `q`). | Cleanly shut down and exit. |
-| `Unhandled` | The controller doesn’t recognise the event. | Pass the event to the next handler in the chain (global bindings, debug console, …). |
+Legacy [App_reducer](app_reducer.doc.md) and native/daemon
+[App](app.doc.md) own reaction handling. Every new constructor requires
+deliberate host handling, not a catch-all redraw. Native history deletion routes
+through actor authorization; destination preparation routes through
+[Agent_history_layout](agent_history_layout.doc.md).
 
-## 3  Example usage
-
-```ocaml
-let rec event_loop term model =
-  match Notty_eio.Term.event term with
-  | None -> ()
-  | Some ev ->
-    match Controller.handle_key ~model ~term ev with
-    | Redraw ->
-        Renderer.render ~model ~term;
-        event_loop term model
-    | Submit_input ->
-        (* spawn_request performs the OpenAI call in a background fiber *)
-        spawn_request ~model;
-        Renderer.render ~model ~term;
-        event_loop term model
-    | Cancel_or_quit ->
-        (* Implementation-specific; typically either cancel a running
-           request or fall through to Quit. *)
-        event_loop term model
-    | Quit -> ()
-    | Unhandled ->
-        (* Fall back to global shortcuts *)
-        event_loop term model
-```
-
-## 4  Design notes
-
-*No extra functions.*  The compilation unit purposefully exports nothing but
-`reaction` to minimise inter-module coupling.
-
-The variant is **closed**; extending it in downstream code would require
-patching the type definition here.
-
-## 5  Limitations
-
-The semantics of the constructors are documented here but enforced only by
-convention.  Call-sites are free to ignore `Redraw` or misinterpret
-`Submit_input`.  Future work might encode stricter invariants at the type
-level (e.g. `Submit_input of string` containing the finalised prompt).
-
+Controllers mutate local state only. Server-owned work requires an authorized
+protocol request; a returned reaction by itself neither persists nor
+authorizes a change.

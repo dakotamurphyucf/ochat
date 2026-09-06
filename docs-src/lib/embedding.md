@@ -1,5 +1,10 @@
 # Embedding the libraries & caching
 
+For the new durable daemon, embedded process-bound host, transport adapters and
+typed clients, start with [agent-core embedding](../agent-server/embedding.md).
+The APIs below cover additional/older Ochat components; do not substitute legacy
+Session_store ownership for an agent actor's durable store.
+
 Every public binary is a thin wrapper over libraries available under `lib/`.
 You can reuse the same pieces in your own code both for ChatMD conversations
 and for building search indices.
@@ -27,8 +32,10 @@ updated canonical history. Existing IDs are retained and new assistant/tool
 occurrences use the supplied allocator. Use `History_entry.items` only when
 projecting payloads to a provider API.
 
-`run_completion_stream_in_memory_v1` remains a raw-item compatibility adapter;
-new session-owning embeddings should not use it as their canonical store.
+The public streaming entry point is identity-bearing; there is no exported
+`run_completion_stream_in_memory_v1` raw-item compatibility adapter. Keep one
+allocator/source of identity for the conversation rather than recreating IDs
+between requests.
 
 If you want to manage that cache yourself, use `Chat_response.Cache`:
 
@@ -72,11 +79,11 @@ Other parts of the system reuse the same caching building blocks:
   conversions.
 - `Markdown_snippet` and `Odoc_snippet` use `Lru_cache` to memoise token
   counts.
-- The TUI and CLI entry points both initialise a shared `Chat_response.Cache`
-  under a `.chatmd/cache.bin` directory so repeated agents stay fast.
+- Native local/daemon agent runtimes use the session-owned `cache_dir/cache.bin`.
+  File-backed completion and legacy-local paths use their host's `.chatmd`
+  directory. These are not one globally shared cache across daemon sessions.
 
 Need to embed docs for a project? `Odoc_indexer.index_packages` and
 `Markdown_indexer.index_directory` are the main entry points; combine them
 with the search tools (`odoc_search`, `markdown_search`, `query_vector_db`) to
 build your own RAG workflows.
-

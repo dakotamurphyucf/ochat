@@ -1,5 +1,11 @@
 # ChatMD shell runtime reference
 
+Host integration: see [native/legacy/daemon authorization and administration](../guide/chatmd-shell-host-integration.md).
+The declaration language is shared, but bootstrap grants, approvers, persistence
+owners and management commands differ. `--authorize-shell-manifest` is a legacy
+local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
+management does not accept daemon IDs as a way to select daemon state.
+
 ChatMD can describe a complete shell-capable agent runtime without custom
 OCaml code. A document may declare process authority, executable resolution,
 sandboxing, command policy, approvals, reviewers, interceptors, limits,
@@ -178,8 +184,10 @@ manifest hashing. Ordinary attributes do not perform arbitrary `${env:KEY}`
 substitution; use explicit environment and secret declarations.
 
 Configured [`read_file`](tools.md#configuring-read_file-roots) roots use the
-same path-expression variables. In `chat-tui` and `ochat chat-completion`,
-`${workspace}` and `${tool_dir}` are the process launch directory,
+same path-expression variables. In native local `chat-tui` and the file-backed `ochat chat-completion` host,
+`${workspace}` and `${tool_dir}` default to the process launch directory.
+In daemon-connected use, `${workspace}` is selected by daemon configuration and
+`${tool_dir}` remains the daemon launch directory. In all hosts,
 `${prompt_dir}` is the root prompt directory, and `${source_dir}` follows the
 file containing the declaration. The host may supply different values when
 Ochat is embedded as a library.

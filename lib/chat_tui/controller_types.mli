@@ -22,6 +22,7 @@ type reaction =
   (** Visible state changed – redraw the Notty viewport before waiting for
       the next event. *)
   | Refresh_messages
+  | Delete_history of History_entry.Id.t
   (** Canonical history changed – rebuild the effective Chat projection
       before redrawing. *)
   | Submit_input
@@ -48,8 +49,7 @@ type reaction =
   | Prepare_chat_destination of chat_destination
   (** A nonlocal history destination requires asynchronous exact corridor
       preparation before it can be shown. *)
-  | Shell_approval_response of
-      string * Shell_runtime.Approval_broker.ui_response
+  | Shell_approval_response of string * Shell_runtime.Approval_broker.ui_response
   (** Resolve the active shell approval modal without touching the composer. *)
   | Shell_grant_revoke_requested of int * string
   (** Confirm revocation of the selected persisted grant. *)

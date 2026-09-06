@@ -111,8 +111,10 @@ type ctx =
   ; on_event : Openai.Responses.Response_stream.t -> unit
   ; on_sourced_event : Sourced_response_event.t -> unit
   ; on_history_event : History_stream_event.t -> unit
+  ; on_history_item_appended : History_entry.t -> unit
   ; on_history_tool_out : History_entry.t -> unit
   ; allocator : History_entry.Allocator.t
+  ; id_source : History_entry.Id_source.t
   ; registry : History_stream_event.Registry.t
   ; mutable scope : int
   ; source : string option
@@ -120,6 +122,9 @@ type ctx =
   ; on_fn_out : Openai.Responses.Function_call_output.t -> unit
   ; on_tool_out : Openai.Responses.Item.t -> unit
   ; on_tool_execution : (Tool_execution_event.t -> unit) option
+  ; authorize_tool :
+      kind:Tool_call.Kind.t -> name:string -> payload:string -> call_id:string -> unit
+  ; redact_tool_payload : name:string -> string -> string
   ; injected_post_stream :
       (sw:Eio.Switch.t
        -> inputs:Openai.Responses.Item.t list
@@ -134,11 +139,16 @@ type args =
   ; on_event : Openai.Responses.Response_stream.t -> unit
   ; on_sourced_event : Sourced_response_event.t -> unit
   ; on_history_event : History_stream_event.t -> unit
+  ; on_history_item_appended : History_entry.t -> unit
   ; on_fn_out : Openai.Responses.Function_call_output.t -> unit
   ; on_tool_out : Openai.Responses.Item.t -> unit
   ; on_history_tool_out : History_entry.t -> unit
   ; allocator : History_entry.Allocator.t
+  ; id_source : History_entry.Id_source.t
   ; on_tool_execution : (Tool_execution_event.t -> unit) option
+  ; authorize_tool :
+      kind:Tool_call.Kind.t -> name:string -> payload:string -> call_id:string -> unit
+  ; redact_tool_payload : name:string -> string -> string
   ; tools : Openai.Responses.Request.Tool.t list option
   ; tool_tbl : (string, Ochat_function.runner) Hashtbl.t option
   ; temperature : float option
@@ -414,7 +424,7 @@ let runtime_requests_of_outcomes_result ~(source : string) outcomes =
 
 let make_safe_point_input_item text =
   Res.Item.Input_message
-    { role = Res.Input_message.System
+    { role = Res.Input_message.Developer
     ; content = [ Res.Input_message.Text { text; _type = "input_text" } ]
     ; _type = "message"
     }
@@ -820,7 +830,7 @@ let append_history_item
       ~source:c.source
       item
     |> Option.value_or_thunk ~default:(fun () ->
-      History_entry.Allocator.allocate c.allocator |> Result.ok_or_failwith)
+      History_entry.Id_source.allocate c.id_source |> Result.ok_or_failwith)
   in
   let is_finalized =
     List.exists st.new_entries_rev ~f:(fun entry ->
@@ -829,7 +839,9 @@ let append_history_item
   if is_finalized
   then st
   else (
-    let st = add_entry st (History_entry.create_with_id ~id item) in
+    let entry = History_entry.create_with_id ~id item in
+    c.on_history_item_appended entry;
+    let st = add_entry st entry in
     handle_item_appended_entries
       ~moderator
       ~on_runtime_request
@@ -949,6 +961,79 @@ let report_event (c : ctx) event =
     }
 ;;
 
+let redacted_stream_item (c : ctx) = function
+  | Res.Response_stream.Item.Function_call call ->
+    Res.Response_stream.Item.Function_call
+      { call with arguments = c.redact_tool_payload ~name:call.name call.arguments }
+  | Custom_function call ->
+    Custom_function { call with input = c.redact_tool_payload ~name:call.name call.input }
+  | item -> item
+;;
+
+let pending_stream_item = function
+  | Res.Response_stream.Item.Function_call call ->
+    Res.Response_stream.Item.Function_call { call with arguments = "" }
+  | Custom_function call -> Custom_function { call with input = "" }
+  | item -> item
+;;
+
+let tool_name (st : stream_state) item_id =
+  Option.map (Map.find st.func_info item_id) ~f:(fun info -> info.name)
+;;
+
+let redacted_completion (c : ctx) st item_id payload =
+  Option.value_map (tool_name st item_id) ~default:"<redacted>" ~f:(fun name ->
+    c.redact_tool_payload ~name payload)
+;;
+
+let redacted_event (c : ctx) st = function
+  | Res.Response_stream.Output_item_added event ->
+    Res.Response_stream.Output_item_added
+      { event with item = pending_stream_item event.item }
+  | Output_item_done event ->
+    Output_item_done { event with item = redacted_stream_item c event.item }
+  | Function_call_arguments_delta event ->
+    Function_call_arguments_delta { event with delta = "" }
+  | Function_call_arguments_done event ->
+    Function_call_arguments_done
+      { event with arguments = redacted_completion c st event.item_id event.arguments }
+  | Custom_tool_call_input_delta event ->
+    Custom_tool_call_input_delta { event with delta = "" }
+  | Custom_tool_call_input_done event ->
+    Custom_tool_call_input_done
+      { event with input = redacted_completion c st event.item_id event.input }
+  | event -> event
+;;
+
+let completed_arguments_delta = function
+  | Res.Response_stream.Function_call_arguments_done event ->
+    Some
+      (Res.Response_stream.Function_call_arguments_delta
+         { item_id = event.item_id
+         ; output_index = event.output_index
+         ; delta = event.arguments
+         ; type_ = "response.function_call_arguments.delta"
+         })
+  | Custom_tool_call_input_done event ->
+    Some
+      (Res.Response_stream.Custom_tool_call_input_delta
+         { item_id = event.item_id
+         ; output_index = event.output_index
+         ; delta = event.input
+         ; type_ = "response.custom_tool_call_input.delta"
+         })
+  | _ -> None
+;;
+
+let report_redacted_event c st = function
+  | Res.Response_stream.Function_call_arguments_delta _ | Custom_tool_call_input_delta _
+    -> ()
+  | event ->
+    let event = redacted_event c st event in
+    Option.iter (completed_arguments_delta event) ~f:(report_event c);
+    report_event c event
+;;
+
 let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~arguments =
   let invocation_id = Fork.Invocation_id.create () in
   let child_allocator =
@@ -965,9 +1050,17 @@ let make_run_fork ~turn ~(ctx : ctx) ~history_so_far ~invocation ~call_id ~argum
   let child_ctx =
     { ctx with
       allocator = child_allocator
+    ; id_source = History_entry.Id_source.of_allocator child_allocator
     ; registry = child_registry
     ; source = Some (Fork.Invocation_id.to_string invocation_id)
     ; parent_call_id = Some call_id
+    ; moderator = None
+    ; safe_point_input = None
+    ; on_runtime_request = (fun _ -> ())
+    ; on_history_item_appended = (fun _ -> ())
+    ; on_history_tool_out = (fun _ -> ())
+    ; on_fn_out = (fun _ -> ())
+    ; on_tool_out = (fun _ -> ())
     ; on_event =
         (fun event -> notify_each [ ctx.on_event; Agent_trace.on_event trace ] event)
     ; on_tool_execution = Some (Agent_trace.on_tool_execution trace)
@@ -1038,6 +1131,15 @@ let schedule_function_done
       |> Result.ok_or_failwith
     in
     List.iter moderated.runtime_requests ~f:c.on_runtime_request;
+    let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
+    let history_item =
+      Tool_call.call_item
+        ~kind:moderated.kind
+        ~name:moderated.name
+        ~payload:history_payload
+        ~call_id
+        ~id:(Some item_id)
+    in
     let st =
       append_history_item
         c
@@ -1047,7 +1149,7 @@ let schedule_function_done
         ~now_ms:(now_ms c.env)
         ~hist
         st
-        moderated.call_item
+        history_item
     in
     let name = moderated.name in
     let arguments = moderated.payload in
@@ -1056,6 +1158,7 @@ let schedule_function_done
       match moderated.synthetic_result with
       | Some result -> result
       | None ->
+        c.authorize_tool ~kind:Tool_call.Kind.Function ~name ~payload:arguments ~call_id;
         Tool_call.run_tool
           ~kind:Tool_call.Kind.Function
           ~name
@@ -1116,6 +1219,15 @@ let schedule_custom_done
       |> Result.ok_or_failwith
     in
     List.iter moderated.runtime_requests ~f:c.on_runtime_request;
+    let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
+    let history_item =
+      Tool_call.call_item
+        ~kind:moderated.kind
+        ~name:moderated.name
+        ~payload:history_payload
+        ~call_id
+        ~id:(Some item_id)
+    in
     let st =
       append_history_item
         c
@@ -1125,7 +1237,7 @@ let schedule_custom_done
         ~now_ms:(now_ms c.env)
         ~hist
         st
-        moderated.call_item
+        history_item
     in
     let name = moderated.name in
     let input = moderated.payload in
@@ -1133,6 +1245,7 @@ let schedule_custom_done
       match moderated.synthetic_result with
       | Some result -> result
       | None ->
+        c.authorize_tool ~kind:Tool_call.Kind.Custom ~name ~payload:input ~call_id;
         Tool_call.run_tool
           ~kind:Tool_call.Kind.Custom
           ~name
@@ -1219,7 +1332,7 @@ let fold_stream ~turn (c : ctx) ~(hist : History_entry.t list) ~sem stream =
   in
   Seq.fold_left
     (fun st ev ->
-       report_event c ev;
+       report_redacted_event c st ev;
        match ev with
        | Openai.Responses.Response_stream.Output_item_added { item; _ } ->
          (match item with
@@ -1332,6 +1445,7 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
           ~call_id
           ~result
       in
+      c.on_history_item_appended candidate_entry;
       c.on_history_tool_out candidate_entry;
       ignore (item : Res.Item.t);
       candidate_entry :: entries_rev)
@@ -1458,25 +1572,27 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_event = a.on_event
     ; on_sourced_event = a.on_sourced_event
     ; on_history_event = a.on_history_event
+    ; on_history_item_appended = a.on_history_item_appended
     ; on_history_tool_out = a.on_history_tool_out
     ; allocator = a.allocator
-    ; registry = History_stream_event.Registry.create ~allocator:a.allocator
+    ; id_source = a.id_source
+    ; registry = History_stream_event.Registry.create_with_source ~id_source:a.id_source
     ; scope = 0
     ; source = a.source
     ; parent_call_id = a.parent_call_id
     ; on_fn_out = a.on_fn_out
     ; on_tool_out = a.on_tool_out
     ; on_tool_execution = a.on_tool_execution
+    ; authorize_tool = a.authorize_tool
+    ; redact_tool_payload = a.redact_tool_payload
     ; injected_post_stream = a.injected_post_stream
     }
   in
   c, cache_file, cache
 ;;
 
-let run_completion_stream_in_memory_entries_impl (a : args) : History_entry.t list =
+let run_completion_stream_in_memory_entries_impl ~sw (a : args) : History_entry.t list =
   if a.meta_refine then Caml_unix.putenv "OCHAT_META_REFINE" "1";
-  Eio.Switch.run
-  @@ fun sw ->
   let c, cache_file, cache = setup_ctx ~sw a in
   let full_history = run_turn c ~sw ~history:a.history in
   Cache.save ~file:cache_file cache;
@@ -1487,14 +1603,18 @@ let run_completion_stream_in_memory_entries
       ~env
       ?datadir
       ~allocator
+      ?id_source
       ~(history : History_entry.t list)
       ?(on_event = fun _ -> ())
       ?(on_sourced_event = fun _ -> ())
       ?(on_history_event = fun _ -> ())
+      ?(on_history_item_appended = fun _ -> ())
       ?(on_fn_out = fun _ -> ())
       ?(on_tool_out = fun _ -> ())
       ?(on_history_tool_out = fun _ -> ())
       ?on_tool_execution
+      ?(authorize_tool = fun ~kind:_ ~name:_ ~payload:_ ~call_id:_ -> ())
+      ?(redact_tool_payload = fun ~name:_ payload -> payload)
       ~tools
       ?tool_tbl
       ?temperature
@@ -1512,41 +1632,54 @@ let run_completion_stream_in_memory_entries
       ?post_stream
       ?source
       ?parent_call_id
+      ?sw
       ()
   =
-  let entries =
-    run_completion_stream_in_memory_entries_impl
-      { env
-      ; datadir
-      ; history
-      ; on_event
-      ; on_sourced_event
-      ; on_history_event
-      ; on_fn_out
-      ; on_tool_out
-      ; on_history_tool_out
-      ; allocator
-      ; on_tool_execution
-      ; tools
-      ; tool_tbl
-      ; temperature
-      ; max_output_tokens
-      ; reasoning
-      ; moderator
-      ; on_runtime_request
-      ; history_compaction
-      ; parallel_tool_calls
-      ; meta_refine
-      ; safe_point_input
-      ; model
-      ; prompt_cache_key
-      ; prompt_cache_retention
-      ; injected_post_stream = post_stream
-      ; source
-      ; parent_call_id
-      }
+  let id_source =
+    Option.value id_source ~default:(History_entry.Id_source.of_allocator allocator)
   in
-  History_entry.validate ~allocator entries |> Result.ok_or_failwith;
+  let args =
+    { env
+    ; datadir
+    ; history
+    ; on_event
+    ; on_sourced_event
+    ; on_history_event
+    ; on_history_item_appended
+    ; on_fn_out
+    ; on_tool_out
+    ; on_history_tool_out
+    ; allocator
+    ; id_source
+    ; on_tool_execution
+    ; authorize_tool
+    ; redact_tool_payload
+    ; tools
+    ; tool_tbl
+    ; temperature
+    ; max_output_tokens
+    ; reasoning
+    ; moderator
+    ; on_runtime_request
+    ; history_compaction
+    ; parallel_tool_calls
+    ; meta_refine
+    ; safe_point_input
+    ; model
+    ; prompt_cache_key
+    ; prompt_cache_retention
+    ; injected_post_stream = post_stream
+    ; source
+    ; parent_call_id
+    }
+  in
+  let entries =
+    match sw with
+    | Some sw -> run_completion_stream_in_memory_entries_impl ~sw args
+    | None ->
+      Eio.Switch.run (fun sw -> run_completion_stream_in_memory_entries_impl ~sw args)
+  in
+  History_entry.Id_source.validate id_source entries |> Result.ok_or_failwith;
   entries
 ;;
 

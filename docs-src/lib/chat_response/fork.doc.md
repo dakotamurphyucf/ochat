@@ -1,13 +1,19 @@
 # Fork – drive a nested *assistant clone*
 
-`lib/chat_response/Fork` provides the *runtime* implementation of the
-`fork` GPT-4 tool defined in [`lib/definitions.ml`](../../../lib/definitions.ml).
+Fork progress is classified onto the Agent page and keeps child history/input consumption separate. Completed tool output belongs to the root transcript; active-call summaries are bounded projections, not persisted continuations.
 
-The tool allows the assistant to spawn a fully-featured **child agent**
-that inherits the entire conversation context, available tools and file
-system – but whose intermediate chatter never reaches the user.  Only
-whatever the child writes in the `===PERSIST===` block is kept when the
-fork terminates.
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
+`lib/chat_response/Fork` provides the *runtime* implementation of the
+`fork` tool defined in [`lib/definitions.ml`](../../../lib/definitions.ml).
+
+The tool runs a child over the supplied parent history and tools. Parent
+entries retain their IDs; new child entries use a separate invocation-scoped
+allocator. Child history is not merged into parent history. Instead, all new
+assistant-message text is returned as the completed parent tool output.
+`===RESULT===` and `===PERSIST===` are prompt conventions, not extraction
+boundaries: text outside `===PERSIST===` is returned too.
 
 The parent UI receives live updates while the forked agent is running,
 so users can monitor progress (or cancel a runaway fork) without waiting
@@ -17,17 +23,21 @@ for completion.
 
 ## Public interface
 
-### `execute`
+### `execute_entries`
 
 ````ocaml
-val execute :
+val execute_entries :
   env:Eio_unix.Stdenv.base ->
-  history:Openai.Responses.Item.t list ->
+  allocator:History_entry.Allocator.t ->
+  history:History_entry.t list ->
+  invocation_id:Invocation_id.t ->
   call_id:string ->
   arguments:string ->
   tools:Openai.Responses.Request.Tool.t list ->
-  tool_tbl:(string, string -> string) Base.Hashtbl.t ->
+  tool_tbl:(string, Ochat_function.runner) Base.Hashtbl.t ->
   on_event:(Openai.Responses.Response_stream.t -> unit) ->
+  ?on_sourced_event:(Sourced_response_event.t -> unit) ->
+  ?on_tool_execution:(Tool_execution_event.t -> unit) ->
   on_fn_out:(Openai.Responses.Function_call_output.t -> unit) ->
   ?temperature:float ->
   ?max_output_tokens:int ->
@@ -35,65 +45,69 @@ val execute :
   unit -> string
 ````
 
-Blocking helper that clones the conversation and runs the fork to
-completion.
+Blocking helper that runs the fork to completion in the caller's Eio fiber.
+Errors or cancellation can terminate the call without a returned reply.
 
 Parameters (see the inline documentation in `fork.mli` for full
 details):
 
 * `env` – Eio standard environment, used for network and filesystem.
-* `history` – messages **before** the tool call.
-* `call_id` – identifier assigned by the driver; echoed back in all
-  streamed items.
+* `history` – identity-bearing parent entries supplied to the child.
+* `invocation_id` – fresh identity from `Invocation_id.create ()`, independent
+  of provider IDs and reusable tool-call correlation IDs.
+* `allocator` – child allocator made with `Fork.allocator ~parent_namespace
+  invocation_id`; parent allocation is not advanced by child entries.
+* `call_id` – parent tool-call correlation ID used for cumulative text
+  progress and as the parent ID on sourced events. Raw provider events
+  retain their own IDs.
 * `arguments` – raw JSON arguments of the tool, parsed with
   `Definitions.Fork.input_of_string`.
-* `tools` / `tool_tbl` – capabilities available to the fork.
+* `tools` / `tool_tbl` – supplied tool definitions and invocation-aware
+  runners. Recursive fork dispatch needs no self-entry in the table.
 * `on_event` – forward each raw streaming event upstream.
-* `on_fn_out` – forward each `function_call_output` event upstream.
+* `on_sourced_event` – optionally observe response events tagged with the
+  fork invocation and parent call ID.
+* `on_tool_execution` – optionally observe child tool activity.
+* `on_fn_out` – cumulative assistant-text progress under the parent call ID,
+  plus nested function-call outputs under their own call IDs.
 
-Returns the concatenated assistant messages produced by the fork after
-the initial history.
+Returns all assistant-message text produced after the initial child history,
+joining content parts with spaces and messages with newlines. It does not
+extract either named section from the reply.
 
-### `history`
+### `history_entries`
 
 ```ocaml
-val history :
-  history:Openai.Responses.Item.t list ->
+val history_entries :
+  allocator:History_entry.Allocator.t ->
+  history:History_entry.t list ->
   arguments:string ->
-  string -> (* call_id *)
-  Openai.Responses.Item.t list
+  call_id:string ->
+  History_entry.t list
 ```
 
-Utility used in unit-tests: inserts the synthetic instruction block that
-informs the child agent of its *systems contract* and returns the new
-message list.
+Builds child input without making a model request. It preserves parent
+entries and appends one child-owned synthetic function-call output containing
+the fork instructions. This is also the offline prompt-test entrypoint.
 
 ---
 
 ## Usage example
 
-The snippet below spawns a fork that greps all `.ml` files in the current
-workspace for the identifier `todo`.  While the fork is running, the
-parent UI receives progress events and partial deltas.
+This offline example constructs the child input for a search task without
+running tools or making a model request:
 
 ```ocaml
-let grep_todo () =
-  let open Fork in
-  let output =
-    execute
-      ~env
-      ~history:prev_messages
-      ~call_id:"grep-todo"
-      ~arguments:{|
-        { "command": "rg", "arguments": ["-n", "todo", "*.ml"] }
-      |}
-      ~tools
-      ~tool_tbl
-      ~on_event:(fun ev -> Log.debug "fork-ev: %s" (Sexp.to_string (sexp_of_event ev)))
-      ~on_fn_out:(fun out -> Log.info "fork-out: %s" out.output)
-      ()
+let search_input () =
+  let invocation_id = Chat_response.Fork.Invocation_id.create () in
+  let allocator =
+    Chat_response.Fork.allocator ~parent_namespace:"example" invocation_id
   in
-  Console.print_string output
+  Chat_response.Fork.history_entries
+    ~allocator
+    ~history:[]
+    ~call_id:"grep-todo"
+    ~arguments:{|{"command":"rg","arguments":["-n","todo","-g","*.ml"]}|}
 ```
 
 ---
@@ -106,11 +120,10 @@ let grep_todo () =
   compile-time dependency on the much larger `Driver` module and keeps
   the recursion footprint under control.
 
-* **Progress echoing**.  Whenever the fork receives a new text delta it
+* **Progress echoing**. Whenever the fork receives a new text delta it
   appends it to a local `Buffer.t` and immediately emits a
-  `function_call_output` update up the stack.  The parent therefore sees
-  coherent, incremental output in the tool-call block it already uses to
-  display progress.
+  `function_call_output` update up the stack. Hosts can display this progress
+  on the Agent page without merging child history into the root transcript.
 
 * **Recursive forks** use `Fork.execute_entries` with an invocation-scoped
   allocator. Parent entries retain their IDs, child-created entries remain
@@ -130,9 +143,11 @@ let grep_todo () =
 2. Each fork adds one level of OpenAI completion overhead: streaming
    events must traverse the stack from the model to the fork, then to
    the parent UI.
-3. The current implementation does **not** propagate cancellation from
-   the parent to the nested request.  Adding a cancellation token is on
-   the roadmap.
+3. Local nested execution inherits the caller's Eio cancellation context:
+   the request and response reader run under a nested switch. Cancelling
+   that context stops local work, but does not guarantee that a remote
+   provider stops generation or billing. An embedding must connect its
+   user-facing cancel action to that context.
 
 ## Nested shell runtimes
 

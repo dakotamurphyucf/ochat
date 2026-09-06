@@ -11,13 +11,13 @@
     [position] also stores the corresponding (1-based) line and column numbers
     so that clients can render human-friendly messages.  Invariants:
 
-    • [offset] is in the range [0, Source.length src) where [src] is the parent
+    • [offset] is in the range [0, Source.length src] where [src] is the parent
       document.
     • For any span [sp], [sp.left.offset <= sp.right.offset].  The
       implementation does *not* enforce these invariants at construction time;
       it is the responsibility of the caller to supply consistent data.
 
-    All helpers are **pure** – they never mutate the underlying string – and
+    In-memory helpers never mutate the underlying string and
     run in *O(1)* or *O(length)* where length is the size of the returned
     fragment. *)
 
@@ -67,8 +67,8 @@ val make : string -> t
 (** [from_file filename] reads the whole file [filename] into memory and
     returns a corresponding source document.  The [path] field of the result
     is [Some filename].  The file is read with
-    {!Stdlib.In_channel.open_text}, hence it honours the current locale’s
-    newline conversion rules.
+    the legacy blocking channel API. In Eio code prefer
+    [Source.make (Eio.Path.load path)] when filename metadata is unnecessary.
 
     @raise Sys_error if the file cannot be opened or read. *)
 val from_file : string -> t
@@ -93,16 +93,16 @@ val at : t -> int -> char option
 (** [read src span] extracts the substring designated by [span] from [src].
 
     The function is forgiving: if [span] extends outside the document it is
-    automatically clamped to {[0, Source.length src)}.  Therefore it never
-    raises beyond the usual out-of-memory errors.
+    automatically clamped to the document. Reversed bounds produce an empty
+    string. This operates on bytes, not Unicode grapheme boundaries.
 
     Complexity is O(n) where n is the length of the returned substring. *)
 val read : t -> span -> string
 
 (** {1 Span helpers} *)
 
-(** [merge sp1 sp2] returns the smallest span that contains both [sp1] and
-    [sp2].  Its left bound is [sp1.left] and its right bound is [sp2.right].
-    The caller must guarantee that [sp1] lies entirely *before* [sp2]; the
-    behaviour is undefined otherwise. *)
+(** [merge sp1 sp2] returns the smallest span containing both well-formed
+    spans, choosing endpoints by byte offset. Overlap and either input order
+    are supported. Ties retain [sp1]'s endpoint metadata. Both spans must
+    describe the same document; line/column metadata is not recomputed. *)
 val merge : span -> span -> span

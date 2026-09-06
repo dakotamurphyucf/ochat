@@ -14,6 +14,7 @@ type diagnostic =
 type t =
   { functions : Ochat_function.t list
   ; classifications : (string * Tool_execution_event.agent_page_kind) list
+  ; shell_tool_names : String.Set.t
   ; shell_registry : Shell_runtime.Registry.t option
   ; shell_manifest : Chatmd_shell_spec.Manifest.t option
   ; shell_admin_policy : Shell_runtime.Admin_policy.t option
@@ -430,6 +431,13 @@ let build_functions ~sw ~ctx ~host ~run_agent shell_registry tools =
 
 let classifications tools = List.filter_map tools ~f:Tool.agent_page_classification
 
+let shell_tool_names declarations =
+  List.map declarations.shell_tools ~f:(fun tool ->
+    tool.Chatmd_shell_spec.Shell_tool_spec.name)
+  @ List.map declarations.legacy_tools ~f:(fun tool -> tool.MC.name)
+  |> String.Set.of_list
+;;
+
 let moderator_runtime = function
   | None -> None
   | Some manifest -> manifest.Chatmd_shell_spec.Manifest.payload.moderator_runtime
@@ -480,6 +488,7 @@ let create
           |> Result.map ~f:(fun functions ->
             { functions
             ; classifications = classifications declarations.tools
+            ; shell_tool_names = shell_tool_names declarations
             ; shell_registry
             ; shell_manifest
             ; shell_admin_policy =

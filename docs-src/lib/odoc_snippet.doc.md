@@ -70,7 +70,7 @@ The switch controls …
 
 ## API reference
 
-### Type [`meta`](../odoc_snippet.mli)
+### Type [`meta`](../../lib/odoc_snippet.mli)
 
 | Field | Meaning |
 |-------|---------|
@@ -146,4 +146,3 @@ fast and allocation-friendly.
 ---
 
 *Happy chunking!* :sparkles:
-

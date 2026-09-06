@@ -37,7 +37,7 @@ Public API
 Opaque record used to remember the *last* list of suggestions and the current
 cursor position when the user presses <kbd>Tab</kbd> repeatedly.  Each input
 field that wants independent cycling should allocate its own value with
-[`create`](#VALcreate).
+[`create`](../../../lib/chat_tui/path_completion.mli).
 
 ### `create : unit -> t`
 
@@ -132,4 +132,3 @@ Internal details
 
 Refer to `path_completion.md` for an exhaustive analysis of the algorithm and
 its complexity characteristics.
-

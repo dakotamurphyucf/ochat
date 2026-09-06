@@ -10,7 +10,9 @@
 
     {ol
     {- Prunes retained user-role compaction reminders to the newest ten.}
+    {- Loads {!Config.load} and optionally scores conversation groups.}
     {- Passes that history to {!Summarizer.summarise}.}
+    {- Checks the configured local token estimate before allocating a new ID.}
     {- Returns the original System and Developer items, the retained previous
        reminders, and one new user-role reminder.}}
 
@@ -45,9 +47,13 @@ open! Core
     Parameters
     {ul
     {- [env] – optional {!Eio_unix.Stdenv.base}.  When [Some], the pipeline
-       invokes the OpenAI API; when [None] it falls back to deterministic
-       offline stubs.}
+       reads configuration and can invoke the OpenAI API when credentials are
+       present; when [None] it uses defaults and deterministic offline stubs.}
     {- [history] – full conversation transcript to be compacted.}}
+
+    The token cap estimates serialized text with o200k_base plus per-item overhead;
+    it is not exact provider request or image accounting. Relevance filtering is
+    disabled by default and can add paid grading requests when enabled.
 
     @raise Eio.Cancel.Cancelled if the operation is cancelled. *)
 val compact_entries
@@ -73,4 +79,23 @@ module For_testing : sig
     -> env:Eio_unix.Stdenv.base option
     -> history:History_entry.t list
     -> (History_entry.t list, exn) result
+
+  val compact_entries_configured
+    :  config:Config.t
+    -> summarise:
+         (relevant_items:Openai.Responses.Item.t list
+          -> env:Eio_unix.Stdenv.base option
+          -> (string, exn) result)
+    -> allocator:History_entry.Allocator.t
+    -> env:Eio_unix.Stdenv.base option
+    -> history:History_entry.t list
+    -> (History_entry.t list, exn) result
+
+  val select_relevant
+    :  score:(string -> float)
+    -> Config.t
+    -> Openai.Responses.Item.t list
+    -> Openai.Responses.Item.t list
+
+  val estimated_tokens : Openai.Responses.Item.t list -> int
 end

@@ -1,5 +1,9 @@
 # ochat – Command-line swiss army knife for Ochat & code search
 
+Historical source note: `bin/gpt.ml` is not registered in the current
+`bin/dune`. This page is not an installed-command contract. Use the
+[command index](README.md) for supported executables.
+
 `ochat` is an opinionated collection of developer utilities that sit on
 top of the internal *ochat* OCaml libraries.  The binary groups
 several **sub-commands** under one roof and is therefore closer in
@@ -98,7 +102,7 @@ run `ochat help SUBCOMMAND` for the exhaustive reference.
 | query | `-vector-db-folder`   | `./vector`   | Location of the previously generated corpus |
 |       | `-query-text`         | *(none)*     | Natural-language search string |
 |       | `-num-results`        | `5`          | Maximum number of snippets printed |
-| chat-completion | `-prompt-file` | *(none)* | Template prepended once to the output file |
+| chat-completion | `-prompt-file` | *(none)* | Template appended whenever supplied; omit when continuing existing history |
 |                | `-output-file` | `./prompts/default.md` | Transcript destination |
 | tokenize | `-file` | `bin/main.ml` | File to encode |
 | html-to-markdown | `-file` | `bin/main.ml` | HTML document to convert |
@@ -135,6 +139,5 @@ Pull requests addressing any of the above are warmly welcome.
 * [`Indexer`](../lib/indexer.doc.md) – background on the indexing pipeline
 * [`Vector_db`](../lib/vector_db.doc.md) – cosine similarity & hybrid search engine
 * [`Bm25`](../lib/bm25.doc.md) – lexical ranking component
-* [`Chat_response.Driver`](../lib/chat_response.doc.md) – chatmd runtime
+* [`Chat_response.Driver`](../lib/chat_response/driver.doc.md) – chatmd runtime
 * [`Tikitoken`](https://github.com/openai/tiktoken) – reference Python implementation of the tokenizer
-

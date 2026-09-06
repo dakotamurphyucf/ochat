@@ -12,13 +12,6 @@ type input_capability =
   | Interaction of string
 [@@deriving sexp_of, compare, equal]
 
-type typeahead_done =
-  { generation : int
-  ; base_input : string
-  ; base_cursor : int
-  ; text : string
-  }
-
 type shell_grant_revoke_outcome =
   { grants : Session.Shell_state.Approval_grant.persisted list
   ; audit_sequence : int64 option
@@ -59,9 +52,7 @@ type internal_event =
   | `Moderator_runtime_request of int * Chat_response.Moderation.Runtime_request.t
   | `Streaming_done of int * History_entry.t list
   | `Streaming_error of int * exn
-  | `Typeahead_started of int * Switch.t
-  | `Typeahead_done of int * typeahead_done
-  | `Typeahead_error of int * exn
+  | `Typeahead of Type_ahead_controller.event
   | `Submit_requested of App_runtime.submit_request
   | `Compact_requested
   | `Compaction_started of int * Switch.t

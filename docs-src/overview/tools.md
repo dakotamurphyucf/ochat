@@ -33,7 +33,7 @@ Tools are **opt-in**: the model can only call what your prompt declares via `<to
 
 This set covers most real-world sessions (codebase navigation, retrieval, and safe edits):
 
-- **`apply_patch`** – atomic multi-file edits in a structured patch format.
+- **`apply_patch`** – multi-file edits in a structured patch format; not an atomic transaction.
 - **`read_file`** *(declare as `read_file` or `get_contents`)* – root-scoped
   text reads with truncation and optional line ranges.
 - **`read_directory`** *(declare as `read_dir`)* – list directory entries without guessing paths.
@@ -54,7 +54,7 @@ Some tools have **declaration aliases** for compatibility.
 
 | ChatMD `<tool name="…"/>` | Model sees | Category | What it does |
 |---|---|---|---|
-| `apply_patch` | `apply_patch` | repo | Apply an atomic V4A patch (adds/updates/deletes/moves text files). |
+| `apply_patch` | `apply_patch` | repo | Apply a V4A patch (adds/updates/deletes/moves text files). I/O failures can leave partial changes. |
 | `read_dir` | `read_directory` | fs | List directory entries (non-recursive) as newline-delimited text. |
 | `read_file` **or** `get_contents` | `read_file` | fs | Read a regular UTF-8 text file confined to configured roots, with truncation and optional `offset`/`line_count`. |
 | `append_to_file` | `append_to_file` | fs | Append text to a file (inserts a newline before the appended content). |
@@ -67,10 +67,13 @@ Some tools have **declaration aliases** for compatibility.
 | `odoc_search` | `odoc_search` | docs | Semantic search over locally indexed odoc docs. |
 | `meta_refine` | `meta_refine` | meta | Recursive meta-prompt refinement flow. |
 | `import_image` | `import_image` | vision | Load a local image file and return a vision input item (data URI). |
-| `fork` | `fork` | misc | Reserved name; currently a placeholder tool (do not rely on it). |
+| `fork` | `fork` | agent | Run a nested agent branch through the host's fork handling; see the [fork runtime](../lib/chat_response/fork.doc.md). This is not a separate root daemon session. |
 
 #### Built-in behavior notes (practical gotchas)
 
+- **`apply_patch` failure boundary**: parsing and preparation precede mutation,
+  but writes/deletes run sequentially without rollback. Inspect the working tree
+  after an error before retrying; an error does not mean no files changed.
 - **Naming/aliases**:
   - declaring `<tool name="read_dir"/>` exposes a tool the model calls as `read_directory`.
   - declaring `<tool name="get_contents"/>` exposes a tool the model calls as `read_file`.
@@ -122,11 +125,11 @@ runtime starts; otherwise startup fails before the tool is exposed.
 
 | Variable | Resolves to |
 |---|---|
-| `${workspace}` | Workspace selected by the host. In the shipped TUI and batch runner this is the launch directory. |
-| `${tool_dir}` | Tool working directory selected by the host. In the shipped TUI and batch runner this is also the launch directory. |
-| `${prompt_dir}` | Directory containing the root ChatMD prompt. |
+| `${workspace}` | Native local TUI and batch: launch directory. Connected TUI: daemon-configured workspace root. |
+| `${tool_dir}` | Host launch directory, not a connected client's cwd. |
+| `${prompt_dir}` | Root prompt directory in agent hosts; file-backed `chat-completion` uses the output transcript directory. |
 | `${source_dir}` | Directory containing the file where this declaration appears, including an imported file. |
-| `${session_dir}` | Directory owned by the current persisted session. |
+| `${session_dir}` | Current host/session data directory; transient local hosts also have one. |
 | `${cache_dir}` | Ochat cache directory. |
 | `${home}` | Current user's home directory. |
 
@@ -206,10 +209,11 @@ must advertise `cwd: /Users/alice/project`, and this call reads
 {"root":"cwd","file":"lib/parser.ml"}
 ```
 
-If the intended project is not advertised, change the directory before
-starting ochat. There is currently no `chat-tui` or `chat-completion`
-workspace flag. A missing configured directory is a startup error; a missing
-requested file is a tool-call error.
+For native local TUI and `chat-completion`, change the directory before
+starting ochat; these modes have no workspace override. Connected TUI creation
+uses `--workspace NAME` to select a configured daemon workspace, not a local
+path. A missing configured directory is a startup error; a missing requested
+file is a tool-call error.
 
 This ChatMD configuration affects the built-in `read_file` function exposed
 by the agent runtime. It does not reconfigure the separately registered
@@ -246,6 +250,8 @@ Example:
 ```
 
 ---
+
+<a id="agent-tools--turn-prompts-into-callable-sub-agents"></a>
 
 ## Agent tools – turn prompts into callable sub-agents
 
@@ -336,7 +342,18 @@ MCP (Model Context Protocol) lets you mount tools from a remote server (stdio or
 
 ### Caching and refresh
 
-ochat caches MCP tool catalogs per server for a short TTL to avoid repeated `tools/list` calls. If the server emits `notifications/tools/list_changed`, ochat invalidates the cache and refreshes on the next access.
+Ochat caches MCP catalogs for five minutes per connected tool declaration/client,
+not globally per server URI. Authenticated identities and runtime lifetimes never
+share an entry merely because endpoints match. Expiry/invalidation reloads on the
+next cache access, not on a periodic timer. The current notification wiring has
+a known defect: tool wrappers compete with the invalidation listener for the same
+queue and can discard `notifications/tools/list_changed` before it is handled.
+
+Tool names, schemas and wrappers are constructed when the runtime starts;
+cache invalidation does not hot-reload an active agent's advertised catalog.
+Recreate the runtime to pick up catalog changes. See the
+[implementation gaps](../development/code-documentation-audit.md#mcp-discovery-and-notifications).
+MCP tools remain maintained; only the old ChatMD-prompt-serving MCP host is deprecated.
 
 ---
 
@@ -359,10 +376,14 @@ This enables a practical pattern: run the MCP server inside a sandbox/container/
 
 ochat can execute independent tool calls in parallel (useful when a model requests multiple reads/searches).
 
-In the TUI this is configurable:
+In the **legacy local TUI** this is configurable:
 
 - `--parallel-tool-calls` (default)
 - `--no-parallel-tool-calls`
+
+These flags select legacy mode when no explicit host is selected; native
+`--local` and connected modes reject them. They are not daemon runtime overrides.
+See the [host-qualified command reference](../bin/chat_tui.doc.md).
 
 ---
 
@@ -376,3 +397,10 @@ There are multiple extension routes depending on how you want to ship capabiliti
 4. **Embedding ochat as a library**: register arbitrary `Ochat_function.t` values directly in your host program.
 
 Important note: a plain ChatMD declaration `<tool name="…"/>` (without `command=`, `agent=`, or `mcp_server=`) is treated as a **built-in**. Unknown built-in names are rejected unless you add them to ochat’s built-in dispatcher or expose them via MCP.
+
+## Daemon host context
+
+A connected client's cwd does not select the daemon workspace or file roots.
+`${tool_dir}` remains the daemon launch directory; `${workspace}` is the configured
+root and `${source_dir}` follows imported declarations. See the
+[complete host/path reference](../agent-server/sessions-and-workspaces.md).

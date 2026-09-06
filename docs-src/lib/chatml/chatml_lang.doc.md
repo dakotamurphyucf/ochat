@@ -90,6 +90,8 @@ isolation.
 Useful when you need to evaluate code in a sandbox that should not mutate
 the parent bindings.
 
+<a id="eval_program"></a>
+
 ### `eval_program` – execute a ChatML module
 
 ```ocaml
@@ -162,4 +164,3 @@ Feel free to file issues or open PRs if you run into the above!
 ---
 
 **Happy hacking 🦑**
-

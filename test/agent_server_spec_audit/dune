@@ -1,0 +1,4 @@
+(executable
+ (name read_only_probe)
+ (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_server ochat.agent_client ochat.chat_response)
+ (preprocess (pps ppx_jane)))

@@ -21,7 +21,7 @@ controller (`Chat_tui.Controller.handle_key`) by the reducer.
 - `Resize` / `Redraw`
 - streaming events (`Streaming_started`, `Stream`, `Stream_batch`,
   `Tool_output`, `Streaming_done`, `Streaming_error`)
-- type-ahead events (`Typeahead_started`, `Typeahead_done`, `Typeahead_error`)
+- type-ahead events (`Typeahead` carrying `Type_ahead_controller.event`)
 - submit/compaction requests (`Submit_requested`, `Compact_requested`)
 - compaction lifecycle events (`Compaction_started`, `Compaction_done`,
   `Compaction_error`)
@@ -32,22 +32,7 @@ events from cancelled operations.
 
 ### Type-ahead completion events
 
-Type-ahead follows the same “lifecycle event” pattern as streaming/compaction:
-
-- `Typeahead_started (op_id, sw)` announces the worker and publishes its
-  cancellation switch.
-- `Typeahead_done (op_id, payload)` reports a successful completion.
-- `Typeahead_error (op_id, exn)` reports a failure (often cancellation).
-
-The `payload : Chat_tui.App_events.typeahead_done` contains:
-
-- `generation` — the `Model.typeahead_generation` value at request time
-- `base_input` / `base_cursor` — the exact editor snapshot the completion
-  applies to
-- `text` — the suffix to insert at `base_cursor`
-
-The reducer applies the completion only when the operation id matches the
-current `App_runtime.typeahead_op` *and* the snapshot still matches the
-current model state. This prevents stale completions from “landing” after
-further edits or cursor movement.
-
+Typeahead carries `Ready` and `Completed` snapshots from the shared coordinator.
+The UI rechecks attachment identity, context epoch, generation, base draft and
+cursor at both admission and completion. Errors are bounded categories rather
+than raw exceptions. See [the lifecycle reference](type_ahead_provider.doc.md).

@@ -1,5 +1,10 @@
 # Converter – From ChatMarkdown to OpenAI types
 
+Current host integration preserves canonical history identities and structured tool output while constructing model inputs. ChatML instruction helpers construct developer messages; legacy system entries are not rewritten wholesale.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 ## Purpose
 
 `Converter` transforms the *AST* produced by the ChatMarkdown parser into
@@ -50,5 +55,4 @@ let items : Openai.Responses.Item.t list =
 The current implementation does not support the complete OpenAI JSON
 schema (images are limited to data-URIs, no video support, …).  Those
 capabilities can be added incrementally as the need arises.
-
 

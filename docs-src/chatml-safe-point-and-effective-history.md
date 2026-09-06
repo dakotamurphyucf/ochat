@@ -1,5 +1,14 @@
 # ChatML Safe-Point and Effective-History Semantics
 
+Host scope: the phase/shared-host discussion below remains useful for legacy
+file-backed and embedding controllers. The newer agent host has an actor-owned
+controller, durable jobs/schedules and client projections; see
+[agent-host orchestration](agent-server/chatml-orchestration.md). Statements about
+a phase lacking a generalized Job surface are not limitations of the daemon's
+current `job.*`/`schedule.*` protocol. UI capabilities remain host-specific.
+Instruction helpers with historical system names now construct developer messages;
+old history and raw values are not rewritten.
+
 This guide makes the current safe-point, effective-history, and durable
 moderator-state semantics explicit without changing runtime behavior.
 
@@ -105,7 +114,7 @@ This preserves the distinction:
 
 The durable overlay stored in `Session.Moderator_snapshot.Overlay.t` contains:
 
-- prepended synthetic system items;
+- prepended synthetic developer items;
 - appended synthetic items;
 - replacements keyed by target item id;
 - deleted item ids; and
@@ -233,7 +242,7 @@ append a new canonical user message mid-turn. Instead it:
    `Chat_response.Chatml_turn_driver.Safe_point_input.t`.
 
 The turn driver consumes that input only at request-preparation time through
-the turn-start boundary. The rendered note is wrapped as transient system input
+the turn-start boundary. The rendered note is wrapped as transient developer input
 for the next request only.
 
 The consequences are:

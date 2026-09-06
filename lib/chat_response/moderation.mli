@@ -227,6 +227,7 @@ module Overlay : sig
 
   type op =
     | Prepend_system of string
+    (** Prepend a developer-role instruction; retain the legacy constructor name. *)
     | Append_item of Item.t
     | Replace_item of replacement
     | Delete_item of string

@@ -32,8 +32,9 @@ in-memory index that supports three operations:
 
 The implementation is intentionally minimalistic – no partitioning, no
 OPQ, no product quantisation.  It therefore works best for corpora of
-*O(10⁵)* items that comfortably fit into RAM (~250 MB for 100 k × 1536
-float32 embeddings).
+moderate corpora that fit into RAM. Owl.Mat uses float64: 100,000 × 1,536
+entries need approximately 1.14 GiB for the corpus matrix alone, before raw
+embedding arrays, construction temporaries, metadata or query allocations.
 
 
 2  Data model
@@ -56,7 +57,8 @@ float32 embeddings).
 Important invariants:
 
 * `Mat.col_num corpus = Hashtbl.length index`
-* each column in `corpus` has unit L2-norm
+* each column has unit L2-norm only for finite, nonzero, equally sized inputs;
+  the implementation does not reject zero vectors before dividing by their norm
 
 
 3  Public API walk-through
@@ -97,8 +99,12 @@ val query_hybrid
   -> k:int -> int array
 ```
 
-Interpolates the vector and lexical signals.  `beta = 0.5` is a good
-starting point; tune on a validation set.
+Interpolates vector and lexical signals within the top `20*k` dense shortlist.
+BM25 independently returns its global top `20*k`; only overlapping IDs receive
+lexical scores, normalized by the largest BM25 score in the dense shortlist.
+`beta=1` is lexical ranking **within that dense shortlist**, not a global
+BM25-only search. Keep beta in [0,1] and k nonnegative; no beta validation is
+performed. BM25 IDs must match corpus column indices.
 
 ### Incremental updates
 
@@ -138,7 +144,7 @@ let build_snapshot ~cwd ~embeddings_file ~docs =
   (* 1.  Encode documents with your favourite model – here we mock it *)
   let vecs : Vector_db.Vec.t array =
     Array.mapi docs ~f:(fun id text ->
-        let embedding = (* 1536-dim *) Array.create_float 1536 in
+        let embedding = if id mod 2 = 0 then [| 1.; 0. |] else [| 0.; 1. |] in
         { Vector_db.Vec.id = Int.to_string id
         ; len = String.length text (* dummy *)
         ; vector = embedding })
@@ -186,12 +192,12 @@ let hybrid_search env query_text query_embedding =
 
 * **cosine similarity** – implemented as `embeddingᵀ × corpus` with
   BLAS‐optimised matrix multiplication from Owl (≈ O(d·n)).
-* **shortlisting in `query_hybrid`** – only the top 20·k cosine matches
-  are fed into the BM25 stage which keeps lexical scoring affordable
-  even for large k.
+* **shortlisting in `query_hybrid`** – a dense shortlist is intersected with
+  an independently computed global BM25 top list. BM25 evaluation is not
+  restricted to the dense shortlist. Both ranking stages sort candidates.
 * **length penalty** – the `apply_length_penalty` helper slightly
   down-weights embeddings whose token length is far away from the
-  192-token window Ochat was trained on.  The penalty is currently
+  192-token heuristic target. Ochat itself is not a trained model. The penalty is currently
   *disabled* when computing the final score in `query` (open a PR if
   you want to experiment with this heuristic).
 
@@ -210,4 +216,3 @@ let hybrid_search env query_text query_embedding =
     `Bm25.tokenize` which is currently empty.
 
 ------------------------------------------------------------------------
-

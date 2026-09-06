@@ -978,6 +978,14 @@ exception Response_stream_terminated_without_completion
     completion raises {!Response_stream_terminated_without_completion}. *)
 val validate_response_stream : Response_stream.t Seq.t -> Response_stream.t Seq.t
 
+module For_testing : sig
+  (** Read exactly one queue element per requested sequence node. Construction
+      and returning the current event must never wait for a subsequent event. *)
+  val response_sequence
+    :  (unit -> [ `Done | `Error of exn | `Val of Response_stream.t ])
+    -> Response_stream.t Seq.t
+end
+
 (** [post_response response_type ?max_output_tokens ?temperature ?tools ?model
     ?parallel_tool_calls ?reasoning ~dir net ~inputs] sends [inputs] to the
     [/v1/responses] endpoint using the capability-safe network handle
@@ -1052,6 +1060,23 @@ val validate_response_stream : Response_stream.t Seq.t -> Response_stream.t Seq.
           | _ -> ())
         events
     ]} *)
+val read_private_response_exn : _ Eio.Flow.source -> Response.t
+(** [read_private_response_exn flow] bounds the complete body to 256 KiB before
+    parsing JSON. Does not log. Exceptions may contain private data: callers
+    must discard them rather than print or persist them. *)
+
+(** [post_private_response_exn ...] performs a nonstreaming, tool-free request with
+    no body logging and a 256 KiB body limit. Uses local OPENAI_API_KEY/API_URL.
+    Callers own the total deadline and must sanitize errors. Existing
+    [post_response] logging is unchanged. *)
+val post_private_response_exn
+  :  sw:Eio.Switch.t
+  -> _ Eio.Net.t
+  -> model:Request.model
+  -> max_output_tokens:int
+  -> inputs:Item.t list
+  -> Response.t
+
 val post_response
   :  'a response_type
   -> ?max_output_tokens:int

@@ -44,7 +44,7 @@ let get_user_message_item text =
     }
 ;;
 
-let apply_user_submit_effects
+let apply_user_submit_effects_exn
       ~cwd
       ~env
       ~cache
@@ -114,9 +114,50 @@ let apply_user_submit_effects
                (Res_item.jsonaf_of_t user_msg |> Jsonaf.to_string)
       in
       let txt = Option.value user_msg_txt ~default:(Util.sanitize xml) in
-      ignore (Model.apply_patch model (Add_user_message { text = txt }));
       let entry = History_entry.create ~allocator user_msg |> Result.ok_or_failwith in
+      ignore (Model.apply_patch model (Add_user_message { text = txt }));
       ignore (Model.add_history_item model entry))
+;;
+
+let apply_user_submit_effects
+      ~cwd
+      ~env
+      ~cache
+      ~response_dir
+      ~allocator
+      ~model
+      ~submit_request
+  =
+  try
+    apply_user_submit_effects_exn
+      ~cwd
+      ~env
+      ~cache
+      ~response_dir
+      ~allocator
+      ~model
+      ~submit_request;
+    Ok ()
+  with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
+  | exn -> Error (Exn.to_string exn)
+;;
+
+let restore_rejected_draft model request message =
+  if String.is_empty (Model.input_line model)
+  then (
+    Model.set_input_line model request.Runtime.text;
+    Model.set_cursor_pos model (String.length request.text);
+    Model.set_draft_mode model request.draft_mode;
+    Model.set_mode model Model.Insert);
+  ignore
+    (Model.apply_patch
+       model
+       (Add_placeholder_message
+          { role = "error"
+          ; text = "Input rejected: " ^ message ^ "\nRejected draft:\n" ^ request.text
+          })
+     : Model.t)
 ;;
 
 let apply_turn_start_effects ~model ~screen_size ~throttler =
@@ -183,15 +224,20 @@ let start (ctx : Context.t) (submit_request : request) =
   let cache = services.cache in
   let response_dir = services.datadir in
   let runtime = ctx.runtime in
-  apply_user_submit_effects
-    ~cwd
-    ~env
-    ~cache
-    ~response_dir
-    ~allocator:runtime.Runtime.history_allocator
-    ~model:runtime.Runtime.model
-    ~submit_request;
-  start_from_current_session ctx ~reason:Runtime.User_submit
+  match
+    apply_user_submit_effects
+      ~cwd
+      ~env
+      ~cache
+      ~response_dir
+      ~allocator:runtime.Runtime.history_allocator
+      ~model:runtime.Runtime.model
+      ~submit_request
+  with
+  | Ok () -> start_from_current_session ctx ~reason:Runtime.User_submit
+  | Error message ->
+    restore_rejected_draft runtime.model submit_request message;
+    Redraw_throttle.request_redraw shared.ui.throttler
 ;;
 
 let model_of_history history =
@@ -298,6 +344,37 @@ let%test_unit "start_from_current_session preserves canonical history" =
     ~expect:1
 ;;
 
+let%expect_test "raw validation preserves canonical history and recovers the draft" =
+  Eio_main.run (fun env ->
+    List.iter [ "<user>"; "<developer>not a user</developer>" ] ~f:(fun text ->
+      let model = model_of_history [] in
+      let runtime = Runtime.create ~model () in
+      let request = { Runtime.text; draft_mode = Model.Raw_xml } in
+      let result =
+        apply_user_submit_effects
+          ~cwd:(Eio.Stdenv.cwd env)
+          ~env
+          ~cache:(Cache.create ~max_size:1 ())
+          ~response_dir:(Eio.Stdenv.cwd env)
+          ~allocator:runtime.history_allocator
+          ~model
+          ~submit_request:request
+      in
+      (match result with
+       | Ok () -> failwith "invalid raw input accepted"
+       | Error message -> restore_rejected_draft model request message);
+      printf
+        "history=%d draft=%b activity=%b\n"
+        (List.length (Model.history_items model))
+        (String.equal text (Model.input_line model))
+        (Option.is_some (Model.activity model))));
+  [%expect
+    {|
+    history=0 draft=true activity=false
+    history=0 draft=true activity=false
+    |}]
+;;
+
 let%test_unit "start preserves submit append semantics" =
   let model = model_of_history [] in
   let runtime = Runtime.create ~model () in
@@ -310,7 +387,8 @@ let%test_unit "start preserves submit append semantics" =
     ~response_dir:(Obj.magic 0)
     ~allocator:runtime.Runtime.history_allocator
     ~model
-    ~submit_request:{ Runtime.text = "Hello"; draft_mode = Model.Plain };
+    ~submit_request:{ Runtime.text = "Hello"; draft_mode = Model.Plain }
+  |> Result.ok_or_failwith;
   start_from_current_session_with_screen_size
     ctx
     ~now_ms:0

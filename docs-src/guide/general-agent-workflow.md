@@ -1,5 +1,11 @@
 # General Assistant – agent workflow 
 
+For current native/daemon hosting, see [host modes](../agent-server/concepts.md) and
+[agent-host orchestration](../agent-server/chatml-orchestration.md). Daemon work belongs to
+the session actor, not a connected UI. The existing language/tool APIs remain
+shared; file-backed session/controller descriptions should be read in that host
+context. Instruction helper compatibility names emit developer-role messages.
+
 This workflow turns a single ChatMD prompt into an autonomous
 multi-disciplinary agent.
 
@@ -170,5 +176,4 @@ To adapt it:
   
 - swap Brave Search and Gmail Autoauth for other MCP servers by changing the `mcp_server`
   attribute.
-
 

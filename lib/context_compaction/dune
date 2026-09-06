@@ -1,9 +1,9 @@
 (library
  (name context_compaction)
  (public_name ochat.context_compaction)
- ;; Initial scaffold – modules will be added in later steps
  (modules config relevance_judge summarizer compactor)
- (libraries core eio jsonaf ochat.meta_prompting ochat.openai history_entry)
+ (libraries core eio jsonaf ochat.meta_prompting ochat.openai history_entry
+  ochat.tikitoken ochat.tiktoken_data)
  (preprocess
   (pps ppx_jane)))
 

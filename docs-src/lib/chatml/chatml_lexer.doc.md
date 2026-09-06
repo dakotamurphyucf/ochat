@@ -16,7 +16,7 @@ understand how the ChatML front-end is structured.
 ## 1. Overview
 
 `Chatml_lexer` converts raw character input into the token stream
-expected by the Menhir-generated [`Chatml_parser`](./chatml_parser.mly).
+expected by the Menhir-generated [`Chatml_parser`](../../../lib/chatml/chatml_parser.mly).
 It recognises a deliberately small ML-like syntax featuring:
 
 * Classic keywords: `let`, `in`, `module`, `match`, `fun`, …
@@ -119,4 +119,3 @@ let parse (filename : string) : Chatml_lang.stmt_node list =
 PRs improving Unicode coverage, adding more string escapes, or fixing
 lexical edge cases are very welcome.  The test suite lives in
 `test/chatml`.
-

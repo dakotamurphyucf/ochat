@@ -58,9 +58,27 @@ let rec canonical_jsonaf = function
 
 let sha256 value = Digestif.SHA256.(to_hex (digest_string value))
 
+let logical_source (source : Source_ref.t) =
+  { source with
+    source_dir = Filename.dirname source.file
+  ; prompt_dir = "."
+  }
+;;
+
+let canonical_payload payload =
+  { payload with
+    runtimes =
+      List.map payload.runtimes ~f:(fun runtime ->
+        { runtime with Shell_spec.source = logical_source runtime.source })
+  ; tools =
+      List.map payload.tools ~f:(fun tool ->
+        { tool with Shell_tool_spec.source = logical_source tool.source })
+  }
+;;
+
 let create payload =
   let canonical_json =
-    jsonaf_of_payload payload |> canonical_jsonaf |> Jsonaf.to_string
+    canonical_payload payload |> jsonaf_of_payload |> canonical_jsonaf |> Jsonaf.to_string
   in
   { payload; canonical_json; sha256 = sha256 canonical_json }
 ;;

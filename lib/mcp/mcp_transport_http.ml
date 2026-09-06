@@ -24,7 +24,24 @@ type t =
   ; creds_opt : Oauth2_manager.creds option
   ; issuer : string
   ; mutable closed : bool
+  ; stopped : unit Eio.Promise.t
+  ; stop : unit Eio.Promise.u
   }
+
+let close t =
+  if not t.closed
+  then (
+    t.closed <- true;
+    Eio.Promise.resolve t.stop ();
+    Piaf.Client.shutdown t.client)
+;;
+
+let fail_transport t = function
+  | `Exn (Eio.Cancel.Cancelled _ as exn) ->
+    close t;
+    raise exn
+  | _ -> close t
+;;
 
 (*------------------------------------------------------------------*)
 (* Helpers                                                           *)
@@ -48,81 +65,92 @@ let update_session_id t headers =
 (* SSE streaming helpers                                             *)
 (*------------------------------------------------------------------*)
 
-let parse_sse_stream t (body : Body.t) : unit =
-  (* We follow the approach from the [ocaml_piaf_example] snippet in the
-     project README: copy the [Body.t] into a pipe-backed flow and then use
-     [Eio.Buf_read] for robust, line-oriented parsing. *)
-  let module B = Eio.Buf_read in
-  Eio.Fiber.fork ~sw:t.sw (fun () ->
-    let r, w = Eio_unix.pipe t.sw in
-    Eio.Fiber.fork ~sw:t.sw (fun () ->
-      let res =
-        Body.iter
-          ~f:(fun { buffer; off; len } ->
-            Eio.Flow.write w [ Cstruct.of_bigarray ~off ~len buffer ])
-          body
-      in
-      (match res with
+let json_id = function
+  | `Object fields -> List.Assoc.find fields ~equal:String.equal "id"
+  | _ -> None
+;;
+
+let sse_data event =
+  String.split_lines event
+  |> List.filter_map ~f:(fun line ->
+    Option.bind (String.chop_prefix line ~prefix:"data:") ~f:(fun data ->
+      let data = String.lstrip data in
+      if String.equal data "[DONE]" then None else Some data))
+  |> String.concat ~sep:"\n"
+;;
+
+let sse_event =
+  let open Eio.Buf_read in
+  let rec lines acc =
+    let open Syntax in
+    let* line = line in
+    if String.is_empty line
+    then return (String.concat ~sep:"\n" (List.rev acc))
+    else
+      let* next = peek_char in
+      if Option.is_none next
+      then return (String.concat ~sep:"\n" (List.rev (line :: acc)))
+      else lines (line :: acc)
+  in
+  lines []
+;;
+
+let pump_body t body flow =
+  Fun.protect
+    (fun () ->
+       match
+         Body.iter body ~f:(fun { buffer; off; len } ->
+           Eio.Flow.write flow [ Cstruct.of_bigarray ~off ~len buffer ])
+       with
        | Ok () -> ()
-       | Error error -> Format.eprintf "error: %a@." Piaf.Error.pp_hum error);
-      Eio.Flow.close w);
-    let reader = Eio.Buf_read.of_flow r ~max_size:Core.Int.max_value in
-    (* we want to get all the lines until we hit a double newline *)
-    (* Parse one SSE "event" – terminated by a blank line (i.e. two
-       consecutive newlines).
-       1. If the last event in the stream is not followed by a trailing
-          blank line we still want to emit it when the input ends.
-       2. Accept both "data:" and "data: " prefixes as allowed by the
-          SSE spec. *)
-    let parse_event =
-      let rec run acc =
-        let open B.Syntax in
-        let* line = B.line in
-        let* next = B.peek_char in
-        match next with
-        | Some '\n' ->
-          let* () = B.skip 1 in
-          B.return (String.concat (List.rev (line :: acc)))
-        | None ->
-          (* end-of-input – yield whatever we collected so far *)
-          B.return (String.concat (List.rev (line :: acc)))
-        | _ -> run ("\n" :: line :: acc)
-      in
-      run []
-    in
-    let events = B.seq parse_event ~stop:B.at_end_of_input reader in
-    let on_event event =
-      let data =
-        event
-        |> String.split_lines
-        |> List.filter_map ~f:(fun line ->
-          match
-            ( String.chop_prefix line ~prefix:"data: "
-            , String.chop_prefix line ~prefix:"data:" )
-          with
-          | Some rest, _ ->
-            if String.is_prefix ~prefix:"[DONE]" rest then None else Some rest
-          | None, Some rest ->
-            let rest = String.lstrip rest in
-            if String.is_prefix ~prefix:"[DONE]" rest then None else Some rest
-          | _ -> None)
-        |> String.concat
-      in
-      let choice =
-        match String.is_empty data with
-        | true -> None
-        | false ->
-          (match Jsonaf.parse data |> Result.bind ~f:(fun json -> Ok json) with
-           | Ok json -> Some json
-           | Error _ -> None)
-      in
-      match choice with
-      | None -> ()
-      | Some choice -> push_json_queue t choice
-    in
-    Seq.iter on_event events;
-    (* Close reader *)
-    Eio.Flow.close r)
+       | Error error -> fail_transport t error)
+    ~finally:(fun () -> Eio.Flow.close flow)
+;;
+
+let consume_sse t ~request_id reader =
+  let replied = ref false in
+  let events = Eio.Buf_read.seq sse_event ~stop:Eio.Buf_read.at_end_of_input reader in
+  Seq.iter
+    (fun event ->
+       let data = sse_data event in
+       if not (String.is_empty data)
+       then (
+         match parse_json data with
+         | None -> close t
+         | Some json ->
+           if Option.is_some request_id && Poly.equal (json_id json) request_id
+           then replied := true;
+           push_json_queue t json))
+    events;
+  if Option.is_some request_id && not !replied then close t
+;;
+
+let parse_sse_stream t ~request_id body =
+  Eio.Fiber.fork ~sw:t.sw (fun () ->
+    try
+      let r, w = Eio_unix.pipe t.sw in
+      Eio.Fiber.fork ~sw:t.sw (fun () ->
+        try pump_body t body w with
+        | Eio.Cancel.Cancelled _ as exn ->
+          close t;
+          raise exn
+        | _ -> close t);
+      Fun.protect
+        (fun () ->
+           let reader = Eio.Buf_read.of_flow r ~max_size:Core.Int.max_value in
+           consume_sse t ~request_id reader)
+        ~finally:(fun () -> Eio.Flow.close r)
+    with
+    | Eio.Cancel.Cancelled _ as exn ->
+      close t;
+      raise exn
+    | _ -> close t)
+;;
+
+let with_discarded_body t body f =
+  match Body.drain body with
+  | Ok () -> f ()
+  | Error error -> fail_transport t error
 ;;
 
 let rec perform_post ?(retry = false) (t : t) (payload : string) : unit =
@@ -143,25 +171,26 @@ let rec perform_post ?(retry = false) (t : t) (payload : string) : unit =
   in
   let body = Body.of_string payload in
   match Piaf.Client.post t.client ~headers:headers_list ~body t.endpoint_path with
-  | Error err ->
-    t.closed <- true;
-    Printf.eprintf "(mcp-http) POST error: %s\n" (Piaf.Error.to_string err)
+  | Error err -> fail_transport t err
   | Ok response ->
     (* 401 handling *)
     if Piaf.Status.to_code response.status = 401 && not retry
-    then (
-      match t.creds_opt with
-      | None -> () (* no creds – we cannot retry *)
-      | Some creds ->
-        (match t.auth_token with
-         | Some _ when not retry -> ()
-         | None when retry -> ()
-         | _ ->
-           (match Oauth2_manager.get ~env:t.env ~sw:t.sw ~issuer:t.issuer creds with
-            | Ok tok -> t.auth_token <- Some tok.access_token
-            | Error e -> Printf.eprintf "(mcp-http) OAuth flow failed: %s\n" e));
-        (* retry once *)
-        perform_post ~retry:true t payload)
+    then
+      with_discarded_body t response.body (fun () ->
+        match t.creds_opt with
+        | None -> close t
+        | Some creds ->
+          (match t.auth_token with
+           | Some _ when not retry -> ()
+           | None when retry -> ()
+           | _ ->
+             (match Oauth2_manager.get ~env:t.env ~sw:t.sw ~issuer:t.issuer creds with
+              | Ok tok -> t.auth_token <- Some tok.access_token
+              | Error e -> Printf.eprintf "(mcp-http) OAuth flow failed: %s\n" e));
+          (* retry once *)
+          perform_post ~retry:true t payload)
+    else if Piaf.Status.to_code response.status >= 400
+    then with_discarded_body t response.body (fun () -> close t)
     else (
       (* capture session id if provided *)
       update_session_id t response.headers;
@@ -171,17 +200,17 @@ let rec perform_post ?(retry = false) (t : t) (payload : string) : unit =
         | Some v -> v
       in
       if String.is_prefix ~prefix:"text/event-stream" content_type
-      then parse_sse_stream t response.body
+      then (
+        let request_id = Option.bind (parse_json payload) ~f:json_id in
+        parse_sse_stream t ~request_id response.body)
       else (
         match Piaf.Body.to_string response.body with
-        | Error e ->
-          t.closed <- true;
-          Printf.eprintf
-            "(mcp-http) failed to read response body: %s\n"
-            (Piaf.Error.to_string e)
+        | Error e -> fail_transport t e
         | Ok body_str ->
           (match parse_json body_str with
-           | None -> Printf.eprintf "(mcp-http) ignoring non-JSON response body\n"
+           | None ->
+             if not (String.is_empty body_str && Piaf.Status.to_code response.status = 202)
+             then close t
            | Some (`Array arr) -> List.iter arr ~f:(push_json_queue t)
            | Some json -> push_json_queue t json)))
 ;;
@@ -193,8 +222,6 @@ let set_up_auth ~env ~sw ~issuer uri =
   (* 2. environment variables (global fallback)                    *)
   (*--------------------------------------------------------------*)
   let creds_from_uri () : Oauth2_manager.creds option =
-    (* We do not support credentials in the URI query parameters – use
-       environment variables or store credentials in the file system. *)
     match
       Uri.get_query_param uri "client_id", Uri.get_query_param uri "client_secret"
     with
@@ -203,27 +230,17 @@ let set_up_auth ~env ~sw ~issuer uri =
     | _ -> None
   in
   let creds_from_env () : Oauth2_manager.creds option =
-    (* We do not support environment variables for credentials – use
-       explicit query parameters or store credentials in the file system. *)
     match Sys.getenv "MCP_CLIENT_ID", Sys.getenv "MCP_CLIENT_SECRET" with
     | Some id, Some secret ->
       Some (Oauth2_manager.Client_secret { id; secret; scope = None })
     | _ -> None
   in
   let creds_from_store () : Oauth2_manager.creds option =
-    (* We do not support credentials from the store – use explicit query
-       parameters or environment variables. *)
-    (* Look up issuer in the credential store. *)
-
-    (* We do not support credentials from the store – use explicit query
-       parameters or environment variables. *)
-    (* Look up issuer in the credential store. *)
     match Oauth2_client_store.lookup ~env ~issuer with
     | None -> None
     | Some cred ->
       (match cred.client_secret with
        | Some secret ->
-         if true then failwith "Mcp_transport_http.connect: secret";
          Some (Oauth2_manager.Client_secret { id = cred.client_id; secret; scope = None })
        | None -> Some (Oauth2_manager.Pkce { client_id = cred.client_id }))
   in
@@ -234,10 +251,7 @@ let set_up_auth ~env ~sw ~issuer uri =
     | Some _ -> None (* explicit creds – no registration *)
     | None ->
       (match creds_from_env () with
-       | Some _ ->
-         (* We do not support environment variables for registration – use
-            explicit query parameters or store credentials in the file system. *)
-         None
+       | Some _ -> None
        | None ->
          (match creds_from_store () with
           | Some _ ->
@@ -280,6 +294,7 @@ let set_up_auth ~env ~sw ~issuer uri =
                           { id = reg.client_id; secret; scope = None }
                       | None -> Oauth2_manager.Pkce { client_id = reg.client_id })
                  with
+                 | Eio.Cancel.Cancelled _ as exn -> raise exn
                  | _ -> None)
               | Error _ -> None
             in
@@ -312,19 +327,13 @@ let set_up_auth ~env ~sw ~issuer uri =
   in
   let creds_opt : Oauth2_manager.creds option =
     match creds_from_uri () with
-    | Some _ as c ->
-      print_endline "Using credentials from URI query parameters";
-      c
+    | Some _ as c -> c
     | None ->
       (match creds_from_env () with
-       | Some _ as c ->
-         prerr_endline "Using credentials from environment variables";
-         c
+       | Some _ as c -> c
        | None ->
          (match creds_from_store () with
-          | Some _ as c ->
-            print_endline "Using credentials from client store";
-            c
+          | Some _ as c -> c
           | None -> creds_from_registration ()))
   in
   let auth_token_result : string option =
@@ -367,7 +376,10 @@ let connect ?(auth = true) ~(sw : Eio.Switch.t) ~env (uri_str : string) : t =
   in
   let creds_opt, auth_token_result =
     match auth with
-    | true -> set_up_auth ~env ~sw ~issuer uri
+    | true ->
+      (match Oauth2_http.protect (fun () -> Ok (set_up_auth ~env ~sw ~issuer uri)) with
+       | Ok credentials -> credentials
+       | Error _ -> None, None)
     | false ->
       (* No auth – we do not attempt to fetch credentials or tokens *)
       None, None
@@ -380,6 +392,7 @@ let connect ?(auth = true) ~(sw : Eio.Switch.t) ~env (uri_str : string) : t =
          (Piaf.Error.to_string err))
   | Ok client ->
     let incoming = Eio.Stream.create 64 in
+    let stopped, stop = Eio.Promise.create () in
     { client
     ; endpoint_path = Uri.path uri
     ; incoming
@@ -390,6 +403,8 @@ let connect ?(auth = true) ~(sw : Eio.Switch.t) ~env (uri_str : string) : t =
     ; creds_opt
     ; issuer
     ; closed = false
+    ; stopped
+    ; stop
     }
 ;;
 
@@ -399,25 +414,24 @@ let send (t : t) (json : Jsonaf.t) : unit =
   (* Spawn a fibre so that [send] is non-blocking wrt the caller,
      matching the behaviour of the stdio transport (which writes
      quickly to a pipe and returns). *)
-  Eio.Fiber.fork ~sw:t.sw (fun () -> perform_post t payload)
+  Eio.Fiber.fork ~sw:t.sw (fun () ->
+    try perform_post t payload with
+    | Eio.Cancel.Cancelled _ as exn ->
+      close t;
+      raise exn
+    | _ -> close t)
 ;;
 
 let recv (t : t) : Jsonaf.t =
   if t.closed then raise Connection_closed;
-  try Eio.Stream.take t.incoming with
-  | End_of_file ->
-    t.closed <- true;
-    raise Connection_closed
+  Eio.Fiber.first
+    (fun () -> Eio.Stream.take t.incoming)
+    (fun () ->
+       Eio.Promise.await t.stopped;
+       raise Connection_closed)
 ;;
 
 let is_closed (t : t) = t.closed
-
-let close (t : t) : unit =
-  if not t.closed
-  then (
-    t.closed <- true;
-    Piaf.Client.shutdown t.client)
-;;
 
 (*------------------------------------------------------------------*)
 (* Register exception in the interface namespace                     *)

@@ -34,8 +34,8 @@
 val convert_tools : Openai.Completions.tool list -> Openai.Responses.Request.Tool.t list
 
 (** [agent_page_classification decl] returns the Agent-page classification and
-    runtime name for subagent and custom shell-script declarations. Built-in
-    and MCP declarations return [None]. *)
+    runtime name for subagent and custom shell-script declarations, including
+    the built-in [fork] subagent. Other built-ins and MCP declarations return [None]. *)
 val agent_page_classification
   :  Prompt.Chat_markdown.tool
   -> (string * Tool_execution_event.agent_page_kind) option
@@ -48,6 +48,11 @@ val agent_page_classification
     A declaration may expand into several functions – for instance an
     [`<tool mcp_server="…"/>`] element yields one function per remote
     tool exposed by the server.  Hence the result is a list.
+
+    MCP discovery metadata is cached only within this connected declaration.
+    Endpoint matches never share discovery across authenticated clients or
+    runtimes. Cache expiry uses the context's Eio clock; notification listeners
+    belong to [sw]. This does not change the legacy MCP server protocol.
 
     Parameters:
     • [sw] — parent {!Eio.Switch.t}.  Any background fibres (e.g. MCP

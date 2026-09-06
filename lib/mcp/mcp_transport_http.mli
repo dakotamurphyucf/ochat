@@ -8,11 +8,11 @@
 
     • [application/json] – the response body is parsed once and all JSON
       values are enqueued immediately.  This is used for *single-shot*
-      requests such as ["model.list"].
+      requests such as ["tools/list"].
 
     • [text/event-stream] – the body is treated as a **Server-Sent
       Events (SSE)** stream.  A dedicated fibre decodes events line-by-line
-      and enqueues each JSON payload as soon as it arrives.  The
+      and joins each event's data fields before decoding its JSON payload. The
       transport drops the special “[DONE]” message used by some servers
       to mark the end of a stream.
 
@@ -36,10 +36,13 @@
     {!module:Oauth2_http}.  Failures are logged to [stderr] and the
     connection falls back to anonymous mode.
 
+    Eio cancellation propagates instead of triggering anonymous fallback.
+    Persisted client secrets are supported by the client-credentials grant.
+
     {1  Session persistence}
 
     The server can return an *Mcp-Session-Id* header.  The transport stores
-    the first value it sees and includes it in all subsequent requests so
+    the latest present value and includes it in subsequent requests so
     that the server can associate a series of HTTP requests with the same
     logical session.
 
@@ -65,6 +68,9 @@
     connection or after [close] has been called.  In that state
     [is_closed] is [true] and further [send]/[recv] invocations re-raise
     the exception.
+    Closing the transport wakes receivers already blocked in [recv]. HTTP/body
+    failures and premature SSE termination before the matching RPC response
+    also close the transport. Normal SSE completion after a response does not.
     *)
 
 include Mcp_transport_interface.TRANSPORT

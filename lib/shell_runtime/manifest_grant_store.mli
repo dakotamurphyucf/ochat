@@ -13,6 +13,27 @@ type bindings =
   ; host_id : string option
   }
 
+type grant = Session.Shell_state.Manifest_grant.persisted [@@deriving bin_io, sexp]
+
+type error =
+  { code : string
+  ; message : string
+  }
+[@@deriving sexp, compare, equal]
+
+(** [authorizer] checks caller-owned exact grants before consulting
+    [fallback]. A fallback authorization is returned only after [remember]
+    commits the exact grant. *)
+val authorizer
+  :  load:(unit -> (grant list, error) result)
+  -> remember:(grant -> (unit, error) result)
+  -> now_ns:(unit -> int64)
+  -> session_id:string
+  -> source:source
+  -> bindings:bindings
+  -> fallback:Manifest_authorizer.t
+  -> Manifest_authorizer.t
+
 (** [session_authorizer] first checks active persisted grants using complete
     source, manifest, version, import, and host bindings. If none match it
     invokes [fallback]. A successful explicit fallback authorization is

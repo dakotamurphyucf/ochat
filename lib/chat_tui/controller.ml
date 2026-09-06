@@ -31,14 +31,14 @@ module Scroll_box = Notty_scroll_box
 type reaction = Controller_types.reaction =
   | Redraw
   | Refresh_messages
+  | Delete_history of History_entry.Id.t
   | Submit_input
   | Cancel_or_quit
   | Compact_context
   | Quit
   | Chat_scrolled of bool
   | Prepare_chat_destination of Controller_types.chat_destination
-  | Shell_approval_response of
-      string * Shell_runtime.Approval_broker.ui_response
+  | Shell_approval_response of string * Shell_runtime.Approval_broker.ui_response
   | Shell_grant_revoke_requested of int * string
   | Shell_management_refresh_requested of int
   | Moderator_input_response of string
@@ -106,12 +106,6 @@ let toggle_preview ~(term : Notty_eio.Term.t) ~(model : Model.t) : bool =
     true)
 ;;
 
-(* -------------------------------------------------------------------- *)
-(* Helper – update the input_line ref while keeping it UTF-8 safe.       *)
-(* For the purpose of the demo we take the simple approach of slicing   *)
-(* bytes which works as long as the terminal only inputs ASCII.         *)
-(* -------------------------------------------------------------------- *)
-
 let append_char (model : Model.t) c =
   let pos_ref = Model.cursor_pos model in
   (* Reset history browsing pointer when user edits *)
@@ -130,10 +124,11 @@ let backspace (model : Model.t) =
   let s = input_ref in
   if pos > 0
   then (
-    let before = String.sub s ~pos:0 ~len:(pos - 1) in
+    let previous = Utf8_edit.previous s pos in
+    let before = String.sub s ~pos:0 ~len:previous in
     let after = String.sub s ~pos ~len:(String.length s - pos) in
     Model.set_input_line model (before ^ after);
-    Model.set_cursor_pos model (pos - 1))
+    Model.set_cursor_pos model previous)
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -160,6 +155,9 @@ let yank (model : Model.t) =
 (* -------------------------------------------------------------------- *)
 
 let delete_range (model : Model.t) ~first ~last =
+  let text = Model.input_line model in
+  let first = Utf8_edit.floor text first in
+  let last = Utf8_edit.ceil text last in
   (* Remove [first,last) from input line. Assumes indices are valid. *)
   if first >= last
   then backspace model
@@ -558,10 +556,15 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
      | None -> Model.set_selection_anchor model (Model.cursor_pos model)
      | Some _ -> Model.clear_selection model);
     Redraw
-  | `Key (`Uchar u, _) when UC.to_int u = 0x00DF ->
-    (match Model.selection_anchor model with
-     | None -> Model.set_selection_anchor model (Model.cursor_pos model)
-     | Some _ -> Model.clear_selection model);
+  | `Key (`Uchar u, []) ->
+    dismiss_typeahead model;
+    let text = Utf8_edit.uchar u in
+    let buffer = Model.input_line model in
+    let pos = Model.cursor_pos model in
+    Model.set_input_line
+      model
+      (String.prefix buffer pos ^ text ^ String.drop_prefix buffer pos);
+    Model.set_cursor_pos model (pos + String.length text);
     Redraw
   | `Key (`ASCII ('l' | 'L'), [ `Ctrl ]) ->
     (* Ctrl-L – force redraw / recenter *)
@@ -594,16 +597,24 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     Chat_scrolled (scroll_by_lines model ~term (-1)).changed
   (* ----------------------------------------------------------------- *)
   (*  Cursor vertical move within editor (Ctrl-Up / Ctrl-Down)          *)
-  | `Key (`Arrow `Up, mods) when List.mem mods `Meta ~equal:Poly.equal ->
+  | `Key (`Arrow `Up, mods)
+    when List.mem mods `Meta ~equal:Poly.equal
+         && not (List.mem mods `Shift ~equal:Poly.equal) ->
     move_cursor_vertically model ~term ~dir:(-1);
     Redraw
-  | `Key (`Arrow `Up, mods) when List.mem mods `Shift ~equal:Poly.equal ->
+  | `Key (`Arrow `Up, mods)
+    when List.mem mods `Shift ~equal:Poly.equal
+         && not (List.mem mods `Meta ~equal:Poly.equal) ->
     move_cursor_vertically model ~term ~dir:(-1);
     Redraw
-  | `Key (`Arrow `Down, mods) when List.mem mods `Meta ~equal:Poly.equal ->
+  | `Key (`Arrow `Down, mods)
+    when List.mem mods `Meta ~equal:Poly.equal
+         && not (List.mem mods `Shift ~equal:Poly.equal) ->
     move_cursor_vertically model ~term ~dir:1;
     Redraw
-  | `Key (`Arrow `Down, mods) when List.mem mods `Shift ~equal:Poly.equal ->
+  | `Key (`Arrow `Down, mods)
+    when List.mem mods `Shift ~equal:Poly.equal
+         && not (List.mem mods `Meta ~equal:Poly.equal) ->
     move_cursor_vertically model ~term ~dir:1;
     Redraw
   (* ----------------------------------------------------------------- *)
@@ -612,12 +623,12 @@ let handle_key_insert ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
   (*  cases (Ctrl/Meta + Arrow) so that they don't shadow them.         *)
   | `Key (`Arrow `Left, mods) when List.is_empty mods ->
     let pos = Model.cursor_pos model in
-    if pos > 0 then Model.set_cursor_pos model (pos - 1);
+    Model.set_cursor_pos model (Utf8_edit.previous (Model.input_line model) pos);
     Redraw
   | `Key (`Arrow `Right, mods) when List.is_empty mods ->
     let pos = Model.cursor_pos model in
     let input = Model.input_line model in
-    if pos < String.length input then Model.set_cursor_pos model (pos + 1);
+    Model.set_cursor_pos model (Utf8_edit.next input pos);
     Redraw
   (* ----------------------------------------------------------------- *)
   (* Copy / Cut when selection active                                   *)
@@ -805,7 +816,7 @@ let handle_chat_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : react
          dismiss_typeahead model;
          Model.set_mode model Normal;
          Redraw)
-     | `Key (`ASCII 'r', mods) when List.equal Poly.( = ) mods [ `Ctrl ] ->
+     | `Key (`ASCII ('r' | 'R'), [ `Ctrl ]) | `Key (`ASCII '\018', []) ->
        (* Toggle Raw-XML draft mode in Insert state. *)
        let new_mode =
          match Model.draft_mode model with
@@ -821,7 +832,15 @@ let handle_chat_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : react
        Model.set_mode model Insert;
        Redraw
      | `Key (`Enter, _) -> Submit_input
+     | `Key (`Escape, []) when Model.selection_active model ->
+       Controller_normal.handle_key_normal ~model ~term ev
      | `Key (`Escape, _) -> Cancel_or_quit
+     | `Key (`ASCII 'u', []) ->
+       dismiss_typeahead model;
+       if Model.undo model then Redraw else Unhandled
+     | `Key (`ASCII ('r' | 'R'), [ `Ctrl ]) | `Key (`ASCII '\018', []) ->
+       dismiss_typeahead model;
+       if Model.redo model then Redraw else Unhandled
      | _ -> Controller_normal.handle_key_normal ~model ~term ev)
   | Cmdline -> Controller_cmdline.handle_key_cmdline ~model ~term ev
   | Search _ -> Controller_search.handle_key_search ~model ~term ev
@@ -841,10 +860,15 @@ let open_agent model =
     Redraw)
 ;;
 
-let handle_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
+let dispatch_key ~(model : Model.t) ~term (ev : Notty.Unescape.event) : reaction =
   match Model.shell_interaction_id model, Model.active_page model with
   | Some _, _ -> Controller_shell_security.handle_key ~model ~term ev
   | None, Agent -> Controller_agent.handle_key ~model ~term ev
   | None, Shell_security -> Controller_shell_security.handle_key ~model ~term ev
-  | None, Chat -> if is_ctrl_g ev then open_agent model else handle_chat_key ~model ~term ev
+  | None, Chat ->
+    if is_ctrl_g ev then open_agent model else handle_chat_key ~model ~term ev
+;;
+
+let handle_key ~model ~term ev =
+  Model.with_edit_checkpoint model (fun () -> dispatch_key ~model ~term ev)
 ;;

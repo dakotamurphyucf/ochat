@@ -110,13 +110,16 @@ unavailable.  In such environments:
 
 ## Known Limitations
 
-1. **Single-message granularity** – relevance is assessed per message
-   without looking at the surrounding context.  Future work could feed
-   a sliding window into the judge to improve accuracy.
+1. **Limited context** – callers provide the text being scored. The compactor
+   scores rendered tool-pair-preserving groups, not the whole conversation at
+   once. Policy groups and the final group bypass filtering. Filtering is
+   opt-in through `relevance_filtering`; default compaction makes no grading
+   requests. See [configuration](config.doc.md).
 
 2. **Latency & cost** – scoring with real grader calls introduces
    network round-trips and potential cost.  Cache invalidation and
-   batching are not yet implemented.
+   batching are not yet implemented. Cancellation propagates through the judge,
+   self-consistency wrapper and evaluator guards rather than becoming a score.
 
 3. **Grader availability** – the OpenAI grader API is in alpha.  Its
    schema or availability may change.
@@ -127,4 +130,3 @@ unavailable.  In such environments:
 
 * **v0.1** – Initial implementation: single importance judge, optional
   network calls, offline fallback.
-

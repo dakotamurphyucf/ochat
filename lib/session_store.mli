@@ -46,7 +46,7 @@ val path : env:Eio_unix.Stdenv.base -> id -> path
 
      Identifier selection (highest priority first):
      1. explicit [?id] when [new_session = false];
-     2. freshly generated UUID-v4 when [new_session = true];
+     2. freshly generated time/PRNG-derived MD5 identifier when [new_session = true];
      3. MD5 digest of [prompt_file] (default).
 
      If [snapshot.bin] exists under the chosen directory it is loaded and
@@ -90,10 +90,15 @@ val read_staged_v4_file : Bin_prot_utils_eio.path -> (Session.V4.t, Error.t) res
 val read_staged_v4 : env:Eio_unix.Stdenv.base -> id:id -> staged_v4_read
 
 (** [save ~env session] atomically writes [session] to
-     [<session-dir>/snapshot.bin] while holding an advisory lock file
-     (`snapshot.bin.lock`).  The program exits with status 1 when the
-     lock is already taken by another process. *)
-val save : env:Eio_unix.Stdenv.base -> Session.t -> unit
+    [<session-dir>/snapshot.bin] while holding an exclusive Eio-created lock
+    file. An exclusive temporary file and rename preserve the prior snapshot
+    on write/rename failure; no fsync durability is promised. Lock and persistence
+    failures are returned. Initial directory-creation failures can raise. *)
+val save : env:Eio_unix.Stdenv.base -> Session.t -> unit Or_error.t
+
+(** [save_exn] is the legacy exception-raising compatibility wrapper. New
+    executable boundaries should prefer [save] and render its typed error. *)
+val save_exn : env:Eio_unix.Stdenv.base -> Session.t -> unit
 
 (** [list ~env] enumerates *valid* sessions – i.e. directories that
      contain a readable [snapshot.bin].  The function returns

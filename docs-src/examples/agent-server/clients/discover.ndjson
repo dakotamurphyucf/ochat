@@ -1,0 +1,5 @@
+{"jsonrpc":"2.0","id":"initialize","method":"protocol.initialize","params":{"implementation":{"name":"tutorial","version":"1"},"protocol_min":{"major":1,"minor":0},"protocol_max":{"major":1,"minor":0},"features":[],"event_encodings":["json"],"max_inbound_event_bytes":16777216}}
+{"jsonrpc":"2.0","id":"info","method":"server.info","params":{}}
+{"jsonrpc":"2.0","id":"prompts","method":"prompt.list","params":{"limit":20}}
+{"jsonrpc":"2.0","id":"workspaces","method":"workspace.list","params":{"limit":20}}
+{"jsonrpc":"2.0","id":"sessions","method":"session.list","params":{"limit":20}}

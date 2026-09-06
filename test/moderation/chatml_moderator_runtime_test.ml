@@ -786,6 +786,45 @@ let%expect_test
     |}]
 ;;
 
+let instruction_roles_script =
+  {|
+    type event = [ `Tick ]
+    let initial_state = ""
+    let on_event : context -> string -> event -> string task = fun ctx state event ->
+      match event with
+      | `Tick ->
+        let policy = Item.system_text("policy", "policy") in
+        let notice = Item.notice("notice", "notice") in
+        let explicit = Item.input_text_message("explicit", "system", "explicit") in
+        let legacy = Item.create("legacy", Json.parse("{\"type\":\"message\",\"role\":\"system\"}")) in
+        Task.bind(Turn.append_notice("appended"), fun ignored ->
+        Task.pure(
+          Option.get_or(Item.role(policy), "missing") ++ ":" ++
+          Option.get_or(Item.role(notice), "missing") ++ ":" ++
+          Option.get_or(Item.role(explicit), "missing") ++ ":" ++
+          Option.get_or(Item.role(legacy), "missing") ++ ":" ++
+          to_string(Item.is_system(policy)) ++ ":" ++ to_string(Item.is_system(legacy)) ++ ":" ++
+          Item.id(Option.get_or(Context.last_system_item(ctx), legacy))))
+  |}
+;;
+
+let%expect_test "ChatML constructors use developer and preserve raw historical messages" =
+  let session = compile_session instruction_roles_script in
+  let items = [| item ~id:"developer" ~value:(message_item_value ~role:"developer") |] in
+  Runtime.handle_event
+    session
+    ~context:(context ~items ~phase:"before_model" ())
+    ~event:(L.VVariant ("Tick", []))
+  |> ok_or_fail;
+  print_endline (show_value (Runtime.current_state session));
+  print_endline (show_effects (Runtime.committed_local_effects session));
+  [%expect
+    {|
+    developer:developer:developer:system:true:true:developer
+    [Turn.append_message({ id = system:appended; value = `Object([|{ key = type; value = `String(message) }, { key = role; value = `String(developer) }, { key = content; value = `Array([|`Object([|{ key = type; value = `String(input_text) }, { key = text; value = `String(appended) }|])|]) }|]) })]
+    |}]
+;;
+
 let%expect_test
     "moderator runtime Tool_call helper builtins are available on the default surface"
   =

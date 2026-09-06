@@ -15,6 +15,10 @@
 (** Captured editor state at the time of submission. *)
 type request = App_runtime.submit_request
 
+(** Restores a rejected submission when no newer draft exists and adds a
+    local validation notice. Does not alter canonical history. *)
+val restore_rejected_draft : Model.t -> request -> string -> unit
+
 (** [capture_request ~model] snapshots the current editor buffer.
 
     @param model UI model supplying the current input buffer and draft mode.
@@ -51,17 +55,16 @@ module Context : sig
     }
 end
 
-(** [start ... submit_request] applies local submit effects and then spawns the
-    streaming worker fibre.
+(** [start ctx submit_request] validates and appends a captured user message,
+    then starts a streaming turn on success. Editor clearing is a separate
+    caller action through {!clear_editor}. Raw input converts the first user
+    message and may evaluate its inline helpers.
 
-    The function:
-    {ul
-    {- moves the draft into the transcript (as plain text or raw XML); }
-    {- clears the editor and scrolls to the bottom; }
-    {- marks assistant activity as thinking; }
-    {- marks the runtime as [Starting_streaming]; and }
-    {- forks a fibre that runs the streaming worker and reports results via the
-       internal event stream.}}
+    A rejected request starts no turn and leaves canonical history unchanged.
+    It restores the draft and its mode when the editor is empty; a newer draft
+    is preserved instead. A local notice includes the rejected text.
+    Cancellation propagates. Successful admission follows the moderator's
+    turn-start policy and applies activity/scroll effects when a turn starts.
 
     All inputs other than [submit_request] are bundled in
     {!Chat_tui.App_submit.Context.t}.

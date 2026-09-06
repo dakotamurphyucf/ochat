@@ -1,146 +1,86 @@
-# `Context_compaction.Compactor`
+# Context_compaction.Compactor
 
-Conversation–history compactor that keeps your chat under the model’s
-context window without throwing away crucial information.
-
----
+Build a replacement canonical history from retained instructions, previous
+reminders, and a new summary. This is lossy context reduction, not a guarantee
+that every important detail survives. Export first when the original transcript
+matters. See [TUI behavior](../guide/chat_tui.md#context-compaction-compact--current-behavior)
+and [daemon history](../agent-server/sessions-and-workspaces.md#history-and-synchronization).
 
 ## Overview
 
-`Compactor` orchestrates the three lower-level building blocks that make
-up the **context-compaction** pipeline:
-
-| Step | Module | Responsibility |
-|------|--------|----------------|
-| 1.   | [`Config`](./config.doc.md) | Provide runtime parameters such as *context limit* and *relevance threshold*. |
-| 2.   | [`Relevance_judge`](./relevance_judge.doc.md) | Decide which messages are important enough to survive. |
-| 3.   | `Summarizer` | Turn the survivors into a single textual summary. |
-
-The output is a **new chat history** that contains:
-
-* the very first message of the original transcript (usually the system
-  prompt), and
-* *at most one* additional `system` message with the generated summary.
-
-This design minimises token usage while still giving the LLM enough
-context to pick up the conversation where it left off.
-
----
+The pipeline loads [configuration](config.doc.md) through Eio when an environment
+is available, optionally grades relevance, and calls
+[Summarizer](../lib/context_compaction/summarizer.doc.md). Relevance grading is
+disabled by default; ordinary compaction does not add grader requests.
 
 ## Algorithm in Detail
 
-1. **Load configuration** – `Config.load ()` looks for a JSON file in
-   XDG-conformant locations and overlays any values it finds onto the
-   built-in defaults.
-
-2. **Filter by relevance** – Each `Openai.Responses.Item` is rendered to
-   plain text (role prefix + content).  The text is scored by
-   `Relevance_judge.is_relevant`.  Messages that do not reach
-   `cfg.relevance_threshold` are dropped.
-
-3. **Summarise** – The remaining messages are concatenated and fed into
-   `Summarizer.summarise`, producing a concise recap of the
-   conversation.  The summary is then truncated to
-   `cfg.context_limit` characters.  In practice **1 character ≈ 1
-   token** is a safe upper bound, making a separate tokenizer
-   unnecessary.
-
-4. **Build new history** – `Compactor` keeps the original first item and
-   appends the summary wrapped in a `system` message.  If the input list
-   is empty the function generates a synthetic «You are a helpful
-   assistant.» prompt first.
-
-5. **Exception safety** – Any unexpected exception causes the function
-   to fall back to the identity transformation and return the original
-   `history` unchanged.  The caller therefore never needs to guard with
-   `try … with`.
-
----
+1. Partition the input while preserving occurrence IDs and relative order.
+   Retain all system/developer input messages and up to ten most recent
+   previous user-role reminders whose first text part, after stripping whitespace,
+   starts with `<system-reminder>`.
+2. Send the history to the summarizer, excluding older reminders beyond that
+   ten-entry bound. Opt-in relevance selection keeps tool call/output groups
+   together and always includes policy-containing groups and the latest group.
+3. After successful summarization, validate the resulting history against
+   `context_limit` using the documented local token estimate. Reject an oversized
+   result without allocating a reminder or replacing history. Otherwise allocate
+   one fresh `History_entry.Id` and
+   construct a **user-role** message containing `<system-reminder>...</system-reminder>`.
+   The tag is text, not a system-role conversion.
+4. Return retained instruction entries, retained reminders, and the new reminder
+   in that order. Up to eleven reminders can therefore be present immediately
+   after compaction. No synthetic first instruction is added for empty history.
+5. Return an explicit error on failure; propagate Eio cancellation. The caller
+   installs the replacement only on success.
 
 ## Public Interface
 
-### `compact_entries`
-
 ```ocaml
-val compact_entries :
-  allocator:History_entry.Allocator.t ->
-  env:Eio_unix.Stdenv.base option ->
-  history:History_entry.t list ->
-  (History_entry.t list, exn) result
+val compact_entries
+  :  allocator:History_entry.Allocator.t
+  -> env:Eio_unix.Stdenv.base option
+  -> history:History_entry.t list
+  -> (History_entry.t list, exn) result
 ```
 
-Transactionally compacts canonical history. Retained entries preserve their
-IDs and one new reminder ID is allocated only after summarization succeeds.
-
-**Parameters**
-
-* `env` – optional Eio standard environment that grants network access.
-  Provide this when you want the summariser to call the OpenAI API.  Pass
-  `None` in offline contexts; the pipeline switches to deterministic
-  stubs.
-* `allocator` – live session allocator for the new reminder occurrence.
-* `history` – canonical conversation transcript to compact.
-
-**Returns** `Ok compacted` on success or `Error exn` without modifying the
-original history. Cancellation is re-raised as `Eio.Cancel.Cancelled`.
-
----
+The function does not itself persist, archive, or reset a session. It checks the
+configured resulting-history estimate; this is not exact provider token accounting.
+The host owns the commit and synchronization
+boundary. The allocator advances for the new reminder; it is not a pure
+identity-free string operation.
 
 ## Usage Examples
 
-### Basic compaction before an LLM call
-
 ```ocaml
-open Context_compaction
-
-let send_request ~env ~allocator history fresh_user_entry =
-  match Compactor.compact_entries ~allocator ~env:(Some env) ~history with
-  | Ok compacted -> send_to_llm (compacted @ [ fresh_user_entry ])
-  | Error error -> report_error error
+let compact_offline ~allocator ~history =
+  Context_compaction.Compactor.compact_entries ~allocator ~env:None ~history
 ```
 
-### Offline unit tests
-
-```ocaml
-let%expect_test "compaction keeps summary under limit" =
-  let history = (* synthetic transcript … *) in
-  let compacted =
-    Compactor.compact_entries ~allocator ~env:None ~history
-    |> Result.ok
-    |> Option.value_exn
-  in
-  assert (List.length compacted >= 1);
-  ();;
-```
-
----
+`env:None` explicitly chooses deterministic summary truncation. It tests wiring,
+not semantic summary quality. With an environment and provider key, summary
+requests can incur costs; online failures do not silently switch to a stub.
 
 ## Interaction with Other Modules
 
-* **`Config.context_limit`** – upper-bounds the length of the generated
-  summary.
-* **`Config.relevance_threshold`** – influences which messages
-  `Relevance_judge` keeps.
-* `Summarizer` may perform costly LLM calls; keep an eye on rate limits
-  and API quotas in production setups.
-
----
+- [Legacy TUI compaction](../lib/chat_tui/app_compaction.doc.md) saves the current
+  snapshot when available and applies operation-ID-matching results on the UI owner.
+- Native/daemon `Session_actor` commits an archive reference and replacement
+  history together, advances the compaction generation, and publishes
+  `history.replaced`. Durable hosts sync the checksummed archive file before
+  committing the reference; failure leaves original history intact.
+- `session.get` exposes `archived_revisions`; `session.export` with one of those
+  revisions retrieves the old history using the same authorization/redaction
+  as current-history exports. See [session history](../agent-server/sessions-and-workspaces.md#history-and-synchronization).
 
 ## Known Limitations
 
-1. **Naïve token budgeting** – character count is a safe *upper* bound
-   but can still exceed the true token limit by ~30 % for some scripts.
-2. **First-message preservation** – Always keeping the very first item is
-   a heuristic that works for typical system prompts but may be
-   sub-optimal for exotic prompt styles.
-3. **Lack of incremental summarisation** – The entire transcript is
-   reprocessed on every compaction call.  Caching or incremental diffs
-   could reduce latency.
+Summarization is lossy and may require several provider requests. The reminder
+count bound is independent of the configurable token estimate. Agent-session
+archives are separate from journal/fallback-snapshot retention and remain until
+the session is removed. They enable export, not automatic undo or rollback of
+tools. Transient embedded archives do not outlive the transient session. Legacy
+TUI snapshot persistence is not this archive feature; export first in that host.
 
----
-
-## Change Log
-
-* **v0.1** – Initial implementation: relevance filtering, LLM summary,
-  exception-safe fallback.
-
+Sources: [implementation](../../lib/context_compaction/compactor.ml),
+[interface](../../lib/context_compaction/compactor.mli).

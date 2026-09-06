@@ -38,8 +38,9 @@
     • **Single outstanding resolver per request id** – the client
       guarantees that at most one resolver is stored for any
       {!Mcp_types.Jsonrpc.Id.t}.
-    • **Cancellation** – closing the underlying {!transport} will cause
-      all awaiting fibres to fail with {!Connection_closed}.
+    • **Cancellation** – transport termination resolves pending requests with
+      [Error "Connection_closed"] (or a diagnostic for other receive errors).
+      Eio cancellation of a calling fibre propagates after request cleanup.
 *)
 
 type t
@@ -56,7 +57,7 @@ type t
     • [?auth] – set to [false] to disable transport-level
       authentication (default = [true]).
     • [sw] – switch whose lifetime bounds the client; closing the
-      switch closes the connection and cancels all pending promises.
+      switch closes the connection and fails pending promises.
     • [env] – {!Eio_unix.Stdenv.base} passed to the transport (used for
       spawning processes, opening sockets, …).
     • [uri] – transport-selecting identifier (see module doc).
@@ -67,9 +68,8 @@ type t
 *)
 val connect : ?auth:bool -> sw:Eio.Switch.t -> env:Eio_unix.Stdenv.base -> string -> t
 
-(** [close t] closes the underlying transport.  Further calls to any
-    function except {!is_closed} will raise {!Connection_closed}.  Safe
-    to call multiple times. *)
+(** [close t] fails pending requests before closing the transport. Subsequent
+    RPCs return [Error]; metadata access remains available. Safe to repeat. *)
 val close : t -> unit
 
 (** [is_closed t] is [true] once {!close} has been called or the server
@@ -82,7 +82,12 @@ val is_closed : t -> bool
     The promise is resolved with:
     • [Ok json] – the [result] field of the response.
     • [Error msg] – if the server responded with an [error] object or
-      if the response could not be parsed. *)
+      if the response could not be parsed, sending fails, or the receiver stops.
+    A send failure terminates the client because the request may have been
+    partially written. Cancellation during send also fails pending requests,
+    then propagates to the sender. Cancelling an asynchronous promise's waiter
+    does not cancel the underlying request; use the blocking helpers for
+    caller-scoped request cleanup. *)
 val rpc_async : t -> Mcp_types.Jsonrpc.request -> (Jsonaf.t, string) result Eio.Promise.t
 
 (** [rpc t req] is a blocking wrapper around {!rpc_async}. *)
@@ -115,3 +120,17 @@ val call_tool
     *raw* JSON-RPC notification sent by the server.  Callers can attach
     their own consumer fibres if they need side-band events. *)
 val notifications : t -> Mcp_types.Jsonrpc.notification Eio.Stream.t
+
+module For_testing : sig
+  (** [create ~sw ~send ~recv ~close] starts the real RPC lifecycle with injected
+      transport operations, without performing the initialization handshake. *)
+  val create
+    :  sw:Eio.Switch.t
+    -> send:(Jsonaf.t -> unit)
+    -> recv:(unit -> Jsonaf.t)
+    -> close:(unit -> unit)
+    -> t
+
+  (** [pending_count t] counts requests still awaiting a response. *)
+  val pending_count : t -> int
+end

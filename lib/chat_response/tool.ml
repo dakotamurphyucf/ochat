@@ -48,6 +48,7 @@ module CM = Prompt.Chat_markdown
 let agent_page_classification (decl : CM.tool) =
   match decl with
   | CM.Agent { name; _ } -> Some (name, Tool_execution_event.Subagent)
+  | CM.Builtin "fork" -> Some ("fork", Tool_execution_event.Subagent)
   | CM.Custom { name; _ } -> Some (name, Tool_execution_event.Shell_script)
   | CM.Shell { name; _ } -> Some (name, Tool_execution_event.Shell_script)
   | CM.Builtin _ | CM.Read_file _ | CM.Mcp _ -> None
@@ -55,45 +56,7 @@ let agent_page_classification (decl : CM.tool) =
 
 module Res = Openai.Responses
 
-(*------------------------------------------------------------------*)
-(* 5. Remote MCP tool metadata cache                                *)
-(*------------------------------------------------------------------*)
-
-(* We keep a small TTL-based LRU that maps an MCP server URI to the
-   list of tools it exposes. This avoids re-running the expensive
-   `tools/list` handshake for every `<tool mcp_server=...>`
-   declaration inside a prompt. *)
-
-module String_key = struct
-  type t = string [@@deriving sexp, compare, hash]
-
-  (* The cache key is just the server URI – no internal invariants. *)
-  let invariant (_ : t) = ()
-end
-
-module Tool_cache = Ttl_lru_cache.Make (String_key)
-
-let tool_cache : Mcp_types.Tool.t list Tool_cache.t = Tool_cache.create ~max_size:32 ()
-let cache_ttl = Time_ns.Span.of_int_sec 300
-
-(* When a given MCP server notifies that its tool list has changed we
-   simply drop the cached entry for that URI so that the next lookup
-   forces a fresh `tools/list` request.  The helper below registers a
-   lightweight daemon (at most one per client/URI pair) that listens
-   for such notifications and performs the invalidation.            *)
-
-let register_invalidation_listener ~sw ~mcp_server ~client =
-  (* Register a background fibre that listens for
-     `notifications/tools/list_changed` messages published by the MCP
-     server.  Upon reception the local *TTL-LRU* entry for that server
-     is evicted so that the next call to {!mcp_tool} forces a fresh
-     `tools/list` round-trip.
-
-     The operation is idempotent and cheap – duplicates are acceptable. *)
-  (* We attach the listener on a background fibre so it does not block the
-     normal execution flow.  The fibre terminates automatically when the
-     underlying stream closes (e.g. connection lost) or the switch is
-     torn down. *)
+let register_invalidation_listener ~sw ~cache ~client =
   Eio.Fiber.fork_daemon ~sw (fun () ->
     let rec loop () =
       match
@@ -102,10 +65,8 @@ let register_invalidation_listener ~sw ~mcp_server ~client =
       with
       | None -> `Stop_daemon
       | Some notification ->
-        (match notification.method_ with
-         | "notifications/tools/list_changed" ->
-           ignore (Tool_cache.remove tool_cache mcp_server : _)
-         | _ -> ());
+        if String.equal notification.method_ "notifications/tools/list_changed"
+        then Mcp_discovery_cache.invalidate cache;
         loop ()
     in
     loop ())
@@ -240,7 +201,7 @@ let agent_fn ~(ctx : _ Ctx.t) ~run_agent (agent_spec : CM.agent_tool) : Ochat_fu
 
       Implementation details:
       – Remote metadata are fetched through {!Mcp_client.list_tools}.
-      – A TTL-LRU (5 min / 32 entries) caches the result per server.
+      – A five-minute cache belongs to this connected declaration only.
       – The helper registers a background fibre listening for
         `notifications/tools/list_changed` and invalidates the cache on
         demand.
@@ -269,53 +230,32 @@ let mcp_tool
     Uri.to_string uri
   in
   let client = Mcp_client.connect ~sw ~env:(Ctx.env ctx) mcp_server_uri in
-  (* Ensure cache invalidation for this server is wired up exactly
-     once.  We conservatively register a listener each time – the
-     underlying [Tool_cache.remove] operation is idempotent and cheap,
-     so occasional duplicates are harmless. *)
-  register_invalidation_listener ~sw ~mcp_server ~client;
-  let get_tool name =
-    let tools_for_server =
-      Tool_cache.find_or_add tool_cache mcp_server ~ttl:cache_ttl ~default:(fun () ->
+  let cache =
+    Mcp_discovery_cache.create
+      ~now:(fun () -> Eio.Time.now (Eio.Stdenv.clock (Ctx.env ctx)))
+      ~load:(fun () ->
         match Mcp_client.list_tools client with
-        | Ok lst -> lst
-        | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
+        | Ok tools -> tools
+        | Error _ -> failwith "MCP tool discovery failed")
+  in
+  register_invalidation_listener ~sw ~cache ~client;
+  let wrap = Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict in
+  let get_tool name =
+    let find () =
+      List.find (Mcp_discovery_cache.get cache) ~f:(fun tool ->
+        String.equal tool.Mcp_types.Tool.name name)
     in
-    let tool_meta =
-      match List.find tools_for_server ~f:(fun t -> String.equal t.name name) with
-      | Some t -> t
-      | None ->
-        (* Cache might be stale – refresh once before giving up. *)
-        let tools =
-          match Mcp_client.list_tools client with
-          | Ok lst ->
-            (* Update cache and continue. *)
-            Tool_cache.set_with_ttl tool_cache ~key:mcp_server ~data:lst ~ttl:cache_ttl;
-            lst
-          | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ()
-        in
-        (match List.find tools ~f:(fun t -> String.equal t.name name) with
-         | Some t -> t
-         | None ->
-           failwithf
-             "MCP server %s does not expose tool %s (after refresh)"
-             mcp_server
-             name
-             ())
-    in
-    Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict tool_meta
+    match find () with
+    | Some tool -> wrap tool
+    | None ->
+      Mcp_discovery_cache.invalidate cache;
+      (match find () with
+       | Some tool -> wrap tool
+       | None -> failwithf "MCP tool %s is unavailable" name ())
   in
   match names with
   | Some names -> List.map names ~f:get_tool
-  | None ->
-    let tools_for_server =
-      Tool_cache.find_or_add tool_cache mcp_server ~ttl:cache_ttl ~default:(fun () ->
-        match Mcp_client.list_tools client with
-        | Ok lst -> lst
-        | Error msg -> failwithf "Failed to list tools from %s: %s" mcp_server msg ())
-    in
-    List.map tools_for_server ~f:(fun t ->
-      Mcp_tool.ochat_function_of_remote_tool ~sw ~client ~strict t)
+  | None -> List.map (Mcp_discovery_cache.get cache) ~f:wrap
 ;;
 
 (*--- 4-d.  Unified declaration → function mapping ------------------*)

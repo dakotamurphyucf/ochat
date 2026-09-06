@@ -1,110 +1,98 @@
-# `Chat_tui.Conversation` – Bridging OpenAI responses and the TUI
+# Chat_tui.Conversation — display text and stable projections
 
-`Chat_tui.Conversation` is a *pure* utility that turns the rich, typed
-OpenAI response AST produced by the [`openai`](https://github.com/olinicola/ocaml-openai)
-library into the simple `(role * text)` tuples expected by
-`Chat_tui.Renderer`.
+Convert the repository's `Openai.Responses.Item.t` values into display messages
+and identity-bearing projected rows. These helpers perform no I/O. Tuple
+conversion does not change canonical history or the content exported by
+[Persistence](persistence.doc.md).
 
-It performs no I/O and keeps no mutable state – you can safely call it
-from the model, the renderer, unit-tests or background workers without
-fear of side-effects.
-
----
-
-## Table of contents
-
-1. [Why does this exist?](#why-does-this-exist)
-2. [`pair_of_item`](#pair_of_item)
-3. [`of_history`](#of_history)
-4. [Known limitations](#known-limitations)
-
----
-
-### 1&nbsp;·&nbsp;Why does this exist? <a id="why-does-this-exist"></a>
-
-The OpenAI chat API returns a *heterogeneous* list of variants – user
-input, assistant output, function calls, tool invocation results, and so
-on.  Most of them contain plain text somewhere inside the nested record
-structure, but the *location* and *format* vary greatly.
-
-`Chat_tui.Conversation` hides this complexity behind two functions that
-extract the textual content, sanitize it, and normalise the role names
-so the renderer can treat every entry uniformly.
-
-Safety is a primary concern: the conversion strips escape sequences and
-truncates unreasonably large tool output so the terminal UI cannot be
-corrupted or locked up by malicious / buggy data.
-
----
-
-### 2&nbsp;·&nbsp;`pair_of_item` <a id="pair_of_item"></a>
+## pair_of_item <a id="pair_of_item"></a>
 
 ```ocaml
 val pair_of_item : Openai.Responses.Item.t -> Types.message option
 ```
 
-Takes a single OpenAI response item and returns an optional
-`(role, content)` tuple ready for rendering.
+Return `Some (role, text)` for a supported item, or `None` when the variant
+has no supported presentation.
 
-Behaviour summary:
+- Input messages join text parts with newlines; image-only input yields empty
+  display text.
+- Assistant output joins text parts with spaces.
+- Function/custom calls display `name(arguments)` or `name(input)`.
+- Function/custom outputs join text and image placeholders, sanitize the text,
+  and retain at most **10,000 bytes**, followed by `\n…truncated…` if needed.
+- Reasoning joins summary parts with spaces.
 
-* **Input / assistant messages** – concatenates all text parts and keeps
-  newlines.
-* **Function/tool calls** – formats the invocation as
-  `name(arguments)` so the user can see what exactly was executed.
-* **Tool output** – returns the JSON result up to 2 000 bytes; excess
-  data is replaced by `…truncated…` to keep the UI responsive.
-* **Reasoning summaries** – joins the partial strings emitted by the
-  model into a single paragraph.
-* **Non-textual items** – returns `None`, effectively filtering the
-  entry out.
+Input text and call arguments use `Util.sanitize ~strip:true`; assistant,
+reasoning and tool output use `~strip:false`. This is display sanitization,
+not secret redaction. The tool-output byte truncation is not grapheme-aware.
+Specialized tool rendering can use separate metadata; this tuple limit is not
+a universal bound on all renderers, canonical history or exports.
 
-All text passes through `Chat_tui.Util.sanitize ~strip:true` so ASCII
-control characters become harmless spaces.
-
-Example – render the **assistant** response "*Hello*":
+A complete user-message example:
 
 ```ocaml
-let open Openai.Responses in
-let item = Item.Output_message
-             { role = Assistant
-             ; content = [ { text = "Hello" } ]
-             } in
+let hello =
+  let open Openai.Responses in
+  Item.Input_message
+    { Input_message.role = Input_message.User
+    ; content = [ Input_message.Text { text = "Hello"; _type = "input_text" } ]
+    ; _type = "message"
+    }
 
-match Chat_tui.Conversation.pair_of_item item with
-| Some (role, txt) -> assert (role = "assistant" && txt = "Hello")
-| None -> assert false
+let displayed = Chat_tui.Conversation.pair_of_item hello
 ```
 
----
+`displayed` is `Some ("user", "Hello")`.
 
-### 3&nbsp;·&nbsp;`of_history` <a id="of_history"></a>
+## of_history <a id="of_history"></a>
 
 ```ocaml
 val of_history : Openai.Responses.Item.t list -> Types.message list
 ```
 
-Maps `pair_of_item` over a complete OpenAI response, dropping every
-entry without a textual representation.  The relative order is
-preserved, therefore the indices of the resulting list match the one
-returned by the API.
-
-Typical usage inside the model layer:
+Filter-map `pair_of_item` over the input. Relative order survives, but filtered
+items mean **display indices do not equal original response/history indices**.
+Use this helper for text conversion, not to identify a canonical deletion target.
 
 ```ocaml
-let messages = Chat_tui.Conversation.of_history response.output in
-Model.{ model with messages }
+let display_messages items =
+  Chat_tui.Conversation.of_history items
 ```
 
----
+## Identity-aware projections
 
-### 4&nbsp;·&nbsp;Known limitations <a id="known-limitations"></a>
+```ocaml
+val project_entries : History_entry.t list -> projection
+val project_effective_entries
+  :  Chat_response.Moderation.Effective_entry.t list -> projection
+val rows : projection -> Projected_message.t list
+val messages : projection -> Types.message list
+val index_of_id : projection -> Projected_message.Id.t -> int option
+```
 
-1. **Display width** – The module deals purely with bytes and
-   code-points; East-Asian wide glyphs still count as one unit.  The
-   renderer (Notty) takes care of visual width.
-2. **Arbitrary truncation limit** – 2 000 bytes for tool output is a
-   pragmatic value chosen during manual testing.  Feel free to adjust
-   if your workflow regularly produces larger payloads.
+A projection contains ordered rows and an ID-to-display-index lookup.
+Canonical rows retain their entry IDs. Moderator insertions and replacements
+carry explicit provenance; replacements use the target occurrence's projected
+identity. Local approval/placeholder rows use separate namespaced IDs and have
+no canonical entry ID.
 
+```ocaml
+let display_index entries projected_id =
+  let projection = Chat_tui.Conversation.project_entries entries in
+  Chat_tui.Conversation.index_of_id projection projected_id
+```
+
+Do not overwrite `Model.messages` directly to replace history: the model also
+owns identity lookup, selection, caches and effective projection state.
+Use the owning host's history/projection update path.
+
+## Known limitations <a id="known-limitations"></a>
+
+Text projection is lossy and is not a persistence format. Unsupported variants
+are omitted. Byte-limited display text can omit details present in canonical
+history; display sanitization does not establish export privacy.
+Terminal-cell geometry belongs to the renderer, not this module.
+
+Sources: [interface](../../../lib/chat_tui/conversation.mli),
+[implementation](../../../lib/chat_tui/conversation.ml).
 

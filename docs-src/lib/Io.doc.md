@@ -1,177 +1,122 @@
-# `Io` – Utilities for effect-based IO  
+# Io — explicit-capability I/O helpers
 
-`Io` bundles small, self-contained helpers that are used pervasively in
-the Ochat code-base.  The functions are thin wrappers around
-[Eio](https://github.com/ocaml-multicore/eio)’s capabilities and were
-collected in a single place to avoid repeating the same boiler-plate in
-every module.
-
-The module is not meant to grow into a fully-blown standard library –
-the guiding principle is *“only what is needed right now”*.
-
-
-## Table of contents
-
-1. [Filesystem helpers](#filesystem-helpers)  
-2. [General utilities](#general-utilities)  
-3. [Logging](#logging)  
-4. [HTTP helpers – `Io.Net`](#http-helpers--ionet)  
-5. [Domain-aware worker pools – `Io.Task_pool`](#domainaware-worker-pools--iotask_pool)  
-6. [Example echo server / client](#example-echo-server--client)  
-7. [Base-64 data-URIs](#base64-datauris)
-
-
----
+[Interface](../../lib/io.mli) · [implementation](../../lib/io.ml).
+Core is the standard library; these helpers use Eio for filesystem operations.
+They are convenience wrappers, not the daemon's durable store or a sandbox.
 
 ## Filesystem helpers
 
-```ocaml
-val ( / )      : ('d Eio.Path.t) -> string -> 'd Eio.Path.t
-val save_doc   : dir:'d Eio.Path.t -> string -> string -> unit
-val append_doc : dir:'d Eio.Path.t -> string -> string -> unit
-val load_doc   : dir:'d Eio.Path.t -> string -> string
-val delete_doc : dir:'d Eio.Path.t -> string -> unit
-val mkdir      : ?exists_ok:bool -> dir:'d Eio.Path.t -> string -> unit
-val directory  : dir:'d Eio.Path.t -> string -> string list
-val is_dir     : dir:'d Eio.Path.t -> string -> bool
-val with_dir   : dir:'d Eio.Path.t -> (Eio.Path.t -> 'a) -> 'a
-```
-
-Most projects work with a *lot* of small files: prompts, generated code
-snippets, cached completions…  All helpers take a directory capability
-so that callers stay in the capability world and do not rely on global
-paths.
-
-### Example – writing and reading a file
+`save_doc ~dir file text` truncates/writes; `append_doc` appends; both request
+0600 for newly created files. They do not chmod existing files, atomically replace
+them, fsync them, or coordinate concurrent writers. `load_doc` reads the entire
+file. `delete_doc` calls unlink and raises if the file is missing.
+`mkdir ?exists_ok ~dir subdir` creates parent directories with requested mode
+0700. `directory` lists names and `is_dir` checks directory kind.
 
 ```ocaml
-Eio_main.run @@ fun env ->
-  let cwd = Eio.Stdenv.cwd env in
-  Io.save_doc  ~dir:cwd "hello.txt" "Hello, Io!";
-  let back = Io.load_doc ~dir:cwd "hello.txt" in
-  assert (back = "Hello, Io!")
+let file_roundtrip env =
+  let dir = Eio.Stdenv.cwd env in
+  Io.save_doc ~dir "example.txt" "hello";
+  Io.append_doc ~dir "example.txt" "\n";
+  assert (String.equal (Io.load_doc ~dir "example.txt") "hello\n")
 ```
 
----
+`Io.( / )` appends a path component. `with_dir ~dir f` opens a scoped directory
+capability and closes it after the callback; do not return live resources that
+depend on it. `ensure_chatmd_dir ~cwd` creates/returns `cwd/.chatmd` with requested
+mode 0700. This does not clean up artifacts or provide zero-artifact execution.
 
 ## General utilities
 
-### `to_res`
-
-```ocaml
-val to_res : (unit -> 'a) -> ('a, string) result
-```
-
-`to_res f` executes `f ()` and converts its outcome to a
-`Result.t`:
-
-* returns `Ok v` on success where `v` is the value produced by
-  the function;
-* returns `Error msg` when `f` raises, with `msg` containing a
-  human-readable description obtained through `Eio.Exn.pp`.
-
-The helper is particularly handy at process or fibre boundaries where
-you want to surface failures without using exceptions.
-
-### `ensure_chatmd_dir`
-
-```ocaml
-val ensure_chatmd_dir : cwd:'d Eio.Path.t -> 'd Eio.Path.t
-```
-
-Ensures the hidden directory `.chatmd` exists under `cwd` (it is
-created with mode `0o700` if missing) and returns an `Eio.Path.t`
-capability to it.  Several high-level modules rely on this helper to
-keep their scratch files out of the way.
-
----
-
+`to_res f` returns Ok or a formatted Eio exception string. It catches **all**
+exceptions, including cancellation; callers requiring cancellation propagation
+must not use it as their cancellation boundary. Error strings can contain
+sensitive context. `run_main` wraps `Eio_main.run` and initializes the default
+Mirage RNG.
 
 ## Logging
 
-```ocaml
-val log         : dir:'d Eio.Path.t -> ?file:string -> string -> unit
-val console_log : stdout:Eio.Flow.sink -> string -> unit
-```
+`log ~dir ?file text` appends the supplied string verbatim to `./logs.txt` by
+default, requesting 0600 on creation. It does **not** add a newline or promise
+whole-message atomicity across fibers. `console_log ~stdout text` copies verbatim
+to the supplied sink. Neither helper redacts content.
 
-`log` simply appends a line to a file (default `./logs.txt`).  The
-counterpart `console_log` writes directly to `stdout` when the caller
-does not want to open `Eio.Flow` by itself.
+<a id="http-helpers--ionet"></a>
 
+## HTTP helpers – Io.Net
 
-## HTTP helpers – `Io.Net`
-
-`Io.Net` is a very thin façade over *cohttp-eio* that removes some of
-the repetitive plumbing when dealing with the HTTPS happy-path.
+`Net.post` requires an owning switch; `Net.get` creates an internal switch.
+`Default` consumes the whole body; `Raw f` lets the callback inspect/consume
+the response while its resources remain live.
 
 ```ocaml
-Io.Net.post Io.Net.Default
-  ~net:(Eio.Stdenv.net env)
-  ~host:"api.example.com"
-  ~headers:(Cohttp.Header.init ())
-  ~path:"/v1/endpoint"
-  "{ "json": true }"
+let post_example env =
+  Eio.Switch.run (fun sw ->
+    Io.Net.post Io.Net.Default
+      ~net:(Eio.Stdenv.net env) ~host:"api.example.com"
+      ~headers:(Cohttp.Header.init ()) ~path:"/v1/endpoint" ~sw
+      {|{"json":true}|})
 ```
 
-`post` and `get` accept a *response descriptor* that tells them how to
-consume the response body:
+This is a placeholder endpoint, not an offline test. POST accepts explicit origins
+or defaults a bare host to HTTPS. GET constructs HTTPS from its host/path.
+`get_host` and `get_path` are URI helpers; the latter omits query/fragment.
+`download_file` reads a whole response then uses `save_doc`.
 
-* `Default` – return the whole body as a string.  
-* `Raw f` – give full control to a user-supplied consumer.
+**TLS certificates are not verified:** these wrappers install a null
+authenticator. There is no authenticator argument on their public get/post API;
+use a properly validating transport for untrusted networks. They do not enforce
+a general response-size bound or HTTP-success status policy.
 
-> **Security notice**: the underlying `Tls.Config` uses a *null*
-> authenticator by default.  This is acceptable for quick prototypes but
-> your production code must provide a real certificate validator.
+<a id="domainaware-worker-pools--iotask_pool"></a>
 
+## Domain-aware worker pools – Io.Task_pool
 
-## Domain-aware worker pools – `Io.Task_pool`
-
-`Io.Task_pool` is an example of how to combine [`Eio.Domain_manager`]
-with [`Eio.Stream`] to perform CPU-bound work in parallel without
-blocking the event-loop.
+`Task_pool` delegates submitted work to an Eio-owned worker domain. The queue
+contains an input and a reply promise. Capacity zero means **synchronous
+rendezvous**, not an unbounded queue.
 
 ```ocaml
-module Pool = Io.Task_pool (struct
-  type input  = string
-  type output = string
-
-  let dm     = Eio.Stdenv.domain_mgr env
-  let stream = Eio.Stream.create 0    (* unbounded *)
-  let sw     = Eio.Switch.create ()
-
-  let handler s = String.uppercase_ascii s
-end)
-
-let () = Pool.spawn "upper" in
-assert (Pool.submit "abc" = "ABC")
+let uppercase_example env =
+  Eio.Switch.run (fun sw ->
+    let module Pool = Io.Task_pool (struct
+      type input = string
+      type output = string
+      let dm = Eio.Stdenv.domain_mgr env
+      let stream = Eio.Stream.create 0
+      let sw = sw
+      let handler = Core.String.uppercase
+    end) in
+    Pool.spawn "uppercase";
+    assert (String.equal (Pool.submit "abc") "ABC"))
 ```
 
+`spawn` starts an owned daemon fiber/domain; `submit` waits for its promise.
+This minimal demonstration is not a robust job scheduler: handlers must be
+thread-safe, and handler exceptions fail the owning switch rather than yielding
+a typed per-job result. Cancellation cannot preempt arbitrary CPU-only code.
+
+<a id="example-echo-server--client"></a>
 
 ## Example echo server / client
 
-The modules `Io.Server`, `Io.Client` and `Io.Run_server` serve as short,
-compile-tested code samples that show how to wire a TCP server and a
-couple of clients with Eio.
+`Server`, `Client` and `Run_server` are simple line-based networking demos.
+They are not authenticated production agent transports. Use
+[agent transports](../agent-server/README.md) for sessions and reconnects.
 
+<a id="base64-datauris"></a>
 
 ## Base-64 data-URIs
 
-```ocaml
-val file_to_data_uri : dir:'d Eio.Path.t -> string -> string
-```
-
-`file_to_data_uri ~dir file` loads `file` from `dir`, finds a MIME type
-from the file extension and returns a `data:…;base64,` URI – handy when
-talking to the OpenAI `images` API.
-
-
----
+`Io.Base64.file_to_data_uri ~dir file` loads a complete local file and encodes it
+with a MIME prefix. The function is inside `Io.Base64`, not at the Io top level.
+Encoding increases size and does not redact file contents. Supported image
+extensions select a MIME type; unknown extensions default to image/jpeg.
+The current helper prints filename/extension/MIME diagnostics to stdout, so it
+is not a silent or privacy-preserving encoder.
 
 ## Known limitations
 
-* The TLS configuration does **not** validate certificates – do not ship
-  code using `Io.Net` as-is to production.
-* All filesystem helpers load the whole file in memory – this is fine
-  for the short text snippets they are intended to handle but will not
-  scale to megabytes.
-
+Whole-file/body helpers are unbounded unless their caller supplies a bound.
+Plain writes, log appends and demo worker pools have none of the daemon's
+transaction, retention or security contracts.

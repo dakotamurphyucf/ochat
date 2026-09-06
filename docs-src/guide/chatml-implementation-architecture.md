@@ -1,5 +1,11 @@
 # ChatML implementation architecture
 
+For current native/daemon hosting, see [host modes](../agent-server/concepts.md) and
+[agent-host orchestration](../agent-server/chatml-orchestration.md). Daemon work belongs to
+the session actor, not a connected UI. The existing language/tool APIs remain
+shared; file-backed session/controller descriptions should be read in that host
+context. Instruction helper compatibility names emit developer-role messages.
+
 This guide is for contributors working on the ChatML implementation.
 
 It explains how the major pieces fit together and where to make changes for:

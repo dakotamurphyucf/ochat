@@ -47,6 +47,7 @@ let mode_name = function
 let reaction_name = function
   | Controller.Redraw -> "Redraw"
   | Refresh_messages -> "Refresh_messages"
+  | Delete_history _ -> "Delete_history"
   | Submit_input -> "Submit_input"
   | Cancel_or_quit -> "Cancel_or_quit"
   | Compact_context -> "Compact_context"
@@ -173,18 +174,36 @@ let%expect_test "Agent Escape, Ctrl-G, and printable keys preserve Chat state" =
     |}]
 ;;
 
-let%expect_test "Agent Escape returns to Chat before Chat Escape cancels or quits" =
+let%expect_test "Agent Escape returns to Chat before clearing Visual selection and cancelling" =
   let model = make_model ~mode:Model.Normal () in
   start model;
   Model.set_active_page model Agent;
   let first = Controller.handle_key ~model ~term:dummy_term (`Key (`Escape, [])) in
+  assert (Model.selection_active model);
   let second = Controller.handle_key ~model ~term:dummy_term (`Key (`Escape, [])) in
+  assert (not (Model.selection_active model));
+  assert (String.equal (Model.input_line model) "draft");
+  assert (Model.cursor_pos model = 2);
+  assert (Poly.equal (Model.mode model) Model.Normal);
+  let third = Controller.handle_key ~model ~term:dummy_term (`Key (`Escape, [])) in
   print_s
     [%sexp
       (reaction_name first : string)
     , (page_name model : string)
-    , (reaction_name second : string)];
-  [%expect {| (Redraw Chat Cancel_or_quit) |}]
+    , (reaction_name second : string)
+    , (reaction_name third : string)];
+  [%expect {| (Redraw Chat Redraw Cancel_or_quit) |}]
+;;
+
+let%expect_test "Agent Escape without Visual selection needs no extra Chat Escape" =
+  let model = make_model ~mode:Model.Normal ~selection_anchor:None () in
+  start model;
+  Model.set_active_page model Agent;
+  let dispatch () = Controller.handle_key ~model ~term:dummy_term (`Key (`Escape, [])) in
+  assert (Poly.equal (dispatch ()) Controller.Redraw);
+  assert (Poly.equal (Model.active_page model) Model.Page_id.Chat);
+  assert (Poly.equal (dispatch ()) Controller.Cancel_or_quit);
+  [%expect {| |}]
 ;;
 
 let%expect_test "Agent scrolling is page-local" =

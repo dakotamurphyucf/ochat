@@ -1,5 +1,11 @@
 # ChatML language specification
 
+For current native/daemon hosting, see [host modes](../agent-server/concepts.md) and
+[agent-host orchestration](../agent-server/chatml-orchestration.md). Daemon work belongs to
+the session actor, not a connected UI. The existing language/tool APIs remain
+shared; file-backed session/controller descriptions should be read in that host
+context. Instruction helper compatibility names emit developer-role messages.
+
 This document is the implementation-faithful specification of ChatML as it
 exists in the current codebase.
 
@@ -2626,39 +2632,43 @@ embeddings.
 
 ### 21.5 Moderator script contract
 
-The integrated moderator runtime uses a convention-based contract:
+The integrated moderator runtime uses a convention-based contract. This
+self-contained example counts appended items and rejects every tool call.
+The complete source is available as
+[`moderator.chatml`](../examples/chatml/moderator.chatml):
 
 ```ocaml
-let initial_state = { reminder_count = 0 }
-  
+type state = { appended_count : int }
+type event =
+  [ `Session_start
+  | `Session_resume
+  | `Turn_start
+  | `Item_appended(item)
+  | `Pre_tool_call(tool_call)
+  | `Post_tool_response(tool_result)
+  | `Turn_end
+  ]
+
+let initial_state = { appended_count = 0 }
+
 let on_event : context -> state -> event -> state task =
   fun ctx st ev ->
     match ev with
-    | `UserMessage(msg) ->
-      let st = { st with reminder_count = st.reminder_count + 1 } in
-      let* () = Turn.prepend_system("Be concise. Validate tool arguments before execution.") in
+    | `Item_appended(item) ->
+      Task.pure({ st with appended_count = st.appended_count + 1 })
+    | `Pre_tool_call(call) ->
+      let* () = Tool.reject("Tools are disabled by this moderator.") in
       Task.pure(st)
-
-    | `BeforeToolCall(call) ->
-      let input = ... in
-      let* review = Model.call("tool_safety_review", input) in
-      ( match review with
-      | `Ok(decision) ->
-        let* () = Tool.approve() in
-        Task.pure(st)
-      | `Refused(msg) ->
-        let* () = Tool.reject("model refused: " ++ msg) in
-        Task.pure(st)
-      | `Error(msg) ->
-        let* () = Tool.reject("review failed: " ++ msg) in
-        Task.pure(st))
-    | `AsyncCompleted(job_id, payload) ->
-      let* () = Log.info("async completed: " ++ job_id) in
-      Task.pure(st)
-
     | _ ->
       Task.pure(st)
 ```
+
+`Item_appended` is not limited to user messages. The standard host events are
+`Session_start`, `Session_resume`, `Turn_start`, `Item_appended(item)`,
+`Pre_tool_call(call)`, `Post_tool_response(result)`, and `Turn_end`. Internal
+events are host-defined variants, such as
+`Model_job_succeeded(job_id, recipe, result)`, not a universal
+`AsyncCompleted` event. See the [moderator event model](chatml-moderator-runtime.md#event-model).
 
 Conceptually:
 
@@ -2957,7 +2967,7 @@ shared moderation layer rather than mutating canonical history directly.
 
 `Turn.*` effects update a host-owned overlay that can:
 
-- prepend synthetic system messages,
+- prepend synthetic developer messages,
 - append synthetic messages,
 - replace projected messages by stable host id,
 - delete projected messages by stable host id,

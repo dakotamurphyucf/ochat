@@ -38,7 +38,7 @@
       end
 
       (* 2.  Provide the implementation *)
-      let echo_impl (text : string) = text
+      let echo_impl (text : string) = Openai.Responses.Tool_output.Output.Text text
 
       (* 3.  Register *)
       let echo_tool : Ochat_function.t =
@@ -192,9 +192,9 @@ type t =
     [D] with the OCaml implementation [impl].  The resulting [t] can be
     included in a model request's tool list.
 
-    [strict] mirrors the field described in OpenAI docs: when [true] (the
-    default) the model must supply exactly the schema; when [false] additional
-    properties are permitted. *)
+    [strict] is forwarded as provider metadata and defaults to [true]. This
+    function does not perform local JSON-Schema validation or authorization;
+    [D.input_of_string] and the owning host enforce their respective policies. *)
 val create_function
   :  (module Def with type input = 'a)
   -> ?strict:bool (** default = [true] – controls OpenAI's argument parsing *)

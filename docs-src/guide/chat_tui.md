@@ -3,7 +3,25 @@
 `chat_tui` is the Notty-based terminal UI for running **ChatMarkdown** prompts interactively.
 
 - **Installed binary name:** `chat-tui`
-- **From the repo:** `dune exec chat_tui -- …`
+- **From the repo:** `dune exec bin/chat_tui.exe -- …`
+
+## Current host modes
+
+For new local work use [native local TUI](../agent-server/tutorials/local-tui.md);
+it is transient and process-bound. For persistence/background work use
+[daemon connections](../agent-server/tutorials/unix-daemon.md). The
+[CLI reference](../bin/chat_tui.doc.md) explains mode selection and incompatible
+flags. `--no-config` avoids ambient arguments selecting a legacy host.
+
+Connected clients render server-owned state and preserve drafts across reconnect.
+Quitting detaches; it does not export over the prompt or stop a detached session.
+Read-only attachments cannot submit input or answer approvals. Security/transcript
+visibility also depends on credential scopes. Shell authorization differs by
+host: see [the host matrix](chatmd-shell-host-integration.md).
+
+Keyboard, rendering, navigation and editing sections below apply where their
+host offers the relevant capability. File-backed session and automatic prompt
+export sections are explicitly legacy behavior, not native/daemon defaults.
 
 ChatMarkdown is Markdown + a small XML dialect; the runtime does **not** depend on file
 extensions, so any `.md` can be a ChatMarkdown prompt.
@@ -20,9 +38,9 @@ extensions, so any `.md` can be a ChatMarkdown prompt.
 `chat_tui` is designed for the “draft → run → iterate” loop:
 
 - **Multi-line drafts without accidental sends:** `Enter` inserts a newline; **`Meta+Enter` submits**.
-- **Two live pages:** Chat keeps the canonical transcript and editor; Agent shows transient progress from active tools.
+- **Chat, Agent, and Shell Security views:** Chat keeps the transcript/editor, Agent shows tool/nested-agent progress, and Shell Security shows authority, approvals and audit.
 - **Vim-ish interaction:** Insert / Normal / Cmdline modes, plus message selection and yank/edit/resubmit.
-- **Sessions you can resume/branch/export:** persistent snapshots under `$HOME/.ochat/sessions/<id>`.
+- **Sessions:** daemon sessions are durable in their configured store; legacy snapshots use `$HOME/.ochat/sessions/<id>`; native local sessions are transient.
 - **Manual context compaction:** `:compact` produces a concise summary so long chats stay usable.
 - **Syntax highlighting:** Rich syntax highlighting enabled for Markdown, XML, Json, Ocaml with more to come.
 
@@ -38,7 +56,7 @@ $ chat-tui -file prompts/interactive.md
 From the repo:
 
 ```console
-$ dune exec chat_tui -- -file prompts/interactive.md
+$ dune exec bin/chat_tui.exe -- -file prompts/interactive.md
 ```
 
 Notes:
@@ -47,9 +65,15 @@ Notes:
 
 ### Workspace and `read_file` roots
 
-The directory where `chat-tui` is launched is the configured `${workspace}`
+In native local mode, the directory where `chat-tui` is launched is `${workspace}`
 and `${tool_dir}` for the agent. The location of `-file` does not change that
-workspace; it sets `${prompt_dir}` instead. Start the TUI from the project the
+workspace; it selects the source to pin. Native local `${prompt_dir}` points to
+that prompt's materialized artifact directory, not its original directory;
+`${source_dir}` similarly follows captured imports. Uncaptured neighboring assets
+are not copied. Use `${workspace}` or explicit tool roots for project data. In
+daemon mode, the server resolves
+the configured workspace and its own launch directory; the client's cwd does
+not change either. Start a local TUI from the project the
 agent should operate on:
 
 ```console
@@ -176,10 +200,10 @@ produces one final canonical output through the existing Chat transcript path.
 | `:q` / `:quit` | quit |
 | `:wq` | quit (**does not submit first**) |
 | `:c` / `:cmp` / `:compact` | compact context |
-| `:d` / `:delete` | delete selected message |
-| `:e` / `:edit` | yank selected message into editor and switch to **Raw XML** |
+| `:d` / `:delete` | delete the selected canonical occurrence while idle; native/daemon hosts require a writable attachment (see below) |
+| `:e` / `:edit` | copy the selected canonical row's displayed text into the editor in **Plain** Insert mode |
 | `:noh` / `:nohlsearch` | clear last-search highlight *(currently may be slower on very large histories due to cache invalidation strategy)* |
-| `:shell` | open Shell Security and refresh its management snapshot |
+| `:shell` / `:security` | open Shell Security and refresh its management snapshot |
 
 ---
 
@@ -197,7 +221,7 @@ produces one final canonical output through the existing Chat transcript path.
 
 ## Modes and the one subtle ESC behavior
 
-`chat_tui` has two pages and four Chat-editor modes. Agent is a page, not an
+`chat_tui` has three pages and four Chat-editor modes. Agent is a page, not an
 editor mode:
 
 - **Insert:** you type into the draft buffer.
@@ -210,13 +234,17 @@ editor mode:
 This is the most important behavior to learn:
 
 - **Insert + bare `Esc`** → switches to **Normal** mode (it does *not* cancel streaming).
-- **Normal + `Esc`** → “cancel or quit”:
+- **Normal + bare `Esc`, Visual selection active** → clear the selection and
+  pending command/count, remain Normal, and leave active work running.
+- **Normal + `Esc`, no selection** → “cancel or quit”:
   - if a response is streaming: **cancel** the in-flight request
   - otherwise: triggers the “quit-via-ESC” shutdown path (which changes export prompting)
 - **Agent page + `Esc`** → return to Chat without cancelling.
 
 Practical tip:
-- To cancel while you’re typing in Insert: press `Esc` (go Normal), then `Esc` again (cancel).
+- To cancel while typing in Insert with no suggestion or selection: press
+  `Esc` (go Normal), then `Esc` again (cancel). Suggestions/previews and Visual
+  selection consume their own Escape presses first.
 - If Agent is visible, first press `Esc` to return to Chat, then use the
   existing Chat-page cancellation sequence.
 
@@ -231,9 +259,11 @@ Beyond basic typing:
 - **Line navigation:** `Ctrl-A` / `Ctrl-E` (start/end of line)
 - **Whole-draft navigation:** `Ctrl-Home` / `Ctrl-End`
 - **Word navigation:** `Ctrl+←/→`, `Meta+←/→`, plus `Meta-b` / `Meta-f`
-- **Multi-line cursor movement inside the editor:** `Ctrl+↑/↓`
-  (plain `↑/↓` scrolls the history viewport instead)
-- **Duplicate line:** `Meta+Shift+↑/↓`
+- **Multi-line cursor movement inside the editor:** `Meta+↑/↓` or `Shift+↑/↓`.
+  Plain and `Ctrl+↑/↓` scroll history. With the typeahead preview closed,
+  `Ctrl+Shift+↑/↓` moves through the editor by its visible page height.
+- **Duplicate line:** `Meta+Shift+↑/↓` duplicates the current line above/below.
+  This is one undoable edit, distinct from Meta-arrow movement.
 - **Indent/unindent line:** `Meta+Shift+→/←`
 - **Kill/yank:** `Ctrl-k`, `Ctrl-u`, `Ctrl-w`, `Ctrl-y`
 - **`Meta+Backspace`:** kill previous word
@@ -244,12 +274,23 @@ This is one of the fastest ways to iterate on a previous result:
 
 1. `Esc` → Normal
 2. `[` / `]` to select the message you care about
-3. `:e` to yank it into the draft (switches to Raw XML)
+3. `:e` to copy its displayed text into the draft (Plain Insert mode)
 4. Edit and submit with `Meta+Enter` (or `:w`)
 
-Use cases:
-- tweak a previous tool call and rerun it
-- quote and refine an earlier instruction
+This copies text; it does not replace the original entry or re-execute a tool
+call. Moderator-inserted/replaced and transient rows cannot be edited this way.
+Use it to quote and refine an earlier instruction. To author rich input,
+explicitly toggle Raw XML and provide a `<user>...</user>` block.
+
+`:delete` removes the selected canonical occurrence and, for a tool call or
+result, its matching call/result occurrence. It does not undo tool effects.
+Native/daemon clients send [`session.delete_history`](../agent-server/protocol.md)
+with the stable history ID and expected revision; the actor requires a writable
+attachment and idle/stopped session. Stale revisions and active work are rejected.
+The committed replacement updates all subscribers; the TUI never deletes
+optimistically. Legacy mode applies the same pairing rule to local history
+while no operation is active. Moderator-projected and transient rows cannot be
+deleted. Draft undo does not restore deleted history.
 
 ---
 
@@ -289,33 +330,138 @@ Use cases:
 
 ### “Note From the User” while streaming
 
-If a response is currently streaming and you submit again, the draft text is **not** queued as a new
-visible user turn. Instead it is injected into the in-flight request as:
+In native local and daemon modes, submitted messages are admitted by the session
+actor. Input arriving during active work is queued with canonical identity and
+applied at a safe boundary; it does not modify a provider request already sent.
+The UI projects the accepted server history and admission state.
+
+The older file-backed host instead records a deferred steering note, rendered
+as transient developer input at the next safe model-input boundary:
 
 > `This is a Note From the User:\n…`
 
-This lets you correct or refine mid-stream without restarting the run.
+This lets you steer subsequent work without restarting the run. It is not
+injection into an already in-flight HTTP request. See
+[safe-point semantics](../chatml-safe-point-and-effective-history.md) and
+[agent-host orchestration](../agent-server/chatml-orchestration.md) for the
+distinct persistence and ordering contracts.
 
 ---
 
 ## Draft modes: Plain Markdown vs Raw XML
 
+### Type-ahead availability and privacy
+
+Typeahead is an optional **client-local** feature in all three modes: native
+local, daemon-connected, and legacy file-backed. It is **off by default**,
+including for existing legacy configurations that omit the new flags.
+
+```sh
+# Explicit suggestions; your regular local prompt/agent remains unchanged.
+chat-tui --no-config --local -file ./prompts/interactive.md --typeahead manual
+
+# Automatic suggestions after eligible edits or cursor movement.
+chat-tui --no-config --local -file ./prompts/interactive.md --typeahead auto
+```
+
+Enabling it requires a nonempty local `OPENAI_API_KEY`, even when connected to
+a daemon. It uses the TUI process's `API_URL` and never borrows the daemon's
+provider key or bearer token. **Enabling suggestions sends unsent draft text
+to the provider and can incur additional charges.** History inclusion is
+separately opt-in. Token limits are not a monetary spending cap.
+
+| Setting | Default | Meaning |
+|---|---|---|
+| `--typeahead off\|manual\|auto` | `off` | No requests / Ctrl+Space only / also after eligible edits |
+| `--typeahead-model MODEL` | `gpt-5.6-luna` | Independent of the ChatMD/daemon model |
+| `--typeahead-history-messages N` | `0` | Newest 0–3 visible text messages; no tool/image payloads |
+| `--typeahead-debounce-ms N` | `200` | Automatic debounce, 100–5000 ms |
+| `--typeahead-max-output-tokens N` | `200` | Output limit, 1–512 |
+
+These flags use the existing argument config file. Explicit CLI settings
+override corresponding config-file settings; `--no-config` disables that file.
+They do not select legacy mode. Invalid bounds or a missing enabled-feature
+credential fail before session creation or connection.
+
+In Insert mode on Chat with a nonblank Plain draft:
+
+- Ctrl+Space requests a suggestion, or toggles an existing suggestion's preview.
+  Ctrl+@/NUL terminal aliases are supported.
+- Manual requests open the preview when the result arrives; automatic requests
+  show an inline ghost first. The first line appears at the cursor with a count
+  of hidden lines. The expandable preview uses at most ten rows and crops long
+  lines to its width; it does not wrap them.
+- While a preview is open, `Ctrl+Shift+Up/Down` scrolls one line,
+  `PageUp/PageDown` scrolls five, and `Ctrl+Shift+Left/Right` jumps to its
+  beginning/end.
+- Tab accepts all; Shift+Tab accepts one line. Both affect only the local editor,
+  with undo support. Acceptance itself does not start another request.
+- Each acceptance is one undo step: `Esc` to Normal, then `u` to undo or
+  `Ctrl+R` to redo. This restores draft text/cursor, not a dismissed popup,
+  transcript, or tool effects. Shift+Tab includes the line's newline, closes
+  the preview, and leaves any remaining suggestion available for acceptance.
+- `[suggesting]` appears while a request is running, in both manual and auto
+  modes; it does not appear during the automatic debounce. It is independent
+  of the foreground agent's Thinking indicator. A first failed request can
+  show `[typeahead unavailable]`; raw errors are not displayed and later errors
+  are suppressed for that TUI instance. Narrow terminals can crop the status.
+- Escape first closes the preview, then dismisses the suggestion, then follows
+  normal editor mode/quit behavior. Dismissal cancels pending work.
+- Requests are suppressed in Raw XML, read-only/disconnected attachments, other
+  pages, startup/resize barriers, and blocking approval dialogs.
+- Edits, cursor changes, submission, history replacement, attachment changes,
+  and disconnect invalidate outstanding work. Disconnect preserves the draft
+  but clears suggestions; reconnect alone never transmits it.
+
+Requests contain an at-most-8192-byte UTF-8 draft window around the cursor,
+plus omission/cursor markers. Optional visible history has a combined 16384-byte
+budget. Results are sanitized and limited to 4096 UTF-8 bytes. Requests have a
+ten-second total deadline, no automatic retries, and a 256 KiB response body
+limit. Errors are nonfatal and shown without raw provider details. Typeahead
+does not write raw request/response/error logs; other agent/provider requests
+retain their existing logging behavior.
+
+Suggestions are not session messages, tool calls, permission grants, or daemon
+jobs. Other clients cannot see a private draft until explicit submission.
+See [provider and lifecycle reference](../lib/chat_tui/type_ahead_provider.doc.md)
+and [offline tests / visual check](../development/typeahead-verification.md).
+
+### Plain and raw input
+
 The draft buffer has two interpretations:
 
 - **Plain**: normal Markdown text sent as a user message.
-- **Raw XML**: low-level ChatMarkdown XML elements (useful for editing tool calls/tags precisely).
+- **Raw XML**: parse a ChatMD user message, including inline document/image/agent
+  helpers. This is not an arbitrary transcript or tool-call injection interface.
 
 How to toggle:
 - Insert: `Ctrl-r`
 - Normal: `r` (bare) toggles Plain ⇄ Raw XML
   - (`Ctrl-r` in Normal is redo)
 
-`:e` / `:edit` always yanks into the editor and forces **Raw XML** so you can safely rework
-structured content.
+`:e` / `:edit` selects **Plain**, not Raw XML. Raw submission converts the first
+`<user>` element; additional top-level messages are not appended as a transcript.
+Text not starting with `<` is wrapped in `<user>`. A payload with no user message
+is rejected by agent hosts. Legacy malformed/no-user input also starts no turn
+and leaves canonical history unchanged. It restores the rejected text and draft
+mode when the editor is empty; if a newer draft exists, that draft is preserved.
+An error notice includes the rejected text so it can be recovered. This also
+applies to deferred submissions. Use a well-formed user block rather than tool
+records alone.
+
+Example rich input (after explicitly toggling Raw XML):
+
+```xml
+<user>Explain this document: <doc src="docs-src/README.md" local/></user>
+```
 
 ---
 
 ## Quitting & export (predictable rules)
+
+The automatic prompt-file export rules in this section describe the legacy
+file-backed host only. Native local quit closes its transient host; connected
+quit detaches. Use explicit daemon export commands for a remote transcript.
 
 There are two distinct shutdown experiences:
 
@@ -339,12 +485,18 @@ If you say yes, it may also ask for an output path when `--export-file` is not s
 
 Notes:
 - There is no `/quit` slash command.
-- `q` only triggers Quit in the Insert-mode key handler; for consistent quitting, prefer `:q` or `Ctrl-C`.
+- Bare `q` types a letter in Insert mode; it is not a quit shortcut. Prefer
+  `:q`. In Insert mode `Ctrl-C` copies when a selection is active, otherwise
+  it requests quit.
 - The prompt text says “promptmd”; it refers to exporting a **ChatMarkdown transcript**.
 
 ---
 
 ## Persistent sessions (resume / branch / reset / export)
+
+This section describes legacy `Session_store` sessions. For daemon sessions,
+use the [connected lifecycle guide](../agent-server/sessions-and-workspaces.md);
+do not mix the IDs, stores, flags or persistence defaults.
 
 Session snapshots store identity-bearing canonical history. Every logical
 occurrence has an application-owned `History_entry.Id`; provider item IDs and
@@ -403,6 +555,8 @@ Use:
 
 ---
 
+<a id="context-compaction-compact--current-behavior"></a>
+
 ## Context compaction (`:compact`) — current behavior
 
 When a conversation grows too large, you can compact it manually:
@@ -419,18 +573,43 @@ Rules:
 
 The current compactor:
 
-- keeps only system/developer messages from the existing history (and any previous `<system-reminder>` messages),
-- appends a new summary wrapped in a `<system-reminder>…</system-reminder>` block.
+- retains system/developer messages and up to ten most recent user-role
+  `<system-reminder>` entries, preserving their canonical IDs,
+- appends a fresh user-role summary wrapped in
+  `<system-reminder>…</system-reminder>` (the tag does not set the message role).
 
-If you are in a persisted session, compaction also archives the current `snapshot.bin` into the
-session’s `archive/` folder as part of the reset flow.
+The legacy host saves a pre-compaction snapshot when a session is present, but
+does not invoke reset/archive as part of this action. Agent hosts durably archive
+the pre-replacement state before committing replacement history. Retrieve an
+archive revision from `session.get`'s `archived_revisions`, then request
+`session.export` at that revision. Archives survive daemon restart and normal
+journal pruning; transient session cleanup still removes them. This is export,
+not automatic undo or restoration. See [session history](../agent-server/sessions-and-workspaces.md).
 
-Note: there are modules for config and relevance scoring, but user config-file loading and relevance
-filtering are not fully wired in the current implementation.
+The summarizer retries parsing failures and can split work into two tool-pair-
+preserving parts; online failure is explicit rather than silently installing a
+truncated fallback. [Configuration](../context_compaction/config.doc.md) is loaded
+through Eio. `context_limit` caps a local estimate of the resulting context;
+optional `relevance_filtering` is disabled by default and may add paid requests.
+See [compaction](../context_compaction/compactor.doc.md)
+and [summarization](../lib/context_compaction/summarizer.doc.md).
 
 ---
 
 ## Shell approvals and Shell Security
+
+### Native local and daemon permission dialog
+
+Agent hosts show actor-owned pending tool permissions as a **Moderator choice
+required** dialog on Shell Security. It lists the redacted invocation and only
+the offered choices. Use `j/k` or arrows to select and Enter to submit; digits
+select a listed choice. Escape chooses `deny`. This client submits a choice
+without a free-text reason; generation checks protect against stale answers.
+The legacy shell-dialog `m`/`i` controls below do not apply to this dialog.
+Approval does not return to Chat automatically; press Escape after the dialog
+closes. Read-only connections cannot answer permissions.
+
+### Legacy local shell approval dialog
 
 When a command reaches policy action `ask`, `chat_tui` opens a centered local
 approval modal over the current page. The modal is not a conversation message
@@ -459,6 +638,8 @@ offers a broader scope. Parallel tool calls queue approval requests
 deterministically. A pending shell approval has priority over moderator
 text/choice input so ordinary submission cannot race or corrupt transcript
 state.
+
+### Shell Security page (all hosts)
 
 Open Shell Security with `:shell`. Tabs are:
 
@@ -495,7 +676,7 @@ The shell UI uses a centralized modern 256-color palette built with
 readable when a terminal reduces color fidelity or Unicode border support.
 A persistent red warning banner appears when a YOLO profile is active.
 
-`--authorize-shell-manifest` is a one-process interactive authorization for
+`--authorize-shell-manifest` is a legacy-local, one-process authorization for
 the exact canonical manifest. A security-relevant edit changes the digest and
 requires new authorization. It is not global path trust and is rejected for
 noninteractive selector commands.
@@ -512,18 +693,34 @@ Terminals differ in how they encode Alt/Option and which keys they report as `Me
 To see exactly what your terminal sends, run the key inspector:
 
 ```console
-$ dune exec key_dump --
+$ dune exec bin/key_dump.exe --
 ```
 
 ### Known limitations
 
-- Cursor positioning is derived from **byte offsets** in the input buffer; wide Unicode glyphs may
-  misalign the cursor with what you see on screen.
+- Draft, command and search input accept Unicode. Horizontal draft movement,
+  backspace and Normal-mode character deletion respect extended grapheme
+  boundaries, including combining marks and emoji sequences. Word motions are
+  whitespace-based, not language-aware. Terminal glyph widths can still differ.
+- Ordinary draft edits are checkpointed once per controller action; undo/redo
+  restores text and cursor, and a new edit clears redo. Typeahead whole/line
+  acceptance remains one checkpoint each. This is not history or tool-effect undo.
+  Unmodified `ß` now inserts text; use Meta+S/Meta+V to toggle selection.
 - Mouse input is disabled in `chat_tui` (keyboard-driven UI).
 - Agent shows active calls only; completed calls are removed rather than kept
   as a second transcript.
 
 ### Tuning responsiveness (optional)
+
+Native local and daemon-connected modes use a
+[coalesced background layout worker](../lib/chat_tui/agent_history_layout.doc.md)
+for initial history and width changes. Superseded results cannot publish. Home,
+End and search destinations are applied after exact geometry is ready. At an
+already-warm width, streaming updates synchronously warm dirty chunks only.
+
+The progressive corridor pipeline below describes the **legacy reducer**;
+native/daemon mode uses aggregate preparation, not that exact scheduling
+algorithm. Do not interpret legacy worker metrics as native performance evidence.
 
 Startup uses an animated barrier and one aggregate two-domain render. Ordinary
 input is discarded until exact history is atomically published.

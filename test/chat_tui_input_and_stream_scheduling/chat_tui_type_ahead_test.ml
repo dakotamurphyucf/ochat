@@ -52,6 +52,7 @@ let reaction_to_string (r : Chat_tui.Controller.reaction) : string =
   match r with
   | Chat_tui.Controller.Redraw -> "Redraw"
   | Chat_tui.Controller.Refresh_messages -> "Refresh_messages"
+  | Chat_tui.Controller.Delete_history _ -> "Delete_history"
   | Chat_tui.Controller.Submit_input -> "Submit_input"
   | Chat_tui.Controller.Cancel_or_quit -> "Cancel_or_quit"
   | Chat_tui.Controller.Compact_context -> "Compact_context"
@@ -211,6 +212,51 @@ let%expect_test
     {| r1=Redraw after1=(preview=false completion=true) r2=Redraw after2=(preview=false completion=false) r3=Redraw mode=Normal |}]
 ;;
 
+let%expect_test "terminal Ctrl-R redoes an accepted completion" =
+  let open Chat_tui in
+  let model = make_model ~input_line:"hi" ~cursor_pos:2 () in
+  set_relevant_completion model ~text:" there";
+  assert (Model.accept_typeahead_all model);
+  Model.set_mode model Normal;
+  ignore
+    (Controller.handle_key ~model ~term:dummy_term (`Key (`ASCII 'u', []))
+     : Controller.reaction);
+  Notty.Unescape.decode [ Uchar.of_char '\018' ]
+  |> List.iter ~f:(fun event ->
+    let reaction = Controller.handle_key ~model ~term:dummy_term event in
+    printf
+      "%s draft=%S cursor=%d\n"
+      (reaction_to_string reaction)
+      (Model.input_line model)
+      (Model.cursor_pos model));
+  [%expect {| Redraw draft="hi there" cursor=8 |}]
+;;
+
+let%expect_test "Ctrl-R encodings redo in Normal and toggle raw XML in Insert" =
+  let open Chat_tui in
+  List.iter
+    [ `Key (`ASCII 'r', [ `Ctrl ])
+    ; `Key (`ASCII 'R', [ `Ctrl ])
+    ; `Key (`ASCII '\018', [])
+    ]
+    ~f:(fun event ->
+      let model = make_model ~input_line:"hi" ~cursor_pos:2 () in
+      set_relevant_completion model ~text:" there";
+      assert (Model.accept_typeahead_all model);
+      Model.set_mode model Normal;
+      assert (Model.undo model);
+      let handle () = Controller.handle_key ~model ~term:dummy_term event in
+      assert (Poly.equal (handle ()) Redraw);
+      assert (String.equal (Model.input_line model) "hi there");
+      assert (Model.cursor_pos model = 8);
+      Model.set_mode model Insert;
+      assert (Poly.equal (handle ()) Redraw);
+      assert (Poly.equal (Model.draft_mode model) Raw_xml);
+      assert (Poly.equal (handle ()) Redraw);
+      assert (Poly.equal (Model.draft_mode model) Plain));
+  [%expect {| |}]
+;;
+
 let%expect_test "controller: Ctrl+Space encoding closes preview when already open" =
   let model = make_model ~input_line:"hi" ~cursor_pos:2 () in
   set_relevant_completion model ~text:" there";
@@ -234,5 +280,70 @@ let%expect_test "controller: Ctrl+Space encoding closes preview when already ope
     after_space_ctrl=false
     after_at_ctrl=false
     after_nul=false
+    |}]
+;;
+
+let editor_key model key =
+  ignore
+    (Chat_tui.Controller.handle_key ~model ~term:(Obj.magic ()) (`Key key)
+     : Chat_tui.Controller.reaction)
+;;
+
+let%expect_test "Unicode insertion and grapheme editing preserve undo and invalidate redo"
+  =
+  let open Chat_tui in
+  let model = make_model () in
+  List.iter [ 0x65; 0x301; 0x1f600; 0xdf ] ~f:(fun code ->
+    editor_key model (`Uchar (Stdlib.Uchar.of_int code), []));
+  print_endline (Model.input_line model);
+  editor_key model (`Arrow `Left, []);
+  editor_key model (`Backspace, []);
+  print_endline (Model.input_line model);
+  ignore (Model.undo model : bool);
+  print_endline (Model.input_line model);
+  ignore (Model.redo model : bool);
+  editor_key model (`Backspace, []);
+  print_endline (Model.input_line model);
+  ignore (Model.undo model : bool);
+  editor_key model (`ASCII 'x', []);
+  printf
+    "redo=%b valid=%b\n"
+    (Model.redo model)
+    (Stdlib.String.is_valid_utf_8 (Model.input_line model));
+  [%expect
+    {|
+    é😀ß
+    éß
+    é😀ß
+    ß
+    redo=false valid=true
+    |}]
+;;
+
+let%expect_test "Meta Shift duplication is not shadowed and is one undo step" =
+  let model = make_model ~input_line:"first\nsecond" ~cursor_pos:0 () in
+  editor_key model (`Arrow `Down, [ `Meta; `Shift ]);
+  print_endline (Chat_tui.Model.input_line model);
+  ignore (Chat_tui.Model.undo model : bool);
+  printf "restored=%b\n" (String.equal (Chat_tui.Model.input_line model) "first\nsecond");
+  [%expect
+    {|
+    first
+    first
+    second
+    restored=true
+    |}]
+;;
+
+let%expect_test "normal x removes a whole emoji cluster" =
+  let model = make_model ~input_line:"👩‍💻!" ~mode:Chat_tui.Model.Normal () in
+  editor_key model (`ASCII 'x', []);
+  print_endline (Chat_tui.Model.input_line model);
+  editor_key model (`ASCII 'u', []);
+  print_endline (Chat_tui.Model.input_line model);
+  [%expect
+    {|
+    !
+    👩‍💻!
     |}]
 ;;

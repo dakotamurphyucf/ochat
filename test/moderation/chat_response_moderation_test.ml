@@ -16,6 +16,24 @@ let ok_or_fail = function
   | Error msg -> failwith msg
 ;;
 
+let%expect_test "ChatML instruction constructors emit developer roles" =
+  let module Item = Chat_response.Chatml_moderation.Item in
+  let items =
+    [ Item.system_text ~id:"policy" "policy"
+    ; Item.notice ~id:"notice" ~text:"notice"
+    ; Item.input_text_message ~id:"explicit" ~role:"system" ~text:"explicit"
+    ; Item.user_text ~id:"user" "user"
+    ]
+  in
+  print_s [%sexp (List.map items ~f:Item.role : string option list)];
+  print_s [%sexp (List.map items ~f:Item.is_system : bool list)];
+  [%expect
+    {|
+    ((developer) (developer) (developer) (user))
+    (true true true false)
+    |}]
+;;
+
 let input_text (text : string) : Res.Input_message.content_item =
   Res.Input_message.Text { text; _type = "input_text" }
 ;;

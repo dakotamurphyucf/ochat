@@ -71,7 +71,7 @@ templates—all without reflection or fragile global state.
 |-------|-------------|
 | `of_string : string -> string` | Identity function (convenience wrapper). |
 | `load : ?search_dirs:string list -> string -> string` | Read a template file from disk, trying each directory in `search_dirs` (default `"."`). Raises if the file is not found. |
-| `render : string -> (string * string) list -> string` | Direct substitution on a raw string (no functor instantiation). |
+| `render : string -> (string * string) list -> string` | Literal `{{key}}` replacements in mapping order; unmatched placeholders and whitespace-bearing forms remain. Later mappings can replace text inserted by earlier ones. |
 
 
 ### 2.1 `module type RENDERABLE`
@@ -127,7 +127,7 @@ module Person = struct
     items: string list;
   }
 
-  let items_template = Items_template.create {|items\n-----------\n{{items}}|}
+  let items_template = Items_template.create "items\n-----------\n{{items}}"
 
   let to_key_value_pairs p =
     [ "name",  p.name
@@ -139,7 +139,7 @@ end
 module PT = Template.Make_Template (Person)
 
 let () =
-  let tpl = PT.create {|Hello, {{name}}!\nYour age is {{age}}.\nShopping:\n{{items}}|} in
+  let tpl = PT.create "Hello, {{name}}!\nYour age is {{age}}.\nShopping:\n{{items}}" in
   print_endline @@ PT.render tpl {
     name = "John"; age = 30; items = ["milk"; "bread"]; }
 ```
@@ -160,16 +160,22 @@ items
 
 ## 4. Design decisions & limitations
 
-* **Performance** — substitution relies on a single `Re2.replace_exn`
-  call; for small templates this is negligible.  No streaming
-  interface is provided.
+* **Two renderers** — the functor uses one whitespace-aware regex replacement;
+  standalone `Template.render` folds literal replacements over the mapping.
+  They do not have identical missing-key or replacement-cascade behavior.
 
 * **Escaping / conditionals** — out-of-scope on purpose.  Use a full
   feature-rich engine (e.g. *mustache.ml*) if you require loops or
   conditionals.
 
-* **Missing keys** — silently replaced by the empty string.  Wrap
-  `render` if you need stricter behaviour.
+* **Missing keys** — the functor replaces them with the empty string;
+  standalone render preserves them. Neither is a strict validation API.
+* **Loading** — searches only the supplied directories (default `.`), with no
+  extra literal-path fallback. It uses blocking file I/O; call from an appropriate
+  boundary rather than assuming it is an Eio-native loader.
+* **Parsing** — missing captures print a diagnostic and return None. Invalid
+  regexes or exceptions in `from_key_value_pairs` can raise. This is not a
+  universally exception-free parser.
 
 ---
 
@@ -190,4 +196,3 @@ items
 ---
 
 Happy templating! ✨
-

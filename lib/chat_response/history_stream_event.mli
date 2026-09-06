@@ -11,6 +11,7 @@ module Registry : sig
   type t
 
   val create : allocator:History_entry.Allocator.t -> t
+  val create_with_source : id_source:History_entry.Id_source.t -> t
   val create_scope : t -> int
 
   val observe

@@ -1,5 +1,14 @@
 # ChatML Host Session-Controller Contract
 
+Host scope: the phase/shared-host discussion below remains useful for legacy
+file-backed and embedding controllers. The newer agent host has an actor-owned
+controller, durable jobs/schedules and client projections; see
+[agent-host orchestration](agent-server/chatml-orchestration.md). Statements about
+a phase lacking a generalized Job surface are not limitations of the daemon's
+current `job.*`/`schedule.*` protocol. UI capabilities remain host-specific.
+Instruction helpers with historical system names now construct developer messages;
+old history and raw values are not rewritten.
+
 This document makes the current host-side session-controller behavior explicit
 without introducing a new compiled API.
 

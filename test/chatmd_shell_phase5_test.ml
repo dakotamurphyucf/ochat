@@ -1033,7 +1033,7 @@ let%test_unit "executor timeout is a terminal replay event, not an interrupted r
            in
            let limits =
              Shell_access.Limits.
-               { default with wall_time_seconds = 0.03; idle_time_seconds = None }
+               { default with wall_time_seconds = 0.5; idle_time_seconds = None }
            in
            let config =
              Shell_access.Executor.config

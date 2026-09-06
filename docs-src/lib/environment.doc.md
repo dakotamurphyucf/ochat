@@ -20,16 +20,16 @@ The module lives in `lib/environment.{ml,mli}` and is published as
 ## Quick example
 
 ```ocaml
-open Chatochat.Environment  (* or simply Environment if you opened the library *)
+open! Core
 
-let base  = of_list [ "x", 1 ; "y", 2 ]
-let extra = of_list [ "y", 0 ; "z", 3 ]
-
-let merged = merge base extra
-
-assert (find_opt "x" merged = Some 1);  (* from [base]          *)
-assert (find_opt "y" merged = Some 2);  (* [base] wins over RHS *)
-assert (find_opt "z" merged = Some 3);  (* came from [extra]    *)
+let example () =
+  let base = Environment.of_list [ "x", 1; "y", 2 ] in
+  let extra = Environment.of_list [ "y", 0; "z", 3 ] in
+  let merged = Environment.merge base extra in
+  assert (Option.equal Int.equal (Environment.find_opt "x" merged) (Some 1));
+  assert (Option.equal Int.equal (Environment.find_opt "y" merged) (Some 2));
+  assert (Option.equal Int.equal (Environment.find_opt "z" merged) (Some 3))
+;;
 ```
 
 ---
@@ -37,7 +37,7 @@ assert (find_opt "z" merged = Some 3);  (* came from [extra]    *)
 ## API reference (summary)
 
 ### `type 'a Environment.t`
-Alias for `('a, String.t) Map.t`.  All complexity bounds are the same as for
+The `Stdlib.Map.Make(String)` value type `'a t`. Complexity follows
 `Stdlib.Map` – look-ups are logarithmic in the number of bindings.
 
 ### `val of_list : (string * 'a) list -> 'a t`
@@ -65,8 +65,8 @@ Environment.find "x" env   (* instead of Environment.Map.find *)
 ## Known limitations
 
 * The implementation picks the default `Stdlib` map; if you rely on the
-  `Core` or `Base` map variants (with hash-consed keys or polymorphic
-  compare disabled) you need to wrap those yourself.
+  `Core` or `Base` map APIs, convert explicitly. Their types and argument
+  conventions are not interchangeable with this compatibility module.
 * No custom merge strategy besides the left-biased one is provided – you can
   of course roll your own with `Map.union`.
 
@@ -77,12 +77,12 @@ Environment.find "x" env   (* instead of Environment.Map.find *)
 The full code fits on a postcard:
 
 ```ocaml
-module M = Map.Make(String)
+module M = Stdlib.Map.Make(Stdlib.String)
 
 include M  (* re-export the whole Map.S API *)
 
 let of_list lst =
-  List.fold_left (fun acc (k,v) -> add k v acc) empty lst
+  Stdlib.List.fold_left (fun acc (k,v) -> add k v acc) empty lst
 
 let merge lhs rhs =
   fold (fun k v acc -> if mem k acc then acc else add k v acc) rhs lhs
@@ -90,4 +90,3 @@ let merge lhs rhs =
 
 The helper functions are linear in the number of bindings they traverse and
 therefore O(n · log n) due to the internal map operations.
-

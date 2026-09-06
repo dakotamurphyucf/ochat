@@ -1,5 +1,11 @@
 # ChatML moderator runtime guide
 
+For current native/daemon hosting, see [host modes](../agent-server/concepts.md) and
+[agent-host orchestration](../agent-server/chatml-orchestration.md). Daemon work belongs to
+the session actor, not a connected UI. The existing language/tool APIs remain
+shared; file-backed session/controller descriptions should be read in that host
+context. Instruction helper compatibility names emit developer-role messages.
+
 This guide describes the current ChatML moderator runtime as exposed by the
 repository today.
 
@@ -215,6 +221,14 @@ example, the event constructor is `` `Item_appended(item) ``, while
 
 `Item` provides constructors and accessors for common transcript items.
 
+Instruction helpers emit the `developer` role. The compatibility names
+`Item.system_text`, `Turn.prepend_system`, and notice helpers remain available;
+`Item.input_text_message(id, "system", text)` also creates a developer message.
+`Item.role` reports the actual `developer` role. `Item.is_system` and
+`Context.last_system_item` recognize both developer instructions and legacy system
+items. This changes newly constructed messages only: existing snapshots, canonical
+history, and raw values supplied to `Item.create` are not rewritten.
+
 Useful helpers include:
 
 - `Item.id`
@@ -385,7 +399,7 @@ There are three related transcript views:
 `Turn.*` operations do not directly rewrite canonical history. They update a
 durable overlay that can:
 
-- prepend synthetic system items,
+- prepend synthetic developer items (through the compatibility name `prepend_system`),
 - append synthetic items,
 - replace projected items by id,
 - delete projected items by id,

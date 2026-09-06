@@ -1,7 +1,7 @@
 # `Functions` – Curated toolbox exposed to the LLM agent
 
-The `Functions` module bundles **ready-made, production-hardened
-[Ochat_function] registrations** that can be advertised to an OpenAI model and
+The `Functions` module bundles ready-made
+`Ochat_function` registrations that can be advertised to a model and
 executed on demand.  Each value – `get_contents`, `apply_patch`,
 `odoc_search`, … – is a *self-contained* record combining a declarative JSON
 schema with an OCaml implementation.
@@ -22,27 +22,21 @@ schema with an OCaml implementation.
 ## Quick start
 
 ```ocaml
-open Functions
-
-Eio_main.run @@ fun env ->
-  let cwd  = Eio.Stdenv.cwd  env
-  and net  = Eio.Stdenv.net  env in
-
-  (* Pick a subset of tools and hand them to the model *)
-  let tools, dispatch =
-    Ochat_function.functions
-      [ get_contents    ~dir:cwd
-      ; apply_patch     ~dir:cwd
-      ; odoc_search     ~dir:cwd ~net
-      ]
-
-  (* tools → OpenAI;  dispatch → your inference loop *)
-  |> ignore
+let registrations env =
+  let dir = Eio.Stdenv.cwd env in
+  Ochat_function.functions
+    [ Functions.get_contents ~dir
+    ; Functions.apply_patch ~dir
+    ; Functions.odoc_search ~dir ~net:(Eio.Stdenv.net env)
+    ]
 ```
 
 Each call to `Functions.<tool>` returns a fresh `Ochat_function.t`.  The helper
 constructs can therefore be instantiated multiple times with different
-capabilities (e.g. sandboxed directories).
+capabilities. The returned dispatch runners require an invocation and return
+`Openai.Responses.Tool_output.Output.t`. See [custom tools](gpt_function.doc.md)
+for a compiled example. Registering a directory does not universally sandbox
+every tool: use each tool's documented path and authorization contract.
 
 ---
 
@@ -65,7 +59,7 @@ capabilities (e.g. sandboxed directories).
 | `markdown_search`                  | `markdown_search`| search      | Query a Markdown index created with *index_markdown_docs*. |
 | `odoc_search`                      | `odoc_search`    | search      | Semantic search over locally-indexed OCaml docs. |
 | `meta_refine`                      | `meta_refine`    | misc        | Refine a raw prompt using Recursive Meta-Prompting. |
-| `fork`                             | `fork`           | misc        | *Stub* – reserved for future agent-forking support. |
+| `fork`                             | `fork`           | agent       | Declaration stub intercepted by the host's implemented nested-fork driver; do not call this registration directly. |
 | `import_image`                     | `import_image`   | filesystem  | Return an image as a data-URI suitable for image-input tool outputs. |
 
 > ℹ️  Most tools return a plain string (`Tool_output.Output.Text`). The exception
@@ -78,9 +72,9 @@ Read the specified file relative to the capability directory supplied during
 registration.
 
 ```ocaml
-let read = Functions.get_contents ~dir in
-(* JSON arguments expected from the model *)
-{"file": "lib/bm25.ml", "offset": 0, "line_count": 200}
+let read_example dir =
+  let tool = Functions.get_contents ~dir in
+  tool.run {|{"file":"lib/bm25.ml","offset":0,"line_count":200}|}
 ```
 
 Notes:
@@ -100,29 +94,21 @@ For ChatMD-style named roots, construct `read_file_root` values and register
 `get_contents_scoped`:
 
 ```ocaml
-let project =
-  Functions.read_file_root
-    ~id:"project"
-    ~path:project_dir
-    ~description:"Project source"
-    ()
-in
-let packages =
-  Functions.read_file_root
-    ~id:"packages"
-    ~path:package_docs
-    ~description:"Installed package documentation"
-    ()
-in
-let read =
+let scoped_reader env ~project_dir ~package_docs =
+  let project =
+    Functions.read_file_root ~id:"project" ~path:project_dir
+      ~description:"Project source" ()
+  in
+  let packages =
+    Functions.read_file_root ~id:"packages" ~path:package_docs
+      ~description:"Installed package documentation" ()
+  in
   Functions.get_contents_scoped
     ~fs:(Eio.Stdenv.fs env)
-    ~dir:cwd
+    ~dir:(Eio.Stdenv.cwd env)
     ~roots:[ project; packages ]
     ~description:"Prefer packages for dependency questions."
     ()
-in
-ignore read
 ```
 
 The scoped schema requires `file`, accepts optional `root`, `offset`, and
@@ -160,15 +146,17 @@ the formula explained in [`Vector_db.query_hybrid`].  The optional
 
 ### 5 . `apply_patch`
 
-Thin wrapper around [`Apply_patch.process_patch`].  Supports multi-file
-add/update/delete/move operations using the *Ochat diff* syntax.
+Wraps [Apply_patch](apply_patch.doc.md). Supports multi-file add/update/delete/move
+operations using the Ochat patch syntax. Writes/deletes are sequential, not an
+atomic transaction; inspect the working tree after failure before retrying.
 
 ### 6 . `odoc_search`
 
 Embeds the natural-language query with OpenAI and runs a vector search over
 the pre-computed snippet embeddings stored in `.odoc_index/`.  Results are
-rendered as a Markdown list identical to the command-line utility shipped with
-this repository.
+rendered as Markdown snippets. This registration searches all package directories
+when `package="all"`; the standalone CLI's shortlist and other options differ.
+See [search behavior](../guide/search-and-indexing.md).
 
 ### 7 . `index_markdown_docs`
 
@@ -179,12 +167,15 @@ them with OpenAI, and writes the resulting vectors under
 heuristics (extension filter, `.gitignore` support, context window sizing).
 
 ```ocaml
-let register =
+let register env dir =
   Functions.index_markdown_docs
-    ~env                     (* capability: network & clock *)
-    ~dir                     (* capability: workspace root *)
+    ~env
+    ~dir
+```
 
-(* JSON expected from the model *)
+Example model arguments:
+
+```json
 {"root": "docs", "index_name": "project_docs", "description": "Project documentation"}
 ```
 
@@ -196,10 +187,9 @@ similarity on catalogue vectors before the selected stores are queried for the
 top-`k` snippets.
 
 ```ocaml
-let search = Functions.markdown_search ~dir ~net in
-
-(* JSON arguments *)
-{"query": "how to configure dune for js_of_ocaml", "k": 3, "index_name": "project_docs"}
+let search_example dir net =
+  let tool = Functions.markdown_search ~dir ~net in
+  tool.run {|{"query":"configure dune for js_of_ocaml","k":3,"index_name":"project_docs"}|}
 ```
 
 ### 9 . `append_to_file`
@@ -209,10 +199,9 @@ exist it will be created.  The helper prefixes the payload with a newline so
 that multiple calls result in clean paragraph breaks.
 
 ```ocaml
-let append = Functions.append_to_file ~dir in
-
-(* JSON expected from the model *)
-{"path": "CHANGELOG.md", "content": "## 0.2.0 – 2025-08-05\n* Add new CLI flags"}
+let append_example dir =
+  let tool = Functions.append_to_file ~dir in
+  tool.run {|{"path":"CHANGELOG.md","content":"Document the new CLI flags."}|}
 ```
 
 ### 10 . `find_and_replace`
@@ -227,34 +216,33 @@ Search–replace convenience wrapper.  Receives a four-tuple
 * When `all = true` all non-overlapping matches are replaced.
 
 ```ocaml
-let sub = Functions.find_and_replace ~dir in
-
-(* Replace absolute imports with ppxlib qualified ones *)
-{"path": "lib/parser.ml", "find": "open Ast", "replace": "open Ppxlib.Ast", "all": true}
+let replace_example dir =
+  let tool = Functions.find_and_replace ~dir in
+  tool.run {|{"path":"lib/parser.ml","find":"open Ast","replace":"open Ppxlib.Ast","all":true}|}
 ```
 
 ### 11 . `meta_refine`
 
-Performs *Recursive Meta-Prompting* ([paper link](https://arxiv.org/abs/2302.00000))
-on an input prompt.  Useful for auto-improving user instructions before they
-are forwarded to another agent or LLM.
+Runs the [meta-prompting flow](meta_prompting.doc.md) on a prompt and task.
+An empty prompt selects generation; a nonempty prompt selects updating.
+Execution can make provider requests; constructing the registration does not.
 
 ```ocaml
-let refine = Functions.meta_refine in
-
-refine """You are ChatGPT, a large language model trained by OpenAI."""
-(* ⇒ returns a better structured system prompt *)
+let refine_example env =
+  let tool = Functions.meta_refine ~env in
+  tool.run {|{"prompt":"Review code carefully.","task":"Review OCaml changes for correctness."}|}
 ```
 
 ---
 
 ## Design notes
 
-* **Capability-oriented** – no ambient authority.  Filesystem and network
-  access are supplied explicitly.
-* **Stateless** – each tool is a pure function `string -> string`; long-running
-  side effects (like indexing) are performed inside `Eio.Switch.run` to ensure
-  clean-up on cancellation.
+* **Explicit capabilities** – callers supply directory/network/environment
+  handles. This is not a promise that a broad handle confines every operation.
+* **Effectful runners** – registrations decode serialized input and return typed
+  output. Running them may change files, start work, use caches or call providers;
+  they are not pure functions. Some older tools report failures as output text
+  instead of raising, so callers must respect the individual contract.
 * **Thread-safe caches** – `odoc_search` maintains small in-memory caches for
   embeddings and vector blobs, protected by an `Eio.Mutex`.
 
@@ -262,11 +250,13 @@ refine """You are ChatGPT, a large language model trained by OpenAI."""
 
 ## Limitations
 
-1. Return type is fixed to `string`; structured results require manual JSON
-   encoding.
+1. Results can be text or structured text/image content. Individual tools still
+   determine their error convention; generic registration adds no validation,
+   secret redaction, transaction rollback or retry policy.
 2. `get_url_content` performs no readability heuristics; large pages may blow
    the context window.
-3. `fork` is a placeholder awaiting a full multi-agent orchestrator.
+3. `Functions.fork.run` is only a declaration stub. The host intercepts it and
+   uses the [fork runtime](chat_response/fork.doc.md) for nested execution.
 
 ---
 

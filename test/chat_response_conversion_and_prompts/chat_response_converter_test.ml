@@ -97,6 +97,27 @@ let%expect_test "to_items converts user message with basic text" =
     |}]
 ;;
 
+let%expect_test "id-less assistant input survives JSON round trip" =
+  Eio_main.run
+  @@ fun env ->
+  let dir = Eio.Stdenv.fs env in
+  let cache = Chat_response.Cache.create ~max_size:5 () in
+  let ctx = Ctx.create ~env ~dir ~cache ~tool_dir:dir in
+  let elements = CM.parse_chat_inputs ~dir "<assistant>prior response</assistant>" in
+  let item = Converter.to_items ~ctx ~run_agent:stub_run_agent elements |> List.hd_exn in
+  let decoded =
+    Openai.Responses.Item.jsonaf_of_t item |> Openai.Responses.Item.t_of_jsonaf
+  in
+  print_s [%sexp (decoded : Openai.Responses.Item.t)];
+  [%expect
+    {|
+    (Input_message
+     ((role Assistant)
+      (content ((Text ((text "prior response") (_type input_text)))))
+      (_type message)))
+    |}]
+;;
+
 let%expect_test "to_items converts <tool_call type=custom_tool_call>" =
   Eio_main.run
   @@ fun env ->

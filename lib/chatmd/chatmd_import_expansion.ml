@@ -5,10 +5,13 @@ module Source_ref = Chatmd_shell_spec.Source_ref
 type sourced_node =
   { node : Ast.node
   ; source : Source_ref.t
+  ; source_node : Source_loader.source
   }
 
 type context =
   { dir : Eio.Fs.dir_ty Eio.Path.t
+  ; loader : Source_loader.t
+  ; source_node : Source_loader.source
   ; file : string
   ; prompt_dir : string
   ; namespace : string option
@@ -96,7 +99,9 @@ let normalize_native_path value =
 ;;
 
 let import_key context src =
-  Eio.Path.(context.dir / src) |> Eio.Path.native_exn |> normalize_native_path
+  match Source_loader.resolve context.loader ~base:context.source_node ~reference:src with
+  | Ok source -> Source_loader.relative_path source |> normalize_native_path
+  | Error _ -> normalize_native_path src
 ;;
 
 let reject_import_cycle context src =
@@ -116,10 +121,16 @@ let import_context (context : context) attributes =
     | None -> failwith "<import> requires a src attribute."
   in
   let key = reject_import_cycle context src in
-  let source = Io.load_doc ~dir:context.dir src in
+  let source_node =
+    Source_loader.resolve context.loader ~base:context.source_node ~reference:src
+    |> Result.ok_or_failwith
+  in
+  let source = Source_loader.read context.loader source_node |> Result.ok_or_failwith in
   let namespace = combine_namespace context.namespace (namespace_attribute attributes) in
-  let dir = Eio.Path.(context.dir / Filename.dirname src) in
+  let dir = Source_loader.materialized_dir source_node in
   { dir
+  ; loader = context.loader
+  ; source_node
   ; file = src
   ; prompt_dir = context.prompt_dir
   ; namespace
@@ -166,19 +177,19 @@ and sourced_parent ~parse (context : context) tag attributes children =
 
 and sourced (context : context) node : sourced_node =
   let source = source_ref context in
-  { node; source }
+  { node; source; source_node = context.source_node }
 ;;
 
-let expand ~parse ~dir ~file ~source document =
+let expand ~parse ~loader ~root_source ~dir ~file ~source document =
   let active_imports =
     if String.is_prefix file ~prefix:"<"
     then String.Set.empty
-    else
-      String.Set.singleton
-        (Eio.Path.(dir / file) |> Eio.Path.native_exn |> normalize_native_path)
+    else String.Set.singleton (Source_loader.relative_path root_source)
   in
   let context =
     { dir
+    ; loader
+    ; source_node = root_source
     ; file
     ; prompt_dir = Eio.Path.native_exn dir
     ; namespace = None

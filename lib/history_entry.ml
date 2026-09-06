@@ -108,12 +108,24 @@ module Allocator = struct
   type t =
     { namespace : string
     ; next_sequence : int Atomic.t
+    ; limit_exclusive : int option
     }
 
-  let create ~namespace ~next_sequence =
+  let create_with_limit ~namespace ~next_sequence ~limit_exclusive =
     let open Result.Let_syntax in
     let%map (_ : Id.t) = Id.create ~namespace ~sequence:next_sequence in
-    { namespace; next_sequence = Atomic.make next_sequence }
+    { namespace; next_sequence = Atomic.make next_sequence; limit_exclusive }
+  ;;
+
+  let create ~namespace ~next_sequence =
+    create_with_limit ~namespace ~next_sequence ~limit_exclusive:None
+  ;;
+
+  let create_bounded ~namespace ~next_sequence ~limit_exclusive =
+    if limit_exclusive < next_sequence
+    then Error "history ID allocation limit precedes the next sequence"
+    else
+      create_with_limit ~namespace ~next_sequence ~limit_exclusive:(Some limit_exclusive)
   ;;
 
   let namespace t = t.namespace
@@ -124,7 +136,9 @@ module Allocator = struct
     then Error "history ID reservation count must be nonnegative"
     else (
       let next_sequence = Atomic.get t.next_sequence in
-      if count > Int.max_value - next_sequence
+      if Option.exists t.limit_exclusive ~f:(fun limit -> count > limit - next_sequence)
+      then Error "history ID reservation exceeds its committed allocation block"
+      else if count > Int.max_value - next_sequence
       then Error "history ID sequence exhausted"
       else (
         let ids =
@@ -148,6 +162,8 @@ type t =
   ; item : Openai.Responses.Item.t
   }
 [@@deriving bin_io, sexp]
+
+type entry = t
 
 let create ~allocator item =
   Result.map (Allocator.allocate allocator) ~f:(fun id -> { id; item })
@@ -175,3 +191,60 @@ let validate ~allocator entries =
       then Error "history entry sequence is not below the allocator high-water mark"
       else Ok ()))
 ;;
+
+let tool_relation entry =
+  match item entry with
+  | Openai.Responses.Item.Function_call call -> Some (`Function, call.call_id, true)
+  | Function_call_output output -> Some (`Function, output.call_id, false)
+  | Custom_tool_call call -> Some (`Custom, call.call_id, true)
+  | Custom_tool_call_output output -> Some (`Custom, output.call_id, false)
+  | _ -> None
+;;
+
+let paired_id entries index selected =
+  Option.bind (tool_relation selected) ~f:(fun (family, call_id, is_call) ->
+    let candidates =
+      if is_call
+      then List.drop entries (index + 1)
+      else List.take entries index |> List.rev
+    in
+    List.find candidates ~f:(fun entry ->
+      Option.exists (tool_relation entry) ~f:(fun (other, key, _) ->
+        Poly.equal family other && String.equal call_id key))
+    |> Option.bind ~f:(fun entry ->
+      match tool_relation entry with
+      | Some (_, _, other_is_call) when Bool.(is_call <> other_is_call) -> Some (id entry)
+      | _ -> None))
+;;
+
+let remove_with_tool_pair entries ~entry_id =
+  match List.findi entries ~f:(fun _ entry -> Id.equal (id entry) entry_id) with
+  | None -> Error "canonical history entry not found"
+  | Some (index, selected) ->
+    let paired = paired_id entries index selected in
+    Ok
+      (List.filter entries ~f:(fun entry ->
+         not
+           (Id.equal (id entry) entry_id || Option.exists paired ~f:(Id.equal (id entry)))))
+;;
+
+module Id_source = struct
+  type t =
+    { namespace : string
+    ; allocate : unit -> (Id.t, string) result
+    ; validate : entry list -> (unit, string) result
+    }
+
+  let create ~namespace ~allocate ~validate = { namespace; allocate; validate }
+
+  let of_allocator allocator =
+    create
+      ~namespace:(Allocator.namespace allocator)
+      ~allocate:(fun () -> Allocator.allocate allocator)
+      ~validate:(fun entries -> validate ~allocator entries)
+  ;;
+
+  let namespace t = t.namespace
+  let allocate t = t.allocate ()
+  let validate t entries = t.validate entries
+end

@@ -1,5 +1,10 @@
 # `Response_loop` – synchronous completion loop
 
+Streaming, tool invocation and cancellation are composed by the owning host. Daemon sessions commit durable results through their actor; recoverable deltas are not a second canonical history.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 `Response_loop` is a utility module that repeatedly sends the current
 conversation to the OpenAI *chat/completions* endpoint, executes every
 tool requested by the assistant, and stops only when the reply contains

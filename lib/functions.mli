@@ -155,16 +155,16 @@ val read_dir : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
     0o700.  The action is idempotent when the folder already exists. *)
 val mkdir : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
-(** Register the [`append_to_file`] tool.  Appends a string to a file, creating
-    it if necessary.  The input is a tuple of [file] and [text].  The action is
-    idempotent when the text is already present at the end of the file. *)
+(** [append_to_file ~dir] registers a tool that appends a newline followed by
+    the supplied text, creating the file if needed. Every invocation appends;
+    existing text is not deduplicated. *)
 val append_to_file : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
 (** Register the [`find_and_replace`] tool.  Searches for a string in a file and
     replaces it with another string.  The input is a tuple of [file], [search],
     [replace], and a boolean [all] that controls whether all occurrences should
-    be replaced or only the first one.  The action is idempotent when the search
-    string is not found or already replaced. *)
+    be replaced. With [all = false], multiple matches return an error string
+    without writing. Missing matches return a notice without writing. *)
 val find_and_replace : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
 (** {1 Search helpers} *)
@@ -195,9 +195,9 @@ val webpage_to_markdown
     schema can be advertised to the model. *)
 val fork : Ochat_function.t
 
-(** Apply *Recursive Meta-Prompting* refinement to a raw prompt.  The tool
-    receives the full prompt in its JSON [prompt] field and returns the
-    improved version produced by {!Meta_prompting.Recursive_mp.refine}. *)
+(** [meta_refine ~env] registers the meta-prompting flow. Arguments require
+    [prompt] and [task]. An empty prompt selects generation; a nonempty prompt
+    selects updating. Running the tool may make provider requests. *)
 val meta_refine : env:Eio_unix.Stdenv.base -> Ochat_function.t
 
 (** Register the [`import_image`] tool.

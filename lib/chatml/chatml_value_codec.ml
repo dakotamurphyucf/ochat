@@ -203,4 +203,121 @@ module Snapshot = struct
     | Ok value -> value
     | Error msg -> failwith msg
   ;;
+
+  let rec to_jsonaf = function
+    | Int value ->
+      `Object [ "kind", `String "int"; "value", `Number (Int.to_string value) ]
+    | Float value ->
+      `Object [ "kind", `String "float"; "value", `String (Float.to_string value) ]
+    | Bool value ->
+      `Object [ "kind", `String "bool"; ("value", if value then `True else `False) ]
+    | String value -> `Object [ "kind", `String "string"; "value", `String value ]
+    | Unit -> `Object [ "kind", `String "unit" ]
+    | Array values ->
+      `Object [ "kind", `String "array"; "values", `Array (List.map values ~f:to_jsonaf) ]
+    | Record fields ->
+      let field (name, value) =
+        `Object [ "name", `String name; "value", to_jsonaf value ]
+      in
+      `Object [ "kind", `String "record"; "fields", `Array (List.map fields ~f:field) ]
+    | Variant (tag, payload) ->
+      `Object
+        [ "kind", `String "variant"
+        ; "tag", `String tag
+        ; "payload", `Array (List.map payload ~f:to_jsonaf)
+        ]
+  ;;
+
+  let required fields name =
+    List.Assoc.find fields name ~equal:String.equal
+    |> Result.of_option ~error:(Printf.sprintf "ChatML snapshot is missing field %S" name)
+  ;;
+
+  let string_field fields name =
+    let open Result.Let_syntax in
+    let%bind value = required fields name in
+    match value with
+    | `String value -> Ok value
+    | _ -> Error (Printf.sprintf "ChatML snapshot field %S must be a string" name)
+  ;;
+
+  let array_field fields name =
+    let open Result.Let_syntax in
+    let%bind value = required fields name in
+    match value with
+    | `Array values -> Ok values
+    | _ -> Error (Printf.sprintf "ChatML snapshot field %S must be an array" name)
+  ;;
+
+  let parse_int fields =
+    let open Result.Let_syntax in
+    let%bind value = required fields "value" in
+    match value with
+    | `Number value ->
+      Result.try_with (fun () -> Int.of_string value)
+      |> Result.map_error ~f:(fun _ -> "ChatML snapshot integer is invalid")
+    | _ -> Error "ChatML snapshot integer value must be a number"
+  ;;
+
+  let parse_float fields =
+    let open Result.Let_syntax in
+    let%bind value = string_field fields "value" in
+    Result.try_with (fun () -> Float.of_string value)
+    |> Result.map_error ~f:(fun _ -> "ChatML snapshot float is invalid")
+  ;;
+
+  let parse_bool fields =
+    let open Result.Let_syntax in
+    let%bind value = required fields "value" in
+    match value with
+    | `True -> Ok true
+    | `False -> Ok false
+    | _ -> Error "ChatML snapshot boolean value must be a boolean"
+  ;;
+
+  let rec of_jsonaf json =
+    match json with
+    | `Object fields ->
+      let open Result.Let_syntax in
+      let%bind kind = string_field fields "kind" in
+      of_kind fields kind
+    | _ -> Error "ChatML snapshot must be an object"
+
+  and decode_values fields name =
+    let open Result.Let_syntax in
+    let%bind values = array_field fields name in
+    Result.all (List.map values ~f:of_jsonaf)
+
+  and decode_record_field = function
+    | `Object fields ->
+      let open Result.Let_syntax in
+      let%bind name = string_field fields "name" in
+      let%map value = required fields "value" >>= of_jsonaf in
+      name, value
+    | _ -> Error "ChatML snapshot record field must be an object"
+
+  and decode_record fields =
+    let open Result.Let_syntax in
+    let%bind values = array_field fields "fields" in
+    Result.all (List.map values ~f:decode_record_field)
+
+  and decode_variant fields =
+    let open Result.Let_syntax in
+    let%bind tag = string_field fields "tag" in
+    let%map payload = decode_values fields "payload" in
+    tag, payload
+
+  and of_kind fields = function
+    | "int" -> Result.map (parse_int fields) ~f:(fun value -> Int value)
+    | "float" -> Result.map (parse_float fields) ~f:(fun value -> Float value)
+    | "bool" -> Result.map (parse_bool fields) ~f:(fun value -> Bool value)
+    | "string" -> Result.map (string_field fields "value") ~f:(fun value -> String value)
+    | "unit" -> Ok Unit
+    | "array" ->
+      Result.map (decode_values fields "values") ~f:(fun values -> Array values)
+    | "record" -> Result.map (decode_record fields) ~f:(fun fields -> Record fields)
+    | "variant" ->
+      Result.map (decode_variant fields) ~f:(fun (tag, payload) -> Variant (tag, payload))
+    | kind -> Error (Printf.sprintf "unknown ChatML snapshot kind %S" kind)
+  ;;
 end

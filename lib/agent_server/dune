@@ -1,0 +1,48 @@
+(library
+ (name agent_server)
+ (public_name ochat.agent_server)
+ (modules
+  config
+  config_parser
+  authenticator
+  config_validator
+  config_diff
+  config_watcher
+  catalog_identity
+  operator_manifest_grant
+  catalog_builder
+  runtime_owner
+  session_registry
+  connection_context
+  authorization
+  principal_projection
+  pagination
+  catalog_projection
+  session_capacity
+  start_scheduler
+  job_capacity
+  job_scheduler
+  permission_review_service
+  permission_scheduler
+  schedule_scheduler
+  maintenance
+  session_factory
+  embedded
+  daemon
+  command_handler
+  dispatcher)
+ (libraries
+ core
+  base64
+  cstruct
+  digestif
+  eio
+  eio.unix
+  mirage-crypto-rng.unix
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.agent_store
+  ochat.agent_session
+  chatmd)
+ (preprocess
+  (pps ppx_jane)))

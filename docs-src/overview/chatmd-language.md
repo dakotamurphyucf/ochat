@@ -1,5 +1,11 @@
 # ChatMarkdown (ChatMD) language reference
 
+For current native/daemon hosting, see [host modes](../agent-server/concepts.md) and
+[agent-host orchestration](../agent-server/chatml-orchestration.md). Daemon work belongs to
+the session actor, not a connected UI. The existing language/tool APIs remain
+shared; file-backed session/controller descriptions should be read in that host
+context. Instruction helper compatibility names emit developer-role messages.
+
 ChatMarkdown (ChatMD) is a **small, closed XML vocabulary embedded in Markdown** for authoring LLM conversations as plain files.
 
 The core idea is simple: a ChatMD file is both:
@@ -196,8 +202,9 @@ Validation rules:
 
 - `src="..."` and inline body text are mutually exclusive.
 - `src="..."` is loaded during prompt parsing, so missing files fail early.
-- Relative `src` paths resolve against the prompt directory passed to
-  `parse_chat_inputs`.
+- Relative `src` paths resolve against the directory of the source file
+  declaring the script. A script in an imported ChatMD file therefore loads
+  relative to that imported file, not the root prompt directory.
 - Duplicate script IDs are errors even when kinds differ.
 - More than one selected moderator script is an error.
 - Extra attributes are rejected.
@@ -293,8 +300,8 @@ The shared drivers interpret these requests through an explicit runtime-semantic
 
 ### 3.5.1a Deferred steering notes and safe-point input
 
-When the user submits steering text while a turn is already streaming in
-`chat_tui`, the host does not inject a new canonical user message into the
+In the older file-backed `chat_tui` host, when the user submits steering text
+while a turn is already streaming, the host does not inject a new canonical user message into the
 in-flight request. Instead it records a **deferred steering note** in
 session-controller state.
 
@@ -303,11 +310,13 @@ boundary. Concretely:
 
 - it remains outside canonical transcript history,
 - it survives until the next safe-point request preparation,
-- it is appended as transient system input for that request only,
+- it is appended as transient developer input for that request only,
 - it never rewrites tool output history in place.
 
 This preserves the in-flight reasoning/tool workflow while still letting the
-user steer the next request.
+user steer the next request. Native-local and daemon hosts instead admit
+canonical deferred entries through the actor; see the
+[host-specific steering contract](../guide/chat_tui.md).
 
 
 ### 3.5.2 Model recipes (`Model.call` / `Model.spawn`)
@@ -355,7 +364,7 @@ aliases.
 Moderator scripts do not rewrite canonical OpenAI history in place. Instead the
 host keeps a durable overlay that can:
 
-- prepend synthetic system messages,
+- prepend synthetic developer messages (the compatibility operation is named `prepend_system`),
 - append synthetic items,
 - replace projected items by id,
 - delete projected items by id,
@@ -402,7 +411,7 @@ An end-to-end non-interrupting steering flow currently looks like this:
    user message mid-turn
 4. the current turn reaches a safe point and eventually completes
 5. the next request is prepared from moderator-effective history
-6. the deferred steering note is appended as transient system input for that
+6. the deferred steering note is appended as transient developer input for that
    next request only
 
 Persisted moderator state is intentionally narrow:
@@ -715,11 +724,12 @@ Notes:
 
 ## 9) `<import src="..."/>` — parse-time include (modularity)
 
-`<import/>` keeps prompts maintainable by letting you reuse shared text (policies, glossaries, style guides).
+`<import/>` keeps prompts maintainable by letting you reuse top-level
+declarations and shared message text (policies, glossaries, style guides).
 
 **Where imports expand**
 
-Imports are expanded recursively when they appear inside:
+Imports are expanded recursively at the document top level and inside:
 
 - `<user>...</user>`
 - `<system>...</system>`
@@ -729,9 +739,30 @@ Imports are expanded recursively when they appear inside:
 
 **Where imports do not expand**
 
-Everywhere else, `<import/>` is preserved as literal text (for example inside `<assistant>`, `<tool_call>`, `<tool_response>`, `<reasoning>`).
+Inside other elements, `<import/>` is preserved as literal text (for example
+inside `<assistant>`, `<tool_call>`, `<tool_response>`, `<reasoning>`).
 
-Example:
+Relative `src` paths resolve against the importing source file's directory.
+Top-level imports can supply tools, scripts, and shell-runtime declarations;
+those declarations retain the imported source context. The optional
+`namespace` attribute qualifies imported declarations; see
+[IDs, references, and namespaces](chatmd-shell-runtime.md#ids-references-and-namespaces).
+Import cycles and duplicate sibling namespace aliases are rejected.
+
+Native-local and daemon hosts additionally pin these sources into an artifact
+tree. Imports/scripts must remain beneath the root prompt directory; parent
+traversal outside it and absolute import/script paths are rejected during
+artifact construction, even if standalone parsing succeeds. Runtime
+`${prompt_dir}`/`${source_dir}` refer to that captured tree, not the original
+source directories. See [pinning and paths](../agent-server/sessions-and-workspaces.md#prompt-revision-pinning).
+
+For example, a top-level declaration bundle can be imported with:
+
+```xml
+<import src="runtime/common.chatmd" namespace="team"/>
+```
+
+For shared message text:
 
 ```xml
 <system>

@@ -53,7 +53,7 @@ files are processed in parallel inside each directory.
 val crawl :
   root:_ Eio.Path.t ->
   ?filter:(string -> bool) ->
-  f:(pkg:string -> doc_path:string -> markdown:string -> unit) ->
+  (pkg:string -> doc_path:string -> markdown:string -> unit) ->
   unit
 ```
 
@@ -70,14 +70,15 @@ val crawl :
 
 ### Behaviour & guarantees
 
-* **Best-effort** – unreadable paths and conversion failures are logged and
-  ignored.
+* Failed metadata reads are silently skipped. Directory enumeration, file
+  reads and logging can raise. Conversion failures return fenced raw HTML;
+  they do not necessarily skip the document.
 
-* **No unexpected exceptions** – the only unchecked exceptions that may escape
-  are those raised by `f` itself.
+* Callback exceptions are currently swallowed, including cancellation raised
+  there. A successful return does not establish that every callback succeeded.
 
-* **Bounded concurrency** – at most 25 fibers per directory provide
-  throughput while keeping memory usage predictable.
+* At most 25 entries per directory invocation run concurrently. Nested
+  traversals are independent; this is not a global memory/concurrency bound.
 
 * **Deterministic ordering inside a directory** – the directory entries are
   obtained from `Eio.Path.read_dir`, which returns a list sorted with
@@ -90,13 +91,13 @@ val crawl :
 ## Usage example
 
 ```ocaml
-open Eio.Std
+open! Core
 
-let () =
-  Eio_main.run @@ fun env ->
+let crawl env =
   let root = Eio.Path.(Eio.Stdenv.cwd env / "_build/default/_doc/_html") in
-  Odoc_crawler.crawl root ~f:(fun ~pkg ~doc_path ~markdown ->
-    Printf.printf "[%s] %s – %d bytes\n%!" pkg doc_path (String.length markdown))
+  Odoc_crawler.crawl ~root (fun ~pkg ~doc_path ~markdown ->
+    Printf.printf "[%s] %s - %d bytes\n%!" pkg doc_path (String.length markdown))
+;;
 ```
 
 ---
@@ -111,10 +112,10 @@ let () =
   are reported.  If you need images or other resources you will have to extend
   the crawler.
 
-* **No cancellation propagation** – a failure in the callback cancels the
-  current fiber but not the *whole* traversal.  You can wrap your callback in
-  a custom cancellation context if needed.
+* Symlinks are followed with no visited-directory guard. Only crawl trusted
+  trees without cycles. File reads have no practical size cap.
+* Cancellation is not consistently propagated through broad exception
+  wrappers. This limitation and swallowed callback errors require runtime
+  hardening, not a different way of spelling the callback.
 
 ---
-
-

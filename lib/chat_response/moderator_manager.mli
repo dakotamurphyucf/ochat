@@ -152,6 +152,13 @@ val drain_internal_events_entries
 val effective_entries : t -> History_entry.t list -> Moderation.Effective_entry.t list
 val effective_history_entries : t -> History_entry.t list -> History_entry.t list
 
+(** Reconstruct the effective conversation from a committed identity snapshot,
+    without creating a runtime or executing moderator code. *)
+val effective_entries_of_snapshot
+  :  Session.Moderator_state.Identity_snapshot.t
+  -> History_entry.t list
+  -> (Moderation.Effective_entry.t list, string) result
+
 (** [effective_items t history] applies the durable moderator overlay to the
     projected canonical history. *)
 val effective_items : t -> Res.Item.t list -> Moderation.Item.t list

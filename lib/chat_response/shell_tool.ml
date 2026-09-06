@@ -209,11 +209,21 @@ let result_description (tool : S.t) =
   output ^ " " ^ nonzero
 ;;
 
+let stream_description (tool : S.t) =
+  match tool.stream with
+  | Finalized -> ""
+  | Sanitized ->
+    "Emits bounded sanitized combined stdout/stderr progress during native execution; \
+     undecidable secret suffixes are delayed. Progress is transient and may differ from \
+     the final result."
+;;
+
 let default_description (tool : S.t) =
   [ mode_description tool
   ; stdin_description tool.stdin
   ; rationale_description tool.rationale
   ; result_description tool
+  ; stream_description tool
   ; "Execution is governed by the configured runtime's command policy, approvals, \
      sandboxing, resource limits, interceptors, output sanitization, secret redaction, \
      and audit settings."
@@ -414,13 +424,39 @@ let render_result (tool : S.t) result =
   | Structured_result -> R.jsonaf_of_t result |> Jsonaf.to_string
 ;;
 
-let run registry runtime (tool : S.t) prepared_script input =
+let validate_stream runtime (tool : S.t) =
+  match tool.stream with
+  | Finalized -> ()
+  | Sanitized ->
+    (match
+       SA.Executor.streaming_support (Shell_runtime.Runtime.executor_config runtime)
+     with
+     | Ok () -> ()
+     | Error message -> fail "shell.tool_stream_unsupported" message)
+;;
+
+let execute runtime (tool : S.t) ~invocation request =
+  let config = Shell_runtime.Runtime.executor_config runtime in
+  match tool.stream with
+  | Finalized -> SA.Executor.run config request
+  | Sanitized ->
+    SA.Executor.run_streaming config request ~on_progress:(fun progress ->
+      Ochat_function.Invocation.emit
+        invocation
+        { channel = (progress.channel :> Ochat_function.Progress.channel)
+        ; update = Append progress.text
+        })
+;;
+
+let run registry runtime (tool : S.t) prepared_script ~invocation input =
   let stdin = validate_stdin runtime tool input in
   let rationale = validate_rationale tool input in
   let request = request runtime tool prepared_script input in
   match
-    SA.Executor.run
-      (Shell_runtime.Runtime.executor_config runtime)
+    execute
+      runtime
+      tool
+      ~invocation
       { request
       ; input = (if String.is_empty stdin then SA.Input.Empty else Text stdin)
       ; rationale
@@ -446,11 +482,11 @@ let error_output error =
   |> fun text -> Res.Tool_output.Output.Text text
 ;;
 
-let run_tool registry runtime tool prepared_script serialized_input =
+let run_tool registry runtime tool prepared_script ~invocation serialized_input =
   try
     serialized_input
     |> input_of_string
-    |> run registry runtime tool prepared_script
+    |> run registry runtime tool prepared_script ~invocation
     |> fun text -> Res.Tool_output.Output.Text text
   with
   | Tool_error error -> error_output error
@@ -464,6 +500,7 @@ let create_exn registry (tool : S.t) =
       ; message = "shell tool runtime is not instantiated: " ^ tool.runtime
       }
   | Some runtime ->
+    validate_stream runtime tool;
     let prepared_script =
       match tool.mode with
       | Script_file _ ->
@@ -488,7 +525,8 @@ let create_exn registry (tool : S.t) =
     Ok
       (Ochat_function.create_streaming_function
          (module Definition)
-         (fun ~invocation:_ input -> run_tool registry runtime tool prepared_script input))
+         (fun ~invocation input ->
+            run_tool registry runtime tool prepared_script ~invocation input))
 ;;
 
 let create registry tool =

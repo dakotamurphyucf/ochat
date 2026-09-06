@@ -14,9 +14,9 @@ $ ochat eio-get http://localhost:8080
 
 ## High-level overview
 
-1. **Logging** – [`setup_log`](#val-setup_log) configures coloured log
+1. **Logging** – [`setup_log`](#setup_log) configures coloured log
    output via `Logs` and `Fmt`.
-2. **Connection** – [`request`](#val-request) creates a
+2. **Connection** – [`request`](#request) creates a
    `Piaf.Client.t`, enabling redirect following and allowing insecure
    TLS certificates so the executable can be used against local dev
    servers.
@@ -88,4 +88,3 @@ port number.  The program adds `/mcp` automatically.
   program exits.
 
 Pull requests improving any of the above are welcome.
-

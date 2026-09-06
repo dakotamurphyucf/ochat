@@ -174,8 +174,8 @@ let insert_text_at (model : Model.t) ~pos text =
 let delete_range (model : Model.t) ~first ~last =
   let s = Model.input_line model in
   let len = String.length s in
-  let first = Int.max 0 (Int.min len first) in
-  let last = Int.max 0 (Int.min len last) in
+  let first = Utf8_edit.floor s (Int.max 0 (Int.min len first)) in
+  let last = Utf8_edit.ceil s (Int.max 0 (Int.min len last)) in
   if first >= last
   then ()
   else (
@@ -467,8 +467,8 @@ let apply_op_to_motion ~(model : Model.t) ~(op : op) ~(motion : motion) ~(count 
   let a, b =
     if start_pos <= target_pos then start_pos, target_pos else target_pos, start_pos
   in
-  let a = Int.max 0 (Int.min len0 a) in
-  let b = Int.max 0 (Int.min len0 b) in
+  let a = Utf8_edit.floor s0 (Int.max 0 (Int.min len0 a)) in
+  let b = Utf8_edit.ceil s0 (Int.max 0 (Int.min len0 b)) in
   if a = b
   then ()
   else (
@@ -825,13 +825,16 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
   | `Key (`ASCII 'h', mods) when List.is_empty mods ->
     let n = take_count_default 1 in
     let pos = Model.cursor_pos model in
-    Model.set_cursor_pos model (Int.max 0 (pos - n));
+    Model.set_cursor_pos
+      model
+      (Fn.apply_n_times ~n (Utf8_edit.previous (Model.input_line model)) pos);
     Redraw
   | `Key (`ASCII 'l', mods) when List.is_empty mods ->
     let n = take_count_default 1 in
     let pos = Model.cursor_pos model in
-    let len = String.length (Model.input_line model) in
-    Model.set_cursor_pos model (Int.min len (pos + n));
+    Model.set_cursor_pos
+      model
+      (Fn.apply_n_times ~n (Utf8_edit.next (Model.input_line model)) pos);
     Redraw
   | `Key (`ASCII 'k', mods) when List.is_empty mods ->
     let n = take_count_default 1 in
@@ -905,7 +908,9 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     clear_state ();
     let len = String.length (Model.input_line model) in
     let pos = Model.cursor_pos model in
-    let new_pos = if pos < len then pos + 1 else pos in
+    let new_pos =
+      if pos < len then Utf8_edit.next (Model.input_line model) pos else pos
+    in
     Model.set_cursor_pos model new_pos;
     Model.set_mode model Insert;
     Redraw
@@ -949,7 +954,9 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
       Model.push_undo model;
       let pos = Model.cursor_pos model in
       let len = String.length (Model.input_line model) in
-      let insert_pos = if pos < len then pos + 1 else pos in
+      let insert_pos =
+        if pos < len then Utf8_edit.next (Model.input_line model) pos else pos
+      in
       insert_text_at model ~pos:insert_pos text;
       Redraw)
   | `Key (`ASCII 'P', mods) when List.is_empty mods ->
@@ -970,8 +977,9 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     if pos < String.length s
     then (
       Model.push_undo model;
-      Controller_register.set (String.sub s ~pos ~len:1);
-      delete_range model ~first:pos ~last:(pos + 1));
+      let last = Utf8_edit.next s pos in
+      Controller_register.set (String.sub s ~pos ~len:(last - pos));
+      delete_range model ~first:pos ~last);
     Redraw
   (* Resolve f/F/t/T with next ASCII char *)
   | `Key (`ASCII ch, mods) when List.is_empty mods ->

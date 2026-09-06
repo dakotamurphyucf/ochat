@@ -1,0 +1,15 @@
+(library
+ (name agent_transport_client)
+ (public_name ochat.agent_transport_client)
+ (modules endpoint)
+ (libraries
+  core
+  eio
+  eio.unix
+  uri
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.agent_transport_http
+  ochat.agent_transport_socket)
+ (preprocess
+  (pps ppx_jane)))

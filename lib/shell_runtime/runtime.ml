@@ -12,6 +12,7 @@ type executable =
 type t =
   { spec : S.t
   ; executor_config : Shell_access.Executor.config
+  ; secret_filter : Shell_access.Secret_filter.t
   ; max_stdin_bytes : int
   ; executables : executable String.Map.t
   ; resolver : Shell_access.Resolver.t
@@ -1211,7 +1212,12 @@ let config
       ~pipefail:(value specification "pipefail" specification.pipefail)
       ()
   in
-  executor_config, max_stdin_bytes, environment.values, resolver, Eio.Path.native_exn cwd
+  ( executor_config
+  , secret_filter
+  , max_stdin_bytes
+  , environment.values
+  , resolver
+  , Eio.Path.native_exn cwd )
 ;;
 
 let create_exn
@@ -1230,7 +1236,7 @@ let create_exn
       ~model_completion
       specification
   =
-  let executor_config, max_stdin_bytes, environment, resolver, cwd =
+  let executor_config, secret_filter, max_stdin_bytes, environment, resolver, cwd =
     config
       specification
       ~sw
@@ -1249,6 +1255,7 @@ let create_exn
   in
   { spec = specification
   ; executor_config
+  ; secret_filter
   ; max_stdin_bytes
   ; executables = executables specification host
   ; resolver
@@ -1305,6 +1312,7 @@ let create
 let id t = runtime_id t.spec
 let spec t = t.spec
 let executor_config t = t.executor_config
+let redact t value = Shell_access.Secret_filter.redact t.secret_filter value
 let max_stdin_bytes t = t.max_stdin_bytes
 let executable t id = Map.find t.executables id
 

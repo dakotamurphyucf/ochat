@@ -1,0 +1,316 @@
+(include_subdirs qualified)
+
+(rule
+ (alias agent-e2e-typeahead)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_SERVER_EXE %{exe:../../bin/ochat_agent_server.exe}
+    (setenv OCHAT_E2E_TUI_EXE %{exe:../../bin/chat_tui.exe}
+     (progn
+      (run %{exe:agent_server_e2e.exe} --scenario tui-typeahead)
+      (run %{exe:agent_server_e2e.exe} --scenario tui-manual --case typeahead-self-check)))))))
+
+(alias
+ (name agent-e2e-pr)
+ (deps
+  (alias agent-e2e-smoke)
+  (alias agent-e2e-transports)
+  (alias agent-e2e-workspaces)
+  (alias agent-e2e-multiclient)))
+
+(alias
+ (name agent-e2e-safe)
+ (deps
+  (alias agent-e2e-pr)
+  (alias agent-e2e-harness)
+  (alias agent-e2e-cleanup)
+  (alias agent-e2e-quotas)
+  (alias agent-e2e-prompts)
+  (alias agent-e2e-liveness)
+  (alias agent-e2e-admin)
+  (alias agent-e2e-lifecycle)
+  (alias agent-e2e-permissions)
+  (alias agent-e2e-runtime)
+  (alias agent-e2e-persistence)
+  (alias agent-e2e-security)
+  (alias agent-e2e-crash)
+  (alias agent-e2e-recovery)
+  (alias agent-e2e-tui-auto)
+  (alias agent-e2e-pty-headless)
+  (alias agent-e2e-load)))
+
+(rule
+ (alias agent-e2e-load)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_SERVER_EXE %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario load)))))
+
+(rule
+ (alias agent-e2e-soak)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_SERVER_EXE %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario soak)))))
+
+(rule
+ (alias agent-e2e-pty-headless)
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_SERVER_EXE %{exe:../../bin/ochat_agent_server.exe}
+    (setenv OCHAT_E2E_TUI_EXE %{exe:../../bin/chat_tui.exe}
+     (run %{exe:agent_server_e2e.exe} --scenario tui-manual --case headless-self-check))))))
+
+(executable
+ (name agent_server_e2e)
+ (modules :standard)
+ (libraries
+  base64
+  core
+  core_unix.command_unix
+  core_unix.unix_pseudo_terminal
+  cstruct
+  digestif
+  eio
+  eio_main
+  eio_posix
+  eio.unix
+  mirage-crypto-rng.unix
+  ochat.agent_client
+  ochat.agent_protocol
+  ochat.agent_server
+  ochat.chat_response
+  ochat.chat_tui
+  ochat.openai
+  ochat.agent_transport_http
+  ochat.agent_transport_socket
+  piaf
+  uri)
+ (preprocess
+  (pps ppx_jane)))
+
+(rule
+ (alias agent-e2e-tui-auto)
+ (deps (alias agent-e2e-typeahead))
+ (action
+  (setenv OCHAT_E2E_ARTIFACT_ROOT %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv OCHAT_E2E_TUI_EXE %{exe:../../bin/chat_tui.exe}
+    (setenv OCHAT_E2E_SERVER_EXE %{exe:../../bin/ochat_agent_server.exe}
+     (run %{exe:agent_server_e2e.exe} --scenario tui-parity))))))
+
+(rule
+ (alias agent-e2e-harness)
+ (deps dune)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (progn
+    (run %{exe:agent_server_e2e.exe} --scenario harness-isolation)
+    (run %{exe:agent_server_e2e.exe} --scenario process-harness)))))
+
+(rule
+ (alias agent-e2e-smoke)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario daemon-smoke)))))
+
+(rule
+ (alias agent-e2e-transports)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (setenv
+     OCHAT_E2E_STDIO_EXE
+     %{exe:../../bin/ochat_agent_stdio.exe}
+     (progn
+      (run %{exe:agent_server_e2e.exe} --scenario unix-transport)
+      (run %{exe:agent_server_e2e.exe} --scenario stdio-modes)
+      (run %{exe:agent_server_e2e.exe} --scenario http-transport)
+      (run
+       %{exe:agent_server_e2e.exe}
+       --scenario
+       cross-transport-conformance)))))))
+
+(rule
+ (alias agent-e2e-workspaces)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario workspace-context)))))
+
+(rule
+ (alias agent-e2e-cleanup)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario workspace-cleanup)))))
+
+(rule
+ (alias agent-e2e-quotas)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario quota-queues-leases)))))
+
+(rule
+ (alias agent-e2e-prompts)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario prompt-lifecycle)))))
+
+(rule
+ (alias agent-e2e-liveness)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (setenv
+     OCHAT_E2E_STDIO_EXE
+     %{exe:../../bin/ochat_agent_stdio.exe}
+     (setenv
+      OCHAT_E2E_TUI_EXE
+      %{exe:../../bin/chat_tui.exe}
+      (run %{exe:agent_server_e2e.exe} --scenario session-liveness)))))))
+
+(rule
+ (alias agent-e2e-admin)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario administration-idempotency)))))
+
+(rule
+ (alias agent-e2e-multiclient)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario multi-client)))))
+
+(rule
+ (alias agent-e2e-lifecycle)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario replay-backpressure)))))
+
+(rule
+ (alias agent-e2e-permissions)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (progn
+     (run %{exe:agent_server_e2e.exe} --scenario permission-reviewers)
+     (run %{exe:agent_server_e2e.exe} --scenario shell-grants-redaction))))))
+
+(rule
+ (alias agent-e2e-runtime)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (setenv
+     OCHAT_E2E_STDIO_EXE
+     %{exe:../../bin/ochat_agent_stdio.exe}
+     (progn
+      (run %{exe:agent_server_e2e.exe} --scenario canonical-runtime)
+      (run %{exe:agent_server_e2e.exe} --scenario jobs-orchestration)
+      (run %{exe:agent_server_e2e.exe} --scenario data-retention)))))))
+
+(rule
+ (alias agent-e2e-persistence)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (setenv
+     OCHAT_E2E_STDIO_EXE
+     %{exe:../../bin/ochat_agent_stdio.exe}
+     (run %{exe:agent_server_e2e.exe} --scenario graceful-restart))))))
+
+(rule
+ (alias agent-e2e-security)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (setenv
+     OCHAT_E2E_STDIO_EXE
+     %{exe:../../bin/ochat_agent_stdio.exe}
+     (run %{exe:agent_server_e2e.exe} --scenario security-matrix))))))
+
+(rule
+ (alias agent-e2e-crash)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario crash-matrix)))))
+
+(rule
+ (alias agent-e2e-recovery)
+ (action
+  (setenv
+   OCHAT_E2E_ARTIFACT_ROOT
+   %{workspace_root}/_build/agent-e2e-artifacts
+   (setenv
+    OCHAT_E2E_SERVER_EXE
+    %{exe:../../bin/ochat_agent_server.exe}
+    (run %{exe:agent_server_e2e.exe} --scenario recovery-migration)))))

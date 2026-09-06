@@ -1,5 +1,11 @@
 # ChatMD shell tool declarations
 
+Host integration: see [native/legacy/daemon authorization and administration](../guide/chatmd-shell-host-integration.md).
+The declaration language is shared, but bootstrap grants, approvers, persistence
+owners and management commands differ. `--authorize-shell-manifest` is a legacy
+local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
+management does not accept daemon IDs as a way to select daemon state.
+
 Shell tools expose commands to a model through a named `<shell_access>`
 runtime. The runtime—not the tool alone—controls resolution, capabilities,
 sandboxing, policy, approval, interception, limits, secrets, and audit.
@@ -88,6 +94,13 @@ and per-command metadata.
 `nonzero="result"` returns a safe result normally. `nonzero="error"` attaches
 the same safe result to a tool error.
 
+`stream="sanitized"` additionally publishes bounded live progress as a single
+combined `Stdout` stream, including stderr; it does not change the returned
+result selected above. It requires the built-in streaming-safe literal-filter
+subset and rejects every after-interceptor at registration. See the
+[exact restrictions and lifecycle](../guide/chatmd-shell-security.md#sanitized-live-progress)
+before enabling it. `finalized` remains the default and emits no pipe progress.
+
 ## Fixed command tools
 
 Fixed tools declare the program and optional leading arguments. Model-supplied
@@ -120,13 +133,16 @@ The default model schema is equivalent to:
 {
   "type": "object",
   "properties": {
-    "arguments": {"type": "array", "items": {"type": "string"}},
-    "rationale": {"type": "string"}
+    "arguments": {"type": "array", "items": {"type": "string"}}
   },
   "required": ["arguments"],
   "additionalProperties": false
 }
 ```
+
+Fixed tools default to `rationale="none"`: the schema omits `rationale`, and
+supplying it is rejected. Set `rationale="optional"` or `rationale="required"`
+on the tool to enable that field.
 
 Control model arguments with:
 

@@ -46,30 +46,31 @@ let read_bin_prot' (file : path) reader =
   let buf = Core.Bigstring.of_string data in
   match Bigstring_unix.read_bin_prot buf reader with
   | Error err -> failwith (Error.to_string_hum err)
-  | Ok (v, _) -> v
+  | Ok (v, consumed) ->
+    if consumed <> Bigstring.length buf then failwith "Trailing data after Bin_prot value";
+    v
 ;;
 
 let fold_bin_file_list (file : path) reader ~init ~f =
   Path.with_open_in file
   @@ fun flow ->
-  (* [bin_read_stream] expects a [read] function that fills the given
-     bigstring.  We implement that on top of [Eio.Flow.read_exact]. *)
+  let input = Eio.Buf_read.of_flow flow ~max_size:8 in
+  let buffered = Eio.Buf_read.as_flow input in
   let read buf ~pos ~len =
-    let cs = Cstruct.of_bigarray ~off:pos ~len buf in
-    Flow.read_exact flow cs
+    Flow.read_exact buffered (Cstruct.of_bigarray ~off:pos ~len buf)
   in
   let rec aux acc =
-    try
+    if Eio.Buf_read.at_end_of_input input
+    then acc
+    else (
       let v = Bin_prot.Utils.bin_read_stream ~read reader in
-      aux (f acc v)
-    with
-    | End_of_file -> acc
+      aux (f acc v))
   in
   aux init
 ;;
 
 let read_bin_file_list (file : path) reader =
-  fold_bin_file_list file reader ~init:[] ~f:(fun acc v -> v :: acc)
+  fold_bin_file_list file reader ~init:[] ~f:(fun acc v -> v :: acc) |> List.rev
 ;;
 
 let iter_bin_file_list ~f (file : path) reader =
@@ -77,7 +78,7 @@ let iter_bin_file_list ~f (file : path) reader =
 ;;
 
 let map_bin_file_list ~f (file : path) reader =
-  fold_bin_file_list file reader ~init:[] ~f:(fun acc v -> f v :: acc)
+  fold_bin_file_list file reader ~init:[] ~f:(fun acc v -> f v :: acc) |> List.rev
 ;;
 
 (**************************************************************************)

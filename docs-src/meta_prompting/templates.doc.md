@@ -16,7 +16,7 @@ sub-system:
 All texts are embedded at compile-time which eliminates run-time file
 lookups and guarantees that the *canonical* versions are always
 available.  Higher-level helpers such as
-[`Prompt_factory`](prompt_factory.doc.md) allow callers to override the
+[`Prompt_factory`](../lib/meta_prompting/prompt_factory.doc.md) allow callers to override the
 defaults when needed.
 
 ---
@@ -169,4 +169,3 @@ Use the helper whenever you build system prompts dynamically.
   *et al.* 2022 (the idea behind *minimal_reasoning_helper*)
 * [OpenAI function calling & *Responses API*](https://platform.openai.com/docs/guides/function-calling)
 * [Guard-rails vs. LLM prison breaks — best practices](https://arxiv.org/abs/2305.15324)
-

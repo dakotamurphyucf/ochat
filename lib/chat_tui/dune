@@ -3,6 +3,7 @@
  (public_name ochat.chat_tui)
  (modules
   util
+  utf8_edit
   highlight_styles
   highlight_theme
   highlight_tm_engine
@@ -62,6 +63,13 @@
   redraw_throttle
   path_completion
   conversation
+  connection_status
+  agent_projection
+  agent_security_projection
+  agent_permission_view
+  agent_event_apply
+  agent_session_client
+  agent_history_layout
   snippet
   app_runtime
   app_events
@@ -73,12 +81,16 @@
   app_stream_apply
   app_reducer
   type_ahead_provider
+  type_ahead_config
+  type_ahead_controller
+  type_ahead_ui
   app
   attachments
   export
   ui_helpers)
  (libraries
   core
+  uuseg
   jsonaf
   textmate-language
   openai
@@ -96,6 +108,8 @@
   ochat.notty_scroll_box
   ochat.session
   ochat.history_entry
+  ochat.agent_protocol
+  ochat.agent_client
   context_compaction)
  (preprocess
   (pps ppx_jane ppx_blob))

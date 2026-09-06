@@ -49,7 +49,9 @@ let exchange_code ~env ~sw ~code ~client_id ~redirect_uri ~token_endpoint =
       "redirect_uri", redirect_uri ]
   in
   Oauth2_http.post_form ~env ~sw token_endpoint params
-  |> Result.map ~f:Oauth2_types.Token.t_of_jsonaf
+  |> Result.bind ~f:(fun json ->
+       Oauth2_types.Token.of_response_json
+         ~obtained_at:(Eio.Time.now (Eio.Stdenv.clock env)) json)
 ```
 
 ### Register a public client
@@ -70,15 +72,14 @@ let register_public_client ~env ~sw registration_endpoint ~name ~redirect_uri =
 
 ## Error handling semantics
 
-The helpers return `(Jsonaf.t, string) Result.t` where `Error msg` is a
-human-readable description coming from:
+All three helpers return `(Jsonaf.t, string) Result.t`. Transport failures,
+non-2xx HTTP statuses, response-body failures, and malformed JSON return `Error`.
+Diagnostics report the failure category (and HTTP status where available), not
+response bodies, URLs, credentials, or raw exception text. This includes
+`post_form`; it no longer re-raises JSON parse exceptions.
 
-1. `Piaf.Error.to_string` — network / TLS / HTTP problems.
-2. `Exn.to_string` — JSON decoding failures (`get_json`, `post_json`).
-
-`post_form` intentionally {em raises} the JSON parse exception instead of
-wrapping it.  This mirrors historical code paths and avoids an extra match
-layer in callers that pre-validate the content-type.
+Eio cancellation always propagates. `protect` provides the same cancellation-aware
+exception boundary for higher-level OAuth operations.
 
 ---
 
@@ -98,5 +99,4 @@ layer in callers that pre-validate the content-type.
    inefficient.
 2. Only `application/json` responses are supported.
 3. No automatic retry / back-off strategy.
-
 

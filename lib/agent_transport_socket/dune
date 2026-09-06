@@ -1,0 +1,19 @@
+(library
+ (name agent_transport_socket)
+ (public_name ochat.agent_transport_socket)
+ (modules peer_credentials server client)
+ (foreign_stubs
+  (language c)
+  (names peer_credentials_stubs))
+ (libraries
+  core
+  digestif
+  eio
+  eio.unix
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.agent_session
+  ochat.agent_server
+  ochat.agent_transport_stdio)
+ (preprocess
+  (pps ppx_jane)))

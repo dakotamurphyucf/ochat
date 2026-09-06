@@ -116,6 +116,53 @@ let%expect_test "entry partition prunes old reminders without rewrapping retaine
   [%expect {| (true true) |}]
 ;;
 
+let%expect_test
+    "compaction budget failure does not allocate or return replacement history"
+  =
+  let allocator =
+    History_entry.Allocator.create ~namespace:"budget" ~next_sequence:0
+    |> Result.ok_or_failwith
+  in
+  let history = [ create_entry allocator (make_user_msg "keep me") ] in
+  let before = History_entry.Allocator.next_sequence allocator in
+  let result =
+    Context_compaction.Compactor.For_testing.compact_entries_configured
+      ~config:{ Context_compaction.Config.default with context_limit = 1 }
+      ~summarise:(fun ~relevant_items:_ ~env:_ -> Ok "summary")
+      ~allocator
+      ~env:None
+      ~history
+  in
+  printf
+    "rejected=%b allocator_unchanged=%b\n"
+    (Result.is_error result)
+    (History_entry.Allocator.next_sequence allocator = before);
+  [%expect {| rejected=true allocator_unchanged=true |}]
+;;
+
+let%expect_test "relevance is opt-in and policy and latest input remain pinned" =
+  let items =
+    [ make_role_msg Developer "policy"; make_user_msg "old"; make_user_msg "latest" ]
+  in
+  let calls = ref 0 in
+  let score _ =
+    incr calls;
+    0.
+  in
+  let select = Context_compaction.Compactor.For_testing.select_relevant ~score in
+  let original = select Context_compaction.Config.default items in
+  printf "default=%d calls=%d\n" (List.length original) !calls;
+  let filtered =
+    select { Context_compaction.Config.default with relevance_filtering = true } items
+  in
+  printf "filtered=%d calls=%d\n" (List.length filtered) !calls;
+  [%expect
+    {|
+    default=3 calls=0
+    filtered=2 calls=1
+    |}]
+;;
+
 let%expect_test "failed entry compaction does not allocate or expose history" =
   let allocator =
     History_entry.Allocator.create ~namespace:"failure" ~next_sequence:0

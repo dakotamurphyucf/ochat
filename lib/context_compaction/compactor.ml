@@ -46,14 +46,54 @@ let partition_history ~item history =
   devs, comps, relevant_items
 ;;
 
-let compact_entries_with ~summarise ~allocator ~env ~(history : History_entry.t list) =
+let token_codec = lazy (Tikitoken.create_codec Tiktoken_data.o200k_base)
+
+let estimated_tokens items =
+  let codec = Lazy.force token_codec in
+  List.sum
+    (module Int)
+    items
+    ~f:(fun item ->
+      let text = Openai.Responses.Item.jsonaf_of_t item |> Jsonaf.to_string in
+      8 + List.length (Tikitoken.encode ~codec ~text))
+;;
+
+let select_relevant ~score config items =
+  if not config.Config.relevance_filtering
+  then items
+  else (
+    let groups = S.grouped_items items in
+    let last = List.length groups - 1 in
+    List.filteri groups ~f:(fun index group ->
+      index = last
+      || List.exists group ~f:(function
+        | Openai.Responses.Item.Input_message { role = System | Developer; _ } -> true
+        | _ -> false)
+      || Float.(score (S.render_transcript group) >= config.relevance_threshold))
+    |> List.concat)
+;;
+
+let compact_entries_configured
+      ~config
+      ~summarise
+      ~allocator
+      ~env
+      ~(history : History_entry.t list)
+  =
   try
+    if not (Config.is_valid config) then invalid_arg "invalid compaction configuration";
     let devs, comps, relevant_entries =
       partition_history ~item:History_entry.item history
     in
     let open Result.Let_syntax in
     let%bind compacted =
-      summarise ~relevant_items:(History_entry.items relevant_entries) ~env
+      let relevant_items =
+        select_relevant
+          config
+          (History_entry.items relevant_entries)
+          ~score:(fun prompt -> Relevance_judge.score_relevance ?env config ~prompt)
+      in
+      summarise ~relevant_items ~env
     in
     let summary =
       sprintf
@@ -66,8 +106,16 @@ let compact_entries_with ~summarise ~allocator ~env ~(history : History_entry.t 
          </system-reminder>"
         compacted
     in
+    let item = build_system_summary_message summary in
+    let retained = devs @ comps in
+    let%bind () =
+      if
+        estimated_tokens (History_entry.items retained @ [ item ]) <= config.context_limit
+      then Ok ()
+      else Error (Failure "compaction exceeds context_limit; original history retained")
+    in
     let%map reminder =
-      History_entry.create ~allocator (build_system_summary_message summary)
+      History_entry.create ~allocator item
       |> Result.map_error ~f:(fun error -> Failure error)
     in
     List.concat [ devs; comps; [ reminder ] ]
@@ -76,9 +124,23 @@ let compact_entries_with ~summarise ~allocator ~env ~(history : History_entry.t 
   | exn -> Error exn
 ;;
 
-let compact_entries = compact_entries_with ~summarise:S.summarise
+let compact_entries_with ~summarise ~allocator ~env ~history =
+  compact_entries_configured
+    ~config:(Config.load ?env ())
+    ~summarise
+    ~allocator
+    ~env
+    ~history
+;;
+
+let compact_entries ~allocator ~env ~history =
+  compact_entries_with ~summarise:S.summarise ~allocator ~env ~history
+;;
 
 module For_testing = struct
   let process_current_entries history = partition_history ~item:History_entry.item history
   let compact_entries_with = compact_entries_with
+  let compact_entries_configured = compact_entries_configured
+  let select_relevant = select_relevant
+  let estimated_tokens = estimated_tokens
 end

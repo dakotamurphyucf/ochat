@@ -48,19 +48,6 @@ type op =
   (** A compaction worker has been forked but has not yet published its
           switch. *)
 
-(** Tracking state for background type-ahead completion work. *)
-type typeahead_op =
-  | Typeahead of
-      { sw : Eio.Switch.t
-      ; id : int
-      }
-  (** A type-ahead worker is currently running.
-
-      The operation can be cancelled by failing [sw]. *)
-  | Starting_typeahead of { id : int }
-  (** A type-ahead worker has been forked but has not yet published its
-      switch. *)
-
 (** A snapshot of the editor state that is submitted to the assistant. *)
 type submit_request =
   { text : string
@@ -142,7 +129,6 @@ type t =
   ; agent_page_kind_by_name :
       Chat_response.Tool_execution_event.agent_page_kind Core.String.Table.t
   ; mutable op : op option
-  ; mutable typeahead_op : typeahead_op option
   ; moderator : Chat_response.In_memory_stream.moderator option
   ; shell_approval_broker : Shell_runtime.Approval_broker.t option
   ; approval_store : Shell_runtime.Approval_store.t option
@@ -164,9 +150,6 @@ type t =
   ; mutable cancel_compaction_on_start : bool
     (** Records a cancellation request that arrived while the state was
           [Starting_compaction]. *)
-  ; mutable cancel_typeahead_on_start : bool
-    (** Records a cancellation request that arrived while the state was
-        [Starting_typeahead]. *)
   ; mutable pending_agent_toggle : int option
     (** Streaming operation whose first tool call should open Agent because
         Ctrl-G was pressed before its [Started] event reached the reducer. *)

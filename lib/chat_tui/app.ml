@@ -109,7 +109,7 @@ module Session_persist = struct
           ; kv_store = Hashtbl.to_alist (Model.kv_store runtime.Runtime.model)
           }
       in
-      Session_store.save ~env updated_session
+      Session_store.save_exn ~env updated_session
   ;;
 end
 
@@ -614,6 +614,497 @@ module For_testing = struct
   let cursor_for_frame = Ui.cursor_for_frame
 end
 
+module Agent_mode = struct
+  type event =
+    | Input of input_event
+    | Update of Agent_session_client.update
+    | Audit_loaded of
+        int * (Shell_security_page_state.audit_page, Agent_protocol.Error.t) result
+    | Grant_revoked of
+        int * string * (Agent_protocol.Grant.t, Agent_protocol.Error.t) result
+    | Typeahead of Type_ahead_controller.event
+    | History_layout of Agent_history_layout.completion
+    | Resize
+    | Redraw
+
+  type t =
+    { client : Agent_session_client.t
+    ; sw : Switch.t
+    ; management_events : event Eio.Stream.t
+    ; model : Model.t
+    ; typeahead : Type_ahead_ui.t
+    ; applier : Agent_event_apply.t
+    ; history_layout : Agent_history_layout.t
+    ; term : Notty_eio.Term.t
+    ; throttler : Redraw_throttle.t
+    ; redraw : unit -> unit
+    ; mutable pending_permission : Agent_protocol.Permission.t option
+    }
+
+  let show_error t failure =
+    let text =
+      Agent_protocol.Error.code_to_string failure.Agent_protocol.Error.code
+      ^ ": "
+      ^ failure.message
+    in
+    ignore (Model.apply_patch t.model (Add_placeholder_message { role = "error"; text }));
+    Redraw_throttle.request_redraw t.throttler
+  ;;
+
+  let choice_label = Agent_permission_view.choice_label
+
+  let sync_permission t projection =
+    t.pending_permission
+    <- Agent_permission_view.sync t.model ~current:t.pending_permission projection
+  ;;
+
+  let sync_activity model projection =
+    let session = (Agent_projection.snapshot projection).session in
+    let activity =
+      match session.active_operation with
+      | Some { Agent_protocol.Operation.kind = Compaction; _ } -> Some Model.Compacting
+      | Some { kind = Turn _; _ } -> Some (Model.Assistant Model.Thinking)
+      | None -> None
+    in
+    Model.set_activity model activity
+  ;;
+
+  let sync_security model projection =
+    let current = Model.shell_security_snapshot model in
+    let snapshot =
+      Agent_security_projection.snapshot ~current (Agent_projection.snapshot projection)
+    in
+    Model.set_shell_security_snapshot model snapshot
+  ;;
+
+  let viewport_height t =
+    let screen_w, screen_h = Notty_eio.Term.size t.term in
+    (Chat_page_layout.compute ~screen_w ~screen_h ~model:t.model).scroll_height
+  ;;
+
+  let relayout t =
+    Agent_history_layout.request t.history_layout ~size:(Notty_eio.Term.size t.term)
+  ;;
+
+  let apply_projection t projection =
+    match
+      Agent_event_apply.apply
+        t.applier
+        ~model:t.model
+        ~viewport_height:(viewport_height t)
+        projection
+    with
+    | Error failure -> show_error t failure
+    | Ok damage ->
+      Model.set_connection_status t.model (Some (Connection_status.connected ()));
+      sync_activity t.model projection;
+      sync_security t.model projection;
+      sync_permission t projection;
+      if Model.projection_damage_requires_redraw damage then relayout t;
+      Redraw_throttle.request_redraw t.throttler
+  ;;
+
+  let handle_update t = function
+    | Agent_session_client.Projection projection -> apply_projection t projection
+    | Connection_changed status ->
+      Model.set_connection_status t.model (Some status);
+      Redraw_throttle.request_redraw t.throttler
+    | Connection_failed failure ->
+      Model.set_connection_status t.model (Some (Connection_status.failed failure));
+      Redraw_throttle.request_redraw t.throttler
+  ;;
+
+  let message_content model text =
+    let kind =
+      match Model.draft_mode model with
+      | Model.Plain -> Agent_protocol.Session.Message_content.Plain_text
+      | Raw_xml -> Chatmd
+    in
+    Agent_protocol.Session.Message_content.{ kind; text; attachments = [] }
+  ;;
+
+  let submit t =
+    let text = String.strip (Model.input_line t.model) in
+    if String.is_empty text
+    then Redraw_throttle.request_redraw t.throttler
+    else (
+      match Agent_session_client.send_content t.client (message_content t.model text) with
+      | Error failure -> show_error t failure
+      | Ok _ ->
+        App_submit.clear_editor ~model:t.model;
+        Model.set_activity t.model (Some (Model.Assistant Model.Thinking));
+        Redraw_throttle.request_redraw t.throttler)
+  ;;
+
+  let respond_permission t response =
+    match t.pending_permission with
+    | None -> ()
+    | Some permission ->
+      let normalized = String.lowercase (String.strip response) in
+      (match
+         List.find permission.choices ~f:(fun choice ->
+           String.equal normalized (choice_label choice))
+       with
+       | None ->
+         Model.set_moderator_validation_error
+           t.model
+           (Some "Select one of the listed permission choices.")
+       | Some choice ->
+         (match
+            Agent_session_client.respond_permission
+              t.client
+              ~permission_id:permission.id
+              ~permission_generation:permission.generation
+              ~choice
+              ~reason:None
+          with
+          | Error failure -> show_error t failure
+          | Ok _ ->
+            t.pending_permission <- None;
+            Model.close_moderator_modal t.model));
+      Redraw_throttle.request_redraw t.throttler
+  ;;
+
+  let cancel_or_quit t =
+    match t.pending_permission with
+    | Some _ ->
+      respond_permission t "deny";
+      true
+    | None ->
+      (match
+         (Agent_projection.snapshot (Agent_session_client.projection t.client)).session
+           .active_operation
+       with
+       | None -> false
+       | Some _ ->
+         (match Agent_session_client.cancel_active_operation t.client with
+          | Ok _ -> ()
+          | Error failure -> show_error t failure);
+         true)
+  ;;
+
+  let compact t =
+    match Agent_session_client.compact t.client with
+    | Ok _ -> Model.set_activity t.model (Some Model.Compacting)
+    | Error failure -> show_error t failure
+  ;;
+
+  let refresh_security t generation =
+    Fiber.fork ~sw:t.sw (fun () ->
+      let result =
+        Agent_session_client.read_audit t.client ~limit:200
+        |> Result.map
+             ~f:
+               (Agent_security_projection.audit_page
+                  ~session_id:
+                    (Agent_projection.snapshot (Agent_session_client.projection t.client))
+                      .session
+                      .id)
+      in
+      Eio.Stream.add t.management_events (Audit_loaded (generation, result)))
+  ;;
+
+  let revoke_grant t generation grant_id =
+    Model.mark_shell_grant_revoking t.model ~generation ~grant_id;
+    match Agent_protocol.Id.Grant.of_string grant_id with
+    | Error failure ->
+      Model.fail_shell_grant_revoke t.model ~generation ~grant_id failure.message
+    | Ok grant_id' ->
+      Fiber.fork ~sw:t.sw (fun () ->
+        let result =
+          Agent_session_client.revoke_grant
+            t.client
+            ~grant_id:grant_id'
+            ~reason:"revoked from connected TUI Shell Security"
+        in
+        Eio.Stream.add t.management_events (Grant_revoked (generation, grant_id, result)))
+  ;;
+
+  let handle_reaction t = function
+    | Controller.Submit_input ->
+      submit t;
+      true
+    | Cancel_or_quit -> cancel_or_quit t
+    | Compact_context ->
+      compact t;
+      true
+    | Delete_history id ->
+      (match Agent_session_client.delete_history t.client id with
+       | Ok _ -> ()
+       | Error failure -> show_error t failure);
+      true
+    | Moderator_input_response response ->
+      respond_permission t response;
+      true
+    | Quit -> false
+    | Chat_scrolled changed ->
+      if changed then Redraw_throttle.request_redraw t.throttler;
+      true
+    | Prepare_chat_destination destination ->
+      Agent_history_layout.prepare_destination
+        t.history_layout
+        ~size:(Notty_eio.Term.size t.term)
+        destination;
+      Redraw_throttle.request_redraw t.throttler;
+      true
+    | Redraw | Refresh_messages ->
+      Redraw_throttle.request_redraw t.throttler;
+      true
+    | Shell_grant_revoke_requested (generation, grant_id) ->
+      revoke_grant t generation grant_id;
+      true
+    | Shell_management_refresh_requested generation ->
+      refresh_security t generation;
+      true
+    | Shell_approval_response _ ->
+      show_error
+        t
+        (Agent_protocol.Error.invalid_request
+           "legacy shell approval responses are unavailable in connected mode");
+      true
+    | Unhandled -> true
+  ;;
+
+  let handle_input t input =
+    let previous_status = Model.typeahead_status t.model in
+    let before = Type_ahead_ui.before t.typeahead in
+    let reaction = Controller.handle_key ~model:t.model ~term:t.term input in
+    let keep_going = handle_reaction t reaction in
+    let finished =
+      (not keep_going)
+      ||
+      match reaction with
+      | Controller.Submit_input | Compact_context | Cancel_or_quit | Quit -> true
+      | _ -> false
+    in
+    Type_ahead_ui.after t.typeahead before input ~finished;
+    if not (Option.equal String.equal previous_status (Model.typeahead_status t.model))
+    then Redraw_throttle.request_redraw t.throttler;
+    keep_going
+  ;;
+
+  let handle_redraw t =
+    Redraw_throttle.on_redraw_handled t.throttler;
+    if Option.is_some (Model.activity t.model) then Model.advance_animation_frame t.model;
+    t.redraw ();
+    if Option.is_some (Model.activity t.model)
+    then Redraw_throttle.request_redraw t.throttler;
+    true
+  ;;
+
+  let handle_event t = function
+    | History_layout completion ->
+      ignore
+        (Agent_history_layout.accept
+           t.history_layout
+           ~size:(Notty_eio.Term.size t.term)
+           completion
+         : bool);
+      Redraw_throttle.request_redraw t.throttler;
+      true
+    | Input input -> handle_input t input
+    | Update update ->
+      handle_update t update;
+      Type_ahead_ui.sync t.typeahead;
+      true
+    | Audit_loaded (generation, result) ->
+      let changed =
+        match result with
+        | Ok page -> Model.finish_shell_management_load t.model ~generation page
+        | Error failure ->
+          Model.fail_shell_management_load
+            t.model
+            ~generation
+            (Agent_protocol.Error.code_to_string failure.code ^ ": " ^ failure.message)
+      in
+      if changed then Redraw_throttle.request_redraw t.throttler;
+      true
+    | Grant_revoked (generation, grant_id, result) ->
+      (match result with
+       | Ok _ -> Model.close_shell_grant_revoke_modal t.model
+       | Error failure ->
+         Model.fail_shell_grant_revoke
+           t.model
+           ~generation
+           ~grant_id
+           (Agent_protocol.Error.code_to_string failure.code ^ ": " ^ failure.message));
+      Redraw_throttle.request_redraw t.throttler;
+      true
+    | Typeahead event ->
+      Type_ahead_ui.handle t.typeahead event;
+      Redraw_throttle.request_redraw t.throttler;
+      true
+    | Resize ->
+      Type_ahead_ui.invalidate t.typeahead;
+      relayout t;
+      t.redraw ();
+      true
+    | Redraw -> handle_redraw t
+  ;;
+
+  let rec loop t input_stream resize_stream redraw_stream =
+    let ready =
+      Fiber.n_any
+        [ (fun () -> Input (Eio.Stream.take input_stream))
+        ; (fun () ->
+            Eio.Stream.take resize_stream;
+            Resize)
+        ; (fun () -> Update (Agent_session_client.next_update t.client))
+        ; (fun () -> Eio.Stream.take t.management_events)
+        ; (fun () ->
+            Eio.Stream.take redraw_stream;
+            Redraw)
+        ]
+    in
+    if List.for_all ready ~f:(handle_event t)
+    then loop t input_stream resize_stream redraw_stream
+  ;;
+
+  let initial_model client =
+    let projection = Agent_session_client.projection client in
+    let model =
+      Setup.init_model
+        ~session:None
+        ~history_items:(Agent_projection.canonical_history projection)
+    in
+    Model.set_connection_status model (Some (Connection_status.connected ()));
+    model, projection
+  ;;
+
+  let load_explicit_grammars ~env files =
+    Highlight_grammar_discovery.load_explicit
+      ~fs:(Eio.Stdenv.fs env)
+      ~cwd:(Eio.Stdenv.cwd env)
+      ~registry:(Highlight_registry.get ())
+      files
+    |> Or_error.ok_exn
+  ;;
+
+  let typeahead_host client () =
+    match
+      (Agent_session_client.status client).phase, Agent_session_client.attachment client
+    with
+    | Connection_status.Connected, Some attachment ->
+      (match attachment.mode with
+       | Agent_protocol.Session.Read_only -> None
+       | _ ->
+         let snapshot =
+           Agent_projection.snapshot (Agent_session_client.projection client)
+         in
+         let grants = List.map snapshot.grants ~f:Agent_protocol.Grant.sexp_of_t in
+         Some
+           (Sexp.to_string
+              (Sexp.List (Agent_protocol.Session.Attachment.sexp_of_t attachment :: grants))))
+    | _ -> None
+  ;;
+
+  let run_terminal ~env ~sw ~client ~model ~projection ~typeahead_config ~render_config =
+    let input_stream = Eio.Stream.create 4096 in
+    let resize_stream = Eio.Stream.create 16 in
+    let redraw_stream = Eio.Stream.create 1 in
+    Notty_eio.Term.run
+      ~input:env#stdin
+      ~output:env#stdout
+      ~mouse:false
+      ~on_event:(function
+      | #Notty.Unescape.event as event -> Eio.Stream.add input_stream event
+      | `Resize -> Eio.Stream.add resize_stream ())
+    @@ fun term ->
+    let runtime = Runtime.create ~model () in
+    let presenter = Ui.create_presenter () in
+    Ui.spawn_presenter ~sw ~term ~input_stream ~on_presented:(fun _ _ -> ()) presenter;
+    let redraw, _, _ = Ui.make_redraws ~term ~presenter ~runtime ~model in
+    let throttler =
+      Ui.init_throttler ~fps:(Ui.read_fps_env ()) ~enqueue_redraw:(fun () ->
+        Eio.Stream.add redraw_stream ())
+    in
+    Ui.spawn_throttler ~env ~sw ~throttler;
+    let management_events = Eio.Stream.create 32 in
+    let history_layout =
+      Agent_history_layout.create
+        ~sw
+        ~env
+        ~model
+        ~config:render_config
+        ~emit:(fun completion ->
+          Eio.Stream.add management_events (History_layout completion))
+    in
+    let typeahead =
+      Type_ahead_ui.create
+        ~sw
+        ~env
+        ~config:typeahead_config
+        ~model
+        ~host:(typeahead_host client)
+        ~emit:(fun event -> Eio.Stream.add management_events (Typeahead event))
+    in
+    let state =
+      { client
+      ; sw
+      ; management_events
+      ; typeahead
+      ; model
+      ; applier = Agent_event_apply.create ()
+      ; history_layout
+      ; term
+      ; throttler
+      ; redraw
+      ; pending_permission = None
+      }
+    in
+    ignore
+      (Agent_event_apply.apply state.applier ~model ~viewport_height:0 projection
+       : (_, _) result);
+    sync_activity model projection;
+    sync_security model projection;
+    sync_permission state projection;
+    relayout state;
+    redraw ();
+    Fun.protect
+      ~finally:(fun () ->
+        Agent_history_layout.close history_layout;
+        Type_ahead_ui.close typeahead;
+        Notty_eio.Term.release term;
+        ignore
+          (Agent_session_client.detach client : (unit, Agent_protocol.Error.t) result))
+      (fun () -> loop state input_stream resize_stream redraw_stream)
+  ;;
+
+  let run ~env ~client ~textmate_grammar_files ~typeahead_config =
+    load_explicit_grammars ~env textmate_grammar_files;
+    let custom_grammars =
+      Highlight_grammar_discovery.load_explicit_sources
+        ~fs:(Eio.Stdenv.fs env)
+        ~cwd:(Eio.Stdenv.cwd env)
+        textmate_grammar_files
+      |> Or_error.ok_exn
+    in
+    let render_config =
+      Chat_render_worker_runtime.Config.create
+        ~custom_grammars
+        ~theme_generation:0
+        ~grammar_generation:(Highlight_registry.generation ())
+    in
+    Switch.run (fun sw ->
+      let model, projection = initial_model client in
+      run_terminal ~env ~sw ~client ~model ~projection ~typeahead_config ~render_config)
+  ;;
+end
+
+let run_agent_session
+      ~env
+      ~client
+      ?(textmate_grammar_files = [])
+      ?(typeahead_config = Type_ahead_config.default)
+      ()
+  =
+  Type_ahead_config.validate_credentials
+    typeahead_config
+    ~api_key:(Sys.getenv "OPENAI_API_KEY")
+  |> Or_error.ok_exn;
+  Agent_mode.run ~env ~client ~textmate_grammar_files ~typeahead_config
+;;
+
 (* ────────────────────────────────────────────────────────────────────────── *)
 (*  Main event handler for submitting the draft to the assistant             *)
 (* ────────────────────────────────────────────────────────────────────────── *)
@@ -791,6 +1282,7 @@ let time_startup_phase label f =
 ;;
 
 let run_chat
+      ?(typeahead_config = Type_ahead_config.default)
       ~env
       ~prompt_file
       ?session
@@ -802,6 +1294,10 @@ let run_chat
       ?shell_approval_provider
       ()
   =
+  Type_ahead_config.validate_credentials
+    typeahead_config
+    ~api_key:(Sys.getenv "OPENAI_API_KEY")
+  |> Or_error.ok_exn;
   let fs = Eio.Stdenv.fs env in
   let cwd = Eio.Stdenv.cwd env in
   let grammar_registry = time_startup_phase "bundled grammars" Highlight_registry.get in
@@ -857,7 +1353,7 @@ let run_chat
             (Sexp.equal
                (Session.Shell_state.sexp_of_t session.shell_state)
                (Session.Shell_state.sexp_of_t refreshed.shell_state))
-        then Session_store.save ~env refreshed;
+        then Session_store.save_exn ~env refreshed;
         ref refreshed)
   in
   let approval_store =
@@ -869,7 +1365,7 @@ let run_chat
     | None -> Shell_runtime.Approval_store.memory ~bindings ()
     | Some session ->
       Shell_runtime.Approval_store.session ~session ~bindings ~persist:(fun updated ->
-        Or_error.try_with (fun () -> Session_store.save ~env updated)
+        Or_error.try_with (fun () -> Session_store.save_exn ~env updated)
         |> Result.map_error ~f:Error.to_string_hum)
   in
   let executor_approval_store =
@@ -950,7 +1446,7 @@ let run_chat
       Shell_runtime.Manifest_grant_store.session_authorizer
         ~session
         ~persist:(fun updated ->
-          Or_error.try_with (fun () -> Session_store.save ~env updated)
+          Or_error.try_with (fun () -> Session_store.save_exn ~env updated)
           |> Result.map_error ~f:Error.to_string_hum)
         ~source:
           { canonical_source_root = Eio.Path.native_exn prompt_dir
@@ -1006,7 +1502,7 @@ let run_chat
       Option.map session_state ~f:(fun state extension_snapshots ->
         let shell_state = { !state.Session.shell_state with extension_snapshots } in
         let updated = { !state with shell_state } in
-        Or_error.try_with (fun () -> Session_store.save ~env updated)
+        Or_error.try_with (fun () -> Session_store.save_exn ~env updated)
         |> Result.map_error ~f:Error.to_string_hum
         |> Result.map ~f:(fun () -> state := updated))
     in
@@ -1268,7 +1764,7 @@ let run_chat
           ~f:Chat_response.Moderator_manager.unsubscribe;
         Option.iter shell_approval_broker ~f:Shell_runtime.Approval_broker.close;
         unregister_moderator_wakeup ())
-      (fun () -> App_reducer.run reducer_ctx)
+      (fun () -> App_reducer.run ~typeahead_config reducer_ctx)
   in
   Shutdown.shutdown
     ~env

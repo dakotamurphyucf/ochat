@@ -21,8 +21,12 @@ A companion executable, **`odoc-search`**, consumes the artefacts produced by
 • After upgrading or pinning new opam packages.  \
 • Whenever you want the search index to reflect the latest docs on disk.
 
-The command is incremental by default: if the output directory already exists
-only *new* or *changed* packages are (re)-processed.
+The current binary is not a general incremental package updater. Its hard-coded
+`Update` filter writes snippet/vector/BM25 indexes only for `ochat`,
+`textmate-language`, `irmin`, `irmin-git`, and `irmin-watcher`. It crawls other
+non-excluded packages for the coarse package catalog, which does not imply their
+snippet indexes exist. Use the library with an explicit filter, or change the
+wrapper, when you need other packages; no CLI package-filter flag is exposed.
 
 ---
 
@@ -113,15 +117,22 @@ Include [ "my_pkg1"; "my_pkg2" ]
 to whitelist a subset.  See the `package_filter` type in
 `Odoc_indexer` for all available options.
 
+Those are source/library changes, not accepted command-line arguments. The
+binary actually wraps the exclusion set in `Update (..., ["ochat";
+"textmate-language"; "irmin"; "irmin-git"; "irmin-watcher"])`. Selected packages
+are re-embedded; the filter does not compare old and new source hashes.
+
 ---
 
 ## Limitations & gotchas
 
-* **OpenAI key** – embedding requires the `OPENAI_API_KEY` environment
-  variable to be set.  If it’s missing or invalid the command fails.
+* **Embedding mode** – missing/empty `OPENAI_API_KEY` or a present
+  `OPENAI_EMBEDDINGS_STUB` selects test vectors; see
+  [embedding configuration](../guide/search-and-indexing.md#embedding-configuration).
 * **Rate limits** – despite local throttling the OpenAI API may still return
   429 / 502 errors during traffic spikes.  The indexer retries up to three
-  times before giving up.
+  times after the first attempt. Failed snippet batches are caught and omitted,
+  so completion can leave a partial index; inspect diagnostics and results.
 * **Large documentation trees** – a full `odoc` render of the OCaml
   ecosystem can weigh several GB.  Make sure you have enough disk space in
   `--out`.
@@ -148,4 +159,3 @@ directly.
 ---
 
 © 2024.  No warranty – use at your own risk.
-

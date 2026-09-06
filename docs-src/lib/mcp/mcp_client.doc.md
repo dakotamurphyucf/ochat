@@ -1,5 +1,10 @@
 # `Mcp_client` – High-level client helper for the Model-Context-Protocol
 
+This is maintained MCP tool/client infrastructure. It is not deprecated by the
+new agent server; only the separate ChatMD prompt-serving MCP host is legacy.
+See [MCP tool configuration](../../overview/tools.md) and
+[discovery identity/lifetime](../chat_response/tool.doc.md#cache-invalidation-strategy).
+
 `Mcp_client` hides the transport details of the **Model-Context-Protocol**
 and provides a *concurrency-safe*, *non-blocking* wrapper around
 JSON-RPC-style requests.
@@ -131,12 +136,22 @@ particular request.
 
 ## 4  Error handling
 
-`Mcp_client` itself never raises on normal operation.  All errors are
-channelled through the [`('a, string) result`] surface.
+RPC failures use the `('a, string) result` surface. EOF and explicit `close`
+resolve every pending request with `Error "Connection_closed"`; other transport
+failures use a generic diagnostic without copying payloads or exception text.
+The pending table is drained before transport cleanup. Repeated close is safe,
+late responses are ignored, and further RPCs return the terminal error.
 
-Closing the underlying transport (either explicitly via {!close} or due
-to server termination) cancels *all* in-flight promises with the error
-`Connection_closed`.
+A send failure terminates the client because the request may have been partially
+written. Eio cancellation during send drains pending requests and propagates to
+the sender. Cancelling a blocking `rpc`, `list_tools`, or `call_tool` removes that
+request; cancelling only a waiter on an asynchronous promise leaves its request
+active until a reply or client shutdown. Connection setup and Eio cancellation
+can still raise; they are not converted into successful results.
+
+Typed async results are resolved directly by the pending-request table, without
+mapper fibers. Terminal results resolve synchronously, including calls made
+during cancellation-protected teardown of an already-cancelled client switch.
 
 ---
 
@@ -155,4 +170,3 @@ to server termination) cancels *all* in-flight promises with the error
 * {!Mcp_tool} – wrap a JSON schema into a first-class OCaml function.
 * {!Mcp_transport_stdio} – spawn local process and exchange newline-delimited JSON.
 * {!Mcp_transport_http} – experimental streaming HTTP transport.
-

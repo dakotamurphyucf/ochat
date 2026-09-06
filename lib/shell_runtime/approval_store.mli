@@ -24,6 +24,15 @@ type t
 (** Process-local, fiber-safe storage. *)
 val memory : ?initial:grant list -> bindings:bindings -> unit -> t
 
+(** [create] builds a fiber-safe store over caller-owned persistence.
+    Mutations load the latest grants, derive a replacement, and commit that
+    replacement before returning it as visible to the executor. *)
+val create
+  :  load:(unit -> (grant list, error) result)
+  -> commit:(grant list -> (unit, error) result)
+  -> bindings:bindings
+  -> t
+
 (** Session-backed storage. Successful mutations replace [session] and call
     [persist] before becoming visible. *)
 val session

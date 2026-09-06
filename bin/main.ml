@@ -555,7 +555,7 @@ let shell_grants_revoke_command =
          let state = ref session in
          let persist updated =
            try
-             Session_store.save ~env updated;
+             Session_store.save_exn ~env updated;
              Ok ()
            with
            | exn -> Error (Core.Exn.to_string exn)
@@ -606,7 +606,7 @@ let shell_grants_revoke_command =
              { !state.Session.shell_state with last_audit_sequence = Some sequence }
            in
            let updated = { !state with shell_state } in
-           Session_store.save ~env updated;
+           Session_store.save_exn ~env updated;
            state := updated;
            printf "Revoked grant %s (audit sequence %Ld).\n" grant_id sequence))
 ;;
@@ -724,7 +724,7 @@ let shell_manifest_grants_revoke_command =
          let state = ref session in
          let persist updated =
            try
-             Session_store.save ~env updated;
+             Session_store.save_exn ~env updated;
              Ok ()
            with
            | exn -> Error (Core.Exn.to_string exn)
@@ -768,7 +768,7 @@ let shell_manifest_grants_revoke_command =
              { !state.Session.shell_state with last_audit_sequence = Some sequence }
            in
            let updated = { !state with shell_state } in
-           Session_store.save ~env updated;
+           Session_store.save_exn ~env updated;
            printf "Revoked manifest grant %s (audit sequence %Ld).\n" grant_id sequence))
 ;;
 

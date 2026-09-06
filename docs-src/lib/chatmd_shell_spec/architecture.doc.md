@@ -39,3 +39,27 @@ manifest. Required feature IDs prevent unsupported declarations from being
 ignored or lowered to weaker behavior.
 
 See [the contributor runtime guide](../../guide/chatmd-shell-runtime-internals.md).
+
+## Agent-host integration and complete API index
+
+See [host integration](../../guide/chatmd-shell-host-integration.md) for daemon
+versus legacy ownership and [environment](../../agent-server/environment.md) for
+host-specific configuration. Compiling a manifest is not authorization or OS
+confinement. A detached viewer disconnect does not cancel daemon-owned runtimes.
+
+| Module | Contract | Code |
+|---|---|---|
+| `builtin_profile` | [Interface](../../../lib/chatmd_shell_spec/builtin_profile.mli) | [Implementation](../../../lib/chatmd_shell_spec/builtin_profile.ml) |
+| `chatmd_script_spec` | [Interface](../../../lib/chatmd_shell_spec/chatmd_script_spec.mli) | [Implementation](../../../lib/chatmd_shell_spec/chatmd_script_spec.ml) |
+| `diagnostic` | [Interface](../../../lib/chatmd_shell_spec/diagnostic.mli) | [Implementation](../../../lib/chatmd_shell_spec/diagnostic.ml) |
+| `duration` | [Interface](../../../lib/chatmd_shell_spec/duration.mli) | [Implementation](../../../lib/chatmd_shell_spec/duration.ml) |
+| `feature` | [Interface](../../../lib/chatmd_shell_spec/feature.mli) | [Implementation](../../../lib/chatmd_shell_spec/feature.ml) |
+| `manifest` | [Interface](../../../lib/chatmd_shell_spec/manifest.mli) | [Implementation](../../../lib/chatmd_shell_spec/manifest.ml) |
+| `manifest_compiler` | [Interface](../../../lib/chatmd_shell_spec/manifest_compiler.mli) | [Implementation](../../../lib/chatmd_shell_spec/manifest_compiler.ml) |
+| `manifest_defaults` | [Interface](../../../lib/chatmd_shell_spec/manifest_defaults.mli) | [Implementation](../../../lib/chatmd_shell_spec/manifest_defaults.ml) |
+| `manifest_merge` | [Interface](../../../lib/chatmd_shell_spec/manifest_merge.mli) | [Implementation](../../../lib/chatmd_shell_spec/manifest_merge.ml) |
+| `path_expr` | [Interface](../../../lib/chatmd_shell_spec/path_expr.mli) | [Implementation](../../../lib/chatmd_shell_spec/path_expr.ml) |
+| `shell_element` | [Interface](../../../lib/chatmd_shell_spec/shell_element.mli) | [Implementation](../../../lib/chatmd_shell_spec/shell_element.ml) |
+| `shell_spec` | [Interface](../../../lib/chatmd_shell_spec/shell_spec.mli) | [Implementation](../../../lib/chatmd_shell_spec/shell_spec.ml) |
+| `shell_tool_spec` | [Interface](../../../lib/chatmd_shell_spec/shell_tool_spec.mli) | [Implementation](../../../lib/chatmd_shell_spec/shell_tool_spec.ml) |
+| `source_ref` | [Interface](../../../lib/chatmd_shell_spec/source_ref.mli) | [Implementation](../../../lib/chatmd_shell_spec/source_ref.ml) |

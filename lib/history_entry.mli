@@ -36,6 +36,14 @@ module Allocator : sig
       creates a new allocator; a live allocator cannot move backwards. *)
   val create : namespace:string -> next_sequence:int -> (t, string) result
 
+  (** [create_bounded] creates an allocator that cannot advance beyond the
+      already committed exclusive high-water mark. *)
+  val create_bounded
+    :  namespace:string
+    -> next_sequence:int
+    -> limit_exclusive:int
+    -> (t, string) result
+
   val namespace : t -> string
   val next_sequence : t -> int
   val allocate : t -> (Id.t, string) result
@@ -47,6 +55,7 @@ module Allocator : sig
 end
 
 type t [@@deriving bin_io, sexp]
+type entry = t
 
 val create : allocator:Allocator.t -> Openai.Responses.Item.t -> (t, string) result
 val create_with_id : id:Id.t -> Openai.Responses.Item.t -> t
@@ -66,3 +75,27 @@ val items : t list -> Openai.Responses.Item.t list
     mutation is in progress. Explicitly constructed/imported entries must be
     validated before becoming canonical history. *)
 val validate : allocator:Allocator.t -> t list -> (unit, string) result
+
+(** Removes the selected occurrence and its nearest matching call/result pair.
+    Reused provider call IDs in other turns do not select additional entries. *)
+val remove_with_tool_pair : t list -> entry_id:Id.t -> (t list, string) result
+
+module Id_source : sig
+  type t
+
+  (** [of_allocator] preserves the existing standalone allocator behavior. *)
+  val of_allocator : Allocator.t -> t
+
+  (** [create] installs an application-owned allocator and collection
+      validator. The allocator must reserve durable identity before returning
+      an ID when externally visible streams require that invariant. *)
+  val create
+    :  namespace:string
+    -> allocate:(unit -> (Id.t, string) result)
+    -> validate:(entry list -> (unit, string) result)
+    -> t
+
+  val namespace : t -> string
+  val allocate : t -> (Id.t, string) result
+  val validate : t -> entry list -> (unit, string) result
+end

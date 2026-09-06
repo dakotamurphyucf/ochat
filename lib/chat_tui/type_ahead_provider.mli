@@ -1,34 +1,43 @@
-(** Fetch a type-ahead completion suffix.
+open! Core
 
-    The returned string is the exact text that should be inserted at the cursor
-    position in the current draft buffer. It must be a suffix (i.e. it must not
-    repeat the draft prefix before the cursor).
+(** Private, bounded, client-local typeahead requests. No draft or response logs. *)
 
-    The provider is designed for low-latency interactive use:
-    {ul
-    {- it caps output tokens;}
-    {- it disables tools;}
-    {- it encodes the cursor position explicitly via a marker inserted into the
-       draft excerpt; and}
-    {- it limits the excerpted draft/history context.}}
+type input = private
+  { draft : string
+  ; history : string
+  }
 
-    Cancellation: the request runs under [sw]. Failing [sw] will cancel the
-    request, typically raising the exception used with [Switch.fail].
+type outcome = (string, [ `Unavailable | `Timeout ]) result
 
-    The returned text is sanitised with {!Chat_tui.Util.sanitize} using
-    [~strip:false] so it is safe to render and insert.
-
-    When credentials are missing (no [OPENAI_API_KEY]), returns the empty
-    string.
-
-    Cursor semantics: [cursor] is a byte index into [draft]. Out-of-range
-    cursors are clamped. *)
-val complete_suffix
-  :  sw:Eio.Switch.t
-  -> env:Eio_unix.Stdenv.base
-  -> dir:Eio.Fs.dir_ty Eio.Path.t
-  -> cfg:Chat_response.Config.t
+(** [prepare config ...] windows the draft to 8192 UTF-8 bytes plus markers,
+    and opted-in visible history to 16384 bytes. Never supply hidden/tool data. *)
+val prepare
+  :  Type_ahead_config.t
   -> messages:(string * string) list
   -> draft:string
   -> cursor:int
-  -> string
+  -> input
+
+(** [sanitize text] removes outer fences, cursor markers and terminal controls,
+    limiting the insertion to 4096 UTF-8 bytes. *)
+val sanitize : string -> string
+
+(** [inputs input] pairs developer insertion instructions and a partial-word
+    example with user context and draft enclosed in explicit section delimiters.
+    Delimiters do not change the bounds applied by [prepare]. *)
+val inputs : input -> Openai.Responses.Item.t list
+
+(** [complete_with ...] enforces a ten-second total deadline and redacts errors.
+    Cancellation propagates. Injectable request supports offline verification. *)
+val complete_with
+  :  clock:_ Eio.Time.clock
+  -> request:(Openai.Responses.Item.t list -> Openai.Responses.Response.t)
+  -> input
+  -> outcome
+
+val complete_suffix
+  :  sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> config:Type_ahead_config.t
+  -> input
+  -> outcome

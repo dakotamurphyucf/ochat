@@ -12,11 +12,11 @@
      {- {!Chat_response.Driver} for OpenAI streaming and tool execution}
      {- {!Context_compaction.Compactor} for user-triggered history compaction}}
 
-     Use {!run_chat} to boot the UI and block until the user quits.
-
-     Most callers should treat everything other than {!run_chat} as
-     test-support: these helpers are exposed to enable white-box unit and
-     integration tests of the event-loop and streaming behaviour.
+     Use {!run_chat} for the legacy prompt/snapshot host and
+     {!run_agent_session} for an attached native or daemon session.
+     Both block until the user quits. The latter leaves execution and
+     persistence with the session authority. [For_testing] is test support;
+     streaming and reducer helpers live in their own modules.
 
      @canonical Chat_tui.App *)
 
@@ -47,10 +47,10 @@ module For_testing : sig
   val cursor_for_frame : model:Model.t -> int * int -> (int * int) option
 end
 
-(** Boot the TUI and block until the user terminates the program.
+(** [run_chat ~env ~prompt_file ()] boots the legacy file-backed TUI and
+    blocks until the user terminates the program.
 
-    Calling [run_chat ~env ~prompt_file ()] is the primary way to start an
-    interactive Ochat session from an executable.  The function initialises
+    The function initialises
     a full-screen {!Notty_eio.Term}, parses the ChatMarkdown prompt, builds
     an initial {!Model.t} and then runs the main event-loop until the user
     quits.
@@ -99,7 +99,10 @@ end
     {[
       let () =
         Eio_main.run @@ fun env ->
-        let session = Session_store.load ~env ~id:"my-session-id" in
+        let session =
+          Session_store.load_or_create
+            ~env ~prompt_file:"prompt.chatmd" ~id:"my-session-id" ()
+        in
         Chat_tui.App.run_chat
           ~env
           ~prompt_file:"prompt.chatmd"
@@ -110,7 +113,8 @@ end
     ]}
  *)
 val run_chat
-  :  env:Eio_unix.Stdenv.base
+  :  ?typeahead_config:Type_ahead_config.t
+  -> env:Eio_unix.Stdenv.base
   -> prompt_file:string
   -> ?session:Session.t
   -> ?export_file:string
@@ -119,5 +123,17 @@ val run_chat
   -> ?textmate_grammar_files:string list
   -> ?shell_manifest_authorizer:Shell_runtime.Manifest_authorizer.t
   -> ?shell_approval_provider:Shell_runtime.Approval_broker.provider
+  -> unit
+  -> unit
+
+(** [run_agent_session ~env ~client ()] runs the terminal as a projection of
+    an already attached agent-server session. The server remains authoritative
+    for history, execution, permissions, compaction, and persistence; editor
+    and viewport state remain local to this process. *)
+val run_agent_session
+  :  env:Eio_unix.Stdenv.base
+  -> client:Agent_session_client.t
+  -> ?textmate_grammar_files:string list
+  -> ?typeahead_config:Type_ahead_config.t
   -> unit
   -> unit

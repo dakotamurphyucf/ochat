@@ -1,5 +1,11 @@
 # ChatMD shell runtime security
 
+Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
+The declaration language is shared, but bootstrap grants, approvers, persistence
+owners and management commands differ. `--authorize-shell-manifest` is a legacy
+local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
+management does not accept daemon IDs as a way to select daemon state.
+
 This guide explains how ochat decides whether a shell request may run and what
 the operating system actually confines. It complements the
 [language reference](../overview/chatmd-shell-runtime.md).
@@ -50,7 +56,7 @@ $ ochat shell inspect agent.chatmd
 $ ochat shell inspect agent.chatmd -canonical
 ```
 
-Interactive `chat_tui` normally fails closed when shell authority has not been
+Legacy interactive `chat-tui` normally fails closed when shell authority has not been
 authorized. `--authorize-shell-manifest` grants only the exact manifest for
 that process. Persistent manifest grants remain bound to source, manifest,
 profile/import versions, and configured session/user/host identity.
@@ -359,20 +365,71 @@ Missing required sources are fatal. Empty values are ignored with a warning
 instead of becoming a global replacement pattern. File sources remove one
 trailing newline by default.
 
-Before output reaches a model, UI, history, progress observer, reviewer, or
-content-bearing audit field, ochat:
+`stream="finalized"` is the default and emits no process-output progress. Its
+existing completed-result path is unchanged: capture bounds, terminal filtering,
+literal secret replacement, result bounds, and after-interceptors, with filtering
+and bounds repeated after each transformation. These are byte bounds; this legacy
+finalizer is not the incremental UTF-8 sanitizer described below. In particular,
+byte-truncated finalized output is not guaranteed to end on a UTF-8 boundary.
 
-1. enforces per-channel and total bounds;
-2. validates or replaces invalid UTF-8;
-3. removes terminal controls and unsafe characters;
-4. redacts configured secrets;
-5. runs after-interceptors over the finalized value;
-6. repeats validation, sanitization, redaction, and bounds after every custom
-   transformation.
+### Sanitized live progress
 
-`stream="finalized"` is the default. `sanitized` is valid only when every
-filter supports streaming-safe cross-chunk matching. Raw process bytes are
-never sent to an agent-visible observer.
+`stream="sanitized"` emits safe prefixes while native processes are running,
+after command policy, capability checks, approval, and before-interceptors have
+allowed execution. This is not buffered final-only output. Short outputs can
+remain pending until EOF because potential secret suffixes cannot yet be
+disclosed. Simulated backends and trusted substitutes only supply completed
+results, so their progress is emitted after existing finalization checks.
+
+Registration fails with `shell.tool_stream_unsupported` unless all these
+conditions hold:
+
+- The runtime has **no after-interceptors**, including identity/keep filters,
+  ChatML filters, and executable filters. There is no streaming-safety flag for
+  arbitrary custom transformations. Before-interceptors remain supported.
+- Every nonempty literal secret and the replacement are valid UTF-8 and are
+  unchanged by the progress sanitizer: no escape/C0 controls except tab, CR and
+  LF, no DEL/C1 controls, and no Unicode bidi embedding/override/isolate controls.
+  Each fits the configured total-output byte budget.
+- When secrets exist, the replacement is nonempty and contains no configured
+  secret. Its **first and last bytes must each be absent from every secret**.
+  This deliberately restrictive rule prevents replacement boundaries from
+  constructing another secret. For example, default `[REDACTED]` is rejected if
+  a secret contains `[` or `]`, or occurs inside `[REDACTED]`. A replacement `aX`
+  is rejected for secret `ab`. A different replacement is usable only if it
+  satisfies every condition; otherwise use `stream="finalized"`.
+
+The executor checks compatibility again before running. Unsupported configurations
+are not silently downgraded or buffered, and there is no raw-output callback.
+
+Each process pipe has independent terminal and UTF-8 decoder state. Split ANSI
+CSI/OSC/control strings and unsafe controls are removed; invalid UTF-8 becomes
+U+FFFD. Literal matching spans arbitrary read boundaries after normalization.
+Overlapping or adjacent secret matches coalesce into one replacement. Selected
+commands' stdout and stderr are filtered again across command boundaries, then a
+final disclosure filter protects their combined presentation.
+
+**All sanitized progress is published as one combined `Stdout` append stream**,
+including diagnostic stderr. This intentionally avoids channel separation: a
+renderer concatenating stdout and stderr must not reconstruct a secret. No
+separator is assumed safe, since secrets may contain newlines. Independent pipe
+arrival and held suffixes can affect presentation order. Intermediate pipeline
+stdout is not published. Canonical returned stdout/stderr, command metadata,
+result formatting, and nonzero-exit behavior remain unchanged.
+
+Progress events are individually valid UTF-8 and at most 4096 bytes. Separate
+invocation-wide source-channel and total budgets cap disclosure, including
+replacement expansion; the combined published stream is capped by the total
+budget. A limit never skips an unfitting character and resumes at later text.
+Progress may therefore be shorter or more conservatively redacted than the
+canonical result; it is transient display data, not a replacement for history.
+
+Final-tail delivery is inside the invocation wall deadline. Error, timeout, and
+cancellation discard undecidable tails, but cannot retract safe prefixes already
+shown. This also applies when a later command fails or `nonzero="error"` rejects
+the final result. Observers should return promptly; Eio cancellation interrupts
+suspended delivery. The sanitizer does not authorize execution, recognize
+unconfigured/encoded secrets, or upgrade the separate legacy finalizer.
 
 ## YOLO profile
 

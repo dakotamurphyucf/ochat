@@ -1,5 +1,11 @@
 # ChatMD shell runtime extensions
 
+Host integration: see [native/legacy/daemon authorization and administration](chatmd-shell-host-integration.md).
+The declaration language is shared, but bootstrap grants, approvers, persistence
+owners and management commands differ. `--authorize-shell-manifest` is a legacy
+local TUI option, not a native `--local` or daemon flag. Legacy `Session_store`
+management does not accept daemon IDs as a way to select daemon state.
+
 Shell runtimes can delegate project-specific decisions to ChatML scripts or
 custom executables without adding OCaml code. Extensions remain subordinate to
 manifest authorization, administrative ceilings, worker-runtime confinement,
@@ -45,7 +51,8 @@ are not silently selected.
 Shell scripts receive only the operations appropriate to their kind. Common
 read-only context exposes normalized values such as command argv, basename,
 canonical executable path/SHA-256/trust, cwd, effects, policy action/matches,
-request kind, session identity, and safe path constructors.
+request kind and session identity. The selector list below is the supported
+`Shell` context surface; it does not provide a general filesystem API.
 
 Reviewer actions include defer, once/exact/prefix approval, deny, and rewrite.
 Before-interceptor actions include continue, rewrite, synthetic response, and
@@ -63,6 +70,50 @@ Typed bridge values are versioned (`shell-context-v1`, `shell-policy-v1`,
 bounded, and exact-field validated. Malformed or future versions fail closed.
 
 ## Lifecycle, state, and transactions
+
+### ChatML action reference
+
+Each helper below constructs a task for the selected extension host. Call it
+from the script's task expression; constructing a task does not itself perform
+the action. The host requires a valid action for that script kind, subject to
+the transactional and authority rules below.
+
+| Surface | Helpers and arguments | Meaning |
+|---|---|---|
+| Matcher | `Match.yes(reason)`, `Match.no(reason)` | Match/no-match with a string reason. |
+| Reviewer | `Review.approve()`, `Review.approve_for(scope)`, `Review.deny(reason)`, `Review.rewrite(argv)`, `Review.defer()` | Approve once, request a permitted scope, deny, propose a string-array argv rewrite, or defer. |
+| Before interceptor | `Intercept.continue()`, `Intercept.rewrite(argv)`, `Intercept.respond(stdout, stderr)`, `Intercept.reject(reason)` | Continue, revalidate rewritten argv, synthesize string output, or reject before execution. |
+| After interceptor | `Result.keep()`, `Result.replace(stdout, stderr)`, `Result.reject_disclosure(reason)` | Keep/replace output strings or fail disclosure. This does not undo an executed process or change its exit status. |
+| Effect analyzer | `Effect.add(effect)`, `Effect.replace(effects)` | Add a string-encoded effect or explicitly replace with a string array when the extension configuration permits replacement. |
+| Effect shortcuts | `Effect.read_path(path)`, `Effect.write_path(path)`, `Effect.network()`, `Effect.child_processes()`, `Effect.arbitrary_code()`, `Effect.privilege_change()` | Construct the corresponding effect action without manually encoding it. |
+| Audit filter | `Audit.keep()`, `Audit.drop_field(name)`, `Audit.replace(json)` | Keep the envelope, suppress a permitted field, or supply a JSON object of string-valued field replacements. |
+
+`Review.approve_for` accepts `once`, `exact_session`, `prefix_session`, or
+`durable_exact`. These actions cannot exceed offered/administrative scopes.
+This helper supplies no expiration; prefix approval uses the current complete
+argv as its prefix, not an arbitrary shorter prefix supplied by the script.
+
+Audit filters cannot drop/replace `sequence`, `timestamp`, `request_id`,
+`runtime_id`, or `manifest_sha256`. `Audit.replace` takes serialized JSON text,
+not a ChatML record. Duplicate keys, non-string field values, and protected-field
+replacement fail validation; replacement values are redacted again. Filters do
+not erase an audit envelope or rewrite chain identity.
+
+The read-only `Shell` helpers each take a `shell_context`: `request_id`,
+`runtime_id`, `manifest_sha256`, `argv`, `executable`, `cwd`, `origin`,
+`request_kind`, `stdin_kind`, `stdin_sha256`, `stdin_bytes`, `script_sha256`,
+`script_preview`, `effects`, `capabilities`, `session_id`, and `policy`.
+For example, `Shell.argv(ctx)` returns the normalized string array. Optional
+fields remain option values; these accessors do not grant filesystem access.
+After/audit surfaces use their own result/audit context rather than adding
+the entire `Shell` module.
+
+Sources: [builtin signatures](../../lib/chatml/chatml_builtin_spec.ml),
+[surface selection](../../lib/chatml/chatml_builtin_surface.ml),
+[action decoder](../../lib/shell_runtime/chatml_extension.ml), and
+[runtime enforcement](../../lib/shell_runtime/runtime.ml).
+
+### Stateful invocation rules
 
 Extension lifecycle is:
 

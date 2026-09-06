@@ -1,5 +1,10 @@
 # `Chatml_builtin_modules` – Standard Library Primitives for ChatML
 
+Instruction constructors with historical system names now emit developer-role messages. Compatibility predicates accept old system/developer entries. Existing raw values/history are not rewritten; agent-host async jobs/schedules are documented separately.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 > Location: `lib/chatml/chatml_builtin_modules.ml`
 
 This module defines the *built-in* functions and operators that are
@@ -75,4 +80,3 @@ and is used both by `print` and by unit tests across the code-base.
 
 Generated automatically following the guidelines in
 `<ocaml-documentation-guidelines>`.
-

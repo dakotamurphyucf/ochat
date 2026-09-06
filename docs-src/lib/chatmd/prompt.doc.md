@@ -1,5 +1,10 @@
 # ChatMarkdown prompt parsing (`prompt.ml`)
 
+Current parsing retains source-loader provenance across imports/scripts and nested prompt capture. Daemon prompt revisions use verified stored artifacts; ordinary local parsing does not snapshot an arbitrary workspace.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 This document complements the inline **odoc** comments inside
 `prompt.mli` / `prompt.ml`.  It provides a broader overview, usage
 examples, and clarifications that fall outside the scope of API

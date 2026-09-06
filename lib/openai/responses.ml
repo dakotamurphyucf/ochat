@@ -416,6 +416,14 @@ module Text = struct
   type t = { verbosity : string } [@@deriving jsonaf, sexp, bin_io]
 end
 
+let is_output_message_json json =
+  match Jsonaf.member "role" json with
+  | Some (`String "assistant") ->
+    Option.is_some (Jsonaf.member "id" json)
+    || Option.is_some (Jsonaf.member "status" json)
+  | _ -> false
+;;
+
 module Item = struct
   type t =
     | Input_message of Input_message.t
@@ -448,10 +456,9 @@ module Item = struct
     | `Object obj ->
       (match Jsonaf.member "type" (`Object obj) with
        | Some (`String "message") ->
-         (match Jsonaf.member "role" (`Object obj) with
-          | Some (`String "assistant") ->
-            Output_message (Output_message.t_of_jsonaf (`Object obj))
-          | _ -> Input_message (Input_message.t_of_jsonaf (`Object obj)))
+         if is_output_message_json json
+         then Output_message (Output_message.t_of_jsonaf (`Object obj))
+         else Input_message (Input_message.t_of_jsonaf (`Object obj))
        | Some (`String "function_call") ->
          Function_call (Function_call.t_of_jsonaf (`Object obj))
        | Some (`String "custom_tool_call") ->
@@ -1171,10 +1178,9 @@ module Response_stream = struct
       | `Object obj ->
         (match Jsonaf.member "type" (`Object obj) with
          | Some (`String "message") ->
-           (match Jsonaf.member "role" (`Object obj) with
-            | Some (`String "assistant") ->
-              Output_message (Output_message.t_of_jsonaf (`Object obj))
-            | _ -> Input_message (Input_message.t_of_jsonaf (`Object obj)))
+           if is_output_message_json json
+           then Output_message (Output_message.t_of_jsonaf (`Object obj))
+           else Input_message (Input_message.t_of_jsonaf (`Object obj))
          | Some (`String "function_call") ->
            Function_call (Function_call.t_of_jsonaf (`Object obj))
          | Some (`String "custom_tool_call") ->
@@ -1644,6 +1650,50 @@ let validate_response_stream stream =
   loop false stream
 ;;
 
+let rec response_sequence take () =
+  match take () with
+  | `Done -> Seq.Nil
+  | `Error exn -> raise exn
+  | `Val value -> Seq.Cons (value, response_sequence take)
+;;
+
+module For_testing = struct
+  let response_sequence = response_sequence
+end
+
+let read_private_response_exn flow =
+  let limit = 256 * 1024 in
+  let data = Eio.Buf_read.(parse_exn take_all) flow ~max_size:(limit + 1) in
+  if String.length data > limit then failwith "private response body limit exceeded";
+  Response.t_of_jsonaf (Jsonaf.of_string data)
+;;
+
+let post_private_response_exn ~sw net ~model ~max_output_tokens ~inputs =
+  let headers =
+    Http.Header.of_list
+      [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
+  in
+  let request =
+    Request.create
+      ~model
+      ~max_output_tokens
+      ~input:inputs
+      ~tools:[]
+      ~reasoning:Request.Reasoning.{ effort = Some Low; summary = None }
+      ~verbosity:"low"
+      ~stream:false
+      ()
+  in
+  post
+    ~net
+    ~host:api_url
+    ~sw
+    ~headers
+    ~path:"/v1/responses"
+    (Raw (fun (_, body) -> read_private_response_exn body))
+    (Jsonaf.to_string (Request.jsonaf_of_t request))
+;;
+
 let post_response
   : type a.
     a response_type
@@ -1820,11 +1870,5 @@ let post_response
      @@ fun () ->
      try loop lines with
      | ex -> cb (`Error ex));
-    let rec loop_stream () =
-      match Stream.take stream with
-      | `Done -> fun () -> Seq.Nil
-      | `Error ex -> raise ex
-      | `Val value -> fun () -> Seq.Cons (value, loop_stream ())
-    in
-    validate_response_stream (loop_stream ())
+    validate_response_stream (response_sequence (fun () -> Stream.take stream))
 ;;

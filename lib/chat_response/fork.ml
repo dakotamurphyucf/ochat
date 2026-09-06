@@ -1,26 +1,5 @@
 open Core
 module Res = Openai.Responses
-
-(** Nested *fork* execution
-
-    The fork tool allows a conversation to spawn an **auxiliary agent**
-    that runs in isolation and eventually reports back using a special
-    `PERSIST` block.  This OCaml module contains the runtime support to
-    drive that nested conversation without depending on {!Driver} – a
-    lighter subset is required to keep recursion small.
-
-    There are two entry points:
-
-    {ul
-    {- {!run_stream} – streaming version used when the parent
-       conversation itself is streamed.}
-    {- {!execute}     – synchronous helper used by the non-streaming
-       response loop.}}
-
-    Both functions guarantee that the *outer* assistant receives a
-    function-call output as soon as text becomes available so that user
-    interfaces can render fork progress in real time.
-*)
 module Output = Res.Tool_output.Output
 
 module Invocation_id = struct
@@ -45,42 +24,42 @@ let create_allocator ~parent_namespace invocation_id =
 
 let allocator = create_allocator
 
-let instruction_item ~arguments ~call_id =
-  let input = Definitions.Fork.input_of_string arguments in
-  let arg_str = String.concat ~sep:" " input.arguments in
-  let instruction_text =
-    Printf.sprintf
-      {|SYSTEM MESSAGE – Forked Agent
+let instruction_template : (string -> string -> string -> string, unit, string) format =
+  {|SYSTEM MESSAGE – Forked Agent
 
-You are an **isolated clone** of the main assistant.  Your internal state will be *discarded* once you hand control back and merge with the parent.  Only the information you explicitly place in the *PERSIST* section will survive.
+You are an **isolated clone** of the main assistant. Your child history is not merged into the parent history. All new assistant-message text is returned to the parent as tool output, including both RESULT and PERSIST sections. PERSIST is a summary convention, not an extraction boundary. Live progress may also be visible to the user.
 
 Primary task inside the fork
 • Execute:
   command - `%s`
   arguments - `%s`
 
-You may leverage every available tool (except the [fork] tool), read/write files if capable, and generate extensive output.  Work **thoroughly**; token limits are not a concern in this fork.
+Use available tools within their granted authority, including recursive forks when available. Respect output and token limits.
 
 Return exactly **one** assistant message in this template:
 
 ```
 ===RESULT===
-<Exhaustive narrative of EVERYTHING you did – reasoning, obstacles, fixes, validation, code patches (use fenced blocks), logs, etc.>
+<Report actions, outcomes, relevant evidence, validation, and unresolved issues.>
 
 ===PERSIST===
-<Consise ≤20 bullet points capturing facts, artefacts, follow-ups, or warnings the parent must retain. Bullets can be as detailed as needed, but should be succinct>
+<Concise summary of facts, artefacts, follow-ups, or warnings for the parent. This section does not exclude the rest of your reply from the returned output.>
 ```
 
-Best-practice reminders (GPT-4.1 / O3):
-• Think step-by-step internally; *write* that reasoning in RESULT for auditability.
+Best-practice reminders:
+• Include concise explanations and evidence in RESULT.
 • Perform a quick self-check before replying; note unresolved issues in PERSIST.
 • Avoid filler phrases like “let’s think step-by-step”.  Just reason and write.
 
 Call-ID: %s
 |}
-      input.command
-      arg_str
-      call_id
+;;
+
+let instruction_item ~arguments ~call_id =
+  let input = Definitions.Fork.input_of_string arguments in
+  let arg_str = String.concat ~sep:" " input.arguments in
+  let instruction_text =
+    Printf.sprintf instruction_template input.command arg_str call_id
   in
   Res.Item.Function_call_output
     { output = Res.Tool_output.Output.Text instruction_text

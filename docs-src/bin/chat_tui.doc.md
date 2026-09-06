@@ -1,201 +1,140 @@
-# chat_tui – Terminal Ochat client
+# chat-tui command reference
 
-`chat_tui` is a convenience wrapper around the high-level
-`Chat_tui.App` module.  It turns the library into an end-user binary
-that you can launch from a shell.
+The installed name is `chat-tui`; in a checkout use
+`dune exec bin/chat_tui.exe -- ...`. See the [interactive guide](../guide/chat_tui.md)
+for keys and views and [host concepts](../agent-server/concepts.md) for lifetimes.
 
----
+## Synopsis
 
-## 1 Synopsis
-
-```console
-$ chat-tui [-file FILE]
-           [--list-sessions]
-           [--session NAME | --new-session]
-           [--session-info NAME]
-           [--reset-session NAME [--keep-history] [--prompt-file FILE]]
-           [--rebuild-from-prompt NAME]
-           [--export-session NAME --out FILE]
-           [--export-file FILE]
-           [--help-short]
-           [--format FORMAT | --json]
-           [--dry-run]
-           [-prompt-preview-max N]
-           [--parallel-tool-calls | --no-parallel-tool-calls]
-           [--auto-persist | --no-persist]
+```text
+chat-tui --no-config --local -file FILE
+chat-tui --no-config --connect URI --new-daemon-session --prompt NAME --workspace NAME [--detached | --owner-bound]
+chat-tui --no-config --connect URI --session ID [--read-only | --owner-bound]
+chat-tui --no-config --connect URI --list-sessions
 ```
 
-### Subcommands (new, optional)
+A Unix URI is `unix:///absolute/path.sock`; HTTP(S) requires the relevant
+`--bearer-token-file FILE`. Connected creation accepts configured names;
+raw protocol clients must discover catalog IDs.
 
-In addition to the flag-based interface above (kept for backwards
-compatibility), `chat-tui` also offers a subcommand-oriented interface:
+## Modes and flag constraints
 
-```console
-$ chat-tui sessions -help
-$ chat-tui sessions list [--format tsv|json] [--json]
-$ chat-tui sessions info NAME [--format human|tsv|json] [--json]
-$ chat-tui sessions export NAME --out FILE
-$ chat-tui sessions reset NAME [--keep-history] [--prompt-file FILE] [--dry-run]
-$ chat-tui sessions rebuild-from-prompt NAME [--dry-run] [-prompt-preview-max N]
-```
+| Flags | Meaning / restrictions |
+|---|---|
+| `-file FILE` | Local prompt; default path is `./prompts/interactive.md`, which need not exist in a clean checkout. Supply a tracked/user-created file. |
+| `--local` | Native transient process-bound host; workspace is launch cwd. No workspace/data-root override here. |
+| `--connect URI` | Daemon mode; incompatible with local runtime/persistence flags. |
+| `--new-daemon-session --prompt NAME --workspace NAME` | Create and attach; do not combine with existing `--session`. |
+| `--detached` | Explicit creation liveness; also the connected creation default. |
+| `--owner-bound` | Create/attach with exclusive renewable owner lease. Incompatible with detached/read-only. |
+| `--disconnect-grace-ms MS` | Nonnegative owner grace; default 30000. |
+| `--read-only` | Observe an existing session without write authority. Credential read scopes still apply. |
+| `--bearer-token-file FILE` | Connected HTTP token loaded privately with Eio; rejected for Unix endpoints. |
+| `--session ID` | Connected: daemon ID. Implicit local: legacy store ID and mode. |
+| `--new-session` | Legacy local UUID session; not daemon creation. |
+| `--export-file FILE` | Legacy interactive transcript export. |
+| `--auto-persist`, `--no-persist` | Legacy interactive snapshot persistence controls. |
+| `--parallel-tool-calls`, `--no-parallel-tool-calls` | Legacy interactive execution controls, not native/connected runtime overrides. |
+| `--authorize-shell-manifest` | Legacy interactive exact-manifest authorization for this process. |
+| `--textmate-grammar FILE` | Repeatable additional grammar files for interactive rendering. |
 
-### Ask AI subcommand (ask AI questions about using chat-tui):
+The legacy-only flags select the implicit legacy path if `--local` is absent.
+Explicit `--local` rejects them. Do not silently combine mode examples.
 
-```console
-$ chat-tui ask-ai -query QUERY
-```
+## Administration
 
-### Config file (optional)
+Use one selector per command. Without `--connect`, session listing/info/export/
+reset/rebuild operate on the legacy store, not native transient sessions.
 
-You can store default flags in a config file and have them applied to every
-invocation of `chat-tui` (the command-line still wins over config defaults).
+| Selector | Relevant flags and behavior |
+|---|---|
+| `--list-sessions` | `--format human|tsv|json` or `--json`; selected host's sessions. |
+| `--session-info ID` | Inspect selected host; output format controls apply. |
+| `--start-session ID` | Connected only; start stopped session. |
+| `--stop-session ID` | Connected only; graceful by default, `--cancel` cancels active work. |
+| `--delete-session ID` | Connected stopped session; removes by default. Use `--archive` for archive policy. Treat removal as destructive. |
+| `--reset-session ID` | `--keep-history`; legacy can also replace `--prompt-file FILE`. Connected reset cannot replace prompt. |
+| `--rebuild-from-prompt ID` | Rebuild selected session; not ordinary start. |
+| `--export-session ID --out FILE` | Export selected session; remote downloads verify blob length/digest before installation. |
+| `--dry-run` | Legacy reset/rebuild only; not daemon administration. |
+| `-prompt-preview-max N` | Legacy dry-run preview length; 0 means unlimited. |
 
-Default path:
+`--cancel` is valid only with stop; `--archive` only with delete. Connected
+administration rejects interactive creation/attachment flags. Legacy subcommands
+`sessions list/info/export/reset/rebuild-from-prompt` remain available; do not
+assume prepending `--connect` makes those separate subcommand parsers remote.
+Use the flag-based connected commands above.
 
-* `$XDG_CONFIG_HOME/ochat/chat-tui.args` (when `XDG_CONFIG_HOME` is set)
-* `~/.config/ochat/chat-tui.args` (fallback)
+## Configuration and help
 
-Format:
+Config file arguments come from `OCHAT_CHAT_TUI_CONFIG`, explicit `--config FILE`,
+or the XDG `ochat/chat-tui.args` location (fallback `~/.config/ochat/chat-tui.args`).
+`--no-config` disables them; `--print-effective-args` displays normalized inputs.
+Keep sensitive paths private when sharing output.
 
-* parsed as whitespace-separated arguments (one or more per line)
-* blank lines and lines starting with `#` are ignored
+`-help`/`--help`, `--help-short`, `-version` and `-build-info` expose discovery
+information. Some long-help introductory session descriptions refer to the
+legacy host; the mode normalizer and this host-qualified reference govern native
+and connected behavior. `ask-ai -query QUERY` is an optional AI help workflow,
+not an offline CLI-help replacement.
 
-Control:
+## Examples
 
-* disable config: `--no-config`
-* override path: `--config FILE`
-* env override path: `OCHAT_CHAT_TUI_CONFIG=FILE`
-* debug merged defaults: `--print-effective-args`
+- [Native local TUI](../agent-server/tutorials/local-tui.md)
+- [Unix daemon and owner-bound variation](../agent-server/tutorials/unix-daemon.md)
+- [HTTP and a transcript-only observer](../agent-server/tutorials/http-client.md)
+- [Shell authorization by host](../guide/chatmd-shell-host-integration.md)
 
-## 2 Command-line flags
+## Behaviour
 
-| Flag | Default | Description |
-|------|---------|-------------|
-| `-file FILE` | `./prompts/interactive.md` | ChatMarkdown / Markdown document that seeds the conversation buffer, declares function-callable tools and stores default settings. |
-| `--list-sessions` | *(n/a)* | Enumerate all existing session identifiers along with their prompt file and exit. Cannot be combined with any other session-related flag. Default output is TSV (`id<TAB>prompt_file`); use `--format json` / `--json` for JSON. |
-| `--session NAME` | *(derived from `-file`)* | Resume the existing session identified by `NAME`. Errors out if the snapshot is missing. |
-| `--new-session` | *(false)* | Force creation of a **fresh** session even if a deterministic one already exists for the chosen prompt file. Mutually exclusive with `--session`. |
-| `--session-info NAME` | *(n/a)* | Print metadata (prompt path, last modified timestamp, history length, task count) for the given session and exit. Mutually exclusive with `--session` and `--new-session`. Use `--format json` / `--json` for JSON. |
-| `--export-session NAME` | *(n/a)* | Convert the specified session snapshot to a standalone ChatMarkdown file. Requires `--out` and is incompatible with other session flags. |
-| `--out FILE` | *(required with `--export-session`)* | Destination file for `--export-session`. Directories are created automatically; existing files trigger an overwrite confirmation prompt. |
-| `--export-file FILE` | *(n/a)* | After the interactive session ends, append the full transcript to `FILE` in ChatMarkdown format. Cannot be combined with `--export-session`. |
-| `--reset-session NAME` | *(n/a)* | Archive the current snapshot of `NAME` and start a brand new session. Incompatible with most other session flags (see CLI help). |
-| `--keep-history` | *(false)* | Retain the existing conversation history when resetting a session (requires `--reset-session`). |
-| `--prompt-file FILE` | *(n/a)* | Replace the prompt when resetting a session (requires `--reset-session`). |
-| `--rebuild-from-prompt NAME` | *(n/a)* | Recreate the deterministic snapshot for `NAME` from its stored `prompt.chatmd` file and exit. |
-| `--parallel-tool-calls` / `--no-parallel-tool-calls` | `--parallel-tool-calls` | Enable / disable concurrent execution of function-callable tools during the conversation. |
-| `--auto-persist` / `--no-persist` | prompt | Force or suppress snapshot saving on exit instead of asking interactively. |
-| `--help-short` | *(n/a)* | Print a short usage summary and exit (use `--help` for the full manual). |
-| `--format FORMAT` | *(mode-dependent)* | Output format for `--list-sessions` / `--session-info`. Supported: `tsv`, `human`, `json` (not all formats apply to both modes). |
-| `--json` | *(n/a)* | Alias for `--format json` (for `--list-sessions` / `--session-info`). |
-| `--dry-run` | *(false)* | Print what would happen and exit (including a truncated prompt preview when available). If `--keep-history` is set for `--reset-session`, also prints a preview of the kept history items (as ChatMarkdown tags). Supported with `--reset-session` and `--rebuild-from-prompt` (and their `sessions` subcommands). |
-| `-prompt-preview-max N` | `2000` | Max chars of prompt preview printed by `--dry-run`. Use `0` for unlimited. |
+Connected Unix/HTTP sessions restore stable history IDs, drafts and bounded
+active-call summaries on reconnect. Completion/cancellation clears transient
+activity; recovered snapshots are replacements, not appended duplicate rows.
+The Agent page displays nested/fork progress separately from root history.
+Committed overlays affect the effective view without overwriting canonical history.
 
-The following flags are handled before command-line parsing (and therefore may
-not show up in `-help` output):
+## Programmatic embedding
 
-* `--config FILE`
-* `--no-config`
-* `--print-effective-args`
+Use the shared [agent APIs](../agent-server/embedding.md) for new integrations;
+the TUI is a rendering client, not the daemon's session owner.
 
-### Examples
+## Exit codes
 
-List all sessions:
+Successful one-shot operations exit zero; invalid mode/arguments and runtime or
+protocol failures exit nonzero with diagnostics. Quitting native local closes the
+host. Quitting a connected client detaches and restores the terminal; detached
+daemon sessions remain.
 
-```console
-$ chat-tui --list-sessions
-42b1ac08  prompts/interactive.md
-5f3c9cc4  prompts/project_x.chatmd
-```
+## Limitations & notes
 
-Inspect a single session:
-
-```console
-$ chat-tui --session-info 42b1ac08
-Session: 42b1ac08
-Prompt file: /home/alice/prompts/interactive.md
-Last modified: 2025-07-25 18:39:02
-History items: 57
-Tasks: 3
-```
-
-Export a session to ChatMarkdown:
-
-```console
-$ chat-tui --export-session 42b1ac08 --out exports/interactive_export.chatmd
-Session '42b1ac08' exported to exports/interactive_export.chatmd
-```
-
-If the file does not exist it is created on exit so you can resume the
-session later.
-
-## 3 Behaviour
-
-1. `chat_tui` creates (if needed) the hidden directory `.chatmd` in the
-   current working directory.  The directory holds cache files and
-   transient artefacts produced by tools.
-2. It then calls `Io.run_main` which in turn delegates to
-   `Eio_main.run` to bootstrap an event loop.
-3. Finally it invokes `Chat_tui.App.run_chat` with the chosen prompt
-   file.  Control is handed over to the TUI engine; the wrapper will
-   not return until the user quits (`/quit` or *Ctrl-c*).
-4. The process current working directory becomes both `${workspace}` and
-   `${tool_dir}` for ChatMD path expressions. The root prompt's directory is
-   `${prompt_dir}`. Consequently, a configured `<tool name="read_file">`
-   reads relative to the launch directory unless its nested `<read>` uses
-   another explicit path expression. There is no separate workspace flag.
-5. When the **meta-refine** toggle is active (either via the `/meta_refine`
-   command or the *Ctrl-r* shortcut) the draft message is first passed through
-   [`Recursive_mp.refine`].  The TUI previews the resulting **diff** – additions
-   in green, deletions in red – so that you can confirm or cancel before the
-   message leaves your machine.
-
-## 4 Programmatic embedding
-
-Applications can reuse the TUI component directly instead of spawning
-an external process:
-
-```ocaml
-let () =
-  Io.run_main @@ fun env ->
-  Chat_tui.App.run_chat ~env ~prompt_file:"./prompts/demo.chatmd" ()
-```
-
-This is exactly what the `chat_tui` binary does under the hood.
-
-## 5 Exit codes
-
-| Code | Meaning |
-|------|---------|
-| 0 | Normal termination (user quit). |
-| ≠0 | Unhandled exception – inspect the console for the stack-trace. |
-
-## 6 Limitations & notes
+Native local persistence and legacy flags are not interchangeable. Owner-bound
+loss follows detection/lease/grace rather than immediate process equivalence.
+Headless PTY validation does not cover every terminal emulator.
 
 ## Shell runtime authorization and management
 
-`--authorize-shell-manifest` authorizes exactly the canonical shell manifest
-compiled from the interactive prompt for the current process. Without an
-authorizer, shell manifests fail closed before tools are exposed. The flag does
-not create global path trust and cannot be used with selector commands that do
-not enter the interactive UI.
+Use [shell host integration](../guide/chatmd-shell-host-integration.md).
+`ochat shell` legacy-store management is not daemon administration.
 
-Inside the TUI, `:shell` opens the Shell Security page. It presents effective
-runtime posture, persisted command grants, read-only audit replay, and
-interrupted requests. Shell approval is a local modal with once, exact-session,
-optional prefix-session, and optional durable-exact scopes; manifest and host
-policy limit the available choices. Escape cancels/denies the request without
-quitting.
+## Optional typeahead in every TUI mode
 
-Session snapshots persist typed shell manifest grants, command grants, ChatML
-extension snapshots, last audit sequence, and interrupted metadata. Reset
-clears shell trust by default, and in-flight processes are never resumed.
+See [typeahead setup, defaults, keys and privacy](../guide/chat_tui.md#type-ahead-availability-and-privacy).
+The five flags are `--typeahead off|manual|auto`, `--typeahead-model MODEL`,
+`--typeahead-history-messages N` (0–3), `--typeahead-debounce-ms N` (100–5000),
+and `--typeahead-max-output-tokens N` (1–512).
+Defaults are off, gpt-5.6-luna, 0, 200 and 200 respectively.
 
-See [the full TUI guide](../guide/chat_tui.md#shell-approvals-and-shell-security).
+Example argument-file entries:
 
-* **Single window** – each execution manages one conversation.  Run
-  multiple instances for parallel chats.
-* **Unix-only** – relies on `Eio_main` and `Notty`, therefore does not
-  currently work in JavaScript or MirageOS environments.
-* **No live reload** – editing `FILE` while the TUI is running has no
-  effect; restart to load the changes.
+```text
+--typeahead manual
+--typeahead-model gpt-5.6-luna
+--typeahead-history-messages 0
+```
+
+These settings do not select legacy execution. Explicit CLI values override
+the corresponding file values; `--no-config` bypasses the file. The
+`--print-effective-args` output includes configured/explicit flags, never the
+provider key. Enabling requires a local nonblank `OPENAI_API_KEY` and permits
+sending unsent draft text through local `API_URL`, with additional charges.
+Daemon credentials are not used for suggestions.

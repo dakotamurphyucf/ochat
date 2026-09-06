@@ -1,0 +1,15 @@
+<developer>This host demonstrates a background timer; no model request is needed.</developer>
+<script language="chatml" kind="moderator">
+  type state = int
+  type event = [ `Session_start | `Tick ]
+  let initial_state = 0
+  let on_event : context -> state -> event -> state task =
+    fun ctx st ev ->
+      match ev with
+      | `Session_start ->
+        Task.bind(Schedule.after_ms(10000, `Tick), fun timer_id ->
+        Task.pure(st + 1))
+      | `Tick ->
+        Task.bind(Runtime.end_session("scheduled tutorial stop"), fun ignored_end ->
+        Task.pure(st + 1))
+</script>

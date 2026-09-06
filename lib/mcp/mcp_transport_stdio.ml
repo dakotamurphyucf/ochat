@@ -32,6 +32,7 @@ type t =
   ; recv_fn : unit -> Jsonaf.t
   ; close_fn : unit -> unit
   ; mutable closed : bool
+  ; mutable disposed : bool
   }
 
 exception Connection_closed
@@ -80,21 +81,20 @@ let spawn_child ~sw ~(env : < process_mgr : _ ; .. >) cmd_line : t =
   let send_fn (json : Jsonaf.t) : unit =
     let line = Jsonaf.to_string json ^ "\n" in
     try
-      Eio.Mutex.lock write_mutex;
-      Eio.Flow.copy_string line stdin_w;
-      Eio.Mutex.unlock write_mutex
+      Eio.Mutex.use_rw ~protect:false write_mutex (fun () ->
+        Eio.Flow.copy_string line stdin_w)
     with
-    | End_of_file | _ -> raise Connection_closed
+    | Eio.Cancel.Cancelled _ as exn -> raise exn
+    | _ -> raise Connection_closed
   in
   let recv_fn () : Jsonaf.t =
     try
-      Eio.Mutex.lock read_mutex;
-      (* Read a line from the child.  This will block until the child
-         sends a message or closes its stdout. *)
-      let line = Eio.Buf_read.line reader in
-      Eio.Mutex.unlock read_mutex;
+      let line =
+        Eio.Mutex.use_rw ~protect:false read_mutex (fun () -> Eio.Buf_read.line reader)
+      in
       Jsonaf.of_string line
     with
+    | Eio.Cancel.Cancelled _ as exn -> raise exn
     | End_of_file ->
       (* Child closed its stdout → no further messages. *)
       raise Connection_closed
@@ -115,10 +115,11 @@ let spawn_child ~sw ~(env : < process_mgr : _ ; .. >) cmd_line : t =
      | _ -> ());
     (* Wait for the process to exit to avoid zombies.  We ignore
          failures, e.g. if the fibre holding [close] is cancelled. *)
-    try ignore (Eio.Process.await child) with
+    try ignore (Eio.Process.await child : Eio.Process.exit_status) with
+    | Eio.Cancel.Cancelled _ as exn -> raise exn
     | _ -> ()
   in
-  { send_fn; recv_fn; close_fn; closed = false }
+  { send_fn; recv_fn; close_fn; closed = false; disposed = false }
 ;;
 
 (*---------------------  public API  ---------------------------------*)
@@ -173,9 +174,11 @@ let recv t : Jsonaf.t =
 let is_closed (t : t) = t.closed
 
 let close t : unit =
-  if not t.closed
+  if not t.disposed
   then (
+    t.disposed <- true;
     t.closed <- true;
     try t.close_fn () with
+    | Eio.Cancel.Cancelled _ as exn -> raise exn
     | _ -> ())
 ;;

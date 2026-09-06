@@ -12,12 +12,18 @@ module Registry = struct
   module Alias_table = Hashtbl.Make (Alias)
 
   type t =
-    { allocator : History_entry.Allocator.t
+    { id_source : History_entry.Id_source.t
     ; aliases : History_entry.Id.t Alias_table.t
     ; mutable next_scope : int
     }
 
-  let create ~allocator = { allocator; aliases = Alias_table.create (); next_scope = 0 }
+  let create_with_source ~id_source =
+    { id_source; aliases = Alias_table.create (); next_scope = 0 }
+  ;;
+
+  let create ~allocator =
+    create_with_source ~id_source:(History_entry.Id_source.of_allocator allocator)
+  ;;
 
   let create_scope t =
     let scope = t.next_scope in
@@ -55,7 +61,7 @@ module Registry = struct
     let id =
       match find_alias t aliases with
       | Some id -> id
-      | None -> History_entry.Allocator.allocate t.allocator |> Result.ok_or_failwith
+      | None -> History_entry.Id_source.allocate t.id_source |> Result.ok_or_failwith
     in
     List.iter aliases ~f:(fun alias -> register_alias t alias id);
     id

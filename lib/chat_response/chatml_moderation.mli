@@ -39,11 +39,20 @@ module Item : sig
   val output_text_message : id:string -> text:string -> t
   val user_text : id:string -> string -> t
   val assistant_text : id:string -> string -> t
+
+  (** [system_text ~id text] creates a developer-role instruction. The legacy
+      name remains source-compatible; [input_text_message] also maps an explicit
+      system role to developer. Existing raw items and snapshots are not rewritten. *)
   val system_text : id:string -> string -> t
+
   val notice : id:string -> text:string -> t
   val is_user : t -> bool
   val is_assistant : t -> bool
+
+  (** [is_system t] recognizes both developer instructions and legacy system
+      items, preserving script predicates across the constructor role change. *)
   val is_system : t -> bool
+
   val is_tool_call : t -> bool
   val is_tool_result : t -> bool
 end

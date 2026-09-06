@@ -386,10 +386,13 @@ type t =
   ; mutable typeahead_completion : typeahead_completion option
   ; mutable typeahead_preview_open : bool
   ; mutable typeahead_preview_scroll : int
+  ; mutable typeahead_context_epoch : int
+  ; mutable typeahead_status : string option
   ; mutable typeahead_generation : int
   ; mutable activity : activity option
   ; mutable animation_frame : int
   ; mutable normal_input_enabled : bool
+  ; mutable connection_status : Connection_status.t option
   ; projected : Projected_state.t
   }
 [@@deriving fields ~getters ~setters]
@@ -407,6 +410,10 @@ and editor_mode =
 and draft_mode =
   | Plain
   | Raw_xml
+
+let set_cursor_pos t pos = t.cursor_pos <- Utf8_edit.floor t.input_line pos
+let set_cmdline_cursor t pos = t.cmdline_cursor <- Utf8_edit.floor t.cmdline pos
+let set_search_cursor t pos = t.search_cursor <- Utf8_edit.floor t.search_query pos
 
 let classify_tool_output ~(name_opt : string option) ~(path : string option)
   : Types.tool_output_kind
@@ -531,6 +538,8 @@ let create
   ; typeahead_completion = None
   ; typeahead_preview_open = false
   ; typeahead_preview_scroll = 0
+  ; typeahead_context_epoch = 0
+  ; typeahead_status = None
   ; typeahead_generation = 0
   ; search_query = ""
   ; search_cursor = 0
@@ -539,6 +548,7 @@ let create
   ; activity = None
   ; animation_frame = 0
   ; normal_input_enabled = true
+  ; connection_status = None
   ; projected = Projected_state.empty ()
   }
 ;;
@@ -563,11 +573,16 @@ let advance_animation_frame t =
 ;;
 
 let clear_selection t = t.selection_anchor <- None
-let set_selection_anchor t idx = t.selection_anchor <- Some idx
+
+let set_selection_anchor t idx =
+  t.selection_anchor <- Some (Utf8_edit.floor t.input_line idx)
+;;
+
 let selection_active t = Option.is_some t.selection_anchor
 let messages t = Array.to_list t.message_array
 
 let reset_message_projection t messages =
+  t.typeahead_context_epoch <- t.typeahead_context_epoch + 1;
   let old_render_row_ids = t.render_row_ids in
   t.message_array <- messages;
   t.render_row_ids
@@ -1015,10 +1030,11 @@ let delete_selected_canonical_entry t =
   | Some row ->
     (match row.Projected_message.source with
      | Canonical { entry_id } ->
-       t.history_items
-       <- List.filter t.history_items ~f:(fun entry ->
-            not (History_entry.Id.equal (History_entry.id entry) entry_id));
-       `Deleted
+       (match History_entry.remove_with_tool_pair t.history_items ~entry_id with
+        | Error message -> `Rejected message
+        | Ok entries ->
+          t.history_items <- entries;
+          `Deleted)
      | Moderator_inserted _ | Moderator_replacement _ ->
        `Rejected "Cannot delete a moderator-projected row."
      | Streaming _ | Pending_approval _ | Placeholder _ ->
@@ -1340,6 +1356,7 @@ let active_page t = t.active_page
 let set_active_page t page = t.active_page <- page
 let shell_security_page t = t.pages.shell_security
 let shell_security_snapshot t = t.pages.shell_security.snapshot
+
 let set_shell_security_snapshot t snapshot =
   let page = t.pages.shell_security in
   page.snapshot <- snapshot;
@@ -1352,6 +1369,7 @@ let set_shell_security_snapshot t snapshot =
       | Some id when List.mem ids id ~equal:String.equal -> Some id
       | _ -> List.hd ids)
 ;;
+
 let shell_security_tab t = t.pages.shell_security.tab
 let set_shell_security_tab t tab = t.pages.shell_security.tab <- tab
 let shell_security_scroll_box t = t.pages.shell_security.scroll_box
@@ -1381,11 +1399,20 @@ let move_shell_grant_selection t delta =
 
 let default_approval_choice (request : Shell_runtime.Approval_broker.ui_request) =
   let scopes = request.Shell_runtime.Approval_broker.scopes in
-  if List.mem scopes Chatmd_shell_spec.Shell_spec.Once ~equal:Chatmd_shell_spec.Shell_spec.equal_approval_scope
+  if
+    List.mem
+      scopes
+      Chatmd_shell_spec.Shell_spec.Once
+      ~equal:Chatmd_shell_spec.Shell_spec.equal_approval_scope
   then Shell_security_page_state.Once
-  else if List.mem scopes Exact_session ~equal:Chatmd_shell_spec.Shell_spec.equal_approval_scope
+  else if
+    List.mem scopes Exact_session ~equal:Chatmd_shell_spec.Shell_spec.equal_approval_scope
   then Exact_session
-  else if List.mem scopes Prefix_session ~equal:Chatmd_shell_spec.Shell_spec.equal_approval_scope
+  else if
+    List.mem
+      scopes
+      Prefix_session
+      ~equal:Chatmd_shell_spec.Shell_spec.equal_approval_scope
   then Prefix_session
   else Durable_exact
 ;;
@@ -1432,9 +1459,7 @@ let open_shell_grant_revoke_modal t =
            }))
 ;;
 
-let close_shell_grant_revoke_modal t =
-  t.pages.shell_security.grant_revoke_modal <- None
-;;
+let close_shell_grant_revoke_modal t = t.pages.shell_security.grant_revoke_modal <- None
 
 let mark_shell_grant_revoking t ~generation ~grant_id =
   Option.iter t.pages.shell_security.grant_revoke_modal ~f:(fun modal ->
@@ -1459,8 +1484,8 @@ let moderator_request_equal left right =
         { prompt = right_prompt; choices = right_choices } ) ->
     String.equal left_prompt right_prompt
     && Array.equal String.equal left_choices right_choices
-  | Chat_response.In_memory_stream.Ask_text _, Ask_choice _
-  | Ask_choice _, Ask_text _ -> false
+  | Chat_response.In_memory_stream.Ask_text _, Ask_choice _ | Ask_choice _, Ask_text _ ->
+    false
 ;;
 
 let open_moderator_modal t request =
@@ -1534,6 +1559,7 @@ let fail_shell_management_load t ~generation message =
 
 let move_shell_audit_selection t delta =
   let page = t.pages.shell_security in
+  Notty_scroll_box.scroll_to page.scroll_box 0;
   match page.audit_load_state with
   | Audit_loaded audit_page ->
     let ids = List.map audit_page.requests ~f:(fun request -> request.request_id) in
@@ -1566,8 +1592,7 @@ let toggle_shell_approval_details t =
 ;;
 
 let set_shell_approval_stage t stage =
-  Option.iter t.pages.shell_security.approval_modal ~f:(fun modal ->
-    modal.stage <- stage)
+  Option.iter t.pages.shell_security.approval_modal ~f:(fun modal -> modal.stage <- stage)
 ;;
 
 let shell_interaction_id t =
@@ -1596,6 +1621,7 @@ let shell_interaction_uses_cursor t =
          | Chat_response.In_memory_stream.Ask_text _ -> true
          | Ask_choice _ -> false))
 ;;
+
 let chat_page t = t.pages.chat
 let agent_page t = t.pages.agent
 let scroll_box t = (chat_page t).scroll_box
@@ -3517,6 +3543,17 @@ let push_undo (t : t) : unit =
   t.redo_stack <- []
 ;;
 
+let with_edit_checkpoint t f =
+  let before = t.input_line, t.cursor_pos in
+  let stack = t.undo_stack in
+  let result = f () in
+  if (not (String.equal (fst before) t.input_line)) && phys_equal stack t.undo_stack
+  then (
+    t.undo_stack <- before :: t.undo_stack;
+    t.redo_stack <- []);
+  result
+;;
+
 let undo (t : t) : bool =
   match t.undo_stack with
   | (txt, pos) :: rest ->
@@ -3524,6 +3561,7 @@ let undo (t : t) : bool =
     t.input_line <- txt;
     t.cursor_pos <- Int.min (String.length txt) pos;
     t.undo_stack <- rest;
+    t.selection_anchor <- None;
     true
   | [] -> false
 ;;
@@ -3535,6 +3573,7 @@ let redo (t : t) : bool =
     t.input_line <- txt;
     t.cursor_pos <- Int.min (String.length txt) pos;
     t.redo_stack <- rest;
+    t.selection_anchor <- None;
     true
   | [] -> false
 ;;

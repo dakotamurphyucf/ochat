@@ -113,6 +113,7 @@ type audit_load_state =
 
 type t =
   { scroll_box : Notty_scroll_box.t
+  ; audit_list_scroll_box : Notty_scroll_box.t
   ; mutable tab : tab
   ; mutable snapshot : snapshot
   ; mutable selected_grant_id : string option
@@ -139,6 +140,7 @@ let empty_snapshot =
 
 let empty () =
   { scroll_box = Notty_scroll_box.create Notty.I.empty
+  ; audit_list_scroll_box = Notty_scroll_box.create Notty.I.empty
   ; tab = Overview
   ; snapshot = empty_snapshot
   ; selected_grant_id = None

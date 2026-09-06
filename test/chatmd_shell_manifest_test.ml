@@ -191,6 +191,32 @@ let%expect_test "source content digest changes invalidate authorization" =
   [%expect {| different=true |}]
 ;;
 
+let relocate_source root (source : Chatmd_shell_spec.Source_ref.t) =
+  { source with
+    source_dir = Filename.concat root (Filename.dirname source.file)
+  ; prompt_dir = root
+  }
+;;
+
+let relocate_input root (input : MC.input) =
+  { input with
+    runtimes =
+      List.map input.runtimes ~f:(fun runtime ->
+        { runtime with S.source = relocate_source root runtime.source })
+  ; tools =
+      List.map input.tools ~f:(fun tool ->
+        { tool with T.source = relocate_source root tool.source })
+  }
+;;
+
+let%expect_test "runtime materialization paths do not alter manifest identity" =
+  let original = security_source |> input in
+  let first = relocate_input "/live/prompts" original |> compile_exn in
+  let second = relocate_input "/artifacts/revision/tree" original |> compile_exn in
+  printf "equal=%b\n" (String.equal first.sha256 second.sha256);
+  [%expect {| equal=true |}]
+;;
+
 let%expect_test "literal secret values are excluded from inspectable manifest" =
   let source value =
     sprintf

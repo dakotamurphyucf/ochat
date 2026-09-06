@@ -1,5 +1,11 @@
 # `Mcp_server_router` – stateless JSON-RPC dispatcher
 
+Compatibility scope: this page describes the deprecated MCP host that exposes
+ChatMD prompts as agents. New session servers use the [Ochat agent protocol](../../agent-server/README.md).
+This deprecation does **not** apply to MCP-backed tools declared in ChatMD or
+their maintained client/type/transport libraries. Existing compatibility behavior
+below is retained; the new daemon does not require redesigning this server.
+
 `Mcp_server_router` is the {b glue} between the wire-transport (stdio, HTTP
 or WebSocket) and the in-memory registry exposed by
 [`Mcp_server_core`](./mcp_server_core.doc.md).  It receives raw JSON values
@@ -118,7 +124,7 @@ handlers can query `Mcp_server_core.is_cancelled` to abort early.
 
 * Hooks are executed synchronously – a slow logging sink blocks the caller.
 * Resource enumeration is non-recursive and capped at 1 MiB per file.
-* The MIME type mapping depends on the tiny heuristic in [`Mime`](../mime.mli).
+* The MIME type mapping depends on the tiny heuristic in [`Mime`](../../../lib/mime.mli).
 
 ## 7  Extending the router
 
@@ -131,4 +137,3 @@ Adding a new RPC generally involves three changes:
 
 A defensive default case makes unrecognised methods safe – clients receive a
 standard “method not found” error until the feature rolls out on both ends.
-

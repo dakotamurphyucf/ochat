@@ -707,4 +707,162 @@
  (libraries core expect_test_helpers_core chat_response)
  (inline_tests)
  (preprocess
+   (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_protocol_test)
+ (modules agent_protocol_test)
+ (libraries core expect_test_helpers_core ochat.agent_protocol)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_store_test)
+ (modules agent_store_test)
+ (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_store)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_config_test)
+ (modules agent_server_config_test)
+ (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_server)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_permission_test)
+ (modules agent_server_permission_test)
+ (libraries
+  core
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  ochat.agent_server)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_session_test)
+ (modules agent_session_test)
+ (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_session)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_client_test)
+ (modules agent_client_test)
+ (libraries core eio_main ochat.agent_protocol ochat.agent_client)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_transport_http_test)
+ (modules agent_transport_http_test)
+ (libraries core eio eio_main eio.unix ochat.agent_client ochat.agent_protocol ochat.agent_transport_http)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_transport_client_test)
+ (modules agent_transport_client_test)
+ (libraries
+  core
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  ochat.agent_protocol
+  ochat.agent_transport_client)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_transport_stdio_test)
+ (modules agent_transport_stdio_test)
+ (libraries
+  core
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  ochat.agent_protocol
+  ochat.agent_server
+  ochat.agent_transport_stdio)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_transport_socket_test)
+ (modules agent_transport_socket_test)
+ (libraries
+  core
+  eio
+  eio_main
+  eio.unix
+  mirage-crypto-rng.unix
+  ochat.agent_protocol
+  ochat.agent_server
+  ochat.agent_transport_socket)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_tui_agent_client_test)
+ (modules chat_tui_agent_client_test)
+ (libraries
+  core
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.chat_tui
+  openai
+  notty
+  ochat.notty_scroll_box)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_gap_test)
+ (modules agent_server_gap_test)
+ (libraries core base64 eio eio_main mirage-crypto-rng.unix ochat.agent_protocol ochat.agent_client ochat.agent_server ochat.agent_session ochat.agent_store)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_embedded_test)
+ (modules agent_server_embedded_test)
+ (libraries
+  core
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.agent_server)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name agent_server_restart_test)
+ (modules agent_server_restart_test)
+ (libraries
+  core
+  eio
+  eio_main
+  mirage-crypto-rng.unix
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.agent_server)
+ (inline_tests)
+ (preprocess
   (pps ppx_jane ppx_expect)))

@@ -8,6 +8,16 @@ out.txt
 raw-openai-chat-streaming-response.txt
 .vscode/
 prompts/
+tools/
+!docs-src/examples/
+!docs-src/examples/README.md
+!docs-src/examples/prompt-patterns.md
+!docs-src/examples/agent-server/
+!docs-src/examples/agent-server/**
+!docs-src/examples/agent-server/prompts/
+!docs-src/examples/agent-server/prompts/**
+!docs-src/examples/tools/
+!docs-src/examples/tools/**
 ochat_history/
 raw-openai-streaming-response.txt
 cache.bin
@@ -15,7 +25,9 @@ src/
 .chatmd/
 dependency-docs/
 notes.txt
-tools/
+
+!docs-src/tools/
+!docs-src/tools/README.md
 gmail
 sherlodoc.marshal
 .odoc_index/

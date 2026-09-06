@@ -1,138 +1,83 @@
-# Oauth2_manager – Token caching and refresh wrapper
+# Oauth2_manager — credential-isolated token caching
 
-`Oauth2_manager` combines the low-level helpers in the `ochat.oauth2`
-library into a {b plug-and-play} access-token provider that “just works” for
-both headless background jobs and interactive command-line tools.
+The maintained outbound MCP client uses this helper for optional OAuth.
+It is not the daemon's inbound authentication service. See the
+[public interface](../../../lib/oauth/oauth2_manager.mli) and
+[MCP HTTP adapter](../mcp/mcp_transport_http.doc.md).
 
-At a glance it delivers:
+## 1 Public API
 
-| Feature | How it works |
-|---------|--------------|
-| **Automatic discovery** | Attempts `/.well-known/oauth-authorization-server`, otherwise falls back to the conventional `/authorize` and `/token` endpoints. |
-| **Client-credentials grant** | Uses {!module:Oauth2_client_credentials} when a `client_secret` is available. |
-| **PKCE flow** | Falls back to the browser-based {!module:Oauth2_pkce_flow} for public clients. |
-| **Local cache** | Persists the full [`Oauth2_types.Token.t`](oauth2_types.doc.md) as JSON under `$XDG_CACHE_HOME/ocamlochat/tokens/`. |
-| **Refresh logic** | Refreshes whenever less than 60 s remain before expiry and propagates any *refresh_token* errors to the caller. |
+`get ~env ~sw ~issuer creds` returns a token or operational Error; Eio
+cancellation propagates. Credentials are either
+`Client_secret { id; secret; scope }` or `Pkce { client_id }`.
 
-The module is exception-free.  Any transport, HTTP, or decoding failure is
-reported as `Error "…"` while unrecoverable bugs (e.g. programmer mistakes)
-continue to surface via regular exceptions.
+Fresh cached tokens are reused. Expiring tokens attempt refresh; a returned
+refresh failure triggers acquisition. Cache freshness uses a 60-second margin.
+Newly acquired tokens retain the issuer's lifetime, which may be shorter.
+Wire decoding assigns a local obtained_at; loading cached JSON preserves it.
 
----
-
-## 1  Public API
+## 2 Quick start
 
 ```ocaml
-type creds =
-  | Client_secret of {
-      id     : string;
-      secret : string;
-      scope  : string option;
-    }
-  | Pkce of { client_id : string }
-
-val get :
-  env:Eio_unix.Stdenv.base ->
-  sw:Eio.Switch.t ->
-  issuer:string ->
-  creds ->
-  (Oauth2_types.Token.t, string) result
+let authenticate env sw secret =
+  Oauth2_manager.get ~env ~sw ~issuer:"https://auth.example"
+    (Oauth2_manager.Client_secret
+       { id = "build-bot"; secret; scope = Some "tools.read" })
 ```
 
-*Everything else* (`cache_file`, `store`, `refresh_access_token` …) is
-semi-public and documented in the source for users with more advanced needs.
+This placeholder requires a real authorization service. Inspect the Result,
+but do not print tokens or secrets. PKCE can open a browser and wait for a
+callback; see its [known limitations](oauth2_pkce_flow.doc.md). It is not a
+general unattended login fallback.
 
----
+## 3 Function reference
 
-## 2  Quick start
+- `fetch_metadata` tries issuer + `/.well-known/oauth-authorization-server`;
+  transport/status/JSON/schema failures yield conventional endpoints.
+- `fallback_metadata` builds /authorize, /token and /register from the origin.
+- `obtain` and `refresh_access_token` use issuer + /token for confidential
+  clients; PKCE uses the discovered token endpoint.
+- `cache_dir ()` resolves XDG_CACHE_HOME, HOME/.cache or ./.cache, followed by
+  `ocamlochat/tokens`.
+- `cache_file issuer creds`, `load ~env issuer creds` and
+  `store ~env issuer creds token` require explicit credential identity.
 
-### 2.1  Headless service – client-credentials
+The latter three formerly accepted only issuer. Callers must now supply creds;
+there is deliberately no issuer-only fallback API.
 
-```ocaml
-Eio_main.run @@ fun env ->
-  Eio.Switch.run @@ fun sw ->
-    match
-      Oauth2_manager.get
-        ~env ~sw
-        ~issuer:"https://auth.example"
-        (Client_secret {
-           id     = "build-bot";
-           secret = Sys.getenv_exn "CLIENT_SECRET";
-           scope  = Some "openid profile";
-         })
-    with
-    | Error msg -> Format.eprintf "Token error: %s@." msg
-    | Ok tok -> Format.printf "Bearer %s@." tok.access_token
-```
+## 4 Cache location & security
 
-`Bearer <token>` can now be attached to ordinary HTTP requests.
+Files are named `v2-<sha256>.json`. The digest binds the **exact** issuer,
+grant type, client ID, confidential-client secret and requested scope.
+Different IDs, secret rotations, scopes and grant types cannot reuse one
+another's tokens. Scope ordering/whitespace is not normalized; equivalent but
+differently spelled scopes may acquire separate tokens.
 
-### 2.2  Interactive CLI – PKCE
+Old `<md5-of-issuer>.json` files are ignored and left untouched. They cannot
+be safely migrated because they contain no credential identity. First use of
+the new cache reacquires authorization (possibly interactive for PKCE).
 
-```ocaml
-let authenticate () =
-  Eio_main.run @@ fun env ->
-    Eio.Switch.run @@ fun sw ->
-      match
-        Oauth2_manager.get
-          ~env ~sw
-          ~issuer:"https://login.okta.com/oauth2/default"
-          (Pkce { client_id = "0oa5abc123XYZ" })
-      with
-      | Error msg -> Error (`Auth msg)
-      | Ok tok -> Ok tok
-```
+Cache JSON contains the token, including any refresh token, but not the supplied
+client secret. Load rejects group/other permission bits. Store uses a new
+exclusive 0600 temporary file and rename, preventing concurrent writers from
+sharing a temporary file; cleanup removes owned temporary files. Store failures
+are best-effort, except cancellation. No fsync durability is promised.
 
-The helper opens the user’s browser, waits for the redirect, writes the token
-to cache, refreshes on subsequent invocations – and stays entirely within the
-terminal otherwise.
+Use a private, trusted cache directory. This is neither encryption nor protection
+against a malicious same-user process, manipulated parent directories, or token
+revocation. PKCE has no account selector: separate accounts of the same public
+client need separate cache roots. A requested scope is not local enforcement
+of the scopes the issuer actually grants.
 
----
+## 5 Known limitations
 
-## 3  Function reference (abbreviated)
+No single-flight acquisition or refresh locking: concurrent misses may make
+multiple network requests, and last completed cache publication wins for that
+identity. There is no retry/backoff or forced invalidation on HTTP 401.
+Discovery fallback may not match nonstandard servers.
+Interactive callback hardening remains a [tracked limitation](../../development/code-documentation-audit.md).
 
-| Function | Purpose |
-|----------|---------|
-| `cache_dir` | Return `$XDG_CACHE_HOME`-compatible directory for token files. |
-| `cache_file issuer` | Deterministic filename based on MD5 of the issuer URL. |
-| `fallback_metadata` | Construct minimal `Metadata.t` when discovery fails. |
-| `fetch_metadata` | Download and decode `/.well-known/oauth-authorization-server`. |
-| `load` / `store` | *Exact* JSON round-trip for `Token.t` with strict `0600` perms. |
-| `refresh_access_token` | Perform a refresh-token grant. |
-| `obtain` | First-time acquisition via client-credentials or PKCE. |
-| `get` | High-level cache + refresh + obtain pipeline. |
+## 6 Related modules
 
-All helpers favour explicit parameters (`env`, `sw`, `issuer`) so that they
-compose cleanly inside larger Eio applications.
-
----
-
-## 4  Cache location & security
-
-Token files are created with permissions `0600` and loaded only if the file is
-{i still} private to the user.  Any stray `group` or `other` bits cause
-`Error "insecure_token_cache_permissions"` and force a fresh network request.
-
----
-
-## 5  Known limitations
-
-1. **No retry/back-off.** The caller is expected to retry transient
-   `Error` values.
-2. **Single issuer per process.** There is no in-memory LRU; invoking
-   `get` for multiple issuers concurrently is perfectly safe but heavy
-   traffic may cause a surge in open/noisy connections.
-3. **Discovery shortcut.** The fallback assumes standard endpoint paths; some
-   proprietary setups may break.
-
----
-
-## 6  Related modules
-
-* [`Oauth2_client_credentials`](oauth2_client_credentials.doc.md) – raw
-  client-credentials grant.
-* [`Oauth2_pkce_flow`](oauth2_pkce_flow.doc.md) – interactive PKCE browser
-  helper.
-* [`Oauth2_http`](oauth2_http.doc.md) – tiny wrapper over *Piaf* for JSON and
-  form HTTP requests.
-
+[Token codec](oauth2_types.doc.md), [client credentials](oauth2_client_credentials.doc.md),
+[PKCE](oauth2_pkce_flow.doc.md), [HTTP helpers](oauth2_http.doc.md).

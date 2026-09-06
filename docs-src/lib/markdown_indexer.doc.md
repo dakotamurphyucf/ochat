@@ -2,7 +2,7 @@
 
 Turns an arbitrary *directory tree of Markdown files* into a ready-to-use
 vector database that can be queried via semantic similarity search
-(`Vector_db.query` or the `ochat md-search` CLI helper).
+(`Vector_db.query` or the `md-search` CLI).
 
 Internally the pipeline glues together:
 
@@ -28,7 +28,7 @@ Internally the pipeline glues together:
 ```
 
 The *parent* directory holds `md_index_catalog.binio` containing the metadata
-of every index created on the machine.
+of indexes registered under that parent directory.
 
 ---
 
@@ -55,13 +55,15 @@ val index_directory :
 ### What the function does
 
 1. Creates/updates the on-disk structure shown above.
-2. Uploads *new* snippets only — the stable MD5-based identifier guarantees
-   idempotency.  Existing embeddings are reused unchanged.
+2. Embeds all discovered snippets and replaces `vectors.binio`; it does not
+   read the previous vector file to reuse embeddings. Stable IDs name snippet
+   files but do not eliminate repeated provider calls.
 3. Computes the **centroid vector** of the index and writes/updates the global
    catalogue (`Md_index_catalog`).
 
-All I/O is performed through Eio and therefore non-blocking.  The function is
-fully cancel-safe and can be composed with other Eio-based components.
+I/O uses Eio and workers belong to the switch. Cancellation does not make the
+multi-file update transactional. Old snippets may remain after a rebuild; an
+empty crawl exits without replacing an existing index.
 
 ---
 
@@ -71,13 +73,13 @@ Executable wrappers are provided under `bin/`:
 
 ```bash
 # create/update index
-ochat md-index \
-  --root lib/docs-src \
-  --index-name docs \
-  --description "Library documentation"
+md-index \
+  --root docs-src \
+  --name docs \
+  --desc "Library documentation"
 
-# query the corpus with hybrid BM25 + vector search
-ochat md-search --query "How to initialise?"
+# query the corpus with dense vector search
+md-search --query "How to initialise?"
 ```
 
 These are thin shims around the public API and are primarily used for manual
@@ -93,4 +95,3 @@ testing.
   would require a thin adapter inside `Embed_service`.
 * Corpus must fit into memory during embedding.  For millions of snippets a
   streaming approach would be required.
-

@@ -87,8 +87,11 @@ Behaviour summary:
   helps with heavily JS-driven websites.  The sub-process is guarded by a
   60-second timeout.
 
-Errors never raise; networking or parsing failures are returned as a single
-Markdown paragraph describing the problem.
+Many fetch failures become diagnostic text, and HTML conversion failures fall
+back to a fenced copy of the HTML. This is not a no-exceptions API: malformed
+GitHub line fragments can raise during integer parsing, and local-file reads
+can raise filesystem errors. Callers must preserve cancellation and handle
+other exceptions at their own boundary.
 
 
 ### `val convert_html_file : _ Eio.Path.t -> Markdown.t`
@@ -118,7 +121,7 @@ flowchart TD
   J --> F
 ```
 
-The full implementation lives in [`driver.ml`](./driver.ml).  All heavy-weight
+The full implementation lives in [`driver.ml`](../../../lib/webpage_markdown/driver.ml).  All heavy-weight
 operations are delegated to specialised modules so that `Driver` stays tiny and
 stateless.
 
@@ -173,4 +176,3 @@ Known limitations
   solely from the file extension.
 
 * The module is *not* streaming; large pages are held entirely in memory.
-

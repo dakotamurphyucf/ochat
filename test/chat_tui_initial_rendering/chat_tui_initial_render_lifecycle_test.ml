@@ -182,3 +182,69 @@ let%test_unit "stale aggregate is rejected before commit" =
   Array.iteri (Model.render_messages model) ~f:(fun index _ ->
     assert (cache_is_current model index))
 ;;
+
+let%test_unit "agent layout coalesces resize and publishes only the current generation" =
+  Eio_main.run (fun env ->
+    Eio.Switch.run (fun sw ->
+      let messages =
+        List.init 500 ~f:(fun index -> "assistant", sprintf "row %d\nsecond line" index)
+      in
+      let model = make_model messages in
+      project_messages model messages;
+      let completions = Eio.Stream.create 8 in
+      let layout =
+        Chat_tui.Agent_history_layout.create
+          ~sw
+          ~env
+          ~model
+          ~config
+          ~emit:(Eio.Stream.add completions)
+      in
+      Exn.protect
+        ~finally:(fun () -> Chat_tui.Agent_history_layout.close layout)
+        ~f:(fun () ->
+          Chat_tui.Agent_history_layout.request layout ~size:(80, 24);
+          Chat_tui.Agent_history_layout.request layout ~size:(40, 12);
+          Chat_tui.Agent_history_layout.prepare_destination
+            layout
+            ~size:(40, 12)
+            Earlier_conversation;
+          assert (
+            not
+              (Chat_tui.Agent_history_layout.accept layout ~size:(40, 12) (1, Cancelled)));
+          let result =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+              Eio.Stream.take completions)
+          in
+          assert (Chat_tui.Agent_history_layout.accept layout ~size:(40, 12) result);
+          assert (Model.normal_input_is_enabled model);
+          assert (Option.equal Int.equal (Model.active_history_width model) (Some 40));
+          assert (Notty_scroll_box.scroll (Model.scroll_box model) = 0);
+          assert (not (Model.auto_follow model));
+          Chat_tui.Agent_history_layout.prepare_destination
+            layout
+            ~size:(40, 12)
+            Latest_conversation;
+          assert (Model.auto_follow model);
+          Array.iteri (Model.render_messages model) ~f:(fun index _ ->
+            assert (cache_is_current model index));
+          let target = (Model.projected_rows model).(120).id in
+          Chat_tui.Agent_history_layout.prepare_destination
+            layout
+            ~size:(40, 12)
+            (Search_result target);
+          assert (
+            Option.equal
+              Chat_tui.Projected_message.Id.equal
+              (Model.take_projected_reveal_request model)
+              (Some target));
+          let updated =
+            List.mapi messages ~f:(fun index message ->
+              if index = 499 then "assistant", "streamed replacement" else message)
+          in
+          project_messages model updated;
+          Chat_tui.Agent_history_layout.request layout ~size:(40, 12);
+          assert (cache_is_current model 499);
+          Chat_tui.Agent_history_layout.close layout;
+          assert (not (Chat_tui.Agent_history_layout.accept layout ~size:(40, 12) result)))))
+;;

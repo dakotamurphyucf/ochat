@@ -79,7 +79,6 @@ let module_scheme (m : builtin_module) : ty =
 let option_ty (a : string) : ty = variant [ "None", TUnit; "Some", TVar a ]
 let task_ty (a : ty) : ty = TCon ("task", [ a ])
 let string_array_ty : ty = TArray TString
-
 let option_of_ty ty = variant [ "None", TUnit; "Some", ty ]
 let string_option_ty = option_of_ty TString
 
@@ -968,6 +967,7 @@ let first_string_option_value (values : value array) : value =
 ;;
 
 let item_input_text_message_value ~(role : string) ~(text : string) : value =
+  let role = if String.Caseless.equal role "system" then "developer" else role in
   json_object_value
     [ "type", json_string_value "message"
     ; "role", json_string_value role
@@ -1956,7 +1956,7 @@ let item_module : builtin_module =
                |> Option.bind ~f:json_string_payload
                |> Option.value ~default:""
              in
-             VBool (String.equal role "system"))
+             VBool (String.equal role "system" || String.equal role "developer"))
       ; make_unary_builtin
           "is_tool_call"
           (TFun ([ item_ty ], TBool))
@@ -2175,7 +2175,7 @@ let context_module : builtin_module =
              expect_context_items "Context.last_system_item" context
              |> last_matching_value ~f:(fun item ->
                Option.value (item_role_string "Context.last_system_item" item) ~default:""
-               |> String.equal "system")
+               |> fun role -> String.equal role "system" || String.equal role "developer")
              |> option_value)
       ; make_unary_builtin
           "last_tool_call"

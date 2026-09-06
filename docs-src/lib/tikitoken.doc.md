@@ -1,130 +1,63 @@
-# Tikitoken – developer documentation
+# Tikitoken — byte-pair encoding
 
-This document **complements** the inline `odoc` comments of
-`tikitoken.{mli,ml}` with a more conversational overview, examples that
-include I/O, and background material that does **not** belong in the API
-reference.
+[Interface](../../lib/tikitoken.mli) · [implementation](../../lib/tikitoken.ml).
 
-## Table of contents
+## 1 High-level overview
 
-1. High-level overview  
-2. Vocabulary file format  
-3. Public API walk-through  
-4. Usage examples  
-5. Internals & performance notes  
-6. Known limitations / future work
+Tikitoken builds a codec from a text vocabulary and encodes/decodes in memory.
+File I/O belongs to the caller. The encoder uses Core, Base64 and PCRE; it is
+not dependency-free or entirely free of native-library dependencies.
 
----
+The implementation has one fixed pre-tokenization regex. Loading another
+vocabulary does not select that vocabulary's reference regex or special-token
+policy. The CLI uses the bundled o200k_base vocabulary; do not infer arbitrary
+tiktoken/model compatibility merely from accepting a vocabulary file.
 
-## 1  High-level overview
+## 2 Vocabulary file format
 
-`Tikitoken` is a *pure* OCaml implementation of the byte-pair encoding
-(BPE) used by the official Python **tiktoken** library.  It lets you
-count tokens or round-trip prompts **without** shelling out to Python or
-linking to C foreign code.  The module comes in at <200 LOC and has no
-mutable global state, which makes it easy to embed in servers, CLI
-tools or tests.
+Each nonblank line contains a Base64 byte sequence and integer rank, separated
+by whitespace. Malformed Base64/ranks/rows raise; duplicate ranks can fail codec
+construction. Include all single-byte tokens required by the input.
+The codec contains encoder/decoder tables and a rolling-hash vocabulary index.
 
-Typical workflow:
+## 3 Public API walk-through
 
-```ocaml
-let bpe_contents = In_channel.read_all "./cl100k_base.tiktoken" in
-let codec        = Tikitoken.create_codec bpe_contents in
-let tokens       = Tikitoken.encode ~codec ~text:"Hello world!" in
-printf "prompt consumes %d tokens\n" (List.length tokens);
-```
+`create_codec contents` parses the vocabulary once. `encode ~codec ~text`
+returns all token IDs. `decode ~codec ~encoded` concatenates token bytes and
+silently ignores unknown IDs. Decoded bytes need not constitute valid UTF-8.
 
-## 2  Vocabulary file format
+Encoding expects input accepted by the UTF-8 PCRE regex. There is no exposed
+streaming interface, special-token policy, or model-specific chat-envelope
+token accounting.
 
-The reference library ships binary-compatible files such as
-`cl100k_base.tiktoken`.  Each line contains:
-
-```
-<base64-bytes> <rank>\n
-```
-
-* *`<base64-bytes>`* – a Base64 representation of an **arbitrary** byte
-  sequence (not necessarily valid UTF-8)
-* *`<rank>`* – integer token id as used by the OpenAI HTTP APIs
-
-The format is parsed by {!Tikitoken.create_codec} which builds two hash
-maps for constant-time look-ups.
-
-## 3  Public API walk-through
-
-### Building a codec
+## 4 Usage examples
 
 ```ocaml
-val create_codec : string -> codec
+let count_file env vocabulary text =
+  let contents = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / vocabulary) in
+  let codec = Tikitoken.create_codec contents in
+  Core.List.length (Tikitoken.encode ~codec ~text)
 ```
 
-Runs in `O(n)` where *n* is the number of vocabulary entries and returns
-an in-memory bidirectional mapping.
+Reuse the codec for repeated calls. For chunking, avoid blindly bisecting UTF-8
+bytes; choose valid text boundaries and retokenize each chunk. Do not claim a
+fixed token window by slicing arbitrary bytes or decoding arbitrary token
+subsets without checking validity.
 
-### Encoding
+## 5 Internals & performance notes
 
-```ocaml
-val encode : codec:codec -> text:string -> int list
-```
+The regex yields pieces; exact vocabulary matches take the fast path.
+Otherwise a rolling-hash slice index finds vocabulary candidates, verifies bytes
+to handle hash collisions, and a min-heap selects adjacent merges by rank.
+Temporary node/adjacency arrays and heap entries are allocated for each piece;
+the implementation is not recursive byte-string splitting.
 
-Splits the input string with the original **tiktoken** regex, performs
-exact look-ups in the encoder table, and falls back to the recursive
-byte-pair merge for out-of-vocabulary segments.  The function allocates
-at most one small OCaml list cell per token.
+The full match array and token lists are materialized. There is no
+one-list-cell-per-token allocation bound, fixed small LOC size, or general
+constant-memory guarantee.
 
-### Decoding
+## 6 Known limitations / future work
 
-```ocaml
-val decode : codec:codec -> encoded:int list -> bytes
-```
-
-Simply concatenates the byte sequences referenced by the ids.  It is
-meant for debugging; production code usually only needs the *length* of
-the encoded list.
-
-## 4  Usage examples
-
-### 4.1  Counting tokens in a Markdown cell
-
-```ocaml
-let token_count md_cell =
-  let bpe   = In_channel.read_all "cl100k_base.tiktoken" in
-  let codec = Tikitoken.create_codec bpe in
-  List.length (Tikitoken.encode ~codec ~text:md_cell)
-```
-
-### 4.2  Chunking a large document into 8 k-token windows
-
-```ocaml
-let rec split_into_chunks ~codec ~max_len text =
-  let tokens = Tikitoken.encode ~codec ~text in
-  if List.length tokens <= max_len then [ text ]
-  else
-    (* naïve strategy: cut the text in half and recurse *)
-    let half     = String.length text / 2 in
-    let left     = String.sub text 0 half in
-    let right    = String.sub text half (String.length text - half) in
-    split_into_chunks ~codec ~max_len left
-    @ split_into_chunks ~codec ~max_len right
-```
-
-## 5  Internals & performance notes
-
-* The heavy lifting happens in `byte_pair_merge` which implements the
-  greedy merge loop exactly as described in the original paper.
-* Both encoder and decoder use `Core.Hashtbl` with the default
-  (~polymorphic) hash which is fast enough for vocabularies of O(100 k).
-* Regular-expression splitting relies on the `pcre` library because the
-  original pattern makes use of Unicode property escapes (`\p{L}`).
-
-## 6  Known limitations / future work
-
-* {p Lazy evaluation} – the current implementation allocates the *whole*
-  encoded list even if the caller only needs its length.
-* {p Streaming} – decoding works only on complete lists; streaming input
-  would require a stateful interface.
-* {p Error handling} – unknown token ids are silently ignored and out-of-
-  vocabulary Unicode codepoints degrade to their byte representation.
-
-Contributions welcome! 😉
-
+No automatic vocabulary/regex pairing, streaming input, or complete provider
+billing accounting. Invalid inputs can raise. Token counts are useful estimates,
+not a dollar spending cap.
