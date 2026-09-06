@@ -141,6 +141,14 @@ shell; use your usual private environment setup for future terminals.
 [Provider configuration and limitations](docs-src/agent-server/environment.md)
 are documented separately.
 
+
+**Additional LLM providers**  
+Today Ochat integrates with OpenAI; future work is intended to support additional backends while keeping ChatMD and tool contracts stable.
+You can use a proxy server that maps the Openai api Response endpoint format to your preferred providers format. Example: [LiteLLm](https://docs.litellm.ai/) and set the enviorment url API_URL to the proxy url. 
+For a governed OpenAI-compatible proxy, `API_URL=https://api.tuningengines.com/v1`
+can route the same workflow through Tuning Engines while Ochat keeps owning
+the local workflow artifact and tool execution.
+
 ### 3. Save the agent in your project
 
 Change into the repository you want to explore. For a first try, you can also
@@ -494,6 +502,8 @@ Each topic index introduces the ideas and points you to examples and references.
 Looking for a particular executable? See the [command index](docs-src/bin/README.md).
 For design principles, repository layout, and the roadmap, see the
 [project overview](docs-src/overview/project.md).
+
+
 
 Contributing code? Start with [DEVELOPMENT.md](DEVELOPMENT.md). From the source
 checkout:
