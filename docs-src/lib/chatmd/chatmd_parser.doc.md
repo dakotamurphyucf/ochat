@@ -8,7 +8,7 @@ Menhir‐generated parser for the **ChatMarkdown** language.
 
 `Chatmd_parser` turns the token stream produced by
 [`Chatmd_lexer`](./chatmd_lexer.doc.md) into the lightweight DOM defined
-in [`Chatmd_ast`](../chatmd_ast.ml).
+in [`Chatmd_ast`](../../../lib/chatmd/chatmd_ast.ml).
 
 At the moment the grammar recognises **only** the *official* set of
 ChatMarkdown tags:
@@ -100,5 +100,14 @@ allocates only the minimal structure required to represent the AST.
   Malformed attributes are caught earlier by the lexer.
 * Unknown tags are silently accepted as raw text.  This is a
   deliberate design choice to allow embedding arbitrary XML in ChatMarkdown
-  documents for inclusion in the LLM prompt.
+documents for inclusion in the LLM prompt.
 
+### Shell scope exception
+
+Nested shell declarations are parsed by this parser, not by a second XML
+parser. `Chatmd_lexer` enables the closed `Shell_element` vocabulary only
+inside `<shell_access>` and shell-tool scope. The subsequent
+`Chatmd_shell_declaration` conversion rejects unknown attributes/children,
+duplicate singleton sections, invalid values, and mixed text. The permissive
+unknown-markup behavior above applies to model-visible content, not runtime
+configuration.

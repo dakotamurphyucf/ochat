@@ -1,75 +1,26 @@
 open Core
 open Mcp_types
 module JT = Jsonrpc
-
-(*------------------------------------------------------------------*)
-(* Transport dispatch                                                *)
-(*------------------------------------------------------------------*)
-
-module T_stdio = Mcp_transport_stdio
-module T_http = Mcp_transport_http
-
-(* Thin runtime union allowing us to choose the concrete transport
-   implementation at connection time while still exposing a uniform
-   set of helpers. *)
+module Id_table = Hashtbl.Poly
 
 exception Connection_closed
 
 type transport =
-  | Stdio of T_stdio.t
-  | Http of T_http.t
-
-let transport_send (t : transport) (json : Jsonaf.t) =
-  match t with
-  | Stdio s ->
-    (try T_stdio.send s json with
-     | T_stdio.Connection_closed -> raise Connection_closed)
-  | Http h ->
-    (try T_http.send h json with
-     | T_http.Connection_closed -> raise Connection_closed)
-;;
-
-let transport_recv (t : transport) : Jsonaf.t =
-  match t with
-  | Stdio s ->
-    (try T_stdio.recv s with
-     | T_stdio.Connection_closed -> raise Connection_closed)
-  | Http h ->
-    (try T_http.recv h with
-     | T_http.Connection_closed -> raise Connection_closed)
-;;
-
-let transport_close (t : transport) =
-  match t with
-  | Stdio s -> T_stdio.close s
-  | Http h -> T_http.close h
-;;
-
-let transport_is_closed (t : transport) =
-  match t with
-  | Stdio s -> T_stdio.is_closed s
-  | Http h -> T_http.is_closed h
-;;
-
-(*------------------------------------------------------------------*)
-(* Internal state                                                    *)
-(*------------------------------------------------------------------*)
-
-module Id_table = Hashtbl.Poly
-
-type pending_resolver = (Jsonaf.t, string) result Eio.Promise.u
+  { send : Jsonaf.t -> unit
+  ; recv : unit -> Jsonaf.t
+  ; close : unit -> unit
+  ; is_closed : unit -> bool
+  }
 
 type t =
   { transport : transport
   ; sw : Eio.Switch.t
   ; mutable next_id : int
-  ; pending : (JT.Id.t, pending_resolver) Id_table.t
-  ; notif_stream : Mcp_types.Jsonrpc.notification Eio.Stream.t
+  ; pending : (JT.Id.t, (Jsonaf.t, string) result -> unit) Id_table.t
+  ; notif_stream : JT.notification Eio.Stream.t
+  ; stopped : string Eio.Promise.t
+  ; stop : string Eio.Promise.u
   }
-
-(*------------------------------------------------------------------*)
-(* Helpers                                                           *)
-(*------------------------------------------------------------------*)
 
 let fresh_id c =
   let i = c.next_id in
@@ -77,69 +28,114 @@ let fresh_id c =
   JT.Id.of_int i
 ;;
 
-let parse_response json =
-  try Ok (JT.response_of_jsonaf json) with
-  | exn -> Error (Exn.to_string_mach exn)
+let error_of_exn = function
+  | Connection_closed
+  | Mcp_transport_stdio.Connection_closed
+  | Mcp_transport_http.Connection_closed
+  | End_of_file -> "Connection_closed"
+  | Eio.Cancel.Cancelled _ -> "Cancelled"
+  | _ -> "MCP transport failed"
 ;;
 
-let parse_notification json =
-  try Ok (JT.notification_of_jsonaf json) with
-  | exn -> Error (Exn.to_string_mach exn)
+let fail_pending c message =
+  if Option.is_none (Eio.Promise.peek c.stopped) then Eio.Promise.resolve c.stop message;
+  let resolvers = Id_table.data c.pending in
+  Id_table.clear c.pending;
+  List.iter resolvers ~f:(fun resolve -> resolve (Error message))
 ;;
 
-let error_of_rpc_error (e : JT.error_obj) = sprintf "RPC error %d – %s" e.code e.message
-
-let fulfil_resolver resolver (v : (Jsonaf.t, string) result) =
-  Eio.Promise.resolve resolver v
+let close c =
+  fail_pending c "Connection_closed";
+  c.transport.close ()
 ;;
 
-(*------------------------------------------------------------------*)
-(* RPC helper                                                        *)
-(*------------------------------------------------------------------*)
+let is_closed c = Option.is_some (Eio.Promise.peek c.stopped) || c.transport.is_closed ()
+let notifications c = c.notif_stream
 
-let rpc_async (c : t) (req : JT.request) =
+let start_rpc c (req : JT.request) resolve =
+  if Option.is_some (Eio.Switch.get_error c.sw) then fail_pending c "Cancelled";
+  match Eio.Promise.peek c.stopped with
+  | Some message -> resolve (Error message)
+  | None ->
+    Id_table.add_exn c.pending ~key:req.id ~data:resolve;
+    (try c.transport.send (JT.jsonaf_of_request req) with
+     | exn ->
+       fail_pending c (error_of_exn exn);
+       (match exn with
+        | Eio.Cancel.Cancelled _ -> raise exn
+        | _ -> ()))
+;;
+
+let rpc_async c req =
   let promise, resolver = Eio.Promise.create () in
-  Id_table.add_exn c.pending ~key:req.id ~data:resolver;
-  transport_send c.transport (JT.jsonaf_of_request req);
+  start_rpc c req (Eio.Promise.resolve resolver);
   promise
 ;;
 
-let rpc c req = Eio.Promise.await (rpc_async c req)
+let rpc c req =
+  let promise = rpc_async c req in
+  try Eio.Promise.await promise with
+  | Eio.Cancel.Cancelled _ as exn ->
+    Option.iter (Id_table.find_and_remove c.pending req.id) ~f:(fun resolve ->
+      resolve (Error "Cancelled"));
+    raise exn
+;;
 
-(*------------------------------------------------------------------*)
-(* Receiver loop                                                     *)
-(*------------------------------------------------------------------*)
+let dispatch_response c (resp : JT.response) =
+  Option.iter (Id_table.find_and_remove c.pending resp.id) ~f:(fun resolve ->
+    let result =
+      match resp.result, resp.error with
+      | Some r, None -> Ok r
+      | _, Some err -> Error (sprintf "RPC error %d – %s" err.code err.message)
+      | None, None -> Error "Invalid response: empty"
+    in
+    resolve result)
+;;
+
+let dispatch c json =
+  match JT.response_of_jsonaf json with
+  | resp -> dispatch_response c resp
+  | exception _ ->
+    (match JT.notification_of_jsonaf json with
+     | notif -> Eio.Stream.add c.notif_stream notif
+     | exception _ -> ())
+;;
 
 let receiver_loop c =
   let rec loop () =
-    match transport_recv c.transport with
-    | (exception Connection_closed) | (exception End_of_file) -> ()
-    | json ->
-      (match parse_response json with
-       | Ok resp ->
-         (match Id_table.find_and_remove c.pending resp.id with
-          | None -> ()
-          | Some resolver ->
-            let result =
-              match resp.result, resp.error with
-              | Some r, None -> Ok r
-              | None, Some err | Some _, Some err -> Error (error_of_rpc_error err)
-              | None, None -> Error "Invalid response: empty"
-            in
-            fulfil_resolver resolver result)
-       | Error _ ->
-         (match parse_notification json with
-          | Ok notif -> Eio.Stream.add c.notif_stream notif
-          | Error _ -> ()));
-      loop ()
+    let json = c.transport.recv () in
+    dispatch c json;
+    loop ()
   in
-  try loop () with
-  | _ -> ()
+  try Eio.Fiber.first loop (fun () -> ignore (Eio.Promise.await c.stopped : string)) with
+  | exn ->
+    fail_pending c (error_of_exn exn);
+    (match exn with
+     | Eio.Cancel.Cancelled _ -> raise exn
+     | _ -> ())
 ;;
 
-(*------------------------------------------------------------------*)
-(* Connect / close                                                   *)
-(*------------------------------------------------------------------*)
+let create ~sw transport =
+  let stopped, stop = Eio.Promise.create () in
+  let c =
+    { transport
+    ; sw
+    ; next_id = 1
+    ; pending = Id_table.create ()
+    ; notif_stream = Eio.Stream.create 64
+    ; stopped
+    ; stop
+    }
+  in
+  Eio.Switch.on_release sw (fun () -> close c);
+  c
+;;
+
+let start_receiver c =
+  Eio.Fiber.fork_daemon ~sw:c.sw (fun () ->
+    receiver_loop c;
+    `Stop_daemon)
+;;
 
 let perform_initialize c =
   let id = fresh_id c in
@@ -151,97 +147,85 @@ let perform_initialize c =
       ]
   in
   let req = JT.make_request ~id ~method_:"initialize" ~params () in
-  (* Use synchronous path here because receiver fibre may not yet be
-     running.  We'll read directly. *)
-  transport_send c.transport (JT.jsonaf_of_request req);
+  c.transport.send (JT.jsonaf_of_request req);
   let rec wait () =
-    match parse_response (transport_recv c.transport) with
-    | Ok resp when JT.Id.(resp.id = id) -> resp
-    | _ -> wait ()
+    let json = c.transport.recv () in
+    match JT.response_of_jsonaf json with
+    | resp when JT.Id.(resp.id = id) -> resp
+    | _ | (exception _) -> wait ()
   in
-  let _resp = wait () in
-  (* fire-and-forget initialized notification *)
+  ignore (wait () : JT.response);
   let notif = JT.notify ~method_:"notifications/initialized" () in
-  (try transport_send c.transport (JT.jsonaf_of_notification notif) with
-   | _ -> ());
-  ()
+  c.transport.send (JT.jsonaf_of_notification notif)
+;;
+
+let connect_transport ~auth ~sw ~env uri =
+  match Uri.scheme (Uri.of_string uri) with
+  | Some ("http" | "https" | "mcp+http" | "mcp+https") ->
+    let t = Mcp_transport_http.connect ~auth ~sw ~env uri in
+    { send = Mcp_transport_http.send t
+    ; recv = (fun () -> Mcp_transport_http.recv t)
+    ; close = (fun () -> Mcp_transport_http.close t)
+    ; is_closed = (fun () -> Mcp_transport_http.is_closed t)
+    }
+  | _ ->
+    let t = Mcp_transport_stdio.connect ~auth ~sw ~env uri in
+    { send = Mcp_transport_stdio.send t
+    ; recv = (fun () -> Mcp_transport_stdio.recv t)
+    ; close = (fun () -> Mcp_transport_stdio.close t)
+    ; is_closed = (fun () -> Mcp_transport_stdio.is_closed t)
+    }
 ;;
 
 let connect ?(auth = true) ~sw ~env uri =
-  let transport : transport =
-    (* Decide transport based on URI scheme.  For historical reasons we
-       allow plain strings starting with "stdio:" as well. *)
-    let choose_http uri =
-      (* We treat any uri with scheme http/https or prefixed with mcp+http* as HTTP *)
-      match Uri.scheme (Uri.of_string uri) with
-      | Some ("http" | "https" | "mcp+http" | "mcp+https") -> true
-      | _ -> false
-    in
-    if String.is_prefix uri ~prefix:"stdio:"
-    then Stdio (T_stdio.connect ~auth ~sw ~env uri)
-    else if choose_http uri
-    then Http (T_http.connect ~auth ~sw ~env uri)
-    else
-      (* Fallback to stdio for unknown scheme (keeps backwards compat) *)
-      Stdio (T_stdio.connect ~auth ~sw ~env uri)
-  in
-  let pending = Id_table.create () in
-  let notif_stream = Eio.Stream.create 64 in
-  (* We need [client] inside the receiver fibre and the fibre handle
-     inside [client] – use [let rec] to tie the knot. *)
-  let client : t = { transport; sw; next_id = 1; pending; notif_stream } in
-  (* Perform blocking initialize before running the daemon and returning because the receiver loop  *)
-  perform_initialize client;
-  (* Start receiver fibre now that [client] is ready *)
-  let _ =
-    Eio.Fiber.fork_daemon ~sw (fun () ->
-      receiver_loop client;
-      `Stop_daemon)
-  in
-  client
+  let c = create ~sw (connect_transport ~auth ~sw ~env uri) in
+  perform_initialize c;
+  start_receiver c;
+  c
 ;;
 
-let close c = transport_close c.transport
-let is_closed c = transport_is_closed c.transport
-let notifications c = c.notif_stream
+let decode decoder json =
+  try Ok (decoder json) with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
+  | _ -> Error "decode failure"
+;;
 
-(*------------------------------------------------------------------*)
-(* High-level helpers                                                *)
-(*------------------------------------------------------------------*)
-
-let list_tools_async c =
-  let id = fresh_id c in
-  let req = JT.make_request ~id ~method_:"tools/list" ~params:(`Object []) () in
-  let base_promise = rpc_async c req in
+let map_rpc_async c req decoder =
   let promise, resolver = Eio.Promise.create () in
-  Eio.Fiber.fork ~sw:c.sw (fun () ->
-    match Eio.Promise.await base_promise with
-    | Error _ as e -> Eio.Promise.resolve resolver e
-    | Ok json ->
-      (match Tools_list_result.t_of_jsonaf json with
-       | res -> Eio.Promise.resolve resolver (Ok res.tools)
-       | exception _ -> Eio.Promise.resolve resolver (Error "decode failure")));
+  start_rpc c req (fun result ->
+    Eio.Promise.resolve resolver (Result.bind result ~f:(decode decoder)));
   promise
 ;;
 
-let list_tools c = Eio.Promise.await (list_tools_async c)
+let list_request c =
+  JT.make_request ~id:(fresh_id c) ~method_:"tools/list" ~params:(`Object []) ()
+;;
+
+let decode_tools json = (Tools_list_result.t_of_jsonaf json).tools
+let list_tools_async c = map_rpc_async c (list_request c) decode_tools
+let list_tools c = Result.bind (rpc c (list_request c)) ~f:(decode decode_tools)
+
+let call_request c ~name ~arguments =
+  let params = `Object [ "name", `String name; "arguments", arguments ] in
+  JT.make_request ~id:(fresh_id c) ~method_:"tools/call" ~params ()
+;;
 
 let call_tool_async c ~name ~arguments =
-  let id = fresh_id c in
-  let params = `Object [ "name", `String name; "arguments", arguments ] in
-  let req = JT.make_request ~id ~method_:"tools/call" ~params () in
-  let base_promise = rpc_async c req in
-  let promise, resolver = Eio.Promise.create () in
-  Eio.Fiber.fork ~sw:c.sw (fun () ->
-    match Eio.Promise.await base_promise with
-    | Error _ as e -> Eio.Promise.resolve resolver e
-    | Ok json ->
-      (try
-         let r = Tool_result.t_of_jsonaf json in
-         Eio.Promise.resolve resolver (Ok r)
-       with
-       | _ -> Eio.Promise.resolve resolver (Error "decode failure")));
-  promise
+  map_rpc_async c (call_request c ~name ~arguments) Tool_result.t_of_jsonaf
 ;;
 
-let call_tool c ~name ~arguments = Eio.Promise.await (call_tool_async c ~name ~arguments)
+let call_tool c ~name ~arguments =
+  Result.bind
+    (rpc c (call_request c ~name ~arguments))
+    ~f:(decode Tool_result.t_of_jsonaf)
+;;
+
+module For_testing = struct
+  let create ~sw ~send ~recv ~close =
+    let c = create ~sw { send; recv; close; is_closed = (fun () -> false) } in
+    start_receiver c;
+    c
+  ;;
+
+  let pending_count c = Id_table.length c.pending
+end

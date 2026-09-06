@@ -1,0 +1,7 @@
+(library
+ (name chat_tui_identity_performance_baselines_test)
+ (modules chat_tui_identity_performance_baselines_test)
+ (libraries core notty notty_scroll_box chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane)))

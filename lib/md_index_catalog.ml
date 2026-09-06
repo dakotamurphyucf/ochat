@@ -38,12 +38,32 @@ module Io = Bin_prot_utils_eio.With_file_methods (struct
   end)
 
 let file_name = "md_index_catalog.binio"
-let save ~(dir : path) (cat : t) = Io.File.write Path.(dir / file_name) cat
+let publication_sequence = Atomic.make 0
+
+let save ~(dir : path) (cat : t) =
+  let suffix = Atomic.fetch_and_add publication_sequence 1 in
+  let temporary =
+    Path.(dir / sprintf ".%s.%d.%d.tmp" file_name (Caml_unix.getpid ()) suffix)
+  in
+  let owned = ref false in
+  Fun.protect
+    ~finally:(fun () ->
+      if !owned then Eio.Cancel.protect (fun () -> Eio.Path.unlink temporary))
+    (fun () ->
+       Eio.Switch.run (fun sw ->
+         let output = Path.open_out ~sw ~create:(`Exclusive 0o600) temporary in
+         owned := true;
+         let data = Bin_prot.Utils.bin_dump ~header:true bin_writer_t cat in
+         Eio.Flow.write output [ Cstruct.of_bigarray data ]);
+       Path.rename temporary Path.(dir / file_name);
+       owned := false)
+;;
 
 let load ~(dir : path) : t option =
-  match Or_error.try_with (fun () -> Io.File.read Path.(dir / file_name)) with
-  | Ok cat -> Some cat
-  | Error _ -> None
+  match Io.File.read Path.(dir / file_name) with
+  | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+  | exception _ -> None
+  | cat -> Some cat
 ;;
 
 (**************************************************************************)

@@ -1,0 +1,23 @@
+(library
+ (name chat_response_response_loop_test)
+ (modules chat_response_response_loop_test)
+ (libraries core chat_response)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_response_tool_executor_test)
+ (modules chat_response_tool_executor_test)
+ (libraries core chat_response eio eio_main)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_response_tool_test)
+ (modules chat_response_tool_test)
+ (libraries core chat_response chatmd ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

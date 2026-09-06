@@ -1,5 +1,14 @@
 # ChatML UI host capabilities
 
+Host scope: the phase/shared-host discussion below remains useful for legacy
+file-backed and embedding controllers. The newer agent host has an actor-owned
+controller, durable jobs/schedules and client projections; see
+[agent-host orchestration](agent-server/chatml-orchestration.md). Statements about
+a phase lacking a generalized Job surface are not limitations of the daemon's
+current `job.*`/`schedule.*` protocol. UI capabilities remain host-specific.
+Instruction helpers with historical system names now construct developer messages;
+old history and raw values are not rewritten.
+
 This document describes the optional UI-only capabilities available to
 interactive ChatML embedders such as `chat_tui`.
 
@@ -270,3 +279,17 @@ Use these documents together:
 
 The runtime guide gives the consolidated picture. This document stays focused
 on the UI-only additions layered on top of the default moderator runtime.
+
+## Shell approval is a separate host capability
+
+Moderator `Approval.ask_text` / `ask_choice` and shell command approval share
+host suspension and modal infrastructure, but they are different protocols.
+Shell approval carries executable identity, effects, policy matches,
+runtime/manifest identity, and permitted grant scopes; it can create or use
+persisted security grants. Moderator approval returns script input and has no
+authority to approve a shell command.
+
+When both are pending, shell approval has priority. Neither interaction is a
+canonical user message. See the
+[TUI guide](guide/chat_tui.md#shell-approvals-and-shell-security) and
+[shell security guide](guide/chatmd-shell-security.md).

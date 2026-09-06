@@ -1,0 +1,20 @@
+(library
+ (name identity_history_lifecycle_test)
+ (modules identity_history_lifecycle_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.unix
+  notty
+  notty_scroll_box
+  chat_response
+  chat_tui
+  chatmd
+  chatml
+  context_compaction
+  ochat.session)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

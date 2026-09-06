@@ -1,5 +1,4 @@
 open! Core
-
 module Lang = Chatml.Chatml_lang
 module Runtime = Chatml_runtime
 module Res = Openai.Responses
@@ -36,8 +35,7 @@ let text_item_json ~role ~text : Jsonaf.t =
   `Object
     [ "type", `String "message"
     ; "role", `String role
-    ; ( "content"
-      , `Array [ `Object [ "type", `String "input_text"; "text", `String text ] ] )
+    ; "content", `Array [ `Object [ "type", `String "input_text"; "text", `String text ] ]
     ]
 ;;
 
@@ -55,7 +53,6 @@ module Item = struct
   let to_value = Moderation.Item.to_value
   let of_response_item = Moderation.Item.of_response_item
   let to_response_item = Moderation.Item.to_response_item
-
   let kind t = string_field t.value "type"
   let role t = string_field t.value "role"
 
@@ -80,7 +77,7 @@ module Item = struct
         let role = Res.Input_message.Assistant in
         Moderation.Item.text_input_message ~id ~role ~text |> fun item -> item.value
       | "system" ->
-        let role = Res.Input_message.System in
+        let role = Res.Input_message.Developer in
         Moderation.Item.text_input_message ~id ~role ~text |> fun item -> item.value
       | "developer" ->
         let role = Res.Input_message.Developer in
@@ -95,8 +92,10 @@ module Item = struct
       Res.Item.Output_message
         { role = Res.Output_message.Assistant
         ; id
-        ; content = [ { Res.Output_message.annotations = []; text; _type = "output_text" } ]
+        ; content =
+            [ { Res.Output_message.annotations = []; text; _type = "output_text" } ]
         ; status = "completed"
+        ; phase = None
         ; _type = "message"
         }
     in
@@ -107,10 +106,14 @@ module Item = struct
   let assistant_text ~id text = output_text_message ~id ~text
   let system_text ~id text = input_text_message ~id ~role:"system" ~text
   let notice ~id ~text = system_text ~id text
-
   let is_user t = String.equal (Option.value (role t) ~default:"") "user"
   let is_assistant t = String.equal (Option.value (role t) ~default:"") "assistant"
-  let is_system t = String.equal (Option.value (role t) ~default:"") "system"
+
+  let is_system t =
+    match role t with
+    | Some ("system" | "developer") -> true
+    | _ -> false
+  ;;
 
   let is_tool_call t =
     match kind t with
@@ -145,7 +148,6 @@ module Tool_call = struct
 
   let of_response_item = Moderation.Tool_call.of_response_item
   let to_value = Moderation.Tool_call.to_value
-
   let arg (t : t) (name : string) : Jsonaf.t option = field t.args name
 
   let arg_string t name =
@@ -204,10 +206,7 @@ module Context = struct
   let last_tool_call t = last_matching t.items ~f:Item.is_tool_call
   let last_tool_result t = last_matching t.items ~f:Item.is_tool_result
   let find_item t ~id = List.find t.items ~f:(fun item -> String.equal item.id id)
-
-  let items_since_last_user_turn t =
-    items_since_last_matching t.items ~f:Item.is_user
-  ;;
+  let items_since_last_user_turn t = items_since_last_matching t.items ~f:Item.is_user
 
   let items_since_last_assistant_turn t =
     items_since_last_matching t.items ~f:Item.is_assistant

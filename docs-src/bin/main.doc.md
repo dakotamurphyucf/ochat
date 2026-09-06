@@ -1,9 +1,14 @@
 # `bin/main.ml` – OCaml source behind the `ochat` executable
 
+Host scope: this is the existing file-backed completion/utility CLI. New durable
+agent sessions use [ochat-agent-server](../agent-server/README.md), while daemon-free
+native TUI uses [the local guide](../agent-server/tutorials/local-tui.md).
+`ochat shell` store administration targets legacy sessions, not daemon IDs.
+
 This document describes the **implementation module** of the
 `ochat` command-line application that ships with this repository.  The
-public-facing manual of the tool (sub-command synopsis, usage examples,
-etc.) lives in [`docs-src/bin/ochat.doc.md`](ochat.doc.md); the goal here is to
+public-facing entry points and examples are listed in the
+[command index](README.md); the goal here is to
 explain **how** the OCaml code wires everything together and to provide a
 reference for maintainers.
 
@@ -13,8 +18,8 @@ reference for maintainers.
 
 `bin/main.ml` contains a single compilation unit which:
 
-1. Instantiates *five* independent `Core.Command.basic` values – one per
-   feature exposed at the CLI.
+1. Defines the completion, indexing, query, tokenization, and HTML conversion
+   commands, plus the nested shell-management command group.
 2. Collects them under a `Core.Command.group` called
    `main_command` and delegates execution to
    `Command_unix.run`.
@@ -84,7 +89,7 @@ Flags of interest:
 
 | Flag | Default | Meaning |
 |------|---------|---------|
-| `-prompt-file`  | *(none)* | Template prepended once at the start of the transcript |
+| `-prompt-file`  | *(none)* | Template appended before execution on every invocation supplying it; omit when continuing existing history |
 | `-output-file`  | `./prompts/default.md` | Running conversation log |
 
 ### 2.4  `tokenize_command`
@@ -93,7 +98,7 @@ Flags of interest:
 val tokenize_command : Core.Command.t
 ```
 
-Counts how many *cl100k_base* tokens a file occupies according to the
+Counts how many *o200k_base* tokens a file occupies according to the
 [Tikitoken](https://github.com/openai/tiktoken) encoding.
 
 ```console
@@ -146,11 +151,37 @@ separately in [`docs-src/lib/io.doc.md`](../lib/io.doc.md).
 
 ---
 
-## 5  Related modules
+## 5  `ochat shell` subcommands
+
+The top-level `shell` group provides non-executing inspection and security
+management:
+
+```text
+ochat shell inspect CHATMD [-canonical]
+ochat shell audit validate PATH
+ochat shell audit replay PATH
+ochat shell audit request PATH REQUEST_ID
+ochat shell grants list SESSION_ID
+ochat shell grants explain SESSION_ID GRANT_ID
+ochat shell grants revoke SESSION_ID GRANT_ID [-reason TEXT] -confirm
+ochat shell manifest-grants list SESSION_ID
+ochat shell manifest-grants explain SESSION_ID GRANT_ID
+ochat shell manifest-grants revoke SESSION_ID GRANT_ID [-reason TEXT] -confirm
+ochat shell interrupted list SESSION_ID
+```
+
+Inspection compiles and reports requested/live authority but grants nothing and
+executes no command. Audit replay validates/reconstructs events without rerun.
+Grant revocation refuses to mutate state without `-confirm` and appends a
+management audit event. Output is non-secret/redacted.
+
+See [`docs-src/cli/shell-runtime-management.md`](../cli/shell-runtime-management.md).
+
+## 6  Related modules
 
 * [`Indexer`](../lib/indexer.doc.md) – building the corpus
 * [`Vector_db`](../lib/vector_db.doc.md) – hybrid retrieval engine
-* [`Chat_response.Driver`](../lib/chat_response.doc.md) – chatmd runtime
+* [`Chat_response.Driver`](../lib/chat_response/driver.doc.md) – ChatMD runtime
 * [`Odoc_snippet`](../lib/odoc_snippet.doc.md) – Markdown chunking logic
 
 ---

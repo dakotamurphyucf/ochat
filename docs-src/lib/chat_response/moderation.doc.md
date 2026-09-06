@@ -1,5 +1,10 @@
 # `Chat_response.Moderation`
 
+Agent hosts apply moderator state/effects at actor-owned safe points. Connected clients render the projection; the old file-backed controller remains a separate host. See current orchestration for durable jobs/schedules.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 Shared host-side moderation helpers for ChatML-enabled chat drivers.
 
 For the canonical safe-point and effective-history narrative, see
@@ -170,3 +175,11 @@ baseline non-moderated behavior.
 - [`driver.doc.md`](driver.doc.md) – high-level orchestration entrypoints
 - [`response_loop.doc.md`](response_loop.doc.md) – recursive model/tool loop
 - [`tool.doc.md`](tool.doc.md) – tool declaration loading
+
+## Shell interaction boundary
+
+Moderator `Approval.ask_*` and command approval are separate host inputs.
+Command approval has priority and is answered through
+`Shell_runtime.Approval_broker`; it can create scoped grants but never creates
+a user message. Moderator `Process.run` uses `Moderator_process_adapter` and a
+named shell runtime rather than a direct process handler.

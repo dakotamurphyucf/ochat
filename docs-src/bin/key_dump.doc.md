@@ -88,5 +88,4 @@ be useful elsewhere:
 ## 6  See also
 
 * ODoc documentation of [`Notty.Unescape`](https://pqwy.github.io/notty/doc/Notty.Unescape.html)
-* [`Notty_eio`](../lib/notty-eio/notty_eio.mli) source and docs – Eio bridge
-
+* [`Notty_eio`](../../lib/notty-eio/notty_eio.mli) source and docs – Eio bridge

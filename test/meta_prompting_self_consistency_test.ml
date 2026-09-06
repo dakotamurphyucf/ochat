@@ -1,6 +1,30 @@
 open Core
 open Meta_prompting
 
+module Cancelled_judge : Evaluator.Judge = struct
+  let name = "cancelled"
+  let evaluate ?env:_ _ = raise (Eio.Cancel.Cancelled Exit)
+end
+
+let%expect_test "self consistency and evaluator preserve cancellation" =
+  let judge =
+    Evaluator.wrap_self_consistency_judge
+      ~k:3
+      ~strategy:Evaluator.Mean
+      (module Cancelled_judge)
+  in
+  let evaluator = Evaluator.create ~judges:[ Evaluator.Judge judge ] () in
+  let cancelled =
+    try
+      ignore (Evaluator.evaluate evaluator "cancel" : float);
+      false
+    with
+    | Eio.Cancel.Cancelled _ -> true
+  in
+  print_s [%sexp (cancelled : bool)];
+  [%expect {| true |}]
+;;
+
 (** A deterministic pseudo-random judge that alternates between a high and
     low score on subsequent calls.  This allows us to simulate stochastic
     LLM behaviour in a reproducible fashion. *)

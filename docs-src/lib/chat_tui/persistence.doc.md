@@ -1,119 +1,114 @@
-# `Chat_tui.Persistence` – Saving ChatMarkdown transcripts and tool output
+# Chat_tui.Persistence — identity-aware ChatMarkdown export
 
-`Chat_tui.Persistence` is the *single* I/O façade used by the TUI to turn the
-in-memory conversation state into a durable ChatMarkdown transcript on disk.
-It has only two public entry-points:
+Render canonical history and optional moderator overlays as a semantic
+ChatMarkdown transcript. This module supports legacy file export; it is not the
+native/daemon durable session store or an automatic draft autosave service.
+Filesystem operations use caller-supplied Eio directory capabilities.
 
-* [`write_user_message`](#write_user_message) – update the trailing `<user>`
-  block while the user is still typing.
-* [`persist_session`](#persist_session) – append every message generated since
-  the last refresh and, optionally, store large tool payloads as separate JSON
-  files.
+## Public API
 
-Both helpers embrace the capability style promoted by
-[Eio](https://github.com/ocaml-multicore/eio): instead of passing raw strings
-the caller must supply a directory capability, ensuring that the persistence
-layer cannot break out of its sandbox.
-
----
-
-## Table of contents
-
-1. [Why is this a separate module?](#why-module)
-2. [`write_user_message`](#write_user_message)
-3. [`persist_session`](#persist_session)
-4. [Known limitations](#limitations)
-
----
-
-### 1 · Why is this a separate module? <a id="why-module"></a>
-
-File-system concerns should not pollute the
-[model–view–update](https://guide.elm-lang.org/architecture/) flow that drives
-the TUI.  Centralising all persistence logic behind the small `Persistence`
-API offers a couple of advantages:
-
-* **Isolation** – The controller and renderer deal exclusively with *pure*
-  OCaml data.  No accidental `Eio` calls leak into the UI layer.
-* **Consistency** – A single module implements one canonical mapping from the
-  OpenAI AST to ChatMarkdown, guaranteeing that manual editing and automatic
-  saving always agree.
-* **Extensibility** – Adding support for future OpenAI item variants only
-  requires touching `Persistence`.
-
----
-
-### 2 · `write_user_message` <a id="write_user_message"></a>
+### write_user_message <a id="write_user_message"></a>
 
 ```ocaml
-val write_user_message :
-  dir:Eio.Fs.dir_ty Eio.Path.t ->
-  file:string ->
-  string ->
-  unit
+val write_user_message
+  :  dir:Eio.Fs.dir_ty Eio.Path.t
+  -> file:string
+  -> string
+  -> unit
 ```
 
-Updates the *last* `<user>` block in the ChatMarkdown document.  If the file
-already ends with an empty stub the function replaces it in place; otherwise a
-fresh block is appended.
+Read the file, replace a trailing empty `<user>\n\n</user>` stub when present,
+or append a new user block, and save the complete text. Input is inserted
+verbatim, without XML escaping or secret redaction. This is an explicit helper;
+ordinary editor keystrokes do not call it.
 
-Example – keep the prompt on disk while the user is typing:
+### Canonical rendering
 
 ```ocaml
-(* inside the controller *)
-Persistence.write_user_message
-  ~dir:(Eio.Stdenv.cwd env)
-  ~file:"prompt.chatmd"
-  current_input
+val history_entries_as_chatmd
+  :  moderator_snapshot:Session.Moderator_snapshot.t option
+  -> history:History_entry.t list
+  -> string
 ```
 
----
+Render each canonical entry with its `ochat-history-id`, then append the
+supplied moderator overlay. Function/custom calls and outputs are inline
+ChatMarkdown blocks; this API does not create numbered tool-output JSON files.
+Provider item IDs and tool correlation IDs remain distinct from history IDs.
 
-### 3 · `persist_session` <a id="persist_session"></a>
+### Checkpoints and persist_entries <a id="persist_session"></a>
 
 ```ocaml
-val persist_session :
-  dir:Eio.Fs.dir_ty Eio.Path.t ->
-  prompt_file:string ->
-  datadir:Eio.Fs.dir_ty Eio.Path.t ->
-  cfg:Chat_response.Config.t ->
-  initial_msg_count:int ->
-  history_items:Openai.Responses.Item.t list ->
-  unit
+module Checkpoint : sig
+  type t
+  val empty : unit -> t
+  val of_entries : History_entry.t list -> t
+end
+
+val entries_after_checkpoint
+  :  Checkpoint.t -> History_entry.t list -> History_entry.t list
+
+val persist_entries
+  :  dir:Eio.Fs.dir_ty Eio.Path.t
+  -> prompt_file:string
+  -> checkpoint:Checkpoint.t
+  -> moderator_snapshot:Session.Moderator_snapshot.t option
+  -> history:History_entry.t list
+  -> unit
 ```
 
-Serialises every item whose index is **≥ `initial_msg_count`** into
-`prompt_file`.  The function is *append-only* – existing content is never
-rewritten.
+A checkpoint records stable occurrence IDs and serialized payload fingerprints.
+Selection includes new IDs and changed payloads under retained IDs, omitting
+unchanged entries regardless of their current list positions. Deleted entries
+produce no deletion record. There is no `persist_session ~initial_msg_count`
+API.
 
-Behavior summary:
+`persist_entries` renders the selected entries and the supplied overlay,
+reads the existing file, strips trailing whitespace, and saves the combined
+text. It logically adds content but physically rewrites the file; it is not
+an atomic append. The checkpoint is not advanced, so repeating a call with the
+same checkpoint can duplicate exported blocks.
 
-| Item variant                              | Resulting ChatMarkdown block                                                             |
-|-------------------------------------------|-------------------------------------------------------------------------------------------|
-| `Input_message` (role = `user`)           | `<user>` text `</user>`                                                                  |
-| `Input_message` (role = `assistant`)      | `<assistant>` text `</assistant>`                                                        |
-| `Input_message` (role = `tool`)           | `<tool_response>` text `</tool_response>`                                                |
-| `Output_message`                          | `<assistant id="…"> RAW| text |RAW </assistant>`                                        |
-| `Function_call` / `Function_call_output`  | Inline `RAW| … |RAW` or external `<doc …>` depending on `cfg.show_tool_call`             |
-| `Reasoning`                               | `<reasoning>` with nested `<summary>` children                                           |
+## Example
 
-External files use the naming scheme `N.{tool_call_id}.json` where *N* is a
-monotonically increasing counter per session.  They live underneath
-`datadir/.chatmd` and are referenced through relative `<doc>` links so moving
-the whole folder preserves consistency.
+Export changes since a captured canonical history. The destination must exist:
 
----
+```ocaml
+let persist_changes ~dir ~prompt_file ~before ~after =
+  let checkpoint = Chat_tui.Persistence.Checkpoint.of_entries before in
+  Chat_tui.Persistence.persist_entries
+    ~dir ~prompt_file ~checkpoint ~moderator_snapshot:None ~history:after
+```
 
-### 4 · Known limitations <a id="limitations"></a>
+To obtain a full semantic rendering without file I/O:
 
-1. **No truncation support** – Very large assistant messages are written in
-   full which might slow down editors when the prompt grows beyond a few
-   megabytes.
-2. **Single-writer assumption** – Concurrent calls from multiple fibres would
-   interleave blocks.  A higher-level lock should guarantee that only one
-   persistence operation runs at a time.
-3. **Not transactional** – Crashes in the middle of a write might leave the
-   transcript in an invalid state.  Practical experience shows this to be rare
-   enough not to warrant a full journalling system.
+```ocaml
+let render_history history =
+  Chat_tui.Persistence.history_entries_as_chatmd
+    ~moderator_snapshot:None ~history
+```
 
+## Privacy and shell security state
 
+Exported tool text is **not universally bounded, terminal-sanitized or
+secret-redacted**. This serializer preserves text supplied in canonical
+function/custom-tool outputs. Some upstream tools or hosts apply their own
+policies; those do not create a universal guarantee for arbitrary tool output.
+Display truncation/sanitization in [Conversation](conversation.doc.md) does not
+protect the exported transcript. Review exports and attachments before sharing.
+
+ChatMarkdown does not encode all security/runtime state. The binary legacy
+session snapshot remains authoritative for exact grants, shell extensions,
+audit position and interrupted requests. Native/daemon exports use their own
+authorized session APIs; this helper is not that authorization boundary.
+
+## Limitations
+
+Calls require single-writer coordination. Complete-file rewrites are neither
+transactional nor crash-safe replacements and can leave partial output on failure.
+A checkpoint is an export-selection aid, not full-file synchronization or an
+exact snapshot round-trip. Large tool and assistant text can be written in full.
+
+Sources: [interface](../../../lib/chat_tui/persistence.mli),
+[implementation](../../../lib/chat_tui/persistence.ml),
+[legacy export caller](../../../lib/chat_tui/export.ml).

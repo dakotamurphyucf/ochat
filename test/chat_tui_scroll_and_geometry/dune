@@ -1,0 +1,15 @@
+(library
+ (name chat_tui_scroll_trace_test)
+ (modules chat_tui_scroll_trace_test)
+ (libraries core expect_test_helpers_core ochat.chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_tui_renderer_virtual_list_test)
+ (modules chat_tui_renderer_virtual_list_test)
+ (libraries core expect_test_helpers_core notty chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

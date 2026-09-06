@@ -1,0 +1,32 @@
+(library
+ (name agent_store)
+ (public_name ochat.agent_store)
+ (modules
+  store_error
+  data_root
+  durable_file
+  frame
+  lock
+  journal_segment
+  journal
+  snapshot
+  session_index
+  session_store
+  blob_store
+  transaction
+  commit_writer
+  recovery
+  idempotency_store
+  audit_store
+  prompt_artifact_store
+  migration)
+ (libraries
+  core
+  core_unix
+  bin_prot
+  digestif
+  eio
+  eio.unix
+  ochat.agent_protocol)
+ (preprocess
+  (pps ppx_jane)))

@@ -21,7 +21,10 @@ module Moderator = Chatml_moderator
 module Res = Openai.Responses
 
 module Safe_point_input : sig
-  type t = In_memory_stream.Safe_point_input.t = { consume : unit -> string option }
+  type t = In_memory_stream.Safe_point_input.t =
+    { consume_entries : unit -> History_entry.t list
+    ; consume_compatibility_text : unit -> string option
+    }
 end
 
 type moderator =
@@ -33,7 +36,10 @@ type moderator =
 
 type pending_ui_request = Moderator.pending_ui_request =
   | Ask_text of { prompt : string }
-  | Ask_choice of { prompt : string; choices : string array }
+  | Ask_choice of
+      { prompt : string
+      ; choices : string array
+      }
 
 type moderated_tool_call =
   { call_item : Res.Item.t
@@ -54,8 +60,10 @@ val resume_ui_request
 (** [prepare_turn_inputs ?safe_point_input ?moderator ~available_tools ~now_ms
     ~history ()] applies the turn-start safe point before the next model call.
 
-    This helper prepares effective request history and may append transient
-    safe-point input, but it does not decide broader host scheduling policy. *)
+    This raw compatibility helper prepares effective request history and may
+    append [consume_compatibility_text] to the request, but it does not consume
+    canonical [consume_entries] values or decide broader host scheduling
+    policy. *)
 val prepare_turn_inputs
   :  moderator:moderator option
   -> ?safe_point_input:Safe_point_input.t

@@ -1,0 +1,23 @@
+type state = { appended_count : int }
+type event =
+  [ `Session_start
+  | `Session_resume
+  | `Turn_start
+  | `Item_appended(item)
+  | `Pre_tool_call(tool_call)
+  | `Post_tool_response(tool_result)
+  | `Turn_end
+  ]
+
+let initial_state = { appended_count = 0 }
+
+let on_event : context -> state -> event -> state task =
+  fun ctx st ev ->
+    match ev with
+    | `Item_appended(item) ->
+      Task.pure({ st with appended_count = st.appended_count + 1 })
+    | `Pre_tool_call(call) ->
+      let* () = Tool.reject("Tools are disabled by this moderator.") in
+      Task.pure(st)
+    | _ ->
+      Task.pure(st)

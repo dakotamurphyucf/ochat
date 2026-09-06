@@ -1,176 +1,97 @@
-# `Session_store` – On-disk persistence helper
+# Session_store — legacy snapshot persistence
 
-This module offers the *persistence layer* for the [`Session`](session.doc.md)
-record: it decides **where** a session lives on disk, **how** snapshots are
-read or written, and provides a few high-level maintenance commands that the
-CLI front-ends hook into (`--reset`, `--rebuild`, …).
-
-Unlike `Session.Io.File`, which is a *plain* serializer/deserializer operating
-on an [`Eio.Path.t`](https://ocaml.github.io/eio/eio/Eio/Path/index.html),
-`Session_store` manages
-
-* directory layout (`$HOME/.ochat/sessions/<id>`),
-* unique identifier generation,
-* schema migrations for **legacy snapshots**,
-* advisory file locking so concurrent instances never step on each other’s
-  toes, and
-* a small archive mechanism that keeps older snapshots around when a reset or
-  rebuild is requested.
-
----
+This is the file-backed compatibility store under `$HOME/.ochat/sessions`
+(or `./.ochat/sessions` without HOME), not
+[daemon storage](../agent-server/operations.md). Avoid changing HOME merely to
+relocate it; HOME also affects unrelated credentials and configuration.
 
 ## Quick reference
 
-```ocaml
-module Session_store : sig
-  type id   = string
-  type path = Eio.Fs.dir_ty Eio.Path.t
+The [public interface](../../lib/session_store.mli) defines the exact API.
+Important entry points:
 
-  val base_dir     : unit -> string
-  val rel_path     : id -> string
+- `load_or_create ~env ~prompt_file ?id ?new_session () : Session.t`
+- `read_existing ~env ~id : Session.t option`
+- `read_current_file path : (Session.t, Core.Error.t) result`
+- `save ~env session : unit Core.Or_error.t`
+- `save_exn ~env session : unit`
+- `list ~env : (string * string) list`
 
-  val ensure_dir   : env:Eio_unix.Stdenv.base -> id -> path
-  val path         : env:Eio_unix.Stdenv.base -> id -> path
-
-  val load_or_create
-    :  env:Eio_unix.Stdenv.base
-    -> prompt_file:string
-    -> ?id:id
-    -> ?new_session:bool
-    -> unit
-    -> Session.t
-
-  val save         : env:Eio_unix.Stdenv.base -> Session.t -> unit
-  val list         : env:Eio_unix.Stdenv.base -> (id * string) list
-
-  val reset_session
-    :  env:Eio_unix.Stdenv.base
-    -> id:id
-    -> ?prompt_file:string
-    -> ?keep_history:bool
-    -> unit
-    -> unit
-
-  val rebuild_session : env:Eio_unix.Stdenv.base -> id:id -> unit -> unit
-end
-```
-
-All operations expect an `Eio_unix.Stdenv.base` value – the capability that
-`Eio_main.run` hands to the entry-point of your program.
-
----
+Staged V4 readers distinguish missing, loaded and unreadable snapshots without
+modifying them; they serve migration/inspection callers.
 
 ## 1. Directory layout & identifier strategy
 
-* **Root** – by default everything lives under
-  `$HOME/.ochat/sessions` (or `./.ochat/sessions` if `HOME` is not
-  defined).  Override the environment variable if you want to relocate the
-  whole tree.
+Each ID has a directory containing `snapshot.bin`, an optional `prompt.chatmd`
+copy, and associated runtime data. Selection is: a fresh time/PRNG-derived MD5 ID when
+`new_session=true`; otherwise explicit ID; otherwise MD5 of the supplied prompt
+path. The library does not canonicalize that path for its caller.
 
-* **Session directory** – the sub-directory name is the *identifier* `id`.  It
-  is obtained via the following rules (in order):
+`ensure_dir`/`path` create directories with requested mode 0700. IDs and paths
+are trusted local inputs, not daemon-authorized remote path selectors.
 
-  | Scenario                                   | Resulting `id` |
-  | ------------------------------------------ | -------------- |
-  | `load_or_create ~id:"my-name"`           | `"my-name"`   |
-  | `~new_session:true` (no explicit id)       | random UUID-v4 |
-  | neither of the above                       | `md5(prompt_file)` |
+## 2. Reading or creating a session – load_or_create
 
-This scheme makes sure that **repeat executions using the same prompt but no
-explicit flags resume the same conversation** – extremely handy when you are
-iterating on a prompt interactively.
+An existing snapshot is decoded with `read_current_file`, which tries V5
+through supported legacy shapes and validates/migrates them. Failure raises;
+it does not create an empty replacement. Missing snapshots return a fresh
+in-memory record and attempt a private prompt copy. Copy failure is ignored.
 
----
+`read_existing` returns None on missing/unreadable snapshots; `list` skips
+unreadable records. These convenience APIs intentionally lose the diagnostic
+distinction, unlike the staged reader. Loading does not save the migrated value.
 
-## 2. Reading or creating a session – `load_or_create`
+## 3. Saving – save
 
-```ocaml
-val load_or_create
-  :  env:Eio_unix.Stdenv.base
-  -> prompt_file:string
-  -> ?id:id
-  -> ?new_session:bool
-  -> unit
-  -> Session.t
-```
+Exclusive creation of `snapshot.bin.lock` serializes individual save operations.
+Lock/persistence errors are returned; `save_exn` raises them. Initial directory
+creation happens before this Result boundary and can raise.
+The store writes an exclusive private temporary file and renames it into place.
+It does not fsync; direct Session.Io.File.write still truncates in place. The save lock
+is removed on normal unwinding; process crashes can leave it behind.
 
-1. Determine the identifier (`id`) using the table above.
-2. If `<dir>/snapshot.bin` exists:
-   * read it via `Session.Io.File.read` – **automatic migration** upgrades old
-     schemas on the fly;
-   * return the resulting value.
-3. Otherwise:
-   * create the directory (permissions `0o700`);
-   * copy *prompt_file* into it as `prompt.chatmd` (best-effort);
-   * return `Session.create …` initialised with the correct metadata.
-
-Note that **nothing is written back** – saving is an explicit action.
-
----
-
-## 3. Saving – `save`
-
-`save` performs two levels of safety:
-
-1. **Advisory lock** – exclusive creation of `snapshot.bin.lock` aborts the
-   program when the file already exists, preventing corruptions from multiple
-   writers.
-2. **Atomic replace** – `Session.Io.File.write` dumps the data to a temp file
-   and `rename(2)`s it into place.
-
-Call the function whenever you want the on-disk state to reflect the in-memory
-value (for instance on a `Ctrl-S` binding or when the UI shuts down cleanly).
-
----
+This is not lifetime ownership or revision compare-and-set: two processes can
+load the same snapshot and later overwrite each other's work in separate,
+individually locked saves. Use the daemon for multi-client coordination.
 
 ## 4. House-keeping helpers
 
-### 4.1 `reset_session`
+### 4.1 reset_session
 
-Archives the current snapshot (`archive/YYYYMMDD-HHMM.snapshot.bin`) and
-creates a **new** one.  By default the history is wiped – pass
-`~keep_history:true` if you only want to change the prompt while keeping the
-conversation log.
+Archives the existing snapshot as
+`archive/YYYYMMDD-HHMM.snapshot.bin`, resets history unless
+`~keep_history:true`, clears moderator/shell state, and saves. A supplied prompt
+is copied and recorded. Missing/unreadable sessions print diagnostics.
+Minute-resolution archive names can overwrite an earlier archive from the same
+minute; archive-rename errors are ignored. This is **not** the daemon's retained,
+checksummed administration archive contract.
 
-### 4.2 `rebuild_session`
+### 4.2 rebuild_session
 
-When you edited *prompt.chatmd* manually you can call `rebuild_session` to
-start fresh **and** keep a backup of the old snapshot under `archive/`.
-
----
+Archives similarly, creates fresh empty state from recorded prompt metadata,
+and removes `.chatmd/cache.bin`. Prompt parsing occurs on a subsequent launch.
+Reset/rebuild are not rollback-capable transactions and use exception-raising
+save internally. Back up important material before maintenance.
 
 ## 5. Example – minimal CLI wrapper
 
 ```ocaml
-open Eio.Std
-
-let () = Eio_main.run @@ fun env ->
-  (* 1. Load or initialise a session *)
-  let prompt = "prompts/system.chatmd" in
-  let session =
-    Session_store.load_or_create ~env ~prompt_file:prompt ()
-  in
-
-  (* … talk to OpenAI, mutate [session] … *)
-
-  (* 2. Persist the new state *)
+let save_session env prompt_file =
+  let session = Session_store.load_or_create ~env ~prompt_file () in
   Session_store.save ~env session
 ```
 
----
+The caller must inspect the returned Result. See
+[TUI checkpoint/export rules](../guide/chat_tui.md#snapshot-saving-on-exit).
 
 ## 6. Limitations / future work
 
-1. **Hard-coded location** – the module respects `HOME` but nothing else.  A
-   proper configuration file would be nicer.
-2. **No snapshot compaction** – every `save` re-writes the full record.  Large
-   histories could benefit from incremental deltas.
-3. **Locking granularity** – a single byte-file lock would avoid the extra
-   inode and survive crashes better than the current "create & unlink"
-   approach.
+Whole-record saves, local trusted paths, save-time-only locks and minute-based
+maintenance archives are compatibility constraints, not daemon guarantees.
+Binary snapshots and exports may contain sensitive tool/history data.
 
----
+## Shell-state persistence
 
-*Happy hacking!*  
-*The Ochat team*
-
+V5 includes shell state. Migrating older schemas supplies empty shell security
+state. Rebuilding or importing a transcript does not infer fresh authorization.
+See [Session](session.doc.md) and [legacy import](../agent-server/operations.md#inspection-migration-and-legacy-import).

@@ -1,0 +1,4 @@
+(executable
+ (name custom_tool)
+ (libraries core jsonaf ochat.ochat_function ochat.openai)
+ (preprocess (pps ppx_jane)))

@@ -1,0 +1,38 @@
+(library
+ (name agent_protocol)
+ (public_name ochat.agent_protocol)
+ (modules
+  protocol_error
+  error
+  id
+  version
+  timestamp
+  json_codec
+  idempotency_key
+  initialize
+  ping
+  health
+  mutation_result
+  blob
+  history
+  permission
+  grant
+  audit
+  job
+  schedule
+  scope
+  principal
+  page
+  prompt
+  workspace
+  operation
+  session
+  snapshot
+  envelope
+  event
+  command
+  method_result)
+ (private_modules protocol_error)
+ (libraries core jsonaf base64 mirage-crypto-rng uutf ochat.history_entry)
+ (preprocess
+  (pps ppx_jane)))

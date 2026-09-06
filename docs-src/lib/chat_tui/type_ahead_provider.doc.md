@@ -1,79 +1,70 @@
-# `Chat_tui.Type_ahead_provider` — fetch a type-ahead completion suffix
+# Chat_tui.Type_ahead_provider: private draft suggestions
 
-`Chat_tui.Type_ahead_provider` is the “backend” for the TUI’s type-ahead feature.
-Given the current draft buffer plus a cursor position, it asks the OpenAI API
-for a short suffix that can be inserted at that cursor.
+[User setup and privacy](../../guide/chat_tui.md#type-ahead-availability-and-privacy).
 
-The module is designed for interactive use:
+## Shared lifecycle
 
-- **low latency:** small prompt, small output cap
-- **single candidate:** only one completion is tracked at a time
-- **no tools:** tool calls are disabled for this request
-- **cancellable:** the request runs under an `Eio.Switch.t`
+All hosts use `Type_ahead_ui` on the UI owner and `Type_ahead_controller` for
+serialized background work. The legacy reducer carries `Typeahead` events;
+native local and daemon sessions use the same adapter in `App.Agent_mode`.
 
-The higher-level wiring lives in `Chat_tui.App_reducer` (debounce + lifecycle
-events), `Chat_tui.Controller` (accept/dismiss/preview keys), and the renderer
-(inline “ghost” suffix + preview popup).
+The coordinator owns one active switch and one replaceable pending snapshot.
+Automatic debounce emits `Ready`, allowing the UI to recheck eligibility before
+admission. Cancellation unwinds the previous request before replacement. Quit
+cancels and joins work. Neither workers nor the provider mutate `Model.t`.
 
----
+Both TUI input loops request a redraw when the adapter changes the typeahead
+status, even if the editor controller returns `Unhandled`. This makes manual
+Ctrl+Space show `[suggesting]` from an idle editor without relying on a pending
+typing redraw. Automatic admission and completion events also request redraws.
 
-## API
+Snapshots include attachment/session identity, context epoch, editor generation,
+base draft and byte cursor. Results are accepted only while all still match.
+Canonical history changes are conservatively invalidating; streaming text alone
+does not schedule requests. Read-only/off/disconnected paths make no requests.
 
-```ocaml
-val complete_suffix
-  :  sw:Eio.Switch.t
-  -> env:Eio_unix.Stdenv.base
-  -> dir:Eio.Fs.dir_ty Eio.Path.t
-  -> cfg:Chat_response.Config.t
-  -> history_items:Openai.Responses.Item.t list
-  -> draft:string
-  -> cursor:int
-  -> string
-```
+## Provider API
 
-### Parameters
+`prepare config ~messages ~draft ~cursor` consumes only already-visible role/text
+pairs. It windows the draft around a UTF-8 boundary-clamped cursor to 8192 bytes
+(excluding markers). History is off by default; opting in selects up to three
+newest visible user/assistant/developer/system texts, budgets newest-first with
+a combined 16384-byte limit, then emits chronological context. Tool outputs,
+tool arguments, reasoning, image payloads and unprojected history are excluded.
 
-- `sw`: cancellation switch. Failing the switch cancels the request.
-- `env`: used to obtain the network stack via `Eio.Stdenv.net`.
-- `dir`: working directory used by the OpenAI client (request context).
-- `cfg`: base OpenAI configuration (model, temperature, max tokens).
-- `history_items`: recent conversation context (best-effort summarised).
-- `draft`: full editor buffer.
-- `cursor`: cursor position as a byte index within `draft`.
+`complete_suffix ~sw ~env ~config input` returns `Ok text` or a sanitized
+`Unavailable` / `Timeout` error. It sends developer instructions and plain
+user context with no tools. The validated model defaults to `gpt-5.6-luna`;
+reasoning and verbosity are low. The independent output cap defaults to 200.
+Matching outer fences and marker artifacts are removed; invalid UTF-8 and
+terminal controls are sanitized; insertions are capped at 4096 bytes.
 
-### Return value
+The developer instruction includes the original partial-word example:
+`mary had a li⟦INSERT⟧` should insert `ttle lamb`, not `little lamb`.
+It treats context as data and requests short, insertion-only text without
+Markdown fences. The user message encloses the bounded history in
+`<<<|completion-context-start|>>>` / `<<<|completion-context-end|>>>` and the
+bounded draft in `<<<|draft-buffer-start|>>>` / `<<<|draft-buffer-end|>>>`.
+These labels do not opt in to history or expand either input budget.
 
-Returns the *suffix* to insert at `cursor`. The returned text is:
+`complete_with` injects the request callback and Eio clock for offline tests.
+The total request deadline is ten seconds; cancellation propagates. There is
+no fallback model or automatic retry.
 
-- capped to a small maximum length,
-- stripped of accidental code fences, and
-- sanitised with `Chat_tui.Util.sanitize ~strip:false` so it is safe to render
-  and insert.
+## No-log transport
 
-If the OpenAI credentials are missing (no `OPENAI_API_KEY`), returns the empty
-string.
+`Openai.Responses.post_private_response_exn` uses the existing local
+`OPENAI_API_KEY` and `API_URL` endpoint configuration, without a directory or
+logging callback. Its bounded reader rejects bodies over 256 KiB before JSON
+parsing. Raw errors are discarded by the provider; status messages never include
+draft, context, output, credentials, headers or exception strings.
+Existing `post_response` callers keep their logging policy.
 
----
+This is local editor assistance, not a session operation. Enabling it authorizes
+transmission of unsent text and additional provider charges; token bounds are
+not a spending cap.
 
-## How the cursor position is represented
-
-The provider inserts a literal marker into the draft excerpt to indicate the
-insertion point (e.g. `⟦CURSOR⟧`). The prompt instructs the model to return only
-the text to insert *after* that marker, and to avoid repeating any content that
-appears before it.
-
-Because the excerpt is bounded (for latency), the provider may include an
-ellipsis prefix/suffix (`…`) when it drops context far from the cursor.
-
----
-
-## Limitations / notes
-
-- Cursor offsets are treated as byte indices (consistent with the editor).
-- The provider is heuristic: it uses only a small slice of the history and the
-  local draft excerpt; it may return an empty string when unsure.
-- The module does not perform relevance checks; consumers should validate that a
-  result still applies to the current editor snapshot (generation + base input +
-  base cursor). `Chat_tui.App_reducer` does this before storing a completion in
-  the model.
-
+Sources: [config](../../../lib/chat_tui/type_ahead_config.mli),
+[coordinator](../../../lib/chat_tui/type_ahead_controller.mli),
+[UI adapter](../../../lib/chat_tui/type_ahead_ui.mli),
+[provider](../../../lib/chat_tui/type_ahead_provider.mli).

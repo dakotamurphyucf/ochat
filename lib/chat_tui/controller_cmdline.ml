@@ -37,19 +37,13 @@
 open Core
 open Controller_types
 
-(** [insert_char m c] inserts printable character [c] at the current
-    cursor position inside the command-line buffer of [m].  The cursor is
-    moved one position to the right afterwards.  The function does not
-    perform any UTF-8 validation – the surrounding controller guarantees
-    that only single-byte ASCII reaches this path. *)
-
-let insert_char model c =
+let insert_text model text =
   let buf = Model.cmdline model in
   let pos = Model.cmdline_cursor model in
   let before = String.sub buf ~pos:0 ~len:pos in
   let after = String.sub buf ~pos ~len:(String.length buf - pos) in
-  Model.set_cmdline model (before ^ String.of_char c ^ after);
-  Model.set_cmdline_cursor model (pos + 1)
+  Model.set_cmdline model (before ^ text ^ after);
+  Model.set_cmdline_cursor model (pos + String.length text)
 ;;
 
 (** [backspace m] removes the character immediately left of the cursor in
@@ -61,10 +55,17 @@ let backspace model =
   let pos = Model.cmdline_cursor model in
   if pos > 0
   then (
-    let before = String.sub buf ~pos:0 ~len:(pos - 1) in
+    let previous = Utf8_edit.previous buf pos in
+    let before = String.sub buf ~pos:0 ~len:previous in
     let after = String.sub buf ~pos ~len:(String.length buf - pos) in
     Model.set_cmdline model (before ^ after);
-    Model.set_cmdline_cursor model (pos - 1))
+    Model.set_cmdline_cursor model previous)
+;;
+
+let add_rejection_notice model text =
+  ignore
+    (Model.apply_patch model (Types.Add_placeholder_message { role = "system"; text })
+     : Model.t)
 ;;
 
 (** [execute_command m line] evaluates the normalized [line] (without the
@@ -100,42 +101,38 @@ let execute_command model line : reaction =
   | "w" -> Submit_input
   | "wq" -> Quit
   | "c" | "cmp" | "compact" -> Compact_context
+  | "shell" | "security" ->
+    Model.set_active_page model Model.Page_id.Shell_security;
+    Shell_management_refresh_requested (Model.begin_shell_management_load model)
   | "delete" | "d" ->
-    (match Model.selected_msg model with
-     | None -> Redraw
-     | Some sel_idx ->
-       let msgs = Model.messages model in
-       if Int.(sel_idx < 0) || Int.(sel_idx >= List.length msgs)
-       then Redraw
-       else (
-         let new_msgs = List.filteri msgs ~f:(fun i _ -> Int.(i <> sel_idx)) in
-         Model.set_messages model new_msgs;
-         let new_history =
-           Model.history_items model |> List.filteri ~f:(fun i _ -> Int.(i <> sel_idx))
-         in
-         Model.set_history_items model new_history;
-         (* Adjust selection to previous message or None *)
-         let new_len = List.length new_msgs in
-         if Int.(new_len = 0)
-         then Model.select_message model None
-         else Model.select_message model (Some (Int.min (new_len - 1) sel_idx));
-         Redraw))
+    (match Model.selected_projected_row model with
+     | Some { source = Canonical { entry_id }; _ } -> Delete_history entry_id
+     | _ ->
+       add_rejection_notice model "Select a canonical history entry to delete.";
+       Redraw)
   | "edit" | "e" ->
-    (match Model.selected_msg model with
-     | None -> Redraw
-     | Some sel_idx ->
-       (match List.nth (Model.messages model) sel_idx with
-        | None -> Redraw
-        | Some (_role, txt) ->
+    (match Model.selected_projected_row model with
+     | None ->
+       add_rejection_notice model "No projected row is selected.";
+       Redraw
+     | Some row ->
+       (match row.Projected_message.source with
+        | Canonical _ ->
+          let _, txt = row.message in
           Model.set_input_line model txt;
           Model.set_cursor_pos model (String.length txt);
           Model.set_mode model Model.Insert;
-          (* Enable Raw mode for safe editing as per design.*)
-          Model.set_draft_mode model Model.Raw_xml;
+          Model.set_draft_mode model Model.Plain;
+          Redraw
+        | Moderator_inserted _
+        | Moderator_replacement _
+        | Streaming _
+        | Pending_approval _
+        | Placeholder _ ->
+          add_rejection_notice model "Cannot edit a noncanonical projected row.";
           Redraw))
   | "noh" | "nohlsearch" ->
-    Model.set_last_search_query model None;
-    Model.clear_all_img_caches model;
+    Model.clear_last_search model;
     Redraw
   | _ -> Redraw
 ;;
@@ -158,16 +155,18 @@ let handle_key_cmdline ~(model : Model.t) ~term:_ (ev : Notty.Unescape.event) : 
     backspace model;
     Redraw
   | `Key (`ASCII c, mods) when List.is_empty mods ->
-    insert_char model c;
+    insert_text model (String.of_char c);
     Redraw
   | `Key (`Arrow `Left, _) ->
     let pos = Model.cmdline_cursor model in
-    if pos > 0 then Model.set_cmdline_cursor model (pos - 1);
+    Model.set_cmdline_cursor model (Utf8_edit.previous (Model.cmdline model) pos);
     Redraw
   | `Key (`Arrow `Right, _) ->
     let pos = Model.cmdline_cursor model in
-    if pos < String.length (Model.cmdline model)
-    then Model.set_cmdline_cursor model (pos + 1);
+    Model.set_cmdline_cursor model (Utf8_edit.next (Model.cmdline model) pos);
+    Redraw
+  | `Key (`Uchar u, []) ->
+    insert_text model (Utf8_edit.uchar u);
     Redraw
   | _ -> Unhandled
 ;;

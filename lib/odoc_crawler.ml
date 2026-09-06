@@ -28,10 +28,10 @@
     callback.  Hidden modules (those whose generated HTML contains the
     sentinel string "This module is hidden.") are skipped.
 
-    The crawler is resilient: unreadable paths, parser failures and other
-    recoverable errors are logged with {!Log.emit} and ignored.  The only
-    unchecked exceptions that can escape are those raised by the callback
-    itself.
+    Metadata failures and callback exceptions are currently swallowed, including
+    cancellation at those sites. Enumeration, file read and logging errors may
+    propagate. Conversion errors fall back to fenced raw HTML. Symlinks are
+    followed without a cycle guard; use trusted acyclic trees.
 
     Concurrency is provided by {!Eio.Fiber.List.iter} with
     [~max_fibers = 25] – at most 25 directory entries are processed at the
@@ -45,7 +45,7 @@
       let () =
         Eio_main.run @@ fun env ->
         let root = Eio.Path.(Eio.Stdenv.cwd env / "_build/default/_doc/_html") in
-        Odoc_crawler.crawl root ~f:(fun ~pkg ~doc_path ~markdown ->
+        Odoc_crawler.crawl ~root (fun ~pkg ~doc_path ~markdown ->
           Format.printf "[%s] %s (chars: %d)\n%!" pkg doc_path (String.length markdown))
     ]}
     *)
@@ -88,8 +88,8 @@ let read_file_to_string (path : _ Eio.Path.t) : string =
     The implementation relies on {!Eio.Buf_read.parse_exn} with the
     {!Eio.Buf_read.take_all} parser and therefore honours the reader limits
     enforced by that module.  In practice odoc-generated HTML files are
-    small (around 5 MB), so the limit of [Int.max_value] is safe.  The function never
-    blocks the scheduler for long: IO is handled by {!Eio.Switch.run}. *)
+    not bounded by a practical content-size limit. Large documents require
+    proportionally large allocations. File reads use Eio. *)
 
 let markdown_of_html (html : string) : string =
   (* Convert [html] to Markdown using the existing converter implemented in   *)
@@ -143,10 +143,10 @@ let markdown_of_html (html : string) : string =
 
       The implementation is *best-effort*:
 
-      • Files or directories that cannot be accessed are silently skipped.
-      • Exceptions raised by the user-supplied callback [f] are propagated,
-        but all other failures (e.g. HTML parsing) are logged with
-        {!Log.emit} and ignored.
+      • Failed metadata reads are skipped; enumeration/read/logging errors can
+        propagate.
+      • Callback exceptions are suppressed. This includes cancellation and is
+        a compatibility limitation, not proof that all callbacks succeeded.
 
       @param root    Filesystem location of the directory produced by
                      [dune build @doc] or [odoc compile-pkg].

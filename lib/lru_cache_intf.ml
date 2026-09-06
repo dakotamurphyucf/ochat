@@ -17,7 +17,8 @@ open Core
     • An optional clean-up callback ([destruct]) can observe or dispose of evicted
       bindings.
 
-    All public operations run in amortised O(1) time.
+    Point access is amortised O(1), excluding callbacks. Traversal, clear and
+    capacity shrinking can process O(length t) entries.
 *)
 
 module type H = sig
@@ -72,7 +73,8 @@ module type S = sig
 
   (** [hit_rate t] is the ratio of successful look-ups to total look-ups since [t] was
       created.  A *look-up* is any call to {!mem}, {!find}, or {!find_and_remove}.  The
-      value is in the inclusive range [[0.; 1.]]. *)
+      value is in the inclusive range [[0.; 1.]]. [find_or_add] also counts
+      through its internal call to [find]. *)
   val hit_rate : _ t -> float
 
   include Invariant.S1 with type 'a t := 'a t

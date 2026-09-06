@@ -1,5 +1,10 @@
 # `Responses` – OpenAI `/v1/responses` API bindings
 
+Current streaming preserves cancellation rather than treating it as successful empty completion. The provider reader decodes individual `data: ` lines; do not assume it supports arbitrary multiline SSE data frames. Provider transport/logging security is distinct from incoming agent-server authentication. See the existing TLS warning below.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 `Openai.Responses` is the lowest-level OpenAI client used throughout the
 Ochat code-base. It mirrors the `/v1/responses` schema with OCaml types
 (generated via `ppx_jsonaf_conv`) and provides one function,
@@ -217,4 +222,11 @@ See `docs-src/lib/Io.doc.md` for details.
 * [`Chat_response.Driver`](../chat_response/driver.doc.md) – high-level
   orchestration of tool calls, streaming, and ChatMarkdown conversations.
 
+## Private bounded requests
 
+`post_private_response_exn` is the nonstreaming, tool-free transport used by TUI
+typeahead. It never writes raw logs and bounds the complete body to 256 KiB
+before parsing. The caller owns the total deadline and must discard raw
+exceptions; `Type_ahead_provider` uses a ten-second deadline and sanitized
+error categories. Existing `post_response` callers are unchanged.
+See [typeahead provider](../chat_tui/type_ahead_provider.doc.md).

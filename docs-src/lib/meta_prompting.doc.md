@@ -27,7 +27,7 @@ prompt type.
 
 1. [Quick start](#quick-start)
 2. [API overview](#api-overview)
-3. [`Recursive_mp.refine`](#recursivemprefine) – how the loop works
+3. [`Recursive_mp.refine`](#recursive_mprefine) – how the loop works
 4. [Context retrieval & environment variables](#context-retrieval--environment-variables)
 5. [Integration guide](#integration-guide)
 6. [Writing a custom evaluator](#writing-a-custom-evaluator)
@@ -36,6 +36,10 @@ prompt type.
 ---
 
 ## Quick start
+
+For command-line use, start with [mp-refine-run](../bin/mp_refine_run.doc.md).
+Its local template, default online-factory, and classic recursive strategies
+have distinct behavior; the command reference documents their precedence.
 
 The snippet below shows how *ten* lines of code are enough to turn a plain data
 record into a ready-to-send ChatMarkdown prompt **and** run one self-improvement
@@ -301,5 +305,3 @@ built-in helper `Evaluator.with_exception_guard`.
    most accurate signatures always refer to the OCaml interface files (`*.mli`)
    in `lib/meta_prompting/` and the specialised docs under
    `docs-src/meta_prompting/*.doc.md`.
-
-

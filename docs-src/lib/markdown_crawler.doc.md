@@ -2,7 +2,7 @@
 
 Walk a directory tree, pick out hand-written Markdown files, and stream them
 to user code.  The module is the *source* component of the Markdown indexing
-pipeline described in `markdown_indexing_plan.md`.
+pipeline described in the [search guide](../guide/search-and-indexing.md).
 
 ```
 root/
@@ -18,10 +18,11 @@ Features
   static deny-list containing `_build/`, `dist/`, `node_modules/`, …​.
 * **File filter**   – accepts basenames ending in one of
   `".md"`, `".markdown"`, `".mdown"`.
-* **Size cap**      – files larger than **10 MiB** are skipped to avoid memory
-  exhaustion.
-* **Bounded concurrency** – traversal uses
-  `Eio.Fiber.List.iter ~max_fibers:25` for predictable throughput.
+* **Size filter** – files larger than **10 MiB** are skipped after a full read.
+  This does not bound peak read memory. Empty files are also skipped.
+* **Per-directory concurrency** – traversal uses
+  `Eio.Fiber.List.iter ~max_fibers:25` in each recursive directory call.
+  This is not a global 25-file/fiber limit.
 
 ---
 
@@ -44,10 +45,13 @@ val crawl :
 
 ### Guarantees
 
-* **Best-effort** – unreadable paths and all non-fatal I/O problems are logged
-  via `Log.emit` and silently skipped.
-* **Exception safety** – only exceptions raised *by the user callback* escape
-  `crawl`; everything else is caught inside the helper.
+* Failed metadata/file reads are skipped silently; a failed root `.gitignore`
+  read is treated as no additional rules. Directory enumeration errors escape.
+* Callback and logging errors propagate. Only selected metadata/read operations
+  are wrapped, and those broad wrappers also catch cancellation exceptions.
+  Do not assume this is a fully cancellation-transparent traversal.
+* Callback order is not deterministic and callbacks can overlap across fibers.
+  Markdown is supplied as bytes; UTF-8 validity is not checked.
 
 ---
 
@@ -72,4 +76,8 @@ let () =
 * `.gitattributes` and other VCS ignore files are not supported.
 * The fallback block-list is heuristic; adapt it to your repository layout if
   necessary.
-
+* Symlinks are followed and there is no visited-directory/cycle guard. Crawl
+  trusted trees without cycles; this API does not enforce confinement beneath
+  the logical root. Eio's supplied filesystem capability remains the boundary.
+* Negated Git ignore rules are not implemented as ordered re-inclusions. This
+  is best-effort matching, not Git's complete ignore semantics.

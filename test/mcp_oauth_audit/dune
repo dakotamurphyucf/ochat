@@ -1,0 +1,7 @@
+(test
+ (name audit_test)
+ (modules audit_test fixture loopback mcp_cases mcp_peer oauth_cases cache_cases http_cases teardown_cases)
+ (libraries core core_unix core_unix.sys_unix eio eio_main eio.unix jsonaf_ext uri
+  ochat.mcp_client ochat.mcp_transport ochat.mcp_types ochat.oauth2
+  mirage-crypto-rng.unix)
+ (preprocess (pps ppx_jane)))

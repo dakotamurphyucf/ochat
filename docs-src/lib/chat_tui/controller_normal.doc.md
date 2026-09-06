@@ -1,116 +1,88 @@
-# Controller_normal – Normal-mode key handling
+# Chat_tui.Controller_normal — Normal-mode draft and history commands
 
-This document complements the inline odoc comments of
-`controller_normal.ml` and explains the public behaviour of the module at a
-slightly higher level: what it does, which functions matter to the outside
-world, and how to integrate it into the Chat-TUI event loop.
+## Purpose and dispatch
 
-## 1  Purpose and scope
+Handle Normal-mode draft motions, selection, operators and history navigation
+by mutating the UI-owned model and returning a typed reaction. No provider,
+persistence or daemon calls run here.
 
-`Controller_normal` implements the subset of Vim-like key bindings that are
-active while the input area is in **Normal** editor mode.  It is the
-counterpart to `controller_cmdline` (command-line prompt) and the Insert-mode
-handler embedded in `controller.ml`.
+Applications must dispatch through [Controller.handle_key](controller.doc.md),
+not invoke this handler as a complete event loop. The shared controller owns
+page/dialog priority, Insert entry, submission, undo/redo and cancel-or-quit.
+Both legacy and native/daemon TUI runners use that shared route.
 
-* The module is **pure** with regard to side-effects: it only mutates the
-  in-memory `Chat_tui.Model.t`.  Network requests or disk IO are handled by
-  higher-level parts of the application.
-* All byte indices refer to the UTF-8 encoded `Model.input_line`.  The code
-  therefore treats the string as an opaque byte array – full Unicode-grapheme
-  support will be added later.
-
-
-## 2  Public API
+## Public API
 
 ```ocaml
-val handle_key_normal :
-  model:Model.t ->
-  term:Notty_eio.Term.t ->
-  Notty.Unescape.event ->
-  Controller_types.reaction
+val handle_key_normal
+  :  model:Model.t
+  -> term:Notty_eio.Term.t
+  -> Notty.Unescape.event
+  -> Controller_types.reaction
+
+val cancel_pending : unit -> unit
 ```
 
-Dispatches **one** terminal event and returns a reaction that tells the caller
-what to do next:
+`cancel_pending ()` clears partial counts/operators, `g` and find prefixes
+while retaining the repeatable last-find command. Motion helpers are private,
+not separately callable APIs.
 
-* `Redraw` – the visible state changed; rerender the viewport.
-* `Submit_input` – user pressed *Meta+Enter* while in Normal mode.  The main
-  loop should send the current prompt to the assistant.
-* `Cancel_or_quit`, `Quit`, `Unhandled` – see `controller_types.ml`.
+## Key semantics
 
-All other values and helpers inside the module are *implementation details*
-that are **not** meant to be used from the outside.
+| Keys | Behavior through the shared controller |
+|---|---|
+| `h/l` | Move one extended grapheme cluster left/right, with counts |
+| `j/k` | Move one visual draft row, with counts |
+| `w/b/e` | Whitespace-based word motions |
+| `0/^/$` | Draft line start / first nonblank / end |
+| `gg/G` | First/last **draft line**; `5gg` or `5G` selects draft line five |
+| `Home/End` | Earlier/latest conversation viewport destination |
+| `↑/↓`, `Ctrl-f/b`, `Ctrl-d/u` | History line/page/half-page scrolling |
+| `[/]` | Select previous/next displayed history row |
+| `a`, `o/O` | Append or open a draft line, entering Insert |
+| `v` | Toggle character-wise Visual selection |
+| Bare `Esc`, selection active | Clear selection and pending command/count; remain Normal |
+| `y/d/c`, selection active | Yank/delete/change selected draft text |
+| `x` | Delete and register-yank the grapheme under the cursor |
+| `p/P`, `yy/dd/cc` | Register paste and line operators |
+| `u` / `Ctrl-r` | Draft undo/redo |
+| Bare `r` | Toggle Plain/Raw XML, not Vim replace-character |
+| `:`, `/ ?`, `n/N` | Command prompt, history search, repeat search |
+| `Enter` | Submit draft |
+| `Esc`, no selection | Return cancel-or-quit for the host to interpret |
 
+Selection clearing neither changes draft text/cursor nor cancels active work.
+A subsequent Escape without a selection follows the ordinary cancellation/quit
+path. Shell dialogs and non-Chat pages retain their own Escape handling.
 
-## 3  Supported key bindings
+The [complete user keymap](../../guide/chat_tui.md) also lists supported
+operator/find combinations. This is a partial Vim implementation, not a full
+Vim parser; register contents are local editor state, not the OS clipboard.
 
-The table lists the recognised commands.  Motions follow Vim semantics unless
-stated otherwise.
+## Example
 
-| Key(s)            | Action                                   |
-|-------------------|------------------------------------------|
-| `h` / `l`         | Move cursor one byte left / right        |
-| `k` / `j`         | Move cursor one visual line up / down    |
-| `w` / `b`         | Next / previous word                     |
-| `0` / `$`         | Start / end of current line (no newline) |
-| `gg` / `G`        | Scroll to top / bottom of history        |
-| `a`               | Append – switch to **Insert** mode       |
-| `o` / `O`         | Insert new line below / above current    |
-| `x`               | Delete character under cursor            |
-| `dd`              | Delete current line                      |
-| `u` / *Ctrl-r*    | Undo / redo                              |
-| `r`               | Toggle *Raw-XML* draft mode              |
-| `[` / `]`         | Previous / next message in history       |
-| `:`               | Enter command-line mode                  |
-
-Most bindings aim to be intuitive for regular Vim users while remaining easy
-to learn for newcomers – no exotic motions, registers or text objects have
-been added so far.
-
-
-## 4  Examples
-
-### 4.1  Integrating into the main loop
+Return the full reaction to the application host:
 
 ```ocaml
-let rec read_events term model =
-  Notty_eio.Term.events term |> Eio.Stream.iter (fun ev ->
-    match Controller_normal.handle_key_normal ~model ~term ev with
-    | Redraw -> Renderer.draw ~model ~term
-    | Submit_input ->
-        (* send Model.input_line to OpenAI and clear the prompt *)
-    | Cancel_or_quit -> (* handle Cancel / ESC *)
-    | Quit -> raise Exit
-    | Unhandled -> ()
-  )
+let dispatch ~model ~term event =
+  Chat_tui.Controller.handle_key ~model ~term event
 ```
 
+For a complete executable use [App](app.doc.md). A renderer-only loop cannot
+correctly implement submission, authorized history deletion, background layout,
+approvals or cancellation. There is no `Renderer.draw` API.
 
-### 4.2  Programmatic cursor motion
+## Editing and geometry
 
-The lower-level helpers can be handy when tests need to replicate complex
-motions without synthesising full terminal events.
+Cursor offsets remain UTF-8 byte positions, but horizontal movement and
+character deletion use `Utf8_edit` extended-grapheme boundaries.
+Visual rows use terminal-cell layout. Word motions remain whitespace-based;
+terminal glyph widths may differ for complex Unicode sequences.
 
-```ocaml
-(* Move the caret up by two visual lines *)
-Controller_normal.move_cursor_vertically model ~dir:(-1);
-Controller_normal.move_cursor_vertically model ~dir:(-1);
+Ordinary controller edits are checkpointed once per action. Undo restores
+draft text/cursor, not transcript mutations or tool effects. New edits clear
+redo. Tests for selection Escape go through the public shared controller.
 
-assert (Model.cursor_pos model = expected_pos);
-```
-
-
-## 5  Known limitations
-
-* **UTF-8 awareness** – The cursor operates on byte offsets, therefore moving
-  left or right may land inside a multi-byte sequence for non-ASCII text.
-  Terminals typically only send ASCII, so the limitation is acceptable for
-  now but will be addressed in a later milestone.
-* **Partial Vim coverage** – Only a small subset of normal-mode commands is
-  supported.  The implementation is intentionally minimalist; additional
-  motions can be added as user demand arises.
-
-
----
-
-
+Sources: [interface](../../../lib/chat_tui/controller_normal.mli),
+[implementation](../../../lib/chat_tui/controller_normal.ml),
+[shared-controller regression](../../../test/chat_tui_normal_mode_cursor_test.ml).

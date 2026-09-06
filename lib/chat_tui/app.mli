@@ -12,11 +12,11 @@
      {- {!Chat_response.Driver} for OpenAI streaming and tool execution}
      {- {!Context_compaction.Compactor} for user-triggered history compaction}}
 
-     Use {!run_chat} to boot the UI and block until the user quits.
-
-     Most callers should treat everything other than {!run_chat} as
-     test-support: these helpers are exposed to enable white-box unit and
-     integration tests of the event-loop and streaming behaviour.
+     Use {!run_chat} for the legacy prompt/snapshot host and
+     {!run_agent_session} for an attached native or daemon session.
+     Both block until the user quits. The latter leaves execution and
+     persistence with the session authority. [For_testing] is test support;
+     streaming and reducer helpers live in their own modules.
 
      @canonical Chat_tui.App *)
 
@@ -25,7 +25,7 @@ type prompt_context =
   { cfg : Chat_response.Config.t (** Behavioural settings (temperature, …) *)
   ; tools : Openai.Responses.Request.Tool.t list
     (** Tools exposed to the assistant at runtime. *)
-  ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Base.Hashtbl.t
+  ; tool_tbl : (string, Ochat_function.runner) Base.Hashtbl.t
     (** Mapping [tool_name -> implementation]. *)
   ; moderator : Chat_response.In_memory_stream.moderator option
     (** Optional shared moderator runtime for the session. *)
@@ -42,10 +42,15 @@ type persist_mode =
   | `Ask
   ]
 
-(** Boot the TUI and block until the user terminates the program.
+module For_testing : sig
+  val should_warm_history_before_redraw : runtime:App_runtime.t -> model:Model.t -> bool
+  val cursor_for_frame : model:Model.t -> int * int -> (int * int) option
+end
 
-    Calling [run_chat ~env ~prompt_file ()] is the primary way to start an
-    interactive Ochat session from an executable.  The function initialises
+(** [run_chat ~env ~prompt_file ()] boots the legacy file-backed TUI and
+    blocks until the user terminates the program.
+
+    The function initialises
     a full-screen {!Notty_eio.Term}, parses the ChatMarkdown prompt, builds
     an initial {!Model.t} and then runs the main event-loop until the user
     quits.
@@ -70,6 +75,18 @@ type persist_mode =
            written back on exit.  Defaults to [`Ask].
     @param parallel_tool_calls Allow multiple tool calls to run in parallel
            (default: [true]).
+    @param textmate_grammar_files Explicit TextMate grammar JSON files to load
+           before terminal initialization. Directories from
+           [OCHAT_GRAMMAR_DIR] and the default
+           [$XDG_CONFIG_HOME/ochat/grammars] directory are scanned after the
+           first frame and trigger a cache-invalidating redraw. Invalid
+           explicit files stop startup; invalid discovered files produce
+           warnings.
+    @param shell_manifest_authorizer Authorizes the exact canonical shell
+           manifest before any shell tool is exposed. The default rejects
+           manifests.
+    @param shell_approval_provider Supplies command-level approval decisions.
+           The default uses the TUI's fiber-friendly approval broker.
 
     Starting the UI from an executable:
     {[
@@ -82,7 +99,10 @@ type persist_mode =
     {[
       let () =
         Eio_main.run @@ fun env ->
-        let session = Session_store.load ~env ~id:"my-session-id" in
+        let session =
+          Session_store.load_or_create
+            ~env ~prompt_file:"prompt.chatmd" ~id:"my-session-id" ()
+        in
         Chat_tui.App.run_chat
           ~env
           ~prompt_file:"prompt.chatmd"
@@ -93,11 +113,27 @@ type persist_mode =
     ]}
  *)
 val run_chat
-  :  env:Eio_unix.Stdenv.base
+  :  ?typeahead_config:Type_ahead_config.t
+  -> env:Eio_unix.Stdenv.base
   -> prompt_file:string
   -> ?session:Session.t
   -> ?export_file:string
   -> ?persist_mode:persist_mode
   -> ?parallel_tool_calls:bool
+  -> ?textmate_grammar_files:string list
+  -> ?shell_manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> ?shell_approval_provider:Shell_runtime.Approval_broker.provider
+  -> unit
+  -> unit
+
+(** [run_agent_session ~env ~client ()] runs the terminal as a projection of
+    an already attached agent-server session. The server remains authoritative
+    for history, execution, permissions, compaction, and persistence; editor
+    and viewport state remain local to this process. *)
+val run_agent_session
+  :  env:Eio_unix.Stdenv.base
+  -> client:Agent_session_client.t
+  -> ?textmate_grammar_files:string list
+  -> ?typeahead_config:Type_ahead_config.t
   -> unit
   -> unit

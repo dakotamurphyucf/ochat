@@ -1,0 +1,16 @@
+(library
+ (name agent_client)
+ (public_name ochat.agent_client)
+ (modules
+  transport
+  projection
+  connection
+  catalog
+  admin
+  in_memory
+  blob_download
+  session_handle
+  reconnect)
+ (libraries core eio base64 digestif ochat.agent_protocol)
+ (preprocess
+  (pps ppx_jane)))

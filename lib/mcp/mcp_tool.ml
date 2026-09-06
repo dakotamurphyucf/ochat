@@ -92,8 +92,8 @@ let ochat_function_of_remote_tool ~sw ~client ~strict (tool : Tool.t) : Ochat_fu
   let notifications = Client.notifications client in
   Fiber.fork_daemon ~sw (fun () ->
     let rec loop () =
-      let json = Eio.Stream.take notifications in
-      print_endline (Jsonaf.to_string @@ Mcp_types.Jsonrpc.jsonaf_of_notification json);
+      let _json = Eio.Stream.take notifications in
+      (* print_endline (Jsonaf.to_string @@ Mcp_types.Jsonrpc.jsonaf_of_notification json); *)
       loop ()
     in
     let _ = loop () in

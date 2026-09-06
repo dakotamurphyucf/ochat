@@ -1,7 +1,6 @@
 (** Binary-protocol helpers backed by {!Eio}.
 
-    This interface is a drop-in, non-blocking replacement for
-    {!Bin_prot_utils}.  All functions use {!Eio.Path} and {!Eio.Flow}
+    All filesystem operations use {!Eio.Path} and {!Eio.Flow}
     rather than blocking system calls and must therefore run from
     within an Eio fibre (e.g. the callback passed to
     {!Eio_main.run}).
@@ -54,7 +53,9 @@ val read_bin_prot' : path -> 'a Bin_prot.Type_class.reader -> 'a
 
 (** [fold_bin_file_list file reader ~init ~f] folds [f] over the values
     stored in [file] from left to right without loading the whole file
-    into memory. *)
+    into memory. EOF is accepted only between records; an incomplete header or
+    payload raises. Callback exceptions, including [End_of_file], propagate.
+    There is no configured record-size limit. *)
 val fold_bin_file_list
   :  path
   -> 'a Bin_prot.Type_class.reader
@@ -136,10 +137,12 @@ module With_file_methods (M : Bin_prot.Binable.S) : sig
     (** Iterate over the stored values for side-effects. *)
     val iter : path -> f:(t -> unit) -> unit
 
-    (** Read the entire file into memory. *)
+    (** Decode records incrementally and collect the results in write order. *)
     val read_all : path -> t list
 
-    (** Truncate and rewrite the file with the given list. *)
+    (** Append the given list. This preserves the historical implementation's
+        behavior despite its name; use an explicitly prepared new file when
+        replacement is needed. Writes are not atomic or synchronized. *)
     val write_all : path -> t list -> unit
 
     (** Read exactly one value.  Fails if the file contains a

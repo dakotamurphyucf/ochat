@@ -1,5 +1,4 @@
 open Core
-module Scroll_box = Notty_scroll_box
 
 (* History search is over Model.messages (role, text).
    We do case-insensitive substring match for now. *)
@@ -8,14 +7,16 @@ let normalize_query (q : string) = String.strip q
 let normalize_haystack (s : string) = String.lowercase s
 let normalize_needle (s : string) = String.lowercase s
 
-let message_text_at ~(model : Model.t) (i : int) : string option =
-  match List.nth (Model.messages model) i with
-  | None -> None
-  | Some (_role, txt) -> Some txt
+let message_text_at ~(messages : Types.message array) (i : int) : string option =
+  if i < 0 || i >= Array.length messages
+  then None
+  else (
+    let _role, text = messages.(i) in
+    Some text)
 ;;
 
-let matches_query ~(model : Model.t) ~(query : string) (i : int) : bool =
-  match message_text_at ~model i with
+let matches_query ~messages ~(query : string) (i : int) : bool =
+  match message_text_at ~messages i with
   | None -> false
   | Some txt ->
     let needle = normalize_needle query in
@@ -31,8 +32,8 @@ let next_index ~n ~dir i =
 (* Determine where to start searching.
    Forward: start after selected msg (or 0 if none)
    Backward: start before selected msg (or last if none) *)
-let start_index ~(model : Model.t) ~(dir : Model.search_dir) : int option =
-  let n = List.length (Model.messages model) in
+let start_index ~(model : Model.t) ~(dir : Model.search_dir) ~length : int option =
+  let n = length in
   if n = 0
   then None
   else (
@@ -49,54 +50,62 @@ let start_index ~(model : Model.t) ~(dir : Model.search_dir) : int option =
          | Backward -> Int.max 0 (i - 1)))
 ;;
 
-let find_next ~(model : Model.t) ~(query : string) ~(dir : Model.search_dir) : int option =
+let find_next ~(model : Model.t) ~(query : string) ~(dir : Model.search_dir)
+  : Projected_message.Id.t option
+  =
   let query = normalize_query query in
-  let n = List.length (Model.messages model) in
+  let messages = Model.render_messages model in
+  let n = Array.length messages in
   if n = 0 || String.is_empty query
   then None
   else (
-    match start_index ~model ~dir with
+    match start_index ~model ~dir ~length:n with
     | None -> None
     | Some start ->
       (* Wrap-around scan at most n messages *)
       let rec loop i steps_left =
         if steps_left <= 0
         then None
-        else if matches_query ~model ~query i
-        then Some i
+        else if matches_query ~messages ~query i
+        then Model.render_row_identity model ~idx:i |> Option.map ~f:fst
         else loop (next_index ~n ~dir i) (steps_left - 1)
       in
       loop start n)
 ;;
 
-let scroll_to_message ~(model : Model.t) ~term ~(idx : int) : unit =
-  (* Best-effort scroll using cached per-message prefix heights if available.
-     If cache isn't ready, selection will still move; user can scroll manually. *)
+let select_and_reveal ~(model : Model.t) ~term:_ ~(id : Projected_message.Id.t) =
+  let idx = Model.render_index_by_id model ~id in
+  let direction =
+    match Model.selected_msg model, idx with
+    | Some current, Some idx when idx < current -> Model.Toward_older
+    | Some _, Some _ -> Toward_newer
+    | None, _ | _, None ->
+      (match Model.last_search_dir model with
+       | Some Model.Backward -> Toward_older
+       | Some Forward | None -> Toward_newer)
+  in
+  Model.set_chat_scroll_direction model direction;
+  Model.select_projected model (Some id);
   Model.set_auto_follow model false;
-  let screen_w, screen_h = Notty_eio.Term.size term in
-  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
-  let height = layout.scroll_height in
-  let prefix = Model.height_prefix model in
-  if idx < 0 || idx >= Array.length prefix
-  then ()
-  else (
-    let msg_top = prefix.(idx) in
-    (* Center the target message in the viewport if possible *)
-    let desired = Int.max 0 (msg_top - (height / 2)) in
-    let maxs = Scroll_box.max_scroll (Model.scroll_box model) ~height in
-    let desired = Int.min desired maxs in
-    let cur = Scroll_box.scroll (Model.scroll_box model) in
-    Scroll_box.scroll_by (Model.scroll_box model) ~height (desired - cur))
+  match Model.chat_materialization model, Model.width_preparation model with
+  | Model.Chat_page_state.Corridor, Some preparation ->
+    let viewport_height = (Model.width_preparation_layout preparation).scroll_height in
+    if
+      Model.reveal_prepared_row
+        model
+        ~viewport_height
+        ~id
+        ~placement:Model.Chat_page_state.Destination.Center
+    then Controller_types.Chat_scrolled true
+    else Prepare_chat_destination (Search_result id)
+  | (Loading | Resizing | Warm), _ | Corridor, None ->
+    Model.request_projected_reveal model ~id;
+    Redraw
 ;;
 
-let select_and_reveal ~(model : Model.t) ~term ~(idx : int) : unit =
-  Model.select_message model (Some idx);
-  scroll_to_message ~model ~term ~idx
-;;
-
-let repeat_last ~(model : Model.t) ~term ~(reverse : bool) : bool =
+let repeat_last ~(model : Model.t) ~term ~(reverse : bool) =
   match Model.last_search_query model, Model.last_search_dir model with
-  | None, _ | _, None -> false
+  | None, _ | _, None -> None
   | Some q, Some dir0 ->
     let dir =
       if reverse
@@ -107,10 +116,9 @@ let repeat_last ~(model : Model.t) ~term ~(reverse : bool) : bool =
       else dir0
     in
     (match find_next ~model ~query:q ~dir with
-     | None -> false
-     | Some idx ->
+     | None -> None
+     | Some id ->
        (* Note: keep last_search as the original query+dir0; that's Vim behavior:
          'n' repeats same direction, 'N' repeats opposite without overwriting. *)
-       select_and_reveal ~model ~term ~idx;
-       true)
+       Some (select_and_reveal ~model ~term ~id))
 ;;

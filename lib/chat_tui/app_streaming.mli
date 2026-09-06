@@ -16,13 +16,18 @@ exception Cancelled
     The worker emits:
     {ul
     {- [`Streaming_started] once a dedicated streaming switch exists;}
-    {- [`Stream] and [`Stream_batch] events for incremental deltas;}
+    {- [`Sourced_stream] and [`Sourced_stream_batch] events for incremental deltas;}
+    {- [`Tool_execution] events for transient tool lifecycle and progress;}
     {- [`Tool_output] items for tool call outputs;}
     {- [`Streaming_done] with the final item list; or}
     {- [`Streaming_error] on failure or cancellation.}}
 
-    The function catches all exceptions and converts them into a
-    [`Streaming_error] event.
+    Normal completion flushes every accepted sourced stream, tool execution,
+    tool output, and moderator request before [`Streaming_done]. The function
+    catches all exceptions and converts them into a [`Streaming_error] event.
+    Provider stream reads enforce a separate idle timeout in the response
+    drivers. The Chat-TUI operation itself has no aggregate deadline, so
+    responsive multi-turn agent and tool workflows may continue.
 
     All inputs other than [history] and [op_id] are bundled in {!Context.t}.
 
@@ -32,7 +37,7 @@ exception Cancelled
     Example:
     {[
       let streams : Chat_tui.App_context.Streams.t =
-        { input; internal }
+        { input; internal; redraw }
       in
       let services : Chat_tui.App_context.Services.t =
         { env; ui_sw; cwd; cache; datadir; session }
@@ -55,9 +60,10 @@ exception Cancelled
 module Context : sig
   type t =
     { shared : App_context.Resources.t
+    ; allocator : History_entry.Allocator.t
     ; cfg : Chat_response.Config.t
     ; tools : Openai.Responses.Request.Tool.t list
-    ; tool_tbl : (string, string -> Openai.Responses.Tool_output.Output.t) Core.Hashtbl.t
+    ; tool_tbl : (string, Ochat_function.runner) Core.Hashtbl.t
     ; moderator : Chat_response.In_memory_stream.moderator option
     ; safe_point_input : Chat_response.In_memory_stream.Safe_point_input.t option
     ; parallel_tool_calls : bool
@@ -65,4 +71,32 @@ module Context : sig
     }
 end
 
-val start : Context.t -> history:Openai.Responses.Item.t list -> op_id:int -> unit
+val start : Context.t -> history:History_entry.t list -> op_id:int -> unit
+
+module For_testing : sig
+  type event =
+    | Sourced_stream of Chat_response.Sourced_response_event.t
+    | History_stream of Chat_response.History_stream_event.t
+    | Tool_execution of Chat_response.Tool_execution_event.t
+    | Tool_output of History_entry.t
+    | Runtime_request of Chat_response.Moderation.Runtime_request.t
+
+  (** [finish ~internal_stream ~op_id ~events ~items] synchronously emits
+      chronological [events], followed by [`Streaming_done (op_id, items)].
+      The destination stream must have enough capacity or a concurrent
+      consumer. *)
+  val finish
+    :  internal_stream:App_events.internal_event Eio.Stream.t
+    -> op_id:int
+    -> events:event list
+    -> items:History_entry.t list
+    -> unit
+
+  (** [run_with_terminal_event ~on_done ~on_error f] reports exactly one
+      terminal outcome from [f]. *)
+  val run_with_terminal_event
+    :  on_done:('a -> unit)
+    -> on_error:(exn -> unit)
+    -> (unit -> 'a)
+    -> unit
+end

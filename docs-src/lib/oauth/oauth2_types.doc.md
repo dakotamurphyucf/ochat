@@ -67,11 +67,21 @@ type t = {
 }
 
 val is_expired : t -> bool
+
+val of_response_json : obtained_at:float -> Jsonaf.t -> (t, string) result
 ```
 
 `is_expired` returns `true` if *less than 60 s* remain before the token hits
 its `expires_in` deadline – giving the caller just enough time to refresh and
 retry without a failed request.
+
+`of_response_json` decodes token-endpoint responses using required `access_token`,
+`token_type`, and `expires_in` fields and optional `refresh_token`/`scope`. It
+ignores provider extensions and any remote `obtained_at`, using the caller's
+local acquisition time instead. Malformed fields return `Error`.
+
+`Token.t_of_jsonaf` remains the persisted-cache decoder: it requires and preserves
+the stored `obtained_at`. Do not use it directly on a token endpoint response.
 
 ---
 
@@ -122,4 +132,3 @@ let with_fresh_token file ~refresh ~use =
 ---
 
 *Generated automatically by the project’s documentation tooling.*
-

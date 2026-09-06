@@ -21,10 +21,38 @@ let render ~width ~(model : Model.t) =
     | Model.Raw_xml -> " -- RAW --"
     | Model.Plain -> ""
   in
-  let text =
-    let base = mode_txt ^ raw_txt in
-    if Model.typeahead_is_relevant model then base ^ "  " ^ hint_text else base
+  let connection_txt =
+    match Model.connection_status model with
+    | None -> ""
+    | Some { Connection_status.phase = Connected; _ } -> "  [connected]"
+    | Some { phase = Reconnecting { attempt }; _ } ->
+      Printf.sprintf "  [reconnecting %d]" attempt
+    | Some { phase = Disconnected; _ } -> "  [disconnected]"
+    | Some { phase = Failed failure; _ } ->
+      "  [connection failed: " ^ Agent_protocol.Error.code_to_string failure.code ^ "]"
+  in
+  let base = I.string bar_attr (mode_txt ^ raw_txt ^ connection_txt) in
+  let activity =
+    match Renderer_component_loader.status_text model with
+    | None -> I.empty
+    | Some text ->
+      I.hcat
+        [ I.string bar_attr "  "
+        ; Renderer_component_loader.render
+            ~base_attr:bar_attr
+            ~frame:(Model.animation_frame model)
+            text
+        ]
+  in
+  let hint =
+    if Model.typeahead_is_relevant model
+    then I.string bar_attr ("  " ^ hint_text)
+    else I.empty
   in
   let width = Int.max 0 width in
-  I.string bar_attr text |> I.hsnap ~align:`Left width
+  let typeahead =
+    Option.value_map (Model.typeahead_status model) ~default:I.empty ~f:(fun status ->
+      I.string bar_attr ("  [" ^ status ^ "]"))
+  in
+  I.hcat [ base; activity; typeahead; hint ] |> I.hsnap ~align:`Left width
 ;;

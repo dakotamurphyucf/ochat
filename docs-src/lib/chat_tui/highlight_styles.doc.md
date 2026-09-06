@@ -158,3 +158,6 @@ let img =
 
 - Notty.A documentation — colour spaces, styles, and attribute composition
 - [Highlight_theme](highlight_theme.doc.md) — uses these helpers to map scopes to attributes
+- [Renderer_shell_security_palette](renderer_shell_security_palette.doc.md) —
+  uses `fg_hex` / `bg_hex` for the modern 256-color Shell Security and approval
+  palette

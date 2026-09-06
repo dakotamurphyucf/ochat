@@ -13,6 +13,12 @@ let lang_of_path (path : string) : string option =
     let ext = String.lowercase ext in
     (match ext with
      | "ml" | "mli" -> Some "ocaml"
+     | "py" | "pyw" | "pyi" -> Some "python"
+     | "rs" -> Some "rust"
+     | "js" | "mjs" | "cjs" -> Some "javascript"
+     | "jsx" -> Some "jsx"
+     | "ts" | "mts" | "cts" -> Some "typescript"
+     | "tsx" -> Some "tsx"
      | "md" -> Some "markdown"
      | "json" -> Some "json"
      | "sh" -> Some "bash"

@@ -40,10 +40,15 @@ let at source offset =
 
 let read source span =
   let start = max 0 (min span.left.offset (length source)) in
-  let length = min span.right.offset (length source) - start in
-  String.sub source.content ~pos:start ~len:length
+  let stop = max start (min span.right.offset (length source)) in
+  String.sub source.content ~pos:start ~len:(stop - start)
 ;;
 
 (* ----- Span manipulation functions ------------------------------------------------------------ *)
 
-let merge lspan rspan = { left = lspan.left; right = rspan.right }
+let merge lspan rspan =
+  { left = (if lspan.left.offset <= rspan.left.offset then lspan.left else rspan.left)
+  ; right =
+      (if lspan.right.offset >= rspan.right.offset then lspan.right else rspan.right)
+  }
+;;

@@ -14,11 +14,6 @@ type tool_output_kind =
   | Read_directory of { path : string option }
   | Other of { name : string option }
 
-type msg_buffer =
-  { buf : Buffer.t
-  ; index : int
-  }
-
 (* ------------------------------------------------------------------------ *)
 (*  Cmd constructors                                                        *)
 (* ------------------------------------------------------------------------ *)
@@ -45,6 +40,10 @@ type patch =
   | Set_function_name of
       { id : string
       ; name : string
+      }
+  | Associate_tool_call of
+      { item_id : string
+      ; call_id : string
       }
   | Set_function_output of
       { id : string

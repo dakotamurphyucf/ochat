@@ -33,8 +33,9 @@ Tools are **opt-in**: the model can only call what your prompt declares via `<to
 
 This set covers most real-world sessions (codebase navigation, retrieval, and safe edits):
 
-- **`apply_patch`** – atomic multi-file edits in a structured patch format.
-- **`read_file`** *(declare as `read_file` or `get_contents`)* – safe file reads with truncation + optional offset.
+- **`apply_patch`** – multi-file edits in a structured patch format; not an atomic transaction.
+- **`read_file`** *(declare as `read_file` or `get_contents`)* – root-scoped
+  text reads with truncation and optional line ranges.
 - **`read_directory`** *(declare as `read_dir`)* – list directory entries without guessing paths.
 - **`webpage_to_markdown`** – ingest web pages and GitHub blob URLs as Markdown.
 - **`index_markdown_docs` + `markdown_search`** – semantic search over project Markdown docs.
@@ -53,9 +54,9 @@ Some tools have **declaration aliases** for compatibility.
 
 | ChatMD `<tool name="…"/>` | Model sees | Category | What it does |
 |---|---|---|---|
-| `apply_patch` | `apply_patch` | repo | Apply an atomic V4A patch (adds/updates/deletes/moves text files). |
+| `apply_patch` | `apply_patch` | repo | Apply a V4A patch (adds/updates/deletes/moves text files). I/O failures can leave partial changes. |
 | `read_dir` | `read_directory` | fs | List directory entries (non-recursive) as newline-delimited text. |
-| `read_file` **or** `get_contents` | `read_file` | fs | Read a UTF-8 text file with truncation and optional `offset`. Refuses binary files. |
+| `read_file` **or** `get_contents` | `read_file` | fs | Read a regular UTF-8 text file confined to configured roots, with truncation and optional `offset`/`line_count`. |
 | `append_to_file` | `append_to_file` | fs | Append text to a file (inserts a newline before the appended content). |
 | `find_and_replace` | `find_and_replace` | fs | Replace an exact substring in a file (single or all occurrences). |
 | `webpage_to_markdown` | `webpage_to_markdown` | web | Download a page and convert it to Markdown (includes a GitHub blob fast-path). |
@@ -66,17 +67,158 @@ Some tools have **declaration aliases** for compatibility.
 | `odoc_search` | `odoc_search` | docs | Semantic search over locally indexed odoc docs. |
 | `meta_refine` | `meta_refine` | meta | Recursive meta-prompt refinement flow. |
 | `import_image` | `import_image` | vision | Load a local image file and return a vision input item (data URI). |
-| `fork` | `fork` | misc | Reserved name; currently a placeholder tool (do not rely on it). |
+| `fork` | `fork` | agent | Run a nested agent branch through the host's fork handling; see the [fork runtime](../lib/chat_response/fork.doc.md). This is not a separate root daemon session. |
 
 #### Built-in behavior notes (practical gotchas)
 
+- **`apply_patch` failure boundary**: parsing and preparation precede mutation,
+  but writes/deletes run sequentially without rollback. Inspect the working tree
+  after an error before retrying; an error does not mean no files changed.
 - **Naming/aliases**:
   - declaring `<tool name="read_dir"/>` exposes a tool the model calls as `read_directory`.
   - declaring `<tool name="get_contents"/>` exposes a tool the model calls as `read_file`.
+- **`read_file` default root**: a self-closing declaration permits reads only
+  beneath the directory from which ochat was launched. Relative `file` values
+  resolve from that launch directory.
+- **`read_file` line ranges**: `offset` is an optional non-negative, 0-based
+  line offset. `line_count` is an optional non-negative maximum number of
+  lines; omitting it returns the rest of the file subject to output limits.
 - **`read_file` truncation**: reads up to ~380,928 bytes and appends `---` + `[File truncated]` when it stops early.
 - **`read_file` binary refusal**: binary-like content is rejected to avoid polluting context.
 - **`append_to_file` always appends** (it does not deduplicate).
 - **`find_and_replace` with `all=false` and multiple matches** returns an error string advising to use `apply_patch`.
+
+### Configuring `read_file` roots
+
+The short form grants read access beneath ochat's launch directory:
+
+```xml
+<tool name="read_file"/>
+```
+
+It is equivalent to an implicit root named `cwd` at `${tool_dir}`. A normal
+model call can omit `root`:
+
+```json
+{"file":"lib/driver.ml","offset":0,"line_count":200}
+```
+
+Use nested `<read/>` elements when an agent needs a different or broader set
+of readable directories:
+
+```xml
+<tool
+  name="read_file"
+  description="Prefer the docs root when answering documentation questions.">
+  <read id="source" path="lib" description="OCaml implementation files"/>
+  <read id="docs" path="${workspace}/docs-src" description="Project documentation"/>
+  <read id="package-docs" path="${home}/.opam/default/doc"
+        description="Installed OCaml package documentation"/>
+</tool>
+```
+
+Relative root paths such as `lib` are relative to `${tool_dir}`, the directory
+from which ochat was launched. Root paths may also use `${workspace}`,
+`${prompt_dir}`, `${source_dir}`, `${session_dir}`, `${cache_dir}`, or
+`${home}`. Every configured root must exist and be a directory when the agent
+runtime starts; otherwise startup fails before the tool is exposed.
+
+| Variable | Resolves to |
+|---|---|
+| `${workspace}` | Native local TUI and batch: launch directory. Connected TUI: daemon-configured workspace root. |
+| `${tool_dir}` | Host launch directory, not a connected client's cwd. |
+| `${prompt_dir}` | Root prompt directory in agent hosts; file-backed `chat-completion` uses the output transcript directory. |
+| `${source_dir}` | Directory containing the file where this declaration appears, including an imported file. |
+| `${session_dir}` | Current host/session data directory; transient local hosts also have one. |
+| `${cache_dir}` | Ochat cache directory. |
+| `${home}` | Current user's home directory. |
+
+For example, if ochat is launched in `/work/project` with
+`-file /work/prompts/agent.md`, `${workspace}` and `${tool_dir}` resolve to
+`/work/project`, while `${prompt_dir}` resolves to `/work/prompts`. Moving a
+prompt file does not silently change its workspace authority.
+
+For a named root, the model passes the root ID and a relative path:
+
+```json
+{"root":"docs","file":"overview/tools.md","offset":0,"line_count":160}
+```
+
+The accepted arguments are:
+
+| Argument | Required | Meaning |
+|---|---:|---|
+| `file` | yes | File path. It must be relative when `root` is present. `path` is accepted as a legacy alias. |
+| `root` | no | One configured root ID. The generated schema restricts it to the declared IDs. |
+| `offset` | no | Non-negative, 0-based line offset. Defaults to the first line. |
+| `line_count` | no | Non-negative maximum number of lines. Omit it to read the remainder, subject to the byte limit. |
+
+The generated tool description sent to the model is assembled at startup. It
+lists every root ID, its resolved absolute native path, and its optional description,
+then appends the custom `description` from `<tool>`. The JSON schema also gives
+`root` an enum containing exactly the configured IDs. This means an agent can
+discover how each mounted root should be used without relying on a separate
+system-prompt convention.
+
+If `root` is omitted, a relative `file` still resolves from ochat's launch
+directory and is accepted only if its canonical path is inside one of the
+configured roots. Absolute `file` paths are accepted under the same rule. If
+`root` is supplied, `file` must be relative to that root.
+
+Root and requested paths are canonicalized before enforcement. `..` traversal
+and symlinks cannot escape an allowed root. The target must be an existing
+regular file; directories, sockets, FIFOs, devices, and binary-like files are
+rejected.
+
+To grant read access to the entire host filesystem, configure `/` explicitly:
+
+```xml
+<tool name="read_file" description="Read any regular text file on this computer.">
+  <read id="computer" path="/" description="Host filesystem root"/>
+</tool>
+```
+
+Then either form is valid:
+
+```json
+{"file":"/etc/hosts"}
+{"root":"computer","file":"etc/hosts"}
+```
+
+This is unrestricted read authority for regular text files visible to the
+ochat process. It does not bypass operating-system permissions, but it can
+expose credentials, source code, configuration, and other sensitive data to
+the model and provider. Prefer narrow named roots whenever possible.
+
+#### Diagnosing root resolution
+
+The resolved absolute paths listed in the model-visible tool description are
+the quickest way to verify a configuration. With ochat launched from
+`/Users/alice/project`, this declaration:
+
+```xml
+<tool name="read_file">
+  <read id="cwd" path="${workspace}"/>
+</tool>
+```
+
+must advertise `cwd: /Users/alice/project`, and this call reads
+`/Users/alice/project/lib/parser.ml`:
+
+```json
+{"root":"cwd","file":"lib/parser.ml"}
+```
+
+For native local TUI and `chat-completion`, change the directory before
+starting ochat; these modes have no workspace override. Connected TUI creation
+uses `--workspace NAME` to select a configured daemon workspace, not a local
+path. A missing configured directory is a startup error; a missing requested
+file is a tool-call error.
+
+This ChatMD configuration affects the built-in `read_file` function exposed
+by the agent runtime. It does not reconfigure the separately registered
+`Functions.get_contents` tool used by the standalone MCP server or by custom
+OCaml embeddings.
 
 #### Library-only helpers (not mountable as ChatMD built-ins by default)
 
@@ -109,6 +251,8 @@ Example:
 
 ---
 
+<a id="agent-tools--turn-prompts-into-callable-sub-agents"></a>
+
 ## Agent tools – turn prompts into callable sub-agents
 
 Agent tools mount a `*.chatmd` prompt as a callable tool. This is the fastest way to build repeatable “mini workflows” without writing code.
@@ -131,46 +275,45 @@ When to use:
 
 ---
 
-## Shell-command wrappers – the 30-second custom tool
+## ChatMD shell runtimes and tools
 
-Shell wrappers expose a specific command as a function-callable tool:
+Shell tools bind a model-visible schema to a named, manifest-authorized
+runtime. The runtime controls resolution, effects, capabilities, sandboxing,
+allow/ask/deny policy, approvals, hooks, limits, secrets, and audit.
+
+For a narrow operation, use a fixed tool:
 
 ```xml
-<tool name="git_ls_files"
-      command="git ls-files --exclude=docs/"
-      description="Show files tracked by git except docs/"/>
+<shell_access id="readonly" extends="builtin:workspace-readonly@1"/>
+<tool name="git_status" type="shell" mode="fixed" runtime="readonly">
+  <command program="git"><arg value="status"/><arg value="--short"/></command>
+  <arguments mode="none"/>
+</tool>
 ```
 
-Security note:
+For general agent commands, prefer structured argv:
 
-- A `<tool command="…"/>` wrapper runs the specified binary with the full privileges of the current user.
-- Only mount shell wrappers in trusted environments, or inside a container/sandbox.
+```xml
+<shell_access id="development" extends="builtin:workspace-development@1"/>
+<tool name="shell" type="shell" mode="structured" runtime="development"
+      rationale="required" result="structured"/>
+```
 
-Code-accurate behavior:
+Fixed and structured model strings remain literal argv; semicolons, quotes,
+substitutions, redirection characters, and spaces do not gain shell-control
+meaning. Additional explicit modes are:
 
-1. The tool input schema is always:
-   ```json
-   { "arguments": ["..."] }
-   ```
-2. The declared command is executed as:
-   ```sh
-   <command> <arguments...>
-   ```
-3. stdout and stderr are captured (combined) and returned as text.
+- `chain`: pipelines and `;`, `&&`, `||` through a conservative grammar;
+- `raw`: a model-supplied script for one fixed shell executable;
+- `script`: a fixed hashed script file plus literal arguments.
 
-Operational limits (important in practice):
+Unsupported structured/chain syntax is an error, never an implicit raw shell.
+Legacy `<tool command="...">` declarations are desugared into fixed shell
+tools and use the same centralized runtime path.
 
-- Hard timeout: **60 seconds**
-- Output is truncated to a bounded size (currently ~10k characters) to avoid flooding context
-- Command parsing is intentionally simple:
-  - `%20` in `command="..."` is decoded to a space
-  - the command string is split on whitespace (do not rely on shell quoting/escaping)
-
-Design guidelines:
-
-- Prefer idempotent/read-only wrappers when possible.
-- Pin non-negotiable flags directly into `command="…"`.
-- Use clear, verb-based tool names (`git_pull`, `docker_ps`, `rg_search`) so the model can choose correctly.
+See [ChatMD shell tools](chatmd-shell-tools.md), the
+[security guide](../guide/chatmd-shell-security.md), and
+[worked examples](../guide/chatmd-shell-examples.md).
 
 ---
 
@@ -199,7 +342,18 @@ MCP (Model Context Protocol) lets you mount tools from a remote server (stdio or
 
 ### Caching and refresh
 
-ochat caches MCP tool catalogs per server for a short TTL to avoid repeated `tools/list` calls. If the server emits `notifications/tools/list_changed`, ochat invalidates the cache and refreshes on the next access.
+Ochat caches MCP catalogs for five minutes per connected tool declaration/client,
+not globally per server URI. Authenticated identities and runtime lifetimes never
+share an entry merely because endpoints match. Expiry/invalidation reloads on the
+next cache access, not on a periodic timer. The current notification wiring has
+a known defect: tool wrappers compete with the invalidation listener for the same
+queue and can discard `notifications/tools/list_changed` before it is handled.
+
+Tool names, schemas and wrappers are constructed when the runtime starts;
+cache invalidation does not hot-reload an active agent's advertised catalog.
+Recreate the runtime to pick up catalog changes. See the
+[implementation gaps](../development/code-documentation-audit.md#mcp-discovery-and-notifications).
+MCP tools remain maintained; only the old ChatMD-prompt-serving MCP host is deprecated.
 
 ---
 
@@ -222,10 +376,14 @@ This enables a practical pattern: run the MCP server inside a sandbox/container/
 
 ochat can execute independent tool calls in parallel (useful when a model requests multiple reads/searches).
 
-In the TUI this is configurable:
+In the **legacy local TUI** this is configurable:
 
 - `--parallel-tool-calls` (default)
 - `--no-parallel-tool-calls`
+
+These flags select legacy mode when no explicit host is selected; native
+`--local` and connected modes reject them. They are not daemon runtime overrides.
+See the [host-qualified command reference](../bin/chat_tui.doc.md).
 
 ---
 
@@ -240,3 +398,9 @@ There are multiple extension routes depending on how you want to ship capabiliti
 
 Important note: a plain ChatMD declaration `<tool name="…"/>` (without `command=`, `agent=`, or `mcp_server=`) is treated as a **built-in**. Unknown built-in names are rejected unless you add them to ochat’s built-in dispatcher or expose them via MCP.
 
+## Daemon host context
+
+A connected client's cwd does not select the daemon workspace or file roots.
+`${tool_dir}` remains the daemon launch directory; `${workspace}` is the configured
+root and `${source_dir}` follows imported declarations. See the
+[complete host/path reference](../agent-server/sessions-and-workspaces.md).

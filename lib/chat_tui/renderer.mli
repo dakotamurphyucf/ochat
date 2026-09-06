@@ -10,8 +10,8 @@
 
      {!render_full} is the single entry point. Internally, the renderer routes
      to a page-specific implementation via {!Chat_tui.Renderer_pages} based on
-     {!Chat_tui.Model.active_page}.  Today only the chat page exists, but the
-     structure is intended to accommodate future full-screen pages.
+     {!Chat_tui.Model.active_page}. Chat renders the canonical transcript and
+     editor; Agent renders transient active-tool progress.
 
      {1 Chat page layout}
 
@@ -48,7 +48,9 @@
      {- Fenced code blocks delimited by three backticks or three tildes are
         detected via {!Chat_tui.Markdown_fences.split}. Non-HTML blocks are
         highlighted with {!Chat_tui.Highlight_tm_engine} configured with the
-        shared registry from {!Chat_tui.Highlight_registry}.}
+        shared registry from {!Chat_tui.Highlight_registry} on the synchronous
+        path. Detached workers instead use independently constructed,
+        single-owner registries and caches.}
      {- Messages classified as tool output via
         {!Chat_tui.Model.tool_output_by_index} and
         {!Chat_tui.Types.tool_output_kind} may be rendered with specialised
@@ -83,6 +85,8 @@
      cursor may not line up with the displayed text.
  *)
 val render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)
+
+val decorate : size:int * int -> model:Model.t -> Notty.I.t -> Notty.I.t
 (** [render_full ~size ~model] builds the full screen image and the cursor
     position.
 
@@ -123,6 +127,15 @@ val render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)
       ()
     ]} *)
 
+(** [visible_fingerprint ~size image] fingerprints the rendered cells in the
+    visible terminal rectangle, including attributes. Visually equal images
+    have equal fingerprints even when their Notty expression trees differ. *)
+val visible_fingerprint : size:int * int -> Notty.I.t -> string
+
+(** [visible_components_equal ~size ~left ~right] compares visible rendered
+    cells rather than Notty expression-tree identity. *)
+val visible_components_equal : size:int * int -> left:Notty.I.t -> right:Notty.I.t -> bool
+
 (** [lang_of_path path] performs best-effort language inference for
     [read_file] tool outputs.
 
@@ -130,6 +143,10 @@ val render_full : size:int * int -> model:Model.t -> Notty.I.t * (int * int)
     TextMate-style language identifier when known.  For example:
     {ul
     {- [".ml"] and [".mli"] map to ["ocaml"];}
+    {- [".py"] maps to ["python"];}
+    {- [".rs"] maps to ["rust"];}
+    {- [".js"] and [".jsx"] map to ["javascript"];}
+    {- [".ts"] and [".tsx"] map to ["typescript"];}
     {- [".md"] maps to ["markdown"];}
     {- [".json"] maps to ["json"];}
     {- [".sh"] maps to ["bash"].}}

@@ -8,8 +8,11 @@
     {ol 0}
     {li  Built-ins – OCaml helpers hard-coded in {!module:Functions}
           such as ["apply_patch"], ["fork"], … }
-    {li  Custom shell wrappers – e.g. [{<tool command="grep" name="grep"/>}]
-          which execute an external binary inside the {!Eio} sandbox.}
+    {li  Custom command wrappers – e.g. [{<tool command="grep" name="grep"/>}]
+          which execute an external binary inside the {!Eio} sandbox. Stdout
+          and stderr are combined, with live output available to observed
+          invocations. Commands have a 180-second timeout, a 1,000,000-byte
+          read limit, and a 10,000-byte final-result prefix limit.}
     {li  Agent prompts – nested ChatMarkdown documents executed through
           the same driver stack.  Allows hierarchical compositions of
           specialised prompts. }
@@ -30,6 +33,13 @@
     therefore in O(n) where n = length of the input list. *)
 val convert_tools : Openai.Completions.tool list -> Openai.Responses.Request.Tool.t list
 
+(** [agent_page_classification decl] returns the Agent-page classification and
+    runtime name for subagent and custom shell-script declarations, including
+    the built-in [fork] subagent. Other built-ins and MCP declarations return [None]. *)
+val agent_page_classification
+  :  Prompt.Chat_markdown.tool
+  -> (string * Tool_execution_event.agent_page_kind) option
+
 (** [of_declaration ~sw ~ctx ~run_agent decl] maps a single ChatMarkdown
     [`<tool …/>`] declaration to its runtime implementation.  The
     function inspects the variant constructor of [decl] and returns the
@@ -38,6 +48,11 @@ val convert_tools : Openai.Completions.tool list -> Openai.Responses.Request.Too
     A declaration may expand into several functions – for instance an
     [`<tool mcp_server="…"/>`] element yields one function per remote
     tool exposed by the server.  Hence the result is a list.
+
+    MCP discovery metadata is cached only within this connected declaration.
+    Endpoint matches never share discovery across authenticated clients or
+    runtimes. Cache expiry uses the context's Eio clock; notification listeners
+    belong to [sw]. This does not change the legacy MCP server protocol.
 
     Parameters:
     • [sw] — parent {!Eio.Switch.t}.  Any background fibres (e.g. MCP
@@ -53,11 +68,15 @@ val convert_tools : Openai.Completions.tool list -> Openai.Responses.Request.Too
     @raise Failure if the declaration references an unknown built-in
            tool name. *)
 val of_declaration
-  :  sw:Eio.Switch.t
+  :  ?shell_registry:Shell_runtime.Registry.t
+  -> ?host:Shell_runtime.Host.t
+  -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> run_agent:
        (?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
         -> ?session_id:string
+        -> ?observer:Agent_response_loop.observer
+        -> source:string
         -> ctx:Eio_unix.Stdenv.base Ctx.t
         -> string (* prompt XML *)
         -> Prompt.Chat_markdown.content_item list

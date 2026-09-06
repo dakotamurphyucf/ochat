@@ -1,0 +1,91 @@
+# Embed the agent core in OCaml
+
+Use Core as the standard library and Eio for I/O, switches, fibers and resource
+ownership. The installed libraries are `ochat.agent_protocol`, `agent_session`,
+`agent_store`, `agent_server`, `agent_client`, `agent_transport_socket`,
+`agent_transport_stdio`, `agent_transport_http` and `agent_transport_client`
+with the `ochat.` prefix on each public library name.
+
+## Client integration
+
+The complete [compiled client](../examples/agent-server/clients/docs_example.ml)
+and its [Dune dependencies](../examples/agent-server/clients/dune) demonstrate:
+
+1. Load a bearer-token file through Eio only for HTTP.
+2. Parse a Unix/HTTP endpoint with `Agent_transport_client.Endpoint.create`.
+3. Connect inside an Eio switch with a bounded notification capacity.
+4. Use `Agent_client.Connection.request` for typed commands and
+   `next_notification` for asynchronous events, or the shared stdio gateway.
+5. Close the connection in `Fun.protect` before leaving the switch.
+
+Initialize explicitly before dispatch. Request/notification handling must not
+assume a synchronous next-line response. The client projection/reconnect modules
+maintain snapshots, stable identities and event cursors; rendering clients should
+keep local drafts separate from server state. Blob downloads verify cursor,
+length and digest before atomic installation.
+
+## Embedded session host
+
+`Agent_server.Embedded.start ~sw ~env options` creates the host and initial
+session. Options specify absolute prompt/workspace/tool_dir/home context,
+optional durable data root, start intent, permission profile, attachment mode and
+event capacity. No data root means a private transient root. `data_root = Some`
+does not change process-bound liveness into detached daemon liveness.
+
+Initialize the cryptographic RNG before calling `Embedded.start`, for example
+with `Mirage_crypto_rng_unix.use_default ()` in an owning Unix executable. The
+transient-root path allocates random IDs before `Daemon.start`'s initialization.
+See the [stock stdio limitation](troubleshooting.md#local-stdio-rng-initialization).
+
+Use `Embedded.session_id`, `attachment`, `connection`, or `connect` as documented
+in its interface. Close each extra connection and finally `Embedded.close`;
+the switch owns fibers/resources. The [embedded interface](../../lib/agent_server/embedded.mli)
+and [offline embedded tests](../../test/agent_server_embedded_test.ml) contain
+complete typed lifecycle examples with no real provider calls.
+
+## Daemon embedding
+
+`Daemon.start` owns one durable data root and semantic services; it does not
+start transport listeners. Supply validated config, launch `tool_dir`, home and
+process identity inside the owning switch. Bind selected adapters to its
+dispatcher/registry/authenticator/close callbacks. `Daemon.shutdown` drains and
+releases locks; transport owners must close their own connections/listeners too.
+
+`Daemon.options` supports named reviewer, deterministic policy and OAuth
+resolvers, as well as a model-stream injection seam. Reviewer implementations
+receive redacted invocation data and have immutable security revisions.
+Unavailable implementations fail closed; an ID string is not a network endpoint
+or downloaded program. OAuth validators return a typed principal with scopes.
+Never reuse identity-sensitive state globally across daemon instances.
+
+## Ownership and extension rules
+
+- Session actors serialize state changes and durable commits. Do not mutate a
+  store or runtime behind an actor's back.
+- Workers execute blocking/model/tool work outside the actor and return results;
+  cancellation must propagate through owned fibers and subprocesses.
+- Schedulers own quota/start/job/timer capacity and release it on terminal/failure
+  paths. A client disconnect is not a detached worker cancellation request.
+- Snapshot/replay/live/export visibility uses the principal projection. A new
+  adapter must not bypass it or cache unscoped results.
+- Store operations return typed errors; preserve corruption versus missing/I/O
+  distinctions rather than swallowing all failures as retryable absence.
+- Fake provider/clock injection is useful for deterministic tests, not a claim
+  that production providers or external MCP servers behave identically.
+
+## Library map
+
+See the module inventories and ownership notes:
+
+- [Protocol](../lib/agent_protocol/architecture.doc.md)
+- [Session actors and runtime](../lib/agent_session/architecture.doc.md)
+- [Store](../lib/agent_store/architecture.doc.md)
+- [Daemon and authorization](../lib/agent_server/architecture.doc.md)
+- [Client](../lib/agent_client/architecture.doc.md)
+- [Unix transport](../lib/agent_transport_socket/architecture.doc.md)
+- [Stdio transport](../lib/agent_transport_stdio/architecture.doc.md)
+- [HTTP transport](../lib/agent_transport_http/architecture.doc.md)
+- [Endpoint composition](../lib/agent_transport_client/architecture.doc.md)
+
+Public `.mli` contracts remain the exact API reference. Markdown explains how
+those pieces fit; odoc is generated separately from interfaces.

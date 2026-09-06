@@ -51,6 +51,14 @@ module Snapshot : sig
 
   (** Exception-raising wrapper around {!to_value}. *)
   val to_value_exn : t -> value
+
+  (** [to_jsonaf snapshot] encodes the complete serializable ChatML value
+      shape without conflating ChatML variants with builtin JSON variants. *)
+  val to_jsonaf : t -> Jsonaf.t
+
+  (** [of_jsonaf json] decodes the stable snapshot representation produced by
+      {!to_jsonaf}. *)
+  val of_jsonaf : Jsonaf.t -> (t, string) result
 end
 
 (** Read a named field from a record-like value map, returning a labelled

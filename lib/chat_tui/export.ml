@@ -16,10 +16,8 @@ open Core
        remains self-contained.}
     {- [target_path] – path of the output *.chatmd* file (may be relative
        or absolute).  Intermediate directories are created as needed.}
-    {- [cfg] – runtime configuration parsed from the prompt; required by
-       {!Chat_tui.Persistence.persist_session}.}
     {- [initial_msg_count] – number of static prompt messages so the
-       persistence helper can avoid duplicating them.}
+       persistence checkpoint can avoid duplicating them.}
     {- [session] – optional active session (for attachment discovery).}}
 
     The function performs the following high-level steps:
@@ -31,7 +29,7 @@ open Core
        to the prompt, inside the current working directory, or the session
        directory.}
     {- Persist the runtime conversation beyond the static prompt using
-       {!Chat_tui.Persistence.persist_session}.}}
+       {!Chat_tui.Persistence.persist_entries}.}}
 
     The implementation is mostly lifted as-is from the original [do_export]
     closure in [app.ml] with minor refactorings for parameterisation. *)
@@ -41,7 +39,6 @@ let archive
       ~(model : Model.t)
       ~(prompt_file : string)
       ~(target_path : string)
-      ~(cfg : Chat_response.Config.t)
       ~(initial_msg_count : int)
       ~(moderator_snapshot : Session.Moderator_snapshot.t option)
       ~(session : Session.t option)
@@ -114,12 +111,14 @@ let archive
       ~session_dir
       ~dst:datadir_export;
     (* ---------------------- 1. Persist ChatMarkdown conversation ------------------ *)
-    Persistence.persist_session
+    let history = Model.history_items model in
+    let checkpoint =
+      List.take history initial_msg_count |> Persistence.Checkpoint.of_entries
+    in
+    Persistence.persist_entries
       ~dir:cwd_export
       ~prompt_file:file_name
-      ~datadir:datadir_export
-      ~cfg
-      ~initial_msg_count
+      ~checkpoint
       ~moderator_snapshot
-      ~history_items:(Model.history_items model))
+      ~history)
 ;;

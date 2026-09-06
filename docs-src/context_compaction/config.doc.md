@@ -1,157 +1,52 @@
-# `Context_compaction.Config`
+# Context_compaction.Config
 
-Runtime parameters that control how the **context-compaction** pipeline
-filters and trims a chat conversation.
+Configure compaction for the process that owns the agent: the local TUI process
+or the daemon, not a remote client's environment.
 
----
+## Configuration
 
-## Overview
+Create a private JSON file at one of these locations:
 
-When pruning a long chat we want to keep as much of the useful history
-as possible while staying within the model’s context window.  The
-library therefore exposes two knobs:
+1. `$XDG_CONFIG_HOME/ochat/context_compaction.json`, or
+   `$HOME/.config/ochat/context_compaction.json` when XDG_CONFIG_HOME is unset.
+2. `$HOME/.ochat/context_compaction.json`.
 
-* **`context_limit`** – maximum number of *tokens* the relevance judge
-  is allowed to consider when deciding which messages to keep.
-* **`relevance_threshold`** – minimum importance score on the unit
-  interval **[0, 1]** a message needs in order to survive filtering.
+The first valid, readable file wins. Reads use Eio capabilities. Missing,
+unreadable, malformed, duplicate-key or invalid-value files are skipped; if none
+is valid, defaults apply. Unknown keys are ignored. Cancellation propagates.
 
-`Config` stores those values in a record and provides a helper to load
-user overrides from a JSON file.  If the file is missing or malformed
-the module falls back on conservative defaults:
-
-```ocaml
-let default =
-  { context_limit = 20_000;
-    relevance_threshold = 0.5 }
-```
-
-The design goal is to remain *offline-friendly*: the module never
-attempts network or file-system access unless the embedding
-application explicitly grants the necessary Eio capabilities.
-
----
-
-## JSON schema
-
-The configuration file is a single JSON object with the following
-optional keys:
-
-```jsonc
+```json
 {
-  "context_limit": 4096,          // integer ≥ 0
-  "relevance_threshold": 0.75     // float   ∈ [0, 1]
+  "context_limit": 20000,
+  "relevance_filtering": false,
+  "relevance_threshold": 0.5
 }
 ```
 
-Unknown keys are ignored so that future versions can add more
-parameters without breaking older setups.
+- `context_limit`: positive integer; maximum **estimated resulting history
+  tokens**. The estimate encodes each serialized OpenAI item with o200k_base
+  and adds eight tokens per item. It is a local sizing rule, not a guarantee
+  of the provider's full request token count, image cost, or model context limit.
+- `relevance_filtering`: boolean, default false. Enabling it grades groups before
+  summarization and can add paid provider requests. It is not needed for normal
+  compaction.
+- `relevance_threshold`: finite number from 0 to 1, default 0.5. Used only when
+  relevance filtering is enabled. Groups scoring below it are omitted from
+  the summarizer input, except policy-containing groups and the latest group.
 
-### Search path
+Tool calls and their outputs are kept together for relevance selection.
+Filtering and summarization are lossy. A budget failure returns an error without
+installing replacement history; instructions are not silently truncated to fit.
 
-`Config.load` inspects the following locations in order and returns the
-first file that parses successfully:
+## API
 
-1. `$XDG_CONFIG_HOME/ochat/context_compaction.json`  
-   *(falls back to `$HOME/.config/…` when `XDG_CONFIG_HOME` is unset)*
-2. `$HOME/.ochat/context_compaction.json`
+`Config.load ~env ()` reads the search paths above. `Config.load ()` returns
+defaults without filesystem access. `load_paths ~env paths` provides explicit
+paths for embedders/tests. `is_valid` checks a constructed configuration.
+`Compact_config` retains the `default` and `load` compatibility aliases.
 
-Failure to read or parse a location simply moves on to the next one;
-the function never raises.
+The [compactor](compactor.doc.md) uses this configuration automatically.
+[Relevance_judge](relevance_judge.doc.md) is also available independently.
 
----
-
-## Public interface
-
-### `type t`
-
-```ocaml
-type t = {
-  context_limit : int;
-  relevance_threshold : float;
-}
-```
-
-Record of all tunable parameters.
-
-### `default`
-
-```ocaml
-val default : t
-```
-
-Built-in configuration shown in the Overview section.
-
-### `load`
-
-```ocaml
-val load : unit -> t
-```
-
-Returns the merged configuration obtained by overlaying the first valid
-JSON file found in the *search path* onto `default`.
-
----
-
-## Usage examples
-
-### Initialising the pipeline with user settings
-
-```ocaml
-open Context_compaction
-
-let cfg = Config.load () in
-
-let keep_message msg =
-  Relevance_judge.is_relevant
-    ~env:stdenv                (* Eio capabilities *)
-    cfg                        (* uses both fields *)
-    ~prompt:msg
-in
-...
-```
-
-### Tightening the relevance filter programmatically
-
-```ocaml
-let strict_cfg =
-  { Config.default with relevance_threshold = 0.8 } in
-
-(* apply strict_cfg to the compaction pipeline … *)
-```
-
----
-
-## Behaviour in offline mode
-
-`Config` itself is pure and does not depend on the presence of an
-`Eio_unix` environment.  Nevertheless, the values you choose directly
-affect how other modules behave when network access is unavailable:
-
-* A **low** `relevance_threshold` combined with the fallback score of
-  **0.5** will keep most messages.
-* A **high** threshold will discard them instead.
-
-Choose threshold values carefully when writing unit tests that run in
-CI.
-
----
-
-## Known limitations
-
-1. **No validation of extreme values** – numbers outside their natural
-   range can be provided and will propagate downstream unchecked.  This
-   is deliberate to avoid breaking existing setups but may change in
-   the future.
-2. **`read_file_if_exists` placeholder** – the current implementation
-   always returns `None`, effectively disabling user overrides until
-   the IO layer is integrated.  The API is stable and will not change
-   when real IO is implemented.
-
----
-
-## Change log
-
-* **v0.1** – Initial scaffolding: in-memory defaults, JSON overlay,
-  placeholder file IO.
-
+Sources: [interface](../../lib/context_compaction/config.mli),
+[implementation](../../lib/context_compaction/config.ml).

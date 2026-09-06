@@ -17,7 +17,7 @@ module Context = struct
   type t =
     { runtime : Runtime.t
     ; streaming : App_streaming.Context.t
-    ; start_streaming : history:Res_item.t list -> op_id:int -> unit
+    ; start_streaming : history:History_entry.t list -> op_id:int -> unit
     }
 end
 
@@ -35,11 +35,6 @@ let clear_editor ~model : unit =
   Model.set_draft_mode model Model.Plain
 ;;
 
-let add_placeholder_thinking_message (model : Model.t) : unit =
-  let patch = Add_placeholder_message { role = "assistant"; text = "(thinking…)" } in
-  ignore (Model.apply_patch model patch)
-;;
-
 let get_user_message_item text =
   let open Openai.Responses in
   Item.Input_message
@@ -49,10 +44,12 @@ let get_user_message_item text =
     }
 ;;
 
-let apply_user_submit_effects
+let apply_user_submit_effects_exn
       ~cwd
       ~env
       ~cache
+      ~response_dir
+      ~allocator
       ~model
       ~(submit_request : request)
   =
@@ -62,7 +59,11 @@ let apply_user_submit_effects
     match submit_request.Runtime.draft_mode with
     | Model.Plain ->
       ignore (Model.apply_patch model (Add_user_message { text = user_msg }));
-      ignore @@ Model.add_history_item model (get_user_message_item user_msg)
+      let entry =
+        History_entry.create ~allocator (get_user_message_item user_msg)
+        |> Result.ok_or_failwith
+      in
+      ignore @@ Model.add_history_item model entry
     | Model.Raw_xml ->
       let xml =
         if String.is_prefix ~prefix:"<" user_msg
@@ -83,7 +84,15 @@ let apply_user_submit_effects
             Some
               (Converter.convert_user_msg
                  ~ctx
-                 ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:true)
+                 ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+                   Chat_response.Driver.run_agent
+                     ~history_compaction:true
+                     ?prompt_dir
+                     ?session_id
+                     ~response_dir
+                     ~ctx
+                     prompt
+                     items)
                  m)
           | _ -> None)
       in
@@ -105,16 +114,57 @@ let apply_user_submit_effects
                (Res_item.jsonaf_of_t user_msg |> Jsonaf.to_string)
       in
       let txt = Option.value user_msg_txt ~default:(Util.sanitize xml) in
+      let entry = History_entry.create ~allocator user_msg |> Result.ok_or_failwith in
       ignore (Model.apply_patch model (Add_user_message { text = txt }));
-      ignore (Model.add_history_item model user_msg))
+      ignore (Model.add_history_item model entry))
+;;
+
+let apply_user_submit_effects
+      ~cwd
+      ~env
+      ~cache
+      ~response_dir
+      ~allocator
+      ~model
+      ~submit_request
+  =
+  try
+    apply_user_submit_effects_exn
+      ~cwd
+      ~env
+      ~cache
+      ~response_dir
+      ~allocator
+      ~model
+      ~submit_request;
+    Ok ()
+  with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
+  | exn -> Error (Exn.to_string exn)
+;;
+
+let restore_rejected_draft model request message =
+  if String.is_empty (Model.input_line model)
+  then (
+    Model.set_input_line model request.Runtime.text;
+    Model.set_cursor_pos model (String.length request.text);
+    Model.set_draft_mode model request.draft_mode;
+    Model.set_mode model Model.Insert);
+  ignore
+    (Model.apply_patch
+       model
+       (Add_placeholder_message
+          { role = "error"
+          ; text = "Input rejected: " ^ message ^ "\nRejected draft:\n" ^ request.text
+          })
+     : Model.t)
 ;;
 
 let apply_turn_start_effects ~model ~screen_size ~throttler =
-  Model.set_auto_follow model true;
+  Model.set_activity model (Some (Model.Assistant Model.Thinking));
   let screen_w, screen_h = screen_size in
   let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
-  Scroll_box.scroll_to_bottom (Model.scroll_box model) ~height:layout.scroll_height;
-  add_placeholder_thinking_message model;
+  Model.follow_chat_bottom model ~viewport_height:layout.scroll_height;
   Redraw_throttle.request_redraw throttler
 ;;
 
@@ -172,20 +222,28 @@ let start (ctx : Context.t) (submit_request : request) =
   let env = services.env in
   let cwd = services.cwd in
   let cache = services.cache in
+  let response_dir = services.datadir in
   let runtime = ctx.runtime in
-  apply_user_submit_effects
-    ~cwd
-    ~env
-    ~cache
-    ~model:runtime.Runtime.model
-    ~submit_request;
-  start_from_current_session ctx ~reason:Runtime.User_submit
+  match
+    apply_user_submit_effects
+      ~cwd
+      ~env
+      ~cache
+      ~response_dir
+      ~allocator:runtime.Runtime.history_allocator
+      ~model:runtime.Runtime.model
+      ~submit_request
+  with
+  | Ok () -> start_from_current_session ctx ~reason:Runtime.User_submit
+  | Error message ->
+    restore_rejected_draft runtime.model submit_request message;
+    Redraw_throttle.request_redraw shared.ui.throttler
 ;;
 
 let model_of_history history =
   Model.create
     ~history_items:history
-    ~messages:(Conversation.of_history history)
+    ~messages:(Conversation.of_history (History_entry.items history))
     ~input_line:""
     ~auto_follow:true
     ~msg_buffers:(Hashtbl.create (module String))
@@ -221,19 +279,22 @@ let context_for_tests runtime started_turns =
         ; datadir = Obj.magic 0
         ; session = None
         }
-    ; streams = { input = Obj.magic 0; internal = Obj.magic 0 }
+    ; streams = { input = Obj.magic 0; internal = Obj.magic 0; redraw = Obj.magic 0 }
     ; ui =
         { term = Obj.magic 0
         ; size = (fun () -> 80, 24)
-        ; throttler =
-            Redraw_throttle.create ~fps:60. ~enqueue_redraw:(fun () -> ())
+        ; throttler = Redraw_throttle.create ~fps:60. ~enqueue_redraw:(fun () -> ())
         ; redraw = (fun () -> ())
         ; redraw_immediate = (fun () -> ())
+        ; latest_frame_generation = (fun () -> 0)
+        ; resize_and_redraw = (fun ~size:_ ~layout:_ -> ())
+        ; render_current_with_layout = (fun ~size:_ ~layout:_ -> ())
         }
     }
   in
   let streaming : App_streaming.Context.t =
     { shared
+    ; allocator = runtime.Runtime.history_allocator
     ; cfg = Chat_response.Config.default
     ; tools = []
     ; tool_tbl = Hashtbl.create (module String)
@@ -243,16 +304,21 @@ let context_for_tests runtime started_turns =
     ; history_compaction = false
     }
   in
-  { Context.runtime = runtime
-  ; streaming
-  ; start_streaming = start_streaming_stub started_turns
-  }
+  { Context.runtime; streaming; start_streaming = start_streaming_stub started_turns }
 ;;
 
 let%test_unit "start_from_current_session preserves canonical history" =
-  let history = [ get_user_message_item "Hello" ] in
+  let allocator =
+    History_entry.Allocator.create ~namespace:"submit-test" ~next_sequence:0
+    |> Result.ok_or_failwith
+  in
+  let history =
+    [ History_entry.create ~allocator (get_user_message_item "Hello")
+      |> Result.ok_or_failwith
+    ]
+  in
   let model = model_of_history history in
-  let runtime = Runtime.create ~model () in
+  let runtime = Runtime.create ~history_allocator:allocator ~model () in
   let started_turns = ref None in
   let ctx = context_for_tests runtime started_turns in
   start_from_current_session_with_screen_size
@@ -262,7 +328,9 @@ let%test_unit "start_from_current_session preserves canonical history" =
     ~reason:Runtime.Idle_followup;
   [%test_result: int] (List.length (Model.history_items model)) ~expect:1;
   [%test_result: string option]
-    (Option.map (Runtime.active_turn_start_reason runtime) ~f:Runtime.string_of_turn_start_reason)
+    (Option.map
+       (Runtime.active_turn_start_reason runtime)
+       ~f:Runtime.string_of_turn_start_reason)
     ~expect:(Some "idle_followup");
   [%test_result: bool]
     (match runtime.Runtime.op with
@@ -271,8 +339,40 @@ let%test_unit "start_from_current_session preserves canonical history" =
      | None -> false)
     ~expect:true;
   [%test_result: int]
-    (Option.value_map !started_turns ~default:0 ~f:(fun (_, history) -> List.length history))
+    (Option.value_map !started_turns ~default:0 ~f:(fun (_, history) ->
+       List.length history))
     ~expect:1
+;;
+
+let%expect_test "raw validation preserves canonical history and recovers the draft" =
+  Eio_main.run (fun env ->
+    List.iter [ "<user>"; "<developer>not a user</developer>" ] ~f:(fun text ->
+      let model = model_of_history [] in
+      let runtime = Runtime.create ~model () in
+      let request = { Runtime.text; draft_mode = Model.Raw_xml } in
+      let result =
+        apply_user_submit_effects
+          ~cwd:(Eio.Stdenv.cwd env)
+          ~env
+          ~cache:(Cache.create ~max_size:1 ())
+          ~response_dir:(Eio.Stdenv.cwd env)
+          ~allocator:runtime.history_allocator
+          ~model
+          ~submit_request:request
+      in
+      (match result with
+       | Ok () -> failwith "invalid raw input accepted"
+       | Error message -> restore_rejected_draft model request message);
+      printf
+        "history=%d draft=%b activity=%b\n"
+        (List.length (Model.history_items model))
+        (String.equal text (Model.input_line model))
+        (Option.is_some (Model.activity model))));
+  [%expect
+    {|
+    history=0 draft=true activity=false
+    history=0 draft=true activity=false
+    |}]
 ;;
 
 let%test_unit "start preserves submit append semantics" =
@@ -284,8 +384,11 @@ let%test_unit "start preserves submit append semantics" =
     ~cwd:(Obj.magic 0)
     ~env:(Obj.magic 0)
     ~cache:(Chat_response.Cache.create ~max_size:1 ())
+    ~response_dir:(Obj.magic 0)
+    ~allocator:runtime.Runtime.history_allocator
     ~model
-    ~submit_request:{ Runtime.text = "Hello"; draft_mode = Model.Plain };
+    ~submit_request:{ Runtime.text = "Hello"; draft_mode = Model.Plain }
+  |> Result.ok_or_failwith;
   start_from_current_session_with_screen_size
     ctx
     ~now_ms:0
@@ -293,10 +396,21 @@ let%test_unit "start preserves submit append semantics" =
     ~reason:Runtime.User_submit;
   [%test_result: int] (List.length (Model.history_items model)) ~expect:1;
   [%test_result: string option]
-    (Option.map (Runtime.active_turn_start_reason runtime) ~f:Runtime.string_of_turn_start_reason)
+    (Option.map
+       (Runtime.active_turn_start_reason runtime)
+       ~f:Runtime.string_of_turn_start_reason)
     ~expect:(Some "user_submit");
-  [%test_result: int] (List.length (Model.messages model)) ~expect:2;
+  [%test_result: int] (List.length (Model.messages model)) ~expect:1;
+  [%test_result: bool]
+    (match Model.activity model with
+     | Some (Model.Assistant Model.Thinking) -> true
+     | Some (Model.Assistant Model.Writing)
+     | Some (Model.Assistant Model.Working)
+     | Some Model.Compacting
+     | None -> false)
+    ~expect:true;
   [%test_result: int]
-    (Option.value_map !started_turns ~default:0 ~f:(fun (_, history) -> List.length history))
+    (Option.value_map !started_turns ~default:0 ~f:(fun (_, history) ->
+       List.length history))
     ~expect:1
 ;;

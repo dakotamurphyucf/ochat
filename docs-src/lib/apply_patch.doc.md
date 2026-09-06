@@ -1,7 +1,7 @@
 # `apply_patch` – Developer documentation
 
 This document complements the inline `odoc` comments in
-[`apply_patch.{mli,ml}`](./apply_patch.mli) with a more discursive
+[`apply_patch.{mli,ml}`](../../lib/apply_patch.mli) with a more discursive
 overview, extended examples, and a few implementation notes that do
 **not** belong in the API reference.
 
@@ -41,11 +41,10 @@ against an in-memory map or to plug into an Eio virtual file-system.
 ```text
 *** Begin Patch
 *** Update File: src/foo.ml
+*** Move to: lib/foo.ml
 @@
 -let foo = 1
 +let foo = 42
-@@
-*** Move to: lib/foo.ml
 *** Delete File: obsolete.txt
 *** Add File: docs/usage.txt
 +hello
@@ -103,7 +102,11 @@ returns a tuple:
   one unchanged context line, and omitted-line separators, which is
   convenient for logging or chat-ops style confirmations.
 
-If anything goes wrong a `Diff_error` is raised (see above).
+Parsing/preparation failures can raise `Diff_error`; callback I/O exceptions can
+also propagate. Preparation finishes before mutation, but application writes and
+deletes files sequentially without rollback. An error during application can
+leave partial changes; inspect them before retrying. This is not an atomic
+multi-file transaction.
 
 
 4  Usage examples
@@ -120,19 +123,20 @@ let apply_in_memory ~patch_text ~files =
   let open_fn   path = Map.find_exn !fs path in
   let write_fn  path contents = fs := Map.set !fs ~key:path ~data:contents in
   let remove_fn path = fs := Map.remove !fs path in
-  ignore (process_patch ~text:patch_text ~open_fn ~write_fn ~remove_fn);
+  let (_ : string * (string * string) list) =
+    process_patch ~text:patch_text ~open_fn ~write_fn ~remove_fn
+  in
   !fs
 
 let () =
   let initial = [ "hello.txt", "hello" ] in
   let patch =
-    """*** Begin Patch
+    {|*** Begin Patch
 *** Update File: hello.txt
 @@
 -hello
 +hi
-@@
-*** End Patch""" in
+*** End Patch|} in
   let final = apply_in_memory ~patch_text:patch ~files:initial in
   assert ([%equal: string] (Map.find_exn final "hello.txt") "hi\n")
 ```
@@ -152,8 +156,13 @@ let apply_patch_on_disk ~env patch_text =
   let remove_fn path = Eio.Path.(unlink (cwd / path)) in
   Apply_patch.process_patch ~text:patch_text ~open_fn ~write_fn ~remove_fn
 
-let () = Eio_main.run @@ fun env ->
-  let _ = apply_patch_on_disk ~env my_patch in
+let () =
+  let patch = {|*** Begin Patch
+*** Add File: patch-example.txt
++hello
+*** End Patch|} in
+  Eio_main.run @@ fun env ->
+  let (_ : string * (string * string) list) = apply_patch_on_disk ~env patch in
   ()
 ```
 
@@ -173,9 +182,10 @@ let () = Eio_main.run @@ fun env ->
   reported back to the caller of `text_to_patch` (currently an internal
   helper).
 
-* **Streaming parser** – the patch is processed line-by-line without
-  holding additional copies in memory.  This keeps peak memory usage
-  roughly at `O(|patch| + |largest_file|)`.
+* **Preparation and memory** – the implementation loads the referenced original
+  files, builds the patch/commit and renders snippets before applying changes.
+  Memory therefore depends on the combined affected contents and derived data,
+  not only the largest file; this is not a bounded streaming file transformer.
 
 
 6  Known limitations / future work
@@ -189,4 +199,3 @@ let () = Eio_main.run @@ fun env ->
    move by at least one hunk (this mirrors the reference behaviour).
 
 ---
-

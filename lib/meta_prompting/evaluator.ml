@@ -407,6 +407,7 @@ let with_exception_guard
     in
     res
   with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
   | exn ->
     Log.emit `Debug (sprintf "%s judge error: %s" name (Core.Exn.to_string exn));
     (* Log the error but do not crash the caller. *)
@@ -446,6 +447,7 @@ let with_exception_guard_sequential (j : judge) ?env ?best (candidate : string)
     in
     Some score
   with
+  | Eio.Cancel.Cancelled _ as exn -> raise exn
   | exn ->
     Log.emit
       `Debug
@@ -955,6 +957,7 @@ module Self_consistency_judge
         let positive = if Float.(s > 0.5) then 1 else 0 in
         Some (s, positive)
       with
+      | Eio.Cancel.Cancelled _ as exn -> raise exn
       | exn ->
         Log.emit
           `Debug

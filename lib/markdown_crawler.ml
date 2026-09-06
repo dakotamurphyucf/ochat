@@ -10,9 +10,10 @@
       deny-list of common build artefacts.
     • Considers regular files whose basename ends in one of
       [".md"; ".markdown"; ".mdown"].  Empty files are ignored.
-    • Files larger than 10 MiB are skipped to protect memory usage.
-    • All non-fatal problems are logged via {!Log.emit}; only exceptions
-      raised by the user supplied callback propagate further. *)
+    • Files larger than 10 MiB are skipped after a complete read.
+    • Metadata/file reads are best-effort; enumeration, callback and logging
+      errors can propagate. Broad read wrappers also catch cancellation.
+    • Symlinks are followed without a cycle guard; use trusted acyclic trees. *)
 
 open Core
 open Jsonaf.Export

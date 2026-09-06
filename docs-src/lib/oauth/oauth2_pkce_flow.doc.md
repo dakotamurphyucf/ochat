@@ -8,8 +8,8 @@ It is aimed at **native / command-line applications** where launching a
 web browser is feasible but exposing a world-reachable redirect URI is
 not.  The helper:
 
-1. Creates a one-shot HTTP listener on
-   `http://127.0.0.1:8876/cb`.
+1. Advertises callback `http://127.0.0.1:8876/cb`, but currently binds the
+   one-shot listener to IPv4 wildcard `0.0.0.0:8876`, not loopback only.
 2. Generates a cryptographically-secure `code_verifier` /
    `code_challenge` pair.
 3. Opens the user’s browser at the authorisation endpoint with the
@@ -128,12 +128,13 @@ Feel free to adapt the port, path or HTML response to fit your UX.
 
 | Layer | Propagation |
 |-------|-------------|
-| Browser launch | Logged via `Logs.warn`; function continues |
+| Browser launch | Skipped with a warning when `CI` or `OAUTH_NO_BROWSER` is present; otherwise tries the launcher and an Eio I/O-error fallback, which can still raise |
 | Socket bind / accept | Raises `Eio.Io` (let it crash philosophy) |
 | Token exchange | `Ok token` / `Error message` |
 
-`exchange_token` re-raises `Jsonaf.Parse_error` if the server returns
-malformed JSON – mirroring `Oauth2_http.post_form`.
+`exchange_token` returns `Error` for malformed JSON or token fields. It decodes
+the wire token separately from the persisted cache record and sets `obtained_at`
+locally; the server need not supply that field. Eio cancellation propagates.
 
 
 ---
@@ -142,9 +143,15 @@ malformed JSON – mirroring `Oauth2_http.post_form`.
 
 1. Port is **hard-coded** to 8876.  A random high port would avoid
    clashes with other local services.
-2. Listener is IPv4 only (`127.0.0.1`).  IPv6 dual-stack would be more
-   robust.
+2. Listener is IPv4 wildcard, not confined to `127.0.0.1`. Do not expose this
+   helper's port to untrusted networks.
 3. Only the first callback is handled – subsequent clicks yield a blank
    page.
 4. No state/nonce parameter – CSRF protection left to the caller.
 
+Setting `CI` or `OAUTH_NO_BROWSER` suppresses browser launch by presence, even
+with an empty value; it does not complete authentication or bypass the callback
+wait. The callback handler reads until EOF before parsing rather than using a
+complete HTTP request parser, so clients that wait for a response before closing
+their write side can stall. This helper is not the daemon's static bearer-token
+authentication and is not a general hardened OAuth callback server.

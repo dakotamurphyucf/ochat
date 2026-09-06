@@ -1,0 +1,6 @@
+(executable
+ (name docs_example)
+ (libraries core eio eio_main eio.unix jsonaf digestif mirage-crypto-rng.unix
+  ochat.agent_protocol ochat.agent_server ochat.agent_client
+  ochat.agent_transport_client ochat.agent_transport_stdio)
+ (preprocess (pps ppx_jane)))

@@ -49,6 +49,21 @@ val add_line_numbers : string -> string
 
 (** {1 Filesystem helpers} *)
 
+type read_file_root =
+  { id : string
+  ; path : Eio.Fs.dir_ty Eio.Path.t
+  ; description : string option
+  }
+
+(** [read_file_root ~id ~path ?description ()] defines one named directory
+    exposed by a scoped [read_file] tool. *)
+val read_file_root
+  :  id:string
+  -> path:Eio.Fs.dir_ty Eio.Path.t
+  -> ?description:string
+  -> unit
+  -> read_file_root
+
 (** Register the [`read_file`] tool.
 
     • **Schema** – expects an argument object with:
@@ -56,6 +71,7 @@ val add_line_numbers : string -> string
       {ul
       {- [file] (string) – path to read (preferred field);}
       {- [path] (string) – legacy alias accepted by the decoder;}
+      {- [root] (string, optional) – named root for scoped readers;}
       {- [offset] (int, optional) – 0-based line offset to start reading from;}
       {- [line_count] (int, optional) – number of lines to return.}}
 
@@ -68,6 +84,20 @@ val add_line_numbers : string -> string
       The tool refuses to read binary files (best-effort heuristic) and returns
       a human-readable error message instead. *)
 val get_contents : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
+
+(** [get_contents_scoped ~fs ~dir ~roots ?description ()] registers a
+    [read_file] tool restricted to canonical descendants of [roots]. Relative
+    paths without a named root resolve against [dir] and must still be inside
+    one of [roots]. The generated tool description and JSON schema enumerate
+    every root identifier and its resolved native path. Root and target paths
+    are canonicalized so symlinks cannot escape the configured directories. *)
+val get_contents_scoped
+  :  fs:Eio.Fs.dir_ty Eio.Path.t
+  -> dir:Eio.Fs.dir_ty Eio.Path.t
+  -> roots:read_file_root list
+  -> ?description:string
+  -> unit
+  -> Ochat_function.t
 
 (** Register the [`get_url_content`] tool.
 
@@ -125,16 +155,16 @@ val read_dir : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
     0o700.  The action is idempotent when the folder already exists. *)
 val mkdir : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
-(** Register the [`append_to_file`] tool.  Appends a string to a file, creating
-    it if necessary.  The input is a tuple of [file] and [text].  The action is
-    idempotent when the text is already present at the end of the file. *)
+(** [append_to_file ~dir] registers a tool that appends a newline followed by
+    the supplied text, creating the file if needed. Every invocation appends;
+    existing text is not deduplicated. *)
 val append_to_file : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
 (** Register the [`find_and_replace`] tool.  Searches for a string in a file and
     replaces it with another string.  The input is a tuple of [file], [search],
     [replace], and a boolean [all] that controls whether all occurrences should
-    be replaced or only the first one.  The action is idempotent when the search
-    string is not found or already replaced. *)
+    be replaced. With [all = false], multiple matches return an error string
+    without writing. Missing matches return a notice without writing. *)
 val find_and_replace : dir:Eio.Fs.dir_ty Eio.Path.t -> Ochat_function.t
 
 (** {1 Search helpers} *)
@@ -165,9 +195,9 @@ val webpage_to_markdown
     schema can be advertised to the model. *)
 val fork : Ochat_function.t
 
-(** Apply *Recursive Meta-Prompting* refinement to a raw prompt.  The tool
-    receives the full prompt in its JSON [prompt] field and returns the
-    improved version produced by {!Meta_prompting.Recursive_mp.refine}. *)
+(** [meta_refine ~env] registers the meta-prompting flow. Arguments require
+    [prompt] and [task]. An empty prompt selects generation; a nonempty prompt
+    selects updating. Running the tool may make provider requests. *)
 val meta_refine : env:Eio_unix.Stdenv.base -> Ochat_function.t
 
 (** Register the [`import_image`] tool.

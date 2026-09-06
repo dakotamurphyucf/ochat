@@ -4,10 +4,11 @@ open Core
     associated with an absolute expiration timestamp – expressed as a
     {!Core.Time_ns.Span.t} since the Unix epoch – and is considered invalid once
     [now >= expires_at].  Expired bindings are never returned by read
-    operations and may be physically removed from the underlying cache by
+    freshness-aware point lookups; diagnostics such as [to_alist] can expose
+    stale entries. Expired entries may be physically removed from the cache by
     {!remove_expired} or implicitly during reads.
 
-    The functor {!Make} reuses all the efficient O(1) operations provided by
+    The functor {!Make} reuses the point-access operations provided by
     {!Lru_cache.Make}.  Only the semantics change: look-ups that hit an expired
     binding behave as misses and *atomically* purge the stale binding so that
     future accesses do not scan it again.
@@ -18,12 +19,11 @@ open Core
       module String_cache = Ttl_lru_cache.Make (String)
 
       let%expect_test "basic" =
-        let ttl   = Time_ns.Span.of_sec 10. in
+        let ttl   = Time_ns.Span.of_sec (-1.) in
         let cache = String_cache.create ~max_size:2 () in
         String_cache.set_with_ttl cache ~key:"k" ~data:"v" ~ttl;
-        assert (String_cache.find cache "k" = Some "v");
-        (* after 10 s: *)
-        assert (String_cache.find cache "k" = None)
+        assert (String_cache.length cache = 1);
+        assert (Option.is_none (String_cache.find cache "k"))
       ;;
     ]}
 
@@ -86,9 +86,9 @@ module Make (H : Lru_cache.H) : sig
   val set : 'a t -> key:H.t -> data:'a entry -> unit
 
   (** {1 Read operations}
-      All reads promote the binding to most-recently-used *if and only if* it
-      is still fresh.  An expired binding is removed and the read behaves as a
-      cache miss. *)
+    Lookup promotes/counts a present binding before checking freshness.
+      An expired binding is removed and returned as a miss, but contributes
+      a hit to the underlying LRU statistics. *)
 
   (** [find t key] returns [`Some data] if [key] is present **and** the binding
       has not expired, [`None] otherwise.  The function has the side effect of
@@ -127,6 +127,7 @@ module Make (H : Lru_cache.H) : sig
 
   (** [find_and_remove t key] returns the data bound to [key] if present and
       fresh, then deletes the binding unconditionally (expired or not).  The
-      operation counts as a cache hit when the result is [`Some _]. *)
+      underlying lookup counts as a hit whenever a binding was present,
+      even when expiration makes this function return [None]. *)
   val find_and_remove : 'a t -> H.t -> 'a option
 end

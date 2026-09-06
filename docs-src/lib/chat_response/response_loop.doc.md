@@ -1,5 +1,10 @@
 # `Response_loop` – synchronous completion loop
 
+Streaming, tool invocation and cancellation are composed by the owning host. Daemon sessions commit durable results through their actor; recoverable deltas are not a second canonical history.
+
+See [agent-host integration](../../agent-server/embedding.md) and
+[orchestration semantics](../../agent-server/chatml-orchestration.md).
+
 `Response_loop` is a utility module that repeatedly sends the current
 conversation to the OpenAI *chat/completions* endpoint, executes every
 tool requested by the assistant, and stops only when the reply contains
@@ -34,8 +39,9 @@ invoked tools.
 ## API reference
 
 ```ocaml
-val run :
+val run_entries :
   ctx:_ Ctx.t ->
+  allocator:History_entry.Allocator.t ->
   ?temperature:float ->
   ?max_output_tokens:int ->
   ?tools:Openai.Responses.Request.Tool.t list ->
@@ -43,9 +49,9 @@ val run :
   ?fork_depth:int ->
   ?history_compaction:bool ->
   model:Openai.Responses.Request.model ->
-  tool_tbl:(string, string -> string) Hashtbl.t ->
-  Openai.Responses.Item.t list ->
-  Openai.Responses.Item.t list
+  tool_tbl:(string, Ochat_function.runner) Hashtbl.t ->
+  History_entry.t list ->
+  History_entry.t list
 ```
 
 ### Parameters
@@ -60,14 +66,14 @@ val run :
   entered from a nested agent (created via the builtin `fork` tool).
 * **history_compaction** – when `true`, repeated reads of the same file are collapsed so that only the most recent version is sent to the model.
 * **model** – OpenAI model to call (e.g. `Gpt4`).
-* **tool_tbl** – mapping from tool names to implementations. **Must**
-  contain `"fork"` ↦ {!Fork.execute}.
-* **history** – full conversation so far.
+* **allocator** – caller-owned allocator for newly accepted occurrences.
+* **tool_tbl** – mapping from tool names to invocation-aware implementations.
+* **history** – canonical identity-bearing conversation so far.
 
 ### Return value
 
-Extended conversation that includes every assistant message and
-[`Function_call_output`] produced during the loop.
+Extended canonical history that includes every assistant message and
+tool output produced during the loop. Existing entries retain their IDs.
 
 ---
 
@@ -83,13 +89,16 @@ let grep_tool (args : string) : string =
 let () =
   Eio_main.run (fun env ->
     let ctx = Ctx.of_env ~env ~cache:Cache.empty in
-    let tool_tbl = String.Table.of_alist_exn
-      [ "grep", grep_tool ;
-        "fork", Fork.execute ]
+    let allocator =
+      History_entry.Allocator.create
+        ~namespace:"example"
+        ~next_sequence:0
+      |> Result.get_ok
     in
     let final_history =
-      Response_loop.run
+      Response_loop.run_entries
         ~ctx
+        ~allocator
         ~model:Openai.Responses.Request.Gpt4
         ~tool_tbl
         initial_history
@@ -123,3 +132,10 @@ let () =
 * {!Driver} – higher-level helper that wires the loop to the user‐side
   CLI.
 
+## Shell tool lifecycle
+
+Shell calls enter the same tool loop but may suspend on the approval broker.
+The loop never converts approval input into conversation history. Parallel
+calls can queue independent approvals. Cancellation propagates through the
+owning Eio switch to approvals, hook workers, pipes, and processes. Only the
+final bounded/sanitized/redacted tool result is appended as canonical output.

@@ -1,5 +1,11 @@
 # ChatML moderator runtime guide
 
+For current native/daemon hosting, see [host modes](../agent-server/concepts.md) and
+[agent-host orchestration](../agent-server/chatml-orchestration.md). Daemon work belongs to
+the session actor, not a connected UI. The existing language/tool APIs remain
+shared; file-backed session/controller descriptions should be read in that host
+context. Instruction helper compatibility names emit developer-role messages.
+
 This guide describes the current ChatML moderator runtime as exposed by the
 repository today.
 
@@ -215,6 +221,14 @@ example, the event constructor is `` `Item_appended(item) ``, while
 
 `Item` provides constructors and accessors for common transcript items.
 
+Instruction helpers emit the `developer` role. The compatibility names
+`Item.system_text`, `Turn.prepend_system`, and notice helpers remain available;
+`Item.input_text_message(id, "system", text)` also creates a developer message.
+`Item.role` reports the actual `developer` role. `Item.is_system` and
+`Context.last_system_item` recognize both developer instructions and legacy system
+items. This changes newly constructed messages only: existing snapshots, canonical
+history, and raw values supplied to `Item.create` are not rewritten.
+
 Useful helpers include:
 
 - `Item.id`
@@ -375,23 +389,30 @@ Runtime.end_session        : string -> unit task
 
 There are three related transcript views:
 
-- **canonical history**: the durable transcript stored by the host;
-- **effective history**: canonical history projected through the durable
-  moderator overlay;
-- **visible history**: the host/UI presentation derived from effective
-  history.
+- **canonical history**: durable `History_entry.t` occurrences stored by the
+  host, each with an application-owned ID;
+- **effective entries**: canonical history projected through the durable
+  moderator overlay with canonical/inserted/replacement provenance;
+- **visible rows**: the host/UI presentation derived from effective entries,
+  with stable row IDs and revision numbers.
 
 `Turn.*` operations do not directly rewrite canonical history. They update a
 durable overlay that can:
 
-- prepend synthetic system items,
+- prepend synthetic developer items (through the compatibility name `prepend_system`),
 - append synthetic items,
 - replace projected items by id,
 - delete projected items by id,
 - halt the session with a reason.
 
-Before the next model request, the host computes effective history by applying
-that overlay to the projected canonical history.
+Replacement preserves the target canonical ID; insertions allocate new host
+IDs; deletion records a tombstone. Before the next model request, the host
+computes effective entries and unwraps only their OpenAI payloads at the
+provider boundary.
+
+Committed overlay batches carry a monotonic revision and immutable operation
+facts. Interactive hosts may observe those commits immediately, but they
+reproject visible rows only at foreground-operation safe points.
 
 ## Safe-point and runtime semantics
 
@@ -567,3 +588,23 @@ Use these focused documents when you need more detail on one topic:
 - [ChatML budget policy](../chatml-budget-policy.md)
 - [ChatML UI host capabilities](../chatml-ui-host-capabilities.md)
 - [ChatML language specification](chatml-language-spec.md)
+
+## Shell runtime integration
+
+`Process.run` is installed only when ChatMD declares:
+
+```xml
+<moderator_runtime shell_runtime="moderator-processes"/>
+```
+
+The operation creates structured argv and routes through the same immutable
+shell registry used by agent tools: resolver/fingerprint, effects,
+administrative and manifest policy, capabilities, approval, interceptors,
+backend, limits, output finalization, and audit. There is no moderator-only
+direct-spawn path. Without a binding, `Process.run` is unavailable.
+
+Shell-specific script kinds (`shell_matcher`, `shell_reviewer`,
+`shell_before_interceptor`, `shell_after_interceptor`,
+`shell_effect_analyzer`, and `shell_audit_filter`) use purpose-built surfaces
+and do not inherit moderator `Process`, `Model`, `Tool`, filesystem, network,
+or UI capabilities. See the [shell extension guide](chatmd-shell-extensions.md).

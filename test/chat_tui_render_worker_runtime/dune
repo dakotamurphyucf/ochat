@@ -1,0 +1,7 @@
+(library
+ (name chat_tui_render_worker_runtime_test)
+ (modules chat_tui_render_worker_runtime_test)
+ (libraries core notty chat_tui)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane)))

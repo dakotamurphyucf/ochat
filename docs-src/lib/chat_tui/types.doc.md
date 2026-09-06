@@ -1,143 +1,74 @@
-# Chat_tui.Types – Shared Data Types
+# Chat_tui.Types — shared display and command types
 
-This document complements the inline `odoc` comments and provides the human-oriented reference for the **Ochat Terminal UI** code-base.
+Keep small shared types independent of the UI model and runtime. These are
+rendering/adapter types, not the canonical session history or protocol schema.
+The complete [interface](../../../lib/chat_tui/types.mli) defines exact fields.
 
-While the implementation follows an Elm-style _model–view–update_ architecture, the individual OCaml compilation units are kept very small to avoid circular dependencies.  **`Types`** is the single place in which foundational data structures live so that all other modules can reference them without linking heavy libraries or higher-level concepts.
+## Shell UI commands and pages
 
----
+Shell Security, Agent and Chat page state belongs to `Model`. Approval,
+revocation, management and moderator-input reactions belong to
+[Controller_types](controller_types.doc.md), not to this module's `cmd`.
 
-## 1 Chat Transcript Helpers
+## Chat transcript helpers
 
-| Type | Purpose |
-|------|---------|
-| `role` | Alias for `string`. Indicates who authored a chat message. Valid values: `"system"`, `"user"`, `"assistant"`, `"function"`. |
-| `message` | Tuple `(role * string)` representing the role and markdown content of one message. |
-
-### Example – constructing a minimal transcript
-
-```ocaml
-open Chat_tui.Types
-
-let seed : message list =
-  [ "system",    "You are a helpful assistant." ;
-    "user",      "Hello!" ]
-```
-
----
-
-## 2 Streaming Buffer
+`role = string` and `message = role * string` hold displayed role/text.
+Roles are not validated by this alias; rendering also uses developer,
+reasoning and tool labels. They do not replace identity-bearing
+`History_entry.t` or `Projected_message.t`.
 
 ```ocaml
-type msg_buffer = {
-  text  : string ref;  (* Accumulating partial output            *)
-  index : int;         (* Position in Model.messages to update   *)
-}
+let seed : Chat_tui.Types.message list =
+  [ "developer", "You are a helpful assistant."; "user", "Hello!" ]
 ```
 
-The record is created **when** the first delta of a streaming OpenAI response arrives.  `text` grows in-place until the HTTP connection closes, at which point the accumulated string replaces `Model.messages.(index)`.
+## Streaming buffers
 
-### Usage sketch
+Streaming buffers belong to [Model](model.doc.md), not a public
+`Types.msg_buffer` record. Deltas update the display incrementally before the
+connection closes. Stable projected IDs identify rows; current array indexes
+are layout positions, not durable identities.
 
-```ocaml
-let buffers : (string, msg_buffer) Hashtbl.t = Hashtbl.create 8
+## Commands
 
-let ensure_buffer ~id ~role ~messages =
-  match Hashtbl.find_opt buffers id with
-  | Some b -> b
-  | None ->
-      let index = List.length !messages in
-      messages := !messages @ [ role, "" ];
-      let buf = { text = ref "" ; index } in
-      Hashtbl.add buffers id buf;
-      buf
-```
+`Persist_session`, `Start_streaming`, and `Cancel_streaming` each carry a
+`unit -> unit` thunk. [Cmd](cmd.doc.md) executes these with host-owned lifetime
+and error handling. This compatibility abstraction is distinct from
+`Agent_protocol.Command` and `Controller_types.reaction`.
 
----
+## Patches
 
-## 3 Commands (`cmd`)
+`Model.apply_patch` applies these in-place on the UI owner:
 
-Elm followers will recognise `cmd` as the escape hatch for **impure** effects.  The controller layer decides *what* needs to happen, `cmd` carries the _thunk_, and a small interpreter (`Cmd.run` elsewhere in the code-base) performs the side-effect in an Eio fibre.
+| Patch | Effect |
+|---|---|
+| Ensure_buffer | Ensure an ID-keyed streaming display buffer |
+| Append_text | Append delta text and reflect it in the displayed row |
+| Set_function_name | Associate tool name with buffer ID |
+| Associate_tool_call | Correlate streaming item ID with tool call ID |
+| Set_function_output | Record tool output text |
+| Update_reasoning_idx | Record reasoning-summary correlation |
+| Add_user_message | Add a display row only; **does not** append canonical history |
+| Add_placeholder_message | Add a transient UI-only notice |
 
-| Constructor | Semantics |
-|-------------|-----------|
-| `Persist_session   of (unit -> unit)` | Spawn a fibre that writes the current conversation to disk, cloud, … |
-| `Start_streaming   of (unit -> unit)` | Launch an OpenAI streaming request. |
-| `Cancel_streaming  of (unit -> unit)` | Abort the request started above. |
+Callers maintaining canonical state must append an allocated history entry
+separately; native clients instead receive authoritative server projections.
+Do not persist a placeholder or send display-only live tool activity to a model.
 
-The indirection through `unit -> unit` keeps the variant free of heavy types (`Eio.Path.t`, `Persistence.config`, …) and therefore free of dependency cycles.
+## Tool-output classification
 
-### Example – emitting a command from the controller
+`Apply_patch`, `Read_file { path }`, `Read_directory { path }`, and
+`Other { name }` select specialized display/highlighting. This metadata is
+derived in the TUI and is not itself durable conversation state.
 
-```ocaml
-let submit (state : Model.t) ~(run : cmd -> unit) () =
-  let start () = Openai.Stream.request ~prompt:state.input_line () in
-  run (Start_streaming start)
-```
+## Runtime settings
 
----
+`settings` contains `parallel_tool_calls : bool`, default true through
+`default_settings ()`. It is a legacy local execution setting; CLI flags
+do not override native/daemon runtime policy.
 
-## 4 Patches (`patch`)
+## Known limitations
 
-`patch` values describe **pure** transformations of `Model.t`.  They allow the renderer, persistence layer, and controller to evolve independently because each side only observes the *intent* (append text, insert message, …) instead of directly mutating shared state.
-
-| Constructor | Effect on the model |
-|-------------|--------------------|
-| `Ensure_buffer        { id; role }` | Guarantee that a `msg_buffer` exists for `id`; append an empty placeholder message if necessary. |
-| `Append_text          { id; role; text }` | Append `text` to the streaming buffer `id` (allocate lazily) **and** reflect the change in `Model.messages`. |
-| `Set_function_name    { id; name }` | Remember which tool/function call is responsible for buffer `id`. |
-| `Set_function_output  { id; output }` | Store the raw return value of the function call. |
-| `Update_reasoning_idx { id; idx }` | Track the last reasoning summary index emitted for buffer `id` so the UI can insert line breaks neatly. |
-| `Add_user_message     { text }` | Insert the user’s prompt into `history_items` **and** `messages`. |
-| `Add_placeholder_message { role; text }` | Display a transient placeholder such as “(thinking…)”. Not persisted. |
-
-### Example – applying a patch
-
-```ocaml
-let apply (model : Model.t) = function
-  | Append_text { id; text; _ } ->
-      let buf = Hashtbl.find model.msg_buffers id in
-      buf.text := !(buf.text) ^ text;
-      let role, _ = List.nth model.messages buf.index in
-      model.messages <- List.mapi model.messages ~f:(fun i msg ->
-        if i = buf.index then role, !(buf.text) else msg)
-  | _ -> ()
-```
-
----
-
-## 5 Runtime Settings
-
-```ocaml
-type settings = {
-  parallel_tool_calls : bool;
-}
-
-val default_settings : unit -> settings
-```
-
-`settings` groups user-togglable flags that influence runtime behaviour.  At
-present the record contains a single field:
-
-| Field | Effect |
-|-------|--------|
-| `parallel_tool_calls` | When `true` the assistant may ask for multiple tool/function calls in one turn.  Each call is executed concurrently using `Eio.Switch`.  Disable the flag while debugging or when using a model that does not yet support OpenAI's *parallel tool calls* feature. |
-
-Retrieve the defaults:
-
-```ocaml
-let cfg = Chat_tui.Types.default_settings ()
-(* val cfg : Chat_tui.Types.settings = { parallel_tool_calls = true } *)
-```
-
----
-
-## 6 Known Limitations
-
-* `role` is a plain `string`, therefore invalid values are not enforced at compile-time.
-* `msg_buffer.text` mutates in-place; callers must be cautious when sharing the reference across fibres.
-* `cmd` carries raw `(unit -> unit)` thunks — error handling and resource management must be implemented by the interpreter.
-
----
-
-
-
+The UI model is mutable; these patches are not immutable-state transformations.
+String roles and thunk commands do not enforce semantic authority, durability,
+or cancellation. Keep those responsibilities in the host.

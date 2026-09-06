@@ -1,5 +1,10 @@
 # `Mcp_types` – OCaml bindings for the Model Context Protocol
 
+This is maintained MCP tool/client infrastructure. It is not deprecated by the
+new agent server; only the separate ChatMD prompt-serving MCP host is legacy.
+See [MCP tool configuration](../../overview/tools.md) and
+[discovery identity/lifetime](../chat_response/tool.doc.md#cache-invalidation-strategy).
+
 > *Version modelled: MCP draft 2025-03-26*
 
 This module provides _value types only_ – no runtime logic – for talking to

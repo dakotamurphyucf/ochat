@@ -206,9 +206,7 @@ let run ~env ~sw ~(meta : T.Metadata.t) ~(client_id : string) =
     tears down a fresh TLS session.  This is perfectly adequate for the
     sporadic traffic produced by OAuth clients.
 
-    @raise Jsonaf.Parse_error  Transparently propagated if the server
-            returns invalid JSON (mirrors {!Oauth2_http.post_form}
-            semantics).
+    Malformed responses return [Error]. Eio cancellation propagates.
 
     Example – fully automated code exchange
     {[
@@ -243,9 +241,5 @@ let exchange_token
     ]
   in
   let* json = Oauth2_http.post_form ~env ~sw meta.token_endpoint params in
-  Ok
-    T.Token.
-      { (T.Token.t_of_jsonaf json) with
-        obtained_at = Eio.Time.now (Eio.Stdenv.clock env)
-      }
+  T.Token.of_response_json ~obtained_at:(Eio.Time.now (Eio.Stdenv.clock env)) json
 ;;

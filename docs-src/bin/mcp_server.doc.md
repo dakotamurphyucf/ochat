@@ -1,5 +1,11 @@
 # mcp_server – MCP registry wrapper binary
 
+Compatibility scope: this page describes the deprecated MCP host that exposes
+ChatMD prompts as agents. New session servers use the [Ochat agent protocol](../agent-server/README.md).
+This deprecation does **not** apply to MCP-backed tools declared in ChatMD or
+their maintained client/type/transport libraries. Existing compatibility behavior
+below is retained; the new daemon does not require redesigning this server.
+
 `mcp_server` launches an instance of the in-memory registry from
 [`Mcp_server_core`](../lib/mcp/mcp_server_core.doc.md), registers a small set
 of built-in tools and turns every `*.chatmd` prompt file in the *prompts*
@@ -38,11 +44,15 @@ below.
 | Name | Purpose | Source |
 |------|---------|--------|
 | `echo` | Returns the supplied text verbatim. | Internal demo helper |
-| `apply_patch` | Apply a textual V4A diff/patch to the repository. | [`Functions.apply_patch`](../lib/functions/functions.doc.md) |
-| `read_dir` | List the contents of a directory. | [`Functions.read_dir`](../lib/functions/functions.doc.md) |
-| `get_contents` | Read a file and return its contents. | [`Functions.get_contents`](../lib/functions/functions.doc.md) |
-| `webpage_to_markdown` | Download a web page and convert it to Markdown. | [`Functions.webpage_to_markdown`](../lib/functions/functions.doc.md) |
-| `meta_refine` | Refine a *meta-prompt* using LLM-backed heuristics. | [`Functions.meta_refine`](../lib/functions/functions.doc.md) |
+| `apply_patch` | Apply a textual V4A diff/patch to the repository. | [`Functions.apply_patch`](../lib/functions.doc.md) |
+| `read_dir` | List the contents of a directory. | [`Functions.read_dir`](../lib/functions.doc.md) |
+| `get_contents` | Read a file and return its contents. | [`Functions.get_contents`](../lib/functions.doc.md) |
+| `webpage_to_markdown` | Download a web page and convert it to Markdown. | [`Functions.webpage_to_markdown`](../lib/functions.doc.md) |
+| `meta_refine` | Refine a *meta-prompt* using LLM-backed heuristics. | [`Functions.meta_refine`](../lib/functions.doc.md) |
+
+The MCP server registers its `get_contents` tool directly from the OCaml
+library. Nested `<read>` roots in a ChatMD prompt configure that prompt's
+agent-side `read_file` tool; they do not alter this server-wide MCP tool.
 
 Every prompt file discovered under the directory referenced by
 `$MCP_PROMPTS_DIR` (or `./prompts` when the variable is unset) is also
@@ -128,7 +138,9 @@ Registers the `read_dir` tool.  Arguments:
 
 * `path` – file-system path; may be relative to the server’s working directory.
 
-The response is a JSON array listing the directory contents.
+The handler returns a JSON string containing newline-separated directory entries,
+not a JSON array. Filesystem failures are also returned as text (prefixed with
+`error running read_directory:`), rather than as structured handler errors.
 
 ### `register_builtin_get_contents`
 
@@ -278,4 +290,3 @@ they terminate automatically when the main service shuts down.
 ---
 
 © The documentation is released into the public domain.  No warranties.
-

@@ -1,0 +1,13 @@
+(library
+ (name session_store_migration_and_reset_test)
+ (modules session_store_migration_and_reset_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  eio
+  eio_main
+  eio.unix
+  ochat.session)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

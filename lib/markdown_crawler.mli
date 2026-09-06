@@ -24,7 +24,7 @@ open! Core
 
     A file is considered Markdown if its basename ends with one of
     [".md"], [".markdown"] or [".mdown"].  Files larger than {b 10 MiB} or
-    empty files are skipped.
+    empty files are skipped after loading them, not before allocation.
 
     Arguments supplied to the callback:
     • [doc_path] – path relative to [root] using POSIX separators.
@@ -36,7 +36,8 @@ open! Core
     • Ignore rules combine the root-level {.gitignore} (if present) with a
       built-in deny-list (["_build/"], ["dist/"], ["node_modules/"], …).
 
-    Only exceptions raised from within [f] propagate to the caller; all other
-    recoverable I/O problems are logged through {!Log.emit} and silently
-    skipped. *)
+    Directory enumeration, callback and logging errors can propagate. Failed
+    stat/file reads are silently skipped by broad exception wrappers, including
+    cancellation at those sites. Symlinks are followed with no cycle guard.
+    Limits are per directory, not global. UTF-8 is not validated. *)
 val crawl : root:_ Eio.Path.t -> f:(doc_path:string -> markdown:string -> unit) -> unit

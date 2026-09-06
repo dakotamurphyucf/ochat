@@ -28,9 +28,9 @@ type entry = {
 type t = entry array
 ```
 
-Serialisation uses `Bin_prot.Utils.bin_dump ~header:true`, which prefixes
-the data with its byte length and therefore allows append-friendly I/O
-and safe robustness checking on read.
+Serialisation uses `Bin_prot.Utils.bin_dump ~header:true`. Each catalogue
+contains exactly one size-prefixed array; appending another array is invalid.
+This is not a versioned/checksummed database format.
 
 ---
 
@@ -44,7 +44,7 @@ val load :
 
 val save :
   dir:Eio.Fs.dir_ty Eio.Path.t -> t -> unit
-(** Atomically rewrite the catalogue in [dir] with the given value. *)
+(** Publish a private temporary file by rename. No fsync or update lock. *)
 
 val add_or_update :
   dir:Eio.Fs.dir_ty Eio.Path.t ->
@@ -69,6 +69,7 @@ let ( / ) = Eio.Path.( / )
 
 let demo env =
   let dir = Eio.Stdenv.cwd env / ".md_index" in
+  Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 dir;
 
   (* 1.  Create or update an entry *)
   Md_index_catalog.add_or_update
@@ -97,16 +98,24 @@ let () =
    L2-norm using `Owl.Mat.vecnorm'`.  Zero vectors are left untouched.
 2. **Idempotency.** `add_or_update` filters out an existing entry with
    the same `name` before re-inserting, making repeated calls safe.
-3. **Failure handling.** The module never raises when the catalogue is
-   missing or unreadable – callers receive `None` and can fall back to
-   an empty catalogue.
+3. **Failure handling.** `load` returns `None` for missing/unreadable/invalid
+   catalogues but propagates cancellation. `save` and `add_or_update` can
+   raise. A read failure during `add_or_update` starts from an empty catalogue;
+   this is not a corruption-repair operation.
+4. **Publication.** `save` writes an exclusive 0600 temporary file and then
+   renames it over the destination. Failed publication preserves the previous
+   destination and cleans its owned temporary file during normal unwinding.
+   Already-open readers retain the old file. Use an existing trusted directory.
 
 ---
 
 ## Known limitations
 
-* **No concurrency control.** Multiple fibres / processes writing the
-  catalogue simultaneously will race and may interleave writes.
+* **No update transaction.** Individual publications are atomic, but concurrent
+  `add_or_update` read/modify/write operations can lose each other's changes.
+  The last successful publisher wins; this is not a multi-writer catalogue.
+* **Visibility, not crash durability.** There is no fsync. Abrupt termination
+  may leave a temporary file; no automatic orphan-temp recovery is provided.
 * **Whole-file rewrite.** `save` rewrites the whole array; the file size
   grows linearly with the number of indexes.  The design is adequate
   for the expected tens-of-indexes scale. For larger deployments a
@@ -119,4 +128,3 @@ let () =
 * [`Markdown_indexer`](./markdown_indexer.doc.md) – builds per-folder
   indexes and computes centroid vectors.
 * [`Vector_db`](./vector_db.doc.md) – underlying vector search engine.
-

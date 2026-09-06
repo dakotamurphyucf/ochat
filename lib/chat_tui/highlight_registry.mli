@@ -12,6 +12,17 @@
      {!Highlight_tm_loader.create_registry} and call the
      {!Highlight_grammars.add_*} helpers directly. *)
 
+(** [create ()] returns a distinct registry populated with the bundled
+    grammars. No registry or decoded grammar state is shared with registries
+    returned by other calls. *)
+val create : unit -> Highlight_tm_loader.registry
+
+(** [create_with_sources sources] constructs a private bundled registry and
+    installs [sources] in order. *)
+val create_with_sources
+  :  Highlight_grammar_discovery.Source.t list
+  -> Highlight_tm_loader.registry Core.Or_error.t
+
 (** [get ()] returns the shared registry pre-populated with the built-in
     grammars used by the TUI.
 
@@ -20,8 +31,13 @@
     standard output using [Core.printf]. Subsequent calls return the same
     value.
 
-    The returned registry is shared by all callers. It is safe to add extra
-    grammars to it using {!Highlight_tm_loader.add_grammar_jsonaf} or
-    {!Highlight_tm_loader.add_grammar_jsonaf_file}, but there is no support
-    for removing grammars once installed. *)
+    The returned registry remains current until {!replace} installs a fully
+    constructed replacement. *)
 val get : unit -> Highlight_tm_loader.registry
+
+(** [replace registry] transfers ownership of [registry] to the synchronous
+    renderer. *)
+val replace : Highlight_tm_loader.registry -> unit
+
+(** [generation ()] changes whenever {!replace} installs a registry. *)
+val generation : unit -> int

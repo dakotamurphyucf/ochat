@@ -1,0 +1,21 @@
+(library
+ (name chatmd_shell_spec)
+ (public_name ochat.chatmd_shell_spec)
+ (modules
+  source_ref
+  diagnostic
+  chatmd_script_spec
+  feature
+  path_expr
+  duration
+  shell_spec
+  builtin_profile
+  shell_tool_spec
+  shell_element
+  manifest
+  manifest_defaults
+  manifest_merge
+  manifest_compiler)
+ (libraries core digestif jsonaf)
+ (preprocess
+  (pps ppx_jane ppx_jsonaf_conv)))

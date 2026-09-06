@@ -1,5 +1,4 @@
 open! Core
-
 module Moderation = Chat_response.Moderation
 module Manager = Chat_response.Moderator_manager
 module Stream_moderator = Chat_response.In_memory_stream
@@ -29,16 +28,15 @@ let request_turn_action ~policy ~turn_request ~halt_reason requests =
   match halt_reason, turn_request with
   | Some _, _ | None, Ignore -> None
   | None, Schedule reason ->
-    if policy.Runtime_semantics.honor_request_turn
-       && Runtime_semantics.request_turn requests
+    if
+      policy.Runtime_semantics.honor_request_turn
+      && Runtime_semantics.request_turn requests
     then Some reason
     else None
 ;;
 
 let internal_events_to_enqueue ~request_compact ~request_turn =
-  let compact_event =
-    if request_compact then [ `Compact_requested ] else []
-  in
+  let compact_event = if request_compact then [ `Compact_requested ] else [] in
   let turn_event =
     Option.value_map request_turn ~default:[] ~f:(fun reason -> [ `Start_turn reason ])
   in
@@ -51,11 +49,13 @@ let request_refresh_of_outcomes outcomes =
 ;;
 
 let ui_notifications_of_outcomes outcomes =
-  List.concat_map outcomes ~f:(fun (outcome : Moderation.Outcome.t) -> outcome.ui_notifications)
+  List.concat_map outcomes ~f:(fun (outcome : Moderation.Outcome.t) ->
+    outcome.ui_notifications)
 ;;
 
 let runtime_requests_of_outcomes outcomes =
-  List.concat_map outcomes ~f:(fun (outcome : Moderation.Outcome.t) -> outcome.runtime_requests)
+  List.concat_map outcomes ~f:(fun (outcome : Moderation.Outcome.t) ->
+    outcome.runtime_requests)
 ;;
 
 let of_runtime_requests ~policy ~turn_request requests =
@@ -65,9 +65,7 @@ let of_runtime_requests ~policy ~turn_request requests =
     policy.Runtime_semantics.honor_request_compaction
     && Runtime_semantics.request_compaction requests
   in
-  let request_turn =
-    request_turn_action ~policy ~turn_request ~halt_reason requests
-  in
+  let request_turn = request_turn_action ~policy ~turn_request ~halt_reason requests in
   let system_notices = system_notices_of_halt_reason halt_reason in
   let internal_events_to_enqueue =
     internal_events_to_enqueue ~request_compact ~request_turn
@@ -104,7 +102,7 @@ let drain_internal_events
   =
   let open Result.Let_syntax in
   let%bind outcomes =
-    Manager.drain_internal_events
+    Manager.drain_internal_events_entries
       ~max_events:moderator.runtime_policy.budget.max_internal_event_drain
       moderator.manager
       ~session_id:moderator.session_id
@@ -113,12 +111,45 @@ let drain_internal_events
       ~available_tools
       ~session_meta:moderator.session_meta
   in
-  let%map snapshot = Manager.snapshot moderator.manager in
+  let%map snapshot = Manager.identity_snapshot moderator.manager in
   let internal_events_remain =
-    not (List.is_empty snapshot.Session.Moderator_snapshot.queued_internal_events)
+    not
+      (List.is_empty
+         snapshot.Session.Moderator_state.Identity_snapshot.queued_internal_events)
   in
   let outcome = of_outcomes ~policy:moderator.runtime_policy ~turn_request outcomes in
   { outcome with internal_events_remain }
+;;
+
+let handle_appended_entries
+      ~(moderator : Stream_moderator.moderator)
+      ~now_ms
+      ~history
+      ~entries
+      ~available_tools
+      ~turn_request
+  =
+  let open Result.Let_syntax in
+  let%map _, outcomes =
+    List.fold_result entries ~init:(history, []) ~f:(fun (history, outcomes) entry ->
+      let history = history @ [ entry ] in
+      let event =
+        Moderation.Entry_projection.project_item entry
+        |> fun item -> Moderation.Event.Item_appended item
+      in
+      let%map outcome =
+        Manager.handle_event_entries
+          moderator.manager
+          ~session_id:moderator.session_id
+          ~now_ms
+          ~history
+          ~available_tools
+          ~session_meta:moderator.session_meta
+          ~event
+      in
+      history, outcomes @ [ outcome ])
+  in
+  of_outcomes ~policy:moderator.runtime_policy ~turn_request outcomes
 ;;
 
 let%test_unit "end_session suppresses scheduled turn" =

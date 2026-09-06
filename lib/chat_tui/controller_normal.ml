@@ -148,20 +148,11 @@ let goto_last_line_start (model : Model.t) =
 (* -------------------------------------------------------------------- *)
 
 let scroll_by_lines (model : Model.t) ~term delta =
-  let screen_w, screen_h = Notty_eio.Term.size term in
-  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
-  let scroll_height = layout.scroll_height in
-  Scroll_box.scroll_by (Model.scroll_box model) ~height:scroll_height delta;
-  if
-    Scroll_box.max_scroll (Model.scroll_box model) ~height:scroll_height
-    = Scroll_box.scroll (Model.scroll_box model)
-  then Model.set_auto_follow model true
+  Controller_shared.scroll_history ~mode:"normal" ~model ~term delta
 ;;
 
 let page_size ~term (model : Model.t) =
-  let screen_w, screen_h = Notty_eio.Term.size term in
-  let layout = Chat_page_layout.compute ~screen_w ~screen_h ~model in
-  layout.scroll_height
+  Controller_shared.history_viewport_height ~model ~term
 ;;
 
 (* -------------------------------------------------------------------- *)
@@ -183,8 +174,8 @@ let insert_text_at (model : Model.t) ~pos text =
 let delete_range (model : Model.t) ~first ~last =
   let s = Model.input_line model in
   let len = String.length s in
-  let first = Int.max 0 (Int.min len first) in
-  let last = Int.max 0 (Int.min len last) in
+  let first = Utf8_edit.floor s (Int.max 0 (Int.min len first)) in
+  let last = Utf8_edit.ceil s (Int.max 0 (Int.min len last)) in
   if first >= last
   then ()
   else (
@@ -304,6 +295,7 @@ type state =
 
 let st : state ref = ref { pending = None_pending; count = None }
 let clear_state () = st := { pending = None_pending; count = None }
+let cancel_pending = clear_state
 let last_find : find_spec option ref = ref None
 
 let push_digit (d : int) =
@@ -475,8 +467,8 @@ let apply_op_to_motion ~(model : Model.t) ~(op : op) ~(motion : motion) ~(count 
   let a, b =
     if start_pos <= target_pos then start_pos, target_pos else target_pos, start_pos
   in
-  let a = Int.max 0 (Int.min len0 a) in
-  let b = Int.max 0 (Int.min len0 b) in
+  let a = Utf8_edit.floor s0 (Int.max 0 (Int.min len0 a)) in
+  let b = Utf8_edit.ceil s0 (Int.max 0 (Int.min len0 b)) in
   if a = b
   then ()
   else (
@@ -583,61 +575,56 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     Redraw
   | `Key (`ASCII 'n', mods) when List.is_empty mods ->
     clear_state ();
-    if Controller_history_search.repeat_last ~model ~term ~reverse:false
-    then Redraw
-    else Unhandled
+    Option.value
+      (Controller_history_search.repeat_last ~model ~term ~reverse:false)
+      ~default:Unhandled
   | `Key (`ASCII 'N', mods) when List.is_empty mods ->
     clear_state ();
-    if Controller_history_search.repeat_last ~model ~term ~reverse:true
-    then Redraw
-    else Unhandled
+    Option.value
+      (Controller_history_search.repeat_last ~model ~term ~reverse:true)
+      ~default:Unhandled
   (* -------------------------------------------------------------- *)
   (* ArrowUp/Down scroll history (preference)                        *)
   | `Key (`Arrow `Up, mods) when List.is_empty mods ->
     clear_state ();
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term (-1);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-1)).changed
   | `Key (`Arrow `Down, mods) when List.is_empty mods ->
     clear_state ();
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term 1;
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term 1).changed
   | `Key (`Arrow `Down, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
     clear_state ();
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term 1;
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term 1).changed
   | `Key (`Arrow `Up, mods) when List.mem mods `Ctrl ~equal:Poly.equal ->
     clear_state ();
-    Model.set_auto_follow model false;
-    scroll_by_lines model ~term (-1);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-1)).changed
   (* Ctrl-f/b/d/u page/half-page history scrolling *)
   | `Key (`ASCII ('b' | 'B'), [ `Ctrl ]) ->
     clear_state ();
-    Model.set_auto_follow model false;
     let ps = page_size ~term model in
-    scroll_by_lines model ~term (-ps);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-ps)).changed
   | `Key (`ASCII ('f' | 'F'), [ `Ctrl ]) ->
     clear_state ();
-    Model.set_auto_follow model false;
     let ps = page_size ~term model in
-    scroll_by_lines model ~term ps;
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term ps).changed
   | `Key (`ASCII ('u' | 'U'), [ `Ctrl ]) ->
     clear_state ();
-    Model.set_auto_follow model false;
     let ps = page_size ~term model / 2 in
-    scroll_by_lines model ~term (-Int.max 1 ps);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (-Int.max 1 ps)).changed
   | `Key (`ASCII ('d' | 'D'), [ `Ctrl ]) ->
     clear_state ();
-    Model.set_auto_follow model false;
     let ps = page_size ~term model / 2 in
-    scroll_by_lines model ~term (Int.max 1 ps);
-    Redraw
+    Chat_scrolled (scroll_by_lines model ~term (Int.max 1 ps)).changed
+  | `Mouse (`Press (`Scroll dir), (_x, _y), _mods) ->
+    clear_state ();
+    (match dir with
+     | `Up -> Chat_scrolled (scroll_by_lines model ~term (-1)).changed
+     | `Down -> Chat_scrolled (scroll_by_lines model ~term 1).changed)
+  | `Key (`Home, _) ->
+    clear_state ();
+    Prepare_chat_destination Earlier_conversation
+  | `Key (`End, _) ->
+    clear_state ();
+    Prepare_chat_destination Latest_conversation
   (* -------------------------------------------------------------- *)
   (* Cursor vertical move within editor (Meta/Shift + arrows)         *)
   | `Key (`Arrow `Up, mods) when List.mem mods `Meta ~equal:Poly.equal ->
@@ -838,13 +825,16 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
   | `Key (`ASCII 'h', mods) when List.is_empty mods ->
     let n = take_count_default 1 in
     let pos = Model.cursor_pos model in
-    Model.set_cursor_pos model (Int.max 0 (pos - n));
+    Model.set_cursor_pos
+      model
+      (Fn.apply_n_times ~n (Utf8_edit.previous (Model.input_line model)) pos);
     Redraw
   | `Key (`ASCII 'l', mods) when List.is_empty mods ->
     let n = take_count_default 1 in
     let pos = Model.cursor_pos model in
-    let len = String.length (Model.input_line model) in
-    Model.set_cursor_pos model (Int.min len (pos + n));
+    Model.set_cursor_pos
+      model
+      (Fn.apply_n_times ~n (Utf8_edit.next (Model.input_line model)) pos);
     Redraw
   | `Key (`ASCII 'k', mods) when List.is_empty mods ->
     let n = take_count_default 1 in
@@ -918,7 +908,9 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     clear_state ();
     let len = String.length (Model.input_line model) in
     let pos = Model.cursor_pos model in
-    let new_pos = if pos < len then pos + 1 else pos in
+    let new_pos =
+      if pos < len then Utf8_edit.next (Model.input_line model) pos else pos
+    in
     Model.set_cursor_pos model new_pos;
     Model.set_mode model Insert;
     Redraw
@@ -962,7 +954,9 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
       Model.push_undo model;
       let pos = Model.cursor_pos model in
       let len = String.length (Model.input_line model) in
-      let insert_pos = if pos < len then pos + 1 else pos in
+      let insert_pos =
+        if pos < len then Utf8_edit.next (Model.input_line model) pos else pos
+      in
       insert_text_at model ~pos:insert_pos text;
       Redraw)
   | `Key (`ASCII 'P', mods) when List.is_empty mods ->
@@ -983,8 +977,9 @@ let handle_key_normal ~(model : Model.t) ~term (ev : Notty.Unescape.event) : rea
     if pos < String.length s
     then (
       Model.push_undo model;
-      Controller_register.set (String.sub s ~pos ~len:1);
-      delete_range model ~first:pos ~last:(pos + 1));
+      let last = Utf8_edit.next s pos in
+      Controller_register.set (String.sub s ~pos ~len:(last - pos));
+      delete_range model ~first:pos ~last);
     Redraw
   (* Resolve f/F/t/T with next ASCII char *)
   | `Key (`ASCII ch, mods) when List.is_empty mods ->

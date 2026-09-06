@@ -1,140 +1,46 @@
-# Tool – Bridging ChatMarkdown and function calls
+# Chat_response.Tool — declarations to runtime tools
 
-This document complements the in-code odoc comments.  It focuses on the
-big picture and provides examples that are inconvenient to keep in the
-source file.
+`of_declaration ?shell_registry ?host ~sw ~ctx ~run_agent decl` is the public
+conversion boundary; the [interface](../../../lib/chat_response/tool.mli)
+specifies its complete signature. A declaration can expand into multiple tools.
 
-## Overview
-`Tool` converts a ChatMarkdown [`<tool …/>`](../chatmd/README.md) element
-into a [`Ochat_function.t`](../../ochat_function/ochat_function.mli) – the
-structure expected by the {i function-calling} variant of OpenAI’s
-chat/completions endpoint.
+## Declaration families
 
-Internally the helper recognises {b four} back-ends:
+| Family | Runtime behavior |
+|---|---|
+| Built-in | Resolve maintained built-in definitions and configured file roots. |
+| Shell / legacy command lowering | Use the compiled shell runtime/registry and host policy; legacy syntax does not bypass manifest authority. |
+| Nested agent | Use the supplied runner with source context; daemon static-relative sources are pinned transitively. |
+| MCP | Connect to the declared server and wrap its remote tools under this runtime's identity. |
 
-| Kind | XML snippet | Runtime representation |
-|------|-------------|------------------------|
-| Built-in | `<tool name="fork"/>` | OCaml function from {!module:Functions} |
-| Shell wrapper | `<tool command="grep" name="grep"/>` | `Eio.Process.spawn` |
-| Agent | `<tool agent="./sentiment.chatmd" name="sentiment"/>` | Recursively runs driver |
-| MCP remote | `<tool mcp_server="https://tools.acme.com" name="sum"/>` | `Mcp_client` over HTTP |
-
-
-## API cheatsheet
-High-level summary (refer to the in-code odoc comments for the
-canonical specification):
-
-| Function | Role | Key parameters |
-|----------|------|---------------|
-| `convert_tools` | Convert the minimal `Openai.Completions.tool` records into the richer `Openai.Responses.Request.Tool.t` form expected by the *chat/completions* endpoint. | – |
-| `custom_fn` | Wrap an arbitrary shell command so that it can be invoked through the function-calling API. | `env` – Eio standard environment; `command` – binary to execute; `name`/`description` – exposed to the model. |
-| `agent_fn` | Run a nested ChatMarkdown agent prompt from within the current conversation. | `ctx` – shared execution context; `run_agent` – callback that starts a fresh driver. |
-| `mcp_tool` | Convert an `<tool mcp_server="…"/>` declaration into one `Ochat_function.t` per remote tool, using a 5-minute TTL-LRU cache and passive invalidation via server notifications. | `sw` – parent switch; `ctx` – execution context; `mcp_server` – URI of the MCP endpoint. |
-| `of_declaration` | Single front-door dispatcher that maps any `<tool …/>` element to its runtime implementation (may return several functions). | `sw`, `ctx`, `run_agent`, `decl`. |
-
-The next section drills deeper into signatures, invariants, and
-example invocations.
-
-## Function reference
-
-### `convert_tools`
-
-```ocaml
-val convert_tools : Openai.Completions.tool list -> Res.Request.Tool.t list
-```
-
-Pure field-by-field copy. Complexity O(n).
-
-### `custom_fn`
-
-```ocaml
-val custom_fn : env:Eio.Stdenv.t -> CM.custom_tool -> Ochat_function.t
-```
-
-- Accepts JSON input `{ "arguments": string array }`.
-- Hard timeout: **60 s** (configurable only via code change).
-- Output capped at **100 KiB** – long output is truncated with `…truncated`.
-
-Example:
-
-```ocaml
-let grep = custom_fn ~env { name="grep"; description=None; command="grep" } in
-Ochat_function.call grep ["-n"; "pattern"; "file.txt"]
-```
-
-### `agent_fn`
-
-```ocaml
-val agent_fn :
-  ctx:_ Ctx.t ->
-  run_agent:(ctx:_ Ctx.t -> string -> CM.content list -> string) ->
-  CM.agent_tool ->
-  Ochat_function.t
-```
-
-Input schema `{ "input": string }`. The call spawns a new driver
-instance, forwarding only the final answer back to the parent model.
-
-### `mcp_tool`
-
-```ocaml
-val mcp_tool :
-  sw:Eio.Switch.t ->
-  ctx:_ Ctx.t ->
-  CM.mcp_tool ->
-  Ochat_function.t list
-```
-
-Queries the remote `/tools/list` endpoint (or reads from cache) and
-converts the advertised metadata into `Ochat_function.t` values. Each
-remote tool becomes an individual function.
-
-### `of_declaration`
-
-```ocaml
-val of_declaration :
-  sw:Eio.Switch.t ->
-  ctx:_ Ctx.t ->
-  run_agent:(ctx:_ Ctx.t -> string -> CM.content list -> string) ->
-  CM.tool ->
-  Ochat_function.t list
-```
-
-Central dispatcher used by {!module:chat_response.driver} and
-{!module:chat_response.converter}.  See in-code docs for full details.
-
-
-## Usage example
-
-### Converting `<tool>` declarations into a request payload
-
-```ocaml
-(* [decls] is a list of ChatMarkdown AST nodes extracted from the prompt *)
-let ochat_fns =
-  List.concat_map decls ~f:(Tool.of_declaration ~sw ~ctx ~run_agent)
-
-(* Build the JSON payload for OpenAI.  The helper also returns a
-   lookup table mapping function names to OCaml closures. *)
-let comp_tools, _tbl = Ochat_function.functions ochat_fns in
-let request_tools      = Tool.convert_tools comp_tools in
-
-Responses.post_response ~model:"ochat-4o-mini" ~tools:request_tools body
-```
-
+See [tool syntax](../../overview/tools.md), [shell declarations](../../overview/chatmd-shell-tools.md),
+and [agent source pinning](../../agent-server/sessions-and-workspaces.md).
+The older helper names shown in past internal documentation are not all public
+APIs; use the current interface rather than copying obsolete `custom_fn` calls.
 
 ## Cache invalidation strategy
 
-MCP servers are polled at most every *[cache_ttl]* seconds.  However, the
-server may push a `notifications/tools/list_changed` message when a tool
-is added or removed.  The helper [`register_invalidation_listener`] keeps
-an ear on that channel and flushes the TTL-LRU entry so that the next
-prompt reflects the new tool list.
+MCP discovery has a five-minute cache owned by one connected declaration/client,
+not a process-global URI-keyed TTL-LRU cache. Equal endpoints do not merge
+authenticated identities. An Eio clock controls expiry and a mutex serializes
+loading. Failed/cancelled loads release the mutex, allowing later retries.
+Closing the runtime closes its discovery lifetime.
 
+The listener is intended to invalidate on `notifications/tools/list_changed`,
+but tool wrappers currently consume and discard from the same notification queue;
+delivery to the invalidation listener is not guaranteed. Moreover, wrappers and
+schemas are built once: expiry/invalidation does not refresh the active runtime's
+advertised tools. Recreate the runtime after catalog changes. See the
+[tracked implementation gaps](../../development/code-documentation-audit.md#mcp-discovery-and-notifications).
 
-## Limitations & warnings
-* **Security** – `custom_fn` executes arbitrary binaries with user input.
-  Do not enable on a multi-tenant server.
-* MCP tool discovery ignores pagination and assumes a single RPC call
-  returns the full list.
-* Timeout (60 s) and output cap (100 KiB) are hard-coded.
+MCP tool integration is maintained. Only the old MCP server exposing ChatMD
+prompts is deprecated; this outbound tool client is not legacy functionality.
 
+## Ownership and security
+
+Keep `sw`, filesystem context and the shell registry alive through invocation.
+The host's tool permission gate and shell runtime enforce their distinct
+decisions; declaration conversion does not confer authorization. Use configured
+read roots, source provenance and principal-scoped outputs. Runtime exceptions/
+cancellation must propagate through owned workers, not be mistaken for successful
+tool output. See [embedding](../../agent-server/embedding.md).

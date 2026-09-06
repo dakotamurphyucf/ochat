@@ -79,10 +79,13 @@ room for future optional parameters.
 
 ## Error handling
 
-The helper is *exception-free*: any transport-layer error (connection
-refused, TLS handshake failure, …), HTTP error response, or JSON decoding
-issue is returned as `Error "…"` with a descriptive message.  Inspect or
-log the message before propagating it to the caller.
+Transport failures, non-2xx HTTP statuses, malformed JSON, and invalid token
+fields return `Error "…"`. Diagnostics do not include credentials or raw response
+bodies. Eio cancellation propagates rather than becoming `Error`.
+
+The response decoder requires `access_token`, `token_type`, and `expires_in`;
+`refresh_token` and `scope` are optional. Additional provider fields are ignored.
+`obtained_at` is generated locally, not required from or trusted to the server.
 
 ---
 
@@ -106,4 +109,3 @@ log the message before propagating it to the caller.
 
 [`Oauth2_types.Token.t`]: oauth2_types.doc.md
 [`Oauth2_types.Token.is_expired`]: oauth2_types.doc.md
-

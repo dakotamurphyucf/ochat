@@ -88,7 +88,8 @@ end
 
 (** [create_corpus docs] builds a new snapshot from raw embeddings.
 
-    Each element of [docs] is L2-normalised and appended as a column of
+    Inputs must be finite, nonzero and equally sized; zero vectors are not
+    explicitly rejected before division. Each element is L2-normalised as a column of
     the resulting matrix; the original float array is not mutated.  The
     function guarantees:
 
@@ -116,12 +117,14 @@ val query : t -> Owl.Mat.mat -> int -> int array
     1.   Cosine similarities between [embedding] and the whole corpus
          are computed.
     2.   The top 20·k candidates form a shortlist.
-    3.   BM25 scores for [text] are evaluated on the same shortlist.
+    3.   BM25 independently returns its global top 20*k. Only IDs overlapping
+         the dense shortlist receive lexical scores. IDs must match columns.
     4.   Final score = (1&nbsp;−&nbsp;β)·cos  +  β·normalised&nbsp;BM25
          and the best [k] hits are returned.
 
     [beta] ∈ [0, 1] controls the trade-off (0 = vector-only,
-    1 = BM25-only). *)
+    1 = lexical ranking within the dense shortlist, not global BM25-only).
+    The caller must supply a nonnegative k and beta in [0,1]; beta is not validated. *)
 val query_hybrid
   :  t
   -> bm25:Bm25.t

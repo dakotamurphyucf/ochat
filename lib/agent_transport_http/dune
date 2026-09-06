@@ -1,0 +1,18 @@
+(library
+ (name agent_transport_http)
+ (public_name ochat.agent_transport_http)
+ (modules request_contract rpc_body server client_lifetime client)
+ (libraries
+  core
+  digestif
+  eio
+  eio.unix
+  piaf
+  uutf
+  ochat.agent_protocol
+  ochat.agent_client
+  ochat.agent_store
+  ochat.agent_session
+  ochat.agent_server)
+ (preprocess
+  (pps ppx_jane)))

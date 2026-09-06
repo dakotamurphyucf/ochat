@@ -52,3 +52,59 @@ let%expect_test "normal_mode_w_and_b_move_cursor" =
     {|6
 0|}]
 ;;
+
+let check_selection_escape activity ~cursor =
+  let open Chat_tui in
+  let model = make_model () in
+  Model.set_activity model activity;
+  Model.set_selection_anchor model 0;
+  Model.set_cursor_pos model cursor;
+  let dispatch event = Controller.handle_key ~model ~term:dummy_term event in
+  ignore (dispatch (`Key (`ASCII '2', [])) : Controller.reaction);
+  let reaction = dispatch (`Key (`Escape, [])) in
+  assert (Poly.equal reaction Controller.Redraw);
+  assert (Poly.equal (Model.mode model) Model.Normal);
+  assert (Poly.equal (Model.active_page model) Model.Page_id.Chat);
+  assert (not (Model.selection_active model));
+  assert (String.equal (Model.input_line model) "hello world");
+  assert (Model.cursor_pos model = cursor);
+  assert (Poly.equal (Model.activity model) activity);
+  assert (not (Model.undo model));
+  ignore (dispatch (`Key (`ASCII 'l', [])) : Controller.reaction);
+  assert (Model.cursor_pos model = cursor + 1);
+  assert (Poly.equal (dispatch (`Key (`Escape, []))) Controller.Cancel_or_quit)
+;;
+
+let%expect_test "public controller clears Visual selection before cancel or quit" =
+  List.iter
+    [ None; Some (Chat_tui.Model.Assistant Thinking); Some Chat_tui.Model.Compacting ]
+    ~f:(fun activity ->
+      List.iter [ 0; 3 ] ~f:(fun cursor -> check_selection_escape activity ~cursor));
+  [%expect {| |}]
+;;
+
+let%expect_test "Escape preserves history selection with and without Visual draft selection" =
+  let open Chat_tui in
+  let model = make_model () in
+  let entry_id =
+    History_entry.Id.create ~namespace:"escape" ~sequence:0 |> Result.ok_or_failwith
+  in
+  let row = Projected_message.canonical_row ~entry_id ("assistant", "history") in
+  Model.reconcile_projected_rows model [ row ];
+  Model.reconcile_messages model [ row.message ];
+  Model.select_projected model (Some row.id);
+  let dispatch event = Controller.handle_key ~model ~term:dummy_term event in
+  List.iter [ Some 0; None ] ~f:(fun anchor ->
+    Option.iter anchor ~f:(Model.set_selection_anchor model);
+    let expected =
+      if Option.is_some anchor then Controller.Redraw else Controller.Cancel_or_quit
+    in
+    assert (Poly.equal (dispatch (`Key (`Escape, []))) expected);
+    assert (not (Model.selection_active model));
+    assert (Poly.equal (Model.selected_projected_id model) (Some row.id)));
+  ignore (dispatch (`Key (`ASCII ':', [])) : Controller.reaction);
+  String.iter "delete" ~f:(fun character ->
+    ignore (dispatch (`Key (`ASCII character, [])) : Controller.reaction));
+  assert (Poly.equal (dispatch (`Key (`Enter, []))) (Controller.Delete_history entry_id));
+  [%expect {| |}]
+;;

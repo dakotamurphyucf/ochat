@@ -61,6 +61,9 @@ type tag =
   | Tool_call
   | Tool_response
   | Tool
+  | Shell_access
+  | Moderator_runtime
+  | Shell_element of Chatmd_shell_spec.Shell_element.t
 [@@deriving sexp]
 
 (** [tag_equal a b] returns [true] iff tags [a] and [b] are identical.
@@ -85,7 +88,10 @@ let tag_equal (a : tag) (b : tag) : bool =
   | Tool_call, Tool_call
   | Tool_response, Tool_response
   | Tool, Tool
+  | Shell_access, Shell_access
+  | Moderator_runtime, Moderator_runtime
   | Config, Config -> true
+  | Shell_element a, Shell_element b -> Chatmd_shell_spec.Shell_element.equal a b
   | _ -> false
 ;;
 
@@ -110,7 +116,11 @@ let tag_of_string_opt : string -> tag option = function
   | "tool_call" -> Some Tool_call
   | "tool_response" -> Some Tool_response
   | "tool" -> Some Tool
-  | _ -> None
+  | "shell_access" -> Some Shell_access
+  | "moderator_runtime" -> Some Moderator_runtime
+  | name ->
+    Option.map (Chatmd_shell_spec.Shell_element.of_string name) ~f:(fun element ->
+      Shell_element element)
 ;;
 
 (** [tag_of_string s] behaves like {!tag_of_string_opt} but raises

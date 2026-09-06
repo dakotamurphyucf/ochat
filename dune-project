@@ -38,6 +38,8 @@
   ppxlib
   pcre
   re
+  digestif
+  optint
   textmate-language
   owl
   eio
@@ -47,8 +49,12 @@
   lwt_eio
   base64
   jsonaf
+  uutf
+  uuseg
+  uri
   tls-eio
   notty
+  mirage-crypto-rng
   mirage-crypto-rng-eio
   ppx_jsonaf_conv
   ppx_expect

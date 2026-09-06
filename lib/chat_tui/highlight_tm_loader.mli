@@ -64,7 +64,7 @@ val add_grammar_jsonaf : registry -> Jsonaf.t -> unit Core.Or_error.t
 val add_grammar_jsonaf_file : registry -> path:string -> unit Core.Or_error.t
 
 (** [find_grammar_by_lang_tag reg lang] looks up a grammar in [reg] using a
-    language tag like ["ocaml"], ["bash"], ["diff"], etc.
+    language tag like ["ocaml"], ["python"], ["rs"], ["js"], or ["ts"].
 
     Matching is case-insensitive. The function tries a small set of aliases for
     common languages and then queries the registry by:

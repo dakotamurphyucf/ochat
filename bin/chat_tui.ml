@@ -25,6 +25,8 @@
                [--export-file FILE]
                [--reset-session NAME [--prompt-file FILE] [--keep-history]]
                [--rebuild-from-prompt NAME]
+               [--textmate-grammar FILE]...
+               [--authorize-shell-manifest]
                [--parallel-tool-calls | --no-parallel-tool-calls]
                [--auto-persist | --no-persist]
     v}
@@ -58,6 +60,10 @@
         finishes, save the full transcript to the given file.
 
     • *Runtime behaviour*:
+      – [--textmate-grammar FILE] · load an additional TextMate grammar before
+                                    starting the TUI; may be repeated.
+      – [--authorize-shell-manifest] · authorize the exact canonical shell
+        manifest compiled from the prompt for this process only.
       – [--parallel-tool-calls] / [--no-parallel-tool-calls] · toggle parallel
         execution of function-callable tools.
       – [--auto-persist] / [--no-persist] · control whether the snapshot is
@@ -136,6 +142,9 @@ let help_output_texts_prompt =
         - override: --config FILE
         - debug: --print-effective-args
       The file is parsed as whitespace-separated arguments (one or more per line).
+    • Custom TextMate grammars are discovered from repeated
+      --textmate-grammar flags, OCHAT_GRAMMAR_DIR, and
+      $XDG_CONFIG_HOME/ochat/grammars (or ~/.config/ochat/grammars).
     • Some flags are mode-specific:
         - --export-file only applies to interactive mode.
         - --prompt-file only applies to --reset-session.
@@ -193,6 +202,8 @@ let help_output_texts_prompt =
                                  --new-session.
     [--session-info NAME]      . Display metadata for session NAME (prompt path,
                                  timestamps, history length, …) and exit.
+    [--textmate-grammar FILE]  . Load an additional TextMate grammar before
+                                 starting the TUI. May be repeated.
     [-file FILE]               . Prompt file (ChatMarkdown/Markdown) used to seed
                                  the interactive session. Also used to derive the
                                  default session ID when neither --session nor
@@ -412,6 +423,8 @@ Notes:
   • Some flags are mode-specific:
       - --export-file only applies to interactive mode.
       - --prompt-file only applies to --reset-session.
+      - --authorize-shell-manifest only applies to interactive mode and grants
+        one-process authorization to the exact compiled manifest.
       - --parallel-tool-calls / --no-parallel-tool-calls and
         --auto-persist / --no-persist only apply to interactive mode.
   • For scripting, --list-sessions and --session-info support JSON output
@@ -445,6 +458,7 @@ Ask AI subcommand (ask ai questions about using chat-tui):
 
 Interactive mode:
   chat-tui [-file FILE] [--session NAME | --new-session]
+           [--authorize-shell-manifest]
 
 Run with --help for full flag documentation.
 |}
@@ -457,6 +471,7 @@ let load_session ~env ~prompt_file ?id ~new_session () =
 ;;
 
 let run_in_env
+      ~typeahead_config
       ~env
       ~prompt_file
       ?session_id
@@ -464,16 +479,26 @@ let run_in_env
       ?export_file
       ~persist_mode
       ~parallel_tool_calls
+      ~textmate_grammar_files
+      ~authorize_shell_manifest
       ()
   =
   let session = load_session ~env ~prompt_file ?id:session_id ~new_session () in
+  let shell_manifest_authorizer =
+    if authorize_shell_manifest
+    then Shell_runtime.Manifest_authorizer.assume_authorized
+    else Shell_runtime.Manifest_authorizer.deny
+  in
   Chat_tui.App.run_chat
+    ~typeahead_config
     ~env
     ~prompt_file
     ~session
     ?export_file
     ~persist_mode
     ~parallel_tool_calls
+    ~textmate_grammar_files
+    ~shell_manifest_authorizer
     ()
 ;;
 
@@ -511,16 +536,20 @@ let run_in_env
     or *Ctrl-c* ).
 *)
 let run
+      ?(typeahead_config = Chat_tui.Type_ahead_config.default)
       ?session_id
       ?(new_session = false)
       ?export_file
       ?(persist_mode : Chat_tui.App.persist_mode = `Ask)
       ?(parallel_tool_calls = true)
+      ?(textmate_grammar_files = [])
+      ?(authorize_shell_manifest = false)
       ~prompt_file
       ()
   =
   Env.with_env (fun env ->
     run_in_env
+      ~typeahead_config
       ~env
       ~prompt_file
       ?session_id
@@ -528,6 +557,8 @@ let run
       ?export_file
       ~persist_mode
       ~parallel_tool_calls
+      ~textmate_grammar_files
+      ~authorize_shell_manifest
       ())
 ;;
 
@@ -656,22 +687,25 @@ module Handlers = struct
       | false -> Eio.Path.mkdirs ~perm:0o700 dir
     ;;
 
-    let confirm_overwrite ~dest_path ~outfile =
+    let confirm_overwrite ~env ~dest_path ~outfile =
       if not (Eio.Path.is_file dest_path)
       then true
       else (
-        Out_channel.output_string
-          stdout
-          (Printf.sprintf "File %s exists. Overwrite? [y/N] " outfile);
-        Out_channel.flush stdout;
-        match In_channel.input_line In_channel.stdin with
-        | Some ans
+        Eio.Flow.copy_string
+          (Printf.sprintf "File %s exists. Overwrite? [y/N] " outfile)
+          (Eio.Stdenv.stdout env);
+        let input = Eio.Buf_read.of_flow (Eio.Stdenv.stdin env) ~max_size:1_024 in
+        match Eio.Buf_read.line input with
+        | ans
           when List.mem
                  [ "y"; "yes" ]
                  (String.lowercase (String.strip ans))
                  ~equal:String.equal -> true
+        | exception End_of_file ->
+          Eio.Flow.copy_string "Aborted.\n" (Eio.Stdenv.stdout env);
+          false
         | _ ->
-          printf "Aborted.\n";
+          Eio.Flow.copy_string "Aborted.\n" (Eio.Stdenv.stdout env);
           false)
     ;;
 
@@ -718,7 +752,14 @@ module Handlers = struct
         in
         Chat_response.Converter.to_items
           ~ctx
-          ~run_agent:(Chat_response.Driver.run_agent ~history_compaction:false)
+          ~run_agent:(fun ?prompt_dir ?session_id ~ctx prompt items ->
+            Chat_response.Driver.run_agent
+              ~history_compaction:false
+              ?prompt_dir
+              ?session_id
+              ~ctx
+              prompt
+              items)
           elements
         |> List.length
       with
@@ -732,20 +773,19 @@ module Handlers = struct
     let persist_full_history
           ~cwd
           ~prompt_file
-          ~datadir
           ~initial_msg_count
           ~(moderator_snapshot : Session.Moderator_snapshot.t option)
-          ~history_items
+          ~history
       =
-      let module Config = Chat_response.Config in
-      Chat_tui.Persistence.persist_session
+      let checkpoint =
+        List.take history initial_msg_count |> Chat_tui.Persistence.Checkpoint.of_entries
+      in
+      Chat_tui.Persistence.persist_entries
         ~dir:cwd
         ~prompt_file
-        ~datadir
-        ~cfg:Config.default
-        ~initial_msg_count
+        ~checkpoint
         ~moderator_snapshot
-        ~history_items
+        ~history
     ;;
 
     let read_session ~env ~id =
@@ -785,7 +825,7 @@ module Handlers = struct
     let handle ~env ~id ~outfile =
       let sdir, session = read_session ~env ~id in
       let out_dir, dest_path, file_name, fs = export_paths ~env ~outfile in
-      let proceed = confirm_overwrite ~dest_path ~outfile in
+      let proceed = confirm_overwrite ~env ~dest_path ~outfile in
       if proceed
       then (
         let source = prompt_source session in
@@ -799,25 +839,25 @@ module Handlers = struct
         persist_full_history
           ~cwd
           ~prompt_file:file_name
-          ~datadir
           ~initial_msg_count
-          ~moderator_snapshot:session.moderator_snapshot
-          ~history_items:session.history;
+          ~moderator_snapshot:session.moderator_state.legacy_snapshot
+          ~history:session.history;
         printf "Session '%s' exported to %s\n" id outfile)
     ;;
   end
 
   let handle_export_session ~env ~id ~outfile = Export_session.handle ~env ~id ~outfile
 
-  let timestamp_for_archive () =
-    let tm = Core_unix.localtime (Core_unix.time ()) in
-    Printf.sprintf
-      "%04d%02d%02d-%02d%02d"
-      (tm.tm_year + 1900)
-      (tm.tm_mon + 1)
-      tm.tm_mday
-      tm.tm_hour
-      tm.tm_min
+  let timestamp_for_archive ~env =
+    let timestamp =
+      Eio.Time.now (Eio.Stdenv.clock env)
+      |> Time_ns.Span.of_sec
+      |> Time_ns.of_span_since_epoch
+      |> Agent_protocol.Timestamp.of_time_ns
+      |> Agent_protocol.Timestamp.to_string
+      |> String.filter ~f:Char.is_digit
+    in
+    sprintf "%s-%s" (String.prefix timestamp 8) (String.sub timestamp ~pos:8 ~len:4)
   ;;
 
   let truncated ~max_len s =
@@ -833,117 +873,6 @@ module Handlers = struct
     printf "%s:\n%s\n" label contents
   ;;
 
-  let input_message_as_chatmd (im : Openai.Responses.Input_message.t) =
-    let role = Openai.Responses.Input_message.role_to_string im.role in
-    let content =
-      List.filter_map im.content ~f:(function
-        | Openai.Responses.Input_message.Text { text; _ } -> Some text
-        | _ -> None)
-      |> String.concat ~sep:""
-    in
-    match role with
-    | "user" -> Printf.sprintf "<user>\n%s\n</user>\n" content
-    | "assistant" -> Printf.sprintf "<assistant>\n%s\n</assistant>\n" content
-    | "tool" -> Printf.sprintf "<tool_response>\n%s\n</tool_response>\n" content
-    | _ -> Printf.sprintf "<msg role=\"%s\">\n%s\n</msg>\n" role content
-  ;;
-
-  let output_message_as_chatmd (om : Openai.Responses.Output_message.t) =
-    let text = List.map om.content ~f:(fun c -> c.text) |> String.concat ~sep:" " in
-    Printf.sprintf "\n<assistant id=\"%s\">\nRAW|\n%s\n|RAW\n</assistant>\n" om.id text
-  ;;
-
-  let reasoning_as_chatmd (r : Openai.Responses.Reasoning.t) =
-    let summaries =
-      List.map r.summary ~f:(fun s ->
-        Printf.sprintf "\n<summary>\n%s\n</summary>\n" s.text)
-      |> String.concat ~sep:""
-    in
-    Printf.sprintf "\n<reasoning id=\"%s\">%s\n</reasoning>\n" r.id summaries
-  ;;
-
-  let tool_output_as_chatmd_string = function
-    | Openai.Responses.Tool_output.Output.Text text -> text
-    | Content cont ->
-      List.map cont ~f:(function
-        | Openai.Responses.Tool_output.Output_part.Input_text { text } -> text
-        | Input_image { image_url; _ } -> Printf.sprintf "<img src=\"%s\" />" image_url)
-      |> String.concat ~sep:"\n"
-  ;;
-
-  let function_call_as_chatmd (fc : Openai.Responses.Function_call.t) =
-    Printf.sprintf
-      "\n\
-       <tool_call tool_call_id=\"%s\" function_name=\"%s\" id=\"%s\">\n\
-       %s|\n\
-       %s\n\
-       |%s\n\
-       </tool_call>\n"
-      fc.call_id
-      fc.name
-      (Option.value fc.id ~default:fc.call_id)
-      "RAW"
-      fc.arguments
-      "RAW"
-  ;;
-
-  let custom_tool_call_as_chatmd (tc : Openai.Responses.Custom_tool_call.t) =
-    Printf.sprintf
-      "\n\
-       <tool_call type=\"custom_tool_call\" tool_call_id=\"%s\" function_name=\"%s\" \
-       id=\"%s\">\n\
-       %s|\n\
-       %s\n\
-       |%s\n\
-       </tool_call>\n"
-      tc.call_id
-      tc.name
-      (Option.value tc.id ~default:tc.call_id)
-      "RAW"
-      tc.input
-      "RAW"
-  ;;
-
-  let function_call_output_as_chatmd (fco : Openai.Responses.Function_call_output.t) =
-    Printf.sprintf
-      "<tool_response tool_call_id=\"%s\">\nRAW|\n%s\n|RAW\n</tool_response>\n"
-      fco.call_id
-      (tool_output_as_chatmd_string fco.output)
-  ;;
-
-  let custom_tool_call_output_as_chatmd (tco : Openai.Responses.Custom_tool_call_output.t)
-    =
-    Printf.sprintf
-      "<tool_response type=\"custom_tool_call\" tool_call_id=\"%s\">\n\
-       RAW|\n\
-       %s\n\
-       |RAW\n\
-       </tool_response>\n"
-      tco.call_id
-      (tool_output_as_chatmd_string tco.output)
-  ;;
-
-  let other_item_as_chatmd item =
-    let sexp = Sexp.to_string_hum (Openai.Responses.Item.sexp_of_t item) in
-    Printf.sprintf "<item>\n%s\n</item>\n" sexp
-  ;;
-
-  let history_item_as_chatmd = function
-    | Openai.Responses.Item.Input_message im -> input_message_as_chatmd im
-    | Openai.Responses.Item.Output_message om -> output_message_as_chatmd om
-    | Openai.Responses.Item.Function_call fc -> function_call_as_chatmd fc
-    | Openai.Responses.Item.Custom_tool_call tc -> custom_tool_call_as_chatmd tc
-    | Openai.Responses.Item.Function_call_output fco -> function_call_output_as_chatmd fco
-    | Openai.Responses.Item.Custom_tool_call_output tco ->
-      custom_tool_call_output_as_chatmd tco
-    | Openai.Responses.Item.Reasoning r -> reasoning_as_chatmd r
-    | item -> other_item_as_chatmd item
-  ;;
-
-  let history_as_chatmd history =
-    List.map history ~f:history_item_as_chatmd |> String.concat ~sep:""
-  ;;
-
   let print_history_preview
         ~prompt_preview_max
         ~(moderator_snapshot : Session.Moderator_snapshot.t option)
@@ -953,7 +882,7 @@ module Handlers = struct
     print_prompt_preview
       ~prompt_preview_max
       ~label:"History preview (as chatmd)"
-      (Chat_tui.Persistence.history_as_chatmd ~moderator_snapshot ~history_items:history)
+      (Chat_tui.Persistence.history_entries_as_chatmd ~moderator_snapshot ~history)
   ;;
 
   let load_prompt_for_reset ~env prompt_file =
@@ -1023,7 +952,8 @@ module Handlers = struct
     let session = read_existing_or_exit ~env ~id in
     let archive_dir = Eio.Path.(dir / "archive") in
     let archived_snapshot =
-      Eio.Path.(archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp_for_archive ()))
+      Eio.Path.(
+        archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp_for_archive ~env))
     in
     let lock_file = Eio.Path.(dir / "snapshot.bin.lock") in
     let chatmd_cache = Eio.Path.(dir / ".chatmd" / "cache.bin") in
@@ -1046,7 +976,7 @@ module Handlers = struct
     | true ->
       print_history_preview
         ~prompt_preview_max
-        ~moderator_snapshot:session.moderator_snapshot
+        ~moderator_snapshot:session.moderator_state.legacy_snapshot
         session.history
   ;;
 
@@ -1057,7 +987,8 @@ module Handlers = struct
     let session = read_existing_or_exit ~env ~id in
     let archive_dir = Eio.Path.(dir / "archive") in
     let archived_snapshot =
-      Eio.Path.(archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp_for_archive ()))
+      Eio.Path.(
+        archive_dir / Printf.sprintf "%s.snapshot.bin" (timestamp_for_archive ~env))
     in
     let lock_file = Eio.Path.(dir / "snapshot.bin.lock") in
     let chatmd_cache = Eio.Path.(dir / ".chatmd" / "cache.bin") in
@@ -1092,19 +1023,25 @@ module Handlers = struct
   ;;
 
   let handle_interactive
+        ~typeahead_config
         ~prompt_file
         ~session_id
         ~new_session
         ~export_file
         ~persist_mode
         ~parallel_tool_calls
+        ~textmate_grammar_files
+        ~authorize_shell_manifest
     =
     run
+      ~typeahead_config
       ?session_id
       ~new_session
       ?export_file
       ~persist_mode
       ~parallel_tool_calls
+      ~textmate_grammar_files
+      ~authorize_shell_manifest
       ~prompt_file
       ()
   ;;
@@ -1271,19 +1208,37 @@ end
 
 module Cli = struct
   type raw_flags =
-    { conversation_file : string
+    { typeahead_config : Chat_tui.Type_ahead_config.t Or_error.t
+    ; conversation_file : string
+    ; local : bool
+    ; connect : string option
+    ; bearer_token_file : string option
     ; list_sessions : bool
     ; session_id : string option
     ; new_session : bool
+    ; new_daemon_session : bool
+    ; daemon_prompt : string option
+    ; workspace : string option
+    ; detached : bool
+    ; owner_bound : bool
+    ; read_only : bool
+    ; disconnect_grace_ms : int
     ; export_session_id : string option
     ; export_out_file : string option
     ; export_file : string option
     ; session_info : string option
+    ; start_session_id : string option
+    ; stop_session_id : string option
+    ; stop_cancel : bool
+    ; delete_session_id : string option
+    ; delete_archive : bool
     ; reset_session_id : string option
     ; reset_prompt_file : string option
     ; reset_keep_history : bool
     ; parallel_tool_calls : bool
     ; no_parallel_tool_calls : bool
+    ; textmate_grammar_files : string list
+    ; authorize_shell_manifest : bool
     ; no_persist : bool
     ; auto_persist : bool
     ; rebuild_session_id : string option
@@ -1293,6 +1248,39 @@ module Cli = struct
     ; dry_run : bool
     ; prompt_preview_max : int
     }
+
+  type daemon_target =
+    | Attach of { session_id : string }
+    | Create of
+        { prompt : string
+        ; workspace : string
+        ; liveness : Agent_protocol.Session.liveness
+        }
+
+  type daemon_admin =
+    | List of { format : Handlers.Output_format.t }
+    | Info of
+        { id : string
+        ; format : Handlers.Output_format.t
+        }
+    | Reset of
+        { id : string
+        ; keep_history : bool
+        }
+    | Rebuild of { id : string }
+    | Start of { id : string }
+    | Stop of
+        { id : string
+        ; mode : Agent_protocol.Session.stop_mode
+        }
+    | Delete of
+        { id : string
+        ; policy : Agent_protocol.Session.Delete_request.policy
+        }
+    | Export of
+        { id : string
+        ; out_file : string
+        }
 
   type action =
     | List_sessions of { format : Handlers.Output_format.t }
@@ -1323,11 +1311,32 @@ module Cli = struct
         ; export_file : string option
         ; persist_mode : Chat_tui.App.persist_mode
         ; parallel_tool_calls : bool
+        ; textmate_grammar_files : string list
+        ; authorize_shell_manifest : bool
+        }
+    | Daemon_interactive of
+        { connect : string
+        ; bearer_token_file : string option
+        ; target : daemon_target
+        ; mode : Agent_protocol.Session.attachment_mode
+        ; textmate_grammar_files : string list
+        }
+    | Daemon_admin of
+        { connect : string
+        ; bearer_token_file : string option
+        ; command : daemon_admin
+        }
+    | Embedded_interactive of
+        { prompt_file : string
+        ; textmate_grammar_files : string list
         }
 
   type selector =
     | Sel_list_sessions
     | Sel_session_info of string
+    | Sel_start_session of string
+    | Sel_stop_session of string
+    | Sel_delete_session of string
     | Sel_reset_session of string
     | Sel_export_session of string
     | Sel_rebuild_from_prompt of string
@@ -1336,14 +1345,17 @@ module Cli = struct
     List.filter_opt
       [ (if t.list_sessions then Some Sel_list_sessions else None)
       ; Option.map t.session_info ~f:(fun id -> Sel_session_info id)
+      ; Option.map t.start_session_id ~f:(fun id -> Sel_start_session id)
+      ; Option.map t.stop_session_id ~f:(fun id -> Sel_stop_session id)
+      ; Option.map t.delete_session_id ~f:(fun id -> Sel_delete_session id)
       ; Option.map t.reset_session_id ~f:(fun id -> Sel_reset_session id)
       ; Option.map t.export_session_id ~f:(fun id -> Sel_export_session id)
       ; Option.map t.rebuild_session_id ~f:(fun id -> Sel_rebuild_from_prompt id)
       ]
   ;;
 
-  let require_no_session_selection t =
-    if Option.is_some t.session_id || t.new_session
+  let require_no_local_session_selection t =
+    if Option.is_some t.session_id || t.new_session || t.new_daemon_session
     then
       Or_error.error_string
         "Error: --session/--new-session cannot be used with this mode."
@@ -1422,6 +1434,10 @@ module Cli = struct
     then
       Or_error.error_string
         "Error: --no-persist and --auto-persist are mutually exclusive."
+    else if t.authorize_shell_manifest && not (List.is_empty (selectors t))
+    then
+      Or_error.error_string
+        "Error: --authorize-shell-manifest can only be used in interactive mode."
     else if
       t.dry_run
       && Option.is_none t.reset_session_id
@@ -1434,6 +1450,12 @@ module Cli = struct
     else if t.reset_keep_history && Option.is_none t.reset_session_id
     then
       Or_error.error_string "Error: --keep-history can only be used with --reset-session."
+    else if t.stop_cancel && Option.is_none t.stop_session_id
+    then Or_error.error_string "Error: --cancel can only be used with --stop-session."
+    else if t.delete_archive && Option.is_none t.delete_session_id
+    then Or_error.error_string "Error: --archive can only be used with --delete-session."
+    else if Option.is_some t.bearer_token_file && Option.is_none t.connect
+    then Or_error.error_string "Error: --bearer-token-file requires --connect."
     else Ok ()
   ;;
 
@@ -1451,18 +1473,126 @@ module Cli = struct
     else Ok ()
   ;;
 
-  let normalize_interactive t =
+  let rec normalize_interactive t =
+    match t.connect with
+    | Some connect -> normalize_daemon_interactive t ~connect
+    | None -> normalize_local_interactive t
+
+  and normalize_local_interactive t =
     let open Or_error.Let_syntax in
-    let%bind persist_mode = derive_persist_mode t in
-    let%map parallel_tool_calls = derive_parallel_tool_calls t in
-    Interactive
-      { session_id = t.session_id
-      ; new_session = t.new_session
-      ; prompt_file = t.conversation_file
-      ; export_file = t.export_file
-      ; persist_mode
-      ; parallel_tool_calls
+    if
+      t.new_daemon_session
+      || Option.is_some t.daemon_prompt
+      || Option.is_some t.workspace
+      || t.detached
+      || t.owner_bound
+      || t.read_only
+    then Or_error.error_string "Error: daemon session flags require --connect."
+    else (
+      let legacy_requested =
+        Option.is_some t.session_id
+        || t.new_session
+        || Option.is_some t.export_file
+        || t.no_persist
+        || t.auto_persist
+        || t.parallel_tool_calls
+        || t.no_parallel_tool_calls
+        || t.authorize_shell_manifest
+      in
+      if t.local && legacy_requested
+      then
+        Or_error.error_string
+          "Error: legacy session/export/runtime flags are not supported with explicit \
+           --local."
+      else if t.local || not legacy_requested
+      then
+        Ok
+          (Embedded_interactive
+             { prompt_file = t.conversation_file
+             ; textmate_grammar_files = t.textmate_grammar_files
+             })
+      else (
+        let%bind persist_mode = derive_persist_mode t in
+        let%map parallel_tool_calls = derive_parallel_tool_calls t in
+        Interactive
+          { session_id = t.session_id
+          ; new_session = t.new_session
+          ; prompt_file = t.conversation_file
+          ; export_file = t.export_file
+          ; persist_mode
+          ; parallel_tool_calls
+          ; textmate_grammar_files = t.textmate_grammar_files
+          ; authorize_shell_manifest = t.authorize_shell_manifest
+          }))
+
+  and normalize_daemon_interactive t ~connect =
+    let open Or_error.Let_syntax in
+    let%bind () =
+      if t.local
+      then Or_error.error_string "Error: --local and --connect are mutually exclusive."
+      else if t.new_session
+      then Or_error.error_string "Error: use --new-daemon-session with --connect."
+      else if Option.is_some t.export_file || t.no_persist || t.auto_persist
+      then
+        Or_error.error_string
+          "Error: local export/persistence flags cannot be used with --connect."
+      else if
+        t.parallel_tool_calls || t.no_parallel_tool_calls || t.authorize_shell_manifest
+      then
+        Or_error.error_string "Error: local runtime flags cannot be used with --connect."
+      else if t.detached && t.owner_bound
+      then
+        Or_error.error_string
+          "Error: --detached and --owner-bound are mutually exclusive."
+      else if t.read_only && t.owner_bound
+      then Or_error.error_string "Error: an owner-bound attachment cannot be read-only."
+      else if t.disconnect_grace_ms < 0
+      then Or_error.error_string "Error: --disconnect-grace-ms must be nonnegative."
+      else Ok ()
+    in
+    let mode =
+      if t.read_only
+      then Agent_protocol.Session.Read_only
+      else if t.owner_bound
+      then Owner_read_write
+      else Read_write
+    in
+    let%map target = daemon_target t in
+    Daemon_interactive
+      { connect
+      ; bearer_token_file = t.bearer_token_file
+      ; target
+      ; mode
+      ; textmate_grammar_files = t.textmate_grammar_files
       }
+
+  and daemon_target t =
+    match t.session_id, t.new_daemon_session with
+    | Some session_id, false ->
+      if Option.is_some t.daemon_prompt || Option.is_some t.workspace || t.detached
+      then
+        Or_error.error_string
+          "Error: creation flags cannot be used when attaching --session."
+      else Ok (Attach { session_id })
+    | None, true ->
+      (match t.daemon_prompt, t.workspace with
+       | Some prompt, Some workspace ->
+         let liveness =
+           if t.owner_bound
+           then
+             Agent_protocol.Session.Owner_bound
+               { disconnect_grace_ms = t.disconnect_grace_ms; stop_mode = Graceful }
+           else Detached
+         in
+         Ok (Create { prompt; workspace; liveness })
+       | _ ->
+         Or_error.error_string
+           "Error: --new-daemon-session requires --prompt and --workspace.")
+    | Some _, true ->
+      Or_error.error_string
+        "Error: --session and --new-daemon-session are mutually exclusive."
+    | None, false ->
+      Or_error.error_string "Error: --connect requires --session or --new-daemon-session."
   ;;
 
   let normalize_export_session t ~id =
@@ -1472,9 +1602,9 @@ module Cli = struct
     | Some out_file -> Ok (Export_session { id; out_file })
   ;;
 
-  let normalize_selected t sel =
+  let normalize_local_selected t sel =
     let open Or_error.Let_syntax in
-    let%bind () = require_no_session_selection t in
+    let%bind () = require_no_local_session_selection t in
     match sel with
     | Sel_list_sessions ->
       let%map format = list_sessions_format t in
@@ -1482,6 +1612,9 @@ module Cli = struct
     | Sel_session_info id ->
       let%map format = session_info_format t in
       Session_info { id; format }
+    | Sel_start_session _ | Sel_stop_session _ | Sel_delete_session _ ->
+      Or_error.error_string
+        "Error: --start-session, --stop-session, and --delete-session require --connect."
     | Sel_reset_session id ->
       Ok
         (Reset_session
@@ -1498,6 +1631,63 @@ module Cli = struct
            { id; dry_run = t.dry_run; prompt_preview_max = t.prompt_preview_max })
   ;;
 
+  let validate_daemon_selected t =
+    if t.local
+    then Or_error.error_string "Error: --local and --connect are mutually exclusive."
+    else if
+      Option.is_some t.session_id
+      || t.new_session
+      || t.new_daemon_session
+      || Option.is_some t.daemon_prompt
+      || Option.is_some t.workspace
+      || t.detached
+      || t.owner_bound
+      || t.read_only
+    then Or_error.error_string "Error: interactive daemon flags cannot be used here."
+    else if t.dry_run
+    then
+      Or_error.error_string "Error: --dry-run is not supported for daemon administration."
+    else if Option.is_some t.reset_prompt_file
+    then
+      Or_error.error_string
+        "Error: connected reset cannot replace the prompt; use prompt upgrade/rebuild."
+    else Ok ()
+  ;;
+
+  let normalize_daemon_selected t ~connect sel =
+    let open Or_error.Let_syntax in
+    let%bind () = validate_daemon_selected t in
+    let%map command =
+      match sel with
+      | Sel_list_sessions ->
+        let%map format = list_sessions_format t in
+        List { format }
+      | Sel_session_info id ->
+        let%map format = session_info_format t in
+        Info { id; format }
+      | Sel_start_session id -> Ok (Start { id })
+      | Sel_stop_session id ->
+        Ok (Stop { id; mode = (if t.stop_cancel then Cancel else Graceful) })
+      | Sel_delete_session id ->
+        Ok (Delete { id; policy = (if t.delete_archive then Archive else Remove) })
+      | Sel_reset_session id -> Ok (Reset { id; keep_history = t.reset_keep_history })
+      | Sel_rebuild_from_prompt id -> Ok (Rebuild { id })
+      | Sel_export_session id ->
+        (match t.export_out_file with
+         | None ->
+           Or_error.error_string
+             "Error: --out must be provided when using --export-session."
+         | Some out_file -> Ok (Export { id; out_file }))
+    in
+    Daemon_admin { connect; bearer_token_file = t.bearer_token_file; command }
+  ;;
+
+  let normalize_selected t sel =
+    match t.connect with
+    | None -> normalize_local_selected t sel
+    | Some connect -> normalize_daemon_selected t ~connect sel
+  ;;
+
   let normalize_action t =
     let open Or_error.Let_syntax in
     let%bind () = validate_global t in
@@ -1507,6 +1697,399 @@ module Cli = struct
     | [ sel ] -> normalize_selected t sel
     | _ ->
       Or_error.error_string "Error: multiple session modes selected; choose only one."
+  ;;
+end
+
+module Daemon_connection = struct
+  let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
+
+  let endpoint ~env ~connect ~bearer_token_file =
+    let open Result.Let_syntax in
+    let%bind bearer_token =
+      match bearer_token_file with
+      | None -> Ok None
+      | Some path ->
+        Agent_transport_client.Endpoint.load_bearer_token ~env ~path
+        |> Result.map ~f:Option.some
+    in
+    Agent_transport_client.Endpoint.create ~home:(Sys.getenv "HOME") ~bearer_token connect
+  ;;
+
+  let with_connection ~env ~connect ~bearer_token_file f =
+    let open Or_error.Let_syntax in
+    let%bind endpoint =
+      endpoint ~env ~connect ~bearer_token_file |> Result.map_error ~f:protocol_error
+    in
+    Eio.Switch.run
+    @@ fun sw ->
+    let%bind connection =
+      Agent_transport_client.Endpoint.connect
+        endpoint
+        ~sw
+        ~env
+        ~notification_capacity:4096
+      |> Result.map_error ~f:protocol_error
+    in
+    Fun.protect
+      ~finally:(fun () -> Agent_client.Connection.close connection)
+      (fun () -> f sw endpoint connection)
+  ;;
+end
+
+module Daemon_interactive = struct
+  let protocol_error = Daemon_connection.protocol_error
+
+  let attach ~sw ~env ~connection ~reconnect ~mode session_id =
+    let open Or_error.Let_syntax in
+    let%bind session_id =
+      Agent_protocol.Id.Session.of_string session_id |> Result.map_error ~f:protocol_error
+    in
+    Chat_tui.Agent_session_client.attach
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~connection
+      ~reconnect:(Some reconnect)
+      ~session_id
+      ~mode
+      ()
+    |> Result.map_error ~f:protocol_error
+  ;;
+
+  let create ~sw ~env ~connection ~reconnect ~mode ~prompt ~workspace ~liveness =
+    Chat_tui.Agent_session_client.create
+      ~sw
+      ~clock:(Eio.Stdenv.clock env)
+      ~connection
+      ~reconnect:(Some reconnect)
+      { prompt
+      ; workspace
+      ; liveness
+      ; permission_profile = None
+      ; display_name = None
+      ; labels = []
+      ; mode
+      }
+    |> Result.map_error ~f:protocol_error
+  ;;
+
+  let select_client ~sw ~env ~connection ~reconnect ~mode = function
+    | Cli.Attach { session_id } -> attach ~sw ~env ~connection ~reconnect ~mode session_id
+    | Create { prompt; workspace; liveness } ->
+      create ~sw ~env ~connection ~reconnect ~mode ~prompt ~workspace ~liveness
+  ;;
+
+  let run
+        ~typeahead_config
+        ~env
+        ~connect
+        ~bearer_token_file
+        ~target
+        ~mode
+        ~textmate_grammar_files
+    =
+    Daemon_connection.with_connection
+      ~env
+      ~connect
+      ~bearer_token_file
+      (fun sw endpoint connection ->
+         let reconnect () =
+           Agent_transport_client.Endpoint.connect
+             endpoint
+             ~sw
+             ~env
+             ~notification_capacity:4096
+         in
+         let open Or_error.Let_syntax in
+         let%map client = select_client ~sw ~env ~connection ~reconnect ~mode target in
+         Chat_tui.App.run_agent_session
+           ~typeahead_config
+           ~env
+           ~client
+           ~textmate_grammar_files
+           ())
+  ;;
+end
+
+module Daemon_admin = struct
+  let protocol_error = Daemon_connection.protocol_error
+  let write env text = Eio.Flow.copy_string text (Eio.Stdenv.stdout env)
+  let state_text sexp_of value = Sexp.to_string_mach (sexp_of value)
+
+  let session_line (session : Agent_protocol.Session.t) =
+    String.concat
+      ~sep:"\t"
+      [ Agent_protocol.Id.Session.to_string session.id
+      ; Option.value session.spec.display_name ~default:""
+      ; state_text Agent_protocol.Session.sexp_of_desired_state session.desired_state
+      ; state_text Agent_protocol.Session.sexp_of_observed_state session.observed_state
+      ]
+  ;;
+
+  let write_sessions env format sessions =
+    match format with
+    | Handlers.Output_format.Json ->
+      `Array (List.map sessions ~f:Agent_protocol.Session.to_json)
+      |> Jsonaf.to_string
+      |> fun json -> write env (json ^ "\n")
+    | Tsv | Human ->
+      List.iter sessions ~f:(fun session -> write env (session_line session ^ "\n"))
+  ;;
+
+  let write_info env format (snapshot : Agent_protocol.Snapshot.t) =
+    let session = snapshot.session in
+    match format with
+    | Handlers.Output_format.Json ->
+      write env (Jsonaf.to_string (Agent_protocol.Snapshot.to_json snapshot) ^ "\n")
+    | Tsv -> write env (session_line session ^ "\n")
+    | Human ->
+      write
+        env
+        (sprintf
+           "Session: %s\nDesired: %s\nObserved: %s\nRevision: %Ld\nEvent sequence: %Ld\n"
+           (Agent_protocol.Id.Session.to_string session.id)
+           (state_text Agent_protocol.Session.sexp_of_desired_state session.desired_state)
+           (state_text
+              Agent_protocol.Session.sexp_of_observed_state
+              session.observed_state)
+           snapshot.revision
+           snapshot.latest_event_sequence)
+  ;;
+
+  let session_id value =
+    Agent_protocol.Id.Session.of_string value |> Result.map_error ~f:protocol_error
+  ;;
+
+  let initialize connection =
+    Agent_client.Session_handle.initialize
+      connection
+      ~implementation_name:"chat-tui-admin"
+      ~implementation_version:"dev"
+    |> Result.map_error ~f:protocol_error
+  ;;
+
+  let with_handle ~env ~sw ~connection id f =
+    let open Or_error.Let_syntax in
+    let%bind session_id = session_id id in
+    let%bind handle =
+      Agent_client.Session_handle.attach
+        ~sw
+        ~clock:(Eio.Stdenv.clock env)
+        ~connection
+        ~session_id
+        ~mode:Read_write
+        ~subscribe:false
+        ()
+      |> Result.map_error ~f:protocol_error
+    in
+    let snapshot =
+      Agent_client.Session_handle.projection handle |> Agent_client.Projection.snapshot
+    in
+    Fun.protect
+      ~finally:(fun () -> Agent_client.Session_handle.close handle)
+      (fun () -> f handle snapshot)
+  ;;
+
+  let reset ~env ~sw ~connection id ~keep_history =
+    with_handle ~env ~sw ~connection id (fun handle snapshot ->
+      Agent_client.Session_handle.reset
+        handle
+        ~expected_revision:snapshot.revision
+        ~keep_history
+        ~keep_tasks:false
+        ~keep_cache:false
+        ~keep_workspace:true
+        ~keep_grants:false
+        ~keep_labels:true
+      |> Result.map_error ~f:protocol_error
+      |> Or_error.map ~f:(fun session -> write env (session_line session ^ "\n")))
+  ;;
+
+  let rebuild ~env ~sw ~connection id =
+    with_handle ~env ~sw ~connection id (fun handle snapshot ->
+      Agent_client.Session_handle.rebuild
+        handle
+        ~expected_revision:snapshot.revision
+        ~prompt_choice:Pinned
+      |> Result.map_error ~f:protocol_error
+      |> Or_error.map ~f:(fun session -> write env (session_line session ^ "\n")))
+  ;;
+
+  let start ~env ~sw ~connection id =
+    with_handle ~env ~sw ~connection id (fun handle _snapshot ->
+      Agent_client.Session_handle.start handle ~queue_if_limited:true
+      |> Result.map_error ~f:protocol_error
+      |> Or_error.map ~f:(fun session -> write env (session_line session ^ "\n")))
+  ;;
+
+  let stop ~env ~sw ~connection id ~mode =
+    with_handle ~env ~sw ~connection id (fun handle _snapshot ->
+      Agent_client.Session_handle.stop handle ~mode
+      |> Result.map_error ~f:protocol_error
+      |> Or_error.map ~f:(fun session -> write env (session_line session ^ "\n")))
+  ;;
+
+  let delete ~env ~sw ~connection id ~policy =
+    with_handle ~env ~sw ~connection id (fun handle snapshot ->
+      Agent_client.Session_handle.delete
+        handle
+        ~expected_revision:snapshot.revision
+        ~policy
+        ~confirmation:id
+      |> Result.map_error ~f:protocol_error
+      |> Or_error.map ~f:(fun receipt ->
+        write
+          env
+          (sprintf
+             "Deleted session %s at %s\n"
+             (Agent_protocol.Id.Session.to_string receipt.session_id)
+             (Agent_protocol.Timestamp.to_string receipt.deleted_at))))
+  ;;
+
+  let export_format out_file =
+    let _, extension = Filename.split_extension out_file in
+    if Option.exists extension ~f:(String.Caseless.equal ".json")
+    then Agent_protocol.Session.Export_request.Json
+    else Chatmd
+  ;;
+
+  let output_path env out_file =
+    let base =
+      if Filename.is_absolute out_file then Eio.Stdenv.fs env else Eio.Stdenv.cwd env
+    in
+    Eio.Path.(base / out_file)
+  ;;
+
+  let confirm_overwrite ~env ~path ~out_file =
+    if not (Eio.Path.is_file path)
+    then true
+    else (
+      write env (sprintf "File %s exists. Overwrite? [y/N] " out_file);
+      let input = Eio.Buf_read.of_flow (Eio.Stdenv.stdin env) ~max_size:1_024 in
+      match Eio.Buf_read.line input with
+      | answer ->
+        List.mem
+          [ "y"; "yes" ]
+          (String.lowercase (String.strip answer))
+          ~equal:String.equal
+      | exception End_of_file -> false)
+  ;;
+
+  let download_export ~env ~handle ~blob ~out_file =
+    let path = output_path env out_file in
+    if not (confirm_overwrite ~env ~path ~out_file)
+    then (
+      write env "Aborted.\n";
+      Ok ())
+    else
+      let open Or_error.Let_syntax in
+      let%map () =
+        Agent_client.Blob_download.install_atomic ~path ~download:(fun output ->
+          Agent_client.Session_handle.download_blob handle ~blob ~output)
+      in
+      write env (sprintf "Session export written to %s\n" out_file)
+  ;;
+
+  let export ~env ~sw ~connection id ~out_file =
+    with_handle ~env ~sw ~connection id (fun handle _snapshot ->
+      let open Or_error.Let_syntax in
+      let%bind export =
+        Agent_client.Session_handle.export
+          handle
+          ~format:(export_format out_file)
+          ~revision:None
+        |> Result.map_error ~f:protocol_error
+      in
+      download_export ~env ~handle ~blob:export.blob ~out_file)
+  ;;
+
+  let run_command ~env ~sw ~connection = function
+    | Cli.List { format } ->
+      Agent_client.Admin.list_sessions connection
+      |> Result.map_error ~f:protocol_error
+      |> Or_error.map ~f:(write_sessions env format)
+    | Info { id; format } ->
+      let open Or_error.Let_syntax in
+      let%bind session_id = session_id id in
+      let%map snapshot =
+        Agent_client.Admin.get_session connection session_id
+        |> Result.map_error ~f:protocol_error
+      in
+      write_info env format snapshot
+    | Reset { id; keep_history } -> reset ~env ~sw ~connection id ~keep_history
+    | Rebuild { id } -> rebuild ~env ~sw ~connection id
+    | Start { id } -> start ~env ~sw ~connection id
+    | Stop { id; mode } -> stop ~env ~sw ~connection id ~mode
+    | Delete { id; policy } -> delete ~env ~sw ~connection id ~policy
+    | Export { id; out_file } -> export ~env ~sw ~connection id ~out_file
+  ;;
+
+  let run ~env ~connect ~bearer_token_file ~command =
+    Daemon_connection.with_connection
+      ~env
+      ~connect
+      ~bearer_token_file
+      (fun sw _endpoint connection ->
+         let open Or_error.Let_syntax in
+         let%bind _ = initialize connection in
+         run_command ~env ~sw ~connection command)
+  ;;
+end
+
+module Embedded_interactive = struct
+  let protocol_error error = Error.create_s [%sexp (error : Agent_protocol.Error.t)]
+
+  let working_directory env =
+    let native = Eio.Path.native_exn (Eio.Stdenv.cwd env) in
+    if Filename.is_absolute native then native else Eio_posix.Low_level.realpath native
+  ;;
+
+  let absolute_path ~cwd path =
+    if Filename.is_absolute path then path else Filename.concat cwd path
+  ;;
+
+  let run ~typeahead_config ~env ~prompt_file ~textmate_grammar_files =
+    Eio.Switch.run
+    @@ fun sw ->
+    let workspace = working_directory env in
+    let home = Sys.getenv "HOME" |> Option.value ~default:workspace in
+    let options =
+      Agent_server.Embedded.
+        { prompt_file = absolute_path ~cwd:workspace prompt_file
+        ; workspace
+        ; tool_dir = workspace
+        ; home
+        ; data_root = None
+        ; start_immediately = true
+        ; permission_profile = default_permission_profile
+        ; attachment_mode = Agent_protocol.Session.Read_write
+        ; event_capacity = 4096
+        }
+    in
+    Agent_server.Embedded.start ~sw ~env options
+    |> Result.map_error ~f:protocol_error
+    |> Or_error.bind ~f:(fun host ->
+      Fun.protect
+        ~finally:(fun () -> Agent_server.Embedded.close host)
+        (fun () ->
+           let connection = Agent_server.Embedded.connect host in
+           Fun.protect
+             ~finally:(fun () -> Agent_client.Connection.close connection)
+             (fun () ->
+                Chat_tui.Agent_session_client.attach
+                  ~sw
+                  ~clock:(Eio.Stdenv.clock env)
+                  ~connection
+                  ~session_id:(Agent_server.Embedded.session_id host)
+                  ~mode:Agent_protocol.Session.Read_write
+                  ()
+                |> Result.map_error ~f:protocol_error
+                |> Or_error.map ~f:(fun client ->
+                  Chat_tui.App.run_agent_session
+                    ~typeahead_config
+                    ~env
+                    ~client
+                    ~textmate_grammar_files
+                    ()))))
   ;;
 end
 
@@ -1526,10 +2109,10 @@ let run_env_action ~env (action : Cli.action) =
     Handlers.handle_rebuild_from_prompt ~env ~id ~dry_run ~prompt_preview_max
   | Export_session { id; out_file } ->
     Handlers.handle_export_session ~env ~id ~outfile:out_file
-  | Interactive _ -> ()
+  | Interactive _ | Daemon_interactive _ | Daemon_admin _ | Embedded_interactive _ -> ()
 ;;
 
-let run_action (action : Cli.action) =
+let run_action ~typeahead_config (action : Cli.action) =
   match action with
   | Interactive
       { session_id
@@ -1538,15 +2121,39 @@ let run_action (action : Cli.action) =
       ; export_file
       ; persist_mode
       ; parallel_tool_calls
+      ; textmate_grammar_files
+      ; authorize_shell_manifest
       } ->
     Handlers.handle_interactive
+      ~typeahead_config
       ~prompt_file
       ~session_id
       ~new_session
       ~export_file
       ~persist_mode
       ~parallel_tool_calls
-  | _ -> Env.with_env (fun env -> run_env_action ~env action)
+      ~textmate_grammar_files
+      ~authorize_shell_manifest;
+    Ok ()
+  | Daemon_interactive
+      { connect; bearer_token_file; target; mode; textmate_grammar_files } ->
+    Env.with_env (fun env ->
+      Daemon_interactive.run
+        ~typeahead_config
+        ~env
+        ~connect
+        ~bearer_token_file
+        ~target
+        ~mode
+        ~textmate_grammar_files)
+  | Daemon_admin { connect; bearer_token_file; command } ->
+    Env.with_env (fun env -> Daemon_admin.run ~env ~connect ~bearer_token_file ~command)
+  | Embedded_interactive { prompt_file; textmate_grammar_files } ->
+    Env.with_env (fun env ->
+      Embedded_interactive.run ~typeahead_config ~env ~prompt_file ~textmate_grammar_files)
+  | _ ->
+    Env.with_env (fun env -> run_env_action ~env action);
+    Ok ()
 ;;
 
 let run_from_raw (raw : Cli.raw_flags) =
@@ -1554,12 +2161,18 @@ let run_from_raw (raw : Cli.raw_flags) =
   then (
     print_help_short ();
     Ok ())
-  else (
-    match Cli.normalize_action raw |> Or_error.tag ~tag:"Invalid flags (try --help)" with
-    | Error _ as err -> err
-    | Ok action ->
-      run_action action;
-      Ok ())
+  else
+    let open Or_error.Let_syntax in
+    let%bind action =
+      Cli.normalize_action raw |> Or_error.tag ~tag:"Invalid flags (try --help)"
+    in
+    let%bind typeahead_config = raw.typeahead_config in
+    let%bind () =
+      Chat_tui.Type_ahead_config.validate_credentials
+        typeahead_config
+        ~api_key:(Sys.getenv "OPENAI_API_KEY")
+    in
+    run_action ~typeahead_config action
 ;;
 
 let raw_flags_param =
@@ -1573,6 +2186,48 @@ let raw_flags_param =
           "FILE Prompt file (ChatMarkdown/Markdown) used to seed the interactive \
            session. Also used to derive the default session ID when neither --session \
            nor --new-session is provided. (default: ./prompts/interactive.md)"
+    and typeahead =
+      flag
+        "--typeahead"
+        (optional_with_default "off" string)
+        ~doc:
+          "MODE Unsent draft suggestions: off (default), manual, auto; extra provider \
+           charges."
+    and typeahead_model =
+      flag
+        "--typeahead-model"
+        (optional_with_default "gpt-5.6-luna" string)
+        ~doc:"MODEL Local suggestion model, independent of the agent model."
+    and typeahead_history =
+      flag
+        "--typeahead-history-messages"
+        (optional_with_default 0 int)
+        ~doc:"N Opt in to sending 0–3 visible messages with the draft (default 0)."
+    and typeahead_debounce =
+      flag
+        "--typeahead-debounce-ms"
+        (optional_with_default 200 int)
+        ~doc:"MS Automatic suggestion debounce, 100–5000 (default 200)."
+    and typeahead_tokens =
+      flag
+        "--typeahead-max-output-tokens"
+        (optional_with_default 200 int)
+        ~doc:"N Suggestion output limit, 1–512 (default 200); not a spending cap."
+    and local =
+      flag
+        "--local"
+        no_arg
+        ~doc:"Run an embedded local session instead of connecting to a daemon."
+    and connect =
+      flag
+        "--connect"
+        (optional string)
+        ~doc:"URI Connect to an Ochat daemon using unix://, http://, or https://."
+    and bearer_token_file =
+      flag
+        "--bearer-token-file"
+        (optional string)
+        ~doc:"FILE Read the HTTP daemon bearer token from FILE using Eio."
     and list_sessions =
       flag
         "--list-sessions"
@@ -1594,6 +2249,37 @@ let raw_flags_param =
         ~doc:
           "Force creation of a brand-new session (UUID) even if a prompt-derived session \
            already exists. Incompatible with --session."
+    and new_daemon_session =
+      flag
+        "--new-daemon-session"
+        no_arg
+        ~doc:"Create a daemon-owned session and attach to it."
+    and daemon_prompt =
+      flag
+        "--prompt"
+        (optional string)
+        ~doc:"PROMPT_ID Configured prompt name for --new-daemon-session."
+    and workspace =
+      flag
+        "--workspace"
+        (optional string)
+        ~doc:"WORKSPACE_ID Configured workspace name for --new-daemon-session."
+    and detached =
+      flag
+        "--detached"
+        no_arg
+        ~doc:"Create a durable daemon session that outlives this TUI."
+    and owner_bound =
+      flag
+        "--owner-bound"
+        no_arg
+        ~doc:"Create or attach with an owner lease whose loss starts stop grace."
+    and read_only = flag "--read-only" no_arg ~doc:"Attach as a read-only observer."
+    and disconnect_grace_ms =
+      flag
+        "--disconnect-grace-ms"
+        (optional_with_default 30_000 int)
+        ~doc:"MS Owner-bound disconnect grace period."
     and export_session_id =
       flag
         "--export-session"
@@ -1622,6 +2308,28 @@ let raw_flags_param =
         ~doc:
           "NAME Display metadata for session NAME (prompt path, timestamps, history \
            length, …) and exit."
+    and start_session_id =
+      flag
+        "--start-session"
+        (optional string)
+        ~doc:"ID Start a stopped daemon session. Requires --connect."
+    and stop_session_id =
+      flag
+        "--stop-session"
+        (optional string)
+        ~doc:"ID Gracefully stop a daemon session. Requires --connect."
+    and stop_cancel =
+      flag "--cancel" no_arg ~doc:"Cancel active work when used with --stop-session."
+    and delete_session_id =
+      flag
+        "--delete-session"
+        (optional string)
+        ~doc:"ID Delete a stopped daemon session. Requires --connect."
+    and delete_archive =
+      flag
+        "--archive"
+        no_arg
+        ~doc:"Archive instead of removing when used with --delete-session."
     and reset_session_id =
       flag
         "--reset-session"
@@ -1657,6 +2365,20 @@ let raw_flags_param =
         ~doc:
           "Disable parallel execution of callable tools during interactive runs (forces \
            sequential evaluation)."
+    and textmate_grammar_files =
+      flag
+        "--textmate-grammar"
+        (listed string)
+        ~doc:
+          "FILE Load an additional TextMate grammar before starting the TUI. May be \
+           repeated. Explicit files are loaded before automatically discovered grammars."
+    and authorize_shell_manifest =
+      flag
+        "--authorize-shell-manifest"
+        no_arg
+        ~doc:
+          "Authorize the exact canonical shell manifest compiled from the prompt for \
+           this interactive process. Without this flag, shell manifests fail closed."
     and no_persist =
       flag
         "--no-persist"
@@ -1699,19 +2421,43 @@ let raw_flags_param =
         (optional_with_default 2000 int)
         ~doc:"N Max chars of prompt preview for --dry-run (0 = unlimited)."
     in
-    ({ conversation_file
+    ({ typeahead_config =
+         Chat_tui.Type_ahead_config.create
+           ~mode:typeahead
+           ~model:typeahead_model
+           ~history_messages:typeahead_history
+           ~debounce_ms:typeahead_debounce
+           ~max_output_tokens:typeahead_tokens
+     ; conversation_file
+     ; local
+     ; connect
+     ; bearer_token_file
      ; list_sessions
      ; session_id
      ; new_session
+     ; new_daemon_session
+     ; daemon_prompt
+     ; workspace
+     ; detached
+     ; owner_bound
+     ; read_only
+     ; disconnect_grace_ms
      ; export_session_id
      ; export_out_file
      ; export_file
      ; session_info
+     ; start_session_id
+     ; stop_session_id
+     ; stop_cancel
+     ; delete_session_id
+     ; delete_archive
      ; reset_session_id
      ; reset_prompt_file
      ; reset_keep_history
      ; parallel_tool_calls
      ; no_parallel_tool_calls
+     ; textmate_grammar_files
+     ; authorize_shell_manifest
      ; no_persist
      ; auto_persist
      ; rebuild_session_id
@@ -1879,7 +2625,30 @@ let inject_config_args argv selection =
             eprintf "%s\n" (Error.to_string_hum e);
             exit 1
         in
-        (prog :: config_args) @ rest)
+        let scalar_flags =
+          [ "--typeahead"
+          ; "--typeahead-model"
+          ; "--typeahead-history-messages"
+          ; "--typeahead-debounce-ms"
+          ; "--typeahead-max-output-tokens"
+          ]
+        in
+        let overridden flag =
+          List.exists rest ~f:(fun arg ->
+            String.equal arg flag || String.is_prefix arg ~prefix:(flag ^ "="))
+        in
+        let rec filter = function
+          | flag :: _value :: tail
+            when List.mem scalar_flags flag ~equal:String.equal && overridden flag ->
+            filter tail
+          | arg :: tail
+            when List.exists scalar_flags ~f:(fun flag ->
+                   String.is_prefix arg ~prefix:(flag ^ "=") && overridden flag) ->
+            filter tail
+          | arg :: tail -> arg :: filter tail
+          | [] -> []
+        in
+        (prog :: filter config_args) @ rest)
 ;;
 
 let print_effective_args_and_exit ~selection ~argv ~command_kind ~apply_config =

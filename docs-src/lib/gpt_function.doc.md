@@ -1,154 +1,113 @@
-# `Ochat_function` – Registering function-calling **tools** for OpenAI
+# Ochat_function — register and observe custom OCaml tools
 
-The `Ochat_function` module provides a *very* small abstraction that bridges the
-gap between
+Use `ochat.ochat_function` to combine model-visible metadata with an OCaml
+implementation. ChatMD authors normally select [built-ins](../overview/tools.md)
+or [other tool kinds](../tools/README.md); this API is for library authors.
 
-*a) declarative* tool descriptions expected by the OpenAI Chat Completions API
-and
+## Definition and registration
 
-*b) concrete* OCaml functions that execute the requested action.
-
-It is the foundation used across the code-base to expose helpers such as
-`read_file`, `apply_patch`, or `odoc_search` to the LLM.
-
----
-
-## 1 .  Why does it exist?
-
-OpenAI models understand **JSON schemas** and can ask the host program to call
-one of the advertised *tools*.  A tool is identified by its `name` and is
-described by three extra fields:
-
-* `description` – plain-text summary shown to the model,
-* `parameters`  – JSON schema that defines the expected arguments,
-* `strict`      – whether extra properties are allowed (default: `true`).
-
-When the model wants to invoke a tool it returns a structure:
-
-```json
-{
-  "name": "read_file",
-  "arguments": "{ \"file\": \"lib/ochat_function.ml\" }"
-}
-```
-
-The host application is then responsible for 3 steps:
-
-1. Look up the implementation by `name`.
-2. Parse the `arguments` string into an OCaml value.
-3. Execute the function and feed the *string* result back to the model.
-
-`Ochat_function` makes the process trivial and type-safe.
-
----
-
-## 2 .  Public API recap
-
-### 2.1  `module type Def`
-
-`Def` is a **declarative module** – it contains *only values* that describe the
-tool.
+`Def` supplies a decoded input type, `name`, `type_`, optional `description`,
+`parameters`, and `input_of_string`. For `type_ = "function"`, parameters describe
+JSON arguments; custom tools use a format/grammar object and raw input instead.
+The decoder may reject input. Registration is not local schema validation or
+authorization.
 
 ```ocaml
-module type Def = sig
-  type input
-  val name        : string
-  val description : string option
-  val parameters  : Jsonaf.t          (* JSON schema *)
-  val input_of_string : string -> input
-end
-```
-
-* `input` is the OCaml representation of the decoded arguments.
-* `input_of_string` must turn the raw JSON string received from the model into
-  an [`input`] value, raising on malformed input.
-
-
-### 2.2  `create_function`
-
-```ocaml
-val create_function
-  :  (module Def with type input = 'a)
-  -> ?strict:bool
-  -> ('a -> string)
-  -> t
-```
-
-Couples the declarative [`Def`] with its OCaml implementation.  The optional
-`~strict` flag maps to the OpenAI `strict` parameter (defaults to `true`).
-
-
-### 2.3  `functions`
-
-```ocaml
-val functions
-  :  t list
-  -> Openai.Completions.tool list * (string, string -> string) Core.Hashtbl.t
-```
-
-Takes a list of registered tools and returns:
-
-* the list to feed into `Openai.Completions.post_chat_completion ~tools`,
-* a lookup table `name → implementation` for dispatch at runtime.
-
-
----
-
-## 3 .  Full example – “echo”
-
-```ocaml
-open Core
-
 module Echo : Ochat_function.Def with type input = string = struct
   type input = string
-
   let name = "echo"
-  let description = Some "Return the given string unchanged"
-
-  let parameters =
-    `Object
-      [ "type", `String "object"
-      ; "properties", `Object [ "text", `Object [ "type", `String "string" ] ]
-      ; "required", `Array [ `String "text" ]
-      ]
-
-  let input_of_string s =
-    Jsonaf.of_string s |> Jsonaf.member_exn "text" |> Jsonaf.string_exn
+  let type_ = "function"
+  let description = Some "Return the supplied text"
+  let parameters = Jsonaf.of_string
+    {|{"type":"object","properties":{"text":{"type":"string"}},"required":["text"],"additionalProperties":false}|}
+  let input_of_string input =
+    Jsonaf.of_string input |> Jsonaf.member_exn "text" |> Jsonaf.string_exn
 end
 
-let echo_impl (text : string) = text
-
-let echo_tool   = Ochat_function.create_function (module Echo) echo_impl
-let tools, tbl  = Ochat_function.functions [ echo_tool ]
-
-(* later, after the model requests { name = "echo"; arguments = ... } *)
-let result =
-  let fn = Hashtbl.find_exn tbl "echo" in
-  fn "{\"text\":\"Hello\"}"
-(* ⇒ result = "Hello" *)
+let echo =
+  Ochat_function.create_function (module Echo)
+    (fun text -> Openai.Responses.Tool_output.Output.Text text)
 ```
 
----
+`create_function` defaults `strict` to true and forwards it as provider metadata.
+It does not enforce schemas, create confinement, request approval, catch
+implementation failures or add retries. The host owns these policies.
+Use Core/Eio capabilities in implementations that perform I/O.
 
-## 4 .  Implementation notes
+## Results and dispatch
 
-* The record type [`t`] is **transparent** – you can access the `info` and
-  `run` fields directly if needed (many internal modules do).
-* The module purposefully supports *only* `string -> string` functions – this
-  matches OpenAI’s requirement that tool outputs are plain strings.
+Results are `Openai.Responses.Tool_output.Output.t`, not bare strings:
 
+- `Text text` is ordinary textual output.
+- `Content parts` carries ordered text/image parts; `import_image` uses this.
 
----
+`Ochat_function.functions` returns metadata and a table of **runners**:
 
-## 5 .  Limitations & future work
+```ocaml
+let invoke_echo () =
+  let _metadata, dispatch = Ochat_function.functions [ echo ] in
+  let run = Core.Hashtbl.find_exn dispatch "echo" in
+  run ~invocation:Ochat_function.Invocation.silent {|{"text":"Hello"}|}
+```
 
-1. Only a single return type (`string`) is supported.  Structured responses
-   would require a second schema describing the *output*.
-2. No built-in logging or error handling – implementations are expected to
-   raise exceptions or return error strings themselves.
-3. Schema validation is *not* performed at registration time; any JSON value
-   can be supplied in [`parameters`].
+Each runner requires `~invocation`; alternatively `echo.run input` invokes
+silently. Names must be unique: duplicates raise at table construction.
+Metadata order is not a stable ordering contract for callers.
 
+## Progress-capable tools
 
----
+`create_streaming_function` passes `~invocation` to the decoded implementation.
+Emit transient progress with `Invocation.emit`; return exactly one final output.
+Progress does not replace that output and must not become canonical history.
 
+```ocaml
+let observed_echo =
+  Ochat_function.create_streaming_function (module Echo)
+    (fun ~invocation text ->
+       Ochat_function.Invocation.emit invocation
+         { channel = `Activity; update = Replace "Preparing response" };
+       Openai.Responses.Tool_output.Output.Text text)
+```
+
+Channels are `Assistant`, `Reasoning`, `Stdout`, `Stderr`, and `Activity`.
+`Append text` extends a channel; `Replace text` replaces its latest replaceable
+update. Each payload must independently be valid UTF-8. This layer does not
+sanitize, redact or bound custom progress: implementations must respect the
+host's disclosure policy before notifying observers.
+
+Use `Invocation.create callback` to observe progress, `Invocation.silent` to
+discard it, or `create_with_trace ~progress ~trace` to also observe nested tools.
+Callbacks run synchronously, must return promptly, and must be concurrency-safe
+if shared across invocations. Observer exceptions are suppressed/logged by the
+adapter so they do not change final output. Do not use observer exceptions
+as cancellation or authorization signals.
+
+## Nested traces
+
+`Invocation.emit_trace` accepts `Trace.Tool_started`, `Tool_progress`, and
+`Tool_finished`. Start includes call ID, name, function/custom kind and payload;
+finish includes `Returned`, `Raised` or `Cancelled` and optional output. These
+are transient display data, not additional authoritative tool results.
+Apply the same disclosure policy as for progress. The constructors do not
+automatically execute nested tools.
+
+`Invocation.is_observed` allows skipping expensive display-only work when no
+observer is installed. `run` and silent `run_with_progress` retain identical
+final-result semantics.
+
+## Runnable offline example
+
+The [complete example](../examples/tools/custom_tool.ml) is compiled and executed
+by the opt-in documentation check. It verifies silent/observed dispatch,
+progress delivery, structured output, duplicate names and malformed input
+without a provider key or network request:
+
+```sh
+dune exec docs-src/examples/tools/custom_tool.exe
+dune build @agent-docs-check
+```
+
+The check does not execute every historical Markdown snippet. Exact types are in
+the [interface](../../lib/ochat_function.mli); implementation is
+[here](../../lib/ochat_function.ml). See also [packaged registrations](functions.doc.md)
+and [definition catalog](definitions.doc.md).

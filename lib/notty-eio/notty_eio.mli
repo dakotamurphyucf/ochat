@@ -97,6 +97,12 @@ module Term : sig
       • [None]        – hide the cursor. *)
   val cursor : t -> (int * int) option -> unit
 
+  (** [present t ~image ~cursor] sets the image and cursor, then flushes both
+      changes in a synchronized-output region. Terminals that support DEC mode
+      2026 reveal the complete frame atomically; other terminals ignore the
+      synchronization markers. *)
+  val present : t -> image:Notty.image -> cursor:(int * int) option -> unit
+
   (** Current terminal size as [(cols, rows)].  The value is updated
       internally on every [`Resize] event. *)
   val size : t -> int * int

@@ -1,15 +1,14 @@
-# `chat_tui_type_ahead_debounce_test` — expect tests for reducer policies (async)
+# Typeahead coordinator and UI tests
 
-This module runs a real `Chat_tui.App_reducer` loop under Eio and validates
-type-ahead behaviour that depends on the reducer’s concurrency/cancellation
-policy:
+Fast offline tests inject a completion provider and an Eio clock into the shared
+`Type_ahead_ui` / `Type_ahead_controller`. They replace the retired legacy
+operation-ID tests with attachment/context/generation/draft/cursor admission
+and completion checks, off/manual/auto behavior, cancellation serialization,
+privacy bounds, editor-only acceptance, and redacted errors.
+An exact-prompt regression pins the original partial-word completion example,
+explicit context/draft delimiters, insertion-point placement with trailing text,
+and default exclusion of visible history.
 
-- `Typeahead_done` applies only when:
-  - the op id matches the current `App_runtime.typeahead_op`, and
-  - the completion snapshot (`generation`, `base_input`, `base_cursor`) still
-    matches the current editor state.
-- Stale op ids and stale snapshots are ignored, and the reducer still clears the
-  running `typeahead_op`.
-- Cursor-only movement in Insert mode clears any existing completion and closes
-  the preview popup (so suggestions cannot “stick” across cursor motion).
-
+See [the verification record](../development/typeahead-verification.md) for the
+separate opt-in real-PTY checks in each host. These pure/fake-provider tests run
+under normal `dune runtest`; no paid APIs or ordinary user stores are accessed.

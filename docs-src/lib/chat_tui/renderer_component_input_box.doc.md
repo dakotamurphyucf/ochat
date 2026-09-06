@@ -25,6 +25,7 @@ When a type-ahead completion exists and is relevant (see
 ```ocaml
 val render
   :  width:int
+  -> max_height:int
   -> model:Chat_tui.Model.t
   -> Notty.I.t * (int * int)
 ```
@@ -32,6 +33,9 @@ val render
 Parameters:
 
 - `width`: width in terminal cells (must be at least 2 to draw borders).
+- `max_height`: maximum image height in terminal cells. Long drafts scroll
+  internally to keep the caret visible; soft wrapping does not insert newlines
+  into the draft.
 - `model`: provides the active buffer and cursor/selection state.
 
 Returns `(img, (cx, cy))`, where `(cx, cy)` is the caret position **relative**
@@ -40,6 +44,6 @@ to `(img)` with `(0,0)` at the image’s top-left corner.
 ## Selection and cursor notes
 
 - Selection highlighting is applied only in Insert/Normal mode (Cmdline ignores it).
-- Cursor positioning is based on **byte offsets** (`Model.cursor_pos` or
-  `Model.cmdline_cursor`), which can drift for multi-byte UTF-8 and wide glyphs.
-
+- `Input_display` maps byte offsets to measured terminal-cell columns for
+  UTF-8 display. The editor separately aligns movement/deletion to extended
+  grapheme boundaries; see the [input contract](controller.doc.md#known-issues-and-limitations).

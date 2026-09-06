@@ -1,0 +1,5 @@
+(test
+ (name contract_test)
+ (libraries core eio eio_main eio.unix eio_posix ochat.bin_prot_utils_eio
+  ochat.md_index_catalog ochat.source ochat.log ochat.markdown_crawler ochat.odoc_crawler)
+ (preprocess (pps ppx_jane)))

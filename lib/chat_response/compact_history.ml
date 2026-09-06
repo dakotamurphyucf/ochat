@@ -90,3 +90,8 @@ let collapse_read_file_history
            Item.Custom_tool_call_output redacted))
     | _ -> item)
 ;;
+
+let collapse_read_file_entries ?placeholder entries =
+  let items = collapse_read_file_history ?placeholder (History_entry.items entries) in
+  List.map2_exn entries items ~f:History_entry.with_item
+;;

@@ -1,0 +1,21 @@
+(library
+ (name chat_response_response_loop_identity_test)
+ (modules chat_response_response_loop_identity_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_response
+  ochat.history_entry
+  openai
+  eio_main)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_response_executor_parity_test)
+ (modules chat_response_executor_parity_test)
+ (libraries core chat_response eio eio_main)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

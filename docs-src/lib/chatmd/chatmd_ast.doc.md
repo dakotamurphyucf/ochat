@@ -101,5 +101,16 @@ let ast = parse "<msg role='user'>Hi</msg>";;
 
 * [`Chatmd_lexer`](./chatmd_lexer.doc.md) – converts text to tokens.
 * [`Chatmd_parser`](./chatmd_parser.doc.md) – builds the AST from tokens.
-* [`Prompt`](./prompt.mli) – high-level operations on prompt documents.
+* [`Prompt`](../../../lib/chatmd/prompt.mli) – high-level operations on prompt documents.
 
+## Shell runtime nodes
+
+The AST’s closed tag set includes `Shell_access`, `Moderator_runtime`, and
+`Shell_element` values. The lexer recognizes nested shell elements only while
+inside `<shell_access>` or `<tool type="shell">`; the parser then retains the
+complete nested tree and source span. This is intentionally different from
+unknown markup inside message content: strict shell configuration is never
+accepted as permissive raw text.
+
+`Chatmd_shell_declaration` converts these nodes into serializable
+`Chatmd_shell_spec` values and reports source-qualified schema errors.

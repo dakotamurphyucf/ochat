@@ -1,5 +1,11 @@
 # `Mcp_server_core`
 
+Compatibility scope: this page describes the deprecated MCP host that exposes
+ChatMD prompts as agents. New session servers use the [Ochat agent protocol](../../agent-server/README.md).
+This deprecation does **not** apply to MCP-backed tools declared in ChatMD or
+their maintained client/type/transport libraries. Existing compatibility behavior
+below is retained; the new daemon does not require redesigning this server.
+
 In-memory registry that keeps track of all {b user-visible artefacts} during
 the life-time of an MCP (Model-Context-Protocol) server instance.  The module
 is intentionally small and entirely deterministic: every effect is exposed as
@@ -89,5 +95,4 @@ avoid data races.
 
 * Hooks are executed synchronously – a slow sink blocks the caller.
 * No persistence – state is lost when the process terminates.
-
 

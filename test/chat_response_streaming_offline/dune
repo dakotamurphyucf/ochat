@@ -1,0 +1,13 @@
+(library
+ (name chat_response_streaming_offline_test)
+ (modules chat_response_streaming_offline_test)
+ (libraries
+  core
+  expect_test_helpers_core
+  chat_response
+  chatmd
+  chatml
+  ochat.session)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

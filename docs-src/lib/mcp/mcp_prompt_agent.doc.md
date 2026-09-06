@@ -1,12 +1,18 @@
 # `Mcp_prompt_agent` – wrap a *ChatMD* file as an MCP **tool** and **prompt**
 
+Compatibility scope: this page describes the deprecated MCP host that exposes
+ChatMD prompts as agents. New session servers use the [Ochat agent protocol](../../agent-server/README.md).
+This deprecation does **not** apply to MCP-backed tools declared in ChatMD or
+their maintained client/type/transport libraries. Existing compatibility behavior
+below is retained; the new daemon does not require redesigning this server.
+
 > Phase-1 / Phase-2 server helper – requires the *server-core* registry to be
 > available.
 
 `Mcp_prompt_agent` is a tiny bridge between a *static* `*.chatmd` document and
 the runtime entities understood by an MCP server:
 
-| Artefact | Where it is used | Value returned by [`of_chatmd_file`](#val-of_chatmd_file) |
+| Artefact | Where it is used | Value returned by [`of_chatmd_file`](#of_chatmd_file) |
 |----------|-----------------|----------------------------------------|
 | **Tool metadata** (`Mcp_types.Tool.t`) | advertised by `"tools/list"`; invoked through `"tools/call"` | *1st component* |
 | **Tool handler** (`Mcp_server_core.tool_handler`) | executes on every `"tools/call"` | *2nd component* |
@@ -184,4 +190,3 @@ External OPAM packages used directly in this module:
 * **Core** – standard library extension (string utilities, random numbers …).
 
 Both are part of Jane Street’s platform or the OCaml multicore ecosystem.
-

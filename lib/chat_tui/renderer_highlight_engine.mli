@@ -1,8 +1,8 @@
 (** Shared TextMate highlight engine for the renderer.
 
-    Rendering is single-threaded; the engine is cached so that future
-    pages/components do not accidentally instantiate multiple highlight
-    engines per render.
+    Rendering is single-threaded; the engine is cached for the current shared
+    registry generation and replaced after grammar discovery publishes a new
+    registry.
 
     The returned engine is configured with:
 
@@ -12,10 +12,10 @@
        bundled grammars (e.g. markdown, JSON, and the internal
        ["ochat-apply-patch"] grammar).}}
 
-    Callers should treat the engine as an immutable, shared resource and must
-    not mutate its registry or theme.
+    Callers should treat each returned engine as immutable and must not mutate
+    its registry or theme.
 *)
 val get : unit -> Highlight_tm_engine.t
 (** [get ()] returns the global highlight engine instance used by the renderer.
 
-    The value is memoised; repeated calls return the same engine. *)
+    The value is memoised until the shared registry generation changes. *)

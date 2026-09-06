@@ -31,9 +31,10 @@ type path = Eio.Fs.dir_ty Eio.Path.t
     (e.g. due to version skew). *)
 val load : dir:path -> t option
 
-(** [save ~dir cat] truncates or creates
-    {!file:md_index_catalog.binio} in [dir] and writes [cat] using
-    {!Bin_prot}.  The operation replaces any previous file. *)
+(** [save ~dir cat] publishes a private temporary Bin_prot file by rename.
+    Existing readers retain the prior file; failed publication preserves it.
+    [dir] must exist and be trusted. Atomic visibility is not fsync durability.
+    Concurrent publishers are last-writer-wins; updates have no transaction lock. *)
 val save : dir:path -> t -> unit
 
 (** [add_or_update ~dir ~name ~description ~vector] inserts a new entry

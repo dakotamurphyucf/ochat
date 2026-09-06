@@ -2,15 +2,16 @@
 
 > Catalogue of *tool* specifications exposed by the Ochat OCaml agent.
 
-This module is **data-only** – it does *not* carry any behaviour.  Each
-sub-module is an implementation of `Ochat_function.Def`, a small record
-type that mirrors what the OpenAI Function-calling API expects:
+This module contains metadata and input decoders, not tool execution. Each
+sub-module implements `Ochat_function.Def`, pairing metadata with an input
+decoder:
 
 ```ocaml
-module type Ochat_function.Def = sig
+module type Def = sig
   type input
 
   val name            : string          (* Unique identifier *)
+  val type_           : string          (* function or custom *)
   val description     : string option   (* Shown to the LLM *)
   val parameters      : Jsonaf.t        (* JSON-schema of `input` *)
   val input_of_string : string -> input (* Decoder used by runtime *)
@@ -30,18 +31,21 @@ model and later re-hydrate the call into a strongly-typed value.
 2. Implement the runtime logic:
 
    ```ocaml
-   let run url = Webpage_markdown.fetch url in
-   let tool = Ochat_function.create_function (module Definitions.Webpage_to_markdown) run
+   let register run =
+     Ochat_function.create_function (module Definitions.Webpage_to_markdown)
+       (fun url -> Openai.Responses.Tool_output.Output.Text (run url))
    ```
 3. Aggregate the tools and pass their **metadata** to the OpenAI API:
 
    ```ocaml
-   let function_info, dispatch_table = Ochat_function.functions [ tool ] in
-   openai_request ~tools:function_info |> ignore;
+   let bundle tool = Ochat_function.functions [ tool ]
    ```
 
 4. When the API returns `{ "name": "webpage_to_markdown", "arguments": ... }`
-   look up the entry in `dispatch_table` and execute it.
+   look up the entry in `dispatch_table` and execute it with
+   `~invocation:Ochat_function.Invocation.silent`, or an observed invocation.
+   Runners return typed text/content output, not plain strings. See the
+   [complete custom-tool example](gpt_function.doc.md#runnable-offline-example).
 
 ---
 
@@ -52,7 +56,7 @@ Below is a concise reference.  For the *exact* JSON schema consult the
 
 | Tool | `input` OCaml type | Synopsis |
 |------|--------------------|----------|
-| **Get_contents** | `(string * int option * int option)` | Read a local file with optional offset and line count |
+| **Get_contents** | `(string * int option * int option)` | Static metadata/decoder for the legacy single-directory `read_file` helper |
 | **Meta_refine** | `(string * string)` | Refine a prompt via Recursive Meta-Prompting (prompt + task) |
 | **Index_markdown_docs** | `(string * string * string * string option)` | Build a vector DB from a directory of Markdown docs |
 | **Markdown_search** | `(string * int option * string option * string option)` | Semantic search over Markdown indices |
@@ -77,8 +81,9 @@ Below is a concise reference.  For the *exact* JSON schema consult the
 * Decoders vary in strictness. Some `input_of_string` implementations are
   intentionally lenient (e.g. accepting legacy field names); callers should
   still treat decoding as fallible and surface graceful errors to users.
+* Configured ChatMD `read_file` roots need metadata generated from resolved
+  runtime paths, so they do not use `Definitions.Get_contents` directly.
+  `Functions.get_contents_scoped` creates the dynamic description, root enum,
+  decoder, and implementation together.
 * The catalogue is opinionated and targets the needs of the Ochat
   agent in this repository.  Feel free to fork and extend.
-
-
-

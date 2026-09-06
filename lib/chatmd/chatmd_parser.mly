@@ -100,6 +100,9 @@ let string_of_tag : tag -> string = function
   | Tool -> "tool"
   | Tool_call -> "tool_call"
   | Tool_response -> "tool_response"
+  | Shell_access -> "shell_access"
+  | Moderator_runtime -> "moderator_runtime"
+  | Shell_element element -> Chatmd_shell_spec.Shell_element.to_string element
 
 let tag_mismatch ~(open_tag : tag) ~(close_tag : tag) =
   failwithf "Mismatching tags: <%s> … </%s>" (string_of_tag open_tag) (string_of_tag close_tag) ()
@@ -166,4 +169,3 @@ child:
 text_block:
     TEXT                        { $1 }
   | text_block TEXT             { $1 ^ $2 }
-

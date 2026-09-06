@@ -1,29 +1,11 @@
-# `Embed_service`
+# Embed_service: batched embedding requests
 
-Concurrency-friendly wrapper around the OpenAI *Embeddings* HTTP endpoint.
+`Embed_service.create` returns a function that accepts a list of metadata/text
+pairs and waits for the corresponding vectors. Calls can come from concurrent
+Eio fibers under the owning switch. This is not a cross-domain thread-safety
+guarantee.
 
-It batches snippet texts, enforces a global **rate-limit** (requests/second),
-handles retry/back-off on transient failures and converts results straight
-into `Vector_db.Vec` records.
-
----
-
-## Why a dedicated service?
-
-Indexing often needs to embed thousands of snippets.  Doing this naïvely in a
-single blocking loop is wasteful – we want to:
-
-1. **Pipeline** work from multiple producer fibres (Markdown/Odoc indexers).
-2. **Cap throughput** to stay within model rate-limits.
-3. **Retry** failed requests transparently.
-
-`Embed_service.create` returns a *function* that you call with a list of
-(`meta`, `text`) pairs.  Under the hood these requests are sent on a stream
-to a background daemon that serialises actual HTTP calls.
-
----
-
-## API
+## Contract
 
 ```ocaml
 val create :
@@ -36,69 +18,43 @@ val create :
   ('meta * string) list -> ('meta * string * Vector_db.Vec.t) list
 ```
 
-### Parameters
+Supply a positive `rate_per_sec`. The caller batches and bounds texts for the
+chosen model; the service does not split oversized inputs.
 
-* `sw` – parent switch used to supervise the background worker fibre.
-* `clock` – wall clock (from `Eio.Time`) for throttling and back-off.
-* `net` – `Eio.Net.t` capability for issuing HTTPS requests.
-* `codec` – `Tikitoken.codec` to count tokens locally (avoids an extra API call).
-* `rate_per_sec` – hard cap on outgoing requests; must be **> 0**.
-* `get_id` – pure function converting the caller-supplied metadata into a
-  stable identifier (stored in `Vector_db.Vec.id`).
+The queue holds up to 100 requests. A dispatcher spaces initial request starts
+according to `rate_per_sec` and forks each request in the supplied switch, so
+requests may overlap. The limit belongs to this service instance, not all
+processes or all instances. Retries run inside the request fiber and do not
+pass back through the dispatcher throttle.
 
-### Behaviour
+A failed request is retried up to three times after its first attempt (four
+attempts total), with a one-second delay. The catch covers raised exceptions,
+not a classifier restricted to HTTP 5xx errors. Exhausted errors are propagated
+to the waiting caller.
 
-* Calls from arbitrary fibres enqueue work on a bounded stream and return a
-  promise that resolves when the HTTP call completes.
-* The service enforces `rate_per_sec` globally; if necessary it sleeps the
-  worker fibre before issuing the next request.
-* Each request is retried up to **three** times (1 s back-off) on transient
-  failures (network hiccups, 5xx responses). The third failure is re-raised to
-  the caller.
+Response indices associate each embedding with its original metadata and text.
+`get_id` supplies the vector record ID; token counting fills its `len` metadata,
+not the embedding dimension. Embedding dimensions come from the provider or stub.
 
-### Example
+## Example
+
+This function requires an existing Eio environment, switch, and tokenizer codec:
 
 ```ocaml
-open Eio.Std
-
-let () = Eio_main.run @@ fun env ->
-  Switch.run @@ fun sw ->
+let embed_text ~sw ~env ~codec ~id ~text =
   let embed =
     Embed_service.create
       ~sw
       ~clock:(Eio.Stdenv.clock env)
       ~net:(Eio.Stdenv.net env)
-      ~codec:Tikitoken.Cl100k_base.codec
+      ~codec
       ~rate_per_sec:10
-      ~get_id:Digest.string
+      ~get_id:(fun id -> id)
   in
-  let snippets = [ ("README.md#intro", "OpenAI provides powerful models …") ] in
-  match embed snippets with
-  | [ (_meta, _text, vec) ] ->
-      Format.printf "Vector dim = %d\n" (Array.length vec.vector)
-  | _ -> assert false
+  embed [ id, text ]
 ```
 
----
-
-## Known limitations
-
-* Only a single worker fibre is spawned; peak throughput is therefore capped
-  at `rate_per_sec` (no parallelism beyond that).
-* `rate_per_sec` is applied per process – if you spin up multiple processes
-  you must enforce the global limit yourself.
-* The service does not split inputs automatically; the caller must ensure that
-  the batch of texts fits below the model's context window.
-
-* The returned function is **thread-safe** (can be called from any fibre).
-* Vector length is computed locally using `token_count` to avoid an extra API
-  call.
-
----
-
-## Implementation details
-
-* Uses `Stream` (bounded) as the producer-consumer queue.
-* Retry logic sleeps `1.0` seconds between attempts (max 3 tries).
-* The last call timestamp is tracked to respect `rate_per_sec`.
-
+The service has no persistent embedding cache. See
+[embedding configuration](../guide/search-and-indexing.md#embedding-configuration)
+for real versus stub vectors and model compatibility, and the
+[source](../../lib/embed_service.ml) for concurrency and retry details.

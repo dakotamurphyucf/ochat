@@ -16,11 +16,13 @@
 
     Example:
     {[
-      Chat_tui.App_stream_apply.apply_stream_event model throttler ev
+      Chat_tui.App_stream_apply.apply_stream_event
+        runtime throttler ~viewport_height ev
     ]} *)
 val apply_stream_event
-  :  Model.t
+  :  App_runtime.t
   -> Redraw_throttle.t
+  -> viewport_height:int
   -> Openai.Responses.Response_stream.t
   -> unit
 
@@ -35,12 +37,41 @@ val apply_stream_event
 
     Example:
     {[
-      Chat_tui.App_stream_apply.apply_stream_batch model throttler evs
+      Chat_tui.App_stream_apply.apply_stream_batch
+        runtime throttler ~viewport_height evs
     ]} *)
 val apply_stream_batch
-  :  Model.t
+  :  App_runtime.t
   -> Redraw_throttle.t
+  -> viewport_height:int
   -> Openai.Responses.Response_stream.t list
+  -> unit
+
+val apply_sourced_stream_event
+  :  App_runtime.t
+  -> Redraw_throttle.t
+  -> viewport_height:int
+  -> Chat_response.Sourced_response_event.t
+  -> unit
+
+val apply_sourced_stream_batch
+  :  App_runtime.t
+  -> Redraw_throttle.t
+  -> viewport_height:int
+  -> Chat_response.Sourced_response_event.t list
+  -> unit
+
+(** [apply_history_stream_event runtime event] installs a completed root
+    provider item under the driver-allocated ID in [event]. Sourced child
+    events do not enter parent canonical history. *)
+val apply_history_stream_event
+  :  App_runtime.t
+  -> Chat_response.History_stream_event.t
+  -> unit
+
+val apply_history_stream_batch
+  :  App_runtime.t
+  -> Chat_response.History_stream_event.t list
   -> unit
 
 (** [apply_tool_output model throttler item] applies a tool output item and
@@ -55,10 +86,12 @@ val apply_stream_batch
     {[
       Chat_tui.App_stream_apply.apply_tool_output model throttler item
     ]} *)
-val apply_tool_output : Model.t -> Redraw_throttle.t -> Openai.Responses.Item.t -> unit
+val apply_tool_output : App_runtime.t -> Redraw_throttle.t -> History_entry.t -> unit
 
 (** [replace_history runtime redraw_immediate items] replaces the model’s history
-    and derived transcript messages.
+    and derived transcript messages. Compatible target-width preparation is
+    reconciled by stable row identity and revision, then resumed; callers must
+    cancel preparation first for an incompatible replacement.
 
     This is typically used when streaming finishes and the authoritative list
     of items (including tool outputs) is known.
@@ -73,8 +106,4 @@ val apply_tool_output : Model.t -> Redraw_throttle.t -> Openai.Responses.Item.t 
     {[
       Chat_tui.App_stream_apply.replace_history runtime redraw_immediate items
     ]} *)
-val replace_history
-  :  App_runtime.t
-  -> (unit -> unit)
-  -> Openai.Responses.Item.t list
-  -> unit
+val replace_history : App_runtime.t -> (unit -> unit) -> History_entry.t list -> unit

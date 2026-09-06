@@ -1,30 +1,41 @@
 # Embedding the libraries & caching
 
+For the new durable daemon, embedded process-bound host, transport adapters and
+typed clients, start with [agent-core embedding](../agent-server/embedding.md).
+The APIs below cover additional/older Ochat components; do not substitute legacy
+Session_store ownership for an agent actor's durable store.
+
 Every public binary is a thin wrapper over libraries available under `lib/`.
 You can reuse the same pieces in your own code both for ChatMD conversations
 and for building search indices.
 
 ## Driving ChatMD conversations from OCaml
 
-`Chat_response.Driver.run_completion_stream_in_memory_v1` is the main entry
-point when you want to execute a ChatMarkdown conversation entirely in memory
-without touching a `.chatmd` file on disk:
+`Chat_response.In_memory_stream.run_completion_stream_in_memory_entries` is
+the identity-bearing entry point when you want to execute a conversation
+entirely in memory. The embedding owns one allocator for the run and keeps the
+returned `History_entry.t list` as canonical history:
 
 ```ocaml
-let run ~env ~history =
-  Chat_response.Driver.run_completion_stream_in_memory_v1
+let run ~env ~allocator ~history =
+  Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
     ~env
+    ~allocator
     ~history
     ~tools:None
-    ~model:`Gpt4o
     ()
 ```
 
 The function takes an `Eio_unix.Stdenv.base` `env` and an
-`Openai.Responses.Item.t list` `history`, streams tokens as they arrive, and
-returns the updated history. It handles tool discovery and caching for you and
-persists a shared agent cache under a `.chatmd/cache.bin` directory chosen by
-the caller (CLI, TUI, tests).
+identity-bearing history, streams events as they arrive, and returns the
+updated canonical history. Existing IDs are retained and new assistant/tool
+occurrences use the supplied allocator. Use `History_entry.items` only when
+projecting payloads to a provider API.
+
+The public streaming entry point is identity-bearing; there is no exported
+`run_completion_stream_in_memory_v1` raw-item compatibility adapter. Keep one
+allocator/source of identity for the conversation rather than recreating IDs
+between requests.
 
 If you want to manage that cache yourself, use `Chat_response.Cache`:
 
@@ -68,11 +79,11 @@ Other parts of the system reuse the same caching building blocks:
   conversions.
 - `Markdown_snippet` and `Odoc_snippet` use `Lru_cache` to memoise token
   counts.
-- The TUI and CLI entry points both initialise a shared `Chat_response.Cache`
-  under a `.chatmd/cache.bin` directory so repeated agents stay fast.
+- Native local/daemon agent runtimes use the session-owned `cache_dir/cache.bin`.
+  File-backed completion and legacy-local paths use their host's `.chatmd`
+  directory. These are not one globally shared cache across daemon sessions.
 
 Need to embed docs for a project? `Odoc_indexer.index_packages` and
 `Markdown_indexer.index_directory` are the main entry points; combine them
 with the search tools (`odoc_search`, `markdown_search`, `query_vector_db`) to
 build your own RAG workflows.
-

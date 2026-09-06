@@ -64,7 +64,19 @@ val of_runtime_request
 val drain_internal_events
   :  moderator:Chat_response.In_memory_stream.moderator
   -> now_ms:int
-  -> history:Openai.Responses.Item.t list
+  -> history:History_entry.t list
+  -> available_tools:Openai.Responses.Request.Tool.t list
+  -> turn_request:turn_request
+  -> (t, string) result
+
+(** [handle_appended_entries ~moderator ~history ~entries ...] emits one
+    [item_appended] event for each entry in FIFO order. Each event observes the
+    canonical history prefix ending at that entry. *)
+val handle_appended_entries
+  :  moderator:Chat_response.In_memory_stream.moderator
+  -> now_ms:int
+  -> history:History_entry.t list
+  -> entries:History_entry.t list
   -> available_tools:Openai.Responses.Request.Tool.t list
   -> turn_request:turn_request
   -> (t, string) result

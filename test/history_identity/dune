@@ -1,0 +1,7 @@
+(library
+ (name history_entry_test)
+ (modules history_entry_test)
+ (libraries core expect_test_helpers_core ochat.history_entry openai)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

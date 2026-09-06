@@ -9,29 +9,26 @@
     • {!Client_registration} – fields returned by a *Dynamic Client
       Registration* response ({{:https://www.rfc-editor.org/rfc/rfc7591}RFC&nbsp;7591}).
 
-    • {!Token} – access-token payload issued by the authorisation server.
+    • {!Token} – access-token fields with a locally recorded acquisition time.
 
-    All records derive JSON serialisers via `ppx_jsonaf_conv`, so you can
-    convert them to / from {!Jsonaf.t} using the automatically generated
-    functions `{jsonaf_of_t, t_of_jsonaf}`.
+    The generated {!Token.jsonaf_of_t} and {!Token.t_of_jsonaf} functions
+    round-trip persisted tokens, including their original [obtained_at]. Use
+    {!Token.of_response_json} for a server response: it supplies the local
+    acquisition timestamp instead of requiring or trusting a remote one.
 
     {1 Example}
 
     Decoding a token response received from the server:
     {[
-      let json =
-        {|{
-            "access_token": "abc123",
-            "token_type"  : "Bearer",
-            "expires_in"  : 3600,
-            "scope"       : "profile openid",
-            "obtained_at" : 0.0
-          }|}
-      in
-      let token =
-        Jsonaf.of_string_exn json |> Oauth2_types.Token.t_of_jsonaf
-      in
-      assert (not (Oauth2_types.Token.is_expired token))
+      Eio_main.run (fun env ->
+        let json =
+          Jsonaf.of_string
+            {|{"access_token":"abc123","token_type":"Bearer","expires_in":3600}|}
+        in
+        let obtained_at = Eio.Time.now (Eio.Stdenv.clock env) in
+        match Oauth2_types.Token.of_response_json ~obtained_at json with
+        | Error message -> failwith message
+        | Ok token -> assert (Float.equal token.obtained_at obtained_at))
     ]}
 
     The helper function {!Token.is_expired} gives a 60-second safety margin so
@@ -89,6 +86,33 @@ module Token = struct
     ; obtained_at : float [@key "obtained_at"]
     }
   [@@deriving jsonaf]
+
+  module Response = struct
+    type t =
+      { access_token : string
+      ; token_type : string
+      ; expires_in : int
+      ; refresh_token : string option [@jsonaf.option]
+      ; scope : string option [@jsonaf.option]
+      }
+    [@@deriving jsonaf] [@@jsonaf.allow_extra_fields]
+  end
+
+  let of_response_json ~obtained_at json =
+    try
+      let response = Response.t_of_jsonaf json in
+      Ok
+        { access_token = response.access_token
+        ; token_type = response.token_type
+        ; expires_in = response.expires_in
+        ; refresh_token = response.refresh_token
+        ; scope = response.scope
+        ; obtained_at
+        }
+    with
+    | Eio.Cancel.Cancelled _ as exn -> raise exn
+    | _ -> Error "invalid OAuth token response"
+  ;;
 
   (** [is_expired t] returns [true] if [t] will expire within the next minute.
 

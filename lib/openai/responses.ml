@@ -197,6 +197,7 @@ module Output_message = struct
     ; id : string
     ; content : content list
     ; status : string
+    ; phase : string option [@jsonaf.option]
     ; _type : string [@key "type"]
     }
   [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
@@ -408,12 +409,20 @@ module Reasoning = struct
     ; id : string
     ; status : string option [@jsonaf.option]
     }
-  [@@deriving jsonaf, sexp, bin_io]
+  [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
 end
 
 module Text = struct
   type t = { verbosity : string } [@@deriving jsonaf, sexp, bin_io]
 end
+
+let is_output_message_json json =
+  match Jsonaf.member "role" json with
+  | Some (`String "assistant") ->
+    Option.is_some (Jsonaf.member "id" json)
+    || Option.is_some (Jsonaf.member "status" json)
+  | _ -> false
+;;
 
 module Item = struct
   type t =
@@ -447,10 +456,9 @@ module Item = struct
     | `Object obj ->
       (match Jsonaf.member "type" (`Object obj) with
        | Some (`String "message") ->
-         (match Jsonaf.member "role" (`Object obj) with
-          | Some (`String "assistant") ->
-            Output_message (Output_message.t_of_jsonaf (`Object obj))
-          | _ -> Input_message (Input_message.t_of_jsonaf (`Object obj)))
+         if is_output_message_json json
+         then Output_message (Output_message.t_of_jsonaf (`Object obj))
+         else Input_message (Input_message.t_of_jsonaf (`Object obj))
        | Some (`String "function_call") ->
          Function_call (Function_call.t_of_jsonaf (`Object obj))
        | Some (`String "custom_tool_call") ->
@@ -992,8 +1000,8 @@ end
 module Incomplete_details = struct
   type t =
     { reason : string option
-    ; model_output_start : int option
-    ; tokens : int option
+    ; model_output_start : int option [@jsonaf.option]
+    ; tokens : int option [@jsonaf.option]
     }
   [@@deriving jsonaf, sexp, bin_io] [@@jsonaf.allow_extra_fields]
 end
@@ -1170,10 +1178,9 @@ module Response_stream = struct
       | `Object obj ->
         (match Jsonaf.member "type" (`Object obj) with
          | Some (`String "message") ->
-           (match Jsonaf.member "role" (`Object obj) with
-            | Some (`String "assistant") ->
-              Output_message (Output_message.t_of_jsonaf (`Object obj))
-            | _ -> Input_message (Input_message.t_of_jsonaf (`Object obj)))
+           if is_output_message_json json
+           then Output_message (Output_message.t_of_jsonaf (`Object obj))
+           else Input_message (Input_message.t_of_jsonaf (`Object obj))
          | Some (`String "function_call") ->
            Function_call (Function_call.t_of_jsonaf (`Object obj))
          | Some (`String "custom_tool_call") ->
@@ -1618,6 +1625,74 @@ type _ response_type =
 
 exception Response_stream_parsing_error of Jsonaf.t * exn
 exception Response_parsing_error of Jsonaf.t * exn
+exception Response_stream_api_error of Jsonaf.t
+exception Response_stream_terminal_error of Response_stream.t
+exception Response_stream_terminated_without_completion
+
+let validate_response_stream stream =
+  let rec loop completed stream () =
+    match Seq.uncons stream with
+    | None ->
+      if completed then Seq.Nil else raise Response_stream_terminated_without_completion
+    | Some (event, rest) ->
+      (match event with
+       | Response_stream.Response_completed _ ->
+         if completed
+         then raise (Response_stream_terminal_error event)
+         else Seq.Cons (event, loop true rest)
+       | Response_incomplete _ | Response_failed _ | Error _ ->
+         raise (Response_stream_terminal_error event)
+       | _ ->
+         if completed
+         then raise (Response_stream_terminal_error event)
+         else Seq.Cons (event, loop false rest))
+  in
+  loop false stream
+;;
+
+let rec response_sequence take () =
+  match take () with
+  | `Done -> Seq.Nil
+  | `Error exn -> raise exn
+  | `Val value -> Seq.Cons (value, response_sequence take)
+;;
+
+module For_testing = struct
+  let response_sequence = response_sequence
+end
+
+let read_private_response_exn flow =
+  let limit = 256 * 1024 in
+  let data = Eio.Buf_read.(parse_exn take_all) flow ~max_size:(limit + 1) in
+  if String.length data > limit then failwith "private response body limit exceeded";
+  Response.t_of_jsonaf (Jsonaf.of_string data)
+;;
+
+let post_private_response_exn ~sw net ~model ~max_output_tokens ~inputs =
+  let headers =
+    Http.Header.of_list
+      [ "Authorization", "Bearer " ^ api_key; "Content-Type", "application/json" ]
+  in
+  let request =
+    Request.create
+      ~model
+      ~max_output_tokens
+      ~input:inputs
+      ~tools:[]
+      ~reasoning:Request.Reasoning.{ effort = Some Low; summary = None }
+      ~verbosity:"low"
+      ~stream:false
+      ()
+  in
+  post
+    ~net
+    ~host:api_url
+    ~sw
+    ~headers
+    ~path:"/v1/responses"
+    (Raw (fun (_, body) -> read_private_response_exn body))
+    (Jsonaf.to_string (Request.jsonaf_of_t request))
+;;
 
 let post_response
   : type a.
@@ -1711,12 +1786,16 @@ let post_response
     in
     (match json_result with
      | Ok _ ->
+       Io.log
+         ~dir
+         ~file:"raw-openai-response.txt"
+         (Printf.sprintf "Error parsing JSON from line: %s" data);
        raise (Response_parsing_error (Jsonaf.of_string data, Failure "Error in response"))
      | Error _ -> (Response.t_of_jsonaf @@ Jsonaf.of_string @@ data : a))
   | Stream ->
     let reader = Eio.Buf_read.of_flow reader ~max_size:Int.max_value in
     let lines = Buf_read.lines reader in
-    let stream = Eio.Stream.create Int.max_value in
+    let stream = Eio.Stream.create 256 in
     let cb input = Eio.Stream.add stream input in
     let rec loop seq =
       match Seq.uncons seq with
@@ -1735,7 +1814,8 @@ let post_response
          | Ok _ ->
            print_endline "Received error:";
            print_endline line;
-           failwith line
+           Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n");
+           raise (Response_stream_api_error (Jsonaf.of_string line))
          | Error _ ->
            let line =
              String.concat
@@ -1764,6 +1844,13 @@ let post_response
                           "Error parsing JSON from line: %s"
                           (Core.Exn.to_string ex));
                      print_endline line;
+                     (* Io.log ~dir ~file:"raw-openai-streaming-response.txt" (line ^ "\n"); *)
+                     Io.log
+                       ~dir
+                       ~file:"raw-openai-streaming-response.txt"
+                       (Printf.sprintf
+                          "Error parsing JSON from line: %s"
+                          (Core.Exn.to_string ex));
                      raise (Response_stream_parsing_error (json, ex)))
                 | Error _ -> None)
            in
@@ -1779,11 +1866,9 @@ let post_response
               cb (`Val choice);
               loop seq))
     in
-    (Fiber.fork ~sw @@ fun () -> loop lines);
-    let rec loop_stream () =
-      match Stream.take stream with
-      | `Done -> fun () -> Seq.Nil
-      | `Val value -> fun () -> Seq.Cons (value, loop_stream ())
-    in
-    loop_stream ()
+    (Fiber.fork ~sw
+     @@ fun () ->
+     try loop lines with
+     | ex -> cb (`Error ex));
+    validate_response_stream (response_sequence (fun () -> Stream.take stream))
 ;;

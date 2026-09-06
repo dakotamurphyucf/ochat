@@ -8,6 +8,26 @@ Ochat ships **local indexing + retrieval** building blocks that let agents pull 
 
 This is the fastest way to ground an agent in a codebase without pasting huge files into the prompt.
 
+## Embedding configuration
+
+Embedding-backed indexing and queries use `OPENAI_API_KEY`, `EMBEDDINGS_HOST`
+(default `api.openai.com`), and `EMBEDDINGS_MODEL` (default
+`text-embedding-3-large`). These are separate from the Responses agent's
+`API_URL` setting. Key, host, and model are read when the module initializes;
+set them before starting the command.
+
+An absent/empty API key, or any present `OPENAI_EMBEDDINGS_STUB` value (including
+`0`), selects deterministic 128-dimensional pseudo-random test vectors without
+an embedding API call. This is useful for offline plumbing tests, not semantic
+retrieval. Build and query with matching model and stub/live settings. Rebuild
+in a separate index location when changing them; vectors carry no automatic
+model migration guarantee. Live indexing and query embeddings incur provider costs.
+
+Markdown indexing re-embeds every discovered snippet and replaces its vector
+file on a nonempty run; it does not reuse an old embedding cache. Stale snippet
+files may remain, and an empty crawl does not clear an existing index. See the
+[indexer reference](../bin/md_index.doc.md) for file selection and rebuild caveats.
+
 ## Pick the right corpus (quick cheat sheet)
 
 - “Why does the system work this way?” / “what’s the design?” → **Markdown docs** (`markdown_search`)
@@ -80,6 +100,12 @@ odoc-search --query "Eio.Switch.run usage" -k 5 --index .odoc_index
 ```
 
 > Note: `odoc-index` and `odoc-search` work on a directory layout where **first-level directories are packages**.
+
+The stock `odoc-index` wrapper currently updates a hard-coded subset of
+packages, not every installed package. Its coarse catalog may mention packages
+without snippet vectors. See [package selection](../bin/odoc_index.doc.md) before
+using it for arbitrary dependencies. The `odoc-search` CLI is dense-only even
+though it accepts `--beta`; its unused hybrid helper does not change that path.
 
 ---
 
@@ -362,4 +388,3 @@ This is useful for editor-like tooling, but it is **not currently exposed as a b
 - source directories and module file paths.
 
 This can complement retrieval by helping you **scope** what to index/search (e.g. “only index these libraries” or “jump to the owning executable/library”).
-
