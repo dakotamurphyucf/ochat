@@ -18,9 +18,14 @@ The workflow currently has no publication credentials or deploy step. In P11,
 add exactly one trusted publisher requiring `release-gate`, an environment with
 appropriate protection, and the reviewed release record below. Manual accessibility review is deferred from launch by the user. Keep Cloudflare
 Git auto-deployment and alternate production triggers disabled. Untrusted pull
-requests receive no hosting or model credentials. Set `Website / release-gate`
-as a required check using the actual check name observed on the first successful
-GitHub run; verify failure blocks promotion before declaring enforcement complete.
+requests receive no hosting or model credentials. The required check is
+`release-gate` from the GitHub Actions app (ID 15368), as observed on actual runs.
+Main protection requires an up-to-date pull request, applies to administrators,
+blocks force pushes/deletion, and requires conversations to be resolved. The
+sole-maintainer policy requires zero outside approvals. Legacy GitHub Pages
+automatic branch builds are disabled (`build_type: workflow`); no Pages publishing
+workflow exists. See [the enforcement record](p10-github-enforcement.md) for
+actual rejected-push probes, CI results, and the remaining production boundary.
 
 The local opam environment includes pins and is not proof that the clean Ubuntu
 job installs successfully. Resolve failures in the real job with documented,
@@ -62,7 +67,9 @@ dependencies, with Oniguruma 0.1.2: the TextMate fork's metadata does not exclud
 Oniguruma 0.2, whose `Syntax.default` API changed incompatibly. The clean GitHub
 run exposed this missing transitive constraint. It uses the published OCaml 5.3.0 compiler and does not copy the
 developer's opam switch or its macOS-only `core_unix` pin. Keep these revisions
-explicit and review changes with the actual semantic documentation gate.
+explicit and review changes with the actual semantic documentation gate. The
+semantic evidence artifact includes the installed package versions and pins; this
+records the resolved toolchain without claiming a complete OCaml dependency lock.
 
 For local qualification while the checkout is uncommitted:
 
