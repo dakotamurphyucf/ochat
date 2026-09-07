@@ -22,6 +22,12 @@ jobs:
       - uses: ocaml/setup-ocaml@v3
         with:
           ocaml-compiler: 5.3.0
+      # dune-project selects these source repositories; opam install does not
+      # consume Dune's (pin ...) stanzas. Match the qualified local sources.
+      - name: Pin project source dependencies
+        run: |
+          opam pin add --no-action --yes textmate-language.0.4.0 'git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git#e9d1ea854b0734db5e616cacb2ce7e2e5fd744bf'
+          opam pin add --no-action --yes piaf.0.2.0 'git+https://github.com/anmonteiro/piaf.git#c7428ec14dc681e0ef13375cdf657b2727143678'
       - run: opam install . --deps-only --with-test -y
       - run: opam exec -- node website/scripts/check-semantics.mjs website/.release/semantic-report.json
       - uses: actions/upload-artifact@v4

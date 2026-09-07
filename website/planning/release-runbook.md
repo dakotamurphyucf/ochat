@@ -55,6 +55,13 @@ repeat the relevant checks. The importer requires committed canonical/example
 bytes. View-source links must resolve at that public commit; edit links use
 `main`. Never promote a noindex preview or relabel its evidence as production.
 
+For the CI semantic toolchain, `opam install` does not consume the source pins
+in `dune-project`. The Website workflow explicitly pins `textmate-language`
+and `piaf` to the exact public Git revisions qualified locally before installing
+dependencies. It uses the published OCaml 5.3.0 compiler and does not copy the
+developer's opam switch or its macOS-only `core_unix` pin. Keep these revisions
+explicit and review changes with the actual semantic documentation gate.
+
 For local qualification while the checkout is uncommitted:
 
 ```sh
