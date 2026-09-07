@@ -1762,7 +1762,7 @@ Ordered tasks:
 
 Ordered tasks:
 
-- [ ] **P01.01 — Resolve compatible versions.** Select supported Astro, Starlight, Node, and deployment-tool versions. Record the exact combination and use a committed lockfile. **Audit status:** Versions and lockfile are implemented and tested; committing the website/lockfile in the working repository remains pending. Clean Linux checks use a tracked candidate in an isolated temporary clone.
+- [x] **P01.01 — Resolve compatible versions.** Select supported Astro, Starlight, Node, and deployment-tool versions. Record the exact combination and use a committed lockfile. **Audit status:** Exact versions and the website lockfile are publicly committed in `a40dbd208e85d90873f4b960727a79448c9c5a78` on PR #20. Actual clean Linux qualification is recorded under P10.11; earlier temporary-clone checks remain historical evidence.
 - [x] **P01.02 — Create `website/`.** Scaffold static output, minimal configuration, a custom root homepage, and one documentation route. Keep the homepage and documentation route owners distinct.
 - [x] **P01.03 — Configure tracking.** Address the existing broad `src/` ignore rule with narrow exceptions. Ignore dependency, build, cache, and generated-content directories without hiding authored source.
 - [x] **P01.04 — Define package commands.** Provide initial `dev`, `check`, `build`, and `preview` commands. Later phases can extend their work, but normal usage must be documented from the start.

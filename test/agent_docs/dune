@@ -18,6 +18,8 @@
   (source_tree ../../docs-src)
   (source_tree ../../lib)
   (source_tree ../../bin)
+  ; Documentation links include test sources outside this executable's modules.
+  (source_tree ..)
   ../../Readme.md
   ../../LICENSE.txt
   ../../prompt-examples/readme.md

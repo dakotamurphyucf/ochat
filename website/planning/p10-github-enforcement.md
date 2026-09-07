@@ -59,6 +59,12 @@ Clean Ubuntu qualification exposed missing build prerequisites:
    absent. `dune-project` now declares `menhir`, and Dune regenerated `ochat.opam`.
    This fixes clean dependency installation for both CI and ordinary users.
 
+4. A [clean semantic build](https://github.com/dakotamurphyucf/ochat/actions/runs/34170447493)
+   then exposed undeclared documentation-link inputs. The docs gate referenced
+   test source files that happened to exist in the developer build tree. Its Dune
+   rule now includes the test source tree, so a clean build can inspect those
+   links without relying on prior unrelated builds.
+
 CI uses published OCaml 5.3.0, without the developer's macOS-only `core_unix` pin.
 Installed versions and pin evidence are uploaded with the semantic report.
 These explicit compatibility constraints are not a complete OCaml dependency lock.
