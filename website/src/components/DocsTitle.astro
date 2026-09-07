@@ -1,0 +1,21 @@
+---
+import Mark from './Mark.astro';
+---
+
+<a class="wordmark" href="/" aria-label="Ochat home"
+  ><Mark /><span>ochat</span></a
+>
+<style>
+  .wordmark {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    color: var(--sl-color-white);
+    text-decoration: none;
+    font: var(--ochat-wordmark-weight) 1.65rem var(--sl-font);
+    letter-spacing: var(--ochat-wordmark-tracking);
+  }
+  .wordmark :global(svg) {
+    color: var(--sl-color-text-accent);
+  }
+</style>

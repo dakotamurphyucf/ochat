@@ -24,7 +24,9 @@ See [host setup](../../agent-server/embedding.md) and the
 <a id="high-level-entry-point"></a>
 <a id="boot-sequence--run_chat"></a>
 
-### run_chat <a id="run_chat"></a>
+<a id="run_chat"></a>
+
+### run_chat
 
 ```ocaml
 val run_chat
@@ -111,7 +113,9 @@ editor keys. The host switch owns approval, process, audit and worker resources.
 <a id="handle_submit"></a>
 <a id="how-streaming-and-events-fit-together"></a>
 
-## Event loop and streaming architecture <a id="architecture"></a>
+<a id="architecture"></a>
+
+## Event loop and streaming architecture
 
 Input, internal worker results and redraw requests use separate streams.
 The UI reducer owns model mutation; workers report operation-tagged events.
@@ -175,7 +179,9 @@ See [App_compaction](app_compaction.doc.md) and
 <a id="snapshot-persistence"></a>
 <a id="persist_snapshot"></a>
 
-## Sessions, export, and persistence <a id="shutdown"></a>
+<a id="shutdown"></a>
+
+## Sessions, export, and persistence
 
 After releasing the terminal, legacy quit via idle Escape asks whether to export
 and can ask for a destination. Explicit quit via `:q`/Ctrl-C exports to
@@ -234,7 +240,9 @@ a universal redaction boundary. These behaviors are described above and in the
 
 <a id="related-modules"></a>
 
-## Internal modules <a id="internal-modules"></a>
+<a id="internal-modules"></a>
+
+## Internal modules
 
 - [App_runtime](app_runtime.doc.md): operation IDs, switches and pending work.
 - [App_submit](app_submit.doc.md): admission and turn-start effects.

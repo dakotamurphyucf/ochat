@@ -1,0 +1,4 @@
+Project: Lantern
+Purpose: Make a small documentation site.
+Setup: Install the project dependencies before starting the preview.
+Missing detail: The preview command has not been documented yet.

@@ -3,20 +3,48 @@
 Start with a local prompt, then add the capabilities your task needs. You do
 not need a daemon, shell access, or an orchestration script to try Ochat.
 
-## Your first agent
+## Learn in order
 
-- [ChatMD introduction](../chatmd/README.md): a minimal prompt you can save and
-  open locally.
-- [Local TUI walkthrough](../agent-server/tutorials/local-tui.md): setup and
-  execution without a daemon.
-- [File-backed completion](../cli/chat-completion.md): run a prompt with input
-  messages and write the resulting conversation to a file.
+1. [Run your first local agent](../agent-server/tutorials/local-tui.md): setup, one request, and clean exit.
+2. [Give it a file tool](../tutorials/file-tool.md): a complete read declaration and a named sample file.
+3. [Add a specialist reviewer](../tutorials/specialist.md): a parent, companion prompt, and observable delegation.
+4. [Run a request from a script](../cli/chat-completion.md): initialize and continue a file-backed conversation.
+5. [Add bounded ChatML workflow logic](../tutorials/workflow.md): stop after three completed turns.
+6. [Give it a narrow shell command](../agent-server/tutorials/shell-agent.md): inspect authority and select a supported host.
+7. [Run a durable daemon session](../agent-server/tutorials/unix-daemon.md): detach, reconnect, and shut down.
+8. [Respond to a background event](../agent-server/tutorials/background-agent.md): a timer without model work.
+9. [Connect a stdio client](../agent-server/tutorials/stdio-client.md): initialization, attachment, and streamed completion.
+10. [Connect an HTTP client](../agent-server/tutorials/http-client.md): authenticated RPCs and event subscriptions.
+
+Each tutorial records its host, prerequisites, verification scope, and persistence.
+Read the associated ChatMD and companion files directly in each tutorial’s source
+reader or in the website catalog. Download a bundle when you are ready to run it
+in your configured local environment. The website does not execute agents in your browser.
+
+## Choosing a source example
+
+**Complete examples** include their local source/data dependencies; Ochat installation
+and any stated provider credentials remain prerequisites. **Configurable templates**
+need the additional host, backend, library, or connection setup described in their
+linked tutorial. **Illustrative output** is a reading sample, not executable input.
+
+On the website, expand **View source** in the catalog to read complete files with
+syntax highlighting. The entrypoint is shown first; expand other filenames to
+inspect companion prompts, ChatML scripts, sample data, build files, and notices.
+The reader also works without JavaScript. Downloads provide exact-byte source
+files and complete `.tar` bundles. Extract a bundle into a new directory with `tar -xf FILE.tar`;
+its top-level directory matches the example ID. Preserve its relative paths and
+license. Download every listed companion or use the bundle before running a multi-file
+example. In a
+checkout, the following links open maintained sources directly.
 
 ## Add useful capabilities
 
-The [longer prompt examples](prompt-patterns.md) preserve the minimal,
+The repository-only [longer prompt examples](prompt-patterns.md) preserve the minimal,
 refactoring, and moderator examples from the detailed project README, including
-the `Item`, `Tool_call`, and `Context` helper walkthrough.
+the `Item`, `Tool_call`, and `Context` helper walkthrough. They remain deferred from
+website publication pending example-level review; use the complete tutorials above
+for the supported learning progression.
 
 | Try this | Example or walkthrough |
 |---|---|

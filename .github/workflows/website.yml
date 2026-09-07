@@ -1,0 +1,99 @@
+name: Website
+on:
+  pull_request:
+  push:
+    branches: [main]
+permissions:
+  contents: read
+jobs:
+  # No path filters: lib/, bin/, generator/test inputs and packages also gate release.
+  semantics:
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: website/.nvmrc
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.3.0
+      - run: opam install . --deps-only --with-test -y
+      - run: opam exec -- node website/scripts/check-semantics.mjs website/.release/semantic-report.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          include-hidden-files: true
+          name: website-semantic-evidence
+          path: website/.release/semantic-report.json
+  website:
+    needs: semantics
+    strategy:
+      fail-fast: false
+      matrix:
+        environment: [preview, production]
+    env:
+      SITE_ENV: ${{ matrix.environment }}
+      SITE_URL: ${{ matrix.environment == 'production' && 'https://release.ochat.test' || 'http://localhost:4321' }}
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: website/.nvmrc
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+      - run: npm run check
+      - run: npm run build
+      - run: npx playwright install --with-deps chromium firefox webkit
+      - run: npm run measure:performance
+      - run: npm run evaluate:search
+      - run: npm run test:browser -- --workers=2
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          include-hidden-files: true
+          name: website-evidence-${{ matrix.environment }}
+          path: |
+            website/.generated/capacity-report.json
+            website/.generated/applications-report.json
+            website/.generated/content-report.json
+            website/.generated/migration-report.json
+            website/.generated/migration-report.md
+            website/.generated/build-evidence.json
+            website/.generated/examples-report.json
+            website/.generated/publishing-assets.json
+            website/.generated/media-report.json
+            website/.generated/performance-report.json
+            website/.generated/search-index-report.json
+            website/.generated/search-report.json
+            website/.generated/search-report.md
+            website/test-results/
+  release-gate:
+    if: always()
+    needs: [semantics, website]
+    runs-on: ubuntu-latest
+    steps:
+      - name: Require every validation job
+        env:
+          SEMANTICS_RESULT: ${{ needs.semantics.result }}
+          WEBSITE_RESULT: ${{ needs.website.result }}
+        run: |
+          test "$SEMANTICS_RESULT" = success
+          test "$WEBSITE_RESULT" = success
+# Validation only: no publication credentials. P11 may add one publisher that
+# requires release-gate. Keep Cloudflare Git auto-deployment disabled.
+# The reserved production fixture origin must never be deployed publicly.

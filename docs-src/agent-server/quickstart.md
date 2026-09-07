@@ -1,23 +1,72 @@
 # Quickstart
 
+Start here to build Ochat and configure the model provider. You do not need
+to write OCaml to define an agent, but building Ochat currently requires the
+OCaml toolchain. A daemon is optional; the first tutorial runs in your terminal.
+
+## Before you start
+
+You need Git, an OCaml/opam installation, and a model-provider account with an
+API key and access to the model you select. Model requests incur provider
+charges. These instructions use a Unix-style shell such as bash or zsh.
+
+Install OCaml and opam using the [OCaml installation guide](https://ocaml.org/install#linux_mac_bsd)
+if they are not already available. Ochat requires OCaml 5.1+ and Dune 3.21+;
+see [package requirements](../../dune-project) and
+[build troubleshooting](../guide/build-troubleshooting.md) for native libraries
+and Apple Silicon/OpenBLAS setup.
+
 ## Build
 
-Use the repository's opam environment. The package currently requires OCaml
-5.1 or newer and Dune 3.21 or newer; dependencies and pins are declared in
-[dune-project](../../dune-project) and the generated `ochat.opam`.
+If you do not already have an Ochat checkout:
 
 ```sh
-opam install . --deps-only
-eval "$(opam env)"
-dune build bin/chat_tui.exe bin/ochat_agent_server.exe bin/ochat_agent_stdio.exe
+git clone https://github.com/dakotamurphyucf/ochat.git
+cd ochat
 ```
 
-After installing the package, use `chat-tui`, `ochat-agent-server`, and
-`ochat-agent-stdio`. Before installation, use the explicit `dune exec bin/NAME.exe
--- ...` commands below. See [build troubleshooting](../guide/build-troubleshooting.md)
-for native dependencies, including platform-specific numerical libraries.
+Run the following setup **inside the Ochat checkout**, not the project you
+will eventually ask your agent to work on. If there is no suitable opam switch
+for this checkout, create one once:
+
+```sh
+opam switch create .
+```
+
+Use that switch's environment, install the declared dependencies, and build
+and install the command-line tools:
+
+```sh
+eval "$(opam env)"
+opam install . --deps-only
+dune build @install
+dune install
+```
+
+Check that the tools are available:
+
+```sh
+chat-tui -help
+```
+
+The help command does not contact a model. Keep this terminal open so its
+opam environment remains available. In a new terminal, select the same switch
+and load its environment before running Ochat. If `chat-tui` is not found,
+check that environment and the installation steps above.
+
+The installed commands include `chat-tui`, `ochat-agent-server`, and
+`ochat-agent-stdio`. The tutorials also show `dune exec bin/NAME.exe -- ...`
+for running directly from the Ochat checkout.
 
 ## Provider environment
+
+If `OPENAI_API_KEY` is already set in this terminal, keep it. Otherwise, use
+hidden input in bash or zsh, paste the key, and press Enter:
+
+```sh
+read -r -s OPENAI_API_KEY
+export OPENAI_API_KEY
+```
 
 Set `OPENAI_API_KEY` privately in the launching process environment. Do not put it
 in a tracked prompt, config, command transcript, or screenshot. For the current
@@ -36,6 +85,11 @@ Model availability depends on your account. Change the model in the example
 prompt if necessary. Sending messages calls the model and incurs charges;
 configuration validation and catalog discovery do not.
 
+Review [permissions and current transport limitations](permissions-and-security.md)
+when choosing a runtime environment. In particular, provider transport behavior
+is a property of the Ochat runtime; the documentation website's HTTPS does not
+change it.
+
 ## Local TUI: no daemon
 
 From the repository root:
@@ -48,6 +102,9 @@ dune exec bin/chat_tui.exe -- --no-config --local \
 The workspace is the current directory. This native local mode is process-bound
 and transient. It does not offer the legacy `--session` persistence options.
 See the [local walkthrough](tutorials/local-tui.md) for keys and compatibility.
+
+Continue with the [first-agent walkthrough](tutorials/local-tui.md) to understand
+the prompt, submit a request, and quit cleanly.
 
 ## Durable daemon
 

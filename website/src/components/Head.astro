@@ -1,0 +1,20 @@
+---
+import { production } from '../../config/site.mjs';
+import SocialHead from './SocialHead.astro';
+const { entry, head } = Astro.locals.starlightRoute;
+const visibleHead = head.filter(
+  (item) => production || item.attrs?.rel !== 'sitemap',
+);
+---
+
+{
+  visibleHead.map(({ tag: Tag, attrs, content }) => (
+    <Tag {...attrs} set:html={content} />
+  ))
+}
+<SocialHead
+  route={Astro.url.pathname}
+  title={entry.data.title}
+  description={entry.data.description || ''}
+  card={false}
+/>

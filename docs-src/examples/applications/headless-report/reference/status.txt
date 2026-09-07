@@ -1,0 +1,5 @@
+Lantern weekly status (fictional sample)
+Completed: documentation structure and initial overview.
+Blocked: setup instructions need confirmed build commands.
+Next: a maintainer should verify those commands and write the contributor checklist.
+No release date has been chosen.

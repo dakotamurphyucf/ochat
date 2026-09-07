@@ -1,0 +1,153 @@
+---
+import report from '../../.generated/applications-report.json';
+import examples from '../../.generated/examples-report.json';
+import WorkflowDemo from './WorkflowDemo.astro';
+import { sourceFileHref } from '../../config/source-links.mjs';
+const app = report.applications.find((a) => a.route === Astro.url.pathname);
+const example = app && examples.examples.find((e) => e.id === app.example)!;
+---
+
+{
+  app && example && (
+    <section class="application-intro" aria-label="Application overview">
+      <>
+        <a class="back" href="/docs/applications/">
+          ← All applications
+        </a>
+        <div class="application-facts">
+          <p>
+            <span>Input</span>
+            {app.input}
+          </p>
+          <p>
+            <span>Output</span>
+            {app.output}
+          </p>
+        </div>
+        <p class="requirements">
+          <strong>Setup</strong> {example.required.join(' ')}
+        </p>
+      </>
+
+      <div class="application-actions">
+        <>
+          <a href={sourceFileHref(app.route, example.id, example.entry!)}>
+            Inspect the agent files →
+          </a>
+          <a href={app.tutorialRoute}>{app.tutorialTitle} →</a>
+        </>
+      </div>
+      {app.id === 'documentation-review' ? (
+        <WorkflowDemo />
+      ) : (
+        <div class="application-flow" aria-label="Illustrative workflow">
+          <span class="illustration-label">
+            Workflow overview · illustrative
+          </span>
+          <ol>
+            {app.steps.map((step) => (
+              <li>{step}</li>
+            ))}
+          </ol>
+        </div>
+      )}
+    </section>
+  )
+}
+<style>
+  .application-intro {
+    margin-bottom: 2rem;
+  }
+  .back {
+    font-size: 0.8rem;
+    text-underline-offset: 0.25em;
+    color: var(--ochat-accent);
+  }
+  .application-facts {
+    display: grid;
+    grid-template-columns: 1fr 1fr;
+    gap: 1rem;
+    margin: 1.3rem 0;
+  }
+  .application-facts p {
+    margin: 0;
+    padding: 1rem;
+    border: 1px solid var(--ochat-line);
+    border-radius: 8px;
+    font-size: 0.9rem;
+    line-height: 1.6;
+  }
+  .application-facts span {
+    display: block;
+    font-size: 0.7rem;
+    color: var(--ochat-muted);
+    margin-bottom: 0.5rem;
+  }
+  .requirements {
+    font-size: 0.8rem;
+    line-height: 1.7;
+    color: var(--ochat-muted);
+  }
+  .requirements strong {
+    color: var(--ochat-ink);
+    margin-right: 0.5rem;
+  }
+  .application-actions {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.5rem;
+    margin: 1rem 0 1.5rem;
+  }
+  .application-actions a {
+    font-size: 0.8rem;
+    color: var(--ochat-accent);
+    text-underline-offset: 0.25em;
+  }
+  .application-flow {
+    background: var(--ochat-panel);
+    border-radius: 8px;
+    padding: 1rem;
+  }
+  .illustration-label {
+    font-size: 0.7rem;
+    color: var(--ochat-muted);
+  }
+  ol {
+    display: flex;
+    gap: 0.75rem;
+    padding: 0;
+    list-style: none;
+    counter-reset: step;
+    margin: 0.75rem 0 0;
+  }
+  li {
+    flex: 1;
+    font-size: 0.8rem;
+    line-height: 1.6;
+    counter-increment: step;
+  }
+  li:before {
+    content: '0' counter(step);
+    display: block;
+    color: var(--ochat-accent);
+    font-family: var(--ochat-mono);
+    font-size: 0.65rem;
+    margin-bottom: 0.5rem;
+  }
+  a:focus-visible {
+    outline: 3px solid var(--ochat-focus);
+    outline-offset: 3px;
+  }
+  @media (max-width: 35rem) {
+    .application-facts {
+      grid-template-columns: 1fr;
+    }
+    ol {
+      flex-direction: column;
+    }
+    li:before {
+      display: inline;
+      margin-right: 0.7rem;
+    }
+  }
+</style>

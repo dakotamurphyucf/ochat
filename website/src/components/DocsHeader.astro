@@ -1,0 +1,67 @@
+---
+import DocsTitle from './DocsTitle.astro';
+import Search from './Search.astro';
+import ThemeSelect from './ThemeSelect.astro';
+import { repository } from '../../config/site.mjs';
+---
+
+<div class="docs-header">
+  <DocsTitle />
+  <nav aria-label="Main navigation">
+    <a href="/docs/">Documentation</a>
+    <a href="/docs/tutorials/">Tutorials</a>
+    <a href="/docs/applications/">Applications</a><a href="/docs/examples/"
+      >Examples</a
+    >
+  </nav>
+  <div class="actions">
+    <Search compact /><div class="desktop-actions">
+      <ThemeSelect /><a href={repository}>GitHub ↗</a>
+    </div>
+  </div>
+</div>
+<style>
+  .docs-header {
+    display: flex;
+    align-items: center;
+    gap: 2rem;
+    height: 100%;
+    min-width: 0;
+  }
+  nav {
+    display: flex;
+    gap: 1.5rem;
+    margin-inline: auto;
+  }
+  a {
+    color: var(--ochat-muted);
+    text-decoration: none;
+    font-size: 0.85rem;
+    font-weight: 600;
+  }
+  a:hover {
+    color: var(--ochat-accent);
+  }
+  .actions,
+  .desktop-actions {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+  }
+  @media (max-width: 65rem) {
+    nav {
+      display: none;
+    }
+    .actions {
+      margin-left: auto;
+    }
+  }
+  @media (max-width: 49.99rem) {
+    .desktop-actions {
+      display: none;
+    }
+    .docs-header {
+      gap: 1rem;
+    }
+  }
+</style>

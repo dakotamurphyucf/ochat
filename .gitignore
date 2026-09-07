@@ -40,3 +40,20 @@ out/
 meta-prompt/
 markdown/
 litellm_config.yaml
+
+# Website source is authored; dependencies and imported docs are generated.
+!website/src/
+!website/src/**
+website/node_modules/
+website/dist/
+website/.astro/
+website/.generated/
+website/src/content/docs/
+website/test-results/
+website/playwright-report/
+website/src/content/.docs-*/
+website/.generated-previous/
+website/.generated-stage-*/
+website/.content-lock/
+website/.release/
+website/.wrangler/

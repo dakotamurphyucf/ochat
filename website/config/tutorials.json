@@ -1,0 +1,445 @@
+[
+  {
+    "id": "T01",
+    "page": "first-agent",
+    "host": "Native local TUI",
+    "examples": [
+      "hello"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check"
+      ],
+      "observed": "The canonical hello fence matches its tracked source; parsing and batch fixture checks pass. Launch/key instructions were reviewed against the current TUI source.",
+      "limitations": "No live provider response or physical terminal interaction was verified.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/agent-server/tutorials/local-tui.md": "3a5b367bf47f2cb942c94b8737ba8036bd55a45c9feb28327d4706fe714895e1",
+        "docs-src/examples/agent-server/prompts/hello.chatmd": "ceae35cde72dd140fa2e7152581b80d0a4668cddff030906b6d8940fbadf5e26",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  },
+  {
+    "id": "T02",
+    "page": "tutorials/file-tool",
+    "host": "Native local TUI",
+    "examples": [
+      "file-reader"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check"
+      ],
+      "observed": "The exact prompt parses from a captured bundle. Its declared workspace root reads the bundled Lantern sample and rejects an attempted parent-directory escape through the real file tool.",
+      "limitations": "No live provider response or physical terminal interaction was verified.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/examples/learning/file-reader/reader.chatmd": "c2bc92204b540dea0344019ca30dc4d1b15a007273695d8d6cd45e3edf11cab7",
+        "docs-src/examples/learning/file-reader/reference/project.txt": "fff52b6c0d23c6b4f92e3e311e69eb9b6c96a5772427ec58dead944822146cc3",
+        "docs-src/tutorials/file-tool.md": "c07f7ab6577803eeacbf85503e85912ef169d25588a355e84921680b8dd06c9d",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  },
+  {
+    "id": "T03",
+    "page": "tutorials/specialist",
+    "host": "Native local TUI",
+    "examples": [
+      "specialist"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check"
+      ],
+      "observed": "The captured loader resolves the companion beside the parent and fails when it is missing. The parent reads bundled data; the specialist declares no tools. No live parent-to-specialist model exchange was performed.",
+      "limitations": "No live provider response or physical terminal interaction was verified.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/examples/learning/specialist/docs-reviewer.chatmd": "990daf43b83f0508e448fe3793ffa12a445bfcfe60297412bf65f9ec80408f93",
+        "docs-src/examples/learning/specialist/explorer.chatmd": "c80558fb90992126b372e18302e74b2addf2500d1d92704df049c2fca3fdfec7",
+        "docs-src/examples/learning/specialist/reference/project.txt": "fff52b6c0d23c6b4f92e3e311e69eb9b6c96a5772427ec58dead944822146cc3",
+        "docs-src/tutorials/specialist.md": "16981be375ce7453b5b076b33a3553f050e867f0dd31611e9c69c0619ed61370",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  },
+  {
+    "id": "T04",
+    "page": "cli/chat-completion",
+    "host": "File-backed batch CLI",
+    "examples": [
+      "hello"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check"
+      ],
+      "observed": "The exact preparation and follow-up messages parse with one template, one initial user message and then two users after continuation. The CLI flags, append semantics and output-source directory were reviewed against the implementation.",
+      "limitations": "No live provider response or physical terminal interaction was verified.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/cli/chat-completion.md": "de62b5b9cffb8023a4e30d212e238a89109f1ca17062e76e9d14711f0c8ae101",
+        "docs-src/examples/agent-server/prompts/hello.chatmd": "ceae35cde72dd140fa2e7152581b80d0a4668cddff030906b6d8940fbadf5e26",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  },
+  {
+    "id": "T05",
+    "page": "tutorials/workflow",
+    "host": "Native local TUI; experimental ChatML",
+    "examples": [
+      "three-turns"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check"
+      ],
+      "observed": "The real parser resolves the external script. The runtime compiles and instantiates it; synthetic completed-turn events preserve state and request session end on the third turn only.",
+      "limitations": "No live provider response or physical terminal interaction was verified.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/examples/learning/three-turns/three-turns.chatmd": "6a6eb625c7fcc4390c4a9658e91b0bcf066e0df875a6009001402c155968b41f",
+        "docs-src/examples/learning/three-turns/three-turns.chatml": "ac3ba0b15cd5ad43530f897bcfae06918587c0ac010823b8912414b28a7f61a3",
+        "docs-src/tutorials/workflow.md": "f4ad8f388bfd2913e0293c2fe7a9c6d4e9da8971d2ae119dc6f893a008117054",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  },
+  {
+    "id": "T06",
+    "page": "agent-server/tutorials/shell-agent",
+    "host": "Legacy local TUI or configured daemon",
+    "examples": [
+      "narrow-shell"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check",
+        "dune exec bin/main.exe -- shell inspect docs-src/examples/agent-server/shell/pwd.chatmd -canonical"
+      ],
+      "observed": "The prompt parses, its shell manifest compiles for macOS, and the actual checkout CLI produces canonical inspection containing /bin/pwd. No sandboxed command execution was performed.",
+      "limitations": "Inspection does not verify OS sandbox confinement, interactive authorization, or a model-driven shell call. Configure the host/backend before use.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/agent-server/tutorials/shell-agent.md": "4f9fbfc1dd277d5ec4751e2bb4303941475c8c53bbf7c047ecc83b24df25b7f2",
+        "docs-src/examples/agent-server/shell/pwd.chatmd": "5a1d4a4c3f4bf30bf84f905d72ccf82ff076f8d9a5e282779f76a2ff84a80502",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  },
+  {
+    "id": "T07",
+    "page": "agent-server/tutorials/unix-daemon",
+    "host": "Durable Unix daemon",
+    "examples": [
+      "background-timer",
+      "stdio-discovery"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check",
+        "python3 test/agent_docs/check_tutorial_hosts.py",
+        "dune exec docs-src/examples/agent-server/clients/docs_example.exe -- setup PRIVATE_ROOT gpt-5.6-sol",
+        "dune exec bin/ochat_agent_server.exe -- -config PRIVATE_ROOT/unix.sexp -validate-only",
+        "dune exec bin/ochat_agent_server.exe -- -config PRIVATE_ROOT/unix.sexp"
+      ],
+      "observed": "The actual daemon validates a fresh private config, accepts Unix gateway discovery, and shuts down gracefully. Existing offline host tests check session/observer authorization; this increment did not drive TUI detach/reattach.",
+      "limitations": "Local private discovery and authentication checks only; no paid response, physical TUI interaction, public listener, or production hosting verification. HTTP used an available loopback port.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_server.ml": "169038a8ab2e385bb4fb1cec8dbec36c9173e5f4934a7a8c985195d5f10ac990",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/agent-server/tutorials/unix-daemon.md": "2c8f08ce122d6f2ac40812b0d74ae45ddd60937340f76f51ad1954cd3efb0cf6",
+        "docs-src/examples/agent-server/README.md": "4fce3b705cbd72124fba4b01097907092e7f482d143331fc0d36e915e52797d6",
+        "docs-src/examples/agent-server/clients/discover.ndjson": "1540f733ec65410662cce0a3ce2ed1999d60da5158edc8735df1d37649e65d41",
+        "docs-src/examples/agent-server/clients/docs_example.ml": "f39c87e0246ea0f994b8855b76d7635f6f51801ce1219014ad26200760adff23",
+        "docs-src/examples/agent-server/clients/dune": "565dbdc58aa5d3879c8e226694b0a6bf1fa0d2d7c8812c6da78bc877989b3bc5",
+        "docs-src/examples/agent-server/prompts/timer.chatmd": "3da9b8eaa63fbf736cf1f9976e3cab4d2f3a3a3574318754e7fc4e88ffa76b23",
+        "lib/agent_server/embedded.ml": "6c5debb1044ef457c43f396275e30a6121808b1592ac478c4356dec10baed2fa",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_observer.ml": "26293db8772fdae6bf3c3cae9212d2e6a5dae6d9846cb10b904c8aa7845bdc60",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  },
+  {
+    "id": "T08",
+    "page": "background",
+    "host": "Detached daemon; experimental ChatML",
+    "examples": [
+      "background-timer"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check"
+      ],
+      "observed": "The real embedded host delivers the ten-second timer once and reaches the stopped state. No model message or provider request was sent.",
+      "limitations": "Timer execution is verified in the real embedded host. Physical TUI detach/reattach, restart misfires, and external effects were not checked in this increment.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_server.ml": "169038a8ab2e385bb4fb1cec8dbec36c9173e5f4934a7a8c985195d5f10ac990",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/agent-server/tutorials/background-agent.md": "a556af6e25986f2c9010aa6856d26030b4943d15cf4fa7862383ec5ae0e124e5",
+        "docs-src/examples/agent-server/README.md": "4fce3b705cbd72124fba4b01097907092e7f482d143331fc0d36e915e52797d6",
+        "docs-src/examples/agent-server/clients/docs_example.ml": "f39c87e0246ea0f994b8855b76d7635f6f51801ce1219014ad26200760adff23",
+        "docs-src/examples/agent-server/clients/dune": "565dbdc58aa5d3879c8e226694b0a6bf1fa0d2d7c8812c6da78bc877989b3bc5",
+        "docs-src/examples/agent-server/prompts/timer.chatmd": "3da9b8eaa63fbf736cf1f9976e3cab4d2f3a3a3574318754e7fc4e88ffa76b23",
+        "lib/agent_server/embedded.ml": "6c5debb1044ef457c43f396275e30a6121808b1592ac478c4356dec10baed2fa",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_observer.ml": "26293db8772fdae6bf3c3cae9212d2e6a5dae6d9846cb10b904c8aa7845bdc60",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  },
+  {
+    "id": "T09",
+    "page": "stdio",
+    "host": "Local stdio with explicit data root, or gateway",
+    "examples": [
+      "stdio-discovery"
+    ],
+    "verification": {
+      "state": "known-limitation",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check",
+        "python3 test/agent_docs/check_tutorial_hosts.py",
+        "dune exec bin/ochat_agent_stdio.exe -- --local --prompt PRIVATE_ROOT/hello.chatmd --workspace PRIVATE_ROOT/workspace --data-root PRIVATE_ROOT/stdio-state",
+        "dune exec bin/ochat_agent_stdio.exe -- --connect unix://PRIVATE_ROOT/agent.sock",
+        "dune exec bin/ochat_agent_stdio.exe -- --connect http://127.0.0.1:AVAILABLE_PORT --bearer-token-file PRIVATE_ROOT/admin.token"
+      ],
+      "observed": "Typed request codecs validate the five envelopes. Actual checkout local stdio, Unix gateway, and authenticated loopback HTTP gateway return five matching successful discovery responses before EOF.",
+      "limitations": "The explicit private --data-root workaround remains necessary. No model message, TUI input, or public deployment was exercised.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_server.ml": "169038a8ab2e385bb4fb1cec8dbec36c9173e5f4934a7a8c985195d5f10ac990",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/agent-server/tutorials/stdio-client.md": "a684c95c685776b7d0df5b32e9dcfa6386e726abdb4a24e19b950e5daf7ea51c",
+        "docs-src/examples/agent-server/README.md": "4fce3b705cbd72124fba4b01097907092e7f482d143331fc0d36e915e52797d6",
+        "docs-src/examples/agent-server/clients/discover.ndjson": "1540f733ec65410662cce0a3ce2ed1999d60da5158edc8735df1d37649e65d41",
+        "docs-src/examples/agent-server/clients/docs_example.ml": "f39c87e0246ea0f994b8855b76d7635f6f51801ce1219014ad26200760adff23",
+        "docs-src/examples/agent-server/clients/dune": "565dbdc58aa5d3879c8e226694b0a6bf1fa0d2d7c8812c6da78bc877989b3bc5",
+        "lib/agent_server/embedded.ml": "6c5debb1044ef457c43f396275e30a6121808b1592ac478c4356dec10baed2fa",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_observer.ml": "26293db8772fdae6bf3c3cae9212d2e6a5dae6d9846cb10b904c8aa7845bdc60",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  },
+  {
+    "id": "T10",
+    "page": "agent-server/tutorials/http-client",
+    "host": "Authenticated loopback HTTP daemon",
+    "examples": [
+      "stdio-discovery"
+    ],
+    "verification": {
+      "state": "offline-checked",
+      "baseRevision": "bc76b6c72a280b4bad48a793a63373e6db26d2b4",
+      "testedAt": "2026-09-06",
+      "platform": "macOS 14.5 / arm64",
+      "toolchain": "OCaml 5.3.0; Dune 3.21.1; Node 22.22.1",
+      "liveProvider": false,
+      "commands": [
+        "dune build --force @agent-docs-check",
+        "python3 test/agent_docs/check_tutorial_hosts.py",
+        "dune exec docs-src/examples/agent-server/clients/docs_example.exe -- setup PRIVATE_ROOT gpt-5.6-sol",
+        "dune exec bin/ochat_agent_server.exe -- -config PRIVATE_ROOT/http.sexp -validate-only",
+        "dune exec bin/ochat_agent_server.exe -- -config PRIVATE_ROOT/http.sexp"
+      ],
+      "observed": "The actual loopback HTTP daemon validates generated private configuration, authenticates initialization, returns a connection ID, serves session.list, closes the logical connection, and supports gateway discovery. Existing offline observer tests verify restricted session visibility.",
+      "limitations": "Local private discovery and authentication checks only; no paid response, physical TUI interaction, public listener, or production hosting verification. HTTP used an available loopback port.",
+      "hashes": {
+        "LICENSE.txt": "cfe7ad42b7c3ddb8772df672f1001e6457ce5dcef9eaaaa6f271779e67e8b153",
+        "bin/chat_tui.ml": "8ddefc8ee3ebba357406e5118c5b3b652bf27852f99d9d1f6b2d0b7dfd2d7b0b",
+        "bin/main.ml": "00c12f2643203566b8f1981f2080fa6e53bf29bf89083b8e0a8c670d46269a79",
+        "bin/ochat_agent_server.ml": "169038a8ab2e385bb4fb1cec8dbec36c9173e5f4934a7a8c985195d5f10ac990",
+        "bin/ochat_agent_stdio.ml": "02a51ba85490918949712a6f67dd6cce8daa81d1ded02a40f4fe22109d1223a7",
+        "docs-src/agent-server/tutorials/http-client.md": "14b50a9d9c6351681ddf90865847e185403245532513bbec3427bf3dea1427ac",
+        "docs-src/examples/agent-server/README.md": "4fce3b705cbd72124fba4b01097907092e7f482d143331fc0d36e915e52797d6",
+        "docs-src/examples/agent-server/clients/discover.ndjson": "1540f733ec65410662cce0a3ce2ed1999d60da5158edc8735df1d37649e65d41",
+        "docs-src/examples/agent-server/clients/docs_example.ml": "f39c87e0246ea0f994b8855b76d7635f6f51801ce1219014ad26200760adff23",
+        "docs-src/examples/agent-server/clients/dune": "565dbdc58aa5d3879c8e226694b0a6bf1fa0d2d7c8812c6da78bc877989b3bc5",
+        "lib/agent_server/embedded.ml": "6c5debb1044ef457c43f396275e30a6121808b1592ac478c4356dec10baed2fa",
+        "lib/chatmd/prompt.ml": "a3bf5961dffab50f8e40027a0f463a7aa43ff49ac3a8ca77100dcb4e117dbf55",
+        "lib/chatmd/source_loader.ml": "21d8f131bdc5bbb5de64579f7c4803865366f4aa6052501b9e2efaa255eb5895",
+        "lib/chatml/chatml_host_runtime.ml": "6b467b306193837f6b8a99ab4382f648b264bc61906084e29e39927d4728c929",
+        "lib/functions.ml": "eb3459798abbd064a9cd6b7a3f633f254c9a49aeca640875e18ea9864fcff9c7",
+        "lib/io.ml": "e0244d56ceaa3142603b963fd650e8155b79558b26074ad3e87e2f26475da892",
+        "test/agent_docs/check_tutorial_hosts.py": "366140782dd9caad62156695554488926d705c4e90db114e873694c5a92b88e7",
+        "test/agent_docs/docs_chatml.ml": "08dff6b695c39b64397b498893dafe7622cb0b86f802dd1645ef4e77a34e6a1f",
+        "test/agent_docs/docs_check.ml": "03c7d77fc7869dda62ac5d3a08a8ad98bd07079e15920c977e08aa8173bbed81",
+        "test/agent_docs/docs_observer.ml": "26293db8772fdae6bf3c3cae9212d2e6a5dae6d9846cb10b904c8aa7845bdc60",
+        "test/agent_docs/docs_smoke.ml": "6966967934dc576f3b75754221be0a49f96edadeeec09c831c425466482e1b6c",
+        "test/agent_docs/docs_tutorials.ml": "5c69dae2d56f449d889d4f97496aafe3e465c4aa8f215db881595021fd3e2703",
+        "test/agent_docs/dune": "a204d1aab003268ee3e5ecdb5107df6d6a497f0f14f4044a54b987117a3375e7"
+      }
+    }
+  }
+]

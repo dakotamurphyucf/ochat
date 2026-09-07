@@ -1,0 +1,282 @@
+---
+import report from '../../.generated/applications-report.json';
+import WorkflowIcon from './WorkflowIcon.astro';
+const categories = ['All', 'Code', 'Documentation', 'Research', 'Automation'];
+---
+
+<section class="application-gallery" aria-label="Application gallery">
+  <div
+    class="gallery-filters"
+    role="group"
+    aria-label="Filter applications"
+    hidden
+  >
+    {
+      categories.map((category) => (
+        <button
+          type="button"
+          data-category={category}
+          aria-pressed={category === 'All'}
+        >
+          {category}
+        </button>
+      ))
+    }
+  </div>
+  <p class="gallery-count" role="status" hidden>
+    {report.applications.length} applications
+  </p>
+  <noscript>
+    <style is:inline>
+      .application-gallery .gallery-filters[hidden],
+      .application-gallery .gallery-count[hidden] {
+        display: none;
+      }
+    </style>
+  </noscript>
+  <div class="application-grid">
+    {
+      report.applications.map((app) => (
+        <article data-application={app.id} data-category={app.category}>
+          <div class="card-top">
+            <>
+              <WorkflowIcon kind={app.category} />
+              <span>{app.category}</span>
+              <span class="level">{app.level}</span>
+            </>
+          </div>
+          <h3>
+            <a href={app.route}>{app.title}</a>
+          </h3>
+          <p>{app.summary}</p>
+          <div
+            class="artifact-preview"
+            aria-label={
+              app.id === 'documentation-review'
+                ? 'Workflow outcome preview'
+                : 'Illustrative output preview'
+            }
+          >
+            <span class="preview-label">
+              {app.id === 'documentation-review'
+                ? 'Explore the recorded run'
+                : 'Illustrative outcome'}
+            </span>
+            {app.preview.map((line, index) => (
+              <span
+                class:list={['preview-line', { 'preview-title': index === 0 }]}
+              >
+                {line}
+              </span>
+            ))}
+          </div>
+          <p class="application-outcome">
+            <strong>You’ll make</strong> {app.output.toLowerCase()}.
+          </p>
+          <a class="explore-link" href={app.route}>
+            Explore this application <span aria-hidden="true">→</span>
+          </a>
+        </article>
+      ))
+    }
+  </div>
+  <p class="catalog-link">
+    Looking for a particular file? <a href="/docs/examples/"
+      >Browse all source bundles →</a
+    >
+  </p>
+</section>
+<script>
+  document
+    .querySelectorAll<HTMLElement>('.application-gallery')
+    .forEach((gallery) => {
+      const controls = gallery.querySelector<HTMLElement>('.gallery-filters')!;
+      const status = gallery.querySelector<HTMLElement>('.gallery-count')!;
+      controls.hidden = false;
+      status.hidden = false;
+      const update = (category: string) => {
+        let count = 0;
+        gallery
+          .querySelectorAll<HTMLElement>('[data-application]')
+          .forEach((card) => {
+            card.hidden =
+              category !== 'All' && card.dataset.category !== category;
+            if (!card.hidden) count++;
+          });
+        controls
+          .querySelectorAll<HTMLButtonElement>('button')
+          .forEach((b) =>
+            b.setAttribute(
+              'aria-pressed',
+              String(b.dataset.category === category),
+            ),
+          );
+        status.textContent = `${count} ${count === 1 ? 'application' : 'applications'}${category === 'All' ? '' : ` for ${category.toLowerCase()}`}`;
+      };
+      const applyUrl = () => {
+        const category = new URL(location.href).searchParams.get('category');
+        update(
+          ['Code', 'Documentation', 'Research', 'Automation'].includes(
+            category || '',
+          )
+            ? category!
+            : 'All',
+        );
+      };
+      controls.addEventListener('click', (event) => {
+        const button = (event.target as Element).closest<HTMLButtonElement>(
+          'button[data-category]',
+        );
+        if (!button) return;
+        const category = button.dataset.category!;
+        update(category);
+        const url = new URL(location.href);
+        if (category === 'All') url.searchParams.delete('category');
+        else url.searchParams.set('category', category);
+        history.pushState(null, '', url);
+      });
+      addEventListener('popstate', applyUrl);
+      applyUrl();
+    });
+</script>
+<style>
+  .application-gallery {
+    margin-block: 2rem;
+  }
+  .gallery-filters {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem;
+  }
+  /* Reserve the controls' actual wrapped height before enhancement. */
+  .gallery-filters[hidden] {
+    display: flex;
+    visibility: hidden;
+  }
+  .gallery-count[hidden] {
+    display: block;
+    visibility: hidden;
+  }
+  article[hidden] {
+    display: none;
+  }
+  .gallery-filters button {
+    font: inherit;
+    font-size: 0.85rem;
+    padding: 0.6rem 1rem;
+    min-height: 44px;
+    border: 1px solid var(--ochat-control-border);
+    border-radius: 2rem;
+    background: var(--ochat-bg);
+    color: var(--ochat-ink);
+    cursor: pointer;
+  }
+  .gallery-filters button[aria-pressed='true'] {
+    background: var(--ochat-accent-soft);
+    color: var(--ochat-accent);
+    border-color: var(--ochat-accent);
+  }
+  .gallery-count {
+    font-size: 0.8rem;
+    color: var(--ochat-muted);
+    margin: 1rem 0;
+  }
+  .application-grid {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem;
+  }
+  article {
+    display: flex;
+    flex-direction: column;
+    min-width: 0;
+    padding: 1.3rem;
+    border: 1px solid var(--ochat-line);
+    border-radius: 12px;
+    background: var(--ochat-bg);
+    transition: border-color 0.15s;
+  }
+  article:hover {
+    border-color: var(--ochat-control-border);
+  }
+  .card-top {
+    display: flex;
+    align-items: center;
+    gap: 0.5rem;
+    font-size: 0.7rem;
+    color: var(--ochat-accent);
+    flex-wrap: wrap;
+  }
+  .level {
+    margin-left: auto;
+    color: var(--ochat-muted);
+  }
+  h3 {
+    font-size: 1.25rem;
+    line-height: 1.35;
+    margin: 0.9rem 0 0.5rem;
+  }
+  h3 a {
+    color: var(--ochat-ink);
+    text-decoration: none;
+  }
+  article p {
+    font-size: 0.875rem;
+    line-height: 1.65;
+    color: var(--ochat-muted);
+    margin: 0.5rem 0 1rem;
+  }
+  .artifact-preview {
+    background: var(--ochat-panel);
+    padding: 1rem;
+    border-radius: 6px;
+    margin-top: auto;
+  }
+  .preview-label {
+    display: block;
+    color: var(--ochat-muted);
+    font-size: 0.65rem;
+    margin-bottom: 0.7rem;
+  }
+  .preview-line {
+    display: block;
+    font: 0.7rem/1.9 var(--ochat-mono);
+    overflow-wrap: anywhere;
+  }
+  .preview-title {
+    color: var(--ochat-accent);
+  }
+  .application-outcome strong {
+    color: var(--ochat-ink);
+  }
+  .application-outcome {
+    padding-top: 1rem;
+  }
+  .explore-link {
+    font-weight: 650;
+    font-size: 0.85rem;
+    text-underline-offset: 0.25em;
+  }
+  .catalog-link {
+    margin-top: 1.5rem;
+    font-size: 0.85rem;
+  }
+  a:focus-visible,
+  button:focus-visible {
+    outline: 3px solid var(--ochat-focus);
+    outline-offset: 3px;
+  }
+  @media (max-width: 42rem) {
+    .application-grid {
+      grid-template-columns: 1fr;
+    }
+    .level {
+      margin-left: 0;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    article {
+      transition: none;
+    }
+  }
+</style>

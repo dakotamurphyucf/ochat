@@ -1,5 +1,16 @@
 # Integrate a stdio client
 
+Initialize the protocol, discover and attach to a session, then distinguish acknowledgements from streamed completion.
+
+## Prerequisites and command context
+
+Complete [installation](../quickstart.md) and [private example setup](../../examples/agent-server/README.md). Commands run from the repository root with the active opam environment. Local mode owns a process-bound host with an explicit private durable data root; gateway mode requires a running daemon. Discovery is offline. Sending the example message requires provider credentials in the host environment and incurs charges.
+
+Read the current [provider TLS and permission boundaries](../permissions-and-security.md)
+before model work or deployment. [Build troubleshooting](../troubleshooting.md)
+includes the Apple Silicon/OpenBLAS setup path.
+
+
 ## Local host
 
 Build the binaries and prepare [the private example](../../examples/agent-server/README.md).
@@ -66,3 +77,7 @@ client. Applications must keep pipes open, flush writes, demultiplex response ID
 and handle asynchronous notifications. The compiled
 [OCaml client](../../examples/agent-server/clients/docs_example.ml) demonstrates
 the shared Unix/HTTP connection lifecycle; the stock gateway owns the stdio loop.
+
+## Checkpoint, troubleshooting, and next step
+
+Initialization and session listing should return matching JSON-RPC response IDs; attaching supplies an attachment ID for mutations. A send-message acknowledgement is not a completed assistant response. For missing initialization, ensure stdin remains open, each envelope ends with a newline, and responses are read before dependent requests. Preserve the explicit data root for the RNG limitation described above. EOF ends a local host or disconnects a gateway; detached daemon sessions remain. Stop all relevant processes before archiving/removing your recorded demo root, including stdio-state. Next, [connect over HTTP](http-client.md).

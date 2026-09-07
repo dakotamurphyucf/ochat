@@ -1,0 +1,135 @@
+---
+import report from '../../.generated/examples-report.json';
+import overviews from '../../config/lesson-overviews.json';
+const groups = [
+  {
+    title: 'Create and compose',
+    description: 'The local authoring foundation. Start here.',
+    start: 0,
+    end: 3,
+  },
+  {
+    title: 'Add workflow control',
+    description:
+      'Use batch execution, scripts, and explicitly configured shell tools.',
+    start: 3,
+    end: 6,
+  },
+  {
+    title: 'Host and connect',
+    description: 'Optional paths for persistent agents and custom clients.',
+    start: 6,
+    end: 10,
+  },
+];
+---
+
+<nav class="tutorial-curriculum" aria-label="Tutorial curriculum">
+  {
+    groups.map((group) => (
+      <section>
+        <>
+          <div class="path-heading">
+            <>
+              <h2>{group.title}</h2>
+              <p>{group.description}</p>
+            </>
+          </div>
+          <ol start={group.start + 1}>
+            {report.tutorials.slice(group.start, group.end).map((t) => {
+              const info = overviews.find((o) => o.page === t.page)!;
+              return (
+                <li>
+                  <a href={t.route}>
+                    <span class="lesson-number">{t.id}</span>
+                    <span>
+                      <strong>{t.title}</strong>
+                      <span class="outcome">{info.outcome}</span>
+                      <span class="prerequisite">
+                        Before you start: {info.requires}
+                      </span>
+                    </span>
+                    <span class="arrow" aria-hidden="true">
+                      →
+                    </span>
+                  </a>
+                </li>
+              );
+            })}
+          </ol>
+        </>
+      </section>
+    ))
+  }
+</nav>
+<style>
+  .tutorial-curriculum {
+    margin-block: 2rem;
+  }
+  .path-heading h2 {
+    font-size: 1.5rem;
+    letter-spacing: -0.03em;
+    margin: 2.5rem 0 0.4rem;
+  }
+  .path-heading p {
+    font-size: 0.875rem;
+    color: var(--ochat-muted);
+    margin-bottom: 1rem;
+  }
+  ol {
+    list-style: none;
+    padding: 0;
+    border: 1px solid var(--ochat-line);
+    border-radius: 10px;
+    overflow: hidden;
+  }
+  li + li {
+    border-top: 1px solid var(--ochat-line);
+  }
+  a {
+    display: flex;
+    align-items: baseline;
+    gap: 1rem;
+    padding: 1.2rem;
+    text-decoration: none;
+    color: var(--ochat-ink);
+  }
+  a:hover {
+    background: var(--ochat-panel);
+  }
+  a:focus-visible {
+    outline: 3px solid var(--ochat-focus);
+    outline-offset: -3px;
+  }
+  .lesson-number {
+    font: 0.7rem/1.6 var(--ochat-mono);
+    color: var(--ochat-accent);
+  }
+  strong {
+    font-size: 1rem;
+  }
+  .outcome,
+  .prerequisite {
+    display: block;
+    font-size: 0.85rem;
+    line-height: 1.7;
+    margin-top: 0.35rem;
+    color: var(--ochat-muted);
+  }
+  .prerequisite {
+    font-size: 0.75rem;
+  }
+  .arrow {
+    margin-left: auto;
+    color: var(--ochat-accent);
+  }
+  @media (max-width: 35rem) {
+    a {
+      gap: 0.6rem;
+      padding: 1rem;
+    }
+    .arrow {
+      display: none;
+    }
+  }
+</style>

@@ -155,8 +155,10 @@ runtime-only values.
 - Required confinement never falls back to direct.
 - Target, wrapper, resource runner, script, interpreter, and hook are
   reverified immediately before use.
-- Every custom output transformation is followed by bounds, UTF-8, terminal,
-  and secret finalization.
+- Every custom output transformation is followed by byte bounds, terminal
+  filtering, and secret finalization. The legacy finalized-result path does not
+  guarantee UTF-8 boundaries after byte truncation; sanitized live progress
+  uses a separate incremental contract described in the [security guide](chatmd-shell-security.md#sanitized-live-progress).
 - Cancellation closes process, pipes, approval waits, hook workers, and audit
   fibers under the owning Eio switch.
 - Stable typed `shell.*` diagnostics cross CLI/TUI/audit/test boundaries;

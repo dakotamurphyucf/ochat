@@ -1,0 +1,61 @@
+<label class="theme-control"
+  ><span class="sr-only">Color theme</span><select aria-label="Color theme"
+    ><option value="auto">System</option><option value="light">Light</option
+    ><option value="dark">Dark</option></select
+  ></label
+>
+<script>
+  const controls = [
+    ...document.querySelectorAll<HTMLSelectElement>('.theme-control select'),
+  ];
+  let selected = 'auto';
+  try {
+    selected = localStorage.getItem('starlight-theme') || 'auto';
+  } catch {}
+  if (!['auto', 'dark', 'light'].includes(selected)) selected = 'auto';
+  const apply = () => {
+    controls.forEach((control) => {
+      control.value = selected;
+    });
+    document.documentElement.dataset.theme =
+      selected === 'auto'
+        ? matchMedia('(prefers-color-scheme: dark)').matches
+          ? 'dark'
+          : 'light'
+        : selected;
+  };
+  controls.forEach((control) =>
+    control.addEventListener('change', () => {
+      selected = control.value;
+      apply();
+      try {
+        localStorage.setItem(
+          'starlight-theme',
+          selected === 'auto' ? '' : selected,
+        );
+      } catch {}
+    }),
+  );
+  matchMedia('(prefers-color-scheme: dark)').addEventListener('change', () => {
+    if (selected === 'auto') apply();
+  });
+  apply();
+</script>
+<style>
+  .theme-control select {
+    font: inherit;
+    font-size: 0.8rem;
+    border: 1px solid var(--ochat-control-border);
+    border-radius: var(--ochat-radius-control);
+    padding: 0.35rem;
+    background: var(--sl-color-bg);
+    color: var(--sl-color-white);
+  }
+  .sr-only {
+    position: absolute;
+    width: 1px;
+    height: 1px;
+    overflow: hidden;
+    clip: rect(0, 0, 0, 0);
+  }
+</style>

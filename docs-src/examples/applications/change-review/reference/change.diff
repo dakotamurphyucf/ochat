@@ -1,0 +1,6 @@
+--- a/names.py
++++ b/names.py
+@@ -1,2 +1,2 @@
+ def normalize_name(name):
+-    return name
++    return "".join(name.split())

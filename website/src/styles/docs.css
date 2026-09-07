@@ -1,0 +1,192 @@
+@import './tokens.css';
+@import '@fontsource-variable/manrope';
+@import '@fontsource/ibm-plex-mono/400.css';
+:root,
+:root[data-theme='light'] {
+  --sl-font: var(--ochat-font);
+  --sl-font-mono: var(--ochat-mono);
+  --sl-color-accent-low: var(--ochat-accent-soft);
+  --sl-color-accent: var(--ochat-accent);
+  --sl-color-accent-high: var(--ochat-accent);
+  --sl-color-text-accent: var(--ochat-accent);
+  --sl-color-text: var(--ochat-ink);
+  --sl-color-text-invert: var(--ochat-on-accent);
+  --sl-color-white: var(--ochat-ink);
+  --sl-color-black: var(--ochat-bg);
+  --sl-color-gray-1: var(--ochat-ink);
+  --sl-color-gray-2: var(--ochat-muted);
+  --sl-color-gray-3: var(--ochat-muted);
+  --sl-color-gray-4: var(--ochat-control-border);
+  --sl-color-gray-5: var(--ochat-line);
+  --sl-color-gray-6: var(--ochat-panel);
+  --sl-color-bg: var(--ochat-bg);
+  --sl-color-bg-nav: var(--ochat-bg);
+  --sl-color-bg-sidebar: var(--ochat-bg);
+  --sl-content-width: 47rem;
+  --sl-text-h1: 2.7rem;
+  --sl-nav-height: 4.5rem;
+  --sl-menu-button-size: max(2rem, 44px);
+  --sl-line-height: 1.8;
+  --sl-sidebar-width: 17rem;
+}
+:focus-visible {
+  outline: 3px solid var(--ochat-focus);
+  outline-offset: 4px;
+}
+.sl-markdown-content {
+  overflow-wrap: anywhere;
+}
+.sl-markdown-content table {
+  max-width: 100%;
+  display: block;
+  overflow-x: auto;
+  font-size: 0.86rem;
+}
+.sl-markdown-content h2 {
+  letter-spacing: -0.025em;
+}
+.sl-markdown-content pre {
+  overflow-x: auto;
+}
+.sl-markdown-content img {
+  max-width: 100%;
+  height: auto;
+  border-radius: 0.5rem;
+}
+.sl-markdown-content a {
+  text-underline-offset: 0.2em;
+}
+.sl-markdown-content :is(h1, h2, h3, h4, a[id]) {
+  scroll-margin-top: 8rem;
+}
+.sl-markdown-content a[id] {
+  display: block;
+}
+.sl-markdown-content kbd {
+  border: 1px solid var(--sl-color-gray-5);
+  border-bottom-width: 2px;
+  border-radius: 4px;
+  padding: 0.12em 0.35em;
+  font-size: 0.85em;
+}
+h1 {
+  letter-spacing: -0.04em;
+}
+header.header {
+  border-bottom: 1px solid var(--sl-color-gray-5);
+}
+[aria-current='page'] {
+  font-weight: 650;
+}
+::selection {
+  background: var(--ochat-accent-soft);
+  color: var(--ochat-ink);
+}
+@media (max-width: 50rem) {
+  :root {
+    --sl-text-h1: 2.15rem;
+  }
+}
+@media (prefers-reduced-motion: reduce) {
+  * {
+    scroll-behavior: auto !important;
+    transition: none !important;
+    animation: none !important;
+  }
+}
+
+/* The mobile contents disclosure belongs to the document flow. */
+@media (max-width: 71.999rem) {
+  .main-frame {
+    padding-top: var(--sl-nav-height);
+  }
+  mobile-starlight-toc nav {
+    position: static;
+  }
+  mobile-starlight-toc summary {
+    height: auto;
+    min-height: var(--sl-mobile-toc-height);
+  }
+  mobile-starlight-toc .dropdown {
+    max-height: none;
+    box-shadow: none;
+  }
+}
+/* Keep keyboard rings inside code scrollers, where overflow clips outer rings. */
+.expressive-code pre:focus-visible {
+  outline: 3px solid var(--ochat-focus);
+  outline-offset: -3px;
+}
+.theme-control select,
+site-search button[data-open-modal],
+mobile-starlight-toc .toggle {
+  border-color: var(--ochat-control-border);
+}
+.sl-menu-button,
+site-search button[data-open-modal] {
+  min-width: 44px;
+  min-height: 44px;
+}
+:where(a, button, select, summary, pre, table) {
+  scroll-margin-block: calc(var(--sl-nav-height) + 1rem) 1rem;
+}
+.sl-markdown-content .table-scroll {
+  max-width: 100%;
+  overflow-x: auto;
+}
+.sl-markdown-content .table-scroll table {
+  overflow: visible;
+  margin: 0;
+}
+.table-scroll:focus-visible {
+  outline-offset: -3px;
+}
+.sl-markdown-content .table-scroll table {
+  display: table;
+  width: max-content;
+  max-width: none;
+  min-width: 100%;
+}
+.sl-markdown-content .table-scroll :is(th, td) {
+  max-width: 40ch;
+}
+
+/* Reading surfaces share the homepage's neutral hierarchy. */
+.sidebar-content a[aria-current='page'] {
+  color: var(--ochat-accent);
+  background: var(--ochat-accent-soft);
+  border-radius: 6px;
+}
+.sidebar-content summary {
+  font-size: 0.875rem;
+}
+.sidebar-content a {
+  font-size: 0.84rem;
+  padding-block: 0.4rem;
+}
+.sl-markdown-content h2 {
+  margin-top: 2.6rem;
+  font-weight: 650;
+}
+.sl-markdown-content :is(h3, h4) {
+  font-weight: 650;
+}
+.lesson-jump {
+  margin: 0 0 1.5rem;
+  font-size: 0.85rem;
+}
+.lesson-jump:empty {
+  display: none;
+}
+.lesson-jump a {
+  color: var(--ochat-accent);
+  text-underline-offset: 0.2em;
+}
+#lesson-resources {
+  scroll-margin-top: 6rem;
+}
+#lesson-resources:has(.tutorial-record, .tutorial-sources) {
+  margin-top: 3rem;
+  padding-top: 2rem;
+  border-top: 1px solid var(--ochat-line);
+}

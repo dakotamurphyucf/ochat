@@ -1,6 +1,6 @@
 # chat_tui – interactive terminal client (guide + key bindings)
 
-`chat_tui` is the Notty-based terminal UI for running **ChatMarkdown** prompts interactively.
+`chat_tui` is the Notty-based terminal UI for running **ChatMD (ChatMarkdown)** prompts interactively.
 
 - **Installed binary name:** `chat-tui`
 - **From the repo:** `dune exec bin/chat_tui.exe -- …`
@@ -29,9 +29,11 @@ extensions, so any `.md` can be a ChatMarkdown prompt.
 ---
 
 <div>
-<img src="../../assets/tui-snapshot.png" alt="chat_tui demo" height="700" width="900"/>
+<img src="../../assets/tui-snapshot.png" alt="Historical chat_tui interface with a transcript and terminal input" height="2076" width="2420" loading="lazy" decoding="async"/>
 </div>
 
+Historical interface screenshot. Use the current host guidance and controls below;
+this image is not a recording of the current native or daemon workflow.
 
 ## chat_tui in 60 seconds
 

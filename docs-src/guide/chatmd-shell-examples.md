@@ -9,7 +9,8 @@ management does not accept daemon IDs as a way to select daemon state.
 These declaration patterns illustrate complete use cases, but many are partial
 deployment inputs with external files, hashes or platform prerequisites. They are
 not seventeen ready-to-run scripts. The documentation checker parses every XML
-block; it does not execute deployment commands or synthesize absent dependencies.
+block and compiles/invokes the three inline ChatML hooks with synthetic inputs;
+it does not execute deployment commands or synthesize absent dependencies.
 The [tracked narrow shell prompt](../examples/agent-server/shell/pwd.chatmd) is the
 self-contained manifest-compilation example. Replace illustrative paths/hashes
 and inspect every full manifest before authorizing it.
@@ -20,7 +21,7 @@ and inspect every full manifest before authorizing it.
 | 2 Builds/tests | Installed Dune/opam environment, writable build roots, approver for ask rules. |
 | 3 Git status | Git and repository; no model-controlled command arguments. |
 | 4 Deployment shell | Real sandbox, reviewed deployment roots and private token; never run as a docs smoke. |
-| 5 Python interceptor | Referenced safe wrapper and permitted hook runtime. |
+| 5 Python interceptor | Trusted wrapper at `/opt/ochat-tools/safe-python`; adapt both script and policy to your installation. |
 | 6 Output sanitizer | Installed executable sanitizer and identity pin. |
 | 7 Network API | Explicit network authority and privately supplied secret. |
 | 8 Model reviewer | Configured reviewer agent/provider and human fallback host. |
@@ -141,16 +142,17 @@ inserted.
 ```xml
 <script id="python-policy" language="chatml" kind="shell_before_interceptor">
 let initial_state = `State(0)
-let on_event = fun event state ->
-  let ctx = Shell.context(event) in
-  if Shell.basename(ctx) != "python3" then Shell.continue()
-  else Shell.rewrite(Runtime.source_path("tools/safe-python"), Shell.arguments(ctx))
+let before = fun ctx state ->
+  let argv = Array.copy(Shell.argv(ctx)) in
+  Array.set(argv, 0, "/opt/ochat-tools/safe-python");
+  let* () = Intercept.rewrite(argv) in
+  Task.pure(state)
 </script>
 
 <shell_access id="python-dev" extends="builtin:workspace-development@1">
   <policy default="ask">
     <rule id="safe-python" action="allow">
-      <resolved_path value="${source_dir}/tools/safe-python"/>
+      <resolved_path value="/opt/ochat-tools/safe-python"/>
     </rule>
   </policy>
   <interceptors>
@@ -161,7 +163,10 @@ let on_event = fun event state ->
 </shell_access>
 ```
 
-The original command resolves and reaches the interceptor after hard-deny and
+The XML matcher selects Python commands. The script copies their argv and changes
+only the executable; it does not expand path variables inside ChatML strings.
+Install the reviewed wrapper at the declared absolute path, or update both the
+script and policy together. The original command reaches the interceptor after hard-deny and
 capability checks. The rewrite starts preparation again. `safe-python` must
 resolve, fit capabilities, and match final policy. A rejecting action starts
 neither executable and is audited.
@@ -240,7 +245,9 @@ review and audit display `[TOKEN]`. The model cannot choose another endpoint.
 
 <script id="static-review" language="chatml" kind="shell_reviewer">
 let initial_state = `State(0)
-let on_event = fun event state -> Shell.defer()
+let review = fun event state ->
+  let* () = Review.defer() in
+  Task.pure(state)
 </script>
 
 <shell_access id="reviewed" extends="builtin:workspace-development@1">
@@ -266,7 +273,9 @@ implicit defer. The reviewer model has no access to the shell being reviewed.
 ```xml
 <script id="audit-filter" language="chatml" kind="shell_audit_filter">
 let initial_state = `State(0)
-let on_event = fun event state -> Audit.keep(event)
+let filter = fun event state ->
+  let* () = Audit.keep() in
+  Task.pure(state)
 </script>
 
 <shell_access id="compliance" extends="builtin:workspace-development@1">

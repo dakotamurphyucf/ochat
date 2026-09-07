@@ -200,15 +200,20 @@ let contract_sources =
   ]
 ;;
 
+let cli_flags source =
+  let literal = Re.Perl.compile_pat "\"(-{1,2}[a-z][a-z0-9-]*)\"" in
+  let command = Re.Perl.compile_pat "\\bflag\\s+\"([a-z][a-z0-9-]*)\"" in
+  let matches pattern =
+    Re.all pattern source |> List.map ~f:(fun item -> Re.Group.get item 1)
+  in
+  matches literal @ List.map (matches command) ~f:(fun name -> "-" ^ name)
+  |> List.dedup_and_sort ~compare:String.compare
+;;
+
 let cli_inventory env root =
-  let pattern = Re.Perl.compile_pat "\"(-{1,2}[a-z][a-z0-9-]*)\"" in
   [ "bin/chat_tui.ml"; "bin/ochat_agent_server.ml"; "bin/ochat_agent_stdio.ml" ]
   |> List.map ~f:(fun file ->
-    let flags =
-      Re.all pattern (load env root file)
-      |> List.map ~f:(fun item -> Re.Group.get item 1)
-      |> List.dedup_and_sort ~compare:String.compare
-    in
+    let flags = cli_flags (load env root file) in
     sprintf
       "## %s flag inventory\n\n[Parser/normalizer](../../%s).\n\n%s\n\n"
       (Filename.basename file)
@@ -240,7 +245,11 @@ let contracts env root =
      [HTTP](transports/http.md) and [environment](environment.md) first.\n\
      These complete excerpts pin the config record, scope codec and HTTP header/body\n\
      validation contract so documentation checks detect contract drift. They are\n\
-     reference source, not standalone compilable examples.\n\n"
+     reference source, not standalone compilable examples.\n\n\
+     Flag inventories collect literal option strings and named Core Command flag\n\
+     declarations (displayed with a leading dash). Generated help/version options\n\
+     and parser-added aliases are not enumerated; consult each executable's help\n\
+     and [command reference](../bin/README.md) for accepted combinations.\n\n"
   in
   let text =
     header

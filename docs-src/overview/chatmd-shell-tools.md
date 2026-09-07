@@ -342,8 +342,10 @@ so ochat bounds and terminal-sanitizes it.
 }
 ```
 
-All strings have already passed output bounds, UTF-8 handling, terminal
-sanitization, secret redaction, and configured output interceptors.
+Returned output has passed byte bounds, terminal filtering, literal secret
+replacement, and configured output interceptors. The finalized-result path can
+truncate within a UTF-8 sequence; it does not inherit the incremental UTF-8
+guarantees of sanitized live progress. See the [output contract](../guide/chatmd-shell-security.md#secrets-and-safe-output).
 
 ## Moderator `Process.run`
 

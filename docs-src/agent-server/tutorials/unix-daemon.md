@@ -1,5 +1,16 @@
 # Private Unix daemon and multiple TUI clients
 
+Create a durable session, disconnect its client, and reattach to the same history.
+
+## Prerequisites and command context
+
+Complete [installation](../quickstart.md) and [private example setup](../../examples/agent-server/README.md). All commands use `dune exec` from the repository root with the active opam environment. Terminal A owns the daemon and provider environment; clients run in separate terminals with the same absolute `OCHAT_DEMO`. Discovery and attachment are offline; submitting messages invokes a billable provider.
+
+Read the current [provider TLS and permission boundaries](../permissions-and-security.md)
+before model work or deployment. [Build troubleshooting](../troubleshooting.md)
+includes the Apple Silicon/OpenBLAS setup path.
+
+
 ## 1. Prepare
 
 Complete [example setup](../../examples/agent-server/README.md), retaining the
@@ -76,3 +87,7 @@ process; see [session recovery](../sessions-and-workspaces.md).
 
 Archive the private directory if you want to retain this tutorial's state, or
 remove only that exact directory after shutdown. No normal Ochat state was used.
+
+## Checkpoint, troubleshooting, and next step
+
+Success means a detached session remains listed after the first client quits, a new client attaches to the same opaque ID, and the store survives a normal daemon restart. If connection fails, check the foreground daemon, socket path, private-directory permissions, and matching shell variables. A missing session ID is not the configured prompt name. Use [troubleshooting](../troubleshooting.md); do not run two daemons against the same store. Follow step 6 for shutdown and cleanup. Next, [schedule background work](background-agent.md) or [connect a stdio client](stdio-client.md).

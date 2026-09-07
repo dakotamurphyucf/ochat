@@ -1,0 +1,609 @@
+---
+import report from '../../.generated/applications-report.json';
+import examples from '../../.generated/examples-report.json';
+import ExampleSource from './ExampleSource.astro';
+import WorkflowIcon from './WorkflowIcon.astro';
+import { sourceFileHref } from '../../config/source-links.mjs';
+const { home = false } = Astro.props;
+const recording = report.recording;
+const example = examples.examples.find((e) => e.id === 'docs-review')!;
+const route = '/docs/applications/documentation-review/';
+const final = recording.result;
+const steps = recording.steps;
+---
+
+<section
+  class:list={['workflow-demo', { featured: home }]}
+  aria-label="Recorded documentation review"
+>
+  <div class="demo-intro">
+    <div>
+      <p class="eyebrow">One project. Two agents. A useful review.</p><h2>
+        {home ? 'See what the files can do.' : 'Inspect the recorded workflow'}
+      </h2><p>
+        An explorer reads the setup guide. A specialist finds the gaps. You get
+        findings you can act on.
+      </p>
+    </div><span class="recording-badge"
+      >{
+        recording.liveProvider
+          ? 'Recorded model run'
+          : 'Recorded · scripted responses'
+      }</span
+    >
+  </div>
+  <nav class="demo-tabs" aria-label="Explore the recording" hidden>
+    {
+      ['result', 'execution', 'files'].map((view, index) => (
+        <button type="button" data-view={view} aria-pressed={index === 0}>
+          {view === 'result'
+            ? 'Result'
+            : view === 'execution'
+              ? 'Execution'
+              : 'Agent files'}
+        </button>
+      ))
+    }
+  </nav>
+  <div class="demo-panel" data-panel="result">
+    <div class="result-layout">
+      <div class="result-context">
+        <WorkflowIcon kind="Documentation" /><h3>
+          A clearer path for new contributors.
+        </h3><p>
+          The sample Lantern guide leaves its runtime version, setup commands,
+          and checks unspecified.
+        </p><p>
+          Read the model’s report, then inspect the calls and files behind it.
+        </p><a
+          href={home
+            ? route
+            : sourceFileHref(route, 'docs-review', 'recorded-run.chatmd')}
+          >{home ? 'Build this workflow' : 'Read the original transcript'} →</a
+        >
+      </div><div class="report-paper">
+        <div class="paper-header">
+          <span>Documentation review</span><span>reference/project.txt</span>
+        </div><div
+          class="report-text"
+          tabindex="0"
+          role="region"
+          aria-label="Recorded review report"
+        >
+          {final}
+        </div>
+      </div>
+    </div>
+  </div>
+  <div class="demo-panel" data-panel="execution">
+    <h3 class="fallback-title">Execution</h3>
+    <div class="execution-controls" hidden>
+      <button type="button" data-play>Play walkthrough</button><button
+        type="button"
+        data-reset>Restart</button
+      ><span role="status" data-play-status>Step 1 of 3</span>
+    </div>
+    <div class="execution-layout">
+      <nav class="step-map" aria-label="Workflow steps">
+        {
+          steps.map((step, index) => (
+            <a
+              href={`#${home ? 'home-' : ''}review-step-${index}`}
+              data-step={index}
+            >
+              <>
+                <span class="step-number">0{index + 1}</span>
+                <span>
+                  {step.title}
+                  <small>{step.actor}</small>
+                </span>
+              </>
+            </a>
+          ))
+        }
+      </nav><div class="step-details">
+        {
+          steps.map((step, index) => (
+            <section
+              id={`${home ? 'home-' : ''}review-step-${index}`}
+              data-step-panel={index}
+            >
+              <>
+                <p class="step-actor">{step.actor}</p>
+                <h4>{step.title}</h4>
+                <details>
+                  <>
+                    <summary>Input</summary>
+                    <pre tabindex="0" aria-label={`${step.title} input`}>
+                      <code>{step.input}</code>
+                    </pre>
+                  </>
+                </details>
+                <p class="output-label">Observed output</p>
+                <div
+                  class="step-output"
+                  tabindex="0"
+                  role="region"
+                  aria-label={`${step.title} observed output`}
+                >
+                  {step.output}
+                </div>
+                <a
+                  class="step-source"
+                  href={sourceFileHref(
+                    home ? '' : route,
+                    'docs-review',
+                    step.file,
+                  )}
+                >
+                  Inspect {step.file} →
+                </a>
+              </>
+            </section>
+          ))
+        }
+      </div>
+    </div>
+  </div>
+  <div class="demo-panel" data-panel="files">
+    <h3 class="fallback-title">Agent files</h3><nav
+      class="agent-map"
+      aria-label="Agent composition"
+    >
+      <a
+        href={home
+          ? sourceFileHref('', 'docs-review', 'explorer.chatmd')
+          : '#source-docs-review-explorer_2e_chatmd'}
+        ><WorkflowIcon />Explorer<small
+          >Reads the project · chooses the tool</small
+        ></a
+      ><span aria-hidden="true">→</span><a
+        href={sourceFileHref(
+          home ? '' : route,
+          'docs-review',
+          'docs-reviewer.chatmd',
+        )}
+        ><WorkflowIcon kind="Documentation" />Documentation reviewer<small
+          >Own instructions · no tools</small
+        ></a
+      >
+    </nav>{
+      home ? (
+        <ExampleSource example={example} open />
+      ) : (
+        <p>
+          Choose an agent above to open its complete file in the reader below.{' '}
+          <a href="#lesson-resources">Browse all workflow files →</a>
+        </p>
+      )
+    }
+  </div>
+  <div class="recording-note">
+    <p>
+      {
+        recording.liveProvider
+          ? 'Captured with OpenAI gpt-4.1 on synthetic sample documentation. A new run can produce different results.'
+          : 'Real Ochat tools and delegation with scripted model responses. This demonstrates execution, not model quality.'
+      }
+    </p><details>
+      <summary>Recording details and reproduction</summary><p>
+        {recording.scope}
+      </p><p>{recording.transport}</p><p>
+        Playback advances through captured steps; its timing is illustrative.
+        Temporary directory paths are redacted. No credentials are included.
+      </p><p>
+        From the Ochat checkout, reproduce an offline run with <code
+          >python3 website/scripts/record-showcase.py</code
+        >. Add <code>--live</code> to use the configured OpenAI key for at most six
+        model requests and replace the capture with a live run.
+      </p>
+    </details>
+  </div>
+</section>
+<script>
+  document.querySelectorAll<HTMLElement>('.workflow-demo').forEach((demo) => {
+    const tabs = demo.querySelector<HTMLElement>('.demo-tabs')!;
+    tabs.hidden = false;
+    const controls = demo.querySelector<HTMLElement>('.execution-controls')!;
+    controls.hidden = false;
+    const play = demo.querySelector<HTMLButtonElement>('[data-play]')!;
+    const status = demo.querySelector<HTMLElement>('[data-play-status]')!;
+    let step = 0;
+    let timer: ReturnType<typeof setInterval> | undefined;
+    const stop = () => {
+      if (timer) clearInterval(timer);
+      timer = undefined;
+      play.textContent = 'Play walkthrough';
+    };
+    const chooseStep = (index: number) => {
+      step = index;
+      demo
+        .querySelectorAll<HTMLElement>('[data-step-panel]')
+        .forEach(
+          (panel) => (panel.hidden = Number(panel.dataset.stepPanel) !== index),
+        );
+      demo.querySelectorAll<HTMLElement>('[data-step]').forEach((link) => {
+        if (Number(link.dataset.step) === index)
+          link.setAttribute('aria-current', 'step');
+        else link.removeAttribute('aria-current');
+      });
+      status.textContent = `Step ${index + 1} of 3`;
+    };
+    const chooseView = (view: string) => {
+      stop();
+      demo
+        .querySelectorAll<HTMLElement>('[data-panel]')
+        .forEach((panel) => (panel.hidden = panel.dataset.panel !== view));
+      tabs
+        .querySelectorAll<HTMLElement>('[data-view]')
+        .forEach((button) =>
+          button.setAttribute(
+            'aria-pressed',
+            String(button.dataset.view === view),
+          ),
+        );
+    };
+    tabs.addEventListener('click', (event) => {
+      const button = (event.target as Element).closest<HTMLElement>(
+        '[data-view]',
+      );
+      if (button) chooseView(button.dataset.view!);
+    });
+    demo.querySelectorAll<HTMLAnchorElement>('[data-step]').forEach((link) =>
+      link.addEventListener('click', (event) => {
+        event.preventDefault();
+        stop();
+        chooseStep(Number(link.dataset.step));
+      }),
+    );
+    play.addEventListener('click', () => {
+      if (timer) {
+        stop();
+        return;
+      }
+      if (step === 2) chooseStep(0);
+      play.textContent = 'Pause walkthrough';
+      timer = setInterval(() => {
+        if (step < 2) chooseStep(step + 1);
+        else stop();
+      }, 4500);
+    });
+    demo.querySelector('[data-reset]')!.addEventListener('click', () => {
+      stop();
+      chooseStep(0);
+    });
+    addEventListener('visibilitychange', () => {
+      if (document.hidden) stop();
+    });
+    chooseStep(0);
+    chooseView('result');
+    // A direct source fragment should reveal its parent view before scrolling.
+    const revealHash = () => {
+      let target: HTMLElement | null = null;
+      try {
+        target = document.getElementById(
+          decodeURIComponent(location.hash.slice(1)),
+        );
+      } catch {
+        return;
+      }
+      if (!target || !demo.contains(target)) return;
+      const panel = target.closest<HTMLElement>('[data-panel]');
+      if (panel) chooseView(panel.dataset.panel!);
+      if (target.dataset.stepPanel)
+        chooseStep(Number(target.dataset.stepPanel));
+    };
+    addEventListener('hashchange', revealHash);
+    revealHash();
+  });
+</script>
+<style>
+  .workflow-demo {
+    margin-block: 2.5rem;
+    border: 1px solid var(--ochat-line);
+    border-radius: 14px;
+    overflow: hidden;
+    background: var(--ochat-bg);
+    min-width: 0;
+  }
+  .demo-intro {
+    padding: 1.6rem 1.7rem;
+    display: flex;
+    align-items: flex-start;
+    justify-content: space-between;
+    gap: 1rem;
+    flex-wrap: wrap;
+  }
+  .eyebrow {
+    color: var(--ochat-accent);
+    font-size: 0.75rem;
+    margin: 0 0 0.6rem;
+  }
+  h2 {
+    font-size: clamp(1.6rem, 3vw, 2.4rem);
+    letter-spacing: -0.045em;
+    line-height: 1.15;
+    margin: 0;
+  }
+  h3 {
+    font-size: 1.25rem;
+    letter-spacing: -0.03em;
+    line-height: 1.35;
+    margin: 0.8rem 0;
+  }
+  p {
+    font-size: 0.875rem;
+    line-height: 1.7;
+    color: var(--ochat-muted);
+  }
+  .demo-intro p:last-child {
+    max-width: 54ch;
+    margin-bottom: 0;
+  }
+  .recording-badge {
+    font-size: 0.7rem;
+    line-height: 1.5;
+    padding: 0.4rem 0.65rem;
+    border: 1px solid var(--ochat-line);
+    border-radius: 2rem;
+    color: var(--ochat-muted);
+  }
+  .demo-tabs {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.3rem;
+    padding: 0 1.6rem 1rem;
+    border-bottom: 1px solid var(--ochat-line);
+  }
+  button {
+    min-height: 44px;
+    font: inherit;
+    font-size: 0.8rem;
+    cursor: pointer;
+    padding: 0.5rem 0.9rem;
+    border: 1px solid var(--ochat-control-border);
+    border-radius: 6px;
+    background: var(--ochat-bg);
+    color: var(--ochat-ink);
+  }
+  .demo-tabs button {
+    border-color: transparent;
+  }
+  .demo-tabs button[aria-pressed='true'] {
+    color: var(--ochat-accent);
+    background: var(--ochat-accent-soft);
+    border-color: var(--ochat-line);
+  }
+  [hidden] {
+    display: none !important;
+  }
+  .demo-panel {
+    padding: 1.5rem 1.7rem;
+    min-width: 0;
+  }
+  .result-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 0.7fr) minmax(0, 1.3fr);
+    gap: 2rem;
+  }
+  .result-context {
+    padding-top: 0.6rem;
+  }
+  .result-context > svg {
+    color: var(--ochat-accent);
+  }
+  .result-context a,
+  .step-source {
+    font-size: 0.8rem;
+    font-weight: 650;
+    color: var(--ochat-accent);
+    text-underline-offset: 0.25em;
+  }
+  .report-paper {
+    background: var(--ochat-panel);
+    border: 1px solid var(--ochat-line);
+    border-radius: 8px;
+    padding: 1.3rem;
+    min-width: 0;
+  }
+  .paper-header {
+    display: flex;
+    flex-wrap: wrap;
+    justify-content: space-between;
+    gap: 0.5rem;
+    font: 0.65rem/1.6 var(--ochat-mono);
+    color: var(--ochat-muted);
+    border-bottom: 1px solid var(--ochat-line);
+    padding-bottom: 1rem;
+    margin-bottom: 1rem;
+  }
+  .report-text,
+  .step-output {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font-size: 0.8rem;
+    line-height: 1.85;
+  }
+  .report-text {
+    max-height: 27rem;
+    overflow: auto;
+  }
+  .report-text:focus-visible {
+    outline: 3px solid var(--ochat-focus);
+  }
+  .execution-controls {
+    display: flex;
+    align-items: center;
+    gap: 0.6rem;
+    flex-wrap: wrap;
+    margin-bottom: 1.5rem;
+  }
+  .execution-controls span {
+    font-size: 0.75rem;
+    color: var(--ochat-muted);
+    margin-left: auto;
+  }
+  .execution-layout {
+    display: grid;
+    grid-template-columns: minmax(0, 0.75fr) minmax(0, 1.25fr);
+    gap: 1.5rem;
+  }
+  .step-map {
+    display: flex;
+    flex-direction: column;
+    gap: 0.7rem;
+  }
+  .step-map a {
+    display: flex;
+    gap: 0.75rem;
+    align-items: flex-start;
+    padding: 1rem;
+    border: 1px solid var(--ochat-line);
+    border-radius: 8px;
+    text-decoration: none;
+    color: var(--ochat-ink);
+    font-size: 0.85rem;
+  }
+  .step-map a[aria-current] {
+    border-color: var(--ochat-accent);
+    background: var(--ochat-accent-soft);
+  }
+  .step-number {
+    font: 0.7rem/1.8 var(--ochat-mono);
+    color: var(--ochat-accent);
+  }
+  .step-map small {
+    display: block;
+    font-size: 0.65rem;
+    line-height: 1.6;
+    color: var(--ochat-muted);
+    margin-top: 0.3rem;
+  }
+  .step-details {
+    min-width: 0;
+  }
+  .step-details section {
+    scroll-margin-top: 7rem;
+  }
+  .step-actor,
+  .output-label {
+    font-size: 0.7rem;
+    color: var(--ochat-accent);
+  }
+  h4 {
+    font-size: 1.1rem;
+    margin: 0.5rem 0 1rem;
+  }
+  summary {
+    cursor: pointer;
+    font-size: 0.8rem;
+    padding: 0.5rem 0;
+  }
+  pre {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+    font: 0.7rem/1.7 var(--ochat-mono);
+    padding: 1rem;
+    border: 1px solid var(--ochat-line);
+    border-radius: 6px;
+    background: var(--ochat-panel);
+    max-height: 15rem;
+    overflow: auto;
+  }
+  .step-output {
+    max-height: 24rem;
+    overflow: auto;
+    margin-bottom: 1rem;
+  }
+  .recording-note {
+    padding: 1rem 1.7rem;
+    border-top: 1px solid var(--ochat-line);
+  }
+  .recording-note p {
+    font-size: 0.7rem;
+    margin: 0.3rem 0;
+  }
+  .recording-note summary {
+    font-size: 0.7rem;
+    color: var(--ochat-muted);
+  }
+  .recording-note code {
+    overflow-wrap: anywhere;
+  }
+  .agent-map {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    margin-bottom: 1rem;
+  }
+  .agent-map a {
+    flex: 1;
+    min-width: 0;
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    padding: 1rem;
+    border: 1px solid var(--ochat-control-border);
+    border-radius: 8px;
+    color: var(--ochat-accent);
+    text-decoration: none;
+    font-weight: 650;
+    font-size: 0.9rem;
+  }
+  .agent-map small {
+    color: var(--ochat-muted);
+    font-weight: 400;
+    font-size: 0.75rem;
+  }
+  .fallback-title {
+    margin-top: 0;
+  }
+  .demo-tabs:not([hidden]) ~ .demo-panel .fallback-title {
+    display: none;
+  }
+  button:focus-visible,
+  a:focus-visible,
+  summary:focus-visible,
+  pre:focus-visible {
+    outline: 3px solid var(--ochat-focus);
+    outline-offset: 3px;
+  }
+  @media (max-width: 55rem) {
+    .result-layout,
+    .execution-layout {
+      grid-template-columns: 1fr;
+    }
+    .result-context {
+      max-width: 50ch;
+    }
+    .demo-intro,
+    .demo-panel {
+      padding: 1.2rem;
+    }
+    .demo-tabs {
+      padding-inline: 1rem;
+    }
+    .recording-note {
+      padding: 1rem;
+    }
+    .agent-map {
+      flex-direction: column;
+      align-items: stretch;
+    }
+    .agent-map > span {
+      align-self: center;
+      transform: rotate(90deg);
+    }
+    .step-map a {
+      padding: 0.7rem;
+    }
+    .report-text {
+      max-height: none;
+    }
+  }
+  @media (prefers-reduced-motion: reduce) {
+    * {
+      scroll-behavior: auto;
+    }
+  }
+</style>

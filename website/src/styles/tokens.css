@@ -1,0 +1,48 @@
+/* Selected identity: Graphite + blue. Shared by the homepage and docs. */
+:root {
+  --ochat-bg: #ffffff;
+  --ochat-panel: #f4f5f7;
+  --ochat-ink: #20242c;
+  --ochat-muted: #596170;
+  --ochat-line: #e0e3e8;
+  --ochat-accent: #245bd6;
+  --ochat-accent-soft: #eaf0ff;
+  --ochat-on-accent: #ffffff;
+  --ochat-focus: #245bd6;
+  --ochat-control-border: #77808f;
+  --ochat-code-bg: #171b23;
+  --ochat-code-ink: #edf0f7;
+  --ochat-code-muted: #b6bfce;
+  --ochat-code-line: #3a4353;
+  --ochat-code-focus: #91b3ff;
+  --ochat-wordmark-weight: 750;
+  --ochat-wordmark-tracking: -0.055em;
+  --ochat-font: 'Manrope Variable', sans-serif;
+  --ochat-mono: 'IBM Plex Mono', monospace;
+  --ochat-space-1: 0.25rem;
+  --ochat-space-2: 0.5rem;
+  --ochat-space-3: 0.75rem;
+  --ochat-space-4: 1rem;
+  --ochat-space-6: 1.5rem;
+  --ochat-space-8: 2rem;
+  --ochat-radius-control: 0.5rem;
+  --ochat-radius-panel: 0.75rem;
+}
+:root[data-theme='dark'] {
+  --ochat-bg: #12151b;
+  --ochat-panel: #1b2029;
+  --ochat-ink: #edf0f7;
+  --ochat-muted: #b2bac8;
+  --ochat-line: #303744;
+  --ochat-accent: #91b3ff;
+  --ochat-accent-soft: #202f4d;
+  --ochat-on-accent: #122346;
+  --ochat-focus: #a8c5ff;
+  --ochat-control-border: #8995a9;
+}
+@media (forced-colors: active) {
+  :root {
+    --ochat-focus: Highlight;
+    --ochat-control-border: ButtonText;
+  }
+}

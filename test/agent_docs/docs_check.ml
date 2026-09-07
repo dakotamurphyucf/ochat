@@ -193,6 +193,9 @@ let check_examples env root executable =
        run_example env executable [ "setup"; scratch; "gpt-5.6-sol" ];
        Docs_observer.run env scratch;
        Docs_library.run env scratch;
+       Docs_smoke.batch env root scratch;
+       Docs_smoke.shell_examples env root;
+       Docs_tutorials.run env root scratch;
        run_example
          env
          executable
@@ -214,6 +217,22 @@ let check_examples env root executable =
        Docs_smoke.timer env root (Filename.concat scratch "workspace"))
 ;;
 
+let check_cli_flag_inventory () =
+  let source =
+    {|flag "config" (optional string)
+      flag
+        "validate-only" no_arg
+      flag "-config" (optional string)
+      "--connect"; "-help"; "unrelated-value"|}
+  in
+  require
+    (List.equal
+       String.equal
+       (Docs_inventory.cli_flags source)
+       [ "--connect"; "-config"; "-help"; "-validate-only" ])
+    "CLI inventory must include Core Command names and literal options without duplicates"
+;;
+
 let () =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
@@ -231,6 +250,7 @@ let () =
           && not (String.is_suffix file ~suffix:"protocol-types.md"))
       in
       check_protocol env root;
+      check_cli_flag_inventory ();
       check_callable_excerpts env root documents;
       require
         (String.equal

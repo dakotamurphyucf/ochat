@@ -1,5 +1,16 @@
 # A narrow shell agent
 
+Give a model exactly one declared `/bin/pwd` command and inspect its authority before use.
+
+## Prerequisites and command context
+
+Complete [installation](../quickstart.md) and [the first local agent](local-tui.md). Commands below use `dune exec` from the repository root and its active opam environment. Interactive execution uses the legacy local host; the daemon variant needs private example setup. A supported Seatbelt or bubblewrap backend and the resource helper are platform prerequisites. Native `--local` must not be combined with `--authorize-shell-manifest`.
+
+Read the current [provider TLS and permission boundaries](../permissions-and-security.md)
+before model work or deployment. [Build troubleshooting](../troubleshooting.md)
+includes the Apple Silicon/OpenBLAS setup path.
+
+
 Use a disposable workspace. This example publishes exactly one fixed command,
 `/bin/pwd`, with no model-supplied arguments. The
 [tracked prompt](../../examples/agent-server/shell/pwd.chatmd) extends the versioned
@@ -67,3 +78,7 @@ See [the 17 shell declaration examples](../../guide/chatmd-shell-examples.md)
 for structured/chain/raw/script tools, hooks, model reviewers, secrets and backend
 failure cases. Those examples have explicit dependencies/placeholders and are not
 all safe copy-and-run deployment scripts.
+
+## Checkpoint, troubleshooting, and next step
+
+Success means inspection matches the fixed executable/argv and a requested tool call returns the workspace directory. A model naming the directory without a tool result does not verify execution. For backend/helper errors consult [shell diagnostics](../../guide/chatmd-shell-host-integration.md); keep required confinement enabled. A permission denial is separate from parsing and model prose. Wait for work to finish, quit the TUI with Esc then `:q` and Enter, and stop any daemon before removing its private directory. Legacy caches/store records and provider logs can remain separately; inspect their configured locations. Continue to [durable Unix sessions](unix-daemon.md).

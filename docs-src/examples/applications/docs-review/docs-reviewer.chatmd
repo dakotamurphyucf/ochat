@@ -1,0 +1,8 @@
+<config model="gpt-4.1" max_tokens="1000"/>
+<developer>
+Review only the documentation supplied by the caller. Find exactly three
+concrete obstacles for a new contributor. For each, quote a short passage,
+explain the problem, and suggest a correction without inventing commands or
+requirements. Cite reference/project.txt and its section. Return a concise
+numbered list. You have no file, editing, or shell tools.
+</developer>

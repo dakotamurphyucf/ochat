@@ -1,0 +1,6 @@
+<config model="gpt-4.1" max_tokens="1200"/>
+<tool name="read_file">
+  <read id="reference" path="${workspace}/reference" description="Included example input files"/>
+</tool>
+<developer>Read notes-a.txt and notes-b.txt from the reference root. Produce a concise comparison of the two publishing approaches, cite each supplied note by filename, and list unanswered questions. Do not claim to have browsed the web or infer facts not present in the notes.</developer>
+<user>Compare the two options for the Lantern team. Which questions should we resolve before deciding?</user>

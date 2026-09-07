@@ -1,0 +1,30 @@
+---
+import Default from '@astrojs/starlight/components/Footer.astro';
+import { repository, sourceUrl } from '../../config/site.mjs';
+---
+
+<Default />
+<nav class="project-footer" aria-label="Project links" data-pagefind-ignore>
+  <a href="/">Ochat home</a>
+  <a href={`${repository}/blob/main/Readme.md#documentation-and-contributing`}
+    >Contribute ↗</a
+  >
+  <a href={sourceUrl('LICENSE.txt')}>MIT license ↗</a>
+  <a href={repository}>GitHub ↗</a>
+</nav>
+<style>
+  .project-footer {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.6rem 1.4rem;
+    padding-block: 1.5rem;
+    margin-top: 2rem;
+    border-top: 1px solid var(--ochat-line);
+    font-size: 0.8rem;
+  }
+  .project-footer a {
+    color: var(--ochat-muted);
+    text-underline-offset: 0.22em;
+    padding-block: 0.4rem;
+  }
+</style>

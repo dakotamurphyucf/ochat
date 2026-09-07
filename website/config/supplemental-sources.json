@@ -1,0 +1,232 @@
+{
+  "version": 1,
+  "files": [
+    {
+      "source": "Readme.md",
+      "disposition": "hero-source",
+      "reason": "Only the selected complete ChatMD hero fence is extracted; the rest remains repository onboarding prose."
+    },
+    {
+      "source": "DEVELOPMENT.md",
+      "disposition": "repository-only",
+      "reason": "Contributor build and validation instructions stay in the repository; docs link to this source."
+    },
+    {
+      "source": "control-flow-chatmd.md",
+      "disposition": "repository-only",
+      "reason": "Older root guide, design, or history material is not automatically published or indexed by the website."
+    },
+    {
+      "source": "history.md",
+      "disposition": "repository-only",
+      "reason": "Older root guide, design, or history material is not automatically published or indexed by the website."
+    },
+    {
+      "source": "ochat-guide.md",
+      "disposition": "repository-only",
+      "reason": "Older root guide, design, or history material is not automatically published or indexed by the website."
+    },
+    {
+      "source": "ui_design_test.md",
+      "disposition": "repository-only",
+      "reason": "Older root guide, design, or history material is not automatically published or indexed by the website."
+    },
+    {
+      "source": "dune-project",
+      "disposition": "repository-only",
+      "reason": "License or build/package source available through immutable repository links; no automatic document import."
+    },
+    {
+      "source": "ochat.opam",
+      "disposition": "repository-only",
+      "reason": "License or build/package source available through immutable repository links; no automatic document import."
+    },
+    {
+      "source": "assets/tui-snapshot.png",
+      "disposition": "media",
+      "reason": "Reviewed illustration copied only to the exact assets.json destination; not evidence of current runtime behavior."
+    },
+    {
+      "source": "LICENSE.txt",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/agent-server/clients/discover.ndjson",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/agent-server/prompts/hello.chatmd",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/agent-server/prompts/timer.chatmd",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/agent-server/shell/pwd.chatmd",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/chatml/moderator.chatml",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/file-reader/reader.chatmd",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/file-reader/reference/project.txt",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/specialist/docs-reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/specialist/explorer.chatmd",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/specialist/reference/project.txt",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/three-turns/three-turns.chatmd",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/learning/three-turns/three-turns.chatml",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/tools/custom_tool.ml",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/tools/dune",
+      "disposition": "example-download",
+      "reason": "P06 exact source download approval; only the destinations and complete file sets declared by docs-src/examples/catalog.json may be copied."
+    },
+    {
+      "source": "docs-src/examples/applications/docs-review/explorer.chatmd",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/docs-review/docs-reviewer.chatmd",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/docs-review/reference/project.txt",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/docs-review/recorded-run.chatmd",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/research-brief/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/research-brief/reference/notes-a.txt",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/research-brief/reference/notes-b.txt",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/change-review/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/change-review/reference/change.diff",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/change-review/reference/requirements.txt",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/headless-report/agent.chatmd",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/headless-report/reference/status.txt",
+      "disposition": "example-download",
+      "reason": "Explicit application source bundle file; rendered inline and downloadable with byte/provenance checks."
+    },
+    {
+      "source": "docs-src/examples/applications/docs-review/recording.json",
+      "disposition": "example-review",
+      "reason": "Captured application execution evidence; consumed through a hash-validated website importer, not copied as an arbitrary asset."
+    }
+  ],
+  "directories": [
+    {
+      "source": "lib/",
+      "disposition": "repository-only",
+      "reason": "Interfaces and implementations support exact API and provenance links; they are not website documents or source downloads."
+    },
+    {
+      "source": "bin/",
+      "disposition": "repository-only",
+      "reason": "Executable implementations and build declarations remain immutable source links; reviewed CLI prose owns website routes."
+    },
+    {
+      "source": "scripts/",
+      "disposition": "repository-only",
+      "reason": "Installed and development script sources are linked for provenance, not copied or executed by the website."
+    },
+    {
+      "source": "test/",
+      "disposition": "repository-only",
+      "reason": "Validation sources and fixtures remain repository evidence, not public website examples by default."
+    },
+    {
+      "source": "docs-src/",
+      "disposition": "repository-only",
+      "reason": "Non-Markdown example companions remain repository sources until P06 explicitly approves complete downloadable dependencies."
+    },
+    {
+      "source": "prompt-examples/",
+      "disposition": "example-review",
+      "reason": "Prompt packs, including Markdown containing ChatMD, require P06 dependency and capability review before downloads or search inclusion."
+    },
+    {
+      "source": "real-world-example-session/",
+      "disposition": "repository-only",
+      "reason": "Historical session artifacts and full transcripts remain repository-only and excluded from website search and downloads."
+    },
+    {
+      "source": "assets/",
+      "disposition": "repository-only",
+      "reason": "Unselected repository assets are not imported; exact-file media overrides alone permit copying."
+    }
+  ]
+}
