@@ -45,7 +45,21 @@ let delta (invocation : I.t) =
   | _ -> Session_delta.Invocation_changed invocation
 ;;
 
-let plan ~(state : Session_state.t) ~observer ~halted =
+let discard_compaction invocations ~operation_id ~reason =
+  List.filter invocations ~f:(fun invocation ->
+    match invocation.I.observation with
+    | Some
+        { follow_up = Some (Compaction_accepted_follow_up _); compaction_operation_id; _ }
+      ->
+      Option.value_map
+        compaction_operation_id
+        ~default:true
+        ~f:(P.Id.Operation.equal operation_id)
+    | _ -> false)
+  |> discard ~reason
+;;
+
+let plan ~(state : Session_state.t) ~observer ~halted ~compaction_operation_id =
   let open Result.Let_syntax in
   let pending =
     List.filter state.invocations ~f:pending
@@ -60,6 +74,12 @@ let plan ~(state : Session_state.t) ~observer ~halted =
       && P.Id.Session.equal invocation.context.session_id state.identity.session_id
       &&
       match invocation.observation, observer with
+      | ( Some
+            { follow_up = Some (Compaction_accepted_follow_up _)
+            ; compaction_operation_id = None
+            ; _
+            }
+        , _ ) -> false
       | Some observation, Some observer -> I.equal_observer observation.observer observer
       | _ -> false)
   in
@@ -96,7 +116,10 @@ let plan ~(state : Session_state.t) ~observer ~halted =
        let%map invocations =
          List.map compact ~f:(fun invocation ->
            match requests invocation with
-           | Some { request_turn = true; _ } -> I.accept_observation_compaction invocation
+           | Some { request_turn = true; _ } ->
+             I.accept_observation_compaction
+               invocation
+               ~operation_id:compaction_operation_id
            | _ -> I.apply_observation_follow_up invocation)
          |> Result.all
        in

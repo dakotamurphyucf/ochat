@@ -1160,6 +1160,9 @@ type observation =
   ; status : observation_status
   ; follow_up : follow_up_status option [@sexp.option]
     (** Codec 6. Present only after acknowledgement; retained after application. *)
+  ; compaction_operation_id : Id.Operation.t option [@sexp.option]
+    (** Codec 8. The compaction whose outcome controls the dependent turn.
+        Retained after application/discard. Absent on legacy receipts. *)
   }
 [@@deriving equal, sexp]
 
@@ -1233,10 +1236,13 @@ val complete_observation : ?follow_up:follow_up -> t -> (t, Error.t) result
     This primitive does not install a dispatcher or infer actions from snapshots. *)
 val apply_observation_follow_up : t -> (t, Error.t) result
 
-(** Codec 7 intermediate receipt: compaction is durably scheduled, and the
+(** Codec 8 intermediate receipt: compaction is durably scheduled, and the
     requested turn remains pending. Save atomically with compaction admission.
     Repeating acceptance is idempotent and must not start another compaction. *)
-val accept_observation_compaction : t -> (t, Error.t) result
+val accept_observation_compaction
+  :  t
+  -> operation_id:Id.Operation.t
+  -> (t, Error.t) result
 
 (** Terminally discard unaccepted actions, e.g. when a session is stopped.
     Preserve the request and native outcome; never rearm it on restart.

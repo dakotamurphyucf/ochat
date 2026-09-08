@@ -122,6 +122,7 @@ type observation =
   { observer : observer
   ; status : observation_status
   ; follow_up : follow_up_status option [@sexp.option]
+  ; compaction_operation_id : Id.Operation.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -276,6 +277,20 @@ let validate t =
            | Some reason -> text ~name:"observation end-session reason" ~max:1024 reason)
         | Some _, _ -> invalid "follow-up intent requires an acknowledged observation"
       in
+      let%bind () =
+        match observation.compaction_operation_id, observation.follow_up with
+        | None, _ -> Ok ()
+        | ( Some _
+          , Some
+              ( Compaction_accepted_follow_up requests
+              | Applied_follow_up requests
+              | Discarded_follow_up (requests, _) ) )
+          when requests.request_compaction
+               && requests.request_turn
+               && Option.is_none requests.end_session -> Ok ()
+        | _ ->
+          invalid "compaction binding requires an accepted compaction and dependent turn"
+      in
       (match observation.status with
        | Observation_failed reason -> text ~name:"observation failure" ~max:1024 reason
        | Awaiting | Observing | Observed -> Ok ())
@@ -369,7 +384,11 @@ let create ?routing ?observer context =
     ; publication_discarded = None
     ; observation =
         Option.map observer ~f:(fun observer ->
-          { observer; status = Awaiting; follow_up = None })
+          { observer
+          ; status = Awaiting
+          ; follow_up = None
+          ; compaction_operation_id = None
+          })
     }
   in
   Result.map (validate t) ~f:(fun () -> t)
@@ -513,12 +532,24 @@ let change_follow_up t follow_up =
   | None -> failure Invalid_state "invocation has no observation"
 ;;
 
-let accept_observation_compaction t =
+let accept_observation_compaction t ~operation_id =
   match t.observation with
   | Some { status = Observed; follow_up = Some (Pending_follow_up requests); _ } ->
+    let t =
+      { t with
+        observation =
+          Option.map t.observation ~f:(fun observation ->
+            { observation with compaction_operation_id = Some operation_id })
+      }
+    in
     change_follow_up t (Compaction_accepted_follow_up requests)
-  | Some { status = Observed; follow_up = Some (Compaction_accepted_follow_up _); _ } ->
-    Ok t
+  | Some
+      { status = Observed
+      ; follow_up = Some (Compaction_accepted_follow_up _)
+      ; compaction_operation_id = Some existing
+      ; _
+      }
+    when Id.Operation.equal existing operation_id -> Ok t
   | _ -> failure Invalid_state "observation has no pending compaction and turn"
 ;;
 
@@ -549,6 +580,15 @@ let validate_observation_transition previous next =
   | None, None -> Ok ()
   | Some old, Some current when equal_observer old.observer current.observer ->
     let open Result.Let_syntax in
+    let%bind () =
+      match old.compaction_operation_id, current.compaction_operation_id with
+      | before, after when Option.equal Id.Operation.equal before after -> Ok ()
+      | None, Some _ ->
+        (match old.follow_up, current.follow_up with
+         | Some (Pending_follow_up _), Some (Compaction_accepted_follow_up _) -> Ok ()
+         | _ -> failure Conflict "compaction binding can only be attached at admission")
+      | _ -> failure Conflict "compaction operation binding is immutable"
+    in
     let%bind () =
       match old.follow_up, current.follow_up with
       | old, current when Option.equal equal_follow_up_status old current -> Ok ()
@@ -984,7 +1024,9 @@ let observation_to_json (observation : observation) =
      ; "status", `String status
      ]
      @ optional "reason" reason (fun value -> `String value)
-     @ optional "follow_up" observation.follow_up follow_up_to_json)
+     @ optional "follow_up" observation.follow_up follow_up_to_json
+     @ optional "compaction_operation_id" observation.compaction_operation_id (fun id ->
+       `String (Id.Operation.to_string id)))
 ;;
 
 let observation_of_json ~version json =
@@ -997,12 +1039,21 @@ let observation_of_json ~version json =
   let%bind kind = Json_codec.required_as fields "status" Json_codec.string in
   let base_fields =
     [ "script_id"; "source_sha256"; "status" ]
-    @ if version >= 6 then [ "follow_up" ] else []
+    @ (if version >= 6 then [ "follow_up" ] else [])
+    @ if version >= 8 then [ "compaction_operation_id" ] else []
   in
   let%bind follow_up =
     if version >= 6
     then
       Json_codec.required_as fields "follow_up" (follow_up_of_json ~version)
+      |> Result.map ~f:Option.some
+    else Ok None
+  in
+  let%bind compaction_operation_id =
+    if version >= 8
+    then
+      Json_codec.required_as fields "compaction_operation_id" (fun json ->
+        Result.bind (Json_codec.string json) ~f:Id.Operation.of_string)
       |> Result.map ~f:Option.some
     else Ok None
   in
@@ -1020,7 +1071,7 @@ let observation_of_json ~version json =
       Observation_failed reason
     | _ -> invalid "unknown observation status"
   in
-  { observer = { script_id; source_sha256 }; status; follow_up }
+  { observer = { script_id; source_sha256 }; status; follow_up; compaction_operation_id }
 ;;
 
 let to_json t =
@@ -1028,6 +1079,10 @@ let to_json t =
     ([ ( "schema_version"
        , `Number
            (if
+              Option.exists t.observation ~f:(fun observation ->
+                Option.is_some observation.compaction_operation_id)
+            then "8"
+            else if
               Option.exists t.observation ~f:(fun observation ->
                 match observation.follow_up with
                 | Some (Compaction_accepted_follow_up _ | Discarded_follow_up _) -> true
@@ -1068,7 +1123,7 @@ let of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 | 3 | 4 | 5 | 6 | 7 -> Ok ()
+    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =

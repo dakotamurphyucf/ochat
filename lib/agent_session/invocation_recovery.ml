@@ -155,7 +155,22 @@ let plan_selected ~accept ~state ~namespace ~first_sequence ~reason =
 ;;
 
 let plan ~state ~namespace ~first_sequence ~reason =
-  plan_selected ~accept:(fun _ -> true) ~state ~namespace ~first_sequence ~reason
+  let open Result.Let_syntax in
+  let%bind discarded =
+    match state.Session_state.active_operation with
+    | Some { kind = Compaction; id; _ } ->
+      Observation_follow_up.discard_compaction
+        state.invocations
+        ~operation_id:id
+        ~reason:"compaction interrupted before durable completion"
+    | _ -> Ok []
+  in
+  let deltas = List.map discarded ~f:Observation_follow_up.delta in
+  let%bind state = List.fold_result deltas ~init:state ~f:Session_delta.apply in
+  let%map plan =
+    plan_selected ~accept:(fun _ -> true) ~state ~namespace ~first_sequence ~reason
+  in
+  { plan with deltas = deltas @ plan.deltas }
 ;;
 
 let plan_foreground ~state ~namespace ~first_sequence ~reason =

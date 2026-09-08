@@ -12,6 +12,8 @@ type t =
     and reused. Does not run scripts, policy callbacks, providers or post hooks.
     Waiting nested observations survive. An observation claimed before interruption
     is marked failed independently of the tool outcome; handlers are never replayed.
+    If a compaction was active, its dependent follow-up turn is discarded in the
+    same recovery plan. Independent requests and other operation bindings survive.
 
     [first_sequence] must be beyond the durable allocation high-water mark. The
     host must reserve through [next_sequence] and commit all deltas/history events

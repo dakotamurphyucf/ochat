@@ -26,6 +26,17 @@ val discard
   -> reason:string
   -> (Agent_protocol.Invocation.t list, Agent_protocol.Error.t) result
 
+(** Retire turns dependent on this failed/cancelled/interrupted compaction.
+    Other operations and independent pending requests are untouched. Unbound
+    legacy compaction receipts are also retired rather than implicitly resumed. *)
+val discard_compaction
+  :  Agent_protocol.Invocation.t list
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> reason:string
+  -> (Agent_protocol.Invocation.t list, Agent_protocol.Error.t) result
+
+(* [compaction_operation_id] must identify the operation committed with [Compact]. *)
+
 (** Coalesce requests for the current source/generation. End overrides other
     actions. Compaction is accepted before a requested turn; its receipt retains
     that turn without requesting compaction again. Obsolete owners and halted
@@ -35,4 +46,5 @@ val plan
   :  state:Session_state.t
   -> observer:Agent_protocol.Invocation.observer option
   -> halted:bool
+  -> compaction_operation_id:Agent_protocol.Id.Operation.t
   -> (t, Agent_protocol.Error.t) result

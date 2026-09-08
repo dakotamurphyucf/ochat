@@ -1671,7 +1671,7 @@ let compaction_generation t =
   else Ok (t.state.conversation.compaction_generation + 1)
 ;;
 
-let compaction_terminal_delta t operation = function
+let compaction_terminal_base_delta t operation = function
   | Compacted history ->
     let open Result.Let_syntax in
     let%bind generation = compaction_generation t in
@@ -1716,6 +1716,25 @@ let compaction_terminal_delta t operation = function
         ; Session_state_changed
             { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
         ] )
+;;
+
+let compaction_terminal_delta t operation outcome =
+  let open Result.Let_syntax in
+  let%bind delta, payloads = compaction_terminal_base_delta t operation outcome in
+  let%map discarded =
+    match outcome with
+    | Compacted _ -> Ok []
+    | Compaction_cancelled _ | Compaction_failed _ ->
+      Observation_follow_up.discard_compaction
+        t.state.invocations
+        ~operation_id:operation.id
+        ~reason:
+          (match outcome with
+           | Compaction_cancelled _ -> "compaction cancelled"
+           | _ -> "compaction failed")
+  in
+  ( Session_delta.Batch (List.map discarded ~f:Observation_follow_up.delta @ [ delta ])
+  , payloads )
 ;;
 
 let compaction_terminal t operation_id outcome =
@@ -1864,7 +1883,7 @@ let retain_reconciliation_failure t failure =
   |> Result.map ~f:(fun _ -> ())
 ;;
 
-let start_compaction ?(extra_deltas : Session_delta.t list = []) t =
+let start_compaction ?operation ?(extra_deltas : Session_delta.t list = []) t =
   let open Result.Let_syntax in
   let%bind () = reconcile_foreground_invocations t in
   let first_sequence = t.state.conversation.next_history_sequence in
@@ -1877,7 +1896,9 @@ let start_compaction ?(extra_deltas : Session_delta.t list = []) t =
     let%bind history =
       History_codec.all_of_protocol t.state.conversation.canonical_history
     in
-    let operation = create_compaction_operation t in
+    let operation =
+      Option.value_or_thunk operation ~default:(fun () -> create_compaction_operation t)
+    in
     let lifecycle = lifecycle_for_compaction t operation.id in
     let%bind session =
       transition
@@ -3251,7 +3272,14 @@ let apply_observation_follow_up t =
     let open Result.Let_syntax in
     let%bind observer = Runtime_builder.moderator_snapshot_observer t.state.moderator in
     let%bind halted = Runtime_builder.moderator_snapshot_is_halted t.state.moderator in
-    let%bind plan = Observation_follow_up.plan ~state:t.state ~observer ~halted in
+    let compaction = create_compaction_operation t in
+    let%bind plan =
+      Observation_follow_up.plan
+        ~state:t.state
+        ~observer
+        ~halted
+        ~compaction_operation_id:compaction.id
+    in
     let extra_deltas = List.map plan.invocations ~f:Observation_follow_up.delta in
     let drain : Runtime_builder.moderator_drain =
       { moderator_snapshot = t.state.moderator
@@ -3267,7 +3295,8 @@ let apply_observation_follow_up t =
         transition t ~delta:(Session_delta.Batch extra_deltas) ~payloads:[]
         |> Result.map ~f:ignore
       | Stop reason, _ -> stop_from_idle_moderator ~extra_deltas t drain reason
-      | Compact, _ -> start_compaction ~extra_deltas t |> Result.map ~f:ignore
+      | Compact, _ ->
+        start_compaction ~operation:compaction ~extra_deltas t |> Result.map ~f:ignore
       | Turn, _ when Option.is_none t.operation_worker ->
         Error (error Invalid_state "follow-up turn requires an installed worker")
       | Turn, _ ->

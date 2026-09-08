@@ -291,9 +291,21 @@ legacy events. A daemon integration test proves retained termination is consumed
 without a queued event, using a durable v1 receipt fixture and an offline model
 stub. Actor tests exercise save rejection, compaction followed by a coalesced turn,
 reload between operations, stop/restart, and termination overriding work.
-Compaction failure/interruption and operation-cancellation dispositions require
-further qualification; the current intermediate receipt records acceptance and
-leaves a requested turn pending at the next eligible safe point.
+Each newly accepted compaction receipt also retains its operation ID. A cancelled
+or failed compaction discards only the turns tied to that operation, atomically
+with its terminal state. Recovery from a durable active compaction applies the
+same rule before restoring execution. Independent requests and receipts for
+other compactions survive; native tool outcomes remain unchanged. A successful
+compaction still leaves its requested turn pending for the next idle safe point.
+Legacy intermediate receipts without an operation binding are retired rather
+than implicitly resumed.
+
+The actor integration matrix includes cancellation before compaction execution,
+failure to save a completed compaction, and recovery from a serialized active
+admission snapshot. It verifies the actual operation binding and unchanged native
+outcomes, plus preservation of unrelated requests. These are internal actor and
+recovery-plan tests; full process-crash qualification remains a later integration
+task.
 
 **Subsequent/idle observation wakeups after budget exhaustion, ordinary-event
 Tool.call routing and normal runtime installation are still required.** The stream
@@ -425,7 +437,8 @@ routing, bound records retain codec 2 and unbound records retain codec 1. Record
 with a discarded-publication disposition use codec 4; nested moderator records
 with observation intent use codec 5. Acknowledged observations retaining runtime
 follow-up requests use codec 6. Intermediate compaction acceptance and discarded
-follow-up requests use codec 7. All seven
+follow-up requests use codec 7. Receipts with a retained compaction operation ID
+use codec 8. All eight
 remain readable; missing optional S-expression fields load as absent. Older JSON
 readers reject new codecs rather than silently discard their evidence. These
 host-only additions do not change the ChatML context ABI or enable public feature
