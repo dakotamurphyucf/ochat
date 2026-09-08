@@ -23,6 +23,7 @@
   chatml_moderation
   moderation
   moderator_manager
+  moderator_invocation
   tool_call
   response_loop
   shell_tool

@@ -6,6 +6,49 @@ are still under implementation; none of their feature flags is enabled yet.
 This page describes the available storage and client protocol contracts, not a
 runnable extension tutorial.
 
+## Moderator tool dispatch internals
+
+`Moderator_manager.Registry.of_definition` binds an already validated extension
+definition to a moderator manager. It reuses the compiled program and retains the
+exact tool bindings. Ordinary legacy moderator registration remains unchanged.
+
+`Moderator_manager.handle_invocation_entries` executes a dedicated `Tool_invoked`
+event under the manager's execution lock. The invocation must be in `Dispatching`
+state and match the prepared tool name, implementation fingerprint and selected
+capability fingerprint. Input is checked against the tool's input schema before
+the script runs. The script receives the versioned invocation context, input,
+limits and selected capability references described by the compiler surface.
+
+`Invocation.resolve(id, outcome)` is a local transactional task. Its resolution is
+buffered until the handler succeeds. Commit requires exactly one resolution for
+the dispatched ID. `Complete` values and `Pending` acknowledgements must satisfy
+the output schema; `Fail` uses the host error envelope. A host-supplied validation
+callback must confirm that pending work belongs to the current session/generation
+and has an admitted completion path. The helper does not accept fabricated work
+IDs merely because they have the right syntax.
+
+The manager prepares its conversation overlay and the host's resolution installer
+before committing. Missing, duplicate, wrong-ID, invalid-schema and rejected host
+transactions leave these buffered effects uncommitted. The invocation path copies
+serializable moderator state before execution and restores it on failure,
+including array mutations and cancellation during a host callback. This does not
+undo external effects or arbitrary mutable globals. Runtime-only state such as
+closures and refs is rejected; source code should keep persistent state in the
+explicit moderator state value.
+
+The versioned `Runtime.emit` and `Schedule.after_ms` adapters accept JSON payloads
+and wrap them as `Internal_event` data. They do not reinterpret a payload as a
+native invocation or completion event. Legacy scripts retain their existing event
+representation.
+
+These are internal execution primitives, not public tool registration. Actor
+borrowing, current authority checks, nested-call admission, deadlock prevention,
+durable state/result publication, post-tool observation and terminal-failure
+reconciliation remain required before a host exposes moderator tools. The host
+resolution installer must be infallible and must not re-enter the manager lock.
+Runtime task limits and bounded result/state conversion are present here; pure
+evaluation interruption remains part of the execution-budget work.
+
 ## Capability discovery
 
 `protocol.initialize` can return optional `extensions` metadata. Older responses

@@ -256,10 +256,17 @@ val request_session_end : session -> reason:string -> (unit, string) result
     - invokes [on_event],
     - interprets the returned task,
     - commits buffered state/effects on success,
-    - or rolls back local transactional buffers on failure. *)
+    - or rolls back local transactional buffers on failure.
+
+    [copy_state] optionally makes a defensive copy before invoking the handler.
+    Failure (including exceptions/cancellation) restores that copy, so data-state
+    array mutations can be rolled back. By default state is retained by reference
+    for legacy callers. This does not undo mutable globals or external effects.
+    [prepare_commit]'s returned installer must remain infallible. *)
 val handle_event
   :  ?prepare_commit:prepare_commit
   -> ?validate_state:(value -> (unit, string) result)
+  -> ?copy_state:(value -> (value, string) result)
   -> ?limits:execution_limits
   -> session
   -> context:value

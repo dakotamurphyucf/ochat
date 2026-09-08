@@ -294,6 +294,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/mcp_discovery_cache.mli` | [contract](../../lib/chat_response/mcp_discovery_cache.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/model_executor.mli` | [contract](../../lib/chat_response/model_executor.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/moderation.mli` | [contract](../../lib/chat_response/moderation.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/moderator_invocation.mli` | [contract](../../lib/chat_response/moderator_invocation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/moderator_manager.mli` | [contract](../../lib/chat_response/moderator_manager.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/response_loop.mli` | [contract](../../lib/chat_response/response_loop.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/runtime_semantics.mli` | [contract](../../lib/chat_response/runtime_semantics.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |

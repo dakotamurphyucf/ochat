@@ -14,6 +14,8 @@ module Registry = struct
     { script_id : string
     ; source_hash : string
     ; compiled : Runtime.compiled_script
+    ; extension :
+        (Chatmd_shell_spec.Extension_spec.script * Extension_compiler.definition) option
     }
 
   type t = artifact String.Map.t
@@ -54,7 +56,9 @@ module Registry = struct
     | None ->
       Runtime.compile_script ~surface ~source:(source_text script) ()
       |> Result.map ~f:(fun compiled ->
-        let artifact = { script_id = script.id; source_hash; compiled } in
+        let artifact =
+          { script_id = script.id; source_hash; compiled; extension = None }
+        in
         Map.set t ~key ~data:artifact, artifact)
   ;;
 
@@ -75,6 +79,28 @@ module Registry = struct
           let%map registry, compiled = compile_script ~surface registry script in
           registry, Some compiled
         | _ -> Ok (registry, artifact))
+  ;;
+
+  let of_definition t definition =
+    let module Spec = Chatmd_shell_spec.Extension_spec in
+    match
+      List.filter (Extension_compiler.compiled_scripts definition) ~f:(fun (script, _) ->
+        Spec.equal_script_kind script.Spec.kind Spec.Moderator_script)
+    with
+    | [] -> Ok (t, None)
+    | [ (script, compiled) ] ->
+      let key =
+        "extensibility-v1:" ^ Extension_compiler.definition_fingerprint definition
+      in
+      let artifact =
+        { script_id = script.id
+        ; source_hash = script.source_sha256
+        ; compiled
+        ; extension = Some (script, definition)
+        }
+      in
+      Ok (Map.set t ~key ~data:artifact, Some artifact)
+    | _ -> Error "Only one lifecycle moderator may be selected"
   ;;
 
   let script_id artifact = artifact.script_id
@@ -242,6 +268,12 @@ let create
       ~surface:(Runtime.compiled_surface artifact.compiled)
       ~handlers
       ()
+  in
+  let config =
+    match artifact.extension with
+    | None -> config
+    | Some _ ->
+      { config with operations = Moderator_invocation.operations config.operations }
   in
   let open Result.Let_syntax in
   let%bind runtime = Runtime.instantiate_session config artifact.compiled ~entrypoints in
@@ -652,13 +684,23 @@ let install_identity_ops t ~phase ops =
   Result.map (prepare_identity_ops t ~phase ops) ~f:(fun install -> install ())
 ;;
 
+let decode_effects t effects =
+  let open Result.Let_syntax in
+  let%bind effects =
+    match t.artifact.extension with
+    | None -> Ok effects
+    | Some _ -> Moderator_invocation.ordinary_effects effects
+  in
+  Runtime.decode_local_effects effects
+;;
+
 let committed_outcome (t : t) : (Moderation.Outcome.t option, string) result =
   let open Result.Let_syntax in
   let new_effects = new_committed_effects t in
   match new_effects with
   | [] -> Ok None
   | _ ->
-    let%bind decoded = Runtime.decode_local_effects new_effects in
+    let%bind decoded = decode_effects t new_effects in
     let%bind outcome = Moderation.Outcome.of_runtime_effects decoded in
     let%map () =
       match t.allocator with
@@ -751,7 +793,7 @@ let handle_event_entries_unlocked
   let open Result.Let_syntax in
   let outcome = ref Moderation.Outcome.empty in
   let prepare_commit ~local_effects =
-    let%bind decoded = Runtime.decode_local_effects local_effects in
+    let%bind decoded = decode_effects t local_effects in
     let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
     let%map install_overlay =
       prepare_identity_ops t ~phase:(Moderation.Event.phase event) prepared.overlay_ops
@@ -795,6 +837,78 @@ let handle_event_entries
       ~event)
 ;;
 
+let handle_invocation_entries
+      t
+      ~invocation
+      ~history
+      ~available_tools
+      ~session_meta
+      ~now_ms
+      ~validate_work
+      ~prepare_resolution
+  =
+  with_execution_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind script, definition =
+      match t.artifact.extension with
+      | Some value -> Ok value
+      | None ->
+        Error "invocation.legacy_moderator: Tool_invoked requires extensibility-v1"
+    in
+    let%bind prepared =
+      match
+        List.find (Extension_compiler.prepared_tools definition) ~f:(fun tool ->
+          String.equal
+            (Extension_compiler.declaration tool).name
+            invocation.Agent_protocol.Invocation.context.tool_name)
+      with
+      | Some tool when phys_equal (Extension_compiler.program tool) t.artifact.compiled ->
+        Ok tool
+      | _ -> Error "invocation.wrong_handler: tool is not owned by this moderator"
+    in
+    let%bind scope =
+      Moderator_invocation.create
+        ~prepared
+        ~invocation
+        ~limits:script.limits
+        ~validate_work
+    in
+    let context =
+      Moderation.Entry_projection.project_context
+        ~session_id:(Agent_protocol.Id.Session.to_string invocation.context.session_id)
+        ~now_ms
+        ~phase:Moderation.Phase.Tool_invoked
+        ~history
+        ~available_tools
+        ~session_meta
+    in
+    let outcome = ref Moderation.Outcome.empty in
+    let prepare_commit ~resolved ~local_effects =
+      let%bind decoded = Runtime.decode_local_effects local_effects in
+      let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+      let%bind install_overlay =
+        prepare_identity_ops t ~phase:Moderation.Phase.Tool_invoked prepared.overlay_ops
+      in
+      let%map install_resolution = prepare_resolution ~resolved ~outcome:prepared in
+      fun () ->
+        install_overlay ();
+        install_resolution ();
+        (* Include the resolution effect removed before ordinary effect decoding. *)
+        t.processed_effect_count
+        <- t.processed_effect_count + List.length local_effects + 1;
+        outcome := prepared
+    in
+    t.last_history <- history;
+    let%map resolved =
+      Moderator_invocation.run
+        scope
+        ~runtime:t.runtime
+        ~context:(Moderation.Context.to_value context)
+        ~prepare_commit
+    in
+    resolved, !outcome)
+;;
+
 let pending_ui_request (t : t) : pending_ui_request option =
   Runtime.pending_ui_request t.runtime
 ;;
@@ -812,7 +926,7 @@ let resume_ui_request_unlocked (t : t) ~response
     let outcome = ref None in
     let phase = Option.value t.suspended_phase ~default:Moderation.Phase.Internal_event in
     let prepare_commit ~local_effects =
-      let%bind decoded = Runtime.decode_local_effects local_effects in
+      let%bind decoded = decode_effects t local_effects in
       let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
       let%map install_overlay = prepare_identity_ops t ~phase prepared.overlay_ops in
       fun () ->

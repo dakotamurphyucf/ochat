@@ -1219,6 +1219,7 @@ let prepare_runtime_commit prepare_commit exec =
 let handle_event
       ?(prepare_commit = fun ~local_effects:_ -> Ok ignore)
       ?(validate_state = fun _ -> Ok ())
+      ?(copy_state = fun state -> Ok state)
       ?(limits = { fuel = Int.max_value; max_tasks = Int.max_value })
       (session : session)
       ~(context : Lang.value)
@@ -1252,42 +1253,55 @@ let handle_event
         }
       in
       let old_state = session.state in
-      session.current_exec <- Some exec;
-      let result =
-        match Eval.apply_value_result session.on_event [ context; old_state; event ] with
-        | Error err -> Error (format_runtime_error session err)
-        | Ok value ->
-          (match expect_task_value value with
-           | Error msg -> Error msg
-           | Ok task -> interpret_task session exec ~frames:[] task)
-      in
-      session.current_exec <- None;
-      (match result with
-       | Error msg ->
-         Debug_log.emitf
-           "[chatml-runtime] handle_event_error phase=%s state=%s event=%s error=%s"
-           phase
-           (value_to_string old_state)
-           (value_to_string event)
-           msg;
-         Error msg
-       | Ok (Task_value new_state) ->
-         let open Result.Let_syntax in
-         let%bind () = validate_state new_state in
-         let%map commit_host = prepare_runtime_commit prepare_commit exec in
-         commit_exec session exec ~new_state;
-         commit_host ();
-         log_committed_exec session exec ~old_state ~new_state
-       | Ok (Task_suspend suspended_exec) ->
-         session.suspended_exec <- Some suspended_exec;
-         Debug_log.emitf
-           "[chatml-runtime] handle_event_suspended phase=%s state=%s request=%s"
-           phase
-           (value_to_string old_state)
-           (match suspended_exec.request with
-            | Ask_text { prompt } -> "ask_text:" ^ prompt
-            | Ask_choice { prompt; _ } -> "ask_choice:" ^ prompt);
-         Ok ()))
+      let open Result.Let_syntax in
+      let%bind saved_state = copy_state old_state in
+      let committed = ref false in
+      Exn.protect
+        ~finally:(fun () ->
+          session.current_exec <- None;
+          if not !committed then session.state <- saved_state)
+        ~f:(fun () ->
+          session.current_exec <- Some exec;
+          let result =
+            Exn.protect
+              ~f:(fun () ->
+                match
+                  Eval.apply_value_result session.on_event [ context; old_state; event ]
+                with
+                | Error err -> Error (format_runtime_error session err)
+                | Ok value ->
+                  (match expect_task_value value with
+                   | Error msg -> Error msg
+                   | Ok task -> interpret_task session exec ~frames:[] task))
+              ~finally:(fun () -> session.current_exec <- None)
+          in
+          match result with
+          | Error msg ->
+            Debug_log.emitf
+              "[chatml-runtime] handle_event_error phase=%s state=%s event=%s error=%s"
+              phase
+              (value_to_string old_state)
+              (value_to_string event)
+              msg;
+            Error msg
+          | Ok (Task_value new_state) ->
+            let open Result.Let_syntax in
+            let%bind () = validate_state new_state in
+            let%map commit_host = prepare_runtime_commit prepare_commit exec in
+            commit_exec session exec ~new_state;
+            commit_host ();
+            committed := true;
+            log_committed_exec session exec ~old_state ~new_state
+          | Ok (Task_suspend suspended_exec) ->
+            session.suspended_exec <- Some suspended_exec;
+            Debug_log.emitf
+              "[chatml-runtime] handle_event_suspended phase=%s state=%s request=%s"
+              phase
+              (value_to_string old_state)
+              (match suspended_exec.request with
+               | Ask_text { prompt } -> "ask_text:" ^ prompt
+               | Ask_choice { prompt; _ } -> "ask_choice:" ^ prompt);
+            Ok ()))
 ;;
 
 let resume_ui_request

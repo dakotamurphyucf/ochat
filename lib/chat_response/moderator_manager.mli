@@ -27,6 +27,13 @@ module Registry : sig
     -> CM.top_level_elements list
     -> (t * artifact option, string) result
 
+  (** Bind already validated versioned programs without recompiling or executing.
+      The artifact retains the complete definition and exact tool/program bindings. *)
+  val of_definition
+    :  t
+    -> Extension_compiler.definition
+    -> (t * artifact option, string) result
+
   val script_id : artifact -> string
   val source_hash : artifact -> string
 end
@@ -117,6 +124,28 @@ val handle_event_entries
   -> session_meta:Jsonaf.t
   -> event:Moderation.Event.t
   -> (Moderation.Outcome.t, string) result
+
+(** Execute the dedicated extensibility-v1 Tool_invoked event under the manager
+    lock. Only a dispatched invocation matching a prepared tool owned by this
+    moderator is accepted. [prepare_resolution] participates in the local commit:
+    failure discards buffered resolution/overlay effects; its returned installer
+    must not fail. This does not perform actor borrowing, authorization, durable
+    publication, post-tool routing or terminal-error reconciliation. The owning
+    service must supply those boundaries before exposing a model-visible tool.
+    [validate_work] checks current Pending work ownership without side effects. *)
+val handle_invocation_entries
+  :  t
+  -> invocation:Agent_protocol.Invocation.t
+  -> history:History_entry.t list
+  -> available_tools:Res.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> now_ms:int
+  -> validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
+  -> prepare_resolution:
+       (resolved:Agent_protocol.Invocation.t
+        -> outcome:Moderation.Outcome.t
+        -> (unit -> unit, string) result)
+  -> (Agent_protocol.Invocation.t * Moderation.Outcome.t, string) result
 
 (** [pending_ui_request t] exposes the current live-session approval request,
     if the runtime is suspended waiting for UI input. *)

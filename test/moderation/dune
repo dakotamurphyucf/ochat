@@ -64,3 +64,10 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+(library
+ (name moderator_invocation_test)
+ (modules moderator_invocation_test)
+ (libraries core chat_response chatmd chatmd_shell_spec chatml chatml_host_runtime eio eio_main agent_protocol history_entry session)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
