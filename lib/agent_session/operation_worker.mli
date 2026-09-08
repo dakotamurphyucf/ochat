@@ -20,6 +20,25 @@ module Capabilities : sig
     ; commit_moderator : Jsonaf.t option -> (unit, Agent_protocol.Error.t) result
       (** Checkpoint committed moderator state for this active operation.
             Identical snapshots are no-ops; stale/cancelled workers are rejected. *)
+    ; with_moderator_invocation :
+        invocation:Agent_protocol.Invocation.t
+        -> (dispatched:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (unit, Agent_protocol.Error.t) result
+      (** Scoped exclusive moderator handoff for an already authorized call.
+          Atomically admits/dispatches the invocation, then runs the callback
+          outside the actor. [commit] saves the resolution and proposed snapshot
+          together before returning; call it from the manager's preparation hook.
+          Successful preparation must be followed immediately by infallible,
+          non-yielding runtime installation. The borrow remains held until the
+          callback returns. Failure/cancellation records a terminal outcome if
+          no resolution was committed. No provider output is published here.
+          Current capability/policy admission must precede this trusted service;
+          it supplies operation ownership, not tool authorization. *)
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

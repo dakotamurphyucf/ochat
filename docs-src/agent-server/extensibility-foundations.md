@@ -57,15 +57,77 @@ and wrap them as `Internal_event` data. They do not reinterpret a payload as a
 native invocation or completion event. Legacy scripts retain their existing event
 representation.
 
-These are internal execution primitives, not public tool registration. Actor
-borrowing, current authority checks, nested-call admission, deadlock prevention,
-durable state/result publication, post-tool observation and terminal-failure
-reconciliation remain required before a host exposes moderator tools. The host
+These are internal execution primitives, not public tool registration. Shared
+tool routing, current authority checks, nested-call admission, cross-owner
+deadlock prevention, canonical output publication, post-tool observation and
+restart reconciliation remain required before a host exposes moderator tools. The host
 resolution installer must be infallible, must not yield, and must not re-enter
 the manager lock. The prospective snapshot API itself does not implement the
-actor's durable transaction or the active-worker borrow protocol.
+actor's durable transaction or the active-worker borrow protocol; the scoped
+worker service described below supplies that boundary.
 Runtime task limits and bounded result/state conversion are present here; pure
 evaluation interruption remains part of the execution-budget work.
+
+### Actor and worker handoff
+
+`Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped
+host service. The caller must complete capability and policy admission before
+using it. The actor checks the active operation, session generation and invocation
+identity, then atomically records admission and dispatch and grants an exclusive
+process-local borrow. The worker executes the handler outside the actor, so actor
+reads, permissions and cancellation requests can continue through its mailbox.
+
+The callback receives the dispatched invocation and a bound `commit` function.
+Pass that function the manager's proposed snapshot and resolved invocation from
+`prepare_resolution`. The actor saves both in one session transition. Only after
+that succeeds does the manager install its state locally. The borrow remains
+held through local installation and is released when the scoped callback ends.
+
+```mermaid
+sequenceDiagram
+    participant W as Worker
+    participant A as Session actor
+    participant M as Moderator manager
+    participant S as Session storage
+    W->>A: Claim authorized invocation for active operation
+    A->>S: Commit admission and dispatch together
+    S-->>A: Saved
+    A-->>W: Scoped borrow and dispatched invocation
+    W->>M: Handle Tool_invoked under manager lock
+    Note over A: Mailbox remains serviceable
+    M->>W: prepare_resolution(result, proposed snapshot)
+    W->>A: Commit through bound borrow callback
+    A->>S: Commit resolution and moderator snapshot together
+    S-->>A: Saved
+    A-->>W: Commit acknowledged
+    W-->>M: Return infallible installer
+    M->>M: Install local state and effects
+    M-->>W: Handler completed
+    W->>A: Finish scoped borrow
+    A-->>W: Borrow released
+```
+
+Admission, commit acknowledgement and cleanup mailbox calls are protected from
+caller cancellation so an accepted request is not abandoned while the actor is
+saving it. Handler execution remains cancellable. This relies on the documented
+non-yielding installation contract after successful preparation. A cancelled
+operation cannot commit a new handler result. Graceful stopping permits an
+already admitted handler to finish; new admissions require a running session.
+
+Failed admission executes no handler and installs no borrow. Handler failure,
+cancellation or returning without a commit records a terminal invocation without
+installing new moderator state. Cancellation after a successful commit preserves
+the recorded outcome and snapshot. Persistence failure is returned to the caller;
+if cleanup cannot be saved, the borrow stays held for worker-terminal cleanup.
+An unreleased borrow is also reconciled during the worker's terminal transition.
+This is process-local cleanup, not restart reconciliation.
+
+Saved commit callbacks become invalid after their scope or operation ends.
+Duplicate commits, conflicting moderator checkpoints and runtime replacement
+during a borrow are rejected. A second borrow currently returns a conflict;
+shared routing must still distinguish queued independent calls from recursive
+or cross-owner wait cycles. The service publishes no provider tool output, grants
+no additional tool authority, and does not enable any extension feature flag.
 
 ## Capability discovery
 

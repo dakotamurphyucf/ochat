@@ -55,6 +55,10 @@ type job_services =
       -> (Chat_response.Moderation.Capabilities.model_call_result, string) result
   }
 
+(** Encode an already prepared identity snapshot in the durable moderator
+    envelope, without re-entering the live manager. *)
+val encode_moderator_snapshot : Session.Moderator_state.Identity_snapshot.t -> Jsonaf.t
+
 (** [moderator_snapshot_has_queued_events] inspects a durable identity snapshot
     without constructing a live runtime. *)
 val moderator_snapshot_has_queued_events

@@ -41,7 +41,24 @@ module Extension_change = struct
     | Moderator_state of Jsonaf.t option
 end
 
+type moderator_borrow =
+  { operation_id : Agent_protocol.Id.Operation.t
+  ; invocation : Agent_protocol.Invocation.t
+  ; mutable committed : bool
+  }
+
 type _ request =
+  | Claim_moderator_invocation :
+      Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
+      -> moderator_borrow request
+  | Commit_moderator_invocation :
+      moderator_borrow
+      * Agent_protocol.Invocation.t
+      * Session.Moderator_state.Identity_snapshot.t
+      -> unit request
+  | Finish_moderator_invocation :
+      moderator_borrow * Agent_protocol.Invocation.outcome option
+      -> unit request
   | Commit_extensions :
       int * int64 * Extension_change.t list
       -> Agent_protocol.Session.t request
@@ -232,6 +249,7 @@ type t =
   ; mutable owner_timer_cancel : unit Eio.Promise.u option
   ; mutable active_cancel : (unit -> unit) option
   ; mutable idle_moderator_borrowed : bool
+  ; mutable moderator_borrow : moderator_borrow option
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
   ; mutable stopped : bool
@@ -303,6 +321,18 @@ let commit_extensions_internal t generation expected_revision changes =
   then
     Error
       (error Conflict "extension transaction uses a stale session revision or generation")
+  else if
+    Option.is_some t.moderator_borrow
+    && List.exists changes ~f:(function
+      | Extension_change.Moderator_state _ -> true
+      | Invocation value ->
+        Option.exists t.moderator_borrow ~f:(fun borrow ->
+          Agent_protocol.Id.Invocation.compare
+            value.context.id
+            borrow.invocation.context.id
+          = 0)
+      | _ -> false)
+  then Error (error Conflict "moderator invocation owns this state transaction")
   else if List.is_empty changes || List.length changes > 256
   then
     Error
@@ -405,16 +435,21 @@ let commit_extensions_internal t generation expected_revision changes =
 ;;
 
 let set_operation_worker t worker =
-  match worker, t.state.active_operation, t.idle_moderator_borrowed with
-  | None, Some _, _ -> Error (error Conflict "cannot unload an active runtime")
-  | None, None, true -> Error (error Conflict "cannot unload a borrowed moderator")
-  | None, None, false | Some _, _, _ ->
-    t.operation_worker <- worker;
-    Ok ()
+  if Option.is_some t.moderator_borrow
+  then Error (error Conflict "cannot replace a borrowed moderator runtime")
+  else (
+    match worker, t.state.active_operation, t.idle_moderator_borrowed with
+    | None, Some _, _ -> Error (error Conflict "cannot unload an active runtime")
+    | None, None, true -> Error (error Conflict "cannot unload a borrowed moderator")
+    | None, None, false | Some _, _, _ ->
+      t.operation_worker <- worker;
+      Ok ())
 ;;
 
 let change_moderator t moderator =
-  transition t ~delta:(Session_delta.Moderator_changed moderator) ~payloads:[]
+  if Option.is_some t.moderator_borrow
+  then Error (error Conflict "moderator invocation owns the moderator checkpoint")
+  else transition t ~delta:(Session_delta.Moderator_changed moderator) ~payloads:[]
 ;;
 
 let change_workspace t workspace =
@@ -731,6 +766,152 @@ let current_operation t operation_id =
   | None -> Error (error Operation_not_found "foreground operation is not active")
 ;;
 
+let running_operation ?(allow_stopping = false) t operation_id =
+  let open Result.Let_syntax in
+  let%bind operation = current_operation t operation_id in
+  match operation.state, t.state.lifecycle.desired, t.state.lifecycle.observed with
+  | Agent_protocol.Operation.Running, desired, Running_turn id
+    when (allow_stopping || Agent_protocol.Session.equal_desired_state desired Running)
+         && Agent_protocol.Id.Operation.compare id operation_id = 0
+         && not t.state.halted -> Ok operation
+  | _ ->
+    Error (error Invalid_state "foreground operation is not running at a tool safe point")
+;;
+
+let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  if t.idle_moderator_borrowed || Option.is_some t.moderator_borrow
+  then Error (error Conflict "moderator is already borrowed")
+  else (
+    let%bind () =
+      Extension_invariants.owner
+        ~session_id:t.state.identity.session_id
+        ~generation:t.state.identity.generation
+        invocation.context.session_id
+        invocation.context.generation
+    in
+    let%bind () =
+      if
+        List.exists t.state.invocations ~f:(fun current ->
+          Agent_protocol.Id.Invocation.compare current.context.id invocation.context.id
+          = 0)
+      then Error (error Conflict "invocation identity is already admitted")
+      else Ok ()
+    in
+    let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
+    let%bind _ =
+      transition
+        t
+        ~delta:
+          (Session_delta.Batch
+             [ Invocation_changed invocation; Invocation_changed dispatched ])
+        ~payloads:[]
+    in
+    let borrow = { operation_id; invocation = dispatched; committed = false } in
+    t.moderator_borrow <- Some borrow;
+    Ok borrow)
+;;
+
+let validate_moderator_borrow t borrow =
+  match t.moderator_borrow with
+  | Some current when phys_equal current borrow ->
+    let open Result.Let_syntax in
+    let%bind _ = current_operation t borrow.operation_id in
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      borrow.invocation.context.session_id
+      borrow.invocation.context.generation
+  | _ -> Error (error Conflict "moderator borrow is no longer owned by this callback")
+;;
+
+let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t) snapshot
+  =
+  let open Result.Let_syntax in
+  let%bind () = validate_moderator_borrow t borrow in
+  let%bind _ = running_operation ~allow_stopping:true t borrow.operation_id in
+  let%bind () =
+    if borrow.committed
+    then Error (error Already_resolved "moderator invocation is already committed")
+    else if
+      Agent_protocol.Id.Invocation.compare
+        resolved.context.id
+        borrow.invocation.context.id
+      <> 0
+    then Error (error Conflict "resolution does not belong to this moderator borrow")
+    else (
+      match resolved.status with
+      | Resolved _ ->
+        Agent_protocol.Invocation.validate_transition
+          ~previous:(Some borrow.invocation)
+          resolved
+      | _ -> Error (error Invalid_state "moderator commit requires a resolved invocation"))
+  in
+  let%bind _ =
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch
+           [ Invocation_changed resolved
+           ; Moderator_changed (Some (Runtime_builder.encode_moderator_snapshot snapshot))
+           ])
+      ~payloads:[]
+  in
+  borrow.committed <- true;
+  Ok ()
+;;
+
+let uncommitted_borrow_delta t borrow failure =
+  if borrow.committed
+  then Ok (Session_delta.Batch [])
+  else
+    let open Result.Let_syntax in
+    let outcome =
+      Option.value
+        failure
+        ~default:
+          (Agent_protocol.Invocation.Fail
+             { code = "invocation.unhandled"
+             ; message = "moderator callback returned without committing a resolution"
+             ; retryable = false
+             ; details = `Null
+             })
+    in
+    let outcome =
+      match t.state.active_operation with
+      | Some { state = Cancelling; _ } ->
+        Agent_protocol.Invocation.Cancelled "operation cancelled"
+      | _ -> outcome
+    in
+    let%map resolved =
+      Agent_protocol.Invocation.resolve
+        borrow.invocation
+        ~session_id:t.state.identity.session_id
+        ~generation:t.state.identity.generation
+        outcome
+    in
+    Session_delta.Invocation_changed resolved
+;;
+
+let finish_moderator_invocation t borrow failure =
+  let open Result.Let_syntax in
+  let%bind () = validate_moderator_borrow t borrow in
+  let was_committed = borrow.committed in
+  let%bind delta = uncommitted_borrow_delta t borrow failure in
+  let%bind () =
+    if was_committed
+    then Ok ()
+    else Result.map (transition t ~delta ~payloads:[]) ~f:(fun _ -> ())
+  in
+  t.moderator_borrow <- None;
+  if (not was_committed) && Option.is_none failure
+  then
+    Error
+      (error Invalid_state "moderator callback returned without committing a resolution")
+  else Ok ()
+;;
+
 let operation_state t (operation : Agent_protocol.Operation.t) state =
   { operation with state; updated_at = t.services.now () }
 ;;
@@ -771,8 +952,10 @@ let commit_worker_entry t operation_id entry =
 
 let commit_worker_moderator t operation_id moderator =
   let open Result.Let_syntax in
-  let%bind _ = current_operation t operation_id in
-  if Poly.equal t.state.moderator moderator
+  let%bind _ = running_operation ~allow_stopping:true t operation_id in
+  if Option.is_some t.moderator_borrow
+  then Error (error Conflict "moderator invocation owns the moderator checkpoint")
+  else if Poly.equal t.state.moderator moderator
   then Ok ()
   else Result.map (change_moderator t moderator) ~f:(fun _ -> ())
 ;;
@@ -1286,15 +1469,36 @@ let worker_terminal t operation_id outcome =
     -> Ok ()
   | Some operation ->
     let open Result.Let_syntax in
+    let borrow = t.moderator_borrow in
+    let%bind borrow_delta =
+      match borrow with
+      | None -> Ok (Session_delta.Batch [])
+      | Some borrow ->
+        uncommitted_borrow_delta
+          t
+          borrow
+          (Some
+             (Agent_protocol.Invocation.Cancelled
+                "worker exited with an active moderator borrow"))
+    in
+    let outcome =
+      match borrow, outcome with
+      | Some _, Operation_worker.Completed _ ->
+        Operation_worker.Failed
+          (error Internal_error "worker completed with an active moderator borrow")
+      | _ -> outcome
+    in
     let%bind delta, payloads = terminal_delta t operation outcome in
     let permissions, jobs = operation_terminal_cleanup t operation outcome in
     let%bind _ =
       transition
         t
-        ~delta:(Session_delta.Batch [ delta; cleanup_delta permissions jobs ])
+        ~delta:
+          (Session_delta.Batch [ borrow_delta; delta; cleanup_delta permissions jobs ])
         ~payloads:(payloads @ cleanup_payloads permissions jobs)
     in
     resolve_cleaned_permission_waiters t permissions;
+    t.moderator_borrow <- None;
     t.active_cancel <- None;
     if outcome_requests_compaction outcome
     then Result.map (start_compaction t) ~f:(fun _ -> ())
@@ -1409,12 +1613,59 @@ let request_permission_with_review_internal
   | (false | true), _, _ -> Ok (Eio.Promise.await response)
 ;;
 
+let with_moderator_invocation t operation_id ~invocation f =
+  let open Result.Let_syntax in
+  (* Observe existing cancellation before masking the mailbox admission. Once
+     admitted, the borrow must always reach its protected completion request. *)
+  Eio.Fiber.yield ();
+  let%bind borrow =
+    Eio.Cancel.protect (fun () ->
+      call t (Claim_moderator_invocation (operation_id, invocation)))
+  in
+  let commit ~resolved ~snapshot =
+    Eio.Cancel.protect (fun () ->
+      call t (Commit_moderator_invocation (borrow, resolved, snapshot)))
+  in
+  let finish failure =
+    Eio.Cancel.protect (fun () -> call t (Finish_moderator_invocation (borrow, failure)))
+  in
+  let failed message =
+    let message =
+      if String.is_empty message || String.length message > 16_384
+      then "moderator handler failed; diagnostic is outside the invocation message limit"
+      else message
+    in
+    Agent_protocol.Invocation.Fail
+      { code = "invocation.handler_failed"; message; retryable = false; details = `Null }
+  in
+  match f ~dispatched:borrow.invocation ~commit with
+  | result ->
+    let failure =
+      match result with
+      | Ok () -> None
+      | Error (failure : Agent_protocol.Error.t) -> Some (failed failure.message)
+    in
+    let%bind () = finish failure in
+    result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    let failure =
+      match exn with
+      | Eio.Cancel.Cancelled _ ->
+        Agent_protocol.Invocation.Cancelled "moderator handler cancelled"
+      | _ -> failed (Exn.to_string exn)
+    in
+    ignore (finish (Some failure) : (unit, Agent_protocol.Error.t) result);
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+;;
+
 let worker_capabilities t operation_id id_source buffer =
   Operation_worker.Capabilities.
     { id_source = History_id_source.as_history_entry_source id_source
     ; commit_entry = (fun entry -> call t (Commit_worker_entry (operation_id, entry)))
     ; commit_moderator =
         (fun snapshot -> call t (Commit_worker_moderator (operation_id, snapshot)))
+    ; with_moderator_invocation = with_moderator_invocation t operation_id
     ; consume_deferred = (fun () -> call t (Consume_deferred operation_id))
     ; request_permission =
         (fun ~permission ~timeout_seconds ~fallback ~review_on_timeout ->
@@ -2716,6 +2967,12 @@ let detach t attachment_id =
 
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t -> function
+  | Claim_moderator_invocation (operation_id, invocation) ->
+    claim_moderator_invocation t operation_id invocation
+  | Commit_moderator_invocation (borrow, resolved, snapshot) ->
+    commit_moderator_invocation t borrow resolved snapshot
+  | Finish_moderator_invocation (borrow, failure) ->
+    finish_moderator_invocation t borrow failure
   | Commit_extensions (generation, revision, changes) ->
     commit_extensions_internal t generation revision changes
   | State -> Ok t.state
@@ -2898,6 +3155,7 @@ let create_with_owner_lease_duration
     ; owner_timer_cancel = None
     ; active_cancel = None
     ; idle_moderator_borrowed = false
+    ; moderator_borrow = None
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state
     ; stopped = false
