@@ -207,8 +207,24 @@ calls, existing receipts, missing calls, old generations, conflicting outputs,
 provider-ID reuse, snapshot/delta roundtrips and allocation bounds. A real daemon
 fixture persists resolved/dispatched calls, shuts down, lazily restores the stopped
 session and verifies both pairs, then restarts again without duplicate outputs.
-Active-worker cancellation/publication failure and reset-time reconciliation still
-need integration; this restart path does not establish their completion.
+This restart path is separate from administrative reconciliation below and does
+not yet supply immediate active-worker cancellation/publication-failure recovery.
+
+Reset and rebuild now reconcile prior invocation records against the final
+candidate history inside the administrative commit. Kept calls receive their
+missing canonical outputs. Removed calls receive discarded-publication
+dispositions; unfinished invocations also receive an interruption reason. These
+dispositions live on the reset/rebuild archive reference, keyed by invocation ID.
+Original inputs and recorded outcomes remain in the checksummed pre-change
+archive instead of being copied into the new generation's active tool registry.
+Published receipts already present in that archive are preserved unchanged.
+
+The repaired history, allocation high-water mark and disposition index commit
+with the reset. Failed persistence leaves the previous actor state and event
+position unchanged. Reading the archive validates disposition IDs, duplicate
+entries and permitted outcome/publication transitions against its original
+invocations. Older archive references have an empty index. Immediate foreground
+worker cancellation/publication-failure recovery still remains to be integrated.
 
 ### Retained routing provenance
 

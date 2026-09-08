@@ -29,12 +29,15 @@ val rebuild
 val upgrade : Session_state.t -> Agent_protocol.Id.Prompt_revision.t -> Session_state.t
 
 (** [archive previous candidate kind] retains the previous revision independently
-    of journal/snapshot pruning. Persistence writes the archive before commit. *)
+    of journal/snapshot pruning. Reset/rebuild reconcile old invocations against
+    the candidate history and index their dispositions on the archive reference.
+    Candidate history repairs and the index commit atomically with administration.
+    Persistence writes the archive before commit. No handlers are run. *)
 val archive
   :  previous:Session_state.t
   -> Session_state.t
   -> Session_state.Compaction_archive.kind
-  -> Session_state.t
+  -> (Session_state.t, Agent_protocol.Error.t) result
 
 val payloads
   :  previous:Session_state.t

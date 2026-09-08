@@ -9,6 +9,7 @@ let reference_for state ~kind operation_id =
     ; revision = state.Session_state.counters.revision
     ; sha256 = digest (payload state)
     ; kind
+    ; invocation_dispositions = []
     }
 ;;
 
@@ -60,12 +61,46 @@ let write ~env ~handle ~max_payload_length reference state =
   |> Result.map_error ~f:store_error
 ;;
 
-let decode_state handle reference text =
+let decode_state handle (reference : Session_state.Compaction_archive.t) text =
   let open Result.Let_syntax in
   try
     let state = Session_state.t_of_sexp (Sexp.of_string text) in
     let%bind state = Session_state.upgrade_schema state in
     let%bind () = Session_state.validate state in
+    let seen = Hash_set.create (module Agent_protocol.Id.Invocation) in
+    let%bind () =
+      List.fold_result
+        reference.invocation_dispositions
+        ~init:()
+        ~f:(fun () disposition ->
+          if Hash_set.mem seen disposition.invocation_id
+          then Error (error "duplicate archived invocation disposition")
+          else (
+            Hash_set.add seen disposition.invocation_id;
+            let%bind original =
+              List.find state.invocations ~f:(fun inv ->
+                Agent_protocol.Id.Invocation.compare
+                  inv.context.id
+                  disposition.invocation_id
+                = 0)
+              |> Result.of_option
+                   ~error:(error "archive disposition references an unknown invocation")
+            in
+            let%bind resolved =
+              match disposition.interruption_reason with
+              | None -> Ok original
+              | Some reason -> Agent_protocol.Invocation.cancel original ~reason
+            in
+            match disposition.output_entry_id, disposition.publication_discarded with
+            | Some id, None ->
+              Agent_protocol.Invocation.publish_with_history resolved ~output_entry_id:id
+              |> Result.map ~f:ignore
+            | None, Some reason ->
+              Agent_protocol.Invocation.discard_publication resolved ~reason
+              |> Result.map ~f:ignore
+            | None, None when Option.is_some disposition.interruption_reason -> Ok ()
+            | _ -> Error (error "invalid archived invocation disposition")))
+    in
     if
       Int64.equal
         state.counters.revision

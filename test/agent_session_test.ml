@@ -2699,6 +2699,49 @@ let%test_unit
             || Poly.equal mode `Collision
           then assert (Result.is_error (plan state))
           else (
+            List.iter [ false; true ] ~f:(fun keep_history ->
+              let candidate =
+                Agent_session.Administration.reset
+                  state
+                  { keep_history
+                  ; keep_tasks = false
+                  ; keep_grants = false
+                  ; keep_labels = true
+                  ; workspace_instance = None
+                  }
+                |> protocol_ok
+              in
+              let administrative =
+                Agent_session.Administration.archive ~previous:state candidate Reset
+                |> protocol_ok
+              in
+              Agent_session.Session_state.validate administrative |> protocol_ok;
+              let archive = List.hd_exn administrative.conversation.compaction_archives in
+              assert (List.is_empty administrative.invocations);
+              assert (
+                List.length archive.invocation_dispositions
+                = if Poly.equal mode `Published then 0 else 1);
+              if not keep_history
+              then assert (List.is_empty administrative.conversation.canonical_history);
+              List.iter archive.invocation_dispositions ~f:(fun disposition ->
+                assert (
+                  Agent_protocol.Id.Invocation.compare
+                    disposition.invocation_id
+                    invocation.context.id
+                  = 0);
+                if keep_history && not (Poly.equal mode `Removed)
+                then assert (Option.is_some disposition.output_entry_id)
+                else assert (Option.is_some disposition.publication_discarded));
+              let restored_admin =
+                Agent_session.Session_persistence.restore_snapshot
+                  (Sexp.to_string_mach
+                     (Agent_session.Session_state.sexp_of_t administrative))
+                |> store_ok
+              in
+              assert (
+                Sexp.equal
+                  (Agent_session.Session_state.sexp_of_t administrative)
+                  (Agent_session.Session_state.sexp_of_t restored_admin)));
             let result = plan state |> protocol_ok in
             let delta =
               D.Batch
@@ -5432,7 +5475,8 @@ let%expect_test
   [%expect {| read-only and expired owner denied; queued job and session unchanged |}]
 ;;
 
-let audit_actor ~sw ~env ~workspace_instance ~reject_archive =
+let audit_actor ?(with_invocation = false) ~sw ~env ~workspace_instance ~reject_archive ()
+  =
   let initial =
     actor_state ~workspace_instance ~liveness:Process_bound ~start_immediately:false
   in
@@ -5444,6 +5488,43 @@ let audit_actor ~sw ~env ~workspace_instance ~reject_archive =
     { initial with
       conversation = { initial.conversation with canonical_history = [ entry ] }
     }
+  in
+  let initial =
+    if not with_invocation
+    then initial
+    else (
+      let call =
+        History_entry.create_with_id
+          ~id:history_id
+          (Openai.Responses.Item.Function_call
+             { name = "read_file"
+             ; arguments = "null"
+             ; call_id = "audit-call"
+             ; id = None
+             ; status = None
+             ; _type = "function_call"
+             })
+        |> Agent_session.History_codec.to_protocol
+      in
+      let inv =
+        Agent_protocol.Invocation.create
+          { (invocation_fixture ()).context with
+            origin = Model
+          ; provider_call_id = Some "audit-call"
+          ; call_entry_id = Some history_id
+          }
+        |> protocol_ok
+        |> Agent_protocol.Invocation.dispatch
+        |> protocol_ok
+      in
+      let inv =
+        Agent_protocol.Invocation.resolve inv ~session_id ~generation:0 (Complete `Null)
+        |> protocol_ok
+      in
+      { initial with
+        invocations = [ inv ]
+      ; conversation = { initial.conversation with canonical_history = [ call ] }
+      })
   in
   let backend =
     Agent_session.Memory_backend.create ~event_capacity:64 ~initial_state:initial
@@ -5494,7 +5575,13 @@ let%expect_test
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let actor, backend =
-        audit_actor ~sw ~env ~workspace_instance ~reject_archive:true
+        audit_actor
+          ~with_invocation:true
+          ~sw
+          ~env
+          ~workspace_instance
+          ~reject_archive:true
+          ()
       in
       let writer, _ =
         Agent_session.Session_actor.attach actor ~mode:Read_write ~subscribe:false
@@ -5619,7 +5706,7 @@ let%expect_test "history deletion is authoritative, revision checked and broadca
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let actor, backend =
-        audit_actor ~sw ~env ~workspace_instance ~reject_archive:false
+        audit_actor ~sw ~env ~workspace_instance ~reject_archive:false ()
       in
       let writer, first =
         Agent_session.Session_actor.attach actor ~mode:Read_write ~subscribe:true
@@ -5666,7 +5753,9 @@ let%expect_test
   with_actor_workspace (fun env workspace_instance ->
     List.iter [ false; true ] ~f:(fun reject_archive ->
       Eio.Switch.run (fun sw ->
-        let actor, backend = audit_actor ~sw ~env ~workspace_instance ~reject_archive in
+        let actor, backend =
+          audit_actor ~sw ~env ~workspace_instance ~reject_archive ()
+        in
         let writer, _ =
           Agent_session.Session_actor.attach actor ~mode:Read_write ~subscribe:false
           |> protocol_ok

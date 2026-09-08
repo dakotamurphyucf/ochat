@@ -35,11 +35,20 @@ module Compaction_archive = struct
     | Upgrade
   [@@deriving equal, sexp]
 
+  type invocation_disposition =
+    { invocation_id : Agent_protocol.Id.Invocation.t
+    ; interruption_reason : string option [@sexp.option]
+    ; output_entry_id : Agent_protocol.History.Id.t option [@sexp.option]
+    ; publication_discarded : string option [@sexp.option]
+    }
+  [@@deriving sexp]
+
   type t =
     { operation_id : Agent_protocol.Id.Operation.t
     ; revision : int64
     ; sha256 : string
     ; kind : kind [@sexp.default Compaction]
+    ; invocation_dispositions : invocation_disposition list [@sexp.list]
     }
   [@@deriving sexp]
 end

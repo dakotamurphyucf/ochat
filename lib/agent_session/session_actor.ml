@@ -691,7 +691,7 @@ let commit_administration t attachment_id expected_revision kind candidate =
       Error (error Conflict "administrative candidate does not match the captured state")
     else Session_state.validate candidate
   in
-  let state = Administration.archive ~previous:t.state candidate kind in
+  let%bind state = Administration.archive ~previous:t.state candidate kind in
   transition
     t
     ~delta:(Session_delta.Created state)
