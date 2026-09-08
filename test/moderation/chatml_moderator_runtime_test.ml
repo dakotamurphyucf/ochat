@@ -733,6 +733,92 @@ let%expect_test
     |}]
 ;;
 
+let%test_unit "transaction preparation runs last and rejection skips every installer" =
+  let session = compile_session local_ops_script in
+  let installed = ref false in
+  let order = ref [] in
+  let old_state = Runtime.current_state session in
+  let prepare_commit ~local_effects:_ =
+    order := !order @ [ "legacy" ];
+    Ok (fun () -> installed := true)
+  in
+  let prepare_transaction (proposal : Runtime.transaction) =
+    order := !order @ [ "transaction" ];
+    assert (String.equal (show_value proposal.new_state) "{ count = 1 }");
+    assert (phys_equal (Runtime.current_state session) old_state);
+    assert (List.is_empty (Runtime.committed_local_effects session));
+    assert (List.is_empty (Runtime.queued_events session));
+    assert proposal.halted;
+    assert (not (Runtime.is_halted session));
+    Error "storage rejected"
+  in
+  (match
+     Runtime.handle_event
+       session
+       ~prepare_commit
+       ~prepare_transaction
+       ~context:(context ~phase:"turn_start" ())
+       ~event:(L.VVariant ("Tick", []))
+   with
+   | Error "storage rejected" -> ()
+   | _ -> assert false);
+  assert (Poly.equal !order [ "legacy"; "transaction" ]);
+  assert (not !installed);
+  assert (phys_equal (Runtime.current_state session) old_state);
+  assert (List.is_empty (Runtime.queued_events session));
+  assert (not (Runtime.is_halted session));
+  let prepared = ref None in
+  Runtime.handle_event
+    session
+    ~prepare_commit
+    ~prepare_transaction:(fun proposal ->
+      prepared := Some proposal;
+      Ok
+        (fun () ->
+          assert !installed;
+          assert (phys_equal (Runtime.current_state session) proposal.new_state)))
+    ~context:(context ~phase:"turn_start" ())
+    ~event:(L.VVariant ("Tick", []))
+  |> ok_or_fail;
+  let proposal = Option.value_exn !prepared in
+  assert (Poly.equal (Runtime.queued_events session) proposal.queued_events);
+  assert (Poly.equal (Runtime.committed_local_effects session) proposal.local_effects);
+  assert (Bool.equal (Runtime.is_halted session) proposal.halted)
+;;
+
+let%test_unit "resumed UI transaction includes events queued during suspension" =
+  let session =
+    compile_session_with_surface
+      ~surface:Chatml_builtin_surface.ui_moderator_surface
+      approval_suspend_script
+  in
+  Runtime.handle_event
+    session
+    ~prepare_transaction:(fun _ -> failwith "must not prepare a suspended task")
+    ~context:(context ~phase:"turn_start" ())
+    ~event:(L.VVariant ("Tick", []))
+  |> ok_or_fail;
+  let queued = L.VVariant ("Queued", [ L.VString "host" ]) in
+  Runtime.enqueue_internal_event session queued |> ok_or_fail;
+  let prepared = ref None in
+  Runtime.resume_ui_request
+    session
+    ~response:"approved"
+    ~prepare_transaction:(fun proposal ->
+      assert (Poly.equal (Runtime.queued_events session) [ queued ]);
+      prepared := Some proposal;
+      Ok ignore)
+  |> ok_or_fail;
+  let proposal = Option.value_exn !prepared in
+  assert (
+    Poly.equal
+      proposal.queued_events
+      [ queued; L.VVariant ("Queued", [ L.VString "buffered" ]) ]);
+  assert (phys_equal (Runtime.current_state session) proposal.new_state);
+  assert (Poly.equal (Runtime.queued_events session) proposal.queued_events);
+  assert (Poly.equal (Runtime.committed_local_effects session) proposal.local_effects)
+;;
+
 let%expect_test "moderator runtime rejects nested approval during resume" =
   let session =
     compile_session_with_surface

@@ -368,9 +368,9 @@ let run t ~runtime ~context ~prepare_commit =
     else Ok snapshot
   in
   let resolved = ref None in
-  let prepare ~local_effects =
+  let prepare (transaction : R.transaction) =
     let resolutions, other =
-      List.partition_tf local_effects ~f:(fun (eff : L.eff) ->
+      List.partition_tf transaction.local_effects ~f:(fun (eff : L.eff) ->
         String.equal eff.op "Invocation.resolve")
     in
     let%bind outcome =
@@ -395,7 +395,9 @@ let run t ~runtime ~context ~prepare_commit =
            outcome)
     in
     let%bind local_effects = ordinary_effects other in
-    let%map install = prepare_commit ~resolved:next ~local_effects in
+    let%map install =
+      prepare_commit ~resolved:next ~transaction:{ transaction with local_effects }
+    in
     fun () ->
       install ();
       resolved := Some next
@@ -408,7 +410,7 @@ let run t ~runtime ~context ~prepare_commit =
       ~limits:R.{ fuel = t.limits.fuel; max_tasks = t.limits.max_tasks }
       ~validate_state:(fun value -> Result.map (state_snapshot value) ~f:(fun _ -> ()))
       ~copy_state:(fun value -> Result.bind (state_snapshot value) ~f:V.Snapshot.to_value)
-      ~prepare_commit:prepare
+      ~prepare_transaction:prepare
   in
   match !resolved with
   | Some value -> Ok value

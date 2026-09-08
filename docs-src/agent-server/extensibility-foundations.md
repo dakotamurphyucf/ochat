@@ -27,8 +27,24 @@ callback must confirm that pending work belongs to the current session/generatio
 and has an admitted completion path. The helper does not accept fabricated work
 IDs merely because they have the right syntax.
 
-The manager prepares its conversation overlay and the host's resolution installer
-before committing. Missing, duplicate, wrong-ID, invalid-schema and rejected host
+The manager prepares its conversation overlay and an immutable prospective
+identity snapshot before calling the host's `prepare_resolution` callback. The
+snapshot includes the new moderator state, the complete queued event list
+(existing events followed by newly emitted events), the halt flag, and the new
+overlay with its allocated IDs and revision. The host can persist that snapshot
+and the resolved invocation in one transaction before returning an infallible
+installer. It does not need to call back into the locked manager to obtain state.
+Snapshot serialization and local validation finish before this persistence hook.
+
+The underlying runtime exposes this boundary through `prepare_transaction`,
+including for resumed UI tasks. It runs after state validation and the legacy
+`prepare_commit` callback, before any installer or runtime commit. When both hooks
+are used, the legacy hook must only validate and prepare; it must not persist
+independently. Runtime proposal values are borrowed; the manager converts them
+to detached snapshot data before handing them to the resolution host. The host
+must serialize access and make its persistence handoff cancellation-safe.
+
+Missing, duplicate, wrong-ID, invalid-schema and rejected host
 transactions leave these buffered effects uncommitted. The invocation path copies
 serializable moderator state before execution and restores it on failure,
 including array mutations and cancellation during a host callback. This does not
@@ -45,7 +61,9 @@ These are internal execution primitives, not public tool registration. Actor
 borrowing, current authority checks, nested-call admission, deadlock prevention,
 durable state/result publication, post-tool observation and terminal-failure
 reconciliation remain required before a host exposes moderator tools. The host
-resolution installer must be infallible and must not re-enter the manager lock.
+resolution installer must be infallible, must not yield, and must not re-enter
+the manager lock. The prospective snapshot API itself does not implement the
+actor's durable transaction or the active-worker borrow protocol.
 Runtime task limits and bounded result/state conversion are present here; pure
 evaluation interruption remains part of the execution-budget work.
 

@@ -104,7 +104,7 @@ let setup
 
 let call
       ?(validate_work = fun _ -> Error "invocation.invalid_work: not owned")
-      ?(prepare_resolution = fun ~resolved:_ ~outcome:_ -> Ok ignore)
+      ?(prepare_resolution = fun ~resolved:_ ~outcome:_ ~snapshot:_ -> Ok ignore)
       manager
       invocation
   =
@@ -131,7 +131,14 @@ let%test_unit "stateful dedicated tool event commits one result and overlay" =
          ignored -> Task.pure(state + 1)))"
     in
     let commits = ref 0 in
-    let prepare_resolution ~resolved ~outcome =
+    let proposed = ref None in
+    let prepare_resolution
+          ~resolved
+          ~outcome
+          ~(snapshot : Session.Moderator_state.Identity_snapshot.t)
+      =
+      proposed := Some snapshot;
+      assert (Poly.equal snapshot.current_state (Session.Snapshot.Int 1));
       assert (List.length outcome.Chat_response.Moderation.Outcome.overlay_ops = 1);
       (match resolved.I.status with
        | Resolved (Complete (`String "payload")) -> ()
@@ -144,6 +151,7 @@ let%test_unit "stateful dedicated tool event commits one result and overlay" =
     assert (!commits = 1);
     assert (Poly.equal (state manager) (Session.Snapshot.Int 1));
     assert (List.length (M.identity_snapshot manager |> ok).prepended_items = 1);
+    assert (Poly.equal !proposed (Some (M.identity_snapshot manager |> ok)));
     expect "not_dispatched" (call manager result))
 ;;
 
@@ -188,8 +196,11 @@ let%test_unit "unhandled duplicate wrong-id schema and host failures roll back" 
     in
     expect
       "host rejection"
-      (call manager (make ()) ~prepare_resolution:(fun ~resolved:_ ~outcome:_ ->
-         Error "host rejection"));
+      (call
+         manager
+         (make ())
+         ~prepare_resolution:(fun ~resolved:_ ~outcome:_ ~snapshot:_ ->
+           Error "host rejection"));
     assert (Poly.equal (state manager) (Session.Snapshot.Int 0));
     ignore (call manager (make ()) |> ok);
     assert (Poly.equal (state manager) (Session.Snapshot.Int 1)))
@@ -276,6 +287,108 @@ let%test_unit "concurrent calls serialize moderator state" =
       (List.map invocations ~f:(fun invocation () ->
          ignore (call manager invocation |> ok)));
     assert (Poly.equal (state manager) (Session.Snapshot.Int 8)))
+;;
+
+let%test_unit "persistence proposal includes the complete queue halt and overlay" =
+  Eio_main.run (fun env ->
+    let manager, _, make =
+      setup
+        env
+        ~initial:"[0]"
+        {|let ignored = state[0] <- state[0] + 1 in
+          Task.bind(Turn.prepend_system("saved overlay"), fun ignored ->
+          Task.bind(Runtime.emit(`String("new event")), fun ignored ->
+          Task.bind(Runtime.end_session("finished"), fun ignored ->
+          Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`Null)),
+            fun ignored -> Task.pure(state)))))|}
+    in
+    M.enqueue_internal_event
+      manager
+      (L.VVariant ("Internal_event", [ VVariant ("String", [ VString "existing event" ]) ]))
+    |> ok;
+    let before = M.identity_snapshot manager |> ok in
+    let proposal = ref None in
+    let wakeups = ref 0 in
+    let subscription =
+      M.subscribe_committed_changes manager ~on_wakeup:(fun () -> incr wakeups)
+    in
+    let prepare_resolution
+          ~resolved:_
+          ~outcome:_
+          ~(snapshot : Session.Moderator_state.Identity_snapshot.t)
+      =
+      proposal := Some snapshot;
+      assert (Poly.equal snapshot.current_state (Session.Snapshot.Array [ Int 1 ]));
+      assert snapshot.halted;
+      assert (List.length snapshot.prepended_items = 1);
+      assert (
+        Poly.equal
+          snapshot.queued_internal_events
+          (before.queued_internal_events
+           @ [ Session.Snapshot.Variant
+                 ("Internal_event", [ Variant ("String", [ String "new event" ]) ])
+             ]));
+      Error "persistence unavailable"
+    in
+    expect "persistence unavailable" (call ~prepare_resolution manager (make ()));
+    assert (Poly.equal before (M.identity_snapshot manager |> ok));
+    assert (!wakeups = 0);
+    assert (List.is_empty (M.drain_committed_changes subscription));
+    let rejected = Option.value_exn !proposal in
+    (* The snapshot is detached from mutable handler state. A later attempt may
+       allocate different overlay IDs, but cannot mutate the rejected proposal. *)
+    assert (Poly.equal rejected.current_state (Session.Snapshot.Array [ Int 1 ]));
+    let committed = ref None in
+    ignore
+      (call manager (make ()) ~prepare_resolution:(fun ~resolved:_ ~outcome:_ ~snapshot ->
+         committed := Some snapshot;
+         Ok ignore)
+       |> ok);
+    assert (Poly.equal !committed (Some (M.identity_snapshot manager |> ok)));
+    assert (!wakeups = 1);
+    assert (List.length (M.drain_committed_changes subscription) = 1);
+    M.unsubscribe subscription;
+    assert (Poly.equal rejected.current_state (Session.Snapshot.Array [ Int 1 ])))
+;;
+
+let%test_unit "exception or cancellation in persistence preparation installs nothing" =
+  Eio_main.run (fun env ->
+    let manager, _, make =
+      setup
+        env
+        ~initial:"[0]"
+        {|let ignored = state[0] <- state[0] + 1 in
+          Task.bind(Runtime.emit(`Null), fun ignored ->
+          Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`Null)),
+            fun ignored -> Task.pure(state)))|}
+    in
+    let before = M.identity_snapshot manager |> ok in
+    (match
+       call
+         manager
+         (make ())
+         ~prepare_resolution:(fun ~resolved:_ ~outcome:_ ~snapshot:_ -> raise Exit)
+     with
+     | _ -> assert false
+     | exception Exit -> ());
+    assert (Poly.equal before (M.identity_snapshot manager |> ok));
+    let entered = ref false in
+    let never, _ = Eio.Promise.create () in
+    (match
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 0.05 (fun () ->
+         call
+           manager
+           (make ())
+           ~prepare_resolution:(fun ~resolved:_ ~outcome:_ ~snapshot:_ ->
+             entered := true;
+             Eio.Promise.await never))
+     with
+     | _ -> assert false
+     | exception Eio.Time.Timeout -> ());
+    assert !entered;
+    assert (Poly.equal before (M.identity_snapshot manager |> ok));
+    ignore (call manager (make ()) |> ok);
+    assert (Poly.equal (state manager) (Session.Snapshot.Array [ Int 1 ])))
 ;;
 
 let%test_unit "host exception clears active execution and rolls back array state" =

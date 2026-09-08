@@ -1212,12 +1212,38 @@ let log_committed_exec
 
 type prepare_commit = local_effects:Lang.eff list -> (unit -> unit, string) result
 
-let prepare_runtime_commit prepare_commit exec =
-  prepare_commit ~local_effects:(List.rev exec.local_effects_rev)
+type transaction =
+  { new_state : Lang.value
+  ; local_effects : Lang.eff list
+  ; queued_events : Lang.value list
+  ; halted : bool
+  }
+
+type prepare_transaction = transaction -> (unit -> unit, string) result
+
+let prepare_runtime_commit prepare_commit prepare_transaction session exec ~new_state =
+  let open Result.Let_syntax in
+  let local_effects = List.rev exec.local_effects_rev in
+  let%bind install_legacy = prepare_commit ~local_effects in
+  let%map install_transaction =
+    match prepare_transaction with
+    | None -> Ok ignore
+    | Some prepare ->
+      prepare
+        { new_state
+        ; local_effects
+        ; queued_events = Queue.to_list session.queue @ List.rev exec.emitted_rev
+        ; halted = session.halted || Option.is_some exec.end_session_requested
+        }
+  in
+  fun () ->
+    install_legacy ();
+    install_transaction ()
 ;;
 
 let handle_event
       ?(prepare_commit = fun ~local_effects:_ -> Ok ignore)
+      ?prepare_transaction
       ?(validate_state = fun _ -> Ok ())
       ?(copy_state = fun state -> Ok state)
       ?(limits = { fuel = Int.max_value; max_tasks = Int.max_value })
@@ -1287,7 +1313,14 @@ let handle_event
           | Ok (Task_value new_state) ->
             let open Result.Let_syntax in
             let%bind () = validate_state new_state in
-            let%map commit_host = prepare_runtime_commit prepare_commit exec in
+            let%map commit_host =
+              prepare_runtime_commit
+                prepare_commit
+                prepare_transaction
+                session
+                exec
+                ~new_state
+            in
             commit_exec session exec ~new_state;
             commit_host ();
             committed := true;
@@ -1306,6 +1339,7 @@ let handle_event
 
 let resume_ui_request
       ?(prepare_commit = fun ~local_effects:_ -> Ok ignore)
+      ?prepare_transaction
       ?(validate_state = fun _ -> Ok ())
       ?limits:_
       (session : session)
@@ -1336,7 +1370,14 @@ let resume_ui_request
      | Error msg -> Error msg
      | Ok (Task_value new_state) ->
        let%bind () = validate_state new_state in
-       let%map commit_host = prepare_runtime_commit prepare_commit suspended_exec.exec in
+       let%map commit_host =
+         prepare_runtime_commit
+           prepare_commit
+           prepare_transaction
+           session
+           suspended_exec.exec
+           ~new_state
+       in
        commit_exec session suspended_exec.exec ~new_state;
        commit_host ();
        log_committed_exec session suspended_exec.exec ~old_state ~new_state

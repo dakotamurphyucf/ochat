@@ -87,6 +87,26 @@ type local_effect =
     host-owned state immediately after the runtime commit. *)
 type prepare_commit = local_effects:eff list -> (unit -> unit, string) result
 
+(** Prospective committed state, including existing queued events followed by
+    events emitted in this transaction. Values are borrowed, not copied; the
+    callback must not mutate them or re-enter the runtime. *)
+type transaction =
+  { new_state : value
+  ; local_effects : eff list
+  ; queued_events : value list
+  ; halted : bool
+  }
+
+(** Runs after state validation and the legacy [prepare_commit] callback, before
+    any runtime commit or installer. A durable host can serialize this proposal
+    and persist it atomically with its own records here. All fallible validation
+    must precede that persistence. On success, return an infallible installer
+    that does not yield. The host owns cancellation-safe persistence and must
+    serialize access throughout the callback. On failure no installer runs.
+    When combined with this hook, [prepare_commit] must only validate/prepare,
+    not publish or persist independently. *)
+type prepare_transaction = transaction -> (unit -> unit, string) result
+
 (** Runtime classification of task operations. *)
 type op_kind =
   | Local_transactional
@@ -265,6 +285,7 @@ val request_session_end : session -> reason:string -> (unit, string) result
     [prepare_commit]'s returned installer must remain infallible. *)
 val handle_event
   :  ?prepare_commit:prepare_commit
+  -> ?prepare_transaction:prepare_transaction
   -> ?validate_state:(value -> (unit, string) result)
   -> ?copy_state:(value -> (value, string) result)
   -> ?limits:execution_limits
@@ -276,6 +297,7 @@ val handle_event
 (** Resume a suspended UI approval request with a host-supplied response. *)
 val resume_ui_request
   :  ?prepare_commit:prepare_commit
+  -> ?prepare_transaction:prepare_transaction
   -> ?validate_state:(value -> (unit, string) result)
   -> ?limits:execution_limits
   -> session

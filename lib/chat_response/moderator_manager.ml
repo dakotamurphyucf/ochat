@@ -562,10 +562,10 @@ let tombstone_by_target
   @ [ tombstone ]
 ;;
 
-let prepare_identity_ops t ~phase ops =
+let prepare_identity_overlay t ~phase ops =
   let open Result.Let_syntax in
   if List.is_empty ops
-  then Ok (fun () -> ())
+  then Ok (t.identity_overlay, fun () -> ())
   else (
     let%bind planned = Result.all (List.map ops ~f:(plan_identity_op t)) in
     let insertion_count =
@@ -675,9 +675,14 @@ let prepare_identity_ops t ~phase ops =
               | Halted _ -> false)
         }
     in
-    fun () ->
-      t.identity_overlay <- overlay;
-      publish_change t change)
+    ( overlay
+    , fun () ->
+        t.identity_overlay <- overlay;
+        publish_change t change ))
+;;
+
+let prepare_identity_ops t ~phase ops =
+  Result.map (prepare_identity_overlay t ~phase ops) ~f:snd
 ;;
 
 let install_identity_ops t ~phase ops =
@@ -837,6 +842,61 @@ let handle_event_entries
       ~event)
 ;;
 
+let identity_snapshot_of_state t ~current_state ~queued_events ~halted ~overlay =
+  let open Result.Let_syntax in
+  let%bind current_state = Value_codec.Snapshot.of_value current_state in
+  let%bind queued_internal_events =
+    Result.all (List.map queued_events ~f:Value_codec.Snapshot.of_value)
+  in
+  let inserted (inserted : Moderation.Identity_overlay.inserted) =
+    let%map value =
+      History_entry.item inserted.Moderation.Identity_overlay.entry
+      |> Res.Item.jsonaf_of_t
+      |> snapshot_of_jsonaf
+    in
+    Session.Moderator_state.Identity_snapshot.Inserted.
+      { entry_id = History_entry.id inserted.entry
+      ; change_id = inserted.change_id
+      ; value
+      ; script_label = inserted.script_label
+      }
+  in
+  let replacement (replacement : Moderation.Identity_overlay.replacement) =
+    let%map value = replacement.item |> Res.Item.jsonaf_of_t |> snapshot_of_jsonaf in
+    Session.Moderator_state.Identity_snapshot.Replacement.
+      { target_id = replacement.target_id
+      ; change_id = replacement.change_id
+      ; value
+      ; script_label = replacement.script_label
+      }
+  in
+  let overlay : Moderation.Identity_overlay.t = overlay in
+  let%bind prepended_items = Result.all (List.map overlay.prepended_items ~f:inserted) in
+  let%bind appended_items = Result.all (List.map overlay.appended_items ~f:inserted) in
+  let%map replacements = Result.all (List.map overlay.replacements ~f:replacement) in
+  let tombstones =
+    List.map
+      overlay.tombstones
+      ~f:(fun (tombstone : Moderation.Identity_overlay.tombstone) ->
+        Session.Moderator_state.Identity_snapshot.Tombstone.
+          { target_id = tombstone.target_id; change_id = tombstone.change_id })
+  in
+  Session.Moderator_state.Identity_snapshot.
+    { script_id = Registry.script_id t.artifact
+    ; script_source_hash = Registry.source_hash t.artifact
+    ; current_state
+    ; queued_internal_events
+    ; halted
+    ; revision = overlay.revision
+    ; next_change_id = overlay.next_change_id
+    ; prepended_items
+    ; appended_items
+    ; replacements
+    ; tombstones
+    ; halted_reason = overlay.halted_reason
+    }
+;;
+
 let handle_invocation_entries
       t
       ~invocation
@@ -883,19 +943,32 @@ let handle_invocation_entries
         ~session_meta
     in
     let outcome = ref Moderation.Outcome.empty in
-    let prepare_commit ~resolved ~local_effects =
-      let%bind decoded = Runtime.decode_local_effects local_effects in
+    let prepare_commit ~resolved ~(transaction : Runtime.transaction) =
+      let%bind decoded = Runtime.decode_local_effects transaction.local_effects in
       let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
-      let%bind install_overlay =
-        prepare_identity_ops t ~phase:Moderation.Phase.Tool_invoked prepared.overlay_ops
+      let%bind overlay, install_overlay =
+        prepare_identity_overlay
+          t
+          ~phase:Moderation.Phase.Tool_invoked
+          prepared.overlay_ops
       in
-      let%map install_resolution = prepare_resolution ~resolved ~outcome:prepared in
+      let%bind snapshot =
+        identity_snapshot_of_state
+          t
+          ~current_state:transaction.new_state
+          ~queued_events:transaction.queued_events
+          ~halted:transaction.halted
+          ~overlay
+      in
+      let%map install_resolution =
+        prepare_resolution ~resolved ~outcome:prepared ~snapshot
+      in
       fun () ->
         install_overlay ();
         install_resolution ();
         (* Include the resolution effect removed before ordinary effect decoding. *)
         t.processed_effect_count
-        <- t.processed_effect_count + List.length local_effects + 1;
+        <- t.processed_effect_count + List.length transaction.local_effects + 1;
         outcome := prepared
     in
     t.last_history <- history;
@@ -1166,60 +1239,12 @@ let identity_snapshot_unlocked t =
     | None -> Ok ()
     | Some _ -> Error "Cannot snapshot moderator while approval is suspended."
   in
-  let%bind current_state =
-    Value_codec.Snapshot.of_value (Runtime.current_state t.runtime)
-  in
-  let%bind queued_internal_events =
-    Result.all
-      (List.map (Runtime.queued_events t.runtime) ~f:Value_codec.Snapshot.of_value)
-  in
-  let inserted (inserted : Moderation.Identity_overlay.inserted) =
-    let%map value =
-      History_entry.item inserted.Moderation.Identity_overlay.entry
-      |> Res.Item.jsonaf_of_t
-      |> snapshot_of_jsonaf
-    in
-    Session.Moderator_state.Identity_snapshot.Inserted.
-      { entry_id = History_entry.id inserted.entry
-      ; change_id = inserted.change_id
-      ; value
-      ; script_label = inserted.script_label
-      }
-  in
-  let replacement (replacement : Moderation.Identity_overlay.replacement) =
-    let%map value = replacement.item |> Res.Item.jsonaf_of_t |> snapshot_of_jsonaf in
-    Session.Moderator_state.Identity_snapshot.Replacement.
-      { target_id = replacement.target_id
-      ; change_id = replacement.change_id
-      ; value
-      ; script_label = replacement.script_label
-      }
-  in
-  let overlay = t.identity_overlay in
-  let%bind prepended_items = Result.all (List.map overlay.prepended_items ~f:inserted) in
-  let%bind appended_items = Result.all (List.map overlay.appended_items ~f:inserted) in
-  let%map replacements = Result.all (List.map overlay.replacements ~f:replacement) in
-  let tombstones =
-    List.map
-      overlay.tombstones
-      ~f:(fun (tombstone : Moderation.Identity_overlay.tombstone) ->
-        Session.Moderator_state.Identity_snapshot.Tombstone.
-          { target_id = tombstone.target_id; change_id = tombstone.change_id })
-  in
-  Session.Moderator_state.Identity_snapshot.
-    { script_id = Registry.script_id t.artifact
-    ; script_source_hash = Registry.source_hash t.artifact
-    ; current_state
-    ; queued_internal_events
-    ; halted = Runtime.is_halted t.runtime
-    ; revision = overlay.revision
-    ; next_change_id = overlay.next_change_id
-    ; prepended_items
-    ; appended_items
-    ; replacements
-    ; tombstones
-    ; halted_reason = overlay.halted_reason
-    }
+  identity_snapshot_of_state
+    t
+    ~current_state:(Runtime.current_state t.runtime)
+    ~queued_events:(Runtime.queued_events t.runtime)
+    ~halted:(Runtime.is_halted t.runtime)
+    ~overlay:t.identity_overlay
 ;;
 
 let identity_snapshot t = with_execution_lock t (fun () -> identity_snapshot_unlocked t)

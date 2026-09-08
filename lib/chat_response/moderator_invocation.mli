@@ -32,7 +32,8 @@ val ordinary_effects : L.eff list -> (L.eff list, string) result
 
 (** Run Tool_invoked on an already borrowed, serialized moderator runtime.
     Exactly one resolution is validated before the runtime commits state/effects.
-    [prepare_commit] validates other effects and any host transaction, returning
+    [prepare_commit] receives the prospective runtime state/queue/halt and
+    normalized ordinary effects (resolution removed). It validates any host transaction, returning
     an infallible installer. No provider output or persistence is performed by
     this function itself. Failures leave buffered effects uncommitted. External
     work is never automatically retried or undone. Serializable moderator state
@@ -44,5 +45,5 @@ val run
   -> runtime:R.session
   -> context:L.value
   -> prepare_commit:
-       (resolved:I.t -> local_effects:L.eff list -> (unit -> unit, string) result)
+       (resolved:I.t -> transaction:R.transaction -> (unit -> unit, string) result)
   -> (I.t, string) result

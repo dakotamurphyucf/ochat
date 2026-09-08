@@ -127,9 +127,13 @@ val handle_event_entries
 
 (** Execute the dedicated extensibility-v1 Tool_invoked event under the manager
     lock. Only a dispatched invocation matching a prepared tool owned by this
-    moderator is accepted. [prepare_resolution] participates in the local commit:
-    failure discards buffered resolution/overlay effects; its returned installer
-    must not fail. This does not perform actor borrowing, authorization, durable
+    moderator is accepted. [prepare_resolution] receives an immutable prospective
+    identity snapshot (new state, full queued events, halt and overlay), allowing
+    the host to persist it atomically with [resolved]. All local validation and
+    serialization precede this callback. Failure discards buffered state and
+    resolution/overlay effects; its returned installer must not fail or yield.
+    The callback runs under the manager lock and must not re-enter it. The host
+    owns cancellation-safe persistence. This does not perform actor borrowing, authorization, durable
     publication, post-tool routing or terminal-error reconciliation. The owning
     service must supply those boundaries before exposing a model-visible tool.
     [validate_work] checks current Pending work ownership without side effects. *)
@@ -144,6 +148,7 @@ val handle_invocation_entries
   -> prepare_resolution:
        (resolved:Agent_protocol.Invocation.t
         -> outcome:Moderation.Outcome.t
+        -> snapshot:Session.Moderator_state.Identity_snapshot.t
         -> (unit -> unit, string) result)
   -> (Agent_protocol.Invocation.t * Moderation.Outcome.t, string) result
 
