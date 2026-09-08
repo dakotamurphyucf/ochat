@@ -144,13 +144,13 @@ const categories = ['All', 'Code', 'Documentation', 'Research', 'Automation'];
     margin-block: 2rem;
   }
   .gallery-filters {
-    display: flex;
-    flex-wrap: wrap;
+    display: grid;
+    grid-template-columns: repeat(auto-fit, minmax(min(100%, 7.5rem), 1fr));
     gap: 0.5rem;
   }
-  /* Reserve the controls' actual wrapped height before enhancement. */
+  /* Keep rows stable during both enhancement and the fallback-font swap. */
   .gallery-filters[hidden] {
-    display: flex;
+    display: grid;
     visibility: hidden;
   }
   .gallery-count[hidden] {
@@ -162,8 +162,10 @@ const categories = ['All', 'Code', 'Documentation', 'Research', 'Automation'];
   }
   .gallery-filters button {
     font: inherit;
-    font-size: 0.85rem;
-    padding: 0.6rem 1rem;
+    font-size: 0.8rem;
+    padding: 0.6rem 0.4rem;
+    min-width: 0;
+    overflow-wrap: anywhere;
     min-height: 44px;
     border: 1px solid var(--ochat-control-border);
     border-radius: 2rem;

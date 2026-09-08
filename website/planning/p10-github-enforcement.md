@@ -69,6 +69,30 @@ CI uses published OCaml 5.3.0, without the developer's macOS-only `core_unix` pi
 Installed versions and pin evidence are uploaded with the semantic report.
 These explicit compatibility constraints are not a complete OCaml dependency lock.
 
+## Gallery performance correction
+
+[Run 34170942123](https://github.com/dakotamurphyucf/ochat/actions/runs/34170942123)
+passed the real semantic gate and both website builds. Production passed all
+performance/search checks and 208 browser cases (two existing clipboard skips).
+Preview failed the unchanged 0.1 CLS budget on the application gallery (0.1972),
+and the final release gate correctly failed despite production succeeding.
+
+Layout-shift attribution showed that the fallback-to-Manrope font swap changes
+filter widths and can move Research to another row. The filters now use stable,
+responsive grid columns, including before JavaScript enhancement. A new delayed-font
+browser regression fails against the original flex layout and passes with the
+fix in Chromium, Firefox, and WebKit. All 21 scoped application cases and the
+seven-route local performance gate pass; the corrected local gallery sample is
+0.00125. Linux container measurements and GitHub retesting provide separate
+platform evidence; local measurements alone do not close the original CI failure.
+
+The performance report now retains bounded layout-shift attribution (affected
+text/elements and before/after rectangles). The original threshold and cumulative
+measurement remain unchanged. Diagnostic instrumentation follows Chrome's
+[Layout Instability API guidance](https://web.dev/articles/debug-layout-shifts).
+The live workers.dev preview still refers to its earlier hosted artifact; P11
+must qualify the final production bytes at the owned origin.
+
 ## Publishing boundary
 
 GitHub is the single intended production publisher. The workflow has read-only

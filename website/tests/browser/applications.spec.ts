@@ -159,3 +159,49 @@ test('search labels learning and application results by their document kind', as
   });
   await expect(result.locator('.search-context')).toContainText('Guide');
 });
+
+test('application filters keep their positions when the web font loads', async ({
+  page,
+}) => {
+  await page.setViewportSize({ width: 390, height: 844 });
+  let releaseFonts!: () => void;
+  const fontsReady = new Promise<void>((resolve) => {
+    releaseFonts = resolve;
+  });
+  await page.route('**/*.woff2', async (route) => {
+    await fontsReady;
+    await route.continue();
+  });
+  try {
+    await page.goto('/docs/applications/', { waitUntil: 'domcontentloaded' });
+    const filters = page.getByRole('group', { name: 'Filter applications' });
+    await expect(filters).toBeVisible();
+    const positions = () =>
+      filters.evaluate((group) => {
+        const origin = group.getBoundingClientRect();
+        return [...group.querySelectorAll('button')].map((button) => {
+          const box = button.getBoundingClientRect();
+          return {
+            x: box.x - origin.x,
+            y: box.y - origin.y,
+            width: box.width,
+            height: box.height,
+          };
+        });
+      });
+    const before = await positions();
+    releaseFonts();
+    await page.evaluate(() => document.fonts.ready);
+    const after = await positions();
+    for (let i = 0; i < before.length; i++) {
+      for (const key of ['x', 'y', 'width', 'height'] as const) {
+        expect(
+          Math.abs(after[i][key] - before[i][key]),
+          `Filter ${i} ${key}`,
+        ).toBeLessThan(1);
+      }
+    }
+  } finally {
+    releaseFonts();
+  }
+});

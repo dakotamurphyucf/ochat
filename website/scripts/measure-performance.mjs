@@ -46,10 +46,29 @@ try {
     });
     await cdp.send('Emulation.setCPUThrottlingRate', { rate: 4 });
     await page.addInitScript(() => {
-      window.__performanceSample = { cls: 0, lcp: null };
+      window.__performanceSample = { cls: 0, lcp: null, layoutShifts: [] };
       new PerformanceObserver((list) => {
-        for (const e of list.getEntries())
-          if (!e.hadRecentInput) window.__performanceSample.cls += e.value;
+        for (const e of list.getEntries()) {
+          if (e.hadRecentInput) continue;
+          window.__performanceSample.cls += e.value;
+          if (window.__performanceSample.layoutShifts.length >= 20) continue;
+          const rectangle = ({ x, y, width, height }) => ({
+            x,
+            y,
+            width,
+            height,
+          });
+          window.__performanceSample.layoutShifts.push({
+            value: e.value,
+            at: e.startTime,
+            sources: e.sources.map((source) => ({
+              element: source.node?.nodeName || 'detached',
+              text: (source.node?.textContent || '').trim().slice(0, 100),
+              before: rectangle(source.previousRect),
+              after: rectangle(source.currentRect),
+            })),
+          });
+        }
       }).observe({ type: 'layout-shift', buffered: true });
       new PerformanceObserver((list) => {
         for (const e of list.getEntries())
