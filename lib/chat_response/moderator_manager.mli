@@ -38,6 +38,10 @@ module Registry : sig
   val source_hash : artifact -> string
 end
 
+(** Execution and snapshot/queue access share a process-local execution gate.
+    Independent Eio callers serialize. Reentering a held owner or completing a
+    cross-owner acquisition cycle returns an explicit error before handler
+    execution. Synchronous legacy calls remain supported when uncontended. *)
 type t
 
 type pending_ui_request = Runtime.pending_ui_request =

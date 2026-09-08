@@ -250,6 +250,7 @@ type t =
   ; mutable active_cancel : (unit -> unit) option
   ; mutable idle_moderator_borrowed : bool
   ; mutable moderator_borrow : moderator_borrow option
+  ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
   ; mutable stopped : bool
@@ -1613,7 +1614,7 @@ let request_permission_with_review_internal
   | (false | true), _, _ -> Ok (Eio.Promise.await response)
 ;;
 
-let with_moderator_invocation t operation_id ~invocation f =
+let with_moderator_invocation_unlocked t operation_id ~invocation f =
   let open Result.Let_syntax in
   (* Observe existing cancellation before masking the mailbox admission. Once
      admitted, the borrow must always reach its protected completion request. *)
@@ -1657,6 +1658,21 @@ let with_moderator_invocation t operation_id ~invocation f =
     in
     ignore (finish (Some failure) : (unit, Agent_protocol.Error.t) result);
     Stdlib.Printexc.raise_with_backtrace exn backtrace
+;;
+
+let with_moderator_invocation t operation_id ~invocation f =
+  match
+    Chat_response.Execution_gate.with_access t.invocation_gate (fun () ->
+      with_moderator_invocation_unlocked t operation_id ~invocation f)
+  with
+  | Ok result -> result
+  | Error failure ->
+    let code =
+      match failure with
+      | Chat_response.Execution_gate.Resource_limit -> Agent_protocol.Error.Resource_limit
+      | Reentrant | Wait_cycle -> Conflict
+    in
+    Error (error code (Chat_response.Execution_gate.error_message failure))
 ;;
 
 let worker_capabilities t operation_id id_source buffer =
@@ -3156,6 +3172,7 @@ let create_with_owner_lease_duration
     ; active_cancel = None
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
+    ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state
     ; stopped = false

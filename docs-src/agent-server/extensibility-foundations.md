@@ -58,8 +58,8 @@ native invocation or completion event. Legacy scripts retain their existing even
 representation.
 
 These are internal execution primitives, not public tool registration. Shared
-tool routing, current authority checks, nested-call admission, cross-owner
-deadlock prevention, canonical output publication, post-tool observation and
+tool routing, current authority checks, nested-call admission, canonical output
+publication, post-tool observation and
 restart reconciliation remain required before a host exposes moderator tools. The host
 resolution installer must be infallible, must not yield, and must not re-enter
 the manager lock. The prospective snapshot API itself does not implement the
@@ -124,10 +124,43 @@ This is process-local cleanup, not restart reconciliation.
 
 Saved commit callbacks become invalid after their scope or operation ends.
 Duplicate commits, conflicting moderator checkpoints and runtime replacement
-during a borrow are rejected. A second borrow currently returns a conflict;
-shared routing must still distinguish queued independent calls from recursive
-or cross-owner wait cycles. The service publishes no provider tool output, grants
+during a borrow are rejected. Independent calls queue outside the actor; a
+recursive call or cross-owner acquisition cycle returns an explicit error before
+admission. The service publishes no provider tool output, grants
 no additional tool authority, and does not enable any extension feature flag.
+
+### Synchronous call coordination
+
+Actor handoffs and moderator execution share `Execution_gate` coordination.
+Each actor and manager has its own exclusive resource. The coordinator tracks
+active owner ancestry and dependencies between waiting call chains, rejecting
+`moderator_reentrancy` or `moderator_wait_cycle` before entering the requested
+resource. Other fibers can continue while an independent caller waits. Once a
+queued actor request proceeds, its operation and session generation are checked
+again. Shared tool routing must also revalidate current authority before effects;
+coordination does not authorize a tool.
+
+The dependency graph is protected by a short, non-yielding domain mutex; resource
+waits use Eio mutexes outside it. Exceptions and cancellation remove registrations
+and release owners. Fiber children inherit active ancestry, but scopes that have
+already ended no longer count as held resources. Uncontended synchronous legacy
+manager calls use domain-local ancestry. The graph allows up to 4096 active or
+waiting acquisitions and 64 active ancestors, independently of narrower script
+limits.
+
+Eio domains do not automatically inherit fiber-local ownership. Host code that
+moves synchronous nested work into a domain must use
+`Execution_gate.inherit_context` around the submitted function. This transfers
+coordination metadata, not tool authority. Independent background launches use
+`Execution_gate.without_context`; never use it to bypass a synchronous dependency.
+The existing asynchronous model executor uses this launch boundary so a fast
+completion queues behind the originating moderator instead of being rejected as
+recursive. Synchronous calls retain their ancestry.
+
+This detects cycles among coordinated resources in this process. It is not a
+distributed wait detector and does not observe arbitrary waits performed by
+external programs. Shared invocation routing and end-to-end qualification remain
+required before enabling moderator tools publicly.
 
 ## Capability discovery
 

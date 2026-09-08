@@ -479,6 +479,38 @@ let%test_unit "stale bindings and invalid input reject before handler execution"
     assert (Poly.equal (state manager) (Session.Snapshot.Int 0)))
 ;;
 
+let%test_unit "manager callbacks reject reentry and leave the manager usable" =
+  Eio_main.run (fun env ->
+    let manager_ref = ref None in
+    let reenter = ref true in
+    let capabilities =
+      { Chat_response.Moderation.Capabilities.default with
+        on_tool_call =
+          (fun ~name:_ ~args:_ ->
+            if !reenter
+            then (
+              reenter := false;
+              match M.identity_snapshot (Option.value_exn !manager_ref) with
+              | Error error -> Error error
+              | Ok _ -> failwith "expected moderator reentry rejection")
+            else Ok (Tool_ok `Null))
+      }
+    in
+    let manager, _, make =
+      setup
+        env
+        ~capabilities
+        {|Task.bind(Tool.call("reenter", `Null), fun ignored ->
+        Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`Null)),
+          fun ignored -> Task.pure(state + 1)))|}
+    in
+    manager_ref := Some manager;
+    expect "moderator_reentrancy" (call manager (make ()));
+    assert (Poly.equal (state manager) (Session.Snapshot.Int 0));
+    call manager (make ()) |> ok |> ignore;
+    assert (Poly.equal (state manager) (Session.Snapshot.Int 1)))
+;;
+
 let%test_unit "dispatch applies the effective array limit before projection" =
   Eio_main.run (fun env ->
     let _, prepared, make =

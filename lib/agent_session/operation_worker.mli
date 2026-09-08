@@ -38,7 +38,11 @@ module Capabilities : sig
           callback returns. Failure/cancellation records a terminal outcome if
           no resolution was committed. No provider output is published here.
           Current capability/policy admission must precede this trusted service;
-          it supplies operation ownership, not tool authorization. *)
+          it supplies operation ownership, not tool authorization. Independent
+          callers queue outside the actor and recheck operation ownership before
+          admission. The callback must revalidate current authority before effects
+          after any wait. Same-owner recursion and cross-owner acquisition cycles
+          fail before admission through the shared execution coordinator. *)
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

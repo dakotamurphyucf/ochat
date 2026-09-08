@@ -116,7 +116,7 @@ type subscription =
 type t =
   { artifact : Registry.artifact
   ; runtime : Runtime.session
-  ; execution_mutex : Eio.Mutex.t
+  ; execution_gate : Execution_gate.t
   ; mutable overlay : Moderation.Overlay.t
   ; mutable identity_overlay : Moderation.Identity_overlay.t
   ; mutable projection : Moderation.Projection.t
@@ -139,7 +139,11 @@ let entrypoints =
   Runtime.{ initial_state_name = "initial_state"; on_event_name = "on_event" }
 ;;
 
-let with_execution_lock t f = Eio.Mutex.use_ro t.execution_mutex f
+let with_execution_lock t f =
+  match Execution_gate.with_access t.execution_gate f with
+  | Ok result -> result
+  | Error error -> Error (Execution_gate.error_message error)
+;;
 
 let snapshot_of_jsonaf (json : Jsonaf.t) : (Snapshot.t, string) result =
   Value_codec.Snapshot.of_value (Value_codec.jsonaf_to_value json)
@@ -312,7 +316,7 @@ let create
   Ok
     { artifact
     ; runtime
-    ; execution_mutex = Eio.Mutex.create ()
+    ; execution_gate = Execution_gate.create ()
     ; overlay
     ; identity_overlay = Moderation.Identity_overlay.empty
     ; projection = Moderation.Projection.empty

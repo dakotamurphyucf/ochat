@@ -24,6 +24,7 @@
   moderation
   moderator_manager
   moderator_invocation
+  execution_gate
   tool_call
   response_loop
   shell_tool

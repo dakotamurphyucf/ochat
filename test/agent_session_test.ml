@@ -2693,6 +2693,78 @@ let%test_unit "cancellation after the atomic commit preserves its recorded outco
          Poly.equal state.moderator (Agent_session.Memory_backend.state backend).moderator))
 ;;
 
+let%test_unit "independent worker calls queue before actor admission" =
+  let done_, done_u = Eio.Promise.create () in
+  with_handoff_actor
+    ~make_worker:(fun _env actor_ready ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+        let actor = Eio.Promise.await actor_ready in
+        let first_held, first_held_u = Eio.Promise.create () in
+        let release, release_u = Eio.Promise.create () in
+        let attempted, attempted_u = Eio.Promise.create () in
+        let second_entered = ref false in
+        let fresh () =
+          Agent_protocol.Invocation.create
+            { (invocation_fixture ()).context with
+              id = Agent_protocol.Id.Invocation.create ()
+            }
+          |> protocol_ok
+        in
+        let run ~invocation count wait =
+          caps.with_moderator_invocation ~invocation (fun ~dispatched ~commit ->
+            wait ();
+            let resolved =
+              Agent_protocol.Invocation.resolve
+                dispatched
+                ~session_id:input.session_id
+                ~generation:input.session_generation
+                (Complete `Null)
+              |> protocol_ok
+            in
+            commit ~resolved ~snapshot:(handoff_snapshot count))
+          |> protocol_ok
+        in
+        Eio.Switch.run (fun sw ->
+          Eio.Fiber.fork ~sw (fun () ->
+            run ~invocation:(fresh ()) 1 (fun () ->
+              Eio.Promise.resolve first_held_u ();
+              Eio.Promise.await release));
+          Eio.Promise.await first_held;
+          let second = fresh () in
+          Eio.Fiber.fork ~sw (fun () ->
+            Eio.Promise.resolve attempted_u ();
+            run ~invocation:second 2 (fun () -> second_entered := true));
+          Eio.Promise.await attempted;
+          Eio.Fiber.yield ();
+          let while_queued = Agent_session.Session_actor.state actor |> protocol_ok in
+          assert (List.length while_queued.invocations = 1);
+          assert (not !second_entered);
+          Eio.Promise.resolve release_u ());
+        assert !second_entered;
+        let state = Agent_session.Session_actor.state actor |> protocol_ok in
+        assert (List.length state.invocations = 2);
+        assert (
+          List.for_all state.invocations ~f:(fun inv ->
+            match inv.status with
+            | Resolved (Complete _) -> true
+            | _ -> false));
+        assert (
+          Poly.equal
+            state.moderator
+            (Some
+               (Agent_session.Runtime_builder.encode_moderator_snapshot
+                  (handoff_snapshot 2))));
+        Eio.Promise.resolve done_u ();
+        Completed
+          { final_history = input.history
+          ; runtime_requests = []
+          ; moderator_snapshot = state.moderator
+          }))
+    (fun _env actor _writer _backend ->
+       Eio.Promise.await done_;
+       ignore (await_idle actor))
+;;
+
 let%test_unit "failed admission and handler errors cannot strand a moderator borrow" =
   let done_, done_u = Eio.Promise.create () in
   let reject_once = ref true in

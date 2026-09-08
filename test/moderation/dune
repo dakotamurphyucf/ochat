@@ -1,4 +1,11 @@
 (library
+ (name execution_gate_test)
+ (modules execution_gate_test)
+ (libraries core chat_response eio eio_main)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
  (name chat_response_moderation_test)
  (modules chat_response_moderation_test)
  (libraries

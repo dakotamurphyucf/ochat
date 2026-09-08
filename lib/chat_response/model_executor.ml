@@ -310,32 +310,33 @@ let recipe_agent_prompt_v1 (t : t) ~(session_id : string)
       in
       Hashtbl.set t.jobs ~key:job_id ~data:job;
       let _promise =
-        Eio.Fiber.fork_promise ~sw:t.sw (fun () ->
-          (match call ~payload with
-           | Ok (Moderation.Capabilities.Model_ok json) ->
-             job.status <- Succeeded json;
-             deliver_if_possible t ~job_id job;
-             Eio.Promise.resolve_ok completion_resolver ();
-             Ok ()
-           | Ok (Moderation.Capabilities.Model_refused msg) ->
-             job.status <- Failed msg;
-             deliver_if_possible t ~job_id job;
-             Eio.Promise.resolve_ok completion_resolver ();
-             Ok ()
-           | Ok (Moderation.Capabilities.Model_error msg) ->
-             job.status <- Failed msg;
-             deliver_if_possible t ~job_id job;
-             Eio.Promise.resolve_ok completion_resolver ();
-             Ok ()
-           | Error msg ->
-             job.status <- Failed msg;
-             deliver_if_possible t ~job_id job;
-             Eio.Promise.resolve_ok completion_resolver ();
-             Ok ())
-          |> fun r ->
-          match r with
-          | Ok _ -> Ok ()
-          | Error _ -> Ok ())
+        Execution_gate.without_context (fun () ->
+          Eio.Fiber.fork_promise ~sw:t.sw (fun () ->
+            (match call ~payload with
+             | Ok (Moderation.Capabilities.Model_ok json) ->
+               job.status <- Succeeded json;
+               deliver_if_possible t ~job_id job;
+               Eio.Promise.resolve_ok completion_resolver ();
+               Ok ()
+             | Ok (Moderation.Capabilities.Model_refused msg) ->
+               job.status <- Failed msg;
+               deliver_if_possible t ~job_id job;
+               Eio.Promise.resolve_ok completion_resolver ();
+               Ok ()
+             | Ok (Moderation.Capabilities.Model_error msg) ->
+               job.status <- Failed msg;
+               deliver_if_possible t ~job_id job;
+               Eio.Promise.resolve_ok completion_resolver ();
+               Ok ()
+             | Error msg ->
+               job.status <- Failed msg;
+               deliver_if_possible t ~job_id job;
+               Eio.Promise.resolve_ok completion_resolver ();
+               Ok ())
+            |> fun r ->
+            match r with
+            | Ok _ -> Ok ()
+            | Error _ -> Ok ()))
       in
       Ok job_id)
   in
