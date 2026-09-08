@@ -170,7 +170,10 @@ restart reconciliation remain unfinished.
 `In_memory_stream.Tool_dispatch` carries the original and final tool names and
 arguments, the actual committed call occurrence, canonical history and fork source.
 A host can return a validated output with a dedicated commit callback, or select
-the existing native runner. Pre-tool rejection skips this dispatcher. Routed
+the existing native runner. A `pre_rejected` request reaches this dispatcher only
+to record its failure; it must not execute an implementation or invoke the final
+execution authorizer. Returning no routed result preserves the native synthetic
+rejection without running its tool. Routed
 commit callbacks replace the generic history append; they run before output
 callbacks and post-tool moderation. Native outputs now follow the same ordering.
 
@@ -187,13 +190,13 @@ The manager validates the returned outcome and prospective state before a host
 `prepare_outcome` check enforces disclosure and output limits. Rejected output or
 handler/admission failure restores the moderator state and records a bounded
 failure with the previous snapshot. Host classifications distinguish invalid
-input, permission denial, unhandled calls, duplicate resolution, wrong invocation
-IDs, invalid output/state, disclosure rejection, handler failure and failed result
+input, pre-tool rejection, permission denial, unhandled calls, duplicate resolution,
+wrong invocation IDs, invalid output/state, disclosure rejection, handler failure and failed result
 commits. Classification comes from the failing host stage, not parsing a script's
 diagnostic text. Raw exception diagnostics are not placed in model-visible output.
-Host persistence failures propagate without
-rerunning the handler. Known standalone declarations report an unavailable
-execution service; they never fall through to a same-named native runner.
+Host persistence failures propagate without rerunning the handler. Known standalone
+declarations report an unavailable execution service; they never fall through to a
+same-named native runner.
 Transient fork calls cannot use the root actor's invocation ownership.
 
 Moderator invocation execution rejects legacy UI suspension before a continuation
@@ -203,9 +206,14 @@ Normal extensibility scripts do not expose UI approval operations; the guard als
 protects hosts that compose runtime surfaces. Legacy UI handlers retain their
 existing suspend/resume behavior.
 
-The returned runtime requests travel with the result. They are reported after
-publication and participate in the turn decision. An end-session request prevents
+Pre-tool and implementation runtime requests travel with the result. They are
+reported after publication and participate in the turn decision. An end-session request prevents
 further moderator hooks and provider turns after pending outputs are handled.
+When a pre-tool handler rejects a call and ends the session, its call and terminal
+result are still committed. The call's history observer is skipped because the
+moderator has halted, and the initial rejection is published before the worker
+applies the end-session request. The rejection uses the bounded host code
+`invocation.pre_tool_rejected`; the moderator's raw diagnostic is not exposed.
 Post-tool observation failures instead produce a separate, non-retryable durable
 `operation.failed` event, with `phase=post_tool_response` and the committed output
 occurrence ID. The initial tool result remains in history and its receipt remains
@@ -216,6 +224,8 @@ input and actor capabilities. Tests run a compiled ChatML moderator through this
 worker and actor with an offline provider stream, covering success, policy denial,
 disclosure rejection, malformed JSON, redirects and final-schema validation,
 revocation, failed publication persistence, post-hook failure and end-session.
+Pre-tool rejection also has a durable invocation and publication receipt, with
+function/custom coverage, post-hook failure preservation and session termination.
 Additional cases verify exact terminal error codes and prevent script diagnostics
 from impersonating host classifications. Concurrent adapter tests revoke authority
 while a second call queues behind an active handler, cancel queued and active

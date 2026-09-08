@@ -14,7 +14,9 @@ exception Dispatch_error of Agent_protocol.Error.t
     pass through unchanged.
     Pending work must have a qualified, owned completion path. Error details from
     host exceptions are not copied into model-visible output. Root actor ownership
-    cannot be reused for transient fork calls. Unknown native names return [None]. *)
+    cannot be reused for transient fork calls. Unknown native names return [None].
+    [pre_rejected] moderator calls record/publish a bounded terminal rejection with the
+    existing snapshot; no invocation handler or execution authorizer is run. *)
 val create
   :  definition:Chat_response.Extension_compiler.definition
   -> manager:Chat_response.Moderator_manager.t

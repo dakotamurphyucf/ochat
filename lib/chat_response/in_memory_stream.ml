@@ -17,6 +17,7 @@ module Tool_dispatch = struct
     ; original_payload : string
     ; name : string
     ; payload : string
+    ; pre_rejected : bool
     ; call : History_entry.t
     ; history : History_entry.t list
     ; source : string option
@@ -1137,9 +1138,15 @@ let dispatch_tool
       ~payload
       ~call_id
       ~item_id
+      ~synthetic_result
+      ~runtime_requests
       run_native
   =
-  let authorize () = c.authorize_tool ~kind ~name ~payload ~call_id in
+  let authorize () =
+    if Option.is_some synthetic_result
+    then failwith "pre-tool moderation rejected this invocation"
+    else c.authorize_tool ~kind ~name ~payload ~call_id
+  in
   let routed =
     Option.bind c.dispatch_tool ~f:(fun dispatch ->
       let call_id =
@@ -1161,6 +1168,7 @@ let dispatch_tool
           ; original_payload
           ; name
           ; payload
+          ; pre_rejected = Option.is_some synthetic_result
           ; call
           ; history = history_with_new_entries ~hist st
           ; source = c.source
@@ -1168,11 +1176,20 @@ let dispatch_tool
           }
         ~authorize)
   in
-  match routed with
-  | Some result -> result
-  | None ->
-    authorize ();
-    Tool_dispatch.{ output = run_native (); commit_output = None; runtime_requests = [] }
+  let result =
+    match routed with
+    | Some result -> result
+    | None ->
+      let output =
+        match synthetic_result with
+        | Some output -> output
+        | None ->
+          authorize ();
+          run_native ()
+      in
+      Tool_dispatch.{ output; commit_output = None; runtime_requests = [] }
+  in
+  { result with runtime_requests = runtime_requests @ result.runtime_requests }
 ;;
 
 let schedule_function_done
@@ -1207,7 +1224,6 @@ let schedule_function_done
         ~item_id:(Some item_id)
       |> Result.ok_or_failwith
     in
-    List.iter moderated.runtime_requests ~f:c.on_runtime_request;
     let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
     let history_item =
       Tool_call.call_item
@@ -1220,7 +1236,12 @@ let schedule_function_done
     let st =
       append_history_item
         c
-        ~moderator:c.moderator
+        ~moderator:
+          (if
+             Option.is_some
+               (Runtime_semantics.should_end_session moderated.runtime_requests)
+           then None
+           else c.moderator)
         ~on_runtime_request:c.on_runtime_request
         ~available_tools:c.tools
         ~now_ms:(now_ms c.env)
@@ -1232,51 +1253,40 @@ let schedule_function_done
     let arguments = moderated.payload in
     let hs = history_so_far ~history_compaction:c.history_compaction ~hist ~st in
     let run_tool () =
-      match moderated.synthetic_result with
-      | Some output ->
-        Tool_dispatch.{ output; commit_output = None; runtime_requests = [] }
-      | None ->
-        dispatch_tool
-          c
-          ~hist
-          ~st
-          ~kind:Tool_call.Kind.Function
-          ~original_name
-          ~original_payload
-          ~name
-          ~payload:arguments
-          ~call_id
-          ~item_id
-          (fun () ->
-             Tool_call.run_tool
-               ~kind:Tool_call.Kind.Function
-               ~name
-               ~payload:arguments
-               ~call_id
-               ~tool_tbl:c.tool_tbl
-               ?on_tool_execution:c.on_tool_execution
-               ~on_fork:
-                 (Some
-                    (fun ~invocation ~call_id ~arguments ->
-                      make_run_fork
-                        ~turn
-                        ~ctx:c
-                        ~history_so_far:hs
-                        ~invocation
-                        ~call_id
-                        ~arguments))
-               ())
+      dispatch_tool
+        c
+        ~hist
+        ~st
+        ~kind:Tool_call.Kind.Function
+        ~original_name
+        ~original_payload
+        ~name
+        ~payload:arguments
+        ~call_id
+        ~item_id
+        ~synthetic_result:moderated.synthetic_result
+        ~runtime_requests:moderated.runtime_requests
+        (fun () ->
+           Tool_call.run_tool
+             ~kind:Tool_call.Kind.Function
+             ~name
+             ~payload:arguments
+             ~call_id
+             ~tool_tbl:c.tool_tbl
+             ?on_tool_execution:c.on_tool_execution
+             ~on_fork:
+               (Some
+                  (fun ~invocation ~call_id ~arguments ->
+                    make_run_fork
+                      ~turn
+                      ~ctx:c
+                      ~history_so_far:hs
+                      ~invocation
+                      ~call_id
+                      ~arguments))
+             ())
     in
-    let p =
-      match moderated.synthetic_result with
-      | Some result ->
-        let promise, resolver = Eio.Promise.create () in
-        Eio.Promise.resolve_ok
-          resolver
-          Tool_dispatch.{ output = result; commit_output = None; runtime_requests = [] };
-        promise
-      | None -> make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool
-    in
+    let p = make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool in
     add_pending st ~call_id ~kind:`Function ~name p
 ;;
 
@@ -1311,7 +1321,6 @@ let schedule_custom_done
         ~item_id:(Some item_id)
       |> Result.ok_or_failwith
     in
-    List.iter moderated.runtime_requests ~f:c.on_runtime_request;
     let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
     let history_item =
       Tool_call.call_item
@@ -1324,7 +1333,12 @@ let schedule_custom_done
     let st =
       append_history_item
         c
-        ~moderator:c.moderator
+        ~moderator:
+          (if
+             Option.is_some
+               (Runtime_semantics.should_end_session moderated.runtime_requests)
+           then None
+           else c.moderator)
         ~on_runtime_request:c.on_runtime_request
         ~available_tools:c.tools
         ~now_ms:(now_ms c.env)
@@ -1335,42 +1349,31 @@ let schedule_custom_done
     let name = moderated.name in
     let input = moderated.payload in
     let run_tool () =
-      match moderated.synthetic_result with
-      | Some output ->
-        Tool_dispatch.{ output; commit_output = None; runtime_requests = [] }
-      | None ->
-        dispatch_tool
-          c
-          ~hist
-          ~st
-          ~kind:Tool_call.Kind.Custom
-          ~original_name
-          ~original_payload
-          ~name
-          ~payload:input
-          ~call_id
-          ~item_id
-          (fun () ->
-             Tool_call.run_tool
-               ~kind:Tool_call.Kind.Custom
-               ~name
-               ~payload:input
-               ~call_id
-               ~tool_tbl:c.tool_tbl
-               ~on_fork:None
-               ?on_tool_execution:c.on_tool_execution
-               ())
+      dispatch_tool
+        c
+        ~hist
+        ~st
+        ~kind:Tool_call.Kind.Custom
+        ~original_name
+        ~original_payload
+        ~name
+        ~payload:input
+        ~call_id
+        ~item_id
+        ~synthetic_result:moderated.synthetic_result
+        ~runtime_requests:moderated.runtime_requests
+        (fun () ->
+           Tool_call.run_tool
+             ~kind:Tool_call.Kind.Custom
+             ~name
+             ~payload:input
+             ~call_id
+             ~tool_tbl:c.tool_tbl
+             ~on_fork:None
+             ?on_tool_execution:c.on_tool_execution
+             ())
     in
-    let p =
-      match moderated.synthetic_result with
-      | Some result ->
-        let promise, resolver = Eio.Promise.create () in
-        Eio.Promise.resolve_ok
-          resolver
-          Tool_dispatch.{ output = result; commit_output = None; runtime_requests = [] };
-        promise
-      | None -> make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool
-    in
+    let p = make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool in
     add_pending st ~call_id ~kind:`Custom ~name p
 ;;
 

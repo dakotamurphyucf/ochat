@@ -139,7 +139,15 @@ let create
         recorded := Some resolved
       in
       let run () =
-        if
+        if request.pre_rejected
+        then (
+          failure
+          := Some
+               (fail
+                  "invocation.pre_tool_rejected"
+                  "Pre-tool moderation rejected this invocation.");
+          Error "pre-tool rejection")
+        else if
           parse_error
           || Result.is_error
                (Schema.validate (EC.input_schema prepared) invocation.context.input)

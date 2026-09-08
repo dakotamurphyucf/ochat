@@ -32,6 +32,7 @@ module Tool_dispatch : sig
     ; original_payload : string
     ; name : string
     ; payload : string
+    ; pre_rejected : bool
     ; call : History_entry.t
     ; history : History_entry.t list
     ; source : string option
@@ -49,11 +50,14 @@ module Tool_dispatch : sig
       [Some] supplies a validated result; [None] selects normal native execution.
       A routed implementation must validate its final target/schema and call
       [authorize] before effects, including again after an owner-queue wait.
-      Rejected pre-tool calls do not reach this hook. Fork requests retain their
+      [pre_rejected] requests may only record a rejection; they must not run an
+      implementation or invoke [authorize]. Returning [None] preserves the
+      native synthetic rejection without execution. Fork requests retain their
       separate [source] and [parent_call_id]; hosts must use the correct owner.
       [commit_output] replaces generic history append and must persist the output
       and receipt before returning. Failure skips publication and post hooks.
-      Runtime requests are surfaced after publication. End-session requests
+      Pre-tool and implementation runtime requests are surfaced after publication.
+      End-session requests
       suppress further moderator hooks and follow-up turns after pending outputs
       are handled. Other requests participate in the normal turn-end decision. *)
   type t = request -> authorize:(unit -> unit) -> result option

@@ -2892,11 +2892,31 @@ let%test_unit
     ; `Invalid_output
     ; `Forged_error
     ; `Result_rejected
+    ; `Pre_reject
+    ; `Pre_reject_end
+    ; `Pre_reject_post_fail
+    ; `Custom_success
+    ; `Pre_reject_custom
     ]
     ~f:(fun mode ->
       let request_count = ref 0 in
       let admitted = ref 0 in
       let redirected = Poly.equal mode `Redirect || Poly.equal mode `Redirect_bad in
+      let pre_rejected =
+        List.mem
+          [ `Pre_reject; `Pre_reject_end; `Pre_reject_post_fail; `Pre_reject_custom ]
+          mode
+          ~equal:Poly.equal
+      in
+      let ends_session =
+        Poly.equal mode `End_session || Poly.equal mode `Pre_reject_end
+      in
+      let custom =
+        Poly.equal mode `Custom_success || Poly.equal mode `Pre_reject_custom
+      in
+      let post_fails =
+        Poly.equal mode `Post_fail || Poly.equal mode `Pre_reject_post_fail
+      in
       with_handoff_actor
         ~reject:(fun next ->
           List.exists
@@ -2910,7 +2930,20 @@ let%test_unit
                   | _ -> false)))
         ~make_worker:(fun env actor_ready ->
           let events =
-            if Poly.equal mode `Post_fail
+            if pre_rejected
+            then
+              "| `Pre_tool_call(c) -> Task.bind(Tool.reject(\"private diagnostic\"), fun \
+               ignored -> "
+              ^ (if Poly.equal mode `Pre_reject_end
+                 then
+                   "Task.bind(Runtime.end_session(\"done\"), fun ignored -> \
+                    Task.pure(state)))"
+                 else "Task.pure(state))")
+              ^ (if post_fails
+                 then " | `Post_tool_response(r) -> Task.fail(\"post hook failed\")"
+                 else "")
+              ^ " | _ -> Task.pure(state)"
+            else if Poly.equal mode `Post_fail
             then
               "| `Post_tool_response(r) -> Task.fail(\"post hook failed\") | _ -> \
                Task.pure(state)"
@@ -2968,33 +3001,53 @@ let%test_unit
                   Openai.Responses.Response_stream.
                     [ Output_item_added
                         { item =
-                            Function_call
-                              { name = (if redirected then "alias" else "counter")
-                              ; arguments = ""
-                              ; call_id = "counter-call"
-                              ; _type = "function_call"
-                              ; id = Some "counter-item"
-                              ; status = None
-                              }
+                            (if custom
+                             then
+                               Custom_function
+                                 { name = "counter"
+                                 ; input = ""
+                                 ; call_id = "counter-call"
+                                 ; _type = "custom_tool_call"
+                                 ; id = Some "counter-item"
+                                 }
+                             else
+                               Function_call
+                                 { name = (if redirected then "alias" else "counter")
+                                 ; arguments = ""
+                                 ; call_id = "counter-call"
+                                 ; _type = "function_call"
+                                 ; id = Some "counter-item"
+                                 ; status = None
+                                 })
                         ; output_index = 0
                         ; type_ = "response.output_item.added"
                         }
-                    ; Function_call_arguments_done
-                        { arguments =
-                            (if Poly.equal mode `Invalid_json
-                             then "[broken"
-                             else if redirected
-                             then "{}"
-                             else "null")
-                        ; item_id = "counter-item"
-                        ; output_index = 0
-                        ; type_ = "response.function_call_arguments.done"
-                        }
+                    ; (if custom
+                       then
+                         Custom_tool_call_input_done
+                           { input = "null"
+                           ; item_id = "counter-item"
+                           ; output_index = 0
+                           ; type_ = "response.custom_tool_call_input.done"
+                           }
+                       else
+                         Function_call_arguments_done
+                           { arguments =
+                               (if Poly.equal mode `Invalid_json
+                                then "[broken"
+                                else if redirected
+                                then "{}"
+                                else "null")
+                           ; item_id = "counter-item"
+                           ; output_index = 0
+                           ; type_ = "response.function_call_arguments.done"
+                           })
                     ]
               else (
                 assert (
                   List.exists inputs ~f:(function
-                    | Openai.Responses.Item.Function_call_output _ -> true
+                    | Openai.Responses.Item.Function_call_output _ -> not custom
+                    | Custom_tool_call_output _ -> custom
                     | _ -> false));
                 Seq.empty)
             in
@@ -3073,6 +3126,7 @@ let%test_unit
            let expected_count =
              if
                Poly.equal mode `Success
+               || Poly.equal mode `Custom_success
                || Poly.equal mode `Post_fail
                || Poly.equal mode `Publish_rejected
                || Poly.equal mode `Redirect
@@ -3099,6 +3153,7 @@ let%test_unit
              match invocation.status with
              | Published (Complete `Null) ->
                Poly.equal mode `Success
+               || Poly.equal mode `Custom_success
                || Poly.equal mode `Post_fail
                || Poly.equal mode `Redirect
                || Poly.equal mode `End_session
@@ -3114,6 +3169,10 @@ let%test_unit
                  | `Invalid_output -> "invocation.invalid_output"
                  | `Forged_error -> "invocation.handler_failed"
                  | `Result_rejected -> "invocation.commit_failed"
+                 | `Pre_reject
+                 | `Pre_reject_end
+                 | `Pre_reject_post_fail
+                 | `Pre_reject_custom -> "invocation.pre_tool_rejected"
                  | _ -> assert false
                in
                assert (not error.retryable);
@@ -3126,14 +3185,16 @@ let%test_unit
            assert (
              List.length state.conversation.canonical_history
              = if Poly.equal mode `Publish_rejected then 2 else 3);
-           let failed = Poly.equal mode `Post_fail || Poly.equal mode `Publish_rejected in
-           assert (
-             !request_count = if failed || Poly.equal mode `End_session then 1 else 2);
-           if Poly.equal mode `End_session then assert saved_snapshot.halted;
+           let failed = post_fails || Poly.equal mode `Publish_rejected in
+           assert (!request_count = if failed || ends_session then 1 else 2);
+           if ends_session then assert saved_snapshot.halted;
            assert (
              !admitted
              =
-             if Poly.equal mode `Invalid_json || Poly.equal mode `Redirect_bad
+             if
+               pre_rejected
+               || Poly.equal mode `Invalid_json
+               || Poly.equal mode `Redirect_bad
              then 0
              else 1);
            let events =
@@ -3144,7 +3205,7 @@ let%test_unit
                Agent_protocol.Event.Durable.equal_kind e.kind Operation_failed)
            in
            assert (List.length failures = if failed then 1 else 0);
-           if Poly.equal mode `Post_fail
+           if post_fails
            then (
              let event = List.hd_exn failures in
              match
@@ -3215,6 +3276,7 @@ let%test_unit
               ; original_payload = "null"
               ; name = "counter"
               ; payload = "null"
+              ; pre_rejected = false
               ; call
               ; history = !history
               ; source = None
