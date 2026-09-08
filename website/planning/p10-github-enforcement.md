@@ -1,8 +1,9 @@
 # P10.11 GitHub release enforcement
 
-Status: enforcement configured and negative probes passed; final successful CI
-qualification and merge are pending. This record must be finalized against the
-successful current PR head before P10.11 is marked complete.
+Status: P10.11 qualification complete. Actual clean GitHub checks pass, main
+protection is configured, and missing/failed-check probes were rejected. PR #20
+lands through the normal protected merge path after its final checks pass;
+production publishing remains P11 work.
 
 ## Protected contribution path
 
@@ -57,7 +58,7 @@ Clean Ubuntu qualification exposed missing build prerequisites:
    generator. The next [semantic run](https://github.com/dakotamurphyucf/ochat/actions/runs/34169941010)
    installed dependencies successfully but failed because that executable was
    absent. `dune-project` now declares `menhir`, and Dune regenerated `ochat.opam`.
-   This fixes clean dependency installation for both CI and ordinary users.
+   This makes the generator a declared prerequisite for both CI and ordinary users.
 
 4. A [clean semantic build](https://github.com/dakotamurphyucf/ochat/actions/runs/34170447493)
    then exposed undeclared documentation-link inputs. The docs gate referenced
@@ -111,6 +112,36 @@ performance budgets are unchanged. Both themes must pass in every browser. The s
 pass with two workers: Chromium 37–38 seconds, Firefox 55–56 seconds, and WebKit
 39–40 seconds per theme (2.3 minutes total).
 The actual final gate rejected this production failure despite preview succeeding.
+
+## Successful qualification
+
+[GitHub run 34173359224](https://github.com/dakotamurphyucf/ochat/actions/runs/34173359224) passed at
+`2be7647d660225b0ce7ab6012c1cda6e24450d87`: semantic gate, both website jobs, and
+the required final release gate. The semantic report records OCaml 5.3.0 and
+Dune 3.24.2; installed package and pin lists are retained with it.
+
+| Environment | Origin | Artifact SHA-256 |
+|---|---|---|
+| preview | `http://localhost:4321` | `5af649a4574ad6efefc76eb0b862984ea770a29048cf87233cd10fe5e69559a0` |
+| production | `https://release.ochat.test` | `227c4cd478e6fde4b2e80b4e0d8d00e04539ee54bf427fdc742a1fffa2138316` |
+
+Both builds contain 125 HTML pages; preview has 575 files and production has
+577. Output checks require preview noindex metadata and no sitemap; production
+uses its own canonical/social origin, indexable approved pages, 111 sitemap
+URLs, and noindex bridge/404 pages. Both artifacts pass capacity checks, all
+68 unit tests, zero Astro diagnostics, seven performance routes, and all 21
+search queries across 114 indexed pages and 1,860 fragment destinations.
+Each environment passes 214 browser cases with two existing clipboard skips
+(216 cases across Chromium, Firefox and WebKit), including both complete theme
+accessibility scans and the delayed-font regression. The run logs and downloaded
+evidence retain exact case outcomes.
+Search and performance report hashes match their respective build reports.
+The two artifacts have different hashes and are not interchangeable.
+
+These identifiers describe this qualification run. Later PR/main runs qualify
+their own source revisions and artifact hashes; use their uploaded reports when
+preparing a release. The final read-only verification and merge/main run records
+are retained in the evidence directory below.
 
 ## Publishing boundary
 

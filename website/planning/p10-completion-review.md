@@ -1,24 +1,24 @@
 # P10 release-candidate review
 
-Status: local implementation and artifact qualification complete; P10 remains
-in progress pending remote-enforcement release checks; hosted rehearsal and rollback now pass; manual accessibility review is deferred by the user. Milestone C is not
-signed off. P11 has not started.
+Status: P10 and Milestone C complete within the approved launch scope. Local
+qualification, hosted rehearsal/rollback, and actual GitHub release enforcement
+pass. Manual accessibility review is deferred by the user. P11 has not started.
 
 ## Task disposition
 
 | Task | Result |
 |---|---|
-| P10.01 content validation | Complete for the local candidate: 308 canonical documents accounted for, 123 rendered documentation routes, internal links/fragments, exact example downloads, source-link structure, and final asset ownership pass. Public source-commit availability remains a release blocker. |
-| P10.02 production browser matrix | Complete: 208 passes and two existing non-Chromium clipboard skips across Chromium, Firefox and WebKit, in 3.8 minutes with two workers. Tests use the actual production fixture served by pinned local Wrangler/workerd. |
+| P10.01 content validation | Complete for the local candidate: 308 canonical documents accounted for, 123 rendered documentation routes, internal links/fragments, exact example downloads, source-link structure, and final asset ownership pass. Sources are now publicly committed on PR #20; anonymous new-tutorial source bytes were verified. |
+| P10.02 production browser matrix | Complete: current clean GitHub production matrix passes 214 cases with two existing clipboard skips across Chromium, Firefox and WebKit. The earlier local Wrangler/workerd production fixture passed 208 cases before the added font regression and separate theme tests. |
 | P10.03 manual accessibility | Deferred by the user on 2026-09-07; not required for this launch. Actual manual checks were not performed. Automated accessibility tests remain in CI; the worksheet is retained for later review. |
-| P10.04 visual/performance review | Complete locally: 30 representative page/state/theme/viewport combinations pass automated WCAG checks and overflow checks; screenshots inspected. Seven-route throttled performance gate passes. |
+| P10.04 visual/performance review | Complete: 30 local representative page/state/theme/viewport combinations passed automated WCAG and overflow checks; screenshots inspected. The CI-discovered gallery font shift was corrected and reviewed separately. Both current GitHub environments pass the seven-route performance gate. |
 | P10.05 Ochat semantics | Complete: actual offline `dune build --force @agent-docs-check` passes 308 pages and 38 methods. No new live provider calls. Recorded tutorial/example source bytes remain unchanged; fixture revision mismatches correctly keep conservative verification labels. |
-| P10.06 deployment configuration | Complete locally: static asset root, trailing slashes, real 404s, headers, cache behavior, noindex, download MIME/bytes and all-input CI ownership are implemented and tested. GitHub is the intended single publisher; no deploy job or alternate trigger has been enabled. Actual remote enforcement remains P10.11. |
+| P10.06 deployment configuration | Complete locally: static asset root, trailing slashes, real 404s, headers, cache behavior, noindex, download MIME/bytes and all-input CI ownership are implemented and tested. GitHub is the intended single publisher; no deploy job or alternate trigger has been enabled. Actual remote enforcement passes under P10.11. |
 | P10.07 hosted rehearsal | Complete: authorized workers.dev preview; TLS, exact served bytes, routing, indexing and cache behavior pass 3,579 HTTP assertions per stage. Candidate and restored candidate each pass 18 hosted browser checks. Actual version rollback/restore also pass. See [hosted evidence](p10-hosted-rehearsal.md). |
 | P10.08 artifact rollback | Complete for the task's artifact option: retained candidate → prior known-good artifact → candidate, each integrity-checked and served through a fresh local Workers runtime. Actual hosted version rollback and restore subsequently passed on the authorized preview; see the hosted rehearsal record. |
-| P10.09 evidence bundle | Complete as a qualification record, including unresolved blockers. This does not signify Milestone C acceptance. |
-| P10.10 artifact capacity | Complete: production 577 files, largest asset 930,032 bytes, two header rules, maximum header line 52 characters, zero redirect rules. All checked Free-plan limits pass. |
-| P10.11 actual release enforcement | Open. Local CI now gates website jobs on semantics, tests preview and production separately, watches all input changes, and fails the final gate on failure/cancellation/skipping. The workflow is not committed/run remotely; GitHub reports no main-branch protection or rulesets. Public promotion remains disabled. |
+| P10.09 evidence bundle | Complete: local, hosted, and remote-enforcement evidence; deferred manual review and P11 production boundaries are explicit. |
+| P10.10 artifact capacity | Complete: production 577 files, largest asset 930,044 bytes, two header rules, maximum header line 52 characters, zero redirect rules. All checked Free-plan limits pass. |
+| P10.11 actual release enforcement | Complete: [actual clean GitHub run 34173359224](https://github.com/dakotamurphyucf/ochat/actions/runs/34173359224) passes semantics, preview, production, and release-gate. Strict main protection applies to administrators; actual missing/failed-check pushes were rejected. Public sources are committed; legacy Pages branch publishing is disabled. See [the enforcement record](p10-github-enforcement.md). Production promotion remains P11 work. |
 
 ## Delivered behavior
 
@@ -44,8 +44,9 @@ CI has an OCaml prerequisite and separate preview/production website jobs, with
 no path filters. The final release gate was tested against all sixteen combinations
 of successful, failed, skipped and cancelled prerequisite results. Only two
 successful prerequisites pass. There are no deploy credentials or publication
-steps. A clean GitHub runner still needs to execute successfully; the local opam
-switch contains pins and does not establish clean Ubuntu dependency installation.
+steps. Clean GitHub execution now passes after explicit source/API compatibility pins
+and the missing Menhir build dependency were declared. Installed packages and
+pins are retained; see the enforcement record for failures and successful evidence.
 
 The [release runbook](release-runbook.md) gives build, artifact retention, local
 rehearsal, hosted checks, promotion records and rollback instructions. The
@@ -54,12 +55,14 @@ manual checks without recording simulated checks as human observations.
 
 ## Candidate identity and evidence
 
-Main checkout HEAD remains `bc76b6c72a280b4bad48a793a63373e6db26d2b4`; the staged
-diff remains empty. The initial local qualification performed no remote mutation.
-The subsequent authorized preview deployment and rollback are recorded in
-[the hosted rehearsal report](p10-hosted-rehearsal.md). No main-checkout commit,
-push, domain purchase, production deployment, GitHub settings mutation or new
-model recording was performed.
+The initial local qualification used the uncommitted checkout based on
+`bc76b6c72a280b4bad48a793a63373e6db26d2b4`. Its artifact identities below remain
+historical local evidence. The subsequent authorized preview deployment and
+rollback are recorded in [the hosted rehearsal report](p10-hosted-rehearsal.md).
+P10.11 then committed/published the authored sources on PR #20, configured/tested
+GitHub protection, and qualified clean Ubuntu builds. Their actual source and
+artifact identities are in [the enforcement record](p10-github-enforcement.md).
+No domain purchase, production deployment, or new model recording occurred.
 
 | Artifact | Identity |
 |---|---|
@@ -92,10 +95,9 @@ Evidence root: `scratch/ochat-website-evidence/p10/`. Retained artifacts:
 
 ## Remaining release gates
 
-1. Commit/publish the approved source candidate, get the new CI workflow green
-   on GitHub, configure and verify the required check or tested equivalent, and
-   confirm that no independent hosting trigger bypasses it. Rebuild and verify
-   against the eventual owned production origin before P11 promotion.
+P11 must select the owned production origin, rebuild and verify its exact
+artifact, and connect one protected publisher. GitHub source publication, clean
+qualification, and required-check enforcement are now complete.
 
-These are mandatory launch checks from Section 19.18 of the implementation spec.
-P10.07 is complete with hosted evidence; keep P10.11 open until actual remote enforcement passes. P10.03 is explicitly deferred by the user, not completed or required for launch. The executable release approval gate now reflects this decision; automated accessibility checks remain enabled.
+The remaining production work is described in Section 19.19 of the implementation spec.
+P10.07 and P10.11 are complete with hosted and actual GitHub evidence. P10.03 is explicitly deferred by the user, not completed or required for launch. The executable release approval gate now reflects this decision; automated accessibility checks remain enabled.

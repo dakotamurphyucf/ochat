@@ -189,3 +189,23 @@ details. Other application previews remain labeled illustrations. Captures are
 validated build inputs, never generated through model calls during website
 builds. Keep Graphite, the approved Start here order, and the P09 API deferral.
 See [the application UI review](application-ui-review.md). P10 remains open.
+
+## P10.11: protected GitHub release checks
+
+GitHub main protection requires the actual `release-gate` check from GitHub
+Actions, strict up-to-date PRs, and resolved conversations, including for admins.
+Zero outside approvals supports the sole-maintainer repository. Actual missing
+and failed-check administrator pushes were rejected on an identical temporary
+protected branch, then the probe was removed. All source inputs trigger the
+OCaml prerequisite and both environment-specific website checks.
+
+Clean CI exposed source pins not consumed by opam, the TextMate/Oniguruma 0.2
+API incompatibility, and the missing Menhir generator dependency. Exact source
+pins, Oniguruma 0.1.2, and the declared generator fix those failures; uploaded
+package/pin evidence records the resolved Linux toolchain. Real checks remain
+required. Legacy GitHub Pages branch publishing is disabled without removing its
+existing served site. No production publisher or credentials are enabled.
+
+P10 and Milestone C are complete within the approved launch scope; manual
+accessibility remains explicitly deferred. P11 will qualify the owned production
+origin and connect one protected publisher. See [the enforcement record](p10-github-enforcement.md).

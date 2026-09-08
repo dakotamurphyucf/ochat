@@ -1,6 +1,6 @@
 # Ochat website
 
-A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Six application guides, an inspectable recorded workflow, and a ten-lesson curriculum help readers discover and build useful agents. The catalog contains fourteen entries: eight complete examples, five configurable templates, and one illustrative reading sample. The preview renders 123 documentation routes and accounts for 308 canonical documents (110 published, 4 compatibility, 9 bridges, 175 repository-only, 10 deferred). Search covers 114 approved pages with 21 benchmark queries. See [the application UI review](planning/application-ui-review.md) for current scope and verification. P09 is complete through user-confirmed API-reference deferral; P10 local release qualification is complete; hosted preview rehearsal and rollback are complete; actual remote enforcement remains open; manual accessibility review is deferred from launch. See [the P10 review](planning/p10-completion-review.md).
+A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Six application guides, an inspectable recorded workflow, and a ten-lesson curriculum help readers discover and build useful agents. The catalog contains fourteen entries: eight complete examples, five configurable templates, and one illustrative reading sample. The preview renders 123 documentation routes and accounts for 308 canonical documents (110 published, 4 compatibility, 9 bridges, 175 repository-only, 10 deferred). Search covers 114 approved pages with 21 benchmark queries. See [the application UI review](planning/application-ui-review.md) for current scope and verification. P09 is complete through user-confirmed API-reference deferral; P10 and Milestone C are complete within the approved launch scope: local qualification, hosted preview rehearsal/rollback, and actual GitHub release enforcement pass; manual accessibility review remains explicitly deferred. P11 production launch is next. See [the P10 review](planning/p10-completion-review.md).
 
 ## Run locally
 
@@ -68,7 +68,7 @@ The homepage ChatMD comes from the first XML example in the root README. Its lau
 
 Default builds use `http://localhost:4321`, preview noindex metadata/headers, and a crawl-disallowing robots file. `SITE_URL` controls the origin; `SITE_ENV=production` requires an explicit HTTPS origin. A production build must be generated and checked again after domain ownership is established. Do not deploy a localhost-origin preview as production.
 
-`wrangler.jsonc` configures Workers Static Assets and an explicit `preview` environment for the owner’s account and `ochat-website-preview` Worker. It contains no credentials or custom domain. `dist/` is the only deployable directory. Local checks and the [hosted rehearsal/rollback](planning/p10-hosted-rehearsal.md) pass. The [release runbook](planning/release-runbook.md) records the remaining actual GitHub enforcement requirement. Do not configure auto-deployment before the required checks are enforced.
+`wrangler.jsonc` configures Workers Static Assets and an explicit `preview` environment for the owner’s account and `ochat-website-preview` Worker. It contains no credentials or custom domain. `dist/` is the only deployable directory. Local checks and the [hosted rehearsal/rollback](planning/p10-hosted-rehearsal.md) pass. The [release runbook](planning/release-runbook.md) records the enforced GitHub gate and P11 production-publishing requirements. Keep alternate deployment triggers disabled.
 
 The complete source inventory and deferral reasons are regenerated in `.generated/migration-report.json` and `.generated/migration-report.md`. They remain outside `dist/` and are uploaded as CI evidence. Published content/provenance is reported in `.generated/content-report.json`; output sizes and artifact SHA-256 are in `.generated/build-evidence.json`. The tutorial/example verification and download inventory is `.generated/examples-report.json`. These reports describe the local build and are not proof of live-runtime correctness or domain ownership. Immutable view-source links identify the Git HEAD snapshot; uncommitted changes can differ and must be recorded during development.
 
@@ -264,8 +264,8 @@ checks reject API routes/links/files, and the Pagefind hook rejects an `api/`
 directory before indexing. Build evidence includes the deferral status; the
 production sitemap contains only eligible prose routes. Deploy only `dist/`.
 Never copy the historical root `docs/` snapshot or local `_build/` output into
-it. The existing Node-only CI workflow has no API job or additional deployment
-trigger. Reopening inclusion requires the clean artifact, scope/license,
+it. The CI workflow includes an OCaml semantic prerequisite and separate website
+validation jobs; it has no API job or additional deployment trigger. Reopening inclusion requires the clean artifact, scope/license,
 mounted-link/search, provenance, and assembly checks described in
 [the P09 completion review](planning/p09-completion-review.md).
 
@@ -311,8 +311,10 @@ scope, capture provenance, validation, and remaining release boundaries.
 Use `npm run check:semantics` for the actual offline Ochat documentation gate.
 The CI workflow runs this prerequisite before preview and production website
 jobs and has no input path filters. Its final gate rejects failed, skipped and
-cancelled prerequisites. Remote execution and required-check protection must
-still be verified before public promotion.
+cancelled prerequisites. Actual clean GitHub execution and strict main protection are verified in
+[the enforcement record](planning/p10-github-enforcement.md). Main requires
+`release-gate` from GitHub Actions, including for administrators. Production
+publishing remains disabled until P11 connects the owned origin and trusted publisher.
 
 `npm run artifact -- retain DIRECTORY` saves a verified output manifest;
 `npm run artifact -- verify DIRECTORY` checks retained bytes.
