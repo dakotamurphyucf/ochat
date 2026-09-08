@@ -41,3 +41,8 @@ val moderator_event_ty : Chatml_builtin_spec.ty
 val moderator_v1 : Chatml_builtin_surface.surface
 
 val moderator_entrypoints : (string * Chatml_builtin_spec.ty) list
+
+(** Moderator contract for generated child definitions. Tool calls use the
+    inherited registry; direct recipe-model and process modules are excluded.
+    Owning-session mutations still require the delegated host's admission. *)
+val delegated_moderator_v1 : Chatml_builtin_surface.surface

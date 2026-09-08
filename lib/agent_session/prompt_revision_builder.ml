@@ -52,7 +52,7 @@ let shell_digest inspection = inspection.Chat_response.Agent_runtime.manifest.sh
 
 let build_manifest definition ~canonical_source ~root ~sources ~shell_manifest_sha256 =
   [%sexp
-    { schema = (2 : int)
+    { schema = (3 : int)
     ; prompt_definition_id =
         (definition.Prompt_definition.id : Agent_protocol.Id.Prompt_definition.t)
     ; canonical_source : string
@@ -157,11 +157,51 @@ let install artifact_store ~transaction_id artifact =
   else Agent_store.Prompt_artifact_store.install artifact_store ~transaction_id artifact
 ;;
 
+(* Use the same declaration/import semantics as restoration, without starting
+   executable preprocessing during the closure-version preflight. *)
+let validate_parser_elements ~parser_version elements =
+  List.iter elements ~f:(function
+    | Prompt.Chat_markdown.Tool (Inherited _) when parser_version < 3 ->
+      failwith "inherited tool references require prompt parser schema version 3"
+    | (Extension_script _ | Tool (Extension _) | Authoring_context _)
+      when parser_version < 2 ->
+      failwith "extension declarations require prompt parser schema version 2"
+    | _ -> ())
+;;
+
+let validate_parser_closure ~parser_version ~dir loader root_source =
+  let pending = Queue.create ()
+  and visited = Hash_set.create (module String) in
+  let loader = Source_loader.with_agent_observer loader ~f:(Queue.enqueue pending) in
+  Queue.enqueue pending root_source;
+  let bytes = ref 0 in
+  while not (Queue.is_empty pending) do
+    let source = Queue.dequeue_exn pending in
+    let path = Source_loader.relative_path source in
+    if not (Hash_set.mem visited path)
+    then (
+      if Hash_set.length visited >= 256
+      then failwith "prompt source closure limit exceeded";
+      Hash_set.add visited path;
+      let contents =
+        Source_loader.read_bounded ~max_bytes:((8 * 1024 * 1024) - !bytes) loader source
+        |> Result.ok_or_failwith
+      in
+      bytes := !bytes + String.length contents;
+      Prompt.Chat_markdown.parse_chat_inputs_without_preprocessing
+        ~source:path
+        ~source_loader:loader
+        ~dir
+        contents
+      |> validate_parser_elements ~parser_version)
+  done
+;;
+
 let parse_artifact artifact_store artifact =
   let parser_version =
     artifact.Agent_store.Prompt_artifact_store.Artifact.parser_schema_version
   in
-  if (parser_version <> 1 && parser_version <> 2) || artifact.runtime_schema_version <> 1
+  if (parser_version < 1 || parser_version > 3) || artifact.runtime_schema_version <> 1
   then failwith "unsupported prompt parser/runtime schema version";
   Agent_store.Prompt_artifact_store.verify_materialized_tree artifact_store artifact
   |> Result.map_error ~f:(fun error ->
@@ -177,6 +217,11 @@ let parse_artifact artifact_store artifact =
     :: List.map artifact.sources ~f:(fun source -> source.relative_path, source.contents)
   in
   let loader = Source_loader.captured_filesystem ~root:tree ~sources in
+  let root_source =
+    Source_loader.root loader ~file:artifact.root_relative_path |> Result.ok_or_failwith
+  in
+  if parser_version < 3
+  then validate_parser_closure ~parser_version ~dir:tree loader root_source;
   let elements =
     Prompt.Chat_markdown.parse_chat_inputs
       ~source:artifact.root_relative_path
@@ -184,13 +229,7 @@ let parse_artifact artifact_store artifact =
       ~dir:tree
       artifact.root_chatmd
   in
-  if
-    parser_version = 1
-    && List.exists elements ~f:(function
-      | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) | Authoring_context _
-        -> true
-      | _ -> false)
-  then failwith "extension declarations require prompt parser schema version 2";
+  validate_parser_elements ~parser_version elements;
   tree, elements
 ;;
 
@@ -236,7 +275,7 @@ let build
             ~root_relative_path:(Filename.basename definition.root_file)
             ~root_chatmd:root
             ~sources
-            ~parser_schema_version:2
+            ~parser_schema_version:3
             ~runtime_schema_version:1
             ~shell_manifest_sha256
             ~created_at

@@ -287,6 +287,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/extension_compiler.mli` | [contract](../../lib/chat_response/extension_compiler.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/fetch.mli` | [contract](../../lib/chat_response/fetch.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/fork.mli` | [contract](../../lib/chat_response/fork.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/generated_admission.mli` | [contract](../../lib/chat_response/generated_admission.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/history_stream_event.mli` | [contract](../../lib/chat_response/history_stream_event.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/chat_response/in_memory_stream.mli` | [contract](../../lib/chat_response/in_memory_stream.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/mcp_discovery_cache.mli` | [contract](../../lib/chat_response/mcp_discovery_cache.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |

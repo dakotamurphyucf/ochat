@@ -8,6 +8,7 @@ type target =
   | One_off_v1
   | Tool_v1
   | Moderator_v1
+  | Delegated_moderator_v1
 [@@deriving sexp, equal]
 
 type limits =

@@ -237,3 +237,13 @@ let moderator_entrypoints =
     )
   ]
 ;;
+
+let delegated_moderator_v1 =
+  { moderator_v1 with
+    globals =
+      List.filter moderator_v1.globals ~f:(fun b -> not (String.equal b.S.name "print"))
+  ; modules =
+      List.filter moderator_v1.modules ~f:(fun m ->
+        not (List.mem [ "Model"; "Process" ] m.S.name ~equal:String.equal))
+  }
+;;

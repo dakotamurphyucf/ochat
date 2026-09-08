@@ -128,6 +128,7 @@ module Chat_content = struct
     (* A tool exposed by a remote MCP server. *)
     | Mcp of mcp_tool
     | Extension of Chatmd_shell_spec.Extension_spec.tool
+    | Inherited of string
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   and mcp_tool =
@@ -443,6 +444,7 @@ module Chat_markdown = struct
     | Tool t ->
       (match t with
        | Extension tool -> Chatmd_extension_declaration.serialize_tool tool
+       | Inherited name -> Printf.sprintf "<tool type=\"inherited\" name=\"%s\"/>" name
        | Builtin name -> Printf.sprintf "<tool name=\"%s\" />" name
        | Read_file specification -> Chatmd_read_file_declaration.serialize specification
        | Custom { name; description; command; source = _ } ->
@@ -765,6 +767,43 @@ module Chat_markdown = struct
         in
         if
           List.exists attrs ~f:(function
+            | "type", Some "inherited" -> true
+            | _ -> false)
+        then (
+          let allowed =
+            Chatmd_attributes.create
+              ~source:source_ref
+              ~path:[ "tool" ]
+              ~allowed:[ "name"; "type" ]
+              attrs
+          in
+          let attributes =
+            match allowed with
+            | Ok value -> value
+            | Error d -> script_error [ d ]
+          in
+          let inherited =
+            match Chatmd_attributes.required attributes "name" with
+            | Ok value -> value
+            | Error d -> script_error [ d ]
+          in
+          if
+            String.is_empty inherited
+            || String.length inherited > 256
+            || not
+                 (String.for_all inherited ~f:(function
+                    | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | ':' | '.' -> true
+                    | _ -> false))
+          then failwith "invalid inherited tool name";
+          (match node with
+           | Ast.Element (_, _, children)
+             when List.for_all children ~f:(function
+                    | Ast.Text text -> String.for_all text ~f:Char.is_whitespace
+                    | _ -> false) -> ()
+           | _ -> failwith "inherited tool references cannot have children");
+          Tool (Inherited inherited))
+        else if
+          List.exists attrs ~f:(function
             | "type", Some ("moderator" | "chatml") -> true
             | _ -> false)
         then (
@@ -1019,6 +1058,7 @@ module Chat_markdown = struct
           | Tool (Agent tool) -> [ tool.name ]
           | Tool (Mcp tool) -> Option.value tool.names ~default:[]
           | Tool (Extension tool) -> [ tool.name ]
+          | Tool (Inherited name) -> [ name ]
           | _ -> [])
       in
       List.iter extensions ~f:(fun tool ->
@@ -1084,6 +1124,17 @@ module Chat_markdown = struct
         parse_chat_element ~dir ~loader ~preserve_child_sources:canonical_sources sourced)
     in
     of_chat_elements parsed_elements |> validate_scripts
+  ;;
+
+  let parse_chat_inputs_without_preprocessing ?source ~source_loader ~dir content =
+    parse_inputs
+      ~parse_document:parse
+      ~preprocess:Fn.id
+      ~canonical_sources:false
+      ?source
+      ~source_loader
+      ~dir
+      content
   ;;
 
   let parse_chat_inputs ?source ?source_loader ~dir content =

@@ -129,7 +129,7 @@ let declaration_sources declarations =
   @ List.filter_map declarations.tools ~f:(function
     | CM.Read_file specification -> Some specification.source
     | Extension specification -> Some specification.source_ref
-    | Builtin _ | Custom _ | Shell _ | Agent _ | Mcp _ -> None)
+    | Builtin _ | Custom _ | Shell _ | Agent _ | Mcp _ | Inherited _ -> None)
 ;;
 
 let add_source_dir ~env (source_dirs, errors) source =
@@ -480,7 +480,8 @@ let create
   =
   if
     List.exists prompt_elements ~f:(function
-      | CM.Extension_script _ | Tool (Extension _) | Authoring_context _ -> true
+      | CM.Extension_script _ | Tool (Extension _ | Inherited _) | Authoring_context _ ->
+        true
       | _ -> false)
   then
     Error

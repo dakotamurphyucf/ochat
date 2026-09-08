@@ -8,6 +8,13 @@ module Spec = Chatmd_shell_spec.Extension_spec
     compilation budgets; this synchronous API alone does not enforce wall time. *)
 type t
 
+(** Validate captured script version, digest, source and execution-limit bounds
+    without compiling or evaluating. Shared by tool and lifecycle admission. *)
+val validate_script
+  :  max_source_bytes:int
+  -> Spec.script
+  -> (unit, Chatmd_shell_spec.Diagnostic.t list) result
+
 val prepare
   :  ?max_source_bytes:int
   -> scripts:Spec.script list

@@ -193,8 +193,9 @@ An authoring policy is a single top-level declaration:
 ```
 
 `auto` and `manual` reject a `topics` attribute. `preload` requires a nonempty,
-unique whitespace-separated topic list. Topic existence, helper dependencies and
-context injection are not implemented yet, and hosts explicitly reject execution
+unique whitespace-separated topic list. The admission planner described below
+checks topic existence and helper dependencies; context injection and runtime
+registration remain unfinished. Hosts explicitly reject execution
 with these new declarations instead of silently ignoring them. Ordinary inline
 `uses`/`authoring_context` markup remains text outside its declaration scope.
 
@@ -207,11 +208,16 @@ build, more than 256 total source files, or an aggregate larger than 8 MiB. This
 source boundary does not replace execution capability checks or artifact symlink
 verification.
 
-New prompt artifacts use parser schema version 2 and a distinct revision identity.
-Existing parser-version-1 artifacts with legacy declarations still restore; unknown
-parser/runtime versions fail. Existing moderator binary record layouts are retained
-by additive declaration variants. Extension declarations cannot be interpreted as
-version-1 artifact contents.
+New prompt artifacts use parser schema version 3 and a distinct revision identity.
+Existing parser-version-1 and version-2 artifacts still restore within their grammar
+contracts; unknown parser/runtime versions fail. Existing moderator binary record
+layouts are retained by additive declaration variants. Extension declarations
+require version 2; inherited tool references require version 3. Old-version
+restoration checks the captured import/local-agent closure, using the normal
+declaration semantics without executable preprocessing during that check. Inline
+markup that is ordinary message text is not treated as a top-level declaration.
+Ordinary authored restoration retains its existing preprocessing behavior after
+the version check; generated artifact restoration is a separate, unfinished path.
 
 ## Static script contracts
 
@@ -463,3 +469,45 @@ checks, rendered tool descriptions, effective-history injection and compaction
 rediscovery are still under implementation. A plan requesting one primer is not
 yet evidence that it was inserted into a provider request. No authoring feature
 is advertised as available by these primitives.
+
+## Generated definition admission
+
+`Chat_response.Generated_admission.prepare` combines bounded source-bundle parsing,
+exact parent capability selection, authoring policy and isolated compilation.
+It accepts already approved/delegable parent capabilities plus an explicit requested
+subset. A generated definition selects from that subset with references such as:
+
+```xml
+<config model="host-supported-model" reasoning_effort="high"/>
+<developer>Review the supplied report using the available file tool.</developer>
+<tool type="inherited" name="read_file"/>
+```
+
+The reference uses the exact registered name, including any existing namespace.
+It does not alias, rebuild or reconfigure the tool. Only `type` and `name` are
+accepted; duplicate attributes and non-whitespace children reject. The selected
+binding retains the original runner and resource context. Changing the child's
+source directory therefore does not change the parent's read roots or shell rules.
+Ordinary runtime construction rejects these references without inherited admission.
+
+Generated definitions may further narrow their requested tool set. They cannot
+introduce native, shell, MCP, agent or extension tool implementations, including
+through imports, or redefine an inherited moderator tool. Use the inherited
+session/agent tool for explicit subagent work. Initial messages permit plain text,
+not implicit document/image/agent execution or forged provider history. The host
+owns session identity and must authorize the selected model and reasoning settings.
+
+A definition may select one `extensibility-v1` lifecycle moderator. Its
+`delegated_moderator_v1` compiler surface removes direct `Model`, `Process` and
+stdout `print`; external work uses the inherited tool service. The compiler checks
+entrypoint types and source limits without evaluating initializers. Compilation
+honors a bounded wall deadline, including worker cleanup. Other own-session
+operations still require admission by the eventual delegated host.
+
+The result retains the parsed definition, actual capability bindings, authoring
+plan, compiled moderator and source/contract fingerprints. It does not create a
+persisted child, materialize generated artifacts, reconstruct capabilities after
+restart, enforce revocation or mediate the parent's stateful tool policies.
+The caller must supply an already-delegable ceiling; the parent's live registry
+alone is not proof of safe delegation. These responsibilities remain with the
+owning delegation service. No new runtime feature is enabled by this admission API.

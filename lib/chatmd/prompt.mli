@@ -148,6 +148,7 @@ module Chat_markdown : sig
     | Agent of agent_tool
     | Mcp of mcp_tool
     | Extension of Chatmd_shell_spec.Extension_spec.tool
+    | Inherited of string
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type config =
@@ -231,6 +232,17 @@ module Chat_markdown : sig
   val parse_chat_inputs
     :  ?source:string
     -> ?source_loader:Source_loader.t
+    -> dir:Eio.Fs.dir_ty Eio.Path.t
+    -> string
+    -> top_level_elements list
+
+  (** Authored-parser semantics with executable preprocessing disabled. The
+      required loader controls dependency reads; this is not the bounded,
+      canonical generated-bundle admission path. Used to check captured legacy
+      artifact closures without starting refinement. *)
+  val parse_chat_inputs_without_preprocessing
+    :  ?source:string
+    -> source_loader:Source_loader.t
     -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> string
     -> top_level_elements list

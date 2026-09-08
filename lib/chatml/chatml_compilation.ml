@@ -6,6 +6,7 @@ type target =
   | One_off_v1
   | Tool_v1
   | Moderator_v1
+  | Delegated_moderator_v1
 [@@deriving sexp, equal]
 
 type limits =
@@ -48,6 +49,7 @@ let surface = function
   | One_off_v1 -> X.one_off_v1, X.one_off_entrypoints
   | Tool_v1 -> X.tool_v1, X.tool_entrypoints
   | Moderator_v1 -> X.moderator_v1, X.moderator_entrypoints
+  | Delegated_moderator_v1 -> X.delegated_moderator_v1, X.moderator_entrypoints
 ;;
 
 (* Bind the worker to the exact host type surface and entrypoint contracts.

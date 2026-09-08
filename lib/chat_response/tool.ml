@@ -51,7 +51,7 @@ let agent_page_classification (decl : CM.tool) =
   | CM.Builtin "fork" -> Some ("fork", Tool_execution_event.Subagent)
   | CM.Custom { name; _ } -> Some (name, Tool_execution_event.Shell_script)
   | CM.Shell { name; _ } -> Some (name, Tool_execution_event.Shell_script)
-  | CM.Builtin _ | CM.Read_file _ | CM.Mcp _ | CM.Extension _ -> None
+  | CM.Builtin _ | CM.Read_file _ | CM.Mcp _ | CM.Extension _ | CM.Inherited _ -> None
 ;;
 
 module Res = Openai.Responses
@@ -324,6 +324,10 @@ let of_declaration ?shell_registry ?host ~sw ~(ctx : _ Ctx.t) ~run_agent (decl :
   : Ochat_function.t list
   =
   match decl with
+  | CM.Inherited _ ->
+    failwith
+      "capability.inheritance_required: inherited tool references require an admitted \
+       parent binding"
   | CM.Extension _ ->
     failwith
       "chatml.extension_unavailable: extension tool execution is not yet enabled on this \

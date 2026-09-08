@@ -3521,8 +3521,85 @@ let%expect_test
         tool.input_schema.source_ref.source_dir
         (Filename.concat materialized "parts"));
     let artifact = Agent_session.Prompt_revision.artifact restored in
-    assert (artifact.parser_schema_version = 2);
+    assert (artifact.parser_schema_version = 3);
     assert (List.length artifact.sources = 3);
+    let restore_fixture ~suffix ~version ~root ~sources =
+      let id =
+        Agent_protocol.Id.Prompt_revision.of_string ("prv_compat_" ^ suffix)
+        |> protocol_ok
+      in
+      let fixture =
+        Agent_store.Prompt_artifact_store.Artifact.create
+          ~revision_id:id
+          ~root_relative_path:"root.chatmd"
+          ~root_chatmd:root
+          ~sources
+          ~parser_schema_version:version
+          ~runtime_schema_version:1
+          ~created_at:timestamp
+          ()
+        |> store_ok
+      in
+      Agent_store.Prompt_artifact_store.install artifact_store ~transaction_id fixture
+      |> store_ok;
+      Agent_session.Prompt_revision_builder.restore ~artifact_store definition id
+    in
+    assert (
+      Result.is_ok
+        (restore_fixture
+           ~suffix:"v2_extension"
+           ~version:2
+           ~root:artifact.root_chatmd
+           ~sources:artifact.sources));
+    assert (
+      Result.is_error
+        (restore_fixture
+           ~suffix:"v1_extension"
+           ~version:1
+           ~root:artifact.root_chatmd
+           ~sources:artifact.sources));
+    assert (
+      Result.is_ok
+        (restore_fixture
+           ~suffix:"v1_inline_markup"
+           ~version:1
+           ~root:{|<user>Example: <authoring_context policy="manual"/></user>|}
+           ~sources:[]));
+    let inherited = {|<tool type="inherited" name="read_file"/>|} in
+    List.iter [ 1; 2 ] ~f:(fun version ->
+      let assert_floor result =
+        match result with
+        | Ok _ -> failwith "old parser accepted inherited reference"
+        | Error diagnostics ->
+          assert (
+            List.exists diagnostics ~f:(fun diagnostic ->
+              String.is_substring
+                diagnostic.Agent_session.Prompt_revision_builder.Diagnostic.message
+                ~substring:
+                  "inherited tool references require prompt parser schema version 3"))
+      in
+      restore_fixture
+        ~suffix:(sprintf "root_%d" version)
+        ~version
+        ~root:inherited
+        ~sources:[]
+      |> assert_floor;
+      let source path contents =
+        Agent_store.Prompt_artifact_store.Source.create ~relative_path:path ~contents
+        |> store_ok
+      in
+      restore_fixture
+        ~suffix:(sprintf "nested_%d" version)
+        ~version
+        ~root:{|<tool name="child" agent="child.chatmd" local/>|}
+        ~sources:
+          [ source "child.chatmd" {|<import src="parts/refs.chatmd"/>|}
+          ; source "parts/refs.chatmd" inherited
+          ]
+      |> assert_floor);
+    assert (
+      Result.is_ok
+        (restore_fixture ~suffix:"v3_inherited" ~version:3 ~root:inherited ~sources:[]));
     let future_id =
       Agent_protocol.Id.Prompt_revision.of_string "prv_future_extension" |> protocol_ok
     in

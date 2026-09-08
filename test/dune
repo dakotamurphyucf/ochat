@@ -923,3 +923,22 @@
  (libraries core jsonaf chat_response chatmd chatmd_shell_spec eio eio_main ochat_function openai mirage-crypto-rng.unix)
  (inline_tests)
  (preprocess (pps ppx_jane)))
+
+(executable
+ (name generated_admission_test)
+ (modules generated_admission_test)
+ (libraries core core_unix eio eio_main chat_response chatmd chatmd_shell_spec ochat_function openai ochat.shell_runtime ochat.shell_access mirage-crypto-rng.unix)
+ (preprocess (pps ppx_jane)))
+
+(rule
+ (alias runtest-generated-admission)
+ (action (run %{exe:generated_admission_test.exe} %{exe:../bin/ochat_chatml_compiler.exe} %{exe:slow_chatml_compiler.exe})))
+
+(executable
+ (name slow_chatml_compiler)
+ (modules slow_chatml_compiler)
+ (libraries unix chatml_compilation))
+
+(alias
+ (name runtest)
+ (deps (alias runtest-generated-admission)))

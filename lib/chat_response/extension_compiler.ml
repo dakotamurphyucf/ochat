@@ -23,6 +23,39 @@ let input_schema t = t.input_schema
 let output_schema t = t.output_schema
 let completion_schema t = t.completion_schema
 
+let validate_script ~max_source_bytes (script : Spec.script) =
+  let fail code message = Error [ D.error ~source:script.source_ref ~code message ] in
+  let source = Spec.script_text script in
+  let limits = script.limits in
+  let wall = Duration.to_seconds limits.wall_time in
+  if script.version <> 1 || max_source_bytes <= 0 || max_source_bytes > 1024 * 1024
+  then fail "chatml.invalid_contract" "unsupported script version or source limit"
+  else if String.length source > max_source_bytes
+  then fail "chatml.source_limit" "script source exceeds the configured byte limit"
+  else if
+    not (String.equal script.source_sha256 (Chatmd_shell_spec.Source_ref.digest source))
+  then fail "chatml.source_mismatch" "script bytes do not match their retained digest"
+  else if
+    (not (Float.is_finite wall))
+    || Float.(wall <= 0. || wall > 60.)
+    || limits.fuel <= 0
+    || limits.fuel > 10_000_000
+    || limits.max_tasks <= 0
+    || limits.max_tasks > 100_000
+    || limits.max_depth <= 0
+    || limits.max_depth > 128
+    || limits.max_array_items <= 0
+    || limits.max_array_items > 100_000
+    || Int64.(
+         Duration.bytes_to_int64 limits.max_value_bytes <= 0L
+         || Duration.bytes_to_int64 limits.max_value_bytes > 8_388_608L)
+    || Int64.(
+         Duration.bytes_to_int64 limits.max_output_bytes <= 0L
+         || Duration.bytes_to_int64 limits.max_output_bytes > 1_048_576L)
+  then fail "chatml.invalid_limits" "script execution limits are outside supported bounds"
+  else Ok ()
+;;
+
 let prepare_with ~compile ~max_source_bytes ~scripts ~capabilities (tool : Spec.tool) =
   let open Result.Let_syntax in
   let fail code message = Error [ D.error ~source:tool.source_ref ~code message ] in
@@ -57,35 +90,7 @@ let prepare_with ~compile ~max_source_bytes ~scripts ~capabilities (tool : Spec.
       fail "chatml.missing_handler" "required versioned handler script is unavailable"
   in
   let source = Spec.script_text script in
-  let limits = script.limits in
-  let wall = Duration.to_seconds limits.wall_time in
-  let%bind () =
-    if String.length source > max_source_bytes
-    then fail "chatml.source_limit" "script source exceeds the configured byte limit"
-    else if
-      not (String.equal script.source_sha256 (Chatmd_shell_spec.Source_ref.digest source))
-    then fail "chatml.source_mismatch" "script bytes do not match their retained digest"
-    else if
-      (not (Float.is_finite wall))
-      || Float.(wall <= 0. || wall > 60.)
-      || limits.fuel <= 0
-      || limits.fuel > 10_000_000
-      || limits.max_tasks <= 0
-      || limits.max_tasks > 100_000
-      || limits.max_depth <= 0
-      || limits.max_depth > 128
-      || limits.max_array_items <= 0
-      || limits.max_array_items > 100_000
-      || Int64.(
-           Duration.bytes_to_int64 limits.max_value_bytes <= 0L
-           || Duration.bytes_to_int64 limits.max_value_bytes > 8_388_608L)
-      || Int64.(
-           Duration.bytes_to_int64 limits.max_output_bytes <= 0L
-           || Duration.bytes_to_int64 limits.max_output_bytes > 1_048_576L)
-    then
-      fail "chatml.invalid_limits" "script execution limits are outside supported bounds"
-    else Ok ()
-  in
+  let%bind () = validate_script ~max_source_bytes script in
   let%bind input_schema = Spec.validate_schema tool.input_schema in
   let%bind output_schema = Spec.validate_schema tool.output_schema in
   let%bind completion_schema =
@@ -127,6 +132,7 @@ let prepare ?(max_source_bytes = 256 * 1024) ~scripts ~capabilities tool =
       | Chatml_compilation.One_off_v1 -> X.one_off_v1, X.one_off_entrypoints
       | Tool_v1 -> X.tool_v1, X.tool_entrypoints
       | Moderator_v1 -> X.moderator_v1, X.moderator_entrypoints
+      | Delegated_moderator_v1 -> X.delegated_moderator_v1, X.moderator_entrypoints
     in
     Chatml_host_runtime.compile_script ~surface ~required_bindings ~source ()
     |> Result.map_error ~f:(fun message ->
