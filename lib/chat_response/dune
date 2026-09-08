@@ -29,6 +29,7 @@
   agent_runtime
   tool
   tool_capability
+  extension_compiler
   mcp_discovery_cache
   fork
   compact_history)

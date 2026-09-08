@@ -120,3 +120,120 @@ let one_off_entrypoints = [ "main", S.TFun ([ S.json_ty ], S.task_ty S.json_ty) 
 let tool_entrypoints =
   [ "run", S.TFun ([ tool_context_ty; S.json_ty ], S.task_ty tool_outcome_ty) ]
 ;;
+
+let invocation_event_ty =
+  record [ "version", S.TInt; "context", tool_context_ty; "input", S.json_ty ]
+;;
+
+let completion_ty =
+  variant
+    [ "Succeeded", S.json_ty
+    ; "Failed", tool_error_ty
+    ; "Cancelled", S.TString
+    ; "Expired", S.TUnit
+    ]
+;;
+
+let work_completion_ty =
+  record
+    [ "version", S.TInt
+    ; "work", work_ref_ty
+    ; "originating_invocation", option S.TString
+    ; "result", completion_ty
+    ]
+;;
+
+let moderator_event_ty =
+  variant
+    [ "Session_start", S.TUnit
+    ; "Session_resume", S.TUnit
+    ; "Turn_start", S.TUnit
+    ; "Item_appended", S.item_ty
+    ; "Pre_tool_call", S.tool_call_ty
+    ; "Post_tool_response", S.tool_result_ty
+    ; "Turn_end", S.TUnit
+    ; "Internal_event", S.json_ty
+    ; "Tool_invoked", invocation_event_ty
+    ; "Job_completed", work_completion_ty
+    ; "Subscription_expired", work_completion_ty
+    ]
+;;
+
+let task_builtin ~name ~op ~parameters ~result ~spawn : S.builtin =
+  { name
+  ; scheme = S.TFun (parameters, S.task_ty result)
+  ; impl =
+      (fun args ->
+        if List.length args <> List.length parameters
+        then failwith (op ^ ": invalid arity");
+        let task_effect : Chatml_lang.eff = { op; args } in
+        Chatml_lang.VTask (if spawn then TSpawn task_effect else TPerform task_effect))
+  }
+;;
+
+let moderator_v1 =
+  let invocation : S.builtin_module =
+    { name = "Invocation"
+    ; exports =
+        [ task_builtin
+            ~name:"resolve"
+            ~op:"Invocation.resolve"
+            ~parameters:[ S.TString; tool_outcome_ty ]
+            ~result:S.TUnit
+            ~spawn:false
+        ]
+    }
+  in
+  let overrides =
+    List.filter_map S.moderator_modules ~f:(fun entry ->
+      let replacement =
+        match entry.name with
+        | "Runtime" ->
+          Some
+            (task_builtin
+               ~name:"emit"
+               ~op:"Runtime.emit_json"
+               ~parameters:[ S.json_ty ]
+               ~result:S.TUnit
+               ~spawn:false)
+        | "Schedule" ->
+          Some
+            (task_builtin
+               ~name:"after_ms"
+               ~op:"Schedule.after_ms_json"
+               ~parameters:[ S.TInt; S.json_ty ]
+               ~result:S.TString
+               ~spawn:true)
+        | _ -> None
+      in
+      Option.map replacement ~f:(fun replacement ->
+        { entry with
+          exports =
+            List.map entry.exports ~f:(fun value ->
+              if String.equal value.name replacement.name then replacement else value)
+        }))
+  in
+  Surface.merge
+    { Surface.empty with
+      modules = invocation :: overrides
+    ; type_aliases =
+        tool_v1.type_aliases
+        @ List.map
+            [ "tool_invocation", invocation_event_ty
+            ; "completion", completion_ty
+            ; "work_completion", work_completion_ty
+            ; "moderator_event", moderator_event_ty
+            ]
+            ~f:(fun (name, body) -> Surface.{ name; body })
+    }
+    Surface.moderator_surface
+;;
+
+let moderator_entrypoints =
+  [ "initial_state", S.TVar "state"
+  ; ( "on_event"
+    , S.TFun
+        ([ S.context_ty; S.TVar "state"; moderator_event_ty ], S.task_ty (S.TVar "state"))
+    )
+  ]
+;;

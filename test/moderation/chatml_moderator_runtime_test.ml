@@ -1032,3 +1032,89 @@ let%test_unit "restricted extension surfaces expose computation without ambient 
          ~source:"let main = fun input -> Task.pure(`Complete(input))"
          ()))
 ;;
+
+let%test_unit
+    "versioned moderator contracts type invocations and keep legacy surfaces intact"
+  =
+  let module X = Chatml_extension_surface in
+  let compile source =
+    Runtime.compile_script
+      ~surface:X.moderator_v1
+      ~required_bindings:X.moderator_entrypoints
+      ~source
+      ()
+  in
+  let valid =
+    {|let initial_state = 0
+let on_event = fun ctx state event ->
+  match event with
+  | `Tool_invoked(invocation) ->
+      Task.bind(Invocation.resolve(invocation.context.invocation_id, `Complete(invocation.input)),
+        fun ignored -> Task.pure(state + 1))
+  | _ -> Task.pure(state)|}
+  in
+  (match compile valid with
+   | Ok _ -> ()
+   | Error message -> failwith message);
+  assert (Result.is_error (Runtime.compile_script ~source:valid ()));
+  List.iter
+    [ "let initial_state = 0"
+    ; "let on_event = fun ctx state event -> Task.pure(state)"
+    ; "let initial_state = 0\nlet on_event = fun ctx state -> Task.pure(state)"
+    ; "let initial_state = 0\n\
+       let on_event = fun ctx state event -> Task.pure(\"different state\")"
+    ; "type event = [ `Turn_start ]\n\
+       let initial_state = 0\n\
+       let on_event : context -> int -> event -> int task = fun ctx state event -> \
+       Task.pure(state)"
+    ]
+    ~f:(fun source -> assert (Result.is_error (compile source)))
+;;
+
+let%test_unit "v1 emit and timers cannot carry forged native event constructors" =
+  let module X = Chatml_extension_surface in
+  let source expression =
+    "let initial_state = 0\nlet on_event = fun ctx state event -> Task.bind("
+    ^ expression
+    ^ ", fun ignored -> Task.pure(state))"
+  in
+  List.iter
+    [ "Runtime.emit(`Turn_start)"; "Schedule.after_ms(1, `Session_start)" ]
+    ~f:(fun expression ->
+      assert (Result.is_ok (Runtime.compile_script ~source:(source expression) ()));
+      assert (
+        Result.is_error
+          (Runtime.compile_script
+             ~surface:X.moderator_v1
+             ~required_bindings:X.moderator_entrypoints
+             ~source:(source expression)
+             ())));
+  List.iter [ "Runtime.emit(`Null)"; "Schedule.after_ms(1, `Null)" ] ~f:(fun expression ->
+    match
+      Runtime.compile_script
+        ~surface:X.moderator_v1
+        ~required_bindings:X.moderator_entrypoints
+        ~source:(source expression)
+        ()
+    with
+    | Ok _ -> ()
+    | Error message -> failwith message);
+  let find module_name name =
+    let module_ =
+      List.find_exn X.moderator_v1.modules ~f:(fun value ->
+        String.equal value.name module_name)
+    in
+    List.find_exn module_.exports ~f:(fun value -> String.equal value.name name)
+  in
+  let payload =
+    Chatml_value_codec.jsonaf_to_value (`Object [ "type", `String "Tool_invoked" ])
+  in
+  (match (find "Runtime" "emit").impl [ payload ] with
+   | L.VTask (TPerform { op = "Runtime.emit_json"; args = [ value ] }) ->
+     assert (phys_equal value payload)
+   | _ -> assert false);
+  match (find "Schedule" "after_ms").impl [ L.VInt 1; payload ] with
+  | L.VTask (TSpawn { op = "Schedule.after_ms_json"; args = [ _; value ] }) ->
+    assert (phys_equal value payload)
+  | _ -> assert false
+;;

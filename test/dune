@@ -888,3 +888,10 @@
  (libraries core chat_response ochat_function agent_protocol ochat.chatmd_shell_spec mirage-crypto-rng.unix)
  (inline_tests)
  (preprocess (pps ppx_jane)))
+
+(library
+ (name extension_compiler_test)
+ (modules extension_compiler_test)
+ (libraries core eio eio_main chatmd chat_response ochat_function ochat.chatmd_shell_spec mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))

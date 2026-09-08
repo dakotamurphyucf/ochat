@@ -26,3 +26,18 @@ val tool_v1 : Chatml_builtin_surface.surface
 val one_off_entrypoints : (string * Chatml_builtin_spec.ty) list
 
 val tool_entrypoints : (string * Chatml_builtin_spec.ty) list
+val invocation_event_ty : Chatml_builtin_spec.ty
+val completion_ty : Chatml_builtin_spec.ty
+val work_completion_ty : Chatml_builtin_spec.ty
+val moderator_event_ty : Chatml_builtin_spec.ty
+
+(** Opt-in extensibility-v1 moderator contract. Adds Invocation.resolve and
+    typed Tool_invoked/Job_completed/Subscription_expired events. Runtime.emit
+    and Schedule.after_ms accept JSON data only, using distinct host operations
+    Runtime.emit_json and Schedule.after_ms_json. Their host adapters must wrap
+    payloads as Internal_event; they must never decode caller JSON as a native
+    event constructor. Legacy surfaces and their event behavior are unchanged.
+    Operation availability still requires a qualified host implementation. *)
+val moderator_v1 : Chatml_builtin_surface.surface
+
+val moderator_entrypoints : (string * Chatml_builtin_spec.ty) list

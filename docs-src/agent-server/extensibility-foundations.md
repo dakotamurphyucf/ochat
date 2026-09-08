@@ -289,3 +289,53 @@ result-disclosure services. In particular, implementation access is a trusted ho
 operation, not a model-facing bypass for calling a tool. Runtime reconstruction must
 re-admit durable capabilities explicitly; a configuration digest alone cannot prove
 the identity of a reconnected remote implementation or a rebuilt native binary.
+
+## Opt-in moderator compiler contract
+
+`Chatml_extension_surface.moderator_v1` supplies the compiler contract for
+`api="extensibility-v1"`. `initial_state` and the three-argument
+`on_event(ctx, state, event)` share the same state type; the handler returns that
+state in a task. The ordinary moderator surface remains unchanged.
+
+The `moderator_event` alias includes the usual session/turn/item/tool-moderation
+cases plus `Tool_invoked`, `Job_completed`, `Subscription_expired` and a JSON
+`Internal_event`. A `Tool_invoked` payload contains `version`, a typed invocation
+`context` and validated JSON `input`. Work completion payloads contain `version`,
+`work`, optional `originating_invocation` and `result`; results distinguish
+`Succeeded(json)`, `Failed(tool_error)`, `Cancelled(reason)` and `Expired`.
+Native delivery must validate the work kind and ownership before constructing them.
+
+The new `Invocation.resolve(id, outcome)` builtin constructs a task; it does not
+resolve an invocation merely by being called. Transactional resolution, ownership
+checking and handler dispatch are still being implemented.
+
+For this API, `Runtime.emit` and `Schedule.after_ms` accept JSON payloads only.
+Their tasks use the distinct host operation names `Runtime.emit_json` and
+`Schedule.after_ms_json`. Host adapters must deliver these payloads inside
+`Internal_event`; an object with a `type` field naming a native event remains data.
+The adapters are not implemented yet. Keeping the operation names distinct prevents
+a host from accidentally routing the new contract through a legacy handler that
+accepts arbitrary event constructors. Existing legacy emit/timer behavior is unchanged.
+
+## Preparing a declared handler
+
+`Chat_response.Extension_compiler.prepare` combines a captured tool declaration,
+its versioned script registry and the live capability registry. It validates handler
+kind/version/entrypoint, retained source/schema digests, configured execution-limit
+ceilings and the schema definitions. It selects the exact standalone `uses` subset
+or the moderator owner's existing capabilities, then compiles against the matching
+versioned surface and required entrypoint types. Initializers are not evaluated.
+
+Source defaults to a 256 KiB limit, with an explicit host override capped at 1 MiB.
+The resulting prepared value retains the compiled program, separate compiled
+input/output/completion schemas, selected bindings and a fingerprint covering the
+source/declaration/surface contract, schema dialect and live capability selection.
+Schema validation during preparation checks definitions; runtime input and output
+values still require validation at their respective invocation boundaries.
+
+This is an internal synchronous preparation API. It does not load sources, perform
+preprocessing, authorize new native tool declarations, or reconnect resources.
+The source parser/capture stage must validate imports and definition dependency
+cycles first. Public generated-definition validation still needs its stricter
+bundle loader and isolated compilation budgets, and runtime registration must use
+the prepared value before exposing a handler. Those integration steps remain open.
