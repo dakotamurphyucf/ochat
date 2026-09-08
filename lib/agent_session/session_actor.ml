@@ -52,10 +52,15 @@ type moderator_borrow =
   ; mutable committed : bool
   ; mutable accepts_children : bool
   ; mutable cancel : (unit -> unit) option
+  ; mutable cancel_requested : bool
   }
 
+type invocation_owner =
+  | Foreground of Agent_protocol.Id.Operation.t
+  | Idle_moderator of moderator_borrow
+
 type invocation_execution =
-  { operation_id : Agent_protocol.Id.Operation.t
+  { owner : invocation_owner
   ; dispatched : Agent_protocol.Invocation.t
   ; mutable accepts_children : bool
   }
@@ -66,6 +71,9 @@ type _ request =
       -> unit request
   | Claim_invocation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
+      -> invocation_execution request
+  | Claim_idle_invocation :
+      moderator_borrow * Agent_protocol.Invocation.t
       -> invocation_execution request
   | Finish_invocation :
       invocation_execution * Agent_protocol.Invocation.outcome
@@ -80,7 +88,7 @@ type _ request =
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer
       -> moderator_borrow option request
   | Claim_idle_moderator_observation :
-      Agent_protocol.Invocation.observer
+      Agent_protocol.Invocation.observer * bool
       -> moderator_borrow option request
   | Commit_moderator_invocation :
       moderator_borrow
@@ -607,8 +615,9 @@ let stop_internal t mode =
       | _, _ -> stop_transition t mode { desired = Stopped; observed = Stopped } [] []
     in
     (match mode, t.moderator_borrow with
-     | Cancel, Some { operation_id = None; cancel; _ } ->
-       Option.iter cancel ~f:(fun f -> f ())
+     | Cancel, Some ({ operation_id = None; _ } as borrow) ->
+       borrow.cancel_requested <- true;
+       Option.iter borrow.cancel ~f:(fun f -> f ())
      | _ -> ());
     session
   | Some operation ->
@@ -955,7 +964,10 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
       if
         List.exists t.invocation_executions ~f:(fun execution ->
           execution.accepts_children
-          && owned execution.dispatched.context.id execution.operation_id)
+          &&
+          match execution.owner with
+          | Foreground op -> owned execution.dispatched.context.id op
+          | Idle_moderator _ -> false)
         || Option.exists t.moderator_borrow ~f:(fun borrow ->
           borrow.accepts_children
           && (not borrow.committed)
@@ -970,23 +982,41 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
       ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
       ~payloads:[]
   in
-  let execution = { operation_id; dispatched; accepts_children = true } in
+  let execution =
+    { owner = Foreground operation_id; dispatched; accepts_children = true }
+  in
   t.invocation_executions <- execution :: t.invocation_executions;
   Ok execution
 ;;
 
 let finish_invocation t execution outcome =
   let open Result.Let_syntax in
-  let%bind operation = current_operation t execution.operation_id in
+  let%bind cancelled =
+    match execution.owner with
+    | Foreground operation_id ->
+      let%map operation = current_operation t operation_id in
+      (match operation.state with
+       | Cancelling -> true
+       | _ -> false)
+    | Idle_moderator borrow ->
+      (match t.moderator_borrow with
+       | Some current when phys_equal current borrow && t.idle_moderator_borrowed ->
+         Ok borrow.cancel_requested
+       | _ -> Error (error Conflict "idle invocation scope has ended"))
+  in
   let%bind () =
     if List.exists t.invocation_executions ~f:(phys_equal execution)
     then Ok ()
     else Error (error Conflict "invocation callback no longer owns its result")
   in
   let outcome =
-    match operation.state with
-    | Cancelling -> Agent_protocol.Invocation.Cancelled "operation cancelled"
-    | _ -> outcome
+    match cancelled with
+    | true ->
+      Agent_protocol.Invocation.Cancelled
+        (match execution.owner with
+         | Foreground _ -> "operation cancelled"
+         | Idle_moderator _ -> "idle moderator cancelled")
+    | false -> outcome
   in
   (* The callback has returned. Even when outcome persistence fails and the
      execution stays registered for cleanup, it cannot authorize new children. *)
@@ -1035,6 +1065,7 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
       ; committed = false
       ; accepts_children = true
       ; cancel = None
+      ; cancel_requested = false
       }
     in
     t.moderator_borrow <- Some borrow;
@@ -1115,6 +1146,7 @@ let claim_moderator_observation t operation_id invocation_id =
     ; committed = false
     ; accepts_children = Option.is_some operation_id
     ; cancel = None
+    ; cancel_requested = false
     }
   in
   t.moderator_borrow <- Some borrow;
@@ -1187,10 +1219,69 @@ let validate_moderator_borrow t borrow =
   | _ -> Error (error Conflict "moderator borrow is no longer owned by this callback")
 ;;
 
+let idle_execution_owned_by borrow execution =
+  match execution.owner with
+  | Idle_moderator owner -> phys_equal owner borrow
+  | Foreground _ -> false
+;;
+
+let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
+  let open Result.Let_syntax in
+  let%bind () = validate_moderator_borrow t borrow in
+  let%bind () =
+    match borrow.operation_id, t.state.lifecycle.desired, t.state.lifecycle.observed with
+    | None, Running, Idle
+      when borrow.accepts_children
+           && (not (borrow.committed || borrow.cancel_requested))
+           && (not t.state.halted)
+           && Option.is_none t.state.failure -> Ok ()
+    | _ -> Error (error Conflict "idle moderator cannot admit another invocation")
+  in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      invocation.context.session_id
+      invocation.context.generation
+  in
+  let%bind () =
+    match
+      ( invocation.context.origin
+      , invocation.context.parent_invocation
+      , invocation.context.parent_job
+      , invocation.observation
+      , borrow.invocation.observation )
+    with
+    | Moderator, Some parent, None, Some child, Some observed
+      when Agent_protocol.Id.Invocation.equal parent borrow.invocation.context.id
+           && Agent_protocol.Invocation.equal_observer child.observer observed.observer ->
+      Ok ()
+    | _ -> Error (error Conflict "idle invocation must belong to its observing moderator")
+  in
+  let%bind admission = invocation_admission_deltas t invocation in
+  let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
+  let%bind _ =
+    transition
+      t
+      ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
+      ~payloads:[]
+  in
+  let execution =
+    { owner = Idle_moderator borrow; dispatched; accepts_children = true }
+  in
+  t.invocation_executions <- execution :: t.invocation_executions;
+  Ok execution
+;;
+
 let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t) snapshot
   =
   let open Result.Let_syntax in
   let%bind () = validate_moderator_borrow t borrow in
+  let%bind () =
+    match List.exists t.invocation_executions ~f:(idle_execution_owned_by borrow) with
+    | true -> Error (error Conflict "idle native invocations still require completion")
+    | false -> Ok ()
+  in
   let%bind () =
     match borrow.operation_id with
     | Some operation_id ->
@@ -1296,12 +1387,30 @@ let finish_moderator_invocation t borrow failure =
   let%bind () = validate_moderator_borrow t borrow in
   borrow.accepts_children <- false;
   let was_committed = borrow.committed in
+  let unfinished =
+    List.filter t.invocation_executions ~f:(idle_execution_owned_by borrow)
+  in
+  let%bind children =
+    List.map unfinished ~f:(fun execution ->
+      execution.accepts_children <- false;
+      Agent_protocol.Invocation.cancel
+        execution.dispatched
+        ~reason:"idle moderator exited before recording the invocation outcome"
+      |> Result.map ~f:(fun invocation -> Session_delta.Invocation_changed invocation))
+    |> Result.all
+  in
   let%bind delta = uncommitted_borrow_delta t borrow failure in
   let%bind () =
-    if was_committed
+    if was_committed && List.is_empty children
     then Ok ()
-    else Result.map (transition t ~delta ~payloads:[]) ~f:(fun _ -> ())
+    else
+      Result.map
+        (transition t ~delta:(Session_delta.Batch (children @ [ delta ])) ~payloads:[])
+        ~f:(fun _ -> ())
   in
+  t.invocation_executions
+  <- List.filter t.invocation_executions ~f:(fun execution ->
+       not (idle_execution_owned_by borrow execution));
   t.moderator_borrow <- None;
   (match borrow.operation_id with
    | None -> t.idle_moderator_borrowed <- false
@@ -2160,12 +2269,10 @@ let request_permission_with_review_internal
   | (false | true), _, _ -> Ok (Eio.Promise.await response)
 ;;
 
-let with_invocation t operation_id ~invocation f =
+let with_invocation_claim t claim f =
   let open Result.Let_syntax in
   Eio.Fiber.yield ();
-  let%bind execution =
-    Eio.Cancel.protect (fun () -> call t (Claim_invocation (operation_id, invocation)))
-  in
+  let%bind execution = Eio.Cancel.protect (fun () -> call t claim) in
   let finish outcome =
     Eio.Cancel.protect (fun () -> call t (Finish_invocation (execution, outcome)))
   in
@@ -2204,6 +2311,10 @@ let with_invocation t operation_id ~invocation f =
     in
     ignore (finish outcome : (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result);
     Stdlib.Printexc.raise_with_backtrace exn backtrace
+;;
+
+let with_invocation t operation_id ~invocation f =
+  with_invocation_claim t (Claim_invocation (operation_id, invocation)) f
 ;;
 
 let run_moderator_callback t borrow f =
@@ -2319,7 +2430,37 @@ let with_next_moderator_observation t operation_id ~observer f =
 ;;
 
 let with_idle_moderator_observation t ~observer f =
-  with_selected_moderator_observation t (Claim_idle_moderator_observation observer) f
+  with_selected_moderator_observation
+    t
+    (Claim_idle_moderator_observation (observer, false))
+    f
+;;
+
+let with_idle_moderator_observation_tools t ~observer f =
+  with_moderator_gate t (fun () ->
+    let open Result.Let_syntax in
+    Eio.Fiber.yield ();
+    let%bind borrow =
+      Eio.Cancel.protect (fun () ->
+        call t (Claim_idle_moderator_observation (observer, true)))
+    in
+    match borrow with
+    | None -> Ok false
+    | Some borrow ->
+      let active = Atomic.make true in
+      let execute ~invocation callback =
+        match Atomic.get active with
+        | false -> Error (error Conflict "idle invocation scope has ended")
+        | true ->
+          with_invocation_claim t (Claim_idle_invocation (borrow, invocation)) callback
+      in
+      let%map () =
+        run_moderator_borrow t borrow (fun ~dispatched ~commit ->
+          Exn.protect
+            ~f:(fun () -> f ~observing:dispatched ~execute ~commit)
+            ~finally:(fun () -> Atomic.set active false))
+      in
+      true)
 ;;
 
 let worker_capabilities t operation_id id_source buffer =
@@ -3704,6 +3845,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     commit_invocation_call t operation_id invocation entry
   | Claim_invocation (operation_id, invocation) ->
     claim_invocation t operation_id invocation
+  | Claim_idle_invocation (borrow, invocation) ->
+    claim_idle_invocation t borrow invocation
   | Finish_invocation (execution, outcome) -> finish_invocation t execution outcome
   | Claim_moderator_invocation (operation_id, invocation) ->
     claim_moderator_invocation t operation_id invocation
@@ -3711,9 +3854,12 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     claim_moderator_observation t (Some operation_id) invocation_id
   | Claim_next_moderator_observation (operation_id, observer) ->
     claim_next_moderator_observation t (Some operation_id) observer
-  | Claim_idle_moderator_observation observer ->
+  | Claim_idle_moderator_observation (observer, tools) ->
     if idle_moderator_eligible t
-    then claim_next_moderator_observation t None observer
+    then
+      Result.map (claim_next_moderator_observation t None observer) ~f:(fun borrow ->
+        Option.iter borrow ~f:(fun borrow -> borrow.accepts_children <- tools);
+        borrow)
     else Ok None
   | Commit_moderator_invocation (borrow, resolved, snapshot) ->
     commit_moderator_invocation t borrow resolved snapshot

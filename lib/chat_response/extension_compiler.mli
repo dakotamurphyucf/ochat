@@ -79,3 +79,8 @@ val compiled_scripts
   -> (Spec.script * Chatml_host_runtime.compiled_script) list
 
 val definition_fingerprint : definition -> string
+
+(** Actual admitted capability registry retained for lifecycle-only moderator
+    scopes, including definitions with no moderator-handled tool declarations.
+    Its fingerprint already participates in [definition_fingerprint]. *)
+val definition_capabilities : definition -> Tool_capability.t

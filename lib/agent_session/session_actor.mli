@@ -549,6 +549,28 @@ val with_idle_moderator_observation
       -> (unit, Agent_protocol.Error.t) result)
   -> (bool, Agent_protocol.Error.t) result
 
+(** Idle observation handoff with a native invocation executor tied to this
+    borrow. Only Moderator children of the observing invocation, with the same
+    source-bound observation intent and session generation, can be admitted.
+    Calls and results are persisted outside provider history. The executor grants
+    no tool authorization: route it through [Native_tool_invocation.run_scoped].
+    It expires when the callback returns or commits and rejects calls after stop.
+    Cancel-stop interrupts active calls; outcomes still need protected persistence.
+    Acknowledgement is rejected until all child outcomes have been saved. Failed
+    saves leave interruption evidence and are retired when the borrow finishes.
+    This does not install Tool.call, ordinary-event or foreground authority. *)
+val with_idle_moderator_observation_tools
+  :  t
+  -> observer:Agent_protocol.Invocation.observer
+  -> (observing:Agent_protocol.Invocation.t
+      -> execute:Native_tool_invocation.executor
+      -> commit:
+           (resolved:Agent_protocol.Invocation.t
+            -> snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (bool, Agent_protocol.Error.t) result
+
 (** [claim_idle_moderator] acquires the process-local exclusive moderator
     borrow only when the running session is idle and unblocked. *)
 val claim_idle_moderator

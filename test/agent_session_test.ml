@@ -3422,7 +3422,7 @@ let%test_unit "worker failure repairs a transient publication failure without re
        assert (Poly.equal state (Agent_session.Memory_backend.state backend)))
 ;;
 
-let native_registry ?(custom = false) calls ~raises =
+let native_registry ?(custom = false) ?(on_call = fun () -> ()) calls ~raises =
   let module Definition = struct
     type input = string
 
@@ -3438,6 +3438,7 @@ let native_registry ?(custom = false) calls ~raises =
       (module Definition)
       (fun input ->
          Int.incr calls;
+         on_call ();
          assert (String.equal input "{}");
          if raises then failwith "private runner diagnostic";
          Openai.Responses.Tool_output.Output.Text "private output")
@@ -3936,6 +3937,7 @@ let%test_unit
 
 let handoff_definition
       ?capability_registry
+      ?(declare_tool = true)
       ?(events = "| _ -> Task.pure(state)")
       ?(script_limits = "")
       ?(schema = "true")
@@ -3964,9 +3966,13 @@ let handoff_definition
     ^ {|))
     |}
     ^ events
-    ^ {|
-    </script><tool name="counter" type="moderator" moderator="handoff"
+    ^ "\n</script>"
+    ^
+    match declare_tool with
+    | true ->
+      {|<tool name="counter" type="moderator" moderator="handoff"
       input_schema="schema.json" output_schema="schema.json"/>|}
+    | false -> ""
   in
   let loader =
     Source_loader.captured_filesystem ~root:dir ~sources:[ "schema.json", schema ]
@@ -4006,8 +4012,8 @@ let handoff_definition
       ()
     |> Result.ok_or_failwith
   in
-  let tool = List.hd_exn (EC.prepared_tools definition) in
   let invocation () =
+    let tool = List.hd_exn (EC.prepared_tools definition) in
     Agent_protocol.Invocation.create
       { (invocation_fixture ()).context with
         id = Agent_protocol.Id.Invocation.create ()
@@ -4821,6 +4827,339 @@ let%expect_test "runtime owner drains observation batches and applies durable te
      (internal_batches 1))
     ((more false) (observed 35) (awaiting 1) (desired Stopped) (native_calls 36)
      (internal_batches 1))
+    |}]
+;;
+
+let%expect_test "idle moderator tools preserve authority, outcomes and scope lifetime" =
+  let module A = Agent_session.Session_actor in
+  let module I = Agent_protocol.Invocation in
+  let module M = Chat_response.Moderator_manager in
+  let module C = Chat_response.Tool_capability in
+  List.iter
+    [ `Success
+    ; `Deny
+    ; `Revoke
+    ; `Reentrant
+    ; `Handler_fail
+    ; `Save_fail
+    ; `Cancel_native
+    ; `Forged_parent
+    ]
+    ~f:(fun mode ->
+      let prepared = ref None in
+      let native_calls = ref 0
+      and authorizations = ref 0
+      and rejected = ref false in
+      let on_native = ref (fun () -> ()) in
+      let registry =
+        ref
+          (native_registry ~on_call:(fun () -> !on_native ()) native_calls ~raises:false)
+      in
+      with_handoff_actor
+        ~reject:(fun next ->
+          match mode, !rejected with
+          | `Save_fail, false
+            when List.exists
+                   next.Agent_session.Session_transition.state.invocations
+                   ~f:(fun invocation ->
+                     String.equal invocation.context.tool_name "read_file"
+                     &&
+                     match invocation.status with
+                     | Resolved (Complete _) -> true
+                     | _ -> false) ->
+            rejected := true;
+            true
+          | _ -> false)
+        ~make_worker:(fun env _ ->
+          let finish =
+            match mode with
+            | `Handler_fail -> "Task.fail(\"after native effect\")"
+            | _ -> "Task.pure(state)"
+          in
+          let manager, _, definition =
+            handoff_definition
+              env
+              ~capability_registry:!registry
+              ~declare_tool:false
+              ~events:
+                ("| `Tool_observed(p) -> let ignored = state[0] <- state[0] + 1 in "
+                 ^ "Task.bind(Tool.call(\"read_file\", `Object([])), fun ignored -> "
+                 ^ finish
+                 ^ ") | _ -> Task.pure(state)")
+          in
+          let observer = M.invocation_observer manager |> Option.value_exn in
+          let snapshot =
+            Some
+              (Agent_session.Runtime_builder.encode_moderator_snapshot
+                 (M.identity_snapshot manager |> Result.ok_or_failwith))
+          in
+          prepared := Some (manager, definition, observer);
+          Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+            caps.commit_moderator snapshot |> protocol_ok;
+            let parent =
+              I.create { (invocation_fixture ()).context with tool_name = "root" }
+              |> protocol_ok
+            in
+            caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
+              let child =
+                I.create
+                  ~observer
+                  { parent.context with
+                    id = Agent_protocol.Id.Invocation.create ()
+                  ; origin = Moderator
+                  ; parent_invocation = Some parent.context.id
+                  ; tool_name = "seed"
+                  }
+                |> protocol_ok
+              in
+              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
+                Ok (Complete (`String "seed")))
+              |> protocol_ok
+              |> ignore;
+              Ok (Complete `Null))
+            |> protocol_ok
+            |> ignore;
+            Completed
+              { final_history = input.history
+              ; moderator_snapshot = snapshot
+              ; runtime_requests = []
+              }))
+        (fun _env actor writer backend ->
+           let initial = await_idle actor in
+           let manager, definition, observer = Option.value_exn !prepared in
+           let seed =
+             List.find_exn initial.invocations ~f:(fun i ->
+               String.equal i.context.tool_name "seed")
+           in
+           (on_native
+            := fun () ->
+                 let owned = A.state actor |> protocol_ok in
+                 assert (Option.is_none owned.active_operation);
+                 match mode with
+                 | `Cancel_native ->
+                   A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                   |> protocol_ok
+                   |> ignore;
+                   assert (Result.is_error (A.start actor ~attachment_id:writer.id));
+                   Eio.Fiber.yield ()
+                 | _ -> ());
+           let tools =
+             Agent_session.Script_tool_calls.create
+               ~registry:(fun () -> !registry)
+               ~moderator_names:String.Set.empty
+               ~now:Agent_protocol.Timestamp.now
+               ~is_halted:(fun () ->
+                 let state = A.state actor |> protocol_ok in
+                 match state.lifecycle.desired with
+                 | Running -> state.halted
+                 | Stopped -> true)
+               ~requires_active_moderator:(fun _ ->
+                 match mode with
+                 | `Reentrant -> true
+                 | _ -> false)
+               ~authorize:(fun _ _ ->
+                 Int.incr authorizations;
+                 Eio.Fiber.yield ();
+                 match mode with
+                 | `Deny -> Error (handoff_error "denied")
+                 | `Revoke ->
+                   registry := native_registry native_calls ~raises:false;
+                   Ok ()
+                 | _ -> Ok ())
+               ~prepare_output:(fun _ -> Ok (`String "disclosed"))
+               ~defer_observation:(fun _ -> Ok ())
+           in
+           let escaped = ref None
+           and escaped_executor = ref None in
+           let forged_rejected = ref false in
+           let run () =
+             A.with_idle_moderator_observation_tools
+               actor
+               ~observer
+               (fun ~observing ~execute ~commit ->
+                  let reference = List.hd_exn (C.references !registry) in
+                  let child () =
+                    I.create
+                      ~observer
+                      { observing.context with
+                        id = Agent_protocol.Id.Invocation.create ()
+                      ; parent_invocation = Some observing.context.id
+                      ; tool_name = "read_file"
+                      ; input = `Object []
+                      ; implementation_revision = reference.implementation_revision
+                      ; capability_fingerprint = C.fingerprint !registry
+                      }
+                    |> protocol_ok
+                  in
+                  escaped_executor := Some (execute, child);
+                  (match mode with
+                   | `Forged_parent ->
+                     let invocation = child () in
+                     let invocation =
+                       I.create
+                         ~observer
+                         { invocation.context with
+                           parent_invocation = seed.context.parent_invocation
+                         }
+                       |> protocol_ok
+                     in
+                     forged_rejected
+                     := Result.is_error
+                          (execute ~invocation (fun ~dispatched:_ -> assert false))
+                   | _ -> ());
+                  Agent_session.Script_tool_calls.with_observation
+                    tools
+                    ~definition
+                    ~execute
+                    ~observing
+                    (fun call ->
+                       escaped := Some call;
+                       let handled =
+                         M.handle_observation_entries
+                           manager
+                           ~retain_follow_up:true
+                           ~on_tool_call:call
+                           ~invocation:observing
+                           ~history:
+                             (Agent_session.History_codec.all_of_protocol
+                                initial.conversation.canonical_history
+                              |> protocol_ok)
+                           ~available_tools:[]
+                           ~session_meta:`Null
+                           ~now_ms:0
+                           ~prepare_observation:(fun ~observed ~outcome:_ ~snapshot ->
+                             commit ~resolved:observed ~snapshot
+                             |> Result.map_error ~f:(fun error ->
+                               error.Agent_protocol.Error.message)
+                             |> Result.map ~f:(fun () -> fun () -> ()))
+                       in
+                       (match handled with
+                        | Ok _ ->
+                          assert (
+                            match call ~name:"read_file" ~args:(`Object []) with
+                            | Ok (Tool_error "invocation.admission_failed") -> true
+                            | _ -> false)
+                        | Error _ -> ());
+                       handled
+                       |> Result.map ~f:ignore
+                       |> Result.map_error ~f:handoff_error))
+           in
+           let completed =
+             try Result.is_ok (run ()) with
+             | Eio.Cancel.Cancelled _ -> false
+           in
+           let calls_before_escape = !native_calls in
+           let call = Option.value_exn !escaped in
+           assert (
+             match call ~name:"read_file" ~args:(`Object []) with
+             | Ok (Tool_error "invocation.inactive_scope") -> true
+             | _ -> false);
+           let execute, child = Option.value_exn !escaped_executor in
+           assert (
+             Result.is_error
+               (execute ~invocation:(child ()) (fun ~dispatched:_ -> assert false)));
+           [%test_eq: int] calls_before_escape !native_calls;
+           let state = A.state actor |> protocol_ok in
+           let observed =
+             List.find_exn state.invocations ~f:(fun i ->
+               String.equal i.context.tool_name "seed")
+           in
+           let native =
+             List.filter state.invocations ~f:(fun i ->
+               String.equal i.context.tool_name "read_file")
+           in
+           assert (I.equal_status observed.status seed.status);
+           assert (Option.is_none state.active_operation);
+           assert (
+             List.equal
+               Agent_protocol.History.equal_entry
+               initial.conversation.canonical_history
+               state.conversation.canonical_history);
+           assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);
+           assert (Result.is_ok (A.change_moderator actor state.moderator));
+           let count =
+             match
+               (M.identity_snapshot manager |> Result.ok_or_failwith).current_state
+             with
+             | Session.Snapshot.Array [ Int n ] -> n
+             | _ -> assert false
+           in
+           print_s
+             [%sexp
+               { mode : [ `Success
+                        | `Deny
+                        | `Revoke
+                        | `Reentrant
+                        | `Handler_fail
+                        | `Save_fail
+                        | `Cancel_native
+                        | `Forged_parent
+                        ]
+               ; completed : bool
+               ; native_calls = (!native_calls : int)
+               ; authorizations = (!authorizations : int)
+               ; forged_rejected = (!forged_rejected : bool)
+               ; observation =
+                   ((Option.value_exn observed.observation).status : I.observation_status)
+               ; native = (List.map native ~f:(fun i -> i.status) : I.status list)
+               ; state_count = (count : int)
+               }]));
+  [%expect
+    {|
+    ((mode Success) (completed true) (native_calls 1) (authorizations 1)
+     (forged_rejected false) (observation Observed)
+     (native ((Resolved (Complete (String disclosed))))) (state_count 1))
+    ((mode Deny) (completed true) (native_calls 0) (authorizations 1)
+     (forged_rejected false) (observation Observed)
+     (native
+      ((Resolved
+        (Fail
+         ((code invocation.permission_denied)
+          (message "Tool execution was not authorized.") (retryable false)
+          (details Null))))))
+     (state_count 1))
+    ((mode Revoke) (completed true) (native_calls 0) (authorizations 1)
+     (forged_rejected false) (observation Observed)
+     (native
+      ((Resolved
+        (Fail
+         ((code invocation.stale_binding)
+          (message "The selected tool capability is no longer valid.")
+          (retryable false) (details Null))))))
+     (state_count 1))
+    ((mode Reentrant) (completed true) (native_calls 0) (authorizations 0)
+     (forged_rejected false) (observation Observed)
+     (native
+      ((Resolved
+        (Fail
+         ((code moderator_reentrancy)
+          (message
+           "Tool execution requires a decision from the active moderator.")
+          (retryable false) (details Null))))))
+     (state_count 1))
+    ((mode Handler_fail) (completed false) (native_calls 1) (authorizations 1)
+     (forged_rejected false)
+     (observation
+      (Observation_failed "observation handler failed before acknowledgement"))
+     (native ((Resolved (Complete (String disclosed))))) (state_count 0))
+    ((mode Save_fail) (completed false) (native_calls 1) (authorizations 1)
+     (forged_rejected false)
+     (observation
+      (Observation_failed "observation handler failed before acknowledgement"))
+     (native
+      ((Resolved
+        (Cancelled
+         "idle moderator exited before recording the invocation outcome"))))
+     (state_count 0))
+    ((mode Cancel_native) (completed false) (native_calls 1) (authorizations 1)
+     (forged_rejected false)
+     (observation
+      (Observation_failed "observation handler cancelled before acknowledgement"))
+     (native ((Resolved (Cancelled "idle moderator cancelled"))))
+     (state_count 0))
+    ((mode Forged_parent) (completed true) (native_calls 1) (authorizations 1)
+     (forged_rejected true) (observation Observed)
+     (native ((Resolved (Complete (String disclosed))))) (state_count 1))
     |}]
 ;;
 

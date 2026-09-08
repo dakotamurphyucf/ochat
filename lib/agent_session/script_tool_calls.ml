@@ -48,11 +48,10 @@ let checked error f =
   | exception _ -> Error error
 ;;
 
-let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
+let with_scope t ~selected ~script ~valid_parent ~execute ~(parent : I.t) f =
   let active = Atomic.make true in
   let attempts = Atomic.make 0 in
-  let selected = EC.capabilities prepared in
-  let limits = EC.execution_limits prepared in
+  let limits = script.Chatmd_shell_spec.Extension_spec.limits in
   let validate_value value =
     let open Result.Let_syntax in
     let%bind () = I.validate_outcome (Complete value) in
@@ -76,14 +75,6 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
     | Ok selected -> selected
     | Error _ -> failwith "captured tool subset is no longer available"
   in
-  let valid_parent =
-    match parent.status with
-    | Dispatching ->
-      String.equal parent.context.tool_name (EC.declaration prepared).name
-      && String.equal parent.context.implementation_revision (EC.fingerprint prepared)
-      && String.equal parent.context.capability_fingerprint (C.fingerprint selected)
-    | _ -> false
-  in
   let call ~name ~args =
     if (not (Atomic.get active)) || not valid_parent
     then tool_error "invocation.inactive_scope"
@@ -91,8 +82,7 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
       Atomic.fetch_and_add attempts 1
       >= Chat_response.Moderator_invocation.max_nested_calls
     then tool_error "invocation.nested_call_limit"
-    else if
-      String.equal name (EC.declaration prepared).name || Set.mem t.moderator_names name
+    else if Set.mem t.moderator_names name
     then tool_error "moderator_reentrancy"
     else (
       match
@@ -106,10 +96,7 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
           let%bind invocation =
             checked `Admission (fun () ->
               I.create
-                ~observer:
-                  { script_id = (EC.script prepared).id
-                  ; source_sha256 = (EC.script prepared).source_sha256
-                  }
+                ~observer:{ script_id = script.id; source_sha256 = script.source_sha256 }
                 { id = Agent_protocol.Id.Invocation.create ()
                 ; session_id = parent.context.session_id
                 ; generation = parent.context.generation
@@ -130,16 +117,14 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
             checked `Admission (fun () ->
               match t.requires_active_moderator reference with
               | true ->
-                capabilities.Operation_worker.Capabilities.with_invocation
-                  ~invocation
-                  (fun ~dispatched:_ ->
-                     Ok
-                       (fail
-                          "moderator_reentrancy"
-                          "Tool execution requires a decision from the active moderator."))
+                execute ~invocation (fun ~dispatched:_ ->
+                  Ok
+                    (fail
+                       "moderator_reentrancy"
+                       "Tool execution requires a decision from the active moderator."))
               | false ->
-                Native_tool_invocation.run
-                  ~capabilities
+                Native_tool_invocation.run_scoped
+                  ~execute
                   ~registry
                   ~reference
                   ~invocation
@@ -163,4 +148,64 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
          | exception _ -> tool_error "invocation.host_failed"))
   in
   Exn.protect ~f:(fun () -> f call) ~finally:(fun () -> Atomic.set active false)
+;;
+
+let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
+  let selected = EC.capabilities prepared in
+  let valid_parent =
+    match parent.status with
+    | Dispatching ->
+      String.equal parent.context.tool_name (EC.declaration prepared).name
+      && String.equal parent.context.implementation_revision (EC.fingerprint prepared)
+      && String.equal parent.context.capability_fingerprint (C.fingerprint selected)
+    | _ -> false
+  in
+  let t =
+    { t with moderator_names = Set.add t.moderator_names (EC.declaration prepared).name }
+  in
+  with_scope
+    t
+    ~selected
+    ~script:(EC.script prepared)
+    ~valid_parent
+    ~execute:capabilities.Operation_worker.Capabilities.with_invocation
+    ~parent
+    f
+;;
+
+let with_observation t ~definition ~execute ~(observing : I.t) f =
+  match
+    List.find_map (EC.compiled_scripts definition) ~f:(fun (script, _) ->
+      match script.Chatmd_shell_spec.Extension_spec.kind with
+      | Moderator_script -> Some script
+      | Tool_script -> None)
+  with
+  | None -> f (fun ~name:_ ~args:_ -> tool_error "invocation.inactive_scope")
+  | Some script ->
+    let observer : I.observer =
+      { script_id = script.id; source_sha256 = script.source_sha256 }
+    in
+    let valid_parent =
+      match observing.status, observing.observation with
+      | (Resolved _ | Published _), Some { observer = owner; status = Observing; _ } ->
+        I.equal_observer owner observer
+      | _ -> false
+    in
+    let moderator_names =
+      List.fold
+        (EC.prepared_tools definition)
+        ~init:t.moderator_names
+        ~f:(fun names prepared ->
+          match (EC.declaration prepared).implementation with
+          | Moderator _ -> Set.add names (EC.declaration prepared).name
+          | Standalone _ -> names)
+    in
+    with_scope
+      { t with moderator_names }
+      ~selected:(EC.definition_capabilities definition)
+      ~script
+      ~valid_parent
+      ~execute
+      ~parent:observing
+      f
 ;;

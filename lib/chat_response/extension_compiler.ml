@@ -175,12 +175,14 @@ let prepare_in_domain
 type definition =
   { prepared_tools : t list
   ; compiled_scripts : (Spec.script * Chatml_host_runtime.compiled_script) list
+  ; definition_capabilities : Tool_capability.t
   ; definition_fingerprint : string
   }
 
 let prepared_tools definition = definition.prepared_tools
 let compiled_scripts definition = definition.compiled_scripts
 let definition_fingerprint definition = definition.definition_fingerprint
+let definition_capabilities definition = definition.definition_capabilities
 
 let prepare_definition_in_domain
       ?(limits = Chatml_compilation.default_limits)
@@ -339,7 +341,11 @@ let prepare_definition_in_domain
            |> Sexp.to_string
            |> Chatmd_shell_spec.Source_ref.digest
          in
-         { prepared_tools; compiled_scripts; definition_fingerprint })
+         { prepared_tools
+         ; compiled_scripts
+         ; definition_capabilities = capabilities
+         ; definition_fingerprint
+         })
   with
   | Eio.Time.Timeout ->
     fail "chatml.compile_timeout" "definition exceeded its aggregate compilation budget"

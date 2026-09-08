@@ -324,8 +324,28 @@ no model operation or extra history, and agreement with the persistence backend.
 This fixture installs the manager internally; it does not qualify public v1
 runtime construction or a full daemon restart.
 
-**Scoped idle/ordinary-event Tool.call routing and normal runtime installation
-are still required.** The stream
+For internally installed hosts, `with_idle_moderator_observation_tools` adds a
+native invocation executor tied to the exact observation borrow. It admits only
+same-generation Moderator children of that observation with matching source
+intent. It grants neither provider-history access nor tool authorization.
+`Native_tool_invocation.run_scoped` uses this executor with the existing current
+binding, policy, input and output checks. Cancel-stop cancels active native work;
+calls after commit, stop or callback return are rejected. Acknowledgement cannot
+commit while child outcomes remain unsaved. Borrow cleanup records interruption
+for unfinished children without repeating effects or publishing provider outputs.
+
+`Script_tool_calls.with_observation` binds this executor to the complete compiled
+definition's retained native capabilities and moderator limits. Lifecycle-only
+moderators do not need a dummy tool declaration. The bridge enforces the same
+call budget, closed scope, source identity and active-moderator policy restrictions
+as invocation handlers. An offline compiled-handler integration matrix covers
+successful disclosure, denial, capability replacement after an authorization
+wait, required active-moderator decisions, handler failure after effects, rejected
+result persistence, cancel-stop during native execution and a forged parent.
+It also verifies calls after acknowledgement/return cannot execute.
+
+**Installing this scoped Tool.call bridge in runtime-owner draining, ordinary-event
+routing and normal v1 runtime construction are still required.** The stream
 option remains off by default pending that integration. Tests exercise the
 explicit foreground handoff with real compiled handlers, competing claims,
 cancellation, rejected saves, wrong source/snapshot, mutable-state rollback,

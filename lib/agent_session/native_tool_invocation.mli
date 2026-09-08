@@ -1,5 +1,32 @@
 open Core
 
+(** Scoped host admission/outcome persistence, without unrelated foreground
+    capabilities. The host controls its lifetime and cancellation ownership. *)
+type executor =
+  invocation:Agent_protocol.Invocation.t
+  -> (dispatched:Agent_protocol.Invocation.t
+      -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+
+(** Common native dispatch for a host-owned scope. Performs the same current
+    capability, policy, input and output checks as [run]. In particular, [execute]
+    must be a real actor-backed scope, not a direct call to the supplied callback.
+    This grants no foreground/history authority. *)
+val run_scoped
+  :  execute:executor
+  -> registry:(unit -> Chat_response.Tool_capability.t)
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Invocation.t
+  -> is_halted:(unit -> bool)
+  -> authorize:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+
 (** Internal common native invocation path for model and synchronous script
     origins. The registered implementation retains its native shell/file policy
     wrappers. No raw runner is exposed to the caller. [registry] supplies the
