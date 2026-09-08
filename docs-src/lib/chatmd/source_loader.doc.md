@@ -41,6 +41,15 @@ val captured_filesystem
   -> sources:(string * string) list
   -> t
 
+(** Captured-only loader for generated bundles. Rejects portable-path hazards
+    and absolute/missing local agent sources as well as external import/script
+    sources. Callers should use Chatmd_source_bundle to validate map keys and
+    size limits first. No filesystem fallback or materialization occurs. *)
+val generated_filesystem
+  :  root:Eio.Fs.dir_ty Eio.Path.t
+  -> sources:(string * string) list
+  -> t
+
 (** [with_observer t ~f] invokes [f] after each successful source read. *)
 val with_observer : t -> f:(source -> string -> unit) -> t
 

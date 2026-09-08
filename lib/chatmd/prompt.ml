@@ -580,32 +580,29 @@ module Chat_markdown = struct
   ;;
 
   (*--------------------------------------------------------------------------*)
-  (* Generic tree fold                                                        *)
-  (*--------------------------------------------------------------------------*)
-
-  (** [tree node ~f] traverses [node] depth-first and applies the combining
-    function [f] to each node together with the list of results that were
-    produced for its direct children.  This is analogous to a fold over the
-    tree structure.
-
-    For example, to collect all nodes in a tree one can write
-
-    {[ let all_nodes = tree root ~f:(fun n children -> n :: List.concat children) ]}
-
-    The traversal is depth-first and children are processed from left to right,
-    mirroring their order in the underlying list. *)
-  let rec tree (node : Ast.node) ~(f : Ast.node -> 'a list -> 'a) : 'a =
-    match node with
-    | Text _ -> f node []
-    | Element (_, _, children) ->
-      let child_results = List.map children ~f:(fun child -> tree child ~f) in
-      f node child_results
+  (* Fold the expanded source tree. Generated parsing preserves the provenance
+     of inline imports; the legacy parser retains its existing parent context. *)
+  let rec tree ~preserve_child_sources (sourced : Chatmd_import_expansion.sourced_node) ~f
+    =
+    let children =
+      match preserve_child_sources, sourced.children with
+      | true, Some children -> children
+      | _ ->
+        (match sourced.node with
+         | Ast.Text _ -> []
+         | Ast.Element (_, _, children) ->
+           List.map children ~f:(fun node -> { sourced with node; children = None }))
+    in
+    let results =
+      List.map children ~f:(fun child -> tree ~preserve_child_sources child ~f)
+    in
+    f ~source_ref:sourced.source ~source_node:sourced.source_node sourced.node results
   ;;
 
   (* Convert AST nodes into internal chat elements before exposing top-level values. *)
-  let parse_chat_element ~dir ~loader ~source_node ~source_ref node =
-    let source_context = source_ref.Chatmd_shell_spec.Source_ref.file in
-    tree node ~f:(fun node children ->
+  let parse_chat_element ~dir ~loader ~preserve_child_sources sourced =
+    tree ~preserve_child_sources sourced ~f:(fun ~source_ref ~source_node node children ->
+      let source_context = source_ref.Chatmd_shell_spec.Source_ref.file in
       match node with
       | Element (Msg, attrs, _) ->
         let attr = List.map attrs ~f:(fun (n, v) -> n, Option.value v ~default:"") in
@@ -1052,7 +1049,15 @@ module Chat_markdown = struct
     elements
   ;;
 
-  let parse_chat_inputs ?source ?source_loader ~dir (xml_content : string) =
+  let parse_inputs
+        ~parse_document
+        ~preprocess
+        ~canonical_sources
+        ?source
+        ?source_loader
+        ~dir
+        (xml_content : string)
+    =
     let source_file = Option.value source ~default:"<prompt>" in
     let loader =
       Option.value source_loader ~default:(Source_loader.filesystem ~root:dir)
@@ -1060,11 +1065,12 @@ module Chat_markdown = struct
     let root_source =
       Source_loader.root loader ~file:source_file |> Result.ok_or_failwith
     in
-    let xml_content = Meta_prompting.Preprocessor.preprocess xml_content in
-    let document = parse xml_content in
+    let xml_content = preprocess xml_content in
+    let document = parse_document xml_content in
     let expanded =
       Chatmd_import_expansion.expand
-        ~parse
+        ~canonical_sources
+        ~parse:parse_document
         ~loader
         ~root_source
         ~dir
@@ -1075,14 +1081,103 @@ module Chat_markdown = struct
     let chat_elements = chat_elements expanded in
     let parsed_elements =
       List.map chat_elements ~f:(fun sourced ->
-        parse_chat_element
-          ~dir
-          ~loader
-          ~source_node:sourced.source_node
-          ~source_ref:sourced.source
-          sourced.node)
+        parse_chat_element ~dir ~loader ~preserve_child_sources:canonical_sources sourced)
     in
     of_chat_elements parsed_elements |> validate_scripts
+  ;;
+
+  let parse_chat_inputs ?source ?source_loader ~dir content =
+    parse_inputs
+      ~parse_document:parse
+      ~preprocess:Meta_prompting.Preprocessor.preprocess
+      ~canonical_sources:false
+      ?source
+      ?source_loader
+      ~dir
+      content
+  ;;
+
+  type parsed_bundle =
+    { root : top_level_elements list
+    ; agents : (string * top_level_elements list) list
+    }
+
+  let parse_source_bundle ~dir bundle =
+    let reads = ref 0
+    and bytes = ref 0
+    and tokens = ref 0 in
+    let queued = Queue.create ()
+    and seen = Hash_set.create (module String) in
+    let loader =
+      Chatmd_source_bundle.loader bundle ~root:dir
+      |> Source_loader.with_observer ~f:(fun _ text ->
+        incr reads;
+        if !reads > 1024 || String.length text > (8 * 1024 * 1024) - !bytes
+        then failwith "generated source expansion limit exceeded";
+        bytes := !bytes + String.length text)
+      |> Source_loader.with_agent_observer ~f:(fun source ->
+        Queue.enqueue queued (Source_loader.relative_path source))
+    in
+    let parse_document content =
+      if not (Stdlib.String.is_valid_utf_8 content)
+      then failwith "generated ChatMD source must be valid UTF-8";
+      Meta_prompting.Preprocessor.validate_inert content |> Result.ok_or_failwith;
+      let depth = ref 0
+      and next = Chatmd_lexer.create () in
+      let token lexbuf =
+        incr tokens;
+        if !tokens > 100_000 then failwith "generated source token limit exceeded";
+        let token = next lexbuf in
+        (match token with
+         | Chatmd_parser.START _ -> incr depth
+         | END _ -> decr depth
+         | _ -> ());
+        if !depth > 128 then failwith "generated markup nesting limit exceeded";
+        token
+      in
+      let document = Chatmd_parser.document token (Lexing.from_string content) in
+      let rec check = function
+        | Ast.Text _ -> ()
+        | Ast.Element (tag, attrs, children) ->
+          let has name = List.exists attrs ~f:(fun (key, _) -> String.equal key name) in
+          if
+            (Ast.tag_equal tag Ast.Agent || (Ast.tag_equal tag Ast.Tool && has "agent"))
+            && not (has "local")
+          then failwith "generated agent definitions must use bundled local sources";
+          List.iter children ~f:check
+      in
+      List.iter document ~f:check;
+      document
+    in
+    let parse_file file =
+      Hash_set.add seen file;
+      let source = Source_loader.root loader ~file |> Result.ok_or_failwith in
+      let content =
+        Source_loader.read_bounded
+          ~max_bytes:(Chatmd_source_bundle.limits bundle).max_source_bytes
+          loader
+          source
+        |> Result.ok_or_failwith
+      in
+      parse_inputs
+        ~parse_document
+        ~preprocess:Fn.id
+        ~canonical_sources:true
+        ~source:file
+        ~source_loader:loader
+        ~dir
+        content
+    in
+    let root = parse_file (Chatmd_source_bundle.root_file bundle) in
+    let agents = ref [] in
+    while not (Queue.is_empty queued) do
+      let file = Queue.dequeue_exn queued in
+      if not (Hash_set.mem seen file)
+      then (
+        let elements = parse_file file in
+        agents := (file, elements) :: !agents)
+    done;
+    { root; agents = List.rev !agents }
   ;;
 end
 

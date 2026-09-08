@@ -213,8 +213,9 @@ module Chat_markdown : sig
         fragment; leading BOM and surrounding whitespace are ignored.
 
       Behaviour:
-      1. Preprocesses the input via {!Preprocessor.preprocess} to strip
-         comments and handle conditional compilation markers.
+      1. Applies optional meta-refinement via {!Preprocessor.preprocess}.
+         Use [parse_source_bundle] for generated source that must not execute
+         preprocessing.
       2. Parses the cleaned source with the Menhir grammar from
          {!module:Chatmd_parser}.
       3. Expands [`<import>`] directives recursively.
@@ -233,6 +234,26 @@ module Chat_markdown : sig
     -> dir:Eio.Fs.dir_ty Eio.Path.t
     -> string
     -> top_level_elements list
+
+  type parsed_bundle =
+    { root : top_level_elements list
+    ; agents : (string * top_level_elements list) list
+    }
+
+  (** Parse the root and the complete reachable local-agent source closure from
+      supplied bytes only. Imports and script/schema sources cannot fall back to
+      disk; external/missing agent definitions reject. No preprocessing runs,
+      including when ambient meta-refinement is enabled; explicit markers fail.
+      Cumulative reads, bytes, tokens and markup depth are bounded. Generated
+      provenance uses canonical root-relative names. [dir] anchors provenance;
+      no files are read from it or materialized into it by this function.
+      This is parsing, not execution/authority admission. Native tool/root/MCP
+      configuration, message resource access and handler compilation still need
+      validation against inherited authority before any runtime consumes results. *)
+  val parse_source_bundle
+    :  dir:Eio.Fs.dir_ty Eio.Path.t
+    -> Chatmd_source_bundle.t
+    -> parsed_bundle
 end
 
 (** {1 Metadata helpers}

@@ -120,13 +120,14 @@ let tag_mismatch ~(open_tag : tag) ~(close_tag : tag) =
 
 %%
 
+(* Accumulate lists and text fragments in reverse to avoid quadratic copies. *)
 document:
-  | rec_elems EOF { $1 }
+  | rec_elems EOF { List.rev $1 }
 
 rec_elems:
     /* empty */                 { [] }
   | rec_elems whitespace        { $1 }
-  | rec_elems rec_elem          { $1 @ [$2] }
+  | rec_elems rec_elem          { $2 :: $1 }
 
 (*--------------------------------------------------------------------*)
 (*  Whitespace helper – TEXT tokens that contain *only* whitespace     *)
@@ -143,12 +144,12 @@ rec_elem:
   | START children END    {
         let (t_open, attrs) = $1 in
         let t_close = $3 in
-        if tag_equal t_open t_close then Element (t_open, attrs, $2)
+        if tag_equal t_open t_close then Element (t_open, attrs, List.rev $2)
         else tag_mismatch ~open_tag:t_open ~close_tag:t_close }
 
 children:
     /* empty */           { [] }
-  | children child        { $1 @ [$2] }
+  | children child        { $2 :: $1 }
 
 (*--------------------------------------------------------------------*)
 (* Collapse consecutive TEXT tokens into one node so that             *)
@@ -158,16 +159,16 @@ children:
 (*--------------------------------------------------------------------*)
 
 child:
-    text_block            { Text $1 }
+    text_block            { Text (String.concat (List.rev $1)) }
   | SELF                  { let (t,attrs) = $1 in Element (t, attrs, []) }
   | START children END    {
         let (t_open, attrs) = $1 in
         let t_close = $3 in
-        if tag_equal t_open t_close then Element (t_open, attrs, $2)
+        if tag_equal t_open t_close then Element (t_open, attrs, List.rev $2)
         else tag_mismatch ~open_tag:t_open ~close_tag:t_close }
 
 (* A [text_block] is one or more consecutive TEXT tokens, concatenated. *)
 
 text_block:
-    TEXT                        { $1 }
-  | text_block TEXT             { $1 ^ $2 }
+    TEXT                        { [$1] }
+  | text_block TEXT             { $2 :: $1 }

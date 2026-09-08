@@ -339,3 +339,39 @@ The source parser/capture stage must validate imports and definition dependency
 cycles first. Public generated-definition validation still needs its stricter
 bundle loader and isolated compilation budgets, and runtime registration must use
 the prepared value before exposing a handler. Those integration steps remain open.
+
+## Generated source bundles
+
+`Chatmd_source_bundle.create` accepts an immutable root path and a map of
+source bytes. It validates keys and limits without reading files, fetching URLs,
+or preprocessing content. Defaults are 256 KiB per source, 2 MiB per bundle and
+128 files; explicit limits cannot exceed 1 MiB, 8 MiB and 256 files respectively.
+Duplicate paths, simple case collisions, file/directory conflicts, absolute paths
+and parent segments in bundle keys are rejected. The fingerprint covers the root,
+limits and sorted source digests. Filesystem materialization still needs its own
+verification, including filesystem-specific name collisions and symlinks.
+
+`Prompt.Chat_markdown.parse_source_bundle` parses the root and uniquely reachable
+local agent definitions using only supplied bytes. Missing sources fail even if
+a matching file exists on disk. Imports, script/schema dependencies and local
+agent references resolve relative to the declaring source within the bundle.
+Generated parsing retains inline-import provenance and canonical root-relative
+source names. Repeated references to an agent definition do not create sessions.
+
+This path never calls executable preprocessing, regardless of `OCHAT_META_REFINE`,
+and rejects the `<!-- META_REFINE -->` marker in every parsed ChatMD source. It
+requires valid UTF-8 ChatMD, bounds markup nesting (including combined import
+ancestors) to 128, and caps cumulative
+parsing at 100,000 tokens, 1,024 source reads and 8 MiB of read bytes. Repeated
+imports count toward these limits. Ordinary authored-file parsing retains its
+existing preprocessing and provenance policy. Both paths now accumulate parser
+lists and text fragments in linear time, and source digests are cached per import
+context.
+
+Bundle parsing is not execution admission. Native tool declarations, shell rules,
+MCP configuration and message resource references still require inherited-authority
+checks before runtime construction or resource loading. No child session is
+created, and no capability is granted by successful parsing. Persisted generated
+artifacts must retain this parsing policy so restoration cannot silently use the
+ordinary authored-file path; that integration remains part of generated-session
+implementation.

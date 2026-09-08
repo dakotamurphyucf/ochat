@@ -134,3 +134,12 @@ Manifest compilation, authorization, filesystem probing, and live runtime
 instantiation are deliberately outside `prompt.ml`; they belong to
 `Chatmd_shell_spec` and `Shell_runtime`. This keeps the already-large Prompt
 module a dispatch/assembly boundary pending a broader future refactor.
+
+## Generated bundles
+
+The separate `Chat_markdown.parse_source_bundle` entry point parses bounded,
+captured-only sources without invoking preprocessing. It preserves canonical
+source provenance through inline imports and returns the root plus uniquely
+reachable local agent definitions. See [generated source bundle contracts](../../agent-server/extensibility-foundations.md#generated-source-bundles)
+for limits and the execution-admission work still required before using these
+declarations to create a runtime.

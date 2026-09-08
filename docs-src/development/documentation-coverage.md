@@ -390,6 +390,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatmd/chatmd_script_declaration.mli` | [contract](../../lib/chatmd/chatmd_script_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_shell_declaration.mli` | [contract](../../lib/chatmd/chatmd_shell_declaration.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_shell_serialization.mli` | [contract](../../lib/chatmd/chatmd_shell_serialization.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_source_bundle.mli` | [contract](../../lib/chatmd/chatmd_source_bundle.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/prompt.mli` | [contract](../../lib/chatmd/prompt.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/chatmd/source_loader.mli` | [contract](../../lib/chatmd/source_loader.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/builtin_profile.mli` | [contract](../../lib/chatmd_shell_spec/builtin_profile.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |

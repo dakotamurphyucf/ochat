@@ -5,6 +5,7 @@
  (modules
   chatmd_ast
   source_loader
+  chatmd_source_bundle
   chatmd_lexer
   chatmd_parser
   chatmd_attributes
