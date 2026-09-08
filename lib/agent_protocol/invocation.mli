@@ -36,6 +36,10 @@ type context =
   ; generation : int
   ; origin : origin
   ; provider_call_id : string option
+  ; call_entry_id : History.Id.t option [@sexp.option]
+    (** Host-only canonical call occurrence binding. Absent in legacy records;
+        required by the actor's canonical publication service. Only model origin
+        may carry this field. The ChatML context ABI is unchanged. *)
   ; parent_invocation : Id.Invocation.t option
   ; parent_job : Id.Job.t option
   ; tool_name : string
@@ -57,6 +61,7 @@ type status =
 type t = private
   { context : context
   ; status : status
+  ; output_entry_id : History.Id.t option [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -81,6 +86,12 @@ val cancel : t -> reason:string -> (t, Error.t) result
 (** Marks delivery of the initial result. Idempotent after publication; no
     provider-history insertion or external effects are performed here. *)
 val publish : t -> (t, Error.t) result
+
+(** Publish a canonically bound model invocation with a retained output receipt.
+    Repeating the same occurrence is idempotent; another occurrence is rejected.
+    The actor must validate and atomically append the actual history entry.
+    Bound records use JSON codec version 2; legacy records remain version 1. *)
+val publish_with_history : t -> output_entry_id:History.Id.t -> (t, Error.t) result
 
 (** Checks a proposed durable replacement, including immutable context and
     outcome. New records must be admitted; transitions cannot skip dispatch

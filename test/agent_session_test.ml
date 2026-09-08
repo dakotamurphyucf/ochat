@@ -831,6 +831,7 @@ let invocation_fixture () =
     ; generation = 0
     ; origin = Script
     ; provider_call_id = None
+    ; call_entry_id = None
     ; parent_invocation = None
     ; parent_job = None
     ; tool_name = "read_file"
@@ -913,6 +914,132 @@ let%expect_test "invocation deltas replay through durable transactions and snaps
     (Resolved (Complete (String done)))
     (Published (Complete (String done)))
     true |}]
+;;
+
+let%test_unit "bound publication journal replay validates the retained call and output" =
+  with_actor_workspace (fun _env workspace_instance ->
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let id sequence =
+      History_entry.Id.create ~namespace:"publication" ~sequence |> Result.ok_or_failwith
+    in
+    let call =
+      History_entry.create_with_id
+        ~id:(id 0)
+        (Openai.Responses.Item.Function_call
+           { name = "read_file"
+           ; arguments = "{}"
+           ; call_id = "call"
+           ; _type = "function_call"
+           ; id = None
+           ; status = None
+           })
+    in
+    let admitted =
+      Agent_protocol.Invocation.create
+        { (invocation_fixture ()).context with
+          origin = Model
+        ; provider_call_id = Some "call"
+        ; call_entry_id = Some (id 0)
+        }
+      |> protocol_ok
+    in
+    let dispatched = Agent_protocol.Invocation.dispatch admitted |> protocol_ok in
+    let resolved =
+      Agent_protocol.Invocation.resolve
+        dispatched
+        ~session_id
+        ~generation:0
+        (Complete (`String "done"))
+      |> protocol_ok
+    in
+    let output =
+      History_entry.create_with_id
+        ~id:(id 1)
+        (Openai.Responses.Item.Function_call_output
+           { output =
+               Text
+                 (Jsonaf.to_string
+                    (Agent_protocol.Invocation.outcome_to_json
+                       (Complete (`String "done"))))
+           ; call_id = "call"
+           ; _type = "function_call_output"
+           ; id = None
+           ; status = None
+           })
+    in
+    let published =
+      Agent_protocol.Invocation.publish_with_history resolved ~output_entry_id:(id 1)
+      |> protocol_ok
+    in
+    let prefix =
+      Agent_session.Session_delta.
+        [ Canonical_entries_appended [ Agent_session.History_codec.to_protocol call ]
+        ; Invocation_changed admitted
+        ; Invocation_changed dispatched
+        ; Invocation_changed resolved
+        ]
+    in
+    assert (
+      Result.is_error
+        (Agent_session.Session_delta.apply
+           initial
+           (Batch (prefix @ [ Invocation_changed published ]))));
+    let delta =
+      Agent_session.Session_delta.Batch
+        (prefix
+         @ [ Canonical_entries_appended [ Agent_session.History_codec.to_protocol output ]
+           ; Invocation_changed published
+           ])
+    in
+    let transaction =
+      Agent_store.Transaction.create
+        ~session_id
+        ~generation:0
+        ~transaction_sequence:1L
+        ~previous_transaction_hash:None
+        ~session_revision:1L
+        ~first_event_sequence:None
+        ~last_event_sequence:None
+        ~accepted_at_ns:
+          (Agent_protocol.Timestamp.to_time_ns timestamp
+           |> Time_ns.to_int_ns_since_epoch
+           |> Int64.of_int)
+        ~command_audit:None
+        ~delta:(Sexp.to_string_mach (Agent_session.Session_delta.sexp_of_t delta))
+        ~durable_events:[]
+      |> store_ok
+    in
+    let transaction =
+      Agent_store.Transaction.decode (Agent_store.Transaction.encode transaction)
+      |> store_ok
+    in
+    let replayed =
+      Agent_session.Session_persistence.apply_transaction initial transaction |> store_ok
+    in
+    let restored =
+      Agent_session.Session_persistence.restore_snapshot
+        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t replayed))
+      |> store_ok
+    in
+    assert (Poly.equal restored.invocations [ published ]);
+    let wrong =
+      Agent_session.History_codec.user_text ~id:(id 1) "forged result"
+      |> Agent_session.History_codec.to_protocol
+    in
+    let corrupted =
+      { restored with
+        conversation =
+          { restored.conversation with
+            canonical_history = [ Agent_session.History_codec.to_protocol call; wrong ]
+          }
+      }
+    in
+    assert (
+      Result.is_error
+        (Agent_session.Session_persistence.restore_snapshot
+           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t corrupted)))))
 ;;
 
 let%expect_test
@@ -2353,6 +2480,313 @@ let with_handoff_actor ?(reject = fun _ -> false) ~make_worker f =
             |> protocol_ok
             |> ignore;
             f env actor writer backend))))
+;;
+
+let publication_call caps ?(custom = false) () =
+  let id =
+    History_entry.Id_source.allocate
+      caps.Agent_session.Operation_worker.Capabilities.id_source
+    |> Result.ok_or_failwith
+  in
+  let item =
+    if custom
+    then
+      Openai.Responses.Item.Custom_tool_call
+        { name = "read_file"
+        ; input = "{}"
+        ; call_id = "reused"
+        ; _type = "custom_tool_call"
+        ; id = None
+        }
+    else
+      Openai.Responses.Item.Function_call
+        { name = "read_file"
+        ; arguments = "{}"
+        ; call_id = "reused"
+        ; _type = "function_call"
+        ; id = None
+        ; status = None
+        }
+  in
+  let call = History_entry.create_with_id ~id item in
+  let invocation =
+    Agent_protocol.Invocation.create
+      { (invocation_fixture ()).context with
+        id = Agent_protocol.Id.Invocation.create ()
+      ; origin = Model
+      ; provider_call_id = Some "reused"
+      ; call_entry_id = Some id
+      }
+    |> protocol_ok
+  in
+  call, invocation
+;;
+
+let publication_output
+      caps
+      ?(custom = false)
+      ?(text = "{\"type\":\"complete\",\"value\":\"done\"}")
+      ()
+  =
+  let id =
+    History_entry.Id_source.allocate
+      caps.Agent_session.Operation_worker.Capabilities.id_source
+    |> Result.ok_or_failwith
+  in
+  let item =
+    if custom
+    then
+      Openai.Responses.Item.Custom_tool_call_output
+        { output = Text text
+        ; call_id = "reused"
+        ; _type = "custom_tool_call_output"
+        ; id = None
+        }
+    else
+      Openai.Responses.Item.Function_call_output
+        { output = Text text
+        ; call_id = "reused"
+        ; _type = "function_call_output"
+        ; id = None
+        ; status = None
+        }
+  in
+  History_entry.create_with_id ~id item
+;;
+
+let resolve_publication caps invocation =
+  caps.Agent_session.Operation_worker.Capabilities.with_moderator_invocation
+    ~invocation
+    (fun ~dispatched ~commit ->
+       let resolved =
+         Agent_protocol.Invocation.resolve
+           dispatched
+           ~session_id:dispatched.context.session_id
+           ~generation:dispatched.context.generation
+           (Complete (`String "done"))
+         |> protocol_ok
+       in
+       commit ~resolved ~snapshot:(handoff_snapshot 1))
+;;
+
+let%test_unit
+    "invocation publication saves history and receipt atomically and retries only once"
+  =
+  let done_, done_u = Eio.Promise.create () in
+  let reject_publication = ref true in
+  let stale_publish = ref None in
+  with_handoff_actor
+    ~reject:(fun next ->
+      let publishing =
+        List.exists next.Agent_session.Session_transition.state.invocations ~f:(fun i ->
+          Option.is_some i.output_entry_id)
+      in
+      if publishing && !reject_publication
+      then (
+        reject_publication := false;
+        true)
+      else false)
+    ~make_worker:(fun _env actor_ready ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+        let actor = Eio.Promise.await actor_ready in
+        let call, invocation = publication_call caps () in
+        (* Binding a nonexistent call must not invoke the handler. *)
+        assert (Result.is_error (resolve_publication caps invocation));
+        caps.commit_entry call |> protocol_ok;
+        let output = publication_output caps () in
+        let publish entry =
+          caps.publish_invocation_output ~invocation_id:invocation.context.id entry
+        in
+        assert (Result.is_error (publish output));
+        resolve_publication caps invocation |> protocol_ok;
+        let duplicate =
+          Agent_protocol.Invocation.create
+            { invocation.context with id = Agent_protocol.Id.Invocation.create () }
+          |> protocol_ok
+        in
+        assert (Result.is_error (resolve_publication caps duplicate));
+        let wrong = publication_output caps ~text:"wrong" () in
+        assert (Result.is_error (publish wrong));
+        let wrong_kind = publication_output caps ~custom:true () in
+        assert (Result.is_error (publish wrong_kind));
+        let before = Agent_session.Session_actor.state actor |> protocol_ok in
+        assert (Result.is_error (publish output));
+        let failed = Agent_session.Session_actor.state actor |> protocol_ok in
+        assert (
+          Sexp.equal
+            (Agent_session.Session_state.sexp_of_t before)
+            (Agent_session.Session_state.sexp_of_t failed));
+        Eio.Fiber.both
+          (fun () -> publish output |> protocol_ok)
+          (fun () -> publish output |> protocol_ok);
+        let published = Agent_session.Session_actor.state actor |> protocol_ok in
+        assert (
+          Int64.equal published.counters.revision Int64.(before.counters.revision + 1L));
+        assert (List.length published.conversation.canonical_history = 3);
+        assert (
+          Option.equal
+            History_entry.Id.equal
+            (List.hd_exn published.invocations).output_entry_id
+            (Some (History_entry.id output)));
+        assert (Result.is_error (publish (publication_output caps ())));
+        assert (
+          Result.is_error
+            (publish (History_entry.with_item output (History_entry.item wrong))));
+        let restored =
+          Agent_session.Session_persistence.restore_snapshot
+            (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t published))
+          |> store_ok
+        in
+        assert (Poly.equal restored.invocations published.invocations);
+        (* History compaction retains the receipt and permits no new publication identity. *)
+        let compacted =
+          Agent_session.Session_delta.apply restored (Canonical_history_replaced [])
+          |> protocol_ok
+        in
+        let repeated =
+          Agent_session.Session_delta.apply
+            compacted
+            (Invocation_changed (List.hd_exn published.invocations))
+          |> protocol_ok
+        in
+        assert (List.is_empty repeated.conversation.canonical_history);
+        Agent_session.Session_state.validate repeated |> protocol_ok;
+        stale_publish := Some (fun () -> publish output);
+        Eio.Promise.resolve done_u ();
+        Completed
+          { final_history = input.history @ [ call; output ]
+          ; runtime_requests = []
+          ; moderator_snapshot = published.moderator
+          }))
+    (fun _env actor _writer backend ->
+       Eio.Promise.await done_;
+       ignore (await_idle actor);
+       assert (Result.is_error ((Option.value_exn !stale_publish) ()));
+       let saved = Agent_session.Memory_backend.state backend in
+       assert (List.length saved.conversation.canonical_history = 3);
+       assert (List.length saved.invocations = 1))
+;;
+
+let%test_unit
+    "publication binds repeated provider IDs to their exact function or custom call"
+  =
+  let done_, done_u = Eio.Promise.create () in
+  with_handoff_actor
+    ~make_worker:(fun _env actor_ready ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+        let actor = Eio.Promise.await actor_ready in
+        let history = ref input.history in
+        List.iter [ false; true; false ] ~f:(fun custom ->
+          let call, invocation = publication_call caps ~custom () in
+          caps.commit_entry call |> protocol_ok;
+          resolve_publication caps invocation |> protocol_ok;
+          let output = publication_output caps ~custom () in
+          caps.publish_invocation_output ~invocation_id:invocation.context.id output
+          |> protocol_ok;
+          history := !history @ [ call; output ]);
+        let old_call, old_invocation = publication_call caps () in
+        caps.commit_entry old_call |> protocol_ok;
+        let next_call, _ = publication_call caps () in
+        caps.commit_entry next_call |> protocol_ok;
+        assert (Result.is_error (resolve_publication caps old_invocation));
+        let state = Agent_session.Session_actor.state actor |> protocol_ok in
+        assert (List.length state.invocations = 3);
+        Eio.Promise.resolve done_u ();
+        Completed
+          { final_history = !history @ [ old_call; next_call ]
+          ; runtime_requests = []
+          ; moderator_snapshot = state.moderator
+          }))
+    (fun _env actor _writer _backend ->
+       Eio.Promise.await done_;
+       ignore (await_idle actor))
+;;
+
+let%test_unit
+    "cancelled publishers cannot append late results and committed receipts survive \
+     cancellation"
+  =
+  List.iter [ false; true ] ~f:(fun publish_first ->
+    let ready, ready_u = Eio.Promise.create () in
+    let never, _ = Eio.Promise.create () in
+    with_handoff_actor
+      ~make_worker:(fun _env _actor_ready ->
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ caps ->
+          let call, invocation = publication_call caps () in
+          caps.commit_entry call |> protocol_ok;
+          resolve_publication caps invocation |> protocol_ok;
+          let output = publication_output caps () in
+          let publish () =
+            caps.publish_invocation_output ~invocation_id:invocation.context.id output
+          in
+          if publish_first then publish () |> protocol_ok;
+          Eio.Promise.resolve ready_u publish;
+          Eio.Promise.await never))
+      (fun _env actor writer backend ->
+         let publish = Eio.Promise.await ready in
+         Agent_session.Session_actor.stop actor ~attachment_id:writer.id ~mode:Cancel
+         |> protocol_ok
+         |> ignore;
+         assert (Result.is_error (publish ()));
+         let rec finished () =
+           let s = Agent_session.Session_actor.state actor |> protocol_ok in
+           if Option.is_none s.active_operation
+           then s
+           else (
+             Eio.Fiber.yield ();
+             finished ())
+         in
+         let state = finished () in
+         assert (
+           List.length state.conversation.canonical_history
+           = if publish_first then 3 else 2);
+         let invocation = List.hd_exn state.invocations in
+         assert (Bool.equal (Option.is_some invocation.output_entry_id) publish_first);
+         assert (
+           match invocation.status with
+           | Published (Complete (`String "done")) -> publish_first
+           | Resolved (Complete (`String "done")) -> not publish_first
+           | _ -> false);
+         assert (
+           Poly.equal
+             state.invocations
+             (Agent_session.Memory_backend.state backend).invocations)))
+;;
+
+let%test_unit
+    "graceful stop allows an admitted invocation to publish its initial response"
+  =
+  let ready, ready_u = Eio.Promise.create () in
+  let release, release_u = Eio.Promise.create () in
+  let done_, done_u = Eio.Promise.create () in
+  with_handoff_actor
+    ~make_worker:(fun _env actor_ready ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+        let actor = Eio.Promise.await actor_ready in
+        let call, invocation = publication_call caps () in
+        caps.commit_entry call |> protocol_ok;
+        resolve_publication caps invocation |> protocol_ok;
+        let output = publication_output caps () in
+        Eio.Promise.resolve ready_u ();
+        Eio.Promise.await release;
+        caps.publish_invocation_output ~invocation_id:invocation.context.id output
+        |> protocol_ok;
+        let state = Agent_session.Session_actor.state actor |> protocol_ok in
+        Eio.Promise.resolve done_u ();
+        Completed
+          { final_history = input.history @ [ call; output ]
+          ; runtime_requests = []
+          ; moderator_snapshot = state.moderator
+          }))
+    (fun _env actor writer _backend ->
+       Eio.Promise.await ready;
+       Agent_session.Session_actor.stop actor ~attachment_id:writer.id ~mode:Graceful
+       |> protocol_ok
+       |> ignore;
+       Eio.Promise.resolve release_u ();
+       Eio.Promise.await done_;
+       let state = Agent_session.Session_actor.state actor |> protocol_ok in
+       assert (Option.is_some (List.hd_exn state.invocations).output_entry_id))
 ;;
 
 let handoff_manager env =

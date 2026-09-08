@@ -17,6 +17,15 @@ module Capabilities : sig
   type t =
     { id_source : History_entry.Id_source.t
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
+    ; publish_invocation_output :
+        invocation_id:Agent_protocol.Id.Invocation.t
+        -> History_entry.t
+        -> (unit, Agent_protocol.Error.t) result
+      (** Atomically append a bound model invocation's initial result and retain
+          its publication receipt. Requires a running owning operation and a
+          recorded, validated/disclosed outcome. Same-occurrence retries are
+          no-ops even after history compaction; another occurrence is rejected.
+          Does not execute handlers or post-tool observations. *)
     ; commit_moderator : Jsonaf.t option -> (unit, Agent_protocol.Error.t) result
       (** Checkpoint committed moderator state for this active operation.
             Identical snapshots are no-ops; stale/cancelled workers are rejected. *)

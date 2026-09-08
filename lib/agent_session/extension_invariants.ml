@@ -102,6 +102,21 @@ let validate
       ~schedules
   =
   let open Result.Let_syntax in
+  let seen_occurrences = Hash_set.create (module P.History.Id) in
+  let%bind () =
+    List.fold_result invocations ~init:() ~f:(fun () (i : P.Invocation.t) ->
+      let unique seen = function
+        | None -> Ok ()
+        | Some id ->
+          if Hash_set.mem seen id
+          then invalid "canonical occurrence is claimed by multiple invocations"
+          else (
+            Hash_set.add seen id;
+            Ok ())
+      in
+      let%bind () = unique seen_occurrences i.context.call_entry_id in
+      unique seen_occurrences i.output_entry_id)
+  in
   let seen_subscriptions = Hash_set.create (module P.Id.Subscription) in
   let%bind () =
     List.fold_result subscriptions ~init:() ~f:(fun () (s : P.Subscription.t) ->

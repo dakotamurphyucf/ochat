@@ -86,6 +86,7 @@ let setup
         ; generation = 0
         ; origin = Model
         ; provider_call_id = Some "provider-call"
+        ; call_entry_id = None
         ; parent_invocation = None
         ; parent_job = None
         ; tool_name = "counter"

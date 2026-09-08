@@ -19,6 +19,7 @@ let context () : Invocation.context =
   ; generation = 3
   ; origin = Model
   ; provider_call_id = Some "provider-call-1"
+  ; call_entry_id = None
   ; parent_invocation = None
   ; parent_job = None
   ; tool_name = "watch_response"
@@ -160,7 +161,7 @@ let%expect_test
 let%expect_test "incompatible and malformed snapshots fail instead of losing state" =
   let invocation = get (Invocation.create (context ())) in
   let encoded = Invocation.to_json invocation in
-  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "2")));
+  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "3")));
   report
     (Invocation.of_json
        (replace_field encoded "status" (`Object [ "type", `String "resolved" ])));
@@ -253,6 +254,94 @@ let%expect_test "validation also checks typed IDs restored through sexp snapshot
   report (Invocation.validate (Invocation.t_of_sexp (Sexp.of_string corrupted)));
   [%expect
     {|
+    invalid_request
+    invalid_request
+    invalid_request |}]
+;;
+
+let%expect_test
+    "canonical occurrence bindings survive codecs and make publication idempotent"
+  =
+  let call_entry_id = get (History.Id.of_string "4:test:1") in
+  let output_entry_id = get (History.Id.of_string "4:test:2") in
+  let original = context () in
+  let admitted =
+    get (Invocation.create { original with call_entry_id = Some call_entry_id })
+  in
+  let restored = get (Invocation.of_json (Invocation.to_json admitted)) in
+  assert (Sexp.equal (Invocation.sexp_of_t admitted) (Invocation.sexp_of_t restored));
+  let dispatched = get (Invocation.dispatch restored) in
+  let resolved = get (resolve dispatched (Complete (`String "done"))) in
+  report (Invocation.publish resolved);
+  let published = get (Invocation.publish_with_history resolved ~output_entry_id) in
+  report (Invocation.validate_transition ~previous:(Some resolved) published);
+  let restored = get (Invocation.of_json (Invocation.to_json published)) in
+  let repeated = get (Invocation.publish_with_history restored ~output_entry_id) in
+  assert (Sexp.equal (Invocation.sexp_of_t repeated) (Invocation.sexp_of_t published));
+  let another_output = get (History.Id.of_string "4:test:3") in
+  report (Invocation.publish_with_history restored ~output_entry_id:another_output);
+  let other =
+    get (Invocation.publish_with_history resolved ~output_entry_id:another_output)
+  in
+  report (Invocation.validate_transition ~previous:(Some published) other);
+  let other_context =
+    get (Invocation.create { original with call_entry_id = Some output_entry_id })
+  in
+  report
+    (Invocation.validate_transition
+       ~previous:(Some admitted)
+       (get (Invocation.dispatch other_context)));
+  [%expect
+    {|
+    invalid_state
+    ok
+    conflict
+    conflict
+    conflict |}]
+;;
+
+let%expect_test "legacy records remain unbound and v2 cannot lose its occurrence receipts"
+  =
+  let original = context () in
+  let legacy = get (Invocation.create original) in
+  let json = Invocation.to_json legacy in
+  assert (not (String.is_substring (Jsonaf.to_string json) ~substring:"entry_id"));
+  let sexp = Invocation.sexp_of_t legacy in
+  assert (not (String.is_substring (Sexp.to_string sexp) ~substring:"entry_id"));
+  report (Invocation.validate (Invocation.t_of_sexp sexp));
+  let call_entry_id = get (History.Id.of_string "4:test:1") in
+  report (Invocation.publish_with_history legacy ~output_entry_id:call_entry_id);
+  report
+    (Invocation.create
+       { original with
+         origin = Script
+       ; provider_call_id = None
+       ; call_entry_id = Some call_entry_id
+       });
+  let bound =
+    get (Invocation.create { original with call_entry_id = Some call_entry_id })
+  in
+  let bound_json = Invocation.to_json bound in
+  report (Invocation.of_json (replace_field bound_json "schema_version" (`Number "1")));
+  report (Invocation.of_json (replace_field json "schema_version" (`Number "2")));
+  report
+    (Invocation.of_json
+       (replace_field bound_json "output_entry_id" (History.Id.to_json call_entry_id)));
+  report
+    (Invocation.of_json
+       (replace_field
+          bound_json
+          "status"
+          (`Object
+              [ "type", `String "published"
+              ; "outcome", Invocation.outcome_to_json (Complete `Null)
+              ])));
+  [%expect
+    {|
+    ok
+    invalid_state
+    invalid_request
+    invalid_request
     invalid_request
     invalid_request
     invalid_request |}]

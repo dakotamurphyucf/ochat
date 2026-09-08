@@ -182,6 +182,11 @@ let validate t =
   let%bind () =
     List.fold_result t.invocations ~init:() ~f:(fun () invocation ->
       let%bind () = Agent_protocol.Invocation.validate invocation in
+      let%bind () =
+        Invocation_history.validate_retained
+          ~history:t.conversation.canonical_history
+          invocation
+      in
       let context = invocation.context in
       if
         Agent_protocol.Id.Session.compare context.session_id t.identity.session_id <> 0

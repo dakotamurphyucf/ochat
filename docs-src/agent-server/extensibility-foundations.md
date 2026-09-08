@@ -58,8 +58,8 @@ native invocation or completion event. Legacy scripts retain their existing even
 representation.
 
 These are internal execution primitives, not public tool registration. Shared
-tool routing, current authority checks, nested-call admission, canonical output
-publication, post-tool observation and
+tool routing, current authority checks, nested-call admission, integration with
+canonical output publication, post-tool observation and
 restart reconciliation remain required before a host exposes moderator tools. The host
 resolution installer must be infallible, must not yield, and must not re-enter
 the manager lock. The prospective snapshot API itself does not implement the
@@ -128,6 +128,41 @@ during a borrow are rejected. Independent calls queue outside the actor; a
 recursive call or cross-owner acquisition cycle returns an explicit error before
 admission. The service publishes no provider tool output, grants
 no additional tool authority, and does not enable any extension feature flag.
+
+### Canonical initial result publication
+
+`Operation_worker.Capabilities.publish_invocation_output` saves a resolved model
+invocation's initial tool output and publication receipt in one actor transition.
+It checks the running operation and current generation before saving. Graceful
+stopping allows publication of an admitted result; cancelled or stale workers
+cannot publish. The service executes neither the handler nor post-tool hooks.
+
+New model invocation records bind an application-owned `call_entry_id` at
+admission. The referenced canonical entry must contain the matching tool name,
+provider call ID and function/custom call kind. A later call reusing that provider
+ID cannot receive this invocation's result. Multiple invocations cannot claim the
+same canonical occurrence. Script origins cannot carry provider history bindings.
+
+The supplied output contains the exact JSON serialization of the recorded
+`Complete`, `Pending`, `Fail` or host cancellation envelope as provider-compatible
+text. Schema validation and disclosure policy must finish before that outcome is
+recorded; this storage API does not implement those policies. Function calls receive
+function outputs and custom calls receive custom outputs. A newly published
+receipt must reference the actual output after its bound call, without crossing
+another matching call or output.
+
+The output occurrence ID is retained on the invocation. Retrying the same
+occurrence is a no-op, including after history compaction removes its text.
+Another occurrence or a changed retained payload is rejected. Failed persistence
+installs neither the output nor its receipt and emits no committed history event.
+Snapshot and journal restoration validate retained result payloads against their
+receipts. They preserve receipts independently of transcript retention.
+
+Bound invocation JSON records use codec version 2. Unbound legacy records retain
+version 1, and missing S-expression fields load as absent. Older readers reject
+the new codec rather than silently discard the binding. This host-only addition
+does not change the ChatML context ABI or enable public feature flags. Normal
+tool routing and automatic restart reconciliation still need to call this service.
 
 ### Synchronous call coordination
 

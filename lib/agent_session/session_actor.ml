@@ -112,6 +112,9 @@ type _ request =
   | Adopt_deferred : Agent_protocol.Session.t request
   | Reserve_history_block : int -> History_id_source.reservation request
   | Commit_worker_entry : Agent_protocol.Id.Operation.t * History_entry.t -> unit request
+  | Publish_invocation_output :
+      Agent_protocol.Id.Operation.t * Agent_protocol.Id.Invocation.t * History_entry.t
+      -> unit request
   | Commit_worker_moderator :
       Agent_protocol.Id.Operation.t * Jsonaf.t option
       -> unit request
@@ -951,6 +954,65 @@ let commit_worker_entry t operation_id entry =
     else Error (error Conflict "history ID was committed with a different payload")
 ;;
 
+let publish_invocation_output t operation_id invocation_id entry =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation ~allow_stopping:true t operation_id in
+  let%bind invocation =
+    match
+      List.find t.state.invocations ~f:(fun i ->
+        Agent_protocol.Id.Invocation.compare i.context.id invocation_id = 0)
+    with
+    | Some i -> Ok i
+    | None -> Error (error Invalid_state "invocation has not been admitted")
+  in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      invocation.context.session_id
+      invocation.context.generation
+  in
+  let%bind () = Invocation_history.validate_output invocation entry in
+  let%bind published =
+    Agent_protocol.Invocation.publish_with_history
+      invocation
+      ~output_entry_id:(History_entry.id entry)
+  in
+  let protocol_entry = History_codec.to_protocol entry in
+  let existing =
+    List.find t.state.conversation.canonical_history ~f:(fun e ->
+      History_entry.Id.equal e.id protocol_entry.id)
+  in
+  let%bind () =
+    match existing with
+    | Some e
+      when not
+             (Sexp.equal
+                ([%sexp_of: Agent_protocol.History.entry] e)
+                ([%sexp_of: Agent_protocol.History.entry] protocol_entry)) ->
+      Error (error Conflict "output occurrence has a different canonical payload")
+    | _ -> Ok ()
+  in
+  match invocation.status with
+  | Published _ -> Ok ()
+  | _ ->
+    let entries = if Option.is_some existing then [] else [ protocol_entry ] in
+    let payloads =
+      if List.is_empty entries
+      then []
+      else [ Agent_protocol.Event.Durable.Payload.History_appended entries ]
+    in
+    let%map _ =
+      transition
+        t
+        ~delta:
+          (Session_delta.Batch
+             [ Canonical_entries_appended entries; Invocation_changed published ])
+        ~payloads
+    in
+    ()
+;;
+
 let commit_worker_moderator t operation_id moderator =
   let open Result.Let_syntax in
   let%bind _ = running_operation ~allow_stopping:true t operation_id in
@@ -1679,6 +1741,10 @@ let worker_capabilities t operation_id id_source buffer =
   Operation_worker.Capabilities.
     { id_source = History_id_source.as_history_entry_source id_source
     ; commit_entry = (fun entry -> call t (Commit_worker_entry (operation_id, entry)))
+    ; publish_invocation_output =
+        (fun ~invocation_id entry ->
+          Eio.Cancel.protect (fun () ->
+            call t (Publish_invocation_output (operation_id, invocation_id, entry))))
     ; commit_moderator =
         (fun snapshot -> call t (Commit_worker_moderator (operation_id, snapshot)))
     ; with_moderator_invocation = with_moderator_invocation t operation_id
@@ -3025,6 +3091,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Adopt_deferred -> adopt_deferred t
   | Reserve_history_block count -> reserve_history_block t count
   | Commit_worker_entry (operation_id, entry) -> commit_worker_entry t operation_id entry
+  | Publish_invocation_output (operation_id, invocation_id, entry) ->
+    publish_invocation_output t operation_id invocation_id entry
   | Consume_deferred operation_id -> consume_deferred t operation_id
   | Commit_worker_moderator (operation_id, snapshot) ->
     commit_worker_moderator t operation_id snapshot

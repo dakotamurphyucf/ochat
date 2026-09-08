@@ -36,6 +36,7 @@ type context =
   ; generation : int
   ; origin : origin
   ; provider_call_id : string option
+  ; call_entry_id : History.Id.t option [@sexp.option]
   ; parent_invocation : Id.Invocation.t option
   ; parent_job : Id.Job.t option
   ; tool_name : string
@@ -57,6 +58,7 @@ type status =
 type t =
   { context : context
   ; status : status
+  ; output_entry_id : History.Id.t option [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -114,6 +116,12 @@ let validate_context context =
     | _, None -> Ok ()
   in
   let%bind () =
+    match context.origin, context.call_entry_id with
+    | Model, Some id -> validate_id History.Id.to_json History.Id.of_json id
+    | _, None -> Ok ()
+    | _, Some _ -> invalid "non-model invocation cannot bind a canonical call"
+  in
+  let%bind () =
     if
       Option.exists context.parent_invocation ~f:(fun id ->
         Id.Invocation.compare context.id id = 0)
@@ -133,13 +141,28 @@ let validate_context context =
 let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_context t.context in
+  let%bind () =
+    match t.status, t.context.call_entry_id, t.output_entry_id with
+    | Published _, Some call_id, Some id ->
+      if History.Id.compare call_id id = 0
+      then invalid "call and output occurrences must differ"
+      else validate_id History.Id.to_json History.Id.of_json id
+    | Published _, Some _, None ->
+      invalid "bound publication requires an output occurrence"
+    | Published _, None, Some _ ->
+      invalid "publication receipt requires a call occurrence"
+    | (Admitted | Dispatching | Resolved _), _, Some _ ->
+      invalid "unpublished invocation cannot carry an output occurrence"
+    | _, _, None -> Ok ()
+  in
   match t.status with
   | Admitted | Dispatching -> Ok ()
   | Resolved outcome | Published outcome -> validate_outcome outcome
 ;;
 
 let create context =
-  Result.map (validate_context context) ~f:(fun () -> { context; status = Admitted })
+  Result.map (validate_context context) ~f:(fun () ->
+    { context; status = Admitted; output_entry_id = None })
 ;;
 
 let dispatch t =
@@ -173,10 +196,36 @@ let cancel t ~reason =
 ;;
 
 let publish t =
-  match t.status with
-  | Resolved outcome -> Ok { t with status = Published outcome }
-  | Published _ -> Ok t
-  | Admitted | Dispatching -> failure Invalid_state "invocation has no recorded outcome"
+  if Option.is_some t.context.call_entry_id
+  then
+    failure
+      Invalid_state
+      "bound invocation publication requires a canonical output occurrence"
+  else (
+    match t.status with
+    | Resolved outcome -> Ok { t with status = Published outcome }
+    | Published _ -> Ok t
+    | Admitted | Dispatching -> failure Invalid_state "invocation has no recorded outcome")
+;;
+
+let publish_with_history t ~output_entry_id =
+  let open Result.Let_syntax in
+  let%bind () = validate t in
+  let%bind () = validate_id History.Id.to_json History.Id.of_json output_entry_id in
+  if
+    Option.exists t.context.call_entry_id ~f:(fun id ->
+      History.Id.compare id output_entry_id = 0)
+  then invalid "call and output occurrences must differ"
+  else if Option.is_none t.context.call_entry_id
+  then failure Invalid_state "invocation has no canonical call occurrence"
+  else (
+    match t.status, t.output_entry_id with
+    | Resolved outcome, None ->
+      Ok { t with status = Published outcome; output_entry_id = Some output_entry_id }
+    | Published _, Some existing when History.Id.compare existing output_entry_id = 0 ->
+      Ok t
+    | Published _, _ -> failure Conflict "publication output occurrence is immutable"
+    | _ -> failure Invalid_state "invocation has no recorded outcome")
 ;;
 
 let validate_transition ~previous next =
@@ -191,6 +240,14 @@ let validate_transition ~previous next =
     let%bind () = validate previous in
     if not (Sexp.equal (sexp_of_context previous.context) (sexp_of_context next.context))
     then failure Conflict "invocation context is immutable"
+    else if
+      Option.is_some previous.output_entry_id
+      && not
+           (Option.equal
+              (fun a b -> History.Id.compare a b = 0)
+              previous.output_entry_id
+              next.output_entry_id)
+    then failure Conflict "publication output occurrence is immutable"
     else (
       match previous.status, next.status with
       | Admitted, Dispatching | Admitted, Resolved (Cancelled _) | Dispatching, Resolved _
@@ -308,31 +365,33 @@ let context_to_json context =
      ; "created_at", Timestamp.to_json context.created_at
      ]
      @ optional "provider_call_id" context.provider_call_id (fun x -> `String x)
+     @ optional "call_entry_id" context.call_entry_id History.Id.to_json
      @ optional "parent_invocation" context.parent_invocation Id.Invocation.to_json
      @ optional "parent_job" context.parent_job Id.Job.to_json
      @ optional "deadline" context.deadline Timestamp.to_json)
 ;;
 
-let context_of_json json =
+let context_of_json ~version json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
   let%bind () =
     closed
       fields
-      [ "id"
-      ; "session_id"
-      ; "generation"
-      ; "origin"
-      ; "provider_call_id"
-      ; "parent_invocation"
-      ; "parent_job"
-      ; "tool_name"
-      ; "implementation_revision"
-      ; "capability_fingerprint"
-      ; "input"
-      ; "created_at"
-      ; "deadline"
-      ]
+      ([ "id"
+       ; "session_id"
+       ; "generation"
+       ; "origin"
+       ; "provider_call_id"
+       ; "parent_invocation"
+       ; "parent_job"
+       ; "tool_name"
+       ; "implementation_revision"
+       ; "capability_fingerprint"
+       ; "input"
+       ; "created_at"
+       ; "deadline"
+       ]
+       @ if version = 2 then [ "call_entry_id" ] else [])
   in
   let%bind id = Json_codec.required_as fields "id" Id.Invocation.of_json in
   let%bind session_id = Json_codec.required_as fields "session_id" Id.Session.of_json in
@@ -350,6 +409,9 @@ let context_of_json json =
   in
   let%bind provider_call_id =
     Json_codec.optional_as fields "provider_call_id" Json_codec.string
+  in
+  let%bind call_entry_id =
+    Json_codec.optional_as fields "call_entry_id" History.Id.of_json
   in
   let%bind parent_invocation =
     Json_codec.optional_as fields "parent_invocation" Id.Invocation.of_json
@@ -370,6 +432,7 @@ let context_of_json json =
   ; generation
   ; origin
   ; provider_call_id
+  ; call_entry_id
   ; parent_invocation
   ; parent_job
   ; tool_name
@@ -407,17 +470,18 @@ let status_of_json json =
 
 let to_json t =
   `Object
-    [ "schema_version", `Number "1"
-    ; "context", context_to_json t.context
-    ; "status", status_to_json t.status
-    ]
+    ([ ( "schema_version"
+       , `Number (if Option.is_some t.context.call_entry_id then "2" else "1") )
+     ; "context", context_to_json t.context
+     ; "status", status_to_json t.status
+     ]
+     @ optional "output_entry_id" t.output_entry_id History.Id.to_json)
 ;;
 
 let of_json json =
   let open Result.Let_syntax in
   let%bind () = validate_json ~max_bytes:(18 * 1024 * 1024) ~max_depth:136 json in
   let%bind fields = Json_codec.fields json in
-  let%bind () = closed fields [ "schema_version"; "context"; "status" ] in
   let%bind version =
     Json_codec.required_as
       fields
@@ -425,13 +489,27 @@ let of_json json =
       (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
   in
   let%bind () =
-    if version = 1
+    if version = 1 || version = 2
     then Ok ()
     else failure Incompatible_protocol "unsupported invocation schema version"
   in
-  let%bind context = Json_codec.required_as fields "context" context_of_json in
+  let%bind () =
+    closed
+      fields
+      ([ "schema_version"; "context"; "status" ]
+       @ if version = 2 then [ "output_entry_id" ] else [])
+  in
+  let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
+  let%bind () =
+    if version = 2 && Option.is_none context.call_entry_id
+    then invalid "invocation schema 2 requires a canonical call occurrence"
+    else Ok ()
+  in
   let%bind status = Json_codec.required_as fields "status" status_of_json in
-  let t = { context; status } in
+  let%bind output_entry_id =
+    Json_codec.optional_as fields "output_entry_id" History.Id.of_json
+  in
+  let t = { context; status; output_entry_id } in
   let%map () = validate t in
   t
 ;;

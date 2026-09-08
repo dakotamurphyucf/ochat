@@ -170,7 +170,19 @@ let rec apply state = function
       List.find state.invocations ~f:(fun candidate ->
         Agent_protocol.Id.Invocation.compare candidate.context.id context.id = 0)
     in
-    let%map () = Agent_protocol.Invocation.validate_transition ~previous invocation in
+    let%bind () = Agent_protocol.Invocation.validate_transition ~previous invocation in
+    let%map () =
+      match context.call_entry_id, previous, invocation.status with
+      | Some _, None, _ ->
+        Invocation_history.validate_call
+          ~history:state.conversation.canonical_history
+          invocation
+      | Some _, Some { status = Resolved _; _ }, Published _ ->
+        Invocation_history.validate_publication
+          ~history:state.conversation.canonical_history
+          invocation
+      | _ -> Ok ()
+    in
     { state with
       invocations =
         replace_by
