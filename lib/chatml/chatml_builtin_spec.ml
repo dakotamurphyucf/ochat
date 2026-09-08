@@ -9,6 +9,7 @@ type row =
   | TRow_empty
   | TRow_var of string
   | TRow_extend of (string * ty) list * row
+[@@deriving sexp_of]
 
 and ty =
   | TVar of string
@@ -26,6 +27,7 @@ and ty =
   | TFun of ty list * ty
   | TMu of string * ty
   | TRec_var of string
+[@@deriving sexp_of]
 
 let closed_row (fields : (string * ty) list) : row = TRow_extend (fields, TRow_empty)
 

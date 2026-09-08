@@ -76,3 +76,10 @@
  (flags --table --dump))
 
 (ocamllex chatml_lexer)
+
+(library
+ (name chatml_compilation)
+ (public_name ochat.chatml_compilation)
+ (modules chatml_compilation)
+ (libraries core core_unix eio eio.unix cstruct chatml chatml_host_runtime)
+ (preprocess (pps ppx_jane)))

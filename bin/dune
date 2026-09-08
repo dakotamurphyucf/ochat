@@ -228,3 +228,10 @@
   ochat.agent_transport_stdio)
  (preprocess
   (pps ppx_jane)))
+
+(executable
+ (package ochat)
+ (name ochat_chatml_compiler)
+ (public_name ochat-chatml-compiler)
+ (modules ochat_chatml_compiler)
+ (libraries chatml_compilation))

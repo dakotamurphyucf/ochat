@@ -183,6 +183,22 @@ val compile_script
   -> unit
   -> (compiled_script, string) result
 
+(** Internal transport for a trusted compiler executable from the same runtime
+    installation. This imports already checked code without re-typechecking and
+    MUST NOT receive user-supplied artifacts. It serializes only resolved syntax,
+    slot tags and source spans, never closures, runtime values or environments.
+    The owning transport must enforce framing, size/depth, source, version and
+    surface identities before importing. Not a persisted artifact format. *)
+module Private_compiler_transport : sig
+  val export : compiled_script -> Core.Sexp.t
+
+  val import
+    :  surface:Builtin_surface.surface
+    -> source:string
+    -> Core.Sexp.t
+    -> compiled_script
+end
+
 (** Surface recorded on a compiled script artifact. *)
 val compiled_surface : compiled_script -> Builtin_surface.surface
 

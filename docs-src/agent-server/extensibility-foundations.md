@@ -221,8 +221,9 @@ program, without evaluating initializers or invoking entrypoints. Missing names,
 wrong arity, incompatible inputs/results and shadowed final definitions reject.
 Shared type variables relate requirements such as moderator `initial_state` and
 `on_event`. Source-level type aliases cannot redefine the host's expected types.
-This is an internal compiler facility; complete admission and isolated compilation
-with enforced time/resource budgets remain unfinished.
+The synchronous function is an internal compiler facility. Hosts can use the
+isolated compilation service described below; complete runtime admission remains
+unfinished.
 
 `Chatml.Chatml_extension_surface` defines explicit version-1 compiler surfaces:
 
@@ -336,9 +337,11 @@ values still require validation at their respective invocation boundaries.
 This is an internal synchronous preparation API. It does not load sources, perform
 preprocessing, authorize new native tool declarations, or reconnect resources.
 The source parser/capture stage must validate imports and definition dependency
-cycles first. Public generated-definition validation still needs its stricter
-bundle loader and isolated compilation budgets, and runtime registration must use
-the prepared value before exposing a handler. Those integration steps remain open.
+cycles first. `prepare_isolated` preserves those checks and uses the separate
+compiler worker for typechecking. Public generated-definition validation must
+combine the strict bundle parser, inherited-authority checks and this bounded
+compiler path; runtime registration must use the prepared value before exposing a
+handler. Those integration steps remain open.
 
 ## Generated source bundles
 
@@ -375,3 +378,39 @@ created, and no capability is granted by successful parsing. Persisted generated
 artifacts must retain this parsing policy so restoration cannot silently use the
 ordinary authored-file path; that integration remains part of generated-session
 implementation.
+
+## Isolated compilation
+
+`Chatml_compilation.compile` starts the installed `ochat-chatml-compiler` executable
+for a one-off, standalone-tool or extensibility-v1 moderator target. The host
+supplies an absolute, trusted executable path from the same runtime installation.
+This path is not agent input; the API does not search PATH or inherit the host
+environment. Source travels over a private pipe and is never executed by the
+worker. Initializers that would fail at runtime can still pass compilation.
+
+The default wall-time budget is 5 seconds, with an explicit ceiling of 30 seconds;
+the default source budget is 256 KiB, capped at 1 MiB. The worker also applies
+OS CPU, file-size and descriptor limits before reading its request. Unsupported
+limits fail closed. This API does not impose a portable hard process-heap limit
+or an OS filesystem/network sandbox. Its worker is trusted compiler code that
+does not evaluate ChatML, fetch dependencies, instantiate sessions or call tools.
+
+Successful output is a versioned resolved-syntax artifact. The parent checks the
+requested target, exact builtin/alias/entrypoint type contract and original source
+bytes before using it. The pipe carries no closures, runtime environments or
+capability credentials. The parent does not re-run unbounded typechecking. This
+is an internal same-installation transport, not a persisted format or a public
+artifact-import endpoint. The low-level `Private_compiler_transport` import must
+never receive untrusted artifacts.
+
+Transport reads are limited to 16 MiB and nesting is checked before parsing at a
+maximum depth of 512. Diagnostics are capped at 16 KiB. The wall-time deadline
+covers worker launch, input/output and compilation. Timeout or cancellation kills
+the worker and lets the owning Eio switch reap it before the call returns; it
+does not leave an abandoned compiler running. Caller cancellation propagates.
+
+`Extension_compiler.prepare_isolated` provides the same source/schema and exact
+selected-capability checks as synchronous preparation with this worker path.
+Compilation remains separate from dynamic initialization, state serialization,
+per-call authorization and feature qualification. No model-visible feature is
+enabled by these APIs alone.

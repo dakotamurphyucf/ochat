@@ -22,6 +22,7 @@ type row =
   | TRow_empty
   | TRow_var of string
   | TRow_extend of (string * ty) list * row
+[@@deriving sexp_of]
 
 (** The builtin type language mirrored by {!Chatml_typechecker}. *)
 and ty =
@@ -40,6 +41,7 @@ and ty =
   | TFun of ty list * ty
   | TMu of string * ty
   | TRec_var of string
+[@@deriving sexp_of]
 
 (** A top-level builtin value binding along with its type scheme. *)
 type builtin =

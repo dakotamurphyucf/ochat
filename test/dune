@@ -902,3 +902,17 @@
  (libraries core core_unix eio eio_main chatmd ochat.chatmd_shell_spec)
  (inline_tests)
  (preprocess (pps ppx_jane)))
+
+(executable
+ (name chatml_compilation_test)
+ (modules chatml_compilation_test)
+ (libraries core core_unix core_unix.signal_unix eio eio_main chatml chatml_host_runtime chatml_compilation chatmd chatmd_shell_spec chat_response)
+ (preprocess (pps ppx_jane)))
+
+(rule
+ (alias runtest-chatml-compilation)
+ (action (run %{exe:chatml_compilation_test.exe} %{exe:../bin/ochat_chatml_compiler.exe})))
+
+(alias
+ (name runtest)
+ (deps (alias runtest-chatml-compilation)))

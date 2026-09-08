@@ -55,14 +55,14 @@ type var_loc =
   ; index : int
   ; slot : Frame_env.packed_slot
   }
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 type match_case =
   { pat : pattern
   ; pat_span : Source.span
   ; rhs : expr node
   }
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 and match_case_slots =
   { pat : pattern
@@ -70,7 +70,7 @@ and match_case_slots =
   ; slots : Frame_env.packed_slot list
   ; rhs : expr node
   }
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 and resolved_match_case =
   { pat : pattern
@@ -78,12 +78,12 @@ and resolved_match_case =
   ; slots : Frame_env.packed_slot list
   ; rhs : resolved_expr node
   }
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 and unary_prim =
   | UNegInt
   | UNegFloat
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 and binary_prim =
   | BIntAdd
@@ -105,7 +105,7 @@ and binary_prim =
   | BFloatGe
   | BEq
   | BNeq
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 and expr =
   | EUnit
@@ -141,7 +141,7 @@ and expr =
   | EDeref of expr node
   | ERecordExtend of expr node * (string * expr node) list
   | EAnnot of expr node * type_expr
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 and resolved_expr =
   | REUnit
@@ -173,7 +173,7 @@ and resolved_expr =
   | RESequence of resolved_expr node * resolved_expr node
   | REDeref of resolved_expr node
   | RERecordExtend of resolved_expr node * (string * resolved_expr node) list
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 type stmt =
   | SLet of string * expr node
@@ -182,7 +182,7 @@ type stmt =
   | SModule of string * stmt node list
   | SOpen of string
   | SExpr of expr node
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 type resolved_stmt =
   | RSLet of string * resolved_expr node
@@ -190,22 +190,22 @@ type resolved_stmt =
   | RSModule of string * resolved_stmt node list
   | RSOpen of string
   | RSExpr of resolved_expr node
-[@@deriving sexp_of]
+[@@deriving sexp]
 
-type stmt_node = stmt node [@@deriving sexp_of]
-type resolved_stmt_node = resolved_stmt node [@@deriving sexp_of]
+type stmt_node = stmt node [@@deriving sexp]
+type resolved_stmt_node = resolved_stmt node [@@deriving sexp]
 
 type program =
   { stmts : stmt_node list
   ; source_text : string
   }
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 type resolved_program =
   { stmts : resolved_stmt_node list
   ; source_text : string
   }
-[@@deriving sexp_of]
+[@@deriving sexp]
 
 (***************************************************************************)
 (* Runtime diagnostics                                                     *)

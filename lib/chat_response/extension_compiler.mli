@@ -22,3 +22,15 @@ val fingerprint : t -> string
 val input_schema : t -> Chatmd_shell_spec.Tool_schema.t
 val output_schema : t -> Chatmd_shell_spec.Tool_schema.t
 val completion_schema : t -> Chatmd_shell_spec.Tool_schema.t option
+
+(** Uses the trusted compiler worker and enforces compilation resource budgets.
+    All captured-source/schema and selected live-capability checks from [prepare]
+    still apply. Does not expose a tool or authorize generated native config. *)
+val prepare_isolated
+  :  ?limits:Chatml_compilation.limits
+  -> env:Eio_unix.Stdenv.base
+  -> worker:string
+  -> scripts:Spec.script list
+  -> capabilities:Tool_capability.t
+  -> Spec.tool
+  -> (t, Chatmd_shell_spec.Diagnostic.t list) result

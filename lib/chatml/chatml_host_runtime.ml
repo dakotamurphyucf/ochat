@@ -12,8 +12,6 @@ module Value_codec = Chatml.Chatml_value_codec
 
 type compiled_script =
   { surface : Builtin_surface.surface
-  ; program : Lang.program
-  ; checked : Typechecker.checked_program
   ; resolved : Lang.resolved_program
   ; source_text : string
   }
@@ -766,8 +764,19 @@ let compile_script
      | Error diagnostic -> Error (Typechecker.format_diagnostic source diagnostic)
      | Ok checked ->
        let resolved = Resolver.resolve_checked_program checked program in
-       Ok { surface; program; checked; resolved; source_text = source })
+       Ok { surface; resolved; source_text = source })
 ;;
+
+module Private_compiler_transport = struct
+  let export compiled = Lang.sexp_of_resolved_program compiled.resolved
+
+  let import ~surface ~source sexp =
+    let resolved = Lang.resolved_program_of_sexp sexp in
+    if not (String.equal source resolved.source_text)
+    then failwith "compiled source identity mismatch";
+    { surface; resolved; source_text = source }
+  ;;
+end
 
 let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
   compiled.surface

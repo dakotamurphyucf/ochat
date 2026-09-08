@@ -46,6 +46,7 @@
   chatmd
   chatml
   chatml_runtime
+  chatml_compilation
   chatml_moderator_runtime
   session
   lru_cache

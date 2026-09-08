@@ -22,6 +22,16 @@ type _ slot =
 
 type packed_slot = Slot : 'a slot -> packed_slot [@@deriving sexp_of]
 
+(* The wire form contains only slot tags, never runtime cells or Obj values. *)
+let packed_slot_of_sexp = function
+  | Sexp.List [ Atom "Slot"; Atom "SInt" ] -> Slot SInt
+  | Sexp.List [ Atom "Slot"; Atom "SBool" ] -> Slot SBool
+  | Sexp.List [ Atom "Slot"; Atom "SFloat" ] -> Slot SFloat
+  | Sexp.List [ Atom "Slot"; Atom "SString" ] -> Slot SString
+  | Sexp.List [ Atom "Slot"; Atom "SObj" ] -> Slot SObj
+  | sexp -> Sexplib.Conv.of_sexp_error "invalid compiled slot descriptor" sexp
+;;
+
 type frame =
   { cells : Obj.t array
   ; layout : packed_slot array
