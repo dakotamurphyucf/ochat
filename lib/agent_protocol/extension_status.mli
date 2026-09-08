@@ -14,7 +14,7 @@ type t = private
   ; generation : int
   ; state : string
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 val invocation : Invocation.t -> t
 val subscription : Subscription.t -> t

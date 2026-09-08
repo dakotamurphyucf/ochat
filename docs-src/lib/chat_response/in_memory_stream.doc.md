@@ -70,7 +70,7 @@ module Tool_dispatch : sig
     }
 
   (** [run] dispatches after pre-tool moderation and canonical call commit.
-      Both service callbacks are trusted host code.
+      Service callbacks are trusted host code.
       With a service installed, failed pre-tool scripts produce [Pre_tool_failed]
       with bounded diagnostics; cancellation still propagates. Without a service,
       legacy pre-tool error propagation is unchanged.
@@ -89,7 +89,12 @@ module Tool_dispatch : sig
       suppress further moderator hooks and follow-up turns after pending outputs
       are handled. Other requests participate in the normal turn-end decision. *)
   type t =
-    { validate_original :
+    { commit_call : request -> bool
+      (** Runs before appending a canonical call or observing it. A claiming
+          service atomically saves the call and its invocation intent and returns
+          true. False uses the ordinary history append. Failure saves neither and
+          aborts the turn. No policy/implementation callback runs here. *)
+    ; validate_original :
         kind:Tool_call.Kind.t -> name:string -> payload:string -> (unit, string) Result.t
       (** Pure validation of the original target and arguments before pre-tool
           moderation. Unknown targets may pass to another host service. An error

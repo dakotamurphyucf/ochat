@@ -31,8 +31,39 @@ let create
   =
   let initial = registry () in
   let references = C.references initial in
+  let cache = Stream_invocation.cache () in
   let find name =
     List.find references ~f:(fun reference -> String.equal reference.C.name name)
+  in
+  let prepare reference (request : D.request) =
+    if Option.is_some request.source || Option.is_some request.parent_call_id
+    then
+      raise
+        (Dispatch_error
+           (Agent_protocol.Error.create
+              Permission_denied
+              ~message:"native invocation requires its owning persisted session"
+              ~retryable:false
+              ()));
+    Stream_invocation.prepare cache ~capabilities request ~create:(fun request ->
+      let value =
+        Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
+      in
+      Stream_invocation.create
+        ~input
+        ~request
+        ~implementation_revision:reference.C.implementation_revision
+        ~capability_fingerprint:(C.fingerprint initial)
+        ~now
+        ~value:(Result.ok value |> Option.value ~default:`Null))
+    |> require
+  in
+  let commit_call request =
+    match find request.D.name with
+    | None -> false
+    | Some reference ->
+      ignore (prepare reference request : I.t);
+      true
   in
   let validate_original ~kind ~name ~payload =
     match find name with
@@ -72,16 +103,7 @@ let create
       let value =
         Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
       in
-      let invocation =
-        Stream_invocation.create
-          ~input
-          ~request
-          ~implementation_revision:reference.implementation_revision
-          ~capability_fingerprint:(C.fingerprint initial)
-          ~now
-          ~value:(Result.ok value |> Option.value ~default:`Null)
-        |> require
-      in
+      let invocation = prepare reference request in
       let resolved =
         if Result.is_error value && Option.is_none request.rejection
         then
@@ -119,5 +141,5 @@ let create
                   |> require)
           }
   in
-  D.{ validate_original; run }
+  D.{ commit_call; validate_original; run }
 ;;

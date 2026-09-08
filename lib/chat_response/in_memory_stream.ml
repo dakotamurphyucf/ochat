@@ -37,13 +37,17 @@ module Tool_dispatch = struct
     }
 
   type t =
-    { validate_original :
+    { commit_call : request -> bool
+    ; validate_original :
         kind:Tool_call.Kind.t -> name:string -> payload:string -> (unit, string) Result.t
     ; run : request -> authorize:(unit -> unit) -> result option
     }
 
   let chain services =
-    { validate_original =
+    { commit_call =
+        (fun request ->
+          List.exists services ~f:(fun service -> service.commit_call request))
+    ; validate_original =
         (fun ~kind ~name ~payload ->
           List.fold_result services ~init:() ~f:(fun () service ->
             service.validate_original ~kind ~name ~payload))
@@ -64,6 +68,7 @@ type driver_pending_call_kind =
   [ `Function
   | `Custom
   ]
+[@@deriving equal]
 
 type driver_pending_call =
   { seq : int
@@ -864,6 +869,7 @@ let history_with_new_entries ~hist st = List.append hist (List.rev st.new_entrie
 
 let append_history_item
       (c : ctx)
+      ?commit_entry
       ~(moderator : moderator option)
       ~(on_runtime_request : Moderation.Runtime_request.t -> unit)
       ~available_tools
@@ -890,7 +896,7 @@ let append_history_item
   then st
   else (
     let entry = History_entry.create_with_id ~id item in
-    c.on_history_item_appended entry;
+    (Option.value commit_entry ~default:c.on_history_item_appended) entry;
     let st = add_entry st entry in
     handle_item_appended_entries
       ~moderator
@@ -1279,6 +1285,36 @@ let prepare_tool_call (c : ctx) ~hist ~kind ~name ~payload ~call_id ~item_id =
        , Option.map moderated.synthetic_result ~f:(fun _ -> Tool_dispatch.Pre_tool) ))
 ;;
 
+let commit_tool_call
+      (c : ctx)
+      ~hist
+      ~st
+      ~kind
+      ~original_name
+      ~original_payload
+      ~name
+      ~payload
+      ~rejection
+      entry
+  =
+  let request =
+    Tool_dispatch.
+      { kind
+      ; original_name
+      ; original_payload
+      ; name
+      ; payload
+      ; rejection
+      ; call = entry
+      ; history = history_with_new_entries ~hist st @ [ entry ]
+      ; source = c.source
+      ; parent_call_id = c.parent_call_id
+      }
+  in
+  if not (Option.exists c.dispatch_tool ~f:(fun service -> service.commit_call request))
+  then c.on_history_item_appended entry
+;;
+
 let schedule_function_done
       ~turn
       (c : ctx)
@@ -1320,6 +1356,17 @@ let schedule_function_done
     let st =
       append_history_item
         c
+        ~commit_entry:
+          (commit_tool_call
+             c
+             ~hist
+             ~st
+             ~kind:Tool_call.Kind.Function
+             ~original_name
+             ~original_payload
+             ~name:moderated.name
+             ~payload:moderated.payload
+             ~rejection)
         ~moderator:
           (if
              Option.is_some
@@ -1415,6 +1462,17 @@ let schedule_custom_done
     let st =
       append_history_item
         c
+        ~commit_entry:
+          (commit_tool_call
+             c
+             ~hist
+             ~st
+             ~kind:Tool_call.Kind.Custom
+             ~original_name
+             ~original_payload
+             ~name:moderated.name
+             ~payload:moderated.payload
+             ~rejection)
         ~moderator:
           (if
              Option.is_some
@@ -1466,7 +1524,7 @@ let add_tool_info st ~item_id info =
   | Some existing
     when String.equal existing.name info.name
          && String.equal existing.call_id info.call_id
-         && Poly.equal existing.kind info.kind -> st
+         && equal_driver_pending_call_kind existing.kind info.kind -> st
   | Some _ -> failwithf "Conflicting metadata for streamed tool item %s" item_id ()
 ;;
 

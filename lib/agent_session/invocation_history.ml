@@ -2,6 +2,12 @@ open Core
 module P = Agent_protocol
 module Item = Openai.Responses.Item
 
+type call_kind =
+  [ `Function
+  | `Custom
+  ]
+[@@deriving equal]
+
 let invalid message = Error (P.Error.create Conflict ~message ~retryable:false ())
 
 let call = function
@@ -69,7 +75,7 @@ let bound_call ~history (invocation : P.Invocation.t) =
 let same_pair kind provider_id item =
   match call item, output item with
   | Some (k, id, _), _ | _, Some (k, id, _) ->
-    Poly.equal kind k && String.equal id provider_id
+    equal_call_kind kind k && String.equal id provider_id
   | _ -> false
 ;;
 
@@ -114,7 +120,7 @@ let validate_publication ~history (invocation : P.Invocation.t) =
           let%bind _ = canonical entry in
           let%bind () = validate_output invocation decoded in
           match output (History_entry.item decoded) with
-          | Some (actual_kind, _, _) when Poly.equal kind actual_kind -> Ok ()
+          | Some (actual_kind, _, _) when equal_call_kind kind actual_kind -> Ok ()
           | _ -> invalid "tool output kind differs from its canonical call")
         else if same_pair kind provider_id (History_entry.item decoded)
         then invalid "publication crosses an earlier output or a reused call ID"

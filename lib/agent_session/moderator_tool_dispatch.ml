@@ -45,7 +45,38 @@ let validate_input prepared value =
   |> Result.map ~f:(fun _ -> ())
 ;;
 
+let prepare_request
+      ~cache
+      ~input
+      ~capabilities
+      ~now
+      prepared
+      (request : Stream.Tool_dispatch.request)
+  =
+  if Option.is_some request.source || Option.is_some request.parent_call_id
+  then
+    raise
+      (Dispatch_error
+         (P.Error.create
+            Permission_denied
+            ~message:"moderator tool requires its owning persisted session"
+            ~retryable:false
+            ()));
+  Stream_invocation.prepare cache ~capabilities request ~create:(fun request ->
+    let value = parse_input ~kind:request.kind ~payload:request.payload in
+    Stream_invocation.create
+      ~input
+      ~request
+      ~implementation_revision:(EC.fingerprint prepared)
+      ~capability_fingerprint:
+        (Chat_response.Tool_capability.fingerprint (EC.capabilities prepared))
+      ~now
+      ~value:(Result.ok value |> Option.value ~default:`Null))
+  |> require
+;;
+
 let dispatch
+      ~cache
       ~definition
       ~manager
       ~input
@@ -86,17 +117,7 @@ let dispatch
      | Moderator _ -> ());
     let value = parse_input ~kind:request.kind ~payload:request.payload in
     let parse_error = Result.is_error value in
-    let invocation =
-      Stream_invocation.create
-        ~input
-        ~request
-        ~implementation_revision:(EC.fingerprint prepared)
-        ~capability_fingerprint:
-          (Chat_response.Tool_capability.fingerprint (EC.capabilities prepared))
-        ~now
-        ~value:(Result.ok value |> Option.value ~default:`Null)
-      |> require
-    in
+    let invocation = prepare_request ~cache ~input ~capabilities ~now prepared request in
     let recorded = ref None in
     let observed = ref None in
     let failure = ref None in
@@ -128,7 +149,7 @@ let dispatch
         then (
           failure
           := Stream_invocation.rejection_outcome
-               (Option.value_exn dispatched.routing).preparation;
+               (Stream_invocation.preparation request.rejection);
           Error "invocation rejected before execution")
         else if
           parse_error
@@ -250,6 +271,17 @@ let create
       ~admit
       ~prepare_outcome
   =
+  let cache = Stream_invocation.cache () in
+  let commit_call request =
+    match
+      List.find (EC.prepared_tools definition) ~f:(fun tool ->
+        String.equal (EC.declaration tool).name request.Stream.Tool_dispatch.name)
+    with
+    | None -> false
+    | Some prepared ->
+      ignore (prepare_request ~cache ~input ~capabilities ~now prepared request : I.t);
+      true
+  in
   let validate_original ~kind ~name ~payload =
     match
       List.find (EC.prepared_tools definition) ~f:(fun tool ->
@@ -262,9 +294,11 @@ let create
         |> Result.map_error ~f:(fun _ -> "invalid original tool input"))
   in
   Stream.Tool_dispatch.
-    { validate_original
+    { commit_call
+    ; validate_original
     ; run =
         dispatch
+          ~cache
           ~definition
           ~manager
           ~input

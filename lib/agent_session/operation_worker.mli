@@ -17,6 +17,14 @@ module Capabilities : sig
   type t =
     { id_source : History_entry.Id_source.t
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
+    ; commit_invocation_call :
+        invocation:Agent_protocol.Invocation.t
+        -> History_entry.t
+        -> (unit, Agent_protocol.Error.t) result
+      (** Atomically retain a model call and its Admitted invocation before any
+          observer or dispatch runs. Failed persistence saves neither. Identical
+          retries do not change a recorded outcome. This records intent, not tool
+          authorization; dispatch still needs current ownership/policy checks. *)
     ; publish_invocation_output :
         invocation_id:Agent_protocol.Id.Invocation.t
         -> History_entry.t
@@ -35,8 +43,9 @@ module Capabilities : sig
             -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
         -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
       (** Host-only foreground invocation lifecycle for native/standalone calls.
-          Admits and dispatches before running the callback outside the actor,
-          then persists its validated/disclosed outcome. Does not borrow moderator
+          Admits and dispatches, or dispatches an exact previously saved model-call
+          intent. Runs the callback outside the actor and persists its validated/
+          disclosed outcome. Does not borrow moderator
           state, serialize unrelated calls, authorize tools or publish history.
           A parent invocation must be a live callback of the same operation;
           background-job ownership uses a separate service. Callback errors and
@@ -54,8 +63,9 @@ module Capabilities : sig
             -> (unit, Agent_protocol.Error.t) result)
         -> (unit, Agent_protocol.Error.t) result
       (** Scoped exclusive moderator handoff for an already authorized call.
-          Atomically admits/dispatches the invocation, then runs the callback
-          outside the actor. [commit] saves the resolution and proposed snapshot
+          Atomically admits/dispatches the invocation, or dispatches an exact
+          previously saved model-call intent, then runs the callback outside the
+          actor. [commit] saves the resolution and proposed snapshot
           together before returning; call it from the manager's preparation hook.
           Successful preparation must be followed immediately by infallible,
           non-yielding runtime installation. The borrow remains held until the

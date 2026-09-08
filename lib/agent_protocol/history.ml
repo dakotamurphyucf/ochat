@@ -1,11 +1,18 @@
 open Core
 
-type delivery_id = Id.Delivery.t [@@deriving sexp]
+(* Retry identity includes JSON field order; use that contract for derived equality. *)
+module Jsonaf = struct
+  include Jsonaf
+
+  let equal = exactly_equal
+end
+
+type delivery_id = Id.Delivery.t [@@deriving equal, sexp]
 
 module Delivery_id = Id.Delivery
 
 module Id = struct
-  type t = History_entry.Id.t [@@deriving compare, hash, sexp]
+  type t = History_entry.Id.t [@@deriving compare, equal, hash, sexp]
 
   let of_string encoded =
     Result.map_error (History_entry.Id.of_string encoded) ~f:(fun message ->
@@ -41,7 +48,7 @@ type provenance =
   | Moderator_inserted
   | Moderator_replaced of Id.t
   | Runtime_notification of delivery_id
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type entry =
   { id : Id.t
@@ -51,7 +58,7 @@ type entry =
   ; provenance : provenance
   ; redacted : bool
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 let role_to_string = function
   | System -> "system"

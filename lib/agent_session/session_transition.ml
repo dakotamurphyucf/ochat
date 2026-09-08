@@ -62,7 +62,11 @@ let apply ~now state ~delta ~payloads =
   let payloads = projected_payloads ~previous state payloads in
   let statuses = Session_state.extension_status state in
   let statuses_changed =
-    not (Poly.equal (Session_state.extension_status previous) statuses)
+    not
+      (List.equal
+         Agent_protocol.Extension_status.equal
+         (Session_state.extension_status previous)
+         statuses)
   in
   let payloads =
     if

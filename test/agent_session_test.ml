@@ -37,6 +37,13 @@ let store_ok = function
     raise_s [%sexp "unexpected store error", (error : Agent_store.Store_error.t)]
 ;;
 
+(* Compare the complete snapshots, including counters and recovery metadata. *)
+let assert_same_session_snapshot expected actual =
+  [%test_eq: Sexp.t]
+    (Agent_session.Session_state.sexp_of_t expected)
+    (Agent_session.Session_state.sexp_of_t actual)
+;;
+
 let workspace_id =
   Agent_protocol.Id.Workspace_definition.of_string "wsd_agent_session_test" |> protocol_ok
 ;;
@@ -2988,6 +2995,71 @@ let resolve_publication caps invocation =
 ;;
 
 let%test_unit
+    "model call intent and history commit atomically and retries preserve outcomes"
+  =
+  let reject = ref true in
+  with_handoff_actor
+    ~reject:(fun next ->
+      if
+        !reject
+        && not (List.is_empty next.Agent_session.Session_transition.state.invocations)
+      then (
+        reject := false;
+        true)
+      else false)
+    ~make_worker:(fun _env actor_ready ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+        let actor = Eio.Promise.await actor_ready in
+        let call, invocation = publication_call caps () in
+        let before = Agent_session.Session_actor.state actor |> protocol_ok in
+        let save () = caps.commit_invocation_call ~invocation call in
+        assert (Result.is_error (save ()));
+        let failed = Agent_session.Session_actor.state actor |> protocol_ok in
+        assert_same_session_snapshot before failed;
+        Eio.Fiber.both
+          (fun () -> save () |> protocol_ok)
+          (fun () -> save () |> protocol_ok);
+        let admitted = Agent_session.Session_actor.state actor |> protocol_ok in
+        assert (List.length admitted.conversation.canonical_history = 2);
+        assert (List.length admitted.invocations = 1);
+        (match (List.hd_exn admitted.invocations).status with
+         | Admitted -> ()
+         | _ -> assert false);
+        assert (
+          Int64.equal admitted.counters.revision Int64.(before.counters.revision + 1L));
+        let changed =
+          Agent_protocol.Invocation.create
+            { invocation.context with input = `String "different" }
+          |> protocol_ok
+        in
+        assert (Result.is_error (caps.commit_invocation_call ~invocation:changed call));
+        let competing =
+          Agent_protocol.Invocation.create
+            { invocation.context with id = Agent_protocol.Id.Invocation.create () }
+          |> protocol_ok
+        in
+        assert (Result.is_error (caps.commit_invocation_call ~invocation:competing call));
+        resolve_publication caps invocation |> protocol_ok;
+        let output = publication_output caps () in
+        caps.publish_invocation_output ~invocation_id:invocation.context.id output
+        |> protocol_ok;
+        let published = Agent_session.Session_actor.state actor |> protocol_ok in
+        save () |> protocol_ok;
+        let retried = Agent_session.Session_actor.state actor |> protocol_ok in
+        assert_same_session_snapshot published retried;
+        Completed
+          { final_history = input.history @ [ call; output ]
+          ; runtime_requests = []
+          ; moderator_snapshot = published.moderator
+          }))
+    (fun _env actor _writer backend ->
+       let state = await_idle actor in
+       assert (List.length state.conversation.canonical_history = 3);
+       assert (List.length state.invocations = 1);
+       assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))
+;;
+
+let%test_unit
     "invocation publication saves history and receipt atomically and retries only once"
   =
   let done_, done_u = Eio.Promise.create () in
@@ -3890,6 +3962,15 @@ let%test_unit "streamed native and moderator services share pre and post routing
     ; `Invalid_json
     ; `Redacted
     ; `Publish_rejected
+    ; `Call_save_rejected
+    ; `Dispatch_rejected
+    ; `Observer_failed
+    ; `Moderator_call_save_rejected
+    ; `Moderator_dispatch_rejected
+    ; `Moderator_observer_failed
+    ; `Custom_call_save_rejected
+    ; `Custom_dispatch_rejected
+    ; `Custom_observer_failed
     ]
     ~f:(fun mode ->
       let calls = ref 0
@@ -3897,14 +3978,78 @@ let%test_unit "streamed native and moderator services share pre and post routing
       and post_calls = ref 0
       and requests = ref 0 in
       let halted = ref false in
-      let custom = Poly.equal mode `Custom in
+      let custom =
+        match mode with
+        | `Custom
+        | `Custom_call_save_rejected
+        | `Custom_dispatch_rejected
+        | `Custom_observer_failed -> true
+        | _ -> false
+      in
+      let mixed =
+        match mode with
+        | `Mixed -> true
+        | _ -> false
+      in
+      let publication_rejected =
+        match mode with
+        | `Publish_rejected -> true
+        | _ -> false
+      in
+      let redacted =
+        match mode with
+        | `Redacted -> true
+        | _ -> false
+      in
+      let post_failed =
+        match mode with
+        | `Post_fail -> true
+        | _ -> false
+      in
+      let call_save_rejected =
+        match mode with
+        | `Call_save_rejected | `Moderator_call_save_rejected | `Custom_call_save_rejected
+          -> true
+        | _ -> false
+      in
+      let dispatch_rejected =
+        match mode with
+        | `Dispatch_rejected | `Moderator_dispatch_rejected | `Custom_dispatch_rejected ->
+          true
+        | _ -> false
+      in
+      let observer_failed =
+        match mode with
+        | `Observer_failed | `Moderator_observer_failed | `Custom_observer_failed -> true
+        | _ -> false
+      in
+      let moderator_target =
+        match mode with
+        | `Moderator_call_save_rejected
+        | `Moderator_dispatch_rejected
+        | `Moderator_observer_failed -> true
+        | _ -> false
+      in
+      let original_name =
+        match mode with
+        | `Redirect -> "counter"
+        | _ -> if moderator_target then "counter" else "read_file"
+      in
+      let before_execution_failure =
+        call_save_rejected || dispatch_rejected || observer_failed
+      in
       let registry = ref (native_registry ~custom calls ~raises:false) in
       with_handoff_actor
         ~reject:(fun next ->
-          Poly.equal mode `Publish_rejected
-          && List.exists
-               next.Agent_session.Session_transition.state.invocations
-               ~f:(fun invocation -> Option.is_some invocation.output_entry_id))
+          List.exists
+            next.Agent_session.Session_transition.state.invocations
+            ~f:(fun invocation ->
+              (publication_rejected && Option.is_some invocation.output_entry_id)
+              ||
+              match invocation.status with
+              | Admitted -> call_save_rejected
+              | Dispatching -> dispatch_rejected
+              | Resolved _ | Published _ -> false))
         ~make_worker:(fun env actor_ready ->
           let pre =
             match mode with
@@ -3934,10 +4079,18 @@ let%test_unit "streamed native and moderator services share pre and post routing
             ^ pre
             ^ " | `Post_tool_response(r) -> Task.bind(Tool.call(\"observe\", `Null), fun \
                ignored -> "
-            ^ (if Poly.equal mode `Post_fail
+            ^ (if post_failed
                then "Task.fail(\"private post failure\")"
                else "Task.pure(state)")
-            ^ ") | _ -> Task.pure(state)"
+            ^ ")"
+            ^ (if observer_failed
+               then
+                 " | `Item_appended(item) -> (match Json.get_field(item.value, \"type\") \
+                  with | `Some(`String(\"function_call\")) -> Task.fail(\"private \
+                  observer failure\") | `Some(`String(\"custom_tool_call\")) -> \
+                  Task.fail(\"private observer failure\") | _ -> Task.pure(state))"
+               else "")
+            ^ " | _ -> Task.pure(state)"
           in
           let moderator_capabilities =
             { Chat_response.Moderation.Capabilities.default with
@@ -4025,20 +4178,22 @@ let%test_unit "streamed native and moderator services share pre and post routing
                 in
                 let initial =
                   call
-                    ~custom:(custom || Poly.equal mode `Kind_mismatch)
-                    ~name:(if Poly.equal mode `Redirect then "counter" else "read_file")
+                    ~custom:
+                      (match mode with
+                       | `Kind_mismatch -> true
+                       | _ -> custom)
+                    ~name:original_name
                     ~payload:
-                      (if Poly.equal mode `Invalid
-                       then "null"
-                       else if Poly.equal mode `Invalid_json
-                       then "{"
-                       else "{}")
+                      (match mode with
+                       | `Invalid -> "null"
+                       | `Invalid_json -> "{"
+                       | _ -> "{}")
                     ~index:0
                 in
                 Stdlib.List.to_seq
                   (initial
                    @
-                   if Poly.equal mode `Mixed
+                   if mixed
                    then call ~custom:false ~name:"counter" ~payload:"null" ~index:1
                    else [])
             in
@@ -4056,19 +4211,20 @@ let%test_unit "streamed native and moderator services share pre and post routing
                   ~admit:(fun _ _ ->
                     Int.incr admitted;
                     Eio.Fiber.yield ();
-                    if Poly.equal mode `Revoked
-                    then
-                      registry
-                      := Chat_response.Tool_capability.select !registry ~names:[]
-                         |> Result.map_error ~f:(fun error ->
-                           error.Chat_response.Tool_capability.message)
-                         |> Result.ok_or_failwith;
-                    if Poly.equal mode `Halt_wait then halted := true;
+                    (match mode with
+                     | `Revoked ->
+                       registry
+                       := Chat_response.Tool_capability.select !registry ~names:[]
+                          |> Result.map_error ~f:(fun error ->
+                            error.Chat_response.Tool_capability.message)
+                          |> Result.ok_or_failwith
+                     | `Halt_wait -> halted := true
+                     | _ -> ());
                     Ok ())
                   ~prepare_output:(fun _ ->
-                    if Poly.equal mode `Disclosure
-                    then Error (handoff_error "private disclosure")
-                    else Ok (`String "disclosed"))
+                    match mode with
+                    | `Disclosure -> Error (handoff_error "private disclosure")
+                    | _ -> Ok (`String "disclosed"))
               in
               let moderator =
                 Agent_session.Moderator_tool_dispatch.create
@@ -4107,7 +4263,10 @@ let%test_unit "streamed native and moderator services share pre and post routing
                       }
                 ; permission_profile =
                     permission_policy
-                      ~tool_default:(if Poly.equal mode `Deny then Deny else Allow)
+                      ~tool_default:
+                        (match mode with
+                         | `Deny -> Deny
+                         | _ -> Allow)
                       ~fallback:Fallback_deny
                       ~evaluator:None
                       ~reviewer:None
@@ -4121,8 +4280,7 @@ let%test_unit "streamed native and moderator services share pre and post routing
                 ; agent_page_classifications = []
                 ; delegated_permission_tools = String.Set.empty
                 ; redact_tool_payload =
-                    (fun ~name:_ value ->
-                      if Poly.equal mode `Redacted then "\"hidden\"" else value)
+                    (fun ~name:_ value -> if redacted then "\"hidden\"" else value)
                 }
             in
             Agent_session.Operation_worker.run worker ~sw ~input caps))
@@ -4136,113 +4294,151 @@ let%test_unit "streamed native and moderator services share pre and post routing
                finished ())
            in
            let state = finished () in
-           let mixed = Poly.equal mode `Mixed in
-           assert (List.length state.invocations = if mixed then 2 else 1);
-           let native =
-             List.find_exn state.invocations ~f:(fun invocation ->
-               String.equal invocation.context.tool_name "read_file")
+           let expected_count =
+             if call_save_rejected then 0 else if mixed then 2 else 1
            in
-           let expected =
-             match mode with
-             | `Success
-             | `Custom
-             | `Redirect
-             | `Post_fail
-             | `Mixed
-             | `Redacted
-             | `Publish_rejected -> None
-             | `Invalid | `Rewrite_invalid | `Invalid_json | `Kind_mismatch ->
-               Some "invocation.invalid_input"
-             | `Deny -> Some "invocation.permission_denied"
-             | `Pre_reject | `Pre_reject_end -> Some "invocation.pre_tool_rejected"
-             | `Pre_fail -> Some "invocation.pre_tool_failed"
-             | `Revoked | `Revoked_before -> Some "invocation.stale_binding"
-             | `Halt_wait | `Pre_end -> Some "invocation.session_ended"
-             | `Disclosure -> Some "invocation.disclosure_rejected"
-           in
-           (match native.status, expected with
-            | Published (Complete (`String "disclosed")), None -> ()
-            | Resolved (Complete (`String "disclosed")), None ->
-              assert (Poly.equal mode `Publish_rejected)
-            | Published (Fail error), Some code -> assert (String.equal error.code code)
-            | _ -> assert false);
-           let executed = Option.is_none expected || Poly.equal mode `Disclosure in
-           assert (!calls = if executed then 1 else 0);
-           assert (
-             !admitted
-             =
-             if
-               List.mem
-                 [ `Invalid
-                 ; `Invalid_json
-                 ; `Kind_mismatch
-                 ; `Revoked_before
-                 ; `Rewrite_invalid
-                 ; `Pre_reject
-                 ; `Pre_reject_end
-                 ; `Pre_fail
-                 ; `Pre_end
-                 ]
-                 mode
-                 ~equal:Poly.equal
-             then 0
-             else 1);
-           assert (
-             !post_calls
-             =
-             if
-               List.mem
-                 [ `Pre_end; `Pre_reject_end; `Publish_rejected ]
-                 mode
-                 ~equal:Poly.equal
-             then 0
-             else if mixed
-             then 2
-             else 1);
-           assert (
-             !requests
-             =
-             if
-               List.mem
-                 [ `Post_fail; `Publish_rejected; `Pre_end; `Pre_reject_end ]
-                 mode
-                 ~equal:Poly.equal
-             then 1
-             else 2);
-           assert (
-             List.length state.conversation.canonical_history
-             = if mixed then 5 else if Poly.equal mode `Publish_rejected then 2 else 3);
-           let routing = Option.value_exn native.routing in
-           assert (
-             String.equal
-               routing.original_name
-               (if Poly.equal mode `Redirect then "counter" else "read_file"));
-           if Poly.equal mode `Redacted
+           if List.length state.invocations <> expected_count
+           then
+             failwithf
+               "invocation count: expected %d, got %d (save=%b dispatch=%b observer=%b \
+                moderator=%b requests=%d)"
+               expected_count
+               (List.length state.invocations)
+               call_save_rejected
+               dispatch_rejected
+               observer_failed
+               moderator_target
+               !requests
+               ();
+           if call_save_rejected
            then (
-             let canonical = Option.value_exn routing.canonical_payload in
+             assert (!calls = 0 && !admitted = 0 && !post_calls = 0 && !requests = 1);
+             assert (List.length state.conversation.canonical_history = 1);
+             assert_same_session_snapshot
+               state
+               (Agent_session.Memory_backend.state backend))
+           else (
+             let native =
+               List.find_exn state.invocations ~f:(fun invocation ->
+                 String.equal
+                   invocation.context.tool_name
+                   (if moderator_target then "counter" else "read_file"))
+             in
+             let expected =
+               match mode with
+               | `Success
+               | `Custom
+               | `Redirect
+               | `Post_fail
+               | `Mixed
+               | `Redacted
+               | `Publish_rejected -> None
+               | `Invalid | `Rewrite_invalid | `Invalid_json | `Kind_mismatch ->
+                 Some "invocation.invalid_input"
+               | `Deny -> Some "invocation.permission_denied"
+               | `Pre_reject | `Pre_reject_end -> Some "invocation.pre_tool_rejected"
+               | `Pre_fail -> Some "invocation.pre_tool_failed"
+               | `Revoked | `Revoked_before -> Some "invocation.stale_binding"
+               | `Halt_wait | `Pre_end -> Some "invocation.session_ended"
+               | `Disclosure -> Some "invocation.disclosure_rejected"
+               | `Call_save_rejected
+               | `Moderator_call_save_rejected
+               | `Custom_call_save_rejected -> assert false
+               | `Dispatch_rejected
+               | `Observer_failed
+               | `Moderator_dispatch_rejected
+               | `Moderator_observer_failed
+               | `Custom_dispatch_rejected
+               | `Custom_observer_failed -> Some "interrupted"
+             in
+             (match native.status, expected with
+              | Published (Complete (`String "disclosed")), None -> ()
+              | Resolved (Complete (`String "disclosed")), None ->
+                assert publication_rejected
+              | Published (Fail error), Some code -> assert (String.equal error.code code)
+              | Published (Cancelled _), Some "interrupted" -> ()
+              | _ -> assert false);
+             let executed =
+               match mode with
+               | `Disclosure -> true
+               | _ -> Option.is_none expected
+             in
+             assert (!calls = if executed then 1 else 0);
              assert (
-               String.equal
-                 canonical.sha256
-                 (Chatmd_shell_spec.Source_ref.digest "\"hidden\""));
+               !admitted
+               =
+               if
+                 before_execution_failure
+                 ||
+                 match mode with
+                 | `Invalid
+                 | `Invalid_json
+                 | `Kind_mismatch
+                 | `Revoked_before
+                 | `Rewrite_invalid
+                 | `Pre_reject
+                 | `Pre_reject_end
+                 | `Pre_fail
+                 | `Pre_end -> true
+                 | _ -> false
+               then 0
+               else 1);
              assert (
-               String.equal
-                 routing.final_payload.sha256
-                 (Chatmd_shell_spec.Source_ref.digest "{}")));
-           let failures =
-             Agent_session.Memory_backend.events_after backend 0L
-             |> protocol_ok
-             |> List.count ~f:(fun event ->
-               Agent_protocol.Event.Durable.equal_kind event.kind Operation_failed)
-           in
-           assert (
-             failures
-             =
-             if Poly.equal mode `Post_fail || Poly.equal mode `Publish_rejected
-             then 1
-             else 0);
-           assert (
-             Bool.equal (Option.is_some state.failure) (Poly.equal mode `Publish_rejected));
-           assert (Poly.equal state (Agent_session.Memory_backend.state backend))))
+               !post_calls
+               =
+               if
+                 before_execution_failure
+                 ||
+                 match mode with
+                 | `Pre_end | `Pre_reject_end | `Publish_rejected -> true
+                 | _ -> false
+               then 0
+               else if mixed
+               then 2
+               else 1);
+             assert (
+               !requests
+               =
+               if
+                 before_execution_failure
+                 ||
+                 match mode with
+                 | `Post_fail | `Publish_rejected | `Pre_end | `Pre_reject_end -> true
+                 | _ -> false
+               then 1
+               else 2);
+             assert (
+               List.length state.conversation.canonical_history
+               = if mixed then 5 else if publication_rejected then 2 else 3);
+             let routing = Option.value_exn native.routing in
+             assert (String.equal routing.original_name original_name);
+             if redacted
+             then (
+               let canonical = Option.value_exn routing.canonical_payload in
+               assert (
+                 String.equal
+                   canonical.sha256
+                   (Chatmd_shell_spec.Source_ref.digest "\"hidden\""));
+               assert (
+                 String.equal
+                   routing.final_payload.sha256
+                   (Chatmd_shell_spec.Source_ref.digest "{}")));
+             let failures =
+               Agent_session.Memory_backend.events_after backend 0L
+               |> protocol_ok
+               |> List.count ~f:(fun event ->
+                 Agent_protocol.Event.Durable.equal_kind event.kind Operation_failed)
+             in
+             assert (
+               failures
+               =
+               if before_execution_failure || post_failed || publication_rejected
+               then 1
+               else 0);
+             assert (Bool.equal (Option.is_some state.failure) publication_rejected);
+             assert_same_session_snapshot
+               state
+               (Agent_session.Memory_backend.state backend))))
 ;;
 
 let%test_unit
@@ -5111,14 +5307,14 @@ let%test_unit
             (* These mailbox requests must remain responsive while the first
                handler owns the moderator and the second call waits. *)
             let queued = Agent_session.Session_actor.state actor |> protocol_ok in
-            assert (List.length queued.invocations = 1);
+            assert (List.length queued.invocations = 2);
             assert (Poly.equal !admitted [ "first" ]);
             if Poly.equal mode `Cancelled
             then (
               Eio.Promise.resolve cancel_u ();
               Eio.Promise.await cancelled;
               let after = Agent_session.Session_actor.state actor |> protocol_ok in
-              assert (List.length after.invocations = 1))
+              assert (List.length after.invocations = 2))
             else if Poly.equal mode `Active_cancel
             then (
               Eio.Promise.resolve cancel_u ();
@@ -5155,6 +5351,11 @@ let%test_unit
               | Published (Complete `Null) -> false
               | Resolved (Cancelled _) ->
                 assert (Poly.equal mode `Active_cancel);
+                false
+              | Admitted ->
+                (match mode with
+                 | `Cancelled -> ()
+                 | _ -> assert false);
                 false
               | _ -> assert false)
           in

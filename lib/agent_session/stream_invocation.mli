@@ -1,5 +1,27 @@
 open Core
 
+val preparation
+  :  Chat_response.In_memory_stream.Tool_dispatch.rejection option
+  -> Agent_protocol.Invocation.preparation
+
+type cache
+
+val cache : unit -> cache
+
+(** Retain intent with its canonical call before observer/dispatch callbacks.
+    Cache retains the invocation and request digests, not copies of complete history. Reuse
+    validates immutable request data; dispatch may additionally observe a later
+    session halt. Protected publication keeps a saved intent available locally
+    even when cancellation arrives while the actor acknowledges it. *)
+val prepare
+  :  cache
+  -> capabilities:Operation_worker.Capabilities.t
+  -> create:
+       (Chat_response.In_memory_stream.Tool_dispatch.request
+        -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result)
+  -> Chat_response.In_memory_stream.Tool_dispatch.request
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+
 (** Bounded initial failure for a recorded preparation rejection, or [None]
     when preparation passed. Does not run policy or implementation callbacks. *)
 val rejection_outcome

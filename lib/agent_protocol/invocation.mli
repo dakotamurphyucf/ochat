@@ -1,6 +1,7 @@
 (** Versioned tool invocation records. These pure transitions do not grant
     authority: the actor must admit the caller and validate referenced work
-    ownership before committing a resolution. *)
+    ownership before committing a resolution. Derived equality preserves exact
+    JSON structure, including object field order, for immutable identity/results. *)
 
 type origin =
   | Model
@@ -13,7 +14,7 @@ type origin =
 type work =
   | Job of Id.Job.t
   | Subscription of Id.Subscription.t
-[@@deriving compare, sexp]
+[@@deriving compare, equal, sexp]
 
 type tool_error =
   { code : string
@@ -21,14 +22,14 @@ type tool_error =
   ; retryable : bool
   ; details : Jsonaf.t
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type outcome =
   | Complete of Jsonaf.t
   | Pending of work * Jsonaf.t
   | Fail of tool_error
   | Cancelled of string
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type context =
   { id : Id.Invocation.t
@@ -49,14 +50,14 @@ type context =
   ; created_at : Timestamp.t
   ; deadline : Timestamp.t option
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type status =
   | Admitted
   | Dispatching
   | Resolved of outcome
   | Published of outcome
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type call_kind =
   | Function
@@ -77,7 +78,7 @@ type preparation =
   | Session_ended
   (** Stopped before execution, potentially after rewriting the call. Original
         and final routing may differ; successful outcomes are forbidden. *)
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 (** Host-retained routing provenance. Fingerprints describe exact raw bytes;
     canonical_payload describes the separately redacted/displayed call. No extra
@@ -93,7 +94,7 @@ type routing =
   ; canonical_payload : payload_fingerprint option [@sexp.option]
   ; preparation : preparation
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type t = private
   { context : context
@@ -104,7 +105,7 @@ type t = private
     (** Durable reason that no provider result will be published. The recorded
         outcome is preserved. Present only on resolved model invocations; codec 4. *)
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 (** Routing, when present, is fixed at admission and uses JSON codec version 3.
     Legacy records without routing remain readable. *)

@@ -12,7 +12,7 @@ type t =
   ; generation : int
   ; state : string
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 let outcome = function
   | Invocation.Complete _ -> "complete"

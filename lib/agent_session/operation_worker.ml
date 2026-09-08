@@ -13,6 +13,10 @@ module Capabilities = struct
   type t =
     { id_source : History_entry.Id_source.t
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
+    ; commit_invocation_call :
+        invocation:Agent_protocol.Invocation.t
+        -> History_entry.t
+        -> (unit, Agent_protocol.Error.t) result
     ; publish_invocation_output :
         invocation_id:Agent_protocol.Id.Invocation.t
         -> History_entry.t

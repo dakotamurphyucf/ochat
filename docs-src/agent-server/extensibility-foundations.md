@@ -73,8 +73,9 @@ evaluation interruption remains part of the execution-budget work.
 `Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped
 host service. The caller must complete capability and policy admission before
 using it. The actor checks the active operation, session generation and invocation
-identity, then atomically records admission and dispatch and grants an exclusive
-process-local borrow. The worker executes the handler outside the actor, so actor
+identity, then records dispatch and grants an exclusive process-local borrow.
+A model call may already have an exact, saved `Admitted` intent; otherwise the
+claim records admission and dispatch together. The worker executes the handler outside the actor, so actor
 reads, permissions and cancellation requests can continue through its mailbox.
 
 The callback receives the dispatched invocation and a bound `commit` function.
@@ -90,7 +91,7 @@ sequenceDiagram
     participant M as Moderator manager
     participant S as Session storage
     W->>A: Claim authorized invocation for active operation
-    A->>S: Commit admission and dispatch together
+    A->>S: Commit dispatch (and admission if not already saved)
     S-->>A: Saved
     A-->>W: Scoped borrow and dispatched invocation
     W->>M: Handle Tool_invoked under manager lock
@@ -215,10 +216,41 @@ authorization, disclosure failure, redacted history and permanent publication
 rejection. A trap legacy runner ensures claimed native names never fall through.
 
 This adapter is still an internal installation hook. Normal `Runtime_builder`
-construction and script-origin routing remain unconnected. Admission failure
-before any invocation record is saved still needs complete model-call error
-publication handling; standalone routing, host-wide policy integration and public
-qualification remain required. No new feature flag is enabled.
+construction and script-origin routing remain unconnected. Standalone routing,
+host-wide policy integration and public qualification remain required. No new
+feature flag is enabled.
+
+### Atomic model-call intent
+
+Before emitting an `Item_appended` observer event, the stream asks the service's
+`commit_call` callback to retain the canonical call. Native and moderator adapters
+use `Operation_worker.Capabilities.commit_invocation_call` to save the call and
+its `Admitted` invocation in one actor transaction. A rejected save leaves neither
+record. If an observer or dispatch fails after the save, foreground/restart
+reconciliation cancels the unfinished invocation and publishes its matching
+result. It does not retry a tool, moderator handler or observer.
+
+This intent is durable evidence, not execution authority. Dispatch still checks
+the owning operation, current generation, selected implementation and applicable
+policy before effects. Queued calls cancelled before dispatch retain an
+`Admitted` record until boundary recovery. Script-origin calls continue to use
+their ordinary invocation claim; they do not create provider history.
+
+The adapter caches the invocation and a digest of immutable request fields,
+including the canonical call, original/final payloads and owner attribution. It
+does not retain additional copies of the complete history. Cached requests must
+still pass the actor's ownership and canonical-retention checks. A later session
+halt can stop execution without rewriting the initial routing provenance.
+Identical call-intent retries are no-ops, including after result publication;
+conflicting content, duplicate call ownership and attempts to resurrect a removed
+call with an existing receipt fail. Typed record equality preserves exact JSON
+structure, including object field order, when checking retry identity.
+
+Offline actor tests cover rejected saves, concurrent retries and immutable
+published outcomes. The composed stream matrix injects initial-save, dispatch-save
+and tool-call observer failures separately for native and moderator targets. It
+checks canonical call/result pairing, cancellation recovery, callback counts and
+agreement between live and persisted state.
 
 ### Canonical initial result publication
 
@@ -496,7 +528,7 @@ turn, unchanged state for stopped calls, zero native execution and no operation
 failure. A held first handler plus queued second invocation proves termination
 is rechecked before admission; a subsequent third call remains stopped too.
 This is not public feature availability: normal `Runtime_builder` construction,
-shared nested/standalone routing, complete admission-error recording,
+shared nested/standalone routing, host-wide admission integration,
 broader audit and cross-host qualification still need
 qualification. No extension feature flag is enabled by installing this adapter.
 

@@ -9,7 +9,7 @@ module Generator = struct
 end
 
 module type S = sig
-  type t [@@deriving compare, hash, sexp]
+  type t [@@deriving compare, equal, hash, sexp]
 
   val create : unit -> t
   val create_with : Generator.t -> t
@@ -22,7 +22,7 @@ end
 module Make (Name : sig
     val prefix : string
   end) : S = struct
-  type t = string [@@deriving compare, hash, sexp]
+  type t = string [@@deriving compare, equal, hash, sexp]
 
   let maximum_length = 96
   let random_byte_count = 18

@@ -55,6 +55,9 @@ type invocation_execution =
   }
 
 type _ request =
+  | Commit_invocation_call :
+      Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t * History_entry.t
+      -> unit request
   | Claim_invocation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
       -> invocation_execution request
@@ -801,6 +804,88 @@ let running_operation ?(allow_stopping = false) t operation_id =
     Error (error Invalid_state "foreground operation is not running at a tool safe point")
 ;;
 
+let invocation_admission_deltas t (invocation : Agent_protocol.Invocation.t) =
+  match
+    List.find t.state.invocations ~f:(fun current ->
+      Agent_protocol.Id.Invocation.compare current.context.id invocation.context.id = 0)
+  with
+  | None -> Ok [ Session_delta.Invocation_changed invocation ]
+  | Some current
+    when Agent_protocol.Invocation.equal_origin invocation.context.origin Model
+         && Option.is_some invocation.context.call_entry_id
+         && Agent_protocol.Invocation.equal current invocation -> Ok []
+  | Some _ -> Error (error Conflict "invocation identity is already admitted")
+;;
+
+let commit_invocation_call t operation_id (invocation : Agent_protocol.Invocation.t) entry
+  =
+  let open Result.Let_syntax in
+  let%bind _ = current_operation t operation_id in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      invocation.context.session_id
+      invocation.context.generation
+  in
+  let%bind () = Agent_protocol.Invocation.validate invocation in
+  let%bind () =
+    match
+      ( invocation.status
+      , invocation.context.origin
+      , invocation.context.parent_job
+      , invocation.context.parent_invocation
+      , invocation.context.call_entry_id )
+    with
+    | Admitted, Model, None, None, Some id
+      when History_entry.Id.equal id (History_entry.id entry) -> Ok ()
+    | _ ->
+      Error
+        (error Invalid_request "call intent requires an admitted root model invocation")
+  in
+  let encoded = History_codec.to_protocol entry in
+  let%bind entries =
+    match
+      List.find t.state.conversation.canonical_history ~f:(fun item ->
+        History_entry.Id.equal item.id encoded.id)
+    with
+    | None -> Ok [ encoded ]
+    | Some existing when Agent_protocol.History.equal_entry existing encoded -> Ok []
+    | Some _ -> Error (error Conflict "history call already has different content")
+  in
+  let%bind admission =
+    match
+      List.find t.state.invocations ~f:(fun current ->
+        Agent_protocol.Id.Invocation.compare current.context.id invocation.context.id = 0)
+    with
+    | None -> Ok [ Session_delta.Invocation_changed invocation ]
+    | Some current
+      when List.is_empty entries
+           && Agent_protocol.Invocation.equal_context current.context invocation.context
+           && Option.equal
+                Agent_protocol.Invocation.equal_routing
+                current.routing
+                invocation.routing -> Ok []
+    | Some _ -> Error (error Conflict "call intent identity has different content")
+  in
+  if List.is_empty entries && List.is_empty admission
+  then Ok ()
+  else
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch
+           ((if List.is_empty entries
+             then []
+             else [ Session_delta.Canonical_entries_appended entries ])
+            @ admission))
+      ~payloads:
+        (if List.is_empty entries
+         then []
+         else [ Agent_protocol.Event.Durable.Payload.History_appended entries ])
+    |> Result.map ~f:(fun _ -> ())
+;;
+
 let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
   let%bind _ = running_operation t operation_id in
@@ -818,12 +903,9 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
         (error
            Invalid_state
            "foreground invocation cannot borrow background-job ownership")
-    else if
-      List.exists t.state.invocations ~f:(fun current ->
-        Agent_protocol.Id.Invocation.compare current.context.id invocation.context.id = 0)
-    then Error (error Conflict "invocation identity is already admitted")
     else Ok ()
   in
+  let%bind admission = invocation_admission_deltas t invocation in
   let%bind () =
     match invocation.context.parent_invocation with
     | None -> Ok ()
@@ -847,9 +929,7 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   let%bind _ =
     transition
       t
-      ~delta:
-        (Session_delta.Batch
-           [ Invocation_changed invocation; Invocation_changed dispatched ])
+      ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
       ~payloads:[]
   in
   let execution = { operation_id; dispatched; accepts_children = true } in
@@ -902,21 +982,12 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
         invocation.context.session_id
         invocation.context.generation
     in
-    let%bind () =
-      if
-        List.exists t.state.invocations ~f:(fun current ->
-          Agent_protocol.Id.Invocation.compare current.context.id invocation.context.id
-          = 0)
-      then Error (error Conflict "invocation identity is already admitted")
-      else Ok ()
-    in
+    let%bind admission = invocation_admission_deltas t invocation in
     let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
     let%bind _ =
       transition
         t
-        ~delta:
-          (Session_delta.Batch
-             [ Invocation_changed invocation; Invocation_changed dispatched ])
+        ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
         ~payloads:[]
     in
     let borrow =
@@ -1132,7 +1203,7 @@ let commit_worker_moderator t operation_id moderator =
   let%bind _ = running_operation ~allow_stopping:true t operation_id in
   if Option.is_some t.moderator_borrow
   then Error (error Conflict "moderator invocation owns the moderator checkpoint")
-  else if Poly.equal t.state.moderator moderator
+  else if Option.equal Jsonaf.exactly_equal t.state.moderator moderator
   then Ok ()
   else Result.map (change_moderator t moderator) ~f:(fun _ -> ())
 ;;
@@ -1966,6 +2037,10 @@ let worker_capabilities t operation_id id_source buffer =
   Operation_worker.Capabilities.
     { id_source = History_id_source.as_history_entry_source id_source
     ; commit_entry = (fun entry -> call t (Commit_worker_entry (operation_id, entry)))
+    ; commit_invocation_call =
+        (fun ~invocation entry ->
+          Eio.Cancel.protect (fun () ->
+            call t (Commit_invocation_call (operation_id, invocation, entry))))
     ; publish_invocation_output =
         (fun ~invocation_id entry ->
           Eio.Cancel.protect (fun () ->
@@ -3283,6 +3358,8 @@ let detach t attachment_id =
 
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t -> function
+  | Commit_invocation_call (operation_id, invocation, entry) ->
+    commit_invocation_call t operation_id invocation entry
   | Claim_invocation (operation_id, invocation) ->
     claim_invocation t operation_id invocation
   | Finish_invocation (execution, outcome) -> finish_invocation t execution outcome

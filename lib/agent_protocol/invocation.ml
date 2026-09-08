@@ -2,6 +2,13 @@ open Core
 module Error = Protocol_error
 open Extension_codec
 
+(* Invocation identity/outcomes preserve exact JSON structure, including field order. *)
+module Jsonaf = struct
+  include Jsonaf
+
+  let equal = exactly_equal
+end
+
 type origin =
   | Model
   | Moderator
@@ -13,7 +20,7 @@ type origin =
 type work =
   | Job of Id.Job.t
   | Subscription of Id.Subscription.t
-[@@deriving compare, sexp]
+[@@deriving compare, equal, sexp]
 
 type tool_error =
   { code : string
@@ -21,14 +28,14 @@ type tool_error =
   ; retryable : bool
   ; details : Jsonaf.t
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type outcome =
   | Complete of Jsonaf.t
   | Pending of work * Jsonaf.t
   | Fail of tool_error
   | Cancelled of string
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type context =
   { id : Id.Invocation.t
@@ -46,14 +53,14 @@ type context =
   ; created_at : Timestamp.t
   ; deadline : Timestamp.t option
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type status =
   | Admitted
   | Dispatching
   | Resolved of outcome
   | Published of outcome
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type call_kind =
   | Function
@@ -72,7 +79,7 @@ type preparation =
   | Pre_tool_rejected
   | Pre_tool_failed
   | Session_ended
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type routing =
   { kind : call_kind
@@ -82,7 +89,7 @@ type routing =
   ; canonical_payload : payload_fingerprint option [@sexp.option]
   ; preparation : preparation
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type t =
   { context : context
@@ -91,7 +98,7 @@ type t =
   ; routing : routing option [@sexp.option]
   ; publication_discarded : string option [@sexp.option]
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 let invalid message = Error (Error.invalid_request message)
 let failure code message = Error (Error.create code ~message ~retryable:false ())
@@ -353,14 +360,9 @@ let validate_transition ~previous next =
      | _ -> failure Invalid_state "new invocation must be admitted")
   | Some previous ->
     let%bind () = validate previous in
-    if not (Sexp.equal (sexp_of_context previous.context) (sexp_of_context next.context))
+    if not (equal_context previous.context next.context)
     then failure Conflict "invocation context is immutable"
-    else if
-      not
-        (Option.equal
-           (fun a b -> Sexp.equal (sexp_of_routing a) (sexp_of_routing b))
-           previous.routing
-           next.routing)
+    else if not (Option.equal equal_routing previous.routing next.routing)
     then failure Conflict "invocation routing provenance is immutable"
     else if
       Option.is_some previous.publication_discarded
@@ -381,12 +383,12 @@ let validate_transition ~previous next =
     else (
       match previous.status, next.status with
       | Resolved old, Resolved current
-        when Option.is_some next.publication_discarded
-             && Sexp.equal (sexp_of_outcome old) (sexp_of_outcome current) -> Ok ()
+        when Option.is_some next.publication_discarded && equal_outcome old current ->
+        Ok ()
       | Admitted, Dispatching | Admitted, Resolved (Cancelled _) | Dispatching, Resolved _
         -> Ok ()
       | (Resolved old, Published current | Published old, Published current)
-        when Sexp.equal (sexp_of_outcome old) (sexp_of_outcome current) -> Ok ()
+        when equal_outcome old current -> Ok ()
       | Resolved _, _ | Published _, _ ->
         failure Already_resolved "recorded invocation outcome cannot be replaced"
       | _ -> failure Invalid_state "invalid invocation transition")

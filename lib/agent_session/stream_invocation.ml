@@ -1,5 +1,86 @@
 open Core
 module I = Agent_protocol.Invocation
+module D = Chat_response.In_memory_stream.Tool_dispatch
+
+let preparation = function
+  | None -> I.Passed
+  | Some D.Invalid_input -> I.Invalid_input
+  | Some Pre_tool -> Pre_tool_rejected
+  | Some Pre_tool_failed -> Pre_tool_failed
+  | Some Session_ended -> Session_ended
+;;
+
+type prepared =
+  { invocation : I.t
+  ; fingerprint : string
+  ; rejection : D.rejection option
+  }
+
+type cache =
+  { entries : (History_entry.Id.t, prepared) Hashtbl.t
+  ; lock : Eio.Mutex.t
+  }
+
+let cache () =
+  { entries = Hashtbl.create (module History_entry.Id); lock = Eio.Mutex.create () }
+;;
+
+let request_fingerprint (request : D.request) =
+  [%sexp
+    (request.original_name : string)
+  , (request.original_payload : string)
+  , (request.name : string)
+  , (request.payload : string)
+  , ((match request.kind with
+      | Function -> "function"
+      | Custom -> "custom")
+     : string)
+  , (request.call : History_entry.t)
+  , (request.source : string option)
+  , (request.parent_call_id : string option)]
+  |> Sexp.to_string_mach
+  |> Chatmd_shell_spec.Source_ref.digest
+;;
+
+let prepare cache ~capabilities ~create (request : D.request) =
+  Eio.Mutex.use_rw ~protect:true cache.lock (fun () ->
+    let fingerprint = request_fingerprint request in
+    match Hashtbl.find cache.entries (History_entry.id request.call) with
+    | Some saved ->
+      let rejection_matches =
+        match saved.rejection, request.rejection with
+        | None, (None | Some D.Session_ended)
+        | Some D.Invalid_input, Some D.Invalid_input
+        | Some D.Pre_tool, Some D.Pre_tool
+        | Some D.Pre_tool_failed, Some D.Pre_tool_failed
+        | Some D.Session_ended, Some D.Session_ended -> true
+        | _ -> false
+      in
+      if String.equal saved.fingerprint fingerprint && rejection_matches
+      then
+        capabilities.Operation_worker.Capabilities.commit_invocation_call
+          ~invocation:saved.invocation
+          request.call
+        |> Result.map ~f:(fun () -> saved.invocation)
+      else
+        Error
+          (Agent_protocol.Error.invalid_request
+             "prepared invocation request changed before dispatch")
+    | None ->
+      let open Result.Let_syntax in
+      let%bind invocation = create request in
+      Eio.Cancel.protect (fun () ->
+        let%map () =
+          capabilities.Operation_worker.Capabilities.commit_invocation_call
+            ~invocation
+            request.call
+        in
+        Hashtbl.set
+          cache.entries
+          ~key:(History_entry.id request.call)
+          ~data:{ invocation; fingerprint; rejection = request.rejection };
+        invocation))
+;;
 
 let rejection_outcome preparation =
   let fail code message =
@@ -64,13 +145,7 @@ let create
       ; original_payload = fingerprint request.original_payload
       ; final_payload = fingerprint request.payload
       ; canonical_payload = Some (fingerprint canonical_payload)
-      ; preparation =
-          (match request.rejection with
-           | None -> Passed
-           | Some Invalid_input -> Invalid_input
-           | Some Pre_tool -> Pre_tool_rejected
-           | Some Pre_tool_failed -> Pre_tool_failed
-           | Some Session_ended -> Session_ended)
+      ; preparation = preparation request.rejection
       }
   in
   I.create
