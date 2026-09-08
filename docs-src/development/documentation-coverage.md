@@ -403,6 +403,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatmd_shell_spec/shell_spec.mli` | [contract](../../lib/chatmd_shell_spec/shell_spec.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/shell_tool_spec.mli` | [contract](../../lib/chatmd_shell_spec/shell_tool_spec.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/source_ref.mli` | [contract](../../lib/chatmd_shell_spec/source_ref.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/chatmd_shell_spec/tool_schema.mli` | [contract](../../lib/chatmd_shell_spec/tool_schema.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_builtin_modules.mli` | [contract](../../lib/chatml/chatml_builtin_modules.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_builtin_spec.mli` | [contract](../../lib/chatml/chatml_builtin_spec.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatml/chatml_builtin_surface.mli` | [contract](../../lib/chatml/chatml_builtin_surface.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |

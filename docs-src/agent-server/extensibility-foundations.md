@@ -111,3 +111,41 @@ are part of the remaining recovery implementation.
 
 See the [protocol interfaces](protocol-types.md) for exact codecs and
 [session architecture](../lib/agent_session/architecture.doc.md) for actor APIs.
+
+## Tool schema validation foundation
+
+`Chatmd_shell_spec.Tool_schema` provides shared pure compilation and validation;
+new ChatMD tool declarations have not yet been connected to it. The supported
+subset consists of boolean schemas and these object keywords:
+
+- `type` (one type or a nonempty type union)
+- `properties`, `required`, `additionalProperties`
+- `items`, `minItems`, `maxItems`
+- `minLength`, `maxLength`
+- `minimum`, `maximum`
+- `enum`, `const`, `anyOf`
+- String metadata: `title`, `description`, `$comment`
+
+Unknown keywords, including `$ref`, `$schema`, `format`, `pattern` and `oneOf`, are
+rejected explicitly. There is no file/network reference resolution. Primitive
+constraints apply to their respective value types, and an empty object schema
+accepts all valid JSON. Contradictory bounds may compile as an unsatisfiable schema.
+
+Numbers use exact decimal comparison, including values beyond floating-point
+integer precision; mathematically integral decimals satisfy `integer`. Enum and
+const compare objects independently of key order and numbers by mathematical value.
+String lengths count Unicode scalars, not UTF-8 bytes or grapheme clusters.
+Malformed UTF-8, invalid number tokens and duplicate JSON object keys fail validation.
+
+Schema sources and values are limited to 1 MiB, 128 levels and 100,000 nodes.
+Source nesting is checked before JSON parsing. Literal decimal exponent magnitude
+is limited to 1,000,000 without allocating exponent-sized strings; length/count
+bounds must fit the host integer range. Compilation and validation limit structural,
+branch and equality work to 1,000,000 charged steps. Exhausting that budget is a
+resource error, even inside `anyOf`; a later permissive branch cannot hide it.
+These are schema-service ceilings, separate from the narrower runtime invocation
+budgets and the execution services' cancellation guarantees.
+
+Diagnostics distinguish invalid schemas/JSON, resource exhaustion and value
+mismatch and include the failing value or schema path. Compilation does not load
+sources, instantiate ChatML modules, or invoke any tool.

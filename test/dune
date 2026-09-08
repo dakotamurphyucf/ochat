@@ -866,3 +866,10 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+(library
+ (name tool_schema_test)
+ (modules tool_schema_test)
+ (libraries core jsonaf ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

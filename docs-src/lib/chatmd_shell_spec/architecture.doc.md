@@ -1,7 +1,7 @@
 # `Chatmd_shell_spec` architecture
 
 `ochat.chatmd_shell_spec` owns serializable ChatMD shell declarations and pure
-canonical manifest compilation. It depends on Core and Jsonaf only and contains
+canonical manifest compilation. It uses Core, Jsonaf, Digestif and Uutf and contains
 no Eio handles, callbacks, mutable stores, host probing, or process execution.
 
 ## Module map
@@ -15,6 +15,9 @@ no Eio handles, callbacks, mutable stores, host probing, or process execution.
   policy, reviewers, hooks, secrets, and audit values.
 - `Shell_tool_spec`: fixed/structured/chain/raw/script-file tool declarations.
 - `Chatmd_script_spec`: moderator and six shell ChatML script kinds.
+- [`Tool_schema`](../../../lib/chatmd_shell_spec/tool_schema.mli): bounded, pure
+  extension-tool JSON-schema compilation and value validation. Declaration and
+  runtime admission integration is still under implementation.
 - `Manifest_defaults`, `Builtin_profile`: explicit defaults and versioned
   profile expansion.
 - `Manifest_merge`, `Manifest_compiler`: inheritance/reference/cycle checking,
