@@ -1,5 +1,9 @@
 open Core
 
+type delivery_id = Id.Delivery.t [@@deriving sexp]
+
+module Delivery_id = Id.Delivery
+
 module Id = struct
   type t = History_entry.Id.t [@@deriving compare, hash, sexp]
 
@@ -36,6 +40,7 @@ type provenance =
   | Canonical
   | Moderator_inserted
   | Moderator_replaced of Id.t
+  | Runtime_notification of delivery_id
 [@@deriving sexp]
 
 type entry =
@@ -83,6 +88,9 @@ let kind_of_json =
 let provenance_to_json = function
   | Canonical -> `Object [ "type", `String "canonical" ]
   | Moderator_inserted -> `Object [ "type", `String "moderator_inserted" ]
+  | Runtime_notification id ->
+    `Object
+      [ "type", `String "runtime_notification"; "delivery_id", Delivery_id.to_json id ]
   | Moderator_replaced id ->
     `Object [ "type", `String "moderator_replaced"; "canonical_id", Id.to_json id ]
 ;;
@@ -94,6 +102,10 @@ let provenance_of_json json =
   match encoded with
   | "canonical" -> Ok Canonical
   | "moderator_inserted" -> Ok Moderator_inserted
+  | "runtime_notification" ->
+    Result.map
+      (Json_codec.required_as fields "delivery_id" Delivery_id.of_json)
+      ~f:(fun id -> Runtime_notification id)
   | "moderator_replaced" ->
     Result.map (Json_codec.required_as fields "canonical_id" Id.of_json) ~f:(fun id ->
       Moderator_replaced id)

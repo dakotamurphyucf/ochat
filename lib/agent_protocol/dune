@@ -20,6 +20,10 @@
   audit
   job
   invocation
+  extension_codec
+  completion
+  subscription
+  delivery
   schedule
   scope
   principal
@@ -33,7 +37,7 @@
   event
   command
   method_result)
- (private_modules protocol_error)
+ (private_modules protocol_error extension_codec)
  (libraries core jsonaf base64 mirage-crypto-rng uutf ochat.history_entry)
  (preprocess
   (pps ppx_jane)))

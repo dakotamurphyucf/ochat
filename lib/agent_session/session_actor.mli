@@ -74,6 +74,30 @@ val create_with_owner_lease_duration
 val snapshot : t -> (Agent_protocol.Snapshot.t, Agent_protocol.Error.t) result
 val state : t -> (Session_state.t, Agent_protocol.Error.t) result
 
+module Extension_change : sig
+  type t =
+    | Invocation of Agent_protocol.Invocation.t
+    | Subscription of Agent_protocol.Subscription.t
+    | Delivery of Agent_protocol.Delivery.t
+    | Publish of Agent_protocol.Delivery.t * Agent_protocol.History.entry
+    | Start_job of Agent_protocol.Job.t
+    | Schedule of Agent_protocol.Schedule.t
+    | Moderator_state of Jsonaf.t option
+end
+
+(** Host-internal, revision-checked atomic commit of already admitted extension
+    work. Jobs become visible to scheduling only after persistence succeeds.
+    This is not a caller authorization service and must not be exposed as a raw
+    model tool or external RPC. Runtime borrow/admission and disclosure checks
+    belong to the dispatch service. Publication requires an idle safe point;
+    active-turn integration must hand off through the worker boundary. *)
+val commit_extensions
+  :  t
+  -> generation:int
+  -> expected_revision:int64
+  -> Extension_change.t list
+  -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
+
 (** [set_operation_worker] installs or removes the process-local runtime
     capability. It does not mutate durable session state. Callers may remove
     the worker only while no foreground operation is active. *)

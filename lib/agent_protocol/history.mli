@@ -1,5 +1,7 @@
 (** Presentation-neutral canonical and moderated transcript projections. *)
 
+type delivery_id = Id.Delivery.t [@@deriving sexp]
+
 module Id : sig
   type t = History_entry.Id.t [@@deriving compare, hash, sexp]
 
@@ -28,6 +30,7 @@ type provenance =
   | Canonical
   | Moderator_inserted
   | Moderator_replaced of Id.t
+  | Runtime_notification of delivery_id
 [@@deriving sexp]
 
 type entry =

@@ -30,7 +30,21 @@ type reset_options = Administration.reset_options =
   ; workspace_instance : Workspace_instance.t option
   }
 
+module Extension_change = struct
+  type t =
+    | Invocation of Agent_protocol.Invocation.t
+    | Subscription of Agent_protocol.Subscription.t
+    | Delivery of Agent_protocol.Delivery.t
+    | Publish of Agent_protocol.Delivery.t * Agent_protocol.History.entry
+    | Start_job of Agent_protocol.Job.t
+    | Schedule of Agent_protocol.Schedule.t
+    | Moderator_state of Jsonaf.t option
+end
+
 type _ request =
+  | Commit_extensions :
+      int * int64 * Extension_change.t list
+      -> Agent_protocol.Session.t request
   | State : Session_state.t request
   | Snapshot : Agent_protocol.Snapshot.t request
   | Authorize_writer : Agent_protocol.Id.Attachment.t -> unit request
@@ -279,6 +293,115 @@ let transition t ~delta ~payloads =
   in
   let%map () = install t transition in
   Agent_protocol.Session.(Session_state.summary t.state)
+;;
+
+let commit_extensions_internal t generation expected_revision changes =
+  let open Result.Let_syntax in
+  if
+    generation <> t.state.identity.generation
+    || not (Int64.equal expected_revision t.state.counters.revision)
+  then
+    Error
+      (error Conflict "extension transaction uses a stale session revision or generation")
+  else if List.is_empty changes || List.length changes > 256
+  then
+    Error
+      (error
+         Resource_limit
+         "extension transaction must contain between 1 and 256 changes")
+  else if
+    List.exists changes ~f:(function
+      | Extension_change.Publish _ -> true
+      | _ -> false)
+    && (Option.is_some t.state.active_operation
+        || t.idle_moderator_borrowed
+        || t.state.halted
+        || (not
+              (Agent_protocol.Session.equal_desired_state
+                 t.state.lifecycle.desired
+                 Running))
+        ||
+        match t.state.lifecycle.observed with
+        | Agent_protocol.Session.Idle -> false
+        | _ -> true)
+  then
+    Error
+      (error
+         Invalid_state
+         "notification publication requires an idle running session safe point")
+  else (
+    let new_jobs = Hash_set.create (module Agent_protocol.Id.Job) in
+    let new_schedules = Hash_set.create (module Agent_protocol.Id.Schedule) in
+    let%bind deltas =
+      List.map changes ~f:(function
+        | Extension_change.Invocation value -> Ok (Session_delta.Invocation_changed value)
+        | Subscription value -> Ok (Session_delta.Subscription_changed value)
+        | Delivery value -> Ok (Session_delta.Delivery_changed value)
+        | Publish (value, entry) -> Ok (Session_delta.Delivery_committed (value, entry))
+        | Moderator_state value -> Ok (Session_delta.Moderator_changed value)
+        | Start_job job ->
+          let%bind () =
+            Extension_invariants.owner
+              ~session_id:t.state.identity.session_id
+              ~generation
+              job.session_id
+              job.generation
+          in
+          if
+            Hash_set.mem new_jobs job.id
+            || List.exists t.state.jobs ~f:(fun old ->
+              Agent_protocol.Id.Job.compare old.id job.id = 0)
+          then Error (error Conflict "extension job identity is already admitted")
+          else (
+            match job.status with
+            | Queued ->
+              Hash_set.add new_jobs job.id;
+              Ok (Session_delta.Job_changed job)
+            | _ -> Error (error Invalid_state "extension job must start queued"))
+        | Schedule schedule ->
+          let%bind () =
+            Extension_invariants.owner
+              ~session_id:t.state.identity.session_id
+              ~generation
+              schedule.session_id
+              schedule.generation
+          in
+          if
+            Hash_set.mem new_schedules schedule.id
+            || List.exists t.state.schedules ~f:(fun old ->
+              Agent_protocol.Id.Schedule.compare old.id schedule.id = 0)
+          then Error (error Conflict "extension schedule identity is already admitted")
+          else (
+            match schedule.status with
+            | Scheduled ->
+              Hash_set.add new_schedules schedule.id;
+              Ok (Session_delta.Schedule_changed schedule)
+            | _ -> Error (error Invalid_state "extension schedule must start scheduled")))
+      |> Result.all
+    in
+    let delta = Session_delta.Batch deltas in
+    let%bind candidate = Session_delta.apply t.state delta in
+    let old_ids = Hash_set.create (module History_entry.Id) in
+    List.iter t.state.conversation.canonical_history ~f:(fun entry ->
+      Hash_set.add old_ids entry.id);
+    let appended =
+      List.filter candidate.conversation.canonical_history ~f:(fun entry ->
+        not (Hash_set.mem old_ids entry.id))
+    in
+    let history_payloads =
+      if List.is_empty appended
+      then []
+      else [ Agent_protocol.Event.Durable.Payload.History_appended appended ]
+    in
+    let work_payloads =
+      List.filter_map changes ~f:(function
+        | Extension_change.Start_job job ->
+          Some (Agent_protocol.Event.Durable.Payload.Job_state_changed job)
+        | Schedule schedule ->
+          Some (Agent_protocol.Event.Durable.Payload.Schedule_created schedule)
+        | _ -> None)
+    in
+    transition t ~delta ~payloads:(history_payloads @ work_payloads))
 ;;
 
 let set_operation_worker t worker =
@@ -2593,6 +2716,8 @@ let detach t attachment_id =
 
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t -> function
+  | Commit_extensions (generation, revision, changes) ->
+    commit_extensions_internal t generation revision changes
   | State -> Ok t.state
   | Snapshot -> Ok (current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
@@ -2812,6 +2937,10 @@ let create
 
 let snapshot t = call t Snapshot
 let state t = call t State
+
+let commit_extensions t ~generation ~expected_revision changes =
+  call t (Commit_extensions (generation, expected_revision, changes))
+;;
 
 let set_operation_worker t worker =
   call t ~priority:Priority (Set_operation_worker worker)

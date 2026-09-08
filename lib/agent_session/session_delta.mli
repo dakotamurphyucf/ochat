@@ -20,6 +20,9 @@ type t =
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
+  | Subscription_changed of Agent_protocol.Subscription.t
+  | Delivery_changed of Agent_protocol.Delivery.t
+  | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
   | History_block_reserved of int64

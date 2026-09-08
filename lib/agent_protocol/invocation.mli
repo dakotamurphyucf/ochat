@@ -88,6 +88,9 @@ val publish : t -> (t, Error.t) result
 val validate_transition : previous:t option -> t -> (unit, Error.t) result
 
 val outcome_to_json : outcome -> Jsonaf.t
+val validate_outcome : outcome -> (unit, Error.t) result
+val work_to_json : work -> Jsonaf.t
+val work_of_json : Jsonaf.t -> (work, Error.t) result
 val outcome_of_json : Jsonaf.t -> (outcome, Error.t) result
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result

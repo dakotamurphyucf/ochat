@@ -18,6 +18,9 @@ type t =
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
+  | Subscription_changed of Agent_protocol.Subscription.t
+  | Delivery_changed of Agent_protocol.Delivery.t
+  | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
   | History_block_reserved of int64
@@ -177,6 +180,131 @@ let rec apply state = function
           state.invocations
           ~id_of:(fun value -> value.Agent_protocol.Invocation.context.id)
     }
+  | Subscription_changed subscription ->
+    let open Result.Let_syntax in
+    let c = subscription.Agent_protocol.Subscription.context in
+    let%bind () =
+      Extension_invariants.owner
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+        c.session_id
+        c.generation
+    in
+    let previous =
+      List.find state.subscriptions ~f:(fun old ->
+        Agent_protocol.Id.Subscription.compare old.context.id c.id = 0)
+    in
+    let%map () = Agent_protocol.Subscription.validate_transition ~previous subscription in
+    { state with
+      subscriptions =
+        replace_by
+          Agent_protocol.Id.Subscription.compare
+          c.id
+          subscription
+          state.subscriptions
+          ~id_of:(fun s -> s.Agent_protocol.Subscription.context.id)
+    }
+  | Delivery_changed delivery ->
+    let open Result.Let_syntax in
+    let c = delivery.Agent_protocol.Delivery.context in
+    let%bind () =
+      Extension_invariants.owner
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+        c.session_id
+        c.generation
+    in
+    let previous =
+      List.find state.deliveries ~f:(fun old ->
+        Agent_protocol.Id.Delivery.compare old.context.id c.id = 0)
+    in
+    let%bind () =
+      match delivery.status with
+      | Committed _ ->
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:"delivery commit requires an atomic history insertion"
+             ~retryable:false
+             ())
+      | Pending | Failed _ -> Ok ()
+    in
+    let%map () = Agent_protocol.Delivery.validate_transition ~previous delivery in
+    { state with
+      deliveries =
+        replace_by
+          Agent_protocol.Id.Delivery.compare
+          c.id
+          delivery
+          state.deliveries
+          ~id_of:(fun d -> d.Agent_protocol.Delivery.context.id)
+    }
+  | Delivery_committed (delivery, entry) ->
+    let open Result.Let_syntax in
+    let c = delivery.Agent_protocol.Delivery.context in
+    let invalid message =
+      Error (Agent_protocol.Error.create Invalid_state ~message ~retryable:false ())
+    in
+    let%bind () =
+      Extension_invariants.owner
+        ~session_id:state.identity.session_id
+        ~generation:state.identity.generation
+        c.session_id
+        c.generation
+    in
+    let previous =
+      List.find state.deliveries ~f:(fun old ->
+        Agent_protocol.Id.Delivery.compare old.context.id c.id = 0)
+    in
+    let%bind () = Agent_protocol.Delivery.validate_transition ~previous delivery in
+    let%bind () =
+      Extension_invariants.delivery_ready ~invocations:state.invocations delivery
+    in
+    let%bind () =
+      match delivery.status, entry.Agent_protocol.History.provenance with
+      | Committed { history_id; _ }, Runtime_notification id
+        when History_entry.Id.equal history_id entry.id
+             && Agent_protocol.Id.Delivery.compare id c.id = 0 -> Ok ()
+      | _ -> invalid "delivery/history identity or runtime provenance mismatch"
+    in
+    let%bind decoded = History_codec.of_protocol entry in
+    let classified = History_codec.to_protocol decoded in
+    let%bind () =
+      if
+        Agent_protocol.History.equal_role classified.role User
+        && Agent_protocol.History.equal_kind classified.kind Message
+        && Agent_protocol.History.equal_role entry.role User
+        && Agent_protocol.History.equal_kind entry.kind Message
+      then Ok ()
+      else invalid "notification must be runtime data in a user input representation"
+    in
+    let already_committed =
+      Option.exists previous ~f:(fun old ->
+        match old.status with
+        | Committed _ -> true
+        | _ -> false)
+    in
+    if already_committed
+    then Ok state
+    else if
+      List.exists state.conversation.canonical_history ~f:(fun old ->
+        History_entry.Id.equal old.id entry.id)
+    then invalid "notification history identity already exists"
+    else
+      Ok
+        { state with
+          deliveries =
+            replace_by
+              Agent_protocol.Id.Delivery.compare
+              c.id
+              delivery
+              state.deliveries
+              ~id_of:(fun d -> d.Agent_protocol.Delivery.context.id)
+        ; conversation =
+            { state.conversation with
+              canonical_history = state.conversation.canonical_history @ [ entry ]
+            }
+        }
   | Moderator_changed moderator -> Ok { state with moderator }
   | Shell_changed shell -> Ok { state with shell }
   | History_block_reserved reserved_history_through ->

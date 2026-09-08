@@ -967,11 +967,11 @@ let%expect_test
       [%sexp
         (Result.is_error
            (Agent_session.Session_state.upgrade_schema
-              { initial with schema_version = 4 })
+              { initial with schema_version = 5 })
          : bool)]);
   [%expect
     {|
-    ((version 3) (records 0))
+    ((version 4) (records 0))
     true
     true
     true
@@ -1040,7 +1040,407 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 3) (records 0)) |}]
+  [%expect {| ((version 4) (records 0)) |}]
+;;
+
+let extension_fixture workspace_instance =
+  let initial =
+    actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+  in
+  let admitted = invocation_fixture () in
+  let dispatched = Agent_protocol.Invocation.dispatch admitted |> protocol_ok in
+  let subscription =
+    Agent_protocol.Subscription.create
+      { id = Agent_protocol.Id.Subscription.of_string "sub_atomic" |> protocol_ok
+      ; session_id
+      ; generation = 0
+      ; invocation_id = admitted.context.id
+      ; kind = "fixture"
+      ; created_at = timestamp
+      ; deadline =
+          Agent_protocol.Timestamp.of_string "2026-08-15T13:00:00Z" |> protocol_ok
+      ; completion_schema = None
+      ; wake = Request_turn
+      ; ingress_capability = None
+      }
+    |> protocol_ok
+  in
+  let finished, _ =
+    Agent_protocol.Subscription.finish
+      subscription
+      ~expected_epoch:0
+      ~now:timestamp
+      (Succeeded (`String "ready"))
+    |> protocol_ok
+  in
+  let resolved =
+    Agent_protocol.Invocation.resolve
+      dispatched
+      ~session_id
+      ~generation:0
+      (Pending (Subscription subscription.context.id, `String "accepted"))
+    |> protocol_ok
+  in
+  let delivery =
+    Agent_protocol.Delivery.create
+      { id = Agent_protocol.Id.Delivery.of_string "dlv_atomic" |> protocol_ok
+      ; session_id
+      ; generation = 0
+      ; invocation_id = Some admitted.context.id
+      ; work = Some (Subscription subscription.context.id)
+      ; correlation = "fixture"
+      ; source = Moderator
+      ; completion = Succeeded (`String "ready")
+      ; wake = Request_turn
+      ; created_at = timestamp
+      }
+    |> protocol_ok
+  in
+  let delta =
+    Agent_session.Session_delta.Batch
+      [ Invocation_changed admitted
+      ; Invocation_changed dispatched
+      ; Subscription_changed subscription
+      ; Subscription_changed finished
+      ; Invocation_changed resolved
+      ; Delivery_changed delivery
+      ]
+  in
+  let staged =
+    Agent_session.Session_transition.apply ~now:timestamp initial ~delta ~payloads:[]
+    |> protocol_ok
+  in
+  initial, staged.state, resolved, finished, delivery
+;;
+
+let notification_entry delivery =
+  let id =
+    History_entry.Id.create ~namespace:"notification" ~sequence:0 |> Result.ok_or_failwith
+  in
+  let entry =
+    Agent_session.History_codec.user_text ~id "Ochat runtime result data: ready"
+  in
+  Agent_session.History_codec.to_protocol
+    ~provenance:(Runtime_notification delivery.Agent_protocol.Delivery.context.id)
+    entry
+;;
+
+let%expect_test
+    "fast completion stays pending until acknowledgement then commits exactly one \
+     history entry"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let _, staged, resolved, _, delivery = extension_fixture workspace_instance in
+    let restored =
+      Agent_session.Session_persistence.restore_snapshot
+        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t staged))
+      |> store_ok
+    in
+    let entry = notification_entry delivery in
+    let committed =
+      Agent_protocol.Delivery.commit delivery ~history_id:entry.id ~now:timestamp
+      |> protocol_ok
+    in
+    let transition state delta =
+      Agent_session.Session_transition.apply ~now:timestamp state ~delta ~payloads:[]
+    in
+    print_s
+      [%sexp
+        (Result.is_error (transition restored (Delivery_committed (committed, entry)))
+         : bool)];
+    print_s [%sexp (List.length restored.conversation.canonical_history : int)];
+    let published = Agent_protocol.Invocation.publish resolved |> protocol_ok in
+    let ready = transition restored (Invocation_changed published) |> protocol_ok in
+    let delivered =
+      transition ready.state (Delivery_committed (committed, entry)) |> protocol_ok
+    in
+    let repeated =
+      transition delivered.state (Delivery_committed (committed, entry)) |> protocol_ok
+    in
+    print_s [%sexp (List.length repeated.state.conversation.canonical_history : int)];
+    let restored =
+      Agent_session.Session_persistence.restore_snapshot
+        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t repeated.state))
+      |> store_ok
+    in
+    print_s
+      [%sexp
+        ((List.hd_exn restored.conversation.canonical_history).provenance
+         : Agent_protocol.History.provenance)];
+    print_s
+      [%sexp (Result.is_error (transition restored (Delivery_changed committed)) : bool)]);
+  [%expect
+    {|
+    true
+    0
+    1
+    (Runtime_notification dlv_atomic)
+    true |}]
+;;
+
+let%expect_test
+    "invalid delivery transaction cannot publish its acknowledgement or forge human \
+     provenance"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let _, staged, resolved, _, delivery = extension_fixture workspace_instance in
+    let published = Agent_protocol.Invocation.publish resolved |> protocol_ok in
+    let entry = { (notification_entry delivery) with provenance = Canonical } in
+    let committed =
+      Agent_protocol.Delivery.commit delivery ~history_id:entry.id ~now:timestamp
+      |> protocol_ok
+    in
+    let delta =
+      Agent_session.Session_delta.Batch
+        [ Invocation_changed published; Delivery_committed (committed, entry) ]
+    in
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_transition.apply
+              ~now:timestamp
+              staged
+              ~delta
+              ~payloads:[])
+         : bool)];
+    print_s
+      [%sexp ((List.hd_exn staged.invocations).status : Agent_protocol.Invocation.status)];
+    print_s [%sexp (List.length staged.conversation.canonical_history : int)]);
+  [%expect
+    {|
+    true
+    (Resolved (Pending (Subscription sub_atomic) (String accepted)))
+    0 |}]
+;;
+
+let%expect_test "extension references reject missing work and competing delivery owners" =
+  with_actor_workspace (fun _env workspace_instance ->
+    let _, staged, _, subscription, delivery = extension_fixture workspace_instance in
+    let original = List.hd_exn staged.invocations in
+    let wrong_ack =
+      Agent_protocol.Invocation.create original.context
+      |> protocol_ok
+      |> Agent_protocol.Invocation.dispatch
+      |> protocol_ok
+    in
+    let wrong_ack =
+      Agent_protocol.Invocation.resolve
+        wrong_ack
+        ~session_id
+        ~generation:0
+        (Complete `Null)
+      |> protocol_ok
+    in
+    assert (
+      Result.is_error
+        (Agent_session.Session_state.validate { staged with invocations = [ wrong_ack ] }));
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_state.validate { staged with subscriptions = [] })
+         : bool)];
+    let duplicate =
+      Agent_protocol.Delivery.create
+        { delivery.context with
+          id = Agent_protocol.Id.Delivery.of_string "dlv_competing" |> protocol_ok
+        }
+      |> protocol_ok
+    in
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_state.validate
+              { staged with deliveries = duplicate :: staged.deliveries })
+         : bool)];
+    let wrong =
+      Agent_protocol.Delivery.create
+        { delivery.context with completion = Succeeded (`String "forged") }
+      |> protocol_ok
+    in
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_state.validate { staged with deliveries = [ wrong ] })
+         : bool)];
+    let foreign =
+      Agent_protocol.Subscription.create
+        { subscription.context with session_id = second_session_id }
+      |> protocol_ok
+    in
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_delta.apply staged (Subscription_changed foreign))
+         : bool)];
+    let stale =
+      Agent_protocol.Subscription.create { subscription.context with generation = 1 }
+      |> protocol_ok
+    in
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_delta.apply staged (Subscription_changed stale))
+         : bool)]);
+  [%expect
+    {|
+    true
+    true
+    true
+    true
+    true |}]
+;;
+
+let%expect_test "schema-3 invocation snapshots migrate without losing pending publication"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let state =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let invocation =
+      invocation_fixture () |> Agent_protocol.Invocation.dispatch |> protocol_ok
+    in
+    let invocation =
+      Agent_protocol.Invocation.resolve
+        invocation
+        ~session_id
+        ~generation:0
+        (Complete `Null)
+      |> protocol_ok
+    in
+    let legacy = { state with schema_version = 3; invocations = [ invocation ] } in
+    let restored =
+      Agent_session.Session_persistence.restore_snapshot
+        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t legacy))
+      |> store_ok
+    in
+    print_s
+      [%sexp
+        { version = (restored.schema_version : int)
+        ; invocations = (List.length restored.invocations : int)
+        ; subscriptions = (List.length restored.subscriptions : int)
+        ; deliveries = (List.length restored.deliveries : int)
+        }];
+    print_s
+      [%sexp
+        ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
+  [%expect
+    {|
+    ((version 4) (invocations 1) (subscriptions 0) (deliveries 0))
+    (Resolved (Complete Null)) |}]
+;;
+
+let%expect_test
+    "actor extension commit exposes neither queued work nor notification before \
+     persistence succeeds"
+  =
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let _, staged, resolved, _, delivery = extension_fixture workspace_instance in
+      let staged = { staged with lifecycle = { desired = Running; observed = Idle } } in
+      let fail_commit = ref true in
+      let callbacks = ref 0 in
+      let history_events = ref 0 in
+      let actor =
+        Agent_session.Session_actor.create
+          ~sw
+          ~clock:(Eio.Stdenv.clock env)
+          ~mailbox_capacity:32
+          ~compaction_env:None
+          ~initial_state:staged
+          ~operation_worker:None
+          ~persistence:
+            { commit =
+                (fun ~command_audit:_ ~previous:_ _ ->
+                  if !fail_commit
+                  then
+                    Error
+                      (Agent_protocol.Error.create
+                         Persistence_error
+                         ~message:"injected disk failure"
+                         ~retryable:true
+                         ())
+                  else Ok ())
+            }
+          ~services:
+            { now = (fun () -> timestamp)
+            ; create_attachment_id =
+                (fun () ->
+                  Agent_protocol.Id.Attachment.of_string "att_extension" |> protocol_ok)
+            ; create_reclaim_token = (fun () -> "fixture")
+            ; state_committed =
+                (fun _ events ->
+                  Int.incr callbacks;
+                  List.iter events ~f:(fun event ->
+                    if Agent_protocol.Event.Durable.equal_kind event.kind History_appended
+                    then Int.incr history_events))
+            }
+      in
+      let published = Agent_protocol.Invocation.publish resolved |> protocol_ok in
+      let entry = notification_entry delivery in
+      let committed =
+        Agent_protocol.Delivery.commit delivery ~history_id:entry.id ~now:timestamp
+        |> protocol_ok
+      in
+      let job =
+        Agent_protocol.Job.
+          { id = Agent_protocol.Id.Job.of_string "job_atomic" |> protocol_ok
+          ; session_id
+          ; generation = 0
+          ; kind = Async_tool
+          ; payload = `Null
+          ; status = Queued
+          ; retry_policy = Never
+          ; attempt = 0
+          ; created_at = timestamp
+          ; started_at = None
+          ; next_run_at = None
+          ; completed_at = None
+          ; result = None
+          ; delivery = Not_required
+          }
+      in
+      let changes =
+        Agent_session.Session_actor.Extension_change.
+          [ Start_job job; Invocation published; Publish (committed, entry) ]
+      in
+      let commit expected_revision changes =
+        Agent_session.Session_actor.commit_extensions
+          actor
+          ~generation:0
+          ~expected_revision
+          changes
+      in
+      print_s [%sexp (Result.is_error (commit staged.counters.revision changes) : bool)];
+      let failed = Agent_session.Session_actor.state actor |> protocol_ok in
+      print_s
+        [%sexp
+          { jobs = (List.length failed.jobs : int)
+          ; history = (List.length failed.conversation.canonical_history : int)
+          ; callbacks = (!callbacks : int)
+          }];
+      fail_commit := false;
+      let after = commit staged.counters.revision changes |> protocol_ok in
+      print_s [%sexp (Result.is_error (commit staged.counters.revision changes) : bool)];
+      commit
+        after.revision
+        Agent_session.Session_actor.Extension_change.
+          [ Invocation published; Publish (committed, entry) ]
+      |> protocol_ok
+      |> ignore;
+      let final = Agent_session.Session_actor.state actor |> protocol_ok in
+      print_s
+        [%sexp
+          { jobs = (List.length final.jobs : int)
+          ; history = (List.length final.conversation.canonical_history : int)
+          ; history_events = (!history_events : int)
+          }];
+      Agent_session.Session_actor.shutdown actor));
+  [%expect
+    {|
+    true
+    ((jobs 0) (history 0) (callbacks 0))
+    true
+    ((jobs 1) (history 1) (history_events 1)) |}]
 ;;
 
 let%expect_test "session actor publishes committed events to multiple subscribers" =

@@ -89,6 +89,8 @@ type t =
   ; jobs : Agent_protocol.Job.t list
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
+  ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
+  ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
   ; attachments : Agent_protocol.Session.Attachment.t list
   ; moderator : Jsonaf.t option
   ; shell : Session.Shell_state.t
@@ -99,12 +101,15 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 3
+let current_schema_version = 4
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
-  else if t.schema_version = 2 && List.is_empty t.invocations
+  else if
+    (t.schema_version = 3 || (t.schema_version = 2 && List.is_empty t.invocations))
+    && List.is_empty t.subscriptions
+    && List.is_empty t.deliveries
   then Ok { t with schema_version = current_schema_version }
   else
     Error
@@ -142,6 +147,8 @@ let create ~identity ~spec ~initial_history =
   ; jobs = []
   ; schedules = []
   ; invocations = []
+  ; subscriptions = []
+  ; deliveries = []
   ; attachments = []
   ; moderator = None
   ; shell = Session.Shell_state.empty
@@ -190,6 +197,16 @@ let validate t =
       else (
         Hash_set.add seen_invocations context.id;
         Ok ()))
+  in
+  let%bind () =
+    Extension_invariants.validate
+      ~session_id:t.identity.session_id
+      ~generation:t.identity.generation
+      ~invocations:t.invocations
+      ~subscriptions:t.subscriptions
+      ~deliveries:t.deliveries
+      ~jobs:t.jobs
+      ~schedules:t.schedules
   in
   let%bind () = nonnegative "revision" t.counters.revision in
   let%bind () = nonnegative "event sequence" t.counters.event_sequence in
