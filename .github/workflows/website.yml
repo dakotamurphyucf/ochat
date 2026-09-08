@@ -52,6 +52,7 @@ jobs:
         if: always()
         with:
           name: ci-selection
+          overwrite: true
           path: .ci-evidence/selection.json
           include-hidden-files: true
           retention-days: 90
@@ -84,6 +85,7 @@ jobs:
         with:
           include-hidden-files: true
           name: website-semantic-evidence
+          overwrite: true
           path: |
             website/.release/semantic-report.json
             website/.release/opam-packages.txt
@@ -119,6 +121,7 @@ jobs:
         if: always()
         with:
           name: framework-evidence-${{ matrix.tier }}
+          overwrite: true
           include-hidden-files: true
           retention-days: 90
           path: |
@@ -365,6 +368,7 @@ jobs:
         if: always()
         with:
           name: production-deployment-evidence
+          overwrite: true
           path: |
             website/.release/deployment.json
             website/.release/hosted-production.json
