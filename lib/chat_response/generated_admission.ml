@@ -72,6 +72,10 @@ let inspect elements =
         error
           "delegation.execution_configuration"
           "generated definitions may contain only extensibility-v1 lifecycle moderators"
+      | Authoring_help _ ->
+        error
+          "delegation.metadata_reconfiguration"
+          "inherited authoring metadata cannot be replaced by the child"
       | Authoring_context policy when Option.is_none context ->
         Ok (names, scripts, Some policy, configs)
       | Authoring_context _ ->

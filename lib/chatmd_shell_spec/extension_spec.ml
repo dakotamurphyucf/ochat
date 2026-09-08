@@ -60,6 +60,13 @@ type authoring_context =
   }
 [@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
 
+type authoring_help =
+  { tool : string
+  ; help : Authoring_metadata.help
+  ; source_ref : Source_ref.t
+  }
+[@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
+
 let script_text script =
   match script.source with
   | Inline text | Src { source_text = text; _ } -> text

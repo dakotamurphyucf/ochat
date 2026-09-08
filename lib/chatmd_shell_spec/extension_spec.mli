@@ -59,6 +59,13 @@ type authoring_context =
   }
 [@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
 
+type authoring_help =
+  { tool : string
+  ; help : Authoring_metadata.help
+  ; source_ref : Source_ref.t
+  }
+[@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
+
 val script_text : script -> string
 
 (** Recompile pinned schema bytes, checking their retained digest first. *)

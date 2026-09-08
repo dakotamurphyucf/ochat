@@ -278,6 +278,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/agent_runtime.mli` | [contract](../../lib/chat_response/agent_runtime.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_trace.mli` | [contract](../../lib/chat_response/agent_trace.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_policy.mli` | [contract](../../lib/chat_response/authoring_policy.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
+| `lib/chat_response/authoring_registration.mli` | [contract](../../lib/chat_response/authoring_registration.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_moderation.mli` | [contract](../../lib/chat_response/chatml_moderation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_moderator.mli` | [contract](../../lib/chat_response/chatml_moderator.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_turn_driver.mli` | [contract](../../lib/chat_response/chatml_turn_driver.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |

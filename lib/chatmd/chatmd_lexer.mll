@@ -87,7 +87,7 @@ let tag_of_string_in_state state name =
   match tag_of_string_opt name with
   | Some (Shell_element _) when not (is_structured_scope state) -> None
   | Some Uses when List.is_empty state.extension_scope_depths -> None
-  | Some Authoring_context when state.depth <> 0 -> None
+  | Some (Authoring_context | Authoring_help) when state.depth <> 0 -> None
   | tag -> tag
 
 let is_recognised state name = Option.is_some (tag_of_string_in_state state name)

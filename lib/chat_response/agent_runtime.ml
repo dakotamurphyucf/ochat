@@ -100,6 +100,7 @@ let collect declarations = function
   | Reasoning _
   | Script _
   | Extension_script _
+  | Authoring_help _
   | Authoring_context _ -> declarations
 ;;
 
@@ -480,8 +481,9 @@ let create
   =
   if
     List.exists prompt_elements ~f:(function
-      | CM.Extension_script _ | Tool (Extension _ | Inherited _) | Authoring_context _ ->
-        true
+      | CM.Extension_script _
+      | Tool (Extension _ | Inherited _)
+      | Authoring_context _ | Authoring_help _ -> true
       | _ -> false)
   then
     Error
@@ -542,10 +544,15 @@ let create
                        |> Sexp.to_string
                        |> Chatmd_shell_spec.Source_ref.digest
                      in
-                     Tool_capability.create
+                     Authoring_registration.create
+                       ~declarations:
+                         (List.filter_map prompt_elements ~f:(function
+                            | CM.Authoring_help help -> Some help
+                            | _ -> None))
                        ~owner:host.session_id
                        ~resource_fingerprint
                        registrations
+                     |> Result.map ~f:Authoring_registration.capabilities
                    with
                    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
                    | _ ->

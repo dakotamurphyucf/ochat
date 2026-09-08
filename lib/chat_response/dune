@@ -31,6 +31,7 @@
   tool_capability
   authoring_policy
   generated_admission
+  authoring_registration
   extension_compiler
   mcp_discovery_cache
   fork

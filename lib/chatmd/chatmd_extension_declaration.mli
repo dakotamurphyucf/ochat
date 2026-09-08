@@ -25,3 +25,10 @@ val authoring_context
 val serialize_tool : Spec.tool -> string
 val serialize_script : Spec.script -> string
 val serialize_authoring : Spec.authoring_context -> string
+
+val authoring_help
+  :  source:Chatmd_shell_spec.Source_ref.t
+  -> Chatmd_ast.node
+  -> (Spec.authoring_help, Chatmd_shell_spec.Diagnostic.t list) result
+
+val serialize_help : Spec.authoring_help -> string

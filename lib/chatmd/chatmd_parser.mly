@@ -104,6 +104,7 @@ let string_of_tag : tag -> string = function
   | Moderator_runtime -> "moderator_runtime"
   | Uses -> "uses"
   | Authoring_context -> "authoring_context"
+  | Authoring_help -> "authoring_help"
   | Shell_element element -> Chatmd_shell_spec.Shell_element.to_string element
 
 let tag_mismatch ~(open_tag : tag) ~(close_tag : tag) =

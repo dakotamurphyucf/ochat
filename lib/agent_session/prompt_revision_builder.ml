@@ -52,7 +52,7 @@ let shell_digest inspection = inspection.Chat_response.Agent_runtime.manifest.sh
 
 let build_manifest definition ~canonical_source ~root ~sources ~shell_manifest_sha256 =
   [%sexp
-    { schema = (3 : int)
+    { schema = (4 : int)
     ; prompt_definition_id =
         (definition.Prompt_definition.id : Agent_protocol.Id.Prompt_definition.t)
     ; canonical_source : string
@@ -161,6 +161,8 @@ let install artifact_store ~transaction_id artifact =
    executable preprocessing during the closure-version preflight. *)
 let validate_parser_elements ~parser_version elements =
   List.iter elements ~f:(function
+    | Prompt.Chat_markdown.Authoring_help _ when parser_version < 4 ->
+      failwith "authoring help declarations require prompt parser schema version 4"
     | Prompt.Chat_markdown.Tool (Inherited _) when parser_version < 3 ->
       failwith "inherited tool references require prompt parser schema version 3"
     | (Extension_script _ | Tool (Extension _) | Authoring_context _)
@@ -201,7 +203,7 @@ let parse_artifact artifact_store artifact =
   let parser_version =
     artifact.Agent_store.Prompt_artifact_store.Artifact.parser_schema_version
   in
-  if (parser_version < 1 || parser_version > 3) || artifact.runtime_schema_version <> 1
+  if (parser_version < 1 || parser_version > 4) || artifact.runtime_schema_version <> 1
   then failwith "unsupported prompt parser/runtime schema version";
   Agent_store.Prompt_artifact_store.verify_materialized_tree artifact_store artifact
   |> Result.map_error ~f:(fun error ->
@@ -220,7 +222,7 @@ let parse_artifact artifact_store artifact =
   let root_source =
     Source_loader.root loader ~file:artifact.root_relative_path |> Result.ok_or_failwith
   in
-  if parser_version < 3
+  if parser_version < 4
   then validate_parser_closure ~parser_version ~dir:tree loader root_source;
   let elements =
     Prompt.Chat_markdown.parse_chat_inputs
@@ -275,7 +277,7 @@ let build
             ~root_relative_path:(Filename.basename definition.root_file)
             ~root_chatmd:root
             ~sources
-            ~parser_schema_version:3
+            ~parser_schema_version:4
             ~runtime_schema_version:1
             ~shell_manifest_sha256
             ~created_at

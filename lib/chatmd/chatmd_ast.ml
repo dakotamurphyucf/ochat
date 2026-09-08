@@ -66,6 +66,7 @@ type tag =
   | Uses
   | Authoring_context
   | Shell_element of Chatmd_shell_spec.Shell_element.t
+  | Authoring_help
 [@@deriving sexp]
 
 (** [tag_equal a b] returns [true] iff tags [a] and [b] are identical.
@@ -93,6 +94,7 @@ let tag_equal (a : tag) (b : tag) : bool =
   | Shell_access, Shell_access
   | Moderator_runtime, Moderator_runtime
   | Uses, Uses
+  | Authoring_help, Authoring_help
   | Authoring_context, Authoring_context
   | Config, Config -> true
   | Shell_element a, Shell_element b -> Chatmd_shell_spec.Shell_element.equal a b
@@ -124,6 +126,7 @@ let tag_of_string_opt : string -> tag option = function
   | "moderator_runtime" -> Some Moderator_runtime
   | "uses" -> Some Uses
   | "authoring_context" -> Some Authoring_context
+  | "authoring_help" -> Some Authoring_help
   | name ->
     Option.map (Chatmd_shell_spec.Shell_element.of_string name) ~f:(fun element ->
       Shell_element element)

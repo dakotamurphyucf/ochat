@@ -193,6 +193,12 @@ let () =
             ]
             ~f:(fun source -> expect "delegation.invalid_source" (prepare source));
           expect "delegation.duplicate_tool" (prepare (inherited ^ inherited));
+          expect
+            "delegation.metadata_reconfiguration"
+            (prepare
+               (inherited
+                ^ {|<authoring_help tool="read_file" package="one-off" tasks="one_off_script" topics="chatml/basics"/>|}
+               ));
           List.iter
             [ "let initial_state = Process.run(\"/bin/echo\", `Null)\n"
             ; "let initial_state = Model.call(\"other\", `Null)\n"
@@ -252,13 +258,7 @@ let () =
             String.substr_replace_all first ~pattern:"coordinator" ~with_:"second"
           in
           expect "delegation.invalid_source" (prepare (first ^ second));
-          ignore
-            (prepare
-               ~worker:slow_worker
-               ~limits:{ Chatml_compilation.default_limits with wall_seconds = 1. }
-               first
-             |> get
-             : G.t);
+          ignore (prepare ~worker:slow_worker first |> get : G.t);
           expect
             "chatml.compile_timeout"
             (prepare

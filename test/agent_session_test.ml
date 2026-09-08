@@ -3521,7 +3521,7 @@ let%expect_test
         tool.input_schema.source_ref.source_dir
         (Filename.concat materialized "parts"));
     let artifact = Agent_session.Prompt_revision.artifact restored in
-    assert (artifact.parser_schema_version = 3);
+    assert (artifact.parser_schema_version = 4);
     assert (List.length artifact.sources = 3);
     let restore_fixture ~suffix ~version ~root ~sources =
       let id =
@@ -3566,6 +3566,29 @@ let%expect_test
            ~root:{|<user>Example: <authoring_context policy="manual"/></user>|}
            ~sources:[]));
     let inherited = {|<tool type="inherited" name="read_file"/>|} in
+    let authored_help =
+      {|<authoring_help tool="custom" package="one-off" tasks="one_off_script" topics="chatml/basics"/>|}
+    in
+    List.iter [ 1; 2; 3 ] ~f:(fun version ->
+      let result =
+        restore_fixture
+          ~suffix:(sprintf "help_%d" version)
+          ~version
+          ~root:authored_help
+          ~sources:[]
+      in
+      match result with
+      | Ok _ -> failwith "old artifact accepted new help declarations"
+      | Error errors ->
+        assert (
+          List.exists errors ~f:(fun diagnostic ->
+            String.is_substring
+              diagnostic.Agent_session.Prompt_revision_builder.Diagnostic.message
+              ~substring:
+                "authoring help declarations require prompt parser schema version 4")));
+    assert (
+      Result.is_ok
+        (restore_fixture ~suffix:"help_v4" ~version:4 ~root:authored_help ~sources:[]));
     List.iter [ 1; 2 ] ~f:(fun version ->
       let assert_floor result =
         match result with

@@ -205,6 +205,7 @@ module Chat_content = struct
     | Shell_script of Script_spec.t
     | Extension_script of Chatmd_shell_spec.Extension_spec.script
     | Authoring_context of Chatmd_shell_spec.Extension_spec.authoring_context
+    | Authoring_help of Chatmd_shell_spec.Extension_spec.authoring_help
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 end
 
@@ -228,6 +229,7 @@ module Chat_markdown = struct
     | Shell_script of Script_spec.t
     | Extension_script of Chatmd_shell_spec.Extension_spec.script
     | Authoring_context of Chatmd_shell_spec.Extension_spec.authoring_context
+    | Authoring_help of Chatmd_shell_spec.Extension_spec.authoring_help
     | Reasoning of reasoning
     | Summary of reasoning_summary
     | Text of string
@@ -293,6 +295,7 @@ module Chat_markdown = struct
       | Script _
       | Shell_script _
       | Extension_script _
+      | Authoring_help _
       | Authoring_context _ )
       :: rest -> content_items_of_elements rest
   ;;
@@ -441,6 +444,7 @@ module Chat_markdown = struct
     | Shell_script script -> Chatmd_script_declaration.serialize script
     | Extension_script script -> Chatmd_extension_declaration.serialize_script script
     | Authoring_context config -> Chatmd_extension_declaration.serialize_authoring config
+    | Authoring_help help -> Chatmd_extension_declaration.serialize_help help
     | Tool t ->
       (match t with
        | Extension tool -> Chatmd_extension_declaration.serialize_tool tool
@@ -910,6 +914,10 @@ module Chat_markdown = struct
              (String.concat
                 ~sep:"; "
                 (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
+      | Element (Authoring_help, _, _) ->
+        (match Chatmd_extension_declaration.authoring_help ~source:source_ref node with
+         | Ok help -> Authoring_help help
+         | Error diagnostics -> script_error diagnostics)
       | Element (Authoring_context, _, _) ->
         (match Chatmd_extension_declaration.authoring_context ~source:source_ref node with
          | Ok config -> Authoring_context config
@@ -944,6 +952,7 @@ module Chat_markdown = struct
       | Element (Shell_access, _, _)
       | Element (Moderator_runtime, _, _)
       | Element (Authoring_context, _, _)
+      | Element (Authoring_help, _, _)
       | Element (Script, _, _) -> true
       | _ -> false)
   ;;
@@ -965,6 +974,7 @@ module Chat_markdown = struct
     | Shell_script script -> Some (Shell_script script)
     | Extension_script script -> Some (Extension_script script)
     | Authoring_context config -> Some (Authoring_context config)
+    | Authoring_help help -> Some (Authoring_help help)
     | Developer_msg m -> Some (Developer m)
     | System_msg m -> Some (System m) (* System is a legacy alias for Developer *)
     | _ -> None
@@ -1032,6 +1042,21 @@ module Chat_markdown = struct
         (List.hd_exn policies).source_ref
         "chatmd.duplicate_authoring_context"
         "only one authoring_context declaration is permitted";
+    let help_declarations =
+      List.filter_map elements ~f:(function
+        | Authoring_help help -> Some help
+        | _ -> None)
+    in
+    (match
+       List.find_a_dup help_declarations ~compare:(fun a b ->
+         String.compare a.X.tool b.X.tool)
+     with
+     | None -> ()
+     | Some help ->
+       error
+         help.source_ref
+         "chatmd.duplicate_authoring_help"
+         "only one help declaration per tool is permitted");
     List.iter extensions ~f:(fun tool ->
       let target, kind =
         match tool.X.implementation with

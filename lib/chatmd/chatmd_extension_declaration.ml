@@ -368,6 +368,79 @@ let authoring_context ~source node =
         "expected authoring_context")
 ;;
 
+let authoring_help ~source node =
+  protect (fun () ->
+    let module M = Chatmd_shell_spec.Authoring_metadata in
+    let path = [ "authoring_help" ] in
+    match node with
+    | Ast.Element (Ast.Authoring_help, raw, children) ->
+      let attributes =
+        attrs source path [ "tool"; "package"; "tasks"; "topics"; "required_helpers" ] raw
+      in
+      empty source path children;
+      let tool = required attributes "tool" in
+      if
+        String.is_empty tool
+        || String.length tool > 256
+        || not
+             (String.for_all tool ~f:(function
+                | 'a' .. 'z' | 'A' .. 'Z' | '0' .. '9' | '_' | '-' | ':' | '.' -> true
+                | _ -> false))
+      then
+        fail
+          source
+          path
+          "chatmd.authoring_invalid_tool"
+          "use an exact registered tool name";
+      let words value =
+        String.split_on_chars value ~on:[ ' '; '\t'; '\r'; '\n' ]
+        |> List.filter ~f:(Fn.non String.is_empty)
+      in
+      let task name =
+        match
+          List.find
+            [ M.One_off_script
+            ; Standalone_tool
+            ; Moderator_tool
+            ; Child_agent
+            ; Background_workflow
+            ]
+            ~f:(fun t -> String.equal (M.task_id t) name)
+        with
+        | Some task -> task
+        | None ->
+          fail
+            source
+            path
+            "chatmd.authoring_invalid_task"
+            ("unknown authoring task: " ^ String.prefix name 128)
+      in
+      let helper = function
+        | "ochat_authoring_context" -> M.Reference
+        | "ochat_validate" -> M.Validation
+        | _ ->
+          fail source path "chatmd.authoring_invalid_helper" "unknown authoring helper"
+      in
+      let help : M.help =
+        { version = 1
+        ; package = required attributes "package"
+        ; tasks = List.map (words (required attributes "tasks")) ~f:task
+        ; topics = words (required attributes "topics")
+        ; required_helpers =
+            Option.value_map
+              (optional attributes "required_helpers")
+              ~default:[]
+              ~f:(fun value -> List.map (words value) ~f:helper)
+        }
+      in
+      (match M.validate_help help with
+       | Ok () -> ()
+       | Error message -> fail source path "chatmd.authoring_invalid_help" message);
+      { Spec.tool; help; source_ref = source }
+    | _ ->
+      fail source path "chatmd.authoring_invalid_declaration" "expected authoring_help")
+;;
+
 let escape value =
   value
   |> String.substr_replace_all ~pattern:"&" ~with_:"&amp;"
@@ -438,4 +511,24 @@ let serialize_authoring (config : Spec.authoring_context) =
     | Preload topics -> [ "policy", "preload"; "topics", String.concat ~sep:" " topics ]
   in
   sprintf "<authoring_context %s/>" (attributes values)
+;;
+
+let serialize_help (declaration : Spec.authoring_help) =
+  let module M = Chatmd_shell_spec.Authoring_metadata in
+  let help = declaration.help in
+  let values =
+    [ "tool", declaration.tool
+    ; "package", help.package
+    ; "tasks", String.concat ~sep:" " (List.map help.tasks ~f:M.task_id)
+    ; "topics", String.concat ~sep:" " help.topics
+    ]
+    @
+    if List.is_empty help.required_helpers
+    then []
+    else
+      [ ( "required_helpers"
+        , String.concat ~sep:" " (List.map help.required_helpers ~f:M.helper_name) )
+      ]
+  in
+  sprintf "<authoring_help %s/>" (attributes values)
 ;;

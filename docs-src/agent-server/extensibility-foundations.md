@@ -208,11 +208,12 @@ build, more than 256 total source files, or an aggregate larger than 8 MiB. This
 source boundary does not replace execution capability checks or artifact symlink
 verification.
 
-New prompt artifacts use parser schema version 3 and a distinct revision identity.
-Existing parser-version-1 and version-2 artifacts still restore within their grammar
+New prompt artifacts use parser schema version 4 and a distinct revision identity.
+Existing parser-version-1, version-2 and version-3 artifacts still restore within their grammar
 contracts; unknown parser/runtime versions fail. Existing moderator binary record
 layouts are retained by additive declaration variants. Extension declarations
-require version 2; inherited tool references require version 3. Old-version
+require version 2; inherited tool references require version 3; authoring-help
+declarations require version 4. Old-version
 restoration checks the captured import/local-agent closure, using the normal
 declaration semantics without executable preprocessing during that check. Inline
 markup that is ordinary message text is not treated as a top-level declaration.
@@ -464,11 +465,53 @@ primer intent, preloaded IDs, corpus identity and a fingerprint. Fingerprints bi
 the actual capability metadata, corpus catalog, policy and topic order.
 
 These are admission-plan primitives. The installed reference corpus, real helper
-runners, custom ChatMD help-metadata syntax, registration integration, token-budget
+runners, runtime context integration, token-budget
 checks, rendered tool descriptions, effective-history injection and compaction
 rediscovery are still under implementation. A plan requesting one primer is not
 yet evidence that it was inserted into a provider request. No authoring feature
 is advertised as available by these primitives.
+
+### Declaring help for a custom authoring tool
+
+A top-level companion declaration assigns help metadata to an exact registered
+callable name. It works with native, custom, script-backed and expanded MCP tool
+registrations; the name must actually be present when registration is admitted.
+
+```xml
+<authoring_help tool="write_workflow"
+  package="workflow-authoring"
+  tasks="one_off_script child_agent"
+  topics="chatml/basics chatmd/children"
+  required_helpers="ochat_validate"/>
+```
+
+The package/topic names in this syntax example must match the compatible installed
+catalog; the example does not assert that these packages are installed yet.
+`tasks` accepts `one_off_script`, `standalone_tool`, `moderator_tool`, `child_agent`
+and `background_workflow`. The optional `required_helpers` list accepts
+`ochat_authoring_context` and `ochat_validate`. These are dependencies, not grants
+of helper authenticity. Only host registration can assign trusted helper roles.
+
+The declaration has no body and permits only the five shown attributes. Tool,
+package, task and topic lists are validated, with duplicate attributes, task/topic
+entries and declarations rejected. Imports retain source provenance; their
+namespace does not rewrite callable names. Inline `authoring_help` markup inside
+messages remains ordinary text. Generated children inherit their selected tool's
+existing metadata and cannot replace it with their own companion declaration.
+
+`Authoring_registration.create` binds this metadata to actual expanded tool runners
+without invoking them. It rejects unknown names, overrides of host metadata,
+reserved-helper authoring declarations and invalid retained versions. The original
+implementation is preserved; declaration provenance contributes to capability
+identity. `sources` exposes the authored provenance for inspection.
+
+`Authoring_registration.resolve` combines that registration with authoring policy
+admission. It returns the registry and effective plan: automatic helper additions,
+manual control, selected preload topics and shared-primer intent. All helpers must
+already belong to the supplied host-approved ceiling. Hosts must fulfill the
+plan before exposing tools. Ordinary runtime startup still explicitly rejects
+new authoring declarations until the context service is integrated; parsing a
+declaration is not evidence that guidance reaches a model request.
 
 ## Generated definition admission
 

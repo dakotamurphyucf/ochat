@@ -7,12 +7,12 @@ type task =
   | Moderator_tool [@jsonaf.name "moderator_tool"]
   | Child_agent [@jsonaf.name "child_agent"]
   | Background_workflow [@jsonaf.name "background_workflow"]
-[@@deriving sexp, compare, equal, bin_io, jsonaf]
+[@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
 
 type helper =
   | Reference [@jsonaf.name "ochat_authoring_context"]
   | Validation [@jsonaf.name "ochat_validate"]
-[@@deriving sexp, compare, equal, bin_io, jsonaf]
+[@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
 
 type help =
   { version : int
@@ -21,13 +21,13 @@ type help =
   ; topics : string list
   ; required_helpers : helper list
   }
-[@@deriving sexp, compare, equal, bin_io, jsonaf]
+[@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
 
 type t =
   { authoring : help option
   ; helper : helper option
   }
-[@@deriving sexp, compare, equal, bin_io, jsonaf]
+[@@deriving sexp, compare, equal, hash, bin_io, jsonaf]
 
 let empty = { authoring = None; helper = None }
 

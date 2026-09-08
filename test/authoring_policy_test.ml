@@ -350,3 +350,133 @@ let%test_unit "authoring metadata uses frozen task and helper identifiers" =
     assert (
       Poly.equal (M.jsonaf_of_helper helper) (`Array [ `String (M.helper_name helper) ])))
 ;;
+
+let%test_unit "authored help binds actual registrations without overriding trusted roles" =
+  let module R = Chat_response.Authoring_registration in
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let calls = ref 0 in
+    let implementation = native "author" calls in
+    let source =
+      {|<authoring_help tool="author" package="one-off" tasks="one_off_script" topics="chatml/basics"/>|}
+    in
+    let bundle =
+      Chatmd_source_bundle.create
+        ~root_file:"root.chatmd"
+        ~sources:[ "root.chatmd", source ]
+        ()
+      |> Result.ok_or_failwith
+    in
+    let parsed =
+      Prompt.Chat_markdown.parse_source_bundle ~dir:(Eio.Stdenv.cwd env) bundle
+    in
+    let declaration =
+      List.find_map_exn parsed.root ~f:(function
+        | Prompt.Chat_markdown.Authoring_help help -> Some help
+        | _ -> None)
+    in
+    let registrations = [ digest "implementation", implementation ] in
+    let create ?host_metadata ?(registrations = registrations) declarations =
+      R.create
+        ?host_metadata
+        ~declarations
+        ~owner:"owner"
+        ~resource_fingerprint:(digest "roots")
+        registrations
+    in
+    let admitted = create [ declaration ] |> cap_get in
+    let registry = R.capabilities admitted in
+    let binding = C.find registry ~name:"author" |> cap_get in
+    assert (phys_equal (C.implementation binding) implementation);
+    assert (Option.equal M.equal_help (C.metadata binding).authoring (Some help));
+    assert (Option.is_none (C.metadata binding).helper);
+    assert (
+      String.equal
+        (List.Assoc.find_exn (R.sources admitted) ~equal:String.equal "author").file
+        "root.chatmd");
+    assert (!calls = 0);
+    let plan =
+      P.resolve ~policy:Manual ~ceiling:registry ~selected_names:[ "author" ] () |> get
+    in
+    assert (not (P.inject_primer plan));
+    assert (List.length (P.authoring_tools plan) = 1);
+    expect
+      "authoring.helper_unavailable"
+      (P.resolve ~catalog:(catalog ()) ~ceiling:registry ~selected_names:[ "author" ] ());
+    let reject code result =
+      match result with
+      | Ok _ -> failwith ("expected " ^ code)
+      | Error (error : C.error) -> assert (String.equal code error.code)
+    in
+    reject "authoring.unknown_tool" (create [ { declaration with tool = "missing" } ]);
+    reject
+      "authoring.invalid_metadata"
+      (create [ { declaration with tool = "bad tool" } ]);
+    reject "authoring.duplicate_metadata" (create [ declaration; declaration ]);
+    reject
+      "authoring.invalid_metadata"
+      (create [ { declaration with help = { help with version = 2 } } ]);
+    reject
+      "authoring.metadata_override"
+      (create
+         ~host_metadata:[ ("author", M.{ authoring = Some help; helper = None }) ]
+         [ declaration ]);
+    reject
+      "authoring.helper_metadata"
+      (create
+         ~registrations:[ digest "helper", native "ochat_validate" calls ]
+         [ { declaration with tool = "ochat_validate" } ]);
+    reject
+      "capability.invalid_registration"
+      (create ~registrations:[ "bad", implementation ] [ declaration ]);
+    let helpers = [ M.Reference; Validation ] in
+    let helper_registrations =
+      List.map helpers ~f:(fun helper ->
+        digest "helper", native (M.helper_name helper) calls)
+    in
+    let host_metadata =
+      List.map helpers ~f:(fun helper ->
+        M.helper_name helper, M.{ authoring = None; helper = Some helper })
+    in
+    let resolve ?context ?(registrations = registrations @ helper_registrations) () =
+      R.resolve
+        ~host_metadata
+        ?context
+        ~catalog:(catalog ())
+        ~declarations:[ declaration ]
+        ~owner:"owner"
+        ~resource_fingerprint:(digest "roots")
+        ~registrations
+        ~selected_names:[ "author" ]
+        ()
+    in
+    let registered, automatic = resolve () |> cap_get in
+    assert (P.inject_primer automatic);
+    assert (List.length (P.added_helpers automatic) = 2);
+    let author = C.find (P.capabilities automatic) ~name:"author" |> cap_get in
+    assert (phys_equal (C.implementation author) implementation);
+    assert (List.length (R.sources registered) = 1);
+    let context : S.authoring_context =
+      { version = 1; policy = Manual; source_ref = declaration.source_ref }
+    in
+    let _, manual = resolve ~context () |> cap_get in
+    assert (not (P.inject_primer manual));
+    assert (List.is_empty (P.added_helpers manual));
+    let _, preload =
+      resolve ~context:{ context with policy = Preload [ "chatml/basics" ] } () |> cap_get
+    in
+    assert (List.equal String.equal (P.preload_topics preload) [ "chatml/basics" ]);
+    let changed =
+      { declaration with
+        source_ref = { declaration.source_ref with file = "other.chatmd" }
+      }
+    in
+    let other = create [ changed ] |> cap_get |> R.capabilities in
+    let other = C.find other ~name:"author" |> cap_get |> C.reference in
+    assert (
+      not
+        (String.equal
+           (C.reference binding).implementation_revision
+           other.implementation_revision));
+    assert (!calls = 0))
+;;

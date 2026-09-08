@@ -197,6 +197,48 @@ let%test_unit "authoring policy is explicit and old inline markup remains text" 
     | _ -> failwith "unexpected markup")
 ;;
 
+let%test_unit "custom authoring help is strict, captured, and uses exact callable names" =
+  with_fixture (fun dir write ->
+    let source =
+      {|<authoring_help tool="author" package="one-off" tasks="one_off_script child_agent" topics="chatml/basics chatmd/children" required_helpers="ochat_validate"/>|}
+    in
+    write "help.chatmd" source;
+    let parsed = parse dir {|<import src="help.chatmd" namespace="scope"/>|} in
+    let declaration =
+      match parsed with
+      | [ CM.Authoring_help help ] -> help
+      | _ -> failwith "missing authoring help"
+    in
+    assert (String.equal declaration.tool "author");
+    assert (String.equal declaration.source_ref.file "help.chatmd");
+    assert (Option.equal String.equal declaration.source_ref.namespace (Some "scope"));
+    (match parse dir (Chatmd_extension_declaration.serialize_help declaration) with
+     | [ CM.Authoring_help reparsed ] ->
+       assert (
+         Chatmd_shell_spec.Authoring_metadata.equal_help declaration.help reparsed.help)
+     | _ -> failwith "help round-trip failed");
+    List.iter
+      [ String.substr_replace_all source ~pattern:"child_agent" ~with_:"unknown"
+      ; String.substr_replace_all source ~pattern:"ochat_validate" ~with_:"shell"
+      ; String.substr_replace_all
+          source
+          ~pattern:"chatml/basics chatmd/children"
+          ~with_:"chatml/basics chatml/basics"
+      ; String.substr_replace_first
+          source
+          ~pattern:"tool="
+          ~with_:"helper=\"reference\" tool="
+      ; String.substr_replace_first source ~pattern:"tool=" ~with_:"tool=\"other\" tool="
+      ; String.substr_replace_first source ~pattern:"/>" ~with_:">body</authoring_help>"
+      ; source ^ source
+      ]
+      ~f:(fun invalid -> assert (rejected (fun () -> parse dir invalid)));
+    match parse dir ("<user>Example: " ^ source ^ "</user>") with
+    | [ CM.User { content = Some (Text text); _ } ] ->
+      assert (String.is_substring text ~substring:"<authoring_help")
+    | _ -> failwith "inline help markup is not ordinary text")
+;;
+
 let%test_unit "bounded dependency reading observes only successful complete reads" =
   with_fixture (fun dir write ->
     write "large.txt" (String.make 8192 'x');
