@@ -48,6 +48,14 @@ let parse_input ~kind ~payload =
     | Error _ -> Error "invalid JSON arguments")
 ;;
 
+let validate_input prepared value =
+  Chat_response.Moderator_invocation.prepare_input
+    ~prepared
+    ~limits:(EC.execution_limits prepared)
+    value
+  |> Result.map ~f:(fun _ -> ())
+;;
+
 let dispatch
       ~definition
       ~manager
@@ -196,8 +204,7 @@ let dispatch
           Error "invocation rejected before execution")
         else if
           parse_error
-          || Result.is_error
-               (Schema.validate (EC.input_schema prepared) invocation.context.input)
+          || Result.is_error (validate_input prepared invocation.context.input)
         then (
           failure
           := Some
@@ -323,7 +330,7 @@ let create
     | None -> Ok ()
     | Some prepared ->
       Result.bind (parse_input ~kind ~payload) ~f:(fun value ->
-        Schema.validate (EC.input_schema prepared) value
+        validate_input prepared value
         |> Result.map_error ~f:(fun _ -> "invalid original tool input"))
   in
   Stream.Tool_dispatch.

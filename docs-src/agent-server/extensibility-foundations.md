@@ -207,13 +207,17 @@ callbacks and post-tool moderation. Native outputs now follow the same ordering.
 definition, its live moderator manager and the worker's actor capabilities. It
 parses function arguments with bounded JSON parsing; custom-tool input is a JSON
 string. Its pure `validate_original` hook checks known prepared tools before
-pre-tool moderation. Invalid JSON or a schema mismatch skips that handler and
+pre-tool moderation. It uses the implementing script's validated limits, retained
+in the prepared binding, to check the ChatML input projection's array length,
+depth and value bytes as well as the schema. Invalid JSON, a schema mismatch or
+an oversized projection skips that handler and
 records `invocation.invalid_input` against the original canonical call. A typed
 rejection distinguishes this case from a subsequent pre-tool policy denial;
 validator diagnostic text is not published. Unknown targets pass through to other
 services, so this adapter does not yet validate all native tool schemas.
 
-The final target's input schema is checked again inside the owning moderator
+The final target's schema and input projection limits are rechecked after any
+rewrite or redirect and again inside the owning moderator
 lock. A host admission callback then rechecks the live capability and revision,
 followed by the turn worker's final-target permission check, before any handler
 effects. This avoids authorizing a call before waiting for its owner and executing
@@ -273,9 +277,13 @@ worker and actor with an offline provider stream, covering success, policy denia
 disclosure rejection, malformed JSON, redirects and final-schema validation,
 revocation, failed publication persistence, post-hook failure and end-session.
 Original-input cases install a pre-tool handler that fails if called, proving
-malformed JSON and invalid function/custom arguments are rejected before it runs.
+malformed JSON, invalid function/custom arguments and array/depth/byte projection
+overflows are rejected before it runs. Limit cases use a permissive schema, so
+schema rejection cannot mask missing resource checks. Direct preparation tests
+also check values exactly at and just beyond each projection boundary.
 Separate rewrite cases prove final validation still rejects invalid rewritten
-arguments and permits valid ones.
+arguments and permits valid ones; rewrites and redirects cannot bypass projection
+limits by starting with a valid small input.
 Pre-tool rejection also has a durable invocation and publication receipt, with
 function/custom coverage, post-hook failure preservation and session termination.
 Pre-tool failure cases mutate state and buffer effects before failing, raising a

@@ -38,6 +38,7 @@ let setup
       ?(initial = "0")
       ?(capabilities = Chat_response.Moderation.Capabilities.default)
       ?(events = "| _ -> Task.pure(state)")
+      ?(script_limits = "")
       body
   =
   let dir = Eio.Stdenv.cwd env in
@@ -57,7 +58,9 @@ let setup
       ~dir
       ~source_loader:loader
       ("<script id=\"handler\" language=\"chatml\" kind=\"moderator\" \
-        api=\"extensibility-v1\">"
+        api=\"extensibility-v1\" "
+       ^ script_limits
+       ^ ">"
        ^ source
        ^ "</script><tool name=\"counter\" type=\"moderator\" moderator=\"handler\" \
           input_schema=\"schema.json\" output_schema=\"schema.json\"/>")
@@ -570,4 +573,31 @@ let%test_unit "dispatch applies the effective array limit before projection" =
              max_array_items = 1
            }
          ~validate_work:(fun _ -> Error "not owned")))
+;;
+
+let%test_unit "pure input preparation enforces projection boundaries" =
+  Eio_main.run (fun env ->
+    let _, prepared, _ =
+      setup
+        env
+        ~script_limits:{|max_array_items="3" max_depth="8" max_value="1KiB"|}
+        "Task.pure(state)"
+    in
+    let limits = EC.execution_limits prepared in
+    let prepare = MI.prepare_input ~prepared ~limits in
+    let array n = `Array (List.init n ~f:(fun _ -> `Null)) in
+    prepare (array limits.max_array_items) |> ok |> ignore;
+    expect "array item limit" (prepare (array (limits.max_array_items + 1)));
+    let nested n =
+      List.fold (List.init n ~f:Fn.id) ~init:`Null ~f:(fun value _ -> `Array [ value ])
+    in
+    (* JSON arrays project to a variant containing an array: two levels each. *)
+    prepare (nested (limits.max_depth / 2)) |> ok |> ignore;
+    expect "depth/node limit" (prepare (nested ((limits.max_depth / 2) + 1)));
+    let max_bytes =
+      Chatmd_shell_spec.Duration.bytes_to_int64 limits.max_value_bytes |> Int64.to_int_exn
+    in
+    (* The String variant and its contained value consume eight budget bytes. *)
+    prepare (`String (String.make (max_bytes - 8) 'x')) |> ok |> ignore;
+    expect "value byte limit" (prepare (`String (String.make (max_bytes - 7) 'x'))))
 ;;

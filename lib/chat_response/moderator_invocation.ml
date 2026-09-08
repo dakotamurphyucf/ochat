@@ -159,6 +159,25 @@ let ms timestamp =
   |> fun ns -> Int63.(to_int_exn (ns / of_int 1_000_000))
 ;;
 
+let prepare_input ~prepared ~(limits : S.limits) value =
+  let open Result.Let_syntax in
+  let%bind () = protocol (I.validate_outcome (Complete value)) in
+  let%bind () =
+    Schema.validate (EC.input_schema prepared) value
+    |> Result.map_error ~f:(fun _ -> "invocation.invalid_input: input schema mismatch")
+  in
+  let input = V.jsonaf_to_value value in
+  let%map () =
+    check_value
+      ~code:"invocation.invalid_input"
+      ~max_depth:limits.max_depth
+      ~max_array_items:limits.max_array_items
+      ~max_bytes:(bytes limits.max_value_bytes)
+      input
+  in
+  input
+;;
+
 let create ~prepared ~invocation ~(limits : S.limits) ~validate_work =
   let open Result.Let_syntax in
   let%bind () =
@@ -196,19 +215,7 @@ let create ~prepared ~invocation ~(limits : S.limits) ~validate_work =
     then Ok ()
     else error "invocation.stale_binding" "invocation does not match the prepared handler"
   in
-  let%bind () =
-    Schema.validate (EC.input_schema prepared) c.input
-    |> Result.map_error ~f:(fun _ -> "invocation.invalid_input: input schema mismatch")
-  in
-  let input = V.jsonaf_to_value c.input in
-  let%bind () =
-    check_value
-      ~code:"invocation.invalid_input"
-      ~max_depth:limits.max_depth
-      ~max_array_items:limits.max_array_items
-      ~max_bytes:(bytes limits.max_value_bytes)
-      input
-  in
+  let%bind input = prepare_input ~prepared ~limits c.input in
   let origin =
     match c.origin with
     | I.Model -> "Model"

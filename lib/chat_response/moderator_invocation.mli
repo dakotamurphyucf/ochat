@@ -5,6 +5,16 @@ module L = Chatml.Chatml_lang
 
 type t
 
+(** Pure input preparation for both original-call validation before pre hooks and
+    final invocation admission after rewrites. Checks protocol/schema bounds and
+    the ChatML value projection's depth, array and byte limits. Limits must come
+    from a validated script declaration. Performs no effects or authorization. *)
+val prepare_input
+  :  prepared:Extension_compiler.t
+  -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
+  -> Jsonaf.t
+  -> (L.value, string) result
+
 (** Host-only dispatch scope. The invocation must already be dispatched under
     current owner policy. Its implementation revision is the prepared handler's
     fingerprint; its capability fingerprint is the selected registry fingerprint.

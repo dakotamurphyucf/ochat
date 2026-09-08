@@ -22,6 +22,11 @@ val prepare
   -> (t, Chatmd_shell_spec.Diagnostic.t list) result
 
 val declaration : t -> Spec.tool
+
+(** Validated execution limits of the captured implementing script. These limits
+    are included in the prepared implementation fingerprint. *)
+val execution_limits : t -> Chatmd_shell_spec.Chatmd_script_spec.limits
+
 val program : t -> Chatml_host_runtime.compiled_script
 val capabilities : t -> Tool_capability.t
 val fingerprint : t -> string

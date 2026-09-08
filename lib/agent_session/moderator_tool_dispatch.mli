@@ -17,8 +17,9 @@ exception Dispatch_error of Agent_protocol.Error.t
     cannot be reused for transient fork calls. Unknown native names return [None].
     Rejected moderator calls record/publish a bounded terminal failure with the
     existing snapshot; no invocation handler or execution authorizer is run.
-    The service's [validate_original] checks known prepared input schemas without
-    running scripts or policy callbacks. Stream callers run it before pre-tool
+    The service's [validate_original] checks known prepared input schemas and the
+    implementing script's array/depth/byte projection limits without running
+    scripts or policy callbacks. Stream callers run it before pre-tool
     moderation. Unknown targets pass through for other services to validate;
     final-target validation still runs after any redirect or rewrite. *)
 val create

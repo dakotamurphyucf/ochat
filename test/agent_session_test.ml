@@ -2857,6 +2857,7 @@ let%test_unit
 
 let handoff_definition
       ?(events = "| _ -> Task.pure(state)")
+      ?(script_limits = "")
       ?(schema = "true")
       ?(finish = "Task.pure(state)")
       ?(resolve = "Invocation.resolve(p.context.invocation_id, `Complete(`Null))")
@@ -2868,7 +2869,9 @@ let handoff_definition
   let module C = Chat_response.Tool_capability in
   let dir = Eio.Stdenv.cwd env in
   let source =
-    {|<script id="handoff" language="chatml" kind="moderator" api="extensibility-v1">
+    {|<script id="handoff" language="chatml" kind="moderator" api="extensibility-v1" |}
+    ^ script_limits
+    ^ {|>
     let initial_state = [0]
     let on_event = fun ctx state event -> match event with
     | `Tool_invoked(p) ->
@@ -2973,6 +2976,12 @@ let%test_unit
     ; `Pre_host_exception
     ; `Pre_invalid_action
     ; `Pre_custom_fail
+    ; `Original_array_limit
+    ; `Original_depth_limit
+    ; `Original_bytes_limit
+    ; `Custom_bytes_limit
+    ; `Rewrite_limit
+    ; `Redirect_limit
     ]
     ~f:(fun mode ->
       let request_count = ref 0 in
@@ -2985,13 +2994,49 @@ let%test_unit
           mode
           ~equal:Poly.equal
       in
-      let redirected = Poly.equal mode `Redirect || Poly.equal mode `Redirect_bad in
-      let rewritten = Poly.equal mode `Rewrite_bad || Poly.equal mode `Rewrite_ok in
-      let invalid_original =
+      let redirected =
+        List.mem [ `Redirect; `Redirect_bad; `Redirect_limit ] mode ~equal:Poly.equal
+      in
+      let rewritten =
+        List.mem [ `Rewrite_bad; `Rewrite_ok; `Rewrite_limit ] mode ~equal:Poly.equal
+      in
+      let original_limit =
         List.mem
-          [ `Invalid_json; `Original_invalid; `Custom_invalid ]
+          [ `Original_array_limit
+          ; `Original_depth_limit
+          ; `Original_bytes_limit
+          ; `Custom_bytes_limit
+          ]
           mode
           ~equal:Poly.equal
+      in
+      let final_limit =
+        Poly.equal mode `Rewrite_limit || Poly.equal mode `Redirect_limit
+      in
+      let over_array = `Array (List.init 257 ~f:(fun _ -> `Null)) in
+      let array_expression =
+        "`Array([" ^ String.concat ~sep:"," (List.init 257 ~f:(fun _ -> "`Null")) ^ "])"
+      in
+      let original_payload =
+        match mode with
+        | `Invalid_json -> "[broken"
+        | `Original_invalid -> "\"wrong\""
+        | `Original_array_limit -> Jsonaf.to_string over_array
+        | `Original_depth_limit ->
+          Jsonaf.to_string
+            (List.fold (List.init 17 ~f:Fn.id) ~init:`Null ~f:(fun value _ ->
+               `Array [ value ]))
+        | `Original_bytes_limit ->
+          Jsonaf.to_string (`String (String.make (256 * 1024) 'x'))
+        | `Custom_bytes_limit -> String.make (256 * 1024) 'x'
+        | _ -> if redirected then "{}" else "null"
+      in
+      let invalid_original =
+        original_limit
+        || List.mem
+             [ `Invalid_json; `Original_invalid; `Custom_invalid ]
+             mode
+             ~equal:Poly.equal
       in
       let pre_rejected =
         List.mem
@@ -3007,6 +3052,7 @@ let%test_unit
         || Poly.equal mode `Pre_reject_custom
         || Poly.equal mode `Custom_invalid
         || Poly.equal mode `Pre_custom_fail
+        || Poly.equal mode `Custom_bytes_limit
       in
       let post_fails =
         Poly.equal mode `Post_fail || Poly.equal mode `Pre_reject_post_fail
@@ -3047,7 +3093,11 @@ let%test_unit
             else if rewritten
             then
               "| `Pre_tool_call(c) -> Task.bind(Tool.rewrite_args("
-              ^ (if Poly.equal mode `Rewrite_bad then "`String(\"wrong\")" else "`Null")
+              ^ (if final_limit
+                 then array_expression
+                 else if Poly.equal mode `Rewrite_bad
+                 then "`String(\"wrong\")"
+                 else "`Null")
               ^ "), fun ignored -> Task.pure(state)) | _ -> Task.pure(state)"
             else if pre_rejected
             then
@@ -3071,13 +3121,21 @@ let%test_unit
             else if redirected
             then
               "| `Pre_tool_call(c) -> Task.bind(Tool.redirect(\"counter\", "
-              ^ (if Poly.equal mode `Redirect_bad then "`String(\"wrong\")" else "`Null")
+              ^ (if final_limit
+                 then array_expression
+                 else if Poly.equal mode `Redirect_bad
+                 then "`String(\"wrong\")"
+                 else "`Null")
               ^ "), fun ignored -> Task.pure(state)) | _ -> Task.pure(state)"
             else "| _ -> Task.pure(state)"
           in
           let manager, _, definition =
             handoff_definition
               ~events
+              ~script_limits:
+                (if original_limit || final_limit
+                 then {|max_array_items="256" max_depth="32" max_value="256KiB"|}
+                 else "")
               ~moderator_capabilities:
                 { Chat_response.Moderation.Capabilities.default with
                   on_tool_call =
@@ -3086,7 +3144,9 @@ let%test_unit
                       failwith "private diagnostic from host")
                 }
               ~schema:
-                (if
+                (if original_limit || final_limit
+                 then "true"
+                 else if
                    redirected
                    || rewritten
                    || invalid_original
@@ -3162,21 +3222,14 @@ let%test_unit
                     ; (if custom
                        then
                          Custom_tool_call_input_done
-                           { input = "null"
+                           { input = original_payload
                            ; item_id = "counter-item"
                            ; output_index = 0
                            ; type_ = "response.custom_tool_call_input.done"
                            }
                        else
                          Function_call_arguments_done
-                           { arguments =
-                               (if Poly.equal mode `Invalid_json
-                                then "[broken"
-                                else if redirected
-                                then "{}"
-                                else if Poly.equal mode `Original_invalid
-                                then "\"wrong\""
-                                else "null")
+                           { arguments = original_payload
                            ; item_id = "counter-item"
                            ; output_index = 0
                            ; type_ = "response.function_call_arguments.done"
@@ -3265,17 +3318,10 @@ let%test_unit
            assert (List.length state.invocations = 1);
            let invocation = List.hd_exn state.invocations in
            let routing = Option.value_exn invocation.routing in
-           let original_payload =
-             if Poly.equal mode `Invalid_json
-             then "[broken"
-             else if Poly.equal mode `Original_invalid
-             then "\"wrong\""
-             else if redirected
-             then "{}"
-             else "null"
-           in
            let final_payload =
-             if Poly.equal mode `Redirect_bad || Poly.equal mode `Rewrite_bad
+             if final_limit
+             then Jsonaf.to_string over_array
+             else if Poly.equal mode `Redirect_bad || Poly.equal mode `Rewrite_bad
              then "\"wrong\""
              else if redirected || rewritten
              then "null"
@@ -3305,16 +3351,26 @@ let%test_unit
                      (if Poly.equal mode `Redacted_input
                       then "\"redacted\""
                       else final_payload))));
-           assert (
-             Poly.equal
-               routing.preparation
-               (if invalid_original
-                then Agent_protocol.Invocation.Invalid_input
-                else if pre_rejected
-                then Pre_tool_rejected
-                else if pre_failed
-                then Pre_tool_failed
-                else Passed));
+           let expected_preparation =
+             if invalid_original
+             then Agent_protocol.Invocation.Invalid_input
+             else if pre_rejected
+             then Pre_tool_rejected
+             else if pre_failed
+             then Pre_tool_failed
+             else Passed
+           in
+           if not (Poly.equal routing.preparation expected_preparation)
+           then
+             failwithf
+               "unexpected preparation for input %s/%d: %s, expected %s"
+               (Chatmd_shell_spec.Source_ref.digest original_payload)
+               (String.length original_payload)
+               (Sexp.to_string
+                  (Agent_protocol.Invocation.sexp_of_preparation routing.preparation))
+               (Sexp.to_string
+                  (Agent_protocol.Invocation.sexp_of_preparation expected_preparation))
+               ();
            let expected_count =
              if
                Poly.equal mode `Success
@@ -3369,6 +3425,12 @@ let%test_unit
                  | `Redirect_bad
                  | `Original_invalid
                  | `Custom_invalid
+                 | `Original_array_limit
+                 | `Original_depth_limit
+                 | `Original_bytes_limit
+                 | `Custom_bytes_limit
+                 | `Rewrite_limit
+                 | `Redirect_limit
                  | `Rewrite_bad -> "invocation.invalid_input"
                  | `Unhandled -> "invocation.unhandled"
                  | `Duplicate -> "invocation.duplicate_resolution"
@@ -3406,6 +3468,7 @@ let%test_unit
                pre_rejected
                || pre_failed
                || invalid_original
+               || final_limit
                || Poly.equal mode `Rewrite_bad
                || Poly.equal mode `Redirect_bad
              then 0

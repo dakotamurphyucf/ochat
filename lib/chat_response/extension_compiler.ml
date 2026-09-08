@@ -7,6 +7,7 @@ module Duration = Chatmd_shell_spec.Duration
 
 type t =
   { declaration : Spec.tool
+  ; limits : S.limits
   ; program : Chatml_host_runtime.compiled_script
   ; capabilities : Tool_capability.t
   ; fingerprint : string
@@ -16,6 +17,7 @@ type t =
   }
 
 let declaration t = t.declaration
+let execution_limits t = t.limits
 let program t = t.program
 let capabilities t = t.capabilities
 let fingerprint t = t.fingerprint
@@ -123,6 +125,7 @@ let prepare_with
   in
   Ok
     { declaration = tool
+    ; limits = script.limits
     ; program
     ; capabilities = selected
     ; fingerprint
