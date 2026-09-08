@@ -2881,10 +2881,26 @@ let%test_unit
     in
     let observing = I.claim_observation resolved |> protocol_ok in
     let observed = I.complete_observation observing |> protocol_ok in
+    let pending_actions =
+      I.complete_observation
+        observing
+        ~follow_up:{ request_turn = true; request_compaction = true; end_session = None }
+      |> protocol_ok
+    in
+    let applied_actions = I.apply_observation_follow_up pending_actions |> protocol_ok in
     let failed = I.fail_observation observing ~reason:"handler failed" |> protocol_ok in
     let published = I.publish observing |> protocol_ok in
     List.iter
-      [ admitted; dispatched; resolved; observing; observed; failed; published ]
+      [ admitted
+      ; dispatched
+      ; resolved
+      ; observing
+      ; observed
+      ; failed
+      ; published
+      ; pending_actions
+      ; applied_actions
+      ]
       ~f:(fun invocation ->
         let state = { initial with invocations = [ invocation ] } in
         let plan state =

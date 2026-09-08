@@ -1901,6 +1901,11 @@ after the current turn completes. In v1 it is only valid in phases:
 - `turn_end`
 - `internal_event`
 
+The internal `extensibility-v1` moderator surface also permits this request in
+`tool_observed`. Its embedding must schedule the follow-up after the observation
+commits; automatic idle observation scheduling is not yet installed in the public
+runtime.
+
 The host interprets this request after `turn_end` handling finishes; it does not
 directly invoke a side model call.
 

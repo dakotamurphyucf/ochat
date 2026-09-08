@@ -127,6 +127,88 @@ let call
 
 let state manager = (M.identity_snapshot manager |> ok).current_state
 
+let%expect_test "observation handlers can retain coalesced runtime follow-up intent" =
+  List.iter [ false; true ] ~f:(fun retain_follow_up ->
+    Eio_main.run (fun env ->
+      let manager, prepared, make =
+        setup
+          env
+          "Task.pure(state)"
+          ~events:
+            {| | `Tool_observed(p) ->
+          Task.bind(Runtime.request_turn(), fun ignored ->
+          Task.bind(Runtime.request_turn(), fun ignored ->
+          Task.bind(Runtime.request_compaction(), fun ignored ->
+          Task.bind(Runtime.end_session("done"), fun ignored -> Task.pure(state + 1)))))
+          | _ -> Task.pure(state) |}
+      in
+      let context = (make ()).context in
+      let script = EC.script prepared in
+      let invocation =
+        I.create
+          ~observer:{ script_id = script.id; source_sha256 = script.source_sha256 }
+          { context with
+            origin = Moderator
+          ; provider_call_id = None
+          ; parent_invocation = Some (P.Id.Invocation.create_with generator)
+          }
+        |> protocol
+        |> I.dispatch
+        |> protocol
+        |> fun invocation ->
+        I.resolve
+          invocation
+          ~session_id:context.session_id
+          ~generation:context.generation
+          (Complete `Null)
+        |> protocol
+        |> I.claim_observation
+        |> protocol
+      in
+      let receipt = ref None in
+      let outcome =
+        M.handle_observation_entries
+          manager
+          ~retain_follow_up
+          ~invocation
+          ~history:[]
+          ~available_tools:[]
+          ~session_meta:`Null
+          ~now_ms:0
+          ~prepare_observation:(fun ~observed ~outcome:_ ~snapshot ->
+            I.validate_transition ~previous:(Some invocation) observed |> protocol;
+            (match snapshot.Session.Moderator_state.Identity_snapshot.current_state with
+             | Session.Snapshot.Int 1 -> ()
+             | _ -> assert false);
+            assert snapshot.halted;
+            receipt := Some observed;
+            Ok ignore)
+        |> ok
+      in
+      let observed = Option.value_exn !receipt in
+      print_s
+        [%sexp
+          { retained = (retain_follow_up : bool)
+          ; requests =
+              (outcome.runtime_requests : Chat_response.Moderation.Runtime_request.t list)
+          ; follow_up =
+              ((Option.value_exn observed.observation).follow_up
+               : I.follow_up_status option)
+          }];
+      assert (M.is_halted manager |> ok)));
+  [%expect
+    {|
+    ((retained false)
+     (requests (Request_turn Request_turn Request_compaction (End_session done)))
+     (follow_up ()))
+    ((retained true)
+     (requests (Request_turn Request_turn Request_compaction (End_session done)))
+     (follow_up
+      ((Pending_follow_up
+        ((request_turn true) (request_compaction true) (end_session (done)))))))
+    |}]
+;;
+
 let%test_unit "stateful dedicated tool event commits one result and overlay" =
   Eio_main.run (fun env ->
     let manager, _, make =

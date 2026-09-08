@@ -1083,6 +1083,7 @@ let handle_invocation_entries
 
 let handle_observation_entries
       ?on_tool_call
+      ?(retain_follow_up = false)
       t
       ~invocation
       ~history
@@ -1170,7 +1171,25 @@ let handle_observation_entries
           ~overlay
       in
       let%bind observed =
-        I.complete_observation invocation
+        let follow_up =
+          match retain_follow_up with
+          | false -> None
+          | true ->
+            let requests : I.follow_up =
+              { request_turn = Runtime_semantics.request_turn prepared.runtime_requests
+              ; request_compaction =
+                  Runtime_semantics.request_compaction prepared.runtime_requests
+              ; end_session =
+                  Runtime_semantics.should_end_session prepared.runtime_requests
+              }
+            in
+            Option.some_if
+              (requests.request_turn
+               || requests.request_compaction
+               || Option.is_some requests.end_session)
+              requests
+        in
+        I.complete_observation ?follow_up invocation
         |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
       in
       let%map install = prepare_observation ~observed ~outcome:prepared ~snapshot in

@@ -386,7 +386,8 @@ receipts. They preserve receipts independently of transcript retention.
 Invocation records with routing provenance use JSON codec version 3. Without
 routing, bound records retain codec 2 and unbound records retain codec 1. Records
 with a discarded-publication disposition use codec 4; nested moderator records
-with observation intent use codec 5. All five
+with observation intent use codec 5. Acknowledged observations retaining runtime
+follow-up requests use codec 6. All six
 remain readable; missing optional S-expression fields load as absent. Older JSON
 readers reject new codecs rather than silently discard their evidence. These
 host-only additions do not change the ChatML context ABI or enable public feature
@@ -394,6 +395,16 @@ flags. The internal
 stream adapter below calls this service; normal runtime construction remains
 unfinished. Daemon restart reconciliation is described below; immediate
 worker-cancellation reconciliation remains separate work.
+
+An observation host can opt into `retain_follow_up` to store coalesced turn,
+compaction and termination requests with the acknowledgement and prospective
+moderator snapshot. The requests remain `Pending_follow_up` across recovery until
+the host atomically saves `Applied_follow_up` with the scheduling or stop
+transition. Applied means durably accepted, not that a requested operation has
+finished. Requests cannot be replaced, dropped or rearmed, and applying them does
+not rerun the observer or alter the native result. Existing foreground dispatch
+uses returned requests and leaves this option disabled. The durable receipt is a
+foundation for idle scheduling; its automatic consumer is not installed yet.
 
 ### Invocation recovery at daemon restart
 

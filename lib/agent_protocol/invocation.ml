@@ -104,9 +104,22 @@ type observation_status =
   | Observation_failed of string
 [@@deriving equal, sexp]
 
+type follow_up =
+  { request_turn : bool
+  ; request_compaction : bool
+  ; end_session : string option
+  }
+[@@deriving equal, sexp]
+
+type follow_up_status =
+  | Pending_follow_up of follow_up
+  | Applied_follow_up of follow_up
+[@@deriving equal, sexp]
+
 type observation =
   { observer : observer
   ; status : observation_status
+  ; follow_up : follow_up_status option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -227,6 +240,23 @@ let validate t =
           invalid "observation handling requires a recorded invocation outcome"
         | _ -> Ok ()
       in
+      let%bind () =
+        match observation.follow_up, observation.status with
+        | None, _ -> Ok ()
+        | Some (Pending_follow_up requests | Applied_follow_up requests), Observed ->
+          let%bind () =
+            if
+              requests.request_turn
+              || requests.request_compaction
+              || Option.is_some requests.end_session
+            then Ok ()
+            else invalid "observation follow-up must request work"
+          in
+          (match requests.end_session with
+           | None -> Ok ()
+           | Some reason -> text ~name:"observation end-session reason" ~max:1024 reason)
+        | Some _, _ -> invalid "follow-up intent requires an acknowledged observation"
+      in
       (match observation.status with
        | Observation_failed reason -> text ~name:"observation failure" ~max:1024 reason
        | Awaiting | Observing | Observed -> Ok ())
@@ -319,7 +349,8 @@ let create ?routing ?observer context =
     ; routing
     ; publication_discarded = None
     ; observation =
-        Option.map observer ~f:(fun observer -> { observer; status = Awaiting })
+        Option.map observer ~f:(fun observer ->
+          { observer; status = Awaiting; follow_up = None })
     }
   in
   Result.map (validate t) ~f:(fun () -> t)
@@ -418,10 +449,36 @@ let claim_observation t =
   | _ -> failure Invalid_state "observation is absent or already attempted"
 ;;
 
-let complete_observation t =
+let complete_observation ?follow_up t =
   match t.observation with
-  | Some { status = Observing; _ } -> change_observation t ~status:Observed
+  | Some ({ status = Observing; _ } as observation) ->
+    let next =
+      { t with
+        observation =
+          Some
+            { observation with
+              status = Observed
+            ; follow_up =
+                Option.map follow_up ~f:(fun requests -> Pending_follow_up requests)
+            }
+      }
+    in
+    Result.map (validate next) ~f:(fun () -> next)
   | _ -> failure Invalid_state "observation is not being handled"
+;;
+
+let apply_observation_follow_up t =
+  match t.observation with
+  | Some
+      ({ status = Observed; follow_up = Some (Pending_follow_up requests); _ } as
+       observation) ->
+    Ok
+      { t with
+        observation =
+          Some { observation with follow_up = Some (Applied_follow_up requests) }
+      }
+  | Some { status = Observed; follow_up = Some (Applied_follow_up _); _ } -> Ok t
+  | _ -> failure Invalid_state "observation has no acknowledged follow-up intent"
 ;;
 
 let fail_observation t ~reason =
@@ -437,6 +494,19 @@ let validate_observation_transition previous next =
   match previous.observation, next.observation with
   | None, None -> Ok ()
   | Some old, Some current when equal_observer old.observer current.observer ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match old.follow_up, current.follow_up with
+      | old, current when Option.equal equal_follow_up_status old current -> Ok ()
+      | None, Some (Pending_follow_up _)
+        when equal_observation_status old.status Observing
+             && equal_observation_status current.status Observed -> Ok ()
+      | Some (Pending_follow_up before), Some (Applied_follow_up after)
+        when equal_follow_up before after && equal_status previous.status next.status ->
+        Ok ()
+      | _ ->
+        failure Conflict "observation follow-up intent is immutable and cannot be rearmed"
+    in
     (match old.status, current.status with
      | old, current when equal_observation_status old current -> Ok ()
      | Awaiting, (Observing | Observation_failed _)
@@ -801,6 +871,39 @@ let status_of_json json =
   | _ -> invalid "unknown invocation status"
 ;;
 
+let follow_up_to_json follow_up =
+  let kind, requests =
+    match follow_up with
+    | Pending_follow_up requests -> "pending", requests
+    | Applied_follow_up requests -> "applied", requests
+  in
+  `Object
+    ([ "type", `String kind
+     ; ("request_turn", if requests.request_turn then `True else `False)
+     ; ("request_compaction", if requests.request_compaction then `True else `False)
+     ]
+     @ optional "end_session" requests.end_session (fun value -> `String value))
+;;
+
+let follow_up_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind () =
+    closed fields [ "type"; "request_turn"; "request_compaction"; "end_session" ]
+  in
+  let%bind kind = Json_codec.required_as fields "type" Json_codec.string in
+  let%bind request_turn = Json_codec.required_as fields "request_turn" Json_codec.bool in
+  let%bind request_compaction =
+    Json_codec.required_as fields "request_compaction" Json_codec.bool
+  in
+  let%bind end_session = Json_codec.optional_as fields "end_session" Json_codec.string in
+  let requests = { request_turn; request_compaction; end_session } in
+  match kind with
+  | "pending" -> Ok (Pending_follow_up requests)
+  | "applied" -> Ok (Applied_follow_up requests)
+  | _ -> invalid "unknown observation follow-up status"
+;;
+
 let observation_to_json (observation : observation) =
   let status, reason =
     match observation.status with
@@ -814,10 +917,11 @@ let observation_to_json (observation : observation) =
      ; "source_sha256", `String observation.observer.source_sha256
      ; "status", `String status
      ]
-     @ optional "reason" reason (fun value -> `String value))
+     @ optional "reason" reason (fun value -> `String value)
+     @ optional "follow_up" observation.follow_up follow_up_to_json)
 ;;
 
-let observation_of_json json =
+let observation_of_json ~version json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
   let%bind script_id = Json_codec.required_as fields "script_id" Json_codec.string in
@@ -825,28 +929,43 @@ let observation_of_json json =
     Json_codec.required_as fields "source_sha256" Json_codec.string
   in
   let%bind kind = Json_codec.required_as fields "status" Json_codec.string in
+  let base_fields =
+    [ "script_id"; "source_sha256"; "status" ]
+    @ if version >= 6 then [ "follow_up" ] else []
+  in
+  let%bind follow_up =
+    if version >= 6
+    then
+      Json_codec.required_as fields "follow_up" follow_up_of_json
+      |> Result.map ~f:Option.some
+    else Ok None
+  in
   let%map status =
     match kind with
     | "awaiting" | "observing" | "observed" ->
-      let%map () = closed fields [ "script_id"; "source_sha256"; "status" ] in
+      let%map () = closed fields base_fields in
       (match kind with
        | "awaiting" -> Awaiting
        | "observing" -> Observing
        | _ -> Observed)
     | "failed" ->
-      let%bind () = closed fields [ "script_id"; "source_sha256"; "status"; "reason" ] in
+      let%bind () = closed fields ("reason" :: base_fields) in
       let%map reason = Json_codec.required_as fields "reason" Json_codec.string in
       Observation_failed reason
     | _ -> invalid "unknown observation status"
   in
-  { observer = { script_id; source_sha256 }; status }
+  { observer = { script_id; source_sha256 }; status; follow_up }
 ;;
 
 let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (if Option.is_some t.observation
+           (if
+              Option.exists t.observation ~f:(fun observation ->
+                Option.is_some observation.follow_up)
+            then "6"
+            else if Option.is_some t.observation
             then "5"
             else if Option.is_some t.publication_discarded
             then "4"
@@ -877,7 +996,7 @@ let of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 | 3 | 4 | 5 -> Ok ()
+    | 1 | 2 | 3 | 4 | 5 | 6 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =
@@ -887,7 +1006,7 @@ let of_json json =
        @ (if version >= 2 then [ "output_entry_id" ] else [])
        @ (if version >= 3 then [ "routing" ] else [])
        @ (if version >= 4 then [ "publication_discarded" ] else [])
-       @ if version = 5 then [ "observation" ] else [])
+       @ if version >= 5 then [ "observation" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -912,14 +1031,14 @@ let of_json json =
     then
       Json_codec.required_as fields "publication_discarded" Json_codec.string
       |> Result.map ~f:Option.some
-    else if version = 5
+    else if version >= 5
     then Json_codec.optional_as fields "publication_discarded" Json_codec.string
     else Ok None
   in
   let%bind observation =
-    if version = 5
+    if version >= 5
     then
-      Json_codec.required_as fields "observation" observation_of_json
+      Json_codec.required_as fields "observation" (observation_of_json ~version)
       |> Result.map ~f:Option.some
     else Ok None
   in

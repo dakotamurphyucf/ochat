@@ -184,6 +184,11 @@ val handle_invocation_entries
     prospective snapshot in [prepare_observation], returning an infallible,
     non-yielding installer. Local state rolls back on error; external effects do
     not. This method does not itself claim, retry or schedule observations.
+    [retain_follow_up] additionally stores coalesced runtime requests in the
+    observation acknowledgement. Hosts using it must durably apply that intent
+    with the scheduling/stop transition; they must not independently replay both
+    the returned requests and the stored intent. Defaults false for the existing
+    foreground worker path; idle integration requires the retained-intent path.
     Optional Tool.call routing has the same scoped authority requirements as
     [handle_invocation_entries]. *)
 val handle_observation_entries
@@ -191,6 +196,7 @@ val handle_observation_entries
        (name:string
         -> args:Jsonaf.t
         -> (Moderation.Capabilities.tool_call_result, string) result)
+  -> ?retain_follow_up:bool
   -> t
   -> invocation:Agent_protocol.Invocation.t
   -> history:History_entry.t list

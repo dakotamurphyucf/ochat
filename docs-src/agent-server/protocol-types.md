@@ -1139,9 +1139,25 @@ type observation_status =
   | Observation_failed of string
 [@@deriving equal, sexp]
 
+(** Runtime actions requested by an observation handler. These are scheduling
+    intents, separate from native tool outcomes and observer execution. *)
+type follow_up =
+  { request_turn : bool
+  ; request_compaction : bool
+  ; end_session : string option
+  }
+[@@deriving equal, sexp]
+
+type follow_up_status =
+  | Pending_follow_up of follow_up
+  | Applied_follow_up of follow_up
+[@@deriving equal, sexp]
+
 type observation =
   { observer : observer
   ; status : observation_status
+  ; follow_up : follow_up_status option [@sexp.option]
+    (** Codec 6. Present only after acknowledgement; retained after application. *)
   }
 [@@deriving equal, sexp]
 
@@ -1205,7 +1221,15 @@ val claim_observation : t -> (t, Error.t) result
 (** The host must save this receipt atomically with the prospective moderator
     state/effects. Failure leaves the tool outcome intact. These functions do not
     run handlers, authorize callers or install an observation drain. *)
-val complete_observation : t -> (t, Error.t) result
+val complete_observation : ?follow_up:follow_up -> t -> (t, Error.t) result
+
+(** Mark requested runtime actions durably accepted. The host must commit this
+    receipt atomically with the scheduling/stop transition, after releasing live
+    moderator ownership. It does not claim that an operation finished. Idempotent;
+    never reruns the handler or changes its outcome. Pending actions survive
+    interruption between observation acknowledgement and scheduling.
+    This primitive does not install a dispatcher or infer actions from snapshots. *)
+val apply_observation_follow_up : t -> (t, Error.t) result
 
 (** May also discard an Awaiting observation whose owner is no longer available.
     Repeating the same failure is idempotent; successful handling is immutable. *)

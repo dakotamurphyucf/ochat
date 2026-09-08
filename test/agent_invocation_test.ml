@@ -136,6 +136,110 @@ let%test_unit
   rejected (I.of_json (replace_field json "observation" (`Object [])))
 ;;
 
+let%expect_test
+    "observation follow-up intent survives acknowledgement until durably applied"
+  =
+  let module I = Invocation in
+  let observer : I.observer =
+    { script_id = "moderator"; source_sha256 = String.make 64 'a' }
+  in
+  let ctx =
+    { (context ()) with
+      origin = Moderator
+    ; provider_call_id = None
+    ; parent_invocation = Some (get (Id.Invocation.of_string "inv_parent"))
+    }
+  in
+  let claimed =
+    I.create ~observer ctx
+    |> get
+    |> I.dispatch
+    |> get
+    |> fun invocation ->
+    resolve invocation (Complete (`String "native result"))
+    |> get
+    |> I.claim_observation
+    |> get
+  in
+  let requests : I.follow_up =
+    { request_turn = true; request_compaction = true; end_session = Some "finished" }
+  in
+  let pending = I.complete_observation ~follow_up:requests claimed |> get in
+  get (I.validate_transition ~previous:(Some claimed) pending);
+  let restored = I.of_json (I.to_json pending) |> get in
+  assert (I.equal pending restored);
+  assert (I.equal pending (I.t_of_sexp (I.sexp_of_t pending)));
+  let applied = I.apply_observation_follow_up restored |> get in
+  get (I.validate_transition ~previous:(Some restored) applied);
+  assert (I.equal applied (I.of_json (I.to_json applied) |> get));
+  assert (I.equal applied (I.apply_observation_follow_up applied |> get));
+  assert (I.equal_status pending.status applied.status);
+  print_s
+    [%sexp
+      { pending =
+          ((Option.value_exn pending.observation).follow_up : I.follow_up_status option)
+      ; applied =
+          ((Option.value_exn applied.observation).follow_up : I.follow_up_status option)
+      }];
+  let reject label result =
+    match result with
+    | Ok _ -> failwith (label ^ " unexpectedly succeeded")
+    | Error (error : Error.t) ->
+      print_endline (label ^ ": " ^ Error.code_to_string error.code)
+  in
+  let no_actions = I.complete_observation claimed |> get in
+  reject "apply before acknowledgement" (I.apply_observation_follow_up claimed);
+  reject
+    "empty requests"
+    (I.complete_observation
+       ~follow_up:{ request_turn = false; request_compaction = false; end_session = None }
+       claimed);
+  reject
+    "oversized stop reason"
+    (I.complete_observation
+       ~follow_up:{ requests with end_session = Some (String.make 1025 'x') }
+       claimed);
+  reject
+    "late intent attachment"
+    (I.validate_transition ~previous:(Some no_actions) pending);
+  reject "skip pending intent" (I.validate_transition ~previous:(Some claimed) applied);
+  reject "rearm applied intent" (I.validate_transition ~previous:(Some applied) pending);
+  reject
+    "discard pending intent"
+    (I.validate_transition ~previous:(Some pending) no_actions);
+  let different =
+    I.complete_observation ~follow_up:{ requests with request_turn = false } claimed
+    |> get
+  in
+  reject "replace actions" (I.validate_transition ~previous:(Some pending) different);
+  reject
+    "hide new fields in codec 5"
+    (I.of_json (replace_field (I.to_json pending) "schema_version" (`Number "5")));
+  reject
+    "codec 6 without intent"
+    (I.of_json (replace_field (I.to_json no_actions) "schema_version" (`Number "6")));
+  assert (I.equal no_actions (I.of_json (I.to_json no_actions) |> get));
+  [%expect
+    {|
+    ((pending
+      ((Pending_follow_up
+        ((request_turn true) (request_compaction true) (end_session (finished))))))
+     (applied
+      ((Applied_follow_up
+        ((request_turn true) (request_compaction true) (end_session (finished)))))))
+    apply before acknowledgement: invalid_state
+    empty requests: invalid_request
+    oversized stop reason: invalid_request
+    late intent attachment: conflict
+    skip pending intent: conflict
+    rearm applied intent: conflict
+    discard pending intent: conflict
+    replace actions: conflict
+    hide new fields in codec 5: invalid_request
+    codec 6 without intent: invalid_request
+    |}]
+;;
+
 let%expect_test "recorded pending outcome survives restart without a second resolution" =
   let admitted = get (Invocation.create (context ())) in
   report (Invocation.publish admitted);
@@ -252,7 +356,7 @@ let%expect_test
 let%expect_test "incompatible and malformed snapshots fail instead of losing state" =
   let invocation = get (Invocation.create (context ())) in
   let encoded = Invocation.to_json invocation in
-  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "6")));
+  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "7")));
   report
     (Invocation.of_json
        (replace_field encoded "status" (`Object [ "type", `String "resolved" ])));
