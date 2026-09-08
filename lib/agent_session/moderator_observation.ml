@@ -7,11 +7,11 @@ type result =
   ; budget_exhausted : bool
   }
 
-let drain
+let drain_with_claim
       ?(max_observations = 32)
       ?on_tool_call
-      ~capabilities
-      ~observer
+      ~claim
+      ~retain_follow_up
       ~manager
       ~history
       ~available_tools
@@ -32,31 +32,30 @@ let drain
     | _ ->
       let outcome = ref None in
       let%bind claimed =
-        capabilities.Operation_worker.Capabilities.with_next_moderator_observation
-          ~observer
-          (fun ~observing ~commit ->
-             M.handle_observation_entries
-               ?on_tool_call
-               manager
-               ~invocation:observing
-               ~history:(history ())
-               ~available_tools
-               ~session_meta
-               ~now_ms:
-                 (P.Timestamp.to_time_ns (now ())
-                  |> Time_ns.to_int_ns_since_epoch
-                  |> fun n -> n / 1_000_000)
-               ~prepare_observation:(fun ~observed ~outcome:prepared ~snapshot ->
-                 commit ~resolved:observed ~snapshot
-                 |> Result.map_error ~f:(fun e -> e.P.Error.message)
-                 |> Result.map ~f:(fun () -> fun () -> outcome := Some prepared))
-             |> Result.map ~f:(fun _ -> ())
-             |> Result.map_error ~f:(fun _ ->
-               P.Error.create
-                 Invalid_state
-                 ~message:"deferred tool observation failed"
-                 ~retryable:false
-                 ()))
+        claim (fun ~observing ~commit ->
+          M.handle_observation_entries
+            ?on_tool_call
+            ~retain_follow_up
+            manager
+            ~invocation:observing
+            ~history:(history ())
+            ~available_tools
+            ~session_meta
+            ~now_ms:
+              (P.Timestamp.to_time_ns (now ())
+               |> Time_ns.to_int_ns_since_epoch
+               |> fun n -> n / 1_000_000)
+            ~prepare_observation:(fun ~observed ~outcome:prepared ~snapshot ->
+              commit ~resolved:observed ~snapshot
+              |> Result.map_error ~f:(fun e -> e.P.Error.message)
+              |> Result.map ~f:(fun () -> fun () -> outcome := Some prepared))
+          |> Result.map ~f:(fun _ -> ())
+          |> Result.map_error ~f:(fun _ ->
+            P.Error.create
+              Invalid_state
+              ~message:"deferred tool observation failed"
+              ~retryable:false
+              ()))
       in
       (match claimed, !outcome with
        | false, None -> Ok { outcomes = List.rev outcomes; budget_exhausted = false }
@@ -76,4 +75,18 @@ let drain
               ()))
   in
   loop max_observations []
+;;
+
+let drain ?max_observations ?on_tool_call ~capabilities ~observer =
+  drain_with_claim
+    ?max_observations
+    ?on_tool_call
+    ~retain_follow_up:false
+    ~claim:
+      (capabilities.Operation_worker.Capabilities.with_next_moderator_observation
+         ~observer)
+;;
+
+let drain_idle ?max_observations ?on_tool_call ~claim =
+  drain_with_claim ?max_observations ?on_tool_call ~retain_follow_up:true ~claim
 ;;

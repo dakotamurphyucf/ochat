@@ -46,11 +46,12 @@ type moderator_borrow_kind =
   | Observation
 
 type moderator_borrow =
-  { operation_id : Agent_protocol.Id.Operation.t
+  { operation_id : Agent_protocol.Id.Operation.t option
   ; kind : moderator_borrow_kind
   ; invocation : Agent_protocol.Invocation.t
   ; mutable committed : bool
   ; mutable accepts_children : bool
+  ; mutable cancel : (unit -> unit) option
   }
 
 type invocation_execution =
@@ -78,6 +79,9 @@ type _ request =
   | Claim_next_moderator_observation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer
       -> moderator_borrow option request
+  | Claim_idle_moderator_observation :
+      Agent_protocol.Invocation.observer
+      -> moderator_borrow option request
   | Commit_moderator_invocation :
       moderator_borrow
       * Agent_protocol.Invocation.t
@@ -86,6 +90,7 @@ type _ request =
   | Finish_moderator_invocation :
       moderator_borrow * Agent_protocol.Invocation.outcome option
       -> unit request
+  | Set_idle_moderator_cancel : moderator_borrow * (unit -> unit) -> unit request
   | Commit_extensions :
       int * int64 * Extension_change.t list
       -> Agent_protocol.Session.t request
@@ -517,20 +522,26 @@ let lifecycle t ~desired ~observed =
 ;;
 
 let start_internal t =
-  match t.state.lifecycle.desired, t.state.lifecycle.observed with
-  | Running, (Idle | Running_turn _ | Starting | Queued_for_slot) ->
-    Ok (Session_state.summary t.state)
-  | _, _ ->
-    let open Result.Let_syntax in
-    let%bind _ = lifecycle t ~desired:Running ~observed:Starting in
-    lifecycle t ~desired:Running ~observed:Idle
+  if t.idle_moderator_borrowed
+  then Error (error Conflict "cannot restart while the idle moderator is borrowed")
+  else (
+    match t.state.lifecycle.desired, t.state.lifecycle.observed with
+    | Running, (Idle | Running_turn _ | Starting | Queued_for_slot) ->
+      Ok (Session_state.summary t.state)
+    | _, _ ->
+      let open Result.Let_syntax in
+      let%bind _ = lifecycle t ~desired:Running ~observed:Starting in
+      lifecycle t ~desired:Running ~observed:Idle)
 ;;
 
 let queue_start_internal t =
-  match t.state.lifecycle.desired, t.state.lifecycle.observed with
-  | Running, (Queued_for_slot | Starting | Idle | Running_turn _) ->
-    Ok (Session_state.summary t.state)
-  | _, _ -> lifecycle t ~desired:Running ~observed:Queued_for_slot
+  if t.idle_moderator_borrowed
+  then Error (error Conflict "cannot restart while the idle moderator is borrowed")
+  else (
+    match t.state.lifecycle.desired, t.state.lifecycle.observed with
+    | Running, (Queued_for_slot | Starting | Idle | Running_turn _) ->
+      Ok (Session_state.summary t.state)
+    | _, _ -> lifecycle t ~desired:Running ~observed:Queued_for_slot)
 ;;
 
 let activate_queued_start t =
@@ -581,9 +592,17 @@ let stop_transition t mode lifecycle deltas payloads =
 let stop_internal t mode =
   match t.state.active_operation with
   | None ->
-    (match t.state.lifecycle.desired, t.state.lifecycle.observed with
-     | Stopped, Stopped -> Ok (Session_state.summary t.state)
-     | _, _ -> stop_transition t mode { desired = Stopped; observed = Stopped } [] [])
+    let open Result.Let_syntax in
+    let%map session =
+      match t.state.lifecycle.desired, t.state.lifecycle.observed with
+      | Stopped, Stopped -> Ok (Session_state.summary t.state)
+      | _, _ -> stop_transition t mode { desired = Stopped; observed = Stopped } [] []
+    in
+    (match mode, t.moderator_borrow with
+     | Cancel, Some { operation_id = None; cancel; _ } ->
+       Option.iter cancel ~f:(fun f -> f ())
+     | _ -> ());
+    session
   | Some operation ->
     let lifecycle =
       Session_state.Lifecycle.{ desired = Stopped; observed = t.state.lifecycle.observed }
@@ -932,7 +951,7 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
         || Option.exists t.moderator_borrow ~f:(fun borrow ->
           borrow.accepts_children
           && (not borrow.committed)
-          && owned borrow.invocation.context.id borrow.operation_id)
+          && Option.exists borrow.operation_id ~f:(owned borrow.invocation.context.id))
       then Ok ()
       else Error (error Conflict "parent invocation is not executing in this operation")
   in
@@ -1002,20 +1021,48 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
         ~payloads:[]
     in
     let borrow =
-      { operation_id
+      { operation_id = Some operation_id
       ; kind = Invocation
       ; invocation = dispatched
       ; committed = false
       ; accepts_children = true
+      ; cancel = None
       }
     in
     t.moderator_borrow <- Some borrow;
     Ok borrow)
 ;;
 
+let has_pending_permission t =
+  List.exists t.state.permissions ~f:(fun permission ->
+    Agent_protocol.Permission.equal_state permission.state Pending)
+;;
+
+let idle_moderator_eligible t =
+  (not t.idle_moderator_borrowed)
+  && Option.is_none t.moderator_borrow
+  && Option.is_none t.state.active_operation
+  && Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
+  && (match t.state.lifecycle.observed with
+      | Agent_protocol.Session.Idle -> true
+      | _ -> false)
+  && (not t.state.halted)
+  && Option.is_none t.state.failure
+  && not (has_pending_permission t)
+;;
+
+let observation_owner_available t operation_id =
+  match operation_id with
+  | Some operation_id -> Result.map (running_operation t operation_id) ~f:ignore
+  | None ->
+    if idle_moderator_eligible t
+    then Ok ()
+    else Error (error Conflict "session is not available for idle observation")
+;;
+
 let claim_moderator_observation t operation_id invocation_id =
   let open Result.Let_syntax in
-  let%bind _ = running_operation t operation_id in
+  let%bind () = observation_owner_available t operation_id in
   let%bind moderator_halted =
     Runtime_builder.moderator_snapshot_is_halted t.state.moderator
   in
@@ -1058,16 +1105,18 @@ let claim_moderator_observation t operation_id invocation_id =
     ; kind = Observation
     ; invocation = observing
     ; committed = false
-    ; accepts_children = true
+    ; accepts_children = Option.is_some operation_id
+    ; cancel = None
     }
   in
   t.moderator_borrow <- Some borrow;
+  t.idle_moderator_borrowed <- Option.is_none operation_id;
   Ok borrow
 ;;
 
 let claim_next_moderator_observation t operation_id observer =
   let open Result.Let_syntax in
-  let%bind _ = running_operation t operation_id in
+  let%bind () = observation_owner_available t operation_id in
   let%bind moderator_halted =
     Runtime_builder.moderator_snapshot_is_halted t.state.moderator
   in
@@ -1115,7 +1164,13 @@ let validate_moderator_borrow t borrow =
   match t.moderator_borrow with
   | Some current when phys_equal current borrow ->
     let open Result.Let_syntax in
-    let%bind _ = current_operation t borrow.operation_id in
+    let%bind () =
+      match borrow.operation_id with
+      | Some operation_id -> Result.map (current_operation t operation_id) ~f:ignore
+      | None when t.idle_moderator_borrowed && Option.is_none t.state.active_operation ->
+        Ok ()
+      | None -> Error (error Conflict "idle observation no longer owns the moderator")
+    in
     Extension_invariants.owner
       ~session_id:t.state.identity.session_id
       ~generation:t.state.identity.generation
@@ -1128,7 +1183,15 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
   =
   let open Result.Let_syntax in
   let%bind () = validate_moderator_borrow t borrow in
-  let%bind _ = running_operation ~allow_stopping:true t borrow.operation_id in
+  let%bind () =
+    match borrow.operation_id with
+    | Some operation_id ->
+      Result.map (running_operation ~allow_stopping:true t operation_id) ~f:ignore
+    | None ->
+      (match t.state.lifecycle.desired, t.state.lifecycle.observed, t.state.failure with
+       | Running, Idle, None when not t.state.halted -> Ok ()
+       | _ -> Error (error Conflict "idle observation was stopped before acknowledgement"))
+  in
   let%bind () =
     if borrow.committed
     then Error (error Already_resolved "moderator invocation is already committed")
@@ -1232,6 +1295,9 @@ let finish_moderator_invocation t borrow failure =
     else Result.map (transition t ~delta ~payloads:[]) ~f:(fun _ -> ())
   in
   t.moderator_borrow <- None;
+  (match borrow.operation_id with
+   | None -> t.idle_moderator_borrowed <- false
+   | Some _ -> ());
   if (not was_committed) && Option.is_none failure
   then
     Error
@@ -2110,7 +2176,7 @@ let with_invocation t operation_id ~invocation f =
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let run_moderator_borrow t borrow f =
+let run_moderator_callback t borrow f =
   let open Result.Let_syntax in
   let commit ~resolved ~snapshot =
     Eio.Cancel.protect (fun () ->
@@ -2149,6 +2215,21 @@ let run_moderator_borrow t borrow f =
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
+let run_moderator_borrow t (borrow : moderator_borrow) f =
+  match borrow.operation_id with
+  | Some _ -> run_moderator_callback t borrow f
+  | None ->
+    Eio.Cancel.sub (fun context ->
+      run_moderator_callback t borrow (fun ~dispatched ~commit ->
+        let open Result.Let_syntax in
+        let%bind () =
+          call
+            t
+            (Set_idle_moderator_cancel (borrow, fun () -> Eio.Cancel.cancel context Exit))
+        in
+        f ~dispatched ~commit))
+;;
+
 let with_moderator_borrow_unlocked t ~claim f =
   let open Result.Let_syntax in
   (* Once admitted, always reach protected completion even during cancellation. *)
@@ -2185,14 +2266,11 @@ let with_moderator_observation t operation_id ~invocation_id f =
       (fun ~dispatched ~commit -> f ~observing:dispatched ~commit))
 ;;
 
-let with_next_moderator_observation t operation_id ~observer f =
+let with_selected_moderator_observation t claim f =
   with_moderator_gate t (fun () ->
     let open Result.Let_syntax in
     Eio.Fiber.yield ();
-    let%bind borrow =
-      Eio.Cancel.protect (fun () ->
-        call t (Claim_next_moderator_observation (operation_id, observer)))
-    in
+    let%bind borrow = Eio.Cancel.protect (fun () -> call t claim) in
     match borrow with
     | None -> Ok false
     | Some borrow ->
@@ -2201,6 +2279,17 @@ let with_next_moderator_observation t operation_id ~observer f =
           f ~observing:dispatched ~commit)
       in
       true)
+;;
+
+let with_next_moderator_observation t operation_id ~observer f =
+  with_selected_moderator_observation
+    t
+    (Claim_next_moderator_observation (operation_id, observer))
+    f
+;;
+
+let with_idle_moderator_observation t ~observer f =
+  with_selected_moderator_observation t (Claim_idle_moderator_observation observer) f
 ;;
 
 let worker_capabilities t operation_id id_source buffer =
@@ -3047,31 +3136,6 @@ let cancel_schedule_internal t schedule_id =
     Error (error Already_resolved "schedule is already terminal")
 ;;
 
-let has_pending_permission t =
-  List.exists t.state.permissions ~f:(fun permission ->
-    Agent_protocol.Permission.equal_state permission.state Pending)
-;;
-
-let idle_moderator_eligible t =
-  (not t.idle_moderator_borrowed)
-  && Option.is_none t.state.active_operation
-  && Agent_protocol.Session.equal_desired_state t.state.lifecycle.desired Running
-  && (match t.state.lifecycle.observed with
-      | Agent_protocol.Session.Idle -> true
-      | Stopped
-      | Queued_for_slot
-      | Starting
-      | Recovering
-      | Running_turn _
-      | Compacting _
-      | Waiting_for_permission _
-      | Stopping
-      | Failed _ -> false)
-  && (not t.state.halted)
-  && Option.is_none t.state.failure
-  && not (has_pending_permission t)
-;;
-
 let claim_idle_moderator t =
   if not (idle_moderator_eligible t)
   then Ok None
@@ -3166,7 +3230,7 @@ let complete_running_idle_moderator t (drain : Runtime_builder.moderator_drain) 
 ;;
 
 let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
-  if not t.idle_moderator_borrowed
+  if (not t.idle_moderator_borrowed) || Option.is_some t.moderator_borrow
   then Error (error Conflict "session moderator is not borrowed for idle work")
   else (
     let result =
@@ -3182,22 +3246,26 @@ let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
 ;;
 
 let fail_idle_moderator t failure =
-  t.idle_moderator_borrowed <- false;
-  let lifecycle =
-    Session_state.Lifecycle.
-      { desired = t.state.lifecycle.desired
-      ; observed = Agent_protocol.Session.Failed failure
-      }
-  in
-  transition
-    t
-    ~delta:
-      (Session_delta.Batch [ Failure_changed (Some failure); Lifecycle_changed lifecycle ])
-    ~payloads:
-      [ Agent_protocol.Event.Durable.Payload.Session_state_changed
-          { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
-      ]
-  |> Result.map ~f:(fun _ -> ())
+  if Option.is_some t.moderator_borrow
+  then Error (error Conflict "observation callback owns the idle moderator")
+  else (
+    t.idle_moderator_borrowed <- false;
+    let lifecycle =
+      Session_state.Lifecycle.
+        { desired = t.state.lifecycle.desired
+        ; observed = Agent_protocol.Session.Failed failure
+        }
+    in
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch
+           [ Failure_changed (Some failure); Lifecycle_changed lifecycle ])
+      ~payloads:
+        [ Agent_protocol.Event.Durable.Payload.Session_state_changed
+            { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+        ]
+    |> Result.map ~f:(fun _ -> ()))
 ;;
 
 let lease_generation t = Int64.(t.state.counters.owner_lease_generation + 1L)
@@ -3538,13 +3606,26 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Claim_moderator_invocation (operation_id, invocation) ->
     claim_moderator_invocation t operation_id invocation
   | Claim_moderator_observation (operation_id, invocation_id) ->
-    claim_moderator_observation t operation_id invocation_id
+    claim_moderator_observation t (Some operation_id) invocation_id
   | Claim_next_moderator_observation (operation_id, observer) ->
-    claim_next_moderator_observation t operation_id observer
+    claim_next_moderator_observation t (Some operation_id) observer
+  | Claim_idle_moderator_observation observer ->
+    if idle_moderator_eligible t
+    then claim_next_moderator_observation t None observer
+    else Ok None
   | Commit_moderator_invocation (borrow, resolved, snapshot) ->
     commit_moderator_invocation t borrow resolved snapshot
   | Finish_moderator_invocation (borrow, failure) ->
     finish_moderator_invocation t borrow failure
+  | Set_idle_moderator_cancel (borrow, cancel) ->
+    let open Result.Let_syntax in
+    let%bind () = validate_moderator_borrow t borrow in
+    (match borrow.operation_id, t.state.lifecycle.desired, t.state.lifecycle.observed with
+     | None, Running, Idle ->
+       borrow.cancel <- Some cancel;
+       Ok ()
+     | _ ->
+       Error (error Conflict "idle observation was stopped before callback execution"))
   | Commit_extensions (generation, revision, changes) ->
     commit_extensions_internal t generation revision changes
   | State -> Ok t.state

@@ -525,6 +525,30 @@ val skip_schedule
   -> generation:int
   -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
 
+(** Atomically select and claim one deferred observation in an idle, running,
+    unblocked session. The callback runs outside the mailbox under exclusive
+    moderator ownership, without creating a foreground operation. Returns false
+    when unavailable or no matching observation remains. Selection is ordered by
+    creation time and invocation ID, and bound to the exact observer source.
+
+    The callback must prospectively commit the observation acknowledgement and
+    moderator snapshot together. Use [retain_follow_up] in the manager so runtime
+    requests survive until a host applies them durably after releasing ownership.
+    Failure/cancellation records observation failure without altering native
+    results; successful acknowledgements are never replayed. The callback does
+    not acquire foreground native-tool authority. This API does not schedule a
+    turn, install a wakeup or apply retained follow-up requests. *)
+val with_idle_moderator_observation
+  :  t
+  -> observer:Agent_protocol.Invocation.observer
+  -> (observing:Agent_protocol.Invocation.t
+      -> commit:
+           (resolved:Agent_protocol.Invocation.t
+            -> snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (bool, Agent_protocol.Error.t) result
+
 (** [claim_idle_moderator] acquires the process-local exclusive moderator
     borrow only when the running session is idle and unblocked. *)
 val claim_idle_moderator

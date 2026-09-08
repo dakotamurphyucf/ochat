@@ -258,7 +258,24 @@ releases ownership and before returning the parent's canonical result. Observer
 runtime requests join the parent's requests. This also finds intent retained
 after wake-up callback failure or parent rollback.
 
-**Subsequent/idle wakeups after budget exhaustion, idle draining, ordinary-event
+`Session_actor.with_idle_moderator_observation` provides the same exclusive
+selection and prospective acknowledgement without creating a foreground operation.
+It requires an idle, running, unblocked session. Runtime replacement and competing
+checkpoint APIs are rejected while the callback owns the moderator. New user input
+is deferred using the existing idle borrow. The legacy idle completion/failure
+APIs cannot release an observation callback's ownership. Cancel-stop interrupts
+its Eio cancellation context after the stop is persisted, including cancellation
+following a graceful stop. Restart is rejected until ownership is released.
+
+`Moderator_observation.drain_idle` takes this scoped claim callback explicitly,
+keeping runtime construction independent of the actor module. It retains runtime
+requests with each acknowledgement for later durable application. It does not
+apply requests or create a model operation. The idle expect-test matrix covers
+successful/competing/reentrant handling, retained turn/termination requests,
+handler and persistence failures, cancellation, and both stop modes. It checks
+that live and persisted snapshots agree and native results/history remain intact.
+
+**Subsequent/idle wakeups after budget exhaustion, retained-request application, ordinary-event
 Tool.call routing and normal runtime installation are still required.** The stream
 option remains off by default pending that integration. Tests exercise the
 explicit foreground handoff with real compiled handlers, competing claims,
