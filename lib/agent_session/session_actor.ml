@@ -41,8 +41,13 @@ module Extension_change = struct
     | Moderator_state of Jsonaf.t option
 end
 
+type moderator_borrow_kind =
+  | Invocation
+  | Observation
+
 type moderator_borrow =
   { operation_id : Agent_protocol.Id.Operation.t
+  ; kind : moderator_borrow_kind
   ; invocation : Agent_protocol.Invocation.t
   ; mutable committed : bool
   ; mutable accepts_children : bool
@@ -66,6 +71,9 @@ type _ request =
       -> Agent_protocol.Invocation.t request
   | Claim_moderator_invocation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
+      -> moderator_borrow request
+  | Claim_moderator_observation :
+      Agent_protocol.Id.Operation.t * Agent_protocol.Id.Invocation.t
       -> moderator_borrow request
   | Commit_moderator_invocation :
       moderator_borrow
@@ -992,6 +1000,7 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
     in
     let borrow =
       { operation_id
+      ; kind = Invocation
       ; invocation = dispatched
       ; committed = false
       ; accepts_children = true
@@ -999,6 +1008,53 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
     in
     t.moderator_borrow <- Some borrow;
     Ok borrow)
+;;
+
+let claim_moderator_observation t operation_id invocation_id =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind () =
+    match t.idle_moderator_borrowed, t.moderator_borrow, t.state.halted with
+    | false, None, false -> Ok ()
+    | _ -> Error (error Conflict "moderator is borrowed or halted")
+  in
+  let%bind invocation =
+    match
+      List.find t.state.invocations ~f:(fun invocation ->
+        Agent_protocol.Id.Invocation.equal invocation.context.id invocation_id)
+    with
+    | Some invocation -> Ok invocation
+    | None -> Error (error Invalid_state "observation invocation is not retained")
+  in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      invocation.context.session_id
+      invocation.context.generation
+  in
+  let%bind () =
+    match invocation.context.parent_invocation with
+    | Some parent
+      when List.exists t.invocation_executions ~f:(fun execution ->
+             Agent_protocol.Id.Invocation.equal execution.dispatched.context.id parent) ->
+      Error (error Conflict "observation parent is still executing")
+    | _ -> Ok ()
+  in
+  let%bind observing = Agent_protocol.Invocation.claim_observation invocation in
+  let%bind _ =
+    transition t ~delta:(Session_delta.Invocation_changed observing) ~payloads:[]
+  in
+  let borrow =
+    { operation_id
+    ; kind = Observation
+    ; invocation = observing
+    ; committed = false
+    ; accepts_children = true
+    }
+  in
+  t.moderator_borrow <- Some borrow;
+  Ok borrow
 ;;
 
 let validate_moderator_borrow t borrow =
@@ -1029,8 +1085,27 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
       <> 0
     then Error (error Conflict "resolution does not belong to this moderator borrow")
     else (
-      match resolved.status with
-      | Resolved _ ->
+      match borrow.kind, resolved.status with
+      | Invocation, Resolved _ ->
+        Agent_protocol.Invocation.validate_transition
+          ~previous:(Some borrow.invocation)
+          resolved
+      | Observation, (Resolved _ | Published _) ->
+        let%bind () =
+          match resolved.observation with
+          | Some { status = Observed; observer }
+            when String.equal
+                   observer.script_id
+                   snapshot.Session.Moderator_state.Identity_snapshot.script_id
+                 && String.equal observer.source_sha256 snapshot.script_source_hash ->
+            Ok ()
+          | _ ->
+            Error
+              (error
+                 Conflict
+                 "observation acknowledgement requires its source-bound moderator \
+                  checkpoint")
+        in
         Agent_protocol.Invocation.validate_transition
           ~previous:(Some borrow.invocation)
           resolved
@@ -1073,11 +1148,20 @@ let uncommitted_borrow_delta t borrow failure =
       | _ -> outcome
     in
     let%map resolved =
-      Agent_protocol.Invocation.resolve
-        borrow.invocation
-        ~session_id:t.state.identity.session_id
-        ~generation:t.state.identity.generation
-        outcome
+      match borrow.kind with
+      | Invocation ->
+        Agent_protocol.Invocation.resolve
+          borrow.invocation
+          ~session_id:t.state.identity.session_id
+          ~generation:t.state.identity.generation
+          outcome
+      | Observation ->
+        Agent_protocol.Invocation.fail_observation
+          borrow.invocation
+          ~reason:
+            (match outcome with
+             | Cancelled _ -> "observation handler cancelled before acknowledgement"
+             | _ -> "observation handler failed before acknowledgement")
     in
     Session_delta.Invocation_changed resolved
 ;;
@@ -1972,15 +2056,12 @@ let with_invocation t operation_id ~invocation f =
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let with_moderator_invocation_unlocked t operation_id ~invocation f =
+let with_moderator_borrow_unlocked t ~claim f =
   let open Result.Let_syntax in
   (* Observe existing cancellation before masking the mailbox admission. Once
      admitted, the borrow must always reach its protected completion request. *)
   Eio.Fiber.yield ();
-  let%bind borrow =
-    Eio.Cancel.protect (fun () ->
-      call t (Claim_moderator_invocation (operation_id, invocation)))
-  in
+  let%bind borrow = Eio.Cancel.protect (fun () -> call t claim) in
   let commit ~resolved ~snapshot =
     Eio.Cancel.protect (fun () ->
       call t (Commit_moderator_invocation (borrow, resolved, snapshot)))
@@ -2018,11 +2099,8 @@ let with_moderator_invocation_unlocked t operation_id ~invocation f =
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let with_moderator_invocation t operation_id ~invocation f =
-  match
-    Chat_response.Execution_gate.with_access t.invocation_gate (fun () ->
-      with_moderator_invocation_unlocked t operation_id ~invocation f)
-  with
+let with_moderator_gate t f =
+  match Chat_response.Execution_gate.with_access t.invocation_gate f with
   | Ok result -> result
   | Error failure ->
     let code =
@@ -2031,6 +2109,22 @@ let with_moderator_invocation t operation_id ~invocation f =
       | Reentrant | Wait_cycle -> Conflict
     in
     Error (error code (Chat_response.Execution_gate.error_message failure))
+;;
+
+let with_moderator_invocation t operation_id ~invocation f =
+  with_moderator_gate t (fun () ->
+    with_moderator_borrow_unlocked
+      t
+      ~claim:(Claim_moderator_invocation (operation_id, invocation))
+      f)
+;;
+
+let with_moderator_observation t operation_id ~invocation_id f =
+  with_moderator_gate t (fun () ->
+    with_moderator_borrow_unlocked
+      t
+      ~claim:(Claim_moderator_observation (operation_id, invocation_id))
+      (fun ~dispatched ~commit -> f ~observing:dispatched ~commit))
 ;;
 
 let worker_capabilities t operation_id id_source buffer =
@@ -2048,6 +2142,7 @@ let worker_capabilities t operation_id id_source buffer =
     ; commit_moderator =
         (fun snapshot -> call t (Commit_worker_moderator (operation_id, snapshot)))
     ; with_moderator_invocation = with_moderator_invocation t operation_id
+    ; with_moderator_observation = with_moderator_observation t operation_id
     ; with_invocation = with_invocation t operation_id
     ; consume_deferred = (fun () -> call t (Consume_deferred operation_id))
     ; request_permission =
@@ -3365,6 +3460,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Finish_invocation (execution, outcome) -> finish_invocation t execution outcome
   | Claim_moderator_invocation (operation_id, invocation) ->
     claim_moderator_invocation t operation_id invocation
+  | Claim_moderator_observation (operation_id, invocation_id) ->
+    claim_moderator_observation t operation_id invocation_id
   | Commit_moderator_invocation (borrow, resolved, snapshot) ->
     commit_moderator_invocation t borrow resolved snapshot
   | Finish_moderator_invocation (borrow, failure) ->

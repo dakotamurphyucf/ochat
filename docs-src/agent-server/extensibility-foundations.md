@@ -224,11 +224,30 @@ rewritten outcomes. Quiescent recovery preserves waiting intent and marks an
 interrupted `Observing` receipt failed, without replaying scripts or native tools.
 An observation failure does not mean the native tool failed.
 
-**The safe-point drain, dedicated event projection, exclusive actor claim and
-atomic handler checkpoint/acknowledgement integration are still required.** Tests
-verify persisted intent through real compiled-handler calls and exercise pure
-recovery plans, codecs and transition rejection. They do not yet qualify actual
-observation delivery across daemon restarts or administrative reset/compaction.
+The foreground worker capability `with_moderator_observation` now claims a retained
+observation under the actor's exclusive moderator gate. It checks generation,
+operation and parent completion, saves `Observing`, then runs the callback outside
+the mailbox. `Moderator_manager.handle_observation_entries` checks the exact
+observer source and projects a dedicated `Tool_observed` event. Its versioned
+payload includes `invocation_id`, `parent_invocation`, `tool_name`, `origin`, and
+the disclosed initial `outcome` in the Invocation JSON format. No provider call ID
+or synthetic tool-result history is created. The event is specific to the v1
+surface; ordinary `Runtime.emit` still wraps data in `Internal_event`.
+
+The manager validates a prospective state/overlay/internal-event snapshot before
+calling the actor's commit callback. That callback atomically saves `Observed`
+with the source-matching snapshot. Failed handling or acknowledgement rolls back
+moderator data state and records a separate observation failure. A failure after
+successful acknowledgement preserves that acknowledgement. The host must still
+apply resulting runtime requests through its normal integration path.
+
+**Automatic safe-point selection/wakeup, idle draining, ordinary-event Tool.call
+routing and normal runtime installation are still required.** Tests exercise the
+explicit foreground handoff with real compiled handlers, competing claims,
+cancellation, rejected saves, wrong source/snapshot, mutable-state rollback,
+duplicate acknowledgement and forbidden `Invocation.resolve`. They also cover
+persisted intent and pure recovery plans. They do not yet qualify observation
+delivery across real daemon restarts or administrative reset/compaction.
 
 Compiled-handler tests cover native function/custom calls, policy denial,
 revocation/replacement during approval, moderator reentrancy, unknown/unselected

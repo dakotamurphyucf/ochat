@@ -154,6 +154,15 @@ let moderator_event_ty =
     ; "Turn_end", S.TUnit
     ; "Internal_event", S.json_ty
     ; "Tool_invoked", invocation_event_ty
+    ; ( "Tool_observed"
+      , record
+          [ "version", S.TInt
+          ; "invocation_id", S.TString
+          ; "parent_invocation", S.TString
+          ; "tool_name", S.TString
+          ; "origin", origin_ty
+          ; "outcome", S.json_ty
+          ] )
     ; "Job_completed", work_completion_ty
     ; "Subscription_expired", work_completion_ty
     ]

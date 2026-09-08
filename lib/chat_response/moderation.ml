@@ -32,6 +32,7 @@ module Phase = struct
     | Turn_end
     | Internal_event
     | Tool_invoked
+    | Tool_observed
   [@@deriving sexp, compare]
 
   let to_string (t : t) : string =
@@ -45,6 +46,7 @@ module Phase = struct
     | Turn_end -> "turn_end"
     | Internal_event -> "internal_event"
     | Tool_invoked -> "tool_invoked"
+    | Tool_observed -> "tool_observed"
   ;;
 
   let of_string (value : string) : (t, string) result =
@@ -58,6 +60,7 @@ module Phase = struct
     | "turn_end" -> Ok Turn_end
     | "internal_event" -> Ok Internal_event
     | "tool_invoked" -> Ok Tool_invoked
+    | "tool_observed" -> Ok Tool_observed
     | _ -> Error (Printf.sprintf "Unknown moderation phase %S" value)
   ;;
 end

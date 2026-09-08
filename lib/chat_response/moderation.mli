@@ -32,6 +32,7 @@ module Phase : sig
     | Turn_end
     | Internal_event
     | Tool_invoked
+    | Tool_observed
   [@@deriving sexp, compare]
 
   val to_string : t -> string

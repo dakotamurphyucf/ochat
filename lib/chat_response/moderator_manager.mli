@@ -178,6 +178,32 @@ val handle_invocation_entries
         -> (unit -> unit, string) result)
   -> (Agent_protocol.Invocation.t * Moderation.Outcome.t, string) result
 
+(** Deliver a source-bound, already claimed nested outcome through Tool_observed.
+    It has no provider call ID and cannot resolve the original invocation again.
+    The host must hold the exclusive actor borrow and persist [observed] with the
+    prospective snapshot in [prepare_observation], returning an infallible,
+    non-yielding installer. Local state rolls back on error; external effects do
+    not. This method does not itself claim, retry or schedule observations.
+    Optional Tool.call routing has the same scoped authority requirements as
+    [handle_invocation_entries]. *)
+val handle_observation_entries
+  :  ?on_tool_call:
+       (name:string
+        -> args:Jsonaf.t
+        -> (Moderation.Capabilities.tool_call_result, string) result)
+  -> t
+  -> invocation:Agent_protocol.Invocation.t
+  -> history:History_entry.t list
+  -> available_tools:Res.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> now_ms:int
+  -> prepare_observation:
+       (observed:Agent_protocol.Invocation.t
+        -> outcome:Moderation.Outcome.t
+        -> snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> (unit -> unit, string) result)
+  -> (Moderation.Outcome.t, string) result
+
 (** [pending_ui_request t] exposes the current live-session approval request,
     if the runtime is suspended waiting for UI input. *)
 val pending_ui_request : t -> pending_ui_request option

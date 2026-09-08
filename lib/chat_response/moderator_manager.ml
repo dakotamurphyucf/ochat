@@ -1081,6 +1081,128 @@ let handle_invocation_entries
     resolved, !outcome)
 ;;
 
+let handle_observation_entries
+      ?on_tool_call
+      t
+      ~invocation
+      ~history
+      ~available_tools
+      ~session_meta
+      ~now_ms
+      ~prepare_observation
+  =
+  with_execution_lock t (fun () ->
+    let open Result.Let_syntax in
+    let module I = Agent_protocol.Invocation in
+    let module L = Chatml.Chatml_lang in
+    let%bind script =
+      match t.artifact.extension with
+      | Some (script, _) -> Ok script
+      | None -> Error "observation.legacy_moderator: requires extensibility-v1"
+    in
+    let%bind () =
+      I.validate invocation
+      |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
+    in
+    let%bind result, parent =
+      match
+        invocation.observation, invocation.status, invocation.context.parent_invocation
+      with
+      | ( Some { status = Observing; observer }
+        , (Resolved result | Published result)
+        , Some parent )
+        when String.equal observer.script_id script.id
+             && String.equal observer.source_sha256 script.source_sha256 ->
+        Ok (result, parent)
+      | _ ->
+        Error
+          "observation.wrong_owner: requires a claimed outcome for this moderator source"
+    in
+    let%bind () =
+      match Runtime.is_halted t.runtime with
+      | true -> Error "observation.session_ended: moderator session ended"
+      | false -> Ok ()
+    in
+    let event =
+      L.VVariant
+        ( "Tool_observed"
+        , [ L.VRecord
+              (String.Map.of_alist_exn
+                 [ "version", L.VInt 1
+                 ; ( "invocation_id"
+                   , L.VString
+                       (Agent_protocol.Id.Invocation.to_string invocation.context.id) )
+                 ; ( "parent_invocation"
+                   , L.VString (Agent_protocol.Id.Invocation.to_string parent) )
+                 ; "tool_name", L.VString invocation.context.tool_name
+                 ; "origin", L.VVariant ("Moderator", [])
+                 ; "outcome", Value_codec.jsonaf_to_value (I.outcome_to_json result)
+                 ])
+          ] )
+    in
+    let checked = Moderator_invocation.snapshot_state ~limits:script.limits in
+    let%bind _ = checked event in
+    let context =
+      Moderation.Entry_projection.project_context
+        ~session_id:(Agent_protocol.Id.Session.to_string invocation.context.session_id)
+        ~now_ms
+        ~phase:Moderation.Phase.Tool_observed
+        ~history
+        ~available_tools
+        ~session_meta
+    in
+    let outcome = ref Moderation.Outcome.empty in
+    let prepare (transaction : Runtime.transaction) =
+      let%bind decoded = decode_effects t transaction.local_effects in
+      let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+      let%bind overlay, install_overlay =
+        prepare_identity_overlay
+          t
+          ~phase:Moderation.Phase.Tool_observed
+          prepared.overlay_ops
+      in
+      let%bind snapshot =
+        identity_snapshot_of_state
+          t
+          ~current_state:transaction.new_state
+          ~queued_events:transaction.queued_events
+          ~halted:transaction.halted
+          ~overlay
+      in
+      let%bind observed =
+        I.complete_observation invocation
+        |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
+      in
+      let%map install = prepare_observation ~observed ~outcome:prepared ~snapshot in
+      fun () ->
+        install_overlay ();
+        install ();
+        t.processed_effect_count
+        <- t.processed_effect_count + List.length transaction.local_effects;
+        outcome := prepared
+    in
+    t.last_history <- history;
+    let previous = !(t.invocation_tool_call) in
+    t.invocation_tool_call := on_tool_call;
+    let%map () =
+      Exn.protect
+        ~finally:(fun () -> t.invocation_tool_call := previous)
+        ~f:(fun () ->
+          Runtime.handle_event
+            t.runtime
+            ~context:(Moderation.Context.to_value context)
+            ~event
+            ~limits:{ fuel = script.limits.fuel; max_tasks = script.limits.max_tasks }
+            ~copy_state:(fun value ->
+              Result.bind (checked value) ~f:Value_codec.Snapshot.to_value)
+            ~validate_state:(fun value -> Result.map (checked value) ~f:(fun _ -> ()))
+            ~validate_suspension:(fun () ->
+              Error "observation.suspended: cannot retain a UI continuation")
+            ~prepare_transaction:prepare)
+    in
+    !outcome)
+;;
+
 let pending_ui_request (t : t) : pending_ui_request option =
   Runtime.pending_ui_request t.runtime
 ;;

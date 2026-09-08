@@ -4009,6 +4009,249 @@ let handoff_manager env =
   manager, invocation
 ;;
 
+let%test_unit
+    "claimed observations commit moderator state atomically and never replay tools"
+  =
+  List.iter
+    [ `Success
+    ; `Handler_fail
+    ; `Raise
+    ; `Cancelled
+    ; `Claim_rejected
+    ; `Ack_rejected
+    ; `Wrong_source
+    ; `Wrong_snapshot
+    ; `Resolve_again
+    ; `Concurrent
+    ; `After_commit_error
+    ]
+    ~f:(fun mode ->
+      let module I = Agent_protocol.Invocation in
+      let module M = Chat_response.Moderator_manager in
+      let native_calls = ref 0
+      and observer_calls = ref 0
+      and rejected = ref false in
+      let succeeded =
+        match mode with
+        | `Success | `Concurrent | `After_commit_error -> true
+        | _ -> false
+      in
+      with_handoff_actor
+        ~reject:(fun next ->
+          let matches =
+            List.exists
+              next.Agent_session.Session_transition.state.invocations
+              ~f:(fun invocation ->
+                match mode, invocation.observation with
+                | `Claim_rejected, Some { status = Observing; _ }
+                | `Ack_rejected, Some { status = Observed; _ } -> true
+                | _ -> false)
+          in
+          if matches && not !rejected
+          then (
+            rejected := true;
+            true)
+          else false)
+        ~make_worker:(fun env actor_ready ->
+          Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+            let actor = Eio.Promise.await actor_ready in
+            let finish =
+              match mode with
+              | `Handler_fail -> "Task.fail(\"observer failed\")"
+              | `Resolve_again ->
+                "Task.bind(Invocation.resolve(p.invocation_id, `Complete(`Null)), fun \
+                 ignored -> Task.pure(state))"
+              | _ -> "Task.pure(state)"
+            in
+            let manager, _, definition =
+              handoff_definition
+                env
+                ~events:
+                  ("| `Tool_observed(p) -> let ignored = state[0] <- state[0] + 1 in "
+                   ^ "Task.bind(Tool.call(\"observe\", p.outcome), fun ignored -> "
+                   ^ "Task.bind(Runtime.emit(p.outcome), fun ignored -> "
+                   ^ finish
+                   ^ ")) | _ -> Task.pure(state)")
+            in
+            let script =
+              Chat_response.Extension_compiler.script
+                (List.hd_exn (Chat_response.Extension_compiler.prepared_tools definition))
+            in
+            let initial_snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+            caps.commit_moderator
+              (Some
+                 (Agent_session.Runtime_builder.encode_moderator_snapshot
+                    initial_snapshot))
+            |> protocol_ok;
+            let parent = invocation_fixture () in
+            let child =
+              I.create
+                ~observer:
+                  { script_id = script.id
+                  ; source_sha256 =
+                      (match mode with
+                       | `Wrong_source -> String.make 64 'f'
+                       | _ -> script.source_sha256)
+                  }
+                { parent.context with
+                  id = Agent_protocol.Id.Invocation.create ()
+                ; origin = Moderator
+                ; parent_invocation = Some parent.context.id
+                }
+              |> protocol_ok
+            in
+            caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
+              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
+                Int.incr native_calls;
+                Ok (Complete (`String "native result")))
+              |> protocol_ok
+              |> ignore;
+              assert (
+                Result.is_error
+                  (caps.with_moderator_observation
+                     ~invocation_id:child.context.id
+                     (fun ~observing:_ ~commit:_ -> assert false)));
+              Ok (Complete `Null))
+            |> protocol_ok
+            |> ignore;
+            let escaped = ref None in
+            let cancellation = ref None in
+            let run () =
+              caps.with_moderator_observation
+                ~invocation_id:child.context.id
+                (fun ~observing ~commit ->
+                   let state = Agent_session.Session_actor.state actor |> protocol_ok in
+                   assert (List.mem state.invocations observing ~equal:I.equal);
+                   assert (
+                     Result.is_error
+                       (caps.with_moderator_observation
+                          ~invocation_id:child.context.id
+                          (fun ~observing:_ ~commit:_ -> assert false)));
+                   let result =
+                     M.handle_observation_entries
+                       manager
+                       ~invocation:observing
+                       ~history:input.history
+                       ~available_tools:[]
+                       ~session_meta:`Null
+                       ~now_ms:0
+                       ~on_tool_call:(fun ~name ~args ->
+                         [%test_eq: string] "observe" name;
+                         assert (
+                           Jsonaf.exactly_equal
+                             args
+                             (I.outcome_to_json (Complete (`String "native result"))));
+                         Int.incr observer_calls;
+                         Eio.Fiber.yield ();
+                         match mode with
+                         | `Raise -> failwith "observer external helper raised"
+                         | `Cancelled ->
+                           Eio.Cancel.cancel (Option.value_exn !cancellation) Exit;
+                           Eio.Fiber.yield ();
+                           assert false
+                         | _ -> Ok (Tool_ok `Null))
+                       ~prepare_observation:(fun ~observed ~outcome:_ ~snapshot ->
+                         let snapshot =
+                           match mode with
+                           | `Wrong_snapshot -> { snapshot with script_id = "foreign" }
+                           | _ -> snapshot
+                         in
+                         let save () = commit ~resolved:observed ~snapshot in
+                         escaped := Some save;
+                         save ()
+                         |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
+                         |> Result.map ~f:(fun () -> fun () -> ()))
+                     |> Result.map_error ~f:handoff_error
+                   in
+                   match result, mode with
+                   | Ok _, `After_commit_error ->
+                     Error (handoff_error "after acknowledgement")
+                   | Ok _, _ -> Ok ()
+                   | Error e, _ -> Error e)
+            in
+            let safe_run () =
+              let execute () =
+                match mode with
+                | `Cancelled ->
+                  Eio.Cancel.sub (fun context ->
+                    cancellation := Some context;
+                    run ())
+                | _ -> run ()
+              in
+              match execute () with
+              | result -> result
+              | exception Failure message
+                when String.equal message "observer external helper raised" ->
+                Error (handoff_error "observer raised")
+              | exception Eio.Cancel.Cancelled _ ->
+                Error (handoff_error "observer cancelled")
+            in
+            (match mode with
+             | `Concurrent ->
+               let a = ref None
+               and b = ref None in
+               Eio.Fiber.both
+                 (fun () -> a := Some (safe_run ()))
+                 (fun () -> b := Some (safe_run ()));
+               assert (
+                 Bool.equal
+                   (Result.is_ok (Option.value_exn !a))
+                   (Result.is_error (Option.value_exn !b)))
+             | _ ->
+               let result = safe_run () in
+               assert (
+                 Bool.equal
+                   (Result.is_ok result)
+                   (match mode with
+                    | `Success -> true
+                    | _ -> false)));
+            Option.iter !escaped ~f:(fun save -> assert (Result.is_error (save ())));
+            (match mode with
+             | `Claim_rejected -> ()
+             | _ -> assert (Result.is_error (safe_run ())));
+            let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+            (match snapshot.current_state with
+             | Session.Snapshot.Array [ Int value ] ->
+               [%test_eq: int] (if succeeded then 1 else 0) value
+             | _ -> assert false);
+            let state = Agent_session.Session_actor.state actor |> protocol_ok in
+            assert (
+              Option.equal
+                Jsonaf.exactly_equal
+                state.moderator
+                (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)));
+            Completed
+              { final_history = input.history
+              ; runtime_requests = []
+              ; moderator_snapshot = state.moderator
+              }))
+        (fun _env actor _writer backend ->
+           let state = await_idle actor in
+           [%test_eq: int] 1 !native_calls;
+           [%test_eq: int]
+             (match mode with
+              | `Claim_rejected | `Wrong_source -> 0
+              | _ -> 1)
+             !observer_calls;
+           let child =
+             List.find_exn state.invocations ~f:(fun invocation ->
+               I.equal_origin invocation.context.origin Moderator)
+           in
+           assert (
+             I.equal_status child.status (Resolved (Complete (`String "native result"))));
+           (match child.observation with
+            | Some { status = Observed; _ } when succeeded -> ()
+            | Some { status = Awaiting; _ } ->
+              assert (
+                match mode with
+                | `Claim_rejected -> true
+                | _ -> false)
+            | Some { status = Observation_failed _; _ } when not succeeded -> ()
+            | _ -> assert false);
+           [%test_eq: int] 1 (List.length state.conversation.canonical_history);
+           assert_same_session_snapshot state (Agent_session.Memory_backend.state backend)))
+;;
+
 let%test_unit "compiled moderator Tool.call uses persisted scoped native routing" =
   List.iter
     [ `Success

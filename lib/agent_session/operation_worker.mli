@@ -77,6 +77,24 @@ module Capabilities : sig
           admission. The callback must revalidate current authority before effects
           after any wait. Same-owner recursion and cross-owner acquisition cycles
           fail before admission through the shared execution coordinator. *)
+    ; with_moderator_observation :
+        invocation_id:Agent_protocol.Id.Invocation.t
+        -> (observing:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (unit, Agent_protocol.Error.t) result
+      (** Exclusive foreground observation handoff. The actor reads retained
+          Awaiting intent, checks current generation/operation and parent completion,
+          and saves Observing before running the callback outside its mailbox.
+          [commit] accepts only Observed with the exact observer source identity and
+          saves receipt plus prospective moderator snapshot atomically. Call from
+          the manager's preparation hook, then install without yielding. Failure
+          or cancellation records a separate observation failure; native outcomes
+          are never replaced. Same-owner recursion/cross-owner wait cycles fail.
+          This does not install an idle drain or authorize tool calls by observers. *)
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t
