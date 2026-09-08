@@ -206,13 +206,29 @@ moderator; such a call records a failure before effects. The authorization callb
 must not try to re-enter the active moderator or execute first and request approval
 later. Halt checks use actor/lifecycle state instead of acquiring the held manager.
 
-The required `defer_observation` hook receives the saved child invocation before
-the result returns to ChatML. It must retain non-authorizing observations for a
-later safe point. An error or exception produces `invocation.observation_failed`
-without changing or retrying the saved child outcome. **The durable observation
-queue, safe-point drain and restart integration are still required.** Current
-tests collect these hook calls in memory and verify that child outcomes have
-already reached actor storage. This hook alone is not delivery qualification.
+Each admitted child now carries a durable non-authorizing observation intent,
+bound to the implementing moderator's script ID and validated source SHA256.
+This identity does not depend on process-local capability registrations. The
+intent survives cancellation and result persistence, including interruption
+before the required `defer_observation` wake-up callback. That callback receives
+the saved child before its result returns to ChatML. An error or exception
+produces `invocation.observation_failed` without changing or retrying the child
+outcome or removing its observation intent.
+
+The observation has a separate lifecycle: `Awaiting`, `Observing`, then `Observed`
+or `Observation_failed`. Only a recorded initial outcome can be claimed. The host
+must exclusively claim and save `Observing` before executing a handler, then
+atomically acknowledge it with the prospective moderator checkpoint. Pure
+transitions reject repeated claims, changed owners, late intent attachment and
+rewritten outcomes. Quiescent recovery preserves waiting intent and marks an
+interrupted `Observing` receipt failed, without replaying scripts or native tools.
+An observation failure does not mean the native tool failed.
+
+**The safe-point drain, dedicated event projection, exclusive actor claim and
+atomic handler checkpoint/acknowledgement integration are still required.** Tests
+verify persisted intent through real compiled-handler calls and exercise pure
+recovery plans, codecs and transition rejection. They do not yet qualify actual
+observation delivery across daemon restarts or administrative reset/compaction.
 
 Compiled-handler tests cover native function/custom calls, policy denial,
 revocation/replacement during approval, moderator reentrancy, unknown/unselected
@@ -329,7 +345,8 @@ receipts. They preserve receipts independently of transcript retention.
 
 Invocation records with routing provenance use JSON codec version 3. Without
 routing, bound records retain codec 2 and unbound records retain codec 1. Records
-with a discarded-publication disposition use codec 4. All four
+with a discarded-publication disposition use codec 4; nested moderator records
+with observation intent use codec 5. All five
 remain readable; missing optional S-expression fields load as absent. Older JSON
 readers reject new codecs rather than silently discard their evidence. These
 host-only additions do not change the ChatML context ABI or enable public feature

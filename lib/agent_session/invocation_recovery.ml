@@ -42,10 +42,11 @@ let plan_selected ~accept ~state ~namespace ~first_sequence ~reason =
     List.filter state.invocations ~f:(fun invocation ->
       accept invocation
       &&
-      match invocation.status with
-      | Published _ -> false
-      | Resolved _ -> Option.is_none invocation.publication_discarded
-      | Admitted | Dispatching -> true)
+      match invocation.observation, invocation.status with
+      | Some { status = Observing; _ }, _ -> true
+      | _, Published _ -> false
+      | _, Resolved _ -> Option.is_none invocation.publication_discarded
+      | _, (Admitted | Dispatching) -> true)
     |> List.stable_sort ~compare:(fun a b -> Int.compare (index a) (index b))
   in
   let%bind () =
@@ -57,6 +58,19 @@ let plan_selected ~accept ~state ~namespace ~first_sequence ~reason =
           let%map () = apply (Invocation_reconciled cancelled) in
           cancelled
         | Resolved _ | Published _ -> Ok invocation
+      in
+      let%bind invocation =
+        match invocation.observation with
+        | Some { status = Observing; _ } ->
+          let%bind failed =
+            I.fail_observation
+              invocation
+              ~reason:"observation interrupted before durable acknowledgement"
+          in
+          let%map () = apply (Invocation_reconciled failed) in
+          failed
+        | None | Some { status = Awaiting | Observed | Observation_failed _; _ } ->
+          Ok invocation
       in
       match invocation.status with
       | Published _ -> Ok ()

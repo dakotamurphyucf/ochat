@@ -45,6 +45,97 @@ let replace_field json name value =
   | _ -> failwith "expected object fixture"
 ;;
 
+let%test_unit
+    "deferred observation intent survives outcomes and permits one handling attempt"
+  =
+  let module I = Invocation in
+  let observer : I.observer =
+    { script_id = "moderator"; source_sha256 = String.make 64 'a' }
+  in
+  let ctx =
+    { (context ()) with
+      origin = Moderator
+    ; provider_call_id = None
+    ; parent_invocation = Some (get (Id.Invocation.of_string "inv_parent"))
+    }
+  in
+  let admitted = get (I.create ~observer ctx) in
+  let roundtrip invocation =
+    assert (I.equal invocation (get (I.of_json (I.to_json invocation))));
+    assert (I.equal invocation (I.t_of_sexp (I.sexp_of_t invocation)))
+  in
+  let transition previous next =
+    get (I.validate_transition ~previous:(Some previous) next);
+    roundtrip next
+  in
+  let rejected value = assert (Result.is_error value) in
+  roundtrip admitted;
+  rejected (I.create ~observer (context ()));
+  rejected (I.create ~observer:{ observer with source_sha256 = "bad" } ctx);
+  rejected (I.claim_observation admitted);
+  rejected (I.complete_observation admitted);
+  let dispatched = get (I.dispatch admitted) in
+  transition admitted dispatched;
+  rejected (I.claim_observation dispatched);
+  List.iter
+    [ I.Complete (`String "saved")
+    ; I.Fail { code = "denied"; message = "denied"; retryable = false; details = `Null }
+    ; I.Cancelled "stop"
+    ]
+    ~f:(fun outcome ->
+      let resolved = get (resolve dispatched outcome) in
+      transition dispatched resolved;
+      rejected (I.complete_observation resolved);
+      let claimed = get (I.claim_observation resolved) in
+      transition resolved claimed;
+      rejected (I.claim_observation claimed);
+      let completed = get (I.complete_observation claimed) in
+      transition claimed completed;
+      rejected (I.claim_observation completed);
+      rejected (I.fail_observation completed ~reason:"late failure");
+      assert (I.equal_status completed.status resolved.status);
+      List.iter [ resolved; claimed ] ~f:(fun previous ->
+        let failed = get (I.fail_observation previous ~reason:"interrupted") in
+        transition previous failed;
+        assert (I.equal_status failed.status resolved.status);
+        assert (I.equal failed (get (I.fail_observation failed ~reason:"interrupted")));
+        rejected (I.fail_observation failed ~reason:"replacement");
+        rejected (I.claim_observation failed));
+      let publish = get (I.publish claimed) in
+      transition claimed publish;
+      transition publish (get (I.complete_observation publish));
+      let forge json = get (I.of_json json) in
+      let changed_owner =
+        match I.to_json claimed with
+        | `Object fields ->
+          let observation =
+            List.Assoc.find_exn fields ~equal:String.equal "observation"
+          in
+          replace_field
+            (I.to_json claimed)
+            "observation"
+            (replace_field observation "script_id" (`String "other"))
+          |> forge
+        | _ -> assert false
+      in
+      rejected (I.validate_transition ~previous:(Some resolved) changed_owner);
+      rejected (I.validate_transition ~previous:(Some completed) claimed);
+      rejected (I.validate_transition ~previous:(Some resolved) completed);
+      let without =
+        get (I.create ctx)
+        |> I.dispatch
+        |> get
+        |> fun value -> get (resolve value outcome)
+      in
+      rejected (I.validate_transition ~previous:(Some without) claimed);
+      rejected (I.validate_transition ~previous:(Some claimed) without));
+  let legacy = get (I.create ctx) in
+  roundtrip legacy;
+  let json = I.to_json admitted in
+  rejected (I.of_json (replace_field json "schema_version" (`Number "4")));
+  rejected (I.of_json (replace_field json "observation" (`Object [])))
+;;
+
 let%expect_test "recorded pending outcome survives restart without a second resolution" =
   let admitted = get (Invocation.create (context ())) in
   report (Invocation.publish admitted);
@@ -161,7 +252,7 @@ let%expect_test
 let%expect_test "incompatible and malformed snapshots fail instead of losing state" =
   let invocation = get (Invocation.create (context ())) in
   let encoded = Invocation.to_json invocation in
-  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "5")));
+  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "6")));
   report
     (Invocation.of_json
        (replace_field encoded "status" (`Object [ "type", `String "resolved" ])));

@@ -188,6 +188,20 @@ let rec apply state = function
         | Some { status = Resolved _; _ }, Published _ -> Ok ()
         | Some { status = Resolved _; _ }, Resolved _
           when Option.is_some invocation.publication_discarded -> Ok ()
+        | Some previous, _
+          when (match previous.observation, invocation.observation with
+                | ( Some { status = Observing; _ }
+                  , Some { status = Observation_failed _; _ } ) -> true
+                | _ -> false)
+               && Agent_protocol.Invocation.equal_status previous.status invocation.status
+               && Option.equal
+                    Agent_protocol.History.Id.equal
+                    previous.output_entry_id
+                    invocation.output_entry_id
+               && Option.equal
+                    String.equal
+                    previous.publication_discarded
+                    invocation.publication_discarded -> Ok ()
         | _ ->
           Error
             (Agent_protocol.Error.invalid_request

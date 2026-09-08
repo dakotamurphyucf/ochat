@@ -2853,6 +2853,71 @@ let%test_unit
         | _ -> assert false)))
 ;;
 
+let%test_unit
+    "restart preserves waiting observations and fails interrupted handling without replay"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let module I = Agent_protocol.Invocation in
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let observer : I.observer =
+      { script_id = "moderator"; source_sha256 = String.make 64 'a' }
+    in
+    let admitted =
+      I.create
+        ~observer
+        { (invocation_fixture ()).context with
+          origin = Moderator
+        ; provider_call_id = None
+        ; parent_invocation = Some (Agent_protocol.Id.Invocation.create ())
+        }
+      |> protocol_ok
+    in
+    let dispatched = I.dispatch admitted |> protocol_ok in
+    let resolved =
+      I.resolve dispatched ~session_id ~generation:0 (Complete (`String "saved"))
+      |> protocol_ok
+    in
+    let observing = I.claim_observation resolved |> protocol_ok in
+    let observed = I.complete_observation observing |> protocol_ok in
+    let failed = I.fail_observation observing ~reason:"handler failed" |> protocol_ok in
+    let published = I.publish observing |> protocol_ok in
+    List.iter
+      [ admitted; dispatched; resolved; observing; observed; failed; published ]
+      ~f:(fun invocation ->
+        let state = { initial with invocations = [ invocation ] } in
+        let plan state =
+          Agent_session.Invocation_recovery.plan
+            ~state
+            ~namespace:"observation-restart"
+            ~first_sequence:(Int64.to_int_exn state.conversation.next_history_sequence)
+            ~reason:"restart"
+          |> protocol_ok
+        in
+        let recovery = plan state in
+        assert (List.is_empty recovery.appended);
+        let repaired =
+          Agent_session.Session_delta.apply state (Batch recovery.deltas) |> protocol_ok
+        in
+        Agent_session.Session_state.validate repaired |> protocol_ok;
+        let actual = List.hd_exn repaired.invocations in
+        (match invocation.status, actual.status with
+         | (Admitted | Dispatching), Resolved (Cancelled "restart") -> ()
+         | old, current -> assert (I.equal_status old current));
+        (match invocation.observation, actual.observation with
+         | ( Some { status = Observing; observer = old }
+           , Some { status = Observation_failed _; observer = current } ) ->
+           assert (I.equal_observer old current);
+           assert (Result.is_error (I.claim_observation actual))
+         | old, current -> assert (Option.equal I.equal_observation old current));
+        assert (List.is_empty (plan repaired).deltas);
+        (* Recovery may fail interrupted handling, but must never claim successful execution. *)
+        assert (
+          Result.is_error
+            (Agent_session.Session_delta.apply state (Invocation_reconciled observed)))))
+;;
+
 let%test_unit "foreground recovery leaves script and background invocations running" =
   with_actor_workspace (fun _env workspace_instance ->
     let module I = Agent_protocol.Invocation in
@@ -4076,6 +4141,16 @@ let%test_unit "compiled moderator Tool.call uses persisted scoped native routing
                       child
                       ~equal:Agent_protocol.Invocation.equal);
                   observations := child :: !observations;
+                  (match child.observation with
+                   | Some { status = Awaiting; observer } ->
+                     let prepared =
+                       List.hd_exn
+                         (Chat_response.Extension_compiler.prepared_tools definition)
+                     in
+                     let script = Chat_response.Extension_compiler.script prepared in
+                     [%test_eq: string] script.id observer.script_id;
+                     [%test_eq: string] script.source_sha256 observer.source_sha256
+                   | _ -> failwith "saved child lost its deferred observation intent");
                   match mode with
                   | `Observation_failed ->
                     Error (handoff_error "private observer failure")
@@ -4217,6 +4292,9 @@ let%test_unit "compiled moderator Tool.call uses persisted scoped native routing
            assert (List.length children = if has_child then 1 else 0);
            assert (List.length !observations = List.length children);
            List.iter children ~f:(fun child ->
+             (match child.observation with
+              | Some { status = Awaiting; _ } -> ()
+              | _ -> failwith "saved child lost its deferred observation intent");
              assert (Option.is_none child.context.provider_call_id);
              assert (Option.is_none child.context.call_entry_id);
              assert (Option.is_none child.output_entry_id);

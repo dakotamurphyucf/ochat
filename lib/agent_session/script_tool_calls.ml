@@ -106,6 +106,10 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
           let%bind invocation =
             checked `Admission (fun () ->
               I.create
+                ~observer:
+                  { script_id = (EC.script prepared).id
+                  ; source_sha256 = (EC.script prepared).source_sha256
+                  }
                 { id = Agent_protocol.Id.Invocation.create ()
                 ; session_id = parent.context.session_id
                 ; generation = parent.context.generation

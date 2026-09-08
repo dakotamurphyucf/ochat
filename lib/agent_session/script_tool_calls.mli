@@ -34,11 +34,13 @@ val create
     predicate must return true and execution is refused before effects.
     [is_halted] must use actor/lifecycle state, not the held manager lock.
 
-    After a child outcome is saved, [defer_observation] must retain its
-    non-authorizing observation for a later safe point. It must not invoke the
+    The child carries durable observation intent from admission, bound to the
+    prepared moderator script ID/source digest. After its outcome is saved,
+    [defer_observation] requests a later safe-point drain. It must not invoke the
     active moderator. Failure is returned separately without replacing or retrying
-    the saved result. The caller owns durable observation queue integration;
-    this bridge does not itself install a queue or normal runtime features. *)
+    the saved result. Failure also leaves the persisted observation intent intact.
+    The caller owns exclusive claim, atomic handler checkpoint/acknowledgement and
+    recovery integration; this bridge does not install a drain or runtime features. *)
 val with_invocation
   :  t
   -> prepared:Chat_response.Extension_compiler.t

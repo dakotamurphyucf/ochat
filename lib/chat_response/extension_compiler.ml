@@ -7,6 +7,7 @@ module Duration = Chatmd_shell_spec.Duration
 
 type t =
   { declaration : Spec.tool
+  ; script : Spec.script
   ; limits : S.limits
   ; program : Chatml_host_runtime.compiled_script
   ; capabilities : Tool_capability.t
@@ -17,6 +18,7 @@ type t =
   }
 
 let declaration t = t.declaration
+let script t = t.script
 let execution_limits t = t.limits
 let program t = t.program
 let capabilities t = t.capabilities
@@ -125,6 +127,7 @@ let prepare_with
   in
   Ok
     { declaration = tool
+    ; script
     ; limits = script.limits
     ; program
     ; capabilities = selected

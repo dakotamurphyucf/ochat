@@ -91,12 +91,32 @@ type routing =
   }
 [@@deriving equal, sexp]
 
+type observer =
+  { script_id : string
+  ; source_sha256 : string
+  }
+[@@deriving equal, sexp]
+
+type observation_status =
+  | Awaiting
+  | Observing
+  | Observed
+  | Observation_failed of string
+[@@deriving equal, sexp]
+
+type observation =
+  { observer : observer
+  ; status : observation_status
+  }
+[@@deriving equal, sexp]
+
 type t =
   { context : context
   ; status : status
   ; output_entry_id : History.Id.t option [@sexp.option]
   ; routing : routing option [@sexp.option]
   ; publication_discarded : string option [@sexp.option]
+  ; observation : observation option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -180,6 +200,38 @@ let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_context t.context in
   let%bind () =
+    match t.observation with
+    | None -> Ok ()
+    | Some observation ->
+      let%bind () =
+        text ~name:"observer script ID" ~max:256 observation.observer.script_id
+      in
+      let digest = observation.observer.source_sha256 in
+      let%bind () =
+        if
+          String.length digest = 64
+          && String.for_all digest ~f:(function
+            | '0' .. '9' | 'a' .. 'f' -> true
+            | _ -> false)
+        then Ok ()
+        else invalid "observer source digest must be a lowercase SHA256"
+      in
+      let%bind () =
+        match t.context.origin, t.context.parent_invocation with
+        | Moderator, Some _ -> Ok ()
+        | _ -> invalid "deferred observation requires a nested moderator invocation"
+      in
+      let%bind () =
+        match t.status, observation.status with
+        | (Admitted | Dispatching), (Observing | Observed | Observation_failed _) ->
+          invalid "observation handling requires a recorded invocation outcome"
+        | _ -> Ok ()
+      in
+      (match observation.status with
+       | Observation_failed reason -> text ~name:"observation failure" ~max:1024 reason
+       | Awaiting | Observing | Observed -> Ok ())
+  in
+  let%bind () =
     match t.publication_discarded with
     | None -> Ok ()
     | Some reason ->
@@ -259,13 +311,15 @@ let validate t =
   | Resolved outcome | Published outcome -> validate_outcome outcome
 ;;
 
-let create ?routing context =
+let create ?routing ?observer context =
   let t =
     { context
     ; status = Admitted
     ; output_entry_id = None
     ; routing
     ; publication_discarded = None
+    ; observation =
+        Option.map observer ~f:(fun observer -> { observer; status = Awaiting })
     }
   in
   Result.map (validate t) ~f:(fun () -> t)
@@ -350,6 +404,50 @@ let discard_publication t ~reason =
     Result.map (validate next) ~f:(fun () -> next)
 ;;
 
+let change_observation t ~status =
+  match t.observation with
+  | None -> failure Invalid_state "invocation has no deferred observation"
+  | Some observation ->
+    let next = { t with observation = Some { observation with status } } in
+    Result.map (validate next) ~f:(fun () -> next)
+;;
+
+let claim_observation t =
+  match t.observation with
+  | Some { status = Awaiting; _ } -> change_observation t ~status:Observing
+  | _ -> failure Invalid_state "observation is absent or already attempted"
+;;
+
+let complete_observation t =
+  match t.observation with
+  | Some { status = Observing; _ } -> change_observation t ~status:Observed
+  | _ -> failure Invalid_state "observation is not being handled"
+;;
+
+let fail_observation t ~reason =
+  match t.observation with
+  | Some { status = Awaiting | Observing; _ } ->
+    change_observation t ~status:(Observation_failed reason)
+  | Some { status = Observation_failed existing; _ } when String.equal existing reason ->
+    Ok t
+  | _ -> failure Invalid_state "observation is absent or already finished"
+;;
+
+let validate_observation_transition previous next =
+  match previous.observation, next.observation with
+  | None, None -> Ok ()
+  | Some old, Some current when equal_observer old.observer current.observer ->
+    (match old.status, current.status with
+     | old, current when equal_observation_status old current -> Ok ()
+     | Awaiting, (Observing | Observation_failed _)
+     | Observing, (Observed | Observation_failed _) ->
+       if equal_status previous.status next.status
+       then Ok ()
+       else failure Conflict "observation transition must preserve the invocation outcome"
+     | _ -> failure Conflict "observation handling cannot be repeated or rewritten")
+  | _ -> failure Conflict "observation owner and admission intent are immutable"
+;;
+
 let validate_transition ~previous next =
   let open Result.Let_syntax in
   let%bind () = validate next in
@@ -360,6 +458,7 @@ let validate_transition ~previous next =
      | _ -> failure Invalid_state "new invocation must be admitted")
   | Some previous ->
     let%bind () = validate previous in
+    let%bind () = validate_observation_transition previous next in
     if not (equal_context previous.context next.context)
     then failure Conflict "invocation context is immutable"
     else if not (Option.equal equal_routing previous.routing next.routing)
@@ -383,8 +482,13 @@ let validate_transition ~previous next =
     else (
       match previous.status, next.status with
       | Resolved old, Resolved current
-        when Option.is_some next.publication_discarded && equal_outcome old current ->
-        Ok ()
+        when equal_outcome old current
+             && (Option.is_some next.publication_discarded
+                 || not
+                      (Option.equal
+                         equal_observation
+                         previous.observation
+                         next.observation)) -> Ok ()
       | Admitted, Dispatching | Admitted, Resolved (Cancelled _) | Dispatching, Resolved _
         -> Ok ()
       | (Resolved old, Published current | Published old, Published current)
@@ -697,11 +801,54 @@ let status_of_json json =
   | _ -> invalid "unknown invocation status"
 ;;
 
+let observation_to_json (observation : observation) =
+  let status, reason =
+    match observation.status with
+    | Awaiting -> "awaiting", None
+    | Observing -> "observing", None
+    | Observed -> "observed", None
+    | Observation_failed reason -> "failed", Some reason
+  in
+  `Object
+    ([ "script_id", `String observation.observer.script_id
+     ; "source_sha256", `String observation.observer.source_sha256
+     ; "status", `String status
+     ]
+     @ optional "reason" reason (fun value -> `String value))
+;;
+
+let observation_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind script_id = Json_codec.required_as fields "script_id" Json_codec.string in
+  let%bind source_sha256 =
+    Json_codec.required_as fields "source_sha256" Json_codec.string
+  in
+  let%bind kind = Json_codec.required_as fields "status" Json_codec.string in
+  let%map status =
+    match kind with
+    | "awaiting" | "observing" | "observed" ->
+      let%map () = closed fields [ "script_id"; "source_sha256"; "status" ] in
+      (match kind with
+       | "awaiting" -> Awaiting
+       | "observing" -> Observing
+       | _ -> Observed)
+    | "failed" ->
+      let%bind () = closed fields [ "script_id"; "source_sha256"; "status"; "reason" ] in
+      let%map reason = Json_codec.required_as fields "reason" Json_codec.string in
+      Observation_failed reason
+    | _ -> invalid "unknown observation status"
+  in
+  { observer = { script_id; source_sha256 }; status }
+;;
+
 let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (if Option.is_some t.publication_discarded
+           (if Option.is_some t.observation
+            then "5"
+            else if Option.is_some t.publication_discarded
             then "4"
             else if Option.is_some t.routing
             then "3"
@@ -714,7 +861,8 @@ let to_json t =
      @ optional "output_entry_id" t.output_entry_id History.Id.to_json
      @ optional "routing" t.routing routing_to_json
      @ optional "publication_discarded" t.publication_discarded (fun reason ->
-       `String reason))
+       `String reason)
+     @ optional "observation" t.observation observation_to_json)
 ;;
 
 let of_json json =
@@ -728,9 +876,9 @@ let of_json json =
       (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
   in
   let%bind () =
-    if version = 1 || version = 2 || version = 3 || version = 4
-    then Ok ()
-    else failure Incompatible_protocol "unsupported invocation schema version"
+    match version with
+    | 1 | 2 | 3 | 4 | 5 -> Ok ()
+    | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =
     closed
@@ -738,7 +886,8 @@ let of_json json =
       ([ "schema_version"; "context"; "status" ]
        @ (if version >= 2 then [ "output_entry_id" ] else [])
        @ (if version >= 3 then [ "routing" ] else [])
-       @ if version = 4 then [ "publication_discarded" ] else [])
+       @ (if version >= 4 then [ "publication_discarded" ] else [])
+       @ if version = 5 then [ "observation" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -754,7 +903,7 @@ let of_json json =
     if version = 3
     then
       Json_codec.required_as fields "routing" routing_of_json |> Result.map ~f:Option.some
-    else if version = 4
+    else if version >= 4
     then Json_codec.optional_as fields "routing" routing_of_json
     else Ok None
   in
@@ -763,9 +912,20 @@ let of_json json =
     then
       Json_codec.required_as fields "publication_discarded" Json_codec.string
       |> Result.map ~f:Option.some
+    else if version = 5
+    then Json_codec.optional_as fields "publication_discarded" Json_codec.string
     else Ok None
   in
-  let t = { context; status; output_entry_id; routing; publication_discarded } in
+  let%bind observation =
+    if version = 5
+    then
+      Json_codec.required_as fields "observation" observation_of_json
+      |> Result.map ~f:Option.some
+    else Ok None
+  in
+  let t =
+    { context; status; output_entry_id; routing; publication_discarded; observation }
+  in
   let%map () = validate t in
   t
 ;;

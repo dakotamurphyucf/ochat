@@ -23,6 +23,10 @@ val prepare
 
 val declaration : t -> Spec.tool
 
+(** Exact validated implementing source, including stable script ID and digest.
+    Unlike the prepared capability fingerprint, this identity survives restart. *)
+val script : t -> Spec.script
+
 (** Validated execution limits of the captured implementing script. These limits
     are included in the prepared implementation fingerprint. *)
 val execution_limits : t -> Chatmd_shell_spec.Chatmd_script_spec.limits

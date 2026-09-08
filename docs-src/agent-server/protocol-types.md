@@ -1125,6 +1125,26 @@ type routing =
   }
 [@@deriving equal, sexp]
 
+(** Stable source identity, independent of process-local tool capability IDs. *)
+type observer =
+  { script_id : string
+  ; source_sha256 : string
+  }
+[@@deriving equal, sexp]
+
+type observation_status =
+  | Awaiting
+  | Observing
+  | Observed
+  | Observation_failed of string
+[@@deriving equal, sexp]
+
+type observation =
+  { observer : observer
+  ; status : observation_status
+  }
+[@@deriving equal, sexp]
+
 type t = private
   { context : context
   ; status : status
@@ -1133,12 +1153,15 @@ type t = private
   ; publication_discarded : string option [@sexp.option]
     (** Durable reason that no provider result will be published. The recorded
         outcome is preserved. Present only on resolved model invocations; codec 4. *)
+  ; observation : observation option [@sexp.option]
+    (** Non-authorizing nested moderator observation intent, fixed at admission.
+        Handling disposition is independent of the tool outcome; codec 5. *)
   }
 [@@deriving equal, sexp]
 
 (** Routing, when present, is fixed at admission and uses JSON codec version 3.
     Legacy records without routing remain readable. *)
-val create : ?routing:routing -> context -> (t, Error.t) result
+val create : ?routing:routing -> ?observer:observer -> context -> (t, Error.t) result
 
 val validate : t -> (unit, Error.t) result
 val dispatch : t -> (t, Error.t) result
@@ -1172,6 +1195,21 @@ val publish_with_history : t -> output_entry_id:History.Id.t -> (t, Error.t) res
     outcome or fabricating a provider output. The host must prove that the call
     is not retained. Idempotent for the same reason; cannot later publish. *)
 val discard_publication : t -> reason:string -> (t, Error.t) result
+
+(** Pure transitions: the host must exclusively claim and durably save Observing
+    before running the observer. Only terminal invocation outcomes are eligible.
+    Claim is not idempotent: after interruption an Observing receipt must fail,
+    never replay potentially effectful handler execution. *)
+val claim_observation : t -> (t, Error.t) result
+
+(** The host must save this receipt atomically with the prospective moderator
+    state/effects. Failure leaves the tool outcome intact. These functions do not
+    run handlers, authorize callers or install an observation drain. *)
+val complete_observation : t -> (t, Error.t) result
+
+(** May also discard an Awaiting observation whose owner is no longer available.
+    Repeating the same failure is idempotent; successful handling is immutable. *)
+val fail_observation : t -> reason:string -> (t, Error.t) result
 
 (** Checks a proposed durable replacement, including immutable context and
     outcome. New records must be admitted; transitions cannot skip dispatch
