@@ -88,6 +88,7 @@ type t =
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
   ; schedules : Agent_protocol.Schedule.t list
+  ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
   ; attachments : Agent_protocol.Session.Attachment.t list
   ; moderator : Jsonaf.t option
   ; shell : Session.Shell_state.t
@@ -98,7 +99,21 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 2
+let current_schema_version = 3
+
+let upgrade_schema t =
+  if t.schema_version = current_schema_version
+  then Ok t
+  else if t.schema_version = 2 && List.is_empty t.invocations
+  then Ok { t with schema_version = current_schema_version }
+  else
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"unsupported session state schema or inconsistent legacy records"
+         ~retryable:false
+         ())
+;;
 
 let create ~identity ~spec ~initial_history =
   let desired =
@@ -126,6 +141,7 @@ let create ~identity ~spec ~initial_history =
   ; grants = []
   ; jobs = []
   ; schedules = []
+  ; invocations = []
   ; attachments = []
   ; moderator = None
   ; shell = Session.Shell_state.empty
@@ -155,6 +171,26 @@ let nonnegative name value =
 
 let validate t =
   let open Result.Let_syntax in
+  let seen_invocations = Hash_set.create (module Agent_protocol.Id.Invocation) in
+  let%bind () =
+    List.fold_result t.invocations ~init:() ~f:(fun () invocation ->
+      let%bind () = Agent_protocol.Invocation.validate invocation in
+      let context = invocation.context in
+      if
+        Agent_protocol.Id.Session.compare context.session_id t.identity.session_id <> 0
+        || context.generation > t.identity.generation
+        || Hash_set.mem seen_invocations context.id
+      then
+        Error
+          (Agent_protocol.Error.create
+             Journal_corrupt
+             ~message:"invocation owner, generation or uniqueness is invalid"
+             ~retryable:false
+             ())
+      else (
+        Hash_set.add seen_invocations context.id;
+        Ok ()))
+  in
   let%bind () = nonnegative "revision" t.counters.revision in
   let%bind () = nonnegative "event sequence" t.counters.event_sequence in
   let%bind () = nonnegative "transaction sequence" t.counters.transaction_sequence in

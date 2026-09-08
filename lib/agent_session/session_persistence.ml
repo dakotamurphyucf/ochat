@@ -117,10 +117,10 @@ let install_snapshot ~env ~handle ~max_payload_length ~transaction_hash state =
 let restore_snapshot payload =
   try
     let state = Sexp.of_string payload |> [%of_sexp: Session_state.t] in
-    Session_state.validate state
+    Result.bind (Session_state.upgrade_schema state) ~f:(fun state ->
+      Result.map (Session_state.validate state) ~f:(fun () -> state))
     |> Result.map_error ~f:(fun error ->
       Agent_store.Store_error.Corrupt error.Agent_protocol.Error.message)
-    |> Result.map ~f:(fun () -> state)
   with
   | exn ->
     Error

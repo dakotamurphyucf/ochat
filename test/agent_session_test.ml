@@ -824,6 +824,225 @@ let with_actor_workspace f =
     f env workspace_instance)
 ;;
 
+let invocation_fixture () =
+  Agent_protocol.Invocation.create
+    { id = Agent_protocol.Id.Invocation.of_string "inv_session_test" |> protocol_ok
+    ; session_id
+    ; generation = 0
+    ; origin = Script
+    ; provider_call_id = None
+    ; parent_invocation = None
+    ; parent_job = None
+    ; tool_name = "read_file"
+    ; implementation_revision = "revision-1"
+    ; capability_fingerprint = "capability-1"
+    ; input = `Null
+    ; created_at = timestamp
+    ; deadline = None
+    }
+  |> protocol_ok
+;;
+
+let%expect_test "invocation deltas replay through durable transactions and snapshots" =
+  with_actor_workspace (fun _env workspace_instance ->
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let admitted = invocation_fixture () in
+    let dispatched = Agent_protocol.Invocation.dispatch admitted |> protocol_ok in
+    let resolved =
+      Agent_protocol.Invocation.resolve
+        dispatched
+        ~session_id
+        ~generation:0
+        (Complete (`String "done"))
+      |> protocol_ok
+    in
+    let delta =
+      Agent_session.Session_delta.Batch
+        [ Invocation_changed admitted
+        ; Invocation_changed dispatched
+        ; Invocation_changed resolved
+        ]
+    in
+    let transaction =
+      Agent_store.Transaction.create
+        ~session_id
+        ~generation:0
+        ~transaction_sequence:1L
+        ~previous_transaction_hash:None
+        ~session_revision:1L
+        ~first_event_sequence:None
+        ~last_event_sequence:None
+        ~accepted_at_ns:
+          (Agent_protocol.Timestamp.to_time_ns timestamp
+           |> Time_ns.to_int_ns_since_epoch
+           |> Int64.of_int)
+        ~command_audit:None
+        ~delta:(Sexp.to_string_mach (Agent_session.Session_delta.sexp_of_t delta))
+        ~durable_events:[]
+      |> store_ok
+    in
+    let transaction =
+      Agent_store.Transaction.decode (Agent_store.Transaction.encode transaction)
+      |> store_ok
+    in
+    let replayed =
+      Agent_session.Session_persistence.apply_transaction initial transaction |> store_ok
+    in
+    let restored =
+      Agent_session.Session_persistence.restore_snapshot
+        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t replayed))
+      |> store_ok
+    in
+    let invocation = List.hd_exn restored.invocations in
+    print_s [%sexp (invocation.status : Agent_protocol.Invocation.status)];
+    let published = Agent_protocol.Invocation.publish invocation |> protocol_ok in
+    let final =
+      Agent_session.Session_delta.apply restored (Invocation_changed published)
+      |> protocol_ok
+    in
+    print_s
+      [%sexp ((List.hd_exn final.invocations).status : Agent_protocol.Invocation.status)];
+    let repeated_resolution =
+      Agent_session.Session_delta.apply final (Invocation_changed resolved)
+    in
+    print_s [%sexp (Result.is_error repeated_resolution : bool)]);
+  [%expect
+    {|
+    (Resolved (Complete (String done)))
+    (Published (Complete (String done)))
+    true |}]
+;;
+
+let%expect_test
+    "legacy state migration preserves data and rejects invalid invocation ownership"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let legacy =
+      match Agent_session.Session_state.sexp_of_t { initial with schema_version = 2 } with
+      | Sexp.List fields ->
+        Sexp.List
+          (List.filter fields ~f:(function
+             | Sexp.List (Sexp.Atom "invocations" :: _) -> false
+             | _ -> true))
+      | _ -> assert false
+    in
+    let migrated =
+      Agent_session.Session_persistence.restore_snapshot (Sexp.to_string_mach legacy)
+      |> store_ok
+    in
+    print_s
+      [%sexp
+        { version = (migrated.schema_version : int)
+        ; records = (List.length migrated.invocations : int)
+        }];
+    let invocation = invocation_fixture () in
+    let foreign =
+      Agent_protocol.Invocation.create
+        { invocation.context with session_id = second_session_id }
+      |> protocol_ok
+    in
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_delta.apply initial (Invocation_changed foreign))
+         : bool)];
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_state.validate
+              { initial with invocations = [ foreign ] })
+         : bool)];
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_state.validate
+              { initial with invocations = [ invocation; invocation ] })
+         : bool)];
+    print_s
+      [%sexp
+        (Result.is_error
+           (Agent_session.Session_state.upgrade_schema
+              { initial with schema_version = 4 })
+         : bool)]);
+  [%expect
+    {|
+    ((version 3) (records 0))
+    true
+    true
+    true
+    true |}]
+;;
+
+let%expect_test "pre-extension compaction archives remain readable after state migration" =
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let state =
+        actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+      in
+      let legacy = { state with schema_version = 2 } in
+      let store =
+        Agent_store.Session_store.create
+          ~env
+          ~sw
+          ~root:
+            (Filename.concat
+               workspace_instance.canonical_root.native_path
+               "archive-store")
+          ~server_id:(Agent_protocol.Id.Server.of_string "srv_archive_test" |> protocol_ok)
+          ~process_start_identity:None
+          ~lock_nonce:"archive-store-lock"
+        |> store_ok
+      in
+      let metadata =
+        Agent_store.Session_store.Metadata.
+          { schema_version = Agent_store.Session_store.current_schema_version
+          ; session = Agent_session.Session_state.summary legacy
+          ; prompt_artifact =
+              Agent_protocol.Id.Prompt_revision.to_string prompt_revision_id
+          ; workspace_identity = workspace_instance.conflict_domain
+          ; data_schema_version = 2
+          }
+      in
+      let handle =
+        Agent_store.Session_store.create_session
+          store
+          ~sw
+          ~transaction_id
+          ~actor_lock_nonce:"archive-actor-lock"
+          metadata
+        |> store_ok
+      in
+      let reference = Agent_session.Compaction_archive.reference legacy operation_id in
+      Agent_session.Compaction_archive.write
+        ~env
+        ~handle
+        ~max_payload_length:1048576
+        reference
+        legacy
+      |> protocol_ok;
+      let restored =
+        Agent_session.Compaction_archive.read
+          ~env
+          ~handle
+          ~max_payload_length:1048576
+          reference
+        |> protocol_ok
+      in
+      print_s
+        [%sexp
+          { version = (restored.schema_version : int)
+          ; records = (List.length restored.invocations : int)
+          }];
+      Agent_store.Session_store.close_session store handle |> store_ok;
+      Agent_store.Session_store.close store |> store_ok));
+  [%expect {| ((version 3) (records 0)) |}]
+;;
+
 let%expect_test "session actor publishes committed events to multiple subscribers" =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun switch ->

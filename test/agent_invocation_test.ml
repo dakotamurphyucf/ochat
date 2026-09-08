@@ -1,0 +1,259 @@
+open Core
+open Agent_protocol
+
+let get = function
+  | Ok value -> value
+  | Error (error : Error.t) -> failwith error.message
+;;
+
+let report result =
+  print_endline
+    (match result with
+     | Ok _ -> "ok"
+     | Error (error : Error.t) -> Error.code_to_string error.code)
+;;
+
+let context () : Invocation.context =
+  { id = get (Id.Invocation.of_string "inv_example")
+  ; session_id = get (Id.Session.of_string "ses_parent")
+  ; generation = 3
+  ; origin = Model
+  ; provider_call_id = Some "provider-call-1"
+  ; parent_invocation = None
+  ; parent_job = None
+  ; tool_name = "watch_response"
+  ; implementation_revision = "revision-1"
+  ; capability_fingerprint = "capabilities-1"
+  ; input = `Object [ "child", `String "ses_child" ]
+  ; created_at = get (Timestamp.of_string "2026-09-08T12:00:00Z")
+  ; deadline = Some (get (Timestamp.of_string "2026-09-08T12:01:00Z"))
+  }
+;;
+
+let resolve invocation outcome =
+  Invocation.resolve
+    invocation
+    ~session_id:invocation.context.session_id
+    ~generation:invocation.context.generation
+    outcome
+;;
+
+let replace_field json name value =
+  match json with
+  | `Object fields -> `Object (List.Assoc.add fields ~equal:String.equal name value)
+  | _ -> failwith "expected object fixture"
+;;
+
+let%expect_test "recorded pending outcome survives restart without a second resolution" =
+  let admitted = get (Invocation.create (context ())) in
+  report (Invocation.publish admitted);
+  let dispatched = get (Invocation.dispatch admitted) in
+  let outcome =
+    Invocation.Pending
+      (Subscription (get (Id.Subscription.of_string "sub_watch")), `String "watching")
+  in
+  let resolved = get (resolve dispatched outcome) in
+  let restored = get (Invocation.of_json (Invocation.to_json resolved)) in
+  report (resolve restored outcome);
+  let published = get (Invocation.publish restored) in
+  let repeated = get (Invocation.publish published) in
+  print_s
+    [%sexp
+      (String.equal
+         (Jsonaf.to_string (Invocation.to_json published))
+         (Jsonaf.to_string (Invocation.to_json repeated))
+       : bool)];
+  report (Invocation.cancel published ~reason:"late cancel");
+  [%expect
+    {|
+    invalid_state
+    already_resolved
+    true
+    already_resolved |}]
+;;
+
+let%expect_test "resolution checks owner and generation before changing the outcome" =
+  let invocation = get (Invocation.create (context ())) |> Invocation.dispatch |> get in
+  report
+    (Invocation.resolve
+       invocation
+       ~session_id:(get (Id.Session.of_string "ses_foreign"))
+       ~generation:3
+       (Complete `Null));
+  report
+    (Invocation.resolve
+       invocation
+       ~session_id:invocation.context.session_id
+       ~generation:4
+       (Complete `Null));
+  report (resolve invocation (Complete `Null));
+  [%expect
+    {|
+    permission_denied
+    conflict
+    ok |}]
+;;
+
+let%expect_test "script origins cannot fabricate provider call history" =
+  let original = context () in
+  report (Invocation.create { original with origin = Script });
+  report (Invocation.create { original with provider_call_id = None });
+  report (Invocation.create { original with origin = Script; provider_call_id = None });
+  report (Invocation.create { original with parent_invocation = Some original.id });
+  report (Invocation.create { original with generation = -1 });
+  report
+    (Invocation.create
+       { original with
+         deadline = Some (get (Timestamp.of_string "2026-09-07T12:00:00Z"))
+       });
+  [%expect
+    {|
+    invalid_request
+    invalid_request
+    ok
+    invalid_request
+    invalid_request
+    invalid_request |}]
+;;
+
+let%expect_test
+    "outcomes preserve typed work and errors independently of success payloads"
+  =
+  List.iter
+    [ Invocation.Complete (`Object [ "count", `Number "2" ])
+    ; Pending (Job (get (Id.Job.of_string "job_fixture")), `Null)
+    ; Pending (Subscription (get (Id.Subscription.of_string "sub_fixture")), `True)
+    ; Fail
+        { code = "output_schema"
+        ; message = "invalid result"
+        ; retryable = false
+        ; details = `Null
+        }
+    ; Cancelled "deadline"
+    ]
+    ~f:(fun outcome ->
+      let encoded = Invocation.outcome_to_json outcome in
+      let restored = get (Invocation.outcome_of_json encoded) in
+      assert (
+        String.equal
+          (Jsonaf.to_string encoded)
+          (Jsonaf.to_string (Invocation.outcome_to_json restored))));
+  print_endline "all outcomes round-trip";
+  let forged =
+    `Object
+      [ "type", `String "pending"
+      ; "work", `Object [ "type", `String "job"; "id", `String "sub_fixture" ]
+      ; "acknowledgement", `Null
+      ]
+  in
+  report (Invocation.outcome_of_json forged);
+  report
+    (Invocation.outcome_of_json
+       (`Object [ "type", `String "complete"; "value", `Null; "work", `String "job_fake" ]));
+  [%expect
+    {|
+    all outcomes round-trip
+    invalid_request
+    invalid_request |}]
+;;
+
+let%expect_test "incompatible and malformed snapshots fail instead of losing state" =
+  let invocation = get (Invocation.create (context ())) in
+  let encoded = Invocation.to_json invocation in
+  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "2")));
+  report
+    (Invocation.of_json
+       (replace_field encoded "status" (`Object [ "type", `String "resolved" ])));
+  report
+    (Invocation.of_json
+       (replace_field
+          encoded
+          "status"
+          (`Object
+              [ "type", `String "admitted"
+              ; "outcome", Invocation.outcome_to_json (Complete `Null)
+              ])));
+  (match encoded with
+   | `Object fields ->
+     report (Invocation.of_json (`Object (("schema_version", `Number "1") :: fields)))
+   | _ -> assert false);
+  [%expect
+    {|
+    incompatible_protocol
+    invalid_request
+    invalid_request
+    invalid_request |}]
+;;
+
+let%expect_test "deep and invalid JSON is rejected before serialization or execution" =
+  let original = context () in
+  let deep =
+    List.fold (List.init 10000 ~f:Fn.id) ~init:`Null ~f:(fun json _ -> `Array [ json ])
+  in
+  report (Invocation.create { original with input = deep });
+  report (Invocation.create { original with input = `Number "NaN" });
+  report (Invocation.create { original with input = `Number "0x20" });
+  report (Invocation.create { original with input = `Number "1e9999" });
+  report (Invocation.create { original with input = `Object [ "x", `Null; "x", `True ] });
+  report
+    (Invocation.create
+       { original with input = `String (String.make (8 * 1024 * 1024) 'x') });
+  [%expect
+    {|
+    invalid_request
+    invalid_request
+    invalid_request
+    invalid_request
+    invalid_request
+    invalid_request |}]
+;;
+
+let%expect_test "record envelope preserves maximum-depth and large admitted payloads" =
+  let original = context () in
+  let input =
+    List.fold (List.init 127 ~f:Fn.id) ~init:`Null ~f:(fun json _ -> `Array [ json ])
+  in
+  let invocation = get (Invocation.create { original with input }) in
+  report (Invocation.of_json (Invocation.to_json invocation));
+  let input = `String (String.make (1024 * 1024) 'x') in
+  let invocation =
+    get (Invocation.create { original with input }) |> Invocation.dispatch |> get
+  in
+  let invocation = get (resolve invocation (Complete input)) in
+  report (Invocation.of_json (Invocation.to_json invocation));
+  [%expect
+    {|
+    ok
+    ok |}]
+;;
+
+let%expect_test "host cancellation before dispatch remains publishable after restore" =
+  let invocation = get (Invocation.create (context ())) in
+  let cancelled = get (Invocation.cancel invocation ~reason:"parent stopped") in
+  let restored = get (Invocation.of_json (Invocation.to_json cancelled)) in
+  report (Invocation.dispatch restored);
+  report (Invocation.publish restored);
+  [%expect
+    {|
+    invalid_state
+    ok |}]
+;;
+
+let%expect_test "validation also checks typed IDs restored through sexp snapshots" =
+  let original = context () in
+  let forged = Id.Invocation.t_of_sexp (Sexp.Atom "job_forged") in
+  report (Invocation.create { original with id = forged });
+  let invocation = get (Invocation.create original) |> Invocation.dispatch |> get in
+  let forged_job = Id.Job.t_of_sexp (Sexp.Atom "sub_forged") in
+  report (resolve invocation (Pending (Job forged_job, `Null)));
+  let serialized = Sexp.to_string (Invocation.sexp_of_t invocation) in
+  let corrupted =
+    String.substr_replace_all serialized ~pattern:"inv_example" ~with_:"job_forged"
+  in
+  report (Invocation.validate (Invocation.t_of_sexp (Sexp.of_string corrupted)));
+  [%expect
+    {|
+    invalid_request
+    invalid_request
+    invalid_request |}]
+;;

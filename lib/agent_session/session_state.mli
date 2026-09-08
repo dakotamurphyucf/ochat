@@ -90,6 +90,7 @@ type t =
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
   ; schedules : Agent_protocol.Schedule.t list
+  ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
   ; attachments : Agent_protocol.Session.Attachment.t list
   ; moderator : Jsonaf.t option
   ; shell : Session.Shell_state.t
@@ -101,6 +102,10 @@ type t =
 [@@deriving sexp]
 
 val current_schema_version : int
+
+(** Upgrade a supported legacy state before validation/replay. Old schema-2
+    snapshots have no invocation records; unknown versions fail closed. *)
+val upgrade_schema : t -> (t, Agent_protocol.Error.t) result
 
 val create
   :  identity:Identity.t

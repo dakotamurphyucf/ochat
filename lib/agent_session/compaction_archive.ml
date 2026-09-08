@@ -64,6 +64,7 @@ let decode_state handle reference text =
   let open Result.Let_syntax in
   try
     let state = Session_state.t_of_sexp (Sexp.of_string text) in
+    let%bind state = Session_state.upgrade_schema state in
     let%bind () = Session_state.validate state in
     if
       Int64.equal

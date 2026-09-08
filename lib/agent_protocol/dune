@@ -19,6 +19,7 @@
   grant
   audit
   job
+  invocation
   schedule
   scope
   principal

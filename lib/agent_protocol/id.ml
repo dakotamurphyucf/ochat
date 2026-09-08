@@ -97,6 +97,22 @@ module Job = Make (struct
     let prefix = "job"
   end)
 
+module Invocation = Make (struct
+    let prefix = "inv"
+  end)
+
+module Subscription = Make (struct
+    let prefix = "sub"
+  end)
+
+module Delivery = Make (struct
+    let prefix = "dlv"
+  end)
+
+module Capability = Make (struct
+    let prefix = "cap"
+  end)
+
 module Schedule = Make (struct
     let prefix = "sch"
   end)

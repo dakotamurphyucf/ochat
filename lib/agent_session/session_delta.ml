@@ -17,6 +17,7 @@ type t =
   | Grant_changed of Agent_protocol.Grant.t
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
+  | Invocation_changed of Agent_protocol.Invocation.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
   | History_block_reserved of int64
@@ -34,7 +35,7 @@ let replace_by compare_id id value values ~id_of =
 
 let rec apply state = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:apply
-  | Created created -> Ok created
+  | Created created -> Session_state.upgrade_schema created
   | Lifecycle_changed lifecycle -> Ok { state with lifecycle }
   | Workspace_changed workspace_instance ->
     let quota_key =
@@ -145,6 +146,37 @@ let rec apply state = function
             state.schedules
             ~id_of:(fun value -> value.Agent_protocol.Schedule.id)
       }
+  | Invocation_changed invocation ->
+    let open Result.Let_syntax in
+    let context = invocation.Agent_protocol.Invocation.context in
+    let%bind () =
+      if
+        Agent_protocol.Id.Session.compare context.session_id state.identity.session_id
+        <> 0
+        || context.generation <> state.identity.generation
+      then
+        Error
+          (Agent_protocol.Error.create
+             Conflict
+             ~message:"invocation does not belong to the current session generation"
+             ~retryable:false
+             ())
+      else Ok ()
+    in
+    let previous =
+      List.find state.invocations ~f:(fun candidate ->
+        Agent_protocol.Id.Invocation.compare candidate.context.id context.id = 0)
+    in
+    let%map () = Agent_protocol.Invocation.validate_transition ~previous invocation in
+    { state with
+      invocations =
+        replace_by
+          Agent_protocol.Id.Invocation.compare
+          context.id
+          invocation
+          state.invocations
+          ~id_of:(fun value -> value.Agent_protocol.Invocation.context.id)
+    }
   | Moderator_changed moderator -> Ok { state with moderator }
   | Shell_changed shell -> Ok { state with shell }
   | History_block_reserved reserved_history_through ->

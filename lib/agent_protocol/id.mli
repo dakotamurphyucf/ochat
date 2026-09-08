@@ -40,6 +40,10 @@ module Operation : S
 module Event_cursor : S
 module Transaction : S
 module Job : S
+module Invocation : S
+module Subscription : S
+module Delivery : S
+module Capability : S
 module Schedule : S
 module Permission : S
 module Grant : S

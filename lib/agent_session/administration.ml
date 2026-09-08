@@ -50,6 +50,7 @@ let reset_state (state : Session_state.t) options =
   ; grants = (if options.keep_grants then state.grants else [])
   ; jobs = []
   ; schedules = []
+  ; invocations = []
   ; moderator = None
   ; shell = (if options.keep_grants then state.shell else Session.Shell_state.empty)
   ; halted = false

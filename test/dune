@@ -711,7 +711,7 @@
 
 (library
  (name agent_protocol_test)
- (modules agent_protocol_test)
+ (modules agent_protocol_test agent_invocation_test)
  (libraries core expect_test_helpers_core ochat.agent_protocol)
  (inline_tests)
  (preprocess

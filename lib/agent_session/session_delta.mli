@@ -19,6 +19,7 @@ type t =
   | Grant_changed of Agent_protocol.Grant.t
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
+  | Invocation_changed of Agent_protocol.Invocation.t
   | Moderator_changed of Jsonaf.t option
   | Shell_changed of Session.Shell_state.t
   | History_block_reserved of int64
