@@ -6,6 +6,7 @@ type kind =
   | Invocation
   | Subscription
   | Delivery
+  | Moderator_execution
 [@@deriving compare, equal, sexp]
 
 type t = private
@@ -19,6 +20,7 @@ type t = private
 val invocation : Invocation.t -> t
 val subscription : Subscription.t -> t
 val delivery : Delivery.t -> t
+val moderator_execution : Moderator_execution.t -> t
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 

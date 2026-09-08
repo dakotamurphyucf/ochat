@@ -19,6 +19,8 @@ type t =
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
   | Invocation_reconciled of Agent_protocol.Invocation.t
+  | Moderator_execution_changed of Agent_protocol.Moderator_execution.t
+  | Moderator_execution_reconciled of Agent_protocol.Moderator_execution.t
   | Subscription_changed of Agent_protocol.Subscription.t
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
@@ -368,6 +370,62 @@ let rec apply state = function
               canonical_history = state.conversation.canonical_history @ [ entry ]
             }
         }
+  | (Moderator_execution_changed execution | Moderator_execution_reconciled execution) as
+    delta ->
+    let open Result.Let_syntax in
+    let module E = Agent_protocol.Moderator_execution in
+    let c = execution.E.context in
+    let recovery =
+      match delta with
+      | Moderator_execution_reconciled _ -> true
+      | _ -> false
+    in
+    let%bind () =
+      if
+        (not (Agent_protocol.Id.Session.equal c.session_id state.identity.session_id))
+        ||
+        if recovery
+        then c.generation > state.identity.generation
+        else c.generation <> state.identity.generation
+      then
+        Error
+          (Agent_protocol.Error.create
+             Conflict
+             ~message:"event execution owner mismatch"
+             ~retryable:false
+             ())
+      else Ok ()
+    in
+    let previous =
+      List.find state.moderator_executions ~f:(fun e ->
+        Agent_protocol.Id.Moderator_execution.equal e.E.context.id c.id)
+    in
+    let%bind () =
+      match recovery, previous, execution.status, execution.intent with
+      | false, _, _, _ -> Ok ()
+      | true, Some { status = Running; _ }, Interrupted _, _ -> Ok ()
+      | ( true
+        , Some { status = Completed _; intent = Some (Pending | Waiting_compaction _); _ }
+        , Completed _
+        , Some (Discarded _) ) -> Ok ()
+      | _ ->
+        Error
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:"recovery may only retire existing event work"
+             ~retryable:false
+             ())
+    in
+    let%map () = E.validate_transition ~previous execution in
+    { state with
+      moderator_executions =
+        replace_by
+          Agent_protocol.Id.Moderator_execution.compare
+          c.id
+          execution
+          state.moderator_executions
+          ~id_of:(fun e -> e.E.context.id)
+    }
   | Moderator_changed moderator -> Ok { state with moderator }
   | Shell_changed shell -> Ok { state with shell }
   | History_block_reserved reserved_history_through ->

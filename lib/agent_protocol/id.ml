@@ -101,6 +101,10 @@ module Invocation = Make (struct
     let prefix = "inv"
   end)
 
+module Moderator_execution = Make (struct
+    let prefix = "mex"
+  end)
+
 module Subscription = Make (struct
     let prefix = "sub"
   end)

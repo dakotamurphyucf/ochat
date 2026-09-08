@@ -98,6 +98,7 @@ type t =
   ; jobs : Agent_protocol.Job.t list
   ; schedules : Agent_protocol.Schedule.t list
   ; invocations : Agent_protocol.Invocation.t list [@sexp.list]
+  ; moderator_executions : Agent_protocol.Moderator_execution.t list [@sexp.list]
   ; subscriptions : Agent_protocol.Subscription.t list [@sexp.list]
   ; deliveries : Agent_protocol.Delivery.t list [@sexp.list]
   ; attachments : Agent_protocol.Session.Attachment.t list
@@ -110,15 +111,17 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 4
+let current_schema_version = 5
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
   else if
-    (t.schema_version = 3 || (t.schema_version = 2 && List.is_empty t.invocations))
-    && List.is_empty t.subscriptions
-    && List.is_empty t.deliveries
+    List.is_empty t.moderator_executions
+    && (t.schema_version = 4
+        || ((t.schema_version = 3 || (t.schema_version = 2 && List.is_empty t.invocations))
+            && List.is_empty t.subscriptions
+            && List.is_empty t.deliveries))
   then Ok { t with schema_version = current_schema_version }
   else
     Error
@@ -156,6 +159,7 @@ let create ~identity ~spec ~initial_history =
   ; jobs = []
   ; schedules = []
   ; invocations = []
+  ; moderator_executions = []
   ; subscriptions = []
   ; deliveries = []
   ; attachments = []
@@ -211,6 +215,39 @@ let validate t =
       else (
         Hash_set.add seen_invocations context.id;
         Ok ()))
+  in
+  let%bind () =
+    let seen = Hash_set.create (module Agent_protocol.Id.Moderator_execution) in
+    let running = ref false in
+    List.fold_result t.moderator_executions ~init:() ~f:(fun () execution ->
+      let module E = Agent_protocol.Moderator_execution in
+      let%bind () = E.validate execution in
+      let c = execution.E.context in
+      if
+        (not (Agent_protocol.Id.Session.equal c.session_id t.identity.session_id))
+        || c.generation > t.identity.generation
+        || Hash_set.mem seen c.id
+      then
+        Error
+          (Agent_protocol.Error.create
+             Journal_corrupt
+             ~message:"invalid moderator execution ownership or duplicate identity"
+             ~retryable:false
+             ())
+      else (
+        Hash_set.add seen c.id;
+        match execution.status with
+        | Running when !running ->
+          Error
+            (Agent_protocol.Error.create
+               Journal_corrupt
+               ~message:"multiple running moderator event executions"
+               ~retryable:false
+               ())
+        | Running ->
+          running := true;
+          Ok ()
+        | Completed _ | Failed _ | Interrupted _ -> Ok ()))
   in
   let%bind () =
     Extension_invariants.validate
@@ -318,6 +355,7 @@ let moderator_projection t =
 
 let extension_status t =
   List.map t.invocations ~f:Agent_protocol.Extension_status.invocation
+  @ List.map t.moderator_executions ~f:Agent_protocol.Extension_status.moderator_execution
   @ List.map t.subscriptions ~f:Agent_protocol.Extension_status.subscription
   @ List.map t.deliveries ~f:Agent_protocol.Extension_status.delivery
   |> List.sort ~compare:(fun a b ->

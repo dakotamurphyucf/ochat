@@ -41,6 +41,7 @@ module Event_cursor : S
 module Transaction : S
 module Job : S
 module Invocation : S
+module Moderator_execution : S
 module Subscription : S
 module Delivery : S
 module Capability : S

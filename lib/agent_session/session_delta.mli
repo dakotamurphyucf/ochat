@@ -23,6 +23,10 @@ type t =
   | Invocation_reconciled of Agent_protocol.Invocation.t
   (** Recovery-only terminalization/publication of an existing invocation,
         including older generations. Cannot admit, dispatch or create outcomes. *)
+  | Moderator_execution_changed of Agent_protocol.Moderator_execution.t
+  | Moderator_execution_reconciled of Agent_protocol.Moderator_execution.t
+  (** Recovery-only interruption of an existing execution or discard of retained
+      runtime intent. Cannot create receipts or successful outcomes. *)
   | Subscription_changed of Agent_protocol.Subscription.t
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry

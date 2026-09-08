@@ -4,6 +4,7 @@ type kind =
   | Invocation
   | Subscription
   | Delivery
+  | Moderator_execution
 [@@deriving compare, equal, sexp]
 
 type t =
@@ -64,8 +65,29 @@ let delivery (value : Delivery.t) =
   }
 ;;
 
+let moderator_execution (value : Moderator_execution.t) =
+  { kind = Moderator_execution
+  ; id = Id.Moderator_execution.to_string value.context.id
+  ; generation = value.context.generation
+  ; state =
+      (match value.status, value.intent with
+       | Running, _ -> "running"
+       | Failed _, _ -> "failed"
+       | Interrupted _, _ -> "interrupted"
+       | Completed _, None -> "completed"
+       | Completed _, Some Pending -> "completed.pending"
+       | Completed _, Some (Waiting_compaction _) -> "completed.waiting_compaction"
+       | Completed _, Some Applied -> "completed.applied"
+       | Completed _, Some (Discarded _) -> "completed.discarded")
+  }
+;;
+
 let kind_values =
-  [ "invocation", Invocation; "subscription", Subscription; "delivery", Delivery ]
+  [ "invocation", Invocation
+  ; "subscription", Subscription
+  ; "delivery", Delivery
+  ; "moderator_execution", Moderator_execution
+  ]
 ;;
 
 let to_json t =
@@ -105,6 +127,11 @@ let of_json json =
       fun json -> Result.map (Id.Subscription.of_json json) ~f:Id.Subscription.to_string
     | Delivery ->
       fun json -> Result.map (Id.Delivery.of_json json) ~f:Id.Delivery.to_string
+    | Moderator_execution ->
+      fun json ->
+        Result.map
+          (Id.Moderator_execution.of_json json)
+          ~f:Id.Moderator_execution.to_string
   in
   let%bind id = Json_codec.required_as fields "id" decode_id in
   let%bind generation =
@@ -129,6 +156,16 @@ let of_json json =
       ]
     | Subscription -> [ "active"; "succeeded"; "failed"; "cancelled"; "expired" ]
     | Delivery -> [ "pending"; "committed"; "failed" ]
+    | Moderator_execution ->
+      [ "running"
+      ; "failed"
+      ; "interrupted"
+      ; "completed"
+      ; "completed.pending"
+      ; "completed.waiting_compaction"
+      ; "completed.applied"
+      ; "completed.discarded"
+      ]
   in
   let%map state =
     Json_codec.required_as

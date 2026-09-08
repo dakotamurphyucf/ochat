@@ -115,6 +115,29 @@ drain remains separate and does not supply transactional acknowledgement.
 
 ### Actor and worker handoff
 
+Ordinary events now have a separate `Moderator_execution` record in session
+storage. Its `mex_` ID identifies an event execution, with no provider call or
+synthetic tool invocation. Immutable context records session/generation, source,
+optional owning foreground operation, event phase/data and the starting
+checkpoint digest. Outcomes are `Running`, `Completed` with a resulting checkpoint
+digest, `Failed`, or `Interrupted`. Completion can retain runtime requests as
+pending intent. A dependent compaction has an exact operation binding that
+survives intent application or discard. Terminal outcomes, requested actions and
+established compaction bindings cannot be rewritten or replayed.
+
+Session deltas, journal replay and snapshots retain these records. Aggregate
+validation checks ownership, unique IDs and at most one running event execution.
+Recovery interrupts unfinished event receipts, discards intent waiting on an
+interrupted compaction, and discards pending intent belonging to an older session
+generation. Other completed outcomes and current-generation pending intent remain.
+Lifecycle summaries expose IDs and states without event payloads or error details.
+
+This is a persistence foundation. The actor still needs the service that claims
+the exact installed source/checkpoint before execution, commits the receipt with
+the resulting checkpoint and scheduling transition, and grants native children
+event-owned authority. Native child lineage, interactive permission ownership and
+normal v1 runtime binding are not supplied by creating an execution record.
+
 `Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped
 host service. The caller must complete capability and policy admission before
 using it. The actor checks the active operation, session generation and invocation
@@ -901,10 +924,12 @@ source, wake policy, attempt and one history identity. The session aggregate
 checks ownership, generation and cross-record acknowledgement/result correlation.
 One terminal work item has one delivery owner.
 
-Session state schema 4 upgrades schema 2 with empty extension records and schema 3
-with its invocation records preserved. Inconsistent old fields and unknown future
+Session state schema 5 adds moderator event execution receipts. It upgrades schema
+4 with existing extension records preserved, schema 3 with invocation records,
+and schema 2 with empty extension records. Old schemas containing event execution
+records are rejected. Inconsistent old fields and unknown future
 schemas fail closed. Snapshot, journal and compaction archive restoration apply
-the same version checks. An older binary is not a supported reader of schema 4;
+the same version checks. An older binary is not a supported reader of schema 5;
 retain compatible backups before testing a binary rollback.
 
 The host-internal `Session_actor.commit_extensions` operation atomically commits

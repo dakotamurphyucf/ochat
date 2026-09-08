@@ -156,6 +156,33 @@ let plan_selected ~accept ~state ~namespace ~first_sequence ~reason =
 
 let plan ~state ~namespace ~first_sequence ~reason =
   let open Result.Let_syntax in
+  let%bind event_deltas =
+    List.fold_result
+      state.Session_state.moderator_executions
+      ~init:[]
+      ~f:(fun acc execution ->
+        let module E = P.Moderator_execution in
+        let%map retired =
+          match execution.E.status, execution.intent with
+          | Running, _ -> E.interrupt execution ~reason |> Result.map ~f:Option.some
+          | Completed _, Some (Waiting_compaction _) ->
+            E.discard_intent
+              execution
+              ~reason:"compaction interrupted before event follow-up"
+            |> Result.map ~f:Option.some
+          | Completed _, Some Pending
+            when execution.context.generation < state.identity.generation ->
+            E.discard_intent
+              execution
+              ~reason:"event belongs to an older session generation"
+            |> Result.map ~f:Option.some
+          | _ -> Ok None
+        in
+        acc
+        @ Option.to_list
+            (Option.map retired ~f:(fun execution ->
+               Session_delta.Moderator_execution_reconciled execution)))
+  in
   let%bind discarded =
     match state.Session_state.active_operation with
     | Some { kind = Compaction; id; _ } ->
@@ -165,7 +192,7 @@ let plan ~state ~namespace ~first_sequence ~reason =
         ~reason:"compaction interrupted before durable completion"
     | _ -> Ok []
   in
-  let deltas = List.map discarded ~f:Observation_follow_up.delta in
+  let deltas = event_deltas @ List.map discarded ~f:Observation_follow_up.delta in
   let%bind state = List.fold_result deltas ~init:state ~f:Session_delta.apply in
   let%map plan =
     plan_selected ~accept:(fun _ -> true) ~state ~namespace ~first_sequence ~reason

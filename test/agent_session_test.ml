@@ -851,6 +851,233 @@ let invocation_fixture () =
   |> protocol_ok
 ;;
 
+let%expect_test
+    "event execution journal recovery preserves outcomes and prevents intent replay"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let module E = Agent_protocol.Moderator_execution in
+    let module S = Agent_session.Session_state in
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let make name =
+      E.create
+        { id =
+            Agent_protocol.Id.Moderator_execution.of_string ("mex_" ^ name) |> protocol_ok
+        ; session_id
+        ; generation = 0
+        ; source = { script_id = "private-script"; source_sha256 = String.make 64 'a' }
+        ; operation_id = None
+        ; phase = Internal_event
+        ; event = `String "private event payload"
+        ; checkpoint_sha256 = String.make 64 'b'
+        ; created_at = timestamp
+        }
+      |> protocol_ok
+    in
+    let waiting_start = make "waiting" in
+    let completed =
+      E.complete
+        waiting_start
+        ~checkpoint_sha256:(String.make 64 'c')
+        ~requests:{ request_turn = true; request_compaction = true; end_session = None }
+      |> protocol_ok
+    in
+    let waiting = E.accept_compaction completed ~operation_id |> protocol_ok in
+    let applied = E.apply_intent waiting |> protocol_ok in
+    assert (
+      Option.equal
+        Agent_protocol.Id.Operation.equal
+        applied.compaction_operation_id
+        (Some operation_id));
+    assert (Result.is_error (E.apply_intent applied));
+    let pending_start = make "pending" in
+    let pending =
+      E.complete
+        pending_start
+        ~checkpoint_sha256:(String.make 64 'c')
+        ~requests:{ request_turn = true; request_compaction = false; end_session = None }
+      |> protocol_ok
+    in
+    let failed_start = make "failed" in
+    let failed =
+      E.fail
+        failed_start
+        { code = "event.failed"
+        ; message = "private failure"
+        ; retryable = false
+        ; details = `Null
+        }
+      |> protocol_ok
+    in
+    let running = make "running" in
+    List.iter
+      [ waiting_start; completed; waiting; pending; failed; running ]
+      ~f:(fun receipt ->
+        assert (E.equal receipt (E.of_json (E.to_json receipt) |> protocol_ok)));
+    let deltas =
+      List.map
+        [ waiting_start
+        ; completed
+        ; waiting
+        ; pending_start
+        ; pending
+        ; failed_start
+        ; failed
+        ; running
+        ]
+        ~f:(fun receipt ->
+          Agent_session.Session_delta.Moderator_execution_changed receipt)
+    in
+    let transition =
+      Agent_session.Session_transition.apply
+        ~now:timestamp
+        initial
+        ~delta:(Batch deltas)
+        ~payloads:[]
+      |> protocol_ok
+    in
+    let journal =
+      Agent_store.Transaction.create
+        ~session_id
+        ~generation:0
+        ~transaction_sequence:transition.state.counters.transaction_sequence
+        ~previous_transaction_hash:None
+        ~session_revision:transition.state.counters.revision
+        ~first_event_sequence:
+          (Some (List.hd_exn transition.events).Agent_protocol.Event.Durable.sequence)
+        ~last_event_sequence:
+          (Some (List.last_exn transition.events).Agent_protocol.Event.Durable.sequence)
+        ~accepted_at_ns:
+          (Agent_protocol.Timestamp.to_time_ns timestamp
+           |> Time_ns.to_int_ns_since_epoch
+           |> Int64.of_int)
+        ~command_audit:None
+        ~delta:
+          (Sexp.to_string_mach (Agent_session.Session_delta.sexp_of_t transition.delta))
+        ~durable_events:
+          (List.map transition.events ~f:(fun event ->
+             Sexp.to_string_mach (Agent_protocol.Event.Durable.sexp_of_t event)))
+      |> store_ok
+      |> Agent_store.Transaction.encode
+      |> Agent_store.Transaction.decode
+      |> store_ok
+    in
+    let replayed =
+      Agent_session.Session_persistence.apply_transaction initial journal |> store_ok
+    in
+    assert_same_session_snapshot transition.state replayed;
+    let restored =
+      Agent_session.Session_persistence.restore_snapshot
+        (Sexp.to_string_mach (S.sexp_of_t replayed))
+      |> store_ok
+    in
+    assert_same_session_snapshot replayed restored;
+    let projected =
+      S.extension_status restored |> List.map ~f:Agent_protocol.Extension_status.to_json
+    in
+    let encoded_projection = Jsonaf.to_string (`Array projected) in
+    assert (not (String.is_substring encoded_projection ~substring:"private"));
+    assert (
+      List.length
+        (Agent_protocol.Extension_status.list_of_json (`Array projected) |> protocol_ok)
+      = 4);
+    ignore
+      (Agent_session.Session_persistence.durable_events journal |> store_ok
+       : Agent_protocol.Event.Durable.t list);
+    let plan state =
+      Agent_session.Invocation_recovery.plan
+        ~state
+        ~namespace:"event-recovery"
+        ~first_sequence:0
+        ~reason:"owner interrupted"
+      |> protocol_ok
+    in
+    let recovery = plan restored in
+    assert (List.is_empty recovery.appended && recovery.next_sequence = 0);
+    let recovered =
+      List.fold_result recovery.deltas ~init:restored ~f:Agent_session.Session_delta.apply
+      |> protocol_ok
+    in
+    S.validate recovered |> protocol_ok;
+    assert (List.is_empty (plan recovered).deltas);
+    let lookup name =
+      List.find_exn recovered.moderator_executions ~f:(fun receipt ->
+        String.equal
+          (Agent_protocol.Id.Moderator_execution.to_string receipt.E.context.id)
+          ("mex_" ^ name))
+    in
+    let interrupted = lookup "running" in
+    let discarded = lookup "waiting" in
+    assert (E.equal failed (lookup "failed"));
+    assert (E.equal pending (lookup "pending"));
+    assert (
+      Option.equal
+        Agent_protocol.Id.Operation.equal
+        discarded.compaction_operation_id
+        (Some operation_id));
+    assert (Result.is_error (E.apply_intent discarded));
+    assert (
+      Result.is_error
+        (E.complete
+           interrupted
+           ~checkpoint_sha256:(String.make 64 'c')
+           ~requests:
+             { request_turn = false; request_compaction = false; end_session = None }));
+    assert (
+      Result.is_error
+        (E.accept_compaction
+           waiting
+           ~operation_id:
+             (Agent_protocol.Id.Operation.of_string "op_rebound" |> protocol_ok)));
+    let changed_source =
+      E.create
+        { running.context with
+          source = { running.context.source with source_sha256 = String.make 64 'd' }
+        }
+      |> protocol_ok
+    in
+    assert (
+      Result.is_error (E.validate_transition ~previous:(Some running) changed_source));
+    assert (
+      Result.is_error
+        (S.validate { initial with moderator_executions = [ make "one"; make "two" ] }));
+    assert (Result.is_error (S.upgrade_schema { restored with schema_version = 4 }));
+    let migrated = S.upgrade_schema { initial with schema_version = 4 } |> protocol_ok in
+    let older =
+      { recovered with identity = { recovered.identity with generation = 1 } }
+    in
+    let retired =
+      List.fold_result
+        (plan older).deltas
+        ~init:older
+        ~f:Agent_session.Session_delta.apply
+      |> protocol_ok
+    in
+    let states state =
+      S.extension_status state
+      |> List.map ~f:(fun s -> s.Agent_protocol.Extension_status.id, s.state)
+    in
+    print_s
+      [%sexp
+        { schema = (migrated.schema_version : int)
+        ; recovered = (states recovered : (string * string) list)
+        ; after_reset = (states retired : (string * string) list)
+        ; provider_entries = (List.length recovered.conversation.canonical_history : int)
+        }]);
+  [%expect
+    {|
+    ((schema 5)
+     (recovered
+      ((mex_failed failed) (mex_pending completed.pending)
+       (mex_running interrupted) (mex_waiting completed.discarded)))
+     (after_reset
+      ((mex_failed failed) (mex_pending completed.discarded)
+       (mex_running interrupted) (mex_waiting completed.discarded)))
+     (provider_entries 0))
+    |}]
+;;
+
 let%expect_test "invocation deltas replay through durable transactions and snapshots" =
   with_actor_workspace (fun _env workspace_instance ->
     let initial =
@@ -1167,11 +1394,11 @@ let%expect_test
       [%sexp
         (Result.is_error
            (Agent_session.Session_state.upgrade_schema
-              { initial with schema_version = 5 })
+              { initial with schema_version = 6 })
          : bool)]);
   [%expect
     {|
-    ((version 4) (records 0))
+    ((version 5) (records 0))
     true
     true
     true
@@ -1240,7 +1467,7 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 4) (records 0)) |}]
+  [%expect {| ((version 5) (records 0)) |}]
 ;;
 
 let extension_fixture workspace_instance =
@@ -1538,7 +1765,7 @@ let%expect_test "schema-3 invocation snapshots migrate without losing pending pu
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 4) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 5) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null)) |}]
 ;;
 
