@@ -12,12 +12,19 @@ previously qualified launch closeout from PR #23, which GitHub marked merged.
 | --- | --- | --- | --- |
 | [34186360736](https://github.com/dakotamurphyucf/ochat/actions/runs/34186360736) | Previous workflow baseline, without framework tiers | 1,217 s (20m 17s) | 1,856 s |
 | [34191242088](https://github.com/dakotamurphyucf/ochat/actions/runs/34191242088) | Both framework dependency caches hit; semantics rebuilt for a different CPU | 748 s (12m 28s) | 2,269 s |
+| [34192166776](https://github.com/dakotamurphyucf/ochat/actions/runs/34192166776) | First main run; all three project dependency caches missed | 968 s (16m 08s) | 3,515 s |
 
 The passing PR gate was approximately 39% faster with the added framework
 coverage. Summed validation runner time increased approximately 22%; it is a
 measure of elapsed job time, not a billing estimate. The new run was a mixed-cache
 run, not a claim of a fully warm workflow. GitHub queue and runner variation limit
 what can be inferred from individual runs.
+
+The first main run was approximately 20% faster than the old gate despite fresh
+project dependency builds for all three OCaml jobs. Its greater runner usage
+reflects three fresh installations and the added framework coverage. The PR's
+mixed cache reuse reduced summed runner time by about 35% compared with that
+fresh main run. These are observed samples, not guaranteed timing targets.
 
 Both website environments passed 75 unit tests, Astro validation, build checks,
 7 performance routes, 21 search benchmark queries, and 259 browser tests each.
@@ -76,14 +83,27 @@ Main run [34192166776](https://github.com/dakotamurphyucf/ochat/actions/runs/341
 selected framework, semantics, website and deployment for the actual merge.
 Its deployment lookup found successful production revision
 `077b00f905cb4ac61608294b35acd89a7a42a679`, with no fallback, and included the
-unshipped input diff. Full main qualification and publication are in progress.
+unshipped input diff. All selected jobs, the gate, publication and hosted
+verification passed. Both framework dependency caches missed and their forced
+test commands passed (189.075 s normal; 68.596 s E2E). All qualification artifacts
+were reconciled to the merge revision; the production artifact hash is
+`5c527f54c2ce2bb9063071f97678adcee443dd8715e317a5398932d78e2cc269`.
+All 3,594 hosted checks passed for the served bytes, routing, HTTPS, headers and
+conditional caching at `https://ochatlabs.com`.
+Post-merge verification passed 21 checks, including strict required-gate
+enforcement for administrators, required PRs, disabled force pushes/deletion,
+the exact main-only production environment, and the deployed merge revision.
 The maintainer-only [PR #25](https://github.com/dakotamurphyucf/ochat/pull/25)
 changes this qualification record. Its first
 [run 34192361126](https://github.com/dakotamurphyucf/ochat/actions/runs/34192361126)
 completed the required gate in 28 seconds (22 summed runner-seconds). Detection
 selected no heavy jobs, without fallback; `changes` and `release-gate` passed,
-and framework, semantics, website and publication explicitly skipped. The main
-push probe follows successful publication of the framework changes.
+and framework, semantics, website and publication explicitly skipped. The PR is
+merged only after the framework changes are successfully published, so the
+subsequent main push can use that release as its deployment baseline. The
+retained `ci-selection` report and job summary record the main decision; the
+local closeout verification checks that publication skips and production retains
+the qualified `0595f08c` revision.
 
 Manual `validate`, `cold`, and main-only `redeploy` modes and the weekly cold audit
 are configured. Policy tests cover their selection; the actual publisher entry
