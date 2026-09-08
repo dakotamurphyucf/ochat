@@ -36,6 +36,10 @@ jobs:
           mkdir -p website/.release
           opam list --installed --columns=name,version --color=never > website/.release/opam-packages.txt
           opam pin list --color=never > website/.release/opam-pins.txt
+      - name: Record reproducible Linux dependency candidate
+        run: |
+          opam lock . --lock-suffix=ci
+          cp ochat.opam.ci website/.release/ochat.opam.locked
       - run: opam exec -- node website/scripts/check-semantics.mjs website/.release/semantic-report.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -46,8 +50,49 @@ jobs:
             website/.release/semantic-report.json
             website/.release/opam-packages.txt
             website/.release/opam-pins.txt
+            website/.release/ochat.opam.locked
+  framework:
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [normal, e2e]
+    runs-on: ubuntu-latest
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: website/.nvmrc
+      - uses: ocaml/setup-ocaml@v3
+        with:
+          ocaml-compiler: 5.3.0
+      # dune-project selects these source repositories; opam install does not
+      # consume Dune's (pin ...) stanzas. Match the qualified local sources.
+      - name: Pin project source dependencies
+        run: |
+          # The qualified TextMate fork uses the pre-0.2 Oniguruma API.
+          opam pin add --no-action --yes oniguruma 0.1.2
+          opam pin add --no-action --yes textmate-language.0.4.0 'git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git#e9d1ea854b0734db5e616cacb2ce7e2e5fd744bf'
+          opam pin add --no-action --yes piaf.0.2.0 'git+https://github.com/anmonteiro/piaf.git#c7428ec14dc681e0ef13375cdf657b2727143678'
+      - run: opam install . --deps-only --with-test -y
+      - name: Run framework tests
+        run: opam exec -- node .github/scripts/framework-tests.mjs ${{ matrix.tier }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: framework-evidence-${{ matrix.tier }}
+          include-hidden-files: true
+          retention-days: 90
+          path: |
+            .ci-evidence/
+            _build/log
+            _build/agent-e2e-artifacts/
+            _build/agent-e2e-reports/
   website:
-    needs: semantics
     strategy:
       fail-fast: false
       matrix:
@@ -120,15 +165,17 @@ jobs:
             website/test-results/
   release-gate:
     if: always()
-    needs: [semantics, website]
+    needs: [semantics, framework, website]
     runs-on: ubuntu-latest
     steps:
       - name: Require every validation job
         env:
           SEMANTICS_RESULT: ${{ needs.semantics.result }}
+          FRAMEWORK_RESULT: ${{ needs.framework.result }}
           WEBSITE_RESULT: ${{ needs.website.result }}
         run: |
           test "$SEMANTICS_RESULT" = success
+          test "$FRAMEWORK_RESULT" = success
           test "$WEBSITE_RESULT" = success
   deploy-production:
     if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.release-gate.result == 'success'

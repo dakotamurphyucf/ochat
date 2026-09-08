@@ -1,0 +1,17 @@
+import fs from 'node:fs';
+import { execFileSync, spawnSync } from 'node:child_process';
+const tier = process.argv[2];
+const commands = { normal: ['runtest', '--force'], e2e: ['build', '--force', '@agent-e2e-pr'] };
+if (!Object.hasOwn(commands, tier)) throw new Error('Expected normal or e2e');
+fs.mkdirSync('.ci-evidence', { recursive: true });
+const start = Date.now();
+const report = { tier, revision: execFileSync('git', ['rev-parse', 'HEAD'], { encoding: 'utf8' }).trim(), command: ['dune', ...commands[tier]], startedAt: new Date(start).toISOString(), result: 'fail' };
+const log = fs.openSync(`.ci-evidence/${tier}.log`, 'w');
+const result = spawnSync('dune', commands[tier], { stdio: ['ignore', log, log], timeout: 25 * 60 * 1000 });
+fs.closeSync(log);
+Object.assign(report, { result: result.status === 0 && !result.error ? 'pass' : 'fail', exitCode: result.status, signal: result.signal, error: result.error?.message, durationSeconds: (Date.now() - start) / 1000 });
+fs.writeFileSync(`.ci-evidence/${tier}.json`, JSON.stringify(report, null, 2) + '\n');
+console.log(fs.readFileSync(`.ci-evidence/${tier}.log`, 'utf8'));
+console.log(JSON.stringify(report));
+if (process.env.GITHUB_STEP_SUMMARY) fs.appendFileSync(process.env.GITHUB_STEP_SUMMARY, `Framework ${tier}: **${report.result}** in ${report.durationSeconds}s. Full command output and E2E artifacts retained.\n`);
+process.exitCode = report.result === 'pass' ? 0 : 1;

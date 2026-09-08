@@ -84,26 +84,29 @@ test('release gate refuses failed, cancelled or skipped prerequisite jobs and wa
   for (const trigger of Object.values(workflow.on)) {
     assert.ok(!trigger || (!trigger.paths && !trigger['paths-ignore']));
   }
-  assert.equal(workflow.jobs.website.needs, 'semantics');
+  assert.equal(workflow.jobs.website.needs, undefined);
+  assert.deepEqual(workflow.jobs.framework.strategy.matrix.tier, ['normal', 'e2e']);
   assert.deepEqual(workflow.jobs.website.strategy.matrix.environment, [
     'preview',
     'production',
   ]);
   const gate = workflow.jobs['release-gate'];
-  assert.deepEqual(gate.needs, ['semantics', 'website']);
+  assert.deepEqual(gate.needs, ['semantics', 'framework', 'website']);
   assert.equal(gate.if, 'always()');
   for (const semantic of ['success', 'failure', 'cancelled', 'skipped'])
+    for (const framework of ['success', 'failure', 'cancelled', 'skipped'])
     for (const website of ['success', 'failure', 'cancelled', 'skipped']) {
       const result = spawnSync('bash', ['-e', '-c', gate.steps[0].run], {
         env: {
           ...process.env,
           SEMANTICS_RESULT: semantic,
           WEBSITE_RESULT: website,
+          FRAMEWORK_RESULT: framework,
         },
       });
       assert.equal(
         result.status === 0,
-        semantic === 'success' && website === 'success',
+        semantic === 'success' && framework === 'success' && website === 'success',
       );
     }
 });
