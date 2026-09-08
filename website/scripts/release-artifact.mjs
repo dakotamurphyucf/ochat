@@ -46,6 +46,11 @@ export async function verifyArtifact(directory) {
     createHash('sha256').update(config).digest('hex') !== manifest.configSha256
   )
     throw new Error('Artifact Wrangler configuration changed');
+  if (manifest.redirect) {
+    const redirect = await inventory(path.join(directory, 'redirect'));
+    if (JSON.stringify(redirect) !== JSON.stringify(manifest.redirect))
+      throw new Error('Artifact redirect Worker changed');
+  }
   return manifest;
 }
 export async function retainArtifact(
@@ -69,6 +74,12 @@ export async function retainArtifact(
     path.join(site, 'wrangler.jsonc'),
     path.join(directory, 'wrangler.jsonc'),
   );
+  await fs.mkdir(path.join(directory, 'redirect'));
+  for (const name of ['worker.mjs', 'wrangler.jsonc'])
+    await fs.copyFile(
+      path.join(site, 'redirect', name),
+      path.join(directory, 'redirect', name),
+    );
   await fs.cp(evidenceDirectory, path.join(directory, 'evidence'), {
     recursive: true,
     filter: (source) =>
@@ -89,6 +100,7 @@ export async function retainArtifact(
           .update(await fs.readFile(path.join(site, 'package-lock.json')))
           .digest('hex'),
         files: actual.files,
+        redirect: await inventory(path.join(directory, 'redirect')),
       },
       null,
       2,

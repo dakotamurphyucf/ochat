@@ -8,29 +8,51 @@ current evidence and outstanding gates.
 
 ## One publication owner
 
-GitHub Actions is the intended release owner. The Website workflow runs on every
-pull request and every push to `main`, without path filters. Its OCaml semantic
-job precedes both preview and production website jobs. The final `release-gate`
-requires all jobs to succeed; failure, cancellation, and skipping fail the gate.
-The production job uses a reserved fixture origin for CI qualification only.
+The Website workflow is the sole production publisher for `https://ochatlabs.com`.
+Every pull request and main push runs the OCaml documentation gate and both
+preview/production website matrices. Production builds use the owned origin;
+preview builds remain noindex. The final `release-gate` rejects failed, cancelled
+or skipped prerequisite jobs. The broader Ochat normal/E2E test gate is a separate
+follow-up in scratch/todo.md; do not describe it as already implemented.
 
-The workflow currently has no publication credentials or deploy step. In P11,
-add exactly one trusted publisher requiring `release-gate`, an environment with
-appropriate protection, and the reviewed release record below. Manual accessibility review is deferred from launch by the user. Keep Cloudflare
-Git auto-deployment and alternate production triggers disabled. Untrusted pull
-requests receive no hosting or model credentials. The required check is
-`release-gate` from the GitHub Actions app (ID 15368), as observed on actual runs.
-Main protection requires an up-to-date pull request, applies to administrators,
-blocks force pushes/deletion, and requires conversations to be resolved. The
-sole-maintainer policy requires zero outside approvals. Legacy GitHub Pages
-automatic branch builds are disabled (`build_type: workflow`); no Pages publishing
-workflow exists. See [the enforcement record](p10-github-enforcement.md) for
-actual rejected-push probes, CI results, and the remaining production boundary.
+Only a successful **main push** can enter `deploy-production`, whose GitHub
+`production` environment permits only the `main` branch. Deployment concurrency
+is serialized, and the publisher checks the current main SHA before uploading.
+It downloads `website-production-release` from its own run; it does not rebuild.
+Integrity verification matches the retained file inventory, redirect code,
+Wrangler configuration, package lock, origin, source revision, semantic report,
+search/performance hashes, capacity and browser result. It also checks anonymous
+access to the exact committed first-agent tutorial. `approval.json` combines that
+check with the reviewed historical P10 rehearsal/rollback/enforcement records.
+Those records qualify the procedure; the current candidate is separately tested.
 
-The local opam environment includes pins and is not proof that the clean Ubuntu
-job installs successfully. Resolve failures in the real job with documented,
-reproducible dependencies; never replace it with a success placeholder. Any clean
-CI failure blocks release.
+The only credential-bearing step receives the repository Actions secret
+`CLOUDFLARE_API_TOKEN`. Pull-request builds and tests receive no hosting or model
+credentials. The token's Workers permissions are account-scoped; its zone policy
+is restricted to ochatlabs.com by the owner. Review workflow changes carefully:
+repository administrators can change policies or workflow code, so this is not
+an immutable trust boundary against the owner. Do not enable Cloudflare Git
+builds or another automatic publisher. Legacy GitHub Pages remains workflow-only.
+
+Main protection requires up-to-date PRs, `release-gate` from GitHub Actions app
+15368, resolved conversations, and applies to administrators. Force pushes and
+branch deletion are disabled. No outside approval is required for the sole
+maintainer. Deployment failure is visible as a failed workflow/environment;
+`release-gate` itself reports validation, not post-deployment health.
+
+The main Worker `ochat-website` serves static assets at the apex domain without
+invoking application code. A separate `ochat-website-redirect` Worker redirects
+www to HTTPS apex with path/query preservation and sampled logs/traces. Static
+asset requests do not produce Worker invocation traces. Both configurations and
+the redirect code are retained in the qualified artifact. Enable the zone's
+**Always Use HTTPS** setting for HTTP apex requests. Never point production at
+the noindex `ochat-website-preview` Worker.
+
+Production release artifacts and deployment evidence are retained by GitHub for
+90 days. Download known-good archives to durable storage before retention expires.
+The publisher records existing and resulting Cloudflare deployment versions.
+The first production release has no previous production version; the P10 preview
+rollback is a rehearsal, not a prior production release.
 
 ## Build and retain the candidate
 
@@ -47,7 +69,7 @@ npm run measure:performance
 npm run artifact -- retain ../scratch/release-preview
 ```
 
-The artifact command refuses an existing destination, checks the final tree
+The artifact command also retains the www redirect Worker. It refuses an existing destination, checks the final tree
 against build evidence, and retains `dist/`, reports, the Wrangler configuration,
 and a manifest of file hashes. `verify` rejects changed, additional, or symlinked
 output. Reports include the environment, source revision, origin, lockfile hash,
@@ -215,3 +237,22 @@ account before upload. Sources reviewed on 2026-09-07:
 [redirects](https://developers.cloudflare.com/workers/static-assets/redirects/), and
 [Workers Builds limits](https://developers.cloudflare.com/workers/ci-cd/builds/limits-and-pricing/).
 GitHub owns builds in this design; Cloudflare Workers Builds is not configured.
+
+## Production recovery
+
+Prefer a normal revert PR: revert the faulty website change, let the full gate
+qualify the reverted code at its new main revision, and publish through the same
+workflow. This preserves the single automatic publisher and public source links.
+The pre-deployment versions in `production-deployment-evidence/deployment.json`
+and the prior run's retained archive identify the previous deployment. If an
+emergency manual Cloudflare version rollback is needed, pause automatic releases,
+follow the qualified Wrangler rollback procedure, restore both Workers when both
+changed, verify HTTPS/search/downloads/redirects, and reconcile main before
+resuming automatic publishing. A manual rollback is an explicit incident action,
+not an alternate automatic trigger.
+
+After publication, `rehearse-hosted.mjs` checks exact public bytes for all assets,
+indexing headers, robots, cache validators, 404s, HTTP and www redirects. It records
+bounded initial certificate/asset readiness probes rather than hiding failed
+full checks. Browser onboarding/search/inline-reader checks and domain ownership
+evidence are recorded separately under `scratch/ochat-website-evidence/p11/`.

@@ -54,7 +54,7 @@ jobs:
         environment: [preview, production]
     env:
       SITE_ENV: ${{ matrix.environment }}
-      SITE_URL: ${{ matrix.environment == 'production' && 'https://release.ochat.test' || 'http://localhost:4321' }}
+      SITE_URL: ${{ matrix.environment == 'production' && 'https://ochatlabs.com' || 'http://localhost:4321' }}
     runs-on: ubuntu-latest
     timeout-minutes: 30
     defaults:
@@ -78,6 +78,26 @@ jobs:
       - run: npm run measure:performance
       - run: npm run evaluate:search
       - run: npm run test:browser -- --workers=2
+      - name: Retain tested production artifact
+        if: matrix.environment == 'production'
+        run: |
+          mkdir -p .release
+          npm run artifact -- retain .release/candidate
+          cp test-results/.last-run.json .release/candidate/browser-result.json
+      - name: Validate Cloudflare production packaging
+        if: matrix.environment == 'production'
+        run: |
+          node node_modules/wrangler/bin/wrangler.js deploy --dry-run --config .release/candidate/wrangler.jsonc --env production
+          node node_modules/wrangler/bin/wrangler.js deploy --dry-run --config .release/candidate/redirect/wrangler.jsonc
+      - name: Upload tested production artifact
+        if: matrix.environment == 'production'
+        uses: actions/upload-artifact@v4
+        with:
+          name: website-production-release
+          path: website/.release/candidate/
+          include-hidden-files: true
+          retention-days: 90
+          if-no-files-found: error
       - uses: actions/upload-artifact@v4
         if: always()
         with:
@@ -110,6 +130,58 @@ jobs:
         run: |
           test "$SEMANTICS_RESULT" = success
           test "$WEBSITE_RESULT" = success
-# Validation only: no publication credentials. P11 may add one publisher that
-# requires release-gate. Keep Cloudflare Git auto-deployment disabled.
-# The reserved production fixture origin must never be deployed publicly.
+  deploy-production:
+    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.release-gate.result == 'success'
+    needs: [release-gate]
+    runs-on: ubuntu-latest
+    timeout-minutes: 20
+    environment:
+      name: production
+      url: https://ochatlabs.com
+    concurrency:
+      group: ochat-website-production
+      cancel-in-progress: false
+    defaults:
+      run:
+        working-directory: website
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: website/.nvmrc
+          cache: npm
+          cache-dependency-path: website/package-lock.json
+      - run: npm ci
+      - uses: actions/download-artifact@v4
+        with:
+          name: website-production-release
+          path: website/.release/candidate
+      - uses: actions/download-artifact@v4
+        with:
+          name: website-semantic-evidence
+          path: website/.release/semantics
+      - name: Verify exact qualified release
+        run: node scripts/verify-production.mjs .release/candidate .release/semantics/semantic-report.json
+      - name: Publish qualified release
+        env:
+          CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node scripts/publish-production.mjs .release/candidate .release/semantics/semantic-report.json .release/deployment.json
+      - name: Verify live production
+        run: node scripts/rehearse-hosted.mjs .release/candidate .release/hosted-production.json
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: production-deployment-evidence
+          path: |
+            website/.release/deployment.json
+            website/.release/hosted-production.json
+            website/.release/candidate/approval.json
+          include-hidden-files: true
+          retention-days: 90
+# GitHub Actions is the sole production publisher. Pull requests never deploy.
+# Keep Cloudflare Git auto-deployment and alternate publication triggers disabled.

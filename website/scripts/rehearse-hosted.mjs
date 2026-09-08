@@ -3,6 +3,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { verifyArtifact } from './release-artifact.mjs';
+import { productionOrigin } from '../config/production.mjs';
 
 const [directory, output] = process.argv.slice(2);
 if (!directory || !output)
@@ -11,8 +12,15 @@ if (!directory || !output)
   );
 const artifact = await verifyArtifact(path.resolve(directory));
 const origin = new URL(artifact.build.origin);
-if (origin.protocol !== 'https:' || artifact.build.environment !== 'preview')
-  throw new Error('Hosted rehearsal requires an HTTPS preview artifact');
+const production = artifact.build.environment === 'production';
+if (
+  origin.protocol !== 'https:' ||
+  (!production && artifact.build.environment !== 'preview') ||
+  (production && origin.origin !== productionOrigin)
+)
+  throw new Error(
+    'Hosted verification requires an HTTPS preview or the owned production artifact',
+  );
 const headers = await fs.readFile(
   path.join(directory, 'dist/_headers'),
   'utf8',
@@ -24,6 +32,7 @@ const report = {
   artifactSha256: artifact.build.sha256,
   revision: artifact.build.revision,
   baseline,
+  environment: artifact.build.environment,
   scope:
     'Public HTTPS from this machine; exact served bytes, routing, headers and conditional caching. Browser interactions are recorded separately.',
   result: 'fail',
@@ -64,6 +73,37 @@ async function get(route, options = {}) {
   return response;
 }
 try {
+  if (production) {
+    // Initial custom-domain certificates and edge assets may take time to settle.
+    // Preserve each observation; never silently retry a completed verification.
+    report.readiness = [];
+    const homepage = artifact.files.find((file) => file.path === 'index.html');
+    let ready = false;
+    for (let attempt = 0; attempt < 12 && !ready; attempt++) {
+      try {
+        const response = await get('/');
+        ready =
+          response.status === 200 &&
+          hash(Buffer.from(await response.arrayBuffer())) === homepage.sha256;
+        const alternate = await get('https://www.ochatlabs.com/');
+        ready =
+          ready &&
+          alternate.status === 308 &&
+          alternate.headers.get('location') === productionOrigin + '/';
+        report.readiness.push({
+          attempt: attempt + 1,
+          status: response.status,
+          matchingBytes: ready,
+          alternateStatus: alternate.status,
+        });
+      } catch (error) {
+        report.readiness.push({ attempt: attempt + 1, error: error.message });
+      }
+      if (!ready && attempt < 11)
+        await new Promise((resolve) => setTimeout(resolve, 5000));
+    }
+    check(ready, 'Production hostname serves the current artifact over HTTPS');
+  }
   async function checkFile(file) {
     const route = '/' + file.path.replace(/index\.html$/, '');
     const response = await get(route);
@@ -77,8 +117,10 @@ try {
       `${route}: nosniff`,
     );
     check(
-      response.headers.get('x-robots-tag') === 'noindex, nofollow',
-      `${route}: preview indexing header`,
+      production
+        ? !/noindex/i.test(response.headers.get('x-robots-tag') || '')
+        : response.headers.get('x-robots-tag') === 'noindex, nofollow',
+      `${route}: expected environment indexing header`,
     );
     check(
       response.headers.get('x-ochat-rehearsal') ===
@@ -123,10 +165,48 @@ try {
       );
   }
   const robots = await get('/robots.txt');
+  const robotsText = await robots.text();
   check(
-    /Disallow:\s*\//.test(await robots.text()),
-    'robots: disallow crawling',
+    production
+      ? !/^Disallow:\s*\/\s*$/m.test(robotsText) &&
+          robotsText.includes(`Sitemap: ${origin.origin}/sitemap-index.xml`)
+      : /Disallow:\s*\//.test(robotsText),
+    'robots: expected environment crawling policy',
   );
+  if (production) {
+    for (const host of [
+      'http://ochatlabs.com',
+      'http://www.ochatlabs.com',
+      'https://www.ochatlabs.com',
+    ]) {
+      const targetPath = '/docs/start/first-agent/?source=domain-check';
+      const response = await get(host + targetPath);
+      check(
+        [301, 302, 307, 308].includes(response.status),
+        `${host}: redirects to HTTPS canonical host`,
+      );
+      const target = new URL(response.headers.get('location'), host);
+      check(
+        target.protocol === 'https:' &&
+          ['ochatlabs.com', 'www.ochatlabs.com'].includes(target.hostname) &&
+          target.pathname + target.search === targetPath,
+        `${host}: preserves path and query`,
+      );
+      if (target.hostname === 'www.ochatlabs.com') {
+        const next = await get(target.href);
+        check(
+          [301, 302, 307, 308].includes(next.status) &&
+            new URL(next.headers.get('location'), target).href ===
+              origin.origin + targetPath,
+          `${host}: reaches canonical host in at most two redirects`,
+        );
+      } else
+        check(
+          target.href === origin.origin + targetPath,
+          `${host}: exact canonical target`,
+        );
+    }
+  }
   for (const route of [
     '/docs/start/first-agent',
     '/docs/start/first-agent?rehearsal=1',
@@ -170,8 +250,10 @@ try {
       `${route}: exact branded 404`,
     );
     check(
-      response.headers.get('x-robots-tag') === 'noindex, nofollow',
-      `${route}: noindex 404`,
+      production
+        ? !/noindex/i.test(response.headers.get('x-robots-tag') || '')
+        : response.headers.get('x-robots-tag') === 'noindex, nofollow',
+      `${route}: expected environment header (404 HTML noindex is build-validated)`,
     );
   }
   for (const route of [

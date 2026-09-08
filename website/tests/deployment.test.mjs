@@ -16,6 +16,8 @@ import {
   checkApproval,
   requiredReviews,
 } from '../scripts/release-approval.mjs';
+import { checkQualification } from '../scripts/verify-production.mjs';
+import redirectWorker from '../redirect/worker.mjs';
 
 test('public promotion honors the manual-review deferral and rejects incomplete hosted checks or stale evidence', () => {
   const artifact = {
@@ -143,11 +145,17 @@ test('retained artifact verification rejects changed, additional and symlinked o
     await fs.mkdir(path.join(directory, 'dist'));
     await fs.writeFile(path.join(directory, 'dist/index.html'), 'known good');
     await fs.writeFile(path.join(directory, 'wrangler.jsonc'), '{}');
+    await fs.mkdir(path.join(directory, 'redirect'));
+    await fs.writeFile(
+      path.join(directory, 'redirect/worker.mjs'),
+      'original redirect',
+    );
     const actual = await inventory(path.join(directory, 'dist'));
     const manifest = {
       build: { sha256: actual.sha256 },
       files: actual.files,
       configSha256: createHash('sha256').update('{}').digest('hex'),
+      redirect: await inventory(path.join(directory, 'redirect')),
     };
     await fs.writeFile(
       path.join(directory, 'artifact.json'),
@@ -162,7 +170,128 @@ test('retained artifact verification rejects changed, additional and symlinked o
     await fs.unlink(path.join(directory, 'dist/extra.html'));
     await fs.symlink('index.html', path.join(directory, 'dist/link.html'));
     await assert.rejects(verifyArtifact(directory), /symlink/);
+    await fs.unlink(path.join(directory, 'dist/link.html'));
+    await fs.writeFile(
+      path.join(directory, 'redirect/worker.mjs'),
+      'changed redirect',
+    );
+    await assert.rejects(verifyArtifact(directory), /redirect Worker changed/);
   } finally {
     await fs.rm(directory, { recursive: true, force: true });
   }
+});
+
+test('production publishing is main-only, serialized, gated, and uses the tested artifact', async () => {
+  const workflow = parse(
+    await fs.readFile(
+      new URL('../../.github/workflows/website.yml', import.meta.url),
+      'utf8',
+    ),
+  );
+  const publish = workflow.jobs['deploy-production'];
+  assert.deepEqual(publish.needs, ['release-gate']);
+  assert.equal(
+    publish.if,
+    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.release-gate.result == 'success'",
+  );
+  assert.equal(publish.environment.name, 'production');
+  assert.equal(publish.concurrency['cancel-in-progress'], false);
+  assert.equal(workflow.permissions.contents, 'read');
+  assert.deepEqual(Object.keys(workflow.on).sort(), ['pull_request', 'push']);
+  assert.ok(
+    publish.steps.some(
+      (step) =>
+        step.uses === 'actions/download-artifact@v4' &&
+        step.with.name === 'website-production-release',
+    ),
+  );
+  assert.ok(
+    !publish.steps.some((step) => /npm run build/.test(step.run || '')),
+  );
+  const secrets = Object.values(workflow.jobs)
+    .flatMap((job) => job.steps || [])
+    .filter((step) =>
+      JSON.stringify(step).includes('secrets.CLOUDFLARE_API_TOKEN'),
+    );
+  assert.equal(secrets.length, 1);
+  assert.equal(secrets[0].name, 'Publish qualified release');
+});
+
+test('production qualification rejects stale, preview, failed, or mismatched evidence', () => {
+  const revision = 'a'.repeat(40);
+  const build = {
+    result: 'pass',
+    environment: 'production',
+    origin: 'https://ochatlabs.com',
+    revision,
+    sha256: 'b'.repeat(64),
+  };
+  const good = [
+    { build },
+    { result: 'pass', revision },
+    { result: 'pass', environment: 'production', artifactSha256: build.sha256 },
+    { result: 'pass', artifactSha256: build.sha256 },
+    { result: 'pass' },
+    { status: 'passed', failedTests: [] },
+    revision,
+  ];
+  checkQualification(...good);
+  for (const mutate of [
+    (args) => {
+      args[0].build.environment = 'preview';
+    },
+    (args) => {
+      args[0].build.origin = 'https://release.ochat.test';
+    },
+    (args) => {
+      args[0].build.revision = 'c'.repeat(40);
+    },
+    (args) => {
+      args[1].result = 'fail';
+    },
+    (args) => {
+      args[1].revision = 'c'.repeat(40);
+    },
+    (args) => {
+      args[2].artifactSha256 = 'c'.repeat(64);
+    },
+    (args) => {
+      args[3].result = 'fail';
+    },
+    (args) => {
+      args[4].result = 'fail';
+    },
+    (args) => {
+      args[5].failedTests = ['broken-test'];
+    },
+    (args) => {
+      args[5].status = 'failed';
+    },
+  ]) {
+    const args = structuredClone(good);
+    mutate(args);
+    assert.throws(() => checkQualification(...args));
+  }
+});
+
+test('www redirect preserves encoded paths and query strings and rejects unrelated hosts', () => {
+  for (const scheme of ['http:', 'https:'])
+    for (const route of [
+      '/',
+      '/docs/start/first-agent/?q=a%2Fb&x=two+words',
+      '/downloads/a%20b.chatmd',
+    ]) {
+      const response = redirectWorker.fetch(
+        new Request(`${scheme}//www.ochatlabs.com${route}`),
+      );
+      assert.equal(response.status, 308);
+      assert.equal(
+        response.headers.get('location'),
+        `https://ochatlabs.com${route}`,
+      );
+    }
+  assert.equal(
+    redirectWorker.fetch(new Request('https://unrelated.example/')).status,
+    404,
+  );
 });

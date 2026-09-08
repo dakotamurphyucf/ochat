@@ -2,6 +2,8 @@
 
 **Your instructions. Your tools. Your workflow.**
 
+[Website and documentation](https://ochatlabs.com/) · [Run your first agent](https://ochatlabs.com/docs/start/first-agent/) · [Explore applications](https://ochatlabs.com/applications/)
+
 Ochat lets you define an AI agent in a text file and run it against your project.
 Use it to understand unfamiliar code, review changes, update documentation, or
 build a development assistant that works the way you do.
