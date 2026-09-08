@@ -92,10 +92,26 @@ observation events. `Invocation.resolve` is invalid in an ordinary handler;
 `Tool_invoked` and `Tool_observed` still use their dedicated methods.
 
 This method delivers its supplied event without consuming the existing queue.
-Durable queue acknowledgement, actor event borrowing, event-owned interactive
-permissions, host execution deadlines and normal v1 runtime construction remain
-integration work. Calling the legacy drain, which removes a queued event before
-handling it, does not supply a transactional acknowledgement.
+`handle_next_event_entries_transactional` instead selects the oldest queued v1
+event under the same lock. Its authorization callback receives a detached envelope
+for the host to compare with its durable queue and claim before execution. Its
+prospective snapshot removes that head, retains the tail and appends new emits.
+The live queue changes only after the host accepts the snapshot. An empty queue
+returns no outcome and invokes neither authorization nor persistence.
+
+The runtime executes a defensive copy of v1 moderator state and a detached copy
+of the selected event. This prevents handler array mutations from changing a
+retained queue entry, including when several emitted payloads share arrays with
+the moderator state. Failed execution leaves the original state and queue intact.
+The runtime primitive is `handle_next_queued_event`; callers must serialize access
+and supply its value-copying and persistence callbacks.
+
+These primitives do not automatically retry failures. The host must persist a
+claim before external effects and record failed/interrupted disposition so a
+retained event cannot replay effects after a failed checkpoint. Actor event claims
+and acknowledgement, event-owned interactive permissions, host execution deadlines
+and normal v1 runtime construction remain integration work. The legacy pop-first
+drain remains separate and does not supply transactional acknowledgement.
 
 ### Actor and worker handoff
 

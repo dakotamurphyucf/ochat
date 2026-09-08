@@ -868,6 +868,7 @@ let committed_local_effects (session : session) : Lang.eff list =
 ;;
 
 let queued_events (session : session) : Lang.value list = Queue.to_list session.queue
+let peek_queued_event (session : session) : Lang.value option = Queue.peek session.queue
 
 let take_queued_event (session : session) : Lang.value option =
   Queue.dequeue session.queue
@@ -1181,7 +1182,14 @@ and interpret_task
         | Ok (Effect_suspend _) -> assert false))
 ;;
 
-let commit_exec (session : session) (exec : exec_ctx) ~(new_state : Lang.value) : unit =
+let commit_exec
+      ?(consume_queued = false)
+      (session : session)
+      (exec : exec_ctx)
+      ~(new_state : Lang.value)
+  : unit
+  =
+  if consume_queued then ignore (Queue.dequeue_exn session.queue : Lang.value);
   session.state <- new_state;
   session.committed_local_effects_rev
   <- exec.local_effects_rev @ session.committed_local_effects_rev;
@@ -1221,9 +1229,21 @@ type transaction =
 
 type prepare_transaction = transaction -> (unit -> unit, string) result
 
-let prepare_runtime_commit prepare_commit prepare_transaction session exec ~new_state =
+let prepare_runtime_commit
+      ?(consume_queued = false)
+      prepare_commit
+      prepare_transaction
+      session
+      exec
+      ~new_state
+  =
   let open Result.Let_syntax in
   let local_effects = List.rev exec.local_effects_rev in
+  let retained_events =
+    match consume_queued with
+    | false -> Queue.to_list session.queue
+    | true -> List.tl_exn (Queue.to_list session.queue)
+  in
   let%bind install_legacy = prepare_commit ~local_effects in
   let%map install_transaction =
     match prepare_transaction with
@@ -1232,7 +1252,7 @@ let prepare_runtime_commit prepare_commit prepare_transaction session exec ~new_
       prepare
         { new_state
         ; local_effects
-        ; queued_events = Queue.to_list session.queue @ List.rev exec.emitted_rev
+        ; queued_events = retained_events @ List.rev exec.emitted_rev
         ; halted = session.halted || Option.is_some exec.end_session_requested
         }
   in
@@ -1241,13 +1261,14 @@ let prepare_runtime_commit prepare_commit prepare_transaction session exec ~new_
     install_transaction ()
 ;;
 
-let handle_event
+let handle_event_impl
       ?(prepare_commit = fun ~local_effects:_ -> Ok ignore)
       ?prepare_transaction
       ?(validate_state = fun _ -> Ok ())
       ?(validate_suspension = fun () -> Ok ())
       ?(copy_state = fun state -> Ok state)
       ?(limits = { fuel = Int.max_value; max_tasks = Int.max_value })
+      ~consume_queued
       (session : session)
       ~(context : Lang.value)
       ~(event : Lang.value)
@@ -1281,19 +1302,21 @@ let handle_event
       in
       let old_state = session.state in
       let open Result.Let_syntax in
-      let%bind saved_state = copy_state old_state in
+      let%bind execution_state = copy_state old_state in
       let committed = ref false in
       Exn.protect
         ~finally:(fun () ->
           session.current_exec <- None;
-          if not !committed then session.state <- saved_state)
+          if not !committed then session.state <- old_state)
         ~f:(fun () ->
           session.current_exec <- Some exec;
           let result =
             Exn.protect
               ~f:(fun () ->
                 match
-                  Eval.apply_value_result session.on_event [ context; old_state; event ]
+                  Eval.apply_value_result
+                    session.on_event
+                    [ context; execution_state; event ]
                 with
                 | Error err -> Error (format_runtime_error session err)
                 | Ok value ->
@@ -1316,13 +1339,14 @@ let handle_event
             let%bind () = validate_state new_state in
             let%map commit_host =
               prepare_runtime_commit
+                ~consume_queued
                 prepare_commit
                 prepare_transaction
                 session
                 exec
                 ~new_state
             in
-            commit_exec session exec ~new_state;
+            commit_exec ~consume_queued session exec ~new_state;
             commit_host ();
             committed := true;
             log_committed_exec session exec ~old_state ~new_state
@@ -1337,6 +1361,40 @@ let handle_event
               (match suspended_exec.request with
                | Ask_text { prompt } -> "ask_text:" ^ prompt
                | Ask_choice { prompt; _ } -> "ask_choice:" ^ prompt)))
+;;
+
+let handle_event = handle_event_impl ~consume_queued:false
+
+let handle_next_queued_event
+      ?prepare_commit
+      ?prepare_transaction
+      ?validate_state
+      ?copy_state
+      ?limits
+      session
+      ~context
+      ~copy_event
+  =
+  let open Result.Let_syntax in
+  match peek_queued_event session with
+  | None -> Ok None
+  | Some event ->
+    let%bind event = copy_event event in
+    let%map () =
+      handle_event_impl
+        ?prepare_commit
+        ?prepare_transaction
+        ?validate_state
+        ?copy_state
+        ?limits
+        ~consume_queued:true
+        ~validate_suspension:(fun () ->
+          Error "Queued event cannot retain a UI continuation")
+        session
+        ~context
+        ~event
+    in
+    Some ()
 ;;
 
 let resume_ui_request

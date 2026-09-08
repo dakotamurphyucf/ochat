@@ -987,6 +987,118 @@ let identity_snapshot_of_state t ~current_state ~queued_events ~halted ~overlay 
     }
 ;;
 
+let handle_event_entries_transactional_unlocked
+      t
+      ~session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta
+      ~event
+      ~consume_queued
+      ~authorize
+      ~on_tool_call
+      ~prepare_event
+  =
+  let open Result.Let_syntax in
+  let%bind script =
+    match t.artifact.extension with
+    | Some (script, _) -> Ok script
+    | None -> Error "event.legacy_moderator: requires extensibility-v1"
+  in
+  let%bind () =
+    match Runtime.is_halted t.runtime with
+    | true -> Error "event.session_ended: moderator session ended"
+    | false -> Ok ()
+  in
+  let phase = Moderation.Event.phase event in
+  let%bind event =
+    match event with
+    | Moderation.Event.Internal_event
+        (Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ])) ->
+      Moderator_invocation.internal_event payload
+    | Internal_event _ ->
+      Error "event.invalid_internal_event: requires a v1 Internal_event envelope"
+    | _ -> Ok (Moderation.Event.to_value event)
+  in
+  let checked = Moderator_invocation.snapshot_state ~limits:script.limits in
+  let%bind _ = checked event in
+  let context =
+    Moderation.Entry_projection.project_context
+      ~session_id
+      ~now_ms
+      ~phase
+      ~history
+      ~available_tools
+      ~session_meta
+  in
+  let%bind () = authorize () in
+  let outcome = ref Moderation.Outcome.empty in
+  let prepare (transaction : Runtime.transaction) =
+    let%bind decoded = decode_effects t transaction.local_effects in
+    let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+    let%bind overlay, install_overlay =
+      prepare_identity_overlay t ~phase prepared.overlay_ops
+    in
+    let%bind snapshot =
+      identity_snapshot_of_state
+        t
+        ~current_state:transaction.new_state
+        ~queued_events:transaction.queued_events
+        ~halted:transaction.halted
+        ~overlay
+    in
+    let%map install = prepare_event ~outcome:prepared ~snapshot in
+    fun () ->
+      install_overlay ();
+      install ();
+      t.processed_effect_count
+      <- t.processed_effect_count + List.length transaction.local_effects;
+      outcome := prepared
+  in
+  t.last_history <- history;
+  let previous = !(t.invocation_tool_call) in
+  t.invocation_tool_call := Some on_tool_call;
+  let%map () =
+    Exn.protect
+      ~finally:(fun () -> t.invocation_tool_call := previous)
+      ~f:(fun () ->
+        let context = Moderation.Context.to_value context in
+        let limits : Runtime.execution_limits =
+          { fuel = script.limits.fuel; max_tasks = script.limits.max_tasks }
+        in
+        let copy value = Result.bind (checked value) ~f:Value_codec.Snapshot.to_value in
+        let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
+        match consume_queued with
+        | false ->
+          Runtime.handle_event
+            t.runtime
+            ~context
+            ~event
+            ~limits
+            ~copy_state:copy
+            ~validate_state
+            ~prepare_transaction:prepare
+            ~validate_suspension:(fun () ->
+              Error "event.suspended: cannot retain a UI continuation")
+        | true ->
+          let%bind consumed =
+            Runtime.handle_next_queued_event
+              t.runtime
+              ~context
+              ~limits
+              ~copy_state:copy
+              ~copy_event:copy
+              ~validate_state
+              ~prepare_transaction:prepare
+          in
+          (match consumed with
+           | Some () -> Ok ()
+           | None -> Error "event.queue_changed: selected event no longer queued"))
+  in
+  !outcome
+;;
+
 let handle_event_entries_transactional
       t
       ~session_id
@@ -1000,82 +1112,53 @@ let handle_event_entries_transactional
       ~prepare_event
   =
   with_execution_lock t (fun () ->
+    handle_event_entries_transactional_unlocked
+      t
+      ~session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta
+      ~event
+      ~consume_queued:false
+      ~authorize
+      ~on_tool_call
+      ~prepare_event)
+;;
+
+let handle_next_event_entries_transactional
+      t
+      ~session_id
+      ~now_ms
+      ~history
+      ~available_tools
+      ~session_meta
+      ~authorize
+      ~on_tool_call
+      ~prepare_event
+  =
+  with_execution_lock t (fun () ->
     let open Result.Let_syntax in
-    let%bind script =
-      match t.artifact.extension with
-      | Some (script, _) -> Ok script
-      | None -> Error "event.legacy_moderator: requires extensibility-v1"
-    in
-    let%bind () =
-      match Runtime.is_halted t.runtime with
-      | true -> Error "event.session_ended: moderator session ended"
-      | false -> Ok ()
-    in
-    let phase = Moderation.Event.phase event in
-    let%bind event =
-      match event with
-      | Moderation.Event.Internal_event
-          (Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ])) ->
-        Moderator_invocation.internal_event payload
-      | Internal_event _ ->
-        Error "event.invalid_internal_event: requires a v1 Internal_event envelope"
-      | _ -> Ok (Moderation.Event.to_value event)
-    in
-    let checked = Moderator_invocation.snapshot_state ~limits:script.limits in
-    let%bind _ = checked event in
-    let context =
-      Moderation.Entry_projection.project_context
-        ~session_id
-        ~now_ms
-        ~phase
-        ~history
-        ~available_tools
-        ~session_meta
-    in
-    let%bind () = authorize () in
-    let outcome = ref Moderation.Outcome.empty in
-    let prepare (transaction : Runtime.transaction) =
-      let%bind decoded = decode_effects t transaction.local_effects in
-      let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
-      let%bind overlay, install_overlay =
-        prepare_identity_overlay t ~phase prepared.overlay_ops
-      in
-      let%bind snapshot =
-        identity_snapshot_of_state
+    match Runtime.peek_queued_event t.runtime with
+    | None -> Ok None
+    | Some event ->
+      let%map outcome =
+        handle_event_entries_transactional_unlocked
           t
-          ~current_state:transaction.new_state
-          ~queued_events:transaction.queued_events
-          ~halted:transaction.halted
-          ~overlay
+          ~session_id
+          ~now_ms
+          ~history
+          ~available_tools
+          ~session_meta
+          ~event:(Internal_event event)
+          ~consume_queued:true
+          ~authorize:(fun () ->
+            let%bind selected = Value_codec.Snapshot.of_value event in
+            authorize ~event:selected)
+          ~on_tool_call
+          ~prepare_event
       in
-      let%map install = prepare_event ~outcome:prepared ~snapshot in
-      fun () ->
-        install_overlay ();
-        install ();
-        t.processed_effect_count
-        <- t.processed_effect_count + List.length transaction.local_effects;
-        outcome := prepared
-    in
-    t.last_history <- history;
-    let previous = !(t.invocation_tool_call) in
-    t.invocation_tool_call := Some on_tool_call;
-    let%map () =
-      Exn.protect
-        ~finally:(fun () -> t.invocation_tool_call := previous)
-        ~f:(fun () ->
-          Runtime.handle_event
-            t.runtime
-            ~context:(Moderation.Context.to_value context)
-            ~event
-            ~limits:{ fuel = script.limits.fuel; max_tasks = script.limits.max_tasks }
-            ~copy_state:(fun value ->
-              Result.bind (checked value) ~f:Value_codec.Snapshot.to_value)
-            ~validate_state:(fun value -> Result.map (checked value) ~f:(fun _ -> ()))
-            ~validate_suspension:(fun () ->
-              Error "event.suspended: cannot retain a UI continuation")
-            ~prepare_transaction:prepare)
-    in
-    !outcome)
+      Some outcome)
 ;;
 
 let handle_invocation_entries

@@ -187,6 +187,36 @@ val handle_event_entries_transactional
         -> (unit -> unit, string) result)
   -> (Moderation.Outcome.t, string) result
 
+(** Transactionally consume one queued v1 internal event. Shares validation,
+    scoped tool execution and prospective persistence with
+    [handle_event_entries_transactional]. [authorize] receives the detached
+    selected envelope under the manager lock; the host must validate it against
+    its durable queue and claim ownership before handler execution.
+
+    [prepare_event]'s snapshot removes exactly that head, preserves the tail,
+    and appends any new emits. The live queue changes only after this preparation
+    succeeds. Failure/cancellation leaves state and the entire queue untouched.
+    The host must persist failed/interrupted claims to prevent replay of external
+    effects; this method does not retry, claim or retire failures itself.
+    Returns [Ok None] for an empty queue without calling either callback. *)
+val handle_next_event_entries_transactional
+  :  t
+  -> session_id:string
+  -> now_ms:int
+  -> history:History_entry.t list
+  -> available_tools:Res.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> authorize:(event:Session.Snapshot.t -> (unit, string) result)
+  -> on_tool_call:
+       (name:string
+        -> args:Jsonaf.t
+        -> (Moderation.Capabilities.tool_call_result, string) result)
+  -> prepare_event:
+       (outcome:Moderation.Outcome.t
+        -> snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> (unit -> unit, string) result)
+  -> (Moderation.Outcome.t option, string) result
+
 (** Execute the dedicated extensibility-v1 Tool_invoked event under the manager
     lock. Only a dispatched invocation matching a prepared tool owned by this
     moderator is accepted. [prepare_resolution] receives an immutable prospective

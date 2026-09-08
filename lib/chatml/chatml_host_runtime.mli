@@ -87,8 +87,9 @@ type local_effect =
     host-owned state immediately after the runtime commit. *)
 type prepare_commit = local_effects:eff list -> (unit -> unit, string) result
 
-(** Prospective committed state, including existing queued events followed by
-    events emitted in this transaction. Values are borrowed, not copied; the
+(** Prospective committed state, including retained queued events followed by
+    events emitted in this transaction. [handle_next_queued_event] excludes the
+    consumed head. Values are borrowed, not copied; the
     callback must not mutate them or re-enter the runtime. *)
 type transaction =
   { new_state : value
@@ -247,6 +248,10 @@ val decode_local_effects : eff list -> (local_effect list, string) result
 (** Buffered internal events currently queued for later delivery. *)
 val queued_events : session -> value list
 
+(** Borrow the oldest queued value without removing it. The caller must not
+    mutate it and must serialize access through event execution and commit. *)
+val peek_queued_event : session -> value option
+
 (** Remove and return the oldest queued internal event, if one exists. *)
 val take_queued_event : session -> value option
 
@@ -278,9 +283,10 @@ val request_session_end : session -> reason:string -> (unit, string) result
     - commits buffered state/effects on success,
     - or rolls back local transactional buffers on failure.
 
-    [copy_state] optionally makes a defensive copy before invoking the handler.
-    Failure (including exceptions/cancellation) restores that copy, so data-state
-    array mutations can be rolled back. By default state is retained by reference
+    [copy_state] optionally makes a defensive copy for handler execution, leaving
+    the original state untouched until commit. This also prevents mutation of
+    older queued payloads sharing state arrays. Failure (including exceptions/
+    cancellation) retains the original state. By default state is used by reference
     for legacy callers. This does not undo mutable globals or external effects.
     [prepare_commit]'s returned installer must remain infallible.
     [validate_suspension] runs before installing a legacy UI continuation. An
@@ -297,6 +303,28 @@ val handle_event
   -> context:value
   -> event:value
   -> (unit, string) result
+
+(** Handle the oldest queued event, removing it only in the successful state/
+    effects commit. Returns [Ok None] for an empty queue. The prospective
+    transaction excludes that head and retains the tail followed by new emits.
+    Failure leaves the queue untouched; there is no automatic retry.
+
+    [copy_event] must return a detached execution value without mutating the
+    borrowed head. Supply [copy_state] for mutable data state too. UI suspension
+    is rejected. The caller must serialize queue/state access for the whole
+    operation, including host callbacks, and make persistence cancellation-safe.
+    A durable host must claim work before external effects and record failure
+    disposition; retaining a queue entry alone is not permission to replay it. *)
+val handle_next_queued_event
+  :  ?prepare_commit:prepare_commit
+  -> ?prepare_transaction:prepare_transaction
+  -> ?validate_state:(value -> (unit, string) result)
+  -> ?copy_state:(value -> (value, string) result)
+  -> ?limits:execution_limits
+  -> session
+  -> context:value
+  -> copy_event:(value -> (value, string) result)
+  -> (unit option, string) result
 
 (** Resume a suspended UI approval request with a host-supplied response. *)
 val resume_ui_request
