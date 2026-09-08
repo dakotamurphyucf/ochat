@@ -151,9 +151,9 @@ The previous successful main baseline
 took 1,217 seconds to its release gate and approximately 1,856 summed validation
 runner-seconds, without the new framework coverage. The first parallel run's
 failure is retained as enforcement evidence, not as a successful speed result.
-Cold/warm measurements and final main qualification are being collected for the
-new workflow. Browser sharding is evaluated only after those results; all three
-engines and both environments remain required.
+Cold/warm measurements, final main qualification, and the browser-sharding
+decision are recorded in the [qualification record](ci-qualification.md).
+All three engines and both environments remain required.
 
 CI retains selection reasons/baselines, framework logs and E2E artifacts, installed
 versions, semantic reports, website reports, the tested production artifact, and

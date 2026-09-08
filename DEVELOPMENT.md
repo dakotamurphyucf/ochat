@@ -529,5 +529,5 @@ Linux CI installs the committed `ochat.opam.locked` dependency set and verifies
 restored dependencies before testing. Update the lock and `.github/ci-toolchain.json`
 when changing `ochat.opam`/`dune-project` or source pins. The CI lock targets Linux;
 ordinary local setup on other platforms uses the base package definition.
-See [CI coverage and maintenance](website/planning/ci-enforcement.md) for changed-file
+See [CI coverage and maintenance](https://github.com/dakotamurphyucf/ochat/blob/main/website/planning/ci-enforcement.md) for changed-file
 selection, periodic cold checks, cache recovery and the deployment rules.
