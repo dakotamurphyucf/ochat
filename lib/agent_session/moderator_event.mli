@@ -26,12 +26,14 @@ type claim =
     retained intent, not schedule the returned requests independently. [history]
     reads current canonical history after the claim without entering the manager.
     Each call has a fresh Tool.call budget and a scope that expires before return.
+    Without [script_tools], Tool.call returns [invocation.unavailable]; the
+    manager's default native callback is never used.
 
     This internal composition helper does not install startup/foreground routing,
     wakeup polling, deadlines, interactive permission ownership or public tools. *)
 val run_queued_idle
   :  claim:claim
-  -> script_tools:Script_tool_calls.t
+  -> ?script_tools:Script_tool_calls.t
   -> manager:Chat_response.Moderator_manager.t
   -> history:(unit -> History_entry.t list)
   -> available_tools:Openai.Responses.Request.Tool.t list

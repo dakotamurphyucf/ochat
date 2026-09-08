@@ -29,6 +29,18 @@ let encoded_event event =
     [ "snapshot_sexp", `String (Sexp.to_string_mach (Session.Snapshot.sexp_of_t event)) ]
 ;;
 
+let has_unsettled_claim ~state ~(observer : P.Invocation.observer) =
+  List.exists state.Session_state.moderator_executions ~f:(fun receipt ->
+    receipt.context.generation = state.identity.generation
+    && E.equal_phase receipt.context.phase Internal_event
+    && P.Invocation.equal_observer receipt.context.source observer
+    && Option.is_none receipt.retirement
+    &&
+    match receipt.status with
+    | Running | Failed _ | Interrupted _ -> true
+    | Completed _ -> false)
+;;
+
 let claim ~state ~id ~(snapshot : S.t) ~now =
   let open Result.Let_syntax in
   let%bind () = installed ~state ~snapshot in
@@ -50,16 +62,10 @@ let claim ~state ~id ~(snapshot : S.t) ~now =
   let checkpoint_sha256 = checkpoint snapshot in
   let%bind () =
     match
-      List.exists state.moderator_executions ~f:(fun receipt ->
-        receipt.context.generation = state.identity.generation
-        && E.equal_phase receipt.context.phase Internal_event
-        && String.equal receipt.context.source.script_id snapshot.script_id
-        && String.equal receipt.context.source.source_sha256 snapshot.script_source_hash
-        && Option.is_none receipt.retirement
-        &&
-        match receipt.status with
-        | Running | Failed _ | Interrupted _ -> true
-        | Completed _ -> false)
+      has_unsettled_claim
+        ~state
+        ~observer:
+          { script_id = snapshot.script_id; source_sha256 = snapshot.script_source_hash }
     with
     | true ->
       conflict

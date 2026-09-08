@@ -8,6 +8,29 @@ type executor =
   -> (dispatched:I.t -> (I.outcome, Agent_protocol.Error.t) result)
   -> (I.t, Agent_protocol.Error.t) result
 
+type scope =
+  | Unbound
+  | Active of I.t
+  | Expired
+
+let scope_key = Eio.Fiber.create_key ()
+
+let current_scope () =
+  match Eio.Fiber.get scope_key with
+  | None -> Unbound
+  | Some (invocation, active) ->
+    (match Atomic.get active with
+     | true -> Active invocation
+     | false -> Expired)
+;;
+
+let with_scope invocation f =
+  let active = Atomic.make true in
+  Exn.protect
+    ~finally:(fun () -> Atomic.set active false)
+    ~f:(fun () -> Eio.Fiber.with_binding scope_key (invocation, active) f)
+;;
+
 let fail code message = I.Fail { code; message; retryable = false; details = `Null }
 
 let checked failure f =
@@ -122,15 +145,16 @@ let run_scoped
       in
       outcome
     in
-    match
-      Option.bind dispatched.routing ~f:(fun routing ->
-        Stream_invocation.rejection_outcome routing.preparation)
-    with
-    | Some outcome -> Ok outcome
-    | None ->
-      Ok
-        (match execute () with
-         | Ok outcome | Error outcome -> outcome))
+    with_scope dispatched (fun () ->
+      match
+        Option.bind dispatched.routing ~f:(fun routing ->
+          Stream_invocation.rejection_outcome routing.preparation)
+      with
+      | Some outcome -> Ok outcome
+      | None ->
+        Ok
+          (match execute () with
+           | Ok outcome | Error outcome -> outcome)))
 ;;
 
 let run ~capabilities =

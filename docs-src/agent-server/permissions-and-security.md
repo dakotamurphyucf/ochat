@@ -52,6 +52,20 @@ resolution wins. A stale answer cannot approve another invocation. Grant scope
 cannot exceed offered/administratively permitted scopes. Disconnect is not
 approval, and a read-only client cannot answer on a writer's behalf.
 
+Requests identify either their model operation (`operation_id`) or an actual
+persisted tool invocation (`invocation_id`), never both. Invocation ownership lets
+internally installed v1 moderator tools wait for approval while the session has
+no model operation. The actor requires a live invocation callback and resolves
+outstanding requests on stop or callback cancellation. Resolution restores the
+remaining permission wait, or the prior execution state when none remain.
+The `call_id` field remains a request correlation key; an invocation-owned script
+request may use its invocation ID without creating a provider tool-call item.
+
+Native execution carries its invocation identity through a scoped fiber binding
+for shell approval/reviewer adapters. Expired or foreign bindings are rejected;
+only an unbound legacy caller falls back to its active model operation. These
+internal services do not enable public v1 ChatMD declarations by themselves.
+
 ## Shell is a separate authorization layer
 
 Manifest authorization modes are `deny`, `require_grant` and explicitly trusted

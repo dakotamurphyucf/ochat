@@ -530,14 +530,14 @@ let%expect_test "history windows use canonical occurrence IDs" =
     invalid_request |}]
 ;;
 
-let%expect_test "pending permissions cannot contain a terminal resolution" =
+let%expect_test "permission codecs preserve legacy owners and reject ambiguous ownership" =
   let generator = deterministic_generator () in
   let timestamp = Timestamp.of_time_ns Time_ns.epoch in
   let permission : Permission.t =
     { id = Id.Permission.create_with generator
     ; session_id = Id.Session.create_with generator
     ; generation = 0
-    ; operation_id = Id.Operation.create_with generator
+    ; owner = Operation (Id.Operation.create_with generator)
     ; call_id = "call-1"
     ; tool_name = "shell"
     ; runtime_identity = Some "runtime-1"
@@ -553,6 +553,45 @@ let%expect_test "pending permissions cannot contain a terminal resolution" =
   in
   let encoded = Permission.to_json permission in
   ignore (Permission.of_json encoded |> ok_or_fail : Permission.t);
+  let legacy =
+    match Permission.sexp_of_t permission with
+    | Sexp.List fields ->
+      Sexp.List
+        (List.map fields ~f:(function
+           | Sexp.List [ Atom "owner"; List [ Atom "Operation"; id ] ] ->
+             Sexp.List [ Atom "operation_id"; id ]
+           | field -> field))
+    | _ -> assert false
+  in
+  assert (Jsonaf.exactly_equal encoded (Permission.to_json (Permission.t_of_sexp legacy)));
+  let invocation =
+    { permission with owner = Invocation (Id.Invocation.create_with generator) }
+  in
+  let invocation_json = Permission.to_json invocation in
+  assert (
+    Permission.equal_owner
+      invocation.owner
+      (Permission.of_json invocation_json |> ok_or_fail).owner);
+  (match invocation_json with
+   | `Object fields ->
+     let operation_id =
+       match permission.owner with
+       | Operation id -> id
+       | Invocation _ -> assert false
+     in
+     assert (
+       Result.is_error
+         (Permission.of_json
+            (`Object (("operation_id", Id.Operation.to_json operation_id) :: fields))));
+     assert (
+       Result.is_error
+         (Permission.of_json
+            (`Object (List.Assoc.remove fields "invocation_id" ~equal:String.equal))));
+     assert (
+       Result.is_error
+         (Permission.of_json
+            (`Object (List.Assoc.add fields "invocation_id" `Null ~equal:String.equal))))
+   | _ -> assert false);
   let invalid =
     match encoded with
     | `Object fields ->

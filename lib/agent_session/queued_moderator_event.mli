@@ -1,3 +1,12 @@
+(** Whether the current generation has a running or unretired failed/interrupted
+    internal event for this source. Polling uses the same guard as admission to
+    avoid repeatedly attempting a blocked queue; other observations and retained
+    scheduling requests may still be processed. *)
+val has_unsettled_claim
+  :  state:Session_state.t
+  -> observer:Agent_protocol.Invocation.observer
+  -> bool
+
 (** Pure admission and completion checks for actor-owned queued moderator events.
     Failed/interrupted claims block queued execution for that source/generation,
     including after other handlers change the checkpoint. Explicit retirement is

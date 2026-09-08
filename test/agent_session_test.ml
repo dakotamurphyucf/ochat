@@ -1067,7 +1067,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 7)
+    ((schema 8)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.waiting_compaction)))
@@ -1394,15 +1394,16 @@ let%expect_test
       [%sexp
         (Result.is_error
            (Agent_session.Session_state.upgrade_schema
-              { initial with schema_version = 8 })
+              { initial with schema_version = 9 })
          : bool)]);
   [%expect
     {|
-    ((version 7) (records 0))
+    ((version 8) (records 0))
     true
     true
     true
-    true |}]
+    true
+    |}]
 ;;
 
 let%expect_test "pre-extension compaction archives remain readable after state migration" =
@@ -1467,7 +1468,7 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 7) (records 0)) |}]
+  [%expect {| ((version 8) (records 0)) |}]
 ;;
 
 let extension_fixture workspace_instance =
@@ -1765,8 +1766,9 @@ let%expect_test "schema-3 invocation snapshots migrate without losing pending pu
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 7) (invocations 1) (subscriptions 0) (deliveries 0))
-    (Resolved (Complete Null)) |}]
+    ((version 8) (invocations 1) (subscriptions 0) (deliveries 0))
+    (Resolved (Complete Null))
+    |}]
 ;;
 
 let%expect_test
@@ -5165,28 +5167,9 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; start_moderator = (fun () -> failwith "unexpected startup")
            ; enqueue_internal_event = (fun _ -> failwith "unexpected external event")
            ; drain_internal_events =
-               (fun history ->
+               (fun _ ->
                  Int.incr internal_batches;
-                 let outcomes =
-                   M.drain_internal_events_entries
-                     manager
-                     ~session_id:
-                       (Agent_protocol.Id.Session.to_string initial.identity.session_id)
-                     ~now_ms:0
-                     ~history
-                     ~available_tools:[]
-                     ~session_meta:`Null
-                   |> Result.ok_or_failwith
-                 in
-                 Ok
-                   { moderator_snapshot = snapshot ()
-                   ; runtime_requests =
-                       List.concat_map outcomes ~f:(fun outcome ->
-                         outcome.Chat_response.Moderation.Outcome.runtime_requests)
-                   ; notifications = []
-                   ; remaining_events =
-                       B.moderator_snapshot_has_queued_events (snapshot ()) |> protocol_ok
-                   })
+                 failwith "v1 owner used legacy event drain")
            ; execute_model_job =
                (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
            ; enqueue_model_job_completion = (fun _ -> failwith "unexpected completion")
@@ -5249,25 +5232,25 @@ let%expect_test "runtime owner drains observation batches and applies durable te
   [%expect
     {|
     ((tool_calls false) (more true) (observed 32) (awaiting 4) (desired Running)
-     (seed_calls 36) (native_calls 0) (internal_batches 1))
+     (seed_calls 36) (native_calls 0) (internal_batches 0))
     ((tool_calls false) (more true) (observed 35) (awaiting 1) (desired Stopped)
-     (seed_calls 36) (native_calls 0) (internal_batches 1))
+     (seed_calls 36) (native_calls 0) (internal_batches 0))
     ((tool_calls false) (more false) (observed 35) (awaiting 1) (desired Stopped)
-     (seed_calls 36) (native_calls 0) (internal_batches 1))
+     (seed_calls 36) (native_calls 0) (internal_batches 0))
     ((tool_calls true) (more true) (observed 32) (awaiting 132) (desired Running)
-     (seed_calls 36) (native_calls 128) (internal_batches 1))
+     (seed_calls 36) (native_calls 128) (internal_batches 0))
     ((tool_calls true) (more true) (observed 64) (awaiting 112) (desired Running)
-     (seed_calls 36) (native_calls 140) (internal_batches 2))
+     (seed_calls 36) (native_calls 140) (internal_batches 0))
     ((tool_calls true) (more true) (observed 96) (awaiting 80) (desired Running)
-     (seed_calls 36) (native_calls 140) (internal_batches 3))
+     (seed_calls 36) (native_calls 140) (internal_batches 0))
     ((tool_calls true) (more true) (observed 128) (awaiting 48) (desired Running)
-     (seed_calls 36) (native_calls 140) (internal_batches 4))
+     (seed_calls 36) (native_calls 140) (internal_batches 0))
     ((tool_calls true) (more true) (observed 160) (awaiting 16) (desired Running)
-     (seed_calls 36) (native_calls 140) (internal_batches 5))
+     (seed_calls 36) (native_calls 140) (internal_batches 0))
     ((tool_calls true) (more true) (observed 175) (awaiting 1) (desired Stopped)
-     (seed_calls 36) (native_calls 140) (internal_batches 5))
+     (seed_calls 36) (native_calls 140) (internal_batches 0))
     ((tool_calls true) (more false) (observed 175) (awaiting 1) (desired Stopped)
-     (seed_calls 36) (native_calls 140) (internal_batches 5))
+     (seed_calls 36) (native_calls 140) (internal_batches 0))
     |}]
 ;;
 
@@ -6626,6 +6609,635 @@ let%expect_test
      (pending 0) (state 0))
     ((mode Mismatched_head) (handled 0) (native 0) (authorized 0) (wakeups 0)
      (observed 0) (pending 0) (state 0))
+    |}]
+;;
+
+let%expect_test
+    "runtime owner bounds queued events and retains failed effects without replay"
+  =
+  let module A = Agent_session.Session_actor in
+  let module B = Agent_session.Runtime_builder in
+  let module M = Chat_response.Moderator_manager in
+  let module E = Agent_protocol.Moderator_execution in
+  List.iter
+    [ `Batch
+    ; `Unavailable
+    ; `Failure
+    ; `Save_failure
+    ; `End
+    ; `Cancel
+    ; `Cancel_poll
+    ; `Approve
+    ; `Deny
+    ; `Permission_stop
+    ; `Permission_cancel
+    ; `Permission_cancel_save
+    ; `Permission_timeout
+    ]
+    ~f:(fun mode ->
+      let prepared = ref None
+      and calls = ref 0
+      and authorized = ref 0
+      and rejected = ref false in
+      let interactive =
+        match mode with
+        | `Approve
+        | `Deny
+        | `Permission_stop
+        | `Permission_cancel
+        | `Permission_cancel_save
+        | `Permission_timeout -> true
+        | _ -> false
+      in
+      let cancellation = ref None in
+      let on_native = ref (fun () -> ()) in
+      let registry =
+        native_registry calls ~raises:false ~on_call:(fun () -> !on_native ())
+      in
+      with_handoff_actor
+        ~reject:(fun next ->
+          match mode, !rejected with
+          | `Save_failure, false
+            when List.exists next.state.moderator_executions ~f:(fun event ->
+                   match event.status with
+                   | Completed _ -> true
+                   | _ -> false) ->
+            rejected := true;
+            true
+          | `Permission_cancel_save, false
+            when List.exists next.state.permissions ~f:(fun permission ->
+                   Agent_protocol.Permission.equal_state permission.state Cancelled) ->
+            rejected := true;
+            true
+          | _ -> false)
+        ~make_worker:(fun env _ ->
+          let finish =
+            match mode with
+            | `Failure -> "Task.fail(\"after native effect\")"
+            | `End ->
+              {|match state[0] with
+              | 2 -> Task.bind(Runtime.end_session("finished"), fun ignored -> Task.pure(state))
+              | _ -> Task.pure(state)|}
+            | _ -> "Task.pure(state)"
+          in
+          let manager, _, _ =
+            handoff_definition
+              env
+              ~declare_tool:false
+              ~capability_registry:registry
+              ~moderator_capabilities:
+                { Chat_response.Moderation.Capabilities.default with
+                  on_tool_call =
+                    (fun ~name:_ ~args:_ -> failwith "unscoped native fallback")
+                }
+              ~events:
+                ({| | `Session_start ->
+                   let rec emit = fun n -> match n with
+                   | 0 -> Task.pure(state)
+                   | _ -> Task.bind(Runtime.emit(`Null), fun ignored -> emit(n - 1))
+                   in emit(|}
+                 ^ (if interactive then "1" else "35")
+                 ^ {|)
+                 | `Internal_event(payload) ->
+                   Task.bind(Tool.call("read_file", `Object([])), fun result ->
+                     let increment = match result with
+                     | `Ok(value) -> 1
+                     | `Error("invocation.unavailable") -> 10
+                     | `Error("invocation.observation_failed") -> 1
+                     | _ -> 1000 in
+                     let ignored = state[0] <- state[0] + increment in
+                     |}
+                 ^ finish
+                 ^ {|)
+                 | `Tool_observed(p) ->
+                   (match p.parent_event with
+                    | `Some(id) -> let ignored = state[0] <- state[0] + 100 in Task.pure(state)
+                    | _ -> Task.fail("missing event lineage"))
+                 | _ -> Task.pure(state) |}
+                )
+          in
+          M.handle_event_entries_transactional
+            manager
+            ~session_id:"fixture"
+            ~now_ms:0
+            ~history:[]
+            ~available_tools:[]
+            ~session_meta:`Null
+            ~event:Session_start
+            ~authorize:(fun () -> Ok ())
+            ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
+            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+          |> Result.ok_or_failwith
+          |> ignore;
+          let snapshot =
+            Some
+              (B.encode_moderator_snapshot
+                 (M.identity_snapshot manager |> Result.ok_or_failwith))
+          in
+          prepared := Some manager;
+          Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+            caps.commit_moderator snapshot |> protocol_ok;
+            Completed
+              { final_history = input.history
+              ; moderator_snapshot = snapshot
+              ; runtime_requests = []
+              }))
+        (fun _env actor writer backend ->
+           Eio.Switch.run (fun probe_sw ->
+             let initial = await_idle actor in
+             let manager = Option.value_exn !prepared in
+             let release_probe, release_probe_u = Eio.Promise.create () in
+             let probed, probed_u = Eio.Promise.create () in
+             (on_native
+              := fun () ->
+                   let state = A.state actor |> protocol_ok in
+                   assert (Option.is_none state.active_operation);
+                   (match Agent_session.Native_tool_invocation.current_scope () with
+                    | Active invocation ->
+                      assert (
+                        List.exists state.invocations ~f:(fun current ->
+                          Agent_protocol.Id.Invocation.equal
+                            current.context.id
+                            invocation.context.id))
+                    | Unbound | Expired -> assert false);
+                   [%test_eq: int]
+                     1
+                     (List.count state.moderator_executions ~f:(fun event ->
+                        E.equal_status event.status Running));
+                   match mode with
+                   | `Cancel ->
+                     A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                     |> protocol_ok
+                     |> ignore;
+                     Eio.Fiber.yield ()
+                   | `Cancel_poll ->
+                     Eio.Cancel.cancel (Option.value_exn !cancellation) Exit;
+                     Eio.Fiber.yield ()
+                   | _ -> Eio.Fiber.yield ());
+             let script_tools =
+               match mode with
+               | `Unavailable -> None
+               | _ ->
+                 Some
+                   (Agent_session.Script_tool_calls.create
+                      ~registry:(fun () -> registry)
+                      ~moderator_names:String.Set.empty
+                      ~now:Agent_protocol.Timestamp.now
+                      ~is_halted:(fun () ->
+                        let state = A.state actor |> protocol_ok in
+                        match state.lifecycle.desired with
+                        | Running -> state.halted
+                        | Stopped -> true)
+                      ~requires_active_moderator:(fun _ -> false)
+                      ~authorize:(fun child _ ->
+                        incr authorized;
+                        (match Agent_session.Native_tool_invocation.current_scope () with
+                         | Active invocation ->
+                           assert (
+                             Agent_protocol.Id.Invocation.equal
+                               child.context.id
+                               invocation.context.id)
+                         | Unbound | Expired -> assert false);
+                        (match mode with
+                         | `Approve ->
+                           Eio.Fiber.fork ~sw:probe_sw (fun () ->
+                             Eio.Promise.await release_probe;
+                             (match
+                                Agent_session.Native_tool_invocation.current_scope ()
+                              with
+                              | Expired -> ()
+                              | Unbound | Active _ -> assert false);
+                             Eio.Promise.resolve probed_u ())
+                         | _ -> ());
+                        let state = A.state actor |> protocol_ok in
+                        let parent = Option.value_exn child.parent_event in
+                        assert (Option.is_none child.context.parent_invocation);
+                        assert (
+                          List.exists state.moderator_executions ~f:(fun event ->
+                            Agent_protocol.Id.Moderator_execution.equal
+                              parent
+                              event.context.id
+                            && E.equal_status event.status Running));
+                        if not interactive
+                        then Ok ()
+                        else (
+                          let permission : Agent_protocol.Permission.t =
+                            { id = Agent_protocol.Id.Permission.create ()
+                            ; session_id = child.context.session_id
+                            ; generation = child.context.generation
+                            ; owner = Invocation child.context.id
+                            ; call_id =
+                                Agent_protocol.Id.Invocation.to_string child.context.id
+                            ; tool_name = child.context.tool_name
+                            ; runtime_identity = Some child.context.capability_fingerprint
+                            ; invocation_display = "read_file fixture"
+                            ; rationale = None
+                            ; effects = [ "read" ]
+                            ; choices = [ Approve_once; Deny ]
+                            ; created_at = Agent_protocol.Timestamp.now ()
+                            ; expires_at = None
+                            ; state = Pending
+                            ; resolution = None
+                            }
+                          in
+                          let forged =
+                            { permission with
+                              owner = Invocation (Agent_protocol.Id.Invocation.create ())
+                            }
+                          in
+                          assert (
+                            Result.is_error
+                              (A.request_permission
+                                 actor
+                                 ~permission:forged
+                                 ~timeout_seconds:None
+                                 ~fallback:Deny));
+                          let timeout_seconds =
+                            match mode with
+                            | `Permission_timeout -> Some 0.01
+                            | _ -> None
+                          in
+                          match
+                            A.request_permission
+                              actor
+                              ~permission
+                              ~timeout_seconds
+                              ~fallback:Deny
+                          with
+                          | Ok { choice = Approve_once; _ } -> Ok ()
+                          | _ -> Error (handoff_error "permission denied")))
+                      ~prepare_output:(fun _ -> Ok (`String "disclosed"))
+                      ~defer_observation:(fun _ -> Error (handoff_error "lost wakeup")))
+             in
+             let runtime : B.t =
+               { worker =
+                   Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
+                     failwith "unexpected model turn")
+               ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
+               ; initial_history = []
+               ; initial_prompt_entry_count = 0
+               ; reserved_history_through = 0
+               ; moderator_snapshot = initial.moderator
+               ; moderator_manager = Some manager
+               ; moderator_tools = []
+               ; moderator_script_tools = script_tools
+               ; start_moderator = (fun () -> failwith "unexpected startup")
+               ; enqueue_internal_event = (fun _ -> failwith "unexpected external event")
+               ; drain_internal_events = (fun _ -> failwith "legacy event drain used")
+               ; execute_model_job =
+                   (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
+               ; enqueue_model_job_completion =
+                   (fun _ -> failwith "unexpected completion")
+               ; close = (fun () -> ())
+               }
+             in
+             let owner =
+               Agent_server.Runtime_owner.create
+                 ~actor
+                 ~initial:(Some runtime)
+                 ~build:(fun () -> failwith "unexpected runtime build")
+             in
+             let poll () =
+               try
+                 Eio.Cancel.sub (fun context ->
+                   cancellation := Some context;
+                   Agent_server.Runtime_owner.drain_idle_moderator owner)
+               with
+               | Eio.Cancel.Cancelled _ -> Error (handoff_error "cancelled")
+             in
+             let summarize result =
+               let state = A.state actor |> protocol_ok in
+               let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+               assert (
+                 Option.equal
+                   Jsonaf.exactly_equal
+                   state.moderator
+                   (Some (B.encode_moderator_snapshot snapshot)));
+               assert_same_session_snapshot
+                 state
+                 (Agent_session.Memory_backend.state backend);
+               assert (
+                 List.equal
+                   Agent_protocol.History.equal_entry
+                   initial.conversation.canonical_history
+                   state.conversation.canonical_history);
+               assert (Option.is_none state.active_operation);
+               let completed =
+                 List.count state.moderator_executions ~f:(fun event ->
+                   match event.status, event.intent with
+                   | Completed _, (None | Some Applied) -> true
+                   | _ -> false)
+               in
+               let failed =
+                 List.count state.moderator_executions ~f:(fun event ->
+                   match event.status with
+                   | Failed _ | Interrupted _ -> true
+                   | _ -> false)
+               in
+               let observed =
+                 List.count state.invocations ~f:(fun child ->
+                   (match mode, child.status with
+                    | ( ( `Cancel
+                        | `Cancel_poll
+                        | `Permission_stop
+                        | `Permission_cancel
+                        | `Permission_cancel_save )
+                      , Resolved (Cancelled _) ) -> ()
+                    | (`Deny | `Permission_timeout), Resolved (Fail _) -> ()
+                    | _, Resolved (Complete (`String "disclosed")) -> ()
+                    | _ -> assert false);
+                   match child.observation with
+                   | Some { status = Observed; _ } -> true
+                   | _ -> false)
+               in
+               let count =
+                 match snapshot.current_state with
+                 | Session.Snapshot.Array [ Int n ] -> n
+                 | _ -> assert false
+               in
+               print_s
+                 [%sexp
+                   { mode : [ `Batch
+                            | `Unavailable
+                            | `Failure
+                            | `Save_failure
+                            | `End
+                            | `Cancel
+                            | `Cancel_poll
+                            | `Approve
+                            | `Deny
+                            | `Permission_stop
+                            | `Permission_cancel
+                            | `Permission_cancel_save
+                            | `Permission_timeout
+                            ]
+                   ; result =
+                       (Result.map_error result ~f:(fun _ -> "failed")
+                        : (bool, string) result)
+                   ; calls = (!calls : int)
+                   ; authorized = (!authorized : int)
+                   ; completed : int
+                   ; failed : int
+                   ; observed : int
+                   ; queued = (List.length snapshot.queued_internal_events : int)
+                   ; state = (count : int)
+                   ; desired =
+                       (state.lifecycle.desired : Agent_protocol.Session.desired_state)
+                   ; permissions =
+                       (List.map state.permissions ~f:(fun permission ->
+                          permission.Agent_protocol.Permission.state)
+                        : Agent_protocol.Permission.state list)
+                   }]
+             in
+             let first = ref None in
+             (match mode with
+              | `Approve
+              | `Deny
+              | `Permission_stop
+              | `Permission_cancel
+              | `Permission_cancel_save ->
+                Eio.Fiber.both
+                  (fun () -> first := Some (poll ()))
+                  (fun () ->
+                     let rec pending () =
+                       let state = A.state actor |> protocol_ok in
+                       match
+                         List.find state.permissions ~f:(fun p ->
+                           Agent_protocol.Permission.equal_state p.state Pending)
+                       with
+                       | Some permission -> permission
+                       | None ->
+                         Eio.Fiber.yield ();
+                         pending ()
+                     in
+                     let permission = pending () in
+                     [%test_eq: int] 0 !calls;
+                     let persisted = Agent_session.Memory_backend.state backend in
+                     assert (Option.is_none persisted.active_operation);
+                     assert (
+                       List.exists persisted.permissions ~f:(fun p ->
+                         Agent_protocol.Id.Permission.equal p.id permission.id));
+                     (match mode with
+                      | `Approve ->
+                        let module S = Agent_session.Session_state in
+                        let restored =
+                          Agent_session.Session_persistence.restore_snapshot
+                            (Sexp.to_string_mach (S.sexp_of_t persisted))
+                          |> store_ok
+                        in
+                        assert_same_session_snapshot persisted restored;
+                        assert (
+                          Result.is_error
+                            (S.upgrade_schema { restored with schema_version = 7 }));
+                        assert (
+                          Result.is_error (S.validate { restored with invocations = [] }));
+                        let changed =
+                          { permission with
+                            owner =
+                              Agent_protocol.Permission.Operation
+                                (Agent_protocol.Id.Operation.create ())
+                          }
+                        in
+                        assert (
+                          Result.is_error
+                            (Agent_session.Session_delta.apply
+                               restored
+                               (Permission_changed changed)));
+                        let legacy =
+                          { persisted with permissions = [ changed ]; schema_version = 7 }
+                        in
+                        let rec old_permission_field = function
+                          | Sexp.List [ Atom "owner"; List [ Atom "Operation"; id ] ] ->
+                            Sexp.List [ Atom "operation_id"; id ]
+                          | List fields -> List (List.map fields ~f:old_permission_field)
+                          | Atom _ as value -> value
+                        in
+                        let migrated =
+                          Agent_session.Session_persistence.restore_snapshot
+                            (Sexp.to_string_mach
+                               (old_permission_field (S.sexp_of_t legacy)))
+                          |> store_ok
+                        in
+                        [%test_eq: int] 8 migrated.schema_version;
+                        assert (
+                          Agent_protocol.Permission.equal_owner
+                            (List.hd_exn migrated.permissions).owner
+                            changed.owner)
+                      | _ -> ());
+                     match mode with
+                     | `Permission_stop ->
+                       A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                       |> protocol_ok
+                       |> ignore
+                     | `Permission_cancel | `Permission_cancel_save ->
+                       Eio.Cancel.cancel (Option.value_exn !cancellation) Exit
+                     | _ ->
+                       let choice =
+                         match mode with
+                         | `Approve -> Agent_protocol.Permission.Approve_once
+                         | _ -> Deny
+                       in
+                       A.respond_permission
+                         actor
+                         ~attachment_id:writer.id
+                         ~principal_id:(Some principal_id)
+                         ~permission_id:permission.id
+                         ~permission_generation:permission.generation
+                         ~choice
+                         ~reason:None
+                       |> protocol_ok
+                       |> ignore)
+              | _ -> first := Some (poll ()));
+             summarize (Option.value_exn !first);
+             Eio.Promise.resolve release_probe_u ();
+             (match mode with
+              | `Approve -> Eio.Promise.await probed
+              | _ -> ());
+             (match Agent_session.Native_tool_invocation.current_scope () with
+              | Unbound -> ()
+              | Active _ | Expired -> assert false);
+             summarize (poll ());
+             summarize (poll ());
+             let before = A.state actor |> protocol_ok in
+             (match mode with
+              | `Permission_cancel_save -> assert !rejected
+              | _ -> ());
+             List.iter before.permissions ~f:(fun permission ->
+               let late =
+                 { permission with
+                   id = Agent_protocol.Id.Permission.create ()
+                 ; state = Pending
+                 ; resolution = None
+                 }
+               in
+               assert (
+                 Result.is_error
+                   (A.request_permission
+                      actor
+                      ~permission:late
+                      ~timeout_seconds:None
+                      ~fallback:Deny)));
+             [%test_eq: bool] false (poll () |> protocol_ok);
+             assert_same_session_snapshot before (A.state actor |> protocol_ok))));
+  [%expect
+    {|
+    ((mode Batch) (result (Ok true)) (calls 32) (authorized 32) (completed 32)
+     (failed 0) (observed 0) (queued 3) (state 32) (desired Running)
+     (permissions ()))
+    ((mode Batch) (result (Ok true)) (calls 35) (authorized 35) (completed 35)
+     (failed 0) (observed 32) (queued 0) (state 3235) (desired Running)
+     (permissions ()))
+    ((mode Batch) (result (Ok false)) (calls 35) (authorized 35) (completed 35)
+     (failed 0) (observed 35) (queued 0) (state 3535) (desired Running)
+     (permissions ()))
+    ((mode Unavailable) (result (Ok true)) (calls 0) (authorized 0)
+     (completed 32) (failed 0) (observed 0) (queued 3) (state 320)
+     (desired Running) (permissions ()))
+    ((mode Unavailable) (result (Ok true)) (calls 0) (authorized 0)
+     (completed 35) (failed 0) (observed 0) (queued 0) (state 350)
+     (desired Running) (permissions ()))
+    ((mode Unavailable) (result (Ok false)) (calls 0) (authorized 0)
+     (completed 35) (failed 0) (observed 0) (queued 0) (state 350)
+     (desired Running) (permissions ()))
+    ((mode Failure) (result (Error failed)) (calls 1) (authorized 1)
+     (completed 0) (failed 1) (observed 0) (queued 35) (state 0)
+     (desired Running) (permissions ()))
+    ((mode Failure) (result (Ok false)) (calls 1) (authorized 1) (completed 0)
+     (failed 1) (observed 1) (queued 35) (state 100) (desired Running)
+     (permissions ()))
+    ((mode Failure) (result (Ok false)) (calls 1) (authorized 1) (completed 0)
+     (failed 1) (observed 1) (queued 35) (state 100) (desired Running)
+     (permissions ()))
+    ((mode Save_failure) (result (Error failed)) (calls 1) (authorized 1)
+     (completed 0) (failed 1) (observed 0) (queued 35) (state 0)
+     (desired Running) (permissions ()))
+    ((mode Save_failure) (result (Ok false)) (calls 1) (authorized 1)
+     (completed 0) (failed 1) (observed 1) (queued 35) (state 100)
+     (desired Running) (permissions ()))
+    ((mode Save_failure) (result (Ok false)) (calls 1) (authorized 1)
+     (completed 0) (failed 1) (observed 1) (queued 35) (state 100)
+     (desired Running) (permissions ()))
+    ((mode End) (result (Ok true)) (calls 2) (authorized 2) (completed 2)
+     (failed 0) (observed 0) (queued 33) (state 2) (desired Stopped)
+     (permissions ()))
+    ((mode End) (result (Ok false)) (calls 2) (authorized 2) (completed 2)
+     (failed 0) (observed 0) (queued 33) (state 2) (desired Stopped)
+     (permissions ()))
+    ((mode End) (result (Ok false)) (calls 2) (authorized 2) (completed 2)
+     (failed 0) (observed 0) (queued 33) (state 2) (desired Stopped)
+     (permissions ()))
+    ((mode Cancel) (result (Error failed)) (calls 1) (authorized 1) (completed 0)
+     (failed 1) (observed 0) (queued 35) (state 0) (desired Stopped)
+     (permissions ()))
+    ((mode Cancel) (result (Ok false)) (calls 1) (authorized 1) (completed 0)
+     (failed 1) (observed 0) (queued 35) (state 0) (desired Stopped)
+     (permissions ()))
+    ((mode Cancel) (result (Ok false)) (calls 1) (authorized 1) (completed 0)
+     (failed 1) (observed 0) (queued 35) (state 0) (desired Stopped)
+     (permissions ()))
+    ((mode Cancel_poll) (result (Error failed)) (calls 1) (authorized 1)
+     (completed 0) (failed 1) (observed 0) (queued 35) (state 0)
+     (desired Running) (permissions ()))
+    ((mode Cancel_poll) (result (Ok false)) (calls 1) (authorized 1)
+     (completed 0) (failed 1) (observed 1) (queued 35) (state 100)
+     (desired Running) (permissions ()))
+    ((mode Cancel_poll) (result (Ok false)) (calls 1) (authorized 1)
+     (completed 0) (failed 1) (observed 1) (queued 35) (state 100)
+     (desired Running) (permissions ()))
+    ((mode Approve) (result (Ok true)) (calls 1) (authorized 1) (completed 1)
+     (failed 0) (observed 0) (queued 0) (state 1) (desired Running)
+     (permissions (Approved)))
+    ((mode Approve) (result (Ok false)) (calls 1) (authorized 1) (completed 1)
+     (failed 0) (observed 1) (queued 0) (state 101) (desired Running)
+     (permissions (Approved)))
+    ((mode Approve) (result (Ok false)) (calls 1) (authorized 1) (completed 1)
+     (failed 0) (observed 1) (queued 0) (state 101) (desired Running)
+     (permissions (Approved)))
+    ((mode Deny) (result (Ok true)) (calls 0) (authorized 1) (completed 1)
+     (failed 0) (observed 0) (queued 0) (state 1) (desired Running)
+     (permissions (Denied)))
+    ((mode Deny) (result (Ok false)) (calls 0) (authorized 1) (completed 1)
+     (failed 0) (observed 1) (queued 0) (state 101) (desired Running)
+     (permissions (Denied)))
+    ((mode Deny) (result (Ok false)) (calls 0) (authorized 1) (completed 1)
+     (failed 0) (observed 1) (queued 0) (state 101) (desired Running)
+     (permissions (Denied)))
+    ((mode Permission_stop) (result (Error failed)) (calls 0) (authorized 1)
+     (completed 0) (failed 1) (observed 0) (queued 1) (state 0) (desired Stopped)
+     (permissions (Cancelled)))
+    ((mode Permission_stop) (result (Ok false)) (calls 0) (authorized 1)
+     (completed 0) (failed 1) (observed 0) (queued 1) (state 0) (desired Stopped)
+     (permissions (Cancelled)))
+    ((mode Permission_stop) (result (Ok false)) (calls 0) (authorized 1)
+     (completed 0) (failed 1) (observed 0) (queued 1) (state 0) (desired Stopped)
+     (permissions (Cancelled)))
+    ((mode Permission_cancel) (result (Error failed)) (calls 0) (authorized 1)
+     (completed 0) (failed 1) (observed 0) (queued 1) (state 0) (desired Running)
+     (permissions (Cancelled)))
+    ((mode Permission_cancel) (result (Ok false)) (calls 0) (authorized 1)
+     (completed 0) (failed 1) (observed 1) (queued 1) (state 100)
+     (desired Running) (permissions (Cancelled)))
+    ((mode Permission_cancel) (result (Ok false)) (calls 0) (authorized 1)
+     (completed 0) (failed 1) (observed 1) (queued 1) (state 100)
+     (desired Running) (permissions (Cancelled)))
+    ((mode Permission_cancel_save) (result (Error failed)) (calls 0)
+     (authorized 1) (completed 0) (failed 1) (observed 0) (queued 1) (state 0)
+     (desired Running) (permissions (Cancelled)))
+    ((mode Permission_cancel_save) (result (Ok false)) (calls 0) (authorized 1)
+     (completed 0) (failed 1) (observed 1) (queued 1) (state 100)
+     (desired Running) (permissions (Cancelled)))
+    ((mode Permission_cancel_save) (result (Ok false)) (calls 0) (authorized 1)
+     (completed 0) (failed 1) (observed 1) (queued 1) (state 100)
+     (desired Running) (permissions (Cancelled)))
+    ((mode Permission_timeout) (result (Ok true)) (calls 0) (authorized 1)
+     (completed 1) (failed 0) (observed 0) (queued 0) (state 1) (desired Running)
+     (permissions (Denied)))
+    ((mode Permission_timeout) (result (Ok false)) (calls 0) (authorized 1)
+     (completed 1) (failed 0) (observed 1) (queued 0) (state 101)
+     (desired Running) (permissions (Denied)))
+    ((mode Permission_timeout) (result (Ok false)) (calls 0) (authorized 1)
+     (completed 1) (failed 0) (observed 1) (queued 0) (state 101)
+     (desired Running) (permissions (Denied)))
     |}]
 ;;
 
@@ -9919,7 +10531,7 @@ let permission_request ~id =
     { id
     ; session_id
     ; generation = 0
-    ; operation_id
+    ; owner = Operation operation_id
     ; call_id = "call-1"
     ; tool_name = "shell"
     ; runtime_identity = Some "runtime"

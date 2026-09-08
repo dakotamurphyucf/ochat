@@ -40,17 +40,26 @@ val enqueue_internal_event
 
 (** [drain_idle_moderator] handles pending invocation observations and queued
     internal events when the actor can grant an idle moderator borrow. Each
-    observation batch is bounded; its durable follow-up requests are consumed
-    together with retained event requests before another event drain, even when
-    no internal event or observation is queued. Only the installed v1 source can handle an
-    observation. Failed handlers retain their separate observation failure and
+    observation and v1 event batch is bounded to 32 handlers; durable follow-up
+    requests are consumed together before another event drain, even when no
+    internal event or observation is queued. Only the installed v1 source can
+    handle an observation. Failed handlers retain their separate failure and
     are never replayed. The result requests another idle probe when a batch
     exhausts its budget, queued events remain, or follow-up work was scheduled.
     When the runtime supplies script-tool services, every observation gets its
     own actor-bound native scope using the manager's exact admitted definition.
+    Queued v1 events use the same scoped service through persisted event claims;
+    the legacy drain is used only for managers without a v1 definition. Event
+    requests are applied after the batch, with termination ending the batch early.
+    Unretired failed/interrupted event claims suppress further queue polling for
+    their source/generation, while saved native outcomes remain observable.
     Native child results join subsequent bounded observation work. A runtime
-    without these services grants no native scope. Normal v1 declaration
-    admission remains separate; this does not enable public features. *)
+    without these services returns invocation.unavailable for Tool.call. A
+    completed event also requests another probe for newly created observations.
+    V1 handler cancellation releases the owner mutex before propagating, allowing
+    later polling and administration. Runtime installation and legacy draining
+    retain their protected lifecycle boundaries. Normal v1 declaration admission
+    remains separate; this does not enable public features. *)
 val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
 
 (** [execute_model_job t ~recipe ~payload] executes nested model work while

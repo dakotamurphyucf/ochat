@@ -78,7 +78,7 @@ let assert_suspended daemon session (permission : Agent_protocol.Permission.t) =
   let state = state daemon session in
   let operation = Option.value_exn state.active_operation in
   require
-    (Agent_protocol.Id.Operation.compare operation.id permission.operation_id = 0)
+    (Agent_protocol.Permission.equal_owner permission.owner (Operation operation.id))
     "suspended foreground operation changed before maintenance";
   require
     (List.exists state.permissions ~f:(fun candidate ->
@@ -94,10 +94,8 @@ let suspend env daemon client session =
       Permission.await_pending_permission env client session.Permission.summary.id 500)
   in
   require
-    (Option.equal
-       (fun a b -> Agent_protocol.Id.Operation.compare a b = 0)
-       sent.operation_id
-       (Some permission.operation_id))
+    (Option.exists sent.operation_id ~f:(fun id ->
+       Agent_protocol.Permission.equal_owner permission.owner (Operation id)))
     "permission belongs to another operation";
   assert_suspended daemon session permission;
   permission

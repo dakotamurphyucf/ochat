@@ -439,6 +439,23 @@ let shell_broker_response (request : Shell_runtime.Approval_broker.ui_request) r
     Deny (Option.value resolution.reason ~default:"shell command approval was denied")
 ;;
 
+let shell_permission_owner (state : Agent_session.Session_state.t) =
+  match Agent_session.Native_tool_invocation.current_scope () with
+  | Active invocation
+    when Agent_protocol.Id.Session.equal
+           invocation.context.session_id
+           state.identity.session_id
+         && invocation.context.generation = state.identity.generation ->
+    Ok (Agent_protocol.Permission.Invocation invocation.context.id)
+  | Active _ | Expired ->
+    Error (unavailable Invalid_state "shell invocation scope is stale or foreign")
+  | Unbound ->
+    state.active_operation
+    |> Result.of_option
+         ~error:(unavailable Invalid_state "shell permission has no executing owner")
+    |> Result.map ~f:(fun operation -> Agent_protocol.Permission.Operation operation.id)
+;;
+
 let resolve_shell_permission t profile actor request ~review_on_timeout =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state actor in
@@ -452,17 +469,13 @@ let resolve_shell_permission t profile actor request ~review_on_timeout =
        | Deny -> Deny "no shell permission responder is available"
        | Approve_session | Approve_prefix | Durable_exact -> assert false)
   else (
-    let%bind operation =
-      state.active_operation
-      |> Result.of_option
-           ~error:(unavailable Invalid_state "shell permission has no active operation")
-    in
+    let%bind owner = shell_permission_owner state in
     let permission =
       Agent_protocol.Permission.
         { id = Agent_protocol.Id.Permission.create ()
         ; session_id = state.identity.session_id
         ; generation = state.identity.generation
-        ; operation_id = operation.id
+        ; owner
         ; call_id = request.request.context.request_id
         ; tool_name = "shell:" ^ request.runtime_id
         ; runtime_identity = Some request.request.identity.command_hash
@@ -799,9 +812,9 @@ let shell_review_permission t actor_ref profile request =
       Agent_session.Session_actor.state actor
       |> Result.map_error ~f:(fun error -> error.message)
     in
-    let%bind operation =
-      current.active_operation
-      |> Result.of_option ~error:"shell permission has no active operation"
+    let%bind owner =
+      shell_permission_owner current
+      |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
     in
     let invocation = shell_policy_invocation request in
     let permission =
@@ -809,7 +822,7 @@ let shell_review_permission t actor_ref profile request =
         { id = Agent_protocol.Id.Permission.create ()
         ; session_id = current.identity.session_id
         ; generation = current.identity.generation
-        ; operation_id = operation.id
+        ; owner
         ; call_id = request.request.context.request_id
         ; tool_name = invocation.tool_name
         ; runtime_identity = Some invocation.identity_digest

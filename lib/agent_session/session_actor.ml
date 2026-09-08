@@ -618,6 +618,86 @@ let stopped_jobs t mode =
       | Succeeded | Failed _ | Cancelled | Interrupted _ -> None)
 ;;
 
+let cancel_permission t reason (permission : Agent_protocol.Permission.t) =
+  { permission with
+    state = Cancelled
+  ; resolution =
+      Some
+        { choice = Deny
+        ; principal_id = None
+        ; resolved_at = t.services.now ()
+        ; reason = Some reason
+        }
+  }
+;;
+
+let resolve_cleaned_permission_waiters t permissions =
+  List.iter permissions ~f:(fun permission ->
+    Option.iter permission.Agent_protocol.Permission.resolution ~f:(fun resolution ->
+      Option.iter (Map.find !(t.permission_waiters) permission.id) ~f:(fun waiter ->
+        Eio.Promise.resolve waiter.resolver resolution));
+    t.permission_waiters := Map.remove !(t.permission_waiters) permission.id)
+;;
+
+let pending_invocation_permissions t ~matches =
+  List.filter t.state.permissions ~f:(fun permission ->
+    Agent_protocol.Permission.equal_state permission.state Pending
+    &&
+    match permission.owner with
+    | Invocation id -> matches id
+    | Operation _ -> false)
+;;
+
+let permission_resume_observed t ~resolved ~fallback =
+  match t.state.lifecycle.desired, t.state.active_operation with
+  | Stopped, None -> Agent_protocol.Session.Stopped
+  | _ ->
+    (match
+       List.find t.state.permissions ~f:(fun permission ->
+         Agent_protocol.Permission.equal_state permission.state Pending
+         && not
+              (List.exists resolved ~f:(Agent_protocol.Id.Permission.equal permission.id)))
+     with
+     | Some permission -> Waiting_for_permission permission.id
+     | None -> fallback)
+;;
+
+let cleanup_invocation_permissions t ids =
+  let permissions =
+    pending_invocation_permissions t ~matches:(fun id ->
+      List.mem ids id ~equal:Agent_protocol.Id.Invocation.equal)
+    |> List.map
+         ~f:(cancel_permission t "invocation finished before permission resolution")
+  in
+  let lifecycle =
+    match t.state.lifecycle.observed with
+    | Waiting_for_permission id
+      when List.exists permissions ~f:(fun p ->
+             Agent_protocol.Id.Permission.equal p.id id) ->
+      Option.map (Map.find !(t.permission_waiters) id) ~f:(fun waiter ->
+        { t.state.lifecycle with
+          observed =
+            permission_resume_observed
+              t
+              ~resolved:
+                (List.map permissions ~f:(fun p -> p.Agent_protocol.Permission.id))
+              ~fallback:waiter.resume_observed
+        })
+    | _ -> None
+  in
+  ( permissions
+  , List.map permissions ~f:(fun permission ->
+      Session_delta.Permission_changed permission)
+    @ Option.to_list
+        (Option.map lifecycle ~f:(fun value -> Session_delta.Lifecycle_changed value))
+  , List.map permissions ~f:(fun permission ->
+      Agent_protocol.Event.Durable.Payload.Permission_resolved permission)
+    @ Option.to_list
+        (Option.map lifecycle ~f:(fun value ->
+           Agent_protocol.Event.Durable.Payload.Session_state_changed
+             { desired_state = value.desired; observed_state = value.observed })) )
+;;
+
 let stop_transition t mode lifecycle deltas payloads =
   let open Result.Let_syntax in
   let%bind discarded =
@@ -629,20 +709,32 @@ let stop_transition t mode lifecycle deltas payloads =
       ~reason:"session stopped"
   in
   let jobs = stopped_jobs t mode in
-  transition
-    t
-    ~delta:
-      (Session_delta.Batch
-         ((Session_delta.Lifecycle_changed lifecycle :: deltas)
-          @ List.map discarded ~f:Observation_follow_up.delta
-          @ List.map events ~f:Observation_follow_up.event_delta
-          @ List.map jobs ~f:(fun job -> Session_delta.Job_changed job)))
-    ~payloads:
-      ((Agent_protocol.Event.Durable.Payload.Session_state_changed
-          { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
-        :: payloads)
-       @ List.map jobs ~f:(fun job ->
-         Agent_protocol.Event.Durable.Payload.Job_state_changed job))
+  let permissions =
+    pending_invocation_permissions t ~matches:(fun _ -> true)
+    |> List.map ~f:(cancel_permission t "session stopped")
+  in
+  let%map result =
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch
+           ((Session_delta.Lifecycle_changed lifecycle :: deltas)
+            @ List.map discarded ~f:Observation_follow_up.delta
+            @ List.map events ~f:Observation_follow_up.event_delta
+            @ List.map permissions ~f:(fun permission ->
+              Session_delta.Permission_changed permission)
+            @ List.map jobs ~f:(fun job -> Session_delta.Job_changed job)))
+      ~payloads:
+        ((Agent_protocol.Event.Durable.Payload.Session_state_changed
+            { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+          :: payloads)
+         @ List.map jobs ~f:(fun job ->
+           Agent_protocol.Event.Durable.Payload.Job_state_changed job)
+         @ List.map permissions ~f:(fun permission ->
+           Agent_protocol.Event.Durable.Payload.Permission_resolved permission))
+  in
+  resolve_cleaned_permission_waiters t permissions;
+  result
 ;;
 
 let stop_internal t mode =
@@ -1086,9 +1178,18 @@ let finish_invocation t execution outcome =
       ~generation:t.state.identity.generation
       outcome
   in
-  let%bind _ =
-    transition t ~delta:(Session_delta.Invocation_changed resolved) ~payloads:[]
+  let permissions, permission_deltas, permission_payloads =
+    cleanup_invocation_permissions t [ execution.dispatched.context.id ]
   in
+  let%bind _ =
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch
+           (Session_delta.Invocation_changed resolved :: permission_deltas))
+      ~payloads:permission_payloads
+  in
+  resolve_cleaned_permission_waiters t permissions;
   t.invocation_executions
   <- List.filter t.invocation_executions ~f:(fun other ->
        not (phys_equal other execution));
@@ -1341,6 +1442,11 @@ let finish_queued_event t borrow interrupted =
   let children =
     List.filter t.invocation_executions ~f:(event_execution_owned_by borrow)
   in
+  let permissions, permission_deltas, permission_payloads =
+    cleanup_invocation_permissions
+      t
+      (List.map children ~f:(fun child -> child.dispatched.context.id))
+  in
   let%bind children_deltas =
     List.map children ~f:(fun execution ->
       execution.accepts_children <- false;
@@ -1373,10 +1479,14 @@ let finish_queued_event t borrow interrupted =
       transition
         t
         ~delta:
-          (Session_delta.Batch (children_deltas @ [ Moderator_execution_changed terminal ]))
-        ~payloads:[]
+          (Session_delta.Batch
+             (children_deltas
+              @ permission_deltas
+              @ [ Moderator_execution_changed terminal ]))
+        ~payloads:permission_payloads
       |> Result.map ~f:ignore
   in
+  resolve_cleaned_permission_waiters t permissions;
   t.queued_event_borrow <- None;
   t.invocation_executions
   <- List.filter t.invocation_executions ~f:(fun execution ->
@@ -1700,6 +1810,11 @@ let finish_moderator_invocation t borrow failure =
   let unfinished =
     List.filter t.invocation_executions ~f:(idle_execution_owned_by borrow)
   in
+  let permissions, permission_deltas, permission_payloads =
+    cleanup_invocation_permissions
+      t
+      (List.map unfinished ~f:(fun child -> child.dispatched.context.id))
+  in
   let%bind children =
     List.map unfinished ~f:(fun execution ->
       execution.accepts_children <- false;
@@ -1715,9 +1830,13 @@ let finish_moderator_invocation t borrow failure =
     then Ok ()
     else
       Result.map
-        (transition t ~delta:(Session_delta.Batch (children @ [ delta ])) ~payloads:[])
+        (transition
+           t
+           ~delta:(Session_delta.Batch (children @ permission_deltas @ [ delta ]))
+           ~payloads:permission_payloads)
         ~f:(fun _ -> ())
   in
+  resolve_cleaned_permission_waiters t permissions;
   t.invocation_executions
   <- List.filter t.invocation_executions ~f:(fun execution ->
        not (idle_execution_owned_by borrow execution));
@@ -2002,25 +2121,23 @@ let is_permission_review_job (job : Agent_protocol.Job.t) =
   | _ -> false
 ;;
 
-let pending_for_operation (operation : Agent_protocol.Operation.t) permission =
+let pending_for_operation t (operation : Agent_protocol.Operation.t) permission =
   Agent_protocol.Permission.equal_state permission.Agent_protocol.Permission.state Pending
-  && Agent_protocol.Id.Operation.compare permission.operation_id operation.id = 0
+  &&
+  match permission.owner with
+  | Operation id -> Agent_protocol.Id.Operation.equal id operation.id
+  | Invocation id ->
+    List.exists t.invocation_executions ~f:(fun execution ->
+      Agent_protocol.Id.Invocation.equal id execution.dispatched.context.id
+      &&
+      match execution.owner with
+      | Foreground id -> Agent_protocol.Id.Operation.equal id operation.id
+      | Idle_moderator _ | Event_moderator _ -> false)
 ;;
 
 let cancel_operation_permission t operation reason permission =
-  if pending_for_operation operation permission
-  then
-    Some
-      { permission with
-        state = Cancelled
-      ; resolution =
-          Some
-            { choice = Deny
-            ; principal_id = None
-            ; resolved_at = t.services.now ()
-            ; reason = Some reason
-            }
-      }
+  if pending_for_operation t operation permission
+  then Some (cancel_permission t reason permission)
   else None
 ;;
 
@@ -2074,14 +2191,6 @@ let cleanup_payloads permissions jobs =
     Agent_protocol.Event.Durable.Payload.Permission_resolved permission)
   @ List.map jobs ~f:(fun job ->
     Agent_protocol.Event.Durable.Payload.Job_state_changed job)
-;;
-
-let resolve_cleaned_permission_waiters t permissions =
-  List.iter permissions ~f:(fun permission ->
-    Option.iter permission.Agent_protocol.Permission.resolution ~f:(fun resolution ->
-      Option.iter (Map.find !(t.permission_waiters) permission.id) ~f:(fun waiter ->
-        Eio.Promise.resolve waiter.resolver resolution));
-    t.permission_waiters := Map.remove !(t.permission_waiters) permission.id)
 ;;
 
 let compaction_generation t =
@@ -3132,6 +3241,43 @@ let grant_for_resolution
         }
 ;;
 
+let permission_owner_active t (permission : Agent_protocol.Permission.t) =
+  match permission.owner with
+  | Operation id ->
+    (match t.state.active_operation with
+     | Some operation when not (Agent_protocol.Id.Operation.equal operation.id id) ->
+       Error (error Conflict "permission request belongs to another active operation")
+     | _ -> Ok ())
+  | Invocation id ->
+    let live =
+      List.exists t.invocation_executions ~f:(fun execution ->
+        execution.accepts_children
+        && Agent_protocol.Id.Invocation.equal id execution.dispatched.context.id
+        && execution.dispatched.context.generation = permission.generation
+        &&
+        match execution.owner with
+        | Foreground id ->
+          Option.exists t.state.active_operation ~f:(fun operation ->
+            Agent_protocol.Id.Operation.equal operation.id id
+            &&
+            match operation.state with
+            | Cancelling -> false
+            | _ -> true)
+        | Idle_moderator borrow ->
+          t.idle_moderator_borrowed
+          && (not (borrow.committed || borrow.cancel_requested))
+          && Option.exists t.moderator_borrow ~f:(phys_equal borrow)
+        | Event_moderator borrow ->
+          t.idle_moderator_borrowed
+          && borrow.callback_active
+          && (not (borrow.committed || borrow.cancel_requested))
+          && Option.exists t.queued_event_borrow ~f:(phys_equal borrow))
+    in
+    (match t.state.lifecycle.desired, live, t.state.halted, t.state.failure with
+     | Running, true, false, None -> Ok ()
+     | _ -> Error (error Conflict "permission requires a live invocation owner"))
+;;
+
 let resolve_permission
       t
       (permission : Agent_protocol.Permission.t)
@@ -3148,10 +3294,22 @@ let resolve_permission
     { permission with state = permission_state choice; resolution = Some resolution }
   in
   let open Result.Let_syntax in
+  let%bind () =
+    match choice with
+    | Agent_protocol.Permission.Deny -> Ok ()
+    | Approve_once | Approve_session | Approve_prefix | Durable_exact ->
+      permission_owner_active t permission
+  in
   let%bind grant = grant_for_resolution t permission principal_id choice in
   let lifecycle =
     Session_state.Lifecycle.
-      { desired = t.state.lifecycle.desired; observed = resume_observed }
+      { desired = t.state.lifecycle.desired
+      ; observed =
+          permission_resume_observed
+            t
+            ~resolved:[ permission.id ]
+            ~fallback:resume_observed
+      }
   in
   let%bind _ =
     transition
@@ -3198,27 +3356,35 @@ let schedule_permission_expiry t permission timeout_seconds fallback =
 ;;
 
 let open_permission t (permission : Agent_protocol.Permission.t) timeout_seconds fallback =
+  let open Result.Let_syntax in
+  let%bind () = permission_owner_active t permission in
   if
     Agent_protocol.Id.Session.compare permission.session_id t.state.identity.session_id
     <> 0
   then Error (error Invalid_request "permission request belongs to another session")
   else if permission.generation <> t.state.identity.generation
   then Error (error Conflict "permission request belongs to a stale session generation")
-  else if
-    Option.exists t.state.active_operation ~f:(fun operation ->
-      Agent_protocol.Id.Operation.compare operation.id permission.operation_id <> 0)
-  then Error (error Conflict "permission request belongs to another active operation")
   else if not (Agent_protocol.Permission.equal_state permission.state Pending)
   then Error (error Invalid_request "new permission request must be pending")
   else if
     not
       (List.mem permission.choices fallback ~equal:Agent_protocol.Permission.equal_choice)
   then Error (error Invalid_request "permission fallback choice is not offered")
-  else if Map.mem !(t.permission_waiters) permission.id
-  then Error (error Conflict "permission request is already pending")
+  else if
+    List.exists t.state.permissions ~f:(fun previous ->
+      Agent_protocol.Id.Permission.equal previous.id permission.id)
+  then Error (error Conflict "permission request identity is already retained")
   else (
     let response, resolver = Eio.Promise.create () in
-    let resume_observed = t.state.lifecycle.observed in
+    let resume_observed =
+      match t.state.lifecycle.observed with
+      | Waiting_for_permission id ->
+        Option.value_map
+          (Map.find !(t.permission_waiters) id)
+          ~default:t.state.lifecycle.observed
+          ~f:(fun waiter -> waiter.resume_observed)
+      | observed -> observed
+    in
     let lifecycle =
       Session_state.Lifecycle.
         { desired = t.state.lifecycle.desired

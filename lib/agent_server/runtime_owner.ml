@@ -139,7 +139,7 @@ let complete_idle_moderator t drain =
   | Error failure -> fail_idle_moderator t failure
 ;;
 
-let drain_loaded_idle_moderator t runtime =
+let drain_loaded_legacy_events t runtime =
   match Agent_session.Session_actor.claim_idle_moderator t.actor with
   | Error _ as failure -> failure
   | Ok None -> Ok false
@@ -147,6 +147,70 @@ let drain_loaded_idle_moderator t runtime =
     (match runtime.Agent_session.Runtime_builder.drain_internal_events history with
      | Ok drain -> complete_idle_moderator t drain
      | Error failure -> fail_idle_moderator t failure)
+;;
+
+let drain_loaded_queued_events t runtime manager =
+  let module A = Agent_session.Session_actor in
+  let module M = Chat_response.Moderator_manager in
+  let open Result.Let_syntax in
+  let history = ref [] in
+  let claim ~snapshot handle =
+    A.with_idle_queued_moderator_event_tools
+      t.actor
+      ~snapshot
+      (fun ~executing ~event ~execute ~commit ->
+         let%bind state = A.state t.actor in
+         let%bind entries =
+           Agent_session.History_codec.all_of_protocol
+             state.conversation.canonical_history
+         in
+         history := entries;
+         handle ~executing ~event ~execute ~commit)
+  in
+  let rec loop remaining handled =
+    match remaining with
+    | 0 -> Ok true
+    | _ ->
+      let%bind state = A.state t.actor in
+      let blocked =
+        Option.exists (M.invocation_observer manager) ~f:(fun observer ->
+          Agent_session.Queued_moderator_event.has_unsettled_claim ~state ~observer)
+      in
+      if blocked
+      then Ok handled
+      else (
+        let%bind outcome =
+          Agent_session.Moderator_event.run_queued_idle
+            ~claim
+            ?script_tools:runtime.Agent_session.Runtime_builder.moderator_script_tools
+            ~manager
+            ~history:(fun () -> !history)
+            ~available_tools:runtime.moderator_tools
+            ~session_meta:`Null
+            ~now:Agent_protocol.Timestamp.now
+            ()
+        in
+        match outcome with
+        | None -> Ok handled
+        | Some outcome ->
+          (match
+             Chat_response.Runtime_semantics.should_end_session outcome.runtime_requests
+           with
+           | Some _ -> Ok true
+           | None -> loop (remaining - 1) true))
+  in
+  loop 32 false
+;;
+
+let drain_loaded_idle_moderator t runtime =
+  match runtime.Agent_session.Runtime_builder.moderator_manager with
+  | Some manager
+    when Option.is_some (Chat_response.Moderator_manager.extension_definition manager) ->
+    let open Result.Let_syntax in
+    let%bind more = drain_loaded_queued_events t runtime manager in
+    let%map applied = Agent_session.Session_actor.apply_moderator_follow_up t.actor in
+    more || applied
+  | _ -> Eio.Cancel.protect (fun () -> drain_loaded_legacy_events t runtime)
 ;;
 
 let pending_observation state observer =
@@ -248,7 +312,11 @@ let snapshot_has_pending_events t =
     let%map observer =
       Agent_session.Runtime_builder.moderator_snapshot_observer state.moderator
     in
-    queued
+    (queued
+     && (not halted)
+     && not
+          (Option.exists observer ~f:(fun observer ->
+             Agent_session.Queued_moderator_event.has_unsettled_claim ~state ~observer)))
     || List.exists state.invocations ~f:Agent_session.Observation_follow_up.pending
     || List.exists
          state.moderator_executions
@@ -257,38 +325,48 @@ let snapshot_has_pending_events t =
   else Ok false
 ;;
 
-let drain_idle_moderator t =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    let open Result.Let_syntax in
-    let%bind pending = snapshot_has_pending_events t in
-    if not pending
-    then Ok false
-    else (
-      let%bind () = ensure_loaded_locked t in
-      match t.runtime with
-      | Some runtime ->
+let drain_idle_moderator_locked t =
+  let open Result.Let_syntax in
+  let%bind pending = snapshot_has_pending_events t in
+  if not pending
+  then Ok false
+  else (
+    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
+    match t.runtime with
+    | Some runtime ->
+      let%bind applied = Agent_session.Session_actor.apply_moderator_follow_up t.actor in
+      if applied
+      then Ok true
+      else (
+        let%bind more_observations = drain_loaded_observations t runtime in
         let%bind applied =
           Agent_session.Session_actor.apply_moderator_follow_up t.actor
         in
         if applied
         then Ok true
         else (
-          let%bind more_observations = drain_loaded_observations t runtime in
-          let%bind applied =
-            Agent_session.Session_actor.apply_moderator_follow_up t.actor
-          in
-          if applied
-          then Ok true
-          else (
-            let%map more_events = drain_loaded_idle_moderator t runtime in
-            more_observations || more_events))
-      | None ->
-        Error
-          (Agent_protocol.Error.create
-             Internal_error
-             ~message:"runtime load completed without an installed runtime"
-             ~retryable:false
-             ())))
+          let%map more_events = drain_loaded_idle_moderator t runtime in
+          more_observations || more_events))
+    | None ->
+      Error
+        (Agent_protocol.Error.create
+           Internal_error
+           ~message:"runtime load completed without an installed runtime"
+           ~retryable:false
+           ()))
+;;
+
+let drain_idle_moderator t =
+  let outcome =
+    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
+      match drain_idle_moderator_locked t with
+      | result -> Ok result
+      | exception (Eio.Cancel.Cancelled _ as exn) ->
+        Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let with_loaded_runtime t f =

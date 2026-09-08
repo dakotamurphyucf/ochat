@@ -111,11 +111,25 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 7
+let current_schema_version = 8
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    List.exists t.permissions ~f:(fun permission ->
+      match permission.owner with
+      | Invocation _ -> true
+      | Operation _ -> false)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"invocation-owned permissions require session schema 8"
+         ~retryable:false
+         ())
+  else if t.schema_version = 7
+  then Ok { t with schema_version = current_schema_version }
   else if
     List.exists t.invocations ~f:(fun invocation ->
       Option.is_some invocation.parent_event)
@@ -280,6 +294,28 @@ let validate t =
       ~deliveries:t.deliveries
       ~jobs:t.jobs
       ~schedules:t.schedules
+  in
+  let%bind () =
+    List.fold_result t.permissions ~init:() ~f:(fun () permission ->
+      match permission.owner with
+      | Operation _ -> Ok ()
+      | Invocation id ->
+        (match
+           List.find t.invocations ~f:(fun invocation ->
+             Agent_protocol.Id.Invocation.equal invocation.context.id id)
+         with
+         | Some invocation
+           when Agent_protocol.Id.Session.equal
+                  permission.session_id
+                  t.identity.session_id
+                && permission.generation = invocation.context.generation -> Ok ()
+         | _ ->
+           Error
+             (Agent_protocol.Error.create
+                Journal_corrupt
+                ~message:"permission invocation owner is missing or inconsistent"
+                ~retryable:false
+                ())))
   in
   let%bind () = nonnegative "revision" t.counters.revision in
   let%bind () = nonnegative "event sequence" t.counters.event_sequence in

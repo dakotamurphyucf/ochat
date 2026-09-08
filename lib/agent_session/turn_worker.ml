@@ -243,7 +243,7 @@ let permission_request config input ~call_id invocation =
     { id = Agent_protocol.Id.Permission.create ()
     ; session_id = input.Operation_worker.Input.session_id
     ; generation = input.session_generation
-    ; operation_id = input.operation.id
+    ; owner = Operation input.operation.id
     ; call_id
     ; tool_name = invocation.Permission_policy.tool_name
     ; runtime_identity = Some invocation.identity_digest

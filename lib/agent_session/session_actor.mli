@@ -309,6 +309,11 @@ val cancel_operation_with_command_audit
   -> operation_id:Agent_protocol.Id.Operation.t
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
+(** Persist an approval request before waiting outside the actor. Invocation-owned
+    requests require a live actor-dispatched callback, including idle event and
+    observation native calls. Their owner is immutable, stop/callback cancellation
+    resolves pending requests, and a completed callback cannot open a new request.
+    Legacy operation-owned requests retain their existing host behavior. *)
 val request_permission
   :  t
   -> permission:Agent_protocol.Permission.t

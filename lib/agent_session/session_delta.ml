@@ -109,6 +109,27 @@ let rec apply state = function
             Agent_protocol.Id.Attachment.compare value.id attachment_id <> 0)
       }
   | Permission_changed permission ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match
+        List.find state.permissions ~f:(fun previous ->
+          Agent_protocol.Id.Permission.equal previous.id permission.id)
+      with
+      | Some previous
+        when not
+               (Agent_protocol.Permission.equal_owner previous.owner permission.owner
+                && previous.generation = permission.generation
+                && Agent_protocol.Id.Session.equal
+                     previous.session_id
+                     permission.session_id) ->
+        Error
+          (Agent_protocol.Error.create
+             Conflict
+             ~message:"permission ownership is immutable"
+             ~retryable:false
+             ())
+      | _ -> Ok ()
+    in
     Ok
       { state with
         permissions =

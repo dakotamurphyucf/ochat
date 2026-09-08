@@ -217,7 +217,9 @@ lock, and saves runtime requests with the event checkpoint. There is no fallback
 to an unscoped Tool.call callback. Empty queues and unavailable actors return no
 work; errors stop the operation without replay or automatic failed-head retirement.
 Returned runtime requests are already durable and must not be scheduled a second
-time independently of their saved intent.
+time independently of their saved intent. Without configured script-tool services,
+Tool.call returns `invocation.unavailable`; deterministic handler work still uses
+the same durable claim and checkpoint transaction.
 
 An offline compiled-manager/actor/native integration runs two handlers making 51
 calls each, then observes all 102 outcomes, demonstrating that the call budget is
@@ -227,10 +229,40 @@ a mismatched queue head before any native effect. Tests verify actual saved
 outcomes, event lineage, retained scheduling intent, checkpoint agreement, no
 additional provider history, and no invocation of the fallback tool callback.
 
-Idle polling integration for this helper, startup/foreground event ownership,
-changed-checkpoint reconciliation, interactive permissions and normal v1 runtime
-binding remain integration work. The helper
-is exercised through internally installed compiled managers, not public tools.
+`Runtime_owner` uses this helper for internally installed v1 managers, executing
+at most 32 queued events per poll. It applies retained requests through the shared
+event/observation scheduler after each batch, stops the batch on termination, and
+requests another probe after event execution so saved native outcomes can be
+observed even if their wakeup callback failed. Legacy managers retain their
+existing event drain.
+
+Polling and actor admission share the same unsettled-event guard. A running or
+unretired failed/interrupted receipt blocks queued execution for its source and
+generation, including after an observation changes the checkpoint. This avoids
+repeated failed claims without hiding saved native outcomes or retained scheduling
+requests. Failure does not automatically retire the queue head or retry effects.
+
+The compiled-manager/actor/runtime-owner integration test runs 35 tool-using
+events over bounded polls, observes all saved native outcomes despite failed
+wakeups, and checks missing tool services, failure after an effect, rejected event
+checkpoint saves, termination, cancel-stop and external poll cancellation. Both
+cancellation paths preserve durable interruption and leave the owner mutex usable.
+Subsequent observations may update moderator state while the failed event queue
+stays blocked; additional polls cause no effects or checkpoint changes. Native
+calls use event lineage and do not add provider-history items. These are offline
+in-process integrations, not public runtime or process-crash qualification.
+
+Invocation-owned requests use the shared actor permission mechanism during idle
+native calls. Approval, denial, timeout, cancel-stop and cancellation while waiting
+are covered by the compiled-handler/runtime-owner tests. The native invocation's
+scoped identity also feeds shell approval/reviewer ownership selection; ordinary
+legacy requests retain operation ownership. General runtime policy-service
+construction and complete shell/child qualification remain separate work.
+
+Startup/foreground event ownership, changed-checkpoint reconciliation,
+and normal v1 runtime binding remain integration work.
+This path is exercised through internally installed compiled managers, not public
+tools or normal v1 ChatMD construction.
 
 `Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped
 host service. The caller must complete capability and policy admission before
@@ -1034,16 +1066,20 @@ source, wake policy, attempt and one history identity. The session aggregate
 checks ownership, generation and cross-record acknowledgement/result correlation.
 One terminal work item has one delivery owner.
 
-Session state schema 7 adds event-owned invocation lineage. It upgrades schema 6
+Session state schema 8 adds invocation-owned permission requests. It upgrades
+schema 7 while preserving event-owned invocation lineage, schema 6
 without that lineage, schema 5 with
 event execution receipts preserved but no retirements, schema 4 with existing
 extension records preserved, schema 3 with invocation records,
 and schema 2 with empty extension records. Old schemas containing event execution
 records are rejected; schema 5 records containing retirements are also rejected.
-Older schemas cannot contain event-owned invocations.
+Schemas before 7 cannot contain event-owned invocations; schemas before 8 cannot
+contain invocation-owned permissions. The permission JSON codec accepts exactly
+one operation or invocation owner. The S-expression reader accepts the old
+operation-id field, including in legacy snapshots and compaction archives.
 Inconsistent old fields and unknown future
 schemas fail closed. Snapshot, journal and compaction archive restoration apply
-the same version checks. An older binary is not a supported reader of schema 7;
+the same version checks. An older binary is not a supported reader of schema 8;
 retain compatible backups before testing a binary rollback.
 
 The host-internal `Session_actor.commit_extensions` operation atomically commits

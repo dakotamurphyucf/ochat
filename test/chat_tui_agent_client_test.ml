@@ -140,7 +140,8 @@ let permission () : Agent_protocol.Permission.t =
   { id = Agent_protocol.Id.Permission.of_string "per_tui_render" |> protocol_ok
   ; session_id
   ; generation = 0
-  ; operation_id = Agent_protocol.Id.Operation.of_string "op_tui_render" |> protocol_ok
+  ; owner =
+      Operation (Agent_protocol.Id.Operation.of_string "op_tui_render" |> protocol_ok)
   ; call_id = "manual-fork-1"
   ; tool_name = "fork"
   ; runtime_identity = None

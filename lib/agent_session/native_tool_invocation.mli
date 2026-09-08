@@ -8,6 +8,18 @@ type executor =
       -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
 
+(** Fiber-local identity for native policy/approval adapters. This identifies the
+    current actor-dispatched invocation, not authority to approve it. Nested scopes
+    shadow their parent; fibers inheriting the binding and surviving its scope
+    see Expired. Returning to an unbound caller restores Unbound.
+    An expired binding must not fall back to an unrelated active model operation. *)
+type scope =
+  | Unbound
+  | Active of Agent_protocol.Invocation.t
+  | Expired
+
+val current_scope : unit -> scope
+
 (** Common native dispatch for a host-owned scope. Performs the same current
     capability, policy, input and output checks as [run]. In particular, [execute]
     must be a real actor-backed scope, not a direct call to the supplied callback.
