@@ -122,7 +122,8 @@ let dispatch
             (match request.rejection with
              | None -> Passed
              | Some Stream.Tool_dispatch.Invalid_input -> Invalid_input
-             | Some Pre_tool -> Pre_tool_rejected)
+             | Some Pre_tool -> Pre_tool_rejected
+             | Some Pre_tool_failed -> Pre_tool_failed)
         }
     in
     let invocation =
@@ -189,7 +190,9 @@ let dispatch
                 | Invalid_input ->
                   fail
                     "invocation.invalid_input"
-                    "The original tool arguments do not satisfy its input schema.");
+                    "The original tool arguments do not satisfy its input schema."
+                | Pre_tool_failed ->
+                  fail "invocation.pre_tool_failed" "Pre-tool moderation failed.");
           Error "invocation rejected before execution")
         else if
           parse_error

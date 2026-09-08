@@ -29,6 +29,7 @@ module Tool_dispatch : sig
   type rejection =
     | Invalid_input
     | Pre_tool
+    | Pre_tool_failed
 
   type request =
     { kind : Tool_call.Kind.t
@@ -51,6 +52,9 @@ module Tool_dispatch : sig
 
   (** [run] dispatches after pre-tool moderation and canonical call commit.
       Both service callbacks are trusted host code.
+      With a service installed, failed pre-tool scripts produce [Pre_tool_failed]
+      with bounded diagnostics; cancellation still propagates. Without a service,
+      legacy pre-tool error propagation is unchanged.
       Original/final arguments are execution inputs, not display-redacted text.
       [Some] supplies a validated result; [None] selects normal native execution.
       A routed implementation must validate its final target/schema and call

@@ -37,6 +37,7 @@ let setup
       ?(schema = "true")
       ?(initial = "0")
       ?(capabilities = Chat_response.Moderation.Capabilities.default)
+      ?(events = "| _ -> Task.pure(state)")
       body
   =
   let dir = Eio.Stdenv.cwd env in
@@ -45,7 +46,8 @@ let setup
     ^ initial
     ^ "\nlet on_event = fun ctx state event -> match event with\n| `Tool_invoked(p) -> "
     ^ body
-    ^ "\n| _ -> Task.pure(state)"
+    ^ "\n"
+    ^ events
   in
   let loader =
     Source_loader.captured_filesystem ~root:dir ~sources:[ "schema.json", schema ]
@@ -154,6 +156,43 @@ let%test_unit "stateful dedicated tool event commits one result and overlay" =
     assert (List.length (M.identity_snapshot manager |> ok).prepended_items = 1);
     assert (Poly.equal !proposed (Some (M.identity_snapshot manager |> ok)));
     expect "not_dispatched" (call manager result))
+;;
+
+let%test_unit
+    "versioned entry events roll back copied state and buffered effects on failure"
+  =
+  Eio_main.run (fun env ->
+    let manager, _, make =
+      setup
+        env
+        ~initial:"[0]"
+        ~events:
+          {| | `Turn_start ->
+        let ignored = state[0] <- 99 in
+        Task.bind(Turn.prepend_system("uncommitted"), fun ignored ->
+        Task.bind(Runtime.emit(`Null), fun ignored -> Task.fail("entry phase failed")))
+        | _ -> Task.pure(state) |}
+        {|let ignored = state[0] <- state[0] + 1 in
+        Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`Null)),
+          fun ignored -> Task.pure(state))|}
+    in
+    let before = M.identity_snapshot manager |> ok in
+    let subscription = M.subscribe_committed_changes manager ~on_wakeup:ignore in
+    expect
+      "entry phase failed"
+      (M.handle_event_entries
+         manager
+         ~session_id:"entry-phase"
+         ~now_ms:0
+         ~history:[]
+         ~available_tools:[]
+         ~session_meta:`Null
+         ~event:Chat_response.Moderation.Event.Turn_start);
+    assert (Poly.equal before (M.identity_snapshot manager |> ok));
+    assert (List.is_empty (M.drain_committed_changes subscription));
+    ignore (call manager (make ()) |> ok);
+    assert (Poly.equal (state manager) (Session.Snapshot.Array [ Int 1 ]));
+    M.unsubscribe subscription)
 ;;
 
 let%test_unit "unhandled duplicate wrong-id schema and host failures roll back" =

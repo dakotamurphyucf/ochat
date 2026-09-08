@@ -2860,6 +2860,7 @@ let handoff_definition
       ?(schema = "true")
       ?(finish = "Task.pure(state)")
       ?(resolve = "Invocation.resolve(p.context.invocation_id, `Complete(`Null))")
+      ?(moderator_capabilities = Chat_response.Moderation.Capabilities.default)
       env
   =
   let module EC = Chat_response.Extension_compiler in
@@ -2914,7 +2915,7 @@ let handoff_definition
   let manager =
     M.create_entries
       ~artifact:(Option.value_exn artifact)
-      ~capabilities:Chat_response.Moderation.Capabilities.default
+      ~capabilities:moderator_capabilities
       ~allocator
       ()
     |> Result.ok_or_failwith
@@ -2968,10 +2969,22 @@ let%test_unit
     ; `Rewrite_bad
     ; `Rewrite_ok
     ; `Redacted_input
+    ; `Pre_fail
+    ; `Pre_host_exception
+    ; `Pre_invalid_action
+    ; `Pre_custom_fail
     ]
     ~f:(fun mode ->
       let request_count = ref 0 in
       let admitted = ref 0 in
+      let host_calls = ref 0 in
+      let live_snapshot = ref None in
+      let pre_failed =
+        List.mem
+          [ `Pre_fail; `Pre_host_exception; `Pre_invalid_action; `Pre_custom_fail ]
+          mode
+          ~equal:Poly.equal
+      in
       let redirected = Poly.equal mode `Redirect || Poly.equal mode `Redirect_bad in
       let rewritten = Poly.equal mode `Rewrite_bad || Poly.equal mode `Rewrite_ok in
       let invalid_original =
@@ -2993,6 +3006,7 @@ let%test_unit
         Poly.equal mode `Custom_success
         || Poly.equal mode `Pre_reject_custom
         || Poly.equal mode `Custom_invalid
+        || Poly.equal mode `Pre_custom_fail
       in
       let post_fails =
         Poly.equal mode `Post_fail || Poly.equal mode `Pre_reject_post_fail
@@ -3010,7 +3024,23 @@ let%test_unit
                   | _ -> false)))
         ~make_worker:(fun env actor_ready ->
           let events =
-            if invalid_original
+            if pre_failed
+            then
+              "| `Pre_tool_call(c) -> let ignored = state[0] <- 99 in "
+              ^ "Task.bind(Runtime.emit(`String(\"uncommitted\")), fun ignored -> "
+              ^ "Task.bind(Turn.prepend_system(\"uncommitted\"), fun ignored -> "
+              ^ (if Poly.equal mode `Pre_host_exception
+                 then
+                   "Task.bind(Tool.call(\"explode\", `Null), fun ignored -> \
+                    Task.pure(state))"
+                 else if Poly.equal mode `Pre_invalid_action
+                 then
+                   "Task.bind(Tool.reject(\"rejected\"), fun ignored -> \
+                    Task.bind(Tool.redirect(\"counter\", `Null), fun ignored -> \
+                    Task.pure(state)))"
+                 else "Task.fail(\"private diagnostic\")")
+              ^ ")) | _ -> Task.pure(state)"
+            else if invalid_original
             then
               "| `Pre_tool_call(c) -> Task.fail(\"invalid input reached pre handler\") | \
                _ -> Task.pure(state)"
@@ -3029,13 +3059,15 @@ let%test_unit
                     Task.pure(state)))"
                  else "Task.pure(state))")
               ^ (if post_fails
-                 then " | `Post_tool_response(r) -> Task.fail(\"post hook failed\")"
+                 then
+                   " | `Post_tool_response(r) -> let ignored = state[0] <- 99 in \
+                    Task.fail(\"post hook failed\")"
                  else "")
               ^ " | _ -> Task.pure(state)"
             else if Poly.equal mode `Post_fail
             then
-              "| `Post_tool_response(r) -> Task.fail(\"post hook failed\") | _ -> \
-               Task.pure(state)"
+              "| `Post_tool_response(r) -> let ignored = state[0] <- 99 in \
+               Task.fail(\"post hook failed\") | _ -> Task.pure(state)"
             else if redirected
             then
               "| `Pre_tool_call(c) -> Task.bind(Tool.redirect(\"counter\", "
@@ -3046,6 +3078,13 @@ let%test_unit
           let manager, _, definition =
             handoff_definition
               ~events
+              ~moderator_capabilities:
+                { Chat_response.Moderation.Capabilities.default with
+                  on_tool_call =
+                    (fun ~name:_ ~args:_ ->
+                      Int.incr host_calls;
+                      failwith "private diagnostic from host")
+                }
               ~schema:
                 (if
                    redirected
@@ -3076,6 +3115,11 @@ let%test_unit
                  else "Task.pure(state)")
               env
           in
+          live_snapshot
+          := Some
+               (fun () ->
+                 Chat_response.Moderator_manager.identity_snapshot manager
+                 |> Result.ok_or_failwith);
           Agent_session.Operation_worker.create ~run:(fun ~sw ~input caps ->
             let actor = Eio.Promise.await actor_ready in
             let state = Agent_session.Session_actor.state actor |> protocol_ok in
@@ -3268,6 +3312,8 @@ let%test_unit
                 then Agent_protocol.Invocation.Invalid_input
                 else if pre_rejected
                 then Pre_tool_rejected
+                else if pre_failed
+                then Pre_tool_failed
                 else Passed));
            let expected_count =
              if
@@ -3289,6 +3335,13 @@ let%test_unit
                  (Sexp.of_string encoded)
              | _ -> assert false
            in
+           let live = (Option.value_exn !live_snapshot) () in
+           assert (Poly.equal live.current_state saved_snapshot.current_state);
+           assert (!host_calls = if Poly.equal mode `Pre_host_exception then 1 else 0);
+           if pre_failed
+           then (
+             assert (List.is_empty live.prepended_items);
+             assert (List.is_empty live.queued_internal_events));
            assert (
              Poly.equal
                saved_snapshot.current_state
@@ -3323,6 +3376,10 @@ let%test_unit
                  | `Invalid_output -> "invocation.invalid_output"
                  | `Forged_error -> "invocation.handler_failed"
                  | `Result_rejected -> "invocation.commit_failed"
+                 | `Pre_fail
+                 | `Pre_host_exception
+                 | `Pre_invalid_action
+                 | `Pre_custom_fail -> "invocation.pre_tool_failed"
                  | `Pre_reject
                  | `Pre_reject_end
                  | `Pre_reject_post_fail
@@ -3347,6 +3404,7 @@ let%test_unit
              =
              if
                pre_rejected
+               || pre_failed
                || invalid_original
                || Poly.equal mode `Rewrite_bad
                || Poly.equal mode `Redirect_bad

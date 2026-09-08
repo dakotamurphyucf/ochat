@@ -723,6 +723,22 @@ let committed_outcome (t : t) : (Moderation.Outcome.t option, string) result =
     Some outcome
 ;;
 
+let handle_runtime_event ?prepare_commit t ~context ~event =
+  match t.artifact.extension with
+  | None -> Runtime.handle_event ?prepare_commit t.runtime ~context ~event
+  | Some (script, _) ->
+    let snapshot = Moderator_invocation.snapshot_state ~limits:script.limits in
+    Runtime.handle_event
+      ?prepare_commit
+      t.runtime
+      ~context
+      ~event
+      ~limits:{ fuel = script.limits.fuel; max_tasks = script.limits.max_tasks }
+      ~copy_state:(fun value ->
+        Result.bind (snapshot value) ~f:Value_codec.Snapshot.to_value)
+      ~validate_state:(fun value -> Result.map (snapshot value) ~f:(fun _ -> ()))
+;;
+
 let handle_event_unlocked
       (t : t)
       ~session_id
@@ -749,13 +765,33 @@ let handle_event_unlocked
       ~session_meta
   in
   let open Result.Let_syntax in
+  let prepared_outcome = ref None in
+  let prepare_commit ~local_effects =
+    let%bind decoded = decode_effects t local_effects in
+    let%bind outcome = Moderation.Outcome.of_runtime_effects decoded in
+    let%map install =
+      match t.allocator with
+      | None -> Ok (fun () -> List.iter outcome.overlay_ops ~f:(apply_overlay_op t))
+      | Some _ ->
+        prepare_identity_ops t ~phase:(Moderation.Event.phase event) outcome.overlay_ops
+    in
+    fun () ->
+      install ();
+      t.processed_effect_count <- t.processed_effect_count + List.length local_effects;
+      prepared_outcome := Some outcome
+  in
   let%bind () =
-    Runtime.handle_event
-      t.runtime
+    handle_runtime_event
+      ?prepare_commit:(Option.map t.artifact.extension ~f:(fun _ -> prepare_commit))
+      t
       ~context:(Moderation.Context.to_value context)
       ~event:(Moderation.Event.to_value event)
   in
-  let%map outcome = committed_outcome t in
+  let%map outcome =
+    match t.artifact.extension with
+    | Some _ -> Ok !prepared_outcome
+    | None -> committed_outcome t
+  in
   let outcome = Option.value outcome ~default:Moderation.Outcome.empty in
   Debug_log.emitf
     "[moderator-manager] handle_event_ok session=%s overlay_ops=%d runtime_requests=%d \
@@ -813,9 +849,9 @@ let handle_event_entries_unlocked
       outcome := prepared
   in
   let%map () =
-    Runtime.handle_event
+    handle_runtime_event
       ~prepare_commit
-      t.runtime
+      t
       ~context:(Moderation.Context.to_value context)
       ~event:(Moderation.Event.to_value event)
   in

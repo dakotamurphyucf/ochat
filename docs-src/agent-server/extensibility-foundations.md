@@ -179,7 +179,7 @@ redaction without pretending the displayed text was the actual execution input.
 This audit record adds no second copy of the plaintext arguments.
 
 Preparation records whether original-input validation/pre-tool moderation passed,
-original input was rejected, or the pre-tool handler rejected the request. Passing
+original input was rejected, or the pre-tool handler rejected or failed the request. Passing
 preparation does not prove final authorization or handler execution. A preparation
 rejection cannot change the original target/arguments or resolve successfully.
 Host cancellation and failure outcomes remain possible.
@@ -232,6 +232,21 @@ declarations report an unavailable execution service; they never fall through to
 same-named native runner.
 Transient fork calls cannot use the root actor's invocation ownership.
 
+With the internal dispatch service installed, pre-tool script errors, host
+exceptions and invalid moderation outcomes produce `invocation.pre_tool_failed`.
+The original call, terminal result and failure preparation are retained without
+running the requested implementation or execution authorizer. Raw diagnostics are
+not exposed, and cancellation still propagates to worker cleanup. Legacy streams
+without the service retain their existing error propagation.
+
+All ordinary extensibility-v1 moderator events now validate and defensively copy
+serializable state, apply their declared task/fuel limits, and validate buffered
+effects before committing. This includes both item and history-entry manager APIs.
+A failed pre/post handler restores mutated arrays and discards buffered overlays
+and internal events. External effects and mutable globals are not rolled back or
+automatically retried. Task limits do not yet interrupt unproductive pure
+evaluation; that remains part of the standalone execution work.
+
 Moderator invocation execution rejects legacy UI suspension before a continuation
 is installed. A rejected suspension restores copied state, discards buffered
 effects and leaves no pending request that could block or resume a failed call.
@@ -263,6 +278,9 @@ Separate rewrite cases prove final validation still rejects invalid rewritten
 arguments and permits valid ones.
 Pre-tool rejection also has a durable invocation and publication receipt, with
 function/custom coverage, post-hook failure preservation and session termination.
+Pre-tool failure cases mutate state and buffer effects before failing, raising a
+host exception or returning conflicting decisions. They verify the durable failure,
+unchanged live and persisted state, discarded buffers and no execution retry.
 Additional cases verify exact terminal error codes and prevent script diagnostics
 from impersonating host classifications. Concurrent adapter tests revoke authority
 while a second call queues behind an active handler, cancel queued and active

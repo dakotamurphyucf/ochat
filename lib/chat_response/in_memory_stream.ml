@@ -14,6 +14,7 @@ module Tool_dispatch = struct
   type rejection =
     | Invalid_input
     | Pre_tool
+    | Pre_tool_failed
 
   type request =
     { kind : Tool_call.Kind.t
@@ -1202,36 +1203,49 @@ let dispatch_tool
 ;;
 
 let prepare_tool_call (c : ctx) ~hist ~kind ~name ~payload ~call_id ~item_id =
+  let reject reason message =
+    ( { call_item = Tool_call.call_item ~kind ~name ~payload ~call_id ~id:(Some item_id)
+      ; kind
+      ; name
+      ; payload
+      ; synthetic_result = Some (Output.Text message)
+      ; runtime_requests = []
+      }
+    , Some reason )
+  in
   let validation =
     match c.dispatch_tool with
     | None -> Ok ()
     | Some service -> service.validate_original ~kind ~name ~payload
   in
   match validation with
-  | Error _ ->
-    ( { call_item = Tool_call.call_item ~kind ~name ~payload ~call_id ~id:(Some item_id)
-      ; kind
-      ; name
-      ; payload
-      ; synthetic_result = Some (Output.Text "Invalid tool arguments.")
-      ; runtime_requests = []
-      }
-    , Some Tool_dispatch.Invalid_input )
+  | Error _ -> reject Tool_dispatch.Invalid_input "Invalid tool arguments."
   | Ok () ->
-    let moderated =
-      moderate_tool_call
-        ~moderator:c.moderator
-        ~available_tools:c.tools
-        ~now_ms:(now_ms c.env)
-        ~history:(History_entry.items hist)
-        ~kind
-        ~name
-        ~payload
-        ~call_id
-        ~item_id:(Some item_id)
-      |> Result.ok_or_failwith
+    let result =
+      try
+        moderate_tool_call
+          ~moderator:c.moderator
+          ~available_tools:c.tools
+          ~now_ms:(now_ms c.env)
+          ~history:(History_entry.items hist)
+          ~kind
+          ~name
+          ~payload
+          ~call_id
+          ~item_id:(Some item_id)
+      with
+      | Eio.Cancel.Cancelled _ as exn -> raise exn
+      | exn ->
+        if Option.is_none c.dispatch_tool
+        then raise exn
+        else Error "pre-tool host failure"
     in
-    moderated, Option.map moderated.synthetic_result ~f:(fun _ -> Tool_dispatch.Pre_tool)
+    (match result with
+     | Error message when Option.is_none c.dispatch_tool -> failwith message
+     | Error _ -> reject Tool_dispatch.Pre_tool_failed "Pre-tool moderation failed."
+     | Ok moderated ->
+       ( moderated
+       , Option.map moderated.synthetic_result ~f:(fun _ -> Tool_dispatch.Pre_tool) ))
 ;;
 
 let schedule_function_done

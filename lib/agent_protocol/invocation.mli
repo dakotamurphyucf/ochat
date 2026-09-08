@@ -73,6 +73,7 @@ type preparation =
   | Passed
   | Invalid_input
   | Pre_tool_rejected
+  | Pre_tool_failed
 [@@deriving sexp]
 
 (** Host-retained routing provenance. Fingerprints describe exact raw bytes;

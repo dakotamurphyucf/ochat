@@ -459,5 +459,11 @@ let%test_unit "routing rejects malformed fingerprints and successful denied prep
           ; details = `Null
           })
      |> get);
-  ignore (I.cancel inv ~reason:"cancelled" |> get)
+  ignore (I.cancel inv ~reason:"cancelled" |> get);
+  List.iter [ I.Pre_tool_rejected; Pre_tool_failed ] ~f:(fun preparation ->
+    let inv = make { routing with preparation } |> get |> I.dispatch |> get in
+    assert (Result.is_error (resolve inv (Complete `Null)));
+    let cancelled = I.cancel inv ~reason:"cancelled" |> get in
+    let restored = I.of_json (I.to_json cancelled) |> get in
+    assert (Sexp.equal (I.sexp_of_t cancelled) (I.sexp_of_t restored)))
 ;;

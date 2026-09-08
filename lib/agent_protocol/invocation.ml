@@ -70,6 +70,7 @@ type preparation =
   | Passed
   | Invalid_input
   | Pre_tool_rejected
+  | Pre_tool_failed
 [@@deriving sexp]
 
 type routing =
@@ -202,7 +203,7 @@ let validate t =
       in
       (match routing.preparation with
        | Passed -> Ok ()
-       | Invalid_input | Pre_tool_rejected ->
+       | Invalid_input | Pre_tool_rejected | Pre_tool_failed ->
          if
            not
              (String.equal routing.original_name t.context.tool_name
@@ -458,6 +459,7 @@ let preparation_values =
   [ "passed", Passed
   ; "invalid_input", Invalid_input
   ; "pre_tool_rejected", Pre_tool_rejected
+  ; "pre_tool_failed", Pre_tool_failed
   ]
 ;;
 

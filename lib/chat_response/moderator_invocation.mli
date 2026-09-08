@@ -39,6 +39,13 @@ type failure =
   | Suspended
   | Handler_failed
 
+(** Bounded serializable state snapshot shared by all extensibility-v1 event
+    phases. Limits must come from a validated declaration. *)
+val snapshot_state
+  :  limits:Chatmd_shell_spec.Chatmd_script_spec.limits
+  -> L.value
+  -> (Chatml.Chatml_value_codec.Snapshot.t, string) result
+
 (** Run Tool_invoked on an already borrowed, serialized moderator runtime.
     Exactly one resolution is validated before the runtime commits state/effects.
     [prepare_commit] receives the prospective runtime state/queue/halt and

@@ -335,6 +335,24 @@ let decode t value =
   else Ok outcome
 ;;
 
+let snapshot_state ~(limits : S.limits) value =
+  let open Result.Let_syntax in
+  let%bind () =
+    check_value
+      ~code:"invocation.invalid_state"
+      ~max_depth:limits.max_depth
+      ~max_array_items:limits.max_array_items
+      ~max_bytes:(bytes limits.max_value_bytes)
+      value
+  in
+  let%bind snapshot = V.Snapshot.of_value value in
+  if
+    String.length (Jsonaf.to_string (V.Snapshot.to_jsonaf snapshot))
+    > bytes limits.max_value_bytes
+  then error "invocation.state_limit" "encoded moderator state exceeds its byte limit"
+  else Ok snapshot
+;;
+
 type failure =
   | Unhandled
   | Duplicate_resolution
@@ -364,24 +382,8 @@ let run_impl t ~runtime ~context ~prepare_commit ~failure_kind =
            "dispatch requires the owning session and tool_invoked phase")
     | _ -> error "invocation.wrong_context" "expected moderator context"
   in
-  let state_snapshot value =
-    let%bind () =
-      check_value
-        ~code:"invocation.invalid_state"
-        ~max_depth:t.limits.max_depth
-        ~max_array_items:t.limits.max_array_items
-        ~max_bytes:(bytes t.limits.max_value_bytes)
-        value
-    in
-    let%bind snapshot = V.Snapshot.of_value value in
-    if
-      String.length (Jsonaf.to_string (V.Snapshot.to_jsonaf snapshot))
-      > bytes t.limits.max_value_bytes
-    then error "invocation.state_limit" "encoded moderator state exceeds its byte limit"
-    else Ok snapshot
-  in
   let checked_state value =
-    state_snapshot value
+    snapshot_state ~limits:t.limits value
     |> Result.map_error ~f:(fun message ->
       failure_kind := Invalid_state;
       message)
