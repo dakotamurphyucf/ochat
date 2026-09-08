@@ -130,15 +130,73 @@ published website assets or a shared backup.
 
 ## Two-shard follow-up
 
-The follow-up implements two shards per environment while preserving all three
-engines, two workers per shard, zero retries and the exact prepared artifact.
-Discovery and execution evidence must cover every planned test exactly once;
-all four browser jobs and both qualification jobs participate in the gate.
-Local policy tests exercise missing, duplicate, failed, cancelled, stale and
-partially executed evidence. A real Playwright fixture exercises discovery,
-two shard reporters, explicit skips and blob merging without launching browsers.
+[PR #26](https://github.com/dakotamurphyucf/ochat/pull/26) implements two browser
+shards per environment while preserving all three engines, two workers per shard,
+zero retries and the exact prepared artifact. Discovery and execution evidence
+must cover every planned test exactly once; all four browser jobs and both
+qualification jobs participate in the required gate. The production verifier
+also requires the complete bound shard evidence.
 
-Hosted qualification and measured timing results are pending. Compare against
-the prior mixed-cache full PR (748-second gate, 2,269 validation runner-seconds,
-about 9.3 minutes per browser suite); do not treat cold OCaml setup or runner
-queue time as a browser-sharding result.
+Local validation passed 87 combined CI policy and website tests, including
+missing, duplicate, failed, cancelled, stale and partially executed evidence.
+A real Playwright fixture exercises discovery, two shard reporters, explicit
+skips and blob merging. Isolated Astro checking, the 125-page production build,
+and a Chromium smoke check using only restored output and fixture reports passed.
+Actionlint passed. The smoke check removed generated docs and Astro metadata to
+verify that shards can consume a prepared artifact without regenerating content.
+
+### Full PR qualification
+
+[Run 34194852377](https://github.com/dakotamurphyucf/ochat/actions/runs/34194852377)
+qualified source `97bf3f2718f62a943dd2917b7023ab107fb52f45`. Both environments
+recorded **259 passing tests and two existing non-Chromium clipboard skips**,
+covering 261 unique planned tests each. All four shards, both report mergers,
+normal framework tests, E2E, semantics and the required gate passed. Downloaded
+reports were independently reconciled, and exact production-artifact verification
+passed before the normal protected merge.
+
+| Measurement | Previous full PR 34191242088 | Two-shard PR 34194852377 |
+| --- | --- | --- |
+| Time to required gate | 748 s (12m28s) | 596 s (9m56s) |
+| Summed validation runner time | 2,269 s | 2,237 s |
+| Preview browser execution | 562 s workflow step | 248.48 / 201.79 s Playwright shard durations |
+| Production browser execution | 559 s workflow step | 247.23 / 320.06 s Playwright shard durations |
+| Project dependency cache | Framework hits, semantics miss | All three jobs hit |
+
+The gate was 152 seconds (about 20%) faster in this run. The slowest browser
+execution step fell from 562 seconds to 322 seconds (about 43%); its Playwright
+reported duration was 320.06 seconds. This is not a controlled cache comparison:
+the new run had all three dependency caches warm, while the baseline had mixed
+caches. Runner hardware, queue time and test duration also vary. Summed runner
+time includes build preparation, browser setup/transfers and report-merging jobs;
+it was slightly lower in this sample, not a promise that sharding always costs
+less. No test retries or failures were needed for this qualification.
+
+### Main deployment qualification
+
+[Main run 34195660188](https://github.com/dakotamurphyucf/ochat/actions/runs/34195660188)
+qualified merge `94b7d00d1d381fdb6ab816db7b79164fe1680c09` and successfully
+published its same-run artifact to `https://ochatlabs.com`. All selected jobs,
+all 3,594 hosted checks, and 27 main/protection/deployment-policy checks passed.
+Both environments again had 259 passing browser tests and two existing skips,
+with no retries. Downloaded shard reports, build evidence, semantic reports and
+production qualification were independently reconciled before closeout.
+
+The main gate took **627 seconds (10m27s)**, with **2,740 summed validation
+runner-seconds**. Preview shards took 244.00 / 315.23 seconds; production shards
+took 246.29 / 327.41 seconds. Normal-framework and semantic dependencies were
+cache hits; E2E dependencies were a miss and rebuilt successfully. This second
+sample confirms the browser reduction while showing why cold toolchain setup
+and total workflow time must be measured separately.
+
+The published artifact SHA-256 is
+`35361560396190c22780dc6664444b340280cc476a267c82e824eeb28b12b382`.
+Static Worker version: `af55ded8-d328-4d6b-9f13-69d927c5d7a1`.
+Redirect Worker version: `08667b41-673e-412d-be15-0dbd33237aa9`.
+The follow-up measurement record changes maintainer documentation only; selected
+skip verification retains evidence that browser and qualification jobs can skip
+alongside other unnecessary checks without publishing another website build.
+
+Keep two shards per environment. Collect further ordinary-run samples before
+increasing concurrency. Failure traces and merged HTML/JSON reports are retained
+as described in [CI coverage and maintenance](ci-enforcement.md).
