@@ -2017,18 +2017,20 @@ Ordered tasks:
 
 Ordered tasks:
 
-- [ ] **P11.01 — Confirm the domain purchase details.** Check actual availability, full purchase/renewal price, required term, and owning account for the selected candidate.
+- [x] **P11.01 — Confirm the domain purchase details.** Check actual availability, full purchase/renewal price, required term, and owning account for the selected candidate.
 - [ ] **P11.02 — Register or connect the domain.** Complete the intended registrar operation and required ownership/email verification; record renewal ownership and DNS configuration.
-- [ ] **P11.03 — Attach the production custom domain.** Follow the hosting platform's supported flow, verify certificates, and establish canonical-host redirects where applicable.
-- [ ] **P11.04 — Finalize production configuration.** Set the owned site origin, regenerate canonical metadata and sitemaps, remove preview noindex behavior, and run the checks affected by these changes.
-- [ ] **P11.05 — Publish the verified production artifact.** Use the designated deployment owner and retain the prior known-good artifact and revision for rollback.
-- [ ] **P11.06 — Verify the live site.** Test homepage, first-agent path, representative nested docs, search, downloads, optional API content, alternate-host redirects, and real 404 responses over HTTPS.
-- [ ] **P11.07 — Update GitHub entry points.** Set the repository Website field, add the prominent README docs link, and verify reciprocal repository links and source-edit destinations.
-- [ ] **P11.08 — Record Milestone D.** Capture the canonical URL, deployment revision, live verification results, ownership details, and any intentionally deferred features.
+- [x] **P11.03 — Attach the production custom domain.** Follow the hosting platform's supported flow, verify certificates, and establish canonical-host redirects where applicable.
+- [x] **P11.04 — Finalize production configuration.** Set the owned site origin, regenerate canonical metadata and sitemaps, remove preview noindex behavior, and run the checks affected by these changes.
+- [x] **P11.05 — Publish the verified production artifact.** Use the designated deployment owner and retain the prior known-good artifact and revision for rollback.
+- [x] **P11.06 — Verify the live site.** Test homepage, first-agent path, representative nested docs, search, downloads, optional API content, alternate-host redirects, and real 404 responses over HTTPS.
+- [x] **P11.07 — Update GitHub entry points.** Set the repository Website field, add the prominent README docs link, and verify reciprocal repository links and source-edit destinations.
+- [x] **P11.08 — Record Milestone D.** Capture the canonical URL, deployment revision, live verification results, ownership details, and any intentionally deferred features.
 
 **Deliverables:** Working custom-domain website, updated GitHub discovery links, live verification record, and recoverable production deployment.
 
 **Completion gate:** A visitor can reach the live site from GitHub and complete the first-agent reading path. The domain, canonical metadata, search, redirects, and published artifacts agree. A build on a temporary hostname alone does not complete this phase.
+
+**P11 launch checkpoint (2026-09-08 UTC):** Milestone D's public launch is verified at https://ochatlabs.com. PR #21 merged at `b859aef70312a0f2553998a024f3c98561906106`; main run 34182707554 passed the release gate and deployment attempt 2 passed 3,601 hosted assertions. The failed first domain attachment was resolved by removing conflicting DNS records and retrying only deployment with the same qualified artifact. Final live checks passed 21 flows across three browsers, including inline ChatMD, search and first-agent onboarding. GitHub's Website field and README entry points are updated. P11.02 remains administratively open only for unconfirmed registrar contact-email verification; domain registration, DNS connection and HTTPS are verified. The $45 renewal quote's period remains unspecified. P09 API hosting and P10.03 manual accessibility remain deferred. An intermittent initial WebKit prefetch diagnostic is retained for P12 monitoring; subsequent diagnostic and uninstrumented browser checks passed unchanged bytes. See [the launch record](p11-launch.md) for release/version IDs, recovery baseline and evidence. Tasks 17–19 remain future gate enhancements.
 
 ### 19.20 Phase P12 — Complete maintenance handoff and post-launch follow-through
 
@@ -2038,13 +2040,13 @@ Ordered tasks:
 
 Ordered tasks:
 
-- [ ] **P12.01 — Finish contributor documentation.** Explain where article prose, homepage content, metadata, navigation, examples, assets, and redirect rules are edited.
-- [ ] **P12.02 — Document routine changes.** Cover adding/removing a page, changing a route, updating an example, upgrading dependencies, and regenerating optional API output.
-- [ ] **P12.03 — Validate a contributor workflow.** From a clean checkout, edit one source page, preview it, run relevant checks, and confirm the source-edit link points to the right file.
-- [ ] **P12.04 — Finalize operational ownership.** Record domain renewal, account recovery ownership, deployment responsibility, and rollback instructions without putting credentials in repository documentation.
+- [x] **P12.01 — Finish contributor documentation.** Explain where article prose, homepage content, metadata, navigation, examples, assets, and redirect rules are edited.
+- [x] **P12.02 — Document routine changes.** Cover adding/removing a page, changing a route, updating an example, upgrading dependencies, and regenerating optional API output.
+- [x] **P12.03 — Validate a contributor workflow.** From a clean checkout, edit one source page, preview it, run relevant checks, and confirm the source-edit link points to the right file.
+- [x] **P12.04 — Finalize operational ownership.** Record domain renewal, account recovery ownership, deployment responsibility, and rollback instructions without putting credentials in repository documentation.
 - [ ] **P12.05 — Check initial production behavior.** Inspect available deployment/error evidence and revisit principal routes, search, downloads, and indexing headers after launch; fix concrete defects found.
-- [ ] **P12.06 — Create a prioritized follow-up backlog.** Carry forward specific deferred pages, optional API work, search limitations, accessibility findings, and media improvements with their rationale.
-- [ ] **P12.07 — Schedule appropriate later reviews.** Assign ownership for content freshness, external-link checks, framework upgrades, and a later usability/performance review when useful traffic or feedback exists.
+- [x] **P12.06 — Create a prioritized follow-up backlog.** Carry forward specific deferred pages, optional API work, search limitations, accessibility findings, and media improvements with their rationale.
+- [x] **P12.07 — Schedule appropriate later reviews.** Assign ownership for content freshness, external-link checks, framework upgrades, and a later usability/performance review when useful traffic or feedback exists.
 - [ ] **P12.08 — Close the implementation record.** Mark completed phases with evidence, retain explicit deferred scope, and document the final operating configuration. Update the persistent memory file with the deployed revision, remaining follow-ups, and links to the permanent maintenance documentation.
 
 **Deliverables:** Complete website development/operations guide, demonstrated author workflow, initial production review, and an owned follow-up backlog.
@@ -2052,6 +2054,8 @@ Ordered tasks:
 **Completion gate:** Another contributor can update a page without editing generated output or discovering undocumented setup. Required launch work is finished, operational ownership is clear, and remaining enhancements are explicitly tracked.
 
 **Timing note:** Checks requiring future traffic or a later observation period remain scheduled follow-up work. Do not mark future observations as completed during the launch session.
+
+**P12 implementation checkpoint:** Contributor documentation, routine workflows, clean-checkout exercise, operational ownership, prioritized backlog and dated future reviews are complete. The initial production review found readiness-loop and WebKit prefetch issues; fixes pass local checks and are being qualified through the protected publication workflow. P12.05/.08 remain open until publication/live verification and the outstanding P11.02 registrar confirmation are resolved. See [the maintenance handoff](p12-handoff.md); future observations and deferred API/manual-accessibility work are not claimed complete.
 
 ### 19.21 Phase completion record template
 

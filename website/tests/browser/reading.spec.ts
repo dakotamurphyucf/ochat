@@ -2,6 +2,37 @@ import { test, expect } from '@playwright/test';
 
 const routes = ['/', '/docs/start/first-agent/', '/docs/reference/chatml/'];
 
+test('onboarding links navigate without speculative document requests', async ({
+  page,
+}) => {
+  const speculative: string[] = [];
+  const errors: string[] = [];
+  page.on('pageerror', (error) => errors.push(error.message));
+  page.on('request', (request) => {
+    if (
+      new URL(request.url()).pathname.startsWith('/docs/') &&
+      ['fetch', 'xhr'].includes(request.resourceType())
+    )
+      speculative.push(request.url());
+  });
+  await page.goto('/docs/start/installation/');
+  const next = page.getByRole('link', { name: /Next.*Build troubleshooting/ });
+  await next.hover();
+  await next.focus();
+  // Allow the former hover/focus prefetch delay to expire before navigating.
+  await page.waitForTimeout(300);
+  expect(speculative).toEqual([]);
+  await next.click();
+  await page
+    .getByRole('link', { name: /Next.*Run your first local agent/ })
+    .click();
+  await expect(page.getByRole('heading', { level: 1 })).toHaveText(
+    'Run your first local agent',
+  );
+  expect(speculative).toEqual([]);
+  expect(errors).toEqual([]);
+});
+
 test('skip links move keyboard navigation into the main content', async ({
   page,
   browserName,

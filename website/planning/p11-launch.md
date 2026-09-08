@@ -1,9 +1,20 @@
 # P11 production launch
 
-Implementation target: **https://ochatlabs.com**, with www redirecting to the
-HTTPS apex. Production deployment is pending qualification and the first main
-publish. This record does not claim that an unperformed live check passed.
-The deployment history and immutable per-run evidence are available from the
+**Public launch verified:** https://ochatlabs.com, with www redirecting to the
+HTTPS apex. PR #21 merged normally at revision
+`b859aef70312a0f2553998a024f3c98561906106`.
+[Main run 34182707554](https://github.com/dakotamurphyucf/ochat/actions/runs/34182707554)
+passed all release checks; deployment attempt 2 published and verified the site
+on 2026-09-08 UTC (2026-09-07 CDT). GitHub's repository Website field and README
+now point to the owned domain. Milestone D's public visitor path is verified.
+
+The first deployment uploaded the static Worker but Cloudflare rejected the
+custom-domain attachment with error 100117. The user removed the conflicting
+apex A records (`13.248.243.5`, `76.223.105.230`) and www CNAME, preserving other
+DNS records. Only the failed deployment job was rerun; it reused the original
+passing checks and retained artifact without rebuilding.
+
+The immutable per-run evidence is available from the
 [Website workflow](https://github.com/dakotamurphyucf/ochat/actions/workflows/website.yml)
 and [production environment](https://github.com/dakotamurphyucf/ochat/deployments?environment=production).
 
@@ -68,6 +79,33 @@ cover onboarding, search, inline source reading and downloads. Final version IDs
 artifact hashes and results belong in the per-run reports and the persistent
 local record at `scratch/ochat-website-evidence/p11/closeout.json`.
 
-The GitHub repository Website field is updated after live verification; README
-entry points are included in this change. The full Ochat normal/E2E gate remains
-separate todo item 17, not a prerequisite added silently to P11.
+## Verified production release
+
+- Artifact SHA256: `304b0057bdecf2153d2099ed216124c69301ec2ce3866a3c61203270450b5182`.
+- Main Worker version: `2fe02ab9-1cc4-41ea-b0d9-d4bd94b23d19`; deployment `e28cb083-aca9-473a-b035-d07a4a1ee945`.
+- www Worker version: `1adc035f-ce24-4290-90bf-c14d024a730d`; deployment `e6b52ccd-f9ea-48d0-8c12-9d46331734d5`.
+- Both CI environments: 71 unit tests and zero Astro diagnostics; 256 browser passes and two existing clipboard skips each. The semantic gate passed 308 pages/38 methods; both search and performance gates passed.
+- Live hosting: 3,601 assertions passed for retained bytes, indexing, caching, MIME types, real 404s and HTTP/www canonical redirects. Initial certificate readiness failures were recorded before successful verification. Both public hostnames have trusted HTTPS certificates.
+- Live browsers: 21 checks passed across Chromium, Firefox and WebKit, covering onboarding order, search, mobile overflow, committed source links, inline ChatMD without JavaScript, explicit downloads and 404s.
+- GitHub: 18 post-merge policy checks passed. Website field, README links, reciprocal homepage repository link and representative exact-revision source destinations verified.
+
+The first live browser smoke run reported an intermittent WebKit prefetch
+access-control error during rapid navigation. Inspection found Astro already
+catches prefetch failures. An instrumented WebKit run and a full uninstrumented
+three-browser rerun passed against the unchanged artifact. Keep the initial
+report for P12 monitoring; no application or upstream fix is claimed.
+
+The first partial upload is not a previously live, verified production release.
+The qualified artifact above is the first public recovery baseline; retain its
+archive and version IDs beyond GitHub's 90-day artifact retention if needed.
+
+Registrar contact-email verification and the renewal quote's period remain
+owner-managed administrative follow-ups; neither is claimed independently
+verified. Domain connection, certificates and public website operation are
+verified. P11.02's contact-email confirmation remains open in the task checklist.
+The API-hosting and manual-accessibility deferrals are unchanged.
+
+Follow-up tasks in `scratch/todo.md`: 17 adds framework normal/E2E coverage,
+18 selects checks/deployments by changed inputs, and 19 improves workflow speed.
+These changes were not implemented as part of launch. The public site currently
+uses the full gate and automatic deployment on passing main runs.

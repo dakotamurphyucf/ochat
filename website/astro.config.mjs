@@ -22,6 +22,9 @@ export default defineConfig({
   site: origin,
   markdown: { processor: unified({ rehypePlugins: [readingAccessibility] }) },
   output: 'static',
+  // Starlight otherwise enables speculative fetches on link hover/focus.
+  // Keep native navigation: cancelled prefetches report errors in WebKit.
+  prefetch: false,
   trailingSlash: 'always',
   publicDir: './.generated/public',
   integrations: [
