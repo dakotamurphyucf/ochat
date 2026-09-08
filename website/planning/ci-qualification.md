@@ -77,7 +77,13 @@ selected framework, semantics, website and deployment for the actual merge.
 Its deployment lookup found successful production revision
 `077b00f905cb4ac61608294b35acd89a7a42a679`, with no fallback, and included the
 unshipped input diff. Full main qualification and publication are in progress.
-The final maintainer-only PR/main selection probe follows successful publication.
+The maintainer-only [PR #25](https://github.com/dakotamurphyucf/ochat/pull/25)
+changes this qualification record. Its first
+[run 34192361126](https://github.com/dakotamurphyucf/ochat/actions/runs/34192361126)
+completed the required gate in 28 seconds (22 summed runner-seconds). Detection
+selected no heavy jobs, without fallback; `changes` and `release-gate` passed,
+and framework, semantics, website and publication explicitly skipped. The main
+push probe follows successful publication of the framework changes.
 
 Manual `validate`, `cold`, and main-only `redeploy` modes and the weekly cold audit
 are configured. Policy tests cover their selection; the actual publisher entry
