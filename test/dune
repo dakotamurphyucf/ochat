@@ -750,7 +750,7 @@
 (library
  (name agent_session_test)
  (modules agent_session_test)
- (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_session)
+ (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.agent_server)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

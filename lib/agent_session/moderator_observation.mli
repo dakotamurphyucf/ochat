@@ -45,7 +45,8 @@ val drain
     the returned requests independently. The host must wake the idle drain and
     supply an appropriately scoped [on_tool_call] before exposing tool effects.
     Unavailable sessions return no work. This does not install normal runtime
-    binding or a follow-up consumer. [claim] must be the actor's scoped
+    binding or a follow-up consumer itself; [Runtime_owner] supplies that idle
+    integration for an installed v1 manager. [claim] must be the actor's scoped
     [with_idle_moderator_observation] operation with its observer bound. Passing
     it explicitly keeps the drain independent of runtime construction. *)
 val drain_idle

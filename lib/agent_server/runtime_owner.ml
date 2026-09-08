@@ -149,6 +149,54 @@ let drain_loaded_idle_moderator t runtime =
      | Error failure -> fail_idle_moderator t failure)
 ;;
 
+let pending_observation state observer =
+  List.exists state.Agent_session.Session_state.invocations ~f:(fun invocation ->
+    invocation.context.generation = state.identity.generation
+    && Agent_protocol.Id.Session.equal
+         invocation.context.session_id
+         state.identity.session_id
+    &&
+    match invocation.observation, invocation.status with
+    | Some { observer = owner; status = Awaiting; _ }, (Resolved _ | Published _) ->
+      Agent_protocol.Invocation.equal_observer owner observer
+    | _ -> false)
+;;
+
+let drain_loaded_observations t runtime =
+  let open Result.Let_syntax in
+  match
+    Option.bind runtime.Agent_session.Runtime_builder.moderator_manager ~f:(fun manager ->
+      Option.map
+        (Chat_response.Moderator_manager.invocation_observer manager)
+        ~f:(fun observer -> manager, observer))
+  with
+  | None -> Ok false
+  | Some (manager, observer) ->
+    let history = ref [] in
+    let%map drain =
+      Agent_session.Moderator_observation.drain_idle
+        ~claim:(fun handle ->
+          Agent_session.Session_actor.with_idle_moderator_observation
+            t.actor
+            ~observer
+            (fun ~observing ~commit ->
+               let%bind state = Agent_session.Session_actor.state t.actor in
+               let%bind entries =
+                 Agent_session.History_codec.all_of_protocol
+                   state.conversation.canonical_history
+               in
+               history := entries;
+               handle ~observing ~commit))
+        ~manager
+        ~history:(fun () -> !history)
+        ~available_tools:runtime.moderator_tools
+        ~session_meta:`Null
+        ~now:Agent_protocol.Timestamp.now
+        ()
+    in
+    drain.budget_exhausted
+;;
+
 let snapshot_has_pending_events t =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state t.actor in
@@ -169,10 +217,18 @@ let snapshot_has_pending_events t =
     && (not state.halted)
     && Option.is_none state.failure
   then (
-    let%map queued =
+    let%bind queued =
       Agent_session.Runtime_builder.moderator_snapshot_has_queued_events state.moderator
     in
-    queued || List.exists state.invocations ~f:Agent_session.Observation_follow_up.pending)
+    let%bind halted =
+      Agent_session.Runtime_builder.moderator_snapshot_is_halted state.moderator
+    in
+    let%map observer =
+      Agent_session.Runtime_builder.moderator_snapshot_observer state.moderator
+    in
+    queued
+    || List.exists state.invocations ~f:Agent_session.Observation_follow_up.pending
+    || ((not halted) && Option.exists observer ~f:(pending_observation state)))
   else Ok false
 ;;
 
@@ -189,7 +245,18 @@ let drain_idle_moderator t =
         let%bind applied =
           Agent_session.Session_actor.apply_observation_follow_up t.actor
         in
-        if applied then Ok true else drain_loaded_idle_moderator t runtime
+        if applied
+        then Ok true
+        else (
+          let%bind more_observations = drain_loaded_observations t runtime in
+          let%bind applied =
+            Agent_session.Session_actor.apply_observation_follow_up t.actor
+          in
+          if applied
+          then Ok true
+          else (
+            let%map more_events = drain_loaded_idle_moderator t runtime in
+            more_observations || more_events))
       | None ->
         Error
           (Agent_protocol.Error.create

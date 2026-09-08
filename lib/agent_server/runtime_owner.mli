@@ -38,9 +38,14 @@ val enqueue_internal_event
   -> Jsonaf.t
   -> (Jsonaf.t option, Agent_protocol.Error.t) result
 
-(** [drain_idle_moderator] processes one bounded batch of durably queued
-    internal events when the actor can grant an idle moderator borrow. The
-    result reports whether more events remain queued. *)
+(** [drain_idle_moderator] handles pending invocation observations and queued
+    internal events when the actor can grant an idle moderator borrow. Each
+    observation batch is bounded; its durable follow-up requests are consumed
+    before another event drain. Only the installed v1 source can handle an
+    observation. Failed handlers retain their separate observation failure and
+    are never replayed. The result requests another idle probe when a batch
+    exhausts its budget, queued events remain, or follow-up work was scheduled.
+    This does not install script tool-call authority or enable v1 declarations. *)
 val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
 
 (** [execute_model_job t ~recipe ~payload] executes nested model work while

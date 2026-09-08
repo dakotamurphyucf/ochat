@@ -141,6 +141,12 @@ type pending_ui_request = Runtime.pending_ui_request =
       ; choices : string array
       }
 
+let invocation_observer t =
+  Option.map t.artifact.extension ~f:(fun (script, _) ->
+    Agent_protocol.Invocation.
+      { script_id = script.id; source_sha256 = script.source_sha256 })
+;;
+
 let entrypoints =
   Runtime.{ initial_state_name = "initial_state"; on_event_name = "on_event" }
 ;;

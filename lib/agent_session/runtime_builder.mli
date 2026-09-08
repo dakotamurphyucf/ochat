@@ -26,6 +26,8 @@ type t =
   ; initial_prompt_entry_count : int
   ; reserved_history_through : int
   ; mutable moderator_snapshot : Jsonaf.t option
+  ; moderator_manager : Chat_response.Moderator_manager.t option
+  ; moderator_tools : Openai.Responses.Request.Tool.t list
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event : Jsonaf.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; drain_internal_events :

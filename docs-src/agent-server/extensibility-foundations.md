@@ -307,8 +307,25 @@ outcomes, plus preservation of unrelated requests. These are internal actor and
 recovery-plan tests; full process-crash qualification remains a later integration
 task.
 
-**Subsequent/idle observation wakeups after budget exhaustion, ordinary-event
-Tool.call routing and normal runtime installation are still required.** The stream
+Idle polling also detects current-generation terminal invocations awaiting an
+observation for the committed source, even without queued internal events. With
+a compiled v1 manager installed, `Runtime_owner` drains up to 32 observations
+under individual actor borrows, applies their durable follow-up requests, and
+then drains emitted internal events when the session remains idle. A later poll
+finds any remaining eligible observations. Handler failure retains its separate
+failure receipt; already acknowledged observations and native effects are not
+replayed. Legacy managers have no v1 observer identity.
+
+The runtime-owner integration expect test uses a real compiled handler and actor
+with 35 eligible observations and one for another source revision. It verifies
+32 then 3 acknowledgements across polls, delivery of emitted internal events,
+durable termination, no further work after stopping, unchanged native call count,
+no model operation or extra history, and agreement with the persistence backend.
+This fixture installs the manager internally; it does not qualify public v1
+runtime construction or a full daemon restart.
+
+**Scoped idle/ordinary-event Tool.call routing and normal runtime installation
+are still required.** The stream
 option remains off by default pending that integration. Tests exercise the
 explicit foreground handoff with real compiled handlers, competing claims,
 cancellation, rejected saves, wrong source/snapshot, mutable-state rollback,
@@ -456,9 +473,9 @@ compaction admission; `Discarded_follow_up` retains the original request and the
 reason it will not run. Applied means durably accepted, not that a requested operation has
 finished. Requests cannot be replaced, silently dropped or rearmed, and applying them does
 not rerun the observer or alter the native result. Existing foreground dispatch
-uses returned requests and leaves this option disabled. The durable receipt is a
-used by the idle scheduler described above; normal v1 runtime construction and
-automatic observation delivery remain unfinished.
+uses returned requests and leaves this option disabled. The durable receipt is
+used by the idle scheduler described above; normal v1 runtime construction
+remains unfinished.
 
 ### Invocation recovery at daemon restart
 

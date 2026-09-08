@@ -70,6 +70,11 @@ val unsubscribe : subscription -> unit
 (** [overlay_revision t] returns the installed identity-overlay revision. *)
 val overlay_revision : t -> int
 
+(** Exact compiled v1 source identity for deferred invocation observations.
+    Legacy moderators have no invocation observer. This does not enter the
+    manager or read mutable script state. *)
+val invocation_observer : t -> Agent_protocol.Invocation.observer option
+
 (** [create ~artifact ~capabilities ?snapshot ()] instantiates a fresh runtime
     session for [artifact], optionally restoring persisted durable state. *)
 val create

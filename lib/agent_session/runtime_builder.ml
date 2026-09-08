@@ -29,6 +29,8 @@ type t =
   ; initial_prompt_entry_count : int
   ; reserved_history_through : int
   ; mutable moderator_snapshot : Jsonaf.t option
+  ; moderator_manager : Manager.t option
+  ; moderator_tools : Request.Tool.t list
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event : Jsonaf.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; drain_internal_events :
@@ -757,6 +759,10 @@ let build
     ; initial_prompt_entry_count = List.length initial_history
     ; reserved_history_through
     ; moderator_snapshot
+    ; moderator_manager =
+        Option.map moderator ~f:(fun (moderator, _) ->
+          moderator.Chat_response.In_memory_stream.manager)
+    ; moderator_tools = tools
     ; start_moderator =
         (fun () ->
           let open Result.Let_syntax in
