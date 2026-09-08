@@ -1,6 +1,6 @@
 open Core
 
-(** Scoped native Tool.call bridge for moderator invocations and observations. This
+(** Scoped native Tool.call bridge for moderator invocations, observations and events. This
     uses the persisted invocation service, never a raw runner or provider history.
     A prepared script's captured capability subset is the authority ceiling;
     the current registry is checked again after authorizing waits. *)
@@ -66,6 +66,25 @@ val with_observation
   -> definition:Chat_response.Extension_compiler.definition
   -> execute:Native_tool_invocation.executor
   -> observing:Agent_protocol.Invocation.t
+  -> ((name:string
+       -> args:Jsonaf.t
+       -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)
+      -> 'a)
+  -> 'a
+
+(** Tool.call scope for an actor-claimed ordinary moderator event. Captures the
+    complete definition's admitted native subset, requiring its exact source and
+    a Running receipt. The supplied executor must own that same event. Children
+    retain parent_event and observation intent, without a synthetic invocation or
+    provider-history parent. Shares policy, value limits, 100-attempt budget and
+    callback expiration with other moderator scopes. Receipts have no deadline
+    field; event cancellation and deadlines remain the host's responsibility.
+    No active-moderator authorizing decision may be deferred until after effects. *)
+val with_event
+  :  t
+  -> definition:Chat_response.Extension_compiler.definition
+  -> execute:Native_tool_invocation.executor
+  -> executing:Agent_protocol.Moderator_execution.t
   -> ((name:string
        -> args:Jsonaf.t
        -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)

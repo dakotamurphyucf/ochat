@@ -6109,7 +6109,7 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
                                ; request_compaction = false
                                ; end_session = None
                                }));
-                  native_callback ());
+                      native_callback ());
                 let child () =
                   I.create
                     ~parent_event:executing.context.id
@@ -6242,6 +6242,263 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
      (Resolved (Cancelled "event exited before recording its native outcome"))
      Observed)
     (Cancel false 1 (Resolved (Cancelled "idle moderator cancelled")) Awaiting)
+    |}]
+;;
+
+let%expect_test
+    "queued event bridge scopes calls and preserves outcomes across wakeup failure"
+  =
+  let module A = Agent_session.Session_actor in
+  let module M = Chat_response.Moderator_manager in
+  List.iter
+    [ `Many_calls; `Wakeup_failure; `Replace_binding; `Cancel; `Mismatched_head ]
+    ~f:(fun mode ->
+      let prepared = ref None
+      and calls = ref 0
+      and authorized = ref 0
+      and wakeups = ref 0 in
+      let on_native = ref (fun () -> ()) in
+      let registry =
+        ref (native_registry calls ~raises:false ~on_call:(fun () -> !on_native ()))
+      in
+      with_handoff_actor
+        ~make_worker:(fun env _ ->
+          let count =
+            match mode with
+            | `Many_calls -> 51
+            | _ -> 1
+          in
+          let events =
+            {| | `Session_start ->
+                 Task.bind(Runtime.emit(`Null), fun ignored ->
+                 Task.bind(Runtime.emit(`Null), fun ignored -> Task.pure(state)))
+               | `Internal_event(payload) ->
+                 let rec run = fun remaining -> match remaining with
+                 | 0 -> Task.bind(Runtime.request_turn(), fun ignored -> Task.pure(state))
+                 | _ -> Task.bind(Tool.call("read_file", `Object([])), fun result ->
+                     let increment = match result with | `Ok(value) -> 1 | `Error(code) -> 10 in
+                     let ignored = state[0] <- state[0] + increment in
+                     run(remaining - 1))
+                 in run(|}
+            ^ Int.to_string count
+            ^ {|)
+               | `Tool_observed(p) ->
+                 (match p.parent_event with
+                  | `Some(id) -> let ignored = state[0] <- state[0] + 100 in Task.pure(state)
+                  | _ -> Task.fail("missing event owner"))
+               | _ -> Task.pure(state) |}
+          in
+          let manager, _, _ =
+            handoff_definition
+              env
+              ~capability_registry:!registry
+              ~declare_tool:false
+              ~events
+              ~moderator_capabilities:
+                { Chat_response.Moderation.Capabilities.default with
+                  on_tool_call =
+                    (fun ~name:_ ~args:_ -> failwith "unscoped Tool.call fallback used")
+                }
+          in
+          M.handle_event_entries_transactional
+            manager
+            ~session_id:"fixture"
+            ~now_ms:0
+            ~history:[]
+            ~available_tools:[]
+            ~session_meta:`Null
+            ~event:Session_start
+            ~authorize:(fun () -> Ok ())
+            ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
+            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+          |> Result.ok_or_failwith
+          |> ignore;
+          let before = M.identity_snapshot manager |> Result.ok_or_failwith in
+          let snapshot =
+            Some (Agent_session.Runtime_builder.encode_moderator_snapshot before)
+          in
+          prepared := Some manager;
+          Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+            caps.commit_moderator snapshot |> protocol_ok;
+            Completed
+              { final_history = input.history
+              ; moderator_snapshot = snapshot
+              ; runtime_requests = []
+              }))
+        (fun _env actor writer backend ->
+           let initial = await_idle actor in
+           let manager = Option.value_exn !prepared in
+           (on_native
+            := fun () ->
+                 assert (Option.is_none (A.state actor |> protocol_ok).active_operation);
+                 match mode with
+                 | `Cancel ->
+                   A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                   |> protocol_ok
+                   |> ignore;
+                   Eio.Fiber.yield ()
+                 | _ -> ());
+           let tools =
+             Agent_session.Script_tool_calls.create
+               ~registry:(fun () -> !registry)
+               ~moderator_names:String.Set.empty
+               ~now:Agent_protocol.Timestamp.now
+               ~is_halted:(fun () ->
+                 let state = A.state actor |> protocol_ok in
+                 match state.lifecycle.desired with
+                 | Running -> state.halted
+                 | Stopped -> true)
+               ~requires_active_moderator:(fun _ -> false)
+               ~authorize:(fun _ _ ->
+                 incr authorized;
+                 Eio.Fiber.yield ();
+                 (match mode with
+                  | `Replace_binding -> registry := native_registry calls ~raises:false
+                  | _ -> ());
+                 Ok ())
+               ~prepare_output:(fun _ -> Ok (`String "disclosed"))
+               ~defer_observation:(fun child ->
+                 assert (
+                   Option.is_some child.parent_event
+                   && Option.is_none child.context.parent_invocation);
+                 incr wakeups;
+                 match mode with
+                 | `Wakeup_failure -> Error (handoff_error "wakeup unavailable")
+                 | _ -> Ok ())
+           in
+           let claim ~snapshot f =
+             A.with_idle_queued_moderator_event_tools
+               actor
+               ~snapshot
+               (fun ~executing ~event ~execute ~commit ->
+                  let event =
+                    match mode with
+                    | `Mismatched_head -> Session.Snapshot.String "wrong head"
+                    | _ -> event
+                  in
+                  f ~executing ~event ~execute ~commit)
+           in
+           let history () =
+             (A.state actor |> protocol_ok).conversation.canonical_history
+             |> Agent_session.History_codec.all_of_protocol
+             |> protocol_ok
+           in
+           let run () =
+             try
+               Agent_session.Moderator_event.run_queued_idle
+                 ~claim
+                 ~script_tools:tools
+                 ~manager
+                 ~history
+                 ~available_tools:[]
+                 ~session_meta:`Null
+                 ~now:Agent_protocol.Timestamp.now
+                 ()
+             with
+             | Eio.Cancel.Cancelled _ -> Error (handoff_error "cancelled")
+           in
+           let handled = ref 0 in
+           (match run () with
+            | Ok (Some _) -> incr handled
+            | _ -> ());
+           (match mode with
+            | `Cancel | `Mismatched_head -> ()
+            | _ ->
+              assert (Option.is_some (run () |> protocol_ok));
+              incr handled;
+              let before_empty = A.state actor |> protocol_ok in
+              assert (Option.is_none (run () |> protocol_ok));
+              assert (
+                Int64.equal
+                  before_empty.counters.revision
+                  (A.state actor |> protocol_ok).counters.revision));
+           let after_events = A.state actor |> protocol_ok in
+           let before_observation = !calls in
+           (match mode with
+            | `Cancel | `Mismatched_head -> ()
+            | _ ->
+              Agent_session.Moderator_observation.drain_idle
+                ~max_observations:256
+                ~claim:
+                  (A.with_idle_moderator_observation
+                     actor
+                     ~observer:(M.invocation_observer manager |> Option.value_exn))
+                ~manager
+                ~history
+                ~available_tools:[]
+                ~session_meta:`Null
+                ~now:Agent_protocol.Timestamp.now
+                ()
+              |> protocol_ok
+              |> ignore);
+           assert (!calls = before_observation);
+           let final = A.state actor |> protocol_ok in
+           List.iter final.invocations ~f:(fun invocation ->
+             let event_id = Option.value_exn invocation.parent_event in
+             assert (
+               List.exists final.moderator_executions ~f:(fun event ->
+                 Agent_protocol.Id.Moderator_execution.equal event.context.id event_id));
+             match mode, invocation.status with
+             | (`Many_calls | `Wakeup_failure), Resolved (Complete (`String "disclosed"))
+               -> ()
+             | `Replace_binding, Resolved (Fail error) ->
+               assert (String.equal error.code "invocation.stale_binding")
+             | `Cancel, Resolved (Cancelled _) -> ()
+             | _ -> assert false);
+           assert (Option.is_none final.active_operation);
+           assert (
+             List.equal
+               Agent_protocol.History.equal_entry
+               initial.conversation.canonical_history
+               final.conversation.canonical_history);
+           assert_same_session_snapshot final (Agent_session.Memory_backend.state backend);
+           let count =
+             match
+               (M.identity_snapshot manager |> Result.ok_or_failwith).current_state
+             with
+             | Session.Snapshot.Array [ Int n ] -> n
+             | _ -> assert false
+           in
+           let pending =
+             List.count after_events.moderator_executions ~f:(fun event ->
+               match event.intent with
+               | Some Pending -> true
+               | _ -> false)
+           in
+           let observed =
+             List.count final.invocations ~f:(fun invocation ->
+               match invocation.observation with
+               | Some { status = Observed; _ } -> true
+               | _ -> false)
+           in
+           print_s
+             [%sexp
+               { mode : [ `Many_calls
+                        | `Wakeup_failure
+                        | `Replace_binding
+                        | `Cancel
+                        | `Mismatched_head
+                        ]
+               ; handled = (!handled : int)
+               ; native = (!calls : int)
+               ; authorized = (!authorized : int)
+               ; wakeups = (!wakeups : int)
+               ; observed : int
+               ; pending : int
+               ; state = (count : int)
+               }]));
+  [%expect
+    {|
+    ((mode Many_calls) (handled 2) (native 102) (authorized 102) (wakeups 102)
+     (observed 102) (pending 2) (state 10302))
+    ((mode Wakeup_failure) (handled 2) (native 2) (authorized 2) (wakeups 2)
+     (observed 2) (pending 2) (state 220))
+    ((mode Replace_binding) (handled 2) (native 0) (authorized 1) (wakeups 2)
+     (observed 2) (pending 2) (state 220))
+    ((mode Cancel) (handled 0) (native 1) (authorized 1) (wakeups 0) (observed 0)
+     (pending 0) (state 0))
+    ((mode Mismatched_head) (handled 0) (native 0) (authorized 0) (wakeups 0)
+     (observed 0) (pending 0) (state 0))
     |}]
 ;;
 

@@ -202,10 +202,35 @@ rejected outcome persistence and cancel-stop, including wrong/expired ownership,
 checkpoint rejection while native work is active, snapshots, codec round trips,
 and subsequent source-bound observation without additional provider history.
 
-Automatic Tool.call bridge installation for ordinary events, startup/foreground
-event ownership, changed-checkpoint reconciliation, interactive permissions,
-scheduling of retained event requests and normal v1 runtime binding remain
-integration work. Tests install this internal event callback explicitly.
+`Script_tool_calls.with_event` binds that executor to the complete compiled
+definition's captured capabilities and exact source. Its child factory records an
+event parent directly. Invocation and observation scopes share the same native
+admission, value bounds, disclosure, active-moderator rejection and 100-attempt
+limit. Every event gets a fresh scope; callbacks expire when the handler returns.
+Event receipts do not carry deadlines, so their cancellation/deadline enforcement
+remains a host responsibility.
+
+`Moderator_event.run_queued_idle` composes the bridge with one queued event's actor
+claim and manager transaction. It obtains the definition from the manager,
+compares the selected queue head with the actor's selection under the manager
+lock, and saves runtime requests with the event checkpoint. There is no fallback
+to an unscoped Tool.call callback. Empty queues and unavailable actors return no
+work; errors stop the operation without replay or automatic failed-head retirement.
+Returned runtime requests are already durable and must not be scheduled a second
+time independently of their saved intent.
+
+An offline compiled-manager/actor/native integration runs two handlers making 51
+calls each, then observes all 102 outcomes, demonstrating that the call budget is
+per handler. Additional cases preserve successful results after wakeup failure,
+reject a binding replaced during authorization, propagate cancel-stop, and reject
+a mismatched queue head before any native effect. Tests verify actual saved
+outcomes, event lineage, retained scheduling intent, checkpoint agreement, no
+additional provider history, and no invocation of the fallback tool callback.
+
+Idle polling integration for this helper, startup/foreground event ownership,
+changed-checkpoint reconciliation, interactive permissions, scheduling of retained
+event requests and normal v1 runtime binding remain integration work. The helper
+is exercised through internally installed compiled managers, not public tools.
 
 `Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped
 host service. The caller must complete capability and policy admission before

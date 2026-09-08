@@ -3,6 +3,7 @@ module I = Agent_protocol.Invocation
 module C = Chat_response.Tool_capability
 module EC = Chat_response.Extension_compiler
 module M = Chat_response.Moderation.Capabilities
+module E = Agent_protocol.Moderator_execution
 
 type t =
   { registry : unit -> C.t
@@ -48,7 +49,26 @@ let checked error f =
   | exception _ -> Error error
 ;;
 
-let with_scope t ~selected ~script ~valid_parent ~execute ~(parent : I.t) f =
+type parent =
+  | Invocation of I.t
+  | Event of E.t
+
+let with_scope t ~selected ~script ~valid_parent ~execute ~parent f =
+  let session_id, generation, parent_invocation, parent_event, deadline =
+    match parent with
+    | Invocation parent ->
+      ( parent.context.session_id
+      , parent.context.generation
+      , Some parent.context.id
+      , None
+      , parent.context.deadline )
+    | Event parent ->
+      ( parent.context.session_id
+      , parent.context.generation
+      , None
+      , Some parent.context.id
+      , None )
+  in
   let active = Atomic.make true in
   let attempts = Atomic.make 0 in
   let limits = script.Chatmd_shell_spec.Extension_spec.limits in
@@ -97,20 +117,21 @@ let with_scope t ~selected ~script ~valid_parent ~execute ~(parent : I.t) f =
             checked `Admission (fun () ->
               I.create
                 ~observer:{ script_id = script.id; source_sha256 = script.source_sha256 }
+                ?parent_event
                 { id = Agent_protocol.Id.Invocation.create ()
-                ; session_id = parent.context.session_id
-                ; generation = parent.context.generation
+                ; session_id
+                ; generation
                 ; origin = Moderator
                 ; provider_call_id = None
                 ; call_entry_id = None
-                ; parent_invocation = Some parent.context.id
+                ; parent_invocation
                 ; parent_job = None
                 ; tool_name = name
                 ; implementation_revision = reference.implementation_revision
                 ; capability_fingerprint = C.fingerprint selected
                 ; input = args
                 ; created_at = t.now ()
-                ; deadline = parent.context.deadline
+                ; deadline
                 })
           in
           let%bind resolved =
@@ -169,11 +190,11 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
     ~script:(EC.script prepared)
     ~valid_parent
     ~execute:capabilities.Operation_worker.Capabilities.with_invocation
-    ~parent
+    ~parent:(Invocation parent)
     f
 ;;
 
-let with_observation t ~definition ~execute ~(observing : I.t) f =
+let with_moderator_scope t ~definition ~execute ~parent ~valid_parent f =
   match
     List.find_map (EC.compiled_scripts definition) ~f:(fun (script, _) ->
       match script.Chatmd_shell_spec.Extension_spec.kind with
@@ -184,12 +205,6 @@ let with_observation t ~definition ~execute ~(observing : I.t) f =
   | Some script ->
     let observer : I.observer =
       { script_id = script.id; source_sha256 = script.source_sha256 }
-    in
-    let valid_parent =
-      match observing.status, observing.observation with
-      | (Resolved _ | Published _), Some { observer = owner; status = Observing; _ } ->
-        I.equal_observer owner observer
-      | _ -> false
     in
     let moderator_names =
       List.fold
@@ -204,8 +219,37 @@ let with_observation t ~definition ~execute ~(observing : I.t) f =
       { t with moderator_names }
       ~selected:(EC.definition_capabilities definition)
       ~script
-      ~valid_parent
+      ~valid_parent:(valid_parent observer)
       ~execute
-      ~parent:observing
+      ~parent
       f
+;;
+
+let with_observation t ~definition ~execute ~(observing : I.t) f =
+  with_moderator_scope
+    t
+    ~definition
+    ~execute
+    ~parent:(Invocation observing)
+    ~valid_parent:(fun observer ->
+      match observing.status, observing.observation with
+      | (Resolved _ | Published _), Some { observer = owner; status = Observing; _ } ->
+        I.equal_observer owner observer
+      | _ -> false)
+    f
+;;
+
+let with_event t ~definition ~execute ~(executing : E.t) f =
+  with_moderator_scope
+    t
+    ~definition
+    ~execute
+    ~parent:(Event executing)
+    ~valid_parent:(fun observer ->
+      match executing.status with
+      | Running ->
+        Result.is_ok (E.validate executing)
+        && I.equal_observer executing.context.source observer
+      | Completed _ | Failed _ | Interrupted _ -> false)
+    f
 ;;
