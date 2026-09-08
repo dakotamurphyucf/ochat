@@ -645,11 +645,15 @@ val claim_idle_moderator
   :  t
   -> (History_entry.t list option, Agent_protocol.Error.t) result
 
-(** At an idle safe point, coalesce retained requests and atomically accept them
+(** At an idle safe point, coalesce retained event and observation requests into
+    one action and atomically accept them
     with scheduling/stop. A compaction-plus-turn request retains its turn until
     the next idle safe point. Stop discards outstanding requests. Returns whether
     receipts changed; false while unavailable or no work remains. No observer
     executes here. The host must install the worker before admitting a turn. *)
+val apply_moderator_follow_up : t -> (bool, Agent_protocol.Error.t) result
+
+(** Compatibility name for [apply_moderator_follow_up]; also consumes event intent. *)
 val apply_observation_follow_up : t -> (bool, Agent_protocol.Error.t) result
 
 (** [complete_idle_moderator] durably checkpoints the moderator result and

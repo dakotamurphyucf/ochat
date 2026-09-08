@@ -623,6 +623,11 @@ let stop_transition t mode lifecycle deltas payloads =
   let%bind discarded =
     Observation_follow_up.discard t.state.invocations ~reason:"session stopped"
   in
+  let%bind events =
+    Observation_follow_up.discard_events
+      t.state.moderator_executions
+      ~reason:"session stopped"
+  in
   let jobs = stopped_jobs t mode in
   transition
     t
@@ -630,6 +635,7 @@ let stop_transition t mode lifecycle deltas payloads =
       (Session_delta.Batch
          ((Session_delta.Lifecycle_changed lifecycle :: deltas)
           @ List.map discarded ~f:Observation_follow_up.delta
+          @ List.map events ~f:Observation_follow_up.event_delta
           @ List.map jobs ~f:(fun job -> Session_delta.Job_changed job)))
     ~payloads:
       ((Agent_protocol.Event.Durable.Payload.Session_state_changed
@@ -646,7 +652,11 @@ let stop_internal t mode =
     let%map session =
       match t.state.lifecycle.desired, t.state.lifecycle.observed with
       | Stopped, Stopped
-        when not (List.exists t.state.invocations ~f:Observation_follow_up.pending) ->
+        when not
+               (List.exists t.state.invocations ~f:Observation_follow_up.pending
+                || List.exists
+                     t.state.moderator_executions
+                     ~f:Observation_follow_up.pending_event) ->
         Ok (Session_state.summary t.state)
       | _, _ -> stop_transition t mode { desired = Stopped; observed = Stopped } [] []
     in
@@ -2130,7 +2140,7 @@ let compaction_terminal_base_delta t operation = function
 let compaction_terminal_delta t operation outcome =
   let open Result.Let_syntax in
   let%bind delta, payloads = compaction_terminal_base_delta t operation outcome in
-  let%map discarded =
+  let%bind discarded =
     match outcome with
     | Compacted _ -> Ok []
     | Compaction_cancelled _ | Compaction_failed _ ->
@@ -2142,7 +2152,22 @@ let compaction_terminal_delta t operation outcome =
            | Compaction_cancelled _ -> "compaction cancelled"
            | _ -> "compaction failed")
   in
-  ( Session_delta.Batch (List.map discarded ~f:Observation_follow_up.delta @ [ delta ])
+  let%map events =
+    match outcome with
+    | Compacted _ -> Ok []
+    | Compaction_cancelled _ | Compaction_failed _ ->
+      Observation_follow_up.discard_event_compaction
+        t.state.moderator_executions
+        ~operation_id:operation.id
+        ~reason:
+          (match outcome with
+           | Compaction_cancelled _ -> "compaction cancelled"
+           | _ -> "compaction failed")
+  in
+  ( Session_delta.Batch
+      (List.map discarded ~f:Observation_follow_up.delta
+       @ List.map events ~f:Observation_follow_up.event_delta
+       @ [ delta ])
   , payloads )
 ;;
 
@@ -3780,7 +3805,24 @@ let stop_from_idle_moderator
       (List.filter t.state.invocations ~f:(fun invocation -> not (changed invocation)))
       ~reason:"moderator ended session"
   in
-  let extra_deltas = extra_deltas @ List.map discarded ~f:Observation_follow_up.delta in
+  let%bind events =
+    Observation_follow_up.discard_events
+      (List.filter t.state.moderator_executions ~f:(fun event ->
+         not
+           (List.exists extra_deltas ~f:(function
+              | Session_delta.Moderator_execution_changed updated
+              | Moderator_execution_reconciled updated ->
+                Agent_protocol.Id.Moderator_execution.equal
+                  event.context.id
+                  updated.context.id
+              | _ -> false))))
+      ~reason:"moderator ended session"
+  in
+  let extra_deltas =
+    extra_deltas
+    @ List.map discarded ~f:Observation_follow_up.delta
+    @ List.map events ~f:Observation_follow_up.event_delta
+  in
   let lifecycle = Session_state.Lifecycle.{ desired = Stopped; observed = Stopped } in
   let payloads =
     drain_payloads drain
@@ -3820,7 +3862,10 @@ let apply_observation_follow_up t =
         ~halted
         ~compaction_operation_id:compaction.id
     in
-    let extra_deltas = List.map plan.invocations ~f:Observation_follow_up.delta in
+    let extra_deltas =
+      List.map plan.invocations ~f:Observation_follow_up.delta
+      @ List.map plan.events ~f:Observation_follow_up.event_delta
+    in
     let drain : Runtime_builder.moderator_drain =
       { moderator_snapshot = t.state.moderator
       ; runtime_requests = []
@@ -4783,6 +4828,7 @@ let skip_schedule t ~schedule_id ~generation =
 
 let claim_idle_moderator t = call t Claim_idle_moderator
 let apply_observation_follow_up t = call t Apply_observation_follow_up
+let apply_moderator_follow_up t = call t Apply_observation_follow_up
 
 let complete_idle_moderator t drain =
   call t ~priority:Priority (Complete_idle_moderator drain)

@@ -1125,187 +1125,241 @@ let%expect_test "owner reclaim token survives restart and rotates on reclaim" =
 let%expect_test "daemon idle polling applies retained termination without a queued event" =
   let module A = Agent_session.Session_actor in
   let module I = Agent_protocol.Invocation in
-  Eio_main.run (fun env ->
-    Mirage_crypto_rng_unix.use_default ();
-    let root = temporary_root env in
-    Exn.protect
-      ~finally:(fun () ->
-        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
-      ~f:(fun () ->
-        let workspace = Filename.concat root "workspace" in
-        let prompt_file = Filename.concat root "agent.chatmd" in
-        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
-        Eio.Path.save
-          ~create:(`Exclusive 0o600)
-          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
-          {|<developer>Idle follow-up fixture.</developer>
+  List.iter [ `Observation; `Event ] ~f:(fun source ->
+    Eio_main.run (fun env ->
+      Mirage_crypto_rng_unix.use_default ();
+      let root = temporary_root env in
+      Exn.protect
+        ~finally:(fun () ->
+          Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+        ~f:(fun () ->
+          let workspace = Filename.concat root "workspace" in
+          let prompt_file = Filename.concat root "agent.chatmd" in
+          Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+            {|<developer>Idle follow-up fixture.</developer>
 <script language="chatml" kind="moderator">
 type event = [ `Session_start | `Session_resume ]
 let initial_state = 0
 let on_event : context -> int -> event -> int task = fun ctx state event -> Task.pure(state)
 </script>|};
-        Eio.Switch.run (fun sw ->
-          let daemon =
-            Agent_server.Daemon.start
-              ~sw
-              ~env
-              ~config:(config root workspace prompt_file)
-              ~tool_dir:root
-              ~home:root
-              ~process_start_identity:None
-              ~options:
-                { Agent_server.Daemon.default_options with
-                  model_post_stream =
-                    Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model execution")
-                }
-              ()
-            |> protocol_ok
-          in
-          let client = connection daemon (principal ()) in
-          initialize client;
-          let created, _ =
-            create_session ~start_immediately:true ~key:"follow-up-poll" client
-          in
-          let entry =
-            Agent_server.Session_registry.find
-              (Agent_server.Daemon.registry daemon)
-              created.id
-            |> Option.value_exn
-          in
-          let state = A.state entry.actor |> protocol_ok in
-          (* Install a v1-shaped durable receipt fixture; the public runtime
+          Eio.Switch.run (fun sw ->
+            let daemon =
+              Agent_server.Daemon.start
+                ~sw
+                ~env
+                ~config:(config root workspace prompt_file)
+                ~tool_dir:root
+                ~home:root
+                ~process_start_identity:None
+                ~options:
+                  { Agent_server.Daemon.default_options with
+                    model_post_stream =
+                      Some (fun ~sw:_ ~inputs:_ -> failwith "unexpected model execution")
+                  }
+                ()
+              |> protocol_ok
+            in
+            let client = connection daemon (principal ()) in
+            initialize client;
+            let created, _ =
+              create_session ~start_immediately:true ~key:"follow-up-poll" client
+            in
+            let entry =
+              Agent_server.Session_registry.find
+                (Agent_server.Daemon.registry daemon)
+                created.id
+              |> Option.value_exn
+            in
+            let state = A.state entry.actor |> protocol_ok in
+            (* Install a v1-shaped durable receipt fixture; the public runtime
              still uses the legacy moderator compiler's source fingerprint. *)
-          let snapshot =
-            match state.moderator with
-            | Some (`Object fields) ->
-              (match
-                 List.Assoc.find fields "identity_snapshot_sexp" ~equal:String.equal
-               with
-               | Some (`String encoded) ->
-                 Session.Moderator_state.Identity_snapshot.t_of_sexp
-                   (Sexp.of_string encoded)
-               | _ -> assert false)
-            | _ -> assert false
-          in
-          let snapshot = { snapshot with script_source_hash = String.make 64 'a' } in
-          A.change_moderator
-            entry.actor
-            (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
-          |> protocol_ok
-          |> ignore;
-          let state = A.state entry.actor |> protocol_ok in
-          assert (
-            not
-              (Agent_session.Runtime_builder.moderator_snapshot_has_queued_events
-                 state.moderator
-               |> protocol_ok));
-          let observer =
-            Agent_session.Runtime_builder.moderator_snapshot_observer state.moderator
+            let snapshot =
+              match state.moderator with
+              | Some (`Object fields) ->
+                (match
+                   List.Assoc.find fields "identity_snapshot_sexp" ~equal:String.equal
+                 with
+                 | Some (`String encoded) ->
+                   Session.Moderator_state.Identity_snapshot.t_of_sexp
+                     (Sexp.of_string encoded)
+                 | _ -> assert false)
+              | _ -> assert false
+            in
+            let snapshot = { snapshot with script_source_hash = String.make 64 'a' } in
+            A.change_moderator
+              entry.actor
+              (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
             |> protocol_ok
-            |> Option.value_exn
-          in
-          let parent =
-            I.create
-              { id = Agent_protocol.Id.Invocation.create ()
-              ; session_id = created.id
-              ; generation = created.generation
-              ; origin = Script
-              ; provider_call_id = None
-              ; call_entry_id = None
-              ; parent_invocation = None
-              ; parent_job = None
-              ; tool_name = "fixture"
-              ; implementation_revision = "fixture"
-              ; capability_fingerprint = "fixture"
-              ; input = `Null
-              ; created_at = Agent_protocol.Timestamp.now ()
-              ; deadline = None
-              }
-            |> protocol_ok
-          in
-          let parent_dispatched = I.dispatch parent |> protocol_ok in
-          let resolve invocation =
-            I.resolve
-              invocation
-              ~session_id:created.id
-              ~generation:created.generation
-              (Complete `Null)
-            |> protocol_ok
-          in
-          let child =
-            I.create
-              ~observer
-              { parent.context with
-                id = Agent_protocol.Id.Invocation.create ()
-              ; origin = Moderator
-              ; parent_invocation = Some parent.context.id
-              }
-            |> protocol_ok
-          in
-          let dispatched = I.dispatch child |> protocol_ok in
-          let resolved = resolve dispatched in
-          let observing = I.claim_observation resolved |> protocol_ok in
-          let observed =
-            I.complete_observation
-              observing
-              ~follow_up:
-                { request_turn = true
-                ; request_compaction = true
-                ; end_session = Some "finished"
+            |> ignore;
+            let state = A.state entry.actor |> protocol_ok in
+            assert (
+              not
+                (Agent_session.Runtime_builder.moderator_snapshot_has_queued_events
+                   state.moderator
+                 |> protocol_ok));
+            let observer =
+              Agent_session.Runtime_builder.moderator_snapshot_observer state.moderator
+              |> protocol_ok
+              |> Option.value_exn
+            in
+            let parent =
+              I.create
+                { id = Agent_protocol.Id.Invocation.create ()
+                ; session_id = created.id
+                ; generation = created.generation
+                ; origin = Script
+                ; provider_call_id = None
+                ; call_entry_id = None
+                ; parent_invocation = None
+                ; parent_job = None
+                ; tool_name = "fixture"
+                ; implementation_revision = "fixture"
+                ; capability_fingerprint = "fixture"
+                ; input = `Null
+                ; created_at = Agent_protocol.Timestamp.now ()
+                ; deadline = None
                 }
-            |> protocol_ok
-          in
-          A.commit_extensions
-            entry.actor
-            ~generation:created.generation
-            ~expected_revision:state.counters.revision
-            (List.map
-               [ parent
-               ; parent_dispatched
-               ; resolve parent_dispatched
-               ; child
-               ; dispatched
-               ; resolved
-               ; observing
-               ; observed
-               ]
-               ~f:(fun invocation -> A.Extension_change.Invocation invocation))
-          |> protocol_ok
-          |> ignore;
-          let stopped =
-            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
-              let rec wait () =
-                let state = A.state entry.actor |> protocol_ok in
-                match state.lifecycle.observed with
-                | Stopped -> state
-                | _ ->
-                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
-                  wait ()
-              in
-              wait ())
-          in
-          let retained =
-            List.find_exn stopped.invocations ~f:(fun invocation ->
-              Agent_protocol.Id.Invocation.equal invocation.context.id child.context.id)
-          in
-          print_s
-            [%sexp
-              { halted = (stopped.halted : bool)
-              ; active_operation = (Option.is_some stopped.active_operation : bool)
-              ; history_entries =
-                  (List.length stopped.conversation.canonical_history : int)
-              ; follow_up =
-                  ((Option.value_exn retained.observation).follow_up
-                   : I.follow_up_status option)
-              }];
-          Agent_client.Connection.close client;
-          Agent_server.Daemon.shutdown daemon |> protocol_ok)));
+              |> protocol_ok
+            in
+            let parent_dispatched = I.dispatch parent |> protocol_ok in
+            let resolve invocation =
+              I.resolve
+                invocation
+                ~session_id:created.id
+                ~generation:created.generation
+                (Complete `Null)
+              |> protocol_ok
+            in
+            let child =
+              I.create
+                ~observer
+                { parent.context with
+                  id = Agent_protocol.Id.Invocation.create ()
+                ; origin = Moderator
+                ; parent_invocation = Some parent.context.id
+                }
+              |> protocol_ok
+            in
+            let dispatched = I.dispatch child |> protocol_ok in
+            let resolved = resolve dispatched in
+            let observing = I.claim_observation resolved |> protocol_ok in
+            let observed =
+              I.complete_observation
+                observing
+                ~follow_up:
+                  { request_turn = true
+                  ; request_compaction = true
+                  ; end_session = Some "finished"
+                  }
+              |> protocol_ok
+            in
+            (match source with
+             | `Observation ->
+               A.commit_extensions
+                 entry.actor
+                 ~generation:created.generation
+                 ~expected_revision:state.counters.revision
+                 (List.map
+                    [ parent
+                    ; parent_dispatched
+                    ; resolve parent_dispatched
+                    ; child
+                    ; dispatched
+                    ; resolved
+                    ; observing
+                    ; observed
+                    ]
+                    ~f:(fun invocation -> A.Extension_change.Invocation invocation))
+               |> protocol_ok
+               |> ignore
+             | `Event ->
+               (* Hold the owner lock while creating and consuming the fixture head,
+                so polling sees only the final empty queue with retained intent. *)
+               Agent_server.Runtime_owner.For_testing.with_loaded_runtime
+                 entry.runtime
+                 (fun () ->
+                    let open Result.Let_syntax in
+                    let queued =
+                      { snapshot with
+                        queued_internal_events =
+                          [ Session.Snapshot.Variant
+                              ("Internal_event", [ Variant ("Null", []) ])
+                          ]
+                      }
+                    in
+                    let%bind _ =
+                      A.change_moderator
+                        entry.actor
+                        (Some
+                           (Agent_session.Runtime_builder.encode_moderator_snapshot
+                              queued))
+                    in
+                    let%map _ =
+                      A.with_idle_queued_moderator_event
+                        entry.actor
+                        ~snapshot:queued
+                        (fun ~event:_ ~commit ->
+                           commit
+                             ~snapshot
+                             ~requests:
+                               { request_turn = true
+                               ; request_compaction = true
+                               ; end_session = Some "finished"
+                               })
+                    in
+                    ())
+               |> protocol_ok);
+            let stopped =
+              Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                let rec wait () =
+                  let state = A.state entry.actor |> protocol_ok in
+                  match state.lifecycle.observed with
+                  | Stopped -> state
+                  | _ ->
+                    Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                    wait ()
+                in
+                wait ())
+            in
+            let follow_up, event_intent =
+              match source with
+              | `Observation ->
+                let retained =
+                  List.find_exn stopped.invocations ~f:(fun invocation ->
+                    Agent_protocol.Id.Invocation.equal
+                      invocation.context.id
+                      child.context.id)
+                in
+                (Option.value_exn retained.observation).follow_up, None
+              | `Event ->
+                assert (List.is_empty stopped.invocations);
+                None, (List.hd_exn stopped.moderator_executions).intent
+            in
+            print_s
+              [%sexp
+                { source : [ `Observation | `Event ]
+                ; halted = (stopped.halted : bool)
+                ; active_operation = (Option.is_some stopped.active_operation : bool)
+                ; history_entries =
+                    (List.length stopped.conversation.canonical_history : int)
+                ; follow_up : I.follow_up_status option
+                ; event_intent : Agent_protocol.Moderator_execution.intent option
+                }];
+            Agent_client.Connection.close client;
+            Agent_server.Daemon.shutdown daemon |> protocol_ok))));
   [%expect
     {|
-    ((halted true) (active_operation false) (history_entries 1)
+    ((source Observation) (halted true) (active_operation false)
+     (history_entries 1)
      (follow_up
       ((Applied_follow_up
-        ((request_turn true) (request_compaction true) (end_session (finished)))))))
+        ((request_turn true) (request_compaction true) (end_session (finished))))))
+     (event_intent ()))
+    ((source Event) (halted true) (active_operation false) (history_entries 1)
+     (follow_up ()) (event_intent (Applied)))
     |}]
 ;;
 

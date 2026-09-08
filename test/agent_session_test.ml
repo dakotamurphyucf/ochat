@@ -1008,15 +1008,15 @@ let%expect_test
           ("mex_" ^ name))
     in
     let interrupted = lookup "running" in
-    let discarded = lookup "waiting" in
+    let retained = lookup "waiting" in
     assert (E.equal failed (lookup "failed"));
     assert (E.equal pending (lookup "pending"));
     assert (
       Option.equal
         Agent_protocol.Id.Operation.equal
-        discarded.compaction_operation_id
+        retained.compaction_operation_id
         (Some operation_id));
-    assert (Result.is_error (E.apply_intent discarded));
+    assert (E.equal waiting retained);
     assert (
       Result.is_error
         (E.complete
@@ -1070,7 +1070,7 @@ let%expect_test
     ((schema 7)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
-       (mex_running interrupted) (mex_waiting completed.discarded)))
+       (mex_running interrupted) (mex_waiting completed.waiting_compaction)))
      (after_reset
       ((mex_failed failed) (mex_pending completed.discarded)
        (mex_running interrupted) (mex_waiting completed.discarded)))
@@ -4263,6 +4263,7 @@ let%expect_test
   =
   let module A = Agent_session.Session_actor in
   let module I = Agent_protocol.Invocation in
+  let module E = Agent_protocol.Moderator_execution in
   List.iter
     [ `Continue; `Reload; `Stop; `End; `Obsolete; `Cancel; `Failure; `Interrupted ]
     ~f:(fun mode ->
@@ -4299,6 +4300,22 @@ let%expect_test
             let initial =
               actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
             in
+            let event ?(source = observer) id requests =
+              E.create
+                { id = Agent_protocol.Id.Moderator_execution.of_string id |> protocol_ok
+                ; session_id
+                ; generation = 0
+                ; source
+                ; operation_id = None
+                ; phase = Internal_event
+                ; event = `Null
+                ; checkpoint_sha256 = String.make 64 'b'
+                ; created_at = timestamp
+                }
+              |> protocol_ok
+              |> E.complete ~checkpoint_sha256:(String.make 64 'c') ~requests
+              |> protocol_ok
+            in
             let snapshot =
               { (handoff_snapshot 1) with
                 script_source_hash = source
@@ -4317,6 +4334,38 @@ let%expect_test
                 lifecycle = { desired = Running; observed = Idle }
               ; moderator =
                   Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)
+              ; moderator_executions =
+                  ([ event
+                       "mex_follow_both"
+                       { request_turn = true
+                       ; request_compaction = true
+                       ; end_session = None
+                       }
+                   ; event
+                       "mex_follow_turn"
+                       { request_turn = true
+                       ; request_compaction = false
+                       ; end_session = None
+                       }
+                   ; event
+                       ~source:{ observer with source_sha256 = String.make 64 'd' }
+                       "mex_follow_obsolete"
+                       { request_turn = false
+                       ; request_compaction = false
+                       ; end_session = Some "obsolete stop"
+                       }
+                   ]
+                   @
+                   match mode with
+                   | `End ->
+                     [ event
+                         "mex_follow_end"
+                         { request_turn = false
+                         ; request_compaction = false
+                         ; end_session = Some "done"
+                         }
+                     ]
+                   | _ -> [])
               ; invocations =
                   ((parent
                     :: [ child
@@ -4360,7 +4409,20 @@ let%expect_test
                           |> protocol_ok)
                   |> protocol_ok
                 in
-                { initial with invocations = other :: initial.invocations }
+                let other_event =
+                  event
+                    "mex_follow_other"
+                    { request_turn = true; request_compaction = true; end_session = None }
+                  |> E.accept_compaction
+                       ~operation_id:
+                         (Agent_protocol.Id.Operation.of_string "op_previous_compaction"
+                          |> protocol_ok)
+                  |> protocol_ok
+                in
+                { initial with
+                  invocations = other :: initial.invocations
+                ; moderator_executions = other_event :: initial.moderator_executions
+                }
               | _ -> initial
             in
             let restore (state : Agent_session.Session_state.t) =
@@ -4463,6 +4525,20 @@ let%expect_test
                                      (Option.value_exn bound.observation)
                                        .compaction_operation_id
                                      (Some operation.id));
+                                 let bound_event =
+                                   List.find_exn
+                                     committed.moderator_executions
+                                     ~f:(fun event ->
+                                       String.equal
+                                         (Agent_protocol.Id.Moderator_execution.to_string
+                                            event.context.id)
+                                         "mex_follow_both")
+                                 in
+                                 assert (
+                                   Option.equal
+                                     Agent_protocol.Id.Operation.equal
+                                     bound_event.compaction_operation_id
+                                     (Some operation.id));
                                  (match mode with
                                   | `Cancel ->
                                     Eio.Promise.resolve cancel_ready_u operation.id;
@@ -4489,7 +4565,7 @@ let%expect_test
                  |> ignore)
              | _ -> ());
             let before = A.state actor |> protocol_ok in
-            assert (Result.is_error (A.apply_observation_follow_up actor));
+            assert (Result.is_error (A.apply_moderator_follow_up actor));
             assert_same_session_snapshot before (A.state actor |> protocol_ok);
             assert (List.is_empty !starts && !model_runs = 0);
             assert (A.apply_observation_follow_up actor |> protocol_ok);
@@ -4501,7 +4577,18 @@ let%expect_test
                 (match mode with
                  | `Reload ->
                    A.shutdown actor;
-                   create (restore compacted)
+                   let restored = restore compacted in
+                   let recovery =
+                     Agent_session.Invocation_recovery.plan
+                       ~state:restored
+                       ~namespace:"follow-up-reload"
+                       ~first_sequence:
+                         (Int64.to_int_exn restored.conversation.reserved_history_through)
+                       ~reason:"reload after completed compaction"
+                     |> protocol_ok
+                   in
+                   assert (List.is_empty recovery.deltas);
+                   create restored
                  | `Interrupted ->
                    A.shutdown actor;
                    let captured = restore (Option.value_exn !captured_compaction) in
@@ -4569,6 +4656,13 @@ let%expect_test
                     Agent_protocol.Id.Invocation.to_string invocation.context.id, receipt)))
               |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
             in
+            let events =
+              List.map state.moderator_executions ~f:(fun event ->
+                assert (E.equal_status event.status (Completed (String.make 64 'c')));
+                ( Agent_protocol.Id.Moderator_execution.to_string event.context.id
+                , (Agent_protocol.Extension_status.moderator_execution event).state ))
+              |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+            in
             print_s
               [%sexp
                 { mode =
@@ -4585,6 +4679,7 @@ let%expect_test
                 ; starts = (!starts : Agent_protocol.Operation.kind list)
                 ; model_runs = (!model_runs : int)
                 ; receipts : (string * I.follow_up_status) list
+                ; events : (string * string) list
                 }];
             A.shutdown actor))));
   [%expect
@@ -4597,7 +4692,11 @@ let%expect_test
          ((request_turn true) (request_compaction true) (end_session ()))))
        (inv_follow_turn
         (Applied_follow_up
-         ((request_turn true) (request_compaction false) (end_session ())))))))
+         ((request_turn true) (request_compaction false) (end_session ()))))))
+     (events
+      ((mex_follow_both completed.applied)
+       (mex_follow_obsolete completed.discarded)
+       (mex_follow_turn completed.applied))))
     ((mode reload) (starts (Compaction (Turn Moderator_request))) (model_runs 1)
      (receipts
       ((inv_follow_both
@@ -4605,7 +4704,11 @@ let%expect_test
          ((request_turn true) (request_compaction true) (end_session ()))))
        (inv_follow_turn
         (Applied_follow_up
-         ((request_turn true) (request_compaction false) (end_session ())))))))
+         ((request_turn true) (request_compaction false) (end_session ()))))))
+     (events
+      ((mex_follow_both completed.applied)
+       (mex_follow_obsolete completed.discarded)
+       (mex_follow_turn completed.applied))))
     ((mode "stop then restart") (starts (Compaction)) (model_runs 0)
      (receipts
       ((inv_follow_both
@@ -4615,7 +4718,11 @@ let%expect_test
        (inv_follow_turn
         (Discarded_follow_up
          ((request_turn true) (request_compaction false) (end_session ()))
-         "session stopped")))))
+         "session stopped"))))
+     (events
+      ((mex_follow_both completed.discarded)
+       (mex_follow_obsolete completed.discarded)
+       (mex_follow_turn completed.discarded))))
     ((mode "end overrides work") (starts ()) (model_runs 0)
      (receipts
       ((inv_follow_both
@@ -4628,7 +4735,11 @@ let%expect_test
        (inv_follow_turn
         (Discarded_follow_up
          ((request_turn true) (request_compaction false) (end_session ()))
-         "moderator ended session")))))
+         "moderator ended session"))))
+     (events
+      ((mex_follow_both completed.discarded) (mex_follow_end completed.applied)
+       (mex_follow_obsolete completed.discarded)
+       (mex_follow_turn completed.discarded))))
     ((mode "old generation") (starts ()) (model_runs 0)
      (receipts
       ((inv_follow_both
@@ -4638,7 +4749,11 @@ let%expect_test
        (inv_follow_turn
         (Discarded_follow_up
          ((request_turn true) (request_compaction false) (end_session ()))
-         "observation owner is no longer installed")))))
+         "observation owner is no longer installed"))))
+     (events
+      ((mex_follow_both completed.discarded)
+       (mex_follow_obsolete completed.discarded)
+       (mex_follow_turn completed.discarded))))
     ((mode "compaction cancelled") (starts (Compaction (Turn Moderator_request)))
      (model_runs 1)
      (receipts
@@ -4651,7 +4766,11 @@ let%expect_test
          ((request_turn true) (request_compaction true) (end_session ()))))
        (inv_follow_turn
         (Applied_follow_up
-         ((request_turn true) (request_compaction false) (end_session ())))))))
+         ((request_turn true) (request_compaction false) (end_session ()))))))
+     (events
+      ((mex_follow_both completed.discarded)
+       (mex_follow_obsolete completed.discarded)
+       (mex_follow_other completed.applied) (mex_follow_turn completed.applied))))
     ((mode "compaction checkpoint failed")
      (starts (Compaction (Turn Moderator_request))) (model_runs 1)
      (receipts
@@ -4664,7 +4783,11 @@ let%expect_test
          ((request_turn true) (request_compaction true) (end_session ()))))
        (inv_follow_turn
         (Applied_follow_up
-         ((request_turn true) (request_compaction false) (end_session ())))))))
+         ((request_turn true) (request_compaction false) (end_session ()))))))
+     (events
+      ((mex_follow_both completed.discarded)
+       (mex_follow_obsolete completed.discarded)
+       (mex_follow_other completed.applied) (mex_follow_turn completed.applied))))
     ((mode "compaction interrupted")
      (starts (Compaction (Turn Moderator_request))) (model_runs 1)
      (receipts
@@ -4677,7 +4800,11 @@ let%expect_test
          ((request_turn true) (request_compaction true) (end_session ()))))
        (inv_follow_turn
         (Applied_follow_up
-         ((request_turn true) (request_compaction false) (end_session ())))))))
+         ((request_turn true) (request_compaction false) (end_session ()))))))
+     (events
+      ((mex_follow_both completed.discarded)
+       (mex_follow_obsolete completed.discarded)
+       (mex_follow_other completed.applied) (mex_follow_turn completed.applied))))
     |}]
 ;;
 

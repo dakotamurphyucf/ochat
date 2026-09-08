@@ -250,6 +250,9 @@ let snapshot_has_pending_events t =
     in
     queued
     || List.exists state.invocations ~f:Agent_session.Observation_follow_up.pending
+    || List.exists
+         state.moderator_executions
+         ~f:Agent_session.Observation_follow_up.pending_event
     || ((not halted) && Option.exists observer ~f:(pending_observation state)))
   else Ok false
 ;;
@@ -265,14 +268,14 @@ let drain_idle_moderator t =
       match t.runtime with
       | Some runtime ->
         let%bind applied =
-          Agent_session.Session_actor.apply_observation_follow_up t.actor
+          Agent_session.Session_actor.apply_moderator_follow_up t.actor
         in
         if applied
         then Ok true
         else (
           let%bind more_observations = drain_loaded_observations t runtime in
           let%bind applied =
-            Agent_session.Session_actor.apply_observation_follow_up t.actor
+            Agent_session.Session_actor.apply_moderator_follow_up t.actor
           in
           if applied
           then Ok true
@@ -302,6 +305,10 @@ let with_loaded_runtime t f =
            ~retryable:false
            ()))
 ;;
+
+module For_testing = struct
+  let with_loaded_runtime t f = with_loaded_runtime t (fun _ -> f ())
+end
 
 let execute_model_job t ~recipe ~payload =
   let outcome =

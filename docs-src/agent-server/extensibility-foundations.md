@@ -228,8 +228,8 @@ outcomes, event lineage, retained scheduling intent, checkpoint agreement, no
 additional provider history, and no invocation of the fallback tool callback.
 
 Idle polling integration for this helper, startup/foreground event ownership,
-changed-checkpoint reconciliation, interactive permissions, scheduling of retained
-event requests and normal v1 runtime binding remain integration work. The helper
+changed-checkpoint reconciliation, interactive permissions and normal v1 runtime
+binding remain integration work. The helper
 is exercised through internally installed compiled managers, not public tools.
 
 `Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped
@@ -453,8 +453,10 @@ successful/competing/reentrant handling, retained turn/termination requests,
 handler and persistence failures, cancellation, and both stop modes. It checks
 that live and persisted snapshots agree and native results/history remain intact.
 
-`Session_actor.apply_observation_follow_up` now applies retained requests at an
-idle safe point. It coalesces turns and compactions, prioritizes termination,
+`Session_actor.apply_moderator_follow_up` applies retained event and observation
+requests together at an idle safe point. `apply_observation_follow_up` remains a
+compatibility name for the same operation. The shared planner coalesces turns
+and compactions into one action, prioritizes termination,
 and discards requests from obsolete source identities or generations. It saves
 receipt changes in the same transaction as operation admission or stopping;
 a failed save starts no work. Turn admission requires an installed worker.
@@ -465,16 +467,23 @@ so restarting does not rearm it.
 
 The daemon's existing idle polling now detects retained requests even when no
 internal event is queued, loads the runtime, and applies requests before draining
-legacy events. A daemon integration test proves retained termination is consumed
-without a queued event, using a durable v1 receipt fixture and an offline model
-stub. Actor tests exercise save rejection, compaction followed by a coalesced turn,
-reload between operations, stop/restart, and termination overriding work.
+legacy events. A daemon integration test independently proves that observation
+intent and event intent can each trigger termination without a queued event. The
+event-only case has no invocation receipts. The fixture uses the real actor claim
+and checkpoint boundary with a v1-shaped record, while the loaded public runtime
+still uses its legacy compiler; no handler or model runs to apply these requests.
+Actor tests mix event and observation requests, reject an obsolete event's stop
+request, inject save failures, and verify one compaction followed by one coalesced
+turn, reload between operations, stop/restart, and termination overriding work.
 Each newly accepted compaction receipt also retains its operation ID. A cancelled
 or failed compaction discards only the turns tied to that operation, atomically
 with its terminal state. Recovery from a durable active compaction applies the
 same rule before restoring execution. Independent requests and receipts for
 other compactions survive; native tool outcomes remain unchanged. A successful
-compaction still leaves its requested turn pending for the next idle safe point.
+compaction still leaves its requested turn pending for the next idle safe point,
+including after snapshot reload and recovery. Event recovery discards only the
+turn tied to an interrupted active compaction; it does not mistake a completed
+compaction's retained follow-up for interrupted work.
 Legacy intermediate receipts without an operation binding are retired rather
 than implicitly resumed.
 

@@ -15,7 +15,9 @@ type t =
     If a compaction was active, its dependent follow-up turn is discarded in the
     same recovery plan. Independent requests and other operation bindings survive.
     Ordinary event executions left Running are interrupted without replay. Their
-    waiting-compaction intent is discarded with its binding retained; pending
+    waiting-compaction intent is discarded only for the interrupted active
+    compaction, with its binding retained; a turn after committed compaction
+    success survives reload. Pending/waiting
     intent in an older generation is also discarded. Other completed event
     outcomes and current-generation pending intent survive.
 

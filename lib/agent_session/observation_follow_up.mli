@@ -1,6 +1,7 @@
 open Core
 
-(** Pure scheduling decisions over acknowledged observations. The host saves
+(** Pure scheduling decisions over acknowledged observations and completed events.
+    The host saves
     all returned records atomically with the selected scheduling/stop action.
     This planner neither executes callbacks nor authorizes native tools. *)
 type action =
@@ -13,9 +14,27 @@ type action =
 type t =
   { action : action
   ; invocations : Agent_protocol.Invocation.t list
+  ; events : Agent_protocol.Moderator_execution.t list
   }
 
 val pending : Agent_protocol.Invocation.t -> bool
+
+(** Event equivalents retain original execution outcomes and exact compaction
+    bindings. Only pending or waiting intents are settled. *)
+val pending_event : Agent_protocol.Moderator_execution.t -> bool
+
+val event_delta : Agent_protocol.Moderator_execution.t -> Session_delta.t
+
+val discard_events
+  :  Agent_protocol.Moderator_execution.t list
+  -> reason:string
+  -> (Agent_protocol.Moderator_execution.t list, Agent_protocol.Error.t) result
+
+val discard_event_compaction
+  :  Agent_protocol.Moderator_execution.t list
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> reason:string
+  -> (Agent_protocol.Moderator_execution.t list, Agent_protocol.Error.t) result
 
 (** Discard uses nonexecuting reconciliation so old-generation requests can be
     retired; accepting work always requires a current-generation change. *)
@@ -37,8 +56,9 @@ val discard_compaction
 
 (* [compaction_operation_id] must identify the operation committed with [Compact]. *)
 
-(** Coalesce requests for the current source/generation. End overrides other
-    actions. Compaction is accepted before a requested turn; its receipt retains
+(** Coalesce both event and observation requests for the current source/generation
+    into one action. End overrides other actions. Compaction is accepted before a
+    requested turn; its receipt retains
     that turn without requesting compaction again. Obsolete owners and halted
     moderators have their pending actions discarded. Applied means scheduling
     was accepted, not that execution succeeded. *)

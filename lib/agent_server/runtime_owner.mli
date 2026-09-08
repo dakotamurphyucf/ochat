@@ -41,7 +41,8 @@ val enqueue_internal_event
 (** [drain_idle_moderator] handles pending invocation observations and queued
     internal events when the actor can grant an idle moderator borrow. Each
     observation batch is bounded; its durable follow-up requests are consumed
-    before another event drain. Only the installed v1 source can handle an
+    together with retained event requests before another event drain, even when
+    no internal event or observation is queued. Only the installed v1 source can handle an
     observation. Failed handlers retain their separate observation failure and
     are never replayed. The result requests another idle probe when a batch
     exhausts its budget, queued events remain, or follow-up work was scheduled.
@@ -69,3 +70,12 @@ val enqueue_model_job_completion
 (** [close] permanently prevents runtime reload, detaches the operation worker,
     and closes the loaded runtime. The actor must still be running. *)
 val close : t -> unit
+
+module For_testing : sig
+  (** Hold loaded runtime ownership while installing a deterministic actor-state
+      fixture. Polling resumes after the callback. Do not re-enter owner methods. *)
+  val with_loaded_runtime
+    :  t
+    -> (unit -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+end

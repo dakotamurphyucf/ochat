@@ -165,12 +165,15 @@ let plan ~state ~namespace ~first_sequence ~reason =
         let%map retired =
           match execution.E.status, execution.intent with
           | Running, _ -> E.interrupt execution ~reason |> Result.map ~f:Option.some
-          | Completed _, Some (Waiting_compaction _) ->
+          | Completed _, Some (Waiting_compaction bound)
+            when match state.active_operation with
+                 | Some { kind = Compaction; id; _ } -> P.Id.Operation.equal bound id
+                 | _ -> false ->
             E.discard_intent
               execution
               ~reason:"compaction interrupted before event follow-up"
             |> Result.map ~f:Option.some
-          | Completed _, Some Pending
+          | Completed _, Some (Pending | Waiting_compaction _)
             when execution.context.generation < state.identity.generation ->
             E.discard_intent
               execution
