@@ -127,6 +127,256 @@ let call
 
 let state manager = (M.identity_snapshot manager |> ok).current_state
 
+let%expect_test
+    "ordinary events hand off complete snapshots before installing local effects"
+  =
+  let module S = Session.Moderator_state.Identity_snapshot in
+  let same_snapshot left right = Sexp.equal (S.sexp_of_t left) (S.sexp_of_t right) in
+  List.iter [ `Commit; `Reject; `Raise; `Cancel ] ~f:(fun mode ->
+    Eio_main.run (fun env ->
+      let fallback_calls = ref 0 in
+      let capabilities =
+        { Chat_response.Moderation.Capabilities.default with
+          on_tool_call =
+            (fun ~name:_ ~args:_ ->
+              incr fallback_calls;
+              Ok (Tool_ok `Null))
+        }
+      in
+      let manager, _, _ =
+        setup
+          env
+          ~capabilities
+          ~initial:"[0]"
+          "Task.pure(state)"
+          ~events:
+            {| | `Session_start ->
+              let ignored = state[0] <- state[0] + 1 in
+              Task.bind(Tool.call("native", `Null), fun ignored ->
+              Task.bind(Turn.prepend_system("saved overlay"), fun ignored ->
+              Task.bind(Runtime.emit(`String("new event")), fun ignored ->
+              Task.bind(Runtime.end_session("finished"), fun ignored -> Task.pure(state)))))
+            | `Turn_start -> Task.bind(Tool.call("fallback", `Null), fun ignored -> Task.pure(state))
+            | _ -> Task.pure(state) |}
+      in
+      let queued =
+        MI.internal_event (L.VVariant ("String", [ VString "existing" ])) |> ok
+      in
+      M.enqueue_internal_event manager queued |> ok;
+      let before = M.identity_snapshot manager |> ok in
+      let saved = ref before in
+      let proposal = ref None in
+      let native_calls = ref 0 in
+      let installs = ref 0 in
+      let wakeups = ref 0 in
+      let subscription =
+        M.subscribe_committed_changes manager ~on_wakeup:(fun () -> incr wakeups)
+      in
+      let entered, enter = Eio.Promise.create () in
+      let never, _ = Eio.Promise.create () in
+      let prepare_event ~outcome ~(snapshot : S.t) =
+        proposal := Some snapshot;
+        assert (!installs = 0 && !wakeups = 0 && !native_calls = 1);
+        (match snapshot.current_state with
+         | Session.Snapshot.Array [ Int 1 ] -> ()
+         | _ -> failwith "proposal lost array mutation");
+        assert snapshot.halted;
+        assert (List.length snapshot.prepended_items = 1);
+        assert (
+          List.compare
+            Session.Snapshot.compare
+            snapshot.queued_internal_events
+            (before.queued_internal_events
+             @ [ Session.Snapshot.Variant
+                   ("Internal_event", [ Variant ("String", [ String "new event" ]) ])
+               ])
+          = 0);
+        assert (
+          Option.is_some
+            (Chat_response.Runtime_semantics.should_end_session
+               outcome.Chat_response.Moderation.Outcome.runtime_requests));
+        match mode with
+        | `Commit ->
+          (* Exercise the persisted snapshot codec before restoring another manager. *)
+          saved := Binable.of_string (module S) (Binable.to_string (module S) snapshot);
+          Ok (fun () -> incr installs)
+        | `Reject -> Error "event save rejected"
+        | `Raise -> raise Exit
+        | `Cancel ->
+          Eio.Promise.resolve enter ();
+          Eio.Promise.await never
+      in
+      let execute () =
+        M.handle_event_entries_transactional
+          manager
+          ~session_id:"event-fixture"
+          ~now_ms:0
+          ~history:[]
+          ~available_tools:[]
+          ~session_meta:`Null
+          ~event:Session_start
+          ~authorize:(fun () -> Ok ())
+          ~on_tool_call:(fun ~name:_ ~args:_ ->
+            incr native_calls;
+            Ok (Tool_ok `Null))
+          ~prepare_event
+      in
+      (match mode with
+       | `Commit -> execute () |> ok |> ignore
+       | `Reject -> expect "event save rejected" (execute ())
+       | `Raise ->
+         (match execute () with
+          | exception Exit -> ()
+          | _ -> assert false)
+       | `Cancel ->
+         (match
+            Eio.Fiber.first execute (fun () ->
+              Eio.Promise.await entered;
+              raise Exit)
+          with
+          | exception Exit -> ()
+          | _ -> assert false));
+      assert (!native_calls = 1 && !fallback_calls = 0);
+      let after = M.identity_snapshot manager |> ok in
+      assert (same_snapshot after !saved);
+      let changes = M.drain_committed_changes subscription in
+      let committed =
+        match mode with
+        | `Commit -> true
+        | _ -> false
+      in
+      assert (Bool.equal committed (not (same_snapshot before after)));
+      assert (!installs = Bool.to_int committed);
+      assert (!wakeups = !installs && List.length changes = !installs);
+      M.unsubscribe subscription;
+      let definition = M.extension_definition manager |> Option.value_exn in
+      let _, artifact = M.Registry.of_definition M.Registry.empty definition |> ok in
+      let allocator =
+        History_entry.Allocator.create ~namespace:"restored" ~next_sequence:0 |> ok
+      in
+      let restored =
+        M.create_entries
+          ~artifact:(Option.value_exn artifact)
+          ~capabilities
+          ~allocator
+          ~snapshot:!saved
+          ()
+        |> ok
+      in
+      assert (same_snapshot !saved (M.identity_snapshot restored |> ok));
+      (* Failure neither retries the native call nor leaves its scoped callback installed. *)
+      (match mode with
+       | `Commit -> ()
+       | `Reject | `Raise | `Cancel ->
+         M.handle_event_entries
+           manager
+           ~session_id:"event-fixture"
+           ~now_ms:0
+           ~history:[]
+           ~available_tools:[]
+           ~session_meta:`Null
+           ~event:Turn_start
+         |> ok
+         |> ignore;
+         assert (!fallback_calls = 1 && !native_calls = 1);
+         assert (same_snapshot before (M.identity_snapshot manager |> ok)));
+      assert (Option.is_some !proposal);
+      print_s
+        [%sexp
+          (mode : [ `Commit | `Reject | `Raise | `Cancel ])
+        , { native_calls = (!native_calls : int)
+          ; installs = (!installs : int)
+          ; committed : bool
+          ; restored_halted = (M.is_halted restored |> ok : bool)
+          }]));
+  [%expect
+    {|
+    (Commit
+     ((native_calls 1) (installs 1) (committed true) (restored_halted true)))
+    (Reject
+     ((native_calls 1) (installs 0) (committed false) (restored_halted false)))
+    (Raise
+     ((native_calls 1) (installs 0) (committed false) (restored_halted false)))
+    (Cancel
+     ((native_calls 1) (installs 0) (committed false) (restored_halted false)))
+    |}]
+;;
+
+let%expect_test
+    "ordinary event admission cannot forge invocation events or resolve a tool"
+  =
+  Eio_main.run (fun env ->
+    let manager, _, _ =
+      setup
+        env
+        ~initial:"[0]"
+        "fail(\"forged invocation reached handler\")"
+        ~events:
+          {| | `Session_start ->
+            let ignored = state[0] <- state[0] + 1 in
+            Task.bind(Runtime.emit(`Null), fun ignored ->
+            Task.bind(Invocation.resolve("not-dispatched", `Complete(`Null)), fun ignored -> Task.pure(state)))
+          | `Internal_event(payload) ->
+            let ignored = state[0] <- state[0] + 1 in
+            Task.bind(Runtime.emit(payload), fun ignored -> Task.pure(state))
+          | _ -> Task.pure(state) |}
+    in
+    let before = M.identity_snapshot manager |> ok in
+    let authorizations = ref 0 in
+    let preparations = ref 0 in
+    let saved = ref before in
+    let deliver ~event ~allowed =
+      M.handle_event_entries_transactional
+        manager
+        ~session_id:"event-fixture"
+        ~now_ms:0
+        ~history:[]
+        ~available_tools:[]
+        ~session_meta:`Null
+        ~event
+        ~authorize:(fun () ->
+          incr authorizations;
+          match allowed with
+          | true -> Ok ()
+          | false -> Error "event owner revoked")
+        ~on_tool_call:(fun ~name:_ ~args:_ -> failwith "unexpected native call")
+        ~prepare_event:(fun ~outcome:_ ~snapshot ->
+          incr preparations;
+          saved := snapshot;
+          Ok ignore)
+    in
+    expect
+      "invalid_internal_event"
+      (deliver ~event:(Internal_event (L.VVariant ("Tool_invoked", []))) ~allowed:true);
+    assert (!authorizations = 0 && !preparations = 0);
+    expect "event owner revoked" (deliver ~event:Session_start ~allowed:false);
+    expect "invalid in phase 'session_start'" (deliver ~event:Session_start ~allowed:true);
+    assert (!authorizations = 2 && !preparations = 0);
+    let module S = Session.Moderator_state.Identity_snapshot in
+    assert (
+      Sexp.equal (S.sexp_of_t before) (S.sexp_of_t (M.identity_snapshot manager |> ok)));
+    (* A JSON string naming a privileged event stays data inside Internal_event. *)
+    let event =
+      MI.internal_event (L.VVariant ("String", [ VString "Tool_invoked" ])) |> ok
+    in
+    deliver ~event:(Internal_event event) ~allowed:true |> ok |> ignore;
+    let after = M.identity_snapshot manager |> ok in
+    assert (Sexp.equal (S.sexp_of_t !saved) (S.sexp_of_t after));
+    print_s
+      [%sexp
+        { authorizations = (!authorizations : int)
+        ; preparations = (!preparations : int)
+        ; state = (after.current_state : Session.Snapshot.t)
+        ; queue = (after.queued_internal_events : Session.Snapshot.t list)
+        }]);
+  [%expect
+    {|
+    ((authorizations 3) (preparations 1) (state (Array ((Int 1))))
+     (queue
+      ((Variant Internal_event ((Variant String ((String Tool_invoked))))))))
+    |}]
+;;
+
 let%expect_test "observation handlers can retain coalesced runtime follow-up intent" =
   List.iter [ false; true ] ~f:(fun retain_follow_up ->
     Eio_main.run (fun env ->

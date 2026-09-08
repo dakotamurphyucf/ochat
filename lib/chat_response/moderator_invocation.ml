@@ -84,7 +84,7 @@ let json ~max_bytes value =
   else Ok json
 ;;
 
-let wrap_json payload =
+let internal_event payload =
   let open Result.Let_syntax in
   let%map _ = json ~max_bytes:(1024 * 1024) payload in
   L.VVariant ("Internal_event", [ payload ])
@@ -93,7 +93,7 @@ let wrap_json payload =
 let normalize (eff : L.eff) =
   match eff.op, eff.args with
   | "Runtime.emit_json", [ payload ] ->
-    Result.map (wrap_json payload) ~f:(fun event ->
+    Result.map (internal_event payload) ~f:(fun event ->
       L.{ op = "Runtime.emit"; args = [ event ] })
   | "Runtime.emit_json", _ ->
     error "invocation.invalid_event" "emit expects one JSON argument"
@@ -126,7 +126,7 @@ let operations base =
           (fun session args ->
             match args with
             | [ payload ] ->
-              Result.bind (wrap_json payload) ~f:(fun event ->
+              Result.bind (internal_event payload) ~f:(fun event ->
                 emit.perform session [ event ])
             | _ -> Error "Runtime.emit_json: expected one JSON argument")
       }
@@ -136,7 +136,7 @@ let operations base =
           (fun session args ->
             match args with
             | [ delay; payload ] ->
-              Result.bind (wrap_json payload) ~f:(fun event ->
+              Result.bind (internal_event payload) ~f:(fun event ->
                 schedule.perform session [ delay; event ])
             | _ -> Error "Schedule.after_ms_json: expected delay and JSON payload")
       }

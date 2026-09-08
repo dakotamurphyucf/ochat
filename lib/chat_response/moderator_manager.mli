@@ -148,6 +148,45 @@ val handle_event_entries
   -> event:Moderation.Event.t
   -> (Moderation.Outcome.t, string) result
 
+(** Execute an ordinary v1 event with a prospective durable state handoff.
+    [authorize] runs under the execution lock before handler execution; the host
+    must recheck its event ownership and installed source there. [on_tool_call]
+    is required and scoped to this execution, with no legacy callback fallback.
+    It must enforce current capabilities, policy and durable child ownership.
+
+    All local validation precedes [prepare_event], which receives the complete
+    prospective state, queued events, halt and identity overlay. The host must
+    atomically persist that snapshot with the event's receipt and runtime intent,
+    returning an infallible, non-yielding installer. Error, exception or
+    cancellation before commit restores serializable state and discards local
+    effects; external effects are not undone or retried. Callbacks must not
+    re-enter the manager. The host owns cancellation-safe persistence.
+
+    Internal_event must contain the v1 [Internal_event(tagged_json)] envelope,
+    not an arbitrary legacy event value. This delivers the supplied event; it
+    does not dequeue or acknowledge an existing queued event. Tool_invoked and
+    Tool_observed require their dedicated APIs. Halted sessions and legacy UI
+    continuations are rejected. This engine boundary does not acquire an actor
+    borrow, impose a host deadline or provide interactive permission ownership. *)
+val handle_event_entries_transactional
+  :  t
+  -> session_id:string
+  -> now_ms:int
+  -> history:History_entry.t list
+  -> available_tools:Res.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> event:Moderation.Event.t
+  -> authorize:(unit -> (unit, string) result)
+  -> on_tool_call:
+       (name:string
+        -> args:Jsonaf.t
+        -> (Moderation.Capabilities.tool_call_result, string) result)
+  -> prepare_event:
+       (outcome:Moderation.Outcome.t
+        -> snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> (unit -> unit, string) result)
+  -> (Moderation.Outcome.t, string) result
+
 (** Execute the dedicated extensibility-v1 Tool_invoked event under the manager
     lock. Only a dispatched invocation matching a prepared tool owned by this
     moderator is accepted. [prepare_resolution] receives an immutable prospective

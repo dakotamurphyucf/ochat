@@ -68,6 +68,35 @@ worker service described below supplies that boundary.
 Runtime task limits and bounded result/state conversion are present here; pure
 evaluation interruption remains part of the execution-budget work.
 
+### Transactional ordinary events
+
+`Moderator_manager.handle_event_entries_transactional` provides the same
+prospective snapshot boundary for ordinary v1 lifecycle and internal events.
+It requires an authorization callback, checked under the manager lock before
+execution, and an explicit scoped `Tool.call` callback. The host must supply
+current event/source ownership and policy; this API never falls back to the
+manager's legacy tool callback. The scoped callback is removed on success,
+failure, exception and cancellation.
+
+The handler's local effects and serializable state are validated before
+`prepare_event` receives the complete proposed snapshot and outcome. The host
+must save the event receipt and any scheduling intent with that snapshot, then
+return an infallible, non-yielding installer. A failed handoff restores mutable
+state and leaves the queue, halt and overlay unchanged. It does not undo or
+repeat native effects that already ran. Legacy UI continuations are rejected
+on this path.
+
+An internal event must carry the v1 `Internal_event(tagged_json)` envelope.
+Arbitrary legacy event values cannot impersonate lifecycle, invocation or
+observation events. `Invocation.resolve` is invalid in an ordinary handler;
+`Tool_invoked` and `Tool_observed` still use their dedicated methods.
+
+This method delivers its supplied event without consuming the existing queue.
+Durable queue acknowledgement, actor event borrowing, event-owned interactive
+permissions, host execution deadlines and normal v1 runtime construction remain
+integration work. Calling the legacy drain, which removes a queued event before
+handling it, does not supply a transactional acknowledgement.
+
 ### Actor and worker handoff
 
 `Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped

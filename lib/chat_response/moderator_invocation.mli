@@ -43,6 +43,10 @@ val operations : R.op_def list -> R.op_def list
     resolution outside a dispatched invocation. *)
 val ordinary_effects : L.eff list -> (L.eff list, string) result
 
+(** Validate a tagged JSON payload and wrap it in the v1 Internal_event envelope.
+    Shared by emit/timer adapters and host event admission. *)
+val internal_event : L.value -> (L.value, string) result
+
 type failure =
   | Unhandled
   | Duplicate_resolution
