@@ -51,6 +51,7 @@ website/.generated/
 website/src/content/docs/
 website/test-results/
 website/playwright-report/
+website/blob-report/
 website/src/content/.docs-*/
 website/.generated-previous/
 website/.generated-stage-*/

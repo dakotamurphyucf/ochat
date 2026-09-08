@@ -111,7 +111,7 @@ point rejects disallowed events, refs, repositories and modes before touching
 credentials or artifacts. This is not a claim that a future scheduled audit or a
 manual recovery has already executed.
 
-## Browser sharding decision
+## Original browser sharding decision (tasks 17–19)
 
 Retain the two-worker suites in both environments for this change. Concurrency,
 qualified dependency reuse, and Dune object reuse have already reduced the gate
@@ -126,3 +126,19 @@ See [CI coverage and maintenance](ci-enforcement.md) for the selection policy,
 lock refresh, cache recovery, manual modes and retained evidence. Detailed local
 reports and resumable implementation notes remain under `scratch/` and are not
 published website assets or a shared backup.
+
+
+## Two-shard follow-up
+
+The follow-up implements two shards per environment while preserving all three
+engines, two workers per shard, zero retries and the exact prepared artifact.
+Discovery and execution evidence must cover every planned test exactly once;
+all four browser jobs and both qualification jobs participate in the gate.
+Local policy tests exercise missing, duplicate, failed, cancelled, stale and
+partially executed evidence. A real Playwright fixture exercises discovery,
+two shard reporters, explicit skips and blob merging without launching browsers.
+
+Hosted qualification and measured timing results are pending. Compare against
+the prior mixed-cache full PR (748-second gate, 2,269 validation runner-seconds,
+about 9.3 minutes per browser suite); do not treat cold OCaml setup or runner
+queue time as a browser-sharding result.

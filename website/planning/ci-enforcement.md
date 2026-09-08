@@ -13,7 +13,9 @@ publisher. Strict branch protection, administrator enforcement, and the exact
 | `framework (normal)` | Run `opam exec -- dune runtest --force`. |
 | `framework (e2e)` | Run `opam exec -- dune build --force @agent-e2e-pr`: daemon smoke, Unix/stdio/HTTP transports, transport conformance, workspaces and multiple clients. |
 | `semantics` | Run the offline documentation checks and retain evidence for this exact revision. |
-| `website (preview)` and `website (production)` | Unit/Astro checks, build, performance, search, Chromium/Firefox/WebKit tests; production packaging and retained artifact checks. |
+| `website (preview)` and `website (production)` | Unit/Astro checks, one build per environment, performance, search, full browser-test discovery and retained build; production packaging checks. |
+| `browser (environment, shard)` | Two shards per environment, two workers each, zero retries; Chromium/Firefox/WebKit tests against that environment's downloaded build. |
+| `website-qualification (environment)` | Merge both shard reports, verify complete disjoint test coverage and exact artifact/revision/run identity; retain the qualified production artifact. |
 | `release-gate` | Always run; require successful detection and every selected job. Accept a skipped job only when detection explicitly marked it unnecessary. |
 | `deploy-production` | Publish a same-run qualified artifact on main when selected, then verify the hosted site. |
 
@@ -26,6 +28,37 @@ tiers run independently; a failure does not cancel evidence from the other tier.
 Load, soak, live-provider, and manual-terminal tiers remain separate. These jobs
 receive no model credentials and make no paid model requests. Website jobs start
 after detection, concurrently with the OCaml jobs.
+
+## Browser sharding and artifacts
+
+Each environment builds once and uploads `website-build-preview` or
+`website-build-production`. Each contains the retained manifest, exact `dist/`
+bytes, generated fixture reports and an unsharded Playwright discovery plan.
+The four browser jobs download their environment's build, verify its revision,
+lockfile and content hash, restore its bytes and fixtures without rebuilding,
+and verify the served copy again after execution. Existing platform-specific
+clipboard skips remain explicit; retries remain disabled.
+
+Every shard uploads a machine-readable report, a Playwright blob report and
+failure traces as `website-browser-ENVIRONMENT-INDEX`. The environment's
+qualification job merges the blob reports into HTML/JSON and requires both
+shard indices, all three engines, every planned test exactly once, successful
+execution, and matching revision, artifact hash and workflow run. Failed or
+cancelled browser jobs still block `release-gate`, even if another environment
+qualifies. Missing evidence fails qualification. Merged diagnostic reports are
+retained when available; setup failures may have no Playwright report.
+
+Only successful qualification can upload `website-production-release`.
+Production verification rechecks the full shard evidence, not just a summarized
+pass flag. All downloads are from the current run. Failed-job reruns can reuse
+successful shards from an earlier attempt of that same run when the artifact
+hash and revision match; rerun uploads replace their own named evidence.
+A previous run's browser summary cannot qualify a new release.
+
+The additional runners and artifact transfer have overhead. Compare time to the
+required gate, individual browser durations, total validation runner time and
+failures in the [qualification record](ci-qualification.md) before expanding
+beyond two shards. The two-worker limit avoids overloading each runner.
 
 ## Change selection and publication
 

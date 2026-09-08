@@ -122,8 +122,10 @@ test("gate accepts only successful selected jobs and explicitly unnecessary skip
       needs.changes.outputs[names[index]] = String(selected);
       needs[names[index]] = { result: selected ? "success" : "skipped" };
     }
-    assert.equal(requireSelectedJobs(needs).length, 3);
-    for (const name of names)
+    for (const name of ["browser", "website-qualification"])
+      needs[name] = { result: needs.website.result };
+    assert.equal(requireSelectedJobs(needs).length, 5);
+    for (const name of [...names, "browser", "website-qualification"])
       for (const status of [
         "failure",
         "cancelled",
