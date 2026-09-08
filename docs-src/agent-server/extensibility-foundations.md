@@ -155,8 +155,8 @@ sources, instantiate ChatML modules, or invoke any tool.
 
 The following declaration shapes are now parsed, serialized and captured in pinned
 prompt artifacts. Their runtime execution remains disabled while the invocation
-and authoring services are implemented. Handler kind/reference checks are present;
-full entrypoint type checking and effective capability binding remain unfinished.
+and authoring services are implemented. Nonexecuting handler, entrypoint, schema
+and effective-capability checks are available through the preparation APIs below.
 
 ```xml
 <script id="worker" language="chatml" kind="tool" src="worker.chatml"/>
@@ -348,7 +348,32 @@ cycles first. `prepare_isolated` preserves those checks and uses the separate
 compiler worker for typechecking. Public generated-definition validation must
 combine the strict bundle parser, inherited-authority checks and this bounded
 compiler path; runtime registration must use the prepared value before exposing a
-handler. Those integration steps remain open.
+handler. Runtime execution integration remains open.
+
+`prepare_definition_isolated` validates the whole parsed extension definition.
+It reuses the parser's declaration-registry checks for duplicate IDs, handler kinds,
+dependency cycles and authoring declaration uniqueness. Every versioned script is
+compiled, including a lifecycle moderator with no associated tool and a standalone
+script that no tool currently references. Invalid unused scripts cannot pass admission
+merely because the first exposed tool is valid.
+
+Input, output and completion schemas are checked before any compiler worker starts.
+Successful schema compilation is reused, while retained digests are checked on every
+declaration. Scripts with identical source and target share a compiled program;
+multiple tools bound to one handler retain that same program. All compiler workers
+share one wall-clock deadline, so each script does not receive a fresh total budget.
+
+The batch permits up to 128 extension scripts, 4096 extension tools, 16384 parsed
+elements and 8 MiB of distinct script/schema source. Per-script and per-schema
+limits still apply. The result exposes all compiled scripts, individually prepared
+tools and a fingerprint covering declarations, compiler contracts and actual
+capability bindings. No initializer or tool implementation runs during preparation.
+
+This entrypoint validates versioned extensions; existing hosts retain responsibility
+for legacy script execution. It does not load sources, construct runners, fulfill
+authoring context plans or authorize generated native configuration. Generated
+definitions use their separate inherited-authority admission. Runtime hosts must
+consume the appropriate prepared results before enabling the new execution paths.
 
 ## Generated source bundles
 

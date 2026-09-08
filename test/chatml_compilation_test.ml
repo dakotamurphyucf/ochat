@@ -124,6 +124,119 @@ let run = fun ctx input -> Task.pure(`Complete(input))</script><tool name="custo
       List.is_empty
         (Chat_response.Tool_capability.references
            (Chat_response.Extension_compiler.capabilities prepared)));
+    let module EC = Chat_response.Extension_compiler in
+    let module CM = Prompt.Chat_markdown in
+    let module Spec = Chatmd_shell_spec.Extension_spec in
+    let definition ?limits ?(worker = worker) elements =
+      EC.prepare_definition_isolated ?limits ~env ~worker ~capabilities elements
+    in
+    let admitted result =
+      result
+      |> Result.map_error ~f:(fun errors ->
+        [%sexp (errors : Chatmd_shell_spec.Diagnostic.t list)] |> Sexp.to_string)
+      |> Result.ok_or_failwith
+    in
+    let reject code = function
+      | Ok _ -> failwith ("expected " ^ code)
+      | Error errors ->
+        assert (
+          List.exists errors ~f:(fun error ->
+            String.equal error.Chatmd_shell_spec.Diagnostic.code code))
+    in
+    let shared =
+      definition (declarations @ [ CM.Tool (Extension { tool with name = "second" }) ])
+      |> admitted
+    in
+    assert (List.length (EC.compiled_scripts shared) = 1);
+    let prepared = EC.prepared_tools shared in
+    assert (List.length prepared = 2);
+    assert (
+      phys_equal
+        (EC.program (List.nth_exn prepared 0))
+        (EC.program (List.nth_exn prepared 1)));
+    let unused = { script with id = "unused" } in
+    let shared_source =
+      definition (declarations @ [ CM.Extension_script unused ]) |> admitted
+    in
+    let programs = EC.compiled_scripts shared_source |> List.map ~f:snd in
+    assert (phys_equal (List.nth_exn programs 0) (List.nth_exn programs 1));
+    let changed_script script text =
+      { script with
+        Spec.source = Chatmd_shell_spec.Chatmd_script_spec.Inline text
+      ; source_sha256 = Chatmd_shell_spec.Source_ref.digest text
+      }
+    in
+    reject
+      "chatml.invalid_handler"
+      (definition
+         (declarations @ [ CM.Extension_script (changed_script unused "let run = 0") ]));
+    let lifecycle =
+      changed_script
+        { script with id = "lifecycle"; kind = Spec.Moderator_script }
+        "let initial_state = fail(\"must not initialize\")\n\
+         let on_event = fun ctx state event -> Task.pure(state)"
+    in
+    let lifecycle_only = definition [ CM.Extension_script lifecycle ] |> admitted in
+    assert (List.is_empty (EC.prepared_tools lifecycle_only));
+    assert (List.length (EC.compiled_scripts lifecycle_only) = 1);
+    reject
+      "chatml.invalid_definition"
+      (definition (declarations @ [ CM.Extension_script script ]));
+    reject "chatml.invalid_definition" (definition [ CM.Tool (Extension tool) ]);
+    reject
+      "chatml.invalid_definition"
+      (definition
+         [ CM.Extension_script script
+         ; CM.Tool (Extension { tool with uses = [ tool.name ] })
+         ]);
+    reject
+      "chatml.invalid_limits"
+      (definition ~limits:{ C.default_limits with wall_seconds = 0. } []);
+    reject
+      "chatml.definition_limit"
+      (definition
+         (List.init 129 ~f:(fun i ->
+            CM.Extension_script { script with id = Int.to_string i })));
+    reject
+      "chatml.source_mismatch"
+      (definition
+         [ CM.Extension_script { unused with source_sha256 = String.make 64 '0' } ]);
+    let corrupt =
+      { tool with
+        output_schema = { tool.output_schema with source_sha256 = String.make 64 '0' }
+      }
+    in
+    reject
+      "chatmd.schema_digest_mismatch"
+      (definition
+         ~worker:"/unavailable/compiler"
+         [ CM.Extension_script script; CM.Tool (Extension corrupt) ]);
+    reject
+      "capability.not_selected"
+      (definition
+         [ CM.Extension_script script
+         ; CM.Tool (Extension { tool with uses = [ "missing" ] })
+         ]);
+    reject
+      "chatml.invalid_binding"
+      (definition
+         [ CM.Extension_script script
+         ; CM.Tool
+             (Extension
+                { tool with
+                  implementation = Standalone { script = script.id; entrypoint = "wrong" }
+                })
+         ]);
+    let slow_worker = Filename.concat (Core_unix.getcwd ()) (Sys.get_argv ()).(2) in
+    let another =
+      changed_script unused "let run = fun ctx input -> Task.pure(`Complete(`Null))"
+    in
+    reject
+      "chatml.compile_timeout"
+      (definition
+         ~worker:slow_worker
+         ~limits:{ C.default_limits with wall_seconds = 1. }
+         [ CM.Extension_script script; CM.Extension_script another ]);
     let temp = Core_unix.mkdtemp "/tmp/ochat-compiler-test.XXXXXX" in
     let dir = Eio.Path.(Eio.Stdenv.fs env / temp) in
     Exn.protect

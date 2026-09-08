@@ -911,7 +911,7 @@
 
 (rule
  (alias runtest-chatml-compilation)
- (action (run %{exe:chatml_compilation_test.exe} %{exe:../bin/ochat_chatml_compiler.exe})))
+ (action (run %{exe:chatml_compilation_test.exe} %{exe:../bin/ochat_chatml_compiler.exe} %{exe:slow_chatml_compiler.exe})))
 
 (alias
  (name runtest)

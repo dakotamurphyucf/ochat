@@ -253,6 +253,13 @@ module Chat_markdown : sig
     ; agents : (string * top_level_elements list) list
     }
 
+  (** Recheck the parsed declaration registry, including IDs, handler kinds,
+      dependency cycles and authoring declaration uniqueness. No source reads,
+      preprocessing, compilation or evaluation. Returns the same elements;
+      raises [Failure] on invalid declarations. Source/hash/schema and runtime
+      capability checks remain the admission service's responsibility. *)
+  val validate_declarations : top_level_elements list -> top_level_elements list
+
   (** Parse the root and the complete reachable local-agent source closure from
       supplied bytes only. Imports and script/schema sources cannot fall back to
       disk; external/missing agent definitions reject. No preprocessing runs,

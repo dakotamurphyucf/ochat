@@ -1114,6 +1114,8 @@ module Chat_markdown = struct
     elements
   ;;
 
+  let validate_declarations = validate_scripts
+
   let parse_inputs
         ~parse_document
         ~preprocess

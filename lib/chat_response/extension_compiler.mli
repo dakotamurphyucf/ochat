@@ -41,3 +41,34 @@ val prepare_isolated
   -> capabilities:Tool_capability.t
   -> Spec.tool
   -> (t, Chatmd_shell_spec.Diagnostic.t list) result
+
+type definition
+
+(** Validate the complete parsed extension registry and compile every versioned
+    script, including lifecycle-only and currently unused scripts, without
+    evaluating initializers. Shared source/target pairs compile once. All worker
+    calls share one wall deadline. Schemas are checked before launching workers
+    and successful schemas are reused without trusting forged retained digests.
+    Limits: 128 scripts, 4096 extension tools, 16384 elements, 8MiB distinct
+    script/schema source. Legacy execution paths remain with existing hosts.
+
+    [capabilities] contains the actual approved registrations available for
+    nested tool selection. This service does not construct new tools, perform
+    source loading, apply authoring context, or authorize generated definitions.
+    A host must consume the prepared result before exposing extension runners;
+    code editing or registry changes require fresh admission. *)
+val prepare_definition_isolated
+  :  ?limits:Chatml_compilation.limits
+  -> env:Eio_unix.Stdenv.base
+  -> worker:string
+  -> capabilities:Tool_capability.t
+  -> Prompt.Chat_markdown.top_level_elements list
+  -> (definition, Chatmd_shell_spec.Diagnostic.t list) result
+
+val prepared_tools : definition -> t list
+
+val compiled_scripts
+  :  definition
+  -> (Spec.script * Chatml_host_runtime.compiled_script) list
+
+val definition_fingerprint : definition -> string
