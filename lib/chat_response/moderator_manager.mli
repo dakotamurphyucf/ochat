@@ -152,10 +152,18 @@ val handle_event_entries
     [validate_work] checks current Pending work ownership without side effects.
     [authorize] rechecks current authority after acquiring the manager lock and
     validating the invocation, before executing the handler. It must not re-enter
-    this manager. Hosts using queued owner handoffs must supply this check. *)
+    this manager. Hosts using queued owner handoffs must supply this check.
+    [on_tool_call] overrides the legacy callback only during this invocation,
+    under the execution lock, and is restored on success, failure or cancellation.
+    The host must bind it to the active parent's selected capabilities, persistence
+    and policy. It must not synchronously re-enter the manager for pre/post hooks. *)
 val handle_invocation_entries
   :  ?authorize:(unit -> (unit, string) result)
   -> ?on_failure:(Moderator_invocation.failure -> unit)
+  -> ?on_tool_call:
+       (name:string
+        -> args:Jsonaf.t
+        -> (Moderation.Capabilities.tool_call_result, string) result)
   -> t
   -> invocation:Agent_protocol.Invocation.t
   -> history:History_entry.t list

@@ -20,6 +20,7 @@ let option f = function
 
 let string x = L.VString x
 let int x = L.VInt x
+let max_nested_calls = 100
 let bytes x = D.bytes_to_int64 x |> Int64.to_int_exn
 
 (* Bound traversal before recursive conversion/serialization, including cyclic
@@ -241,7 +242,7 @@ let create ~prepared ~invocation ~(limits : S.limits) ~validate_work =
       ; "max_output_bytes", int (bytes limits.max_output_bytes)
       ; "max_array_items", int limits.max_array_items
       ; "max_depth", int limits.max_depth
-      ; "max_nested_calls", int 100
+      ; "max_nested_calls", int max_nested_calls
       ; "max_invocation_depth", int 8
       ]
   in

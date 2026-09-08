@@ -169,13 +169,58 @@ separate canonical publication service below. Post-tool observation remains the
 caller's responsibility and must run once after the recorded outcome.
 
 These are internal services. The stream adapter described below connects native
-execution and publication, while normal runtime construction and
-ChatML `Tool.call` still need to be connected to them, including qualified
-authorization, post-observation and standalone dispatch. No new public tool is
+execution and publication; a scoped bridge also connects native `Tool.call`
+inside a moderator invocation. Normal runtime construction, full authorization/
+observation integration and standalone dispatch remain required. No new public tool is
 enabled by this foundation. Offline tests cover model/script policy and disclosure
 failures, capability changes during authorization, custom input, concurrent calls,
 borrowed-parent execution and rollback, stale parent rejection, cancellation and
 outcome persistence rejection.
+
+### Native calls from a moderator handler
+
+`Script_tool_calls` binds `Tool.call` to an actual dispatched parent and that
+prepared handler's captured native capabilities. `Moderator_tool_dispatch.create`
+accepts the bridge through `script_tools`. The manager installs its callback only
+while executing `Tool_invoked` under the manager lock and restores the existing
+callback on success, failure or cancellation. Other event phases retain their
+existing callbacks.
+
+Each accepted native child uses the same persisted invocation service as a model
+call. Its origin is `Moderator`, its parent is the active invocation, and it has
+no provider call ID, canonical call or output receipt. The disclosed JSON value
+returns to ChatML as `Ok(value)`; failures return bounded error codes. A failed
+parent rolls back its own uncommitted moderator state but does not erase a saved
+child outcome or undo that child's external effects.
+
+The captured capabilities form a ceiling. The live registry must still contain
+the same selected references after any approval wait; revocation or replacement
+prevents execution. Input and returned JSON also respect the implementing
+script's value bounds. A scope permits at most 100 call attempts, matching the
+context ABI. A callback retained beyond its scope fails, and the actor rejects
+new children of a parent whose callback has ended or committed.
+
+Calling the active moderator's own tool returns `moderator_reentrancy`. The host
+must explicitly declare when a native call requires a decision from that active
+moderator; such a call records a failure before effects. The authorization callback
+must not try to re-enter the active moderator or execute first and request approval
+later. Halt checks use actor/lifecycle state instead of acquiring the held manager.
+
+The required `defer_observation` hook receives the saved child invocation before
+the result returns to ChatML. It must retain non-authorizing observations for a
+later safe point. An error or exception produces `invocation.observation_failed`
+without changing or retrying the saved child outcome. **The durable observation
+queue, safe-point drain and restart integration are still required.** Current
+tests collect these hook calls in memory and verify that child outcomes have
+already reached actor storage. This hook alone is not delivery qualification.
+
+Compiled-handler tests cover native function/custom calls, policy denial,
+revocation/replacement during approval, moderator reentrancy, unknown/unselected
+tools, schema/value limits, disclosure, observer failure and parent rollback.
+They also check callback restoration, absence of child provider history, and
+agreement between live and persisted state. Scope tests cover call limits and
+escaped/closed-parent callbacks. General standalone/script routing, ordinary-event
+Tool.call installation and complete admission-attempt auditing remain open.
 
 ### Composed native and moderator stream dispatch
 
@@ -216,8 +261,9 @@ authorization, disclosure failure, redacted history and permanent publication
 rejection. A trap legacy runner ensures claimed native names never fall through.
 
 This adapter is still an internal installation hook. Normal `Runtime_builder`
-construction and script-origin routing remain unconnected. Standalone routing,
-host-wide policy integration and public qualification remain required. No new
+construction and general script-origin routing remain unconnected; the scoped
+native bridge above is available to internal moderator dispatch. Standalone routing,
+durable observation delivery, host-wide policy integration and public qualification remain required. No new
 feature flag is enabled.
 
 ### Atomic model-call intent

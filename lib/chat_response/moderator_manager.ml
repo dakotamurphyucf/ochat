@@ -113,6 +113,11 @@ type subscription =
   ; mutable active : bool
   }
 
+type tool_call =
+  name:string
+  -> args:Jsonaf.t
+  -> (Moderation.Capabilities.tool_call_result, string) result
+
 type t =
   { artifact : Registry.artifact
   ; runtime : Runtime.session
@@ -126,6 +131,7 @@ type t =
   ; mutable last_history : History_entry.t list
   ; mutable subscriptions : subscription list
   ; mutable suspended_phase : Moderation.Phase.t option
+  ; invocation_tool_call : tool_call option ref
   }
 
 type pending_ui_request = Runtime.pending_ui_request =
@@ -262,6 +268,16 @@ let create
       ()
   : (t, string) result
   =
+  let invocation_tool_call = ref None in
+  let capabilities =
+    { capabilities with
+      on_tool_call =
+        (fun ~name ~args ->
+          match !invocation_tool_call with
+          | None -> capabilities.on_tool_call ~name ~args
+          | Some call -> call ~name ~args)
+    }
+  in
   let handlers = Moderation.Capabilities.runtime_handlers capabilities in
   let handlers =
     Option.value_map on_process_run ~default:handlers ~f:(fun on_process_run ->
@@ -326,6 +342,7 @@ let create
     ; last_history = []
     ; subscriptions = []
     ; suspended_phase = None
+    ; invocation_tool_call
     }
 ;;
 
@@ -965,6 +982,7 @@ let identity_snapshot_of_state t ~current_state ~queued_events ~halted ~overlay 
 let handle_invocation_entries
       ?(authorize = fun () -> Ok ())
       ?on_failure
+      ?on_tool_call
       t
       ~invocation
       ~history
@@ -1048,12 +1066,17 @@ let handle_invocation_entries
     in
     t.last_history <- history;
     let%map resolved =
-      Moderator_invocation.run
-        ?on_failure
-        scope
-        ~runtime:t.runtime
-        ~context:(Moderation.Context.to_value context)
-        ~prepare_commit
+      let previous = !(t.invocation_tool_call) in
+      t.invocation_tool_call := on_tool_call;
+      Exn.protect
+        ~f:(fun () ->
+          Moderator_invocation.run
+            ?on_failure
+            scope
+            ~runtime:t.runtime
+            ~context:(Moderation.Context.to_value context)
+            ~prepare_commit)
+        ~finally:(fun () -> t.invocation_tool_call := previous)
     in
     resolved, !outcome)
 ;;

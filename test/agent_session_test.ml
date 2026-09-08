@@ -3854,6 +3854,7 @@ let%test_unit
 ;;
 
 let handoff_definition
+      ?capability_registry
       ?(events = "| _ -> Task.pure(state)")
       ?(script_limits = "")
       ?(schema = "true")
@@ -3893,12 +3894,15 @@ let handoff_definition
     Prompt.Chat_markdown.parse_chat_inputs ~dir ~source_loader:loader source
   in
   let capabilities =
-    C.create
-      ~owner:"handoff"
-      ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "fixture")
-      []
-    |> Result.map_error ~f:(fun e -> e.C.message)
-    |> Result.ok_or_failwith
+    match capability_registry with
+    | Some registry -> registry
+    | None ->
+      C.create
+        ~owner:"handoff"
+        ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "fixture")
+        []
+      |> Result.map_error ~f:(fun e -> e.C.message)
+      |> Result.ok_or_failwith
   in
   let definition =
     EC.prepare_definition_in_domain ~env ~capabilities elements
@@ -3938,6 +3942,419 @@ let handoff_definition
 let handoff_manager env =
   let manager, invocation, _ = handoff_definition env in
   manager, invocation
+;;
+
+let%test_unit "compiled moderator Tool.call uses persisted scoped native routing" =
+  List.iter
+    [ `Success
+    ; `Custom
+    ; `Denied
+    ; `Revoked
+    ; `Replaced
+    ; `Requires_moderator
+    ; `Self
+    ; `Unknown
+    ; `Unselected
+    ; `Observation_failed
+    ; `Observation_raised
+    ; `Invalid
+    ; `Disclosure
+    ; `Output_limit
+    ; `Parent_failed
+    ]
+    ~f:(fun mode ->
+      let calls = ref 0
+      and authorized = ref 0
+      and observations = ref []
+      and legacy_calls = ref 0 in
+      let custom =
+        match mode with
+        | `Custom -> true
+        | _ -> false
+      in
+      let registry = ref (native_registry ~custom calls ~raises:false) in
+      with_handoff_actor
+        ~make_worker:(fun env actor_ready ->
+          Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+            let actor = Eio.Promise.await actor_ready in
+            let selected =
+              match mode with
+              | `Unselected ->
+                Chat_response.Tool_capability.select !registry ~names:[]
+                |> Result.map_error ~f:(fun e -> e.Chat_response.Tool_capability.message)
+                |> Result.ok_or_failwith
+              | _ -> !registry
+            in
+            let name =
+              match mode with
+              | `Self -> "counter"
+              | `Unknown -> "missing"
+              | _ -> "read_file"
+            in
+            let argument =
+              match mode with
+              | `Invalid -> "`Null"
+              | _ -> if custom then "`String(\"{}\")" else "`Object([])"
+            in
+            let resolve =
+              "Task.bind(Tool.call(\""
+              ^ name
+              ^ "\", "
+              ^ argument
+              ^ "), fun result -> "
+              ^ "match result with | `Ok(value) -> \
+                 Invocation.resolve(p.context.invocation_id, `Complete(value)) "
+              ^ "| `Error(code) -> Invocation.resolve(p.context.invocation_id, "
+              ^ "`Fail({code = code; message = \"nested call failed\"; retryable = \
+                 false; details = `Null})))"
+            in
+            let finish =
+              match mode with
+              | `Parent_failed -> "Task.fail(\"parent failed after child\")"
+              | _ -> "Task.pure(state)"
+            in
+            let manager, _, definition =
+              handoff_definition
+                ~capability_registry:selected
+                ~script_limits:{|max_value="256KiB"|}
+                ~resolve
+                ~finish
+                ~events:
+                  "| `Internal_event(x) -> Task.bind(Tool.call(\"legacy\", `Null), fun \
+                   ignored -> Task.pure(state)) | _ -> Task.pure(state)"
+                ~moderator_capabilities:
+                  { Chat_response.Moderation.Capabilities.default with
+                    on_tool_call =
+                      (fun ~name ~args:_ ->
+                        assert (String.equal name "legacy");
+                        Int.incr legacy_calls;
+                        Ok (Tool_ok `Null))
+                  }
+                env
+            in
+            let tools =
+              Agent_session.Script_tool_calls.create
+                ~registry:(fun () -> !registry)
+                ~moderator_names:(String.Set.singleton "counter")
+                ~now:Agent_protocol.Timestamp.now
+                ~is_halted:(fun () ->
+                  let state = Agent_session.Session_actor.state actor |> protocol_ok in
+                  state.halted)
+                ~requires_active_moderator:(fun _ ->
+                  match mode with
+                  | `Requires_moderator -> true
+                  | _ -> false)
+                ~authorize:(fun child _ ->
+                  assert (
+                    Agent_protocol.Invocation.equal_origin child.context.origin Moderator);
+                  assert (Option.is_some child.context.parent_invocation);
+                  Int.incr authorized;
+                  Eio.Fiber.yield ();
+                  match mode with
+                  | `Denied -> Error (handoff_error "private denial")
+                  | `Revoked ->
+                    registry
+                    := Chat_response.Tool_capability.select !registry ~names:[]
+                       |> Result.map_error ~f:(fun e ->
+                         e.Chat_response.Tool_capability.message)
+                       |> Result.ok_or_failwith;
+                    Ok ()
+                  | `Replaced ->
+                    registry := native_registry ~custom calls ~raises:false;
+                    Ok ()
+                  | _ -> Ok ())
+                ~prepare_output:(fun _ ->
+                  match mode with
+                  | `Disclosure -> Error (handoff_error "private disclosure")
+                  | `Output_limit -> Ok (`String (String.make (300 * 1024) 'x'))
+                  | _ -> Ok (`String "disclosed child"))
+                ~defer_observation:(fun child ->
+                  let state = Agent_session.Session_actor.state actor |> protocol_ok in
+                  assert (
+                    List.mem
+                      state.invocations
+                      child
+                      ~equal:Agent_protocol.Invocation.equal);
+                  observations := child :: !observations;
+                  match mode with
+                  | `Observation_failed ->
+                    Error (handoff_error "private observer failure")
+                  | `Observation_raised -> failwith "private observer exception"
+                  | _ -> Ok ())
+            in
+            let call_id = "nested-parent" in
+            let id =
+              History_entry.Id_source.allocate caps.id_source |> Result.ok_or_failwith
+            in
+            let call =
+              History_entry.create_with_id
+                ~id
+                (Chat_response.Tool_call.call_item
+                   ~kind:Function
+                   ~name:"counter"
+                   ~payload:"null"
+                   ~call_id
+                   ~id:None)
+            in
+            let dispatch =
+              Agent_session.Moderator_tool_dispatch.create
+                ~script_tools:tools
+                ~definition
+                ~manager
+                ~input
+                ~capabilities:caps
+                ~available_tools:[]
+                ~session_meta:`Null
+                ~now:Agent_protocol.Timestamp.now
+                ~validate_work:(fun _ -> Error "pending disabled")
+                ~admit:(fun _ -> Ok ())
+                ~prepare_outcome:(fun _ -> Ok ())
+                ()
+            in
+            let request =
+              Chat_response.In_memory_stream.Tool_dispatch.
+                { kind = Function
+                ; original_name = "counter"
+                ; original_payload = "null"
+                ; name = "counter"
+                ; payload = "null"
+                ; rejection = None
+                ; call
+                ; history = input.history @ [ call ]
+                ; source = None
+                ; parent_call_id = None
+                }
+            in
+            let result = dispatch.run request ~authorize:ignore |> Option.value_exn in
+            let output_id =
+              History_entry.Id_source.allocate caps.id_source |> Result.ok_or_failwith
+            in
+            let output =
+              History_entry.create_with_id
+                ~id:output_id
+                (Chat_response.Tool_call.output_item
+                   ~kind:Function
+                   ~call_id
+                   ~output:result.output)
+            in
+            (Option.value_exn result.commit_output) output;
+            let snapshot =
+              Chat_response.Moderator_manager.identity_snapshot manager
+              |> Result.ok_or_failwith
+            in
+            (match snapshot.current_state with
+             | Session.Snapshot.Array [ Int count ] ->
+               assert (
+                 count
+                 =
+                 match mode with
+                 | `Parent_failed -> 0
+                 | _ -> 1)
+             | _ -> assert false);
+            Chat_response.Moderator_manager.handle_event_entries
+              manager
+              ~session_id:(Agent_protocol.Id.Session.to_string input.session_id)
+              ~now_ms:0
+              ~history:(input.history @ [ call; output ])
+              ~available_tools:[]
+              ~session_meta:`Null
+              ~event:
+                (Internal_event
+                   (Chatml.Chatml_lang.VVariant
+                      ( "Internal_event"
+                      , [ Chatml.Chatml_value_codec.jsonaf_to_value
+                            (`String "check restored callback")
+                        ] )))
+            |> Result.ok_or_failwith
+            |> ignore;
+            caps.commit_moderator
+              (Some
+                 (Agent_session.Runtime_builder.encode_moderator_snapshot
+                    (Chat_response.Moderator_manager.identity_snapshot manager
+                     |> Result.ok_or_failwith)))
+            |> protocol_ok;
+            let state = Agent_session.Session_actor.state actor |> protocol_ok in
+            Completed
+              { final_history = input.history @ [ call; output ]
+              ; runtime_requests = []
+              ; moderator_snapshot = state.moderator
+              }))
+        (fun _env actor _writer backend ->
+           let state = await_idle actor in
+           let parent =
+             List.find_exn state.invocations ~f:(fun i ->
+               Option.is_none i.context.parent_invocation)
+           in
+           let children =
+             List.filter state.invocations ~f:(fun i ->
+               Option.is_some i.context.parent_invocation)
+           in
+           let expected =
+             match mode with
+             | `Success | `Custom -> None
+             | `Denied -> Some "invocation.permission_denied"
+             | `Revoked | `Replaced -> Some "invocation.stale_binding"
+             | `Requires_moderator | `Self -> Some "moderator_reentrancy"
+             | `Unknown | `Unselected -> Some "invocation.unselected_tool"
+             | `Observation_failed | `Observation_raised ->
+               Some "invocation.observation_failed"
+             | `Invalid -> Some "invocation.invalid_input"
+             | `Disclosure | `Output_limit -> Some "invocation.disclosure_rejected"
+             | `Parent_failed -> Some "invocation.handler_failed"
+           in
+           (match parent.status, expected with
+            | Published (Complete (`String "disclosed child")), None -> ()
+            | Published (Fail error), Some code -> [%test_eq: string] code error.code
+            | _ ->
+              raise_s
+                [%sexp
+                  "unexpected parent outcome", (parent : Agent_protocol.Invocation.t)]);
+           let has_child =
+             match mode with
+             | `Self | `Unknown | `Unselected -> false
+             | _ -> true
+           in
+           assert (List.length children = if has_child then 1 else 0);
+           assert (List.length !observations = List.length children);
+           List.iter children ~f:(fun child ->
+             assert (Option.is_none child.context.provider_call_id);
+             assert (Option.is_none child.context.call_entry_id);
+             assert (Option.is_none child.output_entry_id);
+             assert (
+               Option.equal
+                 Agent_protocol.Id.Invocation.equal
+                 child.context.parent_invocation
+                 (Some parent.context.id));
+             match mode, child.status with
+             | ( ( `Denied
+                 | `Revoked
+                 | `Replaced
+                 | `Requires_moderator
+                 | `Invalid
+                 | `Disclosure
+                 | `Output_limit )
+               , Resolved (Fail error) ) ->
+               assert (Option.equal String.equal (Some error.code) expected)
+             | ( ( `Success
+                 | `Custom
+                 | `Observation_failed
+                 | `Observation_raised
+                 | `Parent_failed )
+               , Resolved (Complete (`String "disclosed child")) ) -> ()
+             | _ -> assert false);
+           let executed =
+             match mode with
+             | `Success
+             | `Custom
+             | `Observation_failed
+             | `Observation_raised
+             | `Disclosure
+             | `Output_limit
+             | `Parent_failed -> true
+             | _ -> false
+           in
+           assert (!calls = if executed then 1 else 0);
+           assert (
+             !authorized
+             =
+             match mode with
+             | `Self | `Unknown | `Unselected | `Requires_moderator | `Invalid -> 0
+             | _ -> 1);
+           assert (List.length state.conversation.canonical_history = 3);
+           assert (!legacy_calls = 1);
+           assert_same_session_snapshot state (Agent_session.Memory_backend.state backend)))
+;;
+
+let%test_unit "script call scopes bound attempts and reject escaped or closed parents" =
+  let calls = ref 0
+  and observations = ref 0 in
+  let registry = native_registry calls ~raises:false in
+  let expect_error code = function
+    | Ok (Chat_response.Moderation.Capabilities.Tool_error actual) ->
+      assert (String.equal code actual)
+    | _ -> assert false
+  in
+  with_handoff_actor
+    ~make_worker:(fun env actor_ready ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+        let actor = Eio.Promise.await actor_ready in
+        let _, make_parent, definition =
+          handoff_definition
+            ~capability_registry:registry
+            ~script_limits:{|max_value="256KiB"|}
+            env
+        in
+        let prepared =
+          List.hd_exn (Chat_response.Extension_compiler.prepared_tools definition)
+        in
+        let parent = make_parent () in
+        let tools =
+          Agent_session.Script_tool_calls.create
+            ~registry:(fun () -> registry)
+            ~moderator_names:(String.Set.singleton "counter")
+            ~now:Agent_protocol.Timestamp.now
+            ~is_halted:(fun () -> false)
+            ~requires_active_moderator:(fun _ -> false)
+            ~authorize:(fun _ _ -> Ok ())
+            ~prepare_output:(fun _ -> Ok (`String "done"))
+            ~defer_observation:(fun _ ->
+              Int.incr observations;
+              Ok ())
+        in
+        caps.with_moderator_invocation ~invocation:parent (fun ~dispatched ~commit ->
+          let scope f =
+            Agent_session.Script_tool_calls.with_invocation
+              tools
+              ~prepared
+              ~capabilities:caps
+              ~parent:dispatched
+              f
+          in
+          let escaped =
+            scope (fun call ->
+              for _ = 1 to 100 do
+                call ~name:"missing" ~args:`Null
+                |> expect_error "invocation.unselected_tool"
+              done;
+              call ~name:"read_file" ~args:(`Object [])
+              |> expect_error "invocation.nested_call_limit";
+              call)
+          in
+          escaped ~name:"read_file" ~args:(`Object [])
+          |> expect_error "invocation.inactive_scope";
+          assert (!calls = 0);
+          scope (fun call ->
+            call ~name:"read_file" ~args:(`String (String.make (300 * 1024) 'x'))
+            |> expect_error "invocation.invalid_input";
+            match call ~name:"read_file" ~args:(`Object []) with
+            | Ok (Tool_ok (`String "done")) -> ()
+            | _ -> assert false);
+          let resolved =
+            Agent_protocol.Invocation.resolve
+              dispatched
+              ~session_id:input.session_id
+              ~generation:input.session_generation
+              (Complete `Null)
+            |> protocol_ok
+          in
+          commit ~resolved ~snapshot:(handoff_snapshot 1) |> protocol_ok;
+          scope (fun call ->
+            call ~name:"read_file" ~args:(`Object [])
+            |> expect_error "invocation.admission_failed");
+          Ok ())
+        |> protocol_ok;
+        let state = Agent_session.Session_actor.state actor |> protocol_ok in
+        Completed
+          { final_history = input.history
+          ; runtime_requests = []
+          ; moderator_snapshot = state.moderator
+          }))
+    (fun _env actor _writer backend ->
+       let state = await_idle actor in
+       assert (!calls = 1 && !observations = 1);
+       assert (List.length state.invocations = 2);
+       assert (List.length state.conversation.canonical_history = 1);
+       assert_same_session_snapshot state (Agent_session.Memory_backend.state backend))
 ;;
 
 let%test_unit "streamed native and moderator services share pre and post routing" =
@@ -4238,6 +4655,7 @@ let%test_unit "streamed native and moderator services share pre and post routing
                   ~validate_work:(fun _ -> Error "pending disabled")
                   ~admit:(fun _ -> Ok ())
                   ~prepare_outcome:(fun _ -> Ok ())
+                  ()
               in
               Chat_response.In_memory_stream.Tool_dispatch.chain [ moderator; native ]
             in
@@ -4858,6 +5276,7 @@ let%test_unit
                   else Ok ())
                 ~prepare_outcome:(fun _ ->
                   if Poly.equal mode `Disclosure then Error "blocked" else Ok ())
+                ()
             in
             let worker =
               let tool_tbl = String.Table.create () in
@@ -5244,6 +5663,7 @@ let%test_unit
                   Eio.Promise.resolve first_held_u ();
                   Eio.Promise.await release);
                 Ok ())
+              ()
           in
           let run request =
             let result = dispatch.run request ~authorize:ignore |> Option.value_exn in

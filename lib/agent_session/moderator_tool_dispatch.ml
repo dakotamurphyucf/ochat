@@ -76,6 +76,7 @@ let prepare_request
 ;;
 
 let dispatch
+      ~script_tools
       ~cache
       ~definition
       ~manager
@@ -161,47 +162,59 @@ let dispatch
                   "invocation.invalid_input"
                   "The tool arguments do not satisfy its input schema.");
           Error "invalid tool arguments")
-        else
-          M.handle_invocation_entries
-            manager
-            ~invocation:dispatched
-            ~history:request.history
-            ~available_tools
-            ~session_meta
-            ~now_ms:
-              (P.Timestamp.to_time_ns (now ())
-               |> Time_ns.to_int_ns_since_epoch
-               |> fun n -> n / 1_000_000)
-            ~validate_work
-            ~on_failure:(fun kind ->
-              if Option.is_none !failure then failure := Some (handler_failure kind))
-            ~authorize:(fun () ->
-              let open Result.Let_syntax in
-              let denied =
-                fail
-                  "invocation.permission_denied"
-                  "The tool invocation is not authorized by the current policy."
-              in
-              let%bind () = checked denied (fun () -> admit request) in
-              checked denied (fun () ->
-                authorize ();
-                Ok ()))
-            ~prepare_resolution:(fun ~resolved ~outcome ~snapshot ->
-              let open Result.Let_syntax in
-              let%bind () =
-                match resolved.I.status with
-                | Resolved outcome ->
-                  checked
-                    (fail
-                       "invocation.disclosure_rejected"
-                       "The tool outcome did not pass the host output policy.")
-                    (fun () -> prepare_outcome outcome)
-                | _ -> Error "handler did not resolve"
-              in
-              let%map () = save resolved snapshot |> message in
-              observed := Some outcome;
-              fun () -> ())
-          |> Result.map ~f:(fun _ -> ())
+        else (
+          let handle ?on_tool_call () =
+            M.handle_invocation_entries
+              ?on_tool_call
+              manager
+              ~invocation:dispatched
+              ~history:request.history
+              ~available_tools
+              ~session_meta
+              ~now_ms:
+                (P.Timestamp.to_time_ns (now ())
+                 |> Time_ns.to_int_ns_since_epoch
+                 |> fun n -> n / 1_000_000)
+              ~validate_work
+              ~on_failure:(fun kind ->
+                if Option.is_none !failure then failure := Some (handler_failure kind))
+              ~authorize:(fun () ->
+                let open Result.Let_syntax in
+                let denied =
+                  fail
+                    "invocation.permission_denied"
+                    "The tool invocation is not authorized by the current policy."
+                in
+                let%bind () = checked denied (fun () -> admit request) in
+                checked denied (fun () ->
+                  authorize ();
+                  Ok ()))
+              ~prepare_resolution:(fun ~resolved ~outcome ~snapshot ->
+                let open Result.Let_syntax in
+                let%bind () =
+                  match resolved.I.status with
+                  | Resolved outcome ->
+                    checked
+                      (fail
+                         "invocation.disclosure_rejected"
+                         "The tool outcome did not pass the host output policy.")
+                      (fun () -> prepare_outcome outcome)
+                  | _ -> Error "handler did not resolve"
+                in
+                let%map () = save resolved snapshot |> message in
+                observed := Some outcome;
+                fun () -> ())
+            |> Result.map ~f:(fun _ -> ())
+          in
+          match script_tools with
+          | None -> handle ()
+          | Some tools ->
+            Script_tool_calls.with_invocation
+              tools
+              ~prepared
+              ~capabilities
+              ~parent:dispatched
+              (fun on_tool_call -> handle ~on_tool_call ()))
       in
       let result =
         try run () with
@@ -260,6 +273,7 @@ let dispatch
 ;;
 
 let create
+      ?script_tools
       ~definition
       ~manager
       ~input
@@ -270,6 +284,7 @@ let create
       ~validate_work
       ~admit
       ~prepare_outcome
+      ()
   =
   let cache = Stream_invocation.cache () in
   let commit_call request =
@@ -298,6 +313,7 @@ let create
     ; validate_original
     ; run =
         dispatch
+          ~script_tools
           ~cache
           ~definition
           ~manager

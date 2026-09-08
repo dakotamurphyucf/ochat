@@ -5,6 +5,9 @@ module L = Chatml.Chatml_lang
 
 type t
 
+(** Per-invocation Tool.call attempt ceiling exposed in the moderator context. *)
+val max_nested_calls : int
+
 (** Pure input preparation for both original-call validation before pre hooks and
     final invocation admission after rewrites. Checks protocol/schema bounds and
     the ChatML value projection's depth, array and byte limits. Limits must come

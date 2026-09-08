@@ -22,6 +22,7 @@
   stream_invocation
   native_tool_dispatch
   native_tool_invocation
+  script_tool_calls
   compaction_archive
   administration
   session_delta

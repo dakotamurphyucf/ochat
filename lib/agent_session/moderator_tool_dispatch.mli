@@ -1,6 +1,6 @@
 (** Internal bridge from streamed model calls to prepared moderator tools. Public
-    feature qualification, standalone execution and nested-call routing remain
-    separate services. This adapter never executes a raw runner for a known
+    feature qualification and standalone execution remain separate services.
+    This adapter never executes a raw runner for a known
     extension declaration. *)
 exception Dispatch_error of Agent_protocol.Error.t
 
@@ -21,9 +21,13 @@ exception Dispatch_error of Agent_protocol.Error.t
     implementing script's array/depth/byte projection limits without running
     scripts or policy callbacks. Stream callers run it before pre-tool
     moderation. Unknown targets pass through for other services to validate;
-    final-target validation still runs after any redirect or rewrite. *)
+    final-target validation still runs after any redirect or rewrite.
+    [script_tools] supplies the scoped native Tool.call bridge during Tool_invoked.
+    Omitting it retains existing host callbacks. The caller must provide the
+    bridge's current policy/disclosure and deferred-observation services. *)
 val create
-  :  definition:Chat_response.Extension_compiler.definition
+  :  ?script_tools:Script_tool_calls.t
+  -> definition:Chat_response.Extension_compiler.definition
   -> manager:Chat_response.Moderator_manager.t
   -> input:Operation_worker.Input.t
   -> capabilities:Operation_worker.Capabilities.t
@@ -33,4 +37,5 @@ val create
   -> validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
   -> admit:(Chat_response.In_memory_stream.Tool_dispatch.request -> (unit, string) result)
   -> prepare_outcome:(Agent_protocol.Invocation.outcome -> (unit, string) result)
+  -> unit
   -> Chat_response.In_memory_stream.Tool_dispatch.t
