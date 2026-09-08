@@ -18,6 +18,11 @@ val default_home : Eio_unix.Stdenv.base -> Eio.Fs.dir_ty Eio.Path.t
 
 type t =
   { functions : Ochat_function.t list
+    (** Lazily bind the exact constructed implementations, including dynamically
+      expanded MCP names. Forcing requires the host's secure ID generator.
+      Selection never rebuilds tool declarations; invocation policy remains
+      the owning service's responsibility. *)
+  ; capabilities : (Tool_capability.t, Tool_capability.error) result Lazy.t
   ; classifications : (string * Tool_execution_event.agent_page_kind) list
   ; shell_tool_names : String.Set.t
   ; shell_registry : Shell_runtime.Registry.t option

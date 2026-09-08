@@ -28,6 +28,7 @@
   shell_tool
   agent_runtime
   tool
+  tool_capability
   mcp_discovery_cache
   fork
   compact_history)
@@ -38,6 +39,7 @@
   jsonaf
   io
   ochat_function
+  agent_protocol
   definitions
   functions
   chatmd

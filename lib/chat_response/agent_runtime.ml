@@ -13,6 +13,7 @@ type diagnostic =
 
 type t =
   { functions : Ochat_function.t list
+  ; capabilities : (Tool_capability.t, Tool_capability.error) result Lazy.t
   ; classifications : (string * Tool_execution_event.agent_page_kind) list
   ; shell_tool_names : String.Set.t
   ; shell_registry : Shell_runtime.Registry.t option
@@ -425,11 +426,21 @@ let validate_functions functions =
 ;;
 
 let build_functions ~sw ~ctx ~host ~run_agent shell_registry tools =
-  List.map tools ~f:(functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry)
+  List.map tools ~f:(fun declaration ->
+    functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry declaration
+    |> Result.map ~f:(fun functions ->
+      let revision =
+        CM.sexp_of_tool declaration
+        |> Sexp.to_string
+        |> Chatmd_shell_spec.Source_ref.digest
+      in
+      List.map functions ~f:(fun implementation -> revision, implementation)))
   |> Result.all
   |> Result.map ~f:List.concat
   |> Result.map_error ~f:List.return
-  |> Result.bind ~f:validate_functions
+  |> Result.bind ~f:(fun registrations ->
+    validate_functions (List.map registrations ~f:snd)
+    |> Result.map ~f:(fun functions -> functions, registrations))
 ;;
 
 let classifications tools = List.filter_map tools ~f:Tool.agent_page_classification
@@ -500,8 +511,51 @@ let create
              declarations)
           ~f:(fun (shell_registry, shell_manifest, shell_security_status) ->
             build_functions ~sw ~ctx ~host ~run_agent shell_registry declarations.tools
-            |> Result.map ~f:(fun functions ->
+            |> Result.map ~f:(fun (functions, registrations) ->
+              let capabilities =
+                lazy
+                  (try
+                     let resource_fingerprint =
+                       let path value = Eio.Path.native_exn value in
+                       [%sexp
+                         ("ochat.tool-resources.v1" : string)
+                       , ([ path (Ctx.dir ctx)
+                          ; path (Ctx.tool_dir ctx)
+                          ; path host.workspace
+                          ; path host.tool_dir
+                          ; path host.prompt_dir
+                          ; path host.session_dir
+                          ; path host.cache_dir
+                          ; path host.home
+                          ]
+                          : string list)
+                       , (Map.to_alist host.source_dirs
+                          |> List.map ~f:(fun (name, value) -> name, path value)
+                          : (string * string) list)
+                       , (host.process_environment : string array)
+                       , (host.resource_runner : string option)
+                       , (Option.map shell_manifest ~f:(fun manifest ->
+                            manifest.Chatmd_shell_spec.Manifest.sha256)
+                          : string option)
+                       , (admin_policy : Shell_runtime.Admin_policy.t)]
+                       |> Sexp.to_string
+                       |> Chatmd_shell_spec.Source_ref.digest
+                     in
+                     Tool_capability.create
+                       ~owner:host.session_id
+                       ~resource_fingerprint
+                       registrations
+                   with
+                   | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+                   | _ ->
+                     Error
+                       Tool_capability.
+                         { code = "capability.unavailable"
+                         ; message = "host cannot construct capability identities"
+                         })
+              in
               { functions
+              ; capabilities
               ; classifications = classifications declarations.tools
               ; shell_tool_names = shell_tool_names declarations
               ; shell_registry

@@ -259,3 +259,33 @@ revision, fingerprint and input schema. These are host-provided snapshots; copyi
 or modifying a script record cannot change the host's actual execution authority.
 The separate `input` argument contains the validated request. The context does not
 expose transcript items, credentials, filesystem handles or callable OCaml values.
+
+## Live tool capability bindings
+
+`Chat_response.Tool_capability` stores bindings to the actual constructed tools.
+`Agent_runtime` retains the declaration revision for each resulting implementation,
+including each name produced by MCP discovery, and offers a lazy capability registry.
+The registry includes the configured host resource/manifest/policy fingerprint and
+the actual provider descriptor. Descriptors are checked as bounded valid JSON;
+this does not yet compile their schema keywords or validate invocation arguments.
+
+Selecting a list of names returns a subset of those same bindings. Empty selects
+none; duplicate or unavailable names reject. Selection cannot install another
+implementation, add roots, change a shell configuration, reconnect an MCP endpoint
+or select a capability that was removed from the supplied registry. The owning
+invocation service receives the original silent/progress runners.
+
+Every live binding has a fresh opaque `cap_` identity and fingerprint. Resolving a
+reference checks both within the selected registry. A different registration,
+owner, or configuration cannot accept an old reference by falling back to its name.
+Registry fingerprints are independent of selection order. Runtime construction
+captures configuration digests; the registry retains neither serialized credentials
+nor serialized executable closures. Its in-memory implementation closures continue
+to own their existing configured resources.
+
+This is live binding infrastructure. It does not implement durable grant restoration,
+child authority inheritance, per-call moderation, or the invocation admission and
+result-disclosure services. In particular, implementation access is a trusted host
+operation, not a model-facing bypass for calling a tool. Runtime reconstruction must
+re-admit durable capabilities explicitly; a configuration digest alone cannot prove
+the identity of a reconnected remote implementation or a rebuilt native binary.

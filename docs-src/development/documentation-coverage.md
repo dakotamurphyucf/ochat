@@ -297,6 +297,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/sourced_response_event.mli` | [contract](../../lib/chat_response/sourced_response_event.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/tool.mli` | [contract](../../lib/chat_response/tool.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/tool_call.mli` | [contract](../../lib/chat_response/tool_call.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/tool_capability.mli` | [contract](../../lib/chat_response/tool_capability.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/tool_execution_event.mli` | [contract](../../lib/chat_response/tool_execution_event.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/tool_executor.mli` | [contract](../../lib/chat_response/tool_executor.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/utf8_ingest.mli` | [contract](../../lib/chat_response/utf8_ingest.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |

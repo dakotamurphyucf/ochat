@@ -210,6 +210,29 @@ let%expect_test "agent runtime resolves read_file roots and publishes their guid
     |> agent_runtime_or_fail
   in
   let function_ = runtime_function runtime "read_file" in
+  Mirage_crypto_rng_unix.use_default ();
+  let module C = Chat_response.Tool_capability in
+  let capability_ok = function
+    | Ok value -> value
+    | Error error -> raise_s [%sexp (error : C.error)]
+  in
+  let selected =
+    Lazy.force runtime.capabilities
+    |> capability_ok
+    |> fun registry -> C.select registry ~names:[ "read_file" ] |> capability_ok
+  in
+  let binding = C.find selected ~name:"read_file" |> capability_ok in
+  assert (phys_equal (C.implementation binding) function_);
+  Eio.Path.save
+    ~create:(`Or_truncate 0o600)
+    Eio.Path.(root / "outside.txt")
+    "private outside marker";
+  let outside =
+    (C.implementation binding).run {|{"root":"source","file":"../outside.txt"}|}
+    |> output_text
+  in
+  assert (not (String.is_substring outside ~substring:"private outside marker"));
+  assert (String.is_substring outside ~substring:"outside the configured read roots");
   let description = request_description function_ in
   let output = function_.run {|{"root":"source","file":"value.ml"}|} |> output_text in
   let source_root_native = Eio.Path.native_exn source_root in
