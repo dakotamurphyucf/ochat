@@ -35,7 +35,20 @@ let handler_failure = function
     fail "invocation.handler_failed" "The moderator tool handler failed."
 ;;
 
-let create
+let parse_input ~kind ~payload =
+  let value =
+    match kind with
+    | Chat_response.Tool_call.Kind.Function ->
+      Schema.parse_json payload |> Result.map_error ~f:(fun _ -> "invalid JSON arguments")
+    | Custom -> Ok (`String payload)
+  in
+  Result.bind value ~f:(fun value ->
+    match I.validate_outcome (Complete value) with
+    | Ok () -> Ok value
+    | Error _ -> Error "invalid JSON arguments")
+;;
+
+let dispatch
       ~definition
       ~manager
       ~input
@@ -74,19 +87,7 @@ let create
                ~retryable:false
                ()))
      | Moderator _ -> ());
-    let value =
-      match request.kind with
-      | Chat_response.Tool_call.Kind.Function ->
-        Schema.parse_json request.payload
-        |> Result.map_error ~f:(fun _ -> "invalid JSON arguments")
-      | Custom -> Ok (`String request.payload)
-    in
-    let value =
-      Result.bind value ~f:(fun value ->
-        match I.validate_outcome (Complete value) with
-        | Ok () -> Ok value
-        | Error _ -> Error "invalid JSON arguments")
-    in
+    let value = parse_input ~kind:request.kind ~payload:request.payload in
     let parse_error = Result.is_error value in
     let invocation =
       I.create
@@ -139,14 +140,20 @@ let create
         recorded := Some resolved
       in
       let run () =
-        if request.pre_rejected
+        if Option.is_some request.rejection
         then (
           failure
           := Some
-               (fail
-                  "invocation.pre_tool_rejected"
-                  "Pre-tool moderation rejected this invocation.");
-          Error "pre-tool rejection")
+               (match Option.value_exn request.rejection with
+                | Stream.Tool_dispatch.Pre_tool ->
+                  fail
+                    "invocation.pre_tool_rejected"
+                    "Pre-tool moderation rejected this invocation."
+                | Invalid_input ->
+                  fail
+                    "invocation.invalid_input"
+                    "The original tool arguments do not satisfy its input schema.");
+          Error "invocation rejected before execution")
         else if
           parse_error
           || Result.is_error
@@ -254,4 +261,44 @@ let create
                   entry
                 |> require)
         }
+;;
+
+let create
+      ~definition
+      ~manager
+      ~input
+      ~capabilities
+      ~available_tools
+      ~session_meta
+      ~now
+      ~validate_work
+      ~admit
+      ~prepare_outcome
+  =
+  let validate_original ~kind ~name ~payload =
+    match
+      List.find (EC.prepared_tools definition) ~f:(fun tool ->
+        String.equal (EC.declaration tool).name name)
+    with
+    | None -> Ok ()
+    | Some prepared ->
+      Result.bind (parse_input ~kind ~payload) ~f:(fun value ->
+        Schema.validate (EC.input_schema prepared) value
+        |> Result.map_error ~f:(fun _ -> "invalid original tool input"))
+  in
+  Stream.Tool_dispatch.
+    { validate_original
+    ; run =
+        dispatch
+          ~definition
+          ~manager
+          ~input
+          ~capabilities
+          ~available_tools
+          ~session_meta
+          ~now
+          ~validate_work
+          ~admit
+          ~prepare_outcome
+    }
 ;;

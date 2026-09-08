@@ -2897,11 +2897,22 @@ let%test_unit
     ; `Pre_reject_post_fail
     ; `Custom_success
     ; `Pre_reject_custom
+    ; `Original_invalid
+    ; `Custom_invalid
+    ; `Rewrite_bad
+    ; `Rewrite_ok
     ]
     ~f:(fun mode ->
       let request_count = ref 0 in
       let admitted = ref 0 in
       let redirected = Poly.equal mode `Redirect || Poly.equal mode `Redirect_bad in
+      let rewritten = Poly.equal mode `Rewrite_bad || Poly.equal mode `Rewrite_ok in
+      let invalid_original =
+        List.mem
+          [ `Invalid_json; `Original_invalid; `Custom_invalid ]
+          mode
+          ~equal:Poly.equal
+      in
       let pre_rejected =
         List.mem
           [ `Pre_reject; `Pre_reject_end; `Pre_reject_post_fail; `Pre_reject_custom ]
@@ -2912,7 +2923,9 @@ let%test_unit
         Poly.equal mode `End_session || Poly.equal mode `Pre_reject_end
       in
       let custom =
-        Poly.equal mode `Custom_success || Poly.equal mode `Pre_reject_custom
+        Poly.equal mode `Custom_success
+        || Poly.equal mode `Pre_reject_custom
+        || Poly.equal mode `Custom_invalid
       in
       let post_fails =
         Poly.equal mode `Post_fail || Poly.equal mode `Pre_reject_post_fail
@@ -2930,7 +2943,16 @@ let%test_unit
                   | _ -> false)))
         ~make_worker:(fun env actor_ready ->
           let events =
-            if pre_rejected
+            if invalid_original
+            then
+              "| `Pre_tool_call(c) -> Task.fail(\"invalid input reached pre handler\") | \
+               _ -> Task.pure(state)"
+            else if rewritten
+            then
+              "| `Pre_tool_call(c) -> Task.bind(Tool.rewrite_args("
+              ^ (if Poly.equal mode `Rewrite_bad then "`String(\"wrong\")" else "`Null")
+              ^ "), fun ignored -> Task.pure(state)) | _ -> Task.pure(state)"
+            else if pre_rejected
             then
               "| `Pre_tool_call(c) -> Task.bind(Tool.reject(\"private diagnostic\"), fun \
                ignored -> "
@@ -2958,7 +2980,11 @@ let%test_unit
             handoff_definition
               ~events
               ~schema:
-                (if redirected || Poly.equal mode `Invalid_output
+                (if
+                   redirected
+                   || rewritten
+                   || invalid_original
+                   || Poly.equal mode `Invalid_output
                  then "{\"type\":\"null\"}"
                  else "true")
               ~resolve:
@@ -3037,6 +3063,8 @@ let%test_unit
                                 then "[broken"
                                 else if redirected
                                 then "{}"
+                                else if Poly.equal mode `Original_invalid
+                                then "\"wrong\""
                                 else "null")
                            ; item_id = "counter-item"
                            ; output_index = 0
@@ -3127,6 +3155,7 @@ let%test_unit
              if
                Poly.equal mode `Success
                || Poly.equal mode `Custom_success
+               || Poly.equal mode `Rewrite_ok
                || Poly.equal mode `Post_fail
                || Poly.equal mode `Publish_rejected
                || Poly.equal mode `Redirect
@@ -3154,6 +3183,7 @@ let%test_unit
              | Published (Complete `Null) ->
                Poly.equal mode `Success
                || Poly.equal mode `Custom_success
+               || Poly.equal mode `Rewrite_ok
                || Poly.equal mode `Post_fail
                || Poly.equal mode `Redirect
                || Poly.equal mode `End_session
@@ -3162,7 +3192,11 @@ let%test_unit
                  match mode with
                  | `Deny | `Revoked -> "invocation.permission_denied"
                  | `Disclosure -> "invocation.disclosure_rejected"
-                 | `Invalid_json | `Redirect_bad -> "invocation.invalid_input"
+                 | `Invalid_json
+                 | `Redirect_bad
+                 | `Original_invalid
+                 | `Custom_invalid
+                 | `Rewrite_bad -> "invocation.invalid_input"
                  | `Unhandled -> "invocation.unhandled"
                  | `Duplicate -> "invocation.duplicate_resolution"
                  | `Wrong_id -> "invocation.wrong_id"
@@ -3193,7 +3227,8 @@ let%test_unit
              =
              if
                pre_rejected
-               || Poly.equal mode `Invalid_json
+               || invalid_original
+               || Poly.equal mode `Rewrite_bad
                || Poly.equal mode `Redirect_bad
              then 0
              else 1);
@@ -3276,7 +3311,7 @@ let%test_unit
               ; original_payload = "null"
               ; name = "counter"
               ; payload = "null"
-              ; pre_rejected = false
+              ; rejection = None
               ; call
               ; history = !history
               ; source = None
@@ -3310,7 +3345,7 @@ let%test_unit
                 Ok ())
           in
           let run request =
-            let result = dispatch request ~authorize:ignore |> Option.value_exn in
+            let result = dispatch.run request ~authorize:ignore |> Option.value_exn in
             let call_id =
               match History_entry.item request.call with
               | Function_call c -> c.call_id

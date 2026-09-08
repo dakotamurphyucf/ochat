@@ -11,13 +11,17 @@ type post_stream =
   -> Openai.Responses.Response_stream.t Seq.t
 
 module Tool_dispatch = struct
+  type rejection =
+    | Invalid_input
+    | Pre_tool
+
   type request =
     { kind : Tool_call.Kind.t
     ; original_name : string
     ; original_payload : string
     ; name : string
     ; payload : string
-    ; pre_rejected : bool
+    ; rejection : rejection option
     ; call : History_entry.t
     ; history : History_entry.t list
     ; source : string option
@@ -30,7 +34,11 @@ module Tool_dispatch = struct
     ; runtime_requests : Moderation.Runtime_request.t list
     }
 
-  type t = request -> authorize:(unit -> unit) -> result option
+  type t =
+    { validate_original :
+        kind:Tool_call.Kind.t -> name:string -> payload:string -> (unit, string) Result.t
+    ; run : request -> authorize:(unit -> unit) -> result option
+    }
 end
 
 exception Post_tool_moderation_failed of History_entry.t * string
@@ -1139,6 +1147,7 @@ let dispatch_tool
       ~call_id
       ~item_id
       ~synthetic_result
+      ~rejection
       ~runtime_requests
       run_native
   =
@@ -1161,14 +1170,14 @@ let dispatch_tool
         List.find_exn st.new_entries_rev ~f:(fun entry ->
           History_entry.Id.equal (History_entry.id entry) call_id)
       in
-      dispatch
+      dispatch.run
         Tool_dispatch.
           { kind
           ; original_name
           ; original_payload
           ; name
           ; payload
-          ; pre_rejected = Option.is_some synthetic_result
+          ; rejection
           ; call
           ; history = history_with_new_entries ~hist st
           ; source = c.source
@@ -1192,6 +1201,39 @@ let dispatch_tool
   { result with runtime_requests = runtime_requests @ result.runtime_requests }
 ;;
 
+let prepare_tool_call (c : ctx) ~hist ~kind ~name ~payload ~call_id ~item_id =
+  let validation =
+    match c.dispatch_tool with
+    | None -> Ok ()
+    | Some service -> service.validate_original ~kind ~name ~payload
+  in
+  match validation with
+  | Error _ ->
+    ( { call_item = Tool_call.call_item ~kind ~name ~payload ~call_id ~id:(Some item_id)
+      ; kind
+      ; name
+      ; payload
+      ; synthetic_result = Some (Output.Text "Invalid tool arguments.")
+      ; runtime_requests = []
+      }
+    , Some Tool_dispatch.Invalid_input )
+  | Ok () ->
+    let moderated =
+      moderate_tool_call
+        ~moderator:c.moderator
+        ~available_tools:c.tools
+        ~now_ms:(now_ms c.env)
+        ~history:(History_entry.items hist)
+        ~kind
+        ~name
+        ~payload
+        ~call_id
+        ~item_id:(Some item_id)
+      |> Result.ok_or_failwith
+    in
+    moderated, Option.map moderated.synthetic_result ~f:(fun _ -> Tool_dispatch.Pre_tool)
+;;
+
 let schedule_function_done
       ~turn
       (c : ctx)
@@ -1211,18 +1253,15 @@ let schedule_function_done
   | Some { name; call_id; kind = `Function } ->
     let original_name = name in
     let original_payload = arguments in
-    let moderated =
-      moderate_tool_call
-        ~moderator:c.moderator
-        ~available_tools:c.tools
-        ~now_ms:(now_ms c.env)
-        ~history:(History_entry.items hist)
+    let moderated, rejection =
+      prepare_tool_call
+        c
+        ~hist
         ~kind:Tool_call.Kind.Function
         ~name
         ~payload:arguments
         ~call_id
-        ~item_id:(Some item_id)
-      |> Result.ok_or_failwith
+        ~item_id
     in
     let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
     let history_item =
@@ -1265,6 +1304,7 @@ let schedule_function_done
         ~call_id
         ~item_id
         ~synthetic_result:moderated.synthetic_result
+        ~rejection
         ~runtime_requests:moderated.runtime_requests
         (fun () ->
            Tool_call.run_tool
@@ -1308,18 +1348,15 @@ let schedule_custom_done
   | Some { name; call_id; kind = `Custom } ->
     let original_name = name in
     let original_payload = input in
-    let moderated =
-      moderate_tool_call
-        ~moderator:c.moderator
-        ~available_tools:c.tools
-        ~now_ms:(now_ms c.env)
-        ~history:(History_entry.items hist)
+    let moderated, rejection =
+      prepare_tool_call
+        c
+        ~hist
         ~kind:Tool_call.Kind.Custom
         ~name
         ~payload:input
         ~call_id
-        ~item_id:(Some item_id)
-      |> Result.ok_or_failwith
+        ~item_id
     in
     let history_payload = c.redact_tool_payload ~name:moderated.name moderated.payload in
     let history_item =
@@ -1361,6 +1398,7 @@ let schedule_custom_done
         ~call_id
         ~item_id
         ~synthetic_result:moderated.synthetic_result
+        ~rejection
         ~runtime_requests:moderated.runtime_requests
         (fun () ->
            Tool_call.run_tool

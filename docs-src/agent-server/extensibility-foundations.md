@@ -170,7 +170,7 @@ restart reconciliation remain unfinished.
 `In_memory_stream.Tool_dispatch` carries the original and final tool names and
 arguments, the actual committed call occurrence, canonical history and fork source.
 A host can return a validated output with a dedicated commit callback, or select
-the existing native runner. A `pre_rejected` request reaches this dispatcher only
+the existing native runner. A request with a `rejection` reaches this dispatcher only
 to record its failure; it must not execute an implementation or invoke the final
 execution authorizer. Returning no routed result preserves the native synthetic
 rejection without running its tool. Routed
@@ -180,7 +180,14 @@ callbacks and post-tool moderation. Native outputs now follow the same ordering.
 `Moderator_tool_dispatch` connects this boundary to a prepared extension
 definition, its live moderator manager and the worker's actor capabilities. It
 parses function arguments with bounded JSON parsing; custom-tool input is a JSON
-string. The final target's input schema is checked inside the owning moderator
+string. Its pure `validate_original` hook checks known prepared tools before
+pre-tool moderation. Invalid JSON or a schema mismatch skips that handler and
+records `invocation.invalid_input` against the original canonical call. A typed
+rejection distinguishes this case from a subsequent pre-tool policy denial;
+validator diagnostic text is not published. Unknown targets pass through to other
+services, so this adapter does not yet validate all native tool schemas.
+
+The final target's input schema is checked again inside the owning moderator
 lock. A host admission callback then rechecks the live capability and revision,
 followed by the turn worker's final-target permission check, before any handler
 effects. This avoids authorizing a call before waiting for its owner and executing
@@ -224,6 +231,10 @@ input and actor capabilities. Tests run a compiled ChatML moderator through this
 worker and actor with an offline provider stream, covering success, policy denial,
 disclosure rejection, malformed JSON, redirects and final-schema validation,
 revocation, failed publication persistence, post-hook failure and end-session.
+Original-input cases install a pre-tool handler that fails if called, proving
+malformed JSON and invalid function/custom arguments are rejected before it runs.
+Separate rewrite cases prove final validation still rejects invalid rewritten
+arguments and permits valid ones.
 Pre-tool rejection also has a durable invocation and publication receipt, with
 function/custom coverage, post-hook failure preservation and session termination.
 Additional cases verify exact terminal error codes and prevent script diagnostics

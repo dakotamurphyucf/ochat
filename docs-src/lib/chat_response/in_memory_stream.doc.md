@@ -43,13 +43,17 @@ type post_stream =
   -> Openai.Responses.Response_stream.t Seq.t
 
 module Tool_dispatch : sig
+  type rejection =
+    | Invalid_input
+    | Pre_tool
+
   type request =
     { kind : Tool_call.Kind.t
     ; original_name : string
     ; original_payload : string
     ; name : string
     ; payload : string
-    ; pre_rejected : bool
+    ; rejection : rejection option
     ; call : History_entry.t
     ; history : History_entry.t list
     ; source : string option
@@ -62,12 +66,13 @@ module Tool_dispatch : sig
     ; runtime_requests : Moderation.Runtime_request.t list
     }
 
-  (** Trusted host dispatch after pre-tool moderation and canonical call commit.
+  (** [run] dispatches after pre-tool moderation and canonical call commit.
+      Both service callbacks are trusted host code.
       Original/final arguments are execution inputs, not display-redacted text.
       [Some] supplies a validated result; [None] selects normal native execution.
       A routed implementation must validate its final target/schema and call
       [authorize] before effects, including again after an owner-queue wait.
-      [pre_rejected] requests may only record a rejection; they must not run an
+      Requests with [rejection] may only record that failure; they must not run an
       implementation or invoke [authorize]. Returning [None] preserves the
       native synthetic rejection without execution. Fork requests retain their
       separate [source] and [parent_call_id]; hosts must use the correct owner.
@@ -77,7 +82,15 @@ module Tool_dispatch : sig
       End-session requests
       suppress further moderator hooks and follow-up turns after pending outputs
       are handled. Other requests participate in the normal turn-end decision. *)
-  type t = request -> authorize:(unit -> unit) -> result option
+  type t =
+    { validate_original :
+        kind:Tool_call.Kind.t -> name:string -> payload:string -> (unit, string) Result.t
+      (** Pure validation of the original target and arguments before pre-tool
+          moderation. Unknown targets may pass to another host service. An error
+          skips pre moderation and reaches [run] as [Invalid_input], with the
+          original canonical call retained. Diagnostic text is not published. *)
+    ; run : request -> authorize:(unit -> unit) -> result option
+    }
 end
 
 (** A post-tool observer failed after the initial output was committed. Hosts
