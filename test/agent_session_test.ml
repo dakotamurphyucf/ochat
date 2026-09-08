@@ -3269,6 +3269,479 @@ let%test_unit "worker failure repairs a transient publication failure without re
        assert (Poly.equal state (Agent_session.Memory_backend.state backend)))
 ;;
 
+let native_registry ?(custom = false) calls ~raises =
+  let module Definition = struct
+    type input = string
+
+    let name = "read_file"
+    let description = Some "native invocation fixture"
+    let type_ = if custom then "custom" else "function"
+    let parameters = `Object [ "type", `String (if custom then "string" else "object") ]
+    let input_of_string input = input
+  end
+  in
+  let implementation =
+    Ochat_function.create_function
+      (module Definition)
+      (fun input ->
+         Int.incr calls;
+         assert (String.equal input "{}");
+         if raises then failwith "private runner diagnostic";
+         Openai.Responses.Tool_output.Output.Text "private output")
+  in
+  Chat_response.Tool_capability.create
+    ~owner:"fixture"
+    ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "resources")
+    [ Chatmd_shell_spec.Source_ref.digest "native v1", implementation ]
+  |> Result.map_error ~f:(fun error -> error.Chat_response.Tool_capability.message)
+  |> Result.ok_or_failwith
+;;
+
+let native_context ?(input = `Object []) registry invocation =
+  let module C = Chat_response.Tool_capability in
+  let reference = List.hd_exn (C.references registry) in
+  let invocation =
+    Agent_protocol.Invocation.create
+      { invocation.Agent_protocol.Invocation.context with
+        input
+      ; implementation_revision = reference.implementation_revision
+      ; capability_fingerprint = C.fingerprint registry
+      }
+    |> protocol_ok
+  in
+  reference, invocation
+;;
+
+let%test_unit
+    "native invocation policy and disclosure are shared by model and script calls"
+  =
+  List.iter [ false; true ] ~f:(fun model ->
+    List.iter
+      [ `Success; `Deny; `Revoke; `Replace; `Input; `Raise; `Disclosure; `Output ]
+      ~f:(fun mode ->
+        let calls = ref 0
+        and authorized = ref 0
+        and disclosed = ref 0 in
+        let registry = ref (native_registry calls ~raises:(Poly.equal mode `Raise)) in
+        let stale = ref None in
+        with_handoff_actor
+          ~make_worker:(fun _env actor_ready ->
+            Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+              let actor = Eio.Promise.await actor_ready in
+              let call, invocation =
+                if model
+                then (
+                  let call, invocation = publication_call caps () in
+                  caps.commit_entry call |> protocol_ok;
+                  Some call, invocation)
+                else None, invocation_fixture ()
+              in
+              let reference, invocation = native_context !registry invocation in
+              let invocation =
+                if Poly.equal mode `Input
+                then
+                  Agent_protocol.Invocation.create
+                    { invocation.context with input = `Null }
+                  |> protocol_ok
+                else invocation
+              in
+              let run () =
+                Agent_session.Native_tool_invocation.run
+                  ~capabilities:caps
+                  ~registry:(fun () -> !registry)
+                  ~reference
+                  ~invocation
+                  ~authorize:(fun dispatched _binding ->
+                    assert (Poly.equal dispatched.status Dispatching);
+                    Int.incr authorized;
+                    Eio.Fiber.yield ();
+                    (match mode with
+                     | `Revoke ->
+                       registry
+                       := Chat_response.Tool_capability.select !registry ~names:[]
+                          |> Result.map_error ~f:(fun error ->
+                            error.Chat_response.Tool_capability.message)
+                          |> Result.ok_or_failwith
+                     | `Replace -> registry := native_registry calls ~raises:false
+                     | _ -> ());
+                    if Poly.equal mode `Deny
+                    then Error (handoff_error "private denial")
+                    else Ok ())
+                  ~prepare_output:(fun _ ->
+                    Int.incr disclosed;
+                    if Poly.equal mode `Disclosure
+                    then Error (handoff_error "private disclosure diagnostic")
+                    else if Poly.equal mode `Output
+                    then Ok (`Object [ "duplicate", `Null; "duplicate", `Null ])
+                    else Ok (`String "disclosed"))
+              in
+              let recorded = run () |> protocol_ok in
+              stale := Some run;
+              let expected =
+                match mode with
+                | `Success -> None
+                | `Deny -> Some "invocation.permission_denied"
+                | `Revoke | `Replace -> Some "invocation.stale_binding"
+                | `Input -> Some "invocation.invalid_input"
+                | `Raise -> Some "invocation.handler_failed"
+                | `Disclosure -> Some "invocation.disclosure_rejected"
+                | `Output -> Some "invocation.invalid_output"
+              in
+              let outcome =
+                match recorded.status, expected with
+                | Resolved (Complete (`String "disclosed") as outcome), None -> outcome
+                | Resolved (Fail error as outcome), Some code ->
+                  assert (String.equal error.code code);
+                  assert (not (String.is_substring error.message ~substring:"private"));
+                  outcome
+                | _ -> assert false
+              in
+              let tail =
+                match call with
+                | None -> []
+                | Some call ->
+                  let output =
+                    publication_output
+                      caps
+                      ~text:
+                        (Jsonaf.to_string
+                           (Agent_protocol.Invocation.outcome_to_json outcome))
+                      ()
+                  in
+                  caps.publish_invocation_output ~invocation_id:recorded.context.id output
+                  |> protocol_ok;
+                  [ call; output ]
+              in
+              let state = Agent_session.Session_actor.state actor |> protocol_ok in
+              Completed
+                { final_history = input.history @ tail
+                ; runtime_requests = []
+                ; moderator_snapshot = state.moderator
+                }))
+          (fun _env actor _writer backend ->
+             let state = await_idle actor in
+             assert (Result.is_error ((Option.value_exn !stale) ()));
+             assert (!authorized = if Poly.equal mode `Input then 0 else 1);
+             let runs =
+               List.mem [ `Success; `Raise; `Disclosure; `Output ] mode ~equal:Poly.equal
+             in
+             assert (!calls = if runs then 1 else 0);
+             assert (!disclosed = if runs && not (Poly.equal mode `Raise) then 1 else 0);
+             assert (
+               List.length state.conversation.canonical_history = if model then 3 else 1);
+             assert (List.length state.invocations = 1);
+             assert (Poly.equal state (Agent_session.Memory_backend.state backend)))))
+;;
+
+let%test_unit
+    "native custom tools receive raw strings without provider history for scripts"
+  =
+  List.iter [ false; true ] ~f:(fun model ->
+    let calls = ref 0 in
+    let registry = native_registry ~custom:true calls ~raises:false in
+    with_handoff_actor
+      ~make_worker:(fun _env actor_ready ->
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let actor = Eio.Promise.await actor_ready in
+          let call, invocation =
+            if model
+            then (
+              let call, invocation = publication_call caps ~custom:true () in
+              caps.commit_entry call |> protocol_ok;
+              Some call, invocation)
+            else None, invocation_fixture ()
+          in
+          let reference, invocation =
+            native_context ~input:(`String "{}") registry invocation
+          in
+          let result =
+            Agent_session.Native_tool_invocation.run
+              ~capabilities:caps
+              ~registry:(fun () -> registry)
+              ~reference
+              ~invocation
+              ~authorize:(fun _ _ -> Ok ())
+              ~prepare_output:(fun _ -> Ok `Null)
+            |> protocol_ok
+          in
+          assert (Poly.equal result.status (Resolved (Complete `Null)));
+          let tail =
+            match call with
+            | None -> []
+            | Some call ->
+              let output =
+                publication_output
+                  caps
+                  ~custom:true
+                  ~text:
+                    (Jsonaf.to_string
+                       (Agent_protocol.Invocation.outcome_to_json (Complete `Null)))
+                  ()
+              in
+              caps.publish_invocation_output ~invocation_id:result.context.id output
+              |> protocol_ok;
+              [ call; output ]
+          in
+          let state = Agent_session.Session_actor.state actor |> protocol_ok in
+          Completed
+            { final_history = input.history @ tail
+            ; runtime_requests = []
+            ; moderator_snapshot = state.moderator
+            }))
+      (fun _env actor _writer _backend ->
+         let state = await_idle actor in
+         assert (!calls = 1);
+         assert (List.length state.conversation.canonical_history = if model then 3 else 1)))
+;;
+
+let%test_unit "independent ordinary invocations run concurrently outside the actor" =
+  let started = ref 0 in
+  let ready, ready_u = Eio.Promise.create () in
+  with_handoff_actor
+    ~make_worker:(fun _env actor_ready ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+        let actor = Eio.Promise.await actor_ready in
+        let run () =
+          let invocation =
+            Agent_protocol.Invocation.create
+              { (invocation_fixture ()).context with
+                id = Agent_protocol.Id.Invocation.create ()
+              }
+            |> protocol_ok
+          in
+          let result =
+            caps.with_invocation ~invocation (fun ~dispatched:_ ->
+              Int.incr started;
+              if !started = 2 then Eio.Promise.resolve ready_u ();
+              Eio.Promise.await ready;
+              let live = Agent_session.Session_actor.state actor |> protocol_ok in
+              assert (List.length live.invocations = 2);
+              Ok (Complete `Null))
+            |> protocol_ok
+          in
+          assert (Poly.equal result.status (Resolved (Complete `Null)))
+        in
+        Eio.Fiber.both run run;
+        let state = Agent_session.Session_actor.state actor |> protocol_ok in
+        Completed
+          { final_history = input.history
+          ; runtime_requests = []
+          ; moderator_snapshot = state.moderator
+          }))
+    (fun _env actor _writer backend ->
+       let state = await_idle actor in
+       assert (List.length state.invocations = 2);
+       assert (List.length state.conversation.canonical_history = 1);
+       assert (Poly.equal state (Agent_session.Memory_backend.state backend)))
+;;
+
+let%test_unit "native nested invocation persists without reentering a borrowed moderator" =
+  List.iter [ false; true ] ~f:(fun parent_fails ->
+    let calls = ref 0 in
+    let registry = native_registry calls ~raises:false in
+    with_handoff_actor
+      ~make_worker:(fun _env actor_ready ->
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let actor = Eio.Promise.await actor_ready in
+          let parent = invocation_fixture () in
+          let result =
+            caps.with_moderator_invocation ~invocation:parent (fun ~dispatched ~commit ->
+              let reference, child =
+                native_context
+                  registry
+                  (Agent_protocol.Invocation.create
+                     { parent.context with
+                       id = Agent_protocol.Id.Invocation.create ()
+                     ; origin = Moderator
+                     ; parent_invocation = Some dispatched.context.id
+                     }
+                   |> protocol_ok)
+              in
+              let child_result =
+                Agent_session.Native_tool_invocation.run
+                  ~capabilities:caps
+                  ~registry:(fun () -> registry)
+                  ~reference
+                  ~invocation:child
+                  ~authorize:(fun _ _ -> Ok ())
+                  ~prepare_output:(fun _ -> Ok `Null)
+                |> protocol_ok
+              in
+              assert (Poly.equal child_result.status (Resolved (Complete `Null)));
+              let resolved =
+                Agent_protocol.Invocation.resolve
+                  dispatched
+                  ~session_id:input.session_id
+                  ~generation:input.session_generation
+                  (Complete `Null)
+                |> protocol_ok
+              in
+              if parent_fails
+              then Error (handoff_error "parent handler failed after native effect")
+              else commit ~resolved ~snapshot:(handoff_snapshot 1))
+          in
+          assert (Bool.equal (Result.is_error result) parent_fails);
+          let stale_child =
+            Agent_protocol.Invocation.create
+              { parent.context with
+                id = Agent_protocol.Id.Invocation.create ()
+              ; parent_invocation = Some parent.context.id
+              }
+            |> protocol_ok
+          in
+          assert (
+            Result.is_error
+              (caps.with_invocation ~invocation:stale_child (fun ~dispatched:_ ->
+                 assert false)));
+          let state = Agent_session.Session_actor.state actor |> protocol_ok in
+          Completed
+            { final_history = input.history
+            ; runtime_requests = []
+            ; moderator_snapshot = state.moderator
+            }))
+      (fun _env actor _writer backend ->
+         let state = await_idle actor in
+         assert (!calls = 1);
+         assert (List.length state.invocations = 2);
+         List.iter state.invocations ~f:(fun invocation ->
+           if Option.is_some invocation.context.parent_invocation
+           then assert (Poly.equal invocation.status (Resolved (Complete `Null)))
+           else
+             assert (
+               match invocation.status with
+               | Resolved (Complete `Null) -> not parent_fails
+               | Resolved (Fail _) -> parent_fails
+               | _ -> false));
+         assert (List.length state.conversation.canonical_history = 1);
+         assert (Poly.equal state (Agent_session.Memory_backend.state backend))))
+;;
+
+let%test_unit
+    "ordinary invocation cancellation and persistence failures retain terminal evidence"
+  =
+  List.iter [ false; true ] ~f:(fun model ->
+    List.iter [ `Cancel; `Reject_result; `Error; `Raise; `Malformed ] ~f:(fun mode ->
+      let ready, ready_u = Eio.Promise.create () in
+      let never, _ = Eio.Promise.create () in
+      let calls = ref 0 in
+      with_handoff_actor
+        ~reject:(fun next ->
+          Poly.equal mode `Reject_result
+          && List.exists
+               next.Agent_session.Session_transition.state.invocations
+               ~f:(fun invocation ->
+                 match invocation.status with
+                 | Resolved (Complete _) -> true
+                 | _ -> false))
+        ~make_worker:(fun _env actor_ready ->
+          Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+            let actor = Eio.Promise.await actor_ready in
+            let history, invocation =
+              if model
+              then (
+                let call, invocation = publication_call caps () in
+                caps.commit_entry call |> protocol_ok;
+                input.history @ [ call ], invocation)
+              else input.history, invocation_fixture ()
+            in
+            let result =
+              caps.with_invocation ~invocation (fun ~dispatched ->
+                Int.incr calls;
+                let live = Agent_session.Session_actor.state actor |> protocol_ok in
+                assert (List.mem live.invocations dispatched ~equal:Poly.equal);
+                (* Neither a concurrent extension transaction nor a duplicate claim
+                 may replace the live callback's record. *)
+                let replacement =
+                  Agent_protocol.Invocation.cancel dispatched ~reason:"forged"
+                  |> protocol_ok
+                in
+                assert (
+                  Result.is_error
+                    (Agent_session.Session_actor.commit_extensions
+                       actor
+                       ~generation:input.session_generation
+                       ~expected_revision:live.counters.revision
+                       [ Invocation replacement ]));
+                assert (
+                  Result.is_error
+                    (caps.with_invocation ~invocation (fun ~dispatched:_ -> assert false)));
+                Eio.Promise.resolve ready_u ();
+                match mode with
+                | `Cancel -> Eio.Promise.await never
+                | `Error -> Error (handoff_error "private callback diagnostic")
+                | `Raise -> failwith "private callback diagnostic"
+                | `Malformed ->
+                  Ok (Complete (`Object [ "duplicate", `Null; "duplicate", `Null ]))
+                | `Reject_result -> Ok (Complete `Null))
+            in
+            let stale_child =
+              Agent_protocol.Invocation.create
+                { invocation.context with
+                  id = Agent_protocol.Id.Invocation.create ()
+                ; origin = Script
+                ; provider_call_id = None
+                ; call_entry_id = None
+                ; parent_invocation = Some invocation.context.id
+                }
+              |> protocol_ok
+            in
+            assert (
+              Result.is_error
+                (caps.with_invocation ~invocation:stale_child (fun ~dispatched:_ ->
+                   assert false)));
+            match result with
+            | Error failure -> Failed failure
+            | Ok _ ->
+              let state = Agent_session.Session_actor.state actor |> protocol_ok in
+              Completed
+                { final_history = history
+                ; runtime_requests = []
+                ; moderator_snapshot = state.moderator
+                }))
+        (fun _env actor writer backend ->
+           Eio.Promise.await ready;
+           if Poly.equal mode `Cancel
+           then
+             Agent_session.Session_actor.stop actor ~attachment_id:writer.id ~mode:Cancel
+             |> protocol_ok
+             |> ignore;
+           let rec finished () =
+             let state = Agent_session.Session_actor.state actor |> protocol_ok in
+             if Option.is_none state.active_operation
+             then state
+             else (
+               Eio.Fiber.yield ();
+               finished ())
+           in
+           let state = finished () in
+           assert (!calls = 1);
+           let invocation = List.hd_exn state.invocations in
+           let outcome =
+             match invocation.status with
+             | Published outcome ->
+               assert model;
+               outcome
+             | Resolved outcome ->
+               assert (not model);
+               outcome
+             | _ -> assert false
+           in
+           (match mode, outcome with
+            | (`Cancel | `Reject_result), Cancelled _ -> ()
+            | (`Error | `Raise | `Malformed), Fail failure ->
+              assert (
+                String.equal
+                  failure.code
+                  (if Poly.equal mode `Malformed
+                   then "invocation.invalid_output"
+                   else "invocation.handler_failed"));
+              assert (not (String.is_substring failure.message ~substring:"private"))
+            | _ -> assert false);
+           assert (
+             List.length state.conversation.canonical_history = if model then 3 else 1);
+           assert (Poly.equal state (Agent_session.Memory_backend.state backend)))))
+;;
+
 let%test_unit
     "graceful stop allows an admitted invocation to publish its initial response"
   =

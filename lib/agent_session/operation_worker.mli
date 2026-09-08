@@ -29,6 +29,21 @@ module Capabilities : sig
     ; commit_moderator : Jsonaf.t option -> (unit, Agent_protocol.Error.t) result
       (** Checkpoint committed moderator state for this active operation.
             Identical snapshots are no-ops; stale/cancelled workers are rejected. *)
+    ; with_invocation :
+        invocation:Agent_protocol.Invocation.t
+        -> (dispatched:Agent_protocol.Invocation.t
+            -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+        -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+      (** Host-only foreground invocation lifecycle for native/standalone calls.
+          Admits and dispatches before running the callback outside the actor,
+          then persists its validated/disclosed outcome. Does not borrow moderator
+          state, serialize unrelated calls, authorize tools or publish history.
+          A parent invocation must be a live callback of the same operation;
+          background-job ownership uses a separate service. Callback errors and
+          exceptions retain a bounded terminal failure; cancellation retains a
+          cancelled result. Failed outcome persistence leaves interruption evidence
+          for worker/restart cleanup, never retries external work. The host must
+          recheck current capability, policy and disclosure in the callback. *)
     ; with_moderator_invocation :
         invocation:Agent_protocol.Invocation.t
         -> (dispatched:Agent_protocol.Invocation.t

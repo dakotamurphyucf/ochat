@@ -18,6 +18,11 @@ module Capabilities = struct
         -> History_entry.t
         -> (unit, Agent_protocol.Error.t) result
     ; commit_moderator : Jsonaf.t option -> (unit, Agent_protocol.Error.t) result
+    ; with_invocation :
+        invocation:Agent_protocol.Invocation.t
+        -> (dispatched:Agent_protocol.Invocation.t
+            -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+        -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
     ; with_moderator_invocation :
         invocation:Agent_protocol.Invocation.t
         -> (dispatched:Agent_protocol.Invocation.t

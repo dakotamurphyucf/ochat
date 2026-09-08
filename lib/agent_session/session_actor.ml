@@ -45,9 +45,22 @@ type moderator_borrow =
   { operation_id : Agent_protocol.Id.Operation.t
   ; invocation : Agent_protocol.Invocation.t
   ; mutable committed : bool
+  ; mutable accepts_children : bool
+  }
+
+type invocation_execution =
+  { operation_id : Agent_protocol.Id.Operation.t
+  ; dispatched : Agent_protocol.Invocation.t
+  ; mutable accepts_children : bool
   }
 
 type _ request =
+  | Claim_invocation :
+      Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
+      -> invocation_execution request
+  | Finish_invocation :
+      invocation_execution * Agent_protocol.Invocation.outcome
+      -> Agent_protocol.Invocation.t request
   | Claim_moderator_invocation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
       -> moderator_borrow request
@@ -253,6 +266,7 @@ type t =
   ; mutable active_cancel : (unit -> unit) option
   ; mutable idle_moderator_borrowed : bool
   ; mutable moderator_borrow : moderator_borrow option
+  ; mutable invocation_executions : invocation_execution list
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
@@ -326,17 +340,22 @@ let commit_extensions_internal t generation expected_revision changes =
     Error
       (error Conflict "extension transaction uses a stale session revision or generation")
   else if
-    Option.is_some t.moderator_borrow
+    (Option.is_some t.moderator_borrow || not (List.is_empty t.invocation_executions))
     && List.exists changes ~f:(function
-      | Extension_change.Moderator_state _ -> true
+      | Extension_change.Moderator_state _ -> Option.is_some t.moderator_borrow
       | Invocation value ->
-        Option.exists t.moderator_borrow ~f:(fun borrow ->
+        List.exists t.invocation_executions ~f:(fun execution ->
+          Agent_protocol.Id.Invocation.compare
+            value.context.id
+            execution.dispatched.context.id
+          = 0)
+        || Option.exists t.moderator_borrow ~f:(fun borrow ->
           Agent_protocol.Id.Invocation.compare
             value.context.id
             borrow.invocation.context.id
           = 0)
       | _ -> false)
-  then Error (error Conflict "moderator invocation owns this state transaction")
+  then Error (error Conflict "invocation callback owns this state transaction")
   else if List.is_empty changes || List.length changes > 256
   then
     Error
@@ -782,6 +801,94 @@ let running_operation ?(allow_stopping = false) t operation_id =
     Error (error Invalid_state "foreground operation is not running at a tool safe point")
 ;;
 
+let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      invocation.context.session_id
+      invocation.context.generation
+  in
+  let%bind () =
+    if Option.is_some invocation.context.parent_job
+    then
+      Error
+        (error
+           Invalid_state
+           "foreground invocation cannot borrow background-job ownership")
+    else if
+      List.exists t.state.invocations ~f:(fun current ->
+        Agent_protocol.Id.Invocation.compare current.context.id invocation.context.id = 0)
+    then Error (error Conflict "invocation identity is already admitted")
+    else Ok ()
+  in
+  let%bind () =
+    match invocation.context.parent_invocation with
+    | None -> Ok ()
+    | Some parent ->
+      let owned id op =
+        Agent_protocol.Id.Invocation.compare id parent = 0
+        && Agent_protocol.Id.Operation.compare op operation_id = 0
+      in
+      if
+        List.exists t.invocation_executions ~f:(fun execution ->
+          execution.accepts_children
+          && owned execution.dispatched.context.id execution.operation_id)
+        || Option.exists t.moderator_borrow ~f:(fun borrow ->
+          borrow.accepts_children
+          && (not borrow.committed)
+          && owned borrow.invocation.context.id borrow.operation_id)
+      then Ok ()
+      else Error (error Conflict "parent invocation is not executing in this operation")
+  in
+  let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
+  let%bind _ =
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch
+           [ Invocation_changed invocation; Invocation_changed dispatched ])
+      ~payloads:[]
+  in
+  let execution = { operation_id; dispatched; accepts_children = true } in
+  t.invocation_executions <- execution :: t.invocation_executions;
+  Ok execution
+;;
+
+let finish_invocation t execution outcome =
+  let open Result.Let_syntax in
+  let%bind operation = current_operation t execution.operation_id in
+  let%bind () =
+    if List.exists t.invocation_executions ~f:(phys_equal execution)
+    then Ok ()
+    else Error (error Conflict "invocation callback no longer owns its result")
+  in
+  let outcome =
+    match operation.state with
+    | Cancelling -> Agent_protocol.Invocation.Cancelled "operation cancelled"
+    | _ -> outcome
+  in
+  (* The callback has returned. Even when outcome persistence fails and the
+     execution stays registered for cleanup, it cannot authorize new children. *)
+  execution.accepts_children <- false;
+  let%bind resolved =
+    Agent_protocol.Invocation.resolve
+      execution.dispatched
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      outcome
+  in
+  let%bind _ =
+    transition t ~delta:(Session_delta.Invocation_changed resolved) ~payloads:[]
+  in
+  t.invocation_executions
+  <- List.filter t.invocation_executions ~f:(fun other ->
+       not (phys_equal other execution));
+  Ok resolved
+;;
+
 let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
   let%bind _ = running_operation t operation_id in
@@ -812,7 +919,13 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
              [ Invocation_changed invocation; Invocation_changed dispatched ])
         ~payloads:[]
     in
-    let borrow = { operation_id; invocation = dispatched; committed = false } in
+    let borrow =
+      { operation_id
+      ; invocation = dispatched
+      ; committed = false
+      ; accepts_children = true
+      }
+    in
     t.moderator_borrow <- Some borrow;
     Ok borrow)
 ;;
@@ -901,6 +1014,7 @@ let uncommitted_borrow_delta t borrow failure =
 let finish_moderator_invocation t borrow failure =
   let open Result.Let_syntax in
   let%bind () = validate_moderator_borrow t borrow in
+  borrow.accepts_children <- false;
   let was_committed = borrow.committed in
   let%bind delta = uncommitted_borrow_delta t borrow failure in
   let%bind () =
@@ -1581,6 +1695,14 @@ let worker_terminal t operation_id outcome =
   | Some operation ->
     let open Result.Let_syntax in
     let borrow = t.moderator_borrow in
+    let%bind unfinished =
+      List.map t.invocation_executions ~f:(fun execution ->
+        Agent_protocol.Invocation.cancel
+          execution.dispatched
+          ~reason:"worker exited before recording the invocation outcome"
+        |> Result.map ~f:(fun invocation -> Session_delta.Invocation_changed invocation))
+      |> Result.all
+    in
     let%bind borrow_delta =
       match borrow with
       | None -> Ok (Session_delta.Batch [])
@@ -1593,10 +1715,10 @@ let worker_terminal t operation_id outcome =
                 "worker exited with an active moderator borrow"))
     in
     let outcome =
-      match borrow, outcome with
-      | Some _, Operation_worker.Completed _ ->
+      match Option.is_some borrow || not (List.is_empty unfinished), outcome with
+      | true, Operation_worker.Completed _ ->
         Operation_worker.Failed
-          (error Internal_error "worker completed with an active moderator borrow")
+          (error Internal_error "worker completed with an active invocation")
       | _ -> outcome
     in
     let%bind delta, payloads = terminal_delta t operation outcome in
@@ -1605,11 +1727,13 @@ let worker_terminal t operation_id outcome =
       transition
         t
         ~delta:
-          (Session_delta.Batch [ borrow_delta; delta; cleanup_delta permissions jobs ])
+          (Session_delta.Batch
+             (unfinished @ [ borrow_delta; delta; cleanup_delta permissions jobs ]))
         ~payloads:(payloads @ cleanup_payloads permissions jobs)
     in
     resolve_cleaned_permission_waiters t permissions;
     t.moderator_borrow <- None;
+    t.invocation_executions <- [];
     t.active_cancel <- None;
     let%bind () =
       match reconcile_foreground_invocations t with
@@ -1731,6 +1855,52 @@ let request_permission_with_review_internal
   | (false | true), _, _ -> Ok (Eio.Promise.await response)
 ;;
 
+let with_invocation t operation_id ~invocation f =
+  let open Result.Let_syntax in
+  Eio.Fiber.yield ();
+  let%bind execution =
+    Eio.Cancel.protect (fun () -> call t (Claim_invocation (operation_id, invocation)))
+  in
+  let finish outcome =
+    Eio.Cancel.protect (fun () -> call t (Finish_invocation (execution, outcome)))
+  in
+  let failed =
+    Agent_protocol.Invocation.Fail
+      { code = "invocation.handler_failed"
+      ; message = "Tool execution failed."
+      ; retryable = false
+      ; details = `Null
+      }
+  in
+  match f ~dispatched:execution.dispatched with
+  | Ok outcome ->
+    let outcome =
+      match Agent_protocol.Invocation.validate_outcome outcome with
+      | Ok () -> outcome
+      | Error _ ->
+        Agent_protocol.Invocation.Fail
+          { code = "invocation.invalid_output"
+          ; message = "Tool execution returned an invalid outcome."
+          ; retryable = false
+          ; details = `Null
+          }
+    in
+    finish outcome
+  | Error failure ->
+    let%bind _ = finish failed in
+    Error failure
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    let outcome =
+      match exn with
+      | Eio.Cancel.Cancelled _ ->
+        Agent_protocol.Invocation.Cancelled "tool execution cancelled"
+      | _ -> failed
+    in
+    ignore (finish outcome : (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result);
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+;;
+
 let with_moderator_invocation_unlocked t operation_id ~invocation f =
   let open Result.Let_syntax in
   (* Observe existing cancellation before masking the mailbox admission. Once
@@ -1803,6 +1973,7 @@ let worker_capabilities t operation_id id_source buffer =
     ; commit_moderator =
         (fun snapshot -> call t (Commit_worker_moderator (operation_id, snapshot)))
     ; with_moderator_invocation = with_moderator_invocation t operation_id
+    ; with_invocation = with_invocation t operation_id
     ; consume_deferred = (fun () -> call t (Consume_deferred operation_id))
     ; request_permission =
         (fun ~permission ~timeout_seconds ~fallback ~review_on_timeout ->
@@ -3112,6 +3283,9 @@ let detach t attachment_id =
 
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t -> function
+  | Claim_invocation (operation_id, invocation) ->
+    claim_invocation t operation_id invocation
+  | Finish_invocation (execution, outcome) -> finish_invocation t execution outcome
   | Claim_moderator_invocation (operation_id, invocation) ->
     claim_moderator_invocation t operation_id invocation
   | Commit_moderator_invocation (borrow, resolved, snapshot) ->
@@ -3303,6 +3477,7 @@ let create_with_owner_lease_duration
     ; active_cancel = None
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
+    ; invocation_executions = []
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state

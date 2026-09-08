@@ -129,6 +129,52 @@ recursive call or cross-owner acquisition cycle returns an explicit error before
 admission. The service publishes no provider tool output, grants
 no additional tool authority, and does not enable any extension feature flag.
 
+### Ordinary native invocation ownership
+
+The internal `Operation_worker.Capabilities.with_invocation` service records
+foreground native or standalone invocation admission and outcome independently
+of moderator state. Its callback runs outside the actor and receives a dispatched
+record. Concurrent calls can run independently, and a moderator callback can
+invoke a native tool without acquiring its own moderator lock again. A nested
+invocation must reference a live parent callback in the same operation. Closed,
+foreign or duplicate ownership is rejected before the callback runs; background
+job ownership requires a separate service.
+
+The actor reserves each execution record for that callback. Generic extension
+transactions cannot replace it. Callback errors/exceptions become bounded
+terminal failures, malformed outcomes become `invocation.invalid_output`, and
+cancellation records a cancelled outcome. Outcome persistence failure leaves the
+execution registered for terminal cleanup, without replaying the callback. Worker
+exit cancels abandoned execution records before foreground result reconciliation.
+Nested results that have been saved remain durable if the enclosing moderator
+later fails and rolls back its own state.
+
+`Native_tool_invocation.run` uses this lifecycle for both model and synchronous
+script callers. It resolves an exact capability ID/fingerprint in the live selected
+registry, checks invocation identity and input schema, invokes the host authorizer,
+and resolves the capability again after any authorization wait. Revocation,
+replacement, or selection changes prevent runner execution. It uses the originally
+registered implementation, retaining its shell/file policy wrappers. Function
+arguments use JSON encoding; custom arguments are raw strings.
+
+The host must supply current invocation/pre-tool authorization and output
+disclosure callbacks. Authorization that requires a busy moderator must fail
+before effects, rather than defer its decision. Results pass disclosure and
+protocol bounds before persistence. Raw runner output/progress and callback
+diagnostics are not published by this service. Only the final disclosed value or
+bounded failure is retained. Script callers receive the recorded outcome directly;
+they do not create provider call IDs or history items. Model callers use the
+separate canonical publication service below. Post-tool observation remains the
+caller's responsibility and must run once after the recorded outcome.
+
+These are internal services. The normal runtime, streamed native fallback and
+ChatML `Tool.call` still need to be connected to them, including qualified
+authorization, post-observation and standalone dispatch. No new public tool is
+enabled by this foundation. Offline tests cover model/script policy and disclosure
+failures, capability changes during authorization, custom input, concurrent calls,
+borrowed-parent execution and rollback, stale parent rejection, cancellation and
+outcome persistence rejection.
+
 ### Canonical initial result publication
 
 `Operation_worker.Capabilities.publish_invocation_output` saves a resolved model
