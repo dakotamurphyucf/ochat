@@ -5,6 +5,7 @@
   source_ref
   diagnostic
   tool_schema
+  extension_spec
   chatmd_script_spec
   feature
   path_expr

@@ -1,6 +1,6 @@
 # ChatML extension records and capability discovery
 
-The extension record and transaction foundations are implemented. Model-visible
+The extension record/transaction foundations and strict declaration parsing are implemented. Model-visible
 one-off scripts, moderator tools, subscription adapters and generated-child tools
 are still under implementation; none of their feature flags is enabled yet.
 This page describes the available storage and client protocol contracts, not a
@@ -115,7 +115,8 @@ See the [protocol interfaces](protocol-types.md) for exact codecs and
 ## Tool schema validation foundation
 
 `Chatmd_shell_spec.Tool_schema` provides shared pure compilation and validation;
-new ChatMD tool declarations have not yet been connected to it. The supported
+parsed ChatMD extension tools compile input, initial-output and optional completion
+schemas through this service during source capture. The supported
 subset consists of boolean schemas and these object keywords:
 
 - `type` (one type or a nonempty type union)
@@ -149,3 +150,65 @@ budgets and the execution services' cancellation guarantees.
 Diagnostics distinguish invalid schemas/JSON, resource exhaustion and value
 mismatch and include the failing value or schema path. Compilation does not load
 sources, instantiate ChatML modules, or invoke any tool.
+
+## Parsed extension declarations
+
+The following declaration shapes are now parsed, serialized and captured in pinned
+prompt artifacts. Their runtime execution remains disabled while the invocation
+and authoring services are implemented. Handler kind/reference checks are present;
+full entrypoint type checking and effective capability binding remain unfinished.
+
+```xml
+<script id="worker" language="chatml" kind="tool" src="worker.chatml"/>
+<tool name="process_report" type="chatml" script="worker" entrypoint="run"
+      input_schema="schemas/input.json" output_schema="schemas/output.json">
+  <uses tool="read_file"/>
+</tool>
+```
+
+Standalone scripts require an explicit ID. `uses` names exact registered tools,
+without changing their configuration. Omission selects zero tools. Duplicate names
+and cyclic dependencies between declared extension tools are rejected. Resolving
+these references against the final authorized tool manifest is still pending.
+
+```xml
+<script id="coordinator" language="chatml" kind="moderator"
+        api="extensibility-v1" src="coordinator.chatml"/>
+<tool name="watch_result" type="moderator" moderator="coordinator"
+      input_schema="schemas/watch.json" output_schema="schemas/ack.json"
+      completion_schema="schemas/result.json"/>
+```
+
+Moderator tools require the selected version-1 moderator; a legacy moderator
+without `api` cannot receive the new invocation event. At most one conversation
+moderator is allowed. Moderator tools use their owner's configured capabilities;
+`uses` belongs to standalone tool declarations. Binding both implementations,
+combining extension tools with shell/custom/MCP configuration, unknown attributes
+and duplicate attributes fail before schema reads.
+
+An authoring policy is a single top-level declaration:
+
+```xml
+<authoring_context policy="manual"/>
+```
+
+`auto` and `manual` reject a `topics` attribute. `preload` requires a nonempty,
+unique whitespace-separated topic list. Topic existence, helper dependencies and
+context injection are not implemented yet, and hosts explicitly reject execution
+with these new declarations instead of silently ignoring them. Ordinary inline
+`uses`/`authoring_context` markup remains text outside its declaration scope.
+
+Schema and script dependencies must be relative local paths within the prompt's
+source root. Each extension source read is bounded to 1 MiB before an observer can
+capture it. The artifact captures exact schema/script bytes, qualified handler IDs,
+and the declaring source context. It restores without consulting changed or deleted
+live files. Capture rejects differing bytes for one dependency during a single
+build, more than 256 total source files, or an aggregate larger than 8 MiB. This
+source boundary does not replace execution capability checks or artifact symlink
+verification.
+
+New prompt artifacts use parser schema version 2 and a distinct revision identity.
+Existing parser-version-1 artifacts with legacy declarations still restore; unknown
+parser/runtime versions fail. Existing moderator binary record layouts are retained
+by additive declaration variants. Extension declarations cannot be interpreted as
+version-1 artifact contents.

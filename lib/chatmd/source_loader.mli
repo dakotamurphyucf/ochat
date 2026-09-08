@@ -43,3 +43,12 @@ val file_name : source -> string
 val relative_path : source -> string
 val materialized_dir : source -> Eio.Fs.dir_ty Eio.Path.t
 val root_dir : t -> Eio.Fs.dir_ty Eio.Path.t
+
+(** Resolve a relative extension source without lexical escape, even with the
+    legacy filesystem loader. Captured loaders still forbid unknown edges.
+    This is not a symlink sandbox; captured artifact verification remains required. *)
+val resolve_within_root : t -> base:source -> reference:string -> (source, string) result
+
+(** Read at most [max_bytes] (0..8 MiB), then notify the capture observer.
+    Oversized reads never publish a partial captured dependency. *)
+val read_bounded : max_bytes:int -> t -> source -> (string, string) result

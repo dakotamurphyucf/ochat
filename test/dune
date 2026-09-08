@@ -873,3 +873,10 @@
  (libraries core jsonaf ochat.chatmd_shell_spec)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
+
+(library
+ (name chatmd_extension_test)
+ (modules chatmd_extension_test)
+ (libraries core eio eio_main jsonaf ochat.chatmd ochat.chatmd_shell_spec)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))

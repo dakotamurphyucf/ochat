@@ -127,6 +127,7 @@ module Chat_content = struct
     | Agent of agent_tool
     (* A tool exposed by a remote MCP server. *)
     | Mcp of mcp_tool
+    | Extension of Chatmd_shell_spec.Extension_spec.tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   and mcp_tool =
@@ -201,6 +202,8 @@ module Chat_content = struct
     | Moderator_runtime of Chatmd_shell_spec.Manifest_compiler.moderator_runtime
     | Script of script
     | Shell_script of Script_spec.t
+    | Extension_script of Chatmd_shell_spec.Extension_spec.script
+    | Authoring_context of Chatmd_shell_spec.Extension_spec.authoring_context
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 end
 
@@ -222,6 +225,8 @@ module Chat_markdown = struct
     | Moderator_runtime of Chatmd_shell_spec.Manifest_compiler.moderator_runtime
     | Script of script
     | Shell_script of Script_spec.t
+    | Extension_script of Chatmd_shell_spec.Extension_spec.script
+    | Authoring_context of Chatmd_shell_spec.Extension_spec.authoring_context
     | Reasoning of reasoning
     | Summary of reasoning_summary
     | Text of string
@@ -285,7 +290,9 @@ module Chat_markdown = struct
       | Shell_runtime _
       | Moderator_runtime _
       | Script _
-      | Shell_script _ )
+      | Shell_script _
+      | Extension_script _
+      | Authoring_context _ )
       :: rest -> content_items_of_elements rest
   ;;
 
@@ -431,8 +438,11 @@ module Chat_markdown = struct
        | Inline body -> Printf.sprintf "<script %s>%s</script>" attrs_string body
        | Src { path; _ } -> Printf.sprintf "<script %s src=\"%s\" />" attrs_string path)
     | Shell_script script -> Chatmd_script_declaration.serialize script
+    | Extension_script script -> Chatmd_extension_declaration.serialize_script script
+    | Authoring_context config -> Chatmd_extension_declaration.serialize_authoring config
     | Tool t ->
       (match t with
+       | Extension tool -> Chatmd_extension_declaration.serialize_tool tool
        | Builtin name -> Printf.sprintf "<tool name=\"%s\" />" name
        | Read_file specification -> Chatmd_read_file_declaration.serialize specification
        | Custom { name; description; command; source = _ } ->
@@ -536,20 +546,37 @@ module Chat_markdown = struct
   ;;
 
   let parse_script ~dir ~loader ~source_node ~source_ref ~attrs ~children =
-    match
-      Chatmd_script_declaration.parse
-        ~dir
-        ~loader
-        ~source_node
-        ~source:source_ref
-        ~attributes:attrs
-        ~inline_source:(script_body_of_children children)
-    with
-    | Error diagnostics -> script_error diagnostics
-    | Ok script ->
-      (match script.kind with
-       | Script_spec.Moderator -> Script (legacy_script script)
-       | _ -> Shell_script script)
+    if
+      List.exists attrs ~f:(function
+        | "api", _ | "kind", Some "tool" -> true
+        | _ -> false)
+    then (
+      match
+        Chatmd_extension_declaration.script
+          ~dir
+          ~loader
+          ~source_node
+          ~source:source_ref
+          ~attributes:attrs
+          ~inline_source:(script_body_of_children children)
+      with
+      | Ok script -> Extension_script script
+      | Error diagnostics -> script_error diagnostics)
+    else (
+      match
+        Chatmd_script_declaration.parse
+          ~dir
+          ~loader
+          ~source_node
+          ~source:source_ref
+          ~attributes:attrs
+          ~inline_source:(script_body_of_children children)
+      with
+      | Error diagnostics -> script_error diagnostics
+      | Ok script ->
+        (match script.kind with
+         | Script_spec.Moderator -> Script (legacy_script script)
+         | _ -> Shell_script script))
   ;;
 
   (*--------------------------------------------------------------------------*)
@@ -739,7 +766,17 @@ module Chat_markdown = struct
             ~f:(String.equal "shell")
           || Hashtbl.mem tbl "runtime"
         in
-        if is_shell
+        if
+          List.exists attrs ~f:(function
+            | "type", Some ("moderator" | "chatml") -> true
+            | _ -> false)
+        then (
+          match
+            Chatmd_extension_declaration.tool ~loader ~source_node ~source:source_ref node
+          with
+          | Ok tool -> Tool (Extension tool)
+          | Error diagnostics -> script_error diagnostics)
+        else if is_shell
         then (
           match Chatmd_shell_declaration.parse_tool ~source:source_ref node with
           | Ok tool -> Tool (Shell tool)
@@ -837,7 +874,11 @@ module Chat_markdown = struct
              (String.concat
                 ~sep:"; "
                 (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string)))
-      | Element (Shell_element _, _, _) -> Text ""
+      | Element (Authoring_context, _, _) ->
+        (match Chatmd_extension_declaration.authoring_context ~source:source_ref node with
+         | Ok config -> Authoring_context config
+         | Error diagnostics -> script_error diagnostics)
+      | Element (Uses, _, _) | Element (Shell_element _, _, _) -> Text ""
       | Element (Import, attrs, _) ->
         let attr_to_string (n, v) =
           Printf.sprintf "%s=\"%s\"" n (Option.value v ~default:"")
@@ -866,6 +907,7 @@ module Chat_markdown = struct
       | Element (Tool, _, _)
       | Element (Shell_access, _, _)
       | Element (Moderator_runtime, _, _)
+      | Element (Authoring_context, _, _)
       | Element (Script, _, _) -> true
       | _ -> false)
   ;;
@@ -885,6 +927,8 @@ module Chat_markdown = struct
     | Moderator_runtime moderator -> Some (Moderator_runtime moderator)
     | Script s -> Some (Script s)
     | Shell_script script -> Some (Shell_script script)
+    | Extension_script script -> Some (Extension_script script)
+    | Authoring_context config -> Some (Authoring_context config)
     | Developer_msg m -> Some (Developer m)
     | System_msg m -> Some (System m) (* System is a legacy alias for Developer *)
     | _ -> None
@@ -901,12 +945,110 @@ module Chat_markdown = struct
         | Shell_script script -> moderators, script :: shell_scripts
         | _ -> moderators, shell_scripts)
     in
-    let moderator_ids = List.map moderators ~f:(fun script -> script.id) in
+    let module X = Chatmd_shell_spec.Extension_spec in
+    let extension_scripts =
+      List.filter_map elements ~f:(function
+        | Extension_script script -> Some script
+        | _ -> None)
+    in
+    let extensions =
+      List.filter_map elements ~f:(function
+        | Tool (Extension tool) -> Some tool
+        | _ -> None)
+    in
+    let error source code message =
+      script_error [ Chatmd_shell_spec.Diagnostic.error ~source ~code message ]
+    in
+    let extension_moderators =
+      List.filter extension_scripts ~f:(fun script ->
+        X.equal_script_kind script.kind Moderator_script)
+    in
+    let moderator_ids =
+      List.map moderators ~f:(fun script -> script.id)
+      @ List.map extension_moderators ~f:(fun script -> script.id)
+    in
     (match
        Chatmd_script_declaration.validate_prompt_registry ~moderator_ids shell_scripts
      with
      | Ok () -> ()
      | Error diagnostics -> script_error diagnostics);
+    let all_ids =
+      List.map moderators ~f:(fun script -> script.id)
+      @ List.map shell_scripts ~f:(fun script -> script.Script_spec.id)
+      @ List.map extension_scripts ~f:(fun script -> script.id)
+    in
+    (match List.find_a_dup all_ids ~compare:String.compare with
+     | None -> ()
+     | Some id ->
+       script_error
+         [ Chatmd_shell_spec.Diagnostic.error
+             ~code:"chatmd.duplicate_script"
+             ("duplicate script id: " ^ id)
+         ]);
+    let policies =
+      List.filter_map elements ~f:(function
+        | Authoring_context policy -> Some policy
+        | _ -> None)
+    in
+    if List.length policies > 1
+    then
+      error
+        (List.hd_exn policies).source_ref
+        "chatmd.duplicate_authoring_context"
+        "only one authoring_context declaration is permitted";
+    List.iter extensions ~f:(fun tool ->
+      let target, kind =
+        match tool.X.implementation with
+        | Moderator id -> id, X.Moderator_script
+        | Standalone { script; _ } -> script, X.Tool_script
+      in
+      match
+        List.find extension_scripts ~f:(fun script -> String.equal script.id target)
+      with
+      | Some script when X.equal_script_kind script.kind kind -> ()
+      | _ ->
+        error
+          tool.source_ref
+          "chatmd.extension_missing_handler"
+          "extension tool must reference a script of the correct kind and v1 surface");
+    if not (List.is_empty extensions)
+    then (
+      let names =
+        List.concat_map elements ~f:(function
+          | Tool (Builtin name) -> [ name ]
+          | Tool (Read_file _) -> [ "read_file" ]
+          | Tool (Custom tool) -> [ tool.name ]
+          | Tool (Shell tool) -> [ tool.name ]
+          | Tool (Agent tool) -> [ tool.name ]
+          | Tool (Mcp tool) -> Option.value tool.names ~default:[]
+          | Tool (Extension tool) -> [ tool.name ]
+          | _ -> [])
+      in
+      List.iter extensions ~f:(fun tool ->
+        if List.count names ~f:(String.equal tool.name) > 1
+        then
+          error
+            tool.source_ref
+            "chatmd.extension_duplicate_tool"
+            "extension tool name conflicts with another declaration");
+      let complete = Hash_set.create (module String) in
+      let rec visit active (tool : X.tool) =
+        if Set.mem active tool.name
+        then
+          error
+            tool.source_ref
+            "chatmd.extension_capability_cycle"
+            "cyclic extension capability dependencies";
+        if not (Hash_set.mem complete tool.name)
+        then (
+          let active = Set.add active tool.name in
+          List.iter tool.uses ~f:(fun name ->
+            Option.iter
+              (List.find extensions ~f:(fun candidate -> String.equal candidate.name name))
+              ~f:(visit active));
+          Hash_set.add complete tool.name)
+      in
+      List.iter extensions ~f:(visit String.Set.empty));
     elements
   ;;
 

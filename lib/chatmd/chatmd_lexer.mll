@@ -65,6 +65,7 @@ type state =
   { mutable pending_token : Chatmd_parser.token option
   ; mutable depth : int
   ; mutable structured_scope_depths : int list
+  ; mutable extension_scope_depths : int list
   ; scratch : Buffer.t
   }
 
@@ -72,6 +73,7 @@ let create_state () =
   { pending_token = None
   ; depth = 0
   ; structured_scope_depths = []
+  ; extension_scope_depths = []
   ; scratch = Buffer.create 256
   }
 
@@ -84,6 +86,8 @@ let is_structured_scope state = not (List.is_empty state.structured_scope_depths
 let tag_of_string_in_state state name =
   match tag_of_string_opt name with
   | Some (Shell_element _) when not (is_structured_scope state) -> None
+  | Some Uses when List.is_empty state.extension_scope_depths -> None
+  | Some Authoring_context when state.depth <> 0 -> None
   | tag -> tag
 
 let is_recognised state name = Option.is_some (tag_of_string_in_state state name)
@@ -100,18 +104,28 @@ let is_read_file_tool attrs =
   |> Option.value_map ~default:false ~f:(Option.value_map ~default:false ~f:(fun name ->
     String.equal name "read_file" || String.equal name "get_contents"))
 
+let is_extension_tool attrs =
+  List.exists attrs ~f:(function
+    | "type", Some ("moderator" | "chatml") -> true
+    | _ -> false)
+
 let is_structured_root tag attrs =
   match tag with
   | Shell_access -> true
-  | Tool -> is_shell_tool attrs || is_read_file_tool attrs
+  | Tool -> is_shell_tool attrs || is_read_file_tool attrs || is_extension_tool attrs
   | _ -> false
 
 let enter_element state tag attrs =
   state.depth <- state.depth + 1;
+  if tag_equal tag Tool && is_extension_tool attrs
+  then state.extension_scope_depths <- state.depth :: state.extension_scope_depths;
   if is_structured_root tag attrs
   then state.structured_scope_depths <- state.depth :: state.structured_scope_depths
 
 let leave_element state =
+  (match state.extension_scope_depths with
+   | depth :: rest when Int.equal depth state.depth -> state.extension_scope_depths <- rest
+   | _ -> ());
   (match state.structured_scope_depths with
    | depth :: rest when Int.equal depth state.depth ->
      state.structured_scope_depths <- rest

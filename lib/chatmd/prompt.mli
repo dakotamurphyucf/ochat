@@ -147,6 +147,7 @@ module Chat_markdown : sig
     | Shell of Chatmd_shell_spec.Shell_tool_spec.t
     | Agent of agent_tool
     | Mcp of mcp_tool
+    | Extension of Chatmd_shell_spec.Extension_spec.tool
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   type config =
@@ -193,6 +194,8 @@ module Chat_markdown : sig
     | Moderator_runtime of Chatmd_shell_spec.Manifest_compiler.moderator_runtime
     | Script of script
     | Shell_script of Chatmd_shell_spec.Chatmd_script_spec.t
+    | Extension_script of Chatmd_shell_spec.Extension_spec.script
+    | Authoring_context of Chatmd_shell_spec.Extension_spec.authoring_context
   [@@deriving jsonaf, sexp, hash, bin_io, compare]
 
   (** [parse_chat_inputs ~dir raw] tokenises, parses and normalises the

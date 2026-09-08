@@ -380,6 +380,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_tui/utf8_edit.mli` | [contract](../../lib/chat_tui/utf8_edit.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/util.mli` | [contract](../../lib/chat_tui/util.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_attributes.mli` | [contract](../../lib/chatmd/chatmd_attributes.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chatmd/chatmd_extension_declaration.mli` | [contract](../../lib/chatmd/chatmd_extension_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_import_expansion.mli` | [contract](../../lib/chatmd/chatmd_import_expansion.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_moderator_runtime_declaration.mli` | [contract](../../lib/chatmd/chatmd_moderator_runtime_declaration.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chatmd/chatmd_read_file_declaration.mli` | [contract](../../lib/chatmd/chatmd_read_file_declaration.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
@@ -393,6 +394,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatmd_shell_spec/chatmd_script_spec.mli` | [contract](../../lib/chatmd_shell_spec/chatmd_script_spec.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/diagnostic.mli` | [contract](../../lib/chatmd_shell_spec/diagnostic.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/duration.mli` | [contract](../../lib/chatmd_shell_spec/duration.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/chatmd_shell_spec/extension_spec.mli` | [contract](../../lib/chatmd_shell_spec/extension_spec.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/feature.mli` | [contract](../../lib/chatmd_shell_spec/feature.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/manifest.mli` | [contract](../../lib/chatmd_shell_spec/manifest.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/manifest_compiler.mli` | [contract](../../lib/chatmd_shell_spec/manifest_compiler.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |

@@ -3441,3 +3441,136 @@ let%expect_test
   print_endline "journal state/status agree; future status codec rejected during replay";
   [%expect {| journal state/status agree; future status codec rejected during replay |}]
 ;;
+
+let%expect_test
+    "extension schemas and scripts restore from actual pinned artifact closure"
+  =
+  with_temp_directory (fun env temporary ->
+    let directory = Eio.Path.(Eio.Stdenv.fs env / temporary / "prompt") in
+    Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 Eio.Path.(directory / "parts");
+    let save path text =
+      Eio.Path.save ~create:(`Exclusive 0o600) Eio.Path.(directory / path) text
+    in
+    save "root.chatmd" {|<import src="parts/definition.chatmd" namespace="lab"/>|};
+    save
+      "parts/definition.chatmd"
+      {|<script id="worker" language="chatml" kind="tool" src="worker.chatml"/><tool name="work" type="chatml" script="worker" entrypoint="run" input_schema="schema.json" output_schema="schema.json"/>|};
+    save "parts/worker.chatml" "let run = fun ctx input -> Task.pure(`Complete(input))";
+    save "parts/schema.json" {|{"type":"object"}|};
+    let definition =
+      Agent_session.Prompt_definition.create
+        ~id:prompt_id
+        ~config_name:"extensions"
+        ~root_file:(Filename.concat temporary "prompt/root.chatmd")
+        ~allowed_workspaces:[ workspace_id ]
+        ~permission_profile:"interactive"
+        ~runtime_policy:None
+        ~enabled:true
+        ~description:None
+      |> store_ok
+    in
+    let artifact_store =
+      Agent_store.Prompt_artifact_store.create
+        ~env
+        ~root:(Filename.concat temporary "artifacts")
+      |> store_ok
+    in
+    let get = function
+      | Ok value -> value
+      | Error errors ->
+        raise_s [%sexp (errors : Agent_session.Prompt_revision_builder.Diagnostic.t list)]
+    in
+    let revision =
+      Agent_session.Prompt_revision_builder.build
+        ~env
+        ~artifact_store
+        ~transaction_id
+        ~created_at:timestamp
+        definition
+      |> get
+    in
+    let revision_id = Agent_session.Prompt_revision.id revision in
+    Eio.Path.rmtree directory;
+    let restored =
+      Agent_session.Prompt_revision_builder.restore ~artifact_store definition revision_id
+      |> get
+    in
+    let elements = Agent_session.Prompt_revision.elements restored in
+    let tool =
+      List.find_map_exn elements ~f:(function
+        | Prompt.Chat_markdown.Tool (Extension tool) -> Some tool
+        | _ -> None)
+    in
+    assert (String.equal tool.input_schema.source_text {|{"type":"object"}|});
+    assert (List.is_empty tool.uses);
+    let script =
+      List.find_map_exn elements ~f:(function
+        | Prompt.Chat_markdown.Extension_script script -> Some script
+        | _ -> None)
+    in
+    assert (String.equal script.id "lab:worker");
+    assert (
+      String.equal
+        (Chatmd_shell_spec.Extension_spec.script_text script)
+        "let run = fun ctx input -> Task.pure(`Complete(input))");
+    let materialized =
+      Eio.Path.native_exn (Agent_session.Prompt_revision.materialized_tree restored)
+    in
+    assert (
+      String.equal
+        tool.input_schema.source_ref.source_dir
+        (Filename.concat materialized "parts"));
+    let artifact = Agent_session.Prompt_revision.artifact restored in
+    assert (artifact.parser_schema_version = 2);
+    assert (List.length artifact.sources = 3);
+    let future_id =
+      Agent_protocol.Id.Prompt_revision.of_string "prv_future_extension" |> protocol_ok
+    in
+    let future =
+      Agent_store.Prompt_artifact_store.Artifact.create
+        ~revision_id:future_id
+        ~root_relative_path:artifact.root_relative_path
+        ~root_chatmd:artifact.root_chatmd
+        ~sources:artifact.sources
+        ~parser_schema_version:99
+        ~runtime_schema_version:1
+        ~created_at:timestamp
+        ()
+      |> store_ok
+    in
+    Agent_store.Prompt_artifact_store.install artifact_store ~transaction_id future
+    |> store_ok;
+    assert (
+      Result.is_error
+        (Agent_session.Prompt_revision_builder.restore
+           ~artifact_store
+           definition
+           future_id));
+    let legacy_id =
+      Agent_protocol.Id.Prompt_revision.of_string "prv_legacy_extension" |> protocol_ok
+    in
+    let legacy =
+      Agent_store.Prompt_artifact_store.Artifact.create
+        ~revision_id:legacy_id
+        ~root_relative_path:"root.chatmd"
+        ~root_chatmd:"<developer>legacy artifact</developer>"
+        ~sources:[]
+        ~parser_schema_version:1
+        ~runtime_schema_version:1
+        ~created_at:timestamp
+        ()
+      |> store_ok
+    in
+    Agent_store.Prompt_artifact_store.install artifact_store ~transaction_id legacy
+    |> store_ok;
+    assert (
+      Result.is_ok
+        (Agent_session.Prompt_revision_builder.restore
+           ~artifact_store
+           definition
+           legacy_id)));
+  print_endline
+    "script and schema closure survives deleted live sources without runtime execution";
+  [%expect
+    {| script and schema closure survives deleted live sources without runtime execution |}]
+;;

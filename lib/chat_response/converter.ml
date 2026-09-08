@@ -462,7 +462,8 @@ let to_items ~ctx ~run_agent (els : CM.top_level_elements list) : Res.Item.t lis
     | CM.Tool _ -> None
     | CM.Shell_runtime _ -> None
     | CM.Moderator_runtime _ -> None
-    | CM.Script _ | CM.Shell_script _ -> None)
+    | CM.Script _ | CM.Shell_script _ | CM.Extension_script _ | CM.Authoring_context _ ->
+      None)
 ;;
 
 type identity_bearing_item =
@@ -486,7 +487,9 @@ let history_id = function
   | CM.Shell_runtime _
   | CM.Moderator_runtime _
   | CM.Script _
-  | CM.Shell_script _ -> None
+  | CM.Shell_script _
+  | CM.Extension_script _
+  | CM.Authoring_context _ -> None
 ;;
 
 let source_context = function
@@ -503,7 +506,9 @@ let source_context = function
   | CM.Shell_runtime _
   | CM.Moderator_runtime _
   | CM.Script _
-  | CM.Shell_script _ -> None
+  | CM.Shell_script _
+  | CM.Extension_script _
+  | CM.Authoring_context _ -> None
 ;;
 
 let to_identity_bearing_items ~ctx ~run_agent elements =

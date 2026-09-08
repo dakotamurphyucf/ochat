@@ -52,7 +52,7 @@ let shell_digest inspection = inspection.Chat_response.Agent_runtime.manifest.sh
 
 let build_manifest definition ~canonical_source ~root ~sources ~shell_manifest_sha256 =
   [%sexp
-    { schema = (1 : int)
+    { schema = (2 : int)
     ; prompt_definition_id =
         (definition.Prompt_definition.id : Agent_protocol.Id.Prompt_definition.t)
     ; canonical_source : string
@@ -78,6 +78,12 @@ let source_capture_loader root_path root captures dependencies =
     then
       failwith
         "captured imports and scripts must remain beneath the root prompt directory";
+    (match Hashtbl.find captures path with
+     | Some previous when not (String.equal previous contents) ->
+       failwith "prompt dependency changed during capture"
+     | None when Hashtbl.length captures >= 255 ->
+       failwith "prompt dependency file count limit exceeded"
+     | _ -> ());
     let previous_bytes =
       Hashtbl.find captures path |> Option.value_map ~default:0 ~f:String.length
     in
@@ -152,6 +158,11 @@ let install artifact_store ~transaction_id artifact =
 ;;
 
 let parse_artifact artifact_store artifact =
+  let parser_version =
+    artifact.Agent_store.Prompt_artifact_store.Artifact.parser_schema_version
+  in
+  if (parser_version <> 1 && parser_version <> 2) || artifact.runtime_schema_version <> 1
+  then failwith "unsupported prompt parser/runtime schema version";
   Agent_store.Prompt_artifact_store.verify_materialized_tree artifact_store artifact
   |> Result.map_error ~f:(fun error ->
     Sexp.to_string_hum ([%sexp_of: Agent_store.Store_error.t] error))
@@ -173,6 +184,13 @@ let parse_artifact artifact_store artifact =
       ~dir:tree
       artifact.root_chatmd
   in
+  if
+    parser_version = 1
+    && List.exists elements ~f:(function
+      | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) | Authoring_context _
+        -> true
+      | _ -> false)
+  then failwith "extension declarations require prompt parser schema version 2";
   tree, elements
 ;;
 
@@ -218,7 +236,7 @@ let build
             ~root_relative_path:(Filename.basename definition.root_file)
             ~root_chatmd:root
             ~sources
-            ~parser_schema_version:1
+            ~parser_schema_version:2
             ~runtime_schema_version:1
             ~shell_manifest_sha256
             ~created_at

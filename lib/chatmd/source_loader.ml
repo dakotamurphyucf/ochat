@@ -116,6 +116,59 @@ let read t source =
   | exn -> Error (Exn.to_string exn)
 ;;
 
+(* New extension dependencies use a hard read ceiling before allocation and
+   notify capture observers only after a complete successful bounded read. *)
+let read_bounded ~max_bytes t source =
+  if max_bytes < 0 || max_bytes > 8 * 1024 * 1024
+  then Error "invalid source read bound"
+  else (
+    try
+      let contents =
+        match t.captured with
+        | Some sources ->
+          (match Map.find sources source.relative_path with
+           | Some text when String.length text <= max_bytes -> text
+           | Some _ -> failwith "source byte limit exceeded"
+           | None -> failwith ("source is not captured: " ^ source.relative_path))
+        | None ->
+          Eio.Path.with_open_in source.path (fun flow ->
+            let buffer = Buffer.create (Int.min 4096 max_bytes) in
+            let chunk = Cstruct.create (Int.min 4096 (max_bytes + 1)) in
+            let rec loop () =
+              match Eio.Flow.single_read flow chunk with
+              | count ->
+                if Buffer.length buffer + count > max_bytes
+                then failwith "source byte limit exceeded";
+                Buffer.add_string buffer (Cstruct.to_string ~len:count chunk);
+                loop ()
+              | exception End_of_file -> Buffer.contents buffer
+            in
+            loop ())
+      in
+      Option.iter t.observer ~f:(fun observe -> observe source contents);
+      Ok contents
+    with
+    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+    | exn -> Error (Exn.to_string exn))
+;;
+
+let resolve_within_root t ~base ~reference =
+  if Filename.is_absolute reference || String.is_substring reference ~substring:"://"
+  then Error "extension source must be a relative local reference"
+  else (
+    match normalize (relative_reference base reference) with
+    | Error _ -> Error "extension source reference escapes its root"
+    | Ok relative_path ->
+      let directory = Filename.dirname relative_path in
+      Ok
+        (make_source
+           ~file_name:reference
+           ~relative_path
+           ~directory:
+             (if String.equal directory "." then t.root else Eio.Path.(t.root / directory))
+           ~path:Eio.Path.(t.root / relative_path)))
+;;
+
 let agent_reference t ~base ~reference =
   if Filename.is_absolute reference
   then Ok reference

@@ -63,6 +63,8 @@ type tag =
   | Tool
   | Shell_access
   | Moderator_runtime
+  | Uses
+  | Authoring_context
   | Shell_element of Chatmd_shell_spec.Shell_element.t
 [@@deriving sexp]
 
@@ -90,6 +92,8 @@ let tag_equal (a : tag) (b : tag) : bool =
   | Tool, Tool
   | Shell_access, Shell_access
   | Moderator_runtime, Moderator_runtime
+  | Uses, Uses
+  | Authoring_context, Authoring_context
   | Config, Config -> true
   | Shell_element a, Shell_element b -> Chatmd_shell_spec.Shell_element.equal a b
   | _ -> false
@@ -118,6 +122,8 @@ let tag_of_string_opt : string -> tag option = function
   | "tool" -> Some Tool
   | "shell_access" -> Some Shell_access
   | "moderator_runtime" -> Some Moderator_runtime
+  | "uses" -> Some Uses
+  | "authoring_context" -> Some Authoring_context
   | name ->
     Option.map (Chatmd_shell_spec.Shell_element.of_string name) ~f:(fun element ->
       Shell_element element)

@@ -97,7 +97,9 @@ let collect declarations = function
   | Tool_response _
   | Config _
   | Reasoning _
-  | Script _ -> declarations
+  | Script _
+  | Extension_script _
+  | Authoring_context _ -> declarations
 ;;
 
 let declarations elements =
@@ -125,6 +127,7 @@ let declaration_sources declarations =
   @ List.map declarations.legacy_tools ~f:(fun tool -> tool.source)
   @ List.filter_map declarations.tools ~f:(function
     | CM.Read_file specification -> Some specification.source
+    | Extension specification -> Some specification.source_ref
     | Builtin _ | Custom _ | Shell _ | Agent _ | Mcp _ -> None)
 ;;
 
@@ -464,36 +467,48 @@ let create
       ~run_agent
       ()
   =
-  let declarations = declarations prompt_elements in
-  let model_completion = model_completion ~ctx ~run_agent in
-  Result.bind
-    (Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
-     |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ]))
-    ~f:(fun admin_policy ->
-      Result.bind
-        (shell_registry
-           ~sw
-           ~host
-           ~platform
-           ~admin_policy
-           ~manifest_authorizer
-           ~approval_provider
-           ~approval_store
-           ~model_completion
-           ~extension_snapshots
-           ~persist_extension_snapshots
-           declarations)
-        ~f:(fun (shell_registry, shell_manifest, shell_security_status) ->
-          build_functions ~sw ~ctx ~host ~run_agent shell_registry declarations.tools
-          |> Result.map ~f:(fun functions ->
-            { functions
-            ; classifications = classifications declarations.tools
-            ; shell_tool_names = shell_tool_names declarations
-            ; shell_registry
-            ; shell_manifest
-            ; shell_admin_policy =
-                Option.some_if (Option.is_some shell_manifest) admin_policy
-            ; shell_security_status
-            ; moderator_shell_runtime = moderator_runtime shell_manifest
-            })))
+  if
+    List.exists prompt_elements ~f:(function
+      | CM.Extension_script _ | Tool (Extension _) | Authoring_context _ -> true
+      | _ -> false)
+  then
+    Error
+      [ diagnostic
+          "chatml.extension_unavailable"
+          "extension declarations are parsed but execution and authoring services are \
+           not yet enabled on this host"
+      ]
+  else (
+    let declarations = declarations prompt_elements in
+    let model_completion = model_completion ~ctx ~run_agent in
+    Result.bind
+      (Shell_runtime.Admin_policy_loader.load_from_environment ~env:(Ctx.env ctx)
+       |> Result.map_error ~f:(fun error -> [ diagnostic error.code error.message ]))
+      ~f:(fun admin_policy ->
+        Result.bind
+          (shell_registry
+             ~sw
+             ~host
+             ~platform
+             ~admin_policy
+             ~manifest_authorizer
+             ~approval_provider
+             ~approval_store
+             ~model_completion
+             ~extension_snapshots
+             ~persist_extension_snapshots
+             declarations)
+          ~f:(fun (shell_registry, shell_manifest, shell_security_status) ->
+            build_functions ~sw ~ctx ~host ~run_agent shell_registry declarations.tools
+            |> Result.map ~f:(fun functions ->
+              { functions
+              ; classifications = classifications declarations.tools
+              ; shell_tool_names = shell_tool_names declarations
+              ; shell_registry
+              ; shell_manifest
+              ; shell_admin_policy =
+                  Option.some_if (Option.is_some shell_manifest) admin_policy
+              ; shell_security_status
+              ; moderator_shell_runtime = moderator_runtime shell_manifest
+              }))))
 ;;

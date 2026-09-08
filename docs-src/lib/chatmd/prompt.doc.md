@@ -1,6 +1,11 @@
 # ChatMarkdown prompt parsing (`prompt.ml`)
 
-Current parsing retains source-loader provenance across imports/scripts and nested prompt capture. Daemon prompt revisions use verified stored artifacts; ordinary local parsing does not snapshot an arbitrary workspace.
+Current parsing retains source-loader provenance across imports/scripts, extension schemas and nested prompt capture. Daemon prompt revisions use verified stored artifacts; ordinary local parsing does not snapshot an arbitrary workspace.
+
+Versioned extension declarations and their current runtime limits are described in
+[extension foundations](../../agent-server/extensibility-foundations.md). The parser
+uses [strict extension declaration helpers](../../../lib/chatmd/chatmd_extension_declaration.mli)
+and [bounded source loading](../../../lib/chatmd/source_loader.mli).
 
 See [agent-host integration](../../agent-server/embedding.md) and
 [orchestration semantics](../../agent-server/chatml-orchestration.md).
