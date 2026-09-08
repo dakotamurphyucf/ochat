@@ -332,3 +332,13 @@ stale approvals and incomplete hosted release records.
 See [the release runbook](planning/release-runbook.md),
 [manual accessibility worksheet](planning/manual-accessibility-review.md), and
 [P10 qualification record](planning/p10-completion-review.md). Local candidate and public deployment evidence remain distinct. The [P11 launch record](planning/p11-launch.md) identifies the first verified production release; [maintenance](planning/maintenance.md) owns ongoing reviews.
+
+
+## Required CI and selective publication
+
+The required `release-gate` covers selected framework normal/E2E tests,
+documentation semantics, and both website environments. Change detection and
+the final gate always run. Maintainer-documentation-only changes can skip heavy
+jobs and publication; unknown inputs or missing history trigger full checks.
+Unshipped website changes are included before deciding whether to publish.
+See [CI coverage, recovery and cache maintenance](planning/ci-enforcement.md).

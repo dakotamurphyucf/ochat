@@ -67,7 +67,7 @@
   path_glob
   bimage
   bimage-unix
-  nottui
+  (nottui (< 0.5))
   ppx_blob
   menhir
   menhirLib

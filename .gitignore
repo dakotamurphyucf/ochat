@@ -57,3 +57,7 @@ website/.generated-stage-*/
 website/.content-lock/
 website/.release/
 website/.wrangler/
+
+# Local CI reports and restored opam switch.
+.ci-evidence/
+_opam/

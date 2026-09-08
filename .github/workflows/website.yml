@@ -3,12 +3,62 @@ on:
   pull_request:
   push:
     branches: [main]
+  workflow_dispatch:
+    inputs:
+      mode:
+        description: Full validation, a qualified main redeployment, or a cold dependency audit
+        type: choice
+        options: [validate, redeploy, cold]
+        default: validate
+  schedule:
+    - cron: "17 8 * * 1"
 permissions:
   contents: read
+concurrency:
+  group: ${{ github.workflow }}-${{ github.event.pull_request.number || github.run_id }}
+  cancel-in-progress: ${{ github.event_name == 'pull_request' }}
 jobs:
-  # No path filters: lib/, bin/, generator/test inputs and packages also gate release.
+  # Always start detection and the final gate. Do not use workflow path filters.
+  changes:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 10
+    permissions:
+      contents: read
+      deployments: read
+    outputs:
+      framework: ${{ steps.select.outputs.framework }}
+      semantics: ${{ steps.select.outputs.semantics }}
+      website: ${{ steps.select.outputs.website }}
+      deploy: ${{ steps.select.outputs.deploy }}
+      cold: ${{ steps.select.outputs.cold }}
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: website/.nvmrc
+      - name: Test change selection and gate enforcement
+        run: node --test .github/tests/*.test.mjs
+      - id: select
+        name: Select checks and publication
+        env:
+          CI_HEAD_SHA: ${{ github.event.pull_request.head.sha || github.sha }}
+          GITHUB_TOKEN: ${{ github.token }}
+        run: node .github/scripts/select-checks.mjs
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: ci-selection
+          path: .ci-evidence/selection.json
+          include-hidden-files: true
+          retention-days: 90
   semantics:
-    runs-on: ubuntu-latest
+    needs: changes
+    if: needs.changes.outputs.semantics == 'true'
+    runs-on: ubuntu-24.04
     timeout-minutes: 45
     steps:
       - uses: actions/checkout@v4
@@ -19,23 +69,15 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version-file: website/.nvmrc
-      - uses: ocaml/setup-ocaml@v3
+      - uses: ./.github/actions/setup-ochat
         with:
-          ocaml-compiler: 5.3.0
-      # dune-project selects these source repositories; opam install does not
-      # consume Dune's (pin ...) stanzas. Match the qualified local sources.
-      - name: Pin project source dependencies
-        run: |
-          # The qualified TextMate fork uses the pre-0.2 Oniguruma API.
-          opam pin add --no-action --yes oniguruma 0.1.2
-          opam pin add --no-action --yes textmate-language.0.4.0 'git+https://github.com/dakotamurphyucf/ocaml-textmate-language.git#e9d1ea854b0734db5e616cacb2ce7e2e5fd744bf'
-          opam pin add --no-action --yes piaf.0.2.0 'git+https://github.com/anmonteiro/piaf.git#c7428ec14dc681e0ef13375cdf657b2727143678'
-      - run: opam install . --deps-only --with-test -y
+          cold: ${{ needs.changes.outputs.cold }}
+          tier: semantics
       - name: Record installed toolchain
         run: |
           mkdir -p website/.release
-          opam list --installed --columns=name,version --color=never > website/.release/opam-packages.txt
-          opam pin list --color=never > website/.release/opam-pins.txt
+          cp .ci-evidence/* website/.release/
+          cp ochat.opam.locked website/.release/ochat.opam.locked
       - run: opam exec -- node website/scripts/check-semantics.mjs website/.release/semantic-report.json
       - uses: actions/upload-artifact@v4
         if: always()
@@ -46,8 +88,47 @@ jobs:
             website/.release/semantic-report.json
             website/.release/opam-packages.txt
             website/.release/opam-pins.txt
+            website/.release/ochat.opam.locked
+            website/.release/toolchain.json
+            website/.release/toolchain-key.json
+  framework:
+    needs: changes
+    if: needs.changes.outputs.framework == 'true'
+    strategy:
+      fail-fast: false
+      matrix:
+        tier: [normal, e2e]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 45
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: website/.nvmrc
+      - uses: ./.github/actions/setup-ochat
+        with:
+          cold: ${{ needs.changes.outputs.cold }}
+          tier: ${{ matrix.tier }}
+      - name: Run framework tests
+        run: opam exec -- node .github/scripts/framework-tests.mjs ${{ matrix.tier }}
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: framework-evidence-${{ matrix.tier }}
+          include-hidden-files: true
+          retention-days: 90
+          path: |
+            .ci-evidence/
+            _build/log
+            _build/agent-e2e-artifacts/
+            _build/agent-e2e-reports/
   website:
-    needs: semantics
+    needs: changes
+    if: needs.changes.outputs.website == 'true'
     strategy:
       fail-fast: false
       matrix:
@@ -55,7 +136,7 @@ jobs:
     env:
       SITE_ENV: ${{ matrix.environment }}
       SITE_URL: ${{ matrix.environment == 'production' && 'https://ochatlabs.com' || 'http://localhost:4321' }}
-    runs-on: ubuntu-latest
+    runs-on: ubuntu-24.04
     timeout-minutes: 30
     defaults:
       run:
@@ -120,20 +201,25 @@ jobs:
             website/test-results/
   release-gate:
     if: always()
-    needs: [semantics, website]
-    runs-on: ubuntu-latest
+    needs: [changes, semantics, framework, website]
+    runs-on: ubuntu-24.04
+    timeout-minutes: 5
     steps:
-      - name: Require every validation job
+      - uses: actions/checkout@v4
+        with:
+          persist-credentials: false
+          ref: ${{ github.event.pull_request.head.sha || github.sha }}
+      - uses: actions/setup-node@v4
+        with:
+          node-version-file: website/.nvmrc
+      - name: Require every selected validation job
         env:
-          SEMANTICS_RESULT: ${{ needs.semantics.result }}
-          WEBSITE_RESULT: ${{ needs.website.result }}
-        run: |
-          test "$SEMANTICS_RESULT" = success
-          test "$WEBSITE_RESULT" = success
+          NEEDS_JSON: ${{ toJSON(needs) }}
+        run: node .github/scripts/release-gate.mjs
   deploy-production:
-    if: github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.release-gate.result == 'success'
-    needs: [release-gate]
-    runs-on: ubuntu-latest
+    if: always() && github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true' && needs.release-gate.result == 'success'
+    needs: [changes, release-gate]
+    runs-on: ubuntu-24.04
     timeout-minutes: 20
     environment:
       name: production
@@ -168,6 +254,7 @@ jobs:
         run: node scripts/verify-production.mjs .release/candidate .release/semantics/semantic-report.json
       - name: Publish qualified release
         env:
+          CI_DEPLOY_MODE: ${{ inputs.mode }}
           CLOUDFLARE_API_TOKEN: ${{ secrets.CLOUDFLARE_API_TOKEN }}
           GITHUB_TOKEN: ${{ github.token }}
         run: node scripts/publish-production.mjs .release/candidate .release/semantics/semantic-report.json .release/deployment.json

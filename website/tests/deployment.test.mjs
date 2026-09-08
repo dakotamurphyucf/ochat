@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { createHash } from 'node:crypto';
 import {
@@ -74,38 +75,46 @@ test('public promotion honors the manual-review deferral and rejects incomplete 
   );
 });
 
-test('release gate refuses failed, cancelled or skipped prerequisite jobs and watches all source inputs', async () => {
+test('workflow always detects changes, runs selected checks concurrently, and requires their results', async () => {
   const workflow = parse(
     await fs.readFile(
       new URL('../../.github/workflows/website.yml', import.meta.url),
       'utf8',
     ),
   );
-  for (const trigger of Object.values(workflow.on)) {
+  for (const trigger of Object.values(workflow.on))
     assert.ok(!trigger || (!trigger.paths && !trigger['paths-ignore']));
+  for (const name of ['framework', 'semantics', 'website']) {
+    assert.equal(workflow.jobs[name].needs, 'changes');
+    assert.equal(
+      workflow.jobs[name].if,
+      `needs.changes.outputs.${name} == 'true'`,
+    );
   }
-  assert.equal(workflow.jobs.website.needs, 'semantics');
   assert.deepEqual(workflow.jobs.website.strategy.matrix.environment, [
     'preview',
     'production',
   ]);
+  assert.deepEqual(workflow.jobs.framework.strategy.matrix.tier, [
+    'normal',
+    'e2e',
+  ]);
   const gate = workflow.jobs['release-gate'];
-  assert.deepEqual(gate.needs, ['semantics', 'website']);
+  assert.deepEqual(gate.needs, [
+    'changes',
+    'semantics',
+    'framework',
+    'website',
+  ]);
   assert.equal(gate.if, 'always()');
-  for (const semantic of ['success', 'failure', 'cancelled', 'skipped'])
-    for (const website of ['success', 'failure', 'cancelled', 'skipped']) {
-      const result = spawnSync('bash', ['-e', '-c', gate.steps[0].run], {
-        env: {
-          ...process.env,
-          SEMANTICS_RESULT: semantic,
-          WEBSITE_RESULT: website,
-        },
-      });
-      assert.equal(
-        result.status === 0,
-        semantic === 'success' && website === 'success',
-      );
-    }
+  const run = gate.steps.find((step) => step.env?.NEEDS_JSON);
+  assert.equal(run.env.NEEDS_JSON, '${{ toJSON(needs) }}');
+  assert.equal(run.run, 'node .github/scripts/release-gate.mjs');
+  assert.ok(
+    workflow.jobs.changes.steps.some(
+      (step) => step.run === 'node --test .github/tests/*.test.mjs',
+    ),
+  );
 });
 
 test('deployment capacity rejects excess rules, oversized assets and redirect loops', () => {
@@ -189,15 +198,25 @@ test('production publishing is main-only, serialized, gated, and uses the tested
     ),
   );
   const publish = workflow.jobs['deploy-production'];
-  assert.deepEqual(publish.needs, ['release-gate']);
+  assert.deepEqual(publish.needs, ['changes', 'release-gate']);
   assert.equal(
     publish.if,
-    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.release-gate.result == 'success'",
+    "always() && github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true' && needs.release-gate.result == 'success'",
   );
   assert.equal(publish.environment.name, 'production');
   assert.equal(publish.concurrency['cancel-in-progress'], false);
   assert.equal(workflow.permissions.contents, 'read');
-  assert.deepEqual(Object.keys(workflow.on).sort(), ['pull_request', 'push']);
+  assert.deepEqual(Object.keys(workflow.on).sort(), [
+    'pull_request',
+    'push',
+    'schedule',
+    'workflow_dispatch',
+  ]);
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.mode.options, [
+    'validate',
+    'redeploy',
+    'cold',
+  ]);
   assert.ok(
     publish.steps.some(
       (step) =>
@@ -215,6 +234,60 @@ test('production publishing is main-only, serialized, gated, and uses the tested
     );
   assert.equal(secrets.length, 1);
   assert.equal(secrets[0].name, 'Publish qualified release');
+});
+
+test('publisher permits only main pushes and explicit main recovery, before touching credentials or artifacts', () => {
+  const script = fileURLToPath(
+    new URL('../scripts/publish-production.mjs', import.meta.url),
+  );
+  for (const event of ['push', 'pull_request', 'schedule', 'workflow_dispatch'])
+    for (const ref of ['refs/heads/main', 'refs/heads/feature'])
+      for (const mode of ['', 'validate', 'redeploy', 'cold']) {
+        const result = spawnSync(
+          process.execPath,
+          [script, 'unused', 'unused', 'unused'],
+          {
+            env: {
+              ...process.env,
+              GITHUB_EVENT_NAME: event,
+              GITHUB_REF: ref,
+              GITHUB_REPOSITORY: 'dakotamurphyucf/ochat',
+              CI_DEPLOY_MODE: mode,
+              CLOUDFLARE_API_TOKEN: '',
+              GITHUB_TOKEN: '',
+            },
+          },
+        );
+        const allowed =
+          ref === 'refs/heads/main' &&
+          (event === 'push' ||
+            (event === 'workflow_dispatch' && mode === 'redeploy'));
+        assert.notEqual(result.status, 0);
+        assert.match(
+          result.stderr.toString(),
+          allowed
+            ? /Deployment credentials missing/
+            : /requires an Ochat main push or explicit main redeploy/,
+        );
+      }
+  const foreign = spawnSync(
+    process.execPath,
+    [script, 'unused', 'unused', 'unused'],
+    {
+      env: {
+        ...process.env,
+        GITHUB_EVENT_NAME: 'push',
+        GITHUB_REF: 'refs/heads/main',
+        GITHUB_REPOSITORY: 'someone/else',
+        CLOUDFLARE_API_TOKEN: '',
+        GITHUB_TOKEN: '',
+      },
+    },
+  );
+  assert.match(
+    foreign.stderr.toString(),
+    /requires an Ochat main push or explicit main redeploy/,
+  );
 });
 
 test('production qualification rejects stale, preview, failed, or mismatched evidence', () => {

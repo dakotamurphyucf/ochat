@@ -15,12 +15,16 @@ if (!directory || !semanticFile || !output)
     'Usage: publish-production.mjs ARTIFACT SEMANTIC.json REPORT.json',
   );
 if (
-  process.env.GITHUB_EVENT_NAME !== 'push' ||
+  !(
+    process.env.GITHUB_EVENT_NAME === 'push' ||
+    (process.env.GITHUB_EVENT_NAME === 'workflow_dispatch' &&
+      process.env.CI_DEPLOY_MODE === 'redeploy')
+  ) ||
   process.env.GITHUB_REF !== 'refs/heads/main' ||
   process.env.GITHUB_REPOSITORY !== 'dakotamurphyucf/ochat'
 )
   throw new Error(
-    'Production publishing requires a main push in the Ochat repository',
+    'Production publishing requires an Ochat main push or explicit main redeploy',
   );
 if (!process.env.CLOUDFLARE_API_TOKEN || !process.env.GITHUB_TOKEN)
   throw new Error('Deployment credentials missing');

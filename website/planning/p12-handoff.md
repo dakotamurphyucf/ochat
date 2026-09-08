@@ -1,9 +1,9 @@
 # P12 maintenance handoff
 
-The contributor and operations handoff is implemented. Formal phase closeout
-still records the outstanding P11 registrar contact-email confirmation, rather
-than claiming an account detail that was not checked. Future reviews are assigned
-dates and owners, not marked as already performed.
+The contributor and operations handoff is complete. On 2026-09-08 UTC, the
+owner confirmed completed GoDaddy contact-email verification, closing P11.02
+and the final P12.08 record. All required launch work is complete within the
+approved scope. Future reviews remain assigned dates and owners.
 
 ## Delivered documentation
 
@@ -76,11 +76,21 @@ their immutable reports are available from the
 [Website workflow](https://github.com/dakotamurphyucf/ochat/actions/workflows/website.yml).
 Local reports live in `scratch/ochat-website-evidence/p12/`.
 
+The fixes were published from revision
+`077b00f905cb4ac61608294b35acd89a7a42a679` by successful
+[main run 34186360736](https://github.com/dakotamurphyucf/ochat/actions/runs/34186360736).
+Both environments passed 74 unit tests and 259 browser tests, with two existing
+clipboard skips each. The deployed artifact passed 3,594 hosted assertions and
+21 live browser flows across Chromium, Firefox and WebKit, with no page errors.
+The release archive, Worker versions and full evidence are recorded in local
+`scratch/ochat-website-evidence/p12/closeout.json`.
+
 ## Scope retained
 
 P09 odoc hosting and P10.03 manual accessibility remain explicitly deferred.
 Tasks 17–19 are backlog items, not implemented gate changes. GoDaddy contact-email
-verification and the renewal quote's period remain owner-managed/unconfirmed.
+verification is owner-confirmed; the renewal quote's period remains unspecified
+and is optional account bookkeeping.
 The review calendar schedules future observations without installing reminders
 or sending messages. The maintainer owns their follow-through.
 

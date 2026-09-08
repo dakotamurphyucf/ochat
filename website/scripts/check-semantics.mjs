@@ -17,7 +17,7 @@ const tracked = execFileSync('git', ['ls-files', '-z'], {
   .filter(Boolean);
 for (const file of tracked
   .filter((f) =>
-    /^(docs-src\/|lib\/|bin\/|test\/|assets\/|Readme.md$|LICENSE.txt$|dune-project$|ochat.opam$|DEVELOPMENT.md$)/.test(
+    /^(docs-src\/|lib\/|bin\/|test\/|assets\/|Readme.md$|LICENSE.txt$|dune-project$|ochat.opam$|ochat.opam.locked$|dune$|tikitoken\/|\.github\/|DEVELOPMENT.md$)/.test(
       f,
     ),
   )

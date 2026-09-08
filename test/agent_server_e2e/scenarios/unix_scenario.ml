@@ -404,11 +404,16 @@ let test_oversized_line env environment =
         (Result.try_with (fun () -> Unix_driver.send_line raw oversized)
          : (unit, exn) result);
       let closed =
-        Unix_driver.read_envelope raw ~clock:(Eio.Stdenv.clock env) ~timeout_seconds:5.
+        match
+          Unix_driver.read_envelope raw ~clock:(Eio.Stdenv.clock env) ~timeout_seconds:5.
+        with
+        | Unix_driver.End_of_file -> true
+        | Envelope _ | Timeout | Invalid_response _ -> false
+        (* Linux can reset a socket closed with unread oversized input. Both
+           EOF and reset establish rejection; a response or timeout does not. *)
+        | exception Eio.Io (Eio.Net.E (Connection_reset _), _) -> true
       in
-      require
-        (Poly.equal closed Unix_driver.End_of_file)
-        "oversized line did not close connection");
+      require closed "oversized line did not close connection");
     let health =
       Daemon_process.health daemon ~env ~token:(Config_fixture.admin_token fixture)
       |> Result.ok_or_failwith
