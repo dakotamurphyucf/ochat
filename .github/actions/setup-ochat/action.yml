@@ -10,6 +10,14 @@ inputs:
 runs:
   using: composite
   steps:
+    - name: Keep dependency Git repositories stable during opam setup
+      shell: bash
+      run: |
+        # opam copies Git metadata after fetching. Detached maintenance can
+        # remove maintenance.lock between directory enumeration and copying.
+        # These settings apply only to this disposable CI runner.
+        git config --global maintenance.auto false
+        git config --global gc.auto 0
     - id: key
       shell: bash
       run: node .github/scripts/toolchain.mjs key

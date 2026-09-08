@@ -92,6 +92,7 @@ to its reviewed upstream commit.
 
 The dependency cache contains `~/.opam` and the workspace `_opam` switch. Its
 exact key includes the compiler, opam, runner architecture/image version, GCC,
+GCC's native CPU target and instruction flags,
 lockfile, base dependency definition, Dune project, setup action and verification
 script. It has no broad fallback restore key. A base dependency edit without a
 corresponding lock refresh fails with a direct instruction to regenerate it.
@@ -106,6 +107,14 @@ It is scoped to the same toolchain and test tier. `_build` is never restored;
 all selected test aliases use `--force`. A cold audit disables this cache.
 GitHub's cache scope restrictions remain in effect; do not move cache saving
 into a privileged `pull_request_target` workflow.
+
+The disposable runner disables automatic Git maintenance before opam setup.
+This avoids a repository-copy race with a disappearing `maintenance.lock` during
+fetch/refresh; dependency installation and version verification still run.
+CPU target changes also invalidate both compiled caches: hosted x64 runners do
+not all expose the same instruction sets. Initial warm-cache qualification
+exposed illegal-instruction failures before scenario execution, so architecture
+alone is insufficient for these native dependencies.
 
 For a dependency upgrade, update the base definition and source/repository pins
 deliberately, generate a Linux lock from the intended installed dependency set,

@@ -12,6 +12,7 @@ test("dependency cache invalidates for every definition, pin/lock/action change 
     image: "ubuntu24",
     imageVersion: "1",
     gcc: "13.3",
+    cpuTarget: "-march=x86-64-v3 -mavx2 [enabled]",
     compiler: "5.3.0",
     opam: "2.5.2",
   };

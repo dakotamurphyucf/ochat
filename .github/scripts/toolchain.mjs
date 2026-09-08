@@ -54,6 +54,9 @@ function main() {
       image: process.env.ImageOS,
       imageVersion: process.env.ImageVersion,
       gcc: run("gcc", ["-dumpfullversion"]),
+      // Hosted x64 runners can expose different instruction sets. Native C
+      // dependencies must not be restored onto an incompatible CPU.
+      cpuTarget: run("gcc", ["-march=native", "-Q", "--help=target"]),
       compiler: config.compiler,
       opam: config.opam,
     };
