@@ -241,12 +241,33 @@ moderator data state and records a separate observation failure. A failure after
 successful acknowledgement preserves that acknowledgement. The host must still
 apply resulting runtime requests through its normal integration path.
 
-**Automatic safe-point selection/wakeup, idle draining, ordinary-event Tool.call
-routing and normal runtime installation are still required.** Tests exercise the
+`with_next_moderator_observation` selects and claims atomically under the same
+gate. It chooses eligible records for the exact source in creation-time order,
+breaking ties by invocation ID. Active parents, unresolved invocations and other
+sources/generations are excluded. Both claim paths inspect committed moderator
+termination as well as session halt state, without entering the live manager.
+Thus a second drainer cannot consume work after another handler commits termination.
+
+`Moderator_observation.drain` repeats this handoff with a default budget of 32
+observations (configurable from 1 to 256). It returns committed outcomes and a
+budget-exhaustion indicator, stops on failure or termination, and never retries
+native work. Exhaustion requests a future probe; it does not prove more records
+remain. Concurrent drainers cannot select the same record. The internal stream
+adapter can enable `observe_nested` to drain after the parent moderator handoff
+releases ownership and before returning the parent's canonical result. Observer
+runtime requests join the parent's requests. This also finds intent retained
+after wake-up callback failure or parent rollback.
+
+**Subsequent/idle wakeups after budget exhaustion, idle draining, ordinary-event
+Tool.call routing and normal runtime installation are still required.** The stream
+option remains off by default pending that integration. Tests exercise the
 explicit foreground handoff with real compiled handlers, competing claims,
 cancellation, rejected saves, wrong source/snapshot, mutable-state rollback,
 duplicate acknowledgement and forbidden `Invocation.resolve`. They also cover
-persisted intent and pure recovery plans. They do not yet qualify observation
+persisted intent and pure recovery plans. An expect-test matrix shows budget,
+concurrent, failed and terminated drain dispositions while preserving unrelated
+intent. The compiled native-call matrix runs with stream draining both disabled
+and enabled. These do not yet qualify observation
 delivery across real daemon restarts or administrative reset/compaction.
 
 Compiled-handler tests cover native function/custom calls, policy denial,

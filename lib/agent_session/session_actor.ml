@@ -75,6 +75,9 @@ type _ request =
   | Claim_moderator_observation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Id.Invocation.t
       -> moderator_borrow request
+  | Claim_next_moderator_observation :
+      Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer
+      -> moderator_borrow option request
   | Commit_moderator_invocation :
       moderator_borrow
       * Agent_protocol.Invocation.t
@@ -1013,8 +1016,13 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
 let claim_moderator_observation t operation_id invocation_id =
   let open Result.Let_syntax in
   let%bind _ = running_operation t operation_id in
+  let%bind moderator_halted =
+    Runtime_builder.moderator_snapshot_is_halted t.state.moderator
+  in
   let%bind () =
-    match t.idle_moderator_borrowed, t.moderator_borrow, t.state.halted with
+    match
+      t.idle_moderator_borrowed, t.moderator_borrow, t.state.halted || moderator_halted
+    with
     | false, None, false -> Ok ()
     | _ -> Error (error Conflict "moderator is borrowed or halted")
   in
@@ -1055,6 +1063,52 @@ let claim_moderator_observation t operation_id invocation_id =
   in
   t.moderator_borrow <- Some borrow;
   Ok borrow
+;;
+
+let claim_next_moderator_observation t operation_id observer =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind moderator_halted =
+    Runtime_builder.moderator_snapshot_is_halted t.state.moderator
+  in
+  let%bind () =
+    match t.idle_moderator_borrowed, t.moderator_borrow with
+    | false, None -> Ok ()
+    | _ -> Error (error Conflict "moderator is already borrowed")
+  in
+  let eligible (invocation : Agent_protocol.Invocation.t) =
+    (not (t.state.halted || moderator_halted))
+    && invocation.context.generation = t.state.identity.generation
+    && Agent_protocol.Id.Session.equal
+         invocation.context.session_id
+         t.state.identity.session_id
+    && (match invocation.observation, invocation.status with
+        | Some { status = Awaiting; observer = owner }, (Resolved _ | Published _) ->
+          Agent_protocol.Invocation.equal_observer owner observer
+        | _ -> false)
+    && not
+         (Option.exists invocation.context.parent_invocation ~f:(fun parent ->
+            List.exists t.invocation_executions ~f:(fun execution ->
+              Agent_protocol.Id.Invocation.equal execution.dispatched.context.id parent)))
+  in
+  let compare (a : Agent_protocol.Invocation.t) (b : Agent_protocol.Invocation.t) =
+    match Agent_protocol.Timestamp.compare a.context.created_at b.context.created_at with
+    | 0 -> Agent_protocol.Id.Invocation.compare a.context.id b.context.id
+    | order -> order
+  in
+  let selected =
+    List.fold t.state.invocations ~init:None ~f:(fun selected candidate ->
+      match eligible candidate, selected with
+      | false, _ -> selected
+      | true, None -> Some candidate
+      | true, Some previous when compare candidate previous < 0 -> Some candidate
+      | true, Some _ -> selected)
+  in
+  match selected with
+  | None -> Ok None
+  | Some invocation ->
+    claim_moderator_observation t operation_id invocation.context.id
+    |> Result.map ~f:Option.some
 ;;
 
 let validate_moderator_borrow t borrow =
@@ -2056,12 +2110,8 @@ let with_invocation t operation_id ~invocation f =
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let with_moderator_borrow_unlocked t ~claim f =
+let run_moderator_borrow t borrow f =
   let open Result.Let_syntax in
-  (* Observe existing cancellation before masking the mailbox admission. Once
-     admitted, the borrow must always reach its protected completion request. *)
-  Eio.Fiber.yield ();
-  let%bind borrow = Eio.Cancel.protect (fun () -> call t claim) in
   let commit ~resolved ~snapshot =
     Eio.Cancel.protect (fun () ->
       call t (Commit_moderator_invocation (borrow, resolved, snapshot)))
@@ -2099,6 +2149,14 @@ let with_moderator_borrow_unlocked t ~claim f =
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
+let with_moderator_borrow_unlocked t ~claim f =
+  let open Result.Let_syntax in
+  (* Once admitted, always reach protected completion even during cancellation. *)
+  Eio.Fiber.yield ();
+  let%bind borrow = Eio.Cancel.protect (fun () -> call t claim) in
+  run_moderator_borrow t borrow f
+;;
+
 let with_moderator_gate t f =
   match Chat_response.Execution_gate.with_access t.invocation_gate f with
   | Ok result -> result
@@ -2127,6 +2185,24 @@ let with_moderator_observation t operation_id ~invocation_id f =
       (fun ~dispatched ~commit -> f ~observing:dispatched ~commit))
 ;;
 
+let with_next_moderator_observation t operation_id ~observer f =
+  with_moderator_gate t (fun () ->
+    let open Result.Let_syntax in
+    Eio.Fiber.yield ();
+    let%bind borrow =
+      Eio.Cancel.protect (fun () ->
+        call t (Claim_next_moderator_observation (operation_id, observer)))
+    in
+    match borrow with
+    | None -> Ok false
+    | Some borrow ->
+      let%map () =
+        run_moderator_borrow t borrow (fun ~dispatched ~commit ->
+          f ~observing:dispatched ~commit)
+      in
+      true)
+;;
+
 let worker_capabilities t operation_id id_source buffer =
   Operation_worker.Capabilities.
     { id_source = History_id_source.as_history_entry_source id_source
@@ -2143,6 +2219,7 @@ let worker_capabilities t operation_id id_source buffer =
         (fun snapshot -> call t (Commit_worker_moderator (operation_id, snapshot)))
     ; with_moderator_invocation = with_moderator_invocation t operation_id
     ; with_moderator_observation = with_moderator_observation t operation_id
+    ; with_next_moderator_observation = with_next_moderator_observation t operation_id
     ; with_invocation = with_invocation t operation_id
     ; consume_deferred = (fun () -> call t (Consume_deferred operation_id))
     ; request_permission =
@@ -3462,6 +3539,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     claim_moderator_invocation t operation_id invocation
   | Claim_moderator_observation (operation_id, invocation_id) ->
     claim_moderator_observation t operation_id invocation_id
+  | Claim_next_moderator_observation (operation_id, observer) ->
+    claim_next_moderator_observation t operation_id observer
   | Commit_moderator_invocation (borrow, resolved, snapshot) ->
     commit_moderator_invocation t borrow resolved snapshot
   | Finish_moderator_invocation (borrow, failure) ->

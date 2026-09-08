@@ -4009,6 +4009,225 @@ let handoff_manager env =
   manager, invocation
 ;;
 
+let%expect_test
+    "bounded observation drains select atomically and leave unrelated intent alone"
+  =
+  List.iter [ `Budget; `Concurrent; `Failure; `End ] ~f:(fun mode ->
+    let module I = Agent_protocol.Invocation in
+    let module M = Chat_response.Moderator_manager in
+    let calls = ref []
+    and native_calls = ref 0 in
+    with_handoff_actor
+      ~make_worker:(fun env actor_ready ->
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let actor = Eio.Promise.await actor_ready in
+          let finish =
+            match mode with
+            | `Failure -> "Task.fail(\"observer failed\")"
+            | `End ->
+              "Task.bind(Runtime.end_session(\"observations done\"), fun ignored -> \
+               Task.pure(state))"
+            | _ -> "Task.pure(state)"
+          in
+          let manager, _, definition =
+            handoff_definition
+              env
+              ~events:
+                ("| `Tool_observed(p) -> let ignored = state[0] <- state[0] + 1 in \
+                  Task.bind(Tool.call(p.invocation_id, p.outcome), fun ignored -> "
+                 ^ finish
+                 ^ ") | _ -> Task.pure(state)")
+          in
+          let script =
+            Chat_response.Extension_compiler.script
+              (List.hd_exn (Chat_response.Extension_compiler.prepared_tools definition))
+          in
+          let observer : I.observer =
+            { script_id = script.id; source_sha256 = script.source_sha256 }
+          in
+          caps.commit_moderator
+            (Some
+               (Agent_session.Runtime_builder.encode_moderator_snapshot
+                  (M.identity_snapshot manager |> Result.ok_or_failwith)))
+          |> protocol_ok;
+          let parent = invocation_fixture () in
+          caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
+            List.iter [ 2; 0; 1; 3 ] ~f:(fun index ->
+              let observer =
+                match index with
+                | 3 -> { observer with script_id = "unrelated" }
+                | _ -> observer
+              in
+              let child =
+                I.create
+                  ~observer
+                  { parent.context with
+                    id =
+                      Agent_protocol.Id.Invocation.of_string
+                        ("inv_queue_" ^ Int.to_string index)
+                      |> protocol_ok
+                  ; origin = Moderator
+                  ; parent_invocation = Some parent.context.id
+                  }
+                |> protocol_ok
+              in
+              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
+                Int.incr native_calls;
+                Ok (Complete (`Number (Int.to_string index))))
+              |> protocol_ok
+              |> ignore);
+            assert (
+              not
+                (caps.with_next_moderator_observation
+                   ~observer
+                   (fun ~observing:_ ~commit:_ -> assert false)
+                 |> protocol_ok));
+            Ok (Complete `Null))
+          |> protocol_ok
+          |> ignore;
+          let drain max_observations =
+            Agent_session.Moderator_observation.drain
+              ~max_observations
+              ~capabilities:caps
+              ~observer
+              ~manager
+              ~history:(fun () ->
+                (Agent_session.Session_actor.state actor |> protocol_ok).conversation
+                  .canonical_history
+                |> Agent_session.History_codec.all_of_protocol
+                |> protocol_ok)
+              ~available_tools:[]
+              ~session_meta:`Null
+              ~now:Agent_protocol.Timestamp.now
+              ~on_tool_call:(fun ~name ~args:_ ->
+                calls := !calls @ [ name ];
+                Eio.Fiber.yield ();
+                Ok (Tool_ok `Null))
+              ()
+          in
+          assert (Result.is_error (drain 0));
+          assert (Result.is_error (drain 257));
+          let outcomes =
+            match mode with
+            | `Budget ->
+              let first = drain 2 |> protocol_ok in
+              assert first.budget_exhausted;
+              [%test_eq: int] 2 (List.length first.outcomes);
+              let second = drain 2 |> protocol_ok in
+              assert (not second.budget_exhausted);
+              [%test_eq: int] 1 (List.length second.outcomes);
+              let empty = drain 2 |> protocol_ok in
+              assert (List.is_empty empty.outcomes && not empty.budget_exhausted);
+              first.outcomes @ second.outcomes
+            | `Concurrent ->
+              let results = ref [] in
+              Eio.Fiber.both
+                (fun () ->
+                   let result = drain 256 |> protocol_ok in
+                   results := result :: !results)
+                (fun () ->
+                   let result = drain 256 |> protocol_ok in
+                   results := result :: !results);
+              assert (
+                List.for_all !results ~f:(fun result ->
+                  not result.Agent_session.Moderator_observation.budget_exhausted));
+              let outcomes =
+                List.concat_map !results ~f:(fun result ->
+                  result.Agent_session.Moderator_observation.outcomes)
+              in
+              [%test_eq: int] 3 (List.length outcomes);
+              outcomes
+            | `Failure ->
+              assert (Result.is_error (drain 32));
+              []
+            | `End ->
+              let result = drain 32 |> protocol_ok in
+              assert (not result.budget_exhausted);
+              [%test_eq: int] 1 (List.length result.outcomes);
+              let halted = drain 32 |> protocol_ok in
+              assert (List.is_empty halted.outcomes && not halted.budget_exhausted);
+              result.outcomes
+          in
+          let state = Agent_session.Session_actor.state actor |> protocol_ok in
+          let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+          (match snapshot.current_state with
+           | Session.Snapshot.Array [ Int count ] ->
+             [%test_eq: int]
+               (match mode with
+                | `Failure -> 0
+                | `End -> 1
+                | _ -> 3)
+               count
+           | _ -> assert false);
+          assert (
+            Option.equal
+              Jsonaf.exactly_equal
+              state.moderator
+              (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)));
+          Completed
+            { final_history = input.history
+            ; moderator_snapshot = state.moderator
+            ; runtime_requests =
+                List.concat_map outcomes ~f:(fun outcome ->
+                  outcome.Chat_response.Moderation.Outcome.runtime_requests)
+            }))
+      (fun _env actor _writer backend ->
+         let rec finished () =
+           let state = Agent_session.Session_actor.state actor |> protocol_ok in
+           match state.active_operation with
+           | None -> state
+           | Some _ ->
+             Eio.Fiber.yield ();
+             finished ()
+         in
+         let state = finished () in
+         let observations =
+           List.filter_map state.invocations ~f:(fun invocation ->
+             Option.map invocation.observation ~f:(fun observation ->
+               ( Agent_protocol.Id.Invocation.to_string invocation.context.id
+               , observation.status )))
+           |> List.sort ~compare:(fun (a, _) (b, _) -> String.compare a b)
+         in
+         let mode =
+           match mode with
+           | `Budget -> "budget"
+           | `Concurrent -> "concurrent"
+           | `Failure -> "failure"
+           | `End -> "end"
+         in
+         print_s
+           [%sexp
+             { mode : string
+             ; native_calls = (!native_calls : int)
+             ; handled = (!calls : string list)
+             ; observations : (string * I.observation_status) list
+             }];
+         [%test_eq: int] 1 (List.length state.conversation.canonical_history);
+         assert_same_session_snapshot state (Agent_session.Memory_backend.state backend)));
+  [%expect
+    {|
+    ((mode budget) (native_calls 4)
+     (handled (inv_queue_0 inv_queue_1 inv_queue_2))
+     (observations
+      ((inv_queue_0 Observed) (inv_queue_1 Observed) (inv_queue_2 Observed)
+       (inv_queue_3 Awaiting))))
+    ((mode concurrent) (native_calls 4)
+     (handled (inv_queue_0 inv_queue_1 inv_queue_2))
+     (observations
+      ((inv_queue_0 Observed) (inv_queue_1 Observed) (inv_queue_2 Observed)
+       (inv_queue_3 Awaiting))))
+    ((mode failure) (native_calls 4) (handled (inv_queue_0))
+     (observations
+      ((inv_queue_0
+        (Observation_failed "observation handler failed before acknowledgement"))
+       (inv_queue_1 Awaiting) (inv_queue_2 Awaiting) (inv_queue_3 Awaiting))))
+    ((mode end) (native_calls 4) (handled (inv_queue_0))
+     (observations
+      ((inv_queue_0 Observed) (inv_queue_1 Awaiting) (inv_queue_2 Awaiting)
+       (inv_queue_3 Awaiting))))
+    |}]
+;;
+
 let%test_unit
     "claimed observations commit moderator state atomically and never replay tools"
   =
@@ -4253,7 +4472,7 @@ let%test_unit
 ;;
 
 let%test_unit "compiled moderator Tool.call uses persisted scoped native routing" =
-  List.iter
+  let cases =
     [ `Success
     ; `Custom
     ; `Denied
@@ -4270,7 +4489,10 @@ let%test_unit "compiled moderator Tool.call uses persisted scoped native routing
     ; `Output_limit
     ; `Parent_failed
     ]
-    ~f:(fun mode ->
+  in
+  List.iter
+    (List.cartesian_product [ false; true ] cases)
+    ~f:(fun (observe_nested, mode) ->
       let calls = ref 0
       and authorized = ref 0
       and observations = ref []
@@ -4417,6 +4639,7 @@ let%test_unit "compiled moderator Tool.call uses persisted scoped native routing
             let dispatch =
               Agent_session.Moderator_tool_dispatch.create
                 ~script_tools:tools
+                ~observe_nested
                 ~definition
                 ~manager
                 ~input
@@ -4535,8 +4758,9 @@ let%test_unit "compiled moderator Tool.call uses persisted scoped native routing
            assert (List.length children = if has_child then 1 else 0);
            assert (List.length !observations = List.length children);
            List.iter children ~f:(fun child ->
-             (match child.observation with
-              | Some { status = Awaiting; _ } -> ()
+             (match observe_nested, child.observation with
+              | false, Some { status = Awaiting; _ } | true, Some { status = Observed; _ }
+                -> ()
               | _ -> failwith "saved child lost its deferred observation intent");
              assert (Option.is_none child.context.provider_call_id);
              assert (Option.is_none child.context.call_entry_id);

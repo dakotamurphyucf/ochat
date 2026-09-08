@@ -417,6 +417,13 @@ let moderator_snapshot_has_queued_events snapshot =
          snapshot.Session.Moderator_state.Identity_snapshot.queued_internal_events))
 ;;
 
+let moderator_snapshot_is_halted snapshot =
+  let open Result.Let_syntax in
+  let%map snapshot = decode_moderator_snapshot snapshot in
+  Option.value_map snapshot ~default:false ~f:(fun snapshot ->
+    snapshot.Session.Moderator_state.Identity_snapshot.halted)
+;;
+
 let enqueue_internal_value moderator value =
   match moderator with
   | None -> Error (failure "session prompt has no ChatML moderator")

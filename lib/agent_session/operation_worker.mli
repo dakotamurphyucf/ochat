@@ -95,6 +95,23 @@ module Capabilities : sig
           or cancellation records a separate observation failure; native outcomes
           are never replaced. Same-owner recursion/cross-owner wait cycles fail.
           This does not install an idle drain or authorize tool calls by observers. *)
+    ; with_next_moderator_observation :
+        observer:Agent_protocol.Invocation.observer
+        -> (observing:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (bool, Agent_protocol.Error.t) result
+      (** Atomically select and claim the next eligible observation for this exact
+          source under the same gate as explicit observation claims. Orders by
+          creation time, then invocation ID. True means the callback completed;
+          false means no eligible record (including a halted session). Unresolved
+          invocations, old generations, other sources and active parents are skipped.
+          A recorded [Pending] initial tool outcome is eligible.
+          Concurrent drainers cannot both receive the same record. Each claim
+          revalidates operation ownership; this is not an idle-session API. *)
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

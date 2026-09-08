@@ -77,6 +77,7 @@ let prepare_request
 
 let dispatch
       ~script_tools
+      ~observe_nested
       ~cache
       ~definition
       ~manager
@@ -251,6 +252,25 @@ let dispatch
         save resolved snapshot)
     |> require;
     let resolved = Option.value_exn !recorded in
+    let observation_outcomes =
+      match observe_nested with
+      | false -> []
+      | true ->
+        let script = EC.script prepared in
+        let result =
+          Moderator_observation.drain
+            ~capabilities
+            ~observer:{ script_id = script.id; source_sha256 = script.source_sha256 }
+            ~manager
+            ~history:(fun () -> request.history)
+            ~available_tools
+            ~session_meta
+            ~now
+            ()
+          |> require
+        in
+        result.outcomes
+    in
     let outcome =
       match resolved.status with
       | Resolved outcome -> outcome
@@ -261,6 +281,8 @@ let dispatch
         { output = Text (Jsonaf.to_string (I.outcome_to_json outcome))
         ; runtime_requests =
             Option.value_map !observed ~default:[] ~f:(fun outcome ->
+              outcome.Chat_response.Moderation.Outcome.runtime_requests)
+            @ List.concat_map observation_outcomes ~f:(fun outcome ->
               outcome.Chat_response.Moderation.Outcome.runtime_requests)
         ; commit_output =
             Some
@@ -274,6 +296,7 @@ let dispatch
 
 let create
       ?script_tools
+      ?(observe_nested = false)
       ~definition
       ~manager
       ~input
@@ -314,6 +337,7 @@ let create
     ; run =
         dispatch
           ~script_tools
+          ~observe_nested
           ~cache
           ~definition
           ~manager

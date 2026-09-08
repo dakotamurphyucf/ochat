@@ -45,6 +45,15 @@ module Capabilities = struct
                   -> (unit, Agent_protocol.Error.t) result)
             -> (unit, Agent_protocol.Error.t) result)
         -> (unit, Agent_protocol.Error.t) result
+    ; with_next_moderator_observation :
+        observer:Agent_protocol.Invocation.observer
+        -> (observing:Agent_protocol.Invocation.t
+            -> commit:
+                 (resolved:Agent_protocol.Invocation.t
+                  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+                  -> (unit, Agent_protocol.Error.t) result)
+            -> (unit, Agent_protocol.Error.t) result)
+        -> (bool, Agent_protocol.Error.t) result
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

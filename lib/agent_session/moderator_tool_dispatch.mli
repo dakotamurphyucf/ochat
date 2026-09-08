@@ -24,9 +24,17 @@ exception Dispatch_error of Agent_protocol.Error.t
     final-target validation still runs after any redirect or rewrite.
     [script_tools] supplies the scoped native Tool.call bridge during Tool_invoked.
     Omitting it retains existing host callbacks. The caller must provide the
-    bridge's current policy/disclosure and deferred-observation services. *)
+    bridge's current policy/disclosure and deferred-observation services.
+    [observe_nested] enables the internal bounded observation drain after the
+    parent handoff releases ownership and before returning its canonical result.
+    Committed observer runtime requests join the parent requests. Failure stops
+    dispatch without replacing the saved parent/child outcomes; foreground
+    recovery repairs unpublished parent output. Budget overflow remains durable
+    for a later safe point. The caller still owns subsequent/idle wakeups and
+    ordinary-event tool authority routing before public installation. *)
 val create
   :  ?script_tools:Script_tool_calls.t
+  -> ?observe_nested:bool
   -> definition:Chat_response.Extension_compiler.definition
   -> manager:Chat_response.Moderator_manager.t
   -> input:Operation_worker.Input.t
