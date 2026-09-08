@@ -21,3 +21,13 @@ val plan
   -> first_sequence:int
   -> reason:string
   -> (t, Agent_protocol.Error.t) result
+
+(** Same atomic planning contract as [plan], restricted to model invocations
+    without a parent job. Call only at a quiescent foreground boundary; independent
+    script and background-job invocations are left unchanged. *)
+val plan_foreground
+  :  state:Session_state.t
+  -> namespace:string
+  -> first_sequence:int
+  -> reason:string
+  -> (t, Agent_protocol.Error.t) result

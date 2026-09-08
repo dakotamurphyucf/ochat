@@ -2846,6 +2846,60 @@ let%test_unit
         | _ -> assert false)))
 ;;
 
+let%test_unit "foreground recovery leaves script and background invocations running" =
+  with_actor_workspace (fun _env workspace_instance ->
+    let module I = Agent_protocol.Invocation in
+    let initial =
+      actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+    in
+    let make origin parent_job =
+      I.create
+        { (invocation_fixture ()).context with
+          id = Agent_protocol.Id.Invocation.create ()
+        ; origin
+        ; provider_call_id = (if I.equal_origin origin Model then Some "legacy" else None)
+        ; parent_job
+        }
+      |> protocol_ok
+      |> I.dispatch
+      |> protocol_ok
+    in
+    let foreground = make Model None in
+    let script = make Script None in
+    let background = make Model (Some (Agent_protocol.Id.Job.create ())) in
+    let state = { initial with invocations = [ script; foreground; background ] } in
+    let plan =
+      Agent_session.Invocation_recovery.plan_foreground
+        ~state
+        ~namespace:"foreground"
+        ~first_sequence:(Int64.to_int_exn state.conversation.next_history_sequence)
+        ~reason:"worker stopped"
+      |> protocol_ok
+    in
+    let repaired =
+      Agent_session.Session_delta.apply state (Batch plan.deltas) |> protocol_ok
+    in
+    assert (List.is_empty plan.appended);
+    List.iter [ script; background ] ~f:(fun invocation ->
+      assert (List.mem repaired.invocations invocation ~equal:Poly.equal));
+    let actual =
+      List.find_exn repaired.invocations ~f:(fun invocation ->
+        Agent_protocol.Id.Invocation.compare invocation.context.id foreground.context.id
+        = 0)
+    in
+    assert (Poly.equal actual.status (Resolved (Cancelled "worker stopped")));
+    assert (Option.is_some actual.publication_discarded);
+    let again =
+      Agent_session.Invocation_recovery.plan_foreground
+        ~state:repaired
+        ~namespace:"foreground"
+        ~first_sequence:plan.next_sequence
+        ~reason:"worker stopped"
+      |> protocol_ok
+    in
+    assert (List.is_empty again.deltas))
+;;
+
 let publication_call caps ?(custom = false) () =
   let id =
     History_entry.Id_source.allocate
@@ -3101,20 +3155,118 @@ let%test_unit
              finished ())
          in
          let state = finished () in
-         assert (
-           List.length state.conversation.canonical_history
-           = if publish_first then 3 else 2);
+         assert (List.length state.conversation.canonical_history = 3);
          let invocation = List.hd_exn state.invocations in
-         assert (Bool.equal (Option.is_some invocation.output_entry_id) publish_first);
+         assert (Option.is_some invocation.output_entry_id);
          assert (
            match invocation.status with
-           | Published (Complete (`String "done")) -> publish_first
-           | Resolved (Complete (`String "done")) -> not publish_first
+           | Published (Complete (`String "done")) -> true
            | _ -> false);
          assert (
            Poly.equal
              state.invocations
              (Agent_session.Memory_backend.state backend).invocations)))
+;;
+
+let%test_unit "worker cancellation publishes an interrupted handler result exactly once" =
+  List.iter [ false; true ] ~f:(fun custom ->
+    let ready, ready_u = Eio.Promise.create () in
+    let never, _ = Eio.Promise.create () in
+    let calls = ref 0 in
+    with_handoff_actor
+      ~make_worker:(fun _env _actor_ready ->
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ caps ->
+          let call, invocation = publication_call caps ~custom () in
+          caps.commit_entry call |> protocol_ok;
+          ignore
+            (caps.with_moderator_invocation ~invocation (fun ~dispatched:_ ~commit:_ ->
+               Int.incr calls;
+               Eio.Promise.resolve ready_u ();
+               Eio.Promise.await never)
+             : (unit, Agent_protocol.Error.t) result);
+          assert false))
+      (fun _env actor writer backend ->
+         Eio.Promise.await ready;
+         let running = Agent_session.Session_actor.state actor |> protocol_ok in
+         assert (Option.is_some running.active_operation);
+         Agent_session.Session_actor.stop actor ~attachment_id:writer.id ~mode:Cancel
+         |> protocol_ok
+         |> ignore;
+         let rec finished () =
+           let state = Agent_session.Session_actor.state actor |> protocol_ok in
+           if Option.is_none state.active_operation
+           then state
+           else (
+             Eio.Fiber.yield ();
+             finished ())
+         in
+         let state = finished () in
+         let invocation = List.hd_exn state.invocations in
+         assert (!calls = 1);
+         assert (
+           match invocation.status with
+           | Published (Cancelled _) -> true
+           | _ -> false);
+         assert (List.length state.conversation.canonical_history = 3);
+         ignore
+           (Agent_session.Invocation_history.recover_output
+              ~history:state.conversation.canonical_history
+              invocation
+            |> protocol_ok);
+         let events =
+           Agent_session.Memory_backend.events_after backend 0L |> protocol_ok
+         in
+         assert (
+           List.count events ~f:(fun event ->
+             Agent_protocol.Event.Durable.equal_kind event.kind Operation_cancelled)
+           = 1);
+         assert (Poly.equal state (Agent_session.Memory_backend.state backend))))
+;;
+
+let%test_unit "worker failure repairs a transient publication failure without replay" =
+  let publication_attempts = ref 0 in
+  let handler_calls = ref 0 in
+  with_handoff_actor
+    ~reject:(fun next ->
+      if
+        List.exists
+          next.Agent_session.Session_transition.state.invocations
+          ~f:(fun invocation -> Option.is_some invocation.output_entry_id)
+      then (
+        Int.incr publication_attempts;
+        !publication_attempts = 1)
+      else false)
+    ~make_worker:(fun _env _actor_ready ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ caps ->
+        let call, invocation = publication_call caps () in
+        caps.commit_entry call |> protocol_ok;
+        Int.incr handler_calls;
+        resolve_publication caps invocation |> protocol_ok;
+        match
+          caps.publish_invocation_output
+            ~invocation_id:invocation.context.id
+            (publication_output caps ())
+        with
+        | Ok () -> assert false
+        | Error failure -> Failed failure))
+    (fun _env actor _writer backend ->
+       let state = await_idle actor in
+       assert (!handler_calls = 1 && !publication_attempts = 2);
+       assert (Option.is_none state.failure);
+       assert (List.length state.conversation.canonical_history = 3);
+       let invocation = List.hd_exn state.invocations in
+       assert (Poly.equal invocation.status (Published (Complete (`String "done"))));
+       ignore
+         (Agent_session.Invocation_history.recover_output
+            ~history:state.conversation.canonical_history
+            invocation
+          |> protocol_ok);
+       let events = Agent_session.Memory_backend.events_after backend 0L |> protocol_ok in
+       assert (
+         List.count events ~f:(fun event ->
+           Agent_protocol.Event.Durable.equal_kind event.kind Operation_failed)
+         = 1);
+       assert (Poly.equal state (Agent_session.Memory_backend.state backend)))
 ;;
 
 let%test_unit
@@ -3700,7 +3852,7 @@ let%test_unit
                 }
             in
             Agent_session.Operation_worker.run worker ~sw ~input caps))
-        (fun _env actor _writer backend ->
+        (fun _env actor writer backend ->
            let rec finished () =
              let state = Agent_session.Session_actor.state actor |> protocol_ok in
              if Option.is_some state.active_operation
@@ -3711,6 +3863,29 @@ let%test_unit
            in
            let state = finished () in
            assert (!native_calls = 0);
+           if Poly.equal mode `Publish_rejected
+           then (
+             assert (Option.is_some state.failure);
+             assert (
+               match state.lifecycle.observed with
+               | Failed _ -> true
+               | _ -> false);
+             let entry =
+               let id =
+                 History_entry.Id.create ~namespace:"rejected-next-turn" ~sequence:0
+                 |> Result.ok_or_failwith
+               in
+               Agent_session.History_codec.user_text ~id "must not start"
+               |> Agent_session.History_codec.to_protocol
+             in
+             assert (
+               Result.is_error
+                 (Agent_session.Session_actor.submit_message
+                    actor
+                    ~attachment_id:writer.id
+                    entry));
+             let after = Agent_session.Session_actor.state actor |> protocol_ok in
+             assert (Poly.equal state after));
            assert (List.length state.invocations = if multi then 2 else 1);
            let invocation =
              List.find_exn state.invocations ~f:(fun inv ->

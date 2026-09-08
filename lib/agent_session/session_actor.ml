@@ -1421,7 +1421,55 @@ let compaction_allocator t first_sequence reserved_through =
   |> Result.map_error ~f:(fun message -> error Invalid_state message)
 ;;
 
+let reconcile_foreground_invocations t =
+  let open Result.Let_syntax in
+  let first =
+    Int64.max
+      t.state.conversation.next_history_sequence
+      t.state.conversation.reserved_history_through
+  in
+  let%bind first_sequence = int_of_history_sequence first in
+  let%bind plan =
+    Invocation_recovery.plan_foreground
+      ~state:t.state
+      ~namespace:(Agent_protocol.Id.Session.to_string t.state.identity.session_id)
+      ~first_sequence
+      ~reason:"foreground worker ended before recording the invocation outcome"
+  in
+  if List.is_empty plan.deltas
+  then Ok ()
+  else
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch
+           (History_block_reserved (Int64.of_int plan.next_sequence) :: plan.deltas))
+      ~payloads:
+        (if List.is_empty plan.appended
+         then []
+         else [ Agent_protocol.Event.Durable.Payload.History_appended plan.appended ])
+    |> Result.map ~f:(fun _ -> ())
+;;
+
+let retain_reconciliation_failure t failure =
+  let lifecycle =
+    Session_state.Lifecycle.
+      { desired = t.state.lifecycle.desired; observed = Failed failure }
+  in
+  transition
+    t
+    ~delta:
+      (Session_delta.Batch [ Failure_changed (Some failure); Lifecycle_changed lifecycle ])
+    ~payloads:
+      [ Agent_protocol.Event.Durable.Payload.Session_state_changed
+          { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
+      ]
+  |> Result.map ~f:(fun _ -> ())
+;;
+
 let start_compaction t =
+  let open Result.Let_syntax in
+  let%bind () = reconcile_foreground_invocations t in
   let first_sequence = t.state.conversation.next_history_sequence in
   if Int64.equal first_sequence Int64.max_value
   then Error (error Invalid_state "history sequence overflow")
@@ -1563,6 +1611,13 @@ let worker_terminal t operation_id outcome =
     resolve_cleaned_permission_waiters t permissions;
     t.moderator_borrow <- None;
     t.active_cancel <- None;
+    let%bind () =
+      match reconcile_foreground_invocations t with
+      | Ok () -> Ok ()
+      | Error failure ->
+        let%bind () = retain_reconciliation_failure t failure in
+        Error failure
+    in
     if outcome_requests_compaction outcome
     then Result.map (start_compaction t) ~f:(fun _ -> ())
     else Ok ()
@@ -1825,7 +1880,12 @@ let run_worker t worker operation history =
 
 let launch_worker t operation =
   let operation_id = operation.Agent_protocol.Operation.id in
-  match History_codec.all_of_protocol t.state.conversation.canonical_history with
+  let history =
+    let open Result.Let_syntax in
+    let%bind () = reconcile_foreground_invocations t in
+    History_codec.all_of_protocol t.state.conversation.canonical_history
+  in
+  match history with
   | Error failure ->
     Eio.Fiber.fork ~sw:t.sw (fun () ->
       ignore
@@ -1858,6 +1918,8 @@ let create_turn_operation t reason =
 ;;
 
 let submit_idle_message t entry =
+  let open Result.Let_syntax in
+  let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t User_submit in
   let lifecycle = lifecycle_for_operation t operation.id in
   let delta =
@@ -2613,6 +2675,7 @@ let drain_payloads (drain : Runtime_builder.moderator_drain) =
 
 let start_idle_turn t (drain : Runtime_builder.moderator_drain) ~reason ~adopt_deferred =
   let open Result.Let_syntax in
+  let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t reason in
   let lifecycle = lifecycle_for_operation t operation.id in
   let deferred = t.state.conversation.deferred_user_entries in

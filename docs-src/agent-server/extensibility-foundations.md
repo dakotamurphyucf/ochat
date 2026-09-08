@@ -207,8 +207,8 @@ calls, existing receipts, missing calls, old generations, conflicting outputs,
 provider-ID reuse, snapshot/delta roundtrips and allocation bounds. A real daemon
 fixture persists resolved/dispatched calls, shuts down, lazily restores the stopped
 session and verifies both pairs, then restarts again without duplicate outputs.
-This restart path is separate from administrative reconciliation below and does
-not yet supply immediate active-worker cancellation/publication-failure recovery.
+This restart path is separate from the administrative and foreground-boundary
+reconciliation below.
 
 Reset and rebuild now reconcile prior invocation records against the final
 candidate history inside the administrative commit. Kept calls receive their
@@ -223,8 +223,32 @@ The repaired history, allocation high-water mark and disposition index commit
 with the reset. Failed persistence leaves the previous actor state and event
 position unchanged. Reading the archive validates disposition IDs, duplicate
 entries and permitted outcome/publication transitions against its original
-invocations. Older archive references have an empty index. Immediate foreground
-worker cancellation/publication-failure recovery still remains to be integrated.
+invocations. Older archive references have an empty index.
+
+### Invocation recovery at foreground boundaries
+
+After a worker completes, fails or is cancelled, the actor reconciles model
+invocations that have no parent job. It publishes the recorded outcome if one
+exists, or a cancellation outcome for unfinished invocations. Independent script
+and background-job invocations are left unchanged. Recovery executes no handler,
+tool, provider or post hook. A result saved before cancellation remains that exact
+result; the stale worker still cannot publish it itself.
+
+The worker's terminal transition and permission cleanup persist first. Recovery
+then commits missing history outputs, receipts and the allocation reservation
+together. If publication fails again, the actor records a failed session with no
+active operation. This preserves the original operation failure/cancellation
+event and blocks further user turns. If storage also rejects that failure state,
+the command returns an error; guards before subsequent turn and compaction work
+still require successful reconciliation. A crash between commits is covered by
+daemon restart recovery.
+
+The same reconciliation guard runs before appending a new user turn, adopting
+deferred messages, launching a worker or starting compaction. Thus a missing
+result must be repaired before those paths consume history. Repeated recovery
+does not add duplicate outputs or receipts. Offline tests cover function/custom
+handler cancellation, saved results during cancellation, transient and persistent
+publication rejection, and isolation from independently running invocations.
 
 ### Retained routing provenance
 

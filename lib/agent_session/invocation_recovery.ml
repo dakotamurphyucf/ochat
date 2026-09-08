@@ -8,7 +8,7 @@ type t =
   ; next_sequence : int
   }
 
-let plan ~state ~namespace ~first_sequence ~reason =
+let plan_selected ~accept ~state ~namespace ~first_sequence ~reason =
   let open Result.Let_syntax in
   let invalid message = Error (P.Error.invalid_request message) in
   let%bind () =
@@ -39,8 +39,14 @@ let plan ~state ~namespace ~first_sequence ~reason =
     |> Option.value_map ~default:Int.max_value ~f:fst
   in
   let ordered =
-    List.stable_sort state.invocations ~compare:(fun a b ->
-      Int.compare (index a) (index b))
+    List.filter state.invocations ~f:(fun invocation ->
+      accept invocation
+      &&
+      match invocation.status with
+      | Published _ -> false
+      | Resolved _ -> Option.is_none invocation.publication_discarded
+      | Admitted | Dispatching -> true)
+    |> List.stable_sort ~compare:(fun a b -> Int.compare (index a) (index b))
   in
   let%bind () =
     List.fold_result ordered ~init:() ~f:(fun () invocation ->
@@ -132,4 +138,19 @@ let plan ~state ~namespace ~first_sequence ~reason =
           apply (Invocation_reconciled published)))
   in
   Ok { deltas = List.rev !deltas; appended = List.rev !appended; next_sequence = !next }
+;;
+
+let plan ~state ~namespace ~first_sequence ~reason =
+  plan_selected ~accept:(fun _ -> true) ~state ~namespace ~first_sequence ~reason
+;;
+
+let plan_foreground ~state ~namespace ~first_sequence ~reason =
+  plan_selected
+    ~accept:(fun invocation ->
+      I.equal_origin invocation.context.origin Model
+      && Option.is_none invocation.context.parent_job)
+    ~state
+    ~namespace
+    ~first_sequence
+    ~reason
 ;;
