@@ -1099,6 +1099,15 @@ let observation_owner_available t operation_id =
     else Error (error Conflict "session is not available for idle observation")
 ;;
 
+let validate_installed_observer t observer =
+  let open Result.Let_syntax in
+  let%bind installed = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+  match installed, observer with
+  | Some installed, Some observer
+    when Agent_protocol.Invocation.equal_observer installed observer -> Ok ()
+  | _ -> Error (error Conflict "observation source is not the installed moderator")
+;;
+
 let claim_moderator_observation t operation_id invocation_id =
   let open Result.Let_syntax in
   let%bind () = observation_owner_available t operation_id in
@@ -1119,6 +1128,11 @@ let claim_moderator_observation t operation_id invocation_id =
     with
     | Some invocation -> Ok invocation
     | None -> Error (error Invalid_state "observation invocation is not retained")
+  in
+  let%bind () =
+    validate_installed_observer
+      t
+      (Option.map invocation.observation ~f:(fun observation -> observation.observer))
   in
   let%bind () =
     Extension_invariants.owner
@@ -1157,6 +1171,7 @@ let claim_moderator_observation t operation_id invocation_id =
 let claim_next_moderator_observation t operation_id observer =
   let open Result.Let_syntax in
   let%bind () = observation_owner_available t operation_id in
+  let%bind () = validate_installed_observer t (Some observer) in
   let%bind moderator_halted =
     Runtime_builder.moderator_snapshot_is_halted t.state.moderator
   in

@@ -94,6 +94,8 @@ module Capabilities : sig
           the manager's preparation hook, then install without yielding. Failure
           or cancellation records a separate observation failure; native outcomes
           are never replaced. Same-owner recursion/cross-owner wait cycles fail.
+          The receipt's source must match the installed durable moderator source
+          before claiming; stale managers cannot reinstate an earlier snapshot.
           This does not install an idle drain or authorize tool calls by observers. *)
     ; with_next_moderator_observation :
         observer:Agent_protocol.Invocation.observer
@@ -109,6 +111,8 @@ module Capabilities : sig
           creation time, then invocation ID. True means the callback completed;
           false means no eligible record (including a halted session). Unresolved
           invocations, old generations, other sources and active parents are skipped.
+          A caller using a source other than the committed moderator is rejected
+          before selection, without consuming an observation.
           A recorded [Pending] initial tool outcome is eligible.
           Concurrent drainers cannot both receive the same record. Each claim
           revalidates operation ownership; this is not an idle-session API. *)

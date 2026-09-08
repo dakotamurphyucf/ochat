@@ -530,6 +530,8 @@ val skip_schedule
     moderator ownership, without creating a foreground operation. Returns false
     when unavailable or no matching observation remains. Selection is ordered by
     creation time and invocation ID, and bound to the exact observer source.
+    The source must also match the committed moderator snapshot. Missing or
+    replaced sources fail before a claim, leaving receipts/state unchanged.
 
     The callback must prospectively commit the observation acknowledgement and
     moderator snapshot together. Use [retain_follow_up] in the manager so runtime

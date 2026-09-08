@@ -4845,6 +4845,24 @@ let%expect_test "runtime owner drains observation batches and applies durable te
              ~initial:(Some runtime)
              ~build:(fun () -> failwith "unexpected runtime rebuild")
          in
+         let changed_source =
+           { (M.identity_snapshot manager |> Result.ok_or_failwith) with
+             script_source_hash = String.make 64 'f'
+           ; queued_internal_events = [ Session.Snapshot.String "wake" ]
+           }
+         in
+         A.change_moderator actor (Some (B.encode_moderator_snapshot changed_source))
+         |> protocol_ok
+         |> ignore;
+         let changed = A.state actor |> protocol_ok in
+         let stale_source_rejected =
+           Agent_server.Runtime_owner.drain_idle_moderator owner |> Result.is_error
+         in
+         [%test_eq: bool] true stale_source_rejected;
+         assert_same_session_snapshot changed (A.state actor |> protocol_ok);
+         assert_same_session_snapshot changed (Agent_session.Memory_backend.state backend);
+         [%test_eq: int] 0 !nested_calls;
+         A.change_moderator actor initial.moderator |> protocol_ok |> ignore;
          let poll () =
            Agent_server.Runtime_owner.drain_idle_moderator owner |> protocol_ok
          in
@@ -5774,7 +5792,7 @@ let%test_unit
             | Some { status = Awaiting; _ } ->
               assert (
                 match mode with
-                | `Claim_rejected -> true
+                | `Claim_rejected | `Wrong_source -> true
                 | _ -> false)
             | Some { status = Observation_failed _; _ } when not succeeded -> ()
             | _ -> assert false);

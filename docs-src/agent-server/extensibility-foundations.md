@@ -248,6 +248,15 @@ sources/generations are excluded. Both claim paths inspect committed moderator
 termination as well as session halt state, without entering the live manager.
 Thus a second drainer cannot consume work after another handler commits termination.
 
+Both explicit and next-observation claims also compare the requested source
+against the committed moderator snapshot before recording `Observing`. A missing
+or replaced source is rejected without consuming the receipt. A stale live
+manager therefore cannot reinstate its previous source by acknowledging old
+observations. The owner integration test replaces the durable source while
+retaining the old manager and queues a wakeup; draining must reject without
+changing any state or executing native work. Restoring the matching source then
+allows the original observations to proceed.
+
 `Moderator_observation.drain` repeats this handoff with a default budget of 32
 observations (configurable from 1 to 256). It returns committed outcomes and a
 budget-exhaustion indicator, stops on failure or termination, and never retries
