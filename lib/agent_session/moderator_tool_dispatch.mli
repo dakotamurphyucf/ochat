@@ -1,0 +1,27 @@
+(** Internal bridge from streamed model calls to prepared moderator tools. Public
+    feature qualification, standalone execution and nested-call routing remain
+    separate services. This adapter never executes a raw runner for a known
+    extension declaration. *)
+exception Dispatch_error of Agent_protocol.Error.t
+
+(** [admit] must verify the live selected capability/revision and execution
+    authority; it runs inside both actor and manager ownership, immediately
+    before the handler, followed by the stream's final-target authorizer.
+    [prepare_outcome] enforces host disclosure and output limits before recording
+    an outcome; rejecting it rolls back moderator state and produces a bounded
+    generic failure. Successful outcomes pass through unchanged.
+    Pending work must have a qualified, owned completion path. Error details from
+    host exceptions are not copied into model-visible output. Root actor ownership
+    cannot be reused for transient fork calls. Unknown native names return [None]. *)
+val create
+  :  definition:Chat_response.Extension_compiler.definition
+  -> manager:Chat_response.Moderator_manager.t
+  -> input:Operation_worker.Input.t
+  -> capabilities:Operation_worker.Capabilities.t
+  -> available_tools:Openai.Responses.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
+  -> admit:(Chat_response.In_memory_stream.Tool_dispatch.request -> (unit, string) result)
+  -> prepare_outcome:(Agent_protocol.Invocation.outcome -> (unit, string) result)
+  -> Chat_response.In_memory_stream.Tool_dispatch.t

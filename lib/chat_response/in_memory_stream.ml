@@ -10,6 +10,30 @@ type post_stream =
   -> inputs:Openai.Responses.Item.t list
   -> Openai.Responses.Response_stream.t Seq.t
 
+module Tool_dispatch = struct
+  type request =
+    { kind : Tool_call.Kind.t
+    ; original_name : string
+    ; original_payload : string
+    ; name : string
+    ; payload : string
+    ; call : History_entry.t
+    ; history : History_entry.t list
+    ; source : string option
+    ; parent_call_id : string option
+    }
+
+  type result =
+    { output : Output.t
+    ; commit_output : (History_entry.t -> unit) option
+    ; runtime_requests : Moderation.Runtime_request.t list
+    }
+
+  type t = request -> authorize:(unit -> unit) -> result option
+end
+
+exception Post_tool_moderation_failed of History_entry.t * string
+
 (* --------------------------------------------------------------------------- *)
 (* Internal helper – record used for keeping track of running tool invocations *)
 (* --------------------------------------------------------------------------- *)
@@ -24,7 +48,7 @@ type driver_pending_call =
   ; call_id : string
   ; kind : driver_pending_call_kind
   ; name : string
-  ; promise : Openai.Responses.Tool_output.Output.t Eio.Promise.or_exn
+  ; promise : Tool_dispatch.result Eio.Promise.or_exn
   }
 
 module SM = Map.M (String)
@@ -124,6 +148,7 @@ type ctx =
   ; on_tool_execution : (Tool_execution_event.t -> unit) option
   ; authorize_tool :
       kind:Tool_call.Kind.t -> name:string -> payload:string -> call_id:string -> unit
+  ; dispatch_tool : Tool_dispatch.t option
   ; redact_tool_payload : name:string -> string -> string
   ; injected_post_stream :
       (sw:Eio.Switch.t
@@ -148,6 +173,7 @@ type args =
   ; on_tool_execution : (Tool_execution_event.t -> unit) option
   ; authorize_tool :
       kind:Tool_call.Kind.t -> name:string -> payload:string -> call_id:string -> unit
+  ; dispatch_tool : Tool_dispatch.t option
   ; redact_tool_payload : name:string -> string -> string
   ; tools : Openai.Responses.Request.Tool.t list option
   ; tool_tbl : (string, Ochat_function.runner) Hashtbl.t option
@@ -1100,6 +1126,55 @@ let add_pending
   }
 ;;
 
+let dispatch_tool
+      (c : ctx)
+      ~hist
+      ~st
+      ~kind
+      ~original_name
+      ~original_payload
+      ~name
+      ~payload
+      ~call_id
+      ~item_id
+      run_native
+  =
+  let authorize () = c.authorize_tool ~kind ~name ~payload ~call_id in
+  let routed =
+    Option.bind c.dispatch_tool ~f:(fun dispatch ->
+      let call_id =
+        History_stream_event.Registry.find_item
+          c.registry
+          ~scope:c.scope
+          ~source:c.source
+          (Tool_call.call_item ~kind ~name ~payload ~call_id ~id:(Some item_id))
+        |> Option.value_exn
+      in
+      let call =
+        List.find_exn st.new_entries_rev ~f:(fun entry ->
+          History_entry.Id.equal (History_entry.id entry) call_id)
+      in
+      dispatch
+        Tool_dispatch.
+          { kind
+          ; original_name
+          ; original_payload
+          ; name
+          ; payload
+          ; call
+          ; history = history_with_new_entries ~hist st
+          ; source = c.source
+          ; parent_call_id = c.parent_call_id
+          }
+        ~authorize)
+  in
+  match routed with
+  | Some result -> result
+  | None ->
+    authorize ();
+    Tool_dispatch.{ output = run_native (); commit_output = None; runtime_requests = [] }
+;;
+
 let schedule_function_done
       ~turn
       (c : ctx)
@@ -1117,6 +1192,8 @@ let schedule_function_done
     when List.exists st.pending_calls_rev ~f:(fun pending ->
            String.equal pending.call_id call_id) -> st
   | Some { name; call_id; kind = `Function } ->
+    let original_name = name in
+    let original_payload = arguments in
     let moderated =
       moderate_tool_call
         ~moderator:c.moderator
@@ -1156,33 +1233,47 @@ let schedule_function_done
     let hs = history_so_far ~history_compaction:c.history_compaction ~hist ~st in
     let run_tool () =
       match moderated.synthetic_result with
-      | Some result -> result
+      | Some output ->
+        Tool_dispatch.{ output; commit_output = None; runtime_requests = [] }
       | None ->
-        c.authorize_tool ~kind:Tool_call.Kind.Function ~name ~payload:arguments ~call_id;
-        Tool_call.run_tool
+        dispatch_tool
+          c
+          ~hist
+          ~st
           ~kind:Tool_call.Kind.Function
+          ~original_name
+          ~original_payload
           ~name
           ~payload:arguments
           ~call_id
-          ~tool_tbl:c.tool_tbl
-          ?on_tool_execution:c.on_tool_execution
-          ~on_fork:
-            (Some
-               (fun ~invocation ~call_id ~arguments ->
-                 make_run_fork
-                   ~turn
-                   ~ctx:c
-                   ~history_so_far:hs
-                   ~invocation
-                   ~call_id
-                   ~arguments))
-          ()
+          ~item_id
+          (fun () ->
+             Tool_call.run_tool
+               ~kind:Tool_call.Kind.Function
+               ~name
+               ~payload:arguments
+               ~call_id
+               ~tool_tbl:c.tool_tbl
+               ?on_tool_execution:c.on_tool_execution
+               ~on_fork:
+                 (Some
+                    (fun ~invocation ~call_id ~arguments ->
+                      make_run_fork
+                        ~turn
+                        ~ctx:c
+                        ~history_so_far:hs
+                        ~invocation
+                        ~call_id
+                        ~arguments))
+               ())
     in
     let p =
       match moderated.synthetic_result with
       | Some result ->
         let promise, resolver = Eio.Promise.create () in
-        Eio.Promise.resolve_ok resolver result;
+        Eio.Promise.resolve_ok
+          resolver
+          Tool_dispatch.{ output = result; commit_output = None; runtime_requests = [] };
         promise
       | None -> make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool
     in
@@ -1205,6 +1296,8 @@ let schedule_custom_done
     when List.exists st.pending_calls_rev ~f:(fun pending ->
            String.equal pending.call_id call_id) -> st
   | Some { name; call_id; kind = `Custom } ->
+    let original_name = name in
+    let original_payload = input in
     let moderated =
       moderate_tool_call
         ~moderator:c.moderator
@@ -1243,24 +1336,38 @@ let schedule_custom_done
     let input = moderated.payload in
     let run_tool () =
       match moderated.synthetic_result with
-      | Some result -> result
+      | Some output ->
+        Tool_dispatch.{ output; commit_output = None; runtime_requests = [] }
       | None ->
-        c.authorize_tool ~kind:Tool_call.Kind.Custom ~name ~payload:input ~call_id;
-        Tool_call.run_tool
+        dispatch_tool
+          c
+          ~hist
+          ~st
           ~kind:Tool_call.Kind.Custom
+          ~original_name
+          ~original_payload
           ~name
           ~payload:input
           ~call_id
-          ~tool_tbl:c.tool_tbl
-          ~on_fork:None
-          ?on_tool_execution:c.on_tool_execution
-          ()
+          ~item_id
+          (fun () ->
+             Tool_call.run_tool
+               ~kind:Tool_call.Kind.Custom
+               ~name
+               ~payload:input
+               ~call_id
+               ~tool_tbl:c.tool_tbl
+               ~on_fork:None
+               ?on_tool_execution:c.on_tool_execution
+               ())
     in
     let p =
       match moderated.synthetic_result with
       | Some result ->
         let promise, resolver = Eio.Promise.create () in
-        Eio.Promise.resolve_ok resolver result;
+        Eio.Promise.resolve_ok
+          resolver
+          Tool_dispatch.{ output = result; commit_output = None; runtime_requests = [] };
         promise
       | None -> make_tool_promise ~sw:c.sw ~parallel:c.parallel_tool_calls ~sem run_tool
     in
@@ -1403,9 +1510,10 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
   in
   List.foldi
     sorted
-    ~init:st.new_entries_rev
-    ~f:(fun _ entries_rev { seq = _; call_id; kind; name; promise } ->
-      let result = Eio.Promise.await_exn promise in
+    ~init:(st.new_entries_rev, [])
+    ~f:(fun _ (entries_rev, requests_rev) { seq = _; call_id; kind; name; promise } ->
+      let completed = Eio.Promise.await_exn promise in
+      let result = completed.Tool_dispatch.output in
       let tool_kind =
         match kind with
         | `Function -> Tool_call.Kind.Function
@@ -1422,33 +1530,57 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
           ~call_id
       in
       let candidate_entry = History_entry.create_with_id ~id candidate_item in
+      (* Host persistence must precede canonical publication and observation.
+         An extension commit replaces the generic history append so its outcome
+         receipt and output can be saved in one transaction. *)
+      (match completed.commit_output with
+       | Some commit -> commit candidate_entry
+       | None -> c.on_history_item_appended candidate_entry);
+      ignore
+        (emit_tool_output
+           ~on_fn_out:c.on_fn_out
+           ~on_tool_out:c.on_tool_out
+           ~kind
+           ~call_id
+           ~result
+         : Res.Item.t);
+      c.on_history_tool_out candidate_entry;
       let history =
         History_entry.items (List.append hist (List.rev (candidate_entry :: entries_rev)))
       in
       let runtime_requests =
-        handle_tool_result
-          ~moderator:c.moderator
-          ~available_tools:c.tools
-          ~now_ms:(now_ms c.env)
-          ~history
-          ~name
-          ~kind:tool_kind
-          ~item:candidate_item
-        |> Result.ok_or_failwith
+        if
+          Option.is_some
+            (Runtime_semantics.should_end_session
+               (completed.runtime_requests @ requests_rev))
+        then []
+        else (
+          try
+            handle_tool_result
+              ~moderator:c.moderator
+              ~available_tools:c.tools
+              ~now_ms:(now_ms c.env)
+              ~history
+              ~name
+              ~kind:tool_kind
+              ~item:candidate_item
+            |> Result.map_error ~f:(fun message ->
+              Post_tool_moderation_failed (candidate_entry, message))
+            |> function
+            | Ok requests -> requests
+            | Error exn -> raise exn
+          with
+          | Eio.Cancel.Cancelled _ as exn -> raise exn
+          | Post_tool_moderation_failed _ as exn -> raise exn
+          | _ ->
+            raise
+              (Post_tool_moderation_failed
+                 (candidate_entry, "post-tool observer raised an exception")))
       in
+      let runtime_requests = completed.runtime_requests @ runtime_requests in
       List.iter runtime_requests ~f:c.on_runtime_request;
-      let item =
-        emit_tool_output
-          ~on_fn_out:c.on_fn_out
-          ~on_tool_out:c.on_tool_out
-          ~kind
-          ~call_id
-          ~result
-      in
-      c.on_history_item_appended candidate_entry;
-      c.on_history_tool_out candidate_entry;
-      ignore (item : Res.Item.t);
-      candidate_entry :: entries_rev)
+      candidate_entry :: entries_rev, List.rev_append runtime_requests requests_rev)
+  |> fun (entries, requests_rev) -> entries, List.rev requests_rev
 ;;
 
 let log_request (c : ctx) ~(inputs : Openai.Responses.Item.t list) =
@@ -1501,48 +1633,51 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
                   ~seconds:(openai_stream_idle_timeout ()))
       in
       let st = fold_stream ~turn:turn_for_fork c ~hist ~sem events in
-      let new_entries_rev = await_calls c ~hist st in
+      let new_entries_rev, tool_requests = await_calls c ~hist st in
       let hist = List.append hist (List.rev new_entries_rev) in
-      let deferred_entries =
-        consume_safe_point_entries ~safe_point:Turn_start_boundary c.safe_point_input
-      in
-      let hist = append_deferred_entries c ~history:hist deferred_entries in
-      let finish_requests =
-        finish_turn_entries
-          ~moderator:c.moderator
-          ~available_tools:c.tools
-          ~now_ms:(now_ms c.env)
-          ~history:hist
-        |> Result.ok_or_failwith
-      in
-      List.iter finish_requests ~f:c.on_runtime_request;
-      let policy =
-        match c.moderator with
-        | None -> Runtime_semantics.default_policy
-        | Some m -> m.runtime_policy
-      in
-      let decision =
-        Runtime_semantics.decide_after_turn_end
-          ~policy
-          ~tool_followup:(st.run_again || not (List.is_empty deferred_entries))
-          finish_requests
-      in
-      match decision.end_session_reason with
-      | Some _ -> hist
-      | None ->
-        (match decision.continue with
-         | `Stop -> hist
-         | `Continue ->
-           if st.run_again || not (List.is_empty deferred_entries)
-           then turn_with_budget c hist ~request_turn_budget:0
-           else (
-             let next_budget =
-               Runtime_semantics.next_self_triggered_turn_budget
-                 ~policy
-                 ~request_turn_budget
-               |> Result.ok_or_failwith
-             in
-             turn_with_budget c hist ~request_turn_budget:next_budget)))
+      if Option.is_some (Runtime_semantics.should_end_session tool_requests)
+      then hist
+      else (
+        let deferred_entries =
+          consume_safe_point_entries ~safe_point:Turn_start_boundary c.safe_point_input
+        in
+        let hist = append_deferred_entries c ~history:hist deferred_entries in
+        let finish_requests =
+          finish_turn_entries
+            ~moderator:c.moderator
+            ~available_tools:c.tools
+            ~now_ms:(now_ms c.env)
+            ~history:hist
+          |> Result.ok_or_failwith
+        in
+        List.iter finish_requests ~f:c.on_runtime_request;
+        let policy =
+          match c.moderator with
+          | None -> Runtime_semantics.default_policy
+          | Some m -> m.runtime_policy
+        in
+        let decision =
+          Runtime_semantics.decide_after_turn_end
+            ~policy
+            ~tool_followup:(st.run_again || not (List.is_empty deferred_entries))
+            (tool_requests @ finish_requests)
+        in
+        match decision.end_session_reason with
+        | Some _ -> hist
+        | None ->
+          (match decision.continue with
+           | `Stop -> hist
+           | `Continue ->
+             if st.run_again || not (List.is_empty deferred_entries)
+             then turn_with_budget c hist ~request_turn_budget:0
+             else (
+               let next_budget =
+                 Runtime_semantics.next_self_triggered_turn_budget
+                   ~policy
+                   ~request_turn_budget
+                 |> Result.ok_or_failwith
+               in
+               turn_with_budget c hist ~request_turn_budget:next_budget))))
   in
   turn_with_budget root_ctx history ~request_turn_budget:0
 ;;
@@ -1584,6 +1719,7 @@ let setup_ctx ~(sw : Eio.Switch.t) (a : args) =
     ; on_tool_out = a.on_tool_out
     ; on_tool_execution = a.on_tool_execution
     ; authorize_tool = a.authorize_tool
+    ; dispatch_tool = a.dispatch_tool
     ; redact_tool_payload = a.redact_tool_payload
     ; injected_post_stream = a.injected_post_stream
     }
@@ -1614,6 +1750,7 @@ let run_completion_stream_in_memory_entries
       ?(on_history_tool_out = fun _ -> ())
       ?on_tool_execution
       ?(authorize_tool = fun ~kind:_ ~name:_ ~payload:_ ~call_id:_ -> ())
+      ?dispatch_tool
       ?(redact_tool_payload = fun ~name:_ payload -> payload)
       ~tools
       ?tool_tbl
@@ -1653,6 +1790,7 @@ let run_completion_stream_in_memory_entries
     ; id_source
     ; on_tool_execution
     ; authorize_tool
+    ; dispatch_tool
     ; redact_tool_payload
     ; tools
     ; tool_tbl

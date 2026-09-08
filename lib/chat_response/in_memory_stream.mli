@@ -25,6 +25,44 @@ type post_stream =
   -> inputs:Openai.Responses.Item.t list
   -> Openai.Responses.Response_stream.t Seq.t
 
+module Tool_dispatch : sig
+  type request =
+    { kind : Tool_call.Kind.t
+    ; original_name : string
+    ; original_payload : string
+    ; name : string
+    ; payload : string
+    ; call : History_entry.t
+    ; history : History_entry.t list
+    ; source : string option
+    ; parent_call_id : string option
+    }
+
+  type result =
+    { output : Openai.Responses.Tool_output.Output.t
+    ; commit_output : (History_entry.t -> unit) option
+    ; runtime_requests : Moderation.Runtime_request.t list
+    }
+
+  (** Trusted host dispatch after pre-tool moderation and canonical call commit.
+      Original/final arguments are execution inputs, not display-redacted text.
+      [Some] supplies a validated result; [None] selects normal native execution.
+      A routed implementation must validate its final target/schema and call
+      [authorize] before effects, including again after an owner-queue wait.
+      Rejected pre-tool calls do not reach this hook. Fork requests retain their
+      separate [source] and [parent_call_id]; hosts must use the correct owner.
+      [commit_output] replaces generic history append and must persist the output
+      and receipt before returning. Failure skips publication and post hooks.
+      Runtime requests are surfaced after publication. End-session requests
+      suppress further moderator hooks and follow-up turns after pending outputs
+      are handled. Other requests participate in the normal turn-end decision. *)
+  type t = request -> authorize:(unit -> unit) -> result option
+end
+
+(** A post-tool observer failed after the initial output was committed. Hosts
+    must record this separately; never re-execute the tool or replace its output. *)
+exception Post_tool_moderation_failed of History_entry.t * string
+
 (** Raised when an OpenAI stream emits no next event before its idle
     deadline. Each received event resets the deadline. *)
 exception Openai_stream_idle_timeout of float
@@ -216,6 +254,7 @@ val run_completion_stream_in_memory_entries
   -> ?on_tool_execution:(Tool_execution_event.t -> unit)
   -> ?authorize_tool:
        (kind:Tool_call.Kind.t -> name:string -> payload:string -> call_id:string -> unit)
+  -> ?dispatch_tool:Tool_dispatch.t
   -> ?redact_tool_payload:(name:string -> string -> string)
   -> tools:Openai.Responses.Request.Tool.t list option
   -> ?tool_tbl:(string, Ochat_function.runner) Hashtbl.t

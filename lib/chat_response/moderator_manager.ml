@@ -902,6 +902,7 @@ let identity_snapshot_of_state t ~current_state ~queued_events ~halted ~overlay 
 ;;
 
 let handle_invocation_entries
+      ?(authorize = fun () -> Ok ())
       t
       ~invocation
       ~history
@@ -937,6 +938,7 @@ let handle_invocation_entries
         ~limits:script.limits
         ~validate_work
     in
+    let%bind () = authorize () in
     let context =
       Moderation.Entry_projection.project_context
         ~session_id:(Agent_protocol.Id.Session.to_string invocation.context.session_id)

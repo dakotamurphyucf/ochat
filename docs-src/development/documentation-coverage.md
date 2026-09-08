@@ -220,6 +220,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/live_event_buffer.mli` | [contract](../../lib/agent_session/live_event_buffer.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/mailbox.mli` | [contract](../../lib/agent_session/mailbox.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/memory_backend.mli` | [contract](../../lib/agent_session/memory_backend.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/moderator_tool_dispatch.mli` | [contract](../../lib/agent_session/moderator_tool_dispatch.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/operation_worker.mli` | [contract](../../lib/agent_session/operation_worker.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/permission_policy.mli` | [contract](../../lib/agent_session/permission_policy.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_session/permission_reviewer.mli` | [contract](../../lib/agent_session/permission_reviewer.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |

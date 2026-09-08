@@ -396,33 +396,35 @@ let compile schema =
     { schema; node = node [] schema })
 ;;
 
-let of_string text =
-  match
-    protect (fun () ->
-      if String.length text > max_bytes then limit [] "schema source byte limit exceeded";
-      let depth = ref 0
-      and quoted = ref false
-      and escaped = ref false in
-      String.iter text ~f:(fun char ->
-        if !quoted
-        then (
-          if !escaped
-          then escaped := false
-          else if Char.equal char '\\'
-          then escaped := true
-          else if Char.equal char '"'
-          then quoted := false)
+let parse_json text =
+  protect (fun () ->
+    if String.length text > max_bytes then limit [] "schema source byte limit exceeded";
+    let depth = ref 0
+    and quoted = ref false
+    and escaped = ref false in
+    String.iter text ~f:(fun char ->
+      if !quoted
+      then (
+        if !escaped
+        then escaped := false
+        else if Char.equal char '\\'
+        then escaped := true
         else if Char.equal char '"'
-        then quoted := true
-        else if Char.equal char '{' || Char.equal char '['
-        then (
-          Int.incr depth;
-          if !depth > max_depth then limit [] "schema source nesting limit exceeded")
-        else if Char.equal char '}' || Char.equal char ']'
-        then Int.decr depth);
-      try Jsonaf.of_string text with
-      | _ -> fail [] "invalid schema JSON")
-  with
+        then quoted := false)
+      else if Char.equal char '"'
+      then quoted := true
+      else if Char.equal char '{' || Char.equal char '['
+      then (
+        Int.incr depth;
+        if !depth > max_depth then limit [] "schema source nesting limit exceeded")
+      else if Char.equal char '}' || Char.equal char ']'
+      then Int.decr depth);
+    try Jsonaf.of_string text with
+    | _ -> fail [] "invalid schema JSON")
+;;
+
+let of_string text =
+  match parse_json text with
   | Error _ as error -> error
   | Ok schema -> compile schema
 ;;

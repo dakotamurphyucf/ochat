@@ -17,6 +17,7 @@
   session_state
   extension_invariants
   invocation_history
+  moderator_tool_dispatch
   compaction_archive
   administration
   session_delta

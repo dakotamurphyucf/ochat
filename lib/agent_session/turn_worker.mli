@@ -34,4 +34,10 @@ end
     moderator exactly once before the first turn-start boundary. Moderator
     requests to end the session at that boundary skip provider execution.
     Automatic follow-up turns do not re-emit the submission event. *)
-val create : Config.t -> Operation_worker.t
+val create
+  :  ?dispatch_tool:
+       (input:Operation_worker.Input.t
+        -> capabilities:Operation_worker.Capabilities.t
+        -> Chat_response.In_memory_stream.Tool_dispatch.t)
+  -> Config.t
+  -> Operation_worker.t

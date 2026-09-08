@@ -365,7 +365,7 @@ let moderate_submission config input on_runtime_request =
   | Compaction -> ()
 ;;
 
-let run config ~sw ~input capabilities =
+let run ?dispatch_tool config ~sw ~input capabilities =
   let runtime_requests = ref [] in
   moderate_submission config input (fun request ->
     runtime_requests := request :: !runtime_requests);
@@ -407,6 +407,8 @@ let run config ~sw ~input capabilities =
             ~kind:(tool_event_kind event)
             ~payload:(tool_event_payload config event))
         ~authorize_tool:(authorize_tool config input capabilities)
+        ?dispatch_tool:
+          (Option.map dispatch_tool ~f:(fun make -> make ~input ~capabilities))
         ~redact_tool_payload:config.redact_tool_payload
         ~on_runtime_request:(fun request ->
           runtime_requests := request :: !runtime_requests)
@@ -427,9 +429,24 @@ let run config ~sw ~input capabilities =
     }
 ;;
 
-let create config =
+let create ?dispatch_tool config =
   Operation_worker.create ~run:(fun ~sw ~input capabilities ->
-    match run config ~sw ~input capabilities with
+    match run ?dispatch_tool config ~sw ~input capabilities with
     | outcome -> outcome
-    | exception Worker_failure failure -> Operation_worker.Failed failure)
+    | exception Worker_failure failure -> Operation_worker.Failed failure
+    | exception Moderator_tool_dispatch.Dispatch_error failure ->
+      Operation_worker.Failed failure
+    | exception Chat_response.In_memory_stream.Post_tool_moderation_failed (entry, _) ->
+      Operation_worker.Failed
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:"Post-tool moderation failed after the initial result was committed."
+           ~retryable:false
+           ~data:
+             (`Object
+                 [ "phase", `String "post_tool_response"
+                 ; ( "output_entry_id"
+                   , Agent_protocol.History.Id.to_json (History_entry.id entry) )
+                 ])
+           ()))
 ;;

@@ -2789,7 +2789,12 @@ let%test_unit
        assert (Option.is_some (List.hd_exn state.invocations).output_entry_id))
 ;;
 
-let handoff_manager env =
+let handoff_definition
+      ?(events = "| _ -> Task.pure(state)")
+      ?(schema = "true")
+      ?(finish = "Task.pure(state)")
+      env
+  =
   let module EC = Chat_response.Extension_compiler in
   let module M = Chat_response.Moderator_manager in
   let module C = Chat_response.Tool_capability in
@@ -2802,13 +2807,17 @@ let handoff_manager env =
       let ignored = state[0] <- state[0] + 1 in
       Task.bind(Runtime.emit(`String("committed")), fun ignored ->
       Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`Null)),
-        fun ignored -> Task.pure(state)))
-    | _ -> Task.pure(state)
+        fun ignored -> |}
+    ^ finish
+    ^ {|))
+    |}
+    ^ events
+    ^ {|
     </script><tool name="counter" type="moderator" moderator="handoff"
       input_schema="schema.json" output_schema="schema.json"/>|}
   in
   let loader =
-    Source_loader.captured_filesystem ~root:dir ~sources:[ "schema.json", "true" ]
+    Source_loader.captured_filesystem ~root:dir ~sources:[ "schema.json", schema ]
   in
   let elements =
     Prompt.Chat_markdown.parse_chat_inputs ~dir ~source_loader:loader source
@@ -2853,7 +2862,269 @@ let handoff_manager env =
       }
     |> protocol_ok
   in
+  manager, invocation, definition
+;;
+
+let handoff_manager env =
+  let manager, invocation, _ = handoff_definition env in
   manager, invocation
+;;
+
+let%test_unit
+    "streamed moderator tools use actor publication and preserve post-hook failures"
+  =
+  List.iter
+    [ `Success
+    ; `Deny
+    ; `Disclosure
+    ; `Post_fail
+    ; `Publish_rejected
+    ; `Invalid_json
+    ; `Redirect
+    ; `Redirect_bad
+    ; `Revoked
+    ; `End_session
+    ]
+    ~f:(fun mode ->
+      let request_count = ref 0 in
+      let admitted = ref 0 in
+      let redirected = Poly.equal mode `Redirect || Poly.equal mode `Redirect_bad in
+      with_handoff_actor
+        ~reject:(fun next ->
+          Poly.equal mode `Publish_rejected
+          && List.exists
+               next.Agent_session.Session_transition.state.invocations
+               ~f:(fun inv -> Option.is_some inv.output_entry_id))
+        ~make_worker:(fun env actor_ready ->
+          let events =
+            if Poly.equal mode `Post_fail
+            then
+              "| `Post_tool_response(r) -> Task.fail(\"post hook failed\") | _ -> \
+               Task.pure(state)"
+            else if redirected
+            then
+              "| `Pre_tool_call(c) -> Task.bind(Tool.redirect(\"counter\", "
+              ^ (if Poly.equal mode `Redirect_bad then "`String(\"wrong\")" else "`Null")
+              ^ "), fun ignored -> Task.pure(state)) | _ -> Task.pure(state)"
+            else "| _ -> Task.pure(state)"
+          in
+          let manager, _, definition =
+            handoff_definition
+              ~events
+              ~schema:(if redirected then "{\"type\":\"null\"}" else "true")
+              ~finish:
+                (if Poly.equal mode `End_session
+                 then
+                   "Task.bind(Runtime.end_session(\"done\"), fun ignored -> \
+                    Task.pure(state))"
+                 else "Task.pure(state)")
+              env
+          in
+          Agent_session.Operation_worker.create ~run:(fun ~sw ~input caps ->
+            let actor = Eio.Promise.await actor_ready in
+            let state = Agent_session.Session_actor.state actor |> protocol_ok in
+            let response_dir =
+              Eio.Path.(
+                Eio.Stdenv.fs env
+                / state.spec.workspace_instance.canonical_root.native_path
+                / "response")
+            in
+            Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
+            let post_stream ~sw:_ ~inputs =
+              Int.incr request_count;
+              if !request_count = 1
+              then
+                Stdlib.List.to_seq
+                  Openai.Responses.Response_stream.
+                    [ Output_item_added
+                        { item =
+                            Function_call
+                              { name = (if redirected then "alias" else "counter")
+                              ; arguments = ""
+                              ; call_id = "counter-call"
+                              ; _type = "function_call"
+                              ; id = Some "counter-item"
+                              ; status = None
+                              }
+                        ; output_index = 0
+                        ; type_ = "response.output_item.added"
+                        }
+                    ; Function_call_arguments_done
+                        { arguments =
+                            (if Poly.equal mode `Invalid_json
+                             then "[broken"
+                             else if redirected
+                             then "{}"
+                             else "null")
+                        ; item_id = "counter-item"
+                        ; output_index = 0
+                        ; type_ = "response.function_call_arguments.done"
+                        }
+                    ]
+              else (
+                assert (
+                  List.exists inputs ~f:(function
+                    | Openai.Responses.Item.Function_call_output _ -> true
+                    | _ -> false));
+                Seq.empty)
+            in
+            let dispatch_tool ~input ~capabilities =
+              Agent_session.Moderator_tool_dispatch.create
+                ~definition
+                ~manager
+                ~input
+                ~capabilities
+                ~available_tools:[]
+                ~session_meta:`Null
+                ~now:Agent_protocol.Timestamp.now
+                ~validate_work:(fun _ -> Error "no pending work")
+                ~admit:(fun request ->
+                  Int.incr admitted;
+                  assert (String.equal request.name "counter");
+                  if redirected
+                  then (
+                    assert (String.equal request.original_name "alias");
+                    assert (String.equal request.original_payload "{}");
+                    assert (String.equal request.payload "null"));
+                  if Poly.equal mode `Revoked
+                  then Error "capability was revoked"
+                  else Ok ())
+                ~prepare_outcome:(fun _ ->
+                  if Poly.equal mode `Disclosure then Error "blocked" else Ok ())
+            in
+            let worker =
+              Agent_session.Turn_worker.create
+                ~dispatch_tool
+                { env
+                ; response_dir
+                ; tools = []
+                ; tool_tbl = String.Table.create ()
+                ; temperature = None
+                ; max_output_tokens = None
+                ; reasoning = None
+                ; moderator =
+                    Some
+                      { manager
+                      ; session_id = Agent_protocol.Id.Session.to_string input.session_id
+                      ; session_meta = `Null
+                      ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+                      }
+                ; permission_profile =
+                    permission_policy
+                      ~tool_default:(if Poly.equal mode `Deny then Deny else Allow)
+                      ~fallback:Fallback_deny
+                      ~evaluator:None
+                      ~reviewer:None
+                ; review_permission = (fun _ -> assert false)
+                ; history_compaction = false
+                ; parallel_tool_calls = true
+                ; model = Openai.Responses.Request.O3
+                ; prompt_cache_key = None
+                ; prompt_cache_retention = None
+                ; post_stream = Some post_stream
+                ; agent_page_classifications = []
+                ; delegated_permission_tools = String.Set.empty
+                ; redact_tool_payload = (fun ~name:_ value -> value)
+                }
+            in
+            Agent_session.Operation_worker.run worker ~sw ~input caps))
+        (fun _env actor _writer backend ->
+           let rec finished () =
+             let state = Agent_session.Session_actor.state actor |> protocol_ok in
+             if Option.is_some state.active_operation
+             then (
+               Eio.Fiber.yield ();
+               finished ())
+             else state
+           in
+           let state = finished () in
+           assert (List.length state.invocations = 1);
+           let invocation = List.hd_exn state.invocations in
+           let expected_count =
+             if
+               Poly.equal mode `Success
+               || Poly.equal mode `Post_fail
+               || Poly.equal mode `Publish_rejected
+               || Poly.equal mode `Redirect
+               || Poly.equal mode `End_session
+             then 1
+             else 0
+           in
+           let saved_snapshot =
+             match state.moderator with
+             | Some (`Object [ ("identity_snapshot_sexp", `String encoded) ]) ->
+               Session.Moderator_state.Identity_snapshot.t_of_sexp
+                 (Sexp.of_string encoded)
+             | _ -> assert false
+           in
+           assert (
+             Poly.equal
+               saved_snapshot.current_state
+               (Session.Snapshot.Array [ Int expected_count ]));
+           assert (
+             Bool.equal
+               (Option.is_some invocation.output_entry_id)
+               (not (Poly.equal mode `Publish_rejected)));
+           assert (
+             match invocation.status with
+             | Published (Complete `Null) ->
+               Poly.equal mode `Success
+               || Poly.equal mode `Post_fail
+               || Poly.equal mode `Redirect
+               || Poly.equal mode `End_session
+             | Published (Fail _) ->
+               Poly.equal mode `Deny
+               || Poly.equal mode `Disclosure
+               || Poly.equal mode `Invalid_json
+               || Poly.equal mode `Redirect_bad
+               || Poly.equal mode `Revoked
+             | Resolved (Complete `Null) -> Poly.equal mode `Publish_rejected
+             | _ -> false);
+           assert (
+             List.length state.conversation.canonical_history
+             = if Poly.equal mode `Publish_rejected then 2 else 3);
+           let failed = Poly.equal mode `Post_fail || Poly.equal mode `Publish_rejected in
+           assert (
+             !request_count = if failed || Poly.equal mode `End_session then 1 else 2);
+           if Poly.equal mode `End_session then assert saved_snapshot.halted;
+           assert (
+             !admitted
+             =
+             if Poly.equal mode `Invalid_json || Poly.equal mode `Redirect_bad
+             then 0
+             else 1);
+           let events =
+             Agent_session.Memory_backend.events_after backend 0L |> protocol_ok
+           in
+           let failures =
+             List.filter events ~f:(fun e ->
+               Agent_protocol.Event.Durable.equal_kind e.kind Operation_failed)
+           in
+           assert (List.length failures = if failed then 1 else 0);
+           if Poly.equal mode `Post_fail
+           then (
+             let event = List.hd_exn failures in
+             match
+               Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+               |> protocol_ok
+             with
+             | Operation_failed { state = Failed error; _ } ->
+               assert (not error.retryable);
+               assert (
+                 String.is_substring
+                   (Jsonaf.to_string error.data)
+                   ~substring:"post_tool_response");
+               assert (
+                 String.is_substring
+                   (Jsonaf.to_string error.data)
+                   ~substring:
+                     (History_entry.Id.to_string
+                        (Option.value_exn invocation.output_entry_id)))
+             | _ -> assert false);
+           assert (
+             Poly.equal
+               state.invocations
+               (Agent_session.Memory_backend.state backend).invocations)))
 ;;
 
 let%test_unit "actor handoff persists actual manager state and resolution atomically" =

@@ -58,9 +58,9 @@ native invocation or completion event. Legacy scripts retain their existing even
 representation.
 
 These are internal execution primitives, not public tool registration. Shared
-tool routing, current authority checks, nested-call admission, integration with
-canonical output publication, post-tool observation and
-restart reconciliation remain required before a host exposes moderator tools. The host
+complete shared tool routing, current authority checks, nested-call admission and
+restart reconciliation remain required before a host exposes moderator tools. The
+stream/actor integration below is available to qualified internal fixtures. The host
 resolution installer must be infallible, must not yield, and must not re-enter
 the manager lock. The prospective snapshot API itself does not implement the
 actor's durable transaction or the active-worker borrow protocol; the scoped
@@ -161,8 +161,54 @@ receipts. They preserve receipts independently of transcript retention.
 Bound invocation JSON records use codec version 2. Unbound legacy records retain
 version 1, and missing S-expression fields load as absent. Older readers reject
 the new codec rather than silently discard the binding. This host-only addition
-does not change the ChatML context ABI or enable public feature flags. Normal
-tool routing and automatic restart reconciliation still need to call this service.
+does not change the ChatML context ABI or enable public feature flags. The internal
+stream adapter below calls this service; normal runtime construction and automatic
+restart reconciliation remain unfinished.
+
+### Routed moderator calls in the turn worker
+
+`In_memory_stream.Tool_dispatch` carries the original and final tool names and
+arguments, the actual committed call occurrence, canonical history and fork source.
+A host can return a validated output with a dedicated commit callback, or select
+the existing native runner. Pre-tool rejection skips this dispatcher. Routed
+commit callbacks replace the generic history append; they run before output
+callbacks and post-tool moderation. Native outputs now follow the same ordering.
+
+`Moderator_tool_dispatch` connects this boundary to a prepared extension
+definition, its live moderator manager and the worker's actor capabilities. It
+parses function arguments with bounded JSON parsing; custom-tool input is a JSON
+string. The final target's input schema is checked inside the owning moderator
+lock. A host admission callback then rechecks the live capability and revision,
+followed by the turn worker's final-target permission check, before any handler
+effects. This avoids authorizing a call before waiting for its owner and executing
+it later under stale authority.
+
+The manager validates the returned outcome and prospective state before a host
+`prepare_outcome` check enforces disclosure and output limits. Rejected output or
+handler/admission failure restores the moderator state and records a bounded
+generic failure with the previous snapshot. Raw exception diagnostics are not
+placed in model-visible output. Host persistence failures propagate without
+rerunning the handler. Known standalone declarations report an unavailable
+execution service; they never fall through to a same-named native runner.
+Transient fork calls cannot use the root actor's invocation ownership.
+
+The returned runtime requests travel with the result. They are reported after
+publication and participate in the turn decision. An end-session request prevents
+further moderator hooks and provider turns after pending outputs are handled.
+Post-tool observation failures instead produce a separate, non-retryable durable
+`operation.failed` event, with `phase=post_tool_response` and the committed output
+occurrence ID. The initial tool result remains in history and its receipt remains
+published. The observer failure cannot replace it or cause automatic re-execution.
+
+`Turn_worker.create` accepts an internal dispatch factory using the actual worker
+input and actor capabilities. Tests run a compiled ChatML moderator through this
+worker and actor with an offline provider stream, covering success, policy denial,
+disclosure rejection, malformed JSON, redirects and final-schema validation,
+revocation, failed publication persistence, post-hook failure and end-session.
+This is not public feature availability: normal `Runtime_builder` construction,
+shared nested/native/standalone routing, complete admission-error recording,
+persisted original/final audit provenance and restart reconciliation still need
+qualification. No extension feature flag is enabled by installing this adapter.
 
 ### Synchronous call coordination
 

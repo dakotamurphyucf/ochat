@@ -140,9 +140,13 @@ val handle_event_entries
     owns cancellation-safe persistence. This does not perform actor borrowing, authorization, durable
     publication, post-tool routing or terminal-error reconciliation. The owning
     service must supply those boundaries before exposing a model-visible tool.
-    [validate_work] checks current Pending work ownership without side effects. *)
+    [validate_work] checks current Pending work ownership without side effects.
+    [authorize] rechecks current authority after acquiring the manager lock and
+    validating the invocation, before executing the handler. It must not re-enter
+    this manager. Hosts using queued owner handoffs must supply this check. *)
 val handle_invocation_entries
-  :  t
+  :  ?authorize:(unit -> (unit, string) result)
+  -> t
   -> invocation:Agent_protocol.Invocation.t
   -> history:History_entry.t list
   -> available_tools:Res.Request.Tool.t list

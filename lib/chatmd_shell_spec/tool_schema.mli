@@ -25,6 +25,10 @@ val compile : Jsonaf.t -> (t, diagnostic list) result
 (** Enforce byte/nesting bounds before invoking the JSON parser. *)
 val of_string : string -> (t, diagnostic list) result
 
+(** Parse JSON data with the same source byte/nesting bounds as schemas.
+    Call [validate] afterward for node/value and schema constraints. *)
+val parse_json : string -> (Jsonaf.t, diagnostic list) result
+
 val to_json : t -> Jsonaf.t
 
 (** Exact decimal comparisons, Unicode scalar string lengths and structural
