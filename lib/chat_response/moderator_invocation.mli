@@ -48,6 +48,7 @@ type failure =
   | Invalid_state
   | Suspended
   | Handler_failed
+  | Session_ended
 
 (** Bounded serializable state snapshot shared by all extensibility-v1 event
     phases. Limits must come from a validated declaration. *)

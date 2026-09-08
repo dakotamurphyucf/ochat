@@ -105,12 +105,20 @@ val uses_allocator : t -> History_entry.Allocator.t -> bool
     moderation, if configured. *)
 val history_allocator : t -> History_entry.Allocator.t option
 
+(** Read the termination state under the owner execution lock. This is an
+    observation, not an authorization reservation across subsequent yields. *)
+val is_halted : t -> (bool, string) result
+
 (** [handle_event t ... event] projects the current context, invokes the
     moderator runtime, updates the durable overlay, and returns only the newly
     committed outcome for this host event. Calls that execute, resume, drain,
-    enqueue, or snapshot the same manager are serialized. *)
+    enqueue, or snapshot the same manager are serialized. [skip_if_halted]
+    defaults to false. When true, a halted runtime returns an End_session request
+    without invoking the handler or changing state. The check is made under the
+    execution lock, including after waiting for another event to finish. *)
 val handle_event
-  :  t
+  :  ?skip_if_halted:bool
+  -> t
   -> session_id:string
   -> now_ms:int
   -> history:Res.Item.t list
@@ -120,7 +128,8 @@ val handle_event
   -> (Moderation.Outcome.t, string) result
 
 val handle_event_entries
-  :  t
+  :  ?skip_if_halted:bool
+  -> t
   -> session_id:string
   -> now_ms:int
   -> history:History_entry.t list

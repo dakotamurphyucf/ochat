@@ -198,6 +198,87 @@ let%test_unit
     M.unsubscribe subscription)
 ;;
 
+let%test_unit "halted stream observations do not execute or consume queued work" =
+  Eio_main.run (fun env ->
+    let manager, _, make =
+      setup
+        env
+        ~events:"| _ -> Task.fail(\"halted handler executed\")"
+        {|Task.bind(Runtime.emit(`String("retained")), fun ignored ->
+        Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`Null)), fun ignored ->
+        Task.bind(Runtime.end_session("done"), fun ignored -> Task.pure(state + 1))))|}
+    in
+    call manager (make ()) |> ok |> ignore;
+    assert (M.is_halted manager |> ok);
+    let before = M.identity_snapshot manager |> ok in
+    assert (List.length before.queued_internal_events = 1);
+    let subscription = M.subscribe_committed_changes manager ~on_wakeup:ignore in
+    let event = Chat_response.Moderation.Event.Turn_start in
+    let item () =
+      M.handle_event
+        ~skip_if_halted:true
+        manager
+        ~session_id:"stopped"
+        ~now_ms:0
+        ~history:[]
+        ~available_tools:[]
+        ~session_meta:`Null
+        ~event
+    in
+    let entry () =
+      M.handle_event_entries
+        ~skip_if_halted:true
+        manager
+        ~session_id:"stopped"
+        ~now_ms:0
+        ~history:[]
+        ~available_tools:[]
+        ~session_meta:`Null
+        ~event
+    in
+    List.iter [ item; entry ] ~f:(fun observe ->
+      let outcome = observe () |> ok in
+      assert (List.is_empty outcome.overlay_ops);
+      assert (List.is_empty outcome.emitted_events);
+      assert (Option.is_none outcome.tool_moderation);
+      assert (
+        Option.is_some
+          (Chat_response.Runtime_semantics.should_end_session outcome.runtime_requests)));
+    assert (
+      List.is_empty
+        (M.drain_internal_events
+           manager
+           ~session_id:"stopped"
+           ~now_ms:0
+           ~history:[]
+           ~available_tools:[]
+           ~session_meta:`Null
+         |> ok));
+    assert (
+      List.is_empty
+        (M.drain_internal_events_entries
+           manager
+           ~session_id:"stopped"
+           ~now_ms:0
+           ~history:[]
+           ~available_tools:[]
+           ~session_meta:`Null
+         |> ok));
+    assert (
+      Result.is_error
+        (M.handle_event
+           manager
+           ~session_id:"stopped"
+           ~now_ms:0
+           ~history:[]
+           ~available_tools:[]
+           ~session_meta:`Null
+           ~event));
+    assert (Poly.equal before (M.identity_snapshot manager |> ok));
+    assert (List.is_empty (M.drain_committed_changes subscription));
+    M.unsubscribe subscription)
+;;
+
 let%test_unit "unhandled duplicate wrong-id schema and host failures roll back" =
   Eio_main.run (fun env ->
     let cases =

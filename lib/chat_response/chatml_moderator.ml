@@ -24,7 +24,7 @@ type pending_ui_request = Moderator_manager.pending_ui_request =
       }
 
 let create = Moderator_manager.create
-let handle_event = Moderator_manager.handle_event
+let handle_event = Moderator_manager.handle_event ~skip_if_halted:false
 let pending_ui_request = Moderator_manager.pending_ui_request
 let resume_ui_request = Moderator_manager.resume_ui_request
 let drain_internal_events = Moderator_manager.drain_internal_events

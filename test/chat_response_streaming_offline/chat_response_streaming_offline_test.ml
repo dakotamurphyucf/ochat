@@ -1334,6 +1334,73 @@ let%expect_test "parallel mixed tools keep schedule order and distinct identitie
     |}]
 ;;
 
+let%expect_test "native execution stops when authorization yields to session termination" =
+  Eio_main.run
+  @@ fun env ->
+  let moderator =
+    moderator_of_source
+      {|
+    let initial_state = 0
+    let on_event = fun ctx state event -> match event with
+    | `Stop -> Task.bind(Runtime.end_session("done"), fun ignored -> Task.pure(state))
+    | _ -> Task.pure(state)
+  |}
+  in
+  let allocator =
+    History_entry.Allocator.create ~namespace:"native-stop" ~next_sequence:0 |> ok_or_fail
+  in
+  let added, done_ =
+    stream_function_call
+      ~output_index:0
+      ~item_id:"native-stop-item"
+      ~call_id:"native-stop-call"
+      ~arguments:"null"
+  in
+  let ran = ref 0
+  and authorized = ref 0
+  and requests = ref 0 in
+  let tool_tbl = String.Table.create () in
+  Hashtbl.set tool_tbl ~key:"echo" ~data:(fun ~invocation:_ _ ->
+    Int.incr ran;
+    Res.Tool_output.Output.Text "unexpected");
+  let history =
+    Stream.run_completion_stream_in_memory_entries
+      ~env
+      ~allocator
+      ~history:[ input_entry allocator ]
+      ~tools:(Some [])
+      ~tool_tbl
+      ~moderator
+      ~authorize_tool:(fun ~kind:_ ~name:_ ~payload:_ ~call_id:_ ->
+        Int.incr authorized;
+        Eio.Fiber.yield ();
+        Manager.handle_event
+          moderator.manager
+          ~session_id:moderator.session_id
+          ~now_ms:0
+          ~history:[]
+          ~available_tools:[]
+          ~session_meta:`Null
+          ~event:
+            (Chat_response.Moderation.Event.Internal_event
+               (Chatml.Chatml_lang.VVariant ("Stop", [])))
+        |> ok_or_fail
+        |> ignore)
+      ~post_stream:(fun ~sw:_ ~inputs:_ ->
+        Int.incr requests;
+        assert (!requests = 1);
+        Stdlib.List.to_seq [ added; done_ ])
+      ()
+  in
+  print_s
+    [%sexp
+      (!authorized : int)
+    , (!ran : int)
+    , (!requests : int)
+    , (List.map history ~f:entry_kind : string list)];
+  [%expect {| (1 0 1 (input function-call function-output)) |}]
+;;
+
 let%expect_test "queued user entry follows tool output in the next request" =
   Eio_main.run
   @@ fun env ->

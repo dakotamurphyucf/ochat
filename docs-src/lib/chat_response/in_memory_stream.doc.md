@@ -47,6 +47,8 @@ module Tool_dispatch : sig
     | Invalid_input
     | Pre_tool
     | Pre_tool_failed
+    | Session_ended
+    (** The moderator has halted; do not start the requested implementation. *)
 
   type request =
     { kind : Tool_call.Kind.t

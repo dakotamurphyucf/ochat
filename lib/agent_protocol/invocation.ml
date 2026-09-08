@@ -71,6 +71,7 @@ type preparation =
   | Invalid_input
   | Pre_tool_rejected
   | Pre_tool_failed
+  | Session_ended
 [@@deriving sexp]
 
 type routing =
@@ -203,6 +204,11 @@ let validate t =
       in
       (match routing.preparation with
        | Passed -> Ok ()
+       | Session_ended ->
+         (match t.status with
+          | Resolved (Complete _ | Pending _) | Published (Complete _ | Pending _) ->
+            invalid "stopped preparation cannot have a successful outcome"
+          | _ -> Ok ())
        | Invalid_input | Pre_tool_rejected | Pre_tool_failed ->
          if
            not
@@ -460,6 +466,7 @@ let preparation_values =
   ; "invalid_input", Invalid_input
   ; "pre_tool_rejected", Pre_tool_rejected
   ; "pre_tool_failed", Pre_tool_failed
+  ; "session_ended", Session_ended
   ]
 ;;
 

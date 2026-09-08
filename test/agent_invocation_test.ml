@@ -460,7 +460,22 @@ let%test_unit "routing rejects malformed fingerprints and successful denied prep
           })
      |> get);
   ignore (I.cancel inv ~reason:"cancelled" |> get);
-  List.iter [ I.Pre_tool_rejected; Pre_tool_failed ] ~f:(fun preparation ->
+  let stopped_after_rewrite =
+    make
+      { routing with
+        preparation = Session_ended
+      ; original_name = "alias"
+      ; final_payload = { fp with byte_length = 5 }
+      }
+    |> get
+    |> I.dispatch
+    |> get
+  in
+  assert (Result.is_error (resolve stopped_after_rewrite (Complete `Null)));
+  let stopped_after_rewrite = I.cancel stopped_after_rewrite ~reason:"stopped" |> get in
+  let restored = I.of_json (I.to_json stopped_after_rewrite) |> get in
+  assert (Sexp.equal (I.sexp_of_t stopped_after_rewrite) (I.sexp_of_t restored));
+  List.iter [ I.Pre_tool_rejected; Pre_tool_failed; Session_ended ] ~f:(fun preparation ->
     let inv = make { routing with preparation } |> get |> I.dispatch |> get in
     assert (Result.is_error (resolve inv (Complete `Null)));
     let cancelled = I.cancel inv ~reason:"cancelled" |> get in

@@ -804,16 +804,37 @@ let handle_event_unlocked
   outcome
 ;;
 
-let handle_event t ~session_id ~now_ms ~history ~available_tools ~session_meta ~event =
-  with_execution_lock t (fun () ->
-    handle_event_unlocked
+let stopped_outcome =
+  { Moderation.Outcome.empty with
+    runtime_requests =
+      [ Moderation.Runtime_request.End_session "moderator session ended" ]
+  }
+;;
+
+let is_halted t = with_execution_lock t (fun () -> Ok (Runtime.is_halted t.runtime))
+
+let handle_event
+      ?(skip_if_halted = false)
       t
       ~session_id
       ~now_ms
       ~history
       ~available_tools
       ~session_meta
-      ~event)
+      ~event
+  =
+  with_execution_lock t (fun () ->
+    if skip_if_halted && Runtime.is_halted t.runtime
+    then Ok stopped_outcome
+    else
+      handle_event_unlocked
+        t
+        ~session_id
+        ~now_ms
+        ~history
+        ~available_tools
+        ~session_meta
+        ~event)
 ;;
 
 let handle_event_entries_unlocked
@@ -863,6 +884,7 @@ let handle_event_entries_unlocked
 ;;
 
 let handle_event_entries
+      ?(skip_if_halted = false)
       t
       ~session_id
       ~now_ms
@@ -872,14 +894,17 @@ let handle_event_entries
       ~event
   =
   with_execution_lock t (fun () ->
-    handle_event_entries_unlocked
-      t
-      ~session_id
-      ~now_ms
-      ~history
-      ~available_tools
-      ~session_meta
-      ~event)
+    if skip_if_halted && Runtime.is_halted t.runtime
+    then Ok stopped_outcome
+    else
+      handle_event_entries_unlocked
+        t
+        ~session_id
+        ~now_ms
+        ~history
+        ~available_tools
+        ~session_meta
+        ~event)
 ;;
 
 let identity_snapshot_of_state t ~current_state ~queued_events ~halted ~overlay =
@@ -974,6 +999,13 @@ let handle_invocation_entries
         ~invocation
         ~limits:script.limits
         ~validate_work
+    in
+    let%bind () =
+      if Runtime.is_halted t.runtime
+      then (
+        Option.iter on_failure ~f:(fun f -> f Moderator_invocation.Session_ended);
+        Error "invocation.session_ended: moderator session ended")
+      else Ok ()
     in
     let%bind () = authorize () in
     let context =
@@ -1072,7 +1104,7 @@ let rec drain_loop
           ~acc
   : (Moderation.Outcome.t list, string) result
   =
-  if remaining = 0
+  if remaining = 0 || Runtime.is_halted t.runtime
   then Ok (List.rev acc)
   else if Option.is_some (Runtime.pending_ui_request t.runtime)
   then Error "Session is waiting for UI input."
@@ -1158,7 +1190,7 @@ let rec drain_entries_loop
           ~remaining
           ~acc
   =
-  if remaining = 0
+  if remaining = 0 || Runtime.is_halted t.runtime
   then Ok (List.rev acc)
   else if Option.is_some (Runtime.pending_ui_request t.runtime)
   then Error "Session is waiting for UI input."

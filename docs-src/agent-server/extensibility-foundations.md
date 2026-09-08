@@ -266,6 +266,25 @@ result are still committed. The call's history observer is skipped because the
 moderator has halted, and the initial rejection is published before the worker
 applies the end-session request. The rejection uses the bounded host code
 `invocation.pre_tool_rejected`; the moderator's raw diagnostic is not exposed.
+Multiple calls in the same response are also handled. Stream observation calls
+check termination under the moderator lock and, once halted, return an end-session
+request without invoking the script. A pre hook that ends the session without
+rejecting its current call stops that call too. Later function/custom calls retain
+their canonical call/output pairs; prepared moderator tools publish a bounded
+`invocation.session_ended` failure and a `Session_ended` preparation record.
+This preparation may retain a prior rewrite or redirect, but cannot have a
+successful outcome. Trailing assistant items remain in history without running
+halted observers. Native runners are checked before dispatch and again after
+authorization, so termination during a yielding authorization prevents new work.
+
+Already queued moderator invocations recheck termination under the owning lock
+before authorization, even if their earlier preparation passed. Their records
+retain that preparation and publish the same terminal error. Previously committed
+results are preserved; this check does not undo external effects or cancel work
+that already began. Pending internal events remain queued when the manager has
+halted; draining does not consume or execute them. Restart/job lifecycle handling
+remains separate work.
+
 Post-tool observation failures instead produce a separate, non-retryable durable
 `operation.failed` event, with `phase=post_tool_response` and the committed output
 occurrence ID. The initial tool result remains in history and its receipt remains
@@ -296,6 +315,12 @@ calls, check that the actor remains responsive, and execute a later call with th
 retained state. Result-save rejection is tested separately from publication-save
 rejection; the former rolls back handler state and can record a terminal failure,
 whereas the latter retains the already resolved outcome for reconciliation.
+Multi-call fixtures cover end-session from pre hooks (with/without explicit
+rejection) and from the asynchronous invocation handler, followed by custom/native
+calls and a trailing assistant message. They check receipts, no extra provider
+turn, unchanged state for stopped calls, zero native execution and no operation
+failure. A held first handler plus queued second invocation proves termination
+is rechecked before admission; a subsequent third call remains stopped too.
 This is not public feature availability: normal `Runtime_builder` construction,
 shared nested/native/standalone routing, complete admission-error recording,
 persisted original/final audit provenance and restart reconciliation still need

@@ -2982,12 +2982,26 @@ let%test_unit
     ; `Custom_bytes_limit
     ; `Rewrite_limit
     ; `Redirect_limit
+    ; `Pre_end_multi
+    ; `Pre_reject_end_multi
+    ; `End_session_multi
     ]
     ~f:(fun mode ->
       let request_count = ref 0 in
       let admitted = ref 0 in
       let host_calls = ref 0 in
       let live_snapshot = ref None in
+      let native_calls = ref 0 in
+      let multi =
+        List.mem
+          [ `Pre_end_multi; `Pre_reject_end_multi; `End_session_multi ]
+          mode
+          ~equal:Poly.equal
+      in
+      let pre_end = Poly.equal mode `Pre_end_multi in
+      let implementation_end =
+        Poly.equal mode `End_session || Poly.equal mode `End_session_multi
+      in
       let pre_failed =
         List.mem
           [ `Pre_fail; `Pre_host_exception; `Pre_invalid_action; `Pre_custom_fail ]
@@ -3040,13 +3054,16 @@ let%test_unit
       in
       let pre_rejected =
         List.mem
-          [ `Pre_reject; `Pre_reject_end; `Pre_reject_post_fail; `Pre_reject_custom ]
+          [ `Pre_reject
+          ; `Pre_reject_end
+          ; `Pre_reject_post_fail
+          ; `Pre_reject_custom
+          ; `Pre_reject_end_multi
+          ]
           mode
           ~equal:Poly.equal
       in
-      let ends_session =
-        Poly.equal mode `End_session || Poly.equal mode `Pre_reject_end
-      in
+      let ends_session = implementation_end || Poly.equal mode `Pre_reject_end || multi in
       let custom =
         Poly.equal mode `Custom_success
         || Poly.equal mode `Pre_reject_custom
@@ -3070,7 +3087,11 @@ let%test_unit
                   | _ -> false)))
         ~make_worker:(fun env actor_ready ->
           let events =
-            if pre_failed
+            if pre_end
+            then
+              "| `Pre_tool_call(c) -> Task.bind(Runtime.end_session(\"done\"), fun \
+               ignored -> Task.pure(state)) | _ -> Task.pure(state)"
+            else if pre_failed
             then
               "| `Pre_tool_call(c) -> let ignored = state[0] <- 99 in "
               ^ "Task.bind(Runtime.emit(`String(\"uncommitted\")), fun ignored -> "
@@ -3103,7 +3124,9 @@ let%test_unit
             then
               "| `Pre_tool_call(c) -> Task.bind(Tool.reject(\"private diagnostic\"), fun \
                ignored -> "
-              ^ (if Poly.equal mode `Pre_reject_end
+              ^ (if
+                   Poly.equal mode `Pre_reject_end
+                   || Poly.equal mode `Pre_reject_end_multi
                  then
                    "Task.bind(Runtime.end_session(\"done\"), fun ignored -> \
                     Task.pure(state)))"
@@ -3168,7 +3191,7 @@ let%test_unit
                    "Task.fail(\"invocation.unhandled: private diagnostic\")"
                  | _ -> "Invocation.resolve(p.context.invocation_id, `Complete(`Null))")
               ~finish:
-                (if Poly.equal mode `End_session
+                (if implementation_end
                  then
                    "Task.bind(Runtime.end_session(\"done\"), fun ignored -> \
                     Task.pure(state))"
@@ -3193,48 +3216,118 @@ let%test_unit
             let post_stream ~sw:_ ~inputs =
               Int.incr request_count;
               if !request_count = 1
-              then
-                Stdlib.List.to_seq
-                  Openai.Responses.Response_stream.
-                    [ Output_item_added
-                        { item =
-                            (if custom
-                             then
-                               Custom_function
-                                 { name = "counter"
-                                 ; input = ""
-                                 ; call_id = "counter-call"
-                                 ; _type = "custom_tool_call"
-                                 ; id = Some "counter-item"
-                                 }
-                             else
-                               Function_call
-                                 { name = (if redirected then "alias" else "counter")
-                                 ; arguments = ""
-                                 ; call_id = "counter-call"
-                                 ; _type = "function_call"
-                                 ; id = Some "counter-item"
-                                 ; status = None
-                                 })
-                        ; output_index = 0
-                        ; type_ = "response.output_item.added"
-                        }
-                    ; (if custom
-                       then
-                         Custom_tool_call_input_done
-                           { input = original_payload
-                           ; item_id = "counter-item"
-                           ; output_index = 0
-                           ; type_ = "response.custom_tool_call_input.done"
-                           }
-                       else
-                         Function_call_arguments_done
-                           { arguments = original_payload
-                           ; item_id = "counter-item"
-                           ; output_index = 0
-                           ; type_ = "response.function_call_arguments.done"
-                           })
-                    ]
+              then (
+                let initial =
+                  Stdlib.List.to_seq
+                    Openai.Responses.Response_stream.
+                      [ Output_item_added
+                          { item =
+                              (if custom
+                               then
+                                 Custom_function
+                                   { name = "counter"
+                                   ; input = ""
+                                   ; call_id = "counter-call"
+                                   ; _type = "custom_tool_call"
+                                   ; id = Some "counter-item"
+                                   }
+                               else
+                                 Function_call
+                                   { name = (if redirected then "alias" else "counter")
+                                   ; arguments = ""
+                                   ; call_id = "counter-call"
+                                   ; _type = "function_call"
+                                   ; id = Some "counter-item"
+                                   ; status = None
+                                   })
+                          ; output_index = 0
+                          ; type_ = "response.output_item.added"
+                          }
+                      ; (if custom
+                         then
+                           Custom_tool_call_input_done
+                             { input = original_payload
+                             ; item_id = "counter-item"
+                             ; output_index = 0
+                             ; type_ = "response.custom_tool_call_input.done"
+                             }
+                         else
+                           Function_call_arguments_done
+                             { arguments = original_payload
+                             ; item_id = "counter-item"
+                             ; output_index = 0
+                             ; type_ = "response.function_call_arguments.done"
+                             })
+                      ]
+                in
+                if not multi
+                then initial
+                else
+                  Stdlib.Seq.append initial (fun () ->
+                    (* Force later provider items to arrive after the first handler
+                     has halted, including the asynchronous implementation path. *)
+                    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 5. (fun () ->
+                      let rec halted () =
+                        if
+                          Chat_response.Moderator_manager.is_halted manager
+                          |> Result.ok_or_failwith
+                        then ()
+                        else (
+                          Eio.Fiber.yield ();
+                          halted ())
+                      in
+                      halted ());
+                    let open Openai.Responses.Response_stream in
+                    let message =
+                      match worker_output_item with
+                      | Openai.Responses.Item.Output_message message -> message
+                      | _ -> assert false
+                    in
+                    Stdlib.List.to_seq
+                      [ Output_item_added
+                          { item =
+                              Custom_function
+                                { name = "counter"
+                                ; input = ""
+                                ; call_id = "later-custom"
+                                ; _type = "custom_tool_call"
+                                ; id = Some "later-custom-item"
+                                }
+                          ; output_index = 1
+                          ; type_ = "response.output_item.added"
+                          }
+                      ; Custom_tool_call_input_done
+                          { input = "null"
+                          ; item_id = "later-custom-item"
+                          ; output_index = 1
+                          ; type_ = "response.custom_tool_call_input.done"
+                          }
+                      ; Output_item_added
+                          { item =
+                              Function_call
+                                { name = "native"
+                                ; arguments = ""
+                                ; call_id = "later-native"
+                                ; _type = "function_call"
+                                ; id = Some "later-native-item"
+                                ; status = None
+                                }
+                          ; output_index = 2
+                          ; type_ = "response.output_item.added"
+                          }
+                      ; Function_call_arguments_done
+                          { arguments = "null"
+                          ; item_id = "later-native-item"
+                          ; output_index = 2
+                          ; type_ = "response.function_call_arguments.done"
+                          }
+                      ; Output_item_done
+                          { item = Output_message message
+                          ; output_index = 3
+                          ; type_ = "response.output_item.done"
+                          }
+                      ]
+                      ()))
               else (
                 assert (
                   List.exists inputs ~f:(function
@@ -3268,12 +3361,16 @@ let%test_unit
                   if Poly.equal mode `Disclosure then Error "blocked" else Ok ())
             in
             let worker =
+              let tool_tbl = String.Table.create () in
+              Hashtbl.set tool_tbl ~key:"native" ~data:(fun ~invocation:_ _ ->
+                Int.incr native_calls;
+                Openai.Responses.Tool_output.Output.Text "unexpected execution");
               Agent_session.Turn_worker.create
                 ~dispatch_tool
                 { env
                 ; response_dir
                 ; tools = []
-                ; tool_tbl = String.Table.create ()
+                ; tool_tbl
                 ; temperature = None
                 ; max_output_tokens = None
                 ; reasoning = None
@@ -3315,8 +3412,33 @@ let%test_unit
              else state
            in
            let state = finished () in
-           assert (List.length state.invocations = 1);
-           let invocation = List.hd_exn state.invocations in
+           assert (!native_calls = 0);
+           assert (List.length state.invocations = if multi then 2 else 1);
+           let invocation =
+             List.find_exn state.invocations ~f:(fun inv ->
+               Option.equal
+                 String.equal
+                 inv.context.provider_call_id
+                 (Some "counter-call"))
+           in
+           if multi
+           then (
+             let later =
+               List.find_exn state.invocations ~f:(fun inv ->
+                 Option.equal
+                   String.equal
+                   inv.context.provider_call_id
+                   (Some "later-custom"))
+             in
+             assert (Option.is_some later.output_entry_id);
+             assert (
+               Poly.equal
+                 (Option.value_exn later.routing).preparation
+                 Agent_protocol.Invocation.Session_ended);
+             match later.status with
+             | Published (Fail error) ->
+               assert (String.equal error.code "invocation.session_ended")
+             | _ -> assert false);
            let routing = Option.value_exn invocation.routing in
            let final_payload =
              if final_limit
@@ -3352,7 +3474,9 @@ let%test_unit
                       then "\"redacted\""
                       else final_payload))));
            let expected_preparation =
-             if invalid_original
+             if pre_end
+             then Agent_protocol.Invocation.Session_ended
+             else if invalid_original
              then Agent_protocol.Invocation.Invalid_input
              else if pre_rejected
              then Pre_tool_rejected
@@ -3381,6 +3505,7 @@ let%test_unit
                || Poly.equal mode `Publish_rejected
                || Poly.equal mode `Redirect
                || Poly.equal mode `End_session
+               || Poly.equal mode `End_session_multi
              then 1
              else 0
            in
@@ -3416,6 +3541,7 @@ let%test_unit
                || Poly.equal mode `Post_fail
                || Poly.equal mode `Redirect
                || Poly.equal mode `End_session
+               || Poly.equal mode `End_session_multi
              | Published (Fail error) ->
                let expected =
                  match mode with
@@ -3446,6 +3572,8 @@ let%test_unit
                  | `Pre_reject_end
                  | `Pre_reject_post_fail
                  | `Pre_reject_custom -> "invocation.pre_tool_rejected"
+                 | `Pre_reject_end_multi -> "invocation.pre_tool_rejected"
+                 | `Pre_end_multi -> "invocation.session_ended"
                  | _ -> assert false
                in
                assert (not error.retryable);
@@ -3457,7 +3585,7 @@ let%test_unit
              | _ -> false);
            assert (
              List.length state.conversation.canonical_history
-             = if Poly.equal mode `Publish_rejected then 2 else 3);
+             = if multi then 8 else if Poly.equal mode `Publish_rejected then 2 else 3);
            let failed = post_fails || Poly.equal mode `Publish_rejected in
            assert (!request_count = if failed || ends_session then 1 else 2);
            if ends_session then assert saved_snapshot.halted;
@@ -3465,7 +3593,8 @@ let%test_unit
              !admitted
              =
              if
-               pre_rejected
+               pre_end
+               || pre_rejected
                || pre_failed
                || invalid_original
                || final_limit
@@ -3510,11 +3639,20 @@ let%test_unit
 let%test_unit
     "routed calls recheck revoked policy and release cancelled handlers and waits"
   =
-  List.iter [ `Revoked; `Cancelled; `Active_cancel ] ~f:(fun mode ->
+  List.iter [ `Revoked; `Cancelled; `Active_cancel; `Session_ended ] ~f:(fun mode ->
     let done_, done_u = Eio.Promise.create () in
     with_handoff_actor
       ~make_worker:(fun env actor_ready ->
-        let manager, _, definition = handoff_definition env in
+        let manager, _, definition =
+          handoff_definition
+            ~finish:
+              (if Poly.equal mode `Session_ended
+               then
+                 "Task.bind(Runtime.end_session(\"done\"), fun ignored -> \
+                  Task.pure(state))"
+               else "Task.pure(state)")
+            env
+        in
         Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
           let actor = Eio.Promise.await actor_ready in
           let first_held, first_held_u = Eio.Promise.create () in
@@ -3659,7 +3797,8 @@ let%test_unit
             then (
               Eio.Promise.resolve cancel_u ();
               Eio.Promise.await cancelled)
-            else revoked := true;
+            else if Poly.equal mode `Revoked
+            then revoked := true;
             Eio.Promise.resolve release_u ());
           let state = Agent_session.Session_actor.state actor |> protocol_ok in
           assert (!prepared = if Poly.equal mode `Active_cancel then 2 else 1);
@@ -3680,7 +3819,12 @@ let%test_unit
             List.filter state.invocations ~f:(fun inv ->
               match inv.status with
               | Published (Fail error) ->
-                assert (String.equal error.code "invocation.permission_denied");
+                assert (
+                  String.equal
+                    error.code
+                    (if Poly.equal mode `Session_ended
+                     then "invocation.session_ended"
+                     else "invocation.permission_denied"));
                 true
               | Published (Complete `Null) -> false
               | Resolved (Cancelled _) ->
@@ -3688,19 +3832,34 @@ let%test_unit
                 false
               | _ -> assert false)
           in
-          assert (List.length failed = if Poly.equal mode `Revoked then 1 else 0);
+          assert (
+            List.length failed
+            = if Poly.equal mode `Revoked || Poly.equal mode `Session_ended then 1 else 0);
           assert (
             Poly.equal
               !admitted
-              (if Poly.equal mode `Cancelled then [ "first" ] else [ "first"; "second" ]));
+              (if Poly.equal mode `Cancelled || Poly.equal mode `Session_ended
+               then [ "first" ]
+               else [ "first"; "second" ]));
           revoked := false;
           run (request "third");
-          assert (!prepared = if Poly.equal mode `Active_cancel then 3 else 2);
+          assert (
+            !prepared
+            =
+            if Poly.equal mode `Session_ended
+            then 1
+            else if Poly.equal mode `Active_cancel
+            then 3
+            else 2);
           let snapshot =
             Chat_response.Moderator_manager.identity_snapshot manager
             |> Result.ok_or_failwith
           in
-          assert (Poly.equal snapshot.current_state (Session.Snapshot.Array [ Int 2 ]));
+          assert (
+            Poly.equal
+              snapshot.current_state
+              (Session.Snapshot.Array
+                 [ Int (if Poly.equal mode `Session_ended then 1 else 2) ]));
           let state = Agent_session.Session_actor.state actor |> protocol_ok in
           Eio.Promise.resolve done_u ();
           Completed

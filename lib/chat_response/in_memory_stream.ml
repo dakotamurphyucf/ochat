@@ -15,6 +15,7 @@ module Tool_dispatch = struct
     | Invalid_input
     | Pre_tool
     | Pre_tool_failed
+    | Session_ended
 
   type request =
     { kind : Tool_call.Kind.t
@@ -284,6 +285,7 @@ let run_moderation_event
   | Some moderator ->
     Result.map
       (Moderator_manager.handle_event
+         ~skip_if_halted:true
          moderator.manager
          ~session_id:moderator.session_id
          ~now_ms
@@ -306,6 +308,7 @@ let run_moderation_event_entries
   | Some moderator ->
     Result.map
       (Moderator_manager.handle_event_entries
+         ~skip_if_halted:true
          moderator.manager
          ~session_id:moderator.session_id
          ~now_ms
@@ -1152,6 +1155,15 @@ let dispatch_tool
       ~runtime_requests
       run_native
   =
+  let halted () =
+    Option.value_map c.moderator ~default:false ~f:(fun moderator ->
+      Moderator_manager.is_halted moderator.manager |> Result.ok_or_failwith)
+  in
+  let rejection, synthetic_result =
+    if Option.is_none rejection && halted ()
+    then Some Tool_dispatch.Session_ended, Some (Output.Text "The session has ended.")
+    else rejection, synthetic_result
+  in
   let authorize () =
     if Option.is_some synthetic_result
     then failwith "pre-tool moderation rejected this invocation"
@@ -1195,7 +1207,7 @@ let dispatch_tool
         | Some output -> output
         | None ->
           authorize ();
-          run_native ()
+          if halted () then Output.Text "The session has ended." else run_native ()
       in
       Tool_dispatch.{ output; commit_output = None; runtime_requests = [] }
   in
@@ -1243,6 +1255,14 @@ let prepare_tool_call (c : ctx) ~hist ~kind ~name ~payload ~call_id ~item_id =
     (match result with
      | Error message when Option.is_none c.dispatch_tool -> failwith message
      | Error _ -> reject Tool_dispatch.Pre_tool_failed "Pre-tool moderation failed."
+     | Ok moderated
+       when Option.is_none moderated.synthetic_result
+            && Option.is_some
+                 (Runtime_semantics.should_end_session moderated.runtime_requests) ->
+       let rejected, reason =
+         reject Tool_dispatch.Session_ended "The session has ended."
+       in
+       { rejected with runtime_requests = moderated.runtime_requests }, reason
      | Ok moderated ->
        ( moderated
        , Option.map moderated.synthetic_result ~f:(fun _ -> Tool_dispatch.Pre_tool) ))

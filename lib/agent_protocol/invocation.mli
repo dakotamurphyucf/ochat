@@ -74,6 +74,9 @@ type preparation =
   | Invalid_input
   | Pre_tool_rejected
   | Pre_tool_failed
+  | Session_ended
+  (** Stopped before execution, potentially after rewriting the call. Original
+        and final routing may differ; successful outcomes are forbidden. *)
 [@@deriving sexp]
 
 (** Host-retained routing provenance. Fingerprints describe exact raw bytes;

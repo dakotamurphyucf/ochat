@@ -368,6 +368,7 @@ type failure =
   | Invalid_state
   | Suspended
   | Handler_failed
+  | Session_ended
 
 let run_impl t ~runtime ~context ~prepare_commit ~failure_kind =
   let open Result.Let_syntax in
