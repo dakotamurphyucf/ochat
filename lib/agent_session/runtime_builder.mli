@@ -28,6 +28,9 @@ type t =
   ; mutable moderator_snapshot : Jsonaf.t option
   ; moderator_manager : Chat_response.Moderator_manager.t option
   ; moderator_tools : Openai.Responses.Request.Tool.t list
+  ; moderator_script_tools : Script_tool_calls.t option
+    (** Host policy/disclosure services for v1 moderator native calls. Normal
+        construction leaves this absent until v1 admission is installed. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event : Jsonaf.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; drain_internal_events :

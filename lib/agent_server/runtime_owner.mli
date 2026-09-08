@@ -45,7 +45,11 @@ val enqueue_internal_event
     observation. Failed handlers retain their separate observation failure and
     are never replayed. The result requests another idle probe when a batch
     exhausts its budget, queued events remain, or follow-up work was scheduled.
-    This does not install script tool-call authority or enable v1 declarations. *)
+    When the runtime supplies script-tool services, every observation gets its
+    own actor-bound native scope using the manager's exact admitted definition.
+    Native child results join subsequent bounded observation work. A runtime
+    without these services grants no native scope. Normal v1 declaration
+    admission remains separate; this does not enable public features. *)
 val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result
 
 (** [execute_model_job t ~recipe ~payload] executes nested model work while

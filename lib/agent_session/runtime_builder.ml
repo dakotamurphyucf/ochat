@@ -31,6 +31,7 @@ type t =
   ; mutable moderator_snapshot : Jsonaf.t option
   ; moderator_manager : Manager.t option
   ; moderator_tools : Request.Tool.t list
+  ; moderator_script_tools : Script_tool_calls.t option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event : Jsonaf.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; drain_internal_events :
@@ -763,6 +764,7 @@ let build
         Option.map moderator ~f:(fun (moderator, _) ->
           moderator.Chat_response.In_memory_stream.manager)
     ; moderator_tools = tools
+    ; moderator_script_tools = None
     ; start_moderator =
         (fun () ->
           let open Result.Let_syntax in

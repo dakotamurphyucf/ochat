@@ -75,6 +75,11 @@ val overlay_revision : t -> int
     manager or read mutable script state. *)
 val invocation_observer : t -> Agent_protocol.Invocation.observer option
 
+(** The exact admitted definition retained by this v1 manager. Hosts use it to
+    bind per-event tool scopes to the same compiled source and native registry.
+    Legacy managers return None. No script state is evaluated or borrowed. *)
+val extension_definition : t -> Extension_compiler.definition option
+
 (** [create ~artifact ~capabilities ?snapshot ()] instantiates a fresh runtime
     session for [artifact], optionally restoring persisted durable state. *)
 val create

@@ -4679,154 +4679,223 @@ let%expect_test "runtime owner drains observation batches and applies durable te
   let module I = Agent_protocol.Invocation in
   let module M = Chat_response.Moderator_manager in
   let module B = Agent_session.Runtime_builder in
-  let prepared = ref None in
-  let native_calls = ref 0 in
-  with_handoff_actor
-    ~make_worker:(fun env _ ->
-      let manager, _, _ =
-        handoff_definition
-          env
-          ~events:
-            {| | `Tool_observed(p) ->
+  List.iter [ false; true ] ~f:(fun tool_calls ->
+    let prepared = ref None in
+    let native_calls = ref 0
+    and nested_calls = ref 0 in
+    let registry = native_registry nested_calls ~raises:false in
+    with_handoff_actor
+      ~make_worker:(fun env _ ->
+        let call =
+          {|match p.tool_name with
+            | "seed" ->
+              Task.bind(Tool.call("read_file", `Object([])), fun ignored ->
+              Task.bind(Tool.call("read_file", `Object([])), fun ignored ->
+              Task.bind(Tool.call("read_file", `Object([])), fun ignored ->
+              Task.bind(Tool.call("read_file", `Object([])), fun ignored -> Task.pure(state)))))
+            | _ -> Task.pure(state)|}
+        in
+        let total =
+          match tool_calls with
+          | false -> 35
+          | true -> 175
+        in
+        let manager, _, _ =
+          handoff_definition
+            env
+            ~capability_registry:registry
+            ~declare_tool:false
+            ~moderator_capabilities:
+              { Chat_response.Moderation.Capabilities.default with
+                on_tool_call = (fun ~name:_ ~args:_ -> failwith "unscoped callback used")
+              }
+            ~events:
+              ({| | `Tool_observed(p) -> Task.bind((|}
+               ^ call
+               ^ {|), fun ignored ->
                    let ignored = state[0] <- state[0] + 1 in
                    Task.bind(Runtime.emit(`String("observed")), fun ignored ->
                    match state[0] with
-                   | 35 ->
+                   | |}
+               ^ Int.to_string total
+               ^ {| ->
                      Task.bind(Runtime.end_session("all observed"), fun ignored -> Task.pure(state))
-                   | _ -> Task.pure(state))
+                   | _ -> Task.pure(state)))
                  | _ -> Task.pure(state) |}
-      in
-      let observer = M.invocation_observer manager |> Option.value_exn in
-      let snapshot =
-        Some
-          (B.encode_moderator_snapshot
-             (M.identity_snapshot manager |> Result.ok_or_failwith))
-      in
-      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
-        caps.commit_moderator snapshot |> protocol_ok;
-        let parent = invocation_fixture () in
-        caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
-          List.iter (List.range 0 36) ~f:(fun n ->
-            let observer =
-              match n with
-              | 35 -> { observer with source_sha256 = String.make 64 'b' }
-              | _ -> observer
-            in
-            let child =
-              I.create
-                ~observer
-                { parent.context with
-                  id = Agent_protocol.Id.Invocation.create ()
-                ; origin = Moderator
-                ; parent_invocation = Some parent.context.id
-                }
+              )
+        in
+        let observer = M.invocation_observer manager |> Option.value_exn in
+        let snapshot =
+          Some
+            (B.encode_moderator_snapshot
+               (M.identity_snapshot manager |> Result.ok_or_failwith))
+        in
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          caps.commit_moderator snapshot |> protocol_ok;
+          let parent = invocation_fixture () in
+          caps.with_invocation ~invocation:parent (fun ~dispatched:_ ->
+            List.iter (List.range 0 36) ~f:(fun n ->
+              let observer =
+                match n with
+                | 35 -> { observer with source_sha256 = String.make 64 'b' }
+                | _ -> observer
+              in
+              let child =
+                I.create
+                  ~observer
+                  { parent.context with
+                    id = Agent_protocol.Id.Invocation.create ()
+                  ; origin = Moderator
+                  ; parent_invocation = Some parent.context.id
+                  ; tool_name = "seed"
+                  }
+                |> protocol_ok
+              in
+              caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
+                Int.incr native_calls;
+                Ok (Complete (`String "native result")))
               |> protocol_ok
-            in
-            caps.with_invocation ~invocation:child (fun ~dispatched:_ ->
-              Int.incr native_calls;
-              Ok (Complete (`String "native result")))
-            |> protocol_ok
-            |> ignore);
-          Ok (Complete `Null))
-        |> protocol_ok
-        |> ignore;
-        prepared := Some manager;
-        Completed
-          { final_history = input.history
-          ; moderator_snapshot = snapshot
-          ; runtime_requests = []
-          }))
-    (fun _env actor _writer backend ->
-       let initial = await_idle actor in
-       let manager = Option.value_exn !prepared in
-       let snapshot () =
-         Some
-           (B.encode_moderator_snapshot
-              (M.identity_snapshot manager |> Result.ok_or_failwith))
-       in
-       let internal_batches = ref 0 in
-       let runtime : B.t =
-         { worker =
-             Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
-               failwith "unexpected model turn")
-         ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
-         ; initial_history = []
-         ; initial_prompt_entry_count = 0
-         ; reserved_history_through = 0
-         ; moderator_snapshot = snapshot ()
-         ; moderator_manager = Some manager
-         ; moderator_tools = []
-         ; start_moderator = (fun () -> failwith "unexpected startup")
-         ; enqueue_internal_event = (fun _ -> failwith "unexpected external event")
-         ; drain_internal_events =
-             (fun history ->
-               Int.incr internal_batches;
-               let outcomes =
-                 M.drain_internal_events_entries
-                   manager
-                   ~session_id:
-                     (Agent_protocol.Id.Session.to_string initial.identity.session_id)
-                   ~now_ms:0
-                   ~history
-                   ~available_tools:[]
-                   ~session_meta:`Null
-                 |> Result.ok_or_failwith
-               in
-               Ok
-                 { moderator_snapshot = snapshot ()
-                 ; runtime_requests =
-                     List.concat_map outcomes ~f:(fun outcome ->
-                       outcome.Chat_response.Moderation.Outcome.runtime_requests)
-                 ; notifications = []
-                 ; remaining_events =
-                     B.moderator_snapshot_has_queued_events (snapshot ()) |> protocol_ok
-                 })
-         ; execute_model_job =
-             (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
-         ; enqueue_model_job_completion = (fun _ -> failwith "unexpected completion")
-         ; close = (fun () -> ())
-         }
-       in
-       let owner =
-         Agent_server.Runtime_owner.create
-           ~actor
-           ~initial:(Some runtime)
-           ~build:(fun () -> failwith "unexpected runtime rebuild")
-       in
-       let poll () =
-         Agent_server.Runtime_owner.drain_idle_moderator owner |> protocol_ok
-       in
-       let summarize more =
-         let state = A.state actor |> protocol_ok in
-         let count status =
-           List.count state.invocations ~f:(fun invocation ->
-             Option.exists invocation.observation ~f:(fun observation ->
-               I.equal_observation_status observation.status status))
+              |> ignore);
+            Ok (Complete `Null))
+          |> protocol_ok
+          |> ignore;
+          prepared := Some manager;
+          Completed
+            { final_history = input.history
+            ; moderator_snapshot = snapshot
+            ; runtime_requests = []
+            }))
+      (fun _env actor _writer backend ->
+         let initial = await_idle actor in
+         let manager = Option.value_exn !prepared in
+         let snapshot () =
+           Some
+             (B.encode_moderator_snapshot
+                (M.identity_snapshot manager |> Result.ok_or_failwith))
          in
-         assert (Option.is_none state.active_operation);
-         [%test_eq: int] 1 (List.length state.conversation.canonical_history);
-         assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);
-         print_s
-           [%sexp
-             { more : bool
-             ; observed = (count Observed : int)
-             ; awaiting = (count Awaiting : int)
-             ; desired = (state.lifecycle.desired : Agent_protocol.Session.desired_state)
-             ; native_calls = (!native_calls : int)
-             ; internal_batches = (!internal_batches : int)
-             }]
-       in
-       summarize (poll ());
-       summarize (poll ());
-       summarize (poll ()));
+         let internal_batches = ref 0 in
+         let script_tools =
+           match tool_calls with
+           | false -> None
+           | true ->
+             Some
+               (Agent_session.Script_tool_calls.create
+                  ~registry:(fun () -> registry)
+                  ~moderator_names:String.Set.empty
+                  ~now:Agent_protocol.Timestamp.now
+                  ~is_halted:(fun () ->
+                    let state = A.state actor |> protocol_ok in
+                    match state.lifecycle.desired with
+                    | Running -> state.halted
+                    | Stopped -> true)
+                  ~requires_active_moderator:(fun _ -> false)
+                  ~authorize:(fun _ _ ->
+                    let state = A.state actor |> protocol_ok in
+                    assert (Option.is_none state.active_operation);
+                    Ok ())
+                  ~prepare_output:(fun _ -> Ok (`String "disclosed"))
+                  ~defer_observation:(fun _ -> Ok ()))
+         in
+         let runtime : B.t =
+           { worker =
+               Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input:_ _ ->
+                 failwith "unexpected model turn")
+           ; parse_user_content = (fun ~id:_ _ -> failwith "unexpected input")
+           ; initial_history = []
+           ; initial_prompt_entry_count = 0
+           ; reserved_history_through = 0
+           ; moderator_snapshot = snapshot ()
+           ; moderator_manager = Some manager
+           ; moderator_tools = []
+           ; moderator_script_tools = script_tools
+           ; start_moderator = (fun () -> failwith "unexpected startup")
+           ; enqueue_internal_event = (fun _ -> failwith "unexpected external event")
+           ; drain_internal_events =
+               (fun history ->
+                 Int.incr internal_batches;
+                 let outcomes =
+                   M.drain_internal_events_entries
+                     manager
+                     ~session_id:
+                       (Agent_protocol.Id.Session.to_string initial.identity.session_id)
+                     ~now_ms:0
+                     ~history
+                     ~available_tools:[]
+                     ~session_meta:`Null
+                   |> Result.ok_or_failwith
+                 in
+                 Ok
+                   { moderator_snapshot = snapshot ()
+                   ; runtime_requests =
+                       List.concat_map outcomes ~f:(fun outcome ->
+                         outcome.Chat_response.Moderation.Outcome.runtime_requests)
+                   ; notifications = []
+                   ; remaining_events =
+                       B.moderator_snapshot_has_queued_events (snapshot ()) |> protocol_ok
+                   })
+           ; execute_model_job =
+               (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
+           ; enqueue_model_job_completion = (fun _ -> failwith "unexpected completion")
+           ; close = (fun () -> ())
+           }
+         in
+         let owner =
+           Agent_server.Runtime_owner.create
+             ~actor
+             ~initial:(Some runtime)
+             ~build:(fun () -> failwith "unexpected runtime rebuild")
+         in
+         let poll () =
+           Agent_server.Runtime_owner.drain_idle_moderator owner |> protocol_ok
+         in
+         let summarize more =
+           let state = A.state actor |> protocol_ok in
+           let count status =
+             List.count state.invocations ~f:(fun invocation ->
+               Option.exists invocation.observation ~f:(fun observation ->
+                 I.equal_observation_status observation.status status))
+           in
+           assert (Option.is_none state.active_operation);
+           [%test_eq: int] 1 (List.length state.conversation.canonical_history);
+           assert_same_session_snapshot state (Agent_session.Memory_backend.state backend);
+           print_s
+             [%sexp
+               { tool_calls : bool
+               ; more : bool
+               ; observed = (count Observed : int)
+               ; awaiting = (count Awaiting : int)
+               ; desired =
+                   (state.lifecycle.desired : Agent_protocol.Session.desired_state)
+               ; seed_calls = (!native_calls : int)
+               ; native_calls = (!nested_calls : int)
+               ; internal_batches = (!internal_batches : int)
+               }]
+         in
+         List.iter
+           (List.range 0 (if tool_calls then 7 else 3))
+           ~f:(fun _ -> summarize (poll ()))));
   [%expect
     {|
-    ((more true) (observed 32) (awaiting 4) (desired Running) (native_calls 36)
-     (internal_batches 1))
-    ((more true) (observed 35) (awaiting 1) (desired Stopped) (native_calls 36)
-     (internal_batches 1))
-    ((more false) (observed 35) (awaiting 1) (desired Stopped) (native_calls 36)
-     (internal_batches 1))
+    ((tool_calls false) (more true) (observed 32) (awaiting 4) (desired Running)
+     (seed_calls 36) (native_calls 0) (internal_batches 1))
+    ((tool_calls false) (more true) (observed 35) (awaiting 1) (desired Stopped)
+     (seed_calls 36) (native_calls 0) (internal_batches 1))
+    ((tool_calls false) (more false) (observed 35) (awaiting 1) (desired Stopped)
+     (seed_calls 36) (native_calls 0) (internal_batches 1))
+    ((tool_calls true) (more true) (observed 32) (awaiting 132) (desired Running)
+     (seed_calls 36) (native_calls 128) (internal_batches 1))
+    ((tool_calls true) (more true) (observed 64) (awaiting 112) (desired Running)
+     (seed_calls 36) (native_calls 140) (internal_batches 2))
+    ((tool_calls true) (more true) (observed 96) (awaiting 80) (desired Running)
+     (seed_calls 36) (native_calls 140) (internal_batches 3))
+    ((tool_calls true) (more true) (observed 128) (awaiting 48) (desired Running)
+     (seed_calls 36) (native_calls 140) (internal_batches 4))
+    ((tool_calls true) (more true) (observed 160) (awaiting 16) (desired Running)
+     (seed_calls 36) (native_calls 140) (internal_batches 5))
+    ((tool_calls true) (more true) (observed 175) (awaiting 1) (desired Stopped)
+     (seed_calls 36) (native_calls 140) (internal_batches 5))
+    ((tool_calls true) (more false) (observed 175) (awaiting 1) (desired Stopped)
+     (seed_calls 36) (native_calls 140) (internal_batches 5))
     |}]
 ;;
 

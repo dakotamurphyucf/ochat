@@ -173,20 +173,42 @@ let drain_loaded_observations t runtime =
   | None -> Ok false
   | Some (manager, observer) ->
     let history = ref [] in
+    let with_history handle =
+      let%bind state = Agent_session.Session_actor.state t.actor in
+      let%bind entries =
+        Agent_session.History_codec.all_of_protocol state.conversation.canonical_history
+      in
+      history := entries;
+      handle ()
+    in
+    let drain =
+      match
+        ( runtime.moderator_script_tools
+        , Chat_response.Moderator_manager.extension_definition manager )
+      with
+      | Some script_tools, Some definition ->
+        Agent_session.Moderator_observation.drain_idle_with_tools
+          ~script_tools
+          ~definition
+          ~claim:(fun handle ->
+            Agent_session.Session_actor.with_idle_moderator_observation_tools
+              t.actor
+              ~observer
+              (fun ~observing ~execute ~commit ->
+                 with_history (fun () -> handle ~observing ~execute ~commit)))
+      | _ ->
+        Agent_session.Moderator_observation.drain_idle
+          ~on_tool_call:(fun ~name:_ ~args:_ ->
+            Ok (Chat_response.Moderation.Capabilities.Tool_error "invocation.unavailable"))
+          ~claim:(fun handle ->
+            Agent_session.Session_actor.with_idle_moderator_observation
+              t.actor
+              ~observer
+              (fun ~observing ~commit ->
+                 with_history (fun () -> handle ~observing ~commit)))
+    in
     let%map drain =
-      Agent_session.Moderator_observation.drain_idle
-        ~claim:(fun handle ->
-          Agent_session.Session_actor.with_idle_moderator_observation
-            t.actor
-            ~observer
-            (fun ~observing ~commit ->
-               let%bind state = Agent_session.Session_actor.state t.actor in
-               let%bind entries =
-                 Agent_session.History_codec.all_of_protocol
-                   state.conversation.canonical_history
-               in
-               history := entries;
-               handle ~observing ~commit))
+      drain
         ~manager
         ~history:(fun () -> !history)
         ~available_tools:runtime.moderator_tools

@@ -344,8 +344,24 @@ wait, required active-moderator decisions, handler failure after effects, reject
 result persistence, cancel-stop during native execution and a forged parent.
 It also verifies calls after acknowledgement/return cannot execute.
 
-**Installing this scoped Tool.call bridge in runtime-owner draining, ordinary-event
-routing and normal v1 runtime construction are still required.** The stream
+Runtime-owner draining now installs this bridge when the runtime supplies its
+script-tool services. It obtains the definition from the installed manager and
+creates a fresh actor/native scope for every observation, closing it before the
+next claim. An event cannot reuse another event's invocation scope or call budget.
+Without configured services, Tool.call returns `invocation.unavailable`; it does
+not fall back to a manager callback that could bypass persisted admission.
+
+The runtime-owner expect test exercises both configurations with a compiled
+lifecycle-only moderator. With services enabled, 35 source observations make four
+native calls each. The first bounded poll performs 128 native calls, proving the
+100-call budget belongs to each handler rather than the whole batch. Later polls
+acknowledge all 175 source/child observations and terminate; the 140 native calls
+are not repeated. An unrelated source remains untouched. With services absent,
+the same calls execute no native work. A failing fallback callback in both cases
+proves observations do not use unscoped Tool.call. Neither path starts a model turn
+or manufactures provider history during the drain.
+
+**Ordinary-event routing and normal v1 runtime construction are still required.** The stream
 option remains off by default pending that integration. Tests exercise the
 explicit foreground handoff with real compiled handlers, competing claims,
 cancellation, rejected saves, wrong source/snapshot, mutable-state rollback,

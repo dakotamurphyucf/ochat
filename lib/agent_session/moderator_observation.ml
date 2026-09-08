@@ -9,7 +9,6 @@ type result =
 
 let drain_with_claim
       ?(max_observations = 32)
-      ?on_tool_call
       ~claim
       ~retain_follow_up
       ~manager
@@ -32,7 +31,7 @@ let drain_with_claim
     | _ ->
       let outcome = ref None in
       let%bind claimed =
-        claim (fun ~observing ~commit ->
+        claim (fun ~observing ~commit ~on_tool_call ->
           M.handle_observation_entries
             ?on_tool_call
             ~retain_follow_up
@@ -78,15 +77,24 @@ let drain_with_claim
 ;;
 
 let drain ?max_observations ?on_tool_call ~capabilities ~observer =
-  drain_with_claim
-    ?max_observations
-    ?on_tool_call
-    ~retain_follow_up:false
-    ~claim:
-      (capabilities.Operation_worker.Capabilities.with_next_moderator_observation
-         ~observer)
+  drain_with_claim ?max_observations ~retain_follow_up:false ~claim:(fun handle ->
+    capabilities.Operation_worker.Capabilities.with_next_moderator_observation
+      ~observer
+      (fun ~observing ~commit -> handle ~observing ~commit ~on_tool_call))
 ;;
 
 let drain_idle ?max_observations ?on_tool_call ~claim =
-  drain_with_claim ?max_observations ?on_tool_call ~retain_follow_up:true ~claim
+  drain_with_claim ?max_observations ~retain_follow_up:true ~claim:(fun handle ->
+    claim (fun ~observing ~commit -> handle ~observing ~commit ~on_tool_call))
+;;
+
+let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
+  drain_with_claim ?max_observations ~retain_follow_up:true ~claim:(fun handle ->
+    claim (fun ~observing ~execute ~commit ->
+      Script_tool_calls.with_observation
+        script_tools
+        ~definition
+        ~execute
+        ~observing
+        (fun on_tool_call -> handle ~observing ~commit ~on_tool_call:(Some on_tool_call))))
 ;;

@@ -147,6 +147,8 @@ let invocation_observer t =
       { script_id = script.id; source_sha256 = script.source_sha256 })
 ;;
 
+let extension_definition t = Option.map t.artifact.extension ~f:snd
+
 let entrypoints =
   Runtime.{ initial_state_name = "initial_state"; on_event_name = "on_event" }
 ;;
