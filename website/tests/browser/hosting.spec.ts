@@ -68,14 +68,14 @@ test('protocol anchors and source excerpts remain usable without JavaScript', as
   }
 });
 
-test('dense protocol references reflow and retain keyboard scrolling in both themes', async ({
-  page,
-}) => {
-  // Full axe scans traverse ~19,000 syntax-highlighted DOM elements twice.
-  // Keep the complete scan; this timeout is not a page-load performance budget.
-  test.slow();
-  await page.setViewportSize({ width: 320, height: 800 });
-  for (const theme of ['light', 'dark'] as const) {
+for (const theme of ['light', 'dark'] as const) {
+  test(`dense protocol references reflow, scroll, and pass accessibility in ${theme}`, async ({
+    page,
+  }) => {
+    // Each full axe scan traverses ~19,000 syntax-highlighted DOM elements.
+    // Give each theme its own test budget; retain the complete scan and rules.
+    test.slow();
+    await page.setViewportSize({ width: 320, height: 800 });
     await page.emulateMedia({ colorScheme: theme });
     await page.goto('/docs/reference/agent-server/protocol-types/#session');
     await expect(page.locator('html')).toHaveAttribute('data-theme', theme);
@@ -98,8 +98,8 @@ test('dense protocol references reflow and retain keyboard scrolling in both the
       .withTags(['wcag2a', 'wcag2aa', 'wcag21aa'])
       .analyze();
     expect(result.violations).toEqual([]);
-  }
-});
+  });
+}
 
 test('protocol method search reaches the published contract and current daemon flags are visible', async ({
   page,

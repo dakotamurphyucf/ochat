@@ -93,6 +93,25 @@ measurement remain unchanged. Diagnostic instrumentation follows Chrome's
 The live workers.dev preview still refers to its earlier hosted artifact; P11
 must qualify the final production bytes at the owned origin.
 
+## Full accessibility scan scheduling
+
+[Run 34171939816](https://github.com/dakotamurphyucf/ochat/actions/runs/34171939816)
+confirmed the gallery fix on GitHub: preview CLS 0.0222, all performance/search
+checks passed, and the complete preview browser matrix passed. Production passed
+210 cases and retained two existing skips, but Firefox exhausted one shared
+90-second test budget while scanning the dense protocol reference in both themes.
+The trace records about 45 seconds for the first full axe scan and 34 seconds
+for the second partial phase before the remaining scan/overhead exhausted the test.
+
+Light and dark now have separate test cases, each retaining the existing slow-test
+budget, full-document axe scan, WCAG rule tags, narrow reflow, focus, and keyboard
+scrolling assertions. No accessibility rule or source content is excluded. This
+separates independent checks and reports the failing theme directly; page-load
+performance budgets are unchanged. Both themes must pass in every browser. The six scoped Linux container checks
+pass with two workers: Chromium 37–38 seconds, Firefox 55–56 seconds, and WebKit
+39–40 seconds per theme (2.3 minutes total).
+The actual final gate rejected this production failure despite preview succeeding.
+
 ## Publishing boundary
 
 GitHub is the single intended production publisher. The workflow has read-only
