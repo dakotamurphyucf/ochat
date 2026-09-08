@@ -30,7 +30,8 @@ type t
     names/configuration across restarts. Restoration requires explicit host
     re-admission; this function never rebinds an old reference by name. *)
 val create
-  :  owner:string
+  :  ?metadata:(string * Chatmd_shell_spec.Authoring_metadata.t) list
+  -> owner:string
   -> resource_fingerprint:string
   -> (string * Ochat_function.t) list
   -> (t, error) result
@@ -42,6 +43,10 @@ val reference : binding -> reference
     The service must still perform per-call authorization, moderation, schema
     checks and output disclosure. This accessor is not an invocation endpoint. *)
 val implementation : binding -> Ochat_function.t
+
+(** Explicit authoring/helper metadata retained with this actual implementation.
+    Selection cannot edit it, and a same-name registration does not inherit it. *)
+val metadata : binding -> Chatmd_shell_spec.Authoring_metadata.t
 
 (** Select exact registered names. Empty selects none; duplicates/missing names
     reject. The resulting registry retains the same bindings and implementations. *)

@@ -916,3 +916,10 @@
 (alias
  (name runtest)
  (deps (alias runtest-chatml-compilation)))
+
+(library
+ (name authoring_policy_test)
+ (modules authoring_policy_test)
+ (libraries core jsonaf chat_response chatmd chatmd_shell_spec eio eio_main ochat_function openai mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))

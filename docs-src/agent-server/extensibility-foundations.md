@@ -414,3 +414,52 @@ selected-capability checks as synchronous preparation with this worker path.
 Compilation remains separate from dynamic initialization, state serialization,
 per-call authorization and feature qualification. No model-visible feature is
 enabled by these APIs alone.
+
+## Authoring policy admission plans
+
+`Chatmd_shell_spec.Authoring_metadata` describes which registered tools create
+scripts or definitions. A version-1 help declaration contains a package ID,
+explicit task kinds, stable topic IDs and any helpers the author explicitly
+requires. Task kinds cover one-off scripts, standalone tools, moderator tools,
+child agents and background workflows. Names containing `script` do not imply
+this metadata. The optional metadata argument to `Tool_capability.create` binds
+metadata to the actual registered implementation and its capability fingerprint.
+Selection retains it; metadata for missing or duplicate names is rejected.
+
+Read-only helper roles are assigned by trusted host registration. Reference and
+validation roles require their reserved names, `ochat_authoring_context` and
+`ochat_validate`. A matching name without the role is not sufficient. Helper
+roles cannot also request authoring help, preventing recursive helper expansion.
+The host remains responsible for registering the real read-only service: this
+metadata is not a proof that an arbitrary function is read-only.
+
+`Chat_response.Authoring_policy.resolve` produces an inspectable plan from an
+approved capability ceiling, selected tools, policy and installed-corpus metadata.
+For a child, the ceiling is the parent's selected registry. The resolver never
+constructs or reconnects tools and does not consult an ambient global registry.
+
+| Policy | Plan behavior |
+|---|---|
+| Auto with authoring tools | Require compatible installed package/topic metadata, select both authentic helpers from the ceiling, and request one shared primer. |
+| Manual | Add no tools or guidance; expose pointers only to authentic helpers explicitly selected. Explicitly required helpers must already be selected. |
+| Preload | Apply automatic behavior and validate the author's unique, compatible topic list in its declared order. |
+| Auto/manual without authoring tools | Add no guidance or tools. Preload without authoring tools is a configuration error. |
+
+If a parent removes helpers, child auto/preload admission fails explicitly; it
+does not restore them from the host's broader inventory. Manual mode remains
+available without optional helpers. Missing installed catalogs, incompatible
+packages/tasks/topics, malformed metadata and unavailable required helpers are
+errors. This service performs no hidden downloads or filesystem reads.
+
+`resolve_context` accepts the parsed ChatMD `authoring_context` declaration, checks
+its retained version and preserves source provenance. Plans expose the effective
+capabilities, added helper references, callable pointers, authoring-tool metadata,
+primer intent, preloaded IDs, corpus identity and a fingerprint. Fingerprints bind
+the actual capability metadata, corpus catalog, policy and topic order.
+
+These are admission-plan primitives. The installed reference corpus, real helper
+runners, custom ChatMD help-metadata syntax, registration integration, token-budget
+checks, rendered tool descriptions, effective-history injection and compaction
+rediscovery are still under implementation. A plan requesting one primer is not
+yet evidence that it was inserted into a provider request. No authoring feature
+is advertised as available by these primitives.

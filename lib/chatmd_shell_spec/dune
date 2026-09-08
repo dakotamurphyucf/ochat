@@ -6,6 +6,7 @@
   diagnostic
   tool_schema
   extension_spec
+  authoring_metadata
   chatmd_script_spec
   feature
   path_expr

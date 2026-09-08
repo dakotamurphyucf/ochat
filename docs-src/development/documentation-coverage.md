@@ -277,6 +277,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/agent_response_loop.mli` | [contract](../../lib/chat_response/agent_response_loop.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_runtime.mli` | [contract](../../lib/chat_response/agent_runtime.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chat_response/agent_trace.mli` | [contract](../../lib/chat_response/agent_trace.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/authoring_policy.mli` | [contract](../../lib/chat_response/authoring_policy.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_moderation.mli` | [contract](../../lib/chat_response/chatml_moderation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_moderator.mli` | [contract](../../lib/chat_response/chatml_moderator.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_turn_driver.mli` | [contract](../../lib/chat_response/chatml_turn_driver.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
@@ -393,6 +394,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chatmd/chatmd_source_bundle.mli` | [contract](../../lib/chatmd/chatmd_source_bundle.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
 | `lib/chatmd/prompt.mli` | [contract](../../lib/chatmd/prompt.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/chatmd/source_loader.mli` | [contract](../../lib/chatmd/source_loader.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chatmd_shell_spec/authoring_metadata.mli` | [contract](../../lib/chatmd_shell_spec/authoring_metadata.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/builtin_profile.mli` | [contract](../../lib/chatmd_shell_spec/builtin_profile.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/chatmd_script_spec.mli` | [contract](../../lib/chatmd_shell_spec/chatmd_script_spec.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chatmd_shell_spec/diagnostic.mli` | [contract](../../lib/chatmd_shell_spec/diagnostic.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
