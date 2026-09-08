@@ -21,6 +21,53 @@ import { checkQualification } from '../scripts/verify-production.mjs';
 import redirectWorker from '../redirect/worker.mjs';
 import { browserFixture } from './fixtures/browser-evidence.mjs';
 
+test('every named evidence upload replaces its previous attempt without masking upload failures', async () => {
+  const workflow = parse(
+    await fs.readFile(
+      new URL('../../.github/workflows/website.yml', import.meta.url),
+      'utf8',
+    ),
+  );
+  const uploads = Object.entries(workflow.jobs).flatMap(([job, config]) =>
+    config.steps
+      .filter((step) => step.uses?.startsWith('actions/upload-artifact@'))
+      .map((step) => ({ job, step })),
+  );
+  assert.ok(uploads.length > 0);
+  for (const { job, step } of uploads) {
+    assert.ok(step.with.name, `${job}: evidence must have an explicit name`);
+    assert.equal(
+      step.with.overwrite,
+      true,
+      `${job}/${step.with.name}: reruns must replace evidence`,
+    );
+    assert.ok(
+      !step['continue-on-error'],
+      `${job}: upload failures must remain failures`,
+    );
+  }
+  for (const [job, name] of Object.entries({
+    changes: 'ci-selection',
+    semantics: 'website-semantic-evidence',
+    framework: 'framework-evidence-${{ matrix.tier }}',
+    'deploy-production': 'production-deployment-evidence',
+  })) {
+    const found = uploads.filter(
+      (upload) => upload.job === job && upload.step.with.name === name,
+    );
+    assert.equal(
+      found.length,
+      1,
+      `${job}: preserve the existing evidence name`,
+    );
+    assert.equal(
+      found[0].step.if,
+      'always()',
+      `${job}: retain failed-attempt diagnostics`,
+    );
+  }
+});
+
 test('public promotion honors the manual-review deferral and rejects incomplete hosted checks or stale evidence', () => {
   const artifact = {
     build: {

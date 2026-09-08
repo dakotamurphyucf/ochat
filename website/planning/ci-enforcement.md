@@ -55,6 +55,20 @@ successful shards from an earlier attempt of that same run when the artifact
 hash and revision match; rerun uploads replace their own named evidence.
 A previous run's browser summary cannot qualify a new release.
 
+All named evidence uploads use `overwrite: true`, including change selection,
+semantic reports, framework tiers and production-deployment evidence. A job rerun
+replaces its own artifact under the existing name, so a successful retry does
+not fail solely because that name was uploaded by the earlier attempt. Upload
+errors still fail jobs; replacement does not waive any test or release check.
+
+Replacement deletes the previous artifact and creates a new artifact ID. Download
+an earlier attempt's evidence before rerunning if you need to preserve it; the
+named artifact represents the latest upload, not a history of every attempt.
+Other jobs' artifacts are not replaced by that job. Consumers continue to use
+same-run names and verify the required revision and content hashes. A retried
+publisher must still target current main and pass exact-release verification.
+See the [artifact upload contract](https://github.com/actions/upload-artifact/blob/v4/README.md#inputs).
+
 The additional runners and artifact transfer have overhead. Compare time to the
 required gate, individual browser durations, total validation runner time and
 failures in the [qualification record](ci-qualification.md) before expanding
