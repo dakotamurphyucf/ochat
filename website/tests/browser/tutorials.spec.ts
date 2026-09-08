@@ -1,4 +1,4 @@
-import { test, expect } from '@playwright/test';
+import { test, expect, type Browser, type Page } from '@playwright/test';
 import AxeBuilder from '@axe-core/playwright';
 import fs from 'node:fs';
 import { createHash } from 'node:crypto';
@@ -174,9 +174,12 @@ test('tutorial instructions preserve tool, batch, and source-context qualificati
   }
 });
 
-test('all example files can be read inline without JavaScript or downloads, with literal source preserved', async ({
-  browser,
-}) => {
+// Keep catalog and guide checks independent as the example inventory grows.
+// Every case retains literal-byte, native-reading, and no-download coverage.
+async function withNativeSourceReader(
+  browser: Browser,
+  read: (page: Page) => Promise<void>,
+) {
   const context = await browser.newContext({ javaScriptEnabled: false });
   try {
     const page = await context.newPage();
@@ -184,10 +187,21 @@ test('all example files can be read inline without JavaScript or downloads, with
     page.on('download', (download) =>
       downloads.push(download.suggestedFilename()),
     );
-    await page.goto('/docs/examples/');
-    for (const example of report.examples.filter(
-      (e: { files: unknown[] }) => e.files.length,
-    )) {
+    await read(page);
+    expect(downloads).toEqual([]);
+  } finally {
+    await context.close();
+  }
+}
+
+for (const example of report.examples.filter(
+  (e: { files: unknown[] }) => e.files.length,
+)) {
+  test(`catalog ${example.id} preserves all inline files without JavaScript or downloads`, async ({
+    browser,
+  }) => {
+    await withNativeSourceReader(browser, async (page) => {
+      await page.goto('/docs/examples/');
       const viewer = page.locator(`[data-example-source="${example.id}"]`);
       await viewer.locator(':scope > summary').click();
       for (const file of example.files) {
@@ -209,7 +223,14 @@ test('all example files can be read inline without JavaScript or downloads, with
           0,
         );
       }
-    }
+    });
+  });
+}
+
+test('tutorial entrypoints preserve inline source without JavaScript or downloads', async ({
+  browser,
+}) => {
+  await withNativeSourceReader(browser, async (page) => {
     for (const tutorial of report.tutorials) {
       await page.goto(tutorial.route);
       for (const [index, id] of tutorial.examples.entries()) {
@@ -228,6 +249,13 @@ test('all example files can be read inline without JavaScript or downloads, with
         );
       }
     }
+  });
+});
+
+test('associated guide entrypoints preserve inline source without JavaScript or downloads', async ({
+  browser,
+}) => {
+  await withNativeSourceReader(browser, async (page) => {
     for (const example of report.examples.filter(
       (e: { files: unknown[]; tutorialRoute: string }) =>
         e.files.length &&
@@ -245,10 +273,7 @@ test('all example files can be read inline without JavaScript or downloads, with
           .content,
       );
     }
-    expect(downloads).toEqual([]);
-  } finally {
-    await context.close();
-  }
+  });
 });
 
 test('inline reader supports keyboard file expansion and horizontal source scrolling', async ({

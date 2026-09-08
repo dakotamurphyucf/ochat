@@ -143,6 +143,25 @@ their own source revisions and artifact hashes; use their uploaded reports when
 preparing a release. The final read-only verification and merge/main run records
 are retained in the evidence directory below.
 
+## Bounded native source-reader checks
+
+The final-records [run 34174591638](https://github.com/dakotamurphyucf/ochat/actions/runs/34174591638)
+passed preview but exposed a WebKit test timeout in production: one 30-second
+case read all 39 catalog files, ten tutorial pages, and associated guide pages.
+The trace reached the first tutorial at 24.76 seconds and the final application
+guides near 30 seconds. Assertions were passing until the aggregate budget expired.
+
+Catalog entries now have independent cases, followed by separate tutorial and
+associated-guide cases. All original visible-source, literal-byte, highlighting,
+accessible-name, escaping, keyboard focusability, and no-download assertions are retained
+with JavaScript disabled. The default per-case timeout remains unchanged. The
+new case count reflects smaller test units, not removed or duplicated source coverage.
+All 45 scoped Linux checks pass across Chromium, Firefox and WebKit in 1.1 minutes;
+individual WebKit cases finish in roughly 3–5 seconds. The complete suite now has
+258 cases, including the same two existing clipboard skips.
+The first successful qualification above records its historical 214-pass count;
+subsequent runs report the expanded case count for the same reader coverage.
+
 ## Publishing boundary
 
 GitHub is the single intended production publisher. The workflow has read-only
