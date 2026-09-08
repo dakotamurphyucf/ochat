@@ -212,3 +212,50 @@ Existing parser-version-1 artifacts with legacy declarations still restore; unkn
 parser/runtime versions fail. Existing moderator binary record layouts are retained
 by additive declaration variants. Extension declarations cannot be interpreted as
 version-1 artifact contents.
+
+## Static script contracts
+
+`Chatml_host_runtime.compile_script` accepts optional `required_bindings` in the
+host's type language. It checks final inferred bindings before resolving the
+program, without evaluating initializers or invoking entrypoints. Missing names,
+wrong arity, incompatible inputs/results and shadowed final definitions reject.
+Shared type variables relate requirements such as moderator `initial_state` and
+`on_event`. Source-level type aliases cannot redefine the host's expected types.
+This is an internal compiler facility; complete admission and isolated compilation
+with enforced time/resource budgets remain unfinished.
+
+`Chatml.Chatml_extension_surface` defines explicit version-1 compiler surfaces:
+
+- `one_off_v1` provides core computation, task composition, diagnostic logging and
+  `Tool.call`. `main(input)` must return `json task`.
+- `tool_v1` adds typed invocation context and outcome aliases. `run(ctx, input)`
+  must return `tool_outcome task`, with exactly two arguments.
+
+Neither surface provides stdout printing, direct model/process access, tool
+approval/rewriting, conversation mutation, session administration, spawning, timers
+or UI operations. Approved background operations will arrive with the job service.
+Compiling a `Tool.call` does not select or authorize a tool; the host still needs
+the exact admitted capability binding and per-call policy checks.
+
+Tool outcomes are tagged ChatML variants, distinct from ordinary JSON:
+
+```ocaml
+let run : tool_context -> json -> tool_outcome task =
+  fun ctx input -> Task.pure(`Complete(input))
+```
+
+The other script outcomes are `Pending(work_ref, acknowledgement)` and
+`Fail(tool_error)`. Work references are tagged `Job(id)`/`Subscription(id)` values;
+error records contain `code`, `message`, `retryable` and JSON `details`. These tags
+use ChatML's backtick syntax. Host cancellation is not a script-constructible
+success or outcome tag. A type-correct work reference still requires runtime
+ownership and lifecycle validation.
+
+`tool_context` includes the version, invocation/provider/session IDs, generation,
+origin, parent invocation/job references, tool identity/revision, capability
+fingerprint, creation/deadline milliseconds, execution limits and selected
+capability descriptors. Descriptors include an opaque ID, name, implementation
+revision, fingerprint and input schema. These are host-provided snapshots; copying
+or modifying a script record cannot change the host's actual execution authority.
+The separate `input` argument contains the validated request. The context does not
+expose transcript items, credentials, filesystem handles or callable OCaml values.

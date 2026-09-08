@@ -115,3 +115,16 @@ match lookup (snd prog) with
 
 Contributions welcome!
 
+
+### Host-required entrypoint types
+
+`check_program_with_surface` accepts optional `required_bindings` as a list of
+binding names and `Chatml_builtin_spec.ty` contracts. After normal inference it
+checks the final bindings against those types, sharing type variables across the
+entire contract. This lets a host relate `initial_state` to a handler's state
+argument/result and enforce exact function arity without running source code.
+Expected types come from the host, so source aliases or a later incompatible
+binding cannot bypass the check. The generic host compiler forwards this option.
+
+See [extension compiler surfaces](../../agent-server/extensibility-foundations.md#static-script-contracts)
+for the one-off and standalone tool contracts and their current integration limits.

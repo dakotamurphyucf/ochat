@@ -168,10 +168,17 @@ val default_runtime_config
   -> unit
   -> runtime_config
 
-(** Parse, typecheck, and resolve a script once.  The default surface is
-    {!Builtin_surface.moderator_surface}. *)
+(** Parse, typecheck, and resolve a script once without evaluating initializers
+    or performing tasks. The default surface is {!Builtin_surface.moderator_surface}.
+    [required_bindings] checks final bindings against host-provided type schemes;
+    repeated type variables share one instantiation across the whole contract.
+    Missing bindings, wrong arity and incompatible argument/result types fail
+    compilation. Requirements use the host type language, so source aliases cannot
+    replace the expected types. This check does not authorize execution or bound
+    compiler work; hosts must separately enforce their compilation budgets. *)
 val compile_script
   :  ?surface:Builtin_surface.surface
+  -> ?required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
   -> source:string
   -> unit
   -> (compiled_script, string) result

@@ -905,3 +905,130 @@ let%expect_test "moderator runtime default unconfigured external operation fails
     effects=[]
     |}]
 ;;
+
+let%test_unit "entrypoint contracts check final types without executing source" =
+  let module S = Chatml_builtin_spec in
+  let required_bindings = [ "main", S.TFun ([ S.json_ty ], S.task_ty S.json_ty) ] in
+  let compile source =
+    Runtime.compile_script
+      ~surface:Builtin_surface.core_surface
+      ~required_bindings
+      ~source
+      ()
+  in
+  (* Both an initializer and an uncalled body would fail if validation evaluated
+     either of them. Type checking alone is sufficient and must succeed. *)
+  assert (
+    Result.is_ok
+      (compile
+         {|let poison = fail("initializer ran")
+let main = fun input -> Task.pure(input)|}));
+  assert (Result.is_ok (compile {|let main = fun input -> fail("body ran")|}));
+  List.iter
+    [ "let other = 1"
+    ; "let main = 1"
+    ; "let main = fun input extra -> Task.pure(input)"
+    ; "let main = fun input -> input"
+    ; "let main = fun input -> Task.pure(42)"
+    ; "let main = fun input -> Task.pure(input + 1)"
+    ; "let main = fun input -> Task.pure(input)\nlet main = 42"
+    ; "type json = int\nlet main : json -> json task = fun input -> Task.pure(input)"
+    ]
+    ~f:(fun source -> assert (Result.is_error (compile source)))
+;;
+
+let%test_unit "entrypoint contracts share state constraints across required bindings" =
+  let module S = Chatml_builtin_spec in
+  let required_bindings =
+    [ "initial_state", S.TVar "state"
+    ; "on_event", S.TFun ([ S.TUnit; S.TVar "state"; S.TUnit ], S.task_ty (S.TVar "state"))
+    ]
+  in
+  let compile source =
+    Runtime.compile_script
+      ~surface:Builtin_surface.core_surface
+      ~required_bindings
+      ~source
+      ()
+  in
+  assert (
+    Result.is_ok
+      (compile
+         {|let initial_state = 0
+let on_event = fun ctx state event -> Task.pure(state + 1)|}));
+  assert (
+    Result.is_error
+      (compile
+         {|let initial_state = "wrong state"
+let on_event = fun ctx state event -> Task.pure(state + 1)|}));
+  assert (
+    Result.is_error
+      (compile
+         {|let initial_state = 0
+let on_event = fun ctx state event -> Task.pure("wrong result")|}));
+  assert (
+    Result.is_error
+      (Runtime.compile_script
+         ~required_bindings:[ "main", S.TInt; "main", S.TInt ]
+         ~source:"let main = 1"
+         ()))
+;;
+
+let%test_unit "restricted extension surfaces expose computation without ambient effects" =
+  let module X = Chatml_extension_surface in
+  let compile source =
+    Runtime.compile_script
+      ~surface:X.tool_v1
+      ~required_bindings:X.tool_entrypoints
+      ~source
+      ()
+  in
+  List.iter
+    [ {|let run : tool_context -> json -> tool_outcome task = fun ctx input -> Task.pure(`Complete(input))|}
+    ; {|let run = fun ctx input -> Task.bind(Tool.call("selected", input), fun result -> Task.pure(`Complete(input)))|}
+    ; {|let run = fun ctx input -> Task.pure(`Pending(`Job("job_owned"), input))|}
+    ; {|let run = fun ctx input -> Task.pure(`Fail({code="example"; message="failed"; retryable=false; details=input}))|}
+    ; {|let run = fun ctx input -> Task.bind(Log.info(ctx.invocation_id), fun ignored -> Task.pure(`Complete(input)))|}
+    ]
+    ~f:(fun source ->
+      match compile source with
+      | Ok _ -> ()
+      | Error message -> failwith message);
+  List.iter
+    [ "print(\"stdout\")"
+    ; "Process.run(\"sh\", input)"
+    ; "Model.call(\"agent\", input)"
+    ; "Tool.approve()"
+    ; "Tool.spawn(\"selected\", input)"
+    ; "Turn.append_notice(\"message\")"
+    ; "Runtime.request_turn()"
+    ; "Schedule.after_ms(1, input)"
+    ; "Ui.notify(\"message\")"
+    ; "Approval.ask_text(\"question\")"
+    ]
+    ~f:(fun expression ->
+      assert (Result.is_error (compile ("let run = fun ctx input -> " ^ expression))));
+  assert (
+    Result.is_error
+      (compile {|let run = fun ctx input -> Task.pure(`Cancelled("forged"))|}));
+  assert (
+    Result.is_error
+      (compile {|let run = fun ctx input -> Task.pure(`Pending("job_owned", input))|}));
+  assert (
+    Result.is_error
+      (compile {|let run = fun ctx input -> Task.pure(`Complete(ctx.items))|}));
+  assert (
+    Result.is_ok
+      (Runtime.compile_script
+         ~surface:X.one_off_v1
+         ~required_bindings:X.one_off_entrypoints
+         ~source:"let main = fun input -> Task.pure(input)"
+         ()));
+  assert (
+    Result.is_error
+      (Runtime.compile_script
+         ~surface:X.one_off_v1
+         ~required_bindings:X.one_off_entrypoints
+         ~source:"let main = fun input -> Task.pure(`Complete(input))"
+         ()))
+;;

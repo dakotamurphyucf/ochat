@@ -2245,7 +2245,10 @@ let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stm
 
     The snapshot produced on success is the only source of type information
     consulted by the resolver in production. *)
-let check_program_with_surface (surface : Builtin_surface.surface) (prog : program)
+let check_program_with_surface
+      ?(required_bindings : (string * Builtin_spec.ty) list = [])
+      (surface : Builtin_surface.surface)
+      (prog : program)
   : (checked_program, diagnostic) result
   =
   let state = create_state () in
@@ -2255,10 +2258,29 @@ let check_program_with_surface (surface : Builtin_surface.surface) (prog : progr
     (* Each element of [prog] now carries its own source span.  The current
        type-checker, however, does not yet make use of that information.  We
        therefore simply discard the annotation for the time being. *)
-    let _final_env, _final_types =
+    let final_env, _final_types =
       List.fold prog.stmts ~init:(env, types) ~f:(fun (env_acc, types_acc) stmt_node ->
         infer_stmt state env_acc types_acc stmt_node.value)
     in
+    (* Instantiate the entire contract together: repeated type variables relate
+       bindings such as initial_state and on_event. Checking inferred bindings
+       avoids evaluating initializers or introducing shadowable source wrappers. *)
+    (match
+       List.find_a_dup (List.map required_bindings ~f:fst) ~compare:String.compare
+     with
+     | Some name -> raise (Type_error ("Duplicate required binding '" ^ name ^ "'"))
+     | None -> ());
+    let required_types =
+      Tuple (List.map required_bindings ~f:(fun (_, ty) -> typ_of_builtin_ty ty))
+      |> instantiate state
+    in
+    (match required_types with
+     | Tuple types ->
+       List.iter2_exn required_bindings types ~f:(fun (name, _) expected ->
+         try unify state (lookup state final_env name) expected with
+         | Type_error message ->
+           raise (Type_error ("Invalid entrypoint '" ^ name ^ "': " ^ message)))
+     | _ -> assert false);
     Ok { span_types = Hashtbl.copy state.span_types }
   with
   | Type_error msg -> Error { message = msg; span = None }

@@ -752,13 +752,17 @@ let expect_callable (name : string) (value : Lang.value) : (Lang.value, string) 
   | _ -> Error (Printf.sprintf "Entrypoint '%s' is not callable" name)
 ;;
 
-let compile_script ?(surface = Builtin_surface.moderator_surface) ~(source : string) ()
+let compile_script
+      ?(surface = Builtin_surface.moderator_surface)
+      ?(required_bindings = [])
+      ~(source : string)
+      ()
   : (compiled_script, string) result
   =
   match Parse.parse_program source with
   | Error diagnostic -> Error (Parse.format_diagnostic source diagnostic)
   | Ok program ->
-    (match Typechecker.check_program_with_surface surface program with
+    (match Typechecker.check_program_with_surface ~required_bindings surface program with
      | Error diagnostic -> Error (Typechecker.format_diagnostic source diagnostic)
      | Ok checked ->
        let resolved = Resolver.resolve_checked_program checked program in
@@ -1135,36 +1139,36 @@ and interpret_task
   else (
     exec.fuel <- exec.fuel - 1;
     match task with
-  | Lang.TPure value -> continue_with_value session exec ~frames value
-  | Lang.TFail msg -> continue_with_error session exec ~frames msg
-  | Lang.TBind (next_task, k) ->
-    interpret_task session exec ~frames:(Bind_frame k :: frames) next_task
-  | Lang.TMap (next_task, f) ->
-    interpret_task session exec ~frames:(Map_frame f :: frames) next_task
-  | Lang.TCatch (next_task, handler) ->
-    let catch_frame =
-      Catch_frame
-        { handler
-        ; saved_local_effects_rev = exec.local_effects_rev
-        ; saved_emitted_rev = exec.emitted_rev
-        ; saved_end_session_requested = exec.end_session_requested
-        }
-    in
-    interpret_task session exec ~frames:(catch_frame :: frames) next_task
-  | Lang.TPerform eff ->
-    (match dispatch_effect session exec ~spawned:false eff with
-     | Error msg -> continue_with_error session exec ~frames msg
-     | Ok (Effect_value value) -> continue_with_value session exec ~frames value
-     | Ok (Effect_suspend request) -> Ok (Task_suspend { exec; frames; request }))
-  | Lang.TSpawn eff ->
-    if exec.tasks >= exec.max_tasks
-    then continue_with_error session exec ~frames "ChatML task limit exceeded"
-    else (
-      exec.tasks <- exec.tasks + 1;
-      match dispatch_effect session exec ~spawned:true eff with
-      | Error msg -> continue_with_error session exec ~frames msg
-      | Ok (Effect_value value) -> continue_with_value session exec ~frames value
-      | Ok (Effect_suspend _) -> assert false))
+    | Lang.TPure value -> continue_with_value session exec ~frames value
+    | Lang.TFail msg -> continue_with_error session exec ~frames msg
+    | Lang.TBind (next_task, k) ->
+      interpret_task session exec ~frames:(Bind_frame k :: frames) next_task
+    | Lang.TMap (next_task, f) ->
+      interpret_task session exec ~frames:(Map_frame f :: frames) next_task
+    | Lang.TCatch (next_task, handler) ->
+      let catch_frame =
+        Catch_frame
+          { handler
+          ; saved_local_effects_rev = exec.local_effects_rev
+          ; saved_emitted_rev = exec.emitted_rev
+          ; saved_end_session_requested = exec.end_session_requested
+          }
+      in
+      interpret_task session exec ~frames:(catch_frame :: frames) next_task
+    | Lang.TPerform eff ->
+      (match dispatch_effect session exec ~spawned:false eff with
+       | Error msg -> continue_with_error session exec ~frames msg
+       | Ok (Effect_value value) -> continue_with_value session exec ~frames value
+       | Ok (Effect_suspend request) -> Ok (Task_suspend { exec; frames; request }))
+    | Lang.TSpawn eff ->
+      if exec.tasks >= exec.max_tasks
+      then continue_with_error session exec ~frames "ChatML task limit exceeded"
+      else (
+        exec.tasks <- exec.tasks + 1;
+        match dispatch_effect session exec ~spawned:true eff with
+        | Error msg -> continue_with_error session exec ~frames msg
+        | Ok (Effect_value value) -> continue_with_value session exec ~frames value
+        | Ok (Effect_suspend _) -> assert false))
 ;;
 
 let commit_exec (session : session) (exec : exec_ctx) ~(new_state : Lang.value) : unit =

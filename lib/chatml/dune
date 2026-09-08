@@ -12,7 +12,8 @@
   frame_env
   chatml_value_codec
   chatml_builtin_spec
-  chatml_builtin_surface)
+  chatml_builtin_surface
+  chatml_extension_surface)
  (libraries core jsonaf menhirLib source)
  (preprocess
   (pps ppx_jane)))
