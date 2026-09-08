@@ -9,6 +9,7 @@ type t =
   ; permissions : Permission.t list
   ; grants : Grant.t list
   ; jobs : Job.t list
+  ; extension_status : Extension_status.t list [@sexp.list]
   ; schedules : Schedule.t list
   ; active_tool_calls : Jsonaf.t list
   ; active_agent_calls : Jsonaf.t list
@@ -38,6 +39,7 @@ let to_json t =
     ; Some ("permissions", list Permission.to_json t.permissions)
     ; Some ("grants", list Grant.to_json t.grants)
     ; Some ("jobs", list Job.to_json t.jobs)
+    ; Some ("extension_status", list Extension_status.to_json t.extension_status)
     ; Some ("schedules", list Schedule.to_json t.schedules)
     ; Some ("active_tool_calls", `Array t.active_tool_calls)
     ; Some ("active_agent_calls", `Array t.active_agent_calls)
@@ -110,6 +112,9 @@ let of_json json =
   let%bind archived_revisions =
     Json_codec.optional_as fields "archived_revisions" (Json_codec.list nonnegative_int64)
   in
+  let%bind extension_status =
+    Json_codec.optional_as fields "extension_status" Extension_status.list_of_json
+  in
   let%bind canonical_history, effective_history, deferred_entries =
     decode_history fields
   in
@@ -120,7 +125,13 @@ let of_json json =
   let%bind latest_event_sequence =
     Json_codec.required_as fields "latest_event_sequence" nonnegative_int64
   in
+  let extension_status = Option.value extension_status ~default:[] in
   if
+    List.exists extension_status ~f:(fun status ->
+      status.Extension_status.generation > session.generation)
+  then
+    Error (Protocol_error.invalid_request "snapshot contains future extension generation")
+  else if
     (not (Int64.equal revision session.revision))
     || not (Int64.equal latest_event_sequence session.latest_event_sequence)
   then Error (Protocol_error.invalid_request "snapshot and session positions disagree")
@@ -134,6 +145,7 @@ let of_json json =
       ; permissions
       ; grants
       ; jobs
+      ; extension_status
       ; schedules
       ; active_tool_calls
       ; active_agent_calls

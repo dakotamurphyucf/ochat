@@ -1157,6 +1157,19 @@ let%expect_test
     let repeated =
       transition delivered.state (Delivery_committed (committed, entry)) |> protocol_ok
     in
+    let status_updates transition =
+      List.filter_map transition.Agent_session.Session_transition.events ~f:(fun event ->
+        Agent_protocol.Event.Durable.extension_status event |> protocol_ok)
+    in
+    assert (
+      Poly.equal
+        (status_updates ready)
+        [ Agent_session.Session_state.extension_status ready.state ]);
+    assert (
+      Poly.equal
+        (status_updates delivered)
+        [ Agent_session.Session_state.extension_status delivered.state ]);
+    assert (List.is_empty (status_updates repeated));
     print_s [%sexp (List.length repeated.state.conversation.canonical_history : int)];
     let restored =
       Agent_session.Session_persistence.restore_snapshot
@@ -3356,4 +3369,75 @@ let%expect_test
     failure=false archives=1 original_preserved=true idle=true
     failure=true archives=0 original_preserved=true idle=true
     |}]
+;;
+
+let%expect_test
+    "extension status journal replay preserves projection and rejects future codecs"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    let _, staged, resolved, _, _ = extension_fixture workspace_instance in
+    let published = Agent_protocol.Invocation.publish resolved |> protocol_ok in
+    let transition =
+      Agent_session.Session_transition.apply
+        ~now:timestamp
+        staged
+        ~delta:(Invocation_changed published)
+        ~payloads:[]
+      |> protocol_ok
+    in
+    let transaction events =
+      Agent_store.Transaction.create
+        ~session_id
+        ~generation:0
+        ~transaction_sequence:transition.state.counters.transaction_sequence
+        ~previous_transaction_hash:None
+        ~session_revision:transition.state.counters.revision
+        ~first_event_sequence:
+          (Some (List.hd_exn events).Agent_protocol.Event.Durable.sequence)
+        ~last_event_sequence:
+          (Some (List.last_exn events).Agent_protocol.Event.Durable.sequence)
+        ~accepted_at_ns:
+          (Agent_protocol.Timestamp.to_time_ns timestamp
+           |> Time_ns.to_int_ns_since_epoch
+           |> Int64.of_int)
+        ~command_audit:None
+        ~delta:
+          (Sexp.to_string_mach (Agent_session.Session_delta.sexp_of_t transition.delta))
+        ~durable_events:
+          (List.map events ~f:(fun event ->
+             Sexp.to_string_mach (Agent_protocol.Event.Durable.sexp_of_t event)))
+      |> store_ok
+      |> Agent_store.Transaction.encode
+      |> Agent_store.Transaction.decode
+      |> store_ok
+    in
+    let journal = transaction transition.events in
+    let replayed =
+      Agent_session.Session_persistence.apply_transaction staged journal |> store_ok
+    in
+    let statuses = Agent_session.Session_state.extension_status replayed in
+    let events = Agent_session.Session_persistence.durable_events journal |> store_ok in
+    let updates =
+      List.filter_map events ~f:(fun event ->
+        Agent_protocol.Event.Durable.extension_status event |> protocol_ok)
+    in
+    assert (Poly.equal updates [ statuses ]);
+    let corrupt =
+      List.map events ~f:(fun event ->
+        match event.kind, event.payload with
+        | Session_updated, `Object fields ->
+          { event with
+            payload =
+              `Object
+                (("extension_status", `Array [ `Object [ "version", `Number "99" ] ])
+                 :: List.filter fields ~f:(fun (name, _) ->
+                   not (String.equal name "extension_status")))
+          }
+        | _ -> event)
+    in
+    assert (
+      Result.is_error
+        (Agent_session.Session_persistence.durable_events (transaction corrupt))));
+  print_endline "journal state/status agree; future status codec rejected during replay";
+  [%expect {| journal state/status agree; future status codec rejected during replay |}]
 ;;

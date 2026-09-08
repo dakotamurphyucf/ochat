@@ -79,6 +79,23 @@ let%expect_test "embedded host uses the shared protocol and process-bound sessio
           }
       in
       let embedded = Agent_server.Embedded.start ~sw ~env options |> protocol_ok in
+      let probe = Agent_server.Embedded.connect embedded in
+      let initialized =
+        Agent_client.Session_handle.initialize
+          probe
+          ~implementation_name:"host-metadata"
+          ~implementation_version:"test"
+        |> protocol_ok
+      in
+      let metadata = Option.value_exn initialized.extensions in
+      assert (
+        Agent_protocol.Extension_capabilities.equal_host metadata.host Embedded_transient);
+      assert (
+        Agent_protocol.Extension_capabilities.equal_journal_flush
+          metadata.journal_flush
+          Synced);
+      assert (List.is_empty metadata.available_features);
+      Agent_client.Connection.close probe;
       let session_id = Agent_server.Embedded.session_id embedded in
       let response =
         Agent_client.Connection.request

@@ -12,6 +12,7 @@ type options =
   { implementation_name : string
   ; implementation_version : string
   ; features : string list
+  ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
   ; factory_limits : Session_factory.limits
@@ -62,6 +63,7 @@ type health_services =
 let default_options =
   { implementation_name = "ochat-agent-server"
   ; implementation_version = "dev"
+  ; extension_host = Daemon
   ; features =
       [ "attachments.multi_client"
       ; "events.durable"
@@ -291,15 +293,32 @@ let implementation options =
     ~version:options.implementation_version
 ;;
 
-let enabled_features options requested =
+(* Qualification is deliberately empty until the execution services pass their
+   host-specific acceptance suites. Configuring a feature string cannot enable it. *)
+let extension_capabilities options config =
+  Agent_protocol.Extension_capabilities.create
+    ~host:options.extension_host
+    ~journal_flush:
+      (match durability config.Config.server with
+       | Flush -> Synced
+       | Buffered -> Buffered)
+    ~available_features:[]
+  |> function
+  | Ok value -> value
+  | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
+;;
+
+let enabled_features options capabilities requested =
   List.filter options.features ~f:(fun feature ->
     List.mem requested feature ~equal:String.equal)
+  |> Agent_protocol.Extension_capabilities.filter_available capabilities
 ;;
 
 let initialize
       env
       options
       ~event_replay_capacity
+      ~capabilities
       implementation
       store
       status_ref
@@ -327,7 +346,8 @@ let initialize
       ~selected_version
       ~implementation
       ~server_id:(Agent_store.Session_store.server_id store)
-      ~enabled_features:(enabled_features options request.features)
+      ~enabled_features:(enabled_features options capabilities request.features)
+      ~extensions:(Some capabilities)
       ~principal
       ~limits:options.protocol_limits
       ~event_retention:
@@ -368,7 +388,10 @@ let server_info (options : options) implementation (config : Config.t) store =
     { server_id = Agent_store.Session_store.server_id store
     ; implementation
     ; protocol_version = Agent_protocol.Version.initial
-    ; features = options.features
+    ; features =
+        Agent_protocol.Extension_capabilities.filter_available
+          (extension_capabilities options config)
+          options.features
     ; transports = transports config
     ; limits = options.protocol_limits
     ; unsafe_development_auth =
@@ -797,6 +820,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
            env
            options
            ~event_replay_capacity:factory_limits.event_replay_capacity
+           ~capabilities:(extension_capabilities options config)
            implementation
            store
            status_ref)

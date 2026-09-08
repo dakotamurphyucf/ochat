@@ -165,7 +165,15 @@ let apply_transaction state transaction =
 
 let durable_events transaction =
   let decode encoded =
-    try Ok (Sexp.of_string encoded |> [%of_sexp: Agent_protocol.Event.Durable.t]) with
+    try
+      let event = Sexp.of_string encoded |> [%of_sexp: Agent_protocol.Event.Durable.t] in
+      match Agent_protocol.Event.Durable.extension_status event with
+      | Ok _ -> Ok event
+      | Error error ->
+        Error
+          (Agent_store.Store_error.Corrupt
+             ("durable extension status decode failed: " ^ error.message))
+    with
     | exn ->
       Error
         (Agent_store.Store_error.Corrupt

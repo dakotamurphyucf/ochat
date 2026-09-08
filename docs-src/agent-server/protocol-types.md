@@ -203,6 +203,85 @@ val of_method_and_params : method_:string -> params:Jsonaf.t -> (t, Error.t) res
 val supported_methods : string list
 ```
 
+## completion
+
+[JSON codec](../../lib/agent_protocol/completion.ml) · [interface](../../lib/agent_protocol/completion.mli)
+
+```ocaml
+(** Terminal background outcomes, separate from initial tool acknowledgements. *)
+type t =
+  | Succeeded of Jsonaf.t
+  | Failed of Invocation.tool_error
+  | Cancelled of string
+  | Expired
+[@@deriving sexp]
+
+type wake =
+  | Request_turn
+  | Next_turn
+  | No_wake
+[@@deriving compare, equal, sexp]
+
+val validate : t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+val wake_to_json : wake -> Jsonaf.t
+val wake_of_json : Jsonaf.t -> (wake, Error.t) result
+```
+
+## delivery
+
+[JSON codec](../../lib/agent_protocol/delivery.ml) · [interface](../../lib/agent_protocol/delivery.mli)
+
+```ocaml
+(** Durable notification intent. Committing a delivery is only valid in the
+    actor transaction that inserts its matching history entry. *)
+type source =
+  | Moderator
+  | Job_adapter
+  | External_ingress
+[@@deriving compare, equal, sexp]
+
+type context =
+  { id : Id.Delivery.t
+  ; session_id : Id.Session.t
+  ; generation : int
+  ; invocation_id : Id.Invocation.t option
+  ; work : Invocation.work option
+  ; correlation : string
+  ; source : source
+  ; completion : Completion.t
+  ; wake : Completion.wake
+  ; created_at : Timestamp.t
+  }
+[@@deriving sexp]
+
+type status =
+  | Pending
+  | Committed of
+      { history_id : History_entry.Id.t
+      ; at : Timestamp.t
+      }
+  | Failed of Invocation.tool_error
+[@@deriving sexp]
+
+type t = private
+  { context : context
+  ; attempt : int
+  ; status : status
+  }
+[@@deriving sexp]
+
+val create : context -> (t, Error.t) result
+val validate : t -> (unit, Error.t) result
+val commit : t -> history_id:History_entry.Id.t -> now:Timestamp.t -> (t, Error.t) result
+val fail : t -> Invocation.tool_error -> (t, Error.t) result
+val retry : t -> max_attempts:int -> (t, Error.t) result
+val validate_transition : previous:t option -> t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
 ## envelope
 
 [JSON codec](../../lib/agent_protocol/envelope.ml) · [interface](../../lib/agent_protocol/envelope.mli)
@@ -375,6 +454,12 @@ module Durable : sig
   (** [to_json t] encodes the parameters of a [session.event] notification. *)
   val to_json : t -> Jsonaf.t
 
+  (** Optional complete status projection on [Session_updated]. Older clients
+      ignore this field; an empty list explicitly clears previously held state. *)
+  val with_extension_status : t -> Extension_status.t list -> t
+
+  val extension_status : t -> (Extension_status.t list option, Error.t) result
+
   (** [with_replacement_snapshot event snapshot] adds complete replacement state
       to a [Session_updated] event and binds its session revision/sequence to the
       event. Other event kinds are unchanged. Filter the snapshot for the reader
@@ -437,6 +522,83 @@ module Recoverable : sig
   (** [to_notification t] wraps the live event in a JSON-RPC notification. *)
   val to_notification : t -> Envelope.t
 end
+```
+
+## extension_capabilities
+
+[JSON codec](../../lib/agent_protocol/extension_capabilities.ml) · [interface](../../lib/agent_protocol/extension_capabilities.mli)
+
+```ocaml
+(** Versioned host qualification, separate from record-codec support. Presence of
+    this metadata does not enable any model-visible tool or authorize effects. *)
+
+type host =
+  | Daemon
+  | Embedded_durable
+  | Embedded_transient
+  | Direct
+[@@deriving compare, equal, sexp]
+
+type journal_flush =
+  | Synced
+  | Buffered
+  | Memory
+[@@deriving compare, equal, sexp]
+
+type t = private
+  { host : host
+  ; journal_flush : journal_flush
+  ; available_features : string list
+  }
+[@@deriving sexp]
+
+val known_features : string list
+
+val create
+  :  host:host
+  -> journal_flush:journal_flush
+  -> available_features:string list
+  -> (t, Error.t) result
+
+(** Filter only the extension namespace; preserve unrelated protocol features.
+    Host options cannot advertise an extension that has not been qualified. *)
+val filter_available : t -> string list -> string list
+
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## extension_status
+
+[JSON codec](../../lib/agent_protocol/extension_status.ml) · [interface](../../lib/agent_protocol/extension_status.mli)
+
+```ocaml
+(** Payload-free extension lifecycle summaries. These deliberately omit arguments,
+    results, errors, schemas, capability identities and arbitrary correlation text.
+    Servers must still filter them by the principal's security-view scope. *)
+
+type kind =
+  | Invocation
+  | Subscription
+  | Delivery
+[@@deriving compare, equal, sexp]
+
+type t = private
+  { kind : kind
+  ; id : string
+  ; generation : int
+  ; state : string
+  }
+[@@deriving sexp]
+
+val invocation : Invocation.t -> t
+val subscription : Subscription.t -> t
+val delivery : Delivery.t -> t
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Rejects duplicate identities, including ambiguous updates in one event. *)
+val list_of_json : Jsonaf.t -> (t list, Error.t) result
 ```
 
 ## grant
@@ -569,6 +731,8 @@ end
 ```ocaml
 (** Presentation-neutral canonical and moderated transcript projections. *)
 
+type delivery_id = Id.Delivery.t [@@deriving sexp]
+
 module Id : sig
   type t = History_entry.Id.t [@@deriving compare, hash, sexp]
 
@@ -597,6 +761,7 @@ type provenance =
   | Canonical
   | Moderator_inserted
   | Moderator_replaced of Id.t
+  | Runtime_notification of delivery_id
 [@@deriving sexp]
 
 type entry =
@@ -694,6 +859,10 @@ module Operation : S
 module Event_cursor : S
 module Transaction : S
 module Job : S
+module Invocation : S
+module Subscription : S
+module Delivery : S
+module Capability : S
 module Schedule : S
 module Permission : S
 module Grant : S
@@ -824,6 +993,7 @@ module Response : sig
     ; implementation : Implementation.t
     ; server_id : Id.Server.t
     ; enabled_features : string list
+    ; extensions : Extension_capabilities.t option [@sexp.option]
     ; principal : Principal.t
     ; limits : Limits.t
     ; event_retention : Event_retention.t
@@ -838,6 +1008,7 @@ module Response : sig
     -> implementation:Implementation.t
     -> server_id:Id.Server.t
     -> enabled_features:string list
+    -> extensions:Extension_capabilities.t option
     -> principal:Principal.t
     -> limits:Limits.t
     -> event_retention:Event_retention.t
@@ -848,6 +1019,109 @@ module Response : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+```
+
+## invocation
+
+[JSON codec](../../lib/agent_protocol/invocation.ml) · [interface](../../lib/agent_protocol/invocation.mli)
+
+```ocaml
+(** Versioned tool invocation records. These pure transitions do not grant
+    authority: the actor must admit the caller and validate referenced work
+    ownership before committing a resolution. *)
+
+type origin =
+  | Model
+  | Moderator
+  | Script
+  | Delegated_agent
+  | External_adapter
+[@@deriving compare, equal, sexp]
+
+type work =
+  | Job of Id.Job.t
+  | Subscription of Id.Subscription.t
+[@@deriving compare, sexp]
+
+type tool_error =
+  { code : string
+  ; message : string
+  ; retryable : bool
+  ; details : Jsonaf.t
+  }
+[@@deriving sexp]
+
+type outcome =
+  | Complete of Jsonaf.t
+  | Pending of work * Jsonaf.t
+  | Fail of tool_error
+  | Cancelled of string
+[@@deriving sexp]
+
+type context =
+  { id : Id.Invocation.t
+  ; session_id : Id.Session.t
+  ; generation : int
+  ; origin : origin
+  ; provider_call_id : string option
+  ; parent_invocation : Id.Invocation.t option
+  ; parent_job : Id.Job.t option
+  ; tool_name : string
+  ; implementation_revision : string
+  ; capability_fingerprint : string
+  ; input : Jsonaf.t
+  ; created_at : Timestamp.t
+  ; deadline : Timestamp.t option
+  }
+[@@deriving sexp]
+
+type status =
+  | Admitted
+  | Dispatching
+  | Resolved of outcome
+  | Published of outcome
+[@@deriving sexp]
+
+type t = private
+  { context : context
+  ; status : status
+  }
+[@@deriving sexp]
+
+val create : context -> (t, Error.t) result
+val validate : t -> (unit, Error.t) result
+val dispatch : t -> (t, Error.t) result
+
+(** Records one outcome for a dispatched invocation after checking its owner
+    and generation. A duplicate resolution fails, even for identical output.
+    Referenced job/subscription ownership requires actor service validation. *)
+val resolve
+  :  t
+  -> session_id:Id.Session.t
+  -> generation:int
+  -> outcome
+  -> (t, Error.t) result
+
+(** Host cancellation may resolve admitted or dispatched work. It never
+    replaces an already recorded outcome and does not cancel a pending job. *)
+val cancel : t -> reason:string -> (t, Error.t) result
+
+(** Marks delivery of the initial result. Idempotent after publication; no
+    provider-history insertion or external effects are performed here. *)
+val publish : t -> (t, Error.t) result
+
+(** Checks a proposed durable replacement, including immutable context and
+    outcome. New records must be admitted; transitions cannot skip dispatch
+    except for host cancellation. *)
+val validate_transition : previous:t option -> t -> (unit, Error.t) result
+
+val outcome_to_json : outcome -> Jsonaf.t
+val validate_outcome : outcome -> (unit, Error.t) result
+val work_to_json : work -> Jsonaf.t
+val work_of_json : Jsonaf.t -> (work, Error.t) result
+val outcome_of_json : Jsonaf.t -> (outcome, Error.t) result
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## job
@@ -2220,6 +2494,7 @@ type t =
   ; permissions : Permission.t list
   ; grants : Grant.t list
   ; jobs : Job.t list
+  ; extension_status : Extension_status.t list [@sexp.list]
   ; schedules : Schedule.t list
   ; active_tool_calls : Jsonaf.t list
   ; active_agent_calls : Jsonaf.t list
@@ -2236,6 +2511,62 @@ val to_json : t -> Jsonaf.t
 
 (** [of_json json] rejects snapshots whose top-level revision differs from the
     embedded session summary. *)
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## subscription
+
+[JSON codec](../../lib/agent_protocol/subscription.ml) · [interface](../../lib/agent_protocol/subscription.mli)
+
+```ocaml
+(** Durable moderator subscription identity and terminal state. Workflow-specific
+    state lives in the moderator. These functions do not execute timers or jobs. *)
+type context =
+  { id : Id.Subscription.t
+  ; session_id : Id.Session.t
+  ; generation : int
+  ; invocation_id : Id.Invocation.t
+  ; kind : string
+  ; created_at : Timestamp.t
+  ; deadline : Timestamp.t
+  ; completion_schema : Jsonaf.t option
+  ; wake : Completion.wake
+  ; ingress_capability : Id.Capability.t option
+  }
+[@@deriving sexp]
+
+type t = private
+  { context : context
+  ; epoch : int
+  ; timer_id : Id.Schedule.t option
+  ; job_id : Id.Job.t option
+  ; result : Completion.t option
+  ; completed_at : Timestamp.t option
+  }
+[@@deriving sexp]
+
+val create : context -> (t, Error.t) result
+val validate : t -> (unit, Error.t) result
+
+val arm
+  :  t
+  -> expected_epoch:int
+  -> timer_id:Id.Schedule.t option
+  -> job_id:Id.Job.t option
+  -> (t, Error.t) result
+
+(** First terminal commit wins. A repeat returns the retained winner and [false].
+    A stale epoch cannot complete a still-active subscription. Expiry cannot be
+    recorded before the deadline. Actual work cancellation is a host action. *)
+val finish
+  :  t
+  -> expected_epoch:int
+  -> now:Timestamp.t
+  -> Completion.t
+  -> (t * bool, Error.t) result
+
+val validate_transition : previous:t option -> t -> (unit, Error.t) result
+val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 

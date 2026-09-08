@@ -292,6 +292,13 @@ let start ~sw ~env options =
     Daemon.start
       ~sw
       ~env
+      ~options:
+        { Daemon.default_options with
+          extension_host =
+            (if Option.is_some options.data_root
+             then Embedded_durable
+             else Embedded_transient)
+        }
       ~config:(config options data_root)
       ~tool_dir:options.tool_dir
       ~home:options.home

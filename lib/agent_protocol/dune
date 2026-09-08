@@ -21,6 +21,8 @@
   job
   invocation
   extension_codec
+  extension_status
+  extension_capabilities
   completion
   subscription
   delivery

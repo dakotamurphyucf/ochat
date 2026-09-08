@@ -38,6 +38,7 @@ let snapshot principal (snapshot : Agent_protocol.Snapshot.t) =
   ; permissions = (if security then snapshot.permissions else [])
   ; grants = (if has principal Manage_grants then snapshot.grants else [])
   ; jobs = (if writer then snapshot.jobs else [])
+  ; extension_status = (if security then snapshot.extension_status else [])
   ; schedules = (if writer then snapshot.schedules else [])
   ; active_tool_calls = (if security then snapshot.active_tool_calls else [])
   ; active_agent_calls = (if security then snapshot.active_agent_calls else [])

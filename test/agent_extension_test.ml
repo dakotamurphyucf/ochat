@@ -193,3 +193,107 @@ let%expect_test "completion and wake codecs preserve terminal and delivery disti
     invalid_request
     terminal outcomes and wake policies round-trip |}]
 ;;
+
+let%expect_test
+    "extension summaries contain no business payload and reject ambiguous updates"
+  =
+  let values =
+    [ Extension_status.subscription (subscription ())
+    ; Extension_status.delivery (delivery ())
+    ]
+  in
+  let json = `Array (List.map values ~f:Extension_status.to_json) in
+  let restored = Extension_status.list_of_json json |> get in
+  assert (Poly.equal values restored);
+  let encoded = Jsonaf.to_string json in
+  assert (not (String.is_substring encoded ~substring:"response-test"));
+  assert (not (String.is_substring encoded ~substring:"result"));
+  let value = Extension_status.to_json (List.hd_exn values) in
+  report (Extension_status.list_of_json (`Array [ value; value ]));
+  let change name replacement =
+    match value with
+    | `Object fields ->
+      `Object
+        ((name, replacement)
+         :: List.filter fields ~f:(fun (key, _) -> not (String.equal name key)))
+    | _ -> assert false
+  in
+  List.iter
+    [ change "version" (`Number "2")
+    ; change "generation" (`Number "-1")
+    ; change "id" (`String "inv_wrong_kind")
+    ; change "state" (`String "committed")
+    ; change "payload" (`String "secret")
+    ]
+    ~f:(fun json -> assert (Result.is_error (Extension_status.of_json json)));
+  print_endline
+    "payload-free round-trip; malformed versions, identities and states rejected";
+  [%expect
+    {|
+    invalid_request
+    payload-free round-trip; malformed versions, identities and states rejected
+    |}]
+;;
+
+let%expect_test "record support never implicitly enables execution features" =
+  let features = Extension_capabilities.known_features in
+  let unavailable =
+    Extension_capabilities.create
+      ~host:Daemon
+      ~journal_flush:Synced
+      ~available_features:[]
+    |> get
+  in
+  assert (
+    List.equal
+      String.equal
+      (Extension_capabilities.filter_available
+         unavailable
+         ("events.durable" :: "chatml.future.v99" :: features))
+      [ "events.durable" ]);
+  let qualified =
+    Extension_capabilities.create
+      ~host:Embedded_durable
+      ~journal_flush:Buffered
+      ~available_features:[ "chatml.invocations.v1" ]
+    |> get
+  in
+  assert (
+    List.equal
+      String.equal
+      (Extension_capabilities.filter_available qualified features)
+      [ "chatml.invocations.v1" ]);
+  List.iter [ unavailable; qualified ] ~f:(fun value ->
+    assert (
+      Poly.equal
+        value
+        (Extension_capabilities.of_json (Extension_capabilities.to_json value) |> get)));
+  assert (
+    Result.is_error
+      (Extension_capabilities.create
+         ~host:Direct
+         ~journal_flush:Memory
+         ~available_features:[ "chatml.unknown.v1" ]));
+  let json = Extension_capabilities.to_json unavailable in
+  let change name value =
+    match json with
+    | `Object fields ->
+      `Object
+        ((name, value)
+         :: List.filter fields ~f:(fun (key, _) -> not (String.equal key name)))
+    | _ -> assert false
+  in
+  List.iter
+    [ change "record_version" (`Number "2")
+    ; change "version" (`Number "2")
+    ; change "host" (`String "imaginary")
+    ; change "journal_flush" (`String "exactly_once")
+    ; change "known_features" (`Array [])
+    ]
+    ~f:(fun json -> assert (Result.is_error (Extension_capabilities.of_json json)));
+  print_endline
+    "known codecs remain unavailable; explicit host qualification filters requested \
+     features";
+  [%expect
+    {| known codecs remain unavailable; explicit host qualification filters requested features |}]
+;;

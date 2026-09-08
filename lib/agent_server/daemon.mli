@@ -16,6 +16,7 @@ type options =
   { implementation_name : string
   ; implementation_version : string
   ; features : string list
+  ; extension_host : Agent_protocol.Extension_capabilities.host
   ; protocol_limits : Agent_protocol.Initialize.Limits.t
   ; timing : Agent_protocol.Initialize.Timing.t
   ; factory_limits : Session_factory.limits

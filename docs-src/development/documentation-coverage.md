@@ -146,15 +146,20 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/audit.mli` | [contract](../../lib/agent_protocol/audit.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/blob.mli` | [contract](../../lib/agent_protocol/blob.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/command.mli` | [contract](../../lib/agent_protocol/command.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/completion.mli` | [contract](../../lib/agent_protocol/completion.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/delivery.mli` | [contract](../../lib/agent_protocol/delivery.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/envelope.mli` | [contract](../../lib/agent_protocol/envelope.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/error.mli` | [contract](../../lib/agent_protocol/error.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/event.mli` | [contract](../../lib/agent_protocol/event.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/extension_capabilities.mli` | [contract](../../lib/agent_protocol/extension_capabilities.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/extension_status.mli` | [contract](../../lib/agent_protocol/extension_status.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/grant.mli` | [contract](../../lib/agent_protocol/grant.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/health.mli` | [contract](../../lib/agent_protocol/health.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/history.mli` | [contract](../../lib/agent_protocol/history.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/id.mli` | [contract](../../lib/agent_protocol/id.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/idempotency_key.mli` | [contract](../../lib/agent_protocol/idempotency_key.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/initialize.mli` | [contract](../../lib/agent_protocol/initialize.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/invocation.mli` | [contract](../../lib/agent_protocol/invocation.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/job.mli` | [contract](../../lib/agent_protocol/job.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/json_codec.mli` | [contract](../../lib/agent_protocol/json_codec.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/method_result.mli` | [contract](../../lib/agent_protocol/method_result.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -170,6 +175,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/scope.mli` | [contract](../../lib/agent_protocol/scope.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/session.mli` | [contract](../../lib/agent_protocol/session.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/snapshot.mli` | [contract](../../lib/agent_protocol/snapshot.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/subscription.mli` | [contract](../../lib/agent_protocol/subscription.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/timestamp.mli` | [contract](../../lib/agent_protocol/timestamp.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/version.mli` | [contract](../../lib/agent_protocol/version.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/workspace.mli` | [contract](../../lib/agent_protocol/workspace.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -207,6 +213,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/chatmd_export.mli` | [contract](../../lib/agent_session/chatmd_export.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/compaction_archive.mli` | [contract](../../lib/agent_session/compaction_archive.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/durable_event_log.mli` | [contract](../../lib/agent_session/durable_event_log.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/extension_invariants.mli` | [contract](../../lib/agent_session/extension_invariants.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/history_codec.mli` | [contract](../../lib/agent_session/history_codec.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/history_id_source.mli` | [contract](../../lib/agent_session/history_id_source.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/live_event_buffer.mli` | [contract](../../lib/agent_session/live_event_buffer.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -466,6 +473,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../agent-server/configuration.md) | `docs-src/agent-server/configuration.md` | Current reference/tutorial; offline checker applies. |
 | [page](../agent-server/embedding.md) | `docs-src/agent-server/embedding.md` | Current reference/tutorial; offline checker applies. |
 | [page](../agent-server/environment.md) | `docs-src/agent-server/environment.md` | Current reference/tutorial; offline checker applies. |
+| [page](../agent-server/extensibility-foundations.md) | `docs-src/agent-server/extensibility-foundations.md` | Current reference/tutorial; offline checker applies. |
 | [page](../agent-server/operations.md) | `docs-src/agent-server/operations.md` | Current reference/tutorial; offline checker applies. |
 | [page](../agent-server/operator-contracts.md) | `docs-src/agent-server/operator-contracts.md` | Current reference/tutorial; offline checker applies. |
 | [page](../agent-server/permissions-and-security.md) | `docs-src/agent-server/permissions-and-security.md` | Current reference/tutorial; offline checker applies. |
@@ -484,6 +492,13 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../agent-server/tutorials/shell-agent.md) | `docs-src/agent-server/tutorials/shell-agent.md` | Current reference/tutorial; offline checker applies. |
 | [page](../agent-server/tutorials/stdio-client.md) | `docs-src/agent-server/tutorials/stdio-client.md` | Current reference/tutorial; offline checker applies. |
 | [page](../agent-server/tutorials/unix-daemon.md) | `docs-src/agent-server/tutorials/unix-daemon.md` | Current reference/tutorial; offline checker applies. |
+| [page](../applications/README.md) | `docs-src/applications/README.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../applications/background-workflow.md) | `docs-src/applications/background-workflow.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../applications/change-review.md) | `docs-src/applications/change-review.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../applications/documentation-review.md) | `docs-src/applications/documentation-review.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../applications/headless-report.md) | `docs-src/applications/headless-report.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../applications/repository-onboarding.md) | `docs-src/applications/repository-onboarding.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../applications/research-brief.md) | `docs-src/applications/research-brief.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/README.md) | `docs-src/bin/README.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/chat_tui.doc.md) | `docs-src/bin/chat_tui.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../bin/developer-utilities.md) | `docs-src/bin/developer-utilities.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
@@ -756,3 +771,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../test/chat_tui_type_ahead_debounce_test.doc.md) | `docs-src/test/chat_tui_type_ahead_debounce_test.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../test/chat_tui_type_ahead_test.doc.md) | `docs-src/test/chat_tui_type_ahead_test.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../tools/README.md) | `docs-src/tools/README.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../tutorials/README.md) | `docs-src/tutorials/README.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../tutorials/file-tool.md) | `docs-src/tutorials/file-tool.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../tutorials/specialist.md) | `docs-src/tutorials/specialist.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../tutorials/workflow.md) | `docs-src/tutorials/workflow.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

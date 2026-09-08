@@ -52,3 +52,4 @@ resource ownership, return types and cancellation/error behavior.
 | `workspace_instance` | [contract](../../../lib/agent_session/workspace_instance.mli) | [source](../../../lib/agent_session/workspace_instance.ml) |
 | `workspace_lease` | [contract](../../../lib/agent_session/workspace_lease.mli) | [source](../../../lib/agent_session/workspace_lease.ml) |
 | `workspace_resolver` | [contract](../../../lib/agent_session/workspace_resolver.mli) | [source](../../../lib/agent_session/workspace_resolver.ml) |
+| `extension_invariants` | [contract](../../../lib/agent_session/extension_invariants.mli) | [source](../../../lib/agent_session/extension_invariants.ml) |

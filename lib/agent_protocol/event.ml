@@ -99,6 +99,45 @@ module Durable = struct
     | _ -> Ok None
   ;;
 
+  (* An optional field on the existing session.updated event keeps older clients
+     able to advance the durable cursor without adding an unknown event kind. *)
+  let with_extension_status (event : t) statuses =
+    match event.kind, event.payload with
+    | Session_updated, `Object fields ->
+      { event with
+        payload =
+          `Object
+            (("extension_status", `Array (List.map statuses ~f:Extension_status.to_json))
+             :: List.filter fields ~f:(fun (name, _) ->
+               not (String.equal name "extension_status")))
+      }
+    | _ -> event
+  ;;
+
+  let extension_status (event : t) =
+    let open Result.Let_syntax in
+    match event.kind, event.payload with
+    | Session_updated, `Object fields ->
+      let%bind fields = Json_codec.fields (`Object fields) in
+      let%bind statuses =
+        Json_codec.optional_as fields "extension_status" Extension_status.list_of_json
+      in
+      (match statuses with
+       | None -> Ok None
+       | Some statuses ->
+         let%bind session = Session.of_json event.payload in
+         if
+           Id.Session.compare session.id event.session_id <> 0
+           || List.exists statuses ~f:(fun status ->
+             status.Extension_status.generation > session.generation)
+         then
+           Error
+             (Protocol_error.invalid_request
+                "extension status belongs to another session or future generation")
+         else Ok (Some statuses))
+    | _ -> Ok None
+  ;;
+
   let kind_values =
     [ "session.created", Session_created
     ; "session.state_changed", Session_state_changed

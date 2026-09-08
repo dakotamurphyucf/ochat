@@ -302,6 +302,14 @@ let moderator_projection t =
          (Option.map t.halt_reason ~f:(fun reason -> "halt_reason", `String reason)))
 ;;
 
+let extension_status t =
+  List.map t.invocations ~f:Agent_protocol.Extension_status.invocation
+  @ List.map t.subscriptions ~f:Agent_protocol.Extension_status.subscription
+  @ List.map t.deliveries ~f:Agent_protocol.Extension_status.delivery
+  |> List.sort ~compare:(fun a b ->
+    String.compare a.Agent_protocol.Extension_status.id b.id)
+;;
+
 let snapshot ~now t =
   let grants =
     Security_grant.list
@@ -321,6 +329,7 @@ let snapshot ~now t =
     ; permissions = t.permissions
     ; grants
     ; jobs = t.jobs
+    ; extension_status = extension_status t
     ; schedules = t.schedules
     ; active_tool_calls = []
     ; active_agent_calls = []

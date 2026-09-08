@@ -5,6 +5,10 @@ Use the same method/envelope contract over [Unix](transports/unix.md),
 authentication differ; session semantics do not. This is JSON-RPC-style Ochat
 protocol, not an MCP endpoint.
 
+The [ChatML extension foundations](extensibility-foundations.md) describe additive
+status and host-capability metadata, storage guarantees and the current execution
+feature availability.
+
 ## Initialize and correlate
 
 Send this complete request before other work:

@@ -60,6 +60,24 @@ let apply ~now state ~delta ~payloads =
   let previous = state in
   let%bind state = Session_delta.apply state delta in
   let payloads = projected_payloads ~previous state payloads in
+  let statuses = Session_state.extension_status state in
+  let statuses_changed =
+    not (Poly.equal (Session_state.extension_status previous) statuses)
+  in
+  let payloads =
+    if
+      statuses_changed
+      && not
+           (List.exists payloads ~f:(function
+              | Agent_protocol.Event.Durable.Payload.Session_updated _ -> true
+              | _ -> false))
+    then
+      payloads
+      @ [ Agent_protocol.Event.Durable.Payload.Session_updated
+            (Session_state.summary state)
+        ]
+    else payloads
+  in
   let%bind revision = increment "session revision" state.counters.revision in
   let%bind transaction_sequence =
     increment "transaction sequence" state.counters.transaction_sequence
@@ -72,6 +90,13 @@ let apply ~now state ~delta ~payloads =
   let state = { state with identity; counters } in
   let%map () = Session_state.validate state in
   let events = replacement_events state delta events in
+  let events =
+    if statuses_changed
+    then
+      List.map events ~f:(fun event ->
+        Agent_protocol.Event.Durable.with_extension_status event statuses)
+    else events
+  in
   { state; delta; events }
 ;;
 

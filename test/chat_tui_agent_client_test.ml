@@ -87,6 +87,7 @@ let projection text =
       ; permissions = []
       ; grants = []
       ; jobs = []
+      ; extension_status = []
       ; schedules = []
       ; active_tool_calls = []
       ; active_agent_calls = []
