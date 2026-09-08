@@ -81,5 +81,5 @@
  (name chatml_compilation)
  (public_name ochat.chatml_compilation)
  (modules chatml_compilation)
- (libraries core core_unix eio eio.unix cstruct chatml chatml_host_runtime)
+ (libraries core eio eio.unix mtime chatml chatml_host_runtime)
  (preprocess (pps ppx_jane)))

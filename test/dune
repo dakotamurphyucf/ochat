@@ -906,12 +906,12 @@
 (executable
  (name chatml_compilation_test)
  (modules chatml_compilation_test)
- (libraries core core_unix core_unix.signal_unix eio eio_main chatml chatml_host_runtime chatml_compilation chatmd chatmd_shell_spec chat_response)
+ (libraries core eio eio_main chatml chatml_host_runtime chatml_compilation chatmd chatmd_shell_spec chat_response)
  (preprocess (pps ppx_jane)))
 
 (rule
  (alias runtest-chatml-compilation)
- (action (run %{exe:chatml_compilation_test.exe} %{exe:../bin/ochat_chatml_compiler.exe} %{exe:slow_chatml_compiler.exe})))
+ (action (run %{exe:chatml_compilation_test.exe})))
 
 (alias
  (name runtest)
@@ -932,12 +932,7 @@
 
 (rule
  (alias runtest-generated-admission)
- (action (run %{exe:generated_admission_test.exe} %{exe:../bin/ochat_chatml_compiler.exe} %{exe:slow_chatml_compiler.exe})))
-
-(executable
- (name slow_chatml_compiler)
- (modules slow_chatml_compiler)
- (libraries unix chatml_compilation))
+ (action (run %{exe:generated_admission_test.exe})))
 
 (alias
  (name runtest)

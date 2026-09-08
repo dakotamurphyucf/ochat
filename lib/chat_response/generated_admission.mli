@@ -12,7 +12,8 @@ type t
     loading are rejected; use an explicit inherited capability instead.
 
     Generated lifecycle scripts use extensibility-v1 without direct Model or
-    Process modules. Compilation shares one aggregate wall-time budget.
+    Process modules. Compilation in Eio-managed domains shares one aggregate cooperative time budget;
+    cancellation waits for the current compiler stage to finish.
     This does not create a child, materialize an artifact, authorize model use,
     enforce ongoing revocation, or provide parent-moderator mediation. Those
     remain responsibilities of the owning delegation service. *)
@@ -20,7 +21,6 @@ val prepare
   :  ?limits:Chatml_compilation.limits
   -> ?catalog:Authoring_policy.catalog
   -> env:Eio_unix.Stdenv.base
-  -> worker:string
   -> dir:Eio.Fs.dir_ty Eio.Path.t
   -> ceiling:Tool_capability.t
   -> requested_names:string list

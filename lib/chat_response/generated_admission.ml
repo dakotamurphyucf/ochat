@@ -130,7 +130,6 @@ let prepare
       ?(limits = Chatml_compilation.default_limits)
       ?catalog
       ~env
-      ~worker
       ~dir
       ~ceiling
       ~requested_names
@@ -180,22 +179,23 @@ let prepare
     then error "chatml.invalid_limits" "invalid generated definition compilation limits"
     else (
       try
-        Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) limits.wall_seconds (fun () ->
-          List.fold scripts ~init:(Ok []) ~f:(fun state script ->
-            let%bind compiled = state in
-            let%map program =
-              Chatml_compilation.compile
-                ~limits
-                ~env
-                ~worker
-                ~target:Delegated_moderator_v1
-                ~source:(Spec.script_text script)
-                ()
-              |> Result.map_error ~f:(fun e ->
-                [ D.error ~source:script.source_ref ~code:e.code e.message ])
-            in
-            (script, program) :: compiled)
-          |> Result.map ~f:List.rev)
+        Eio.Time.Timeout.run_exn
+          (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) limits.wall_seconds)
+          (fun () ->
+             List.fold scripts ~init:(Ok []) ~f:(fun state script ->
+               let%bind compiled = state in
+               let%map program =
+                 Chatml_compilation.compile
+                   ~limits
+                   ~env
+                   ~target:Delegated_moderator_v1
+                   ~source:(Spec.script_text script)
+                   ()
+                 |> Result.map_error ~f:(fun e ->
+                   [ D.error ~source:script.source_ref ~code:e.code e.message ])
+               in
+               (script, program) :: compiled)
+             |> Result.map ~f:List.rev)
       with
       | Eio.Time.Timeout ->
         error

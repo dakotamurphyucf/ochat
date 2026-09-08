@@ -148,16 +148,15 @@ let prepare ?(max_source_bytes = 256 * 1024) ~scripts ~capabilities tool =
   prepare_with ~compile ~max_source_bytes ~scripts ~capabilities tool
 ;;
 
-let prepare_isolated
+let prepare_in_domain
       ?(limits = Chatml_compilation.default_limits)
       ~env
-      ~worker
       ~scripts
       ~capabilities
       tool
   =
   let compile ~target ~source =
-    Chatml_compilation.compile ~limits ~env ~worker ~target ~source ()
+    Chatml_compilation.compile ~limits ~env ~target ~source ()
   in
   prepare_with
     ~compile
@@ -177,10 +176,9 @@ let prepared_tools definition = definition.prepared_tools
 let compiled_scripts definition = definition.compiled_scripts
 let definition_fingerprint definition = definition.definition_fingerprint
 
-let prepare_definition_isolated
+let prepare_definition_in_domain
       ?(limits = Chatml_compilation.default_limits)
       ~env
-      ~worker
       ~capabilities
       elements
   =
@@ -275,67 +273,67 @@ let prepare_definition_isolated
     match Hashtbl.find cache key with
     | Some compiled -> Ok compiled
     | None ->
-      let%map compiled =
-        Chatml_compilation.compile ~limits ~env ~worker ~target ~source ()
-      in
+      let%map compiled = Chatml_compilation.compile ~limits ~env ~target ~source () in
       Hashtbl.set cache ~key ~data:compiled;
       compiled
   in
   try
-    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) limits.wall_seconds (fun () ->
-      let%bind compiled_scripts =
-        List.fold scripts ~init:(Ok []) ~f:(fun result script ->
-          let%bind compiled = result in
-          let target =
-            match script.Spec.kind with
-            | Moderator_script -> Chatml_compilation.Moderator_v1
-            | Tool_script -> Tool_v1
-          in
-          compile ~target ~source:(Spec.script_text script)
-          |> Result.map ~f:(fun program -> (script, program) :: compiled)
-          |> Result.map_error ~f:(fun error ->
-            [ D.error ~source:script.source_ref ~code:error.code error.message ]))
-        |> Result.map ~f:List.rev
-      in
-      let%map prepared_tools =
-        List.fold tools ~init:(Ok []) ~f:(fun result tool ->
-          let%bind prepared = result in
-          let id =
-            match tool.Spec.implementation with
-            | Moderator id -> id
-            | Standalone { script; _ } -> script
-          in
-          (* Registry validation established the script identity and kind.
+    Eio.Time.Timeout.run_exn
+      (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) limits.wall_seconds)
+      (fun () ->
+         let%bind compiled_scripts =
+           List.fold scripts ~init:(Ok []) ~f:(fun result script ->
+             let%bind compiled = result in
+             let target =
+               match script.Spec.kind with
+               | Moderator_script -> Chatml_compilation.Moderator_v1
+               | Tool_script -> Tool_v1
+             in
+             compile ~target ~source:(Spec.script_text script)
+             |> Result.map ~f:(fun program -> (script, program) :: compiled)
+             |> Result.map_error ~f:(fun error ->
+               [ D.error ~source:script.source_ref ~code:error.code error.message ]))
+           |> Result.map ~f:List.rev
+         in
+         let%map prepared_tools =
+           List.fold tools ~init:(Ok []) ~f:(fun result tool ->
+             let%bind prepared = result in
+             let id =
+               match tool.Spec.implementation with
+               | Moderator id -> id
+               | Standalone { script; _ } -> script
+             in
+             (* Registry validation established the script identity and kind.
              Reuse that exact compiled program without hashing the source again
              for every tool bound to a shared handler. *)
-          let program =
-            List.find_map_exn compiled_scripts ~f:(fun (script, program) ->
-              Option.some_if (String.equal script.Spec.id id) program)
-          in
-          let%map tool =
-            prepare_with
-              ~validate_schema
-              ~compile:(fun ~target:_ ~source:_ -> Ok program)
-              ~max_source_bytes:limits.max_source_bytes
-              ~scripts
-              ~capabilities
-              tool
-          in
-          tool :: prepared)
-        |> Result.map ~f:List.rev
-      in
-      let definition_fingerprint =
-        [%sexp
-          ("ochat.extension-definition.v1" : string)
-        , (scripts : Spec.script list)
-        , (List.map prepared_tools ~f:fingerprint : string list)
-        , (Tool_capability.fingerprint capabilities : string)
-        , (Chatml_compilation.contract Tool_v1 : Sexp.t)
-        , (Chatml_compilation.contract Moderator_v1 : Sexp.t)]
-        |> Sexp.to_string
-        |> Chatmd_shell_spec.Source_ref.digest
-      in
-      { prepared_tools; compiled_scripts; definition_fingerprint })
+             let program =
+               List.find_map_exn compiled_scripts ~f:(fun (script, program) ->
+                 Option.some_if (String.equal script.Spec.id id) program)
+             in
+             let%map tool =
+               prepare_with
+                 ~validate_schema
+                 ~compile:(fun ~target:_ ~source:_ -> Ok program)
+                 ~max_source_bytes:limits.max_source_bytes
+                 ~scripts
+                 ~capabilities
+                 tool
+             in
+             tool :: prepared)
+           |> Result.map ~f:List.rev
+         in
+         let definition_fingerprint =
+           [%sexp
+             ("ochat.extension-definition.v1" : string)
+           , (scripts : Spec.script list)
+           , (List.map prepared_tools ~f:fingerprint : string list)
+           , (Tool_capability.fingerprint capabilities : string)
+           , (Chatml_compilation.contract Tool_v1 : Sexp.t)
+           , (Chatml_compilation.contract Moderator_v1 : Sexp.t)]
+           |> Sexp.to_string
+           |> Chatmd_shell_spec.Source_ref.digest
+         in
+         { prepared_tools; compiled_scripts; definition_fingerprint })
   with
   | Eio.Time.Timeout ->
     fail "chatml.compile_timeout" "definition exceeded its aggregate compilation budget"

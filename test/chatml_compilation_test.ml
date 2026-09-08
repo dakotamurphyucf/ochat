@@ -17,10 +17,7 @@ let expect_error code = function
 
 let () =
   Eio_main.run (fun env ->
-    let worker = Filename.concat (Core_unix.getcwd ()) (Sys.get_argv ()).(1) in
-    let compile ?limits target source =
-      C.compile ?limits ~env ~worker ~target ~source ()
-    in
+    let compile ?limits target source = C.compile ?limits ~env ~target ~source () in
     List.iter
       [ C.One_off_v1, "let main = fun input -> Task.pure(input)"
       ; Tool_v1, "let run = fun ctx input -> Task.pure(`Complete(input))"
@@ -77,9 +74,6 @@ let () =
     expect_error
       "chatml.invalid_limits"
       (compile ~limits:{ C.default_limits with wall_seconds = 31. } C.One_off_v1 "");
-    expect_error
-      "chatml.compiler_unavailable"
-      (C.compile ~env ~worker:"relative" ~target:C.One_off_v1 ~source:"" ());
     let dir = Eio.Stdenv.cwd env in
     let loader =
       Source_loader.captured_filesystem ~root:dir ~sources:[ "schema.json", "true" ]
@@ -110,9 +104,8 @@ let run = fun ctx input -> Task.pure(`Complete(input))</script><tool name="custo
       |> Result.ok_or_failwith
     in
     let prepared =
-      Chat_response.Extension_compiler.prepare_isolated
+      Chat_response.Extension_compiler.prepare_in_domain
         ~env
-        ~worker
         ~scripts:[ script ]
         ~capabilities
         tool
@@ -127,8 +120,8 @@ let run = fun ctx input -> Task.pure(`Complete(input))</script><tool name="custo
     let module EC = Chat_response.Extension_compiler in
     let module CM = Prompt.Chat_markdown in
     let module Spec = Chatmd_shell_spec.Extension_spec in
-    let definition ?limits ?(worker = worker) elements =
-      EC.prepare_definition_isolated ?limits ~env ~worker ~capabilities elements
+    let definition ?limits elements =
+      EC.prepare_definition_in_domain ?limits ~env ~capabilities elements
     in
     let admitted result =
       result
@@ -208,9 +201,7 @@ let run = fun ctx input -> Task.pure(`Complete(input))</script><tool name="custo
     in
     reject
       "chatmd.schema_digest_mismatch"
-      (definition
-         ~worker:"/unavailable/compiler"
-         [ CM.Extension_script script; CM.Tool (Extension corrupt) ]);
+      (definition [ CM.Extension_script script; CM.Tool (Extension corrupt) ]);
     reject
       "capability.not_selected"
       (definition
@@ -227,107 +218,44 @@ let run = fun ctx input -> Task.pure(`Complete(input))</script><tool name="custo
                   implementation = Standalone { script = script.id; entrypoint = "wrong" }
                 })
          ]);
-    let slow_worker = Filename.concat (Core_unix.getcwd ()) (Sys.get_argv ()).(2) in
-    let another =
-      changed_script unused "let run = fun ctx input -> Task.pure(`Complete(`Null))"
-    in
     reject
       "chatml.compile_timeout"
       (definition
-         ~worker:slow_worker
-         ~limits:{ C.default_limits with wall_seconds = 1. }
-         [ CM.Extension_script script; CM.Extension_script another ]);
-    let temp = Core_unix.mkdtemp "/tmp/ochat-compiler-test.XXXXXX" in
-    let dir = Eio.Path.(Eio.Stdenv.fs env / temp) in
-    Exn.protect
-      ~f:(fun () ->
-        let pidfile = Eio.Path.(dir / "pid")
-        and fake = Eio.Path.(dir / "worker") in
-        let fake_worker script =
-          Eio.Path.save ~create:(`Or_truncate 0o700) fake script;
-          Eio.Path.native_exn fake
-        in
-        let worker =
-          fake_worker
-            ("#!/bin/sh\necho $$ > '"
-             ^ Eio.Path.native_exn pidfile
-             ^ "'\nexec /bin/sleep 30\n")
-        in
-        let ensure_dead () =
-          let pid =
-            Eio.Path.load pidfile |> String.strip |> Int.of_string |> Pid.of_int
-          in
-          match Signal_unix.send Signal.zero (`Pid pid) with
-          | `Ok -> failwith "compiler process survived cleanup"
-          | `No_such_process -> ()
-        in
-        expect_error
-          "chatml.compile_timeout"
-          (C.compile
-             ~limits:{ C.default_limits with wall_seconds = 1. }
-             ~env
-             ~worker
-             ~target:C.One_off_v1
-             ~source:""
-             ());
-        ensure_dead ();
-        (match
-           Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 1. (fun () ->
-             C.compile ~env ~worker ~target:C.One_off_v1 ~source:"" ())
-         with
-         | _ -> failwith "outer cancellation was swallowed"
-         | exception Eio.Time.Timeout -> ());
-        ensure_dead ();
-        let emit output =
-          let quoted =
-            "'" ^ String.substr_replace_all output ~pattern:"'" ~with_:"'\"'\"'" ^ "'"
-          in
-          fake_worker ("#!/bin/sh\n/bin/cat >/dev/null\nprintf '%s' " ^ quoted ^ "\n")
-        in
-        List.iter
-          [ "(Compiled(version 0)(target One_off_v1)(contract())(artifact()))"
-          ; "(Compiled(version 1)(target One_off_v1)(contract())(artifact()))"
-          ]
-          ~f:(fun output ->
-            let worker = emit output in
-            expect_error
-              "chatml.compiler_protocol"
-              (C.compile ~env ~worker ~target:C.One_off_v1 ~source:"" ()));
-        let worker = emit (String.make 513 '(' ^ String.make 513 ')') in
-        expect_error
-          "chatml.compiler_failed"
-          (C.compile ~env ~worker ~target:C.One_off_v1 ~source:"" ());
-        let wrong_source = "let main = fun input -> Task.pure(input)" in
-        let compiled =
-          R.compile_script
-            ~surface:Chatml.Chatml_extension_surface.one_off_v1
-            ~required_bindings:Chatml.Chatml_extension_surface.one_off_entrypoints
-            ~source:wrong_source
-            ()
-          |> Result.ok_or_failwith
-        in
-        let artifact = R.Private_compiler_transport.export compiled in
-        let pair name value = Sexp.List [ Atom name; value ] in
-        let output =
-          Sexp.List
-            [ Atom "Compiled"
-            ; pair "version" (Atom "1")
-            ; pair "target" (C.sexp_of_target C.One_off_v1)
-            ; pair "contract" (C.contract C.One_off_v1)
-            ; pair "artifact" artifact
-            ]
-          |> Sexp.to_string
-        in
-        let worker = emit output in
-        expect_error
-          "chatml.compiler_failed"
-          (C.compile ~env ~worker ~target:C.One_off_v1 ~source:"different source" ());
-        let worker = fake_worker "#!/bin/sh\nprintf 'invalid response'\n" in
-        expect_error
-          "chatml.compiler_failed"
-          (C.compile ~env ~worker ~target:C.One_off_v1 ~source:"" ()))
-      ~finally:(fun () -> Eio.Path.rmtree ~missing_ok:true dir);
+         ~limits:{ C.default_limits with wall_seconds = 1e-12 }
+         [ CM.Extension_script script ]);
+    (* Concurrent compilers must own independent inference/slot state. Both
+       positive and negative results agree with serial compilation. *)
+    Eio.Fiber.all
+      (List.init 16 ~f:(fun i () ->
+         let source =
+           if i mod 2 = 0
+           then "let main = fun input -> Task.pure(input)"
+           else "let main = 1"
+         in
+         if i mod 2 = 0
+         then ignore (compile C.One_off_v1 source |> get : R.compiled_script)
+         else expect_error "chatml.invalid_handler" (compile C.One_off_v1 source)));
+    (* A caller's cancellation must propagate, never become an invalid-handler
+       result. The timeout owns and joins the domain before returning. *)
+    (match
+       Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 0. (fun () ->
+         compile C.One_off_v1 "let main = fun input -> Task.pure(input)")
+     with
+     | _ -> failwith "outer cancellation was swallowed"
+     | exception Eio.Time.Timeout -> ());
+    let checkpoints = ref 0 in
+    (match
+       R.compile_script
+         ~checkpoint:(fun () ->
+           incr checkpoints;
+           if !checkpoints = 3 then raise Exit)
+         ~source:"let value = 1"
+         ()
+     with
+     | _ -> failwith "compiler swallowed a stage checkpoint exception"
+     | exception Exit -> ());
+    assert (!checkpoints = 3);
     print_endline
-      "Isolated ChatML compilation: contracts, artifact execution, limits and process \
-       cleanup PASS")
+      "Domain ChatML compilation: contracts, execution, concurrent state, source limits \
+       and cooperative cancellation PASS")
 ;;

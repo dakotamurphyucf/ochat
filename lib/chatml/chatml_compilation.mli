@@ -1,9 +1,7 @@
 open Core
 
-(** Non-executing compilation in a separately executed, resource-limited worker.
-    The worker path is trusted host configuration from the same installation,
-    never model/user input. No PATH search or ambient environment inheritance.
-    Successful compilation grants no tool or session authority. *)
+(** Non-executing compilation in an Eio-managed domain. Successful compilation
+    grants no tool or session authority. No subprocess or artifact transport. *)
 type target =
   | One_off_v1
   | Tool_v1
@@ -27,21 +25,18 @@ type error =
     credentials. Hosts include it in prepared/cache fingerprints. *)
 val contract : target -> Sexp.t
 
-(** Timeout/cancellation kills and reaps the worker before returning/propagating.
-    Transport is bounded to 16 MiB and depth 512. Errors expose at most 16 KiB.
-    OS CPU, file-size and descriptor limits fail closed if unsupported. There
-    is no portable hard process-heap limit in this API. This is process/resource
-    isolation, not a filesystem/network sandbox; the trusted compiler never
-    evaluates source or invokes tools. *)
+(** Calls the native compiler using [Eio.Domain_manager.run]. Source is bounded
+    before starting a domain; diagnostics expose at most 16 KiB. Compilation never
+    evaluates initializers or calls tools. Mutable compiler state is invocation-local.
+
+    Cancellation and elapsed time are checked between compiler stages. A stage
+    already running must finish before cancellation takes effect; the caller waits
+    for domain cleanup. This is a cooperative time budget, not a hard deadline or
+    process/heap sandbox. No domain is abandoned after cancellation. *)
 val compile
   :  ?limits:limits
   -> env:Eio_unix.Stdenv.base
-  -> worker:string
   -> target:target
   -> source:string
   -> unit
   -> (Chatml_host_runtime.compiled_script, error) result
-
-(** Private executable entry point. Applies OS limits before reading its bounded
-    request, and returns a versioned pure artifact. Not an agent-facing API. *)
-val worker_main : unit -> unit

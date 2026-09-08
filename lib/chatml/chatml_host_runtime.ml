@@ -751,32 +751,33 @@ let expect_callable (name : string) (value : Lang.value) : (Lang.value, string) 
 ;;
 
 let compile_script
+      ?(checkpoint = fun () -> ())
       ?(surface = Builtin_surface.moderator_surface)
       ?(required_bindings = [])
       ~(source : string)
       ()
   : (compiled_script, string) result
   =
-  match Parse.parse_program source with
-  | Error diagnostic -> Error (Parse.format_diagnostic source diagnostic)
-  | Ok program ->
-    (match Typechecker.check_program_with_surface ~required_bindings surface program with
-     | Error diagnostic -> Error (Typechecker.format_diagnostic source diagnostic)
-     | Ok checked ->
-       let resolved = Resolver.resolve_checked_program checked program in
-       Ok { surface; resolved; source_text = source })
+  checkpoint ();
+  let parsed = Parse.parse_program source in
+  checkpoint ();
+  let result =
+    match parsed with
+    | Error diagnostic -> Error (Parse.format_diagnostic source diagnostic)
+    | Ok program ->
+      let checked =
+        Typechecker.check_program_with_surface ~required_bindings surface program
+      in
+      checkpoint ();
+      (match checked with
+       | Error diagnostic -> Error (Typechecker.format_diagnostic source diagnostic)
+       | Ok checked ->
+         let resolved = Resolver.resolve_checked_program checked program in
+         Ok { surface; resolved; source_text = source })
+  in
+  checkpoint ();
+  result
 ;;
-
-module Private_compiler_transport = struct
-  let export compiled = Lang.sexp_of_resolved_program compiled.resolved
-
-  let import ~surface ~source sexp =
-    let resolved = Lang.resolved_program_of_sexp sexp in
-    if not (String.equal source resolved.source_text)
-    then failwith "compiled source identity mismatch";
-    { surface; resolved; source_text = source }
-  ;;
-end
 
 let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
   compiled.surface

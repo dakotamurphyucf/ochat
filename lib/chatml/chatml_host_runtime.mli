@@ -175,29 +175,16 @@ val default_runtime_config
     Missing bindings, wrong arity and incompatible argument/result types fail
     compilation. Requirements use the host type language, so source aliases cannot
     replace the expected types. This check does not authorize execution or bound
-    compiler work; hosts must separately enforce their compilation budgets. *)
+    compiler work. [checkpoint] runs before and between compiler stages, including
+    after diagnostic formatting. Its exceptions propagate to the caller; it must
+    not mutate compiler state. Hosts can use it for cooperative cancellation. *)
 val compile_script
-  :  ?surface:Builtin_surface.surface
+  :  ?checkpoint:(unit -> unit)
+  -> ?surface:Builtin_surface.surface
   -> ?required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
   -> source:string
   -> unit
   -> (compiled_script, string) result
-
-(** Internal transport for a trusted compiler executable from the same runtime
-    installation. This imports already checked code without re-typechecking and
-    MUST NOT receive user-supplied artifacts. It serializes only resolved syntax,
-    slot tags and source spans, never closures, runtime values or environments.
-    The owning transport must enforce framing, size/depth, source, version and
-    surface identities before importing. Not a persisted artifact format. *)
-module Private_compiler_transport : sig
-  val export : compiled_script -> Core.Sexp.t
-
-  val import
-    :  surface:Builtin_surface.surface
-    -> source:string
-    -> Core.Sexp.t
-    -> compiled_script
-end
 
 (** Surface recorded on a compiled script artifact. *)
 val compiled_surface : compiled_script -> Builtin_surface.surface

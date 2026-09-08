@@ -229,7 +229,7 @@ wrong arity, incompatible inputs/results and shadowed final definitions reject.
 Shared type variables relate requirements such as moderator `initial_state` and
 `on_event`. Source-level type aliases cannot redefine the host's expected types.
 The synchronous function is an internal compiler facility. Hosts can use the
-isolated compilation service described below; complete runtime admission remains
+domain compilation service described below; complete runtime admission remains
 unfinished.
 
 `Chatml.Chatml_extension_surface` defines explicit version-1 compiler surfaces:
@@ -344,24 +344,24 @@ values still require validation at their respective invocation boundaries.
 This is an internal synchronous preparation API. It does not load sources, perform
 preprocessing, authorize new native tool declarations, or reconnect resources.
 The source parser/capture stage must validate imports and definition dependency
-cycles first. `prepare_isolated` preserves those checks and uses the separate
-compiler worker for typechecking. Public generated-definition validation must
+cycles first. `prepare_in_domain` preserves those checks and uses the separate
+compiler domain for typechecking. Public generated-definition validation must
 combine the strict bundle parser, inherited-authority checks and this bounded
 compiler path; runtime registration must use the prepared value before exposing a
 handler. Runtime execution integration remains open.
 
-`prepare_definition_isolated` validates the whole parsed extension definition.
+`prepare_definition_in_domain` validates the whole parsed extension definition.
 It reuses the parser's declaration-registry checks for duplicate IDs, handler kinds,
 dependency cycles and authoring declaration uniqueness. Every versioned script is
 compiled, including a lifecycle moderator with no associated tool and a standalone
 script that no tool currently references. Invalid unused scripts cannot pass admission
 merely because the first exposed tool is valid.
 
-Input, output and completion schemas are checked before any compiler worker starts.
+Input, output and completion schemas are checked before any compiler domain starts.
 Successful schema compilation is reused, while retained digests are checked on every
 declaration. Scripts with identical source and target share a compiled program;
-multiple tools bound to one handler retain that same program. All compiler workers
-share one wall-clock deadline, so each script does not receive a fresh total budget.
+multiple tools bound to one handler retain that same program. All compiler domains
+share one cooperative time budget, so each script does not receive a fresh total budget.
 
 The batch permits up to 128 extension scripts, 4096 extension tools, 16384 parsed
 elements and 8 MiB of distinct script/schema source. Per-script and per-schema
@@ -411,38 +411,33 @@ artifacts must retain this parsing policy so restoration cannot silently use the
 ordinary authored-file path; that integration remains part of generated-session
 implementation.
 
-## Isolated compilation
+## Compilation in an Eio domain
 
-`Chatml_compilation.compile` starts the installed `ochat-chatml-compiler` executable
-for a one-off, standalone-tool or extensibility-v1 moderator target. The host
-supplies an absolute, trusted executable path from the same runtime installation.
-This path is not agent input; the API does not search PATH or inherit the host
-environment. Source travels over a private pipe and is never executed by the
-worker. Initializers that would fail at runtime can still pass compilation.
+`Chatml_compilation.compile` calls the native ChatML compiler through
+`Eio.Domain_manager.run` for a one-off, standalone-tool or extensibility-v1
+moderator target. Other fibers in the calling domain can continue while the
+compiler parses, typechecks and resolves the source. The compiled value returns
+directly to the caller: no compiler executable, subprocess, pipes or artifact
+serialization is needed.
 
-The default wall-time budget is 5 seconds, with an explicit ceiling of 30 seconds;
-the default source budget is 256 KiB, capped at 1 MiB. The worker also applies
-OS CPU, file-size and descriptor limits before reading its request. Unsupported
-limits fail closed. This API does not impose a portable hard process-heap limit
-or an OS filesystem/network sandbox. Its worker is trusted compiler code that
-does not evaluate ChatML, fetch dependencies, instantiate sessions or call tools.
+Each compilation owns its lexer/parser, inference and resolution state. The
+shared builtin type descriptions are immutable. Compilation never evaluates
+initializers, fetches dependencies, instantiates sessions or calls tools.
+Initializers that would fail at runtime can still pass compilation. The exact
+builtin/alias/entrypoint contract remains part of prepared cache identities.
 
-Successful output is a versioned resolved-syntax artifact. The parent checks the
-requested target, exact builtin/alias/entrypoint type contract and original source
-bytes before using it. The pipe carries no closures, runtime environments or
-capability credentials. The parent does not re-run unbounded typechecking. This
-is an internal same-installation transport, not a persisted format or a public
-artifact-import endpoint. The low-level `Private_compiler_transport` import must
-never receive untrusted artifacts.
+The default source budget is 256 KiB, capped at 1 MiB, and is checked before
+starting a domain. Diagnostics are capped at 16 KiB. The default cooperative time
+budget is 5 seconds, capped at 30 seconds, measured with a monotonic clock.
+Checkpoints before and between compiler stages yield to Eio, observe cancellation
+and check elapsed time. An already-running stage must finish before cancellation
+takes effect, so this is not a hard deadline or a process/memory sandbox. Eio
+joins the domain before returning; cancelled work is not detached or abandoned.
 
-Transport reads are limited to 16 MiB and nesting is checked before parsing at a
-maximum depth of 512. Diagnostics are capped at 16 KiB. The wall-time deadline
-covers worker launch, input/output and compilation. Timeout or cancellation kills
-the worker and lets the owning Eio switch reap it before the call returns; it
-does not leave an abandoned compiler running. Caller cancellation propagates.
-
-`Extension_compiler.prepare_isolated` provides the same source/schema and exact
-selected-capability checks as synchronous preparation with this worker path.
+`Extension_compiler.prepare_in_domain` combines this compiler path with the same
+source/schema and exact selected-capability checks as synchronous preparation.
+`prepare_definition_in_domain` compiles every versioned script and reuses programs
+for shared source/target pairs, under an aggregate cooperative time budget.
 Compilation remains separate from dynamic initialization, state serialization,
 per-call authorization and feature qualification. No model-visible feature is
 enabled by these APIs alone.
@@ -541,7 +536,7 @@ declaration is not evidence that guidance reaches a model request.
 ## Generated definition admission
 
 `Chat_response.Generated_admission.prepare` combines bounded source-bundle parsing,
-exact parent capability selection, authoring policy and isolated compilation.
+exact parent capability selection, authoring policy and domain compilation.
 It accepts already approved/delegable parent capabilities plus an explicit requested
 subset. A generated definition selects from that subset with references such as:
 
@@ -569,7 +564,7 @@ A definition may select one `extensibility-v1` lifecycle moderator. Its
 `delegated_moderator_v1` compiler surface removes direct `Model`, `Process` and
 stdout `print`; external work uses the inherited tool service. The compiler checks
 entrypoint types and source limits without evaluating initializers. Compilation
-honors a bounded wall deadline, including worker cleanup. Other own-session
+uses a cooperative time budget and waits for domain cleanup. Other own-session
 operations still require admission by the eventual delegated host.
 
 The result retains the parsed definition, actual capability bindings, authoring

@@ -52,7 +52,6 @@ let () =
   Eio_main.run (fun env ->
     Eio.Switch.run (fun sw ->
       Mirage_crypto_rng_unix.use_default ();
-      let worker = Filename.concat (Core_unix.getcwd ()) (Sys.get_argv ()).(1) in
       let temp = Core_unix.mkdtemp "/tmp/ochat-admission.XXXXXX" in
       let root = Eio.Path.(Eio.Stdenv.fs env / temp) in
       Exn.protect
@@ -112,13 +111,7 @@ let () =
             |> runtime
           in
           let ceiling = Lazy.force parent.capabilities |> caps in
-          let prepare
-                ?limits
-                ?(worker = worker)
-                ?(requested_names = [ "read_file" ])
-                ?(extras = [])
-                source
-            =
+          let prepare ?limits ?(requested_names = [ "read_file" ]) ?(extras = []) source =
             let bundle =
               Chatmd_source_bundle.create
                 ~root_file:"root.chatmd"
@@ -129,7 +122,6 @@ let () =
             G.prepare
               ?limits
               ~env
-              ~worker
               ~dir:Eio.Path.(root / "child")
               ~ceiling
               ~requested_names
@@ -252,18 +244,16 @@ let () =
             List.exists unsafe.root ~f:(function
               | CM.Tool (Inherited "read_file") -> true
               | _ -> false));
-          let slow_worker = Filename.concat (Core_unix.getcwd ()) (Sys.get_argv ()).(2) in
           let first = script lifecycle in
           let second =
             String.substr_replace_all first ~pattern:"coordinator" ~with_:"second"
           in
           expect "delegation.invalid_source" (prepare (first ^ second));
-          ignore (prepare ~worker:slow_worker first |> get : G.t);
+          ignore (prepare first |> get : G.t);
           expect
             "chatml.compile_timeout"
             (prepare
-               ~worker:slow_worker
-               ~limits:{ Chatml_compilation.default_limits with wall_seconds = 0.1 }
+               ~limits:{ Chatml_compilation.default_limits with wall_seconds = 1e-12 }
                first);
           print_endline
             "Generated admission: inherited identity, original read roots, imports, \
