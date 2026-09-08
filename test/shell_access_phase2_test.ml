@@ -107,9 +107,11 @@ let%expect_test "real Eio pipelines preserve backpressure and stdout flow" =
     S.Executor.run config (invocation (S.Request.Structured chain))
     |> executor_ok
   in
-  printf "status=%d stdout=%s" (status_code result.status) result.stdout;
-  [%expect {| status=0 stdout=       3
-    |}]
+  (* BSD wc pads its count; GNU wc does not. Check the byte count itself. *)
+  printf "status=%d count=%d\n"
+    (status_code result.status)
+    (Int.of_string (String.strip result.stdout));
+  [%expect {| status=0 count=3 |}]
 ;;
 
 let%expect_test "pipefail selects the rightmost failing pipeline status" =

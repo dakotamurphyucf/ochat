@@ -1,0 +1,71 @@
+name: Qualified Ochat toolchain
+description: Restore exact Linux dependencies and reconcile the committed lock before testing
+inputs:
+  cold:
+    description: Bypass project dependency and Dune caches for a clean audit
+    default: "false"
+  tier:
+    description: Semantic, normal or E2E compilation cache namespace
+    required: true
+runs:
+  using: composite
+  steps:
+    - id: key
+      shell: bash
+      run: node .github/scripts/toolchain.mjs key
+    - id: dependencies
+      if: inputs.cold != 'true'
+      uses: actions/cache/restore@v4
+      with:
+        path: |
+          ~/.opam
+          _opam
+        key: ${{ steps.key.outputs.key }}
+    - name: Set up pinned OCaml action
+      uses: ocaml/setup-ocaml@e89b2ded52a6e13f50162220cf5fe47290162032 # v3
+      with:
+        ocaml-compiler: "5.3.0"
+        # A cold audit may reuse only setup-ocaml's compiler-only cache.
+        # A normal run restores our complete, exact-key dependency cache first.
+        cache: ${{ inputs.cold == 'true' || steps.dependencies.outputs.cache-hit != 'true' }}
+        opam-pin: false
+        opam-repositories: |
+          default: ${{ steps.key.outputs.repository }}
+    - name: Install locked system dependencies
+      shell: bash
+      run: opam install . --deps-only --with-test --locked --depext-only --yes
+    - name: Reconcile locked dependencies
+      shell: bash
+      run: opam install . --deps-only --with-test --locked --yes
+    - name: Verify installed dependency versions
+      shell: bash
+      env:
+        DEPENDENCY_CACHE_HIT: ${{ steps.dependencies.outputs.cache-hit }}
+      run: node .github/scripts/toolchain.mjs verify
+    - name: Save qualified dependencies
+      if: inputs.cold != 'true' && steps.dependencies.outputs.cache-hit != 'true'
+      uses: actions/cache/save@v4
+      with:
+        path: |
+          ~/.opam
+          _opam
+        key: ${{ steps.key.outputs.key }}
+    - name: Restore compiled Dune objects
+      if: inputs.cold != 'true'
+      uses: actions/cache@v4
+      with:
+        path: ~/.cache/dune
+        key: dune-${{ steps.key.outputs.key }}-${{ inputs.tier }}-${{ github.sha }}
+        restore-keys: dune-${{ steps.key.outputs.key }}-${{ inputs.tier }}-
+    - name: Configure compilation cache
+      shell: bash
+      env:
+        COLD: ${{ inputs.cold }}
+      run: |
+        if [ "$COLD" = true ]; then
+          echo 'DUNE_CACHE=disabled' >> "$GITHUB_ENV"
+        else
+          echo 'DUNE_CACHE=enabled' >> "$GITHUB_ENV"
+        fi
+        echo 'DUNE_CACHE_STORAGE_MODE=copy' >> "$GITHUB_ENV"
+        # Never restore _build: force all selected test aliases on every run.

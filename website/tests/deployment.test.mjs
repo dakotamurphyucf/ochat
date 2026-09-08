@@ -74,41 +74,46 @@ test('public promotion honors the manual-review deferral and rejects incomplete 
   );
 });
 
-test('release gate refuses failed, cancelled or skipped prerequisite jobs and watches all source inputs', async () => {
+test('workflow always detects changes, runs selected checks concurrently, and requires their results', async () => {
   const workflow = parse(
     await fs.readFile(
       new URL('../../.github/workflows/website.yml', import.meta.url),
       'utf8',
     ),
   );
-  for (const trigger of Object.values(workflow.on)) {
+  for (const trigger of Object.values(workflow.on))
     assert.ok(!trigger || (!trigger.paths && !trigger['paths-ignore']));
+  for (const name of ['framework', 'semantics', 'website']) {
+    assert.equal(workflow.jobs[name].needs, 'changes');
+    assert.equal(
+      workflow.jobs[name].if,
+      `needs.changes.outputs.${name} == 'true'`,
+    );
   }
-  assert.equal(workflow.jobs.website.needs, undefined);
-  assert.deepEqual(workflow.jobs.framework.strategy.matrix.tier, ['normal', 'e2e']);
   assert.deepEqual(workflow.jobs.website.strategy.matrix.environment, [
     'preview',
     'production',
   ]);
+  assert.deepEqual(workflow.jobs.framework.strategy.matrix.tier, [
+    'normal',
+    'e2e',
+  ]);
   const gate = workflow.jobs['release-gate'];
-  assert.deepEqual(gate.needs, ['semantics', 'framework', 'website']);
+  assert.deepEqual(gate.needs, [
+    'changes',
+    'semantics',
+    'framework',
+    'website',
+  ]);
   assert.equal(gate.if, 'always()');
-  for (const semantic of ['success', 'failure', 'cancelled', 'skipped'])
-    for (const framework of ['success', 'failure', 'cancelled', 'skipped'])
-    for (const website of ['success', 'failure', 'cancelled', 'skipped']) {
-      const result = spawnSync('bash', ['-e', '-c', gate.steps[0].run], {
-        env: {
-          ...process.env,
-          SEMANTICS_RESULT: semantic,
-          WEBSITE_RESULT: website,
-          FRAMEWORK_RESULT: framework,
-        },
-      });
-      assert.equal(
-        result.status === 0,
-        semantic === 'success' && framework === 'success' && website === 'success',
-      );
-    }
+  const run = gate.steps.find((step) => step.env?.NEEDS_JSON);
+  assert.equal(run.env.NEEDS_JSON, '${{ toJSON(needs) }}');
+  assert.equal(run.run, 'node .github/scripts/release-gate.mjs');
+  assert.ok(
+    workflow.jobs.changes.steps.some(
+      (step) => step.run === 'node --test .github/tests/*.test.mjs',
+    ),
+  );
 });
 
 test('deployment capacity rejects excess rules, oversized assets and redirect loops', () => {
@@ -192,15 +197,25 @@ test('production publishing is main-only, serialized, gated, and uses the tested
     ),
   );
   const publish = workflow.jobs['deploy-production'];
-  assert.deepEqual(publish.needs, ['release-gate']);
+  assert.deepEqual(publish.needs, ['changes', 'release-gate']);
   assert.equal(
     publish.if,
-    "github.event_name == 'push' && github.ref == 'refs/heads/main' && needs.release-gate.result == 'success'",
+    "always() && github.ref == 'refs/heads/main' && needs.changes.outputs.deploy == 'true' && needs.release-gate.result == 'success'",
   );
   assert.equal(publish.environment.name, 'production');
   assert.equal(publish.concurrency['cancel-in-progress'], false);
   assert.equal(workflow.permissions.contents, 'read');
-  assert.deepEqual(Object.keys(workflow.on).sort(), ['pull_request', 'push']);
+  assert.deepEqual(Object.keys(workflow.on).sort(), [
+    'pull_request',
+    'push',
+    'schedule',
+    'workflow_dispatch',
+  ]);
+  assert.deepEqual(workflow.on.workflow_dispatch.inputs.mode.options, [
+    'validate',
+    'redeploy',
+    'cold',
+  ]);
   assert.ok(
     publish.steps.some(
       (step) =>
