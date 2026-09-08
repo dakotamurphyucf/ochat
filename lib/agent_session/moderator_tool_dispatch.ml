@@ -16,6 +16,25 @@ let require = function
 let message result = Result.map_error result ~f:(fun (e : P.Error.t) -> e.message)
 let fail code message = I.Fail { code; message; retryable = false; details = `Null }
 
+let handler_failure = function
+  | Chat_response.Moderator_invocation.Unhandled ->
+    fail "invocation.unhandled" "The moderator did not resolve this tool invocation."
+  | Duplicate_resolution ->
+    fail
+      "invocation.duplicate_resolution"
+      "The moderator attempted to resolve this tool invocation more than once."
+  | Wrong_id ->
+    fail "invocation.wrong_id" "The resolution referenced a different tool invocation."
+  | Invalid_output ->
+    fail "invocation.invalid_output" "The moderator returned an invalid tool outcome."
+  | Invalid_state ->
+    fail "invocation.invalid_state" "The moderator returned invalid persistent state."
+  | Suspended ->
+    fail "invocation.suspended" "A moderator tool cannot retain a legacy UI continuation."
+  | Handler_failed ->
+    fail "invocation.handler_failed" "The moderator tool handler failed."
+;;
+
 let create
       ~definition
       ~manager
@@ -95,15 +114,42 @@ let create
     in
     let recorded = ref None in
     let observed = ref None in
+    let failure = ref None in
+    let checked outcome f =
+      match f () with
+      | Ok _ as result -> result
+      | Error _ as result ->
+        failure := Some outcome;
+        result
+      | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+      | exception exn ->
+        failure := Some outcome;
+        raise exn
+    in
     capabilities.with_moderator_invocation ~invocation (fun ~dispatched ~commit ->
       let save resolved snapshot =
         let open Result.Let_syntax in
-        let%map () = commit ~resolved ~snapshot in
+        let%map () =
+          checked
+            (fail
+               "invocation.commit_failed"
+               "The moderator result could not be committed.")
+            (fun () -> commit ~resolved ~snapshot)
+        in
         recorded := Some resolved
       in
       let run () =
-        if parse_error
-        then Error "invalid JSON arguments"
+        if
+          parse_error
+          || Result.is_error
+               (Schema.validate (EC.input_schema prepared) invocation.context.input)
+        then (
+          failure
+          := Some
+               (fail
+                  "invocation.invalid_input"
+                  "The tool arguments do not satisfy its input schema.");
+          Error "invalid tool arguments")
         else
           M.handle_invocation_entries
             manager
@@ -116,16 +162,29 @@ let create
                |> Time_ns.to_int_ns_since_epoch
                |> fun n -> n / 1_000_000)
             ~validate_work
+            ~on_failure:(fun kind ->
+              if Option.is_none !failure then failure := Some (handler_failure kind))
             ~authorize:(fun () ->
               let open Result.Let_syntax in
-              let%bind () = admit request in
-              authorize ();
-              Ok ())
+              let denied =
+                fail
+                  "invocation.permission_denied"
+                  "The tool invocation is not authorized by the current policy."
+              in
+              let%bind () = checked denied (fun () -> admit request) in
+              checked denied (fun () ->
+                authorize ();
+                Ok ()))
             ~prepare_resolution:(fun ~resolved ~outcome ~snapshot ->
               let open Result.Let_syntax in
               let%bind () =
                 match resolved.I.status with
-                | Resolved outcome -> prepare_outcome outcome
+                | Resolved outcome ->
+                  checked
+                    (fail
+                       "invocation.disclosure_rejected"
+                       "The tool outcome did not pass the host output policy.")
+                    (fun () -> prepare_outcome outcome)
                 | _ -> Error "handler did not resolve"
               in
               let%map () = save resolved snapshot |> message in
@@ -163,9 +222,7 @@ let create
             dispatched
             ~session_id:input.session_id
             ~generation:input.session_generation
-            (fail
-               "invocation.failed"
-               "The moderator tool failed validation, authorization, or execution.")
+            (Option.value !failure ~default:(handler_failure Handler_failed))
         in
         save resolved snapshot)
     |> require;

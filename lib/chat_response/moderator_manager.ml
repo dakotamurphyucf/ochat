@@ -903,6 +903,7 @@ let identity_snapshot_of_state t ~current_state ~queued_events ~halted ~overlay 
 
 let handle_invocation_entries
       ?(authorize = fun () -> Ok ())
+      ?on_failure
       t
       ~invocation
       ~history
@@ -980,6 +981,7 @@ let handle_invocation_entries
     t.last_history <- history;
     let%map resolved =
       Moderator_invocation.run
+        ?on_failure
         scope
         ~runtime:t.runtime
         ~context:(Moderation.Context.to_value context)

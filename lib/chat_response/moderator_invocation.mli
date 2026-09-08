@@ -30,6 +30,15 @@ val operations : R.op_def list -> R.op_def list
     resolution outside a dispatched invocation. *)
 val ordinary_effects : L.eff list -> (L.eff list, string) result
 
+type failure =
+  | Unhandled
+  | Duplicate_resolution
+  | Wrong_id
+  | Invalid_output
+  | Invalid_state
+  | Suspended
+  | Handler_failed
+
 (** Run Tool_invoked on an already borrowed, serialized moderator runtime.
     Exactly one resolution is validated before the runtime commits state/effects.
     [prepare_commit] receives the prospective runtime state/queue/halt and
@@ -39,9 +48,14 @@ val ordinary_effects : L.eff list -> (L.eff list, string) result
     work is never automatically retried or undone. Serializable moderator state
     is defensively copied and restored on failure; mutable globals are excluded.
     The caller owns serialization, cancellation and conversion to terminal
-    failures. Pure evaluation interruption is not provided by task limits alone. *)
+    failures. Pure evaluation interruption is not provided by task limits alone.
+
+    [on_failure] receives a host classification, independent of any diagnostic
+    text supplied by a script. It runs after failed execution has rolled back;
+    the callback must not re-enter the owning moderator. *)
 val run
-  :  t
+  :  ?on_failure:(failure -> unit)
+  -> t
   -> runtime:R.session
   -> context:L.value
   -> prepare_commit:

@@ -2793,6 +2793,7 @@ let handoff_definition
       ?(events = "| _ -> Task.pure(state)")
       ?(schema = "true")
       ?(finish = "Task.pure(state)")
+      ?(resolve = "Invocation.resolve(p.context.invocation_id, `Complete(`Null))")
       env
   =
   let module EC = Chat_response.Extension_compiler in
@@ -2806,8 +2807,9 @@ let handoff_definition
     | `Tool_invoked(p) ->
       let ignored = state[0] <- state[0] + 1 in
       Task.bind(Runtime.emit(`String("committed")), fun ignored ->
-      Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(`Null)),
-        fun ignored -> |}
+      Task.bind(|}
+    ^ resolve
+    ^ {|, fun ignored -> |}
     ^ finish
     ^ {|))
     |}
@@ -2884,6 +2886,12 @@ let%test_unit
     ; `Redirect_bad
     ; `Revoked
     ; `End_session
+    ; `Unhandled
+    ; `Duplicate
+    ; `Wrong_id
+    ; `Invalid_output
+    ; `Forged_error
+    ; `Result_rejected
     ]
     ~f:(fun mode ->
       let request_count = ref 0 in
@@ -2891,10 +2899,15 @@ let%test_unit
       let redirected = Poly.equal mode `Redirect || Poly.equal mode `Redirect_bad in
       with_handoff_actor
         ~reject:(fun next ->
-          Poly.equal mode `Publish_rejected
-          && List.exists
-               next.Agent_session.Session_transition.state.invocations
-               ~f:(fun inv -> Option.is_some inv.output_entry_id))
+          List.exists
+            next.Agent_session.Session_transition.state.invocations
+            ~f:(fun inv ->
+              (Poly.equal mode `Publish_rejected && Option.is_some inv.output_entry_id)
+              || (Poly.equal mode `Result_rejected
+                  &&
+                  match inv.status with
+                  | Resolved (Complete _) -> true
+                  | _ -> false)))
         ~make_worker:(fun env actor_ready ->
           let events =
             if Poly.equal mode `Post_fail
@@ -2911,7 +2924,24 @@ let%test_unit
           let manager, _, definition =
             handoff_definition
               ~events
-              ~schema:(if redirected then "{\"type\":\"null\"}" else "true")
+              ~schema:
+                (if redirected || Poly.equal mode `Invalid_output
+                 then "{\"type\":\"null\"}"
+                 else "true")
+              ~resolve:
+                (match mode with
+                 | `Unhandled -> "Task.pure(())"
+                 | `Duplicate ->
+                   "Task.bind(Invocation.resolve(p.context.invocation_id, \
+                    `Complete(`Null)), fun ignored -> \
+                    Invocation.resolve(p.context.invocation_id, `Complete(`Null)))"
+                 | `Wrong_id -> "Invocation.resolve(\"other\", `Complete(`Null))"
+                 | `Invalid_output ->
+                   "Invocation.resolve(p.context.invocation_id, \
+                    `Complete(`String(\"wrong\")))"
+                 | `Forged_error ->
+                   "Task.fail(\"invocation.unhandled: private diagnostic\")"
+                 | _ -> "Invocation.resolve(p.context.invocation_id, `Complete(`Null))")
               ~finish:
                 (if Poly.equal mode `End_session
                  then
@@ -3072,12 +3102,25 @@ let%test_unit
                || Poly.equal mode `Post_fail
                || Poly.equal mode `Redirect
                || Poly.equal mode `End_session
-             | Published (Fail _) ->
-               Poly.equal mode `Deny
-               || Poly.equal mode `Disclosure
-               || Poly.equal mode `Invalid_json
-               || Poly.equal mode `Redirect_bad
-               || Poly.equal mode `Revoked
+             | Published (Fail error) ->
+               let expected =
+                 match mode with
+                 | `Deny | `Revoked -> "invocation.permission_denied"
+                 | `Disclosure -> "invocation.disclosure_rejected"
+                 | `Invalid_json | `Redirect_bad -> "invocation.invalid_input"
+                 | `Unhandled -> "invocation.unhandled"
+                 | `Duplicate -> "invocation.duplicate_resolution"
+                 | `Wrong_id -> "invocation.wrong_id"
+                 | `Invalid_output -> "invocation.invalid_output"
+                 | `Forged_error -> "invocation.handler_failed"
+                 | `Result_rejected -> "invocation.commit_failed"
+                 | _ -> assert false
+               in
+               assert (not error.retryable);
+               assert (Poly.equal error.details `Null);
+               assert (
+                 not (String.is_substring error.message ~substring:"private diagnostic"));
+               String.equal error.code expected
              | Resolved (Complete `Null) -> Poly.equal mode `Publish_rejected
              | _ -> false);
            assert (
@@ -3125,6 +3168,215 @@ let%test_unit
              Poly.equal
                state.invocations
                (Agent_session.Memory_backend.state backend).invocations)))
+;;
+
+let%test_unit
+    "routed calls recheck revoked policy and release cancelled handlers and waits"
+  =
+  List.iter [ `Revoked; `Cancelled; `Active_cancel ] ~f:(fun mode ->
+    let done_, done_u = Eio.Promise.create () in
+    with_handoff_actor
+      ~make_worker:(fun env actor_ready ->
+        let manager, _, definition = handoff_definition env in
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let actor = Eio.Promise.await actor_ready in
+          let first_held, first_held_u = Eio.Promise.create () in
+          let release, release_u = Eio.Promise.create () in
+          let cancel, cancel_u = Eio.Promise.create () in
+          let cancelled, cancelled_u = Eio.Promise.create () in
+          let attempted, attempted_u = Eio.Promise.create () in
+          let admitted = ref [] in
+          let revoked = ref false in
+          let prepared = ref 0 in
+          let history = ref input.history in
+          let allocate item =
+            let id =
+              History_entry.Id_source.allocate caps.id_source |> Result.ok_or_failwith
+            in
+            History_entry.create_with_id ~id item
+          in
+          let request call_id =
+            let call =
+              allocate
+                (Openai.Responses.Item.Function_call
+                   { name = "counter"
+                   ; arguments = "null"
+                   ; call_id
+                   ; _type = "function_call"
+                   ; id = None
+                   ; status = None
+                   })
+            in
+            caps.commit_entry call |> protocol_ok;
+            history := !history @ [ call ];
+            Chat_response.In_memory_stream.Tool_dispatch.
+              { kind = Function
+              ; original_name = "counter"
+              ; original_payload = "null"
+              ; name = "counter"
+              ; payload = "null"
+              ; call
+              ; history = !history
+              ; source = None
+              ; parent_call_id = None
+              }
+          in
+          let dispatch =
+            Agent_session.Moderator_tool_dispatch.create
+              ~definition
+              ~manager
+              ~input
+              ~capabilities:caps
+              ~available_tools:[]
+              ~session_meta:`Null
+              ~now:Agent_protocol.Timestamp.now
+              ~validate_work:(fun _ -> Error "no pending work")
+              ~admit:(fun request ->
+                let call_id =
+                  match History_entry.item request.call with
+                  | Function_call c -> c.call_id
+                  | _ -> assert false
+                in
+                admitted := !admitted @ [ call_id ];
+                if !revoked then Error "revoked while queued" else Ok ())
+              ~prepare_outcome:(fun _ ->
+                Int.incr prepared;
+                if !prepared = 1
+                then (
+                  Eio.Promise.resolve first_held_u ();
+                  Eio.Promise.await release);
+                Ok ())
+          in
+          let run request =
+            let result = dispatch request ~authorize:ignore |> Option.value_exn in
+            let call_id =
+              match History_entry.item request.call with
+              | Function_call c -> c.call_id
+              | _ -> assert false
+            in
+            let output =
+              allocate
+                (Openai.Responses.Item.Function_call_output
+                   { output = result.output
+                   ; call_id
+                   ; _type = "function_call_output"
+                   ; id = None
+                   ; status = None
+                   })
+            in
+            (Option.value_exn result.commit_output) output;
+            history := !history @ [ output ]
+          in
+          let first = request "first" in
+          let second = request "second" in
+          Eio.Switch.run (fun sw ->
+            Eio.Fiber.fork ~sw (fun () ->
+              if Poly.equal mode `Active_cancel
+              then (
+                let result =
+                  Eio.Fiber.first
+                    (fun () ->
+                       run first;
+                       `Completed)
+                    (fun () ->
+                       Eio.Promise.await cancel;
+                       `Cancelled)
+                in
+                assert (Poly.equal result `Cancelled);
+                Eio.Promise.resolve cancelled_u ())
+              else run first);
+            Eio.Promise.await first_held;
+            Eio.Fiber.fork ~sw (fun () ->
+              if Poly.equal mode `Cancelled
+              then (
+                let result =
+                  Eio.Fiber.first
+                    (fun () ->
+                       Eio.Promise.resolve attempted_u ();
+                       run second;
+                       `Completed)
+                    (fun () ->
+                       Eio.Promise.await cancel;
+                       `Cancelled)
+                in
+                assert (Poly.equal result `Cancelled);
+                Eio.Promise.resolve cancelled_u ())
+              else (
+                Eio.Promise.resolve attempted_u ();
+                run second));
+            Eio.Promise.await attempted;
+            Eio.Fiber.yield ();
+            (* These mailbox requests must remain responsive while the first
+               handler owns the moderator and the second call waits. *)
+            let queued = Agent_session.Session_actor.state actor |> protocol_ok in
+            assert (List.length queued.invocations = 1);
+            assert (Poly.equal !admitted [ "first" ]);
+            if Poly.equal mode `Cancelled
+            then (
+              Eio.Promise.resolve cancel_u ();
+              Eio.Promise.await cancelled;
+              let after = Agent_session.Session_actor.state actor |> protocol_ok in
+              assert (List.length after.invocations = 1))
+            else if Poly.equal mode `Active_cancel
+            then (
+              Eio.Promise.resolve cancel_u ();
+              Eio.Promise.await cancelled)
+            else revoked := true;
+            Eio.Promise.resolve release_u ());
+          let state = Agent_session.Session_actor.state actor |> protocol_ok in
+          assert (!prepared = if Poly.equal mode `Active_cancel then 2 else 1);
+          assert (
+            Poly.equal
+              state.moderator
+              (Some
+                 (Agent_session.Runtime_builder.encode_moderator_snapshot
+                    (Chat_response.Moderator_manager.identity_snapshot manager
+                     |> Result.ok_or_failwith))));
+          assert (
+            Poly.equal
+              (Chat_response.Moderator_manager.identity_snapshot manager
+               |> Result.ok_or_failwith)
+                .current_state
+              (Session.Snapshot.Array [ Int 1 ]));
+          let failed =
+            List.filter state.invocations ~f:(fun inv ->
+              match inv.status with
+              | Published (Fail error) ->
+                assert (String.equal error.code "invocation.permission_denied");
+                true
+              | Published (Complete `Null) -> false
+              | Resolved (Cancelled _) ->
+                assert (Poly.equal mode `Active_cancel);
+                false
+              | _ -> assert false)
+          in
+          assert (List.length failed = if Poly.equal mode `Revoked then 1 else 0);
+          assert (
+            Poly.equal
+              !admitted
+              (if Poly.equal mode `Cancelled then [ "first" ] else [ "first"; "second" ]));
+          revoked := false;
+          run (request "third");
+          assert (!prepared = if Poly.equal mode `Active_cancel then 3 else 2);
+          let snapshot =
+            Chat_response.Moderator_manager.identity_snapshot manager
+            |> Result.ok_or_failwith
+          in
+          assert (Poly.equal snapshot.current_state (Session.Snapshot.Array [ Int 2 ]));
+          let state = Agent_session.Session_actor.state actor |> protocol_ok in
+          Eio.Promise.resolve done_u ();
+          Completed
+            { final_history = !history
+            ; runtime_requests = []
+            ; moderator_snapshot = state.moderator
+            }))
+      (fun _env actor _writer backend ->
+         Eio.Promise.await done_;
+         let state = await_idle actor in
+         assert (
+           Poly.equal
+             state.invocations
+             (Agent_session.Memory_backend.state backend).invocations)))
 ;;
 
 let%test_unit "actor handoff persists actual manager state and resolution atomically" =

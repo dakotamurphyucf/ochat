@@ -146,6 +146,7 @@ val handle_event_entries
     this manager. Hosts using queued owner handoffs must supply this check. *)
 val handle_invocation_entries
   :  ?authorize:(unit -> (unit, string) result)
+  -> ?on_failure:(Moderator_invocation.failure -> unit)
   -> t
   -> invocation:Agent_protocol.Invocation.t
   -> history:History_entry.t list

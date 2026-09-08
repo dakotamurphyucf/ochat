@@ -9,7 +9,9 @@ exception Dispatch_error of Agent_protocol.Error.t
     before the handler, followed by the stream's final-target authorizer.
     [prepare_outcome] enforces host disclosure and output limits before recording
     an outcome; rejecting it rolls back moderator state and produces a bounded
-    generic failure. Successful outcomes pass through unchanged.
+    [invocation.disclosure_rejected] failure. Host failure codes identify the
+    failing stage independently of script diagnostic text. Successful outcomes
+    pass through unchanged.
     Pending work must have a qualified, owned completion path. Error details from
     host exceptions are not copied into model-visible output. Root actor ownership
     cannot be reused for transient fork calls. Unknown native names return [None]. *)

@@ -335,8 +335,21 @@ let decode t value =
   else Ok outcome
 ;;
 
-let run t ~runtime ~context ~prepare_commit =
+type failure =
+  | Unhandled
+  | Duplicate_resolution
+  | Wrong_id
+  | Invalid_output
+  | Invalid_state
+  | Suspended
+  | Handler_failed
+
+let run_impl t ~runtime ~context ~prepare_commit ~failure_kind =
   let open Result.Let_syntax in
+  let reject kind code message =
+    failure_kind := kind;
+    error code message
+  in
   let%bind () =
     match context with
     | L.VRecord fields ->
@@ -367,6 +380,12 @@ let run t ~runtime ~context ~prepare_commit =
     then error "invocation.state_limit" "encoded moderator state exceeds its byte limit"
     else Ok snapshot
   in
+  let checked_state value =
+    state_snapshot value
+    |> Result.map_error ~f:(fun message ->
+      failure_kind := Invalid_state;
+      message)
+  in
   let resolved = ref None in
   let prepare (transaction : R.transaction) =
     let resolutions, other =
@@ -375,16 +394,27 @@ let run t ~runtime ~context ~prepare_commit =
     in
     let%bind outcome =
       match resolutions with
-      | [] -> error "invocation.unhandled" "moderator did not resolve the invocation"
+      | [] ->
+        reject Unhandled "invocation.unhandled" "moderator did not resolve the invocation"
       | [ { args = [ L.VString id; value ]; _ } ] ->
         if String.equal id (Id.Invocation.to_string t.invocation.context.id)
-        then decode t value
+        then
+          decode t value
+          |> Result.map_error ~f:(fun message ->
+            failure_kind := Invalid_output;
+            message)
         else
-          error
+          reject
+            Wrong_id
             "invocation.wrong_id"
             "resolution does not belong to the dispatched invocation"
-      | [ _ ] -> error "invocation.invalid_output" "malformed resolution arguments"
-      | _ -> error "invocation.duplicate_resolution" "moderator resolved more than once"
+      | [ _ ] ->
+        reject Invalid_output "invocation.invalid_output" "malformed resolution arguments"
+      | _ ->
+        reject
+          Duplicate_resolution
+          "invocation.duplicate_resolution"
+          "moderator resolved more than once"
     in
     let%bind next =
       protocol
@@ -408,11 +438,25 @@ let run t ~runtime ~context ~prepare_commit =
       ~context
       ~event:t.event
       ~limits:R.{ fuel = t.limits.fuel; max_tasks = t.limits.max_tasks }
-      ~validate_state:(fun value -> Result.map (state_snapshot value) ~f:(fun _ -> ()))
-      ~copy_state:(fun value -> Result.bind (state_snapshot value) ~f:V.Snapshot.to_value)
+      ~validate_suspension:(fun () ->
+        reject
+          Suspended
+          "invocation.suspended"
+          "moderator tools cannot retain a legacy UI continuation")
+      ~validate_state:(fun value -> Result.map (checked_state value) ~f:(fun _ -> ()))
+      ~copy_state:(fun value -> Result.bind (checked_state value) ~f:V.Snapshot.to_value)
       ~prepare_transaction:prepare
   in
   match !resolved with
   | Some value -> Ok value
-  | None -> error "invocation.suspended" "tool handler did not complete"
+  | None -> reject Suspended "invocation.suspended" "tool handler did not complete"
+;;
+
+let run ?(on_failure = ignore) t ~runtime ~context ~prepare_commit =
+  let failure_kind = ref Handler_failed in
+  let result = run_impl t ~runtime ~context ~prepare_commit ~failure_kind in
+  (match result with
+   | Error _ -> on_failure !failure_kind
+   | Ok _ -> ());
+  result
 ;;

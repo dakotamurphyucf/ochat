@@ -1245,6 +1245,7 @@ let handle_event
       ?(prepare_commit = fun ~local_effects:_ -> Ok ignore)
       ?prepare_transaction
       ?(validate_state = fun _ -> Ok ())
+      ?(validate_suspension = fun () -> Ok ())
       ?(copy_state = fun state -> Ok state)
       ?(limits = { fuel = Int.max_value; max_tasks = Int.max_value })
       (session : session)
@@ -1326,6 +1327,8 @@ let handle_event
             committed := true;
             log_committed_exec session exec ~old_state ~new_state
           | Ok (Task_suspend suspended_exec) ->
+            let open Result.Let_syntax in
+            let%map () = validate_suspension () in
             session.suspended_exec <- Some suspended_exec;
             Debug_log.emitf
               "[chatml-runtime] handle_event_suspended phase=%s state=%s request=%s"
@@ -1333,8 +1336,7 @@ let handle_event
               (value_to_string old_state)
               (match suspended_exec.request with
                | Ask_text { prompt } -> "ask_text:" ^ prompt
-               | Ask_choice { prompt; _ } -> "ask_choice:" ^ prompt);
-            Ok ()))
+               | Ask_choice { prompt; _ } -> "ask_choice:" ^ prompt)))
 ;;
 
 let resume_ui_request

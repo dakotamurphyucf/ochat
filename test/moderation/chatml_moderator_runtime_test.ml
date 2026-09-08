@@ -733,6 +733,52 @@ let%expect_test
     |}]
 ;;
 
+let%test_unit "rejected UI suspension restores state and retains no continuation" =
+  let session =
+    compile_session_with_surface
+      ~surface:Chatml_builtin_surface.ui_moderator_surface
+      {|let initial_state = [0]
+        let on_event = fun ctx state event ->
+          let ignored = state[0] <- state[0] + 1 in
+          match event with
+          | `Suspend ->
+            Task.bind(Turn.prepend_system("uncommitted"), fun ignored ->
+            Task.bind(Runtime.emit(`Buffered), fun ignored ->
+            Task.bind(Approval.ask_text("continue?"), fun answer -> Task.pure(state))))
+          | _ -> Task.pure(state)|}
+  in
+  let copy_state = function
+    | L.VArray values -> Ok (L.VArray (Array.copy values))
+    | _ -> assert false
+  in
+  let rejected = ref 0 in
+  let result =
+    Runtime.handle_event
+      session
+      ~context:(context ~phase:"turn_start" ())
+      ~event:(L.VVariant ("Suspend", []))
+      ~copy_state
+      ~validate_suspension:(fun () ->
+        Int.incr rejected;
+        Error "suspension forbidden")
+      ~prepare_transaction:(fun _ -> assert false)
+  in
+  assert (Poly.equal result (Error "suspension forbidden"));
+  assert (!rejected = 1);
+  assert (Poly.equal (Runtime.current_state session) (L.VArray [| L.VInt 0 |]));
+  assert (Option.is_none (Runtime.pending_ui_request session));
+  assert (List.is_empty (Runtime.pending_local_effects session));
+  assert (List.is_empty (Runtime.committed_local_effects session));
+  assert (List.is_empty (Runtime.queued_events session));
+  assert (Result.is_error (Runtime.resume_ui_request session ~response:"late"));
+  Runtime.handle_event
+    session
+    ~context:(context ~phase:"turn_start" ())
+    ~event:(L.VVariant ("Continue", []))
+  |> ok_or_fail;
+  assert (Poly.equal (Runtime.current_state session) (L.VArray [| L.VInt 1 |]))
+;;
+
 let%test_unit "transaction preparation runs last and rejection skips every installer" =
   let session = compile_session local_ops_script in
   let installed = ref false in

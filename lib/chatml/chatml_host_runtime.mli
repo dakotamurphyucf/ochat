@@ -282,11 +282,15 @@ val request_session_end : session -> reason:string -> (unit, string) result
     Failure (including exceptions/cancellation) restores that copy, so data-state
     array mutations can be rolled back. By default state is retained by reference
     for legacy callers. This does not undo mutable globals or external effects.
-    [prepare_commit]'s returned installer must remain infallible. *)
+    [prepare_commit]'s returned installer must remain infallible.
+    [validate_suspension] runs before installing a legacy UI continuation. An
+    error rejects suspension and rolls back the handler just like other failures;
+    no pending request is retained. The default preserves legacy UI behavior. *)
 val handle_event
   :  ?prepare_commit:prepare_commit
   -> ?prepare_transaction:prepare_transaction
   -> ?validate_state:(value -> (unit, string) result)
+  -> ?validate_suspension:(unit -> (unit, string) result)
   -> ?copy_state:(value -> (value, string) result)
   -> ?limits:execution_limits
   -> session

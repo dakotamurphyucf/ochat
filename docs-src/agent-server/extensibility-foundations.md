@@ -186,11 +186,22 @@ it later under stale authority.
 The manager validates the returned outcome and prospective state before a host
 `prepare_outcome` check enforces disclosure and output limits. Rejected output or
 handler/admission failure restores the moderator state and records a bounded
-generic failure with the previous snapshot. Raw exception diagnostics are not
-placed in model-visible output. Host persistence failures propagate without
+failure with the previous snapshot. Host classifications distinguish invalid
+input, permission denial, unhandled calls, duplicate resolution, wrong invocation
+IDs, invalid output/state, disclosure rejection, handler failure and failed result
+commits. Classification comes from the failing host stage, not parsing a script's
+diagnostic text. Raw exception diagnostics are not placed in model-visible output.
+Host persistence failures propagate without
 rerunning the handler. Known standalone declarations report an unavailable
 execution service; they never fall through to a same-named native runner.
 Transient fork calls cannot use the root actor's invocation ownership.
+
+Moderator invocation execution rejects legacy UI suspension before a continuation
+is installed. A rejected suspension restores copied state, discards buffered
+effects and leaves no pending request that could block or resume a failed call.
+Normal extensibility scripts do not expose UI approval operations; the guard also
+protects hosts that compose runtime surfaces. Legacy UI handlers retain their
+existing suspend/resume behavior.
 
 The returned runtime requests travel with the result. They are reported after
 publication and participate in the turn decision. An end-session request prevents
@@ -205,6 +216,13 @@ input and actor capabilities. Tests run a compiled ChatML moderator through this
 worker and actor with an offline provider stream, covering success, policy denial,
 disclosure rejection, malformed JSON, redirects and final-schema validation,
 revocation, failed publication persistence, post-hook failure and end-session.
+Additional cases verify exact terminal error codes and prevent script diagnostics
+from impersonating host classifications. Concurrent adapter tests revoke authority
+while a second call queues behind an active handler, cancel queued and active
+calls, check that the actor remains responsive, and execute a later call with the
+retained state. Result-save rejection is tested separately from publication-save
+rejection; the former rolls back handler state and can record a terminal failure,
+whereas the latter retains the already resolved outcome for reconciliation.
 This is not public feature availability: normal `Runtime_builder` construction,
 shared nested/native/standalone routing, complete admission-error recording,
 persisted original/final audit provenance and restart reconciliation still need
