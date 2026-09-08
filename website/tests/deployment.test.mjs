@@ -4,6 +4,7 @@ import fs from 'node:fs/promises';
 import path from 'node:path';
 import os from 'node:os';
 import { spawnSync } from 'node:child_process';
+import { fileURLToPath } from 'node:url';
 import { parse } from 'yaml';
 import { createHash } from 'node:crypto';
 import {
@@ -233,6 +234,60 @@ test('production publishing is main-only, serialized, gated, and uses the tested
     );
   assert.equal(secrets.length, 1);
   assert.equal(secrets[0].name, 'Publish qualified release');
+});
+
+test('publisher permits only main pushes and explicit main recovery, before touching credentials or artifacts', () => {
+  const script = fileURLToPath(
+    new URL('../scripts/publish-production.mjs', import.meta.url),
+  );
+  for (const event of ['push', 'pull_request', 'schedule', 'workflow_dispatch'])
+    for (const ref of ['refs/heads/main', 'refs/heads/feature'])
+      for (const mode of ['', 'validate', 'redeploy', 'cold']) {
+        const result = spawnSync(
+          process.execPath,
+          [script, 'unused', 'unused', 'unused'],
+          {
+            env: {
+              ...process.env,
+              GITHUB_EVENT_NAME: event,
+              GITHUB_REF: ref,
+              GITHUB_REPOSITORY: 'dakotamurphyucf/ochat',
+              CI_DEPLOY_MODE: mode,
+              CLOUDFLARE_API_TOKEN: '',
+              GITHUB_TOKEN: '',
+            },
+          },
+        );
+        const allowed =
+          ref === 'refs/heads/main' &&
+          (event === 'push' ||
+            (event === 'workflow_dispatch' && mode === 'redeploy'));
+        assert.notEqual(result.status, 0);
+        assert.match(
+          result.stderr.toString(),
+          allowed
+            ? /Deployment credentials missing/
+            : /requires an Ochat main push or explicit main redeploy/,
+        );
+      }
+  const foreign = spawnSync(
+    process.execPath,
+    [script, 'unused', 'unused', 'unused'],
+    {
+      env: {
+        ...process.env,
+        GITHUB_EVENT_NAME: 'push',
+        GITHUB_REF: 'refs/heads/main',
+        GITHUB_REPOSITORY: 'someone/else',
+        CLOUDFLARE_API_TOKEN: '',
+        GITHUB_TOKEN: '',
+      },
+    },
+  );
+  assert.match(
+    foreign.stderr.toString(),
+    /requires an Ochat main push or explicit main redeploy/,
+  );
 });
 
 test('production qualification rejects stale, preview, failed, or mismatched evidence', () => {

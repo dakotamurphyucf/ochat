@@ -1,3 +1,4 @@
+import { fileURLToPath } from "node:url";
 import test from "node:test";
 import assert from "node:assert/strict";
 import fs from "node:fs";
@@ -234,7 +235,7 @@ test("actual gate entry point returns nonzero when framework fails", () => {
   };
   const result = spawnSync(
     process.execPath,
-    [".github/scripts/release-gate.mjs"],
+    [fileURLToPath(new URL("../scripts/release-gate.mjs", import.meta.url))],
     {
       env: {
         ...process.env,

@@ -41,7 +41,7 @@ let diagnostic_prompt variable =
     <direct when="linux"/>
   </backends>
   <policy default="deny">
-    <rule id="allow-pwd" action="allow"><resolved_path value="/bin/pwd"/></rule>
+    <rule id="allow-pwd" action="allow"><resolved_path value="%s"/></rule>
   </policy>
   <approvals provider="none" unavailable="deny" scopes="once"/>
   <audit format="jsonl" path="${session_dir}/authority-audit.jsonl"
@@ -65,6 +65,9 @@ let diagnostic_prompt variable =
 </script>
 |}
     variable
+    (* /bin is a symlink on merged-/usr Linux systems. Policy matches the
+       resolved executable, while the diagnostic still invokes /bin/pwd. *)
+    (Eio_posix.Low_level.realpath "/bin/pwd")
 ;;
 
 let configure_fixture fixture variable =
@@ -448,8 +451,8 @@ let authority_runtime ~read_root ~write_root =
     <direct when="linux"/>
   </backends>
   <policy default="deny">
-    <rule id="allow-cat" action="allow"><resolved_path value="/bin/cat"/></rule>
-    <rule id="allow-cp" action="allow"><resolved_path value="/bin/cp"/></rule>
+    <rule id="allow-cat" action="allow"><resolved_path value="%s"/></rule>
+    <rule id="allow-cp" action="allow"><resolved_path value="%s"/></rule>
   </policy>
   <approvals provider="none" unavailable="deny" scopes="once"/>
   <audit format="none"/>
@@ -458,6 +461,8 @@ let authority_runtime ~read_root ~write_root =
 |}
     read_capability
     write_capability
+    (Eio_posix.Low_level.realpath "/bin/cat")
+    (Eio_posix.Low_level.realpath "/bin/cp")
 ;;
 
 let filesystem_prompt ~read_root ~target =

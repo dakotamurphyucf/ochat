@@ -13,15 +13,20 @@ verified baseline. [Contributor workflows](../CONTRIBUTING.md) and
 ## One publication owner
 
 The Website workflow is the sole production publisher for `https://ochatlabs.com`.
-Every pull request and main push runs the OCaml documentation gate and both
-preview/production website matrices. Production builds use the owned origin;
-preview builds remain noindex. The final `release-gate` rejects failed, cancelled
-or skipped prerequisite jobs. The broader Ochat normal/E2E test gate is a separate
-follow-up in scratch/todo.md; do not describe it as already implemented.
+Every pull request and main push runs change detection and the required final
+`release-gate`. Selected jobs include normal framework tests, PR-safe E2E tests,
+offline documentation semantics, and both website environments. The gate rejects
+failed/cancelled selected jobs and accepts skips only when explicitly classified
+as unnecessary. Website and OCaml jobs run concurrently. See
+[CI coverage and maintenance](ci-enforcement.md) for dependency mapping, cache
+policy, retained evidence, and the Linux qualification record.
 
-Only a successful **main push** can enter `deploy-production`, whose GitHub
-`production` environment permits only the `main` branch. Deployment concurrency
-is serialized, and the publisher checks the current main SHA before uploading.
+A passing main run publishes only when website qualification/publication is
+selected. Selection includes unshipped changes since the last successful
+deployment, so failed publications are not stranded by unrelated pushes. A
+manual `redeploy` also requires full qualification on main; scheduled and manual
+validation/cold audits do not publish. The GitHub `production` environment permits
+only `main`. Deployment is serialized and rejects a superseded main revision.
 It downloads `website-production-release` from its own run; it does not rebuild.
 Integrity verification matches the retained file inventory, redirect code,
 Wrangler configuration, package lock, origin, source revision, semantic report,
@@ -86,16 +91,14 @@ repeat the relevant checks. The importer requires committed canonical/example
 bytes. View-source links must resolve at that public commit; edit links use
 `main`. Never promote a noindex preview or relabel its evidence as production.
 
-For the CI semantic toolchain, `opam install` does not consume the source pins
-in `dune-project`. The Website workflow explicitly pins `textmate-language`
-and `piaf` to the exact public Git revisions qualified locally before installing
-dependencies, with Oniguruma 0.1.2: the TextMate fork's metadata does not exclude
-Oniguruma 0.2, whose `Syntax.default` API changed incompatibly. The clean GitHub
-run exposed this missing transitive constraint. It uses the published OCaml 5.3.0 compiler and does not copy the
-developer's opam switch or its macOS-only `core_unix` pin. Keep these revisions
-explicit and review changes with the actual semantic documentation gate. The
-semantic evidence artifact includes the installed package versions and pins; this
-records the resolved toolchain without claiming a complete OCaml dependency lock.
+The Linux CI toolchain uses `ochat.opam.locked` and
+`.github/ci-toolchain.json`, with an immutable opam repository snapshot, explicit
+Piaf/TextMate source pins, Oniguruma 0.1.2, and the compatible Nottui series below
+0.5. Every dependency-cache restore is reconciled against the lock and verified
+before test execution. The semantic evidence retains the installed packages,
+pins, lock and cache/toolchain metadata. These Linux artifacts do not copy the
+developer's macOS opam switch. See [toolchain maintenance](ci-enforcement.md#reproducible-dependencies-and-cache-maintenance)
+for cold validation, lock refresh and cache recovery.
 
 For local qualification while the checkout is uncommitted:
 

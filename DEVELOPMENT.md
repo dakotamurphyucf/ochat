@@ -515,3 +515,19 @@ local OCaml libraries and this repository:
 Once these steps are part of your regular workflow (e.g. after `opam
 upgrade` or significant doc changes), contributors and tools will always
 have up‑to‑date local documentation they can search semantically.
+
+
+## Required GitHub validation
+
+The Website workflow's required `release-gate` includes Ochat framework tests
+when the changed inputs require them. Normal tests use `opam exec -- dune runtest
+--force`; PR-safe daemon, transport, workspace and multi-client scenarios use
+`opam exec -- dune build --force @agent-e2e-pr`. Live-provider, load, soak and
+manual-terminal tiers remain separate.
+
+Linux CI installs the committed `ochat.opam.locked` dependency set and verifies
+restored dependencies before testing. Update the lock and `.github/ci-toolchain.json`
+when changing `ochat.opam`/`dune-project` or source pins. The CI lock targets Linux;
+ordinary local setup on other platforms uses the base package definition.
+See [CI coverage and maintenance](website/planning/ci-enforcement.md) for changed-file
+selection, periodic cold checks, cache recovery and the deployment rules.
