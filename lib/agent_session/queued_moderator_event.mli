@@ -22,3 +22,22 @@ val complete
   -> snapshot:Session.Moderator_state.Identity_snapshot.t
   -> requests:Agent_protocol.Invocation.follow_up
   -> (Agent_protocol.Moderator_execution.t, Agent_protocol.Error.t) result
+
+(** Bind explicit retirement to a retained failed/interrupted receipt and its
+    exact original checkpoint/head. Changed checkpoints require reconciliation;
+    payload equality alone does not prove queue occurrence identity. *)
+val claim_retirement
+  :  state:Session_state.t
+  -> id:Agent_protocol.Id.Moderator_execution.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> ( Agent_protocol.Moderator_execution.t * Session.Snapshot.t
+       , Agent_protocol.Error.t )
+       result
+
+(** Prepare retirement paired with a checkpoint removing only that head. *)
+val retire
+  :  claimed:Agent_protocol.Moderator_execution.t
+  -> before:Session.Moderator_state.Identity_snapshot.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> reason:string
+  -> (Agent_protocol.Moderator_execution.t, Agent_protocol.Error.t) result

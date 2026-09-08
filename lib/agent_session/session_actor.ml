@@ -63,6 +63,7 @@ type queued_event_borrow =
   { receipt : Agent_protocol.Moderator_execution.t
   ; before : Session.Moderator_state.Identity_snapshot.t
   ; event : Session.Snapshot.t
+  ; retirement_reason : string option
   ; mutable callback_active : bool
   ; mutable committed : bool
   ; mutable cancel : (unit -> unit) option
@@ -79,6 +80,11 @@ type _ request =
   | Claim_queued_event :
       Agent_protocol.Id.Moderator_execution.t
       * Session.Moderator_state.Identity_snapshot.t
+      -> queued_event_borrow option request
+  | Claim_queued_retirement :
+      Agent_protocol.Id.Moderator_execution.t
+      * Session.Moderator_state.Identity_snapshot.t
+      * string
       -> queued_event_borrow option request
   | Commit_queued_event :
       queued_event_borrow
@@ -1136,6 +1142,7 @@ let claim_queued_event t id snapshot =
       { receipt
       ; before = snapshot
       ; event
+      ; retirement_reason = None
       ; callback_active = true
       ; committed = false
       ; cancel = None
@@ -1158,11 +1165,61 @@ let validate_queued_event_borrow t borrow =
   | _ -> Error (error Conflict "queued event is no longer owned by this callback")
 ;;
 
+let queued_retirement_available t =
+  (not t.idle_moderator_borrowed)
+  && (not (moderator_is_borrowed t))
+  && Option.is_none t.state.active_operation
+  && (not (has_pending_permission t))
+  &&
+  match t.state.lifecycle.desired, t.state.lifecycle.observed with
+  | Running, Idle | Stopped, Stopped -> true
+  | _ -> false
+;;
+
+let claim_queued_retirement t id snapshot reason =
+  let open Result.Let_syntax in
+  match queued_retirement_available t with
+  | false -> Ok None
+  | true ->
+    let%bind receipt, event =
+      Queued_moderator_event.claim_retirement ~state:t.state ~id ~snapshot
+    in
+    let%bind _ =
+      Agent_protocol.Moderator_execution.retire
+        receipt
+        ~checkpoint_sha256:receipt.context.checkpoint_sha256
+        ~reason
+    in
+    let borrow =
+      { receipt
+      ; before = snapshot
+      ; event
+      ; retirement_reason = Some reason
+      ; callback_active = true
+      ; committed = false
+      ; cancel = None
+      ; cancel_requested = false
+      }
+    in
+    t.queued_event_borrow <- Some borrow;
+    t.idle_moderator_borrowed <- true;
+    Ok (Some borrow)
+;;
+
 let queued_event_can_commit t borrow =
   let open Result.Let_syntax in
   let%bind () = validate_queued_event_borrow t borrow in
-  match t.state.lifecycle.desired, t.state.lifecycle.observed, t.state.failure with
-  | Running, Idle, None
+  match
+    ( borrow.retirement_reason
+    , t.state.lifecycle.desired
+    , t.state.lifecycle.observed
+    , t.state.failure )
+  with
+  | (Some _, Running, Idle, _ | Some _, Stopped, Stopped, _)
+    when borrow.callback_active
+         && (not (borrow.committed || borrow.cancel_requested))
+         && Option.is_none t.state.active_operation -> Ok ()
+  | None, Running, Idle, None
     when borrow.callback_active
          && (not (borrow.committed || borrow.cancel_requested || t.state.halted))
          && Option.is_none t.state.active_operation -> Ok ()
@@ -1173,11 +1230,27 @@ let commit_queued_event t borrow snapshot requests =
   let open Result.Let_syntax in
   let%bind () = queued_event_can_commit t borrow in
   let%bind completed =
-    Queued_moderator_event.complete
-      ~claimed:borrow.receipt
-      ~before:borrow.before
-      ~snapshot
-      ~requests
+    match borrow.retirement_reason with
+    | None ->
+      Queued_moderator_event.complete
+        ~claimed:borrow.receipt
+        ~before:borrow.before
+        ~snapshot
+        ~requests
+    | Some reason ->
+      (match
+         ( requests.Agent_protocol.Invocation.request_turn
+         , requests.request_compaction
+         , requests.end_session )
+       with
+       | false, false, None ->
+         Queued_moderator_event.retire
+           ~claimed:borrow.receipt
+           ~before:borrow.before
+           ~snapshot
+           ~reason
+       | _ ->
+         Error (error Invalid_state "failed-head retirement cannot schedule new work"))
   in
   let%bind _ =
     transition
@@ -1199,9 +1272,9 @@ let finish_queued_event t borrow interrupted =
   borrow.callback_active <- false;
   borrow.cancel <- None;
   let%bind () =
-    match borrow.committed with
-    | true -> Ok ()
-    | false ->
+    match borrow.committed, borrow.retirement_reason with
+    | true, _ | false, Some _ -> Ok ()
+    | false, None ->
       let%bind terminal =
         match interrupted || borrow.cancel_requested with
         | true ->
@@ -2545,16 +2618,11 @@ let with_moderator_gate t f =
     Error (error code (Chat_response.Execution_gate.error_message failure))
 ;;
 
-let with_idle_queued_moderator_event t ~snapshot f =
+let with_queued_event_borrow t ~claim f =
   with_moderator_gate t (fun () ->
     let open Result.Let_syntax in
     Eio.Fiber.yield ();
-    let%bind claimed =
-      Eio.Cancel.protect (fun () ->
-        call
-          t
-          (Claim_queued_event (Agent_protocol.Id.Moderator_execution.create (), snapshot)))
-    in
+    let%bind claimed = Eio.Cancel.protect (fun () -> call t claim) in
     match claimed with
     | None -> Ok false
     | Some borrow ->
@@ -2599,6 +2667,26 @@ let with_idle_queued_moderator_event t ~snapshot f =
          in
          ignore (finish interrupted : (unit, Agent_protocol.Error.t) result);
          Stdlib.Printexc.raise_with_backtrace exn backtrace))
+;;
+
+let with_idle_queued_moderator_event t ~snapshot f =
+  with_queued_event_borrow
+    t
+    ~claim:
+      (Claim_queued_event (Agent_protocol.Id.Moderator_execution.create (), snapshot))
+    f
+;;
+
+let with_queued_moderator_retirement t ~id ~snapshot ~reason f =
+  with_queued_event_borrow
+    t
+    ~claim:(Claim_queued_retirement (id, snapshot, reason))
+    (fun ~event ~commit ->
+       f ~event ~commit:(fun ~snapshot ->
+         commit
+           ~snapshot
+           ~requests:
+             { request_turn = false; request_compaction = false; end_session = None }))
 ;;
 
 let with_moderator_invocation t operation_id ~invocation f =
@@ -4062,6 +4150,8 @@ let detach t attachment_id =
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t -> function
   | Claim_queued_event (id, snapshot) -> claim_queued_event t id snapshot
+  | Claim_queued_retirement (id, snapshot, reason) ->
+    claim_queued_retirement t id snapshot reason
   | Commit_queued_event (borrow, snapshot, requests) ->
     commit_queued_event t borrow snapshot requests
   | Finish_queued_event (borrow, interrupted) -> finish_queued_event t borrow interrupted

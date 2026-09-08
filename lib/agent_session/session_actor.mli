@@ -552,6 +552,26 @@ val with_idle_queued_moderator_event
       -> (unit, Agent_protocol.Error.t) result)
   -> (bool, Agent_protocol.Error.t) result
 
+(** Explicitly retire a retained failed/interrupted queue head at its original
+    checkpoint. Available while quiescent running-idle or stopped, without an
+    active callback/permission. The callback prepares a manager queue-only change;
+    [commit] saves retirement and the new checkpoint atomically. It holds exclusive
+    ownership through local installation, preserves the original failure, and
+    grants no execution or scheduling authority. Uncommitted retirement releases
+    ownership without changing the receipt/queue and can be retried. A changed
+    checkpoint or already retired receipt is rejected. No handler is rerun. *)
+val with_queued_moderator_retirement
+  :  t
+  -> id:Agent_protocol.Id.Moderator_execution.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> reason:string
+  -> (event:Session.Snapshot.t
+      -> commit:
+           (snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (bool, Agent_protocol.Error.t) result
+
 (** Atomically select and claim one deferred observation in an idle, running,
     unblocked session. The callback runs outside the mailbox under exclusive
     moderator ownership, without creating a foreground operation. Returns false

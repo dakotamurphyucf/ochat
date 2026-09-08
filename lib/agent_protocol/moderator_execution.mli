@@ -41,6 +41,14 @@ type intent =
   | Discarded of string
 [@@deriving equal, sexp]
 
+(** Separate disposition for a consumed failed queue head. The original execution
+    outcome remains unchanged. Commit this with the resulting checkpoint. *)
+type retirement =
+  { checkpoint_sha256 : string
+  ; reason : string
+  }
+[@@deriving equal, sexp]
+
 type t = private
   { context : context
   ; status : status
@@ -48,6 +56,7 @@ type t = private
   ; intent : intent option
   ; compaction_operation_id : Id.Operation.t option
     (** Retained after application/discard for provenance and recovery checks. *)
+  ; retirement : retirement option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -62,6 +71,7 @@ val complete
 
 val fail : t -> Invocation.tool_error -> (t, Error.t) result
 val interrupt : t -> reason:string -> (t, Error.t) result
+val retire : t -> checkpoint_sha256:string -> reason:string -> (t, Error.t) result
 
 (** Atomically pair intent transitions with their actual actor scheduling or
     stop transition. Waiting_compaction retains the exact dependent operation. *)

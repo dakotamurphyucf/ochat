@@ -120,7 +120,8 @@ val current_schema_version : int
 
 (** Upgrade supported legacy state before validation/replay. Schema 2 has no
     invocation records; schema 3 retains invocations but has no subscriptions
-    or deliveries. Unknown versions and inconsistent legacy fields fail closed. *)
+    or deliveries; schema 4 has no event receipts, and schema 5 has no event
+    retirements. Unknown versions and inconsistent legacy fields fail closed. *)
 val upgrade_schema : t -> (t, Agent_protocol.Error.t) result
 
 val create

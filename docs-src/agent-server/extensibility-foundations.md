@@ -146,10 +146,27 @@ idle work cannot enter that gap. Reads and cancel-stop remain responsive.
 Cancellation or failed execution leaves the old checkpoint intact and records an
 interrupted or failed receipt. Such a receipt blocks further queued execution for
 that source and generation, even if another handler changes the checkpoint. This
-prevents implicit replay of external effects. Explicit retirement of failed queue
-heads remains to be implemented. If saving the terminal record also fails, the
+prevents implicit replay of external effects. If saving the terminal record also fails, the
 borrow stays held and its commit callback expires; recovery interrupts the saved
 running claim. Successful consumption may legitimately emit an identical event.
+
+The internal `Session_actor.with_queued_moderator_retirement` handoff explicitly
+retires a failed/interrupted head without executing a handler. It accepts a
+quiescent running-idle or stopped session, retains exclusive ownership, and pairs
+the retirement record with a checkpoint removing only that head. The original
+failure remains unchanged and inspectable. The caller uses the manager's
+`retire_queued_event_entries` preparation so the local queue changes only after
+persistence accepts the retirement. Failed saves leave the queue and receipt
+unchanged; retrying retirement does not retry the handler's external effects.
+
+Retirement requires the exact original checkpoint and captured head, preventing
+an old receipt from consuming a later equal-valued event. Changed checkpoints
+require explicit reconciliation; this operation does not infer occurrence identity
+from payload equality. Retirement can happen only once and cannot schedule work.
+Its bounded reason and resulting checkpoint digest are retained separately from
+the failure. Safe status projections report `failed.retired` or
+`interrupted.retired` without disclosing the reason or event payload. Event record
+JSON version 2 adds retirement; version 1 remains readable when it has no retirement.
 
 The compiled-handler/actor expect test covers successful and concurrent claims,
 rejected admission and completion saves, a rejected terminal save followed by
@@ -158,7 +175,14 @@ ownership during the durable/live checkpoint handoff. It uses the in-memory
 persistence backend and snapshot codec, without provider calls or added history.
 This is not a full daemon restart test or native-tool authorization qualification.
 
-Startup/foreground event ownership, failed-head retirement, native child lineage,
+A further compiled-handler/actor expect integration emits two identical payloads,
+fails the first after a probe effect, rejects a retirement save, then retires it
+while stopped and runs the second occurrence once after restart. It checks stale
+checkpoints/callbacks, duplicate retirement, unchanged failure, snapshot migration,
+JSON compatibility and safe projection. This restart is the actor lifecycle; the
+snapshot restore checks do not constitute a separate daemon-process restart.
+
+Startup/foreground event ownership, changed-checkpoint reconciliation, native child lineage,
 interactive permissions, scheduling of retained event requests and normal v1
 runtime binding remain integration work. The idle handoff grants no tool authority.
 
@@ -948,12 +972,14 @@ source, wake policy, attempt and one history identity. The session aggregate
 checks ownership, generation and cross-record acknowledgement/result correlation.
 One terminal work item has one delivery owner.
 
-Session state schema 5 adds moderator event execution receipts. It upgrades schema
-4 with existing extension records preserved, schema 3 with invocation records,
+Session state schema 6 adds failed-event retirement. It upgrades schema 5 with
+event execution receipts preserved but no retirements, schema 4 with existing
+extension records preserved, schema 3 with invocation records,
 and schema 2 with empty extension records. Old schemas containing event execution
-records are rejected. Inconsistent old fields and unknown future
+records are rejected; schema 5 records containing retirements are also rejected.
+Inconsistent old fields and unknown future
 schemas fail closed. Snapshot, journal and compaction archive restoration apply
-the same version checks. An older binary is not a supported reader of schema 5;
+the same version checks. An older binary is not a supported reader of schema 6;
 retain compatible backups before testing a binary rollback.
 
 The host-internal `Session_actor.commit_extensions` operation atomically commits

@@ -1067,7 +1067,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 5)
+    ((schema 6)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.discarded)))
@@ -1394,11 +1394,11 @@ let%expect_test
       [%sexp
         (Result.is_error
            (Agent_session.Session_state.upgrade_schema
-              { initial with schema_version = 6 })
+              { initial with schema_version = 7 })
          : bool)]);
   [%expect
     {|
-    ((version 5) (records 0))
+    ((version 6) (records 0))
     true
     true
     true
@@ -1467,7 +1467,7 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 5) (records 0)) |}]
+  [%expect {| ((version 6) (records 0)) |}]
 ;;
 
 let extension_fixture workspace_instance =
@@ -1765,7 +1765,7 @@ let%expect_test "schema-3 invocation snapshots migrate without losing pending pu
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 5) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 6) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null)) |}]
 ;;
 
@@ -5768,6 +5768,244 @@ let%expect_test "queued events retain actor ownership through checkpoint install
     (Stop_cancel 0 1 (interrupted) 0)
     (Bad_tail 0 1 (failed) 0)
     |}]
+;;
+
+let%expect_test
+    "failed queue retirement preserves failure and advances exactly one occurrence"
+  =
+  let module A = Agent_session.Session_actor in
+  let module M = Chat_response.Moderator_manager in
+  let module E = Agent_protocol.Moderator_execution in
+  let module S = Session.Moderator_state.Identity_snapshot in
+  let prepared = ref None
+  and effects = ref 0
+  and reject_retirement = ref true in
+  with_handoff_actor
+    ~reject:(fun next ->
+      match
+        !reject_retirement
+        && List.exists
+             next.Agent_session.Session_transition.state.moderator_executions
+             ~f:(fun receipt -> Option.is_some receipt.retirement)
+      with
+      | true ->
+        reject_retirement := false;
+        true
+      | false -> false)
+    ~make_worker:(fun env _ ->
+      Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+        let manager, _, _ =
+          handoff_definition
+            env
+            ~events:
+              {| | `Session_start ->
+              Task.bind(Runtime.emit(`String("same")), fun ignored ->
+              Task.bind(Runtime.emit(`String("same")), fun ignored -> Task.pure(state)))
+             | `Internal_event(payload) ->
+              let ignored = state[0] <- state[0] + 1 in
+              Task.bind(Tool.call("probe", payload), fun ignored -> Task.pure(state))
+             | _ -> Task.pure(state) |}
+        in
+        M.handle_event_entries_transactional
+          manager
+          ~session_id:"fixture"
+          ~now_ms:0
+          ~history:[]
+          ~available_tools:[]
+          ~session_meta:`Null
+          ~event:Session_start
+          ~authorize:(fun () -> Ok ())
+          ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
+          ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+        |> Result.ok_or_failwith
+        |> ignore;
+        let before = M.identity_snapshot manager |> Result.ok_or_failwith in
+        let snapshot =
+          Some (Agent_session.Runtime_builder.encode_moderator_snapshot before)
+        in
+        caps.commit_moderator snapshot |> protocol_ok;
+        prepared := Some (manager, before);
+        Completed
+          { final_history = input.history
+          ; moderator_snapshot = snapshot
+          ; runtime_requests = []
+          }))
+    (fun _env actor writer backend ->
+       let initial = await_idle actor in
+       let manager, before = Option.value_exn !prepared in
+       let current () = M.identity_snapshot manager |> Result.ok_or_failwith in
+       let same a b = Sexp.equal (S.sexp_of_t a) (S.sexp_of_t b) in
+       let execute ~fail snapshot =
+         A.with_idle_queued_moderator_event actor ~snapshot (fun ~event:_ ~commit ->
+           M.handle_next_event_entries_transactional
+             manager
+             ~session_id:"fixture"
+             ~now_ms:0
+             ~history:[]
+             ~available_tools:[]
+             ~session_meta:`Null
+             ~authorize:(fun ~event ->
+               assert (
+                 Sexp.equal
+                   (Session.Snapshot.sexp_of_t event)
+                   (Session.Snapshot.sexp_of_t
+                      (List.hd_exn snapshot.queued_internal_events)));
+               Ok ())
+             ~on_tool_call:(fun ~name:_ ~args ->
+               assert (Jsonaf.exactly_equal args (`String "same"));
+               incr effects;
+               match fail with
+               | true -> Error "effect finished but result failed"
+               | false -> Ok (Tool_ok `Null))
+             ~prepare_event:(fun ~outcome:_ ~snapshot ->
+               commit
+                 ~snapshot
+                 ~requests:
+                   { request_turn = false
+                   ; request_compaction = false
+                   ; end_session = None
+                   }
+               |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+               |> Result.map ~f:(fun () -> ignore))
+           |> Result.map ~f:ignore
+           |> Result.map_error ~f:handoff_error)
+       in
+       assert (Result.is_error (execute ~fail:true before));
+       let failed_state = A.state actor |> protocol_ok in
+       let failed = List.hd_exn failed_state.moderator_executions in
+       assert (same before (current ()) && !effects = 1);
+       let escaped = ref None in
+       let cancel_retirement = ref false in
+       let retire () =
+         A.with_queued_moderator_retirement
+           actor
+           ~id:failed.context.id
+           ~snapshot:before
+           ~reason:"operator discarded failed delivery"
+           (fun ~event:_ ~commit ->
+              escaped := Some commit;
+              M.retire_queued_event_entries
+                manager
+                ~expected:before
+                ~prepare:(fun ~snapshot ->
+                  (match !cancel_retirement with
+                   | true ->
+                     A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                     |> protocol_ok
+                     |> ignore;
+                     Eio.Fiber.yield ()
+                   | false -> ());
+                  commit ~snapshot
+                  |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+                  |> Result.map ~f:(fun () ->
+                    assert (Result.is_error (A.change_moderator actor None));
+                    fun () -> ()))
+              |> Result.map_error ~f:handoff_error)
+       in
+       assert (Result.is_error (retire ()));
+       assert (same before (current ()) && !effects = 1);
+       let rejected = A.state actor |> protocol_ok in
+       assert (List.equal E.equal rejected.moderator_executions [ failed ]);
+       cancel_retirement := true;
+       let cancelled =
+         try retire () with
+         | Eio.Cancel.Cancelled _ -> Error (handoff_error "cancelled")
+       in
+       assert (Result.is_error cancelled && same before (current ()) && !effects = 1);
+       assert (
+         List.equal E.equal (A.state actor |> protocol_ok).moderator_executions [ failed ]);
+       cancel_retirement := false;
+       let expected =
+         { before with
+           queued_internal_events = List.tl_exn before.queued_internal_events
+         }
+       in
+       assert (Result.is_error ((Option.value_exn !escaped) ~snapshot:expected));
+       let changed = { before with revision = before.revision + 1 } in
+       assert (
+         Result.is_error
+           (A.with_queued_moderator_retirement
+              actor
+              ~id:failed.context.id
+              ~snapshot:changed
+              ~reason:"stale"
+              (fun ~event:_ ~commit:_ -> assert false)));
+       assert (
+         Result.is_error
+           (M.retire_queued_event_entries
+              manager
+              ~expected:changed
+              ~prepare:(fun ~snapshot:_ -> assert false)));
+       A.stop actor ~attachment_id:writer.id ~mode:Graceful |> protocol_ok |> ignore;
+       assert (retire () |> protocol_ok);
+       assert (same expected (current ()) && !effects = 1);
+       let retired_state = A.state actor |> protocol_ok in
+       let retired = List.hd_exn retired_state.moderator_executions in
+       assert (E.equal_status failed.status retired.status);
+       assert (Option.is_some retired.retirement);
+       assert (Result.is_error (retire ()));
+       let decoded = E.of_json (E.to_json retired) |> protocol_ok in
+       assert (E.equal retired decoded);
+       let v1 record =
+         match E.to_json record with
+         | `Object fields ->
+           `Object
+             (List.Assoc.add fields ~equal:String.equal "schema_version" (`Number "1"))
+         | _ -> assert false
+       in
+       assert (E.equal failed (E.of_json (v1 failed) |> protocol_ok));
+       assert (Result.is_error (E.of_json (v1 retired)));
+       assert (
+         Result.is_error
+           (E.retire retired ~checkpoint_sha256:(String.make 64 'a') ~reason:"again"));
+       let legacy = { failed_state with schema_version = 5 } in
+       let migrated =
+         Agent_session.Session_persistence.restore_snapshot
+           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t legacy))
+         |> store_ok
+       in
+       assert (List.equal E.equal migrated.moderator_executions [ failed ]);
+       assert (
+         Result.is_error
+           (Agent_session.Session_state.upgrade_schema
+              { retired_state with schema_version = 5 }));
+       let restored =
+         Agent_session.Session_persistence.restore_snapshot
+           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t retired_state))
+         |> store_ok
+       in
+       assert_same_session_snapshot restored retired_state;
+       let projection = Agent_session.Session_state.extension_status restored in
+       let projection_json =
+         `Array (List.map projection ~f:Agent_protocol.Extension_status.to_json)
+       in
+       assert (
+         List.length
+           (Agent_protocol.Extension_status.list_of_json projection_json |> protocol_ok)
+         = 1);
+       assert (
+         not
+           (String.is_substring (Jsonaf.to_string projection_json) ~substring:"operator"));
+       A.start actor ~attachment_id:writer.id |> protocol_ok |> ignore;
+       assert (execute ~fail:false (current ()) |> protocol_ok);
+       let final = A.state actor |> protocol_ok in
+       assert (!effects = 2 && List.is_empty (current ()).queued_internal_events);
+       assert (Option.is_none final.active_operation);
+       assert (
+         List.length final.conversation.canonical_history
+         = List.length initial.conversation.canonical_history);
+       assert_same_session_snapshot final (Agent_session.Memory_backend.state backend);
+       let statuses =
+         List.map final.moderator_executions ~f:(fun receipt ->
+           (Agent_protocol.Extension_status.moderator_execution receipt).state)
+         |> List.sort ~compare:String.compare
+       in
+       print_s
+         [%sexp
+           (statuses : string list)
+         , (!effects : int)
+         , (List.length (current ()).queued_internal_events : int)]);
+  [%expect {| ((completed failed.retired) 2 0) |}]
 ;;
 
 let%expect_test "idle observations own state without starting a model operation" =

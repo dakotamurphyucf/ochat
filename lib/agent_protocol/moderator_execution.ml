@@ -46,12 +46,19 @@ type intent =
   | Discarded of string
 [@@deriving equal, sexp]
 
+type retirement =
+  { checkpoint_sha256 : string
+  ; reason : string
+  }
+[@@deriving equal, sexp]
+
 type t =
   { context : context
   ; status : status
   ; requests : Invocation.follow_up option
   ; intent : intent option
   ; compaction_operation_id : Id.Operation.t option
+  ; retirement : retirement option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -89,6 +96,14 @@ let validate t =
   let%bind () = digest c.source.source_sha256 in
   let%bind () = digest c.checkpoint_sha256 in
   let%bind () = validate_json ~max_bytes:(1024 * 1024) c.event in
+  let%bind () =
+    match t.retirement, c.phase, t.status with
+    | None, _, _ -> Ok ()
+    | Some retired, Internal_event, (Failed _ | Interrupted _) ->
+      let%bind () = digest retired.checkpoint_sha256 in
+      text ~name:"event retirement reason" ~max:1024 retired.reason
+    | _ -> invalid "retirement requires a failed or interrupted internal event"
+  in
   let%bind () =
     match t.status with
     | Running -> Ok ()
@@ -145,6 +160,7 @@ let create context =
     ; requests = None
     ; intent = None
     ; compaction_operation_id = None
+    ; retirement = None
     }
   in
   Result.map (validate t) ~f:(fun () -> t)
@@ -166,6 +182,13 @@ let validate_transition ~previous next =
     then Ok ()
     else (
       let%bind () =
+        match previous.retirement, next.retirement with
+        | None, None -> Ok ()
+        | None, Some _ when equal_status previous.status next.status -> Ok ()
+        | Some before, Some after when equal_retirement before after -> Ok ()
+        | _ -> failure Conflict "event retirement is immutable"
+      in
+      let%bind () =
         match previous.compaction_operation_id, next.compaction_operation_id with
         | None, None -> Ok ()
         | None, Some _
@@ -176,6 +199,10 @@ let validate_transition ~previous next =
         | _ -> failure Conflict "compaction binding is immutable"
       in
       match previous.status, next.status with
+      | (Failed _ | Interrupted _), _
+        when equal_status previous.status next.status
+             && Option.is_none previous.retirement
+             && Option.is_some next.retirement -> Ok ()
       | Running, (Completed _ | Failed _ | Interrupted _) ->
         (match next.intent with
          | None | Some Pending -> Ok ()
@@ -214,6 +241,13 @@ let complete t ~checkpoint_sha256 ~requests =
 
 let fail t error = finish t { t with status = Failed error }
 let interrupt t ~reason = finish t { t with status = Interrupted reason }
+
+let retire t ~checkpoint_sha256 ~reason =
+  match t.status, t.retirement with
+  | (Failed _ | Interrupted _), None ->
+    change t { t with retirement = Some { checkpoint_sha256; reason } }
+  | _ -> failure Already_resolved "event is not awaiting failed-head retirement"
+;;
 
 let accept_compaction t ~operation_id =
   match t.intent with
@@ -288,7 +322,7 @@ let requests_to_json (r : Invocation.follow_up) =
 let to_json t =
   let c = t.context in
   `Object
-    ([ "schema_version", `Number "1"
+    ([ "schema_version", `Number "2"
      ; "id", Id.Moderator_execution.to_json c.id
      ; "session_id", Id.Session.to_json c.session_id
      ; "generation", `Number (Int.to_string c.generation)
@@ -306,7 +340,12 @@ let to_json t =
      @ optional "operation_id" c.operation_id Id.Operation.to_json
      @ optional "requests" t.requests requests_to_json
      @ optional "intent" t.intent intent_to_json
-     @ optional "compaction_operation_id" t.compaction_operation_id Id.Operation.to_json)
+     @ optional "compaction_operation_id" t.compaction_operation_id Id.Operation.to_json
+     @ optional "retirement" t.retirement (fun retired ->
+       `Object
+         [ "checkpoint_sha256", `String retired.checkpoint_sha256
+         ; "reason", `String retired.reason
+         ]))
 ;;
 
 let status_of_json json =
@@ -392,10 +431,16 @@ let of_json json =
       ; "requests"
       ; "intent"
       ; "compaction_operation_id"
+      ; "retirement"
       ]
   in
-  let%bind _ =
-    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:1)
+  let%bind version =
+    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:2)
+  in
+  let%bind () =
+    match version, Option.is_some (Json_codec.optional fields "retirement") with
+    | 1, true -> invalid "event retirement requires schema version 2"
+    | _ -> Ok ()
   in
   let%bind id = Json_codec.required_as fields "id" Id.Moderator_execution.of_json in
   let%bind session_id = Json_codec.required_as fields "session_id" Id.Session.of_json in
@@ -429,6 +474,16 @@ let of_json json =
   let%bind compaction_operation_id =
     Json_codec.optional_as fields "compaction_operation_id" Id.Operation.of_json
   in
+  let%bind retirement =
+    Json_codec.optional_as fields "retirement" (fun json ->
+      let%bind fields = Json_codec.fields json in
+      let%bind () = closed fields [ "checkpoint_sha256"; "reason" ] in
+      let%bind checkpoint_sha256 =
+        Json_codec.required_as fields "checkpoint_sha256" Json_codec.string
+      in
+      let%map reason = Json_codec.required_as fields "reason" Json_codec.string in
+      { checkpoint_sha256; reason })
+  in
   let t =
     { context =
         { id
@@ -445,6 +500,7 @@ let of_json json =
     ; requests
     ; intent
     ; compaction_operation_id
+    ; retirement
     }
   in
   let%map () = validate t in

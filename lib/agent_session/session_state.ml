@@ -111,11 +111,16 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 5
+let current_schema_version = 6
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    t.schema_version = 5
+    && List.for_all t.moderator_executions ~f:(fun event ->
+      Option.is_none event.retirement)
+  then Ok { t with schema_version = current_schema_version }
   else if
     List.is_empty t.moderator_executions
     && (t.schema_version = 4

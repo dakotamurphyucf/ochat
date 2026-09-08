@@ -345,6 +345,20 @@ val snapshot : t -> (Session.Moderator_snapshot.t, string) result
 
 val identity_snapshot : t -> (Session.Moderator_state.Identity_snapshot.t, string) result
 
+(** Prepare removal of exactly one queue head without executing a handler. The
+    complete live checkpoint must equal [expected]. [prepare] must hold an actor
+    retirement borrow and atomically persist failed-head retirement with the
+    supplied checkpoint. Return an infallible, non-yielding installer. Rejection
+    leaves the entire live state/queue unchanged. This engine helper does not
+    identify failed receipts or authorize retirement by itself. *)
+val retire_queued_event_entries
+  :  t
+  -> expected:Session.Moderator_state.Identity_snapshot.t
+  -> prepare:
+       (snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> (unit -> unit, string) result)
+  -> (unit, string) result
+
 (** [enqueue_internal_event t event] enqueues [event] after any active manager
     execution has completed for later replay via {!drain_internal_events}. *)
 val enqueue_internal_event : t -> Chatml.Chatml_lang.value -> (unit, string) result

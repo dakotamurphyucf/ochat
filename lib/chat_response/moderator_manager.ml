@@ -1671,6 +1671,32 @@ let identity_snapshot_unlocked t =
 
 let identity_snapshot t = with_execution_lock t (fun () -> identity_snapshot_unlocked t)
 
+let retire_queued_event_entries t ~expected ~prepare =
+  with_execution_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match t.artifact.extension with
+      | Some _ -> Ok ()
+      | None -> Error "event.legacy_moderator: requires extensibility-v1"
+    in
+    let%bind before = identity_snapshot_unlocked t in
+    let%bind () =
+      let sexp = Session.Moderator_state.Identity_snapshot.sexp_of_t in
+      match Sexp.equal (sexp before) (sexp expected) with
+      | true -> Ok ()
+      | false -> Error "event.stale_checkpoint: failed-head retirement checkpoint changed"
+    in
+    match before.queued_internal_events with
+    | [] -> Error "event.empty_queue: no failed head to retire"
+    | _ :: tail ->
+      let snapshot = { before with queued_internal_events = tail } in
+      let%map install = prepare ~snapshot in
+      (* Everything fallible precedes the durable host commit. The execution lock
+         prevents queue changes until this non-yielding local installation. *)
+      ignore (Runtime.take_queued_event t.runtime : Chatml.Chatml_lang.value option);
+      install ())
+;;
+
 let enqueue_internal_event_unlocked (t : t) (event : Chatml.Chatml_lang.value)
   : (unit, string) result
   =

@@ -72,8 +72,14 @@ let moderator_execution (value : Moderator_execution.t) =
   ; state =
       (match value.status, value.intent with
        | Running, _ -> "running"
-       | Failed _, _ -> "failed"
-       | Interrupted _, _ -> "interrupted"
+       | Failed _, _ ->
+         (match value.retirement with
+          | Some _ -> "failed.retired"
+          | None -> "failed")
+       | Interrupted _, _ ->
+         (match value.retirement with
+          | Some _ -> "interrupted.retired"
+          | None -> "interrupted")
        | Completed _, None -> "completed"
        | Completed _, Some Pending -> "completed.pending"
        | Completed _, Some (Waiting_compaction _) -> "completed.waiting_compaction"
@@ -159,7 +165,9 @@ let of_json json =
     | Moderator_execution ->
       [ "running"
       ; "failed"
+      ; "failed.retired"
       ; "interrupted"
+      ; "interrupted.retired"
       ; "completed"
       ; "completed.pending"
       ; "completed.waiting_compaction"
