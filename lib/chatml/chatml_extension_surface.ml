@@ -65,6 +65,7 @@ let tool_context_ty =
     ; "generation", S.TInt
     ; "origin", origin_ty
     ; "parent_invocation", option S.TString
+    ; "parent_event", option S.TString
     ; "parent_job", option S.TString
     ; "tool_name", S.TString
     ; "implementation_revision", S.TString
@@ -158,7 +159,8 @@ let moderator_event_ty =
       , record
           [ "version", S.TInt
           ; "invocation_id", S.TString
-          ; "parent_invocation", S.TString
+          ; "parent_invocation", option S.TString
+          ; "parent_event", option S.TString
           ; "tool_name", S.TString
           ; "origin", origin_ty
           ; "outcome", S.json_ty

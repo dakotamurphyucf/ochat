@@ -182,9 +182,30 @@ checkpoints/callbacks, duplicate retirement, unchanged failure, snapshot migrati
 JSON compatibility and safe projection. This restart is the actor lifecycle; the
 snapshot restore checks do not constitute a separate daemon-process restart.
 
-Startup/foreground event ownership, changed-checkpoint reconciliation, native child lineage,
-interactive permissions, scheduling of retained event requests and normal v1
-runtime binding remain integration work. The idle handoff grants no tool authority.
+`with_idle_queued_moderator_event_tools` adds a native executor scoped to the
+running event. Direct child invocations retain `parent_event`, with no fabricated
+invocation or provider-call parent. The actor admits only that active event's
+same-source children, requires saved child outcomes before committing the event,
+and cancels unsaved child results on callback exit. The scope rejects calls after
+commit, return or stop and cannot be reused through a foreground invocation path.
+The executor must be composed with `Native_tool_invocation.run_scoped`, which
+checks capabilities, authorization, input and output disclosure. The executor
+itself grants no tool policy or foreground-history authority.
+
+Invocation JSON version 9 carries event lineage and optional observation follow-up
+and compaction bindings. Older versions retain their existing decoding rules.
+Cross-record validation requires the retained event's session, generation and
+source to match the invocation; new admission requires its parent to be Running.
+Native outcomes remain observable independently of event failure or interruption.
+The compiled-handler/actor/native expect test covers success, policy denial,
+rejected outcome persistence and cancel-stop, including wrong/expired ownership,
+checkpoint rejection while native work is active, snapshots, codec round trips,
+and subsequent source-bound observation without additional provider history.
+
+Automatic Tool.call bridge installation for ordinary events, startup/foreground
+event ownership, changed-checkpoint reconciliation, interactive permissions,
+scheduling of retained event requests and normal v1 runtime binding remain
+integration work. Tests install this internal event callback explicitly.
 
 `Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped
 host service. The caller must complete capability and policy admission before
@@ -344,11 +365,18 @@ The foreground worker capability `with_moderator_observation` now claims a retai
 observation under the actor's exclusive moderator gate. It checks generation,
 operation and parent completion, saves `Observing`, then runs the callback outside
 the mailbox. `Moderator_manager.handle_observation_entries` checks the exact
-observer source and projects a dedicated `Tool_observed` event. Its versioned
-payload includes `invocation_id`, `parent_invocation`, `tool_name`, `origin`, and
+observer source and projects a dedicated `Tool_observed` event. Its version 2
+payload includes `invocation_id`, optional `parent_invocation`, optional
+`parent_event`, `tool_name`, `origin`, and
 the disclosed initial `outcome` in the Invocation JSON format. No provider call ID
 or synthetic tool-result history is created. The event is specific to the v1
 surface; ordinary `Runtime.emit` still wraps data in `Internal_event`.
+
+Exactly one parent option is populated. Scripts must match the tagged `Some`/`None`
+values; this replaces the earlier internal observation payload's bare invocation
+parent string. The invocation context separately gains an additive `parent_event`
+option while retaining context version 1. These surfaces remain internal pending
+public v1 runtime qualification.
 
 The manager validates a prospective state/overlay/internal-event snapshot before
 calling the actor's commit callback. That callback atomically saves `Observed`
@@ -972,14 +1000,16 @@ source, wake policy, attempt and one history identity. The session aggregate
 checks ownership, generation and cross-record acknowledgement/result correlation.
 One terminal work item has one delivery owner.
 
-Session state schema 6 adds failed-event retirement. It upgrades schema 5 with
+Session state schema 7 adds event-owned invocation lineage. It upgrades schema 6
+without that lineage, schema 5 with
 event execution receipts preserved but no retirements, schema 4 with existing
 extension records preserved, schema 3 with invocation records,
 and schema 2 with empty extension records. Old schemas containing event execution
 records are rejected; schema 5 records containing retirements are also rejected.
+Older schemas cannot contain event-owned invocations.
 Inconsistent old fields and unknown future
 schemas fail closed. Snapshot, journal and compaction archive restoration apply
-the same version checks. An older binary is not a supported reader of schema 6;
+the same version checks. An older binary is not a supported reader of schema 7;
 retain compatible backups before testing a binary rollback.
 
 The host-internal `Session_actor.commit_extensions` operation atomically commits

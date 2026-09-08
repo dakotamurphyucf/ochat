@@ -1180,12 +1180,20 @@ type t = private
   ; observation : observation option [@sexp.option]
     (** Non-authorizing nested moderator observation intent, fixed at admission.
         Handling disposition is independent of the tool outcome; codec 5. *)
+  ; parent_event : Id.Moderator_execution.t option [@sexp.option]
+    (** Direct ordinary-event owner; exclusive with invocation/job parents. Codec 9.
+        Requires matching moderator observation intent and actor admission. *)
   }
 [@@deriving equal, sexp]
 
 (** Routing, when present, is fixed at admission and uses JSON codec version 3.
     Legacy records without routing remain readable. *)
-val create : ?routing:routing -> ?observer:observer -> context -> (t, Error.t) result
+val create
+  :  ?routing:routing
+  -> ?observer:observer
+  -> ?parent_event:Id.Moderator_execution.t
+  -> context
+  -> (t, Error.t) result
 
 val validate : t -> (unit, Error.t) result
 val dispatch : t -> (t, Error.t) result

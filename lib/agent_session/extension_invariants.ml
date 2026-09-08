@@ -27,6 +27,32 @@ let owner ~session_id ~generation actual_session actual_generation =
   else invalid "extension reference crosses session ownership or generation"
 ;;
 
+let invocation_event_owner ~events (invocation : P.Invocation.t) =
+  let open Result.Let_syntax in
+  match invocation.parent_event with
+  | None -> Ok ()
+  | Some id ->
+    let%bind event =
+      match
+        List.find events ~f:(fun event ->
+          P.Id.Moderator_execution.equal event.P.Moderator_execution.context.id id)
+      with
+      | Some event -> Ok event
+      | None -> invalid "invocation references an unknown moderator event"
+    in
+    let%bind () =
+      owner
+        ~session_id:invocation.context.session_id
+        ~generation:invocation.context.generation
+        event.context.session_id
+        event.context.generation
+    in
+    (match invocation.observation with
+     | Some observation
+       when P.Invocation.equal_observer event.context.source observation.observer -> Ok ()
+     | _ -> invalid "invocation observer differs from its parent event source")
+;;
+
 let job jobs id =
   match List.find jobs ~f:(fun j -> P.Id.Job.compare j.P.Job.id id = 0) with
   | Some value -> Ok value

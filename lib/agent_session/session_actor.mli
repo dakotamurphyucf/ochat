@@ -552,6 +552,25 @@ val with_idle_queued_moderator_event
       -> (unit, Agent_protocol.Error.t) result)
   -> (bool, Agent_protocol.Error.t) result
 
+(** Queued-event handoff with an actor-owned native executor. Only direct children
+    of this Running event with matching source observation intent can be admitted.
+    Route the executor through [Native_tool_invocation.run_scoped] for capability,
+    policy and disclosure checks. Commit waits for all recorded child outcomes;
+    failed outcome saves are cancelled at callback cleanup. Scope expires on
+    callback return, commit or stop; no foreground/history authority is granted. *)
+val with_idle_queued_moderator_event_tools
+  :  t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> (executing:Agent_protocol.Moderator_execution.t
+      -> event:Session.Snapshot.t
+      -> execute:Native_tool_invocation.executor
+      -> commit:
+           (snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> requests:Agent_protocol.Invocation.follow_up
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (bool, Agent_protocol.Error.t) result
+
 (** Explicitly retire a retained failed/interrupted queue head at its original
     checkpoint. Available while quiescent running-idle or stopped, without an
     active callback/permission. The callback prepares a manager queue-only change;

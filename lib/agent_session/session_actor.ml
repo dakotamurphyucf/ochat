@@ -55,10 +55,6 @@ type moderator_borrow =
   ; mutable cancel_requested : bool
   }
 
-type invocation_owner =
-  | Foreground of Agent_protocol.Id.Operation.t
-  | Idle_moderator of moderator_borrow
-
 type queued_event_borrow =
   { receipt : Agent_protocol.Moderator_execution.t
   ; before : Session.Moderator_state.Identity_snapshot.t
@@ -69,6 +65,11 @@ type queued_event_borrow =
   ; mutable cancel : (unit -> unit) option
   ; mutable cancel_requested : bool
   }
+
+type invocation_owner =
+  | Foreground of Agent_protocol.Id.Operation.t
+  | Idle_moderator of moderator_borrow
+  | Event_moderator of queued_event_borrow
 
 type invocation_execution =
   { owner : invocation_owner
@@ -101,6 +102,9 @@ type _ request =
       -> invocation_execution request
   | Claim_idle_invocation :
       moderator_borrow * Agent_protocol.Invocation.t
+      -> invocation_execution request
+  | Claim_event_invocation :
+      queued_event_borrow * Agent_protocol.Invocation.t
       -> invocation_execution request
   | Finish_invocation :
       invocation_execution * Agent_protocol.Invocation.outcome
@@ -981,7 +985,9 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
       invocation.context.generation
   in
   let%bind () =
-    if Option.is_some invocation.context.parent_job
+    if
+      Option.is_some invocation.context.parent_job
+      || Option.is_some invocation.parent_event
     then
       Error
         (error
@@ -1004,7 +1010,7 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
           &&
           match execution.owner with
           | Foreground op -> owned execution.dispatched.context.id op
-          | Idle_moderator _ -> false)
+          | Idle_moderator _ | Event_moderator _ -> false)
         || Option.exists t.moderator_borrow ~f:(fun borrow ->
           borrow.accepts_children
           && (not borrow.committed)
@@ -1040,6 +1046,11 @@ let finish_invocation t execution outcome =
        | Some current when phys_equal current borrow && t.idle_moderator_borrowed ->
          Ok borrow.cancel_requested
        | _ -> Error (error Conflict "idle invocation scope has ended"))
+    | Event_moderator borrow ->
+      (match t.queued_event_borrow with
+       | Some current when phys_equal current borrow && t.idle_moderator_borrowed ->
+         Ok borrow.cancel_requested
+       | _ -> Error (error Conflict "event invocation scope has ended"))
   in
   let%bind () =
     if List.exists t.invocation_executions ~f:(phys_equal execution)
@@ -1052,7 +1063,7 @@ let finish_invocation t execution outcome =
       Agent_protocol.Invocation.Cancelled
         (match execution.owner with
          | Foreground _ -> "operation cancelled"
-         | Idle_moderator _ -> "idle moderator cancelled")
+         | Idle_moderator _ | Event_moderator _ -> "idle moderator cancelled")
     | false -> outcome
   in
   (* The callback has returned. Even when outcome persistence fails and the
@@ -1076,6 +1087,11 @@ let finish_invocation t execution outcome =
 
 let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
+  let%bind () =
+    match invocation.parent_event with
+    | None -> Ok ()
+    | Some _ -> Error (error Conflict "event-owned tools require their event scope")
+  in
   let%bind _ = running_operation t operation_id in
   if t.idle_moderator_borrowed || Option.is_some t.moderator_borrow
   then Error (error Conflict "moderator is already borrowed")
@@ -1226,9 +1242,50 @@ let queued_event_can_commit t borrow =
   | _ -> Error (error Conflict "queued event cannot commit after completion or stop")
 ;;
 
+let event_execution_owned_by borrow execution =
+  match execution.owner with
+  | Event_moderator owner -> phys_equal owner borrow
+  | _ -> false
+;;
+
+let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
+  let open Result.Let_syntax in
+  let%bind () = queued_event_can_commit t borrow in
+  let%bind () =
+    match borrow.retirement_reason, invocation.parent_event with
+    | None, Some parent
+      when Agent_protocol.Id.Moderator_execution.equal parent borrow.receipt.context.id ->
+      Ok ()
+    | _ -> Error (error Conflict "invocation does not belong to this executing event")
+  in
+  let%bind () =
+    Extension_invariants.invocation_event_owner
+      ~events:t.state.moderator_executions
+      invocation
+  in
+  let%bind admission = invocation_admission_deltas t invocation in
+  let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
+  let%bind _ =
+    transition
+      t
+      ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
+      ~payloads:[]
+  in
+  let execution =
+    { owner = Event_moderator borrow; dispatched; accepts_children = true }
+  in
+  t.invocation_executions <- execution :: t.invocation_executions;
+  Ok execution
+;;
+
 let commit_queued_event t borrow snapshot requests =
   let open Result.Let_syntax in
   let%bind () = queued_event_can_commit t borrow in
+  let%bind () =
+    match List.exists t.invocation_executions ~f:(event_execution_owned_by borrow) with
+    | true -> Error (error Conflict "event native invocations still require completion")
+    | false -> Ok ()
+  in
   let%bind completed =
     match borrow.retirement_reason with
     | None ->
@@ -1271,6 +1328,18 @@ let finish_queued_event t borrow interrupted =
   let%bind () = validate_queued_event_borrow t borrow in
   borrow.callback_active <- false;
   borrow.cancel <- None;
+  let children =
+    List.filter t.invocation_executions ~f:(event_execution_owned_by borrow)
+  in
+  let%bind children_deltas =
+    List.map children ~f:(fun execution ->
+      execution.accepts_children <- false;
+      Agent_protocol.Invocation.cancel
+        execution.dispatched
+        ~reason:"event exited before recording its native outcome"
+      |> Result.map ~f:(fun invocation -> Session_delta.Invocation_changed invocation))
+    |> Result.all
+  in
   let%bind () =
     match borrow.committed, borrow.retirement_reason with
     | true, _ | false, Some _ -> Ok ()
@@ -1293,11 +1362,15 @@ let finish_queued_event t borrow interrupted =
       in
       transition
         t
-        ~delta:(Session_delta.Moderator_execution_changed terminal)
+        ~delta:
+          (Session_delta.Batch (children_deltas @ [ Moderator_execution_changed terminal ]))
         ~payloads:[]
       |> Result.map ~f:ignore
   in
   t.queued_event_borrow <- None;
+  t.invocation_executions
+  <- List.filter t.invocation_executions ~f:(fun execution ->
+       not (event_execution_owned_by borrow execution));
   t.idle_moderator_borrowed <- false;
   Ok ()
 ;;
@@ -1449,7 +1522,7 @@ let validate_moderator_borrow t borrow =
 let idle_execution_owned_by borrow execution =
   match execution.owner with
   | Idle_moderator owner -> phys_equal owner borrow
-  | Foreground _ -> false
+  | Foreground _ | Event_moderator _ -> false
 ;;
 
 let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
@@ -2645,7 +2718,7 @@ let with_queued_event_borrow t ~claim f =
                          | true -> Eio.Cancel.cancel context Exit
                          | false -> () ))
               in
-              f ~event:borrow.event ~commit:(fun ~snapshot ~requests ->
+              f ~borrow ~event:borrow.event ~commit:(fun ~snapshot ~requests ->
                 Eio.Cancel.protect (fun () ->
                   call t (Commit_queued_event (borrow, snapshot, requests))))))
       in
@@ -2674,19 +2747,37 @@ let with_idle_queued_moderator_event t ~snapshot f =
     t
     ~claim:
       (Claim_queued_event (Agent_protocol.Id.Moderator_execution.create (), snapshot))
-    f
+    (fun ~borrow:_ ~event ~commit -> f ~event ~commit)
 ;;
 
 let with_queued_moderator_retirement t ~id ~snapshot ~reason f =
   with_queued_event_borrow
     t
     ~claim:(Claim_queued_retirement (id, snapshot, reason))
-    (fun ~event ~commit ->
+    (fun ~borrow:_ ~event ~commit ->
        f ~event ~commit:(fun ~snapshot ->
          commit
            ~snapshot
            ~requests:
              { request_turn = false; request_compaction = false; end_session = None }))
+;;
+
+let with_idle_queued_moderator_event_tools t ~snapshot f =
+  with_queued_event_borrow
+    t
+    ~claim:
+      (Claim_queued_event (Agent_protocol.Id.Moderator_execution.create (), snapshot))
+    (fun ~borrow ~event ~commit ->
+       let active = Atomic.make true in
+       let execute ~invocation callback =
+         match Atomic.get active with
+         | false -> Error (error Conflict "event invocation scope has ended")
+         | true ->
+           with_invocation_claim t (Claim_event_invocation (borrow, invocation)) callback
+       in
+       Exn.protect
+         ~finally:(fun () -> Atomic.set active false)
+         ~f:(fun () -> f ~executing:borrow.receipt ~event ~execute ~commit))
 ;;
 
 let with_moderator_invocation t operation_id ~invocation f =
@@ -4164,6 +4255,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     claim_invocation t operation_id invocation
   | Claim_idle_invocation (borrow, invocation) ->
     claim_idle_invocation t borrow invocation
+  | Claim_event_invocation (borrow, invocation) ->
+    claim_event_invocation t borrow invocation
   | Finish_invocation (execution, outcome) -> finish_invocation t execution outcome
   | Claim_moderator_invocation (operation_id, invocation) ->
     claim_moderator_invocation t operation_id invocation

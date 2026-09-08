@@ -111,11 +111,23 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 6
+let current_schema_version = 7
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    List.exists t.invocations ~f:(fun invocation ->
+      Option.is_some invocation.parent_event)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"event-owned invocations require session schema 7"
+         ~retryable:false
+         ())
+  else if t.schema_version = 6
+  then Ok { t with schema_version = current_schema_version }
   else if
     t.schema_version = 5
     && List.for_all t.moderator_executions ~f:(fun event ->
@@ -200,6 +212,11 @@ let validate t =
   let%bind () =
     List.fold_result t.invocations ~init:() ~f:(fun () invocation ->
       let%bind () = Agent_protocol.Invocation.validate invocation in
+      let%bind () =
+        Extension_invariants.invocation_event_owner
+          ~events:t.moderator_executions
+          invocation
+      in
       let%bind () =
         Invocation_history.validate_retained
           ~history:t.conversation.canonical_history

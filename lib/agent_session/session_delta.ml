@@ -220,6 +220,28 @@ let rec apply state = function
     in
     let%bind () = Agent_protocol.Invocation.validate_transition ~previous invocation in
     let%bind () =
+      Extension_invariants.invocation_event_owner
+        ~events:state.moderator_executions
+        invocation
+    in
+    let%bind () =
+      match previous, invocation.parent_event with
+      | None, Some parent ->
+        (match
+           List.find state.moderator_executions ~f:(fun event ->
+             Agent_protocol.Id.Moderator_execution.equal event.context.id parent)
+         with
+         | Some { status = Running; _ } -> Ok ()
+         | _ ->
+           Error
+             (Agent_protocol.Error.create
+                Conflict
+                ~message:"event parent is not executing"
+                ~retryable:false
+                ()))
+      | _ -> Ok ()
+    in
+    let%bind () =
       Invocation_history.validate_retained
         ~history:state.conversation.canonical_history
         invocation

@@ -1287,16 +1287,11 @@ let handle_observation_entries
       I.validate invocation
       |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
     in
-    let%bind result, parent =
-      match
-        invocation.observation, invocation.status, invocation.context.parent_invocation
-      with
-      | ( Some { status = Observing; observer }
-        , (Resolved result | Published result)
-        , Some parent )
+    let%bind result =
+      match invocation.observation, invocation.status with
+      | Some { status = Observing; observer }, (Resolved result | Published result)
         when String.equal observer.script_id script.id
-             && String.equal observer.source_sha256 script.source_sha256 ->
-        Ok (result, parent)
+             && String.equal observer.source_sha256 script.source_sha256 -> Ok result
       | _ ->
         Error
           "observation.wrong_owner: requires a claimed outcome for this moderator source"
@@ -1307,16 +1302,26 @@ let handle_observation_entries
       | false -> Ok ()
     in
     let event =
+      let parent encode = function
+        | None -> L.VVariant ("None", [])
+        | Some id -> L.VVariant ("Some", [ L.VString (encode id) ])
+      in
       L.VVariant
         ( "Tool_observed"
         , [ L.VRecord
               (String.Map.of_alist_exn
-                 [ "version", L.VInt 1
+                 [ "version", L.VInt 2
                  ; ( "invocation_id"
                    , L.VString
                        (Agent_protocol.Id.Invocation.to_string invocation.context.id) )
                  ; ( "parent_invocation"
-                   , L.VString (Agent_protocol.Id.Invocation.to_string parent) )
+                   , parent
+                       Agent_protocol.Id.Invocation.to_string
+                       invocation.context.parent_invocation )
+                 ; ( "parent_event"
+                   , parent
+                       Agent_protocol.Id.Moderator_execution.to_string
+                       invocation.parent_event )
                  ; "tool_name", L.VString invocation.context.tool_name
                  ; "origin", L.VVariant ("Moderator", [])
                  ; "outcome", Value_codec.jsonaf_to_value (I.outcome_to_json result)

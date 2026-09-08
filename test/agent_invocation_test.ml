@@ -356,7 +356,7 @@ let%expect_test
 let%expect_test "incompatible and malformed snapshots fail instead of losing state" =
   let invocation = get (Invocation.create (context ())) in
   let encoded = Invocation.to_json invocation in
-  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "9")));
+  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "10")));
   report
     (Invocation.of_json
        (replace_field encoded "status" (`Object [ "type", `String "resolved" ])));

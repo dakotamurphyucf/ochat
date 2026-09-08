@@ -1067,7 +1067,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 6)
+    ((schema 7)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.discarded)))
@@ -1394,11 +1394,11 @@ let%expect_test
       [%sexp
         (Result.is_error
            (Agent_session.Session_state.upgrade_schema
-              { initial with schema_version = 7 })
+              { initial with schema_version = 8 })
          : bool)]);
   [%expect
     {|
-    ((version 6) (records 0))
+    ((version 7) (records 0))
     true
     true
     true
@@ -1467,7 +1467,7 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 6) (records 0)) |}]
+  [%expect {| ((version 7) (records 0)) |}]
 ;;
 
 let extension_fixture workspace_instance =
@@ -1765,7 +1765,7 @@ let%expect_test "schema-3 invocation snapshots migrate without losing pending pu
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 6) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 7) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null)) |}]
 ;;
 
@@ -6006,6 +6006,243 @@ let%expect_test
          , (!effects : int)
          , (List.length (current ()).queued_internal_events : int)]);
   [%expect {| ((completed failed.retired) 2 0) |}]
+;;
+
+let%expect_test "event-owned native calls retain lineage and expire with their callback" =
+  let module A = Agent_session.Session_actor in
+  let module I = Agent_protocol.Invocation in
+  let module M = Chat_response.Moderator_manager in
+  let module C = Chat_response.Tool_capability in
+  List.iter [ `Success; `Deny; `Save_fail; `Cancel ] ~f:(fun mode ->
+    let calls = ref 0
+    and saved = ref None
+    and rejected = ref false in
+    let on_call = ref (fun () -> ()) in
+    let registry = native_registry calls ~raises:false ~on_call:(fun () -> !on_call ()) in
+    let reference = List.hd_exn (C.references registry) in
+    with_handoff_actor
+      ~reject:(fun next ->
+        let matches =
+          List.exists
+            next.Agent_session.Session_transition.state.invocations
+            ~f:(fun invocation ->
+              Option.is_some invocation.parent_event
+              &&
+              match invocation.status with
+              | Resolved (Complete _) -> true
+              | _ -> false)
+        in
+        match mode, matches, !rejected with
+        | `Save_fail, true, false ->
+          rejected := true;
+          true
+        | _ -> false)
+      ~make_worker:(fun env _ ->
+        Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+          let manager, _, _ =
+            handoff_definition
+              env
+              ~capability_registry:registry
+              ~declare_tool:false
+              ~events:
+                {| | `Session_start -> Task.bind(Runtime.emit(`Null), fun ignored -> Task.pure(state))
+                        | `Internal_event(payload) -> Task.bind(Tool.call("read_file", `Object([])), fun ignored -> Task.pure(state))
+                        | `Tool_observed(p) -> (match p.parent_event with
+                          | `Some(id) -> (match p.parent_invocation with
+                            | `None -> let ignored = state[0] <- state[0] + 100 in Task.pure(state)
+                            | _ -> Task.fail("unexpected invocation parent"))
+                          | _ -> Task.fail("missing event parent"))
+                        | _ -> Task.pure(state) |}
+          in
+          M.handle_event_entries_transactional
+            manager
+            ~session_id:"fixture"
+            ~now_ms:0
+            ~history:[]
+            ~available_tools:[]
+            ~session_meta:`Null
+            ~event:Session_start
+            ~authorize:(fun () -> Ok ())
+            ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
+            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+          |> Result.ok_or_failwith
+          |> ignore;
+          let before = M.identity_snapshot manager |> Result.ok_or_failwith in
+          let snapshot =
+            Some (Agent_session.Runtime_builder.encode_moderator_snapshot before)
+          in
+          caps.commit_moderator snapshot |> protocol_ok;
+          saved := Some (manager, before);
+          Completed
+            { final_history = input.history
+            ; moderator_snapshot = snapshot
+            ; runtime_requests = []
+            }))
+      (fun _env actor writer backend ->
+         let initial = await_idle actor in
+         let manager, before = Option.value_exn !saved in
+         let observer = M.invocation_observer manager |> Option.value_exn in
+         let escaped = ref None in
+         (on_call
+          := fun () ->
+               match mode with
+               | `Cancel ->
+                 A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                 |> protocol_ok
+                 |> ignore;
+                 Eio.Fiber.yield ()
+               | _ -> ());
+         let run () =
+           A.with_idle_queued_moderator_event_tools
+             actor
+             ~snapshot:before
+             (fun ~executing ~event:_ ~execute ~commit ->
+                let native_callback = !on_call in
+                (on_call
+                 := fun () ->
+                      assert (
+                        Result.is_error
+                          (commit
+                             ~snapshot:before
+                             ~requests:
+                               { request_turn = false
+                               ; request_compaction = false
+                               ; end_session = None
+                               }));
+                  native_callback ());
+                let child () =
+                  I.create
+                    ~parent_event:executing.context.id
+                    ~observer
+                    { (invocation_fixture ()).context with
+                      id = Agent_protocol.Id.Invocation.create ()
+                    ; origin = Moderator
+                    ; session_id = executing.context.session_id
+                    ; generation = executing.context.generation
+                    ; input = `Object []
+                    ; parent_invocation = None
+                    ; parent_job = None
+                    ; implementation_revision = reference.implementation_revision
+                    ; capability_fingerprint = C.fingerprint registry
+                    }
+                  |> protocol_ok
+                in
+                escaped := Some (execute, child);
+                let bad =
+                  I.create
+                    ~parent_event:(Agent_protocol.Id.Moderator_execution.create ())
+                    ~observer
+                    (child ()).context
+                  |> protocol_ok
+                in
+                assert (
+                  Result.is_error
+                    (execute ~invocation:bad (fun ~dispatched:_ -> assert false)));
+                M.handle_next_event_entries_transactional
+                  manager
+                  ~session_id:"fixture"
+                  ~now_ms:0
+                  ~history:[]
+                  ~available_tools:[]
+                  ~session_meta:`Null
+                  ~authorize:(fun ~event:_ -> Ok ())
+                  ~on_tool_call:(fun ~name:_ ~args:_ ->
+                    let result =
+                      Agent_session.Native_tool_invocation.run_scoped
+                        ~execute
+                        ~registry:(fun () -> registry)
+                        ~reference
+                        ~invocation:(child ())
+                        ~is_halted:(fun () -> false)
+                        ~authorize:(fun _ _ ->
+                          match mode with
+                          | `Deny -> Error (handoff_error "denied")
+                          | _ -> Ok ())
+                        ~prepare_output:(fun _ -> Ok (`String "disclosed"))
+                    in
+                    match result with
+                    | Ok { status = Resolved (Complete value); _ } -> Ok (Tool_ok value)
+                    | _ -> Error "native call did not complete")
+                  ~prepare_event:(fun ~outcome:_ ~snapshot ->
+                    commit
+                      ~snapshot
+                      ~requests:
+                        { request_turn = false
+                        ; request_compaction = false
+                        ; end_session = None
+                        }
+                    |> Result.map_error ~f:(fun error ->
+                      error.Agent_protocol.Error.message)
+                    |> Result.map ~f:(fun () -> ignore))
+                |> Result.map ~f:ignore
+                |> Result.map_error ~f:handoff_error)
+         in
+         let completed =
+           try Result.is_ok (run ()) with
+           | Eio.Cancel.Cancelled _ -> false
+         in
+         let execute, child = Option.value_exn !escaped in
+         assert (
+           Result.is_error
+             (execute ~invocation:(child ()) (fun ~dispatched:_ -> assert false)));
+         let state = A.state actor |> protocol_ok in
+         let native = List.hd_exn state.invocations in
+         assert (
+           Option.is_some native.parent_event
+           && Option.is_none native.context.parent_invocation);
+         assert (I.equal native (I.of_json (I.to_json native) |> protocol_ok));
+         assert (
+           Result.is_error
+             (Agent_session.Session_state.upgrade_schema
+                { state with schema_version = 6 }));
+         let restored =
+           Agent_session.Session_persistence.restore_snapshot
+             (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
+           |> store_ok
+         in
+         assert_same_session_snapshot state restored;
+         (match mode with
+          | `Cancel -> ()
+          | _ ->
+            Agent_session.Moderator_observation.drain_idle
+              ~claim:(A.with_idle_moderator_observation actor ~observer)
+              ~manager
+              ~history:(fun () -> [])
+              ~available_tools:[]
+              ~session_meta:`Null
+              ~now:Agent_protocol.Timestamp.now
+              ()
+            |> protocol_ok
+            |> ignore);
+         let final = A.state actor |> protocol_ok in
+         let native = List.hd_exn final.invocations in
+         assert (Option.is_none final.active_operation);
+         assert (
+           List.length final.conversation.canonical_history
+           = List.length initial.conversation.canonical_history);
+         assert_same_session_snapshot final (Agent_session.Memory_backend.state backend);
+         print_s
+           [%sexp
+             (mode : [ `Success | `Deny | `Save_fail | `Cancel ])
+           , (completed : bool)
+           , (!calls : int)
+           , (native.status : I.status)
+           , ((Option.value_exn native.observation).status : I.observation_status)]));
+  [%expect
+    {|
+    (Success true 1 (Resolved (Complete (String disclosed))) Observed)
+    (Deny false 0
+     (Resolved
+      (Fail
+       ((code invocation.permission_denied)
+        (message "Tool execution was not authorized.") (retryable false)
+        (details Null))))
+     Observed)
+    (Save_fail false 1
+     (Resolved (Cancelled "event exited before recording its native outcome"))
+     Observed)
+    (Cancel false 1 (Resolved (Cancelled "idle moderator cancelled")) Awaiting)
+    |}]
 ;;
 
 let%expect_test "idle observations own state without starting a model operation" =

@@ -1,4 +1,9 @@
 (** Cross-record validation shared by recovery and actor transactions. *)
+val invocation_event_owner
+  :  events:Agent_protocol.Moderator_execution.t list
+  -> Agent_protocol.Invocation.t
+  -> (unit, Agent_protocol.Error.t) result
+
 val owner
   :  session_id:Agent_protocol.Id.Session.t
   -> generation:int

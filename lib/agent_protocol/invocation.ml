@@ -133,6 +133,7 @@ type t =
   ; routing : routing option [@sexp.option]
   ; publication_discarded : string option [@sexp.option]
   ; observation : observation option [@sexp.option]
+  ; parent_event : Id.Moderator_execution.t option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -216,6 +217,22 @@ let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_context t.context in
   let%bind () =
+    match
+      ( t.parent_event
+      , t.context.origin
+      , t.context.parent_invocation
+      , t.context.parent_job
+      , t.observation )
+    with
+    | None, _, _, _, _ -> Ok ()
+    | Some id, Moderator, None, None, Some _ ->
+      validate_id Id.Moderator_execution.to_json Id.Moderator_execution.of_json id
+    | _ ->
+      invalid
+        "event-owned invocation requires moderator origin, one event parent and \
+         observation intent"
+  in
+  let%bind () =
     match t.observation with
     | None -> Ok ()
     | Some observation ->
@@ -233,8 +250,8 @@ let validate t =
         else invalid "observer source digest must be a lowercase SHA256"
       in
       let%bind () =
-        match t.context.origin, t.context.parent_invocation with
-        | Moderator, Some _ -> Ok ()
+        match t.context.origin, t.context.parent_invocation, t.parent_event with
+        | Moderator, Some _, None | Moderator, None, Some _ -> Ok ()
         | _ -> invalid "deferred observation requires a nested moderator invocation"
       in
       let%bind () =
@@ -375,12 +392,13 @@ let validate t =
   | Resolved outcome | Published outcome -> validate_outcome outcome
 ;;
 
-let create ?routing ?observer context =
+let create ?routing ?observer ?parent_event context =
   let t =
     { context
     ; status = Admitted
     ; output_entry_id = None
     ; routing
+    ; parent_event
     ; publication_discarded = None
     ; observation =
         Option.map observer ~f:(fun observer ->
@@ -627,6 +645,13 @@ let validate_transition ~previous next =
     let%bind () = validate_observation_transition previous next in
     if not (equal_context previous.context next.context)
     then failure Conflict "invocation context is immutable"
+    else if
+      not
+        (Option.equal
+           Id.Moderator_execution.equal
+           previous.parent_event
+           next.parent_event)
+    then failure Conflict "invocation event parent is immutable"
     else if not (Option.equal equal_routing previous.routing next.routing)
     then failure Conflict "invocation routing provenance is immutable"
     else if
@@ -1043,14 +1068,18 @@ let observation_of_json ~version json =
     @ if version >= 8 then [ "compaction_operation_id" ] else []
   in
   let%bind follow_up =
-    if version >= 6
+    if version >= 9
+    then Json_codec.optional_as fields "follow_up" (follow_up_of_json ~version)
+    else if version >= 6
     then
       Json_codec.required_as fields "follow_up" (follow_up_of_json ~version)
       |> Result.map ~f:Option.some
     else Ok None
   in
   let%bind compaction_operation_id =
-    if version >= 8
+    if version >= 9
+    then Json_codec.optional_as fields "compaction_operation_id" Id.Operation.of_json
+    else if version >= 8
     then
       Json_codec.required_as fields "compaction_operation_id" (fun json ->
         Result.bind (Json_codec.string json) ~f:Id.Operation.of_string)
@@ -1078,7 +1107,9 @@ let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (if
+           (if Option.is_some t.parent_event
+            then "9"
+            else if
               Option.exists t.observation ~f:(fun observation ->
                 Option.is_some observation.compaction_operation_id)
             then "8"
@@ -1108,7 +1139,8 @@ let to_json t =
      @ optional "routing" t.routing routing_to_json
      @ optional "publication_discarded" t.publication_discarded (fun reason ->
        `String reason)
-     @ optional "observation" t.observation observation_to_json)
+     @ optional "observation" t.observation observation_to_json
+     @ optional "parent_event" t.parent_event Id.Moderator_execution.to_json)
 ;;
 
 let of_json json =
@@ -1123,7 +1155,7 @@ let of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 -> Ok ()
+    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =
@@ -1133,7 +1165,8 @@ let of_json json =
        @ (if version >= 2 then [ "output_entry_id" ] else [])
        @ (if version >= 3 then [ "routing" ] else [])
        @ (if version >= 4 then [ "publication_discarded" ] else [])
-       @ if version >= 5 then [ "observation" ] else [])
+       @ (if version >= 5 then [ "observation" ] else [])
+       @ if version >= 9 then [ "parent_event" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -1170,7 +1203,21 @@ let of_json json =
     else Ok None
   in
   let t =
-    { context; status; output_entry_id; routing; publication_discarded; observation }
+    { context
+    ; status
+    ; output_entry_id
+    ; routing
+    ; publication_discarded
+    ; observation
+    ; parent_event = None
+    }
+  in
+  let%bind t =
+    match version with
+    | 9 ->
+      Json_codec.required_as fields "parent_event" Id.Moderator_execution.of_json
+      |> Result.map ~f:(fun id -> { t with parent_event = Some id })
+    | _ -> Ok t
   in
   let%map () = validate t in
   t

@@ -256,6 +256,10 @@ let create ~prepared ~invocation ~(limits : S.limits) ~validate_work =
       ; "origin", L.VVariant (origin, [])
       ; ( "parent_invocation"
         , option (fun id -> string (Id.Invocation.to_string id)) c.parent_invocation )
+      ; ( "parent_event"
+        , option
+            (fun id -> string (Id.Moderator_execution.to_string id))
+            invocation.parent_event )
       ; "parent_job", option (fun id -> string (Id.Job.to_string id)) c.parent_job
       ; "tool_name", string c.tool_name
       ; "implementation_revision", string c.implementation_revision
