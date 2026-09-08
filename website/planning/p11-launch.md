@@ -23,8 +23,9 @@ and [production environment](https://github.com/dakotamurphyucf/ochat/deployment
 The user purchased ochatlabs.com through GoDaddy for **$31 for two years**, with
 an **auto-renewal quote of $45**. The quote's renewal term was not specified; do
 not reinterpret it as an annual price. Registration and renewal remain in the
-user's GoDaddy account. Registrant contact-email verification remains owner
-managed and has not been independently checked here.
+user's GoDaddy account. The owner confirmed completed registrant contact-email
+verification on 2026-09-08 UTC. This owner confirmation closes P11.02; no
+independent inspection of the private GoDaddy account is claimed.
 
 Cloudflare's API confirms the zone is active in account
 `ec3ca23aab8456f6369df62e5c6a982c`, zone `3b704db6095d687c7170377de4adf7f1`.
@@ -99,10 +100,10 @@ The first partial upload is not a previously live, verified production release.
 The qualified artifact above is the first public recovery baseline; retain its
 archive and version IDs beyond GitHub's 90-day artifact retention if needed.
 
-Registrar contact-email verification and the renewal quote's period remain
-owner-managed administrative follow-ups; neither is claimed independently
-verified. Domain connection, certificates and public website operation are
-verified. P11.02's contact-email confirmation remains open in the task checklist.
+The owner confirmed completed registrar contact-email verification on
+2026-09-08 UTC, closing P11.02. Domain connection, certificates and public
+website operation are verified. The renewal quote's period remains unspecified
+and is optional owner-managed bookkeeping.
 The API-hosting and manual-accessibility deferrals are unchanged.
 
 Follow-up tasks in `scratch/todo.md`: 17 adds framework normal/E2E coverage,

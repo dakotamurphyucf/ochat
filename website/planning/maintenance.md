@@ -15,7 +15,7 @@ second maintainer has been designated.
 | Responsibility | Owner and location | Maintenance action |
 | --- | --- | --- |
 | Domain registration and renewal | Dakota's GoDaddy account, `ochatlabs.com` | Keep billing/contact details current; purchase was $31 for two years, renewal quote $45 with period unspecified. Confirm the actual renewal date/term in the account; do not infer an annual price. |
-| Registrar contact verification | Dakota, GoDaddy contact email | Confirm completed verification or that no verification remains pending; no independent email/account audit is claimed. |
+| Registrar contact verification | Dakota, GoDaddy contact email | Owner confirmed completed verification on 2026-09-08 UTC. Keep the contact address current; no independent email/account audit is claimed. |
 | DNS, certificates and hosting | Dakota's Cloudflare account; zone and Worker IDs in the launch record | Preserve the Worker-managed apex/www records and Always Use HTTPS. Keep unrelated email/verification records intact. |
 | Repository and branch policies | Dakota, GitHub repository settings | Require `release-gate` from GitHub Actions, strict up-to-date checks and administrator enforcement; use PRs. |
 | Publication | The repository's Website workflow | `main` only, after full qualification, exact same-run retained artifact, serialized publication. Cloudflare Git builds and alternate automatic publishers stay disabled. |
