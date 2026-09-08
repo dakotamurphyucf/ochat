@@ -1,5 +1,7 @@
 # Ochat website
 
+Production domain: **https://ochatlabs.com**. The protected Website workflow builds for this origin, retains the tested artifact, and publishes only after the main release gate passes. See [the production launch record](planning/p11-launch.md) and [release runbook](planning/release-runbook.md).
+
 A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Six application guides, an inspectable recorded workflow, and a ten-lesson curriculum help readers discover and build useful agents. The catalog contains fourteen entries: eight complete examples, five configurable templates, and one illustrative reading sample. The preview renders 123 documentation routes and accounts for 308 canonical documents (110 published, 4 compatibility, 9 bridges, 175 repository-only, 10 deferred). Search covers 114 approved pages with 21 benchmark queries. See [the application UI review](planning/application-ui-review.md) for current scope and verification. P09 is complete through user-confirmed API-reference deferral; P10 and Milestone C are complete within the approved launch scope: local qualification, hosted preview rehearsal/rollback, and actual GitHub release enforcement pass; manual accessibility review remains explicitly deferred. P11 production launch is next. See [the P10 review](planning/p10-completion-review.md).
 
 ## Run locally

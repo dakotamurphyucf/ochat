@@ -8,6 +8,13 @@
     "html_handling": "auto-trailing-slash",
   },
   "env": {
+    "production": {
+      "name": "ochat-website",
+      "account_id": "ec3ca23aab8456f6369df62e5c6a982c",
+      "workers_dev": false,
+      "preview_urls": false,
+      "routes": [{ "pattern": "ochatlabs.com", "custom_domain": true }],
+    },
     "preview": {
       "name": "ochat-website-preview",
       "account_id": "ec3ca23aab8456f6369df62e5c6a982c",

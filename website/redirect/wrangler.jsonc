@@ -1,0 +1,15 @@
+{
+  "$schema": "../node_modules/wrangler/config-schema.json",
+  "name": "ochat-website-redirect",
+  "account_id": "ec3ca23aab8456f6369df62e5c6a982c",
+  "main": "worker.mjs",
+  "compatibility_date": "2026-09-08",
+  "workers_dev": false,
+  "preview_urls": false,
+  "routes": [{ "pattern": "www.ochatlabs.com", "custom_domain": true }],
+  "observability": {
+    "enabled": true,
+    "logs": { "enabled": true, "head_sampling_rate": 1 },
+    "traces": { "enabled": true, "head_sampling_rate": 0.01 },
+  },
+}

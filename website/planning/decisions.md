@@ -18,7 +18,7 @@ Custom Astro homepage owns `/`. Starlight owns manifest-declared `/docs/` pages.
 
 Pagefind runs once through Starlight. Explicit `pagefind` frontmatter controls indexing, explicit sidebar entries control navigation, and the configured sitemap integration filters by the separate manifest field. Preview builds are noindex in HTML and host headers; `robots.txt` disallows crawling. A bridge preserves headings and is omitted from navigation, search, and sitemap. Aliases requiring different fragment translations are not silently accepted.
 
-The default origin is `http://localhost:4321`. `SITE_ENV=production` requires an explicit HTTPS `SITE_URL`. No candidate domain is treated as owned. Local preview listens on loopback only. Development/preview use Astro's public programmatic API because Astro 7 automatically backgrounds CLI servers in an agent environment, which breaks a foreground process supervisor such as Playwright.
+The default origin is `http://localhost:4321`. `SITE_ENV=production` requires an explicit HTTPS `SITE_URL`. The user purchased `ochatlabs.com` through GoDaddy; its zone is active in Cloudflare. Production CI explicitly uses `https://ochatlabs.com`. Local preview listens on loopback only. Development/preview use Astro's public programmatic API because Astro 7 automatically backgrounds CLI servers in an agent environment, which breaks a foreground process supervisor such as Playwright.
 
 The root Dune file excludes `website/` from recursive OCaml builds. Narrow `.gitignore` exceptions expose authored website sources while excluding dependencies and generated files.
 

@@ -1,0 +1,20 @@
+{
+  "hostedRehearsal": {
+    "status": "pass",
+    "reviewer": "Codex review of recorded P10 evidence during P11 implementation",
+    "reviewedAt": "2026-09-08T02:44:03.221374+00:00",
+    "evidence": "https://github.com/dakotamurphyucf/ochat/blob/a93fcd1df8e6524659f4cc1e1c6c34b1c34b93c8/website/planning/p10-hosted-rehearsal.md"
+  },
+  "hostedRollback": {
+    "status": "pass",
+    "reviewer": "Codex review of recorded P10 evidence during P11 implementation",
+    "reviewedAt": "2026-09-08T02:44:03.221536+00:00",
+    "evidence": "https://github.com/dakotamurphyucf/ochat/blob/a93fcd1df8e6524659f4cc1e1c6c34b1c34b93c8/website/planning/p10-hosted-rehearsal.md"
+  },
+  "remoteEnforcement": {
+    "status": "pass",
+    "reviewer": "Codex review of recorded P10 evidence during P11 implementation",
+    "reviewedAt": "2026-09-08T02:44:03.221538+00:00",
+    "evidence": "https://github.com/dakotamurphyucf/ochat/actions/runs/34177137660"
+  }
+}
