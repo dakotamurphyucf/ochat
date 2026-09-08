@@ -5477,6 +5477,299 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
     |}]
 ;;
 
+let%expect_test "queued events retain actor ownership through checkpoint installation" =
+  let module A = Agent_session.Session_actor in
+  let module M = Chat_response.Moderator_manager in
+  let module E = Agent_protocol.Moderator_execution in
+  let module S = Session.Moderator_state.Identity_snapshot in
+  List.iter
+    [ `Commit
+    ; `Concurrent
+    ; `Claim_rejected
+    ; `Commit_rejected
+    ; `Terminal_rejected
+    ; `Stop_cancel
+    ; `Bad_tail
+    ]
+    ~f:(fun mode ->
+      let prepared = ref None
+      and effects = ref 0
+      and rejected = ref false in
+      with_handoff_actor
+        ~reject:(fun next ->
+          let matches =
+            List.exists
+              next.Agent_session.Session_transition.state.moderator_executions
+              ~f:(fun receipt ->
+                match mode, receipt.status with
+                | `Claim_rejected, Running
+                | `Commit_rejected, Completed _
+                | `Terminal_rejected, (Completed _ | Failed _) -> true
+                | _ -> false)
+          in
+          match
+            matches
+            &&
+            match mode with
+            | `Terminal_rejected -> true
+            | _ -> not !rejected
+          with
+          | true ->
+            rejected := true;
+            true
+          | false -> false)
+        ~make_worker:(fun env _ ->
+          Agent_session.Operation_worker.create ~run:(fun ~sw:_ ~input caps ->
+            let manager, _, _ =
+              handoff_definition
+                env
+                ~events:
+                  {| | `Session_start ->
+                    Task.bind(Runtime.emit(`String("first")), fun ignored ->
+                    Task.bind(Runtime.emit(`String("tail")), fun ignored -> Task.pure(state)))
+                   | `Internal_event(payload) ->
+                    let ignored = state[0] <- state[0] + 1 in
+                    Task.bind(Tool.call("probe", payload), fun ignored ->
+                    Task.bind(Runtime.emit(`String("new")), fun ignored ->
+                    Task.bind(Runtime.request_turn(), fun ignored -> Task.pure(state))))
+                   | _ -> Task.pure(state) |}
+            in
+            M.handle_event_entries_transactional
+              manager
+              ~session_id:"fixture"
+              ~now_ms:0
+              ~history:[]
+              ~available_tools:[]
+              ~session_meta:`Null
+              ~event:Session_start
+              ~authorize:(fun () -> Ok ())
+              ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
+              ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+            |> Result.ok_or_failwith
+            |> ignore;
+            let before = M.identity_snapshot manager |> Result.ok_or_failwith in
+            let encoded =
+              Some (Agent_session.Runtime_builder.encode_moderator_snapshot before)
+            in
+            caps.commit_moderator encoded |> protocol_ok;
+            prepared := Some (manager, before);
+            Completed
+              { final_history = input.history
+              ; moderator_snapshot = encoded
+              ; runtime_requests = []
+              }))
+        (fun _env actor writer backend ->
+           let initial = await_idle actor in
+           let manager, before = Option.value_exn !prepared in
+           let escaped = ref None in
+           let run () =
+             A.with_idle_queued_moderator_event
+               actor
+               ~snapshot:before
+               (fun ~event:selected ~commit ->
+                  let claimed = A.state actor |> protocol_ok in
+                  assert (Option.is_none claimed.active_operation);
+                  assert (
+                    List.exists claimed.moderator_executions ~f:(fun receipt ->
+                      match receipt.status with
+                      | Running -> true
+                      | _ -> false));
+                  escaped := Some commit;
+                  M.handle_next_event_entries_transactional
+                    manager
+                    ~session_id:
+                      (Agent_protocol.Id.Session.to_string initial.identity.session_id)
+                    ~now_ms:0
+                    ~history:[]
+                    ~available_tools:[]
+                    ~session_meta:`Null
+                    ~authorize:(fun ~event ->
+                      assert (
+                        Sexp.equal
+                          (Session.Snapshot.sexp_of_t selected)
+                          (Session.Snapshot.sexp_of_t event));
+                      Ok ())
+                    ~on_tool_call:(fun ~name:_ ~args ->
+                      assert (Jsonaf.exactly_equal args (`String "first"));
+                      incr effects;
+                      assert (Result.is_error (A.change_moderator actor None));
+                      (match mode with
+                       | `Stop_cancel ->
+                         A.stop actor ~attachment_id:writer.id ~mode:Cancel
+                         |> protocol_ok
+                         |> ignore;
+                         Eio.Fiber.yield ()
+                       | _ -> ());
+                      Ok (Tool_ok `Null))
+                    ~prepare_event:(fun ~outcome ~snapshot ->
+                      let requests : Agent_protocol.Invocation.follow_up =
+                        { request_turn =
+                            Chat_response.Runtime_semantics.request_turn
+                              outcome.runtime_requests
+                        ; request_compaction = false
+                        ; end_session = None
+                        }
+                      in
+                      let snapshot =
+                        match mode with
+                        | `Bad_tail -> { snapshot with queued_internal_events = [] }
+                        | _ -> snapshot
+                      in
+                      commit ~snapshot ~requests
+                      |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
+                      |> Result.map ~f:(fun () ->
+                        (* The durable checkpoint is installed; the live manager has
+                         not installed it yet. Ownership must cover this gap. *)
+                        assert (Result.is_error (A.change_moderator actor None));
+                        assert (
+                          Option.is_none (A.claim_idle_moderator actor |> protocol_ok));
+                        fun () -> ()))
+                  |> Result.map ~f:ignore
+                  |> Result.map_error ~f:handoff_error)
+           in
+           let safe_run () =
+             try run () with
+             | Eio.Cancel.Cancelled _ -> Error (handoff_error "cancelled")
+           in
+           let results = ref [] in
+           (match mode with
+            | `Concurrent ->
+              Eio.Fiber.both
+                (fun () ->
+                   let result = safe_run () in
+                   results := result :: !results)
+                (fun () ->
+                   let result = safe_run () in
+                   results := result :: !results)
+            | _ -> results := [ safe_run () ]);
+           let saved = A.state actor |> protocol_ok in
+           let live = M.identity_snapshot manager |> Result.ok_or_failwith in
+           assert (
+             Option.equal
+               Jsonaf.exactly_equal
+               saved.moderator
+               (Some (Agent_session.Runtime_builder.encode_moderator_snapshot live)));
+           assert (
+             List.length saved.conversation.canonical_history
+             = List.length initial.conversation.canonical_history);
+           assert (Option.is_none saved.active_operation);
+           assert (
+             List.equal
+               E.equal
+               saved.moderator_executions
+               (Agent_session.Memory_backend.state backend).moderator_executions);
+           Option.iter !escaped ~f:(fun commit ->
+             assert (
+               Result.is_error
+                 (commit
+                    ~snapshot:live
+                    ~requests:
+                      { request_turn = false
+                      ; request_compaction = false
+                      ; end_session = None
+                      })));
+           (match mode with
+            | `Terminal_rejected ->
+              assert (
+                match run () with
+                | Ok false -> true
+                | _ -> false);
+              let restored =
+                Agent_session.Session_persistence.restore_snapshot
+                  (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t saved))
+                |> store_ok
+              in
+              let plan =
+                Agent_session.Invocation_recovery.plan
+                  ~state:restored
+                  ~namespace:"queued-event-recovery"
+                  ~first_sequence:0
+                  ~reason:"restart"
+                |> protocol_ok
+              in
+              let recovered =
+                List.fold_result
+                  plan.deltas
+                  ~init:restored
+                  ~f:Agent_session.Session_delta.apply
+                |> protocol_ok
+              in
+              assert (
+                List.for_all recovered.moderator_executions ~f:(fun receipt ->
+                  match receipt.status with
+                  | Interrupted _ -> true
+                  | _ -> false));
+              assert (
+                Result.is_error
+                  (Agent_session.Queued_moderator_event.claim
+                     ~state:recovered
+                     ~id:(Agent_protocol.Id.Moderator_execution.create ())
+                     ~snapshot:before
+                     ~now:timestamp));
+              assert (!effects = 1)
+            | _ -> ());
+           (match mode with
+            | `Commit_rejected | `Bad_tail ->
+              assert (Sexp.equal (S.sexp_of_t before) (S.sexp_of_t live));
+              assert (Result.is_error (run ()));
+              let changed = { before with revision = before.revision + 1 } in
+              A.change_moderator
+                actor
+                (Some (Agent_session.Runtime_builder.encode_moderator_snapshot changed))
+              |> protocol_ok
+              |> ignore;
+              assert (
+                Result.is_error
+                  (A.with_idle_queued_moderator_event
+                     actor
+                     ~snapshot:changed
+                     (fun ~event:_ ~commit:_ -> assert false)));
+              assert (!effects = 1)
+            | _ -> ());
+           let statuses =
+             List.map saved.moderator_executions ~f:(fun receipt ->
+               match receipt.status with
+               | Completed _ -> "completed"
+               | Failed _ -> "failed"
+               | Interrupted _ -> "interrupted"
+               | Running -> "running")
+           in
+           let pending =
+             List.count saved.moderator_executions ~f:(fun receipt ->
+               match receipt.intent with
+               | Some Pending -> true
+               | _ -> false)
+           in
+           print_s
+             [%sexp
+               (mode
+                : [ `Commit
+                  | `Concurrent
+                  | `Claim_rejected
+                  | `Commit_rejected
+                  | `Terminal_rejected
+                  | `Stop_cancel
+                  | `Bad_tail
+                  ])
+             , (List.count !results ~f:(function
+                  | Ok true -> true
+                  | _ -> false)
+                : int)
+             , (!effects : int)
+             , (statuses : string list)
+             , (pending : int)]));
+  [%expect
+    {|
+    (Commit 1 1 (completed) 1)
+    (Concurrent 1 1 (completed) 1)
+    (Claim_rejected 0 0 () 0)
+    (Commit_rejected 0 1 (failed) 0)
+    (Terminal_rejected 0 1 (running) 0)
+    (Stop_cancel 0 1 (interrupted) 0)
+    (Bad_tail 0 1 (failed) 0)
+    |}]
+;;
+
 let%expect_test "idle observations own state without starting a model operation" =
   let module A = Agent_session.Session_actor in
   let module I = Agent_protocol.Invocation in

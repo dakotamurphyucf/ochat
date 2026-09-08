@@ -59,6 +59,16 @@ type invocation_owner =
   | Foreground of Agent_protocol.Id.Operation.t
   | Idle_moderator of moderator_borrow
 
+type queued_event_borrow =
+  { receipt : Agent_protocol.Moderator_execution.t
+  ; before : Session.Moderator_state.Identity_snapshot.t
+  ; event : Session.Snapshot.t
+  ; mutable callback_active : bool
+  ; mutable committed : bool
+  ; mutable cancel : (unit -> unit) option
+  ; mutable cancel_requested : bool
+  }
+
 type invocation_execution =
   { owner : invocation_owner
   ; dispatched : Agent_protocol.Invocation.t
@@ -66,6 +76,17 @@ type invocation_execution =
   }
 
 type _ request =
+  | Claim_queued_event :
+      Agent_protocol.Id.Moderator_execution.t
+      * Session.Moderator_state.Identity_snapshot.t
+      -> queued_event_borrow option request
+  | Commit_queued_event :
+      queued_event_borrow
+      * Session.Moderator_state.Identity_snapshot.t
+      * Agent_protocol.Invocation.follow_up
+      -> unit request
+  | Finish_queued_event : queued_event_borrow * bool -> unit request
+  | Set_queued_event_cancel : queued_event_borrow * (unit -> unit) -> unit request
   | Commit_invocation_call :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t * History_entry.t
       -> unit request
@@ -294,6 +315,7 @@ type t =
   ; mutable active_cancel : (unit -> unit) option
   ; mutable idle_moderator_borrowed : bool
   ; mutable moderator_borrow : moderator_borrow option
+  ; mutable queued_event_borrow : queued_event_borrow option
   ; mutable invocation_executions : invocation_execution list
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
@@ -303,6 +325,10 @@ type t =
   }
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
+
+let moderator_is_borrowed t =
+  Option.is_some t.moderator_borrow || Option.is_some t.queued_event_borrow
+;;
 
 let call t ?(priority = Mailbox.Normal) ?command_audit request =
   let promise, resolver = Eio.Promise.create () in
@@ -368,9 +394,9 @@ let commit_extensions_internal t generation expected_revision changes =
     Error
       (error Conflict "extension transaction uses a stale session revision or generation")
   else if
-    (Option.is_some t.moderator_borrow || not (List.is_empty t.invocation_executions))
+    (moderator_is_borrowed t || not (List.is_empty t.invocation_executions))
     && List.exists changes ~f:(function
-      | Extension_change.Moderator_state _ -> Option.is_some t.moderator_borrow
+      | Extension_change.Moderator_state _ -> moderator_is_borrowed t
       | Invocation value ->
         List.exists t.invocation_executions ~f:(fun execution ->
           Agent_protocol.Id.Invocation.compare
@@ -486,7 +512,7 @@ let commit_extensions_internal t generation expected_revision changes =
 ;;
 
 let set_operation_worker t worker =
-  if Option.is_some t.moderator_borrow
+  if moderator_is_borrowed t
   then Error (error Conflict "cannot replace a borrowed moderator runtime")
   else (
     match worker, t.state.active_operation, t.idle_moderator_borrowed with
@@ -498,7 +524,7 @@ let set_operation_worker t worker =
 ;;
 
 let change_moderator t moderator =
-  if Option.is_some t.moderator_borrow
+  if moderator_is_borrowed t
   then Error (error Conflict "moderator invocation owns the moderator checkpoint")
   else transition t ~delta:(Session_delta.Moderator_changed moderator) ~payloads:[]
 ;;
@@ -618,6 +644,11 @@ let stop_internal t mode =
      | Cancel, Some ({ operation_id = None; _ } as borrow) ->
        borrow.cancel_requested <- true;
        Option.iter borrow.cancel ~f:(fun f -> f ())
+     | _ -> ());
+    (match mode, t.queued_event_borrow with
+     | Cancel, Some borrow ->
+       borrow.cancel_requested <- true;
+       Option.iter borrow.cancel ~f:(fun cancel -> cancel ())
      | _ -> ());
     session
   | Some operation ->
@@ -1090,6 +1121,114 @@ let idle_moderator_eligible t =
   && not (has_pending_permission t)
 ;;
 
+let claim_queued_event t id snapshot =
+  let open Result.Let_syntax in
+  match idle_moderator_eligible t with
+  | false -> Ok None
+  | true ->
+    let%bind receipt, event =
+      Queued_moderator_event.claim ~state:t.state ~id ~snapshot ~now:(t.services.now ())
+    in
+    let%bind _ =
+      transition t ~delta:(Session_delta.Moderator_execution_changed receipt) ~payloads:[]
+    in
+    let borrow =
+      { receipt
+      ; before = snapshot
+      ; event
+      ; callback_active = true
+      ; committed = false
+      ; cancel = None
+      ; cancel_requested = false
+      }
+    in
+    t.queued_event_borrow <- Some borrow;
+    t.idle_moderator_borrowed <- true;
+    Ok (Some borrow)
+;;
+
+let validate_queued_event_borrow t borrow =
+  match t.queued_event_borrow with
+  | Some current when phys_equal current borrow && t.idle_moderator_borrowed ->
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      borrow.receipt.context.session_id
+      borrow.receipt.context.generation
+  | _ -> Error (error Conflict "queued event is no longer owned by this callback")
+;;
+
+let queued_event_can_commit t borrow =
+  let open Result.Let_syntax in
+  let%bind () = validate_queued_event_borrow t borrow in
+  match t.state.lifecycle.desired, t.state.lifecycle.observed, t.state.failure with
+  | Running, Idle, None
+    when borrow.callback_active
+         && (not (borrow.committed || borrow.cancel_requested || t.state.halted))
+         && Option.is_none t.state.active_operation -> Ok ()
+  | _ -> Error (error Conflict "queued event cannot commit after completion or stop")
+;;
+
+let commit_queued_event t borrow snapshot requests =
+  let open Result.Let_syntax in
+  let%bind () = queued_event_can_commit t borrow in
+  let%bind completed =
+    Queued_moderator_event.complete
+      ~claimed:borrow.receipt
+      ~before:borrow.before
+      ~snapshot
+      ~requests
+  in
+  let%bind _ =
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch
+           [ Moderator_execution_changed completed
+           ; Moderator_changed (Some (Runtime_builder.encode_moderator_snapshot snapshot))
+           ])
+      ~payloads:[]
+  in
+  borrow.committed <- true;
+  Ok ()
+;;
+
+let finish_queued_event t borrow interrupted =
+  let open Result.Let_syntax in
+  let%bind () = validate_queued_event_borrow t borrow in
+  borrow.callback_active <- false;
+  borrow.cancel <- None;
+  let%bind () =
+    match borrow.committed with
+    | true -> Ok ()
+    | false ->
+      let%bind terminal =
+        match interrupted || borrow.cancel_requested with
+        | true ->
+          Agent_protocol.Moderator_execution.interrupt
+            borrow.receipt
+            ~reason:"queued moderator handler interrupted before checkpoint commit"
+        | false ->
+          Agent_protocol.Moderator_execution.fail
+            borrow.receipt
+            { code = "event.handler_failed"
+            ; message =
+                "queued moderator handler exited without committing its checkpoint"
+            ; retryable = false
+            ; details = `Null
+            }
+      in
+      transition
+        t
+        ~delta:(Session_delta.Moderator_execution_changed terminal)
+        ~payloads:[]
+      |> Result.map ~f:ignore
+  in
+  t.queued_event_borrow <- None;
+  t.idle_moderator_borrowed <- false;
+  Ok ()
+;;
+
 let observation_owner_available t operation_id =
   match operation_id with
   | Some operation_id -> Result.map (running_operation t operation_id) ~f:ignore
@@ -1356,7 +1495,7 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
   Ok ()
 ;;
 
-let uncommitted_borrow_delta t borrow failure =
+let uncommitted_borrow_delta t (borrow : moderator_borrow) failure =
   if borrow.committed
   then Ok (Session_delta.Batch [])
   else
@@ -1537,7 +1676,7 @@ let publish_invocation_output t operation_id invocation_id entry =
 let commit_worker_moderator t operation_id moderator =
   let open Result.Let_syntax in
   let%bind _ = running_operation ~allow_stopping:true t operation_id in
-  if Option.is_some t.moderator_borrow
+  if moderator_is_borrowed t
   then Error (error Conflict "moderator invocation owns the moderator checkpoint")
   else if Option.equal Jsonaf.exactly_equal t.state.moderator moderator
   then Ok ()
@@ -2406,6 +2545,62 @@ let with_moderator_gate t f =
     Error (error code (Chat_response.Execution_gate.error_message failure))
 ;;
 
+let with_idle_queued_moderator_event t ~snapshot f =
+  with_moderator_gate t (fun () ->
+    let open Result.Let_syntax in
+    Eio.Fiber.yield ();
+    let%bind claimed =
+      Eio.Cancel.protect (fun () ->
+        call
+          t
+          (Claim_queued_event (Agent_protocol.Id.Moderator_execution.create (), snapshot)))
+    in
+    match claimed with
+    | None -> Ok false
+    | Some borrow ->
+      let finish interrupted =
+        Eio.Cancel.protect (fun () -> call t (Finish_queued_event (borrow, interrupted)))
+      in
+      let execute () =
+        Eio.Cancel.sub (fun context ->
+          let active = ref true in
+          Exn.protect
+            ~finally:(fun () -> active := false)
+            ~f:(fun () ->
+              let%bind () =
+                call
+                  t
+                  (Set_queued_event_cancel
+                     ( borrow
+                     , fun () ->
+                         match !active with
+                         | true -> Eio.Cancel.cancel context Exit
+                         | false -> () ))
+              in
+              f ~event:borrow.event ~commit:(fun ~snapshot ~requests ->
+                Eio.Cancel.protect (fun () ->
+                  call t (Commit_queued_event (borrow, snapshot, requests))))))
+      in
+      (match execute () with
+       | result ->
+         let%bind () = finish false in
+         let%bind () = result in
+         (match borrow.committed with
+          | true -> Ok true
+          | false ->
+            Error
+              (error Invalid_state "queued event returned without a checkpoint commit"))
+       | exception exn ->
+         let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+         let interrupted =
+           match exn with
+           | Eio.Cancel.Cancelled _ -> true
+           | _ -> false
+         in
+         ignore (finish interrupted : (unit, Agent_protocol.Error.t) result);
+         Stdlib.Printexc.raise_with_backtrace exn backtrace))
+;;
+
 let with_moderator_invocation t operation_id ~invocation f =
   with_moderator_gate t (fun () ->
     with_moderator_borrow_unlocked
@@ -3104,6 +3299,11 @@ let complete_job t job_id generation outcome =
 
 let deliver_job t job_id generation moderator_snapshot =
   let open Result.Let_syntax in
+  let%bind () =
+    match moderator_is_borrowed t with
+    | true -> Error (error Conflict "moderator callback owns the checkpoint")
+    | false -> Ok ()
+  in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
   match job.status, job.delivery with
@@ -3249,6 +3449,11 @@ let retry_schedule t schedule_id generation =
 
 let complete_schedule t schedule_id generation moderator_snapshot =
   let open Result.Let_syntax in
+  let%bind () =
+    match moderator_is_borrowed t with
+    | true -> Error (error Conflict "moderator callback owns the checkpoint")
+    | false -> Ok ()
+  in
   let%bind schedule = find_schedule t schedule_id in
   let%bind () = validate_schedule_generation t schedule generation in
   match schedule.status with
@@ -3488,7 +3693,7 @@ let complete_running_idle_moderator t (drain : Runtime_builder.moderator_drain) 
 ;;
 
 let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
-  if (not t.idle_moderator_borrowed) || Option.is_some t.moderator_borrow
+  if (not t.idle_moderator_borrowed) || moderator_is_borrowed t
   then Error (error Conflict "session moderator is not borrowed for idle work")
   else (
     let result =
@@ -3504,7 +3709,7 @@ let complete_idle_moderator t (drain : Runtime_builder.moderator_drain) =
 ;;
 
 let fail_idle_moderator t failure =
-  if Option.is_some t.moderator_borrow
+  if moderator_is_borrowed t
   then Error (error Conflict "observation callback owns the idle moderator")
   else (
     t.idle_moderator_borrowed <- false;
@@ -3856,6 +4061,13 @@ let detach t attachment_id =
 
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t -> function
+  | Claim_queued_event (id, snapshot) -> claim_queued_event t id snapshot
+  | Commit_queued_event (borrow, snapshot, requests) ->
+    commit_queued_event t borrow snapshot requests
+  | Finish_queued_event (borrow, interrupted) -> finish_queued_event t borrow interrupted
+  | Set_queued_event_cancel (borrow, cancel) ->
+    Result.map (queued_event_can_commit t borrow) ~f:(fun () ->
+      borrow.cancel <- Some cancel)
   | Commit_invocation_call (operation_id, invocation, entry) ->
     commit_invocation_call t operation_id invocation entry
   | Claim_invocation (operation_id, invocation) ->
@@ -3993,6 +4205,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     Option.iter t.owner_timer_cancel ~f:(fun resolver -> Eio.Promise.resolve resolver ());
     t.owner_timer_cancel <- None;
     Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
+    Option.iter t.queued_event_borrow ~f:(fun borrow ->
+      borrow.callback_active <- false;
+      borrow.cancel_requested <- true;
+      Option.iter borrow.cancel ~f:(fun cancel -> cancel ()));
     Eio.Mutex.use_rw ~protect:true t.subscriber_mutex (fun () ->
       Map.iter !(t.subscribers) ~f:Subscriber.close;
       t.subscribers := Map.Poly.empty);
@@ -4075,6 +4291,7 @@ let create_with_owner_lease_duration
     ; active_cancel = None
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
+    ; queued_event_borrow = None
     ; invocation_executions = []
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence

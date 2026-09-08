@@ -39,6 +39,7 @@
   operation_worker
   turn_worker
   runtime_builder
+  queued_moderator_event
   permission_reviewer
   permission_policy
   session_transition

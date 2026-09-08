@@ -108,8 +108,9 @@ and supply its value-copying and persistence callbacks.
 
 These primitives do not automatically retry failures. The host must persist a
 claim before external effects and record failed/interrupted disposition so a
-retained event cannot replay effects after a failed checkpoint. Actor event claims
-and acknowledgement, event-owned interactive permissions, host execution deadlines
+retained event cannot replay effects after a failed checkpoint. The idle queued
+event handoff below supplies that claim and acknowledgement boundary. Other event
+phases, event-owned interactive permissions, host execution deadlines
 and normal v1 runtime construction remain integration work. The legacy pop-first
 drain remains separate and does not supply transactional acknowledgement.
 
@@ -132,11 +133,34 @@ interrupted compaction, and discards pending intent belonging to an older sessio
 generation. Other completed outcomes and current-generation pending intent remain.
 Lifecycle summaries expose IDs and states without event payloads or error details.
 
-This is a persistence foundation. The actor still needs the service that claims
-the exact installed source/checkpoint before execution, commits the receipt with
-the resulting checkpoint and scheduling transition, and grants native children
-event-owned authority. Native child lineage, interactive permission ownership and
-normal v1 runtime binding are not supplied by creating an execution record.
+`Session_actor.with_idle_queued_moderator_event` adds an internal execution handoff
+for the head of an exact installed checkpoint. It saves a running receipt before
+calling the handler outside the actor mailbox. The callback compares its selected
+event with the manager's authorization envelope and passes the prospective
+checkpoint and runtime requests to its bound commit callback. The actor checks
+source identity and preservation of the unconsumed tail, then saves the completed
+receipt, checkpoint and pending intent atomically. The borrow spans the manager's
+local installation; checkpoint replacement, job/schedule delivery and competing
+idle work cannot enter that gap. Reads and cancel-stop remain responsive.
+
+Cancellation or failed execution leaves the old checkpoint intact and records an
+interrupted or failed receipt. Such a receipt blocks further queued execution for
+that source and generation, even if another handler changes the checkpoint. This
+prevents implicit replay of external effects. Explicit retirement of failed queue
+heads remains to be implemented. If saving the terminal record also fails, the
+borrow stays held and its commit callback expires; recovery interrupts the saved
+running claim. Successful consumption may legitimately emit an identical event.
+
+The compiled-handler/actor expect test covers successful and concurrent claims,
+rejected admission and completion saves, a rejected terminal save followed by
+snapshot recovery, cancel-stop, an invalid queue tail, expired callbacks and
+ownership during the durable/live checkpoint handoff. It uses the in-memory
+persistence backend and snapshot codec, without provider calls or added history.
+This is not a full daemon restart test or native-tool authorization qualification.
+
+Startup/foreground event ownership, failed-head retirement, native child lineage,
+interactive permissions, scheduling of retained event requests and normal v1
+runtime binding remain integration work. The idle handoff grants no tool authority.
 
 `Operation_worker.Capabilities.with_moderator_invocation` is a trusted, scoped
 host service. The caller must complete capability and policy admission before

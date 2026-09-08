@@ -42,6 +42,11 @@ are separate surfaces. The host drains wakeups while idle and serializes changes
 through the actor. UI capabilities are host-provided; a headless host is not
 guaranteed to have an interactive approval widget or local TUI callback.
 
+The extensibility-v1 [event ownership and persistence internals](extensibility-foundations.md#actor-and-worker-handoff)
+describe the separate queued-event receipt, actor borrow and checkpoint handoff.
+That internal path is still being integrated; new model-visible extension tools
+remain disabled pending runtime and permission qualification.
+
 Instruction helpers retain compatibility names but construct developer messages:
 `Item.system_text`, `Turn.prepend_system`, notice helpers, and
 `Item.input_text_message(..., "system", ...)`. `Item.role` reports developer;

@@ -525,6 +525,33 @@ val skip_schedule
   -> generation:int
   -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
 
+(** Claim the head of an exact installed checkpoint while idle. The callback runs
+    outside the mailbox under exclusive moderator ownership and receives the
+    selected event snapshot for comparison in the manager's [authorize] callback.
+    The claim is durable before script execution. [commit] atomically persists
+    the prospective checkpoint, completed receipt and retained runtime requests;
+    ownership remains held until the callback returns after local installation.
+
+    Failure or cancellation retains terminal evidence without changing the old
+    checkpoint. Unsettled failed/interrupted claims block further queued execution
+    for that source/generation, including after unrelated checkpoint edits. This
+    handoff does not retire failed heads. A failed terminal save retains the borrow
+    until recovery.
+    Stop-cancel interrupts the callback; late or escaped commits are rejected.
+    Returns false while the session is unavailable; empty, stale or previously
+    claimed checkpoints return an error. This internal handoff grants no native
+    tool authority and does not apply scheduling intent or start a model turn. *)
+val with_idle_queued_moderator_event
+  :  t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> (event:Session.Snapshot.t
+      -> commit:
+           (snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> requests:Agent_protocol.Invocation.follow_up
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (bool, Agent_protocol.Error.t) result
+
 (** Atomically select and claim one deferred observation in an idle, running,
     unblocked session. The callback runs outside the mailbox under exclusive
     moderator ownership, without creating a foreground operation. Returns false
