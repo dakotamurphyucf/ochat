@@ -2,7 +2,7 @@
 
 Production domain: **https://ochatlabs.com**. The protected Website workflow builds for this origin, retains the tested artifact, and publishes only after the main release gate passes. See [the production launch record](planning/p11-launch.md) and [release runbook](planning/release-runbook.md).
 
-A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Six application guides, an inspectable recorded workflow, and a ten-lesson curriculum help readers discover and build useful agents. The catalog contains fourteen entries: eight complete examples, five configurable templates, and one illustrative reading sample. The preview renders 123 documentation routes and accounts for 308 canonical documents (110 published, 4 compatibility, 9 bridges, 175 repository-only, 10 deferred). Search covers 114 approved pages with 21 benchmark queries. See [the application UI review](planning/application-ui-review.md) for current scope and verification. P09 is complete through user-confirmed API-reference deferral; P10 and Milestone C are complete within the approved launch scope: local qualification, hosted preview rehearsal/rollback, and actual GitHub release enforcement pass; manual accessibility review remains explicitly deferred. P11 production launch is next. See [the P10 review](planning/p10-completion-review.md).
+A static Astro/Starlight website with an application-led homepage and repository-owned documentation. Six application guides, an inspectable recorded workflow, and a ten-lesson curriculum help readers discover and build useful agents. The catalog contains fourteen entries: eight complete examples, five configurable templates, and one illustrative reading sample. The preview renders 123 documentation routes and accounts for 308 canonical documents (110 published, 4 compatibility, 9 bridges, 175 repository-only, 10 deferred). Search covers 114 approved pages with 21 benchmark queries. See [the application UI review](planning/application-ui-review.md) for current scope and verification. P09 is complete through user-confirmed API-reference deferral; P10 and Milestone C are complete within the approved launch scope: local qualification, hosted preview rehearsal/rollback, and actual GitHub release enforcement pass; manual accessibility review remains explicitly deferred. P11 public launch is verified at https://ochatlabs.com; registrar contact-email confirmation remains owner-managed. See [contributor workflows](CONTRIBUTING.md) and [maintenance ownership and follow-ups](planning/maintenance.md). See [the P10 review](planning/p10-completion-review.md).
 
 ## Run locally
 
@@ -35,7 +35,7 @@ npm run evaluate:search
 npm run test:browser
 ```
 
-The browser suite includes search, themes, mobile navigation/overflow, accessibility checks, source links, no-JavaScript reading, and exact clipboard bytes in Chromium. Hosted headers/routing are separate release checks; Astro preview does not establish Cloudflare behavior. The Linux CI workflow is configured to run the locked build and browser suite; its remote run is still pending. Run `dune build @agent-docs-check` from the repository root when technical docs/examples change; this independent offline semantic gate remains necessary.
+The browser suite includes search, themes, mobile navigation/overflow, accessibility checks, source links, no-JavaScript reading, and exact clipboard bytes in Chromium. Hosted headers/routing are separate release checks; Astro preview does not establish Cloudflare behavior. The Linux CI workflow runs the locked build and browser suite; its actual passing runs and production deployment are recorded in [the launch record](planning/p11-launch.md). Run `dune build @agent-docs-check` from the repository root when technical docs/examples change; this independent offline semantic gate remains necessary.
 
 ## Where changes belong
 
@@ -70,7 +70,7 @@ The homepage ChatMD comes from the first XML example in the root README. Its lau
 
 Default builds use `http://localhost:4321`, preview noindex metadata/headers, and a crawl-disallowing robots file. `SITE_URL` controls the origin; `SITE_ENV=production` requires an explicit HTTPS origin. A production build must be generated and checked again after domain ownership is established. Do not deploy a localhost-origin preview as production.
 
-`wrangler.jsonc` configures Workers Static Assets and an explicit `preview` environment for the owner’s account and `ochat-website-preview` Worker. It contains no credentials or custom domain. `dist/` is the only deployable directory. Local checks and the [hosted rehearsal/rollback](planning/p10-hosted-rehearsal.md) pass. The [release runbook](planning/release-runbook.md) records the enforced GitHub gate and P11 production-publishing requirements. Keep alternate deployment triggers disabled.
+`wrangler.jsonc` configures Workers Static Assets with separate `preview` and `production` environments. Production attaches `ochatlabs.com` to `ochat-website`; `redirect/wrangler.jsonc` attaches `www.ochatlabs.com` to the redirect Worker. Configuration contains public identifiers, never credentials. `dist/` is the only static-asset directory; the qualified release separately retains the redirect Worker and deployment evidence. Local checks and the [hosted rehearsal/rollback](planning/p10-hosted-rehearsal.md) pass. The [release runbook](planning/release-runbook.md) records the enforced GitHub gate, current production publisher, and recovery procedure. Keep alternate deployment triggers disabled.
 
 The complete source inventory and deferral reasons are regenerated in `.generated/migration-report.json` and `.generated/migration-report.md`. They remain outside `dist/` and are uploaded as CI evidence. Published content/provenance is reported in `.generated/content-report.json`; output sizes and artifact SHA-256 are in `.generated/build-evidence.json`. The tutorial/example verification and download inventory is `.generated/examples-report.json`. These reports describe the local build and are not proof of live-runtime correctness or domain ownership. Immutable view-source links identify the Git HEAD snapshot; uncommitted changes can differ and must be recorded during development.
 
@@ -107,6 +107,10 @@ renderer is an optional download, excluded from the eager page budget.
 
 ## Visual and keyboard review
 
+Optional Astro page prefetching is disabled in `astro.config.mjs`: rapid navigation
+reproduced cancelled-prefetch errors in WebKit. Links use ordinary browser
+navigation; the separate on-demand search worker/index remains enabled.
+
 With the built local preview running, run `npm run review:design` from
 `website/`. It captures the homepage, first-agent tutorial and ChatML reference
 at desktop/mobile widths in both themes, measures actual text/focus contrast,
@@ -126,7 +130,7 @@ menu focus/return, search, contents links, code/table scrolling, reduced motion,
 forced-color controls, copy success/failure and no-JavaScript navigation. On
 macOS WebKit, Option+Tab follows the browser's all-links keyboard mode. These
 checks are not a screen-reader assessment or a claim that native browser zoom
-and mobile software keyboards have been reviewed. Those remain release checks.
+and mobile software keyboards have been reviewed. Manual assistive-technology and physical-device reviews remain explicitly deferred from launch; see the maintenance backlog.
 
 ## Tutorial, source reader, and download maintenance
 
@@ -156,8 +160,7 @@ containment, copies exact bytes into the same generated snapshot as the pages,
 and produces deterministic `.tar` bundles with original relative filenames.
 Individual extensionless files use a `.txt` URL for static hosting; their download
 attribute and archive preserve names such as `dune`. Plain `.tar` avoids automatic HTTP decompression and browser recompression
-behavior encountered with gzip archive extensions. Hosted response behavior still needs
-the P10/P11 release check. No source bundle is an executable website action.
+behavior encountered with gzip archive extensions. Hosted response behavior is checked by the P10/P11 release verifier and must be rechecked when download packaging or hosting changes. No source bundle is an executable website action.
 
 Run `dune build --force @agent-docs-check` after changing selected source files or
 tutorials. It checks actual captured dependency loading, missing companions, file
@@ -315,19 +318,17 @@ The CI workflow runs this prerequisite before preview and production website
 jobs and has no input path filters. Its final gate rejects failed, skipped and
 cancelled prerequisites. Actual clean GitHub execution and strict main protection are verified in
 [the enforcement record](planning/p10-github-enforcement.md). Main requires
-`release-gate` from GitHub Actions, including for administrators. Production
-publishing remains disabled until P11 connects the owned origin and trusted publisher.
+`release-gate` from GitHub Actions, including for administrators. Production publishing is enabled only after the passing main release gate, using that run’s retained artifact.
 
 `npm run artifact -- retain DIRECTORY` saves a verified output manifest;
 `npm run artifact -- verify DIRECTORY` checks retained bytes.
 `npm run rehearse:static -- REPORT.json ARTIFACT [ARTIFACT ...]` exercises the
 pinned local Workers runtime and can restore a previous retained artifact.
-`npm run rehearse:hosted -- ARTIFACT REPORT.json` checks a retained preview
-against its public HTTPS origin without deploying or changing remote state.
+`npm run rehearse:hosted -- ARTIFACT REPORT.json` checks a retained HTTPS preview or owned production artifact
+against its public origin without deploying or changing remote state.
 `npm run release:ready -- ARTIFACT APPROVAL.json` rejects fixture origins,
 stale approvals and incomplete hosted release records.
 
 See [the release runbook](planning/release-runbook.md),
 [manual accessibility worksheet](planning/manual-accessibility-review.md), and
-[P10 qualification record](planning/p10-completion-review.md). Local candidate
-and public deployment are distinct; P11 has not started.
+[P10 qualification record](planning/p10-completion-review.md). Local candidate and public deployment evidence remain distinct. The [P11 launch record](planning/p11-launch.md) identifies the first verified production release; [maintenance](planning/maintenance.md) owns ongoing reviews.

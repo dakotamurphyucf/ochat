@@ -6,6 +6,10 @@ or an automated accessibility scan does not establish hosted behavior or manual
 accessibility conformance. See [the P10 review](p10-completion-review.md) for the
 current evidence and outstanding gates.
 
+Production is now live; see [the P11 launch record](p11-launch.md) for its
+verified baseline. [Contributor workflows](../CONTRIBUTING.md) and
+[maintenance ownership](maintenance.md) cover routine work and review dates.
+
 ## One publication owner
 
 The Website workflow is the sole production publisher for `https://ochatlabs.com`.
@@ -153,6 +157,11 @@ recorded separately. Treat an upload success as the start of qualification:
 first-deployment propagation can expose transient asset errors, and the public
 checks must pass before the environment is declared ready.
 
+The production readiness loop requires matching apex bytes and the exact www
+redirect in one completed probe. A failed www certificate/request must remain
+not ready even when the apex has already responded successfully. Every failed
+probe is recorded, retries are bounded, and the full hosted checks still follow.
+
 Use an explicitly selected account/project and a preview artifact built for its
 preview origin. Record the Worker name, version/deployment IDs, origin, source
 revision, and exact uploaded artifact hash. Verify over public HTTPS:
@@ -239,6 +248,29 @@ account before upload. Sources reviewed on 2026-09-07:
 GitHub owns builds in this design; Cloudflare Workers Builds is not configured.
 
 ## Production recovery
+
+### Retry an externally blocked deployment
+
+If the release gate passed but only publication failed, first resolve the
+specific cause and confirm the run's revision is still current main. For the
+launch, Cloudflare error 100117 identified conflicting apex A records and a www
+CNAME; the owner removed only those records, preserving unrelated DNS entries.
+Do not remove unrelated email or verification records or blindly retry a failed
+DNS attachment.
+
+```sh
+gh run view RUN_ID --log-failed
+gh run rerun RUN_ID --failed
+```
+
+Replace `RUN_ID` with the affected main run. The launch successfully used this
+path: only `deploy-production` reran, downloaded the original qualified artifact
+and evidence, and performed the live checks. Keep reports/logs from the failed
+attempt separately before downloading the retry's evidence. Never reuse a
+passing artifact for a different source revision. A superseded revision is
+intentionally rejected; qualify current main through the normal workflow.
+
+### Restore a known-good release
 
 Prefer a normal revert PR: revert the faulty website change, let the full gate
 qualify the reverted code at its new main revision, and publish through the same

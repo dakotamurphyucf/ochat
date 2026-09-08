@@ -4,6 +4,7 @@ import path from 'node:path';
 import { createHash } from 'node:crypto';
 import { verifyArtifact } from './release-artifact.mjs';
 import { productionOrigin } from '../config/production.mjs';
+import { waitForProduction } from './production-readiness.mjs';
 
 const [directory, output] = process.argv.slice(2);
 if (!directory || !output)
@@ -78,30 +79,11 @@ try {
     // Preserve each observation; never silently retry a completed verification.
     report.readiness = [];
     const homepage = artifact.files.find((file) => file.path === 'index.html');
-    let ready = false;
-    for (let attempt = 0; attempt < 12 && !ready; attempt++) {
-      try {
-        const response = await get('/');
-        ready =
-          response.status === 200 &&
-          hash(Buffer.from(await response.arrayBuffer())) === homepage.sha256;
-        const alternate = await get('https://www.ochatlabs.com/');
-        ready =
-          ready &&
-          alternate.status === 308 &&
-          alternate.headers.get('location') === productionOrigin + '/';
-        report.readiness.push({
-          attempt: attempt + 1,
-          status: response.status,
-          matchingBytes: ready,
-          alternateStatus: alternate.status,
-        });
-      } catch (error) {
-        report.readiness.push({ attempt: attempt + 1, error: error.message });
-      }
-      if (!ready && attempt < 11)
-        await new Promise((resolve) => setTimeout(resolve, 5000));
-    }
+    const ready = await waitForProduction({
+      get,
+      homepageSha256: homepage.sha256,
+      attempts: report.readiness,
+    });
     check(ready, 'Production hostname serves the current artifact over HTTPS');
   }
   async function checkFile(file) {
