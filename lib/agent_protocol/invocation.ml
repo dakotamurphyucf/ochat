@@ -113,7 +113,9 @@ type follow_up =
 
 type follow_up_status =
   | Pending_follow_up of follow_up
+  | Compaction_accepted_follow_up of follow_up
   | Applied_follow_up of follow_up
+  | Discarded_follow_up of follow_up * string
 [@@deriving equal, sexp]
 
 type observation =
@@ -243,7 +245,24 @@ let validate t =
       let%bind () =
         match observation.follow_up, observation.status with
         | None, _ -> Ok ()
-        | Some (Pending_follow_up requests | Applied_follow_up requests), Observed ->
+        | ( Some
+              ( Pending_follow_up requests
+              | Applied_follow_up requests
+              | Compaction_accepted_follow_up requests
+              | Discarded_follow_up (requests, _) )
+          , Observed ) ->
+          let%bind () =
+            match observation.follow_up with
+            | Some (Compaction_accepted_follow_up _)
+              when not
+                     (requests.request_compaction
+                      && requests.request_turn
+                      && Option.is_none requests.end_session) ->
+              invalid "partial acceptance requires compaction followed by a turn"
+            | Some (Discarded_follow_up (_, reason)) ->
+              text ~name:"follow-up discard reason" ~max:1024 reason
+            | _ -> Ok ()
+          in
           let%bind () =
             if
               requests.request_turn
@@ -470,8 +489,11 @@ let complete_observation ?follow_up t =
 let apply_observation_follow_up t =
   match t.observation with
   | Some
-      ({ status = Observed; follow_up = Some (Pending_follow_up requests); _ } as
-       observation) ->
+      ({ status = Observed
+       ; follow_up =
+           Some (Pending_follow_up requests | Compaction_accepted_follow_up requests)
+       ; _
+       } as observation) ->
     Ok
       { t with
         observation =
@@ -479,6 +501,38 @@ let apply_observation_follow_up t =
       }
   | Some { status = Observed; follow_up = Some (Applied_follow_up _); _ } -> Ok t
   | _ -> failure Invalid_state "observation has no acknowledged follow-up intent"
+;;
+
+let change_follow_up t follow_up =
+  match t.observation with
+  | Some observation ->
+    let next =
+      { t with observation = Some { observation with follow_up = Some follow_up } }
+    in
+    Result.map (validate next) ~f:(fun () -> next)
+  | None -> failure Invalid_state "invocation has no observation"
+;;
+
+let accept_observation_compaction t =
+  match t.observation with
+  | Some { status = Observed; follow_up = Some (Pending_follow_up requests); _ } ->
+    change_follow_up t (Compaction_accepted_follow_up requests)
+  | Some { status = Observed; follow_up = Some (Compaction_accepted_follow_up _); _ } ->
+    Ok t
+  | _ -> failure Invalid_state "observation has no pending compaction and turn"
+;;
+
+let discard_observation_follow_up t ~reason =
+  match t.observation with
+  | Some
+      { status = Observed
+      ; follow_up =
+          Some (Pending_follow_up requests | Compaction_accepted_follow_up requests)
+      ; _
+      } -> change_follow_up t (Discarded_follow_up (requests, reason))
+  | Some { status = Observed; follow_up = Some (Discarded_follow_up (_, existing)); _ }
+    when String.equal existing reason -> Ok t
+  | _ -> failure Invalid_state "observation has no pending follow-up to discard"
 ;;
 
 let fail_observation t ~reason =
@@ -501,7 +555,9 @@ let validate_observation_transition previous next =
       | None, Some (Pending_follow_up _)
         when equal_observation_status old.status Observing
              && equal_observation_status current.status Observed -> Ok ()
-      | Some (Pending_follow_up before), Some (Applied_follow_up after)
+      | Some (Pending_follow_up before), Some (Compaction_accepted_follow_up after)
+      | ( Some (Pending_follow_up before | Compaction_accepted_follow_up before)
+        , Some (Applied_follow_up after | Discarded_follow_up (after, _)) )
         when equal_follow_up before after && equal_status previous.status next.status ->
         Ok ()
       | _ ->
@@ -872,26 +928,32 @@ let status_of_json json =
 ;;
 
 let follow_up_to_json follow_up =
-  let kind, requests =
+  let kind, requests, reason =
     match follow_up with
-    | Pending_follow_up requests -> "pending", requests
-    | Applied_follow_up requests -> "applied", requests
+    | Pending_follow_up requests -> "pending", requests, None
+    | Applied_follow_up requests -> "applied", requests, None
+    | Compaction_accepted_follow_up requests -> "compaction_accepted", requests, None
+    | Discarded_follow_up (requests, reason) -> "discarded", requests, Some reason
   in
   `Object
     ([ "type", `String kind
      ; ("request_turn", if requests.request_turn then `True else `False)
      ; ("request_compaction", if requests.request_compaction then `True else `False)
      ]
-     @ optional "end_session" requests.end_session (fun value -> `String value))
+     @ optional "end_session" requests.end_session (fun value -> `String value)
+     @ optional "reason" reason (fun value -> `String value))
 ;;
 
-let follow_up_of_json json =
+let follow_up_of_json ~version json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
-  let%bind () =
-    closed fields [ "type"; "request_turn"; "request_compaction"; "end_session" ]
-  in
   let%bind kind = Json_codec.required_as fields "type" Json_codec.string in
+  let%bind () =
+    closed
+      fields
+      ([ "type"; "request_turn"; "request_compaction"; "end_session" ]
+       @ if version >= 7 && String.equal kind "discarded" then [ "reason" ] else [])
+  in
   let%bind request_turn = Json_codec.required_as fields "request_turn" Json_codec.bool in
   let%bind request_compaction =
     Json_codec.required_as fields "request_compaction" Json_codec.bool
@@ -901,6 +963,10 @@ let follow_up_of_json json =
   match kind with
   | "pending" -> Ok (Pending_follow_up requests)
   | "applied" -> Ok (Applied_follow_up requests)
+  | "compaction_accepted" when version >= 7 -> Ok (Compaction_accepted_follow_up requests)
+  | "discarded" when version >= 7 ->
+    let%map reason = Json_codec.required_as fields "reason" Json_codec.string in
+    Discarded_follow_up (requests, reason)
   | _ -> invalid "unknown observation follow-up status"
 ;;
 
@@ -936,7 +1002,7 @@ let observation_of_json ~version json =
   let%bind follow_up =
     if version >= 6
     then
-      Json_codec.required_as fields "follow_up" follow_up_of_json
+      Json_codec.required_as fields "follow_up" (follow_up_of_json ~version)
       |> Result.map ~f:Option.some
     else Ok None
   in
@@ -962,6 +1028,12 @@ let to_json t =
     ([ ( "schema_version"
        , `Number
            (if
+              Option.exists t.observation ~f:(fun observation ->
+                match observation.follow_up with
+                | Some (Compaction_accepted_follow_up _ | Discarded_follow_up _) -> true
+                | _ -> false)
+            then "7"
+            else if
               Option.exists t.observation ~f:(fun observation ->
                 Option.is_some observation.follow_up)
             then "6"
@@ -996,7 +1068,7 @@ let of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 | 3 | 4 | 5 | 6 -> Ok ()
+    | 1 | 2 | 3 | 4 | 5 | 6 | 7 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =

@@ -71,6 +71,11 @@ val moderator_snapshot_is_halted
   :  Jsonaf.t option
   -> (bool, Agent_protocol.Error.t) result
 
+(** Read the installed source identity without entering the live manager. *)
+val moderator_snapshot_observer
+  :  Jsonaf.t option
+  -> (Agent_protocol.Invocation.observer option, Agent_protocol.Error.t) result
+
 (** [build ... ~paths ~storage_paths ...] constructs a runtime with public path
     substitutions from [paths] and private cache/response IO from [storage_paths].
     Supply the same paths outside detached administrative preparation. Initializer

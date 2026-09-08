@@ -424,6 +424,16 @@ let moderator_snapshot_is_halted snapshot =
     snapshot.Session.Moderator_state.Identity_snapshot.halted)
 ;;
 
+let moderator_snapshot_observer snapshot =
+  let open Result.Let_syntax in
+  let%map snapshot = decode_moderator_snapshot snapshot in
+  Option.map snapshot ~f:(fun snapshot ->
+    Agent_protocol.Invocation.
+      { script_id = snapshot.Session.Moderator_state.Identity_snapshot.script_id
+      ; source_sha256 = snapshot.script_source_hash
+      })
+;;
+
 let enqueue_internal_value moderator value =
   match moderator with
   | None -> Error (failure "session prompt has no ChatML moderator")

@@ -20,6 +20,7 @@
   invocation_recovery
   moderator_tool_dispatch
   moderator_observation
+  observation_follow_up
   stream_invocation
   native_tool_dispatch
   native_tool_invocation

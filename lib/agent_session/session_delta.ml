@@ -192,6 +192,15 @@ let rec apply state = function
           when (match previous.observation, invocation.observation with
                 | ( Some { status = Observing; _ }
                   , Some { status = Observation_failed _; _ } ) -> true
+                | ( Some
+                      { status = Observed
+                      ; follow_up =
+                          Some (Pending_follow_up _ | Compaction_accepted_follow_up _)
+                      ; _
+                      }
+                  , Some
+                      { status = Observed; follow_up = Some (Discarded_follow_up _); _ } )
+                  -> true
                 | _ -> false)
                && Agent_protocol.Invocation.equal_status previous.status invocation.status
                && Option.equal

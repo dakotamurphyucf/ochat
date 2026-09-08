@@ -168,7 +168,11 @@ let snapshot_has_pending_events t =
     && Option.is_none state.active_operation
     && (not state.halted)
     && Option.is_none state.failure
-  then Agent_session.Runtime_builder.moderator_snapshot_has_queued_events state.moderator
+  then (
+    let%map queued =
+      Agent_session.Runtime_builder.moderator_snapshot_has_queued_events state.moderator
+    in
+    queued || List.exists state.invocations ~f:Agent_session.Observation_follow_up.pending)
   else Ok false
 ;;
 
@@ -181,7 +185,11 @@ let drain_idle_moderator t =
     else (
       let%bind () = ensure_loaded_locked t in
       match t.runtime with
-      | Some runtime -> drain_loaded_idle_moderator t runtime
+      | Some runtime ->
+        let%bind applied =
+          Agent_session.Session_actor.apply_observation_follow_up t.actor
+        in
+        if applied then Ok true else drain_loaded_idle_moderator t runtime
       | None ->
         Error
           (Agent_protocol.Error.create

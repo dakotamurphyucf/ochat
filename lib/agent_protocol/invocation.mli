@@ -121,7 +121,9 @@ type follow_up =
 
 type follow_up_status =
   | Pending_follow_up of follow_up
+  | Compaction_accepted_follow_up of follow_up
   | Applied_follow_up of follow_up
+  | Discarded_follow_up of follow_up * string
 [@@deriving equal, sexp]
 
 type observation =
@@ -201,6 +203,16 @@ val complete_observation : ?follow_up:follow_up -> t -> (t, Error.t) result
     interruption between observation acknowledgement and scheduling.
     This primitive does not install a dispatcher or infer actions from snapshots. *)
 val apply_observation_follow_up : t -> (t, Error.t) result
+
+(** Codec 7 intermediate receipt: compaction is durably scheduled, and the
+    requested turn remains pending. Save atomically with compaction admission.
+    Repeating acceptance is idempotent and must not start another compaction. *)
+val accept_observation_compaction : t -> (t, Error.t) result
+
+(** Terminally discard unaccepted actions, e.g. when a session is stopped.
+    Preserve the request and native outcome; never rearm it on restart.
+    Repeating the same reason is idempotent. Save with the stop transition. *)
+val discard_observation_follow_up : t -> reason:string -> (t, Error.t) result
 
 (** May also discard an Awaiting observation whose owner is no longer available.
     Repeating the same failure is idempotent; successful handling is immutable. *)

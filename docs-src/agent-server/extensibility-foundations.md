@@ -275,7 +275,27 @@ successful/competing/reentrant handling, retained turn/termination requests,
 handler and persistence failures, cancellation, and both stop modes. It checks
 that live and persisted snapshots agree and native results/history remain intact.
 
-**Subsequent/idle wakeups after budget exhaustion, retained-request application, ordinary-event
+`Session_actor.apply_observation_follow_up` now applies retained requests at an
+idle safe point. It coalesces turns and compactions, prioritizes termination,
+and discards requests from obsolete source identities or generations. It saves
+receipt changes in the same transaction as operation admission or stopping;
+a failed save starts no work. Turn admission requires an installed worker.
+Compaction acceptance retains a requested turn until the next idle safe point;
+it does not request compaction again after a reload. This acceptance records
+scheduling, not successful execution. Explicit stop discards outstanding work,
+so restarting does not rearm it.
+
+The daemon's existing idle polling now detects retained requests even when no
+internal event is queued, loads the runtime, and applies requests before draining
+legacy events. A daemon integration test proves retained termination is consumed
+without a queued event, using a durable v1 receipt fixture and an offline model
+stub. Actor tests exercise save rejection, compaction followed by a coalesced turn,
+reload between operations, stop/restart, and termination overriding work.
+Compaction failure/interruption and operation-cancellation dispositions require
+further qualification; the current intermediate receipt records acceptance and
+leaves a requested turn pending at the next eligible safe point.
+
+**Subsequent/idle observation wakeups after budget exhaustion, ordinary-event
 Tool.call routing and normal runtime installation are still required.** The stream
 option remains off by default pending that integration. Tests exercise the
 explicit foreground handoff with real compiled handlers, competing claims,
@@ -404,7 +424,8 @@ Invocation records with routing provenance use JSON codec version 3. Without
 routing, bound records retain codec 2 and unbound records retain codec 1. Records
 with a discarded-publication disposition use codec 4; nested moderator records
 with observation intent use codec 5. Acknowledged observations retaining runtime
-follow-up requests use codec 6. All six
+follow-up requests use codec 6. Intermediate compaction acceptance and discarded
+follow-up requests use codec 7. All seven
 remain readable; missing optional S-expression fields load as absent. Older JSON
 readers reject new codecs rather than silently discard their evidence. These
 host-only additions do not change the ChatML context ABI or enable public feature
@@ -417,11 +438,14 @@ An observation host can opt into `retain_follow_up` to store coalesced turn,
 compaction and termination requests with the acknowledgement and prospective
 moderator snapshot. The requests remain `Pending_follow_up` across recovery until
 the host atomically saves `Applied_follow_up` with the scheduling or stop
-transition. Applied means durably accepted, not that a requested operation has
-finished. Requests cannot be replaced, dropped or rearmed, and applying them does
+transition. A `Compaction_accepted_follow_up` receipt retains a pending turn after
+compaction admission; `Discarded_follow_up` retains the original request and the
+reason it will not run. Applied means durably accepted, not that a requested operation has
+finished. Requests cannot be replaced, silently dropped or rearmed, and applying them does
 not rerun the observer or alter the native result. Existing foreground dispatch
 uses returned requests and leaves this option disabled. The durable receipt is a
-foundation for idle scheduling; its automatic consumer is not installed yet.
+used by the idle scheduler described above; normal v1 runtime construction and
+automatic observation delivery remain unfinished.
 
 ### Invocation recovery at daemon restart
 

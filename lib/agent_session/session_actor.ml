@@ -224,6 +224,7 @@ type _ request =
       Agent_protocol.Id.Schedule.t * int
       -> Agent_protocol.Schedule.t request
   | Claim_idle_moderator : History_entry.t list option request
+  | Apply_observation_follow_up : bool request
   | Complete_idle_moderator : Runtime_builder.moderator_drain -> unit request
   | Fail_idle_moderator : Agent_protocol.Error.t -> unit request
   | Expire_permission :
@@ -574,12 +575,17 @@ let stopped_jobs t mode =
 ;;
 
 let stop_transition t mode lifecycle deltas payloads =
+  let open Result.Let_syntax in
+  let%bind discarded =
+    Observation_follow_up.discard t.state.invocations ~reason:"session stopped"
+  in
   let jobs = stopped_jobs t mode in
   transition
     t
     ~delta:
       (Session_delta.Batch
          ((Session_delta.Lifecycle_changed lifecycle :: deltas)
+          @ List.map discarded ~f:Observation_follow_up.delta
           @ List.map jobs ~f:(fun job -> Session_delta.Job_changed job)))
     ~payloads:
       ((Agent_protocol.Event.Durable.Payload.Session_state_changed
@@ -595,7 +601,9 @@ let stop_internal t mode =
     let open Result.Let_syntax in
     let%map session =
       match t.state.lifecycle.desired, t.state.lifecycle.observed with
-      | Stopped, Stopped -> Ok (Session_state.summary t.state)
+      | Stopped, Stopped
+        when not (List.exists t.state.invocations ~f:Observation_follow_up.pending) ->
+        Ok (Session_state.summary t.state)
       | _, _ -> stop_transition t mode { desired = Stopped; observed = Stopped } [] []
     in
     (match mode, t.moderator_borrow with
@@ -1856,7 +1864,7 @@ let retain_reconciliation_failure t failure =
   |> Result.map ~f:(fun _ -> ())
 ;;
 
-let start_compaction t =
+let start_compaction ?(extra_deltas : Session_delta.t list = []) t =
   let open Result.Let_syntax in
   let%bind () = reconcile_foreground_invocations t in
   let first_sequence = t.state.conversation.next_history_sequence in
@@ -1876,10 +1884,11 @@ let start_compaction t =
         t
         ~delta:
           (Session_delta.Batch
-             [ History_block_reserved reserved_through
-             ; Active_operation_changed (Some operation)
-             ; Lifecycle_changed lifecycle
-             ])
+             (extra_deltas
+              @ [ Session_delta.History_block_reserved reserved_through
+                ; Active_operation_changed (Some operation)
+                ; Lifecycle_changed lifecycle
+                ]))
         ~payloads:
           [ Agent_protocol.Event.Durable.Payload.Operation_started operation
           ; Session_state_changed
@@ -3155,17 +3164,24 @@ let drain_payloads (drain : Runtime_builder.moderator_drain) =
   List.map drain.Runtime_builder.notifications ~f:notification_payload
 ;;
 
-let start_idle_turn t (drain : Runtime_builder.moderator_drain) ~reason ~adopt_deferred =
+let start_idle_turn
+      ?(extra_deltas = [])
+      t
+      (drain : Runtime_builder.moderator_drain)
+      ~reason
+      ~adopt_deferred
+  =
   let open Result.Let_syntax in
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t reason in
   let lifecycle = lifecycle_for_operation t operation.id in
   let deferred = t.state.conversation.deferred_user_entries in
   let deltas =
-    [ Session_delta.Moderator_changed drain.Runtime_builder.moderator_snapshot
-    ; Active_operation_changed (Some operation)
-    ; Lifecycle_changed lifecycle
-    ]
+    extra_deltas
+    @ [ Session_delta.Moderator_changed drain.Runtime_builder.moderator_snapshot
+      ; Active_operation_changed (Some operation)
+      ; Lifecycle_changed lifecycle
+      ]
     |> fun values ->
     if adopt_deferred then Session_delta.Deferred_entries_adopted :: values else values
   in
@@ -3183,8 +3199,27 @@ let start_idle_turn t (drain : Runtime_builder.moderator_drain) ~reason ~adopt_d
   launch_worker t operation
 ;;
 
-let stop_from_idle_moderator t (drain : Runtime_builder.moderator_drain) reason =
+let stop_from_idle_moderator
+      ?(extra_deltas : Session_delta.t list = [])
+      t
+      (drain : Runtime_builder.moderator_drain)
+      reason
+  =
   let open Result.Let_syntax in
+  let changed invocation =
+    List.exists extra_deltas ~f:(function
+      | Session_delta.Invocation_changed updated | Invocation_reconciled updated ->
+        Agent_protocol.Id.Invocation.equal
+          updated.context.id
+          invocation.Agent_protocol.Invocation.context.id
+      | _ -> false)
+  in
+  let%bind discarded =
+    Observation_follow_up.discard
+      (List.filter t.state.invocations ~f:(fun invocation -> not (changed invocation)))
+      ~reason:"moderator ended session"
+  in
+  let extra_deltas = extra_deltas @ List.map discarded ~f:Observation_follow_up.delta in
   let lifecycle = Session_state.Lifecycle.{ desired = Stopped; observed = Stopped } in
   let payloads =
     drain_payloads drain
@@ -3199,13 +3234,51 @@ let stop_from_idle_moderator t (drain : Runtime_builder.moderator_drain) reason 
       t
       ~delta:
         (Session_delta.Batch
-           [ Moderator_changed drain.moderator_snapshot
-           ; Halt_changed (Some reason)
-           ; Lifecycle_changed lifecycle
-           ])
+           (extra_deltas
+            @ [ Session_delta.Moderator_changed drain.moderator_snapshot
+              ; Halt_changed (Some reason)
+              ; Lifecycle_changed lifecycle
+              ]))
       ~payloads
   in
   ()
+;;
+
+let apply_observation_follow_up t =
+  if not (idle_moderator_eligible t)
+  then Ok false
+  else
+    let open Result.Let_syntax in
+    let%bind observer = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+    let%bind halted = Runtime_builder.moderator_snapshot_is_halted t.state.moderator in
+    let%bind plan = Observation_follow_up.plan ~state:t.state ~observer ~halted in
+    let extra_deltas = List.map plan.invocations ~f:Observation_follow_up.delta in
+    let drain : Runtime_builder.moderator_drain =
+      { moderator_snapshot = t.state.moderator
+      ; runtime_requests = []
+      ; notifications = []
+      ; remaining_events = false
+      }
+    in
+    let%map () =
+      match plan.action, extra_deltas with
+      | Checkpoint, [] -> Ok ()
+      | Checkpoint, _ ->
+        transition t ~delta:(Session_delta.Batch extra_deltas) ~payloads:[]
+        |> Result.map ~f:ignore
+      | Stop reason, _ -> stop_from_idle_moderator ~extra_deltas t drain reason
+      | Compact, _ -> start_compaction ~extra_deltas t |> Result.map ~f:ignore
+      | Turn, _ when Option.is_none t.operation_worker ->
+        Error (error Invalid_state "follow-up turn requires an installed worker")
+      | Turn, _ ->
+        start_idle_turn
+          ~extra_deltas
+          t
+          drain
+          ~reason:Moderator_request
+          ~adopt_deferred:(not (List.is_empty t.state.conversation.deferred_user_entries))
+    in
+    not (List.is_empty extra_deltas)
 ;;
 
 let checkpoint_idle_moderator t (drain : Runtime_builder.moderator_drain) =
@@ -3717,6 +3790,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     fail_schedule t schedule_id generation failure
   | Skip_schedule (schedule_id, generation) -> skip_schedule t schedule_id generation
   | Claim_idle_moderator -> claim_idle_moderator t
+  | Apply_observation_follow_up -> apply_observation_follow_up t
   | Complete_idle_moderator drain -> complete_idle_moderator t drain
   | Fail_idle_moderator failure -> fail_idle_moderator t failure
   | Attach (mode, subscribe, principal_id, reclaim_token) ->
@@ -4118,6 +4192,7 @@ let skip_schedule t ~schedule_id ~generation =
 ;;
 
 let claim_idle_moderator t = call t Claim_idle_moderator
+let apply_observation_follow_up t = call t Apply_observation_follow_up
 
 let complete_idle_moderator t drain =
   call t ~priority:Priority (Complete_idle_moderator drain)
