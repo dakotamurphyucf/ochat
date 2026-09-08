@@ -10,6 +10,9 @@ open Core
     must fail before effects rather than being deferred. [prepare_output] must
     apply output disclosure/redaction and return a bounded structured value.
     Neither callback's diagnostics nor runner exceptions are copied to outcomes.
+    [is_halted] is checked before admission policy and after authorizing waits;
+    it must read current host lifecycle state. Recorded pre-tool rejection takes
+    precedence and executes no authorization or implementation callback.
 
     Admission/outcome persistence uses the operation's [with_invocation] service;
     no moderator snapshot is borrowed or provider history manufactured. The
@@ -22,6 +25,7 @@ val run
   -> registry:(unit -> Chat_response.Tool_capability.t)
   -> reference:Chat_response.Tool_capability.reference
   -> invocation:Agent_protocol.Invocation.t
+  -> is_halted:(unit -> bool)
   -> authorize:
        (Agent_protocol.Invocation.t
         -> Chat_response.Tool_capability.binding

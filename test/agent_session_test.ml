@@ -3347,6 +3347,7 @@ let%test_unit
               in
               let run () =
                 Agent_session.Native_tool_invocation.run
+                  ~is_halted:(fun () -> false)
                   ~capabilities:caps
                   ~registry:(fun () -> !registry)
                   ~reference
@@ -3456,6 +3457,7 @@ let%test_unit
           in
           let result =
             Agent_session.Native_tool_invocation.run
+              ~is_halted:(fun () -> false)
               ~capabilities:caps
               ~registry:(fun () -> registry)
               ~reference
@@ -3559,6 +3561,7 @@ let%test_unit "native nested invocation persists without reentering a borrowed m
               in
               let child_result =
                 Agent_session.Native_tool_invocation.run
+                  ~is_halted:(fun () -> false)
                   ~capabilities:caps
                   ~registry:(fun () -> registry)
                   ~reference
@@ -3863,6 +3866,383 @@ let handoff_definition
 let handoff_manager env =
   let manager, invocation, _ = handoff_definition env in
   manager, invocation
+;;
+
+let%test_unit "streamed native and moderator services share pre and post routing" =
+  List.iter
+    [ `Success
+    ; `Custom
+    ; `Invalid
+    ; `Rewrite_invalid
+    ; `Redirect
+    ; `Deny
+    ; `Pre_reject
+    ; `Pre_fail
+    ; `Post_fail
+    ; `Revoked
+    ; `Halt_wait
+    ; `Disclosure
+    ; `Mixed
+    ; `Pre_end
+    ; `Pre_reject_end
+    ; `Revoked_before
+    ; `Kind_mismatch
+    ; `Invalid_json
+    ; `Redacted
+    ; `Publish_rejected
+    ]
+    ~f:(fun mode ->
+      let calls = ref 0
+      and admitted = ref 0
+      and post_calls = ref 0
+      and requests = ref 0 in
+      let halted = ref false in
+      let custom = Poly.equal mode `Custom in
+      let registry = ref (native_registry ~custom calls ~raises:false) in
+      with_handoff_actor
+        ~reject:(fun next ->
+          Poly.equal mode `Publish_rejected
+          && List.exists
+               next.Agent_session.Session_transition.state.invocations
+               ~f:(fun invocation -> Option.is_some invocation.output_entry_id))
+        ~make_worker:(fun env actor_ready ->
+          let pre =
+            match mode with
+            | `Invalid | `Invalid_json | `Kind_mismatch ->
+              "Task.fail(\"invalid input reached pre hook\")"
+            | `Revoked_before ->
+              "Task.bind(Tool.call(\"revoke\", `Null), fun ignored -> Task.pure(state))"
+            | `Rewrite_invalid ->
+              "Task.bind(Tool.rewrite_args(`Null), fun ignored -> Task.pure(state))"
+            | `Redirect ->
+              "Task.bind(Tool.redirect(\"read_file\", `Object([])), fun ignored -> \
+               Task.pure(state))"
+            | `Pre_reject ->
+              "Task.bind(Tool.reject(\"private rejection\"), fun ignored -> \
+               Task.pure(state))"
+            | `Pre_reject_end ->
+              "Task.bind(Tool.reject(\"private rejection\"), fun ignored -> \
+               Task.bind(Runtime.end_session(\"done\"), fun ignored -> \
+               Task.pure(state)))"
+            | `Pre_fail -> "Task.fail(\"private pre failure\")"
+            | `Pre_end ->
+              "Task.bind(Runtime.end_session(\"done\"), fun ignored -> Task.pure(state))"
+            | _ -> "Task.pure(state)"
+          in
+          let events =
+            "| `Pre_tool_call(c) -> "
+            ^ pre
+            ^ " | `Post_tool_response(r) -> Task.bind(Tool.call(\"observe\", `Null), fun \
+               ignored -> "
+            ^ (if Poly.equal mode `Post_fail
+               then "Task.fail(\"private post failure\")"
+               else "Task.pure(state)")
+            ^ ") | _ -> Task.pure(state)"
+          in
+          let moderator_capabilities =
+            { Chat_response.Moderation.Capabilities.default with
+              on_tool_call =
+                (fun ~name ~args:_ ->
+                  if String.equal name "observe"
+                  then Int.incr post_calls
+                  else (
+                    assert (String.equal name "revoke");
+                    registry
+                    := Chat_response.Tool_capability.select !registry ~names:[]
+                       |> Result.map_error ~f:(fun error ->
+                         error.Chat_response.Tool_capability.message)
+                       |> Result.ok_or_failwith);
+                  Ok (Tool_ok `Null))
+            }
+          in
+          let manager, _, definition =
+            handoff_definition ~events ~moderator_capabilities env
+          in
+          Agent_session.Operation_worker.create ~run:(fun ~sw ~input caps ->
+            let actor = Eio.Promise.await actor_ready in
+            let state = Agent_session.Session_actor.state actor |> protocol_ok in
+            let response_dir =
+              Eio.Path.(
+                Eio.Stdenv.fs env
+                / state.spec.workspace_instance.canonical_root.native_path
+                / "response")
+            in
+            Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
+            let post_stream ~sw:_ ~inputs =
+              Int.incr requests;
+              if !requests > 1
+              then (
+                assert (
+                  List.exists inputs ~f:(function
+                    | Openai.Responses.Item.Function_call_output _
+                    | Custom_tool_call_output _ -> true
+                    | _ -> false));
+                Stdlib.Seq.empty)
+              else
+                let open Openai.Responses.Response_stream in
+                let call ~custom ~name ~payload ~index =
+                  let item_id = "native-item-" ^ Int.to_string index in
+                  let call_id = "native-call-" ^ Int.to_string index in
+                  [ Output_item_added
+                      { item =
+                          (if custom
+                           then
+                             Custom_function
+                               { name
+                               ; input = ""
+                               ; call_id
+                               ; _type = "custom_tool_call"
+                               ; id = Some item_id
+                               }
+                           else
+                             Function_call
+                               { name
+                               ; arguments = ""
+                               ; call_id
+                               ; _type = "function_call"
+                               ; id = Some item_id
+                               ; status = None
+                               })
+                      ; output_index = index
+                      ; type_ = "response.output_item.added"
+                      }
+                  ; (if custom
+                     then
+                       Custom_tool_call_input_done
+                         { input = payload
+                         ; item_id
+                         ; output_index = index
+                         ; type_ = "response.custom_tool_call_input.done"
+                         }
+                     else
+                       Function_call_arguments_done
+                         { arguments = payload
+                         ; item_id
+                         ; output_index = index
+                         ; type_ = "response.function_call_arguments.done"
+                         })
+                  ]
+                in
+                let initial =
+                  call
+                    ~custom:(custom || Poly.equal mode `Kind_mismatch)
+                    ~name:(if Poly.equal mode `Redirect then "counter" else "read_file")
+                    ~payload:
+                      (if Poly.equal mode `Invalid
+                       then "null"
+                       else if Poly.equal mode `Invalid_json
+                       then "{"
+                       else "{}")
+                    ~index:0
+                in
+                Stdlib.List.to_seq
+                  (initial
+                   @
+                   if Poly.equal mode `Mixed
+                   then call ~custom:false ~name:"counter" ~payload:"null" ~index:1
+                   else [])
+            in
+            let dispatch_tool ~input ~capabilities =
+              let native =
+                Agent_session.Native_tool_dispatch.create
+                  ~input
+                  ~capabilities
+                  ~registry:(fun () -> !registry)
+                  ~now:Agent_protocol.Timestamp.now
+                  ~is_halted:(fun () ->
+                    !halted
+                    || Chat_response.Moderator_manager.is_halted manager
+                       |> Result.ok_or_failwith)
+                  ~admit:(fun _ _ ->
+                    Int.incr admitted;
+                    Eio.Fiber.yield ();
+                    if Poly.equal mode `Revoked
+                    then
+                      registry
+                      := Chat_response.Tool_capability.select !registry ~names:[]
+                         |> Result.map_error ~f:(fun error ->
+                           error.Chat_response.Tool_capability.message)
+                         |> Result.ok_or_failwith;
+                    if Poly.equal mode `Halt_wait then halted := true;
+                    Ok ())
+                  ~prepare_output:(fun _ ->
+                    if Poly.equal mode `Disclosure
+                    then Error (handoff_error "private disclosure")
+                    else Ok (`String "disclosed"))
+              in
+              let moderator =
+                Agent_session.Moderator_tool_dispatch.create
+                  ~definition
+                  ~manager
+                  ~input
+                  ~capabilities
+                  ~available_tools:[]
+                  ~session_meta:`Null
+                  ~now:Agent_protocol.Timestamp.now
+                  ~validate_work:(fun _ -> Error "pending disabled")
+                  ~admit:(fun _ -> Ok ())
+                  ~prepare_outcome:(fun _ -> Ok ())
+              in
+              Chat_response.In_memory_stream.Tool_dispatch.chain [ moderator; native ]
+            in
+            let tool_tbl = String.Table.create () in
+            Hashtbl.set tool_tbl ~key:"read_file" ~data:(fun ~invocation:_ _ ->
+              failwith "native adapter fell through");
+            let worker =
+              Agent_session.Turn_worker.create
+                ~dispatch_tool
+                { env
+                ; response_dir
+                ; tools = []
+                ; tool_tbl
+                ; temperature = None
+                ; max_output_tokens = None
+                ; reasoning = None
+                ; moderator =
+                    Some
+                      { manager
+                      ; session_id = Agent_protocol.Id.Session.to_string input.session_id
+                      ; session_meta = `Null
+                      ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+                      }
+                ; permission_profile =
+                    permission_policy
+                      ~tool_default:(if Poly.equal mode `Deny then Deny else Allow)
+                      ~fallback:Fallback_deny
+                      ~evaluator:None
+                      ~reviewer:None
+                ; review_permission = (fun _ -> assert false)
+                ; history_compaction = false
+                ; parallel_tool_calls = true
+                ; model = Openai.Responses.Request.O3
+                ; prompt_cache_key = None
+                ; prompt_cache_retention = None
+                ; post_stream = Some post_stream
+                ; agent_page_classifications = []
+                ; delegated_permission_tools = String.Set.empty
+                ; redact_tool_payload =
+                    (fun ~name:_ value ->
+                      if Poly.equal mode `Redacted then "\"hidden\"" else value)
+                }
+            in
+            Agent_session.Operation_worker.run worker ~sw ~input caps))
+        (fun _env actor _writer backend ->
+           let rec finished () =
+             let state = Agent_session.Session_actor.state actor |> protocol_ok in
+             if Option.is_none state.active_operation
+             then state
+             else (
+               Eio.Fiber.yield ();
+               finished ())
+           in
+           let state = finished () in
+           let mixed = Poly.equal mode `Mixed in
+           assert (List.length state.invocations = if mixed then 2 else 1);
+           let native =
+             List.find_exn state.invocations ~f:(fun invocation ->
+               String.equal invocation.context.tool_name "read_file")
+           in
+           let expected =
+             match mode with
+             | `Success
+             | `Custom
+             | `Redirect
+             | `Post_fail
+             | `Mixed
+             | `Redacted
+             | `Publish_rejected -> None
+             | `Invalid | `Rewrite_invalid | `Invalid_json | `Kind_mismatch ->
+               Some "invocation.invalid_input"
+             | `Deny -> Some "invocation.permission_denied"
+             | `Pre_reject | `Pre_reject_end -> Some "invocation.pre_tool_rejected"
+             | `Pre_fail -> Some "invocation.pre_tool_failed"
+             | `Revoked | `Revoked_before -> Some "invocation.stale_binding"
+             | `Halt_wait | `Pre_end -> Some "invocation.session_ended"
+             | `Disclosure -> Some "invocation.disclosure_rejected"
+           in
+           (match native.status, expected with
+            | Published (Complete (`String "disclosed")), None -> ()
+            | Resolved (Complete (`String "disclosed")), None ->
+              assert (Poly.equal mode `Publish_rejected)
+            | Published (Fail error), Some code -> assert (String.equal error.code code)
+            | _ -> assert false);
+           let executed = Option.is_none expected || Poly.equal mode `Disclosure in
+           assert (!calls = if executed then 1 else 0);
+           assert (
+             !admitted
+             =
+             if
+               List.mem
+                 [ `Invalid
+                 ; `Invalid_json
+                 ; `Kind_mismatch
+                 ; `Revoked_before
+                 ; `Rewrite_invalid
+                 ; `Pre_reject
+                 ; `Pre_reject_end
+                 ; `Pre_fail
+                 ; `Pre_end
+                 ]
+                 mode
+                 ~equal:Poly.equal
+             then 0
+             else 1);
+           assert (
+             !post_calls
+             =
+             if
+               List.mem
+                 [ `Pre_end; `Pre_reject_end; `Publish_rejected ]
+                 mode
+                 ~equal:Poly.equal
+             then 0
+             else if mixed
+             then 2
+             else 1);
+           assert (
+             !requests
+             =
+             if
+               List.mem
+                 [ `Post_fail; `Publish_rejected; `Pre_end; `Pre_reject_end ]
+                 mode
+                 ~equal:Poly.equal
+             then 1
+             else 2);
+           assert (
+             List.length state.conversation.canonical_history
+             = if mixed then 5 else if Poly.equal mode `Publish_rejected then 2 else 3);
+           let routing = Option.value_exn native.routing in
+           assert (
+             String.equal
+               routing.original_name
+               (if Poly.equal mode `Redirect then "counter" else "read_file"));
+           if Poly.equal mode `Redacted
+           then (
+             let canonical = Option.value_exn routing.canonical_payload in
+             assert (
+               String.equal
+                 canonical.sha256
+                 (Chatmd_shell_spec.Source_ref.digest "\"hidden\""));
+             assert (
+               String.equal
+                 routing.final_payload.sha256
+                 (Chatmd_shell_spec.Source_ref.digest "{}")));
+           let failures =
+             Agent_session.Memory_backend.events_after backend 0L
+             |> protocol_ok
+             |> List.count ~f:(fun event ->
+               Agent_protocol.Event.Durable.equal_kind event.kind Operation_failed)
+           in
+           assert (
+             failures
+             =
+             if Poly.equal mode `Post_fail || Poly.equal mode `Publish_rejected
+             then 1
+             else 0);
+           assert (
+             Bool.equal (Option.is_some state.failure) (Poly.equal mode `Publish_rejected));
+           assert (Poly.equal state (Agent_session.Memory_backend.state backend))))
 ;;
 
 let%test_unit

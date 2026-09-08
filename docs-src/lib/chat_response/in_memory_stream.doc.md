@@ -97,6 +97,12 @@ module Tool_dispatch : sig
           original canonical call retained. Diagnostic text is not published. *)
     ; run : request -> authorize:(unit -> unit) -> result option
     }
+
+  (** Compose host services with disjoint registered names. Every original-input
+      validator runs (unknown names must pass); the first service claiming a
+      final target owns execution/publication. Errors propagate, never fall
+      through. The host must reject conflicting registrations before composing. *)
+  val chain : t list -> t
 end
 
 (** A post-tool observer failed after the initial output was committed. Hosts

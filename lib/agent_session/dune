@@ -19,6 +19,8 @@
   invocation_history
   invocation_recovery
   moderator_tool_dispatch
+  stream_invocation
+  native_tool_dispatch
   native_tool_invocation
   compaction_archive
   administration

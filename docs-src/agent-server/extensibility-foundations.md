@@ -167,13 +167,58 @@ they do not create provider call IDs or history items. Model callers use the
 separate canonical publication service below. Post-tool observation remains the
 caller's responsibility and must run once after the recorded outcome.
 
-These are internal services. The normal runtime, streamed native fallback and
+These are internal services. The stream adapter described below connects native
+execution and publication, while normal runtime construction and
 ChatML `Tool.call` still need to be connected to them, including qualified
 authorization, post-observation and standalone dispatch. No new public tool is
 enabled by this foundation. Offline tests cover model/script policy and disclosure
 failures, capability changes during authorization, custom input, concurrent calls,
 borrowed-parent execution and rollback, stale parent rejection, cancellation and
 outcome persistence rejection.
+
+### Composed native and moderator stream dispatch
+
+`Native_tool_dispatch.create` adapts the native invocation service to the existing
+stream pipeline. It captures the selected names and exact capability references
+for that turn. Those names remain claimed even after live revocation or registry
+replacement, so a stale capability produces a recorded failure rather than
+falling through to a legacy runner. Unknown names remain available to other host
+services. Transient fork requests cannot borrow the root persisted owner.
+
+`Tool_dispatch.chain` combines services with disjoint registered names. All
+original-input validators run before pre-tool moderation; unknown targets must
+pass. The first service claiming the final name owns execution and publication,
+and errors never select another runner. Host preparation must reject overlapping
+registrations before composition.
+
+Native original input and call kind are checked before pre-tool hooks. Final
+arguments and exact live bindings are checked after redirects/rewrites and any
+authorization wait. Pre rejection, pre failure and session termination record
+their explicit initial failures without executing native authorization or tools.
+Native dispatch also checks current host termination before and after admission.
+
+Both adapters use `Stream_invocation` to parse bounded input and record immutable
+original/final execution fingerprints separately from the canonical display
+payload. Redacting history does not replace the native runner's input. Recorded
+outcomes use atomic publication receipts; the existing stream runs post-tool
+observation once after publication. Post-hook failure preserves the published
+outcome and produces the existing separate operation failure. Failed publication
+preserves the saved result for foreground/restart recovery and does not run a
+post hook or retry the implementation.
+
+Offline tests exercise a compiled moderator, real actor/worker and provider-stream
+fixture through this composition. They cover mixed native/moderator calls,
+function/custom input, original kind/schema/JSON rejection, redirects and invalid
+rewrites, generic permission denial, pre rejection/failure/termination, post
+failure, revocation before dispatch and during authorization, halt during
+authorization, disclosure failure, redacted history and permanent publication
+rejection. A trap legacy runner ensures claimed native names never fall through.
+
+This adapter is still an internal installation hook. Normal `Runtime_builder`
+construction and script-origin routing remain unconnected. Admission failure
+before any invocation record is saved still needs complete model-call error
+publication handling; standalone routing, host-wide policy integration and public
+qualification remain required. No new feature flag is enabled.
 
 ### Canonical initial result publication
 
@@ -451,8 +496,8 @@ turn, unchanged state for stopped calls, zero native execution and no operation
 failure. A held first handler plus queued second invocation proves termination
 is rechecked before admission; a subsequent third call remains stopped too.
 This is not public feature availability: normal `Runtime_builder` construction,
-shared nested/native/standalone routing, complete admission-error recording,
-broader audit qualification and immediate worker/reset reconciliation still need
+shared nested/standalone routing, complete admission-error recording,
+broader audit and cross-host qualification still need
 qualification. No extension feature flag is enabled by installing this adapter.
 
 ### Synchronous call coordination

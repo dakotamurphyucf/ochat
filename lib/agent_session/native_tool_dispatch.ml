@@ -1,0 +1,123 @@
+open Core
+module C = Chat_response.Tool_capability
+module I = Agent_protocol.Invocation
+module D = Chat_response.In_memory_stream.Tool_dispatch
+module S = Chatmd_shell_spec.Tool_schema
+
+exception Dispatch_error of Agent_protocol.Error.t
+
+let require = function
+  | Ok value -> value
+  | Error error -> raise (Dispatch_error error)
+;;
+
+let invalid_input =
+  I.Fail
+    { code = "invocation.invalid_input"
+    ; message = "The tool arguments are invalid."
+    ; retryable = false
+    ; details = `Null
+    }
+;;
+
+let create
+      ~input
+      ~(capabilities : Operation_worker.Capabilities.t)
+      ~registry
+      ~now
+      ~is_halted
+      ~admit
+      ~prepare_output
+  =
+  let initial = registry () in
+  let references = C.references initial in
+  let find name =
+    List.find references ~f:(fun reference -> String.equal reference.C.name name)
+  in
+  let validate_original ~kind ~name ~payload =
+    match find name with
+    | None -> Ok ()
+    | Some reference ->
+      let open Result.Let_syntax in
+      let%bind binding =
+        C.resolve initial ~id:reference.id ~fingerprint:reference.fingerprint
+        |> Result.map_error ~f:(fun _ -> "invalid native registration")
+      in
+      let%bind () =
+        match kind, (C.implementation binding).info.type_ with
+        | Chat_response.Tool_call.Kind.Function, "function" | Custom, "custom" -> Ok ()
+        | _ -> Error "native tool kind mismatch"
+      in
+      let%bind value = Stream_invocation.parse_input ~kind ~payload in
+      let%bind schema =
+        S.compile reference.input_schema
+        |> Result.map_error ~f:(fun _ -> "invalid native input schema")
+      in
+      S.validate schema value
+      |> Result.map_error ~f:(fun _ -> "invalid native tool input")
+  in
+  let run (request : D.request) ~authorize =
+    match find request.name with
+    | None -> None
+    | Some reference ->
+      if Option.is_some request.source || Option.is_some request.parent_call_id
+      then
+        raise
+          (Dispatch_error
+             (Agent_protocol.Error.create
+                Permission_denied
+                ~message:"native invocation requires its owning persisted session"
+                ~retryable:false
+                ()));
+      let value =
+        Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
+      in
+      let invocation =
+        Stream_invocation.create
+          ~input
+          ~request
+          ~implementation_revision:reference.implementation_revision
+          ~capability_fingerprint:(C.fingerprint initial)
+          ~now
+          ~value:(Result.ok value |> Option.value ~default:`Null)
+        |> require
+      in
+      let resolved =
+        if Result.is_error value && Option.is_none request.rejection
+        then
+          capabilities.with_invocation ~invocation (fun ~dispatched:_ -> Ok invalid_input)
+          |> require
+        else
+          Native_tool_invocation.run
+            ~capabilities
+            ~registry
+            ~reference
+            ~invocation
+            ~is_halted
+            ~authorize:(fun dispatched binding ->
+              let open Result.Let_syntax in
+              let%map () = admit dispatched binding in
+              authorize ())
+            ~prepare_output
+          |> require
+      in
+      let outcome =
+        match resolved.status with
+        | Resolved outcome -> outcome
+        | _ -> assert false
+      in
+      Some
+        D.
+          { output = Text (Jsonaf.to_string (I.outcome_to_json outcome))
+          ; runtime_requests = []
+          ; commit_output =
+              Some
+                (fun entry ->
+                  capabilities.publish_invocation_output
+                    ~invocation_id:resolved.context.id
+                    entry
+                  |> require)
+          }
+  in
+  D.{ validate_original; run }
+;;

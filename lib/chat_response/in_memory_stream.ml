@@ -41,6 +41,17 @@ module Tool_dispatch = struct
         kind:Tool_call.Kind.t -> name:string -> payload:string -> (unit, string) Result.t
     ; run : request -> authorize:(unit -> unit) -> result option
     }
+
+  let chain services =
+    { validate_original =
+        (fun ~kind ~name ~payload ->
+          List.fold_result services ~init:() ~f:(fun () service ->
+            service.validate_original ~kind ~name ~payload))
+    ; run =
+        (fun request ~authorize ->
+          List.find_map services ~f:(fun service -> service.run request ~authorize))
+    }
+  ;;
 end
 
 exception Post_tool_moderation_failed of History_entry.t * string

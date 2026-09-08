@@ -18,14 +18,22 @@ let run
       ~registry
       ~(reference : C.reference)
       ~invocation
+      ~is_halted
       ~authorize
       ~prepare_output
   =
   capabilities.Operation_worker.Capabilities.with_invocation
     ~invocation
     (fun ~dispatched ->
+       let check_halted () =
+         let failure = fail "invocation.session_ended" "The session has ended." in
+         match checked failure (fun () -> Ok (is_halted ())) with
+         | Ok false -> Ok ()
+         | Ok true | Error _ -> Error failure
+       in
        let execute () =
          let open Result.Let_syntax in
+         let%bind () = check_halted () in
          let resolve () =
            checked
              (fail
@@ -76,6 +84,7 @@ let run
          in
          (* An approval wait may have replaced or narrowed the selected registry.
          Never dispatch the binding captured before that wait. *)
+         let%bind () = check_halted () in
          let%bind binding = resolve () in
          let implementation = C.implementation binding in
          let%bind payload =
@@ -112,7 +121,13 @@ let run
          in
          outcome
        in
-       Ok
-         (match execute () with
-          | Ok outcome | Error outcome -> outcome))
+       match
+         Option.bind dispatched.routing ~f:(fun routing ->
+           Stream_invocation.rejection_outcome routing.preparation)
+       with
+       | Some outcome -> Ok outcome
+       | None ->
+         Ok
+           (match execute () with
+            | Ok outcome | Error outcome -> outcome))
 ;;
