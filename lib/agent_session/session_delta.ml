@@ -18,6 +18,7 @@ type t =
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
+  | Invocation_reconciled of Agent_protocol.Invocation.t
   | Subscription_changed of Agent_protocol.Subscription.t
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
@@ -149,14 +150,22 @@ let rec apply state = function
             state.schedules
             ~id_of:(fun value -> value.Agent_protocol.Schedule.id)
       }
-  | Invocation_changed invocation ->
+  | (Invocation_changed invocation | Invocation_reconciled invocation) as delta ->
     let open Result.Let_syntax in
+    let recovery =
+      match delta with
+      | Invocation_reconciled _ -> true
+      | _ -> false
+    in
     let context = invocation.Agent_protocol.Invocation.context in
     let%bind () =
       if
         Agent_protocol.Id.Session.compare context.session_id state.identity.session_id
         <> 0
-        || context.generation <> state.identity.generation
+        ||
+        if recovery
+        then context.generation > state.identity.generation
+        else context.generation <> state.identity.generation
       then
         Error
           (Agent_protocol.Error.create
@@ -170,7 +179,26 @@ let rec apply state = function
       List.find state.invocations ~f:(fun candidate ->
         Agent_protocol.Id.Invocation.compare candidate.context.id context.id = 0)
     in
+    let%bind () =
+      if not recovery
+      then Ok ()
+      else (
+        match previous, invocation.status with
+        | Some { status = Admitted | Dispatching; _ }, Resolved (Cancelled _) -> Ok ()
+        | Some { status = Resolved _; _ }, Published _ -> Ok ()
+        | Some { status = Resolved _; _ }, Resolved _
+          when Option.is_some invocation.publication_discarded -> Ok ()
+        | _ ->
+          Error
+            (Agent_protocol.Error.invalid_request
+               "reconciliation only finishes an existing invocation without executing it"))
+    in
     let%bind () = Agent_protocol.Invocation.validate_transition ~previous invocation in
+    let%bind () =
+      Invocation_history.validate_retained
+        ~history:state.conversation.canonical_history
+        invocation
+    in
     let%map () =
       match context.call_entry_id, previous, invocation.status with
       | Some _, None, _ ->

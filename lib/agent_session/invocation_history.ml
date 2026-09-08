@@ -123,8 +123,42 @@ let validate_publication ~history (invocation : P.Invocation.t) =
     find following
 ;;
 
+let recover_output ~history invocation =
+  let open Result.Let_syntax in
+  let%bind kind, provider_id, following = bound_call ~history invocation in
+  let rec find = function
+    | [] ->
+      Ok
+        (`Missing
+            (match kind with
+             | `Function -> P.Invocation.Function
+             | `Custom -> Custom))
+    | entry :: rest ->
+      let%bind decoded = History_codec.of_protocol entry in
+      if same_pair kind provider_id (History_entry.item decoded)
+      then (
+        match output (History_entry.item decoded) with
+        | Some _ ->
+          let%bind _ = canonical entry in
+          let%map () = validate_output invocation decoded in
+          `Existing decoded
+        | None -> invalid "cannot recover an output across reuse of its provider call ID")
+      else find rest
+  in
+  find following
+;;
+
 let validate_retained ~history (invocation : P.Invocation.t) =
   let open Result.Let_syntax in
+  let%bind () =
+    if
+      Option.is_some invocation.publication_discarded
+      && List.exists history ~f:(fun (entry : P.History.entry) ->
+        Option.exists invocation.context.call_entry_id ~f:(fun id ->
+          P.History.Id.compare entry.id id = 0))
+    then invalid "discarded invocation still has a retained canonical call"
+    else Ok ()
+  in
   let%bind () =
     if
       List.exists history ~f:(fun (entry : P.History.entry) ->

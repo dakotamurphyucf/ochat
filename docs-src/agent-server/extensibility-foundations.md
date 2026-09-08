@@ -57,9 +57,9 @@ and wrap them as `Internal_event` data. They do not reinterpret a payload as a
 native invocation or completion event. Legacy scripts retain their existing event
 representation.
 
-These are internal execution primitives, not public tool registration. Shared
-complete shared tool routing, current authority checks, nested-call admission and
-restart reconciliation remain required before a host exposes moderator tools. The
+These are internal execution primitives, not public tool registration. Complete
+shared tool routing, current authority checks, nested-call admission and
+worker/reset recovery qualification remain required before a host exposes moderator tools. The
 stream/actor integration below is available to qualified internal fixtures. The host
 resolution installer must be infallible, must not yield, and must not re-enter
 the manager lock. The prospective snapshot API itself does not implement the
@@ -159,13 +159,56 @@ Snapshot and journal restoration validate retained result payloads against their
 receipts. They preserve receipts independently of transcript retention.
 
 Invocation records with routing provenance use JSON codec version 3. Without
-routing, bound records retain codec 2 and unbound records retain codec 1. All three
+routing, bound records retain codec 2 and unbound records retain codec 1. Records
+with a discarded-publication disposition use codec 4. All four
 remain readable; missing optional S-expression fields load as absent. Older JSON
 readers reject new codecs rather than silently discard their evidence. These
 host-only additions do not change the ChatML context ABI or enable public feature
 flags. The internal
-stream adapter below calls this service; normal runtime construction and automatic
-restart reconciliation remain unfinished.
+stream adapter below calls this service; normal runtime construction remains
+unfinished. Daemon restart reconciliation is described below; immediate
+worker-cancellation reconciliation remains separate work.
+
+### Invocation recovery at daemon restart
+
+`Invocation_recovery.plan` is a pure plan over durable state. Startup and lazy
+session recovery apply it in the same transaction as the operation-interruption
+boundary, before restoring a runtime. It never calls a model, handler, execution
+policy or post-tool observer. Recorded outcomes have already passed the dispatch
+boundary's output checks and are preserved exactly.
+
+Unfinished invocations become resolved cancellations with a restart reason.
+For model calls with a retained canonical occurrence, recovery reuses an existing
+matching output or appends the recorded outcome as the appropriate function/custom
+output. It commits the publication receipt and history event atomically. Mismatched
+outputs and intervening reuse of the provider call ID fail recovery; it never
+guesses a different call or reruns the implementation to reconstruct a result.
+
+If the canonical call was removed, the original outcome stays resolved and gains
+an immutable `publication_discarded` reason. Legacy model records without an
+occurrence binding receive an explicit unbound-call disposition instead of a
+fabricated output. Discarded records cannot publish later or coexist with their
+retained bound call. Published receipts remain untouched even if transcript
+compaction has removed their entries. Non-model invocations never gain provider
+outputs; unfinished ones are interrupted, and recorded results remain retained.
+
+The internal `Invocation_reconciled` journal delta can finish an existing record
+from an older generation, but cannot admit/dispatch work or manufacture a successful
+outcome. Ordinary `Invocation_changed` still requires the current generation.
+Recovery assigns new IDs beyond the durable allocation high-water mark and
+reserves separate space for the restored runtime. It also rejects an ID that
+collides with retained history or invocation receipts, even if stored allocation
+counters are inconsistent. A failed commit installs none
+of the plan; rerunning it from the same state produces the same IDs. A successful
+recovery is idempotent on subsequent restarts.
+
+Offline tests cover function/custom outcomes, interrupted and already-cancelled
+calls, existing receipts, missing calls, old generations, conflicting outputs,
+provider-ID reuse, snapshot/delta roundtrips and allocation bounds. A real daemon
+fixture persists resolved/dispatched calls, shuts down, lazily restores the stopped
+session and verifies both pairs, then restarts again without duplicate outputs.
+Active-worker cancellation/publication failure and reset-time reconciliation still
+need integration; this restart path does not establish their completion.
 
 ### Retained routing provenance
 
@@ -323,7 +366,7 @@ failure. A held first handler plus queued second invocation proves termination
 is rechecked before admission; a subsequent third call remains stopped too.
 This is not public feature availability: normal `Runtime_builder` construction,
 shared nested/native/standalone routing, complete admission-error recording,
-persisted original/final audit provenance and restart reconciliation still need
+broader audit qualification and immediate worker/reset reconciliation still need
 qualification. No extension feature flag is enabled by installing this adapter.
 
 ### Synchronous call coordination

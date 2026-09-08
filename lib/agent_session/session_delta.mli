@@ -20,6 +20,9 @@ type t =
   | Job_changed of Agent_protocol.Job.t
   | Schedule_changed of Agent_protocol.Schedule.t
   | Invocation_changed of Agent_protocol.Invocation.t
+  | Invocation_reconciled of Agent_protocol.Invocation.t
+  (** Recovery-only terminalization/publication of an existing invocation,
+        including older generations. Cannot admit, dispatch or create outcomes. *)
   | Subscription_changed of Agent_protocol.Subscription.t
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry

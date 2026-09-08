@@ -2284,8 +2284,7 @@ let verify_recovered_workspace t state =
   |> Result.map_error ~f:protocol_of_store
 ;;
 
-let recovery_reservation t state =
-  let first = state.Agent_session.Session_state.conversation.next_history_sequence in
+let recovery_reservation t first =
   let count = t.limits.moderator_reservation_size in
   let maximum = Int64.of_int Int.max_value in
   if count < 0
@@ -2389,7 +2388,13 @@ let recovery_attachment_deltas state ~now =
     | _ -> Agent_session.Session_delta.Attachment_removed attachment.id)
 ;;
 
-let recovery_transition state ~now ~reserved_history_through ~observed =
+let recovery_transition
+      state
+      ~now
+      ~reserved_history_through
+      ~observed
+      ~(invocations : Agent_session.Invocation_recovery.t)
+  =
   let lifecycle =
     Agent_session.Session_state.Lifecycle.
       { desired = state.Agent_session.Session_state.lifecycle.desired; observed }
@@ -2434,11 +2439,16 @@ let recovery_transition state ~now ~reserved_history_through ~observed =
           ; Lifecycle_changed lifecycle
           ]
           @ operation_delta
+          @ invocations.deltas
           @ permission_deltas
           @ reviewer_job_deltas
           @ attachment_deltas))
     ~payloads:
       (operation_payload
+       @ (if List.is_empty invocations.appended
+          then []
+          else
+            [ Agent_protocol.Event.Durable.Payload.History_appended invocations.appended ])
        @ permission_payloads
        @ reviewer_job_payloads
        @ Option.to_list
@@ -2464,10 +2474,22 @@ let create_recovery_writer t journal recovery session_id =
     |> Result.map_error ~f:protocol_of_store
 ;;
 
-let commit_recovery_boundary t persistence state reserved_history_through observed =
+let commit_recovery_boundary
+      t
+      persistence
+      state
+      reserved_history_through
+      observed
+      invocations
+  =
   let open Result.Let_syntax in
   let%bind transition =
-    recovery_transition state ~now:(now t) ~reserved_history_through ~observed
+    recovery_transition
+      state
+      ~now:(now t)
+      ~reserved_history_through
+      ~observed
+      ~invocations
   in
   let%map () =
     Agent_session.Session_persistence.commit
@@ -2599,7 +2621,17 @@ let recover_open_handle t handle =
   let%bind revision = recovered_revision t state in
   let%bind profile = recovered_profile t state in
   let%bind () = verify_recovered_workspace t state in
-  let%bind first_sequence, reserved_history_through = recovery_reservation t state in
+  let%bind recovery_first = preparation_sequence t state in
+  let%bind invocations =
+    Agent_session.Invocation_recovery.plan
+      ~state
+      ~namespace:(Agent_protocol.Id.Session.to_string state.identity.session_id)
+      ~first_sequence:recovery_first
+      ~reason:"daemon restarted before the invocation recorded an outcome"
+  in
+  let%bind first_sequence, reserved_history_through =
+    recovery_reservation t (Int64.of_int invocations.next_sequence)
+  in
   let%bind durable_events = recovered_events recovery in
   let%bind observed, capacity = prepare_recovery_capacity t state in
   let%bind writer = create_recovery_writer t journal recovery state.identity.session_id in
@@ -2616,7 +2648,13 @@ let recover_open_handle t handle =
       ~previous_transaction_hash:recovery.latest_transaction_hash
   in
   match
-    commit_recovery_boundary t persistence state reserved_history_through observed
+    commit_recovery_boundary
+      t
+      persistence
+      state
+      reserved_history_through
+      observed
+      invocations
   with
   | Error _ as failure ->
     Option.iter capacity ~f:Session_capacity.release;

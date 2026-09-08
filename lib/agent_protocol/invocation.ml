@@ -89,6 +89,7 @@ type t =
   ; status : status
   ; output_entry_id : History.Id.t option [@sexp.option]
   ; routing : routing option [@sexp.option]
+  ; publication_discarded : string option [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -172,6 +173,16 @@ let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_context t.context in
   let%bind () =
+    match t.publication_discarded with
+    | None -> Ok ()
+    | Some reason ->
+      let%bind () = text ~name:"publication discard reason" ~max:1024 reason in
+      (match t.context.origin, t.status, t.output_entry_id with
+       | Model, Resolved _, None -> Ok ()
+       | _ ->
+         invalid "discarded publication requires an unpublished resolved model invocation")
+  in
+  let%bind () =
     match t.routing with
     | None -> Ok ()
     | Some routing ->
@@ -242,7 +253,14 @@ let validate t =
 ;;
 
 let create ?routing context =
-  let t = { context; status = Admitted; output_entry_id = None; routing } in
+  let t =
+    { context
+    ; status = Admitted
+    ; output_entry_id = None
+    ; routing
+    ; publication_discarded = None
+    }
+  in
   Result.map (validate t) ~f:(fun () -> t)
 ;;
 
@@ -277,7 +295,9 @@ let cancel t ~reason =
 ;;
 
 let publish t =
-  if Option.is_some t.context.call_entry_id
+  if Option.is_some t.publication_discarded
+  then failure Invalid_state "publication was discarded"
+  else if Option.is_some t.context.call_entry_id
   then
     failure
       Invalid_state
@@ -292,6 +312,11 @@ let publish t =
 let publish_with_history t ~output_entry_id =
   let open Result.Let_syntax in
   let%bind () = validate t in
+  let%bind () =
+    if Option.is_some t.publication_discarded
+    then failure Invalid_state "publication was discarded"
+    else Ok ()
+  in
   let%bind () = validate_id History.Id.to_json History.Id.of_json output_entry_id in
   if
     Option.exists t.context.call_entry_id ~f:(fun id ->
@@ -307,6 +332,15 @@ let publish_with_history t ~output_entry_id =
       Ok t
     | Published _, _ -> failure Conflict "publication output occurrence is immutable"
     | _ -> failure Invalid_state "invocation has no recorded outcome")
+;;
+
+let discard_publication t ~reason =
+  match t.publication_discarded with
+  | Some existing when String.equal existing reason -> Ok t
+  | Some _ -> failure Conflict "publication discard reason is immutable"
+  | None ->
+    let next = { t with publication_discarded = Some reason } in
+    Result.map (validate next) ~f:(fun () -> next)
 ;;
 
 let validate_transition ~previous next =
@@ -329,6 +363,14 @@ let validate_transition ~previous next =
            next.routing)
     then failure Conflict "invocation routing provenance is immutable"
     else if
+      Option.is_some previous.publication_discarded
+      && not
+           (Option.equal
+              String.equal
+              previous.publication_discarded
+              next.publication_discarded)
+    then failure Conflict "publication discard disposition is immutable"
+    else if
       Option.is_some previous.output_entry_id
       && not
            (Option.equal
@@ -338,6 +380,9 @@ let validate_transition ~previous next =
     then failure Conflict "publication output occurrence is immutable"
     else (
       match previous.status, next.status with
+      | Resolved old, Resolved current
+        when Option.is_some next.publication_discarded
+             && Sexp.equal (sexp_of_outcome old) (sexp_of_outcome current) -> Ok ()
       | Admitted, Dispatching | Admitted, Resolved (Cancelled _) | Dispatching, Resolved _
         -> Ok ()
       | (Resolved old, Published current | Published old, Published current)
@@ -654,7 +699,9 @@ let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (if Option.is_some t.routing
+           (if Option.is_some t.publication_discarded
+            then "4"
+            else if Option.is_some t.routing
             then "3"
             else if Option.is_some t.context.call_entry_id
             then "2"
@@ -663,7 +710,9 @@ let to_json t =
      ; "status", status_to_json t.status
      ]
      @ optional "output_entry_id" t.output_entry_id History.Id.to_json
-     @ optional "routing" t.routing routing_to_json)
+     @ optional "routing" t.routing routing_to_json
+     @ optional "publication_discarded" t.publication_discarded (fun reason ->
+       `String reason))
 ;;
 
 let of_json json =
@@ -677,7 +726,7 @@ let of_json json =
       (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
   in
   let%bind () =
-    if version = 1 || version = 2 || version = 3
+    if version = 1 || version = 2 || version = 3 || version = 4
     then Ok ()
     else failure Incompatible_protocol "unsupported invocation schema version"
   in
@@ -686,7 +735,8 @@ let of_json json =
       fields
       ([ "schema_version"; "context"; "status" ]
        @ (if version >= 2 then [ "output_entry_id" ] else [])
-       @ if version = 3 then [ "routing" ] else [])
+       @ (if version >= 3 then [ "routing" ] else [])
+       @ if version = 4 then [ "publication_discarded" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -702,9 +752,18 @@ let of_json json =
     if version = 3
     then
       Json_codec.required_as fields "routing" routing_of_json |> Result.map ~f:Option.some
+    else if version = 4
+    then Json_codec.optional_as fields "routing" routing_of_json
     else Ok None
   in
-  let t = { context; status; output_entry_id; routing } in
+  let%bind publication_discarded =
+    if version = 4
+    then
+      Json_codec.required_as fields "publication_discarded" Json_codec.string
+      |> Result.map ~f:Option.some
+    else Ok None
+  in
+  let t = { context; status; output_entry_id; routing; publication_discarded } in
   let%map () = validate t in
   t
 ;;

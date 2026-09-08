@@ -2548,6 +2548,261 @@ let with_handoff_actor ?(reject = fun _ -> false) ~make_worker f =
             f env actor writer backend))))
 ;;
 
+let%test_unit
+    "invocation recovery preserves results, repairs pairs and never replays work"
+  =
+  List.iter [ false; true ] ~f:(fun custom ->
+    List.iter
+      [ `Admitted
+      ; `Dispatching
+      ; `Resolved
+      ; `Cancelled
+      ; `Existing
+      ; `Published
+      ; `Removed
+      ; `Old_generation
+      ; `Bad_output
+      ; `Reused_id
+      ; `Collision
+      ]
+      ~f:(fun mode ->
+        with_actor_workspace (fun _env workspace_instance ->
+          let module I = Agent_protocol.Invocation in
+          let module D = Agent_session.Session_delta in
+          let initial =
+            actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+          in
+          let id n =
+            History_entry.Id.create ~namespace:"recover" ~sequence:n
+            |> Result.ok_or_failwith
+          in
+          let call_item =
+            if custom
+            then
+              Openai.Responses.Item.Custom_tool_call
+                { name = "read_file"
+                ; input = "null"
+                ; call_id = "same"
+                ; _type = "custom_tool_call"
+                ; id = None
+                }
+            else
+              Function_call
+                { name = "read_file"
+                ; arguments = "null"
+                ; call_id = "same"
+                ; _type = "function_call"
+                ; id = None
+                ; status = None
+                }
+          in
+          let call =
+            History_entry.create_with_id ~id:(id 0) call_item
+            |> Agent_session.History_codec.to_protocol
+          in
+          let admitted =
+            I.create
+              { (invocation_fixture ()).context with
+                origin = Model
+              ; provider_call_id = Some "same"
+              ; call_entry_id = Some (id 0)
+              }
+            |> protocol_ok
+          in
+          let dispatched = I.dispatch admitted |> protocol_ok in
+          let resolved =
+            I.resolve dispatched ~session_id ~generation:0 (Complete (`String "saved"))
+            |> protocol_ok
+          in
+          let output =
+            Openai.Responses.Tool_output.Output.Text
+              (if Poly.equal mode `Bad_output
+               then "wrong"
+               else Jsonaf.to_string (I.outcome_to_json (Complete (`String "saved"))))
+          in
+          let output_item =
+            if custom
+            then
+              Openai.Responses.Item.Custom_tool_call_output
+                { output; call_id = "same"; _type = "custom_tool_call_output"; id = None }
+            else
+              Function_call_output
+                { output
+                ; call_id = "same"
+                ; _type = "function_call_output"
+                ; id = None
+                ; status = None
+                }
+          in
+          let output =
+            History_entry.create_with_id ~id:(id 1) output_item
+            |> Agent_session.History_codec.to_protocol
+          in
+          let invocation =
+            match mode with
+            | `Admitted -> admitted
+            | `Dispatching -> dispatched
+            | `Cancelled -> I.cancel dispatched ~reason:"already cancelled" |> protocol_ok
+            | `Published ->
+              I.publish_with_history resolved ~output_entry_id:(id 1) |> protocol_ok
+            | _ -> resolved
+          in
+          let history =
+            match mode with
+            | `Removed -> []
+            | `Existing | `Bad_output | `Published -> [ call; output ]
+            | `Reused_id ->
+              [ call
+              ; History_entry.create_with_id ~id:(id 1) call_item
+                |> Agent_session.History_codec.to_protocol
+              ]
+            | `Collision ->
+              let other =
+                match call_item with
+                | Openai.Responses.Item.Function_call c ->
+                  Openai.Responses.Item.Function_call { c with call_id = "other" }
+                | Custom_tool_call c -> Custom_tool_call { c with call_id = "other" }
+                | _ -> assert false
+              in
+              [ call
+              ; History_entry.create_with_id ~id:(id 8) other
+                |> Agent_session.History_codec.to_protocol
+              ]
+            | _ -> [ call ]
+          in
+          let state =
+            { initial with
+              invocations = [ invocation ]
+            ; identity =
+                { initial.identity with
+                  generation = (if Poly.equal mode `Old_generation then 1 else 0)
+                }
+            ; conversation =
+                { initial.conversation with
+                  canonical_history = history
+                ; next_history_sequence = 8L
+                ; reserved_history_through = 8L
+                }
+            }
+          in
+          Agent_session.Session_state.validate state |> protocol_ok;
+          let plan state =
+            Agent_session.Invocation_recovery.plan
+              ~state
+              ~namespace:"recover"
+              ~first_sequence:(Int64.to_int_exn state.conversation.next_history_sequence)
+              ~reason:"restart"
+          in
+          if
+            Poly.equal mode `Bad_output
+            || Poly.equal mode `Reused_id
+            || Poly.equal mode `Collision
+          then assert (Result.is_error (plan state))
+          else (
+            let result = plan state |> protocol_ok in
+            let delta =
+              D.Batch
+                (History_block_reserved (Int64.of_int result.next_sequence)
+                 :: result.deltas)
+            in
+            let delta = D.t_of_sexp (D.sexp_of_t delta) in
+            let restored = D.apply state delta |> protocol_ok in
+            Agent_session.Session_state.validate restored |> protocol_ok;
+            let restored =
+              Agent_session.Session_persistence.restore_snapshot
+                (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t restored))
+              |> store_ok
+            in
+            let actual = List.hd_exn restored.invocations in
+            (match mode, actual.status with
+             | (`Admitted | `Dispatching), Published (Cancelled "restart") -> ()
+             | `Cancelled, Published (Cancelled "already cancelled") -> ()
+             | `Removed, Resolved (Complete (`String "saved")) ->
+               assert (Option.is_some actual.publication_discarded)
+             | _, Published (Complete (`String "saved")) -> ()
+             | _ -> assert false);
+            let reused = Poly.equal mode `Existing || Poly.equal mode `Published in
+            assert (
+              List.length result.appended
+              = if reused || Poly.equal mode `Removed then 0 else 1);
+            if reused
+            then
+              assert (
+                Option.equal History_entry.Id.equal actual.output_entry_id (Some (id 1)));
+            if (not reused) && not (Poly.equal mode `Removed)
+            then
+              assert (
+                Option.equal History_entry.Id.equal actual.output_entry_id (Some (id 8)));
+            let again = plan restored |> protocol_ok in
+            assert (List.is_empty again.deltas && List.is_empty again.appended);
+            assert (again.next_sequence = result.next_sequence);
+            assert (
+              Result.is_error
+                (Agent_session.Invocation_recovery.plan
+                   ~state:restored
+                   ~namespace:"recover"
+                   ~first_sequence:0
+                   ~reason:"restart"));
+            if Poly.equal mode `Removed
+            then (
+              assert (Result.is_error (I.publish actual));
+              assert (
+                Result.is_error
+                  (Agent_session.Session_state.validate
+                     { restored with
+                       conversation =
+                         { restored.conversation with canonical_history = [ call ] }
+                     })))))))
+;;
+
+let%test_unit
+    "recovery does not fabricate provider outputs for scripts or unbound legacy calls"
+  =
+  with_actor_workspace (fun _env workspace_instance ->
+    List.iter [ false; true ] ~f:(fun model ->
+      List.iter [ false; true ] ~f:(fun resolved ->
+        let module I = Agent_protocol.Invocation in
+        let initial =
+          actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+        in
+        let invocation =
+          I.create
+            { (invocation_fixture ()).context with
+              origin = (if model then Model else Script)
+            ; provider_call_id = (if model then Some "legacy" else None)
+            }
+          |> protocol_ok
+          |> I.dispatch
+          |> protocol_ok
+        in
+        let invocation =
+          if resolved
+          then
+            I.resolve invocation ~session_id ~generation:0 (Complete `Null) |> protocol_ok
+          else invocation
+        in
+        let state = { initial with invocations = [ invocation ] } in
+        let plan =
+          Agent_session.Invocation_recovery.plan
+            ~state
+            ~namespace:"unbound"
+            ~first_sequence:(Int64.to_int_exn state.conversation.next_history_sequence)
+            ~reason:"restart"
+          |> protocol_ok
+        in
+        assert (List.is_empty plan.appended);
+        let result =
+          Agent_session.Session_delta.apply state (Batch plan.deltas) |> protocol_ok
+        in
+        Agent_session.Session_state.validate result |> protocol_ok;
+        let actual = List.hd_exn result.invocations in
+        assert (Bool.equal (Option.is_some actual.publication_discarded) model);
+        assert (Option.is_none actual.output_entry_id);
+        match resolved, actual.status with
+        | true, Resolved (Complete `Null) | false, Resolved (Cancelled "restart") -> ()
+        | _ -> assert false)))
+;;
+
 let publication_call caps ?(custom = false) () =
   let id =
     History_entry.Id_source.allocate

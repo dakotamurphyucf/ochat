@@ -20,6 +20,16 @@ val validate_publication
   -> Agent_protocol.Invocation.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Find an already committed matching output, or determine the missing output's
+    kind from its canonical call. Reject mismatched outputs and intervening call
+    ID reuse. Never reruns handlers or guesses using a provider ID alone. *)
+val recover_output
+  :  history:Agent_protocol.History.entry list
+  -> Agent_protocol.Invocation.t
+  -> ( [ `Missing of Agent_protocol.Invocation.call_kind | `Existing of History_entry.t ]
+       , Agent_protocol.Error.t )
+       result
+
 (** Check retained receipt payloads during snapshot/journal validation. History
     compaction may remove either occurrence; the receipt still prevents replay. *)
 val validate_retained

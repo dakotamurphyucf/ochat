@@ -100,6 +100,9 @@ type t = private
   ; status : status
   ; output_entry_id : History.Id.t option [@sexp.option]
   ; routing : routing option [@sexp.option]
+  ; publication_discarded : string option [@sexp.option]
+    (** Durable reason that no provider result will be published. The recorded
+        outcome is preserved. Present only on resolved model invocations; codec 4. *)
   }
 [@@deriving sexp]
 
@@ -134,6 +137,11 @@ val publish : t -> (t, Error.t) result
     Routing records use JSON codec 3. Without routing, bound records use codec 2
     and unbound legacy records retain codec 1. *)
 val publish_with_history : t -> output_entry_id:History.Id.t -> (t, Error.t) result
+
+(** Record removal/unavailability of the canonical call without changing the
+    outcome or fabricating a provider output. The host must prove that the call
+    is not retained. Idempotent for the same reason; cannot later publish. *)
+val discard_publication : t -> reason:string -> (t, Error.t) result
 
 (** Checks a proposed durable replacement, including immutable context and
     outcome. New records must be admitted; transitions cannot skip dispatch

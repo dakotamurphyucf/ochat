@@ -17,6 +17,7 @@
   session_state
   extension_invariants
   invocation_history
+  invocation_recovery
   moderator_tool_dispatch
   compaction_archive
   administration

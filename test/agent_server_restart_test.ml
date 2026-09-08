@@ -545,6 +545,163 @@ let%expect_test "operator grant authorizes only the exact compiled manifest" =
   [%expect {| ((mismatched_denied true) (persisted_grants 1)) |}]
 ;;
 
+let%test_unit
+    "restart reconciles durable invocation outcomes once before lazy runtime restoration"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        let prompt_file = Filename.concat root "agent.chatmd" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          "<developer>Offline invocation recovery fixture.</developer>";
+        let configuration = config root workspace prompt_file in
+        Eio.Switch.run (fun sw ->
+          let first = start_daemon sw env configuration root in
+          let client = connection first (principal ()) in
+          initialize client;
+          let created, attachment = create_session ~key:"invocation-recovery" client in
+          let entry =
+            Agent_server.Session_registry.load
+              (Agent_server.Daemon.registry first)
+              created.id
+            |> protocol_ok
+          in
+          List.iter [ false; true ] ~f:(fun custom ->
+            let module I = Agent_protocol.Invocation in
+            let id =
+              Agent_session.History_id_source.allocate entry.history_ids |> protocol_ok
+            in
+            let call_id = if custom then "custom-interrupted" else "function-saved" in
+            let item =
+              if custom
+              then
+                Openai.Responses.Item.Custom_tool_call
+                  { name = "fixture"
+                  ; input = "null"
+                  ; call_id
+                  ; _type = "custom_tool_call"
+                  ; id = None
+                  }
+              else
+                Function_call
+                  { name = "fixture"
+                  ; arguments = "null"
+                  ; call_id
+                  ; _type = "function_call"
+                  ; id = None
+                  ; status = None
+                  }
+            in
+            Agent_session.Session_actor.append_history
+              entry.actor
+              ~attachment_id:attachment.id
+              [ Agent_session.History_codec.to_protocol
+                  (History_entry.create_with_id ~id item)
+              ]
+            |> protocol_ok
+            |> ignore;
+            let state = Agent_session.Session_actor.state entry.actor |> protocol_ok in
+            let admitted =
+              I.create
+                { id = Agent_protocol.Id.Invocation.create ()
+                ; session_id = created.id
+                ; generation = created.generation
+                ; origin = Model
+                ; provider_call_id = Some call_id
+                ; call_entry_id = Some id
+                ; parent_invocation = None
+                ; parent_job = None
+                ; tool_name = "fixture"
+                ; implementation_revision = "retained-fixture"
+                ; capability_fingerprint = "retained-capability"
+                ; input = `Null
+                ; created_at = Agent_protocol.Timestamp.now ()
+                ; deadline = None
+                }
+              |> protocol_ok
+            in
+            let dispatched = I.dispatch admitted |> protocol_ok in
+            let changes =
+              Agent_session.Session_actor.Extension_change.
+                [ Invocation admitted; Invocation dispatched ]
+            in
+            let changes =
+              if custom
+              then changes
+              else
+                changes
+                @ [ Invocation
+                      (I.resolve
+                         dispatched
+                         ~session_id:created.id
+                         ~generation:created.generation
+                         (Complete (`String "already computed"))
+                       |> protocol_ok)
+                  ]
+            in
+            Agent_session.Session_actor.commit_extensions
+              entry.actor
+              ~generation:created.generation
+              ~expected_revision:state.counters.revision
+              changes
+            |> protocol_ok
+            |> ignore);
+          Agent_client.Connection.close client;
+          Agent_server.Daemon.shutdown first |> protocol_ok;
+          let second = start_daemon sw env configuration root in
+          let entry =
+            Agent_server.Session_registry.load
+              (Agent_server.Daemon.registry second)
+              created.id
+            |> protocol_ok
+          in
+          let recovered = Agent_session.Session_actor.state entry.actor |> protocol_ok in
+          assert (List.length recovered.invocations = 2);
+          List.iter recovered.invocations ~f:(fun inv ->
+            assert (Option.is_some inv.output_entry_id);
+            Agent_session.Invocation_history.validate_publication
+              ~history:recovered.conversation.canonical_history
+              inv
+            |> protocol_ok;
+            match inv.context.provider_call_id, inv.status with
+            | Some "function-saved", Published (Complete (`String "already computed")) ->
+              ()
+            | Some "custom-interrupted", Published (Cancelled _) -> ()
+            | _ -> assert false);
+          let new_id =
+            Agent_session.History_id_source.allocate entry.history_ids |> protocol_ok
+          in
+          assert (
+            not
+              (List.exists recovered.conversation.canonical_history ~f:(fun e ->
+                 History_entry.Id.equal new_id e.id)));
+          Agent_server.Daemon.shutdown second |> protocol_ok;
+          let third = start_daemon sw env configuration root in
+          let entry =
+            Agent_server.Session_registry.load
+              (Agent_server.Daemon.registry third)
+              created.id
+            |> protocol_ok
+          in
+          let again = Agent_session.Session_actor.state entry.actor |> protocol_ok in
+          assert (
+            Sexp.equal
+              ([%sexp_of: Agent_protocol.Invocation.t list] recovered.invocations)
+              ([%sexp_of: Agent_protocol.Invocation.t list] again.invocations));
+          assert (
+            List.length again.conversation.canonical_history
+            = List.length recovered.conversation.canonical_history);
+          Agent_server.Daemon.shutdown third |> protocol_ok)))
+;;
+
 let%expect_test "durable stopped session resets, recovers, and starts after restart" =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();

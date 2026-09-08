@@ -161,7 +161,7 @@ let%expect_test
 let%expect_test "incompatible and malformed snapshots fail instead of losing state" =
   let invocation = get (Invocation.create (context ())) in
   let encoded = Invocation.to_json invocation in
-  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "4")));
+  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "5")));
   report
     (Invocation.of_json
        (replace_field encoded "status" (`Object [ "type", `String "resolved" ])));
@@ -414,6 +414,49 @@ let%test_unit "routing provenance has a closed v3 codec and immutable admission 
     Sexp.equal
       (I.sexp_of_t published)
       (I.sexp_of_t (I.of_json (I.to_json published) |> get)))
+;;
+
+let%test_unit "discarded publication preserves outcomes and has an immutable v4 receipt" =
+  let inv =
+    Invocation.create { (context ()) with origin = Model; provider_call_id = Some "call" }
+    |> get
+  in
+  assert (Result.is_error (Invocation.discard_publication inv ~reason:"removed"));
+  let resolved =
+    Invocation.dispatch inv
+    |> get
+    |> fun inv -> resolve inv (Complete (`String "retained")) |> get
+  in
+  let discarded = Invocation.discard_publication resolved ~reason:"removed" |> get in
+  Invocation.validate_transition ~previous:(Some resolved) discarded |> get;
+  assert (
+    Sexp.equal
+      (Invocation.sexp_of_status resolved.status)
+      (Invocation.sexp_of_status discarded.status));
+  let encoded = Invocation.to_json discarded in
+  assert (
+    Poly.equal
+      (get (Json_codec.required (get (Json_codec.fields encoded)) "schema_version"))
+      (`Number "4"));
+  let restored = Invocation.of_json encoded |> get in
+  assert (Sexp.equal (Invocation.sexp_of_t discarded) (Invocation.sexp_of_t restored));
+  assert (
+    Result.is_error
+      (Invocation.of_json (replace_field encoded "schema_version" (`Number "3"))));
+  assert (Result.is_error (Invocation.publish discarded));
+  assert (
+    Result.is_error
+      (Invocation.publish_with_history
+         discarded
+         ~output_entry_id:(get (History.Id.of_string "4:test:5"))));
+  assert (Result.is_error (Invocation.discard_publication discarded ~reason:"different"));
+  assert (
+    Result.is_error (Invocation.validate_transition ~previous:(Some discarded) resolved));
+  assert (
+    Sexp.equal
+      (Invocation.sexp_of_t discarded)
+      (Invocation.sexp_of_t
+         (Invocation.discard_publication discarded ~reason:"removed" |> get)))
 ;;
 
 let%test_unit "routing rejects malformed fingerprints and successful denied preparation" =

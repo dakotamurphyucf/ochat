@@ -102,6 +102,13 @@ interrupted, not blindly rerun. Durable jobs/schedules include their own deliver
 state. External side effects may be uncertain; reconcile before retrying them.
 See [orchestration](chatml-orchestration.md).
 
+For retained extension invocations, daemon recovery restores missing initial tool
+outputs from recorded results and marks unfinished invocations interrupted. It
+does not rerun their handlers. Removed calls receive an explicit discarded-output
+disposition. Conflicting output evidence fails recovery. See the
+[invocation recovery contract](extensibility-foundations.md#invocation-recovery-at-daemon-restart)
+for exact history bindings, allocation and remaining worker/reset limitations.
+
 ## Backup and restore
 
 1. Stop accepting new work and gracefully shut down the owning daemon.
