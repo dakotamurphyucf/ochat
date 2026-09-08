@@ -19,6 +19,7 @@ import {
 } from '../scripts/release-approval.mjs';
 import { checkQualification } from '../scripts/verify-production.mjs';
 import redirectWorker from '../redirect/worker.mjs';
+import { browserFixture } from './fixtures/browser-evidence.mjs';
 
 test('public promotion honors the manual-review deferral and rejects incomplete hosted checks or stale evidence', () => {
   const artifact = {
@@ -105,6 +106,8 @@ test('workflow always detects changes, runs selected checks concurrently, and re
     'semantics',
     'framework',
     'website',
+    'browser',
+    'website-qualification',
   ]);
   assert.equal(gate.if, 'always()');
   const run = gate.steps.find((step) => step.env?.NEEDS_JSON);
@@ -305,7 +308,7 @@ test('production qualification rejects stale, preview, failed, or mismatched evi
     { result: 'pass', environment: 'production', artifactSha256: build.sha256 },
     { result: 'pass', artifactSha256: build.sha256 },
     { result: 'pass' },
-    { status: 'passed', failedTests: [] },
+    browserFixture(build),
     revision,
   ];
   checkQualification(...good);
@@ -340,6 +343,12 @@ test('production qualification rejects stale, preview, failed, or mismatched evi
     (args) => {
       args[5].status = 'failed';
     },
+    (args) => {
+      args[5] = { status: 'passed', failedTests: [] };
+    },
+    (args) => {
+      args[5].shards.pop();
+    },
   ]) {
     const args = structuredClone(good);
     mutate(args);
@@ -366,5 +375,72 @@ test('www redirect preserves encoded paths and query strings and rejects unrelat
   assert.equal(
     redirectWorker.fetch(new Request('https://unrelated.example/')).status,
     404,
+  );
+});
+
+test('browser shards consume a single build per environment and gate requires qualification', async () => {
+  const workflow = parse(
+    await fs.readFile(
+      new URL('../../.github/workflows/website.yml', import.meta.url),
+      'utf8',
+    ),
+  );
+  const {
+    website,
+    browser,
+    'website-qualification': qualification,
+  } = workflow.jobs;
+  assert.deepEqual(browser.needs, ['changes', 'website']);
+  assert.deepEqual(browser.strategy.matrix, {
+    environment: ['preview', 'production'],
+    shard: [1, 2],
+  });
+  assert.equal(browser.strategy['fail-fast'], false);
+  assert.deepEqual(qualification.needs, ['changes', 'website', 'browser']);
+  assert.equal(
+    qualification.if,
+    "!cancelled() && needs.changes.outputs.website == 'true' && needs.website.result == 'success'",
+  );
+  for (const job of [browser, qualification]) {
+    assert.ok(
+      !job.steps.some((step) => /npm run (build|content)/.test(step.run || '')),
+    );
+    assert.ok(
+      job.steps.some(
+        (step) =>
+          step.uses === 'actions/download-artifact@v4' &&
+          step.with.name === 'website-build-${{ matrix.environment }}',
+      ),
+    );
+  }
+  assert.equal(
+    website.steps.filter((step) => step.run === 'npm run build').length,
+    1,
+  );
+  assert.ok(
+    !website.steps.some(
+      (step) => step.with?.name === 'website-production-release',
+    ),
+  );
+  assert.ok(
+    browser.steps.some(
+      (step) =>
+        step.run ===
+        'node scripts/browser-ci.mjs run .release/candidate ${{ matrix.shard }}',
+    ),
+  );
+  assert.ok(
+    qualification.steps.some(
+      (step) =>
+        step.run === 'node scripts/browser-ci.mjs merge .release/candidate',
+    ),
+  );
+  assert.ok(
+    qualification.steps.some(
+      (step) =>
+        step.with?.name === 'website-production-release' &&
+        step.if ===
+          "matrix.environment == 'production' && needs.browser.result == 'success'",
+    ),
   );
 });

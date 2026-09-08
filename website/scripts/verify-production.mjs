@@ -6,6 +6,7 @@ import { execFileSync } from 'node:child_process';
 import { fileURLToPath } from 'node:url';
 import { verifyArtifact } from './release-artifact.mjs';
 import { checkApproval } from './release-approval.mjs';
+import { checkBrowserQualification } from './browser-evidence.mjs';
 import { productionOrigin } from '../config/production.mjs';
 
 const site = fileURLToPath(new URL('../', import.meta.url));
@@ -34,8 +35,7 @@ export function checkQualification(
   }
   assert.equal(search.environment, 'production');
   assert.equal(capacity.result, 'pass');
-  assert.equal(browser.status, 'passed');
-  assert.deepEqual(browser.failedTests, []);
+  checkBrowserQualification(browser, artifact.build, process.env.GITHUB_RUN_ID || browser.runId);
 }
 
 export async function verifyProduction(directory, semanticFile) {
