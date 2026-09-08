@@ -1,0 +1,255 @@
+---
+import applications from '../../.generated/applications-report.json';
+import ApplicationGallery from './ApplicationGallery.astro';
+import ApplicationIntro from './ApplicationIntro.astro';
+import TutorialCurriculum from './TutorialCurriculum.astro';
+import LessonOverview from './LessonOverview.astro';
+import { searchWeight } from '../../config/search.mjs';
+import Default from '@astrojs/starlight/components/MarkdownContent.astro';
+import report from '../../.generated/content-report.json';
+import DocsOverview from './DocsOverview.astro';
+import CapabilityOverview from './CapabilityOverview.astro';
+import ExampleCatalog from './ExampleCatalog.astro';
+import TutorialRecord from './TutorialRecord.astro';
+import examples from '../../.generated/examples-report.json';
+const isTutorial = examples.tutorials.some(
+  (t) => t.route === Astro.url.pathname,
+);
+const isApplication = applications.applications.some(
+  (a) => a.route === Astro.url.pathname,
+);
+const hasResources =
+  isApplication ||
+  isTutorial ||
+  examples.examples.some(
+    (e) => e.tutorialRoute === Astro.url.pathname && e.files.length > 0,
+  );
+const diagrams =
+  report.pages.find((page) => page.route === Astro.url.pathname)?.diagrams ||
+  [];
+---
+
+{Astro.url.pathname === '/docs/' && <DocsOverview />}
+{Astro.url.pathname === '/docs/' && <CapabilityOverview />}
+{isTutorial && <LessonOverview />}
+{isApplication && <ApplicationIntro />}
+{Astro.url.pathname === '/docs/applications/' && <ApplicationGallery />}
+{Astro.url.pathname === '/docs/tutorials/' && <TutorialCurriculum />}
+{
+  hasResources && (
+    <nav
+      class="lesson-jump"
+      aria-label={isTutorial ? 'Tutorial resources' : 'Example resources'}
+      data-pagefind-ignore
+    >
+      <a href="#lesson-resources">
+        {isTutorial
+          ? 'View example files & verification ↓'
+          : 'View example files ↓'}
+      </a>
+    </nav>
+  )
+}
+{
+  Astro.url.pathname === '/docs/examples/' && (
+    <nav
+      data-pagefind-ignore
+      class="catalog-shortcuts"
+      aria-label="Example catalog shortcuts"
+    >
+      <>
+        <a href="#source-catalog">Browse example source ↓</a>
+        <a href="#learn-in-order">Follow the tutorials →</a>
+      </>
+    </nav>
+  )
+}
+<div
+  data-pagefind-weight={searchWeight(
+    report.pages.find((p) => p.route === Astro.url.pathname),
+  )}
+  data-diagram-sources={JSON.stringify(diagrams)}
+>
+  <Default><slot /></Default>
+</div>
+{
+  hasResources && (
+    <div id="lesson-resources">
+      <TutorialRecord />
+    </div>
+  )
+}
+{Astro.url.pathname === '/docs/examples/' && <ExampleCatalog />}
+
+{isTutorial && <LessonOverview next />}
+<script>
+  // Some WebKit versions focus a scroll region without arrow-scrolling it.
+  // Handle only the region itself; links and nested controls keep native keys.
+  document
+    .querySelectorAll<HTMLElement>(
+      '.table-scroll, .expressive-code pre, .example-source pre',
+    )
+    .forEach((region) => {
+      region.addEventListener('keydown', (event) => {
+        if (
+          event.target !== region ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey
+        )
+          return;
+        if (
+          !['ArrowLeft', 'ArrowRight'].includes(event.key) ||
+          region.scrollWidth <= region.clientWidth
+        )
+          return;
+        event.preventDefault();
+        region.scrollBy({
+          left: event.key === 'ArrowRight' ? 40 : -40,
+          behavior: 'instant',
+        });
+      });
+    });
+
+  const blocks = document.querySelectorAll<HTMLElement>(
+    'pre[data-language="mermaid"]',
+  );
+  if (blocks.length) {
+    const sources: string[] = JSON.parse(
+      document.querySelector<HTMLElement>('[data-diagram-sources]')?.dataset
+        .diagramSources || '[]',
+    );
+    // Rendering is an explicit enhancement. Source is available before any
+    // script loads, and a fixed viewport keeps late rendering from moving text.
+    for (const [index, block] of blocks.entries()) {
+      const button = document.createElement('button');
+      button.type = 'button';
+      button.className = 'diagram-toggle';
+      button.textContent = 'Show rendered diagram';
+      button.setAttribute('aria-expanded', 'false');
+      const figure = document.createElement('figure');
+      figure.id = `diagram-${index}`;
+      figure.hidden = true;
+      figure.className = 'ochat-diagram';
+      figure.tabIndex = 0;
+      figure.setAttribute('role', 'region');
+      figure.setAttribute(
+        'aria-label',
+        'Workflow diagram; scroll to read, complete source follows',
+      );
+      figure.addEventListener('keydown', (event) => {
+        if (
+          event.target !== figure ||
+          event.altKey ||
+          event.ctrlKey ||
+          event.metaKey ||
+          event.shiftKey
+        )
+          return;
+        if (event.key === 'ArrowLeft' || event.key === 'ArrowRight') {
+          event.preventDefault();
+          figure.scrollBy({
+            left: event.key === 'ArrowRight' ? 40 : -40,
+            behavior: 'instant',
+          });
+        }
+      });
+      button.setAttribute('aria-controls', figure.id);
+      const caption = document.createElement('figcaption');
+      caption.setAttribute('role', 'status');
+      caption.textContent = 'Rendering the diagram…';
+      const output = document.createElement('div');
+      figure.append(caption, output);
+      block.closest('.expressive-code')?.before(button, figure);
+      let loaded = false;
+      let busy = false;
+      button.addEventListener('click', async () => {
+        const opening = figure.hidden;
+        figure.hidden = !opening;
+        button.setAttribute('aria-expanded', String(opening));
+        button.textContent = opening
+          ? 'Hide rendered diagram'
+          : 'Show rendered diagram';
+        if (!opening || loaded || busy) return;
+        busy = true;
+        try {
+          const { default: mermaid } = await import('mermaid');
+          mermaid.initialize({
+            startOnLoad: false,
+            securityLevel: 'strict',
+            theme: 'neutral',
+            flowchart: { htmlLabels: false },
+            deterministicIds: true,
+          });
+          const { svg } = await mermaid.render(
+            `ochat-mermaid-${index}`,
+            sources[index] || '',
+          );
+          output.innerHTML = svg;
+          output
+            .querySelector('svg')
+            ?.setAttribute(
+              'aria-label',
+              'Workflow diagram; the complete Mermaid source follows',
+            );
+          caption.textContent = 'Workflow diagram · complete source below';
+          loaded = true;
+        } catch {
+          caption.textContent =
+            'Diagram unavailable. Read the complete source below.';
+        } finally {
+          busy = false;
+        }
+      });
+    }
+  }
+</script>
+<style is:global>
+  .catalog-shortcuts {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.7rem 1.5rem;
+    margin: 0 0 2rem;
+  }
+  .catalog-shortcuts a {
+    color: var(--sl-color-text-accent);
+    text-underline-offset: 0.2em;
+    font-weight: 600;
+  }
+  .diagram-toggle {
+    font: inherit;
+    padding: 0.6rem 1rem;
+    margin-top: 1rem;
+    color: var(--ochat-ink);
+    background: var(--ochat-panel);
+    border: 1px solid var(--ochat-control-border);
+    border-radius: 6px;
+    cursor: pointer;
+  }
+  .ochat-diagram[hidden] {
+    display: none;
+  }
+  .ochat-diagram {
+    margin: 1.5rem 0;
+    padding: 1.2rem;
+    border: 1px solid var(--sl-color-gray-5);
+    border-radius: 8px;
+    background: #fff;
+    height: 32rem;
+    max-height: 70vh;
+    color: #20242c;
+    overflow: auto;
+  }
+  .ochat-diagram figcaption {
+    font-size: 0.75rem;
+    margin-bottom: 1rem;
+  }
+  .ochat-diagram svg {
+    display: block;
+    width: 100%;
+    min-width: 36rem;
+    height: auto;
+    margin: auto;
+  }
+</style>

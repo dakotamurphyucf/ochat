@@ -5,6 +5,26 @@ This directory holds free-form Markdown files that go **beyond inline
 decisions, and any other background that helps a human (or an indexing tool)
 understand the code-base.
 
+## Choose an integration path
+
+Start with a subsystem guide, then follow its exact interfaces. The complete
+module index below also links to repository-only internals and historical notes;
+those links are not a claim of website publication or runnable examples.
+
+| Task | Entry point | Boundary |
+|---|---|---|
+| Embed an agent or client | [Agent-core integration](../agent-server/embedding.md), [client library](agent_client/architecture.doc.md) | Hosts own execution; client projections do not own durable state. |
+| Register an OCaml tool | [Custom tools](gpt_function.doc.md) | Registration and progress callbacks do not create authorization or output filtering. |
+| Consume MCP tools | [MCP client](mcp/mcp_client.doc.md), [HTTP transport](mcp/mcp_transport_http.doc.md), [OAuth cache](oauth/oauth2_manager.doc.md) | Maintained outbound tools are separate from deprecated prompt serving. |
+| Compose ChatMD files | [Source loader](chatmd/source_loader.doc.md), [imports](chatmd/chatmd_import_expansion.doc.md) | Captured source closures and relative paths have host-specific semantics. |
+| Program a moderator | [Runtime guide](../guide/chatml-moderator-runtime.md), [language internals](../guide/chatml-implementation-architecture.md) | UI capabilities and automatic work limits depend on the host. |
+| Manage conversation size | [Compaction](../context_compaction/compactor.doc.md), [archives](agent_session/compaction_archive.doc.md) | Summaries are lossy; an archive is not a running continuation. |
+| Add retrieval | [Search setup](../guide/search-and-indexing.md) | Embedding-backed agent retrieval is separate from website search. |
+| Refine prompts | [mp-refine-run](../bin/mp_refine_run.doc.md) | Local and paid strategies differ; the broad older library overview needs API reconciliation. |
+| Reuse additional components | [Embedding and caching](embedding.md) | Keep identity-bearing histories and host-owned resources. |
+| Maintain older file-backed sessions | [Prompt sessions](prompt_session.doc.md), [snapshot store](session_store.doc.md) | Compatibility APIs do not administer daemon sessions. |
+| Extend the terminal UI | [Application hosts](chat_tui/app.doc.md), [controller](chat_tui/controller.doc.md), [display types](chat_tui/types.doc.md) | Editor state is local; native/daemon mutations go through the actor. |
+
 Naming rules
 ------------
 

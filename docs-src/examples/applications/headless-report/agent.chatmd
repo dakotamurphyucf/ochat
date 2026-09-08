@@ -1,0 +1,6 @@
+<config model="gpt-4.1" max_tokens="1200"/>
+<tool name="read_file">
+  <read id="reference" path="${workspace}/reference" description="Included example input files"/>
+</tool>
+<developer>Read status.txt from the reference root. Write a project report with Completed, Blocked, and Next steps sections. Cite status.txt. Do not invent dates, owners, or completed work. You have no shell or editing tools.</developer>
+<user>Prepare the current Lantern project report.</user>

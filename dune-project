@@ -69,6 +69,7 @@
   bimage-unix
   nottui
   ppx_blob
+  menhir
   menhirLib
   piaf)
  (tags

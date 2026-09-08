@@ -1,5 +1,136 @@
 open! Core
 
+let shell_examples env root =
+  let module S = Chatmd_shell_spec.Chatmd_script_spec in
+  let module C = Shell_runtime.Chatml_extension in
+  let module L = Chatml.Chatml_lang in
+  let file = "docs-src/guide/chatmd-shell-examples.md" in
+  let guide = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in
+  let pattern =
+    Re.Perl.compile_pat
+      ~opts:[ `Dotall ]
+      "<script id=\"([^\"]+)\" language=\"chatml\" kind=\"([^\"]+)\">(.*?)</script>"
+  in
+  let scripts = Re.all pattern guide in
+  if List.length scripts <> 3 then failwith "expected three shell example scripts";
+  List.iter scripts ~f:(fun group ->
+    let id = Re.Group.get group 1 in
+    let source = Re.Group.get group 3 in
+    let position = Chatmd_shell_spec.Source_ref.{ offset = 0; line = 1; column = 0 } in
+    let source_ref =
+      Chatmd_shell_spec.Source_ref.create
+        ~file
+        ~source_dir:"."
+        ~prompt_dir:"."
+        ~namespace:None
+        ~start_pos:position
+        ~end_pos:position
+        ~source
+    in
+    let diagnostic_exn = function
+      | Ok value -> value
+      | Error diagnostic -> failwith (Chatmd_shell_spec.Diagnostic.to_string diagnostic)
+    in
+    let kind = S.kind_of_string source_ref (Re.Group.get group 2) |> diagnostic_exn in
+    let script =
+      S.
+        { id
+        ; language = "chatml"
+        ; kind
+        ; source = Inline source
+        ; source_ref
+        ; source_sha256 = Chatmd_shell_spec.Source_ref.digest source
+        ; limits = default_limits
+        }
+    in
+    let compiled =
+      match C.compile ~script with
+      | Ok value -> value
+      | Error diagnostics ->
+        failwith
+          (String.concat
+             ~sep:"\n"
+             (List.map diagnostics ~f:Chatmd_shell_spec.Diagnostic.to_string))
+    in
+    let instance = C.instantiate ~env ~lifecycle:Session compiled |> diagnostic_exn in
+    (* No process or provider capability is installed. Only argv is read by the hook. *)
+    let event =
+      L.VRecord
+        (String.Map.of_alist_exn
+           [ "argv", L.VArray [| L.VString "python3"; L.VString "-V" |] ])
+    in
+    let actual =
+      C.call instance ~context:(Docs_chatml.context (S.kind_to_string kind)) ~event
+      |> diagnostic_exn
+    in
+    let expected =
+      match kind with
+      | S.Shell_before_interceptor ->
+        C.Intercept_rewrite [ "/opt/ochat-tools/safe-python"; "-V" ]
+      | Shell_reviewer -> Review_defer
+      | Shell_audit_filter -> Audit_keep
+      | _ -> failwith ("unexpected shell example kind: " ^ id)
+    in
+    if not (C.equal_action actual expected)
+    then failwith ("shell example action mismatch: " ^ id))
+;;
+
+let batch env root scratch =
+  let module CM = Prompt.Chat_markdown in
+  let load file = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in
+  let guide = load "docs-src/cli/chat-completion.md" in
+  let copy =
+    Re.Perl.compile_pat "cp ([^ \\n]+) \"\\$OCHAT_BATCH/prompt\\.chatmd\""
+    |> fun pattern -> Re.exec pattern guide
+  in
+  let template = load (Re.Group.get copy 1) in
+  let messages =
+    Re.all (Re.Perl.compile_pat "<user>[^\\n]*?</user>") guide
+    |> List.map ~f:(fun group -> Re.Group.get group 0)
+  in
+  let first, second =
+    match messages with
+    | [ first; second ] -> first, second
+    | _ -> failwith "batch guide must provide two complete user messages"
+  in
+  let dir = Eio.Path.(Eio.Stdenv.fs env / scratch) in
+  Io.save_doc ~dir "batch-prompt.chatmd" (template ^ "\n" ^ first ^ "\n");
+  Io.append_doc ~dir "batch-session.chatmd" (Io.load_doc ~dir "batch-prompt.chatmd");
+  let check expected_users =
+    let nodes =
+      CM.parse_chat_inputs
+        ~source:"batch-session.chatmd"
+        ~dir
+        (Io.load_doc ~dir "batch-session.chatmd")
+    in
+    let users =
+      List.count nodes ~f:(function
+        | CM.User _ -> true
+        | _ -> false)
+    in
+    let configs =
+      List.count nodes ~f:(function
+        | CM.Config _ -> true
+        | _ -> false)
+    in
+    let developers =
+      List.count nodes ~f:(function
+        | CM.Developer _ -> true
+        | _ -> false)
+    in
+    if users <> expected_users || configs <> 1 || developers <> 1
+    then failwith "batch preparation/continuation changed message or template counts";
+    if
+      List.exists nodes ~f:(function
+        | CM.Tool _ | CM.Script _ -> true
+        | _ -> false)
+    then failwith "batch hello example must stay tool-free and script-free"
+  in
+  check 1;
+  Io.append_doc ~dir "batch-session.chatmd" (second ^ "\n");
+  check 2
+;;
+
 let shell_actions env root =
   let load file = Eio.Path.load Eio.Path.(Eio.Stdenv.fs env / root / file) in
   let source = load "lib/chatml/chatml_builtin_spec.ml" in

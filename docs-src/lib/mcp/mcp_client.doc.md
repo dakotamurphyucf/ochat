@@ -46,7 +46,7 @@ let () =
     List.iter tools ~f:(fun t -> printf "tool: %s\n" t.Mcp_types.Tool.name);
 
     (* 3.  Call the "echo" tool *)
-    let args = `Assoc [ "text", `String "Hello" ] in
+    let args = `Object [ "text", `String "Hello" ] in
     match Mcp_client.call_tool client ~name:"echo" ~arguments:args with
     | Ok r -> printf "echo → %s\n" (Jsonaf.to_string r.output)
     | Error m -> eprintf "error: %s\n" m;

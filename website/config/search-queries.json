@@ -1,0 +1,144 @@
+[
+  {
+    "query": "install",
+    "expected": [
+      "/docs/start/installation/",
+      "/docs/start/build-troubleshooting/"
+    ]
+  },
+  {
+    "query": "first agent",
+    "expected": [
+      "/docs/start/first-agent/"
+    ]
+  },
+  {
+    "query": "read_file",
+    "expected": [
+      "/docs/reference/tools/",
+      "/docs/reference/chatmd/"
+    ]
+  },
+  {
+    "query": "workspace",
+    "expected": [
+      "/docs/concepts/sessions-and-workspaces/"
+    ]
+  },
+  {
+    "query": "${workspace}",
+    "expected": [
+      "/docs/reference/chatmd/"
+    ]
+  },
+  {
+    "query": "ChatMD",
+    "expected": [
+      "/docs/concepts/chatmd/",
+      "/docs/reference/chatmd/"
+    ]
+  },
+  {
+    "query": "ChatML",
+    "expected": [
+      "/docs/concepts/chatml/",
+      "/docs/reference/chatml/"
+    ]
+  },
+  {
+    "query": "specialist",
+    "expected": [
+      "/docs/tutorials/specialist/"
+    ]
+  },
+  {
+    "query": "--local",
+    "expected": [
+      "/docs/start/first-agent/",
+      "/docs/reference/commands/chat-tui/"
+    ]
+  },
+  {
+    "query": "save session",
+    "expected": [
+      "/docs/concepts/sessions-and-workspaces/",
+      "/docs/start/first-agent/",
+      "/docs/tutorials/unix-daemon/"
+    ]
+  },
+  {
+    "query": "daemon reconnect",
+    "expected": [
+      "/docs/tutorials/unix-daemon/"
+    ]
+  },
+  {
+    "query": "shell_access",
+    "expected": [
+      "/docs/reference/chatmd/",
+      "/docs/guides/shell-hosts/",
+      "/docs/reference/shell-runtime/",
+      "/docs/guides/shell-examples/"
+    ]
+  },
+  {
+    "query": "MCP",
+    "expected": [
+      "/docs/library/mcp/client/",
+      "/docs/library/mcp/tools/"
+    ]
+  },
+  {
+    "query": "stdio",
+    "expected": [
+      "/docs/tutorials/stdio-client/",
+      "/docs/reference/agent-server/transports/stdio/"
+    ]
+  },
+  {
+    "query": "HTTP authentication",
+    "expected": [
+      "/docs/tutorials/http-client/",
+      "/docs/reference/agent-server/transports/http/"
+    ]
+  },
+  {
+    "query": "compaction",
+    "expected": [
+      "/docs/reference/compaction/",
+      "/docs/guides/context-compaction/"
+    ]
+  },
+  {
+    "query": "Prompt_session",
+    "expected": [
+      "/docs/compatibility/prompt-sessions/",
+      "/docs/library/"
+    ]
+  },
+  {
+    "query": "apply_patch",
+    "expected": [
+      "/docs/reference/tools/",
+      "/docs/library/"
+    ]
+  },
+  {
+    "query": "documentation review",
+    "expected": [
+      "/docs/applications/documentation-review/"
+    ]
+  },
+  {
+    "query": "research brief",
+    "expected": [
+      "/docs/applications/research-brief/"
+    ]
+  },
+  {
+    "query": "tutorial curriculum",
+    "expected": [
+      "/docs/tutorials/"
+    ]
+  }
+]

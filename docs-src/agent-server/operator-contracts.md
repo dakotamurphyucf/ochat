@@ -8,6 +8,11 @@ These complete excerpts pin the config record, scope codec and HTTP header/body
 validation contract so documentation checks detect contract drift. They are
 reference source, not standalone compilable examples.
 
+Flag inventories collect literal option strings and named Core Command flag
+declarations (displayed with a leading dash). Generated help/version options
+and parser-added aliases are not enumerated; consult each executable's help
+and [command reference](../bin/README.md) for accepted combinations.
+
 ## chat_tui.ml flag inventory
 
 [Parser/normalizer](../../bin/chat_tui.ml).
@@ -18,7 +23,7 @@ reference source, not standalone compilable examples.
 
 [Parser/normalizer](../../bin/ochat_agent_server.ml).
 
-
+`-config`, `-dry-run`, `-import-legacy`, `-inspect-store`, `-migrate-store`, `-print-config`, `-prompt`, `-validate-only`, `-workspace`
 
 ## ochat_agent_stdio.ml flag inventory
 

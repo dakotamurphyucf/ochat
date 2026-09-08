@@ -1,0 +1,408 @@
+---
+import { sourceFileId } from '../../config/source-links.mjs';
+import { Code } from 'astro:components';
+import type report from '../../.generated/examples-report.json';
+interface Props {
+  example: (typeof report.examples)[number];
+  open?: boolean;
+}
+const { example, open = false } = Astro.props;
+const language = (filename: string) => {
+  if (filename.endsWith('.chatmd')) return 'xml';
+  if (filename.endsWith('.chatml') || filename.endsWith('.ml')) return 'ocaml';
+  if (filename === 'dune') return 'scheme';
+  if (filename.endsWith('.ndjson')) return 'json';
+  return 'text';
+};
+---
+
+{
+  example.files.length > 0 && (
+    <details
+      class="example-source"
+      data-example-source={example.id}
+      open={open}
+      data-pagefind-ignore
+    >
+      <summary>
+        <span>View source · {example.title}</span>
+        <span class="file-count">{example.files.length} files</span>
+      </summary>
+      <div class="source-body">
+        <p class="source-intro">
+          Complete source files. Open a filename to read it here.
+        </p>
+        <label class="file-picker" hidden>
+          Jump to file
+          <select aria-label={`Choose a file from ${example.title}`}>
+            <option value="">Choose a file…</option>
+            {example.files.map((file) => (
+              <option value={file.path}>{file.path}</option>
+            ))}
+          </select>
+        </label>
+        <div class="source-workspace">
+          <nav
+            class="source-tree"
+            aria-label={`Files in ${example.title}`}
+            hidden
+          >
+            <p>Files</p>
+            {example.files.map((file) => (
+              <a
+                href={`#${sourceFileId(example.id, file.path)}`}
+                data-file-link={file.path}
+              >
+                <span aria-hidden="true">▤</span> {file.path}
+              </a>
+            ))}
+          </nav>
+          <div class="source-panels">
+            {example.files.map((file) => (
+              <details
+                class="source-file"
+                id={sourceFileId(example.id, file.path)}
+                data-source-path={file.path}
+                open={file.path === example.entry}
+              >
+                <summary>
+                  <span class="filename">{file.path}</span>
+                  <span class="file-role">
+                    {file.role === 'entry' ? 'Start here' : file.role}
+                  </span>
+                </summary>
+                {/* Astro strips a final snippet newline; restore full-file text before tokenization. */}
+                <Code
+                  code={file.content}
+                  transformers={[{ preprocess: () => file.content }]}
+                  lang={language(file.path)}
+                  themes={{ light: 'github-light', dark: 'github-dark' }}
+                  tabindex="0"
+                  role="region"
+                  aria-label={`${example.title}: ${file.path} source`}
+                />
+                <p class="file-actions">
+                  <button type="button" data-copy-source hidden>
+                    Copy source
+                  </button>
+                  <button
+                    type="button"
+                    data-wrap-source
+                    aria-pressed="false"
+                    hidden
+                  >
+                    Wrap lines
+                  </button>
+                  <a
+                    href={`#${sourceFileId(example.id, file.path)}`}
+                    class="file-permalink"
+                  >
+                    Link to this file
+                  </a>
+                  <a href={file.href} download={file.path.split('/').at(-1)}>
+                    Download this file
+                  </a>
+                </p>
+              </details>
+            ))}
+          </div>
+        </div>
+        <p class="source-status" role="status" />
+      </div>
+    </details>
+  )
+}
+
+<script>
+  document
+    .querySelectorAll<HTMLElement>('.example-source')
+    .forEach((viewer) => {
+      const picker = viewer.querySelector<HTMLElement>('.file-picker');
+      const select = picker?.querySelector<HTMLSelectElement>('select');
+      const tree = viewer.querySelector<HTMLElement>('.source-tree');
+      if (tree) tree.hidden = false;
+      const selectFile = (target: HTMLDetailsElement, scroll = false) => {
+        (viewer as HTMLDetailsElement).open = true;
+        viewer
+          .querySelectorAll<HTMLDetailsElement>('.source-file')
+          .forEach((file) => {
+            file.open = file === target;
+          });
+        viewer
+          .querySelectorAll<HTMLAnchorElement>('[data-file-link]')
+          .forEach((link) => {
+            if (link.dataset.fileLink === target.dataset.sourcePath)
+              link.setAttribute('aria-current', 'true');
+            else link.removeAttribute('aria-current');
+          });
+        if (select) select.value = target.dataset.sourcePath || '';
+        viewer.querySelector<HTMLElement>('.source-status')!.textContent =
+          `Opened ${target.dataset.sourcePath}`;
+        if (scroll) target.scrollIntoView({ block: 'start' });
+      };
+      const fromHash = () => {
+        let id;
+        try {
+          id = decodeURIComponent(location.hash.slice(1));
+        } catch {
+          return;
+        }
+        const target = document.getElementById(id);
+        if (
+          target instanceof HTMLDetailsElement &&
+          target.classList.contains('source-file') &&
+          viewer.contains(target)
+        )
+          selectFile(target, true);
+      };
+      viewer
+        .querySelectorAll<HTMLAnchorElement>('[data-file-link]')
+        .forEach((link) =>
+          link.addEventListener('click', () => {
+            const target = [
+              ...viewer.querySelectorAll<HTMLDetailsElement>('.source-file'),
+            ].find((file) => file.dataset.sourcePath === link.dataset.fileLink);
+            if (target) selectFile(target);
+          }),
+        );
+      if (picker && select) {
+        picker.hidden = false;
+        select.addEventListener('change', () => {
+          const target = [
+            ...viewer.querySelectorAll<HTMLDetailsElement>('.source-file'),
+          ].find((file) => file.dataset.sourcePath === select.value);
+          if (target) {
+            selectFile(target);
+            location.hash = target.id;
+          }
+        });
+      }
+      fromHash();
+      addEventListener('hashchange', fromHash);
+      viewer.querySelectorAll<HTMLElement>('.source-file').forEach((file) => {
+        const copy =
+          file.querySelector<HTMLButtonElement>('[data-copy-source]')!;
+        const wrap =
+          file.querySelector<HTMLButtonElement>('[data-wrap-source]')!;
+        copy.hidden = false;
+        wrap.hidden = false;
+        copy.addEventListener('click', async () => {
+          const status = viewer.querySelector<HTMLElement>('.source-status')!;
+          try {
+            await navigator.clipboard.writeText(
+              file.querySelector('pre code')!.textContent || '',
+            );
+            status.textContent = `Copied ${file.dataset.sourcePath}`;
+          } catch {
+            status.textContent =
+              'Copy unavailable. Select and copy the source text.';
+          }
+        });
+        wrap.addEventListener('click', () => {
+          const wrapped = wrap.getAttribute('aria-pressed') !== 'true';
+          wrap.setAttribute('aria-pressed', String(wrapped));
+          file.dataset.wrap = String(wrapped);
+        });
+      });
+    });
+</script>
+<style>
+  .source-workspace,
+  .source-panels {
+    min-width: 0;
+  }
+  .source-tree {
+    display: none;
+  }
+  .source-tree[hidden] {
+    display: none;
+  }
+  .source-file {
+    scroll-margin-top: 8rem;
+  }
+  .source-file:target {
+    outline: 2px solid var(--ochat-accent);
+    outline-offset: -2px;
+  }
+  @media (min-width: 65rem) {
+    .source-workspace {
+      display: grid;
+      grid-template-columns: minmax(9rem, 0.75fr) minmax(0, 2fr);
+    }
+    .source-workspace:has(.source-tree[hidden]) {
+      display: block;
+    }
+    .source-tree {
+      display: flex;
+      flex-direction: column;
+      gap: 0.25rem;
+      padding: 1rem;
+      border-right: 1px solid var(--ochat-line);
+    }
+    .source-tree p {
+      margin: 0 0 0.75rem;
+      font-size: 0.75rem;
+      color: var(--ochat-muted);
+    }
+    .source-tree a {
+      display: flex;
+      align-items: baseline;
+      gap: 0.5rem;
+      padding: 0.5rem;
+      font: 0.75rem/1.6 var(--ochat-mono);
+      overflow-wrap: anywhere;
+      text-decoration: none;
+      color: var(--ochat-muted);
+      border-radius: 4px;
+    }
+    .source-tree a:hover,
+    .source-tree a[aria-current] {
+      background: var(--ochat-accent-soft);
+      color: var(--ochat-accent);
+    }
+    .file-picker:not([hidden]) {
+      display: none;
+    }
+  }
+
+  .file-picker {
+    display: flex;
+    align-items: center;
+    flex-wrap: wrap;
+    gap: 0.7rem;
+    padding: 0.75rem 1rem;
+    font-size: 0.8rem;
+    color: var(--ochat-muted);
+  }
+  .file-picker[hidden],
+  button[hidden] {
+    display: none;
+  }
+  .file-picker select {
+    min-width: 0;
+    max-width: 100%;
+    min-height: 44px;
+    padding: 0.5rem;
+    border: 1px solid var(--ochat-control-border);
+    border-radius: 6px;
+    background: var(--ochat-bg);
+    color: var(--ochat-ink);
+    font: inherit;
+  }
+  .file-actions {
+    display: flex;
+    gap: 0.8rem;
+    align-items: center;
+    flex-wrap: wrap;
+  }
+  .file-actions button {
+    min-height: 36px;
+    border: 1px solid var(--ochat-control-border);
+    background: var(--ochat-bg);
+    color: var(--ochat-ink);
+    border-radius: 5px;
+    padding: 0.4rem 0.6rem;
+    font: inherit;
+    cursor: pointer;
+  }
+  .file-actions button[aria-pressed='true'] {
+    background: var(--ochat-accent-soft);
+    color: var(--ochat-accent);
+  }
+  .source-file[data-wrap='true'] :global(code) {
+    white-space: pre-wrap;
+    overflow-wrap: anywhere;
+  }
+  .source-status {
+    margin: 0;
+    padding: 0.5rem 1rem;
+    font-size: 0.8rem;
+    color: var(--ochat-muted);
+  }
+  .source-status:empty {
+    display: none;
+  }
+
+  .example-source {
+    min-width: 0;
+    margin: 1rem 0;
+    border: 1px solid var(--sl-color-gray-4);
+    border-radius: 8px;
+    background: var(--sl-color-bg);
+    overflow: hidden;
+    font-size: 0.85rem;
+  }
+  summary {
+    padding: 0.8rem 1rem;
+    cursor: pointer;
+    color: var(--sl-color-white);
+    overflow-wrap: anywhere;
+  }
+  .example-source > summary {
+    font-weight: 600;
+    color: var(--sl-color-text-accent);
+  }
+  .file-count,
+  .file-role {
+    display: inline-block;
+    margin-left: 0.5rem;
+    font-size: 0.72rem;
+    font-weight: 400;
+    color: var(--sl-color-gray-2);
+  }
+  .source-body {
+    border-top: 1px solid var(--sl-color-gray-5);
+  }
+  .source-intro {
+    margin: 0;
+    padding: 0.8rem 1rem;
+    color: var(--sl-color-gray-2);
+  }
+  .source-file {
+    margin: 0;
+    border-top: 1px solid var(--sl-color-gray-5);
+  }
+  .filename {
+    font-family: var(--sl-font-mono);
+    font-size: 0.8rem;
+  }
+  .source-file[open] > summary {
+    background: var(--sl-color-bg-sidebar);
+  }
+  .source-file :global(pre) {
+    margin: 0;
+    border: 0;
+    border-radius: 0;
+    padding: 1rem;
+    max-height: 30rem;
+    overflow: auto;
+    font-family: var(--sl-font-mono);
+    font-size: 0.8rem;
+    line-height: 1.65;
+    tab-size: 2;
+  }
+  .source-file :global(code) {
+    white-space: pre;
+    padding: 0;
+    background: none;
+  }
+  :global([data-theme='dark']) .source-file :global(.astro-code),
+  :global([data-theme='dark']) .source-file :global(.astro-code span) {
+    color: var(--shiki-dark) !important;
+    background-color: var(--shiki-dark-bg) !important;
+  }
+  .file-actions {
+    margin: 0;
+    padding: 0.6rem 1rem;
+    font-size: 0.75rem;
+  }
+  a {
+    color: var(--sl-color-text-accent);
+    text-underline-offset: 0.2em;
+  }
+  summary:focus-visible,
+  .source-file :global(pre:focus-visible) {
+    outline: 2px solid var(--sl-color-text-accent);
+    outline-offset: -3px;
+  }
+</style>

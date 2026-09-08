@@ -1,0 +1,2 @@
+Function: normalize_name
+Trim leading and trailing whitespace. Preserve spacing inside the name. An empty or whitespace-only input returns an empty string.

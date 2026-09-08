@@ -1,0 +1,99 @@
+---
+import capabilities from '../../config/capabilities.json';
+import entries from '../../config/docs-manifest.json';
+import { capabilityCoverage } from '../../scripts/publication-policy.mjs';
+const coverage = capabilityCoverage(capabilities, entries);
+---
+
+<details class="capability-overview" data-pagefind-ignore>
+  <summary>Explore the framework</summary>
+  <p>Find the reference for the part of Ochat you want to use.</p>
+  <nav aria-label="Framework capabilities">
+    <ul>
+      {
+        coverage.map((capability) => (
+          <li>
+            <a href={capability.pages[0].route}>{capability.title}</a>
+            <>
+              <p>{capability.benefit}</p>
+              <p class="capability-example">
+                For example: {capability.example}
+              </p>
+              <details class="capability-constraints">
+                <>
+                  <summary>Setup and limits</summary>
+                  <p>{capability.qualification}</p>
+                </>
+              </details>
+            </>
+          </li>
+        ))
+      }
+    </ul>
+  </nav>
+  <a class="library-link" href="/docs/library/"
+    >Browse the OCaml library overview →</a
+  >
+</details>
+<style>
+  .capability-overview {
+    margin-block: 1.5rem 2.5rem;
+    padding: 1.25rem;
+    border: 1px solid var(--ochat-line);
+    border-radius: var(--ochat-radius-panel);
+    background: var(--ochat-panel);
+  }
+  summary {
+    cursor: pointer;
+    font-weight: 750;
+    font-size: 1.1rem;
+  }
+  p {
+    color: var(--ochat-muted);
+    font-size: 0.875rem;
+    line-height: 1.65;
+  }
+  ul {
+    display: grid;
+    grid-template-columns: repeat(2, minmax(0, 1fr));
+    gap: 1rem 1.5rem;
+    padding: 0;
+    list-style: none;
+  }
+  li {
+    min-width: 0;
+    border-top: 1px solid var(--ochat-line);
+    padding-top: 1rem;
+  }
+  li p {
+    margin-block: 0.5rem 0;
+  }
+  a {
+    color: var(--ochat-accent);
+    text-underline-offset: 0.2em;
+    overflow-wrap: anywhere;
+  }
+  summary:focus-visible,
+  a:focus-visible {
+    outline: 3px solid var(--ochat-focus);
+    outline-offset: 3px;
+  }
+  .capability-example {
+    font-style: italic;
+  }
+  .capability-constraints summary {
+    font-weight: 500;
+    font-size: 0.8rem;
+    color: var(--ochat-muted);
+    padding-block: 0.3rem;
+  }
+  .library-link {
+    display: inline-block;
+    margin-top: 1rem;
+  }
+  @media (max-width: 40rem) {
+    ul {
+      grid-template-columns: minmax(0, 1fr);
+    }
+  }
+</style>

@@ -1,0 +1,2 @@
+Source B: Lantern operations note (fictional sample)
+The team can maintain a build pipeline but has little time to operate a server. Search is required. They have not tested either hosting option or agreed who handles releases.

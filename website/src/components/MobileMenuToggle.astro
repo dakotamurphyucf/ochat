@@ -1,0 +1,36 @@
+---
+import DefaultToggle from '@astrojs/starlight/components/MobileMenuToggle.astro';
+---
+
+<DefaultToggle {...Astro.props} />
+<script>
+  const sidebar = document.querySelector<HTMLElement>('#starlight__sidebar');
+  const trigger = document.querySelector<HTMLButtonElement>(
+    '[popovertarget="starlight__sidebar"]',
+  );
+  if (sidebar && trigger) {
+    let restoreFocus = false;
+    sidebar.addEventListener('beforetoggle', (event) => {
+      if ((event as ToggleEvent).newState === 'closed') {
+        restoreFocus = sidebar.contains(document.activeElement);
+      }
+    });
+    sidebar.addEventListener('toggle', (event) => {
+      const open = (event as ToggleEvent).newState === 'open';
+      trigger.setAttribute('aria-expanded', String(open));
+      if (open) {
+        const current = sidebar.querySelector<HTMLElement>(
+          '[aria-current="page"]',
+        );
+        const first = sidebar.querySelector<HTMLElement>('summary, a');
+        (current?.checkVisibility() ? current : first)?.focus();
+      } else if (
+        restoreFocus &&
+        !document.querySelector('dialog[open]') &&
+        !matchMedia('(min-width: 50rem)').matches
+      ) {
+        trigger.focus({ preventScroll: true });
+      }
+    });
+  }
+</script>

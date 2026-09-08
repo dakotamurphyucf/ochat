@@ -1,0 +1,2 @@
+Source A: Lantern team interview (fictional sample)
+The team has three maintainers. Documentation changes are reviewed in Git. They prefer a static site and do not need authentication. They have not chosen a hosting provider.

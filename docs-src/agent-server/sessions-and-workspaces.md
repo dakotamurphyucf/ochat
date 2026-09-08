@@ -1,5 +1,18 @@
 # Sessions and workspaces
 
+## Save a session and resume work
+
+Persistence depends on the host. The native local TUI uses process-bound transient
+state: quitting ends that host. Use a detached daemon session when work must
+outlive the terminal; durable records survive daemon restart, but interrupted
+operations are not executable continuations. Local stdio or an embedding host can
+use a persistent data root while remaining process-bound.
+
+Follow the [local TUI persistence guidance](tutorials/local-tui.md#persistence-and-compatibility)
+or the [Unix daemon reconnect tutorial](tutorials/unix-daemon.md) for the host you
+use. The older file-backed session commands belong to a separate compatibility
+path; their IDs and save behavior do not describe native local or daemon sessions.
+
 ## Lifecycle and commands
 
 The actor is the authoritative writer of state, history, event sequence and

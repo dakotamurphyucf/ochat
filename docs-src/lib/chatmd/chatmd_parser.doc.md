@@ -36,7 +36,7 @@ how to handle it.
 
 | Scenario | Exception | Message |
 |----------|-----------|---------|
-| `<msg>` closed with `</user>` | `Failure` | *Mismatching tags: <msg> … </user>* |
+| `<msg>` closed with `</user>` | `Failure` | `Mismatching tags: <msg> … </user>` |
 | Non-whitespace text at top level | `Failure` | *Unexpected text at top level: …* |
 
 ---

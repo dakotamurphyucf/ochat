@@ -447,6 +447,15 @@ Committed moderator execution may surface:
 Hosts decide how to honor those requests. The shared runtime policy collapses
 multiple requests rather than treating them as independent side effects.
 
+### Host budgets
+
+Automatic turns, internal-event drains, and spawned jobs have separate limits
+and owners. They are not a hard dollar cap. Native/daemon work follows the
+[agent orchestration contract](../agent-server/chatml-orchestration.md); the
+[detailed budget policy](../chatml-budget-policy.md) documents the older shared
+host/controller boundary. Installing a builtin surface does not grant a host
+capability or override its admission policy.
+
 ### Internal events
 
 `Runtime.emit(event)` buffers a ChatML value transactionally.

@@ -1,0 +1,134 @@
+[
+  {
+    "id": "repository-onboarding",
+    "title": "Understand an unfamiliar repository",
+    "category": "Code",
+    "summary": "Turn a named project file into an explanation you can check against the source.",
+    "input": "A project file and a question",
+    "output": "An explanation with file references",
+    "example": "file-reader",
+    "level": "Start here",
+    "steps": [
+      "Name the file",
+      "Read the source",
+      "Explain the project"
+    ],
+    "preview": [
+      "Lantern / project overview",
+      "Purpose \u2192 a small documentation site",
+      "Start here \u2192 reference/project.txt"
+    ],
+    "tutorial": "tutorials/file-tool",
+    "benefit": "Keep project-specific instructions in a reusable agent instead of repeating them in every conversation."
+  },
+  {
+    "id": "documentation-review",
+    "title": "Find the gaps in your documentation",
+    "category": "Documentation",
+    "summary": "Let an explorer gather the context and a specialist identify what a new contributor needs.",
+    "input": "The sample Lantern setup guide",
+    "output": "Three concrete findings and a next action",
+    "example": "docs-review",
+    "level": "Agent composition",
+    "steps": [
+      "Read the documentation",
+      "Ask a specialist",
+      "Return an actionable review"
+    ],
+    "preview": [
+      "Requirements / specify a tested runtime",
+      "Setup / include the actual commands",
+      "Checks / define a successful result"
+    ],
+    "tutorial": "tutorials/specialist",
+    "benefit": "Give the reviewer its own instructions, then reuse it from other agents. Inspect the complete recorded run."
+  },
+  {
+    "id": "research-brief",
+    "title": "Turn scattered notes into a research brief",
+    "category": "Research",
+    "summary": "Compare supplied source notes, preserve attribution, and separate evidence from open questions.",
+    "input": "Two labeled research notes",
+    "output": "A comparison and questions to investigate",
+    "example": "research-brief",
+    "level": "File tools",
+    "steps": [
+      "Read both sources",
+      "Compare the evidence",
+      "Write a sourced brief"
+    ],
+    "preview": [
+      "Decision brief / publishing options",
+      "Evidence \u2192 notes-a.txt \u00b7 notes-b.txt",
+      "Open question \u2192 maintenance ownership"
+    ],
+    "tutorial": "tutorials/file-tool",
+    "benefit": "Start with supplied notes, then add web-page ingestion and indexed retrieval when your research grows."
+  },
+  {
+    "id": "change-review",
+    "title": "Review a change against the requirements",
+    "category": "Code",
+    "summary": "Read a supplied patch and acceptance criteria, then produce findings tied to the changed lines.",
+    "input": "A sample diff and requirements",
+    "output": "A review checklist with suggested tests",
+    "example": "change-review",
+    "level": "File tools",
+    "steps": [
+      "Read the requirement",
+      "Inspect the change",
+      "Explain the risk"
+    ],
+    "preview": [
+      "Review / normalize_name",
+      "Requirement \u2192 preserve internal spacing",
+      "Suggested test \u2192 a name with two words"
+    ],
+    "tutorial": "tutorials/file-tool",
+    "benefit": "Make your review checklist repeatable. Add a specialist or explicitly configured test command as a separate extension."
+  },
+  {
+    "id": "headless-report",
+    "title": "Generate a project report from a script",
+    "category": "Automation",
+    "summary": "Run one request without the terminal UI and save the conversation as an inspectable artifact.",
+    "input": "A project status note",
+    "output": "A saved ChatMD report",
+    "example": "headless-report",
+    "level": "Batch execution",
+    "steps": [
+      "Read the status note",
+      "Summarize blockers",
+      "Save the conversation"
+    ],
+    "preview": [
+      "Project report / Lantern",
+      "Completed \u2192 documentation structure",
+      "Next \u2192 finish the setup instructions"
+    ],
+    "tutorial": "cli/chat-completion",
+    "benefit": "Use the same file-based authoring model from a shell script or CI job, with a fresh transcript for each independent run."
+  },
+  {
+    "id": "background-workflow",
+    "title": "Keep a workflow running after you disconnect",
+    "category": "Automation",
+    "summary": "Learn the host lifecycle with a real timer, then extend it with background research jobs.",
+    "input": "A daemon session and a scheduled event",
+    "output": "An observable completion after client detach",
+    "example": "background-timer",
+    "level": "Daemon hosting",
+    "steps": [
+      "Create a hosted session",
+      "Detach the client",
+      "Observe the scheduled stop"
+    ],
+    "preview": [
+      "Host-owned workflow",
+      "Client \u2192 disconnected",
+      "Timer \u2192 completion handled by the host"
+    ],
+    "tutorial": "background",
+    "benefit": "Separate the lifetime of the work from the lifetime of the terminal. Background research uses the documented model-job recipe as an extension."
+  }
+]

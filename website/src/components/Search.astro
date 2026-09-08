@@ -1,0 +1,321 @@
+---
+interface Props {
+  compact?: boolean;
+}
+const { compact = false } = Astro.props;
+---
+
+<site-search class:list={['ochat-search', { compact }]} data-pagefind-ignore>
+  <button
+    type="button"
+    data-open-modal
+    disabled
+    aria-label="Search documentation"
+    aria-keyshortcuts="Control+K Meta+K"
+    aria-haspopup="dialog"
+    aria-controls="ochat-search-dialog"
+  >
+    <svg
+      width="20"
+      height="20"
+      viewBox="0 0 24 24"
+      fill="none"
+      stroke="currentColor"
+      stroke-width="1.7"
+      aria-hidden="true"
+      ><circle cx="10.5" cy="10.5" r="6.5"></circle><path d="m16 16 5 5"
+      ></path></svg
+    >
+    <span class="trigger-label">Search</span><kbd
+      class="shortcut"
+      aria-hidden="true">Ctrl K</kbd
+    >
+  </button>
+  <noscript><a class="search-fallback" href="/docs/">Browse docs</a></noscript>
+  <dialog id="ochat-search-dialog" aria-label="Search documentation">
+    <div class="search-frame">
+      <div class="search-heading">
+        <span>Search documentation</span><button
+          type="button"
+          data-close-modal
+          aria-label="Close search"
+          >Close <span aria-hidden="true">Esc</span></button
+        >
+      </div>
+      <form role="search">
+        <label for="ochat-search-input"
+          >Search tutorials, concepts, and reference</label
+        >
+        <div class="search-field">
+          <input
+            id="ochat-search-input"
+            type="text"
+            inputmode="search"
+            enterkeyhint="search"
+            autocomplete="off"
+            spellcheck="false"
+            maxlength="300"
+            aria-controls="ochat-search-results"
+            aria-describedby="ochat-search-hint"
+            autofocus
+            placeholder="Try read_file or ${workspace}"
+          /><button type="button" data-clear aria-label="Clear search" hidden
+            >Clear</button
+          >
+        </div>
+      </form>
+      <p id="ochat-search-hint" class="search-hint">
+        Use quotes for an exact phrase.
+      </p>
+      <p class="search-status" role="status" aria-live="polite">
+        Search by topic, command, or code identifier.
+      </p>
+      <button type="button" data-retry hidden>Retry search</button>
+      <ol
+        id="ochat-search-results"
+        aria-label="Search results"
+        aria-busy="false"
+      >
+      </ol>
+      <button type="button" data-more hidden>Show more results</button>
+      <nav class="search-navigation" aria-label="Search alternatives">
+        <a href="/docs/">Browse all docs</a><a href="/docs/start/first-agent/"
+          >First agent tutorial</a
+        >
+      </nav>
+    </div>
+  </dialog>
+</site-search>
+<script>
+  import { initializeSearch } from '../scripts/search';
+  document
+    .querySelectorAll<HTMLElement>('site-search.ochat-search')
+    .forEach(initializeSearch);
+</script>
+<style>
+  .ochat-search {
+    display: block;
+    width: 100%;
+    font-family: var(--ochat-font);
+    font-weight: 400;
+    color: var(--ochat-ink);
+  }
+  .ochat-search.compact {
+    width: auto;
+  }
+  button,
+  input {
+    font: inherit;
+  }
+  button {
+    cursor: pointer;
+  }
+  button[data-open-modal] {
+    display: flex;
+    align-items: center;
+    gap: 0.65rem;
+    min-height: 44px;
+    width: 100%;
+    max-width: 22rem;
+    padding: 0.5rem 0.7rem;
+    border: 1px solid var(--ochat-control-border);
+    border-radius: 6px;
+    background: var(--ochat-bg);
+    color: var(--ochat-muted);
+    font-size: 0.85rem;
+  }
+  button[data-open-modal]:disabled {
+    display: none;
+  }
+  .shortcut {
+    margin-left: auto;
+    font-family: inherit;
+    font-size: 0.72rem;
+    border-radius: 3px;
+    padding: 0.12rem 0.3rem;
+    background: var(--ochat-panel);
+  }
+  .compact .shortcut {
+    display: none;
+  }
+  dialog {
+    padding: 0;
+    margin: min(10vh, 5rem) auto;
+    width: min(44rem, calc(100% - 2rem));
+    max-width: calc(100% - 2rem);
+    max-height: calc(100dvh - min(10vh, 5rem) - 1rem);
+    border: 1px solid var(--ochat-control-border);
+    border-radius: 12px;
+    background: var(--ochat-bg);
+    color: var(--ochat-ink);
+    box-shadow: 0 20px 80px #0004;
+    overflow: auto;
+    font-size: 1rem;
+    line-height: 1.6;
+  }
+  dialog::backdrop {
+    background: #12151bcc;
+    backdrop-filter: blur(4px);
+  }
+  .search-frame {
+    padding: 1.4rem;
+    min-width: 0;
+  }
+  .search-heading {
+    display: flex;
+    gap: 1rem;
+    align-items: center;
+    justify-content: space-between;
+    flex-wrap: wrap;
+    overflow-wrap: anywhere;
+    margin-bottom: 1rem;
+    font-weight: 650;
+  }
+  [data-close-modal] {
+    background: none;
+    border: 0;
+    color: var(--ochat-ink);
+    min-height: 44px;
+    padding: 0.3rem;
+    font-size: 0.8rem;
+  }
+  [data-close-modal] span {
+    color: var(--ochat-muted);
+    margin-left: 0.4rem;
+  }
+  label {
+    display: block;
+    color: var(--ochat-muted);
+    font-size: 0.85rem;
+    margin-bottom: 0.5rem;
+  }
+  .search-field {
+    display: flex;
+    min-width: 0;
+    border: 1px solid var(--ochat-control-border);
+    border-radius: 6px;
+    background: var(--ochat-panel);
+  }
+  input {
+    border: 0;
+    min-width: 0;
+    width: 100%;
+    border-radius: 6px;
+    padding: 0.8rem;
+    background: none;
+    color: var(--ochat-ink);
+    font-size: 1rem;
+  }
+  input::placeholder {
+    color: var(--ochat-muted);
+    opacity: 1;
+  }
+  [data-clear] {
+    border: 0;
+    background: none;
+    color: var(--ochat-accent);
+    padding: 0.6rem;
+    font-size: 0.8rem;
+  }
+  .search-hint {
+    margin: 0.5rem 0;
+    color: var(--ochat-muted);
+    font-size: 0.75rem;
+  }
+  .search-status {
+    margin: 1rem 0;
+    color: var(--ochat-muted);
+    font-size: 0.85rem;
+  }
+  ol {
+    margin: 0;
+    padding: 0;
+    list-style: none;
+  }
+  ol :global(li) {
+    padding: 1rem 0;
+    border-top: 1px solid var(--ochat-line);
+    overflow-wrap: anywhere;
+  }
+  ol :global(a) {
+    color: var(--ochat-accent);
+    font-weight: 650;
+    text-decoration: underline;
+    text-underline-offset: 0.2em;
+  }
+  ol :global(p) {
+    margin: 0.4rem 0 0;
+    font-size: 0.9rem;
+  }
+  ol :global(.search-context) {
+    font-size: 0.75rem;
+    color: var(--ochat-muted);
+  }
+  ol :global(.search-sections) {
+    display: flex;
+    flex-direction: column;
+    gap: 0.5rem;
+    margin-top: 0.6rem;
+    font-size: 0.85rem;
+  }
+  [data-more],
+  [data-retry] {
+    padding: 0.6rem 1rem;
+    min-height: 44px;
+    margin: 0.5rem 0;
+    border: 1px solid var(--ochat-control-border);
+    border-radius: 6px;
+    background: var(--ochat-panel);
+    color: var(--ochat-ink);
+  }
+  .search-navigation {
+    display: flex;
+    flex-wrap: wrap;
+    gap: 0.5rem 1.5rem;
+    border-top: 1px solid var(--ochat-line);
+    padding-top: 1rem;
+    margin-top: 0.6rem;
+    font-size: 0.8rem;
+  }
+  .search-navigation a,
+  .search-fallback {
+    color: var(--ochat-accent);
+    text-underline-offset: 0.2em;
+  }
+  :where(button, input, a):focus-visible,
+  ol :global(a:focus-visible) {
+    outline: 2px solid var(--ochat-focus);
+    outline-offset: 2px;
+  }
+  [hidden] {
+    display: none !important;
+  }
+  @media (max-width: 49.99rem) {
+    button[data-open-modal] {
+      width: 44px;
+      justify-content: center;
+      padding: 0;
+      border-color: transparent;
+      background: none;
+    }
+    .trigger-label,
+    .shortcut {
+      display: none;
+    }
+    dialog {
+      margin: 0;
+      width: 100%;
+      max-width: 100%;
+      max-height: 100dvh;
+      border-radius: 0;
+    }
+    .search-frame {
+      padding: 0.85rem;
+    }
+  }
+</style>
+<style is:global>
+  body[data-search-modal-open] {
+    overflow: hidden;
+  }
+</style>

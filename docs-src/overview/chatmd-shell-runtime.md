@@ -188,9 +188,13 @@ same path-expression variables. In native local `chat-tui` and the file-backed `
 `${workspace}` and `${tool_dir}` default to the process launch directory.
 In daemon-connected use, `${workspace}` is selected by daemon configuration and
 `${tool_dir}` remains the daemon launch directory. In all hosts,
-`${prompt_dir}` is the root prompt directory, and `${source_dir}` follows the
-file containing the declaration. The host may supply different values when
-Ochat is embedded as a library.
+`${prompt_dir}` is the root source directory in that host's runtime context,
+and `${source_dir}` follows the declaring source. Native-local and daemon hosts
+use the materialized pinned artifact tree; batch completion parses its output
+transcript, so its root source directory is the output directory, not the
+original template directory. See [sessions and workspaces](../agent-server/sessions-and-workspaces.md#workspaces-and-paths)
+and [batch source paths](../cli/chat-completion.md#6-root-scoped-file-reads).
+Embedders may supply different host values.
 
 ## `<shell_access>` root
 

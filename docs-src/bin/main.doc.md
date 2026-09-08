@@ -81,7 +81,7 @@ $ ochat query -vector-db-folder ./vector \
 val chat_completion_command : Core.Command.t
 ```
 
-Streams an assistant reply from the OpenAI *Chat Completion* endpoint
+Streams an assistant reply from the OpenAI *Responses* endpoint
 based on a *chatmd* conversation.  The implementation is a one-liner
 around `Chat_response.Driver.run_completion_stream`.
 
@@ -102,7 +102,7 @@ Counts how many *o200k_base* tokens a file occupies according to the
 [Tikitoken](https://github.com/openai/tiktoken) encoding.
 
 ```console
-$ ochat tokenize -file README.md
+$ ochat tokenize -file Readme.md
 ```
 
 ### 2.5  `html_to_markdown_command` / `h2md`
@@ -136,16 +136,17 @@ side-effect executed at module initialisation time.
 The module opens `Io` and therefore uses `Io.run_main` and
 `Io.console_log` for concise interaction with the underlying `Eio`
 environment.  These helpers are *application-specific* and documented
-separately in [`docs-src/lib/io.doc.md`](../lib/io.doc.md).
+separately in [`Io`](../lib/Io.doc.md).
 
 ---
 
 ## 4  Known limitations
 
-* **No unit tests** – behavioural changes of sub-commands are currently
-  smoke-tested manually.
-* **Hard-coded model names** – updating to newer OpenAI models requires a
-  source edit.
+* **Verification scope** – the offline documentation gate checks selected
+  examples and contracts; it does not execute every utility or paid request.
+* **Provider configuration** – completion uses the prompt configuration;
+  retrieval uses its separate embedding settings. See the
+  [provider environment guide](../agent-server/environment.md).
 * **Exit codes** – unhandled OCaml exceptions propagate to the top and
   result in a non-zero exit status without structured error handling.
 

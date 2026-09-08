@@ -1,13 +1,13 @@
 (executable
  (name docs_check)
  (modules docs_check docs_inventory docs_smoke docs_links docs_links_test docs_chatml docs_library
-  docs_observer docs_examples docs_example_environment docs_example_source docs_example_webpage
+  docs_observer docs_tutorials docs_examples docs_example_environment docs_example_source docs_example_webpage
   docs_example_completions docs_example_crawler)
  (libraries core eio eio_main eio.unix eio_posix jsonaf re mirage-crypto-rng.unix
   ochat.agent_protocol ochat.agent_server ochat.agent_client ochat.chatmd ochat.chatmd_shell_spec
-  ochat.chatml ochat.chatml_host_runtime ochat.io ochat.session ochat.lru_cache
+  ochat.chatml ochat.chatml_host_runtime ochat.shell_runtime ochat.io ochat.session ochat.lru_cache
   ochat.ttl_lru_cache ochat.template ochat.tikitoken ochat.vector_db ochat.bm25 owl base64
-  ochat.environment ochat.source ochat.webpage_markdown ochat.odoc_crawler ochat.ochat_function)
+  ochat.functions ochat.environment ochat.source ochat.webpage_markdown ochat.odoc_crawler ochat.ochat_function)
  (preprocess (pps ppx_jane)))
 
 (rule
@@ -18,6 +18,8 @@
   (source_tree ../../docs-src)
   (source_tree ../../lib)
   (source_tree ../../bin)
+  ; Documentation links include test sources outside this executable's modules.
+  (source_tree ..)
   ../../Readme.md
   ../../LICENSE.txt
   ../../prompt-examples/readme.md

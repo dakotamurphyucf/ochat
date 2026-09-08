@@ -1,0 +1,13 @@
+type state = int
+type event = [ `Session_start | `Turn_end ]
+let initial_state = 0
+let on_event : context -> state -> event -> state task =
+  fun ctx st ev ->
+    match ev with
+    | `Turn_end ->
+      let completed = st + 1 in
+      if completed >= 3 then
+        Task.bind(Runtime.end_session("Three-turn session finished"),
+          fun ignored -> Task.pure(completed))
+      else Task.pure(completed)
+    | _ -> Task.pure(st)

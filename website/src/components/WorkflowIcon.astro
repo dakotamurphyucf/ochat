@@ -1,0 +1,23 @@
+---
+const { kind = 'agent' } = Astro.props;
+const paths: Record<string, string> = {
+  Code: 'm9 6-6 6 6 6m6-12 6 6-6 6',
+  Documentation: 'M6 3h9l4 4v14H6zM14 3v5h5M9 12h7M9 16h5',
+  Research: 'M15 15l6 6M17 10a7 7 0 1 1-14 0 7 7 0 0 1 14 0',
+  Automation:
+    'M12 3v4m0 10v4M3 12h4m10 0h4M5.6 5.6l2.8 2.8m7.2 7.2 2.8 2.8M5.6 18.4l2.8-2.8m7.2-7.2 2.8-2.8M16 12a4 4 0 1 1-8 0 4 4 0 0 1 8 0',
+  agent: 'M4 7l8-4 8 4v10l-8 4-8-4zM4 7l8 4 8-4M12 11v10',
+};
+---
+
+<svg
+  width="22"
+  height="22"
+  viewBox="0 0 24 24"
+  fill="none"
+  stroke="currentColor"
+  stroke-width="1.5"
+  stroke-linecap="round"
+  stroke-linejoin="round"
+  aria-hidden="true"><path d={paths[kind] || paths.agent}></path></svg
+>

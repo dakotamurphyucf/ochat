@@ -24,8 +24,9 @@ the *k* closest snippets to your query.
 $ md-search --query TEXT [--index NAME|all] [--index-dir DIR] [-k INT]
 ```
 
-The binary is installed under the same opam package as the library, so
-`opam install ochat` will place it in your `$PATH`.
+The binary is installed with the Ochat package. Follow the
+[repository installation guide](../agent-server/quickstart.md); from the checkout
+you can also use `dune exec bin/md_search.exe --` followed by these flags.
 
 ## 2 Command-line flags
 

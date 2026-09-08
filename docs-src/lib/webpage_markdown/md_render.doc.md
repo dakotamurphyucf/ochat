@@ -41,11 +41,11 @@ output:
 
 Unsupported nodes are emitted verbatim inside:
 
-```markdown
+````markdown
 ```html
 <original-html/>
 ```
-```
+````
 
 ---
 

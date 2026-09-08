@@ -143,8 +143,11 @@ uncertain side effect.
 closed without blocking the agent; clients recover through durable replay or
 a replacement snapshot.
 
-The event retention settings bound in-memory durable replay, completed stream
-retention, and raw response-artifact lifetime. The maintenance service removes
+The event retention settings bound in-memory durable replay and raw response-artifact
+lifetime. `completed_stream_ms` is a compatibility default for an omitted
+`response_artifact_ms`; it does not enable replay of completed live streams.
+Protocol 1.0 recovers through durable events and replacement snapshots.
+The maintenance service removes
 expired response files with Eio without following symbolic links. Journals are
 pruned only behind an installed snapshot. Snapshot retention keeps the current
 checkpoint and one validated fallback. Journal pruning uses the older retained
@@ -390,7 +393,9 @@ detaches its attachments. It does not imply that a detached session stopped.
 
 The HTTP transport provides:
 
-- bounded JSON RPC POST requests, including ordered batches;
+- bounded JSON RPC POST requests, including batches whose commands may execute
+  concurrently after initialization; ordered response collection does not
+  serialize their side effects;
 - a logical-connection notification SSE queue and a separate replayable per-session SSE subscription;
 - session snapshot retrieval for projection replacement;
 - authenticated server-owned blob streaming; and

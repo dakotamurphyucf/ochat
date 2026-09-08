@@ -1,0 +1,12 @@
+# Lantern
+
+A small documentation site for a software project.
+
+## Requirements
+Install a recent Node.js release. Use whichever package manager you prefer.
+
+## Setup
+Install the dependencies, then start the preview.
+
+## Check your changes
+Run the usual checks before opening a pull request. Make sure everything works.

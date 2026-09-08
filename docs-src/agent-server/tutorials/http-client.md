@@ -1,5 +1,16 @@
 # HTTP client walkthrough
 
+Use an authenticated loopback listener, establish a logical connection, and observe its permitted live updates.
+
+## Prerequisites and command context
+
+Complete [installation](../quickstart.md), [private example setup](../../examples/agent-server/README.md), and the [stdio protocol walkthrough](stdio-client.md). Run checkout commands from the repository root with its active opam environment. Terminal B and later terminals must set `OCHAT_DEMO` to Terminal A's absolute path. The local listener is plain HTTP on loopback, not public HTTPS. Discovery/attachment use no model calls; sending a chat request requires credentials in the daemon and incurs charges.
+
+Read the current [provider TLS and permission boundaries](../permissions-and-security.md)
+before model work or deployment. [Build troubleshooting](../troubleshooting.md)
+includes the Apple Silicon/OpenBLAS setup path.
+
+
 ## Start an isolated authenticated listener
 
 Prepare [the private examples](../../examples/agent-server/README.md). Stop any
@@ -135,3 +146,7 @@ should not be resent automatically as new mutations during reconnect.
 Close logical connections deliberately and quit clients before Ctrl+C in
 Terminal A. Detached sessions remain in the private store for the next startup.
 No public listener or real-model request is required to test discovery/attachment.
+
+## Checkpoint, troubleshooting, and next step
+
+Success means an initialized RPC returns its matching response, and an authorized observer receives permitted transcript updates after a session actually produces them. An idle SSE stream is normal without events; an acknowledgement is not completed model work. For 401/403 errors, check the private token file, principal, scopes, and whether the logical connection was initialized with that credential. On restart initialize again. For a port conflict choose another port consistently. Close streams/connections, quit clients, and stop Terminal A before archiving/removing the private demo root and its credentials. The durable store remains until removed. Next, read [HTTP transport contracts](../transports/http.md) and [permissions](../permissions-and-security.md).

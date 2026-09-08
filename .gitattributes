@@ -1,0 +1,5 @@
+
+# Preserve Markdown hard breaks and indentation in the captured model transcript.
+docs-src/examples/applications/docs-review/recorded-run.chatmd whitespace=-blank-at-eol
+# Keep the redistributed MIT license byte-for-byte identical to LICENSE.txt.
+website/public/licenses/ochat.txt whitespace=-blank-at-eol

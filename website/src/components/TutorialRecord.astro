@@ -1,0 +1,128 @@
+---
+import applications from '../../.generated/applications-report.json';
+import report from '../../.generated/examples-report.json';
+import ExampleSource from './ExampleSource.astro';
+const tutorial = report.tutorials.find((t) => t.route === Astro.url.pathname);
+const application = applications.applications.find(
+  (a) => a.route === Astro.url.pathname,
+);
+const examples = application
+  ? [report.examples.find((e) => e.id === application.example)!]
+  : tutorial
+    ? tutorial.examples.map((id) => report.examples.find((e) => e.id === id)!)
+    : report.examples.filter(
+        (e) => e.tutorialRoute === Astro.url.pathname && e.files.length > 0,
+      );
+---
+
+{
+  tutorial && (
+    <aside
+      class="tutorial-record"
+      data-pagefind-ignore
+      aria-label="Tutorial context and verification"
+    >
+      <p class="lesson">
+        {tutorial.id}{' '}
+        <span>
+          of {report.tutorials.length} · {tutorial.host}
+        </span>
+      </p>
+      <p class="source-links">
+        Example catalog:{' '}
+        {tutorial.examples.map((id, index) => {
+          const example = report.examples.find((e) => e.id === id)!;
+          return (
+            <>
+              {index > 0 && ' · '}
+              <a href={`/docs/examples/#example-${id}`}>{example.title}</a>
+            </>
+          );
+        })}
+      </p>
+      <details data-pagefind-ignore>
+        <summary>
+          Verification:{' '}
+          {tutorial.verification.state === 'offline-checked'
+            ? 'checked offline'
+            : tutorial.verification.state.replaceAll('-', ' ')}
+        </summary>
+        <p>{tutorial.verification.scope}</p>
+        <p>{tutorial.verification.limitations}</p>
+        <p>
+          {tutorial.verification.testedAt} · {tutorial.verification.platform} ·{' '}
+          {tutorial.verification.toolchain}
+        </p>
+        <p>
+          Base revision <code>{tutorial.verification.baseRevision}</code>.
+          Checks apply to the recorded source hashes, including local edits.{' '}
+          {tutorial.verification.liveProvider
+            ? 'Includes recorded provider work.'
+            : 'No live provider calls.'}
+        </p>
+        <ul>
+          {tutorial.verification.commands.map((command) => (
+            <li>
+              <code>{command}</code>
+            </li>
+          ))}
+        </ul>
+      </details>
+    </aside>
+  )
+}
+{
+  examples.length > 0 && (
+    <section class="tutorial-sources" aria-label="Example source files">
+      {examples.map((example, index) => (
+        <ExampleSource example={example} open={index === 0} />
+      ))}
+    </section>
+  )
+}
+<style>
+  .tutorial-record {
+    border: 0;
+    border-left: 0;
+    border-radius: 6px;
+    padding: 0;
+    margin: 0 0 2rem;
+    background: transparent;
+    font-size: 0.85rem;
+    overflow-wrap: anywhere;
+  }
+  .lesson {
+    font-weight: 700;
+    color: var(--sl-color-text-accent);
+    margin: 0;
+  }
+  .lesson span {
+    font-weight: 400;
+    color: var(--sl-color-text);
+  }
+  .source-links {
+    margin: 0.6rem 0;
+  }
+  a {
+    color: var(--sl-color-text-accent);
+    text-underline-offset: 0.2em;
+  }
+  details {
+    margin-top: 0.7rem;
+    font-size: 0.8rem;
+  }
+  summary {
+    cursor: pointer;
+    min-height: 1.8rem;
+  }
+  details p {
+    margin: 0.7rem 0;
+  }
+  code {
+    white-space: normal;
+    overflow-wrap: anywhere;
+  }
+  ul {
+    padding-left: 1.2rem;
+  }
+</style>

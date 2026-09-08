@@ -55,15 +55,15 @@ $ dune build @doc                                 # 1. generate html docs
 $ odoc-index --root _build/default/_doc/_html      # 2. index them
 Indexing completed in .odoc_index
 
-# The resulting on-disk layout (one folder per opam package):
+# Illustrative layout when these selected packages are present:
 $ tree -L 2 .odoc_index | head -n 15
-├── core
+├── ochat
 │   ├── bm25.binio
 │   ├── vectors.binio
 │   ├── 00003d54-….md
 │   ├── 00007af9-….md
 │   └── …
-├── eio
+├── textmate-language
 │   ├── bm25.binio
 │   ├── vectors.binio
 │   ├── 000012ab-….md

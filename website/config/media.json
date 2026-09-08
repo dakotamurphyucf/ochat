@@ -1,0 +1,72 @@
+{
+  "version": 1,
+  "public": [
+    {
+      "url": "/favicon.svg",
+      "source": "website/public/favicon.svg",
+      "license": "/licenses/ochat.txt",
+      "purpose": "Site-authored geometric agent/composition mark; also owns PNG icon geometry."
+    },
+    {
+      "url": "/licenses/ochat.txt",
+      "source": "LICENSE.txt",
+      "license": "/licenses/ochat.txt",
+      "purpose": "Original Ochat MIT notice, including site-authored assets."
+    },
+    {
+      "url": "/licenses/manrope.txt",
+      "source": "@fontsource-variable/manrope/LICENSE",
+      "license": "/licenses/manrope.txt",
+      "purpose": "Manrope OFL notice; website font and static social-card font."
+    },
+    {
+      "url": "/licenses/ibm-plex-mono.txt",
+      "source": "@fontsource/ibm-plex-mono/LICENSE",
+      "license": "/licenses/ibm-plex-mono.txt",
+      "purpose": "IBM Plex Mono OFL notice for code typography."
+    },
+    {
+      "url": "/licenses/mermaid.txt",
+      "source": "mermaid/LICENSE",
+      "license": "/licenses/mermaid.txt",
+      "purpose": "Mermaid MIT notice for optional diagram rendering."
+    }
+  ],
+  "repository": [
+    {
+      "url": "/media/tui-snapshot.png",
+      "source": "assets/tui-snapshot.png",
+      "license": "/licenses/ochat.txt",
+      "purpose": "Historical screenshot retained in the maintained TUI guide with an explicit visible caption; not a current demonstration or runtime verification."
+    }
+  ],
+  "inline": [
+    {
+      "source": "website/src/components/Mark.astro",
+      "license": "/licenses/ochat.txt",
+      "purpose": "Site-authored geometric identity, same silhouette as favicon."
+    },
+    {
+      "source": "website/src/pages/index.astro",
+      "license": "/licenses/ochat.txt",
+      "purpose": "Static illustrative specialist composition, paired with an equivalent text explanation and the maintained specialist tutorial."
+    },
+    {
+      "source": "Readme.md",
+      "license": "/licenses/ochat.txt",
+      "purpose": "First XML fence owns the exact homepage agent definition; visibly labeled static source, no model output."
+    }
+  ],
+  "generators": [
+    {
+      "source": "website/scripts/publishing-assets.mjs",
+      "license": "/licenses/ochat.txt",
+      "purpose": "1200\u00d7630 PNG cards from actual page titles/status, with Manrope outlines and matching icon; four PNG icon sizes. Generated inventory includes hashes and font provenance."
+    },
+    {
+      "source": "website/src/components/MarkdownContent.astro",
+      "license": "/licenses/mermaid.txt",
+      "purpose": "Optional Mermaid rendering of exact canonical fences on request. Source remains visible on error or without JavaScript. Neutral high-contrast diagram paper in both page themes."
+    }
+  ]
+}

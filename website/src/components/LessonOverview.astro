@@ -1,0 +1,89 @@
+---
+import report from '../../.generated/examples-report.json';
+import overviews from '../../config/lesson-overviews.json';
+const index = report.tutorials.findIndex((t) => t.route === Astro.url.pathname);
+const lesson = report.tutorials[index];
+const info = lesson && overviews.find((o) => o.page === lesson.page);
+const { next = false } = Astro.props;
+---
+
+{
+  info &&
+    (next ? (
+      <aside class="lesson-next" aria-label="What comes next">
+        <>
+          <p>What comes next</p>
+          <a href={lesson.next?.route || '/docs/examples/'}>
+            {info.nextBenefit} <span aria-hidden="true">→</span>
+          </a>
+          <a class="curriculum-link" href="/docs/tutorials/">
+            Back to the curriculum
+          </a>
+        </>
+      </aside>
+    ) : (
+      <aside class="lesson-overview" aria-label="Lesson outcome and setup">
+        <>
+          <a class="curriculum-link" href="/docs/tutorials/">
+            Lesson {index + 1} of {report.tutorials.length} · View curriculum
+          </a>
+          <p>
+            <strong>You’ll build</strong> {info.outcome}
+          </p>
+          <p>
+            <strong>Before you start</strong> {info.requires}
+          </p>
+        </>
+      </aside>
+    ))
+}
+<style>
+  .lesson-overview {
+    margin-block: 0 1.5rem;
+    padding: 1rem 1.2rem;
+    border-left: 2px solid var(--ochat-accent);
+    background: var(--ochat-panel);
+    border-radius: 0 6px 6px 0;
+  }
+  .lesson-overview p {
+    font-size: 0.85rem;
+    line-height: 1.7;
+    margin: 0.5rem 0;
+    color: var(--ochat-muted);
+  }
+  strong {
+    color: var(--ochat-ink);
+    margin-right: 0.35rem;
+  }
+  .curriculum-link {
+    font-size: 0.75rem;
+    color: var(--ochat-accent);
+    text-underline-offset: 0.2em;
+  }
+  .lesson-next {
+    margin-block: 1.5rem;
+    padding: 1.2rem;
+    border: 1px solid var(--ochat-line);
+    border-radius: 8px;
+  }
+  .lesson-next p {
+    font-size: 0.75rem;
+    color: var(--ochat-muted);
+    margin: 0 0 0.5rem;
+  }
+  .lesson-next a {
+    display: block;
+    font-size: 0.9rem;
+    line-height: 1.6;
+    color: var(--ochat-accent);
+    text-underline-offset: 0.2em;
+  }
+  .lesson-next .curriculum-link {
+    font-size: 0.75rem;
+    margin-top: 0.7rem;
+  }
+  a:focus-visible {
+    outline: 3px solid var(--ochat-focus);
+    outline-offset: 3px;
+  }
+</style>

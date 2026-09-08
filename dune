@@ -1,0 +1,2 @@
+; The static website has its own toolchain and generated content.
+(dirs :standard \ website)

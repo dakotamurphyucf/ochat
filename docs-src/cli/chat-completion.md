@@ -5,120 +5,117 @@ agent sessions use [ochat-agent-server](../agent-server/README.md), while daemon
 native TUI uses [the local guide](../agent-server/tutorials/local-tui.md).
 `ochat shell` store administration targets legacy sessions, not daemon IDs.
 
-`ochat chat-completion` runs a ChatMarkdown prompt non-interactively from the
-command line. It is the script- and CI-friendly counterpart to the
-interactive `chat_tui` UI.
+`ochat chat-completion` runs a ChatMD conversation non-interactively and appends
+its response to a transcript file. Complete [installation and provider setup](../agent-server/quickstart.md)
+first. The commands below assume the repository root and the active opam switch.
+The model request requires credentials and incurs provider charges; preparation
+alone is offline. Response timing and wording vary. Review the current
+[provider transport boundary](../agent-server/permissions-and-security.md).
 
----
+<a id="130-second-smoke-test"></a>
 
-## 1 30-second smoke-test
+## 1 Run a batch request
 
-Run a single command that verifies **ChatMD parsing → tool-calling → OpenAI
-round-trip** before you start wiring Ochat into your own workflows:
+Create a private directory for this example. Copy the tracked, tool-free
+[hello prompt](../examples/agent-server/prompts/hello.chatmd) and append a request:
 
-```console
-$ ochat chat-completion \
-    -prompt-file prompts/hello.chatmd \
-    -output-file .chatmd/smoke.chatmd
+```sh
+OCHAT_BATCH=$(mktemp -d /tmp/ochat-batch.XXXXXX)
+cp docs-src/examples/agent-server/prompts/hello.chatmd "$OCHAT_BATCH/prompt.chatmd"
+printf '%s\n' '<user>Greet a new Ochat user in one sentence.</user>' >> "$OCHAT_BATCH/prompt.chatmd"
 ```
 
-Open `.chatmd/smoke.chatmd` and you should see something along the lines of:
+Keep `OCHAT_BATCH` in this shell. The copied prompt selects its model and declares
+no tools, imports, scripts, or other file dependencies. Adjust the model in your
+private copy if your configured provider requires it. Then make one request:
 
-```xml
-<tool_call id="1" name="echo">{"text":"Hello ChatMD"}</tool_call>
-<tool_response id="1">{"reply":"Hello ChatMD"}</tool_response>
+```sh
+dune exec bin/main.exe -- chat-completion \
+  -prompt-file "$OCHAT_BATCH/prompt.chatmd" \
+  -output-file "$OCHAT_BATCH/session.chatmd"
 ```
 
-If you do **not** get a reply, check that `OPENAI_API_KEY` is set and
-reachable from the shell session.
+After a successful run, inspect the transcript:
 
----
+```sh
+cat "$OCHAT_BATCH/session.chatmd"
+```
+
+It should contain the prompt, your user message, and an assistant greeting.
+No `echo` tool call is expected: this example has no tools. Exact response text,
+provider IDs, and optional reasoning output are not fixed test expectations.
+If the command fails, read its diagnostics and check the host's provider settings;
+do not assume a partially written file means the request completed.
 
 ## 2 Basic usage
 
-```console
-$ ochat chat-completion [flags]
+Once installed, the same executable is named `ochat`:
+
+```sh
+ochat chat-completion -prompt-file "$OCHAT_BATCH/prompt.chatmd" \
+  -output-file "$OCHAT_BATCH/another-session.chatmd"
 ```
 
-The command reads a ChatMD prompt and appends messages, tool calls and
-assistant responses to the output file. The entire conversation stays in a
-single `.chatmd` document.
-
-Typical invocation:
-
-```console
-$ ochat chat-completion \
-    -prompt-file prompts/hello.chatmd \
-    -output-file .chatmd/session.chatmd
-```
-
-Re-run the command with the same `-output-file` to extend the chat history.
-
----
+The driver creates its launch-directory `.chatmd` cache directory. It does not
+create arbitrary output parent directories. The private directory above already
+exists; create the parent first when choosing another output path. Conversation
+text is appended incrementally; tool payloads and provider logs can be stored
+separately. A transcript is not a backup of all runtime artifacts.
 
 ## 3 Frequently-used flags
 
 | Flag | Purpose | Default |
 |------|---------|---------|
-| `-prompt-file` | Append this template before running. Supply it only when initializing a transcript; every invocation with this flag appends it again. | *(none)* |
-| `-output-file` | Chat log that *persists* across invocations (created if absent, **appended** otherwise). Use `$(mktemp)` or `/dev/stdout` when you want an *ephemeral* transcript. | `./prompts/default.md` |
+| `-prompt-file` | Append the template before this run. Supply it only to initialize a transcript; every invocation with this flag appends it again. | *(none)* |
+| `-output-file` | Transcript path, created if absent and appended otherwise. Its parent must exist. | `./prompts/default.md` |
 
----
+Use a fresh output path for an independent conversation. Use the same output
+path and omit `-prompt-file` when continuing one. Running the initial command
+twice does not reset the transcript or deduplicate its instructions.
 
 ## 4 Conversation state lives in a file
 
-The file supplied to `-output-file` is the *single* source of truth for the
-conversation: tool-calls, reasoning deltas, assistant messages – everything is
-captured in ChatMarkdown.
+Append another user message and continue the existing example:
 
-Re-run the command with the *same* output file to extend the history:
-
-```console
-# Turn 1
-$ ochat chat-completion -prompt-file prompts/hello.chatmd \
-    -output-file .chatmd/tech_support.chatmd
-
-# Turn 2 (assistant sees full history)
-$ echo '<user>My computer is on fire!</user>' >> .chatmd/tech_support.chatmd
-$ ochat chat-completion -output-file .chatmd/tech_support.chatmd
+```sh
+printf '%s\n' '<user>Now describe ChatMD in one sentence.</user>' >> "$OCHAT_BATCH/session.chatmd"
+dune exec bin/main.exe -- chat-completion -output-file "$OCHAT_BATCH/session.chatmd"
 ```
 
-Open the result at any time in the interactive UI:
+This is another billable request. The previous transcript becomes input;
+the template is not appended again. Keep one writer per transcript and wait for
+completion before editing it or starting another run.
 
-```console
-$ dune exec bin/chat_tui.exe -- --no-config --local -file .chatmd/tech_support.chatmd
+To open its conversation in the native TUI:
+
+```sh
+dune exec bin/chat_tui.exe -- --no-config --local -file "$OCHAT_BATCH/session.chatmd"
 ```
 
-`chat_tui` lets you keep chatting as if the session had always been
-interactive.
-
----
+The TUI starts a separate native host initialized from that file. It does not
+attach to the finished batch process, and it does not turn batch storage into a
+durable daemon session. See [native TUI persistence](../agent-server/tutorials/local-tui.md).
 
 ## 5 Ephemeral runs
 
-Nothing prevents you from pointing `-output-file` to a temporary file or
-standard output when you only care about the final transcript.
+The private-directory example keeps its transcript until you deliberately remove
+or archive it. For output on stdout, the driver also supports this special path:
 
-```console
-# Linux / macOS – remove the temporary transcript after a successful run
-$ tmp=$(mktemp /tmp/ochat.XXXX) \
-  && ochat chat-completion -prompt-file prompts/hello.chatmd \
-       -output-file "$tmp" \
-  && cat "$tmp" \
-  && rm "$tmp"
-
-# Portable one-liner (store under /dev/shm when available)
-$ ochat chat-completion -prompt-file ask_weather.chatmd \
-       -output-file /dev/stdout
+```sh
+dune exec bin/main.exe -- chat-completion \
+  -prompt-file "$OCHAT_BATCH/prompt.chatmd" -output-file /dev/stdout
 ```
 
-The first variant removes only the temporary transcript, and only if preceding
-commands succeed. Both variants can leave `.chatmd` cache/tool payload files
-and provider response logs. They are not zero-artifact or privacy-preserving
-modes. See [provider logging](../lib/openai/responses.doc.md); use an isolated
-working directory and review its contents before retaining or removing it.
-The `/dev/stdout` variant writes ChatMD incrementally, not only a final answer,
-and still requires `-prompt-file` as input.
+This writes ChatMD incrementally, including the template, and still requires
+`-prompt-file` as input. `/dev/stdout` is a Unix device path, not a portable
+Windows filename. Relative dependencies use the output source context; use the
+tool-free example here rather than a prompt pack with relative imports.
+
+Both file and stdout runs can leave launch-directory `.chatmd` caches/tool
+payloads and provider response logs. They are not zero-artifact modes. See
+[provider logging](../lib/openai/responses.doc.md). When finished with the private
+example, first stop all processes using it, then archive it or remove only the
+recorded `OCHAT_BATCH` directory. Inspect other runtime artifacts separately.
 
 ## 6 Root-scoped file reads
 
@@ -132,6 +129,7 @@ Launch the command from the project the agent should read:
 
 ```console
 $ cd /work/project
+$ mkdir -p .chatmd
 $ ochat chat-completion \
     -prompt-file /work/prompts/reviewer.chatmd \
     -output-file .chatmd/review.chatmd
@@ -174,7 +172,24 @@ CI prompts should use pinned noninteractive runtimes with a complete allowlist
 and no UI reviewer. A request reaching `ask` without an available reviewer is
 denied or returned as a configured error.
 
-Shell output enters the transcript only after bounds, UTF-8 validation,
-terminal sanitization, secret redaction, and output interceptors. See
+Finalized shell output passes through byte bounds, terminal filtering, literal
+secret replacement, and output interceptors. Byte-truncated finalized output is
+not guaranteed to end on a UTF-8 boundary. Optional sanitized live progress has
+a separate incremental UTF-8 and disclosure contract; it does not replace the
+finalized transcript result. See
 [`ochat shell` runtime management](shell-runtime-management.md) and the
 [shell security guide](../guide/chatmd-shell-security.md).
+
+## Checkpoint and next step
+
+You prepared a complete input, chose a fresh output path, inspected the resulting
+conversation, and learned how to append a follow-up without repeating the template.
+A successful transcript includes your message and an assistant response; a partial
+file or a provider error is not success. Check installation/model access first for
+request failures and create the output parent before retrying a missing-path error.
+Keep one writer per transcript. Follow the cleanup guidance in section 5 after all
+processes exit; caches and provider logs can live outside the transcript directory.
+
+Previous: [add a specialist reviewer](../tutorials/specialist.md). Next:
+[control completed turns with ChatML](../tutorials/workflow.md), or choose an
+advanced host from the [tutorial and example catalog](../examples/README.md).

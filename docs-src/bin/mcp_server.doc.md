@@ -177,9 +177,9 @@ binds a lightweight Piaf server that supports:
 * OAuth2 helper endpoints under `/.well-known/oauth-authorization-server`,
   `/token`, `/authorize` and `/register`.
 
-Internally the same registry instance is shared between all transports,
-therefore a tool call performed over HTTP is immediately visible to stdio
-clients and vice-versa.
+The wrapper selects one transport per process. It does not simultaneously
+serve stdio and HTTP clients or share a registry across separately launched
+processes.
 
 ### Authentication and tokens
 

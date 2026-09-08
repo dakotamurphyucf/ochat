@@ -512,13 +512,18 @@ The parent `<tool name="read_file">` accepts an optional `description`. The
 compatibility name `get_contents` accepts the same structure but still exposes
 the model-visible function name `read_file`.
 
+#### Path variables: `${workspace}` and source directories
+
 The standard variables accepted in `path` are `${workspace}`, `${tool_dir}`,
 `${prompt_dir}`, `${source_dir}`, `${session_dir}`, `${cache_dir}`, and
-`${home}`. In the shipped TUI and batch runner, `${workspace}` and
-`${tool_dir}` are the directory from which the process was launched;
-`${prompt_dir}` is independently derived from the root prompt file. Unknown
-variables are fatal. All roots must resolve to existing directories before
-the first model request.
+`${home}`. Their values are supplied by the execution host. In native local and
+daemon hosts, `${workspace}` is the selected workspace, while `${tool_dir}`
+retains the host launch directory unless an embedder supplies it explicitly.
+Captured prompts use materialized source directories for `${prompt_dir}` and
+`${source_dir}`. See [workspaces and paths](../agent-server/sessions-and-workspaces.md#workspaces-and-paths)
+for the complete native-host contract, and the [batch command guide](../cli/chat-completion.md)
+for file-backed execution context. Unknown variables are fatal. All roots must
+resolve to existing directories before the first model request.
 
 `read_file` calls accept `file`, optional `root`, optional non-negative
 `offset`, and optional non-negative `line_count`. Root paths and requested

@@ -1,0 +1,62 @@
+[
+  {
+    "page": "first-agent",
+    "outcome": "Open a local conversation and learn how to send a request and quit.",
+    "requires": "Installed Ochat, provider configuration, and the tool-free hello prompt.",
+    "nextBenefit": "Give the agent a file tool so it can answer from project evidence."
+  },
+  {
+    "page": "tutorials/file-tool",
+    "outcome": "Read a real file through an explicitly configured tool root.",
+    "requires": "The first-agent lesson and the bundled Lantern reference directory.",
+    "nextBenefit": "Connect a specialist with its own review instructions."
+  },
+  {
+    "page": "tutorials/specialist",
+    "outcome": "Delegate a documentation review from one agent to another.",
+    "requires": "File-tool basics; keep both agent definitions beside one another.",
+    "nextBenefit": "Save an entire request and response from a script."
+  },
+  {
+    "page": "cli/chat-completion",
+    "outcome": "Save a ChatMD conversation from one headless request.",
+    "requires": "Installed Ochat, configured provider, and a fresh output filename.",
+    "nextBenefit": "Add a small script that controls when a session ends."
+  },
+  {
+    "page": "tutorials/workflow",
+    "outcome": "Ask the host to stop after three completed turns.",
+    "requires": "Local-agent basics, both bundled files, and a compatible ChatML host.",
+    "nextBenefit": "Learn how a specific shell command is declared and authorized."
+  },
+  {
+    "page": "agent-server/tutorials/shell-agent",
+    "outcome": "Inspect and authorize one fixed working-directory command.",
+    "requires": "Installed Ochat, supported shell runtime, and the host-specific authorization path.",
+    "nextBenefit": "Move an agent into a private daemon host."
+  },
+  {
+    "page": "agent-server/tutorials/unix-daemon",
+    "outcome": "Create a private daemon configuration and attach a terminal client.",
+    "requires": "Installed daemon and TUI; the private setup helper and provider environment.",
+    "nextBenefit": "Observe a scheduled event after the client disconnects."
+  },
+  {
+    "page": "background",
+    "outcome": "Observe a timer owned by the host rather than the terminal.",
+    "requires": "The private-daemon setup; the included timer itself needs no model request.",
+    "nextBenefit": "Connect through the local stdio protocol."
+  },
+  {
+    "page": "stdio",
+    "outcome": "Discover protocol capabilities through a local stdio connection.",
+    "requires": "Installed stdio host and the tutorial\u2019s private workspace and data root.",
+    "nextBenefit": "Connect an authenticated client over loopback HTTP."
+  },
+  {
+    "page": "agent-server/tutorials/http-client",
+    "outcome": "Initialize an authenticated HTTP connection to a local daemon.",
+    "requires": "The private HTTP daemon configuration and generated bearer-token file.",
+    "nextBenefit": "Choose an application and adapt its complete source bundle."
+  }
+]

@@ -73,19 +73,47 @@ Never reuse identity-sensitive state globally across daemon instances.
 - Fake provider/clock injection is useful for deterministic tests, not a claim
   that production providers or external MCP servers behave identically.
 
+## API reference and source interfaces
+
+The hosted documentation currently provides integration guides and library
+architecture notes. Generated OCaml API pages are deferred for this release.
+Use the linked public `.mli` interfaces for exact types, signatures, and lifecycle
+contracts; the website's search covers the published guides and library notes.
+
+Start with the [library overview](../lib/README.md) for the wider Ochat library
+collection, including ChatMD, ChatML, tools, MCP, and retrieval. For agent hosting,
+the map below pairs each architecture guide with a useful interface entry point.
+The interface links open the repository source at the website's build revision.
+
 ## Library map
 
-See the module inventories and ownership notes:
+See the module inventories, ownership notes, and public interfaces:
 
-- [Protocol](../lib/agent_protocol/architecture.doc.md)
-- [Session actors and runtime](../lib/agent_session/architecture.doc.md)
-- [Store](../lib/agent_store/architecture.doc.md)
-- [Daemon and authorization](../lib/agent_server/architecture.doc.md)
-- [Client](../lib/agent_client/architecture.doc.md)
-- [Unix transport](../lib/agent_transport_socket/architecture.doc.md)
-- [Stdio transport](../lib/agent_transport_stdio/architecture.doc.md)
-- [HTTP transport](../lib/agent_transport_http/architecture.doc.md)
-- [Endpoint composition](../lib/agent_transport_client/architecture.doc.md)
+- [Protocol](../lib/agent_protocol/architecture.doc.md) — [interface](../../lib/agent_protocol/command.mli).
+- [Session actors and runtime](../lib/agent_session/architecture.doc.md) — [interface](../../lib/agent_session/session_actor.mli).
+- [Store](../lib/agent_store/architecture.doc.md) — [interface](../../lib/agent_store/session_store.mli).
+- [Daemon and authorization](../lib/agent_server/architecture.doc.md) — [interface](../../lib/agent_server/daemon.mli).
+- [Client](../lib/agent_client/architecture.doc.md) — [interface](../../lib/agent_client/connection.mli).
+- [Unix transport](../lib/agent_transport_socket/architecture.doc.md) — [interface](../../lib/agent_transport_socket/client.mli).
+- [Stdio transport](../lib/agent_transport_stdio/architecture.doc.md) — [interface](../../lib/agent_transport_stdio/gateway.mli).
+- [HTTP transport](../lib/agent_transport_http/architecture.doc.md) — [interface](../../lib/agent_transport_http/client.mli).
+- [Endpoint composition](../lib/agent_transport_client/architecture.doc.md) — [interface](../../lib/agent_transport_client/endpoint.mli).
 
-Public `.mli` contracts remain the exact API reference. Markdown explains how
-those pieces fit; odoc is generated separately from interfaces.
+## Generate API documentation locally
+
+With the project dependencies and `odoc` installed in your active OCaml switch,
+run this from the repository root:
+
+```sh
+dune build @doc
+```
+
+Open `_build/default/_doc/_html/index.html` to browse the generated reference.
+This step does not require model credentials. Generation can succeed with
+unresolved-reference or markup warnings; local output is not a verified hosted
+artifact. The checked-in `docs/` snapshot is historical and does not cover all
+current agent libraries.
+
+For the separate installed-package and API-search workflows, see
+[the development guide](../../DEVELOPMENT.md). Those workflows have their own
+dependencies and, for semantic indexing, provider requirements.

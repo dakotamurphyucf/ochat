@@ -1,0 +1,176 @@
+[
+  {
+    "id": "composition",
+    "title": "Imports and reusable prompts",
+    "pages": [
+      "chatmd-reference",
+      "lib/chatmd/source_loader.doc"
+    ],
+    "qualification": "Imported paths and captured source closures follow the declaring source and selected host.",
+    "deferred": [],
+    "benefit": "Share project conventions once and reuse them across agent files.",
+    "example": "A shared review checklist imported by several project assistants."
+  },
+  {
+    "id": "tools",
+    "title": "Built-in tools",
+    "pages": [
+      "tool-reference"
+    ],
+    "qualification": "ChatMD read_dir and model-visible read_directory are distinct names; declarations do not grant all host authority.",
+    "deferred": [],
+    "benefit": "Give an agent practical abilities without writing each tool yourself.",
+    "example": "Read project files, propose edits, or ingest a supplied web page."
+  },
+  {
+    "id": "mcp",
+    "title": "MCP tools and authentication",
+    "pages": [
+      "lib/mcp/mcp_client.doc",
+      "lib/mcp/mcp_transport_http.doc",
+      "lib/oauth/oauth2_manager.doc"
+    ],
+    "qualification": "Maintained outbound MCP tools and OAuth are separate from deprecated prompt serving and daemon authentication.",
+    "deferred": [],
+    "benefit": "Connect an agent to capabilities exposed by an MCP server.",
+    "example": "Bring an existing authenticated tool service into your workflow."
+  },
+  {
+    "id": "custom-tools",
+    "title": "Custom OCaml tools",
+    "pages": [
+      "lib/gpt_function.doc"
+    ],
+    "qualification": "Progress and traces are transient and need their own disclosure policy; the tracked example has companion Dune dependencies.",
+    "deferred": [],
+    "benefit": "Expose an application-specific operation as a typed tool.",
+    "example": "Wrap a domain calculation or service call in an OCaml implementation."
+  },
+  {
+    "id": "retrieval",
+    "title": "Retrieval and indexing",
+    "pages": [
+      "guide/search-and-indexing",
+      "bin/md_index.doc",
+      "bin/odoc_search.doc"
+    ],
+    "qualification": "Agent retrieval uses configured embeddings; test vectors are not semantic retrieval and website search uses a separate index.",
+    "deferred": [],
+    "benefit": "Find relevant passages without pasting an entire documentation set.",
+    "example": "A research assistant retrieves project notes before drafting an answer."
+  },
+  {
+    "id": "refinement",
+    "title": "Prompt refinement and evaluation",
+    "pages": [
+      "bin/mp_refine_run.doc"
+    ],
+    "qualification": "Local template and paid online strategies differ; append behavior and model costs matter. The broad older library overview needs reconciliation.",
+    "deferred": [
+      "lib/meta_prompting.doc"
+    ],
+    "benefit": "Iterate on an agent\u2019s instructions with an explicit evaluation process.",
+    "example": "Compare a revised review prompt against a defined set of tasks."
+  },
+  {
+    "id": "compaction",
+    "title": "Compaction and retained history",
+    "pages": [
+      "context_compaction/compactor.doc",
+      "context_compaction/config.doc"
+    ],
+    "qualification": "Summaries are lossy; visible history, canonical history, exports, and archived states are distinct representations.",
+    "deferred": [],
+    "benefit": "Manage the context of a conversation as the work grows.",
+    "example": "Retain a working summary while keeping history representations distinct."
+  },
+  {
+    "id": "chatml",
+    "title": "ChatML capabilities and budgets",
+    "pages": [
+      "guide/chatml-moderator-runtime"
+    ],
+    "qualification": "Capabilities depend on the host. Turn, event-drain, and job limits are not dollar caps; detailed phase contracts retain their historical scope.",
+    "deferred": [
+      "chatml-budget-policy",
+      "chatml-ui-host-capabilities",
+      "chatml-host-session-controller-contract",
+      "chatml-safe-point-and-effective-history",
+      "chatml-async-completion-lifecycle"
+    ],
+    "benefit": "Put workflow decisions in a script when instructions alone are insufficient.",
+    "example": "End a session after three completed turns or react to a tool event."
+  },
+  {
+    "id": "background",
+    "title": "Jobs, timers, and restart",
+    "pages": [
+      "agent-server/chatml-orchestration"
+    ],
+    "qualification": "Recovery does not resume arbitrary continuations or guarantee exactly-once external effects.",
+    "deferred": [],
+    "benefit": "Let a host manage work after a client disconnects.",
+    "example": "Dispatch a specialist job and handle its completion in a moderator."
+  },
+  {
+    "id": "tui",
+    "title": "Terminal controls and drafts",
+    "pages": [
+      "tui"
+    ],
+    "qualification": "Attachments, exports, keybindings, and optional draft suggestions follow host-specific behavior; suggestions may send unsent text and incur costs.",
+    "deferred": [],
+    "benefit": "Inspect and steer an agent from a local terminal.",
+    "example": "Review tool activity while working in the project\u2019s own directory."
+  },
+  {
+    "id": "shell",
+    "title": "Shell grants and audit",
+    "pages": [
+      "guide/chatmd-shell-host-integration",
+      "cli/shell-runtime-management"
+    ],
+    "qualification": "Legacy Session_store commands do not administer daemon IDs; a declaration alone does not authorize execution.",
+    "deferred": [],
+    "benefit": "Give workflows explicitly configured project commands.",
+    "example": "Run a selected build or test command under the chosen host policy."
+  },
+  {
+    "id": "protocol",
+    "title": "Clients and synchronization",
+    "pages": [
+      "agent-server/protocol",
+      "permissions"
+    ],
+    "qualification": "Protocol 1.0 synchronization does not promise replay of live deltas; reconnect restores authoritative projections.",
+    "deferred": [],
+    "benefit": "Build a client that connects to a running agent.",
+    "example": "Use stdio or HTTP to send requests and inspect authoritative session state."
+  },
+  {
+    "id": "embedding",
+    "title": "OCaml integration and older APIs",
+    "pages": [
+      "ocaml",
+      "lib/embedding",
+      "lib/prompt_session.doc"
+    ],
+    "qualification": "Current actor-owned hosts and older file-backed session APIs have different storage and lifetime owners.",
+    "deferred": [],
+    "benefit": "Integrate Ochat\u2019s current host interfaces into an OCaml application.",
+    "example": "Build an application around an actor-owned agent session."
+  },
+  {
+    "id": "commands",
+    "title": "Commands and utilities",
+    "pages": [
+      "bin/README",
+      "bin/main.doc",
+      "bin/developer-utilities"
+    ],
+    "qualification": "Installed names, utility subcommands, and source-only demos are distinguished explicitly.",
+    "deferred": [],
+    "benefit": "Use Ochat from scripts as well as interactive conversations.",
+    "example": "Save a project report from a single batch invocation."
+  }
+]

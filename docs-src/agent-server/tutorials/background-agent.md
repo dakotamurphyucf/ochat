@@ -1,5 +1,16 @@
 # Background work without a connected client
 
+Schedule a bounded timer and observe the host stop the session after the client disconnects.
+
+## Prerequisites and command context
+
+Complete [the Unix daemon tutorial](unix-daemon.md) and use a separate private demo directory. Run the checkout commands from the repository root with its active opam environment. This first example uses a detached daemon host and requires no provider key when you send no model messages. ChatML and scheduling are host-dependent; native local exit would stop its process.
+
+Read the current [provider TLS and permission boundaries](../permissions-and-security.md)
+before model work or deployment. [Build troubleshooting](../troubleshooting.md)
+includes the Apple Silicon/OpenBLAS setup path.
+
+
 This first example uses a timer, not a paid model request. Prepare the
 [private tutorial directory](../../examples/agent-server/README.md).
 Edit the private `unix.sexp` prompt entry's `path` to the absolute path of the
@@ -40,3 +51,7 @@ own it. Check `job.list/get` and `schedule.list/get` after reconnect; cancel wit
 writable authorized attachment. Stop the daemon normally when done. On restart,
 durable scheduling intent and delivery records recover, but in-flight external
 effects are not automatically safe to rerun.
+
+## Checkpoint, troubleshooting, and next step
+
+After the timer fires, `session.get` should report the ended session and `schedule.list` should show the delivered timer. A disconnected client alone is not evidence of background execution. If nothing happens, check that the private prompt path names timer.chatmd, the daemon stayed alive, and the session was created after the configuration change. The example schedules at session start; reconnecting is not a request to restart the script. Shut down clients and daemon before archiving/removing the recorded private directory; durable state persists there until then. Next, inspect scheduling through [the stdio client](stdio-client.md) or study [orchestration](../chatml-orchestration.md).
