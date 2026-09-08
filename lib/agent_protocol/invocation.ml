@@ -55,10 +55,38 @@ type status =
   | Published of outcome
 [@@deriving sexp]
 
+type call_kind =
+  | Function
+  | Custom
+[@@deriving sexp, equal]
+
+type payload_fingerprint =
+  { sha256 : string
+  ; byte_length : int
+  }
+[@@deriving sexp, equal]
+
+type preparation =
+  | Passed
+  | Invalid_input
+  | Pre_tool_rejected
+[@@deriving sexp]
+
+type routing =
+  { kind : call_kind
+  ; original_name : string
+  ; original_payload : payload_fingerprint
+  ; final_payload : payload_fingerprint
+  ; canonical_payload : payload_fingerprint option [@sexp.option]
+  ; preparation : preparation
+  }
+[@@deriving sexp]
+
 type t =
   { context : context
   ; status : status
   ; output_entry_id : History.Id.t option [@sexp.option]
+  ; routing : routing option [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -142,6 +170,52 @@ let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_context t.context in
   let%bind () =
+    match t.routing with
+    | None -> Ok ()
+    | Some routing ->
+      let fingerprint value =
+        if
+          value.byte_length < 0
+          || String.length value.sha256 <> 64
+          || not
+               (String.for_all value.sha256 ~f:(function
+                  | '0' .. '9' | 'a' .. 'f' -> true
+                  | _ -> false))
+        then invalid "invalid invocation payload fingerprint"
+        else Ok ()
+      in
+      let%bind () = text ~name:"original tool name" ~max:256 routing.original_name in
+      let%bind () = fingerprint routing.original_payload in
+      let%bind () = fingerprint routing.final_payload in
+      let%bind () =
+        match routing.canonical_payload with
+        | None -> Ok ()
+        | Some value -> fingerprint value
+      in
+      let%bind () =
+        match t.context.origin, t.context.call_entry_id, routing.canonical_payload with
+        | Model, Some _, Some _ -> Ok ()
+        | Model, _, _ ->
+          invalid "model routing requires canonical call and payload bindings"
+        | _, _, None -> Ok ()
+        | _, _, Some _ -> invalid "non-model routing cannot bind a canonical payload"
+      in
+      (match routing.preparation with
+       | Passed -> Ok ()
+       | Invalid_input | Pre_tool_rejected ->
+         if
+           not
+             (String.equal routing.original_name t.context.tool_name
+              && equal_payload_fingerprint routing.original_payload routing.final_payload
+             )
+         then invalid "rejected preparation cannot change the original target or payload"
+         else (
+           match t.status with
+           | Resolved (Complete _ | Pending _) | Published (Complete _ | Pending _) ->
+             invalid "rejected preparation cannot have a successful outcome"
+           | _ -> Ok ()))
+  in
+  let%bind () =
     match t.status, t.context.call_entry_id, t.output_entry_id with
     | Published _, Some call_id, Some id ->
       if History.Id.compare call_id id = 0
@@ -160,9 +234,9 @@ let validate t =
   | Resolved outcome | Published outcome -> validate_outcome outcome
 ;;
 
-let create context =
-  Result.map (validate_context context) ~f:(fun () ->
-    { context; status = Admitted; output_entry_id = None })
+let create ?routing context =
+  let t = { context; status = Admitted; output_entry_id = None; routing } in
+  Result.map (validate t) ~f:(fun () -> t)
 ;;
 
 let dispatch t =
@@ -180,8 +254,8 @@ let resolve t ~session_id ~generation outcome =
   else (
     match t.status with
     | Dispatching ->
-      Result.map (validate_outcome outcome) ~f:(fun () ->
-        { t with status = Resolved outcome })
+      let next = { t with status = Resolved outcome } in
+      Result.map (validate next) ~f:(fun () -> next)
     | Admitted -> failure Invalid_state "invocation has not been dispatched"
     | Resolved _ | Published _ -> failure Already_resolved "invocation already resolved")
 ;;
@@ -240,6 +314,13 @@ let validate_transition ~previous next =
     let%bind () = validate previous in
     if not (Sexp.equal (sexp_of_context previous.context) (sexp_of_context next.context))
     then failure Conflict "invocation context is immutable"
+    else if
+      not
+        (Option.equal
+           (fun a b -> Sexp.equal (sexp_of_routing a) (sexp_of_routing b))
+           previous.routing
+           next.routing)
+    then failure Conflict "invocation routing provenance is immutable"
     else if
       Option.is_some previous.output_entry_id
       && not
@@ -352,6 +433,98 @@ let optional name value encode =
   Option.to_list (Option.map value ~f:(fun value -> name, encode value))
 ;;
 
+let fingerprint_to_json value =
+  `Object
+    [ "sha256", `String value.sha256
+    ; "byte_length", `Number (Int.to_string value.byte_length)
+    ]
+;;
+
+let fingerprint_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind () = closed fields [ "sha256"; "byte_length" ] in
+  let%bind sha256 = Json_codec.required_as fields "sha256" Json_codec.string in
+  let%map byte_length =
+    Json_codec.required_as
+      fields
+      "byte_length"
+      (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
+  in
+  { sha256; byte_length }
+;;
+
+let preparation_values =
+  [ "passed", Passed
+  ; "invalid_input", Invalid_input
+  ; "pre_tool_rejected", Pre_tool_rejected
+  ]
+;;
+
+let routing_to_json routing =
+  `Object
+    ([ ( "kind"
+       , `String
+           (match routing.kind with
+            | Function -> "function"
+            | Custom -> "custom") )
+     ; "original_name", `String routing.original_name
+     ; "original_payload", fingerprint_to_json routing.original_payload
+     ; "final_payload", fingerprint_to_json routing.final_payload
+     ; ( "preparation"
+       , `String
+           (fst
+              (List.find_exn preparation_values ~f:(fun (_, value) ->
+                 Sexp.equal
+                   (sexp_of_preparation value)
+                   (sexp_of_preparation routing.preparation)))) )
+     ]
+     @ optional "canonical_payload" routing.canonical_payload fingerprint_to_json)
+;;
+
+let routing_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind () =
+    closed
+      fields
+      [ "kind"
+      ; "original_name"
+      ; "original_payload"
+      ; "final_payload"
+      ; "canonical_payload"
+      ; "preparation"
+      ]
+  in
+  let%bind kind =
+    Json_codec.required_as
+      fields
+      "kind"
+      (Json_codec.enum
+         ~name:"invocation call kind"
+         [ "function", Function; "custom", Custom ])
+  in
+  let%bind original_name =
+    Json_codec.required_as fields "original_name" Json_codec.string
+  in
+  let%bind original_payload =
+    Json_codec.required_as fields "original_payload" fingerprint_of_json
+  in
+  let%bind final_payload =
+    Json_codec.required_as fields "final_payload" fingerprint_of_json
+  in
+  let%bind canonical_payload =
+    Json_codec.optional_as fields "canonical_payload" fingerprint_of_json
+  in
+  let%map preparation =
+    Json_codec.required_as
+      fields
+      "preparation"
+      (Json_codec.enum ~name:"invocation preparation" preparation_values)
+  in
+  { kind; original_name; original_payload; final_payload; canonical_payload; preparation }
+;;
+
 let context_to_json context =
   `Object
     ([ "id", Id.Invocation.to_json context.id
@@ -391,7 +564,7 @@ let context_of_json ~version json =
        ; "created_at"
        ; "deadline"
        ]
-       @ if version = 2 then [ "call_entry_id" ] else [])
+       @ if version >= 2 then [ "call_entry_id" ] else [])
   in
   let%bind id = Json_codec.required_as fields "id" Id.Invocation.of_json in
   let%bind session_id = Json_codec.required_as fields "session_id" Id.Session.of_json in
@@ -471,11 +644,17 @@ let status_of_json json =
 let to_json t =
   `Object
     ([ ( "schema_version"
-       , `Number (if Option.is_some t.context.call_entry_id then "2" else "1") )
+       , `Number
+           (if Option.is_some t.routing
+            then "3"
+            else if Option.is_some t.context.call_entry_id
+            then "2"
+            else "1") )
      ; "context", context_to_json t.context
      ; "status", status_to_json t.status
      ]
-     @ optional "output_entry_id" t.output_entry_id History.Id.to_json)
+     @ optional "output_entry_id" t.output_entry_id History.Id.to_json
+     @ optional "routing" t.routing routing_to_json)
 ;;
 
 let of_json json =
@@ -489,7 +668,7 @@ let of_json json =
       (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
   in
   let%bind () =
-    if version = 1 || version = 2
+    if version = 1 || version = 2 || version = 3
     then Ok ()
     else failure Incompatible_protocol "unsupported invocation schema version"
   in
@@ -497,7 +676,8 @@ let of_json json =
     closed
       fields
       ([ "schema_version"; "context"; "status" ]
-       @ if version = 2 then [ "output_entry_id" ] else [])
+       @ (if version >= 2 then [ "output_entry_id" ] else [])
+       @ if version = 3 then [ "routing" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -509,7 +689,13 @@ let of_json json =
   let%bind output_entry_id =
     Json_codec.optional_as fields "output_entry_id" History.Id.of_json
   in
-  let t = { context; status; output_entry_id } in
+  let%bind routing =
+    if version = 3
+    then
+      Json_codec.required_as fields "routing" routing_of_json |> Result.map ~f:Option.some
+    else Ok None
+  in
+  let t = { context; status; output_entry_id; routing } in
   let%map () = validate t in
   t
 ;;

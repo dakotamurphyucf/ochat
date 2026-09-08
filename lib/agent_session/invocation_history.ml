@@ -22,6 +22,25 @@ let canonical entry =
   | _ -> invalid "invocation history must be canonical and usable as model input"
 ;;
 
+let validate_routing (invocation : P.Invocation.t) item =
+  match invocation.routing with
+  | None -> Ok ()
+  | Some routing ->
+    let candidate =
+      match item with
+      | Item.Function_call c -> Some (P.Invocation.Function, c.arguments)
+      | Custom_tool_call c -> Some (P.Invocation.Custom, c.input)
+      | _ -> None
+    in
+    (match candidate, routing.canonical_payload with
+     | Some (kind, payload), Some expected
+       when P.Invocation.equal_call_kind kind routing.kind
+            && expected.byte_length = String.length payload
+            && String.equal expected.sha256 (Chatmd_shell_spec.Source_ref.digest payload)
+       -> Ok ()
+     | _ -> invalid "canonical call differs from recorded routing provenance")
+;;
+
 let bound_call ~history (invocation : P.Invocation.t) =
   let open Result.Let_syntax in
   match invocation.context.call_entry_id with
@@ -35,6 +54,7 @@ let bound_call ~history (invocation : P.Invocation.t) =
      | [] -> invalid "canonical invocation call is no longer retained"
      | entry :: following ->
        let%bind decoded = canonical entry in
+       let%bind () = validate_routing invocation (History_entry.item decoded) in
        (match call (History_entry.item decoded) with
         | Some (kind, provider_id, name)
           when Option.equal
@@ -105,6 +125,14 @@ let validate_publication ~history (invocation : P.Invocation.t) =
 
 let validate_retained ~history (invocation : P.Invocation.t) =
   let open Result.Let_syntax in
+  let%bind () =
+    if
+      List.exists history ~f:(fun (entry : P.History.entry) ->
+        Option.exists invocation.context.call_entry_id ~f:(fun id ->
+          P.History.Id.compare entry.id id = 0))
+    then Result.map (bound_call ~history invocation) ~f:(fun _ -> ())
+    else Ok ()
+  in
   match invocation.output_entry_id with
   | None -> Ok ()
   | Some id ->

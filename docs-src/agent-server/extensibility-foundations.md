@@ -158,12 +158,38 @@ installs neither the output nor its receipt and emits no committed history event
 Snapshot and journal restoration validate retained result payloads against their
 receipts. They preserve receipts independently of transcript retention.
 
-Bound invocation JSON records use codec version 2. Unbound legacy records retain
-version 1, and missing S-expression fields load as absent. Older readers reject
-the new codec rather than silently discard the binding. This host-only addition
-does not change the ChatML context ABI or enable public feature flags. The internal
+Invocation records with routing provenance use JSON codec version 3. Without
+routing, bound records retain codec 2 and unbound records retain codec 1. All three
+remain readable; missing optional S-expression fields load as absent. Older JSON
+readers reject new codecs rather than silently discard their evidence. These
+host-only additions do not change the ChatML context ABI or enable public feature
+flags. The internal
 stream adapter below calls this service; normal runtime construction and automatic
 restart reconciliation remain unfinished.
+
+### Retained routing provenance
+
+The streamed moderator adapter attaches routing evidence when admitting an
+invocation: function/custom kind, original tool name, SHA-256 fingerprints and
+byte lengths of the original and final raw arguments, and a separate fingerprint
+of the canonical call's displayed arguments. The final target is retained in
+`context.tool_name`; implementation and capability fingerprints remain in that
+context. Keeping the canonical fingerprint separate permits normal payload
+redaction without pretending the displayed text was the actual execution input.
+This audit record adds no second copy of the plaintext arguments.
+
+Preparation records whether original-input validation/pre-tool moderation passed,
+original input was rejected, or the pre-tool handler rejected the request. Passing
+preparation does not prove final authorization or handler execution. A preparation
+rejection cannot change the original target/arguments or resolve successfully.
+Host cancellation and failure outcomes remain possible.
+
+Routing is fixed at admission. Later invocation transitions cannot change or remove
+it. Admission and retained-state checks bind its canonical kind, payload digest
+and byte length to the actual history occurrence. Altered retained calls fail
+restoration; compaction may remove transcript entries while preserving routing and
+publication receipts. Original/final raw fingerprints are host-recorded evidence,
+not independently signed attestations or a replacement for live policy checks.
 
 ### Routed moderator calls in the turn worker
 

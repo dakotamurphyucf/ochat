@@ -89,8 +89,45 @@ let dispatch
      | Moderator _ -> ());
     let value = parse_input ~kind:request.kind ~payload:request.payload in
     let parse_error = Result.is_error value in
+    let fingerprint payload =
+      I.
+        { sha256 = Chatmd_shell_spec.Source_ref.digest payload
+        ; byte_length = String.length payload
+        }
+    in
+    let canonical_payload =
+      match History_entry.item request.call with
+      | Function_call call -> call.arguments
+      | Custom_tool_call call -> call.input
+      | _ ->
+        raise
+          (Dispatch_error
+             (P.Error.create
+                Invalid_state
+                ~message:"invocation requires a canonical tool call"
+                ~retryable:false
+                ()))
+    in
+    let routing =
+      I.
+        { kind =
+            (match request.kind with
+             | Function -> Function
+             | Custom -> Custom)
+        ; original_name = request.original_name
+        ; original_payload = fingerprint request.original_payload
+        ; final_payload = fingerprint request.payload
+        ; canonical_payload = Some (fingerprint canonical_payload)
+        ; preparation =
+            (match request.rejection with
+             | None -> Passed
+             | Some Stream.Tool_dispatch.Invalid_input -> Invalid_input
+             | Some Pre_tool -> Pre_tool_rejected)
+        }
+    in
     let invocation =
       I.create
+        ~routing
         { id = P.Id.Invocation.create ()
         ; session_id = input.Operation_worker.Input.session_id
         ; generation = input.session_generation

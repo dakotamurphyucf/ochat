@@ -938,6 +938,20 @@ let%test_unit "bound publication journal replay validates the retained call and 
     in
     let admitted =
       Agent_protocol.Invocation.create
+        ~routing:
+          (let fingerprint payload =
+             Agent_protocol.Invocation.
+               { sha256 = Chatmd_shell_spec.Source_ref.digest payload
+               ; byte_length = String.length payload
+               }
+           in
+           { kind = Function
+           ; original_name = "alias"
+           ; original_payload = fingerprint "original private input"
+           ; final_payload = fingerprint "private execution input"
+           ; canonical_payload = Some (fingerprint "{}")
+           ; preparation = Passed
+           })
         { (invocation_fixture ()).context with
           origin = Model
         ; provider_call_id = Some "call"
@@ -945,6 +959,26 @@ let%test_unit "bound publication journal replay validates the retained call and 
         }
       |> protocol_ok
     in
+    let routing = Option.value_exn admitted.routing in
+    List.iter
+      [ { routing with kind = Custom }
+      ; { routing with
+          canonical_payload = Some { sha256 = String.make 64 'a'; byte_length = 2 }
+        }
+      ]
+      ~f:(fun routing ->
+        let wrong =
+          Agent_protocol.Invocation.create ~routing admitted.context |> protocol_ok
+        in
+        assert (
+          Result.is_error
+            (Agent_session.Session_delta.apply
+               initial
+               (Batch
+                  [ Canonical_entries_appended
+                      [ Agent_session.History_codec.to_protocol call ]
+                  ; Invocation_changed wrong
+                  ]))));
     let dispatched = Agent_protocol.Invocation.dispatch admitted |> protocol_ok in
     let resolved =
       Agent_protocol.Invocation.resolve
@@ -1024,6 +1058,38 @@ let%test_unit "bound publication journal replay validates the retained call and 
       |> store_ok
     in
     assert (Poly.equal restored.invocations [ published ]);
+    let changed_call =
+      match History_entry.item call with
+      | Function_call value ->
+        History_entry.create_with_id
+          ~id:(id 0)
+          (Function_call { value with arguments = "changed" })
+      | _ -> assert false
+    in
+    let changed =
+      { restored with
+        conversation =
+          { restored.conversation with
+            canonical_history =
+              List.map [ changed_call; output ] ~f:Agent_session.History_codec.to_protocol
+          }
+      }
+    in
+    assert (
+      Result.is_error
+        (Agent_session.Session_persistence.restore_snapshot
+           (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t changed))));
+    let compacted =
+      { restored with
+        conversation = { restored.conversation with canonical_history = [] }
+      }
+    in
+    let compacted =
+      Agent_session.Session_persistence.restore_snapshot
+        (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t compacted))
+      |> store_ok
+    in
+    assert (Poly.equal compacted.invocations [ published ]);
     let wrong =
       Agent_session.History_codec.user_text ~id:(id 1) "forged result"
       |> Agent_session.History_codec.to_protocol
@@ -2901,6 +2967,7 @@ let%test_unit
     ; `Custom_invalid
     ; `Rewrite_bad
     ; `Rewrite_ok
+    ; `Redacted_input
     ]
     ~f:(fun mode ->
       let request_count = ref 0 in
@@ -3135,7 +3202,9 @@ let%test_unit
                 ; post_stream = Some post_stream
                 ; agent_page_classifications = []
                 ; delegated_permission_tools = String.Set.empty
-                ; redact_tool_payload = (fun ~name:_ value -> value)
+                ; redact_tool_payload =
+                    (fun ~name:_ value ->
+                      if Poly.equal mode `Redacted_input then "\"redacted\"" else value)
                 }
             in
             Agent_session.Operation_worker.run worker ~sw ~input caps))
@@ -3151,11 +3220,61 @@ let%test_unit
            let state = finished () in
            assert (List.length state.invocations = 1);
            let invocation = List.hd_exn state.invocations in
+           let routing = Option.value_exn invocation.routing in
+           let original_payload =
+             if Poly.equal mode `Invalid_json
+             then "[broken"
+             else if Poly.equal mode `Original_invalid
+             then "\"wrong\""
+             else if redirected
+             then "{}"
+             else "null"
+           in
+           let final_payload =
+             if Poly.equal mode `Redirect_bad || Poly.equal mode `Rewrite_bad
+             then "\"wrong\""
+             else if redirected || rewritten
+             then "null"
+             else original_payload
+           in
+           let fingerprint payload =
+             Agent_protocol.Invocation.
+               { sha256 = Chatmd_shell_spec.Source_ref.digest payload
+               ; byte_length = String.length payload
+               }
+           in
+           assert (
+             String.equal
+               routing.original_name
+               (if redirected then "alias" else "counter"));
+           assert (
+             Poly.equal
+               routing.kind
+               (if custom then Agent_protocol.Invocation.Custom else Function));
+           assert (Poly.equal routing.original_payload (fingerprint original_payload));
+           assert (Poly.equal routing.final_payload (fingerprint final_payload));
+           assert (
+             Poly.equal
+               routing.canonical_payload
+               (Some
+                  (fingerprint
+                     (if Poly.equal mode `Redacted_input
+                      then "\"redacted\""
+                      else final_payload))));
+           assert (
+             Poly.equal
+               routing.preparation
+               (if invalid_original
+                then Agent_protocol.Invocation.Invalid_input
+                else if pre_rejected
+                then Pre_tool_rejected
+                else Passed));
            let expected_count =
              if
                Poly.equal mode `Success
                || Poly.equal mode `Custom_success
                || Poly.equal mode `Rewrite_ok
+               || Poly.equal mode `Redacted_input
                || Poly.equal mode `Post_fail
                || Poly.equal mode `Publish_rejected
                || Poly.equal mode `Redirect
@@ -3184,6 +3303,7 @@ let%test_unit
                Poly.equal mode `Success
                || Poly.equal mode `Custom_success
                || Poly.equal mode `Rewrite_ok
+               || Poly.equal mode `Redacted_input
                || Poly.equal mode `Post_fail
                || Poly.equal mode `Redirect
                || Poly.equal mode `End_session

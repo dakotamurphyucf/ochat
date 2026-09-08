@@ -161,7 +161,7 @@ let%expect_test
 let%expect_test "incompatible and malformed snapshots fail instead of losing state" =
   let invocation = get (Invocation.create (context ())) in
   let encoded = Invocation.to_json invocation in
-  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "3")));
+  report (Invocation.of_json (replace_field encoded "schema_version" (`Number "4")));
   report
     (Invocation.of_json
        (replace_field encoded "status" (`Object [ "type", `String "resolved" ])));
@@ -345,4 +345,119 @@ let%expect_test "legacy records remain unbound and v2 cannot lose its occurrence
     invalid_request
     invalid_request
     invalid_request |}]
+;;
+
+let%test_unit "routing provenance has a closed v3 codec and immutable admission binding" =
+  let module I = Invocation in
+  let fp text = I.{ sha256 = String.make 64 'a'; byte_length = String.length text } in
+  let original =
+    { (context ()) with call_entry_id = Some (get (History.Id.of_string "4:test:1")) }
+  in
+  let routing =
+    I.
+      { kind = Function
+      ; original_name = "alias"
+      ; original_payload = fp "{}"
+      ; final_payload = fp "null"
+      ; canonical_payload = Some (fp "[redacted]")
+      ; preparation = Passed
+      }
+  in
+  let admitted = I.create ~routing original |> get in
+  let json = I.to_json admitted in
+  assert (
+    Poly.equal
+      (Json_codec.fields json
+       |> get
+       |> fun fields -> Json_codec.required fields "schema_version" |> get)
+      (`Number "3"));
+  let decoded = I.of_json json |> get in
+  assert (Sexp.equal (I.sexp_of_t admitted) (I.sexp_of_t decoded));
+  assert (
+    Sexp.equal (I.sexp_of_t admitted) (I.sexp_of_t (I.t_of_sexp (I.sexp_of_t admitted))));
+  assert (Result.is_error (I.of_json (replace_field json "schema_version" (`Number "2"))));
+  assert (Result.is_error (I.of_json (replace_field json "routing" `Null)));
+  let without =
+    match json with
+    | `Object fields -> `Object (List.Assoc.remove fields ~equal:String.equal "routing")
+    | _ -> assert false
+  in
+  assert (Result.is_error (I.of_json without));
+  let changed =
+    I.create ~routing:{ routing with original_name = "another" } original
+    |> get
+    |> I.dispatch
+    |> get
+  in
+  assert (Result.is_error (I.validate_transition ~previous:(Some admitted) changed));
+  let removed = I.create original |> get |> I.dispatch |> get in
+  assert (Result.is_error (I.validate_transition ~previous:(Some admitted) removed));
+  let script =
+    I.create
+      ~routing:{ routing with canonical_payload = None }
+      { original with origin = Script; provider_call_id = None; call_entry_id = None }
+    |> get
+  in
+  assert (
+    Sexp.equal (I.sexp_of_t script) (I.sexp_of_t (I.of_json (I.to_json script) |> get)));
+  let resolved =
+    I.dispatch admitted |> get |> fun inv -> resolve inv (Complete `Null) |> get
+  in
+  let published =
+    I.publish_with_history
+      resolved
+      ~output_entry_id:(get (History.Id.of_string "4:test:2"))
+    |> get
+  in
+  assert (Poly.equal published.routing (Some routing));
+  assert (
+    Sexp.equal
+      (I.sexp_of_t published)
+      (I.sexp_of_t (I.of_json (I.to_json published) |> get)))
+;;
+
+let%test_unit "routing rejects malformed fingerprints and successful denied preparation" =
+  let module I = Invocation in
+  let fp = I.{ sha256 = String.make 64 'a'; byte_length = 4 } in
+  let original =
+    { (context ()) with call_entry_id = Some (get (History.Id.of_string "4:test:1")) }
+  in
+  let routing =
+    I.
+      { kind = Function
+      ; original_name = original.tool_name
+      ; original_payload = fp
+      ; final_payload = fp
+      ; canonical_payload = Some fp
+      ; preparation = Invalid_input
+      }
+  in
+  let make routing = I.create ~routing original in
+  List.iter
+    [ { fp with sha256 = "short" }
+    ; { fp with sha256 = String.make 64 'G' }
+    ; { fp with byte_length = -1 }
+    ]
+    ~f:(fun bad ->
+      assert (Result.is_error (make { routing with original_payload = bad })));
+  assert (Result.is_error (make { routing with original_name = "redirected" }));
+  assert (
+    Result.is_error (make { routing with final_payload = { fp with byte_length = 5 } }));
+  assert (Result.is_error (make { routing with canonical_payload = None }));
+  let inv = make routing |> get |> I.dispatch |> get in
+  assert (Result.is_error (resolve inv (Complete `Null)));
+  assert (
+    Result.is_error
+      (resolve inv (Pending (Job (get (Id.Job.of_string "job_example")), `Null))));
+  ignore
+    (resolve
+       inv
+       (Fail
+          { code = "invocation.invalid_input"
+          ; message = "rejected"
+          ; retryable = false
+          ; details = `Null
+          })
+     |> get);
+  ignore (I.cancel inv ~reason:"cancelled" |> get)
 ;;

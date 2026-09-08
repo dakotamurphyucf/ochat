@@ -58,14 +58,51 @@ type status =
   | Published of outcome
 [@@deriving sexp]
 
+type call_kind =
+  | Function
+  | Custom
+[@@deriving sexp, equal]
+
+type payload_fingerprint =
+  { sha256 : string
+  ; byte_length : int
+  }
+[@@deriving sexp, equal]
+
+type preparation =
+  | Passed
+  | Invalid_input
+  | Pre_tool_rejected
+[@@deriving sexp]
+
+(** Host-retained routing provenance. Fingerprints describe exact raw bytes;
+    canonical_payload describes the separately redacted/displayed call. No extra
+    plaintext arguments are retained. The final target is context.tool_name.
+    [Passed] records completion of original-input/pre-tool preparation, not
+    final-target authorization or successful execution. This is audit evidence,
+    not authority or a claim that the handler executed. *)
+type routing =
+  { kind : call_kind
+  ; original_name : string
+  ; original_payload : payload_fingerprint
+  ; final_payload : payload_fingerprint
+  ; canonical_payload : payload_fingerprint option [@sexp.option]
+  ; preparation : preparation
+  }
+[@@deriving sexp]
+
 type t = private
   { context : context
   ; status : status
   ; output_entry_id : History.Id.t option [@sexp.option]
+  ; routing : routing option [@sexp.option]
   }
 [@@deriving sexp]
 
-val create : context -> (t, Error.t) result
+(** Routing, when present, is fixed at admission and uses JSON codec version 3.
+    Legacy records without routing remain readable. *)
+val create : ?routing:routing -> context -> (t, Error.t) result
+
 val validate : t -> (unit, Error.t) result
 val dispatch : t -> (t, Error.t) result
 
@@ -90,7 +127,8 @@ val publish : t -> (t, Error.t) result
 (** Publish a canonically bound model invocation with a retained output receipt.
     Repeating the same occurrence is idempotent; another occurrence is rejected.
     The actor must validate and atomically append the actual history entry.
-    Bound records use JSON codec version 2; legacy records remain version 1. *)
+    Routing records use JSON codec 3. Without routing, bound records use codec 2
+    and unbound legacy records retain codec 1. *)
 val publish_with_history : t -> output_entry_id:History.Id.t -> (t, Error.t) result
 
 (** Checks a proposed durable replacement, including immutable context and
