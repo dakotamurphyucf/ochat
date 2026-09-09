@@ -16,6 +16,13 @@ val is_halted : t -> bool
     The owning actor must still enforce invocation ownership/cancellation. *)
 val with_lifecycle : t -> is_halted:(unit -> bool) -> t
 
+(** Qualified background host policy: persist handler actions with their outcome
+    instead of forwarding ephemeral runtime requests. Requires actor-owned commit
+    and follow-up consumption; this setting adds no execution authority. *)
+val with_durable_requests : t -> t
+
+val durable_requests : t -> bool
+
 (** Host dispatch accessors. These expose current binding/policy services, not
     permission to execute implementations outside an owned invocation. *)
 val current_capabilities : t -> Chat_response.Tool_capability.t

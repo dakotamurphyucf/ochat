@@ -1944,9 +1944,12 @@ after the current turn completes. In v1 it is only valid in phases:
 - `internal_event`
 
 The internal `extensibility-v1` moderator surface also permits this request in
-`tool_observed`. Its embedding must schedule the follow-up after the observation
-commits; automatic idle observation scheduling is not yet installed in the public
-runtime.
+`tool_observed` and `tool_invoked`. Qualified daemon hosts persist the request with
+the observation or handler result before scheduling it. Background handler requests
+wait for their owning job to complete; cancelled or interrupted jobs discard them.
+Handler and observation requests retain independent disposition, and an applied
+request is not replayed on restart. General feature availability remains gated on
+authoring-support qualification.
 
 The host interprets this request after `turn_end` handling finishes; it does not
 directly invoke a side model call.
@@ -2955,7 +2958,8 @@ Current default behavior is intentionally conservative:
   the host supplies handlers. 
 - `Runtime.request_turn` is a local transactional operation and is phase-restricted in v1
 (see above). It is surfaced to the host as a runtime request and interpreted by the
-host conversation loop after `turn_end`.
+host conversation loop after `turn_end`, or by a qualified daemon at the persisted
+handler/observation boundary described in section 13.4.7.
 
 Named model recipes are host-defined. `Model.call("recipe", payload)` and
 `Model.spawn("recipe", payload)` do not select arbitrary provider model names;

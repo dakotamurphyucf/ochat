@@ -7,6 +7,7 @@
   background_execution_tests
   background_completion_tests
   background_event_tests
+  handler_intent_tests
   compaction_tests
   event_delivery_tests
   follow_up_tests

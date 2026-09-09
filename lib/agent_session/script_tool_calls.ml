@@ -28,6 +28,7 @@ type t =
   ; moderator_names : String.Set.t
   ; now : unit -> Agent_protocol.Timestamp.t
   ; is_halted : unit -> bool
+  ; durable_requests : bool
   ; requires_active_moderator : C.reference -> bool
   ; authorize : I.t -> C.binding -> (unit, Agent_protocol.Error.t) result
   ; prepare_output :
@@ -51,6 +52,7 @@ let create
   ; moderator_names
   ; now
   ; is_halted
+  ; durable_requests = false
   ; requires_active_moderator
   ; authorize
   ; prepare_output
@@ -75,6 +77,8 @@ let is_halted t = t.is_halted ()
 let current_capabilities t = t.registry ()
 let authorize t = t.authorize
 let with_lifecycle t ~is_halted = { t with is_halted }
+let with_durable_requests t = { t with durable_requests = true }
+let durable_requests t = t.durable_requests
 let with_moderator_dispatch t ~dispatch = { t with moderator = Some dispatch }
 
 let validate_definition t definition =

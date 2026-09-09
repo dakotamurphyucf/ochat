@@ -688,7 +688,8 @@ let default_operations ?(handlers = default_handlers) () : op_def list =
     }
   ; { name = "Runtime.request_turn"
     ; kind = Local_transactional
-    ; phase_check = require_phases [ "turn_end"; "internal_event"; "tool_observed" ]
+    ; phase_check =
+        require_phases [ "turn_end"; "internal_event"; "tool_observed"; "tool_invoked" ]
     ; perform =
         with_nullary "Runtime.request_turn" (fun session ->
           wrap_unit_result (handlers.on_request_turn session))

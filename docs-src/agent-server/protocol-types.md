@@ -1158,6 +1158,12 @@ type follow_up_status =
   | Discarded_follow_up of follow_up * string
 [@@deriving equal, sexp]
 
+type handler_intent =
+  { follow_up : follow_up_status
+  ; compaction_operation_id : Id.Operation.t option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
 type observation =
   { observer : observer
   ; status : observation_status
@@ -1183,6 +1189,9 @@ type t = private
   ; parent_event : Id.Moderator_execution.t option [@sexp.option]
     (** Direct ordinary-event owner; exclusive with invocation/job parents. Codec 9.
         Requires matching moderator observation intent and actor admission. *)
+  ; handler_intent : handler_intent option [@sexp.option]
+    (** Codec10. Actions requested by the tool implementation, recorded atomically
+        with its original outcome. Independent of post-tool observation intent. *)
   }
 [@@deriving equal, sexp]
 
@@ -1196,6 +1205,15 @@ val create
   -> (t, Error.t) result
 
 val validate : t -> (unit, Error.t) result
+
+(** Attach actions to a locally resolved invocation before committing it. The
+    actor transition permits first attachment only with Dispatching -> Resolved;
+    this pure function grants no authority to schedule the action. *)
+val record_handler_intent : t -> requests:follow_up -> (t, Error.t) result
+
+val apply_handler_intent : t -> (t, Error.t) result
+val accept_handler_compaction : t -> operation_id:Id.Operation.t -> (t, Error.t) result
+val discard_handler_intent : t -> reason:string -> (t, Error.t) result
 val dispatch : t -> (t, Error.t) result
 
 (** Records one outcome for a dispatched invocation after checking its owner

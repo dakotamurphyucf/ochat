@@ -1193,6 +1193,7 @@ let build_with_services
                    ~request ->
                    let script_tools =
                      Script_tool_calls.with_lifecycle script_tools ~is_halted
+                     |> Script_tool_calls.with_durable_requests
                    in
                    let observer =
                      Option.bind moderator ~f:(fun (moderator, _) ->

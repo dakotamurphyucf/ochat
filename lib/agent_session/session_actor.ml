@@ -155,7 +155,9 @@ type _ request =
       job_scope * Agent_protocol.Invocation.t
       -> invocation_execution request
   | Finish_invocation :
-      invocation_execution * Agent_protocol.Invocation.outcome
+      invocation_execution
+      * Agent_protocol.Invocation.outcome
+      * Agent_protocol.Invocation.follow_up option
       -> Agent_protocol.Invocation.t request
   | Claim_moderator_invocation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
@@ -1327,7 +1329,7 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   Ok execution
 ;;
 
-let finish_invocation t execution outcome =
+let finish_invocation t execution outcome requests =
   let open Result.Let_syntax in
   let%bind cancelled =
     match execution.owner with
@@ -1404,6 +1406,12 @@ let finish_invocation t execution outcome =
       ~session_id:t.state.identity.session_id
       ~generation:t.state.identity.generation
       outcome
+  in
+  let%bind resolved =
+    match requests, outcome with
+    | Some requests, (Complete _ | Fail _ | Pending _) ->
+      Agent_protocol.Invocation.record_handler_intent resolved ~requests
+    | None, _ | Some _, Cancelled _ -> Ok resolved
   in
   let permissions, permission_deltas, permission_payloads =
     cleanup_invocation_permissions t [ execution.dispatched.context.id ]
@@ -1497,7 +1505,7 @@ let has_pending_permission t =
     Agent_protocol.Permission.equal_state permission.state Pending)
 ;;
 
-let idle_moderator_eligible t =
+let idle_actor_available t =
   (not t.idle_moderator_borrowed)
   && Option.is_none t.moderator_borrow
   && Option.is_none t.state.active_operation
@@ -1507,8 +1515,9 @@ let idle_moderator_eligible t =
       | _ -> false)
   && (not t.state.halted)
   && Option.is_none t.state.failure
-  && not (has_pending_permission t)
 ;;
+
+let idle_moderator_eligible t = idle_actor_available t && not (has_pending_permission t)
 
 let claim_queued_event t id operation_id snapshot =
   let open Result.Let_syntax in
@@ -3077,8 +3086,11 @@ let outcome_requests_compaction = function
   | Cancelled _ | Failed _ -> false
 ;;
 
-let follow_up_deltas (plan : Observation_follow_up.t) =
-  List.map plan.invocations ~f:Observation_follow_up.delta
+let follow_up_deltas t (plan : Observation_follow_up.t) =
+  List.map plan.invocations ~f:(fun invocation ->
+    match Int.equal invocation.context.generation t.state.identity.generation with
+    | true -> Session_delta.Invocation_changed invocation
+    | false -> Session_delta.Invocation_reconciled invocation)
   @ List.map plan.events ~f:Observation_follow_up.event_delta
 ;;
 
@@ -3121,7 +3133,7 @@ let admit_moderator_turn t operation_id =
     | false, false -> Ok ()
   in
   let%bind plan = Observation_follow_up.admit_turn ~state:t.state ~observer in
-  match follow_up_deltas plan with
+  match follow_up_deltas t plan with
   | [] -> Ok ()
   | deltas ->
     transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
@@ -3149,7 +3161,7 @@ let foreground_terminal_requests t operation_id outcome =
           ~halted:true
           ~compaction_operation_id:(Agent_protocol.Id.Operation.create ())
     in
-    follow_up_deltas plan
+    follow_up_deltas t plan
 ;;
 
 let worker_terminal t operation_id outcome =
@@ -3357,8 +3369,9 @@ let with_invocation_claim t claim f =
   let open Result.Let_syntax in
   Eio.Fiber.yield ();
   let%bind execution = Eio.Cancel.protect (fun () -> call t claim) in
-  let finish outcome =
-    Eio.Cancel.protect (fun () -> call t (Finish_invocation (execution, outcome)))
+  let finish ?requests outcome =
+    Eio.Cancel.protect (fun () ->
+      call t (Finish_invocation (execution, outcome, requests)))
   in
   let failed =
     Agent_protocol.Invocation.Fail
@@ -3368,21 +3381,36 @@ let with_invocation_claim t claim f =
       ; details = `Null
       }
   in
-  match f ~dispatched:execution.dispatched with
-  | Ok outcome ->
-    let outcome =
+  let run () =
+    match execution.owner with
+    | Background_job _ ->
+      Chat_response.Runtime_request_scope.collect (fun () ->
+        f ~dispatched:execution.dispatched)
+    | Foreground _ | Invocation_moderator _ | Event_moderator _ ->
+      f ~dispatched:execution.dispatched, []
+  in
+  match run () with
+  | Ok outcome, collected ->
+    let outcome, collected =
       match Agent_protocol.Invocation.validate_outcome outcome with
-      | Ok () -> outcome
+      | Ok () -> outcome, collected
       | Error _ ->
-        Agent_protocol.Invocation.Fail
-          { code = "invocation.invalid_output"
-          ; message = "Tool execution returned an invalid outcome."
-          ; retryable = false
-          ; details = `Null
-          }
+        ( Agent_protocol.Invocation.Fail
+            { code = "invocation.invalid_output"
+            ; message = "Tool execution returned an invalid outcome."
+            ; retryable = false
+            ; details = `Null
+            }
+        , [] )
     in
-    finish outcome
-  | Error failure ->
+    let requests : Agent_protocol.Invocation.follow_up =
+      { request_turn = Chat_response.Runtime_semantics.request_turn collected
+      ; request_compaction = Chat_response.Runtime_semantics.request_compaction collected
+      ; end_session = Chat_response.Runtime_semantics.should_end_session collected
+      }
+    in
+    finish ~requests outcome
+  | Error failure, _ ->
     let%bind _ = finish failed in
     Error failure
   | exception exn ->
@@ -5125,6 +5153,11 @@ let stop_from_idle_moderator
       reason
   =
   let open Result.Let_syntax in
+  let jobs = stopped_jobs t Cancel in
+  let permissions =
+    pending_invocation_permissions t ~matches:(fun _ -> true)
+    |> List.map ~f:(cancel_permission t "session ended")
+  in
   let changed invocation =
     List.exists extra_deltas ~f:(function
       | Session_delta.Invocation_changed updated | Invocation_reconciled updated ->
@@ -5155,10 +5188,17 @@ let stop_from_idle_moderator
     extra_deltas
     @ List.map discarded ~f:Observation_follow_up.delta
     @ List.map events ~f:Observation_follow_up.event_delta
+    @ List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
+    @ List.map permissions ~f:(fun permission ->
+      Session_delta.Permission_changed permission)
   in
   let lifecycle = Session_state.Lifecycle.{ desired = Stopped; observed = Stopped } in
   let payloads =
     drain_payloads drain
+    @ List.map jobs ~f:(fun job ->
+      Agent_protocol.Event.Durable.Payload.Job_state_changed job)
+    @ List.map permissions ~f:(fun permission ->
+      Agent_protocol.Event.Durable.Payload.Permission_resolved permission)
     @ [ Agent_protocol.Event.Durable.Payload.Moderator_notification
           (`Object [ "end_session_reason", `String reason ])
       ; Session_state_changed
@@ -5177,11 +5217,12 @@ let stop_from_idle_moderator
               ]))
       ~payloads
   in
-  ()
+  cancel_job_scopes t jobs;
+  resolve_cleaned_permission_waiters t permissions
 ;;
 
 let apply_observation_follow_up t =
-  if not (idle_moderator_eligible t)
+  if not (idle_actor_available t)
   then Ok false
   else
     let open Result.Let_syntax in
@@ -5195,10 +5236,7 @@ let apply_observation_follow_up t =
         ~halted
         ~compaction_operation_id:compaction.id
     in
-    let extra_deltas =
-      List.map plan.invocations ~f:Observation_follow_up.delta
-      @ List.map plan.events ~f:Observation_follow_up.event_delta
-    in
+    let extra_deltas = follow_up_deltas t plan in
     let drain : Runtime_builder.moderator_drain =
       { moderator_snapshot = t.state.moderator
       ; runtime_requests = []
@@ -5675,7 +5713,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     let open Result.Let_syntax in
     let%map () = job_scope_can_execute t scope in
     scope.cancel <- Some cancel
-  | Finish_invocation (execution, outcome) -> finish_invocation t execution outcome
+  | Finish_invocation (execution, outcome, requests) ->
+    finish_invocation t execution outcome requests
   | Claim_moderator_invocation (operation_id, invocation) ->
     claim_moderator_invocation t operation_id invocation
   | Claim_moderator_observation (operation_id, invocation_id) ->

@@ -14,6 +14,8 @@ let with_background_daemon
       ?(profile = permission_profile)
       ?(agent = native_agent)
       ?(sources = [])
+      ?model_post_stream
+      ?(expected_model_calls = 0)
       ?(check_restored =
         fun job restored ->
           assert (Jsonaf.exactly_equal (J.to_json job) (J.to_json restored)))
@@ -78,9 +80,11 @@ let with_background_daemon
                   qualify_chatml_extensions = true
                 ; model_post_stream =
                     Some
-                      (fun ~sw:_ ~inputs:_ ->
+                      (fun ~sw ~inputs ->
                         incr requests;
-                        failwith "background work must not call the model")
+                        match model_post_stream with
+                        | Some post -> post ~sw ~inputs
+                        | None -> failwith "background work must not call the model")
                 }
               ()
             |> protocol_ok
@@ -119,7 +123,7 @@ let with_background_daemon
                     Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
                       f env client entry capabilities);
                     stage := "checking final actor state";
-                    [%test_eq: int] 0 !requests;
+                    [%test_eq: int] expected_model_calls !requests;
                     let state = A.state entry.actor |> protocol_ok in
                     [%test_eq: int]
                       (List.length initial.conversation.canonical_history)
@@ -149,7 +153,7 @@ let with_background_daemon
                     with
                     | Job_get restored -> check_restored job restored
                     | _ -> failwith "unexpected recovered job response");
-                  [%test_eq: int] 0 !requests));
+                  [%test_eq: int] expected_model_calls !requests));
           stage := "joining fixture switch")))
 ;;
 

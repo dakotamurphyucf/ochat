@@ -16,7 +16,7 @@ type t =
   ; events : E.t list
   }
 
-let pending (invocation : I.t) =
+let pending_observation (invocation : I.t) =
   match invocation.observation with
   | Some
       { status = Observed
@@ -25,6 +25,14 @@ let pending (invocation : I.t) =
       } -> true
   | _ -> false
 ;;
+
+let pending_handler (invocation : I.t) =
+  match invocation.handler_intent with
+  | Some { follow_up = Pending_follow_up _ | Compaction_accepted_follow_up _; _ } -> true
+  | _ -> false
+;;
+
+let pending invocation = pending_observation invocation || pending_handler invocation
 
 let pending_event (event : E.t) =
   match event.status, event.intent with
@@ -54,7 +62,16 @@ let discard_event_compaction events ~operation_id ~reason =
 
 let discard invocations ~reason =
   List.filter invocations ~f:pending
-  |> List.map ~f:(fun invocation -> I.discard_observation_follow_up invocation ~reason)
+  |> List.map ~f:(fun invocation ->
+    let open Result.Let_syntax in
+    let%bind invocation =
+      match pending_observation invocation with
+      | true -> I.discard_observation_follow_up invocation ~reason
+      | false -> Ok invocation
+    in
+    match pending_handler invocation with
+    | true -> I.discard_handler_intent invocation ~reason
+    | false -> Ok invocation)
   |> Result.all
 ;;
 
@@ -67,32 +84,65 @@ let requests (invocation : I.t) =
 ;;
 
 let delta (invocation : I.t) =
-  match invocation.observation with
-  | Some { follow_up = Some (Discarded_follow_up _); _ } ->
+  match invocation.handler_intent, invocation.observation with
+  | Some { follow_up = Discarded_follow_up _; _ }, _
+  | _, Some { follow_up = Some (Discarded_follow_up _); _ } ->
     Session_delta.Invocation_reconciled invocation
   | _ -> Session_delta.Invocation_changed invocation
 ;;
 
 let discard_compaction invocations ~operation_id ~reason =
-  List.filter invocations ~f:(fun invocation ->
-    match invocation.I.observation with
-    | Some
-        { follow_up = Some (Compaction_accepted_follow_up _); compaction_operation_id; _ }
-      ->
-      Option.value_map
-        compaction_operation_id
-        ~default:true
-        ~f:(P.Id.Operation.equal operation_id)
-    | _ -> false)
-  |> discard ~reason
+  List.filter_map invocations ~f:(fun invocation ->
+    let observation =
+      match invocation.I.observation with
+      | Some
+          { follow_up = Some (Compaction_accepted_follow_up _)
+          ; compaction_operation_id
+          ; _
+          } ->
+        Option.value_map
+          compaction_operation_id
+          ~default:true
+          ~f:(P.Id.Operation.equal operation_id)
+      | _ -> false
+    in
+    let handler =
+      match invocation.handler_intent with
+      | Some
+          { follow_up = Compaction_accepted_follow_up _
+          ; compaction_operation_id = Some id
+          } -> P.Id.Operation.equal id operation_id
+      | _ -> false
+    in
+    match observation || handler with
+    | false -> None
+    | true ->
+      Some
+        (let open Result.Let_syntax in
+         let%bind invocation =
+           match observation with
+           | true -> I.discard_observation_follow_up invocation ~reason
+           | false -> Ok invocation
+         in
+         match handler with
+         | true -> I.discard_handler_intent invocation ~reason
+         | false -> Ok invocation))
+  |> Result.all
 ;;
 
 type entry =
   | Observation of I.t
+  | Handler of I.t
   | Event of E.t
 
 let entry_requests = function
   | Observation invocation -> requests invocation
+  | Handler invocation ->
+    (match invocation.handler_intent with
+     | Some { follow_up = Pending_follow_up requests; _ } -> Some requests
+     | Some { follow_up = Compaction_accepted_follow_up requests; _ } ->
+       Some { requests with request_compaction = false }
+     | _ -> None)
   | Event event ->
     (match event.requests, event.intent with
      | Some requests, Some Pending -> Some requests
@@ -102,7 +152,7 @@ let entry_requests = function
 ;;
 
 let entry_owner = function
-  | Observation invocation ->
+  | Observation invocation | Handler invocation ->
     let c = invocation.context in
     c.session_id, c.generation, Option.map invocation.observation ~f:(fun o -> o.observer)
   | Event event ->
@@ -111,50 +161,61 @@ let entry_owner = function
 ;;
 
 let entry_order = function
-  | Observation invocation ->
+  | Observation invocation | Handler invocation ->
     invocation.context.created_at, P.Id.Invocation.to_string invocation.context.id
   | Event event ->
     event.context.created_at, P.Id.Moderator_execution.to_string event.context.id
 ;;
 
-let discard_entry entry ~reason =
-  match entry with
-  | Observation invocation ->
-    I.discard_observation_follow_up invocation ~reason
-    |> Result.map ~f:(fun i -> Observation i)
-  | Event event -> E.discard_intent event ~reason |> Result.map ~f:(fun e -> Event e)
-;;
+type update =
+  | Apply
+  | Discard of string
+  | Accept_compaction of P.Id.Operation.t
 
-let apply_entry = function
-  | Observation invocation ->
-    I.apply_observation_follow_up invocation |> Result.map ~f:(fun i -> Observation i)
-  | Event event -> E.apply_intent event |> Result.map ~f:(fun e -> Event e)
-;;
+let discard_entry entry ~reason = Ok (entry, Discard reason)
+let apply_entry entry = Ok (entry, Apply)
+let accept_compaction entry ~operation_id = Ok (entry, Accept_compaction operation_id)
 
-let accept_compaction entry ~operation_id =
-  match entry with
-  | Observation invocation ->
-    I.accept_observation_compaction invocation ~operation_id
-    |> Result.map ~f:(fun i -> Observation i)
-  | Event event ->
-    E.accept_compaction event ~operation_id |> Result.map ~f:(fun e -> Event e)
-;;
-
-let result action entries =
-  { action
-  ; invocations =
-      List.filter_map entries ~f:(function
-        | Observation i -> Some i
-        | Event _ -> None)
-  ; events =
-      List.filter_map entries ~f:(function
-        | Event e -> Some e
-        | Observation _ -> None)
-  }
+let result action updates =
+  let open Result.Let_syntax in
+  let%map invocations, events =
+    List.fold_result
+      updates
+      ~init:(String.Map.empty, [])
+      ~f:(fun (saved, events) (entry, update) ->
+        match entry with
+        | Observation invocation | Handler invocation ->
+          let key = P.Id.Invocation.to_string invocation.context.id in
+          let current = Option.value (Map.find saved key) ~default:invocation in
+          let%map next =
+            match entry, update with
+            | Observation _, Apply -> I.apply_observation_follow_up current
+            | Observation _, Discard reason ->
+              I.discard_observation_follow_up current ~reason
+            | Observation _, Accept_compaction operation_id ->
+              I.accept_observation_compaction current ~operation_id
+            | Handler _, Apply -> I.apply_handler_intent current
+            | Handler _, Discard reason -> I.discard_handler_intent current ~reason
+            | Handler _, Accept_compaction operation_id ->
+              I.accept_handler_compaction current ~operation_id
+            | Event _, _ -> assert false
+          in
+          Map.set saved ~key ~data:next, events
+        | Event event ->
+          let%map next =
+            match update with
+            | Apply -> E.apply_intent event
+            | Discard reason -> E.discard_intent event ~reason
+            | Accept_compaction operation_id -> E.accept_compaction event ~operation_id
+          in
+          saved, next :: events)
+  in
+  { action; invocations = Map.data invocations; events = List.rev events }
 ;;
 
 let current_entries ~(state : Session_state.t) ~observer =
-  (List.filter state.invocations ~f:pending |> List.map ~f:(fun i -> Observation i))
+  (List.filter state.invocations ~f:pending_observation
+   |> List.map ~f:(fun i -> Observation i))
   @ (List.filter state.moderator_executions ~f:pending_event
      |> List.map ~f:(fun e -> Event e))
   |> List.filter ~f:(fun entry ->
@@ -180,7 +241,7 @@ let admit_turn ~state ~observer =
   |> List.filter ~f:turn_only
   |> List.map ~f:apply_entry
   |> Result.all
-  |> Result.map ~f:(result Turn)
+  |> Result.bind ~f:(result Turn)
 ;;
 
 let finish_foreground ~state ~observer ~failed =
@@ -193,15 +254,70 @@ let finish_foreground ~state ~observer ~failed =
   |> List.map ~f:(fun entry ->
     discard_entry entry ~reason:"foreground worker ended without admitting this request")
   |> Result.all
-  |> Result.map ~f:(result Checkpoint)
+  |> Result.bind ~f:(result Checkpoint)
+;;
+
+let handler_readiness ~(state : Session_state.t) invocation =
+  let rec owner seen (invocation : I.t) =
+    let key = P.Id.Invocation.to_string invocation.context.id in
+    match Set.mem seen key with
+    | true -> `Invalid
+    | false ->
+      let seen = Set.add seen key in
+      (match
+         ( invocation.context.parent_job
+         , invocation.context.parent_invocation
+         , invocation.parent_event )
+       with
+       | Some id, _, _ -> `Job id
+       | None, Some parent, _ ->
+         (match
+            List.find state.invocations ~f:(fun invocation ->
+              P.Id.Invocation.equal invocation.context.id parent)
+          with
+          | None -> `Invalid
+          | Some parent -> owner seen parent)
+       | None, None, Some id ->
+         (match
+            List.find state.moderator_executions ~f:(fun event ->
+              P.Id.Moderator_execution.equal event.context.id id)
+          with
+          | None -> `Invalid
+          | Some event ->
+            (match event.context.job with
+             | None -> `Unbound
+             | Some job -> `Job job.job_id))
+       | None, None, None -> `Unbound)
+  in
+  match owner String.Set.empty invocation with
+  | `Invalid -> `Discard "handler invocation has no retained owner"
+  | `Unbound -> `Ready
+  | `Job id ->
+    (match List.find state.jobs ~f:(fun job -> P.Id.Job.equal job.id id) with
+     | None -> `Discard "handler job is no longer retained"
+     | Some job ->
+       (match job.status with
+        | Queued | Running | Waiting_permission _ -> `Wait
+        | Succeeded | Failed _ -> `Ready
+        | Cancelled | Interrupted _ -> `Discard "handler job was cancelled or interrupted"))
 ;;
 
 let plan ~(state : Session_state.t) ~observer ~halted ~compaction_operation_id =
   let open Result.Let_syntax in
   let pending =
-    (List.filter state.invocations ~f:pending |> List.map ~f:(fun i -> Observation i))
+    (List.filter state.invocations ~f:pending_observation
+     |> List.map ~f:(fun i -> Observation i))
+    @ (List.filter state.invocations ~f:pending_handler
+       |> List.map ~f:(fun i -> Handler i))
     @ (List.filter state.moderator_executions ~f:pending_event
        |> List.map ~f:(fun e -> Event e))
+    |> List.filter ~f:(function
+      | Handler invocation when invocation.context.generation = state.identity.generation
+        ->
+        (match handler_readiness ~state invocation with
+         | `Wait -> false
+         | `Ready | `Discard _ -> true)
+      | _ -> true)
     |> List.sort ~compare:(fun a b ->
       let time_a, id_a = entry_order a
       and time_b, id_b = entry_order b in
@@ -226,8 +342,13 @@ let plan ~(state : Session_state.t) ~observer ~halted ~compaction_operation_id =
               } -> false
           | _ -> true)
       &&
-      match owner, observer with
-      | Some owner, Some observer -> I.equal_observer owner observer
+      match entry, owner, observer with
+      | Handler invocation, _, _
+        when match handler_readiness ~state invocation with
+             | `Discard _ -> true
+             | `Wait | `Ready -> false -> false
+      | Handler _, None, _ -> true
+      | _, Some owner, Some observer -> I.equal_observer owner observer
       | _ -> false)
   in
   let%bind obsolete =
@@ -235,6 +356,10 @@ let plan ~(state : Session_state.t) ~observer ~halted ~compaction_operation_id =
       let reason =
         match entry with
         | Observation _ -> "observation owner is no longer installed"
+        | Handler invocation ->
+          (match handler_readiness ~state invocation with
+           | `Discard reason -> reason
+           | `Wait | `Ready -> "handler owner is no longer installed")
         | Event _ -> "moderator event owner is no longer installed"
       in
       discard_entry entry ~reason)
@@ -245,7 +370,7 @@ let plan ~(state : Session_state.t) ~observer ~halted ~compaction_operation_id =
       Option.bind (entry_requests entry) ~f:(fun requests -> requests.end_session))
   with
   | Some reason ->
-    let%map entries =
+    let%bind entries =
       List.map current ~f:(fun entry ->
         match
           Option.bind (entry_requests entry) ~f:(fun requests -> requests.end_session)
@@ -256,7 +381,7 @@ let plan ~(state : Session_state.t) ~observer ~halted ~compaction_operation_id =
     in
     result (Stop reason) (obsolete @ entries)
   | None when halted ->
-    let%map entries =
+    let%bind entries =
       List.map current ~f:(fun entry -> discard_entry entry ~reason:"moderator is halted")
       |> Result.all
     in
@@ -269,7 +394,7 @@ let plan ~(state : Session_state.t) ~observer ~halted ~compaction_operation_id =
     in
     (match compact with
      | _ :: _ ->
-       let%map entries =
+       let%bind entries =
          List.map compact ~f:(fun entry ->
            match entry_requests entry with
            | Some { request_turn = true; _ } ->
@@ -279,7 +404,7 @@ let plan ~(state : Session_state.t) ~observer ~halted ~compaction_operation_id =
        in
        result Compact (obsolete @ entries)
      | [] ->
-       let%map entries = List.map current ~f:apply_entry |> Result.all in
+       let%bind entries = List.map current ~f:apply_entry |> Result.all in
        result
          (match current with
           | [] -> Checkpoint

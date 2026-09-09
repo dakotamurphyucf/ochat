@@ -118,6 +118,12 @@ type follow_up_status =
   | Discarded_follow_up of follow_up * string
 [@@deriving equal, sexp]
 
+type handler_intent =
+  { follow_up : follow_up_status
+  ; compaction_operation_id : Id.Operation.t option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
 type observation =
   { observer : observer
   ; status : observation_status
@@ -134,6 +140,7 @@ type t =
   ; publication_discarded : string option [@sexp.option]
   ; observation : observation option [@sexp.option]
   ; parent_event : Id.Moderator_execution.t option [@sexp.option]
+  ; handler_intent : handler_intent option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -213,9 +220,61 @@ let validate_context context =
   validate_json context.input
 ;;
 
+let follow_up_requests = function
+  | Pending_follow_up requests
+  | Compaction_accepted_follow_up requests
+  | Applied_follow_up requests
+  | Discarded_follow_up (requests, _) -> requests
+;;
+
+let validate_handler_intent (intent : handler_intent) =
+  let open Result.Let_syntax in
+  let requests = follow_up_requests intent.follow_up in
+  let%bind () =
+    match
+      requests.request_turn
+      || requests.request_compaction
+      || Option.is_some requests.end_session
+    with
+    | true -> Ok ()
+    | false -> invalid "handler intent must request an action"
+  in
+  let%bind () =
+    match requests.end_session with
+    | None -> Ok ()
+    | Some reason -> text ~name:"handler end-session reason" ~max:1024 reason
+  in
+  let%bind () =
+    match intent.follow_up with
+    | Discarded_follow_up (_, reason) ->
+      text ~name:"handler discard reason" ~max:1024 reason
+    | _ -> Ok ()
+  in
+  match intent.follow_up, intent.compaction_operation_id with
+  | Compaction_accepted_follow_up _, None ->
+    invalid "handler compaction requires its operation binding"
+  | Pending_follow_up _, Some _ -> invalid "handler compaction binding requires admission"
+  | _, Some id
+    when requests.request_turn
+         && requests.request_compaction
+         && Option.is_none requests.end_session ->
+    validate_id Id.Operation.to_json Id.Operation.of_json id
+  | _, Some _ -> invalid "handler compaction requires a dependent turn"
+  | _, None -> Ok ()
+;;
+
 let validate t =
   let open Result.Let_syntax in
   let%bind () = validate_context t.context in
+  let%bind () =
+    match t.handler_intent, t.status with
+    | None, _ -> Ok ()
+    | ( Some intent
+      , ( Resolved (Complete _ | Fail _ | Pending _)
+        | Published (Complete _ | Fail _ | Pending _) ) ) ->
+      validate_handler_intent intent
+    | Some _, _ -> invalid "handler intent requires a resolved noncancelled invocation"
+  in
   let%bind () =
     match
       ( t.parent_event
@@ -400,6 +459,7 @@ let create ?routing ?observer ?parent_event context =
     ; output_entry_id = None
     ; routing
     ; parent_event
+    ; handler_intent = None
     ; publication_discarded = None
     ; observation =
         Option.map observer ~f:(fun observer ->
@@ -633,6 +693,104 @@ let validate_observation_transition previous next =
   | _ -> failure Conflict "observation owner and admission intent are immutable"
 ;;
 
+let record_handler_intent t ~requests =
+  let open Result.Let_syntax in
+  match
+    requests.request_turn
+    || requests.request_compaction
+    || Option.is_some requests.end_session
+  with
+  | false -> Ok t
+  | true ->
+    let%bind () =
+      match t.handler_intent with
+      | None -> Ok ()
+      | Some _ -> failure Already_resolved "handler intent is already recorded"
+    in
+    let next =
+      { t with
+        handler_intent =
+          Some { follow_up = Pending_follow_up requests; compaction_operation_id = None }
+      }
+    in
+    let%map () = validate next in
+    next
+;;
+
+let change_handler_intent t change =
+  let open Result.Let_syntax in
+  let%bind current =
+    Result.of_option
+      t.handler_intent
+      ~error:
+        (Error.create
+           Invalid_state
+           ~message:"invocation has no handler intent"
+           ~retryable:false
+           ())
+  in
+  let%bind intent = change current in
+  let next = { t with handler_intent = Some intent } in
+  let%map () = validate next in
+  next
+;;
+
+let apply_handler_intent t =
+  change_handler_intent t (fun intent ->
+    match intent.follow_up with
+    | Pending_follow_up requests | Compaction_accepted_follow_up requests ->
+      Ok { intent with follow_up = Applied_follow_up requests }
+    | Applied_follow_up _ -> Ok intent
+    | Discarded_follow_up _ -> failure Invalid_state "handler intent was discarded")
+;;
+
+let accept_handler_compaction t ~operation_id =
+  change_handler_intent t (fun intent ->
+    match intent.follow_up, intent.compaction_operation_id with
+    | Pending_follow_up requests, None ->
+      Ok
+        { follow_up = Compaction_accepted_follow_up requests
+        ; compaction_operation_id = Some operation_id
+        }
+    | Compaction_accepted_follow_up _, Some current
+      when Id.Operation.equal current operation_id -> Ok intent
+    | _ -> failure Invalid_state "handler has no pending compaction and dependent turn")
+;;
+
+let discard_handler_intent t ~reason =
+  change_handler_intent t (fun intent ->
+    match intent.follow_up with
+    | Pending_follow_up requests | Compaction_accepted_follow_up requests ->
+      Ok { intent with follow_up = Discarded_follow_up (requests, reason) }
+    | Discarded_follow_up (_, current) when String.equal current reason -> Ok intent
+    | _ -> failure Invalid_state "handler has no pending intent to discard")
+;;
+
+let validate_handler_transition previous next =
+  match previous.handler_intent, next.handler_intent with
+  | before, after when Option.equal equal_handler_intent before after -> Ok ()
+  | None, Some { follow_up = Pending_follow_up _; compaction_operation_id = None }
+    when equal_status previous.status Dispatching -> Ok ()
+  | Some before, Some after when equal_status previous.status next.status ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match before.compaction_operation_id, after.compaction_operation_id with
+      | before, after when Option.equal Id.Operation.equal before after -> Ok ()
+      | None, Some _ ->
+        (match before.follow_up, after.follow_up with
+         | Pending_follow_up _, Compaction_accepted_follow_up _ -> Ok ()
+         | _ -> failure Conflict "handler compaction binding requires admission")
+      | _ -> failure Conflict "handler compaction binding is immutable"
+    in
+    (match before.follow_up, after.follow_up with
+     | Pending_follow_up before, Compaction_accepted_follow_up after
+     | ( (Pending_follow_up before | Compaction_accepted_follow_up before)
+       , (Applied_follow_up after | Discarded_follow_up (after, _)) )
+       when equal_follow_up before after -> Ok ()
+     | _ -> failure Conflict "handler intent cannot be rewritten or rearmed")
+  | _ -> failure Conflict "handler intent must be recorded with its original outcome"
+;;
+
 let validate_transition ~previous next =
   let open Result.Let_syntax in
   let%bind () = validate next in
@@ -644,6 +802,7 @@ let validate_transition ~previous next =
   | Some previous ->
     let%bind () = validate previous in
     let%bind () = validate_observation_transition previous next in
+    let%bind () = validate_handler_transition previous next in
     if not (equal_context previous.context next.context)
     then failure Conflict "invocation context is immutable"
     else if
@@ -676,6 +835,11 @@ let validate_transition ~previous next =
       | Resolved old, Resolved current
         when equal_outcome old current
              && (Option.is_some next.publication_discarded
+                 || (not
+                       (Option.equal
+                          equal_handler_intent
+                          previous.handler_intent
+                          next.handler_intent))
                  || not
                       (Option.equal
                          equal_observation
@@ -1104,11 +1268,35 @@ let observation_of_json ~version json =
   { observer = { script_id; source_sha256 }; status; follow_up; compaction_operation_id }
 ;;
 
+let handler_intent_to_json (intent : handler_intent) =
+  `Object
+    ([ "follow_up", follow_up_to_json intent.follow_up ]
+     @ optional
+         "compaction_operation_id"
+         intent.compaction_operation_id
+         Id.Operation.to_json)
+;;
+
+let handler_intent_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind () = closed fields [ "follow_up"; "compaction_operation_id" ] in
+  let%bind follow_up =
+    Json_codec.required_as fields "follow_up" (follow_up_of_json ~version:10)
+  in
+  let%map compaction_operation_id =
+    Json_codec.optional_as fields "compaction_operation_id" Id.Operation.of_json
+  in
+  { follow_up; compaction_operation_id }
+;;
+
 let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (if Option.is_some t.parent_event
+           (if Option.is_some t.handler_intent
+            then "10"
+            else if Option.is_some t.parent_event
             then "9"
             else if
               Option.exists t.observation ~f:(fun observation ->
@@ -1141,7 +1329,8 @@ let to_json t =
      @ optional "publication_discarded" t.publication_discarded (fun reason ->
        `String reason)
      @ optional "observation" t.observation observation_to_json
-     @ optional "parent_event" t.parent_event Id.Moderator_execution.to_json)
+     @ optional "parent_event" t.parent_event Id.Moderator_execution.to_json
+     @ optional "handler_intent" t.handler_intent handler_intent_to_json)
 ;;
 
 let of_json json =
@@ -1156,7 +1345,7 @@ let of_json json =
   in
   let%bind () =
     match version with
-    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 -> Ok ()
+    | 1 | 2 | 3 | 4 | 5 | 6 | 7 | 8 | 9 | 10 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported invocation schema version"
   in
   let%bind () =
@@ -1167,7 +1356,8 @@ let of_json json =
        @ (if version >= 3 then [ "routing" ] else [])
        @ (if version >= 4 then [ "publication_discarded" ] else [])
        @ (if version >= 5 then [ "observation" ] else [])
-       @ if version >= 9 then [ "parent_event" ] else [])
+       @ (if version >= 9 then [ "parent_event" ] else [])
+       @ if version >= 10 then [ "handler_intent" ] else [])
   in
   let%bind context = Json_codec.required_as fields "context" (context_of_json ~version) in
   let%bind () =
@@ -1197,11 +1387,16 @@ let of_json json =
     else Ok None
   in
   let%bind observation =
-    if version >= 5
+    if version >= 10
+    then Json_codec.optional_as fields "observation" (observation_of_json ~version)
+    else if version >= 5
     then
       Json_codec.required_as fields "observation" (observation_of_json ~version)
       |> Result.map ~f:Option.some
     else Ok None
+  in
+  let%bind handler_intent =
+    Json_codec.optional_as fields "handler_intent" handler_intent_of_json
   in
   let t =
     { context
@@ -1211,10 +1406,14 @@ let of_json json =
     ; publication_discarded
     ; observation
     ; parent_event = None
+    ; handler_intent
     }
   in
   let%bind t =
     match version with
+    | 10 ->
+      Json_codec.optional_as fields "parent_event" Id.Moderator_execution.of_json
+      |> Result.map ~f:(fun parent_event -> { t with parent_event })
     | 9 ->
       Json_codec.required_as fields "parent_event" Id.Moderator_execution.of_json
       |> Result.map ~f:(fun id -> { t with parent_event = Some id })

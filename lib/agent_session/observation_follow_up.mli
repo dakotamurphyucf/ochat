@@ -18,6 +18,7 @@ type t =
   }
 
 val pending : Agent_protocol.Invocation.t -> bool
+val pending_handler : Agent_protocol.Invocation.t -> bool
 
 (** Event equivalents retain original execution outcomes and exact compaction
     bindings. Only pending or waiting intents are settled. *)
@@ -76,11 +77,15 @@ val finish_foreground
 
 (* [compaction_operation_id] must identify the operation committed with [Compact]. *)
 
-(** Coalesce both event and observation requests for the current source/generation
+(** Coalesce event, observation and handler requests for the current source/generation
     into one action. End overrides other actions. Compaction is accepted before a
     requested turn; its receipt retains
     that turn without requesting compaction again. Obsolete owners and halted
-    moderators have their pending actions discarded. Applied means scheduling
+    moderators have their pending actions discarded. Handler requests wait for
+    the owning job to finish; cancelled/interrupted owners discard them. Native
+    handlers without an observer do not require an installed moderator. Handler
+    and observation updates on one invocation preserve each other's disposition.
+    Applied means scheduling
     was accepted, not that execution succeeded. *)
 val plan
   :  state:Session_state.t

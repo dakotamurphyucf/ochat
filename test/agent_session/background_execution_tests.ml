@@ -260,7 +260,8 @@ let main input =
       print_s
         [%sexp
           (result.resolved.status : I.status)
-        , (result.runtime_requests : M.Runtime_request.t list)];
+        , (result.runtime_requests : M.Runtime_request.t list)
+        , (result.resolved.handler_intent : I.handler_intent option)];
       [%test_eq: string]
         (B.fingerprint request)
         result.resolved.context.implementation_revision);
@@ -276,10 +277,16 @@ let main input =
     {|
     ((Resolved
       (Complete (Object ((count (Number 1)) (read (String disclosed))))))
-     (Request_turn))
+     ()
+     (((follow_up
+        (Pending_follow_up
+         ((request_turn true) (request_compaction false) (end_session ())))))))
     ((Resolved
       (Complete (Object ((count (Number 1)) (read (String disclosed))))))
-     (Request_turn))
+     ()
+     (((follow_up
+        (Pending_follow_up
+         ((request_turn true) (request_compaction false) (end_session ())))))))
     ((calls 2) (invocations 6) (model_operation false) (history 0))
     |}]
 ;;

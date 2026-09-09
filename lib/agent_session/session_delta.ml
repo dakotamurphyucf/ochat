@@ -39,6 +39,33 @@ let replace_by compare_id id value values ~id_of =
   value :: List.filter values ~f:(fun candidate -> compare_id (id_of candidate) id <> 0)
 ;;
 
+let nonexecuting_intent_transition
+      (previous : Agent_protocol.Invocation.t)
+      (next : Agent_protocol.Invocation.t)
+  =
+  let module I = Agent_protocol.Invocation in
+  let observation =
+    match previous.observation, next.observation with
+    | before, after when Option.equal I.equal_observation before after -> true
+    | Some { status = Observing; _ }, Some { status = Observation_failed _; _ } -> true
+    | ( Some
+          { status = Observed
+          ; follow_up = Some (Pending_follow_up _ | Compaction_accepted_follow_up _)
+          ; _
+          }
+      , Some { status = Observed; follow_up = Some (Discarded_follow_up _); _ } ) -> true
+    | _ -> false
+  in
+  let handler =
+    match previous.handler_intent, next.handler_intent with
+    | before, after when Option.equal I.equal_handler_intent before after -> true
+    | ( Some { follow_up = Pending_follow_up _ | Compaction_accepted_follow_up _; _ }
+      , Some { follow_up = Discarded_follow_up _; _ } ) -> true
+    | _ -> false
+  in
+  observation && handler
+;;
+
 let rec apply state = function
   | Batch deltas -> List.fold_result deltas ~init:state ~f:apply
   | Created created -> Session_state.upgrade_schema created
@@ -203,6 +230,15 @@ let rec apply state = function
         Agent_protocol.Id.Invocation.compare candidate.context.id context.id = 0)
     in
     let%bind () =
+      match recovery, previous with
+      | true, Some previous when not (nonexecuting_intent_transition previous invocation)
+        ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "reconciliation cannot admit handler or observation actions")
+      | _ -> Ok ()
+    in
+    let%bind () =
       if not recovery
       then Ok ()
       else (
@@ -212,18 +248,26 @@ let rec apply state = function
         | Some { status = Resolved _; _ }, Resolved _
           when Option.is_some invocation.publication_discarded -> Ok ()
         | Some previous, _
-          when (match previous.observation, invocation.observation with
-                | ( Some { status = Observing; _ }
-                  , Some { status = Observation_failed _; _ } ) -> true
+          when ((match previous.observation, invocation.observation with
+                 | ( Some { status = Observing; _ }
+                   , Some { status = Observation_failed _; _ } ) -> true
+                 | ( Some
+                       { status = Observed
+                       ; follow_up =
+                           Some (Pending_follow_up _ | Compaction_accepted_follow_up _)
+                       ; _
+                       }
+                   , Some
+                       { status = Observed; follow_up = Some (Discarded_follow_up _); _ }
+                   ) -> true
+                 | _ -> false)
+                ||
+                match previous.handler_intent, invocation.handler_intent with
                 | ( Some
-                      { status = Observed
-                      ; follow_up =
-                          Some (Pending_follow_up _ | Compaction_accepted_follow_up _)
+                      { follow_up = Pending_follow_up _ | Compaction_accepted_follow_up _
                       ; _
                       }
-                  , Some
-                      { status = Observed; follow_up = Some (Discarded_follow_up _); _ } )
-                  -> true
+                  , Some { follow_up = Discarded_follow_up _; _ } ) -> true
                 | _ -> false)
                && Agent_protocol.Invocation.equal_status previous.status invocation.status
                && Option.equal

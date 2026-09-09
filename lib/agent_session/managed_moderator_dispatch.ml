@@ -191,6 +191,27 @@ let create
                             disclosed
                           |> message
                         in
+                        let%bind resolved =
+                          match Calls.durable_requests tools with
+                          | false -> Ok resolved
+                          | true ->
+                            let requests =
+                              outcome.Chat_response.Moderation.Outcome.runtime_requests
+                            in
+                            I.record_handler_intent
+                              resolved
+                              ~requests:
+                                { request_turn =
+                                    Chat_response.Runtime_semantics.request_turn requests
+                                ; request_compaction =
+                                    Chat_response.Runtime_semantics.request_compaction
+                                      requests
+                                ; end_session =
+                                    Chat_response.Runtime_semantics.should_end_session
+                                      requests
+                                }
+                            |> message
+                        in
                         let%map () =
                           checked
                             (fail
@@ -200,7 +221,10 @@ let create
                         in
                         fun () ->
                           requests
-                          := outcome.Chat_response.Moderation.Outcome.runtime_requests)
+                          := match Calls.durable_requests tools with
+                             | true -> []
+                             | false ->
+                               outcome.Chat_response.Moderation.Outcome.runtime_requests)
                     |> Result.map ~f:ignore
                     |> Result.map_error ~f:Agent_protocol.Error.invalid_request))
              |> message
