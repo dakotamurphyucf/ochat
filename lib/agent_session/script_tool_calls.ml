@@ -4,6 +4,13 @@ module C = Chat_response.Tool_capability
 module EC = Chat_response.Extension_compiler
 module M = Chat_response.Moderation.Capabilities
 module E = Agent_protocol.Moderator_execution
+module Managed = Chat_response.Managed_tool_registry
+
+type managed_service =
+  { env : Eio_unix.Stdenv.base
+  ; definition : Managed.t
+  ; execution_limits : EC.t -> Chatml_execution.limits
+  }
 
 type t =
   { registry : unit -> C.t
@@ -15,6 +22,7 @@ type t =
   ; prepare_output :
       Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, Agent_protocol.Error.t) result
   ; defer_observation : I.t -> (unit, Agent_protocol.Error.t) result
+  ; managed : (t -> Native_tool_invocation.managed_dispatch) option
   }
 
 let create
@@ -35,6 +43,7 @@ let create
   ; authorize
   ; prepare_output
   ; defer_observation
+  ; managed = None
   }
 ;;
 
@@ -186,6 +195,14 @@ let with_scope
                 ; deadline
                 })
           in
+          let moderation = Native_tool_moderation.capture () in
+          let execute ~invocation f =
+            execute ~invocation (fun ~dispatched ->
+              (* A borrowed executor restores its lending context. This call's
+                 actual host pre-hook scope may have been installed afterwards;
+                 retain it for descendants without extending its lifetime. *)
+              Native_tool_moderation.with_context moderation (fun () -> f ~dispatched))
+          in
           let%bind resolved =
             checked `Admission (fun () ->
               match prepared.rejection with
@@ -198,7 +215,8 @@ let with_scope
                        "moderator_reentrancy"
                        "Tool execution requires a decision from the active moderator."))
               | None ->
-                Native_tool_invocation.run_scoped
+                Native_tool_invocation.run_scoped_with_managed
+                  ~managed:(Option.map t.managed ~f:(fun install -> install t))
                   ~execute
                   ~registry
                   ~reference
@@ -388,6 +406,112 @@ let with_script_native_calls
       ~execute
       ~parent:(Invocation parent)
       f)
+;;
+
+let run_managed t service execution borrowed =
+  let module ABI = Chat_response.Moderator_invocation in
+  let module R = Chatml_host_runtime in
+  let module L = Chatml.Chatml_lang in
+  let module V = Chatml.Chatml_value_codec in
+  let module N = Native_tool_invocation in
+  let execute () =
+    let open Result.Let_syntax in
+    let prepared = Managed.prepared execution in
+    let parent = Managed.invocation execution in
+    let%bind entrypoint =
+      match (EC.declaration prepared).implementation with
+      | Standalone { entrypoint; _ } -> Ok entrypoint
+      | Moderator _ ->
+        Error
+          (fail
+             "invocation.managed_dispatch_required"
+             "Moderator tool handoff is not installed.")
+    in
+    let%bind scope =
+      checked
+        (fail "invocation.invalid_input" "The standalone arguments are invalid.")
+        (fun () ->
+           ABI.create_managed_standalone
+             ~execution
+             ~limits:(EC.execution_limits prepared)
+             ~validate_work:(fun _ -> Error "background completion is not installed"))
+    in
+    let%bind moderation =
+      checked
+        (fail "invocation.pre_tool_failed" "The tool moderation scope is unavailable.")
+        Native_tool_moderation.current
+    in
+    let selected = EC.capabilities prepared in
+    let%bind ceiling =
+      checked
+        (fail "invocation.inactive_scope" "The tool scope is no longer active.")
+        (fun () -> N.borrowed_capabilities borrowed)
+    in
+    let valid_parent =
+      I.equal parent (N.borrowed_invocation borrowed)
+      && String.equal (C.fingerprint selected) (C.fingerprint ceiling)
+    in
+    let%bind value =
+      with_script_native_calls
+        ?observer:(Native_tool_moderation.observer moderation)
+        t
+        ~selected
+        ~limits:(EC.execution_limits prepared)
+        ~execute:(N.execute_borrowed borrowed)
+        ~valid_parent
+        ~parent
+        ~moderate:(Native_tool_moderation.prepare moderation)
+        (fun on_tool_call ->
+           let handlers =
+             { R.default_handlers with
+               on_tool_call =
+                 (fun _ ~name ~args ->
+                   let%bind args = V.value_to_jsonaf_result args in
+                   let%map result = on_tool_call ~name ~args in
+                   match result with
+                   | M.Tool_ok value -> L.VVariant ("Ok", [ V.jsonaf_to_value value ])
+                   | Tool_error message -> L.VVariant ("Error", [ L.VString message ]))
+             }
+           in
+           let config : R.runtime_config =
+             { surface = Chatml.Chatml_extension_surface.tool_v1
+             ; operations = R.default_operations ~handlers ()
+             }
+           in
+           Chatml_execution.run
+             ~context:(N.borrowed_execution_context borrowed)
+             ~policy:(Bounded (service.execution_limits prepared))
+             ~env:service.env
+             ~config
+             ~program:(EC.program prepared)
+             ~entrypoint
+             ~arguments:[ ABI.context scope; ABI.input scope ]
+             ())
+      |> Result.map_error ~f:(fun error ->
+        fail error.Chatml_execution.code "Standalone execution failed.")
+    in
+    checked
+      (fail
+         "invocation.invalid_output"
+         "The standalone handler returned an invalid outcome.")
+      (fun () -> ABI.decode_outcome scope value)
+  in
+  Ok
+    (match execute () with
+     | Ok outcome | Error outcome -> outcome)
+;;
+
+let with_managed_tools t ~env ~definition ~execution_limits =
+  let service = { env; definition; execution_limits } in
+  { t with
+    managed =
+      Some
+        (fun scope ->
+          { Native_tool_invocation.definition
+          ; current = scope.registry
+          ; run = (fun execution borrowed -> run_managed scope service execution borrowed)
+          })
+  }
 ;;
 
 let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderate f =

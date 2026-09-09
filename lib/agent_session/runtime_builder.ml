@@ -190,7 +190,7 @@ let create_agent_runtime
       ~run_agent:(run_agent ~manifest_authorizer ~approval_provider ~response_dir)
       ()
     |> map_diagnostics
-    |> Result.map ~f:(fun native -> native, None)
+    |> Result.map ~f:(fun native -> native, None, None)
   | true ->
     Agent_runtime.prepare_extensions
       ~native_registrations
@@ -206,7 +206,7 @@ let create_agent_runtime
       ()
     |> map_diagnostics
     |> Result.map ~f:(fun resources ->
-      resources.Agent_runtime.native, Some resources.definition)
+      resources.Agent_runtime.native, Some resources.definition, Some resources.managed)
 ;;
 
 let initial_items ~ctx ~elements ~manifest_authorizer ~approval_provider ~response_dir =
@@ -778,7 +778,7 @@ let build_with_services
       ]
     | None, _ | Some _, false -> []
   in
-  let%bind agent_runtime, definition =
+  let%bind agent_runtime, definition, managed =
     create_agent_runtime
       ~extensions:
         (Option.is_some extension_services
@@ -878,8 +878,14 @@ let build_with_services
   in
   let%bind moderator_snapshot = moderator_snapshot moderator in
   let script_tools =
-    match definition, extension_services with
-    | Some _, Some services -> Some (services.script_tools agent_runtime)
+    match managed, extension_services with
+    | Some definition, Some services ->
+      Some
+        (Script_tool_calls.with_managed_tools
+           (services.script_tools agent_runtime)
+           ~env
+           ~definition
+           ~execution_limits:services.standalone_execution_limits)
     | _ -> None
   in
   one_off_services := script_tools;

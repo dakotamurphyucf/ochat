@@ -46,6 +46,16 @@ val create_standalone
   -> validate_work:(I.work -> (unit, string) result)
   -> (t, string) result
 
+(** Standalone ABI for an exact managed-capability admission. The invocation
+    records the caller's selection and registered implementation revision, while
+    [available_tools] contains only the declared implementation's dependencies.
+    The private admission links both identities without rewriting persisted data. *)
+val create_managed_standalone
+  :  execution:Managed_tool_registry.execution
+  -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
+  -> validate_work:(I.work -> (unit, string) result)
+  -> (t, string) result
+
 val context : t -> L.value
 val input : t -> L.value
 

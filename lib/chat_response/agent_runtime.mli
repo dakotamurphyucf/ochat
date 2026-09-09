@@ -23,6 +23,8 @@ type t =
       Selection never rebuilds tool declarations; invocation policy remains
       the owning service's responsibility. *)
   ; capabilities : (Tool_capability.t, Tool_capability.error) result Lazy.t
+    (** Extension preparation includes source-bound managed capabilities here;
+        [functions] continues to contain only actual native implementations. *)
   ; classifications : (string * Tool_execution_event.agent_page_kind) list
   ; shell_tool_names : String.Set.t
   ; shell_registry : Shell_runtime.Registry.t option
@@ -119,6 +121,7 @@ val create
 type extension_resources =
   { native : t
   ; definition : Extension_compiler.definition
+  ; managed : Managed_tool_registry.t
   }
 
 (** Trusted host implementations selected only by an explicit Builtin declaration

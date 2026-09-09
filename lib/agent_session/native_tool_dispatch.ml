@@ -30,7 +30,15 @@ let create
       ~prepare_output
   =
   let initial = registry () in
-  let references = C.references initial in
+  let references =
+    List.filter (C.references initial) ~f:(fun reference ->
+      match C.resolve initial ~id:reference.id ~fingerprint:reference.fingerprint with
+      | Ok binding ->
+        (match C.implementation binding with
+         | Native _ -> true
+         | Managed _ -> false)
+      | Error _ -> false)
+  in
   let cache = Stream_invocation.cache () in
   let find name =
     List.find references ~f:(fun reference -> String.equal reference.C.name name)

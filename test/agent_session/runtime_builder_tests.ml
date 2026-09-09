@@ -23,6 +23,7 @@ let%expect_test "captured runtime construction installs owned lifecycle and scri
     ; `One_off_rewrite
     ; `One_off_end
     ; `One_off_recursive
+    ; `One_off_managed
     ; `One_off_compile
     ; `One_off_limit
     ; `One_off_start
@@ -39,6 +40,7 @@ let%expect_test "captured runtime construction installs owned lifecycle and scri
         | `One_off_rewrite
         | `One_off_end
         | `One_off_recursive
+        | `One_off_managed
         | `One_off_compile
         | `One_off_limit
         | `One_off_start
@@ -101,6 +103,7 @@ let on_event = fun ctx state event -> match event with
             | `One_off_rewrite
             | `One_off_end
             | `One_off_recursive
+            | `One_off_managed
             | `One_off_compile
             | `One_off_limit
             | `One_off_start
@@ -151,7 +154,10 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                   source
                   ~pattern:
                     {|<tool name="counter" type="moderator" moderator="owner" input_schema="input.json" output_schema="output.json"/>|}
-                  ~with_:(if one_off then {|<tool name="run_chatml"/>|} else standalone)
+                  ~with_:
+                    (match mode with
+                     | `One_off_managed -> {|<tool name="run_chatml"/>|} ^ standalone
+                     | _ -> if one_off then {|<tool name="run_chatml"/>|} else standalone)
               in
               let pre =
                 match mode with
@@ -297,7 +303,10 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                   registry_ref := Some registry;
                   Agent_session.Script_tool_calls.create
                     ~registry:(fun () -> Option.value_exn !registry_ref)
-                    ~moderator_names:(String.Set.singleton "counter")
+                    ~moderator_names:
+                      (match mode with
+                       | `One_off_managed -> String.Set.empty
+                       | _ -> String.Set.singleton "counter")
                     ~now:Agent_protocol.Timestamp.now
                     ~is_halted:(fun () -> (A.state actor |> protocol_ok).halted)
                     ~requires_active_moderator:(fun reference ->
@@ -399,6 +408,12 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                   ]
               in
               (match mode with
+               | `One_off_managed ->
+                 request
+                   {|let main input = Task.bind(Tool.call("counter", input), fun result -> match result with
+| `Ok(value) -> Task.pure(value) | `Error(code) -> Task.fail(code))|}
+                   (`Object [])
+                   [ "counter" ]
                | `One_off_compile ->
                  request "let main input = Task.pure(input + 1)" input [ "read_file" ]
                | `One_off_limit ->
@@ -512,6 +527,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                   (List.sort
                      (match mode with
                       | `Standalone_one_off -> [ tool_name; "read_file"; "run_chatml" ]
+                      | `One_off_managed -> [ "counter"; "read_file"; "run_chatml" ]
                       | _ -> [ tool_name; "read_file" ])
                      ~compare:String.compare)
                   (List.sort names ~compare:String.compare);
@@ -683,6 +699,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                              | `One_off_rewrite
                              | `One_off_end
                              | `One_off_recursive
+                             | `One_off_managed
                              | `One_off_compile
                              | `One_off_limit
                              | `One_off_start
@@ -756,6 +773,9 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
      (published (chatml.execution_failed chatml.execution_failed))
      (operation_failed false) (observed 1))
     ((mode One_off_recursive) (provider_calls 2) (authorized_native_calls 7)
+     (policy_evaluations 0) (state 14) (published (1 1)) (operation_failed false)
+     (observed 5))
+    ((mode One_off_managed) (provider_calls 2) (authorized_native_calls 7)
      (policy_evaluations 0) (state 14) (published (1 1)) (operation_failed false)
      (observed 5))
     ((mode One_off_compile) (provider_calls 2) (authorized_native_calls 3)

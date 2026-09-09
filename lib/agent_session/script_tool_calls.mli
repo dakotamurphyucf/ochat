@@ -1,6 +1,7 @@
 open Core
 
-(** Scoped native Tool.call bridge for standalone handlers and moderator invocations,
+(** Scoped Tool.call bridge for native and installed standalone managed targets,
+    used by standalone handlers and moderator invocations,
     observations and events. This
     uses the persisted invocation service, never a raw runner or provider history.
     A prepared script's captured capability subset is the authority ceiling;
@@ -27,6 +28,18 @@ val create
        (Agent_protocol.Invocation.t -> (unit, Agent_protocol.Error.t) result)
   -> t
 
+(** Install captured standalone managed targets for nested Tool.call execution.
+    Each selected capability runs only its pinned compiled implementation with
+    its declared dependencies, under the same actor and current host policy.
+    The caller's own capability selection is unchanged. Moderator-tool handoff
+    retains its separate owner/reentrancy requirements. *)
+val with_managed_tools
+  :  t
+  -> env:Eio_unix.Stdenv.base
+  -> definition:Chat_response.Managed_tool_registry.t
+  -> execution_limits:(Chat_response.Extension_compiler.t -> Chatml_execution.limits)
+  -> t
+
 (** Reuse the same live native registry, policy and disclosure service for model
     calls. The stream still supplies final-target authorization; the owning host
     should delegate these native names to this policy service to avoid duplicate
@@ -37,7 +50,7 @@ val native_dispatch
   -> capabilities:Operation_worker.Capabilities.t
   -> Chat_response.In_memory_stream.Tool_dispatch.t
 
-(** Recheck the captured definition's exact live native selection. Extra current
+(** Recheck the captured definition's exact live capability selection. Extra current
     tools do not widen it; missing/replaced bindings fail. This is a pure policy
     boundary check and must also run after any authorization wait. *)
 val validate_definition
@@ -48,8 +61,8 @@ val validate_definition
 (** Bind calls to the dispatched parent for the duration of [f]. Escaped callbacks
     fail after the scope ends. The actor must still recognize the active parent.
     Each scope allows at most 100 attempts, matching the moderator context ABI.
-    Only captured native names are routed here; own moderator tools fail with
-    moderator_reentrancy. Standalone routing is a separate service.
+    Only captured names are routed here; own moderator tools fail with
+    moderator_reentrancy. Standalone managed targets require [with_managed_tools].
 
     [authorize] must enforce current policy without re-entering the active
     moderator. If a decision from that moderator is required, the dedicated
@@ -74,13 +87,13 @@ val with_invocation
       -> 'a)
   -> 'a
 
-(** Native bridge for a standalone handler under its actual dispatched parent.
+(** Tool bridge for a standalone handler under its actual dispatched parent.
     Child invocations use Script origin and retain the parent's session, generation
-    and deadline. Only the prepared native subset is accessible. If supplied,
+    and deadline. Only the prepared capability subset is accessible. If supplied,
     [observer] must identify the owning conversation moderator, not the tool script.
     [moderate] runs the required pre-tool hook under host ownership after original
     schema checks. Rewrites and redirects retain routing fingerprints; final
-    targets must remain in the captured subset and pass native schema/authority
+    targets must remain in the captured subset and pass schema/authority
     checks after approval. Rejections never reach native authorization or effects.
     The host supplies current admission through [authorize] and owns observation
     draining. This primitive does not install moderation or public dispatch. *)
@@ -103,7 +116,7 @@ val with_standalone
     host's current registry. Does not run source or authorizing callbacks. *)
 val validate_one_off : t -> Chat_response.One_off_script.t -> (unit, string) result
 
-(** Reuse standalone native moderation/routing and disclosure for a prepared
+(** Reuse standalone moderation/routing and disclosure for a prepared
     one-off program under its actual borrowed Script invocation. The source and
     capability fingerprints must match that dispatched child. No synthetic tool
     declaration or moderator event is constructed. [max_nested_calls] is host
@@ -127,7 +140,7 @@ val with_one_off
 (** Tool.call scope for an already claimed Tool_observed event. Captures the
     moderator's admitted registry directly from the complete definition, so no
     synthetic moderator-handled tool is required. Checks the exact script source,
-    input/output limits, current native binding and policy, and the same 100-call
+    input/output limits, current capability binding and policy, and the same 100-call
     budget as invocation handlers. The actor executor must belong to this exact
     observing callback. Children carry Moderator origin, this observation's
     invocation as parent and durable observation intent. No authorizing hook can
@@ -145,7 +158,7 @@ val with_observation
   -> 'a
 
 (** Tool.call scope for an actor-claimed ordinary moderator event. Captures the
-    complete definition's admitted native subset, requiring its exact source and
+    complete definition's admitted capability registry, requiring its exact source and
     a Running receipt. The supplied executor must own that same event. Children
     retain parent_event and observation intent, without a synthetic invocation or
     provider-history parent. Shares policy, value limits, 100-attempt budget and

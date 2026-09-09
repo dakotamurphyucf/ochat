@@ -38,3 +38,23 @@ val resolve
 (** Revalidate this definition's captured registry; extra current bindings cannot
     widen it, and removed/re-registered bindings invalidate it. *)
 val revalidate : t -> current:Tool_capability.t -> (unit, Tool_capability.error) result
+
+(** Verified link between a dispatched call's selected managed capability and
+    that capability's captured implementation. Its private dependencies belong
+    to this implementation, not to the calling script's tool selection. *)
+type execution
+
+(** Checks live captured authority, exact caller selection and dispatched source
+    identity. This performs no authorization or execution; the owning dispatcher
+    must repeat admission after any permission wait. *)
+val admit
+  :  t
+  -> current:Tool_capability.t
+  -> selected:Tool_capability.t
+  -> reference:Tool_capability.reference
+  -> invocation:Agent_protocol.Invocation.t
+  -> (execution, Tool_capability.error) result
+
+val prepared : execution -> Extension_compiler.t
+val binding : execution -> Tool_capability.binding
+val invocation : execution -> Agent_protocol.Invocation.t

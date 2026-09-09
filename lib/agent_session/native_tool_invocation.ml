@@ -2,6 +2,7 @@ open Core
 module I = Agent_protocol.Invocation
 module C = Chat_response.Tool_capability
 module S = Chatmd_shell_spec.Tool_schema
+module Managed = Chat_response.Managed_tool_registry
 
 type executor =
   invocation:I.t
@@ -21,6 +22,12 @@ type borrowed =
   ; execution_context : Chatml_execution.context
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   ; moderation_context : Native_tool_moderation.t option
+  }
+
+type managed_dispatch =
+  { definition : Managed.t
+  ; current : unit -> C.t
+  ; run : Managed.execution -> borrowed -> (I.outcome, string) result
   }
 
 let scope_key = Eio.Fiber.create_key ()
@@ -199,7 +206,8 @@ let with_selected_capabilities selected f =
     with_scope ~ceiling:selected ~execute:scope.execute scope.invocation f
 ;;
 
-let run_scoped
+let run_scoped_with_managed
+      ~managed
       ~execute
       ~registry
       ~(reference : C.reference)
@@ -250,15 +258,29 @@ let run_scoped
                    })
       in
       let%bind binding, selected = resolve () in
-      let native binding =
-        C.native_implementation binding
-        |> Result.of_option
-             ~error:
-               (fail
-                  "invocation.managed_dispatch_required"
-                  "This tool requires its owned extension dispatcher.")
+      let target binding selected =
+        match C.implementation binding, managed with
+        | Native implementation, _ -> Ok (`Native implementation)
+        | Managed _, None ->
+          Error
+            (fail
+               "invocation.managed_dispatch_required"
+               "This tool requires its owned extension dispatcher.")
+        | Managed _, Some service ->
+          checked
+            (fail
+               "invocation.stale_binding"
+               "The managed tool definition is no longer valid.")
+            (fun () ->
+               Managed.admit
+                 service.definition
+                 ~current:(service.current ())
+                 ~selected
+                 ~reference
+                 ~invocation:dispatched
+               |> Result.map ~f:(fun execution -> `Managed (service, execution)))
       in
-      let%bind _ = native binding in
+      let%bind _ = target binding selected in
       with_selected_capabilities selected (fun () ->
         let%bind () =
           checked
@@ -277,26 +299,55 @@ let run_scoped
         (* An approval wait may have replaced or narrowed the selected registry.
          Never dispatch the binding captured before that wait. *)
         let%bind () = check_halted () in
-        let%bind binding, _ = resolve () in
-        let%bind implementation = native binding in
-        let%bind payload =
-          match implementation.info.type_, dispatched.context.input with
-          | "function", input -> Ok (Jsonaf.to_string input)
-          | "custom", `String input -> Ok input
-          | "custom", _ ->
-            Error (fail "invocation.invalid_input" "Custom tools require string input.")
-          | _ ->
-            Error
-              (fail
-                 "invocation.unsupported_kind"
-                 "The registered tool kind is unsupported.")
-        in
+        let%bind binding, selected = resolve () in
+        let%bind target = target binding selected in
         let%bind output =
-          checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
-            Ok
-              (implementation.run_with_progress
-                 ~invocation:Ochat_function.Invocation.silent
-                 payload))
+          match target with
+          | `Native implementation ->
+            let%bind payload =
+              match implementation.info.type_, dispatched.context.input with
+              | "function", input -> Ok (Jsonaf.to_string input)
+              | "custom", `String input -> Ok input
+              | "custom", _ ->
+                Error
+                  (fail "invocation.invalid_input" "Custom tools require string input.")
+              | _ ->
+                Error
+                  (fail
+                     "invocation.unsupported_kind"
+                     "The registered tool kind is unsupported.")
+            in
+            checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
+              Ok
+                (implementation.run_with_progress
+                   ~invocation:Ochat_function.Invocation.silent
+                   payload))
+          | `Managed (service, execution) ->
+            checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
+              (* Only the verified declared implementation receives these tools.
+                 with_scope preserves the real actor executor when a one-off's
+                 direct-child adapter admitted this invocation. Its caller's
+                 borrow and selection are restored when this callback returns. *)
+              with_scope
+                ~ceiling:
+                  (Chat_response.Extension_compiler.capabilities
+                     (Managed.prepared execution))
+                ~execute
+                dispatched
+                (fun () ->
+                   let%bind borrowed =
+                     borrow ()
+                     |> Result.map_error ~f:(fun error ->
+                       error.Agent_protocol.Error.message)
+                   in
+                   let%bind outcome = service.run execution borrowed in
+                   let%map () =
+                     I.validate_outcome outcome
+                     |> Result.map_error ~f:(fun error ->
+                       error.Agent_protocol.Error.message)
+                   in
+                   Openai.Responses.Tool_output.Output.Text
+                     (Jsonaf.to_string (I.outcome_to_json outcome))))
         in
         let%bind value =
           checked
@@ -330,7 +381,18 @@ let run_scoped
         let%map () =
           checked
             (fail "invocation.invalid_output" "The tool returned an invalid result.")
-            (fun () -> I.validate_outcome outcome)
+            (fun () ->
+               let%bind () = I.validate_outcome outcome in
+               match target, outcome with
+               | `Managed (_, execution), Complete value ->
+                 S.validate
+                   (Chat_response.Extension_compiler.output_schema
+                      (Managed.prepared execution))
+                   value
+                 |> Result.map_error ~f:(fun _ ->
+                   Agent_protocol.Error.invalid_request
+                     "disclosed managed result does not match its schema")
+               | _ -> Ok ())
         in
         outcome)
     in
@@ -345,6 +407,8 @@ let run_scoped
           (match execute_native () with
            | Ok outcome | Error outcome -> outcome)))
 ;;
+
+let run_scoped = run_scoped_with_managed ~managed:None
 
 let run ~capabilities =
   run_scoped ~execute:capabilities.Operation_worker.Capabilities.with_invocation

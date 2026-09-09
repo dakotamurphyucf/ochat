@@ -36,7 +36,7 @@ val borrowed_invocation : borrowed -> Agent_protocol.Invocation.t
     extend the owning scope's limits/lifetime. *)
 val borrowed_execution_context : borrowed -> Chatml_execution.context
 
-(** Actual selected native bindings verified by the dispatch boundary, never a
+(** Actual selected tool bindings verified by the dispatch boundary, never a
     registration closure's broader registry. Fails before capability validation
     or after scope expiration. Reading this registry does not skip current policy. *)
 val borrowed_capabilities
@@ -62,6 +62,40 @@ val select_tools
     apply, so borrowing never grants a new event/idle/foreground owner. The caller
     must join child work within the native callback's cancellation scope. *)
 val execute_borrowed : borrowed -> executor
+
+(** Host-owned managed implementation dispatch. The callback receives a verified
+    source-bound admission and a borrow limited to that implementation's declared
+    dependencies. It must execute that compiled target and validate its result;
+    caller-provided one-off source must never receive this delegated borrow. *)
+type managed_dispatch =
+  { definition : Chat_response.Managed_tool_registry.t
+  ; current : unit -> Chat_response.Tool_capability.t
+  ; run :
+      Chat_response.Managed_tool_registry.execution
+      -> borrowed
+      -> (Agent_protocol.Invocation.outcome, string) result
+  }
+
+(** Common owned dispatch with managed targets installed. Performs capability,
+    schema and policy checks and repeats managed admission after authorization.
+    Managed outcomes use the same disclosure and canonical persistence path as
+    native Invocation_v1 results. No implementation runs on a missing/stale
+    binding; the caller's selected registry is restored after execution. *)
+val run_scoped_with_managed
+  :  managed:managed_dispatch option
+  -> execute:executor
+  -> registry:(unit -> Chat_response.Tool_capability.t)
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Invocation.t
+  -> is_halted:(unit -> bool)
+  -> authorize:
+       (Agent_protocol.Invocation.t
+        -> Chat_response.Tool_capability.binding
+        -> (unit, Agent_protocol.Error.t) result)
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
 
 (** Common native dispatch for a host-owned scope. Performs the same current
     capability, policy, input and output checks as [run]. In particular, [execute]

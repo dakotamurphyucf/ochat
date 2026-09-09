@@ -1927,7 +1927,7 @@ audits and authoring-helper integration still require full qualification.
 `Tool_capability` now distinguishes `Native` implementations from `Managed`
 standalone/moderator targets. `descriptor` supplies the interface for either kind;
 `native_implementation` returns an option and never manufactures an executable
-for a managed target. Native dispatch returns `invocation.managed_dispatch_required`
+for a managed target. The native-only invocation executor returns `invocation.managed_dispatch_required`
 before native authorization or execution when it receives a managed binding.
 Existing native identity formats and result contracts are preserved.
 
@@ -1950,9 +1950,37 @@ Tests compile standalone-to-standalone dependencies and a moderator target witho
 evaluating initializers or invoking native tools. They cover source/schema
 identity changes, missing dependencies, declaration cycles, foreign live bindings,
 removed base authority and attempted metadata replacement. An actor test verifies
-that a managed target cannot fall through to a same-name native runner. This
-prepared registry is not yet installed in `Runtime_builder`; owned managed
-execution and its policy/disclosure integration remain implementation work.
+that a managed target cannot fall through to a same-name native runner.
+
+Qualified `Runtime_builder` construction installs this combined registry and
+standalone managed dispatch. For example, a one-off script selecting only
+`summary` can call that declared tool; `summary` may use its own captured
+`read_file` dependency. The one-off cannot call `read_file` directly. Every nested
+call remains a persisted invocation in the same session, with its real parent and
+no additional provider-history entry. Native model dispatch handles only actual
+native registrations; standalone and moderator model calls keep their dedicated
+dispatchers.
+
+`Managed_tool_registry.admit` checks the caller's exact live selection, the
+registered implementation revision and the complete captured definition. It runs
+again after authorization. A private admission links the caller's recorded
+capability fingerprint to the compiled handler's own dependency registry. Only
+that compiled implementation receives the dependency borrow, which expires on
+return; its caller's selection is restored. The standalone ABI exposes those
+declared dependencies without rewriting the invocation's persisted identity.
+
+Managed execution uses fresh globals and inherited execution budgets, current
+pre-tool moderation, input/output schemas and host disclosure. A pre-hook installed
+after borrowing an executor stays attached to descendants; restoring an earlier
+native scope cannot silently discard it. Outcomes are decoded and validated before
+disclosure, and disclosed success values must still satisfy the output schema.
+
+Offline actor tests execute `run_chatml → root → leaf → read_file`, repeat the root
+to prove fresh globals, and reject direct access to the private dependency. Cases
+cover denied permissions, dependencies revoked during authorization, pre-tool
+rejection, invalid output and nested depth limits. They inspect persisted outcomes
+and canonical history. General model-visible availability remains gated on A01;
+nested moderator-tool handoff and full E04 qualification remain separate work.
 
 ## Authoring policy admission plans
 

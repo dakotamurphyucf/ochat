@@ -292,3 +292,41 @@ let revalidate t ~current =
         ; message = "managed definition authority changed"
         }
 ;;
+
+type execution =
+  { prepared : EC.t
+  ; binding : C.binding
+  ; invocation : Agent_protocol.Invocation.t
+  }
+
+let prepared execution = execution.prepared
+let binding execution = execution.binding
+let invocation execution = execution.invocation
+
+let admit t ~current ~selected ~(reference : C.reference) ~invocation =
+  let module I = Agent_protocol.Invocation in
+  let open Result.Let_syntax in
+  let%bind () = revalidate t ~current in
+  let%bind () =
+    List.fold_result (C.references selected) ~init:() ~f:(fun () reference ->
+      C.resolve t.capabilities ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map ~f:ignore)
+  in
+  let%bind binding =
+    C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+  in
+  let%bind prepared = resolve t binding in
+  let context = invocation.I.context in
+  match invocation.status with
+  | Dispatching
+    when String.equal context.tool_name reference.name
+         && String.equal context.implementation_revision reference.implementation_revision
+         && String.equal context.capability_fingerprint (C.fingerprint selected)
+         && Result.is_ok (I.validate invocation) -> Ok { prepared; binding; invocation }
+  | _ ->
+    Error
+      C.
+        { code = "capability.stale_context"
+        ; message = "invocation does not match the selected managed capability"
+        }
+;;

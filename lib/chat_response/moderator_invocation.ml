@@ -197,7 +197,14 @@ let prepare_input ~prepared ~(limits : S.limits) value =
   input
 ;;
 
-let create_for ~implementation ~prepared ~invocation ~(limits : S.limits) ~validate_work =
+let create_for
+      ~managed
+      ~implementation
+      ~prepared
+      ~invocation
+      ~(limits : S.limits)
+      ~validate_work
+  =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -229,10 +236,19 @@ let create_for ~implementation ~prepared ~invocation ~(limits : S.limits) ~valid
   in
   let capabilities = EC.capabilities prepared in
   let%bind () =
-    if
-      String.equal c.tool_name (EC.declaration prepared).name
-      && String.equal c.implementation_revision (EC.fingerprint prepared)
-      && String.equal c.capability_fingerprint (Tool_capability.fingerprint capabilities)
+    let matches =
+      match managed with
+      | None ->
+        String.equal c.tool_name (EC.declaration prepared).name
+        && String.equal c.implementation_revision (EC.fingerprint prepared)
+        && String.equal
+             c.capability_fingerprint
+             (Tool_capability.fingerprint capabilities)
+      | Some execution ->
+        I.equal invocation (Managed_tool_registry.invocation execution)
+        && phys_equal prepared (Managed_tool_registry.prepared execution)
+    in
+    if matches
     then Ok ()
     else error "invocation.stale_binding" "invocation does not match the prepared handler"
   in
@@ -289,8 +305,18 @@ let create_for ~implementation ~prepared ~invocation ~(limits : S.limits) ~valid
   Ok { prepared; invocation; limits; validate_work; context; input }
 ;;
 
-let create = create_for ~implementation:`Moderator
-let create_standalone = create_for ~implementation:`Standalone
+let create = create_for ~managed:None ~implementation:`Moderator
+let create_standalone = create_for ~managed:None ~implementation:`Standalone
+
+let create_managed_standalone ~execution ~limits ~validate_work =
+  create_for
+    ~managed:(Some execution)
+    ~implementation:`Standalone
+    ~prepared:(Managed_tool_registry.prepared execution)
+    ~invocation:(Managed_tool_registry.invocation execution)
+    ~limits
+    ~validate_work
+;;
 
 let decode t value =
   let open Result.Let_syntax in

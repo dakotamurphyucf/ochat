@@ -619,6 +619,7 @@ let create = create_native ~extension_resources:false ~native_registrations:[]
 type extension_resources =
   { native : t
   ; definition : Extension_compiler.definition
+  ; managed : Managed_tool_registry.t
   }
 
 let prepare_extensions
@@ -675,34 +676,25 @@ let prepare_extensions
     |> Result.map_error ~f:(fun error ->
       [ diagnostic error.Tool_capability.code error.message ])
   in
-  let%bind definition =
-    Extension_compiler.prepare_definition_in_domain
+  let%map managed =
+    Managed_tool_registry.prepare
       ~env:(Ctx.env ctx)
+      ~owner:host.session_id
       ~capabilities
       prompt_elements
     |> Result.map_error
          ~f:
            (List.map ~f:(fun (error : D.t) ->
-              { code = error.code; message = error.message; source = error.source }))
+              { code =
+                  (match error.code with
+                   | "capability.duplicate_name" -> "agent.duplicate_tool_name"
+                   | code -> code)
+              ; message = error.message
+              ; source = error.source
+              }))
   in
-  let native_names =
-    Tool_capability.references capabilities
-    |> List.map ~f:(fun reference -> reference.Tool_capability.name)
-    |> String.Set.of_list
+  let native =
+    { native with capabilities = lazy (Ok (Managed_tool_registry.capabilities managed)) }
   in
-  let%map () =
-    match
-      List.find (Extension_compiler.prepared_tools definition) ~f:(fun prepared ->
-        Set.mem native_names (Extension_compiler.declaration prepared).name)
-    with
-    | None -> Ok ()
-    | Some prepared ->
-      Error
-        [ diagnostic
-            "agent.duplicate_tool_name"
-            ("extension conflicts with a constructed native tool: "
-             ^ (Extension_compiler.declaration prepared).name)
-        ]
-  in
-  { native; definition }
+  { native; definition = Managed_tool_registry.definition managed; managed }
 ;;

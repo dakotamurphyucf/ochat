@@ -10,6 +10,7 @@
   infrastructure_tests
   invocation_tests
   jobs_tests
+  managed_nested_tests
   moderator_handoff_tests
   moderator_descendant_tests
   moderator_lifecycle_tests
