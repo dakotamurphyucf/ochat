@@ -486,8 +486,10 @@ val complete_job
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
 (** Complete an Async_tool job's exact claimed attempt after its invocation scope
-    releases. Persists the full [Completion] envelope in [Job.result], with a
-    matching success/failure/cancel status; expiration is a resource-limit failure.
+    releases. Retries cleanup of an inactive scope when its previous cleanup save
+    failed; active callbacks remain ineligible. Persists the full [Completion]
+    envelope in [Job.result], with a matching success/failure/cancel status;
+    expiration is a resource-limit failure.
     Retries require both an explicitly configured retry policy and a retryable
     tool failure. Legacy model-job result encoding is unchanged. *)
 val complete_background_job

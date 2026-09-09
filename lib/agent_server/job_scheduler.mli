@@ -2,7 +2,14 @@ open! Core
 
 (** Daemon-owned dispatcher for actor-persisted model jobs and qualified Async_tool
     requests. Generic jobs retain typed Completion results and pending delivery;
-    their event/notification adapter remains separate from legacy model events. *)
+    their event/notification adapter remains separate from legacy model events.
+    A generic worker retains its completion and capacity lease while retrying a
+    rejected save, with a cancellable 50ms-to-1s backoff. This never reruns tool
+    effects or increments the attempt. Cancellation, generation/attempt replacement
+    and an already-terminal job supersede the pending save. Shutdown leaves an
+    unsaved running attempt for normal interrupted-job recovery.
+    Generic admission rejections use independent workers, with at most one unsaved
+    rejection per session, so persistence failure cannot block the shared scheduler. *)
 
 type t
 

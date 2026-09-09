@@ -63,6 +63,7 @@ type moderator_borrow =
   ; invocation : Agent_protocol.Invocation.t
   ; mutable committed : bool
   ; mutable accepts_children : bool
+  ; mutable callback_finished : bool
   ; mutable cancel : (unit -> unit) option
   ; mutable cancel_requested : bool
   }
@@ -1492,6 +1493,7 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
       ; invocation = dispatched
       ; committed = false
       ; accepts_children = true
+      ; callback_finished = false
       ; cancel = None
       ; cancel_requested = false
       }
@@ -2021,6 +2023,7 @@ let claim_moderator_observation t operation_id invocation_id =
     ; invocation = observing
     ; committed = false
     ; accepts_children = Option.is_some operation_id
+    ; callback_finished = false
     ; cancel = None
     ; cancel_requested = false
     }
@@ -2101,6 +2104,7 @@ let claim_job_moderator t scope invocation =
     ; invocation = dispatched
     ; committed = false
     ; accepts_children = true
+    ; callback_finished = false
     ; cancel = None
     ; cancel_requested = false
     }
@@ -2208,6 +2212,11 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
   =
   let open Result.Let_syntax in
   let%bind () = validate_moderator_borrow t borrow in
+  let%bind () =
+    match borrow.callback_finished with
+    | false -> Ok ()
+    | true -> Error (error Conflict "moderator callback has ended")
+  in
   let%bind () =
     match
       List.exists t.invocation_executions ~f:(invocation_execution_owned_by borrow)
@@ -2323,6 +2332,8 @@ let uncommitted_borrow_delta t (borrow : moderator_borrow) failure =
 let finish_moderator_invocation t borrow failure =
   let open Result.Let_syntax in
   let%bind () = validate_moderator_borrow t borrow in
+  borrow.callback_finished <- true;
+  borrow.cancel <- None;
   borrow.accepts_children <- false;
   let was_committed = borrow.committed in
   let unfinished =
@@ -4711,6 +4722,27 @@ let finish_job_scope t scope =
   scope.active <- false;
   scope.cancel <- None;
   let%bind () =
+    match t.moderator_borrow with
+    | Some borrow
+      when borrow.callback_finished
+           && Option.exists borrow.job_scope ~f:(phys_equal scope) ->
+      finish_moderator_invocation
+        t
+        borrow
+        (Some
+           (Agent_protocol.Invocation.Cancelled
+              "background scope ended before moderator cleanup committed"))
+    | _ -> Ok ()
+  in
+  let%bind () =
+    match t.queued_event_borrow with
+    | Some borrow
+      when (not borrow.callback_active)
+           && Option.exists borrow.job_scope ~f:(phys_equal scope) ->
+      finish_queued_event t borrow true
+    | _ -> Ok ()
+  in
+  let%bind () =
     match job_has_moderator t scope with
     | false -> Ok ()
     | true -> Error (error Conflict "background callback left an owned moderator running")
@@ -4776,13 +4808,30 @@ let complete_job t job_id generation attempt outcome =
 
 let complete_background_job t job_id generation attempt completion =
   let open Result.Let_syntax in
-  let%bind job = running_job_for_completion t job_id generation attempt in
+  let%bind job = find_job t job_id in
+  let%bind () = validate_job_generation t job generation in
+  let%bind () = validate_job_attempt job attempt in
   let%bind () =
     match job.kind with
     | Async_tool -> Ok ()
     | _ -> Error (error Invalid_request "generic completion requires an async tool job")
   in
   let%bind () = Agent_protocol.Completion.validate completion in
+  let%bind () =
+    List.filter t.job_scopes ~f:(fun scope ->
+      (not scope.active)
+      && Agent_protocol.Id.Job.equal scope.job.id job_id
+      && Int.equal scope.job.generation generation
+      && Int.equal scope.job.attempt attempt)
+    |> List.fold_result ~init:() ~f:(fun () scope ->
+      match finish_job_scope t scope with
+      | Ok () -> Ok ()
+      | Error failure ->
+        (match List.mem t.job_scopes scope ~equal:phys_equal with
+         | true -> Error failure
+         | false -> Ok ()))
+  in
+  let%bind job = running_job_for_completion t job_id generation attempt in
   let encoded = Agent_protocol.Completion.to_json completion in
   let terminal status = terminal_job t job status (Some encoded) in
   let job =

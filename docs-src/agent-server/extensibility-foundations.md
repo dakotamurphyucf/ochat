@@ -131,6 +131,22 @@ text retain that contract; the scheduler does not classify text as structured
 failure. Generic terminal delivery remains pending for its own event adapter and
 is never sent through the legacy model-job completion event.
 
+If saving generic completion fails, the scheduler retains the result and its
+worker capacity and retries only persistence, using a cancellable backoff from
+50 milliseconds up to one second. It does not repeat tool effects or advance the
+execution attempt. A cancelled, replaced or already-terminal attempt supersedes
+that result. Shutdown discards the process-local pending result; normal startup
+recovery records its still-running job as interrupted. An explicit tool retry can
+start only after the preceding failure and retry decision have been saved.
+
+Completion also retries failed cleanup saves for inactive invocation scopes and
+finished moderator handlers/events. It never releases an active callback's owner.
+Finished handlers discard their cancellation callback before saving cleanup, so a
+rejected save cannot leave a cancellation function pointing into an ended Eio
+context. Cleanup failure does not authorize replay of the handler or its effects.
+Generic admission failures use separate workers, with at most one awaiting save
+per session, so one failed save does not block the shared scheduling loop.
+
 `Runtime_owner.close_and_wait` joins retained callback cleanup before the factory
 closes the actor and its persistence writer. It is for external session teardown;
 a callback closing its own owner must use nonblocking `close`. Daemon acceptance
@@ -158,9 +174,13 @@ reconciliation and cannot complete the job successfully.
 
 Pre-tool event requests are already durable and are consumed by the existing
 follow-up scheduler, not emitted a second time by the background adapter.
-Managed-handler/native runtime requests still require an owning persistence and
-consumption path; nonempty unconsumed requests currently fail explicitly after
-execution. Transactional capacity reservation, committed
+Managed-handler/native runtime requests now persist with their original invocation
+outcome. Invocation codec 10 records handler intent separately from observation
+intent. The scheduler waits for the owning job to finish, discards requests from
+cancelled/interrupted owners, and saves action admission before executing it.
+Compaction and dependent turns retain their operation binding; retiring one intent
+cannot admit the other through old-generation reconciliation. Native handlers can
+retain intent without an installed moderator. Transactional capacity reservation, committed
 launch intent, public background-start tools, progress/artifact surfaces and
 generic completion delivery remain under implementation. A decoded request or
 its content digest is not an authorization grant. Execution must still use the

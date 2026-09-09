@@ -1,9 +1,11 @@
 open! Core
 
 type running_job =
-  { generation : int
+  { session_id : Agent_protocol.Id.Session.t
+  ; generation : int
   ; attempt : int
   ; sw : Eio.Switch.t
+  ; rejected : bool
   }
 
 type t =
@@ -13,6 +15,7 @@ type t =
   ; mutable running : (Agent_protocol.Id.Job.t, running_job) Map.Poly.t
   ; mutable cursor : int
   ; mutable delivering : Session_registry.entry list
+  ; sleep : float -> unit
   }
 
 exception Job_cancelled
@@ -114,27 +117,55 @@ let failure_completion (failure : Agent_protocol.Error.t) =
       }
 ;;
 
-let complete_background entry (job : Agent_protocol.Job.t) outcome =
-  ignore
-    (Agent_session.Session_actor.complete_background_job
-       entry.Session_registry.actor
-       ~job_id:job.id
-       ~generation:job.generation
-       ~attempt:job.attempt
-       outcome
-     : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
+let completion_still_owned entry (job : Agent_protocol.Job.t) =
+  match Agent_session.Session_actor.state entry.Session_registry.actor with
+  | Error _ -> true
+  | Ok state ->
+    Int.equal state.identity.generation job.generation
+    && List.exists state.jobs ~f:(fun current ->
+      Agent_protocol.Id.Job.equal current.id job.id
+      && Int.equal current.generation job.generation
+      && Int.equal current.attempt job.attempt
+      &&
+      match current.status with
+      | Running -> true
+      | _ -> false)
 ;;
 
-let run_background_job entry job =
+let complete_background t entry (job : Agent_protocol.Job.t) outcome =
+  let rec save delay =
+    match Atomic.get t.closed with
+    | true -> ()
+    | false ->
+      (match
+         Agent_session.Session_actor.complete_background_job
+           entry.Session_registry.actor
+           ~job_id:job.id
+           ~generation:job.generation
+           ~attempt:job.attempt
+           outcome
+       with
+       | Ok _ -> ()
+       | Error _ ->
+         (match completion_still_owned entry job with
+          | false -> ()
+          | true ->
+            t.sleep delay;
+            save (Float.min 1. (delay *. 2.))))
+  in
+  save 0.05
+;;
+
+let run_background_job t entry job =
   let outcome =
     match Runtime_owner.execute_background_job entry.Session_registry.runtime job with
     | Ok outcome -> outcome
     | Error error -> failure_completion error
   in
-  complete_background entry job outcome
+  complete_background t entry job outcome
 ;;
 
-let register_running t (job : Agent_protocol.Job.t) job_sw =
+let register_running t (job : Agent_protocol.Job.t) job_sw ~rejected =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if Atomic.get t.closed
     then Eio.Switch.fail job_sw Job_cancelled
@@ -143,7 +174,13 @@ let register_running t (job : Agent_protocol.Job.t) job_sw =
       <- Map.set
            t.running
            ~key:job.id
-           ~data:{ generation = job.generation; attempt = job.attempt; sw = job_sw })
+           ~data:
+             { session_id = job.session_id
+             ; generation = job.generation
+             ; attempt = job.attempt
+             ; sw = job_sw
+             ; rejected
+             })
 ;;
 
 let unregister_running t (job : Agent_protocol.Job.t) =
@@ -156,11 +193,11 @@ let unregister_running t (job : Agent_protocol.Job.t) =
     | None | Some _ -> ())
 ;;
 
-let run_claimed_job entry job =
+let run_claimed_job t entry job =
   try
     match job.Agent_protocol.Job.kind with
     | Model_call -> run_model_job entry job
-    | Async_tool -> run_background_job entry job
+    | Async_tool -> run_background_job t entry job
     | Nested_agent | Scheduled_event | Shell_process | Compaction ->
       complete
         entry
@@ -172,6 +209,7 @@ let run_claimed_job entry job =
     (match job.kind with
      | Async_tool ->
        complete_background
+         t
          entry
          job
          (failure_completion
@@ -184,19 +222,29 @@ let run_claimed_job entry job =
        complete entry job (Agent_session.Runtime_builder.Model_failed (Exn.to_string exn)))
 ;;
 
-let dispatch t sw entry job lease =
+let dispatch t sw entry job lease rejection =
   Eio.Fiber.fork ~sw (fun () ->
     Exn.protect
       ~f:(fun () ->
         try
           Eio.Switch.run (fun job_sw ->
-            register_running t job job_sw;
-            run_claimed_job entry job)
+            register_running t job job_sw ~rejected:(Option.is_some rejection);
+            match rejection with
+            | None -> run_claimed_job t entry job
+            | Some error ->
+              (match job.kind with
+               | Async_tool -> complete_background t entry job (failure_completion error)
+               | _ ->
+                 complete
+                   entry
+                   job
+                   (Agent_session.Runtime_builder.Model_failed error.message)))
         with
         | Job_cancelled | Eio.Cancel.Cancelled _ -> ())
       ~finally:(fun () ->
-        unregister_running t job;
-        Job_capacity.release lease))
+        Eio.Cancel.protect (fun () ->
+          unregister_running t job;
+          Option.iter lease ~f:Job_capacity.release)))
 ;;
 
 let nested_depth (job : Agent_protocol.Job.t) =
@@ -233,7 +281,7 @@ let capacity_key entry job =
     ~nested_depth
 ;;
 
-let reject_job entry (job : Agent_protocol.Job.t) (error : Agent_protocol.Error.t) =
+let reject_job t sw entry (job : Agent_protocol.Job.t) (error : Agent_protocol.Error.t) =
   match
     Agent_session.Session_actor.claim_job
       entry.Session_registry.actor
@@ -241,10 +289,7 @@ let reject_job entry (job : Agent_protocol.Job.t) (error : Agent_protocol.Error.
       ~generation:job.generation
   with
   | Ok (Some claimed) ->
-    (match claimed.kind with
-     | Async_tool -> complete_background entry claimed (failure_completion error)
-     | _ ->
-       complete entry claimed (Agent_session.Runtime_builder.Model_failed error.message));
+    dispatch t sw entry claimed None (Some error);
     true
   | Ok None | Error _ -> false
 ;;
@@ -257,7 +302,7 @@ let claim_with_lease t sw entry (job : Agent_protocol.Job.t) lease =
       ~generation:job.generation
   with
   | Ok (Some claimed) ->
-    dispatch t sw entry claimed lease;
+    dispatch t sw entry claimed (Some lease) None;
     true
   | Ok None | Error _ ->
     Job_capacity.release lease;
@@ -265,15 +310,21 @@ let claim_with_lease t sw entry (job : Agent_protocol.Job.t) lease =
 ;;
 
 let claim t sw entry (job : Agent_protocol.Job.t) =
-  let already_running = Eio.Mutex.use_ro t.mutex (fun () -> Map.mem t.running job.id) in
+  let already_running =
+    Eio.Mutex.use_ro t.mutex (fun () ->
+      Map.mem t.running job.id
+      || Map.exists t.running ~f:(fun running ->
+        running.rejected
+        && Agent_protocol.Id.Session.equal running.session_id job.session_id))
+  in
   match already_running with
   | true -> false
   | false ->
     (match capacity_key entry job with
-     | Error error -> reject_job entry job error
+     | Error error -> reject_job t sw entry job error
      | Ok key ->
        (match Job_capacity.try_acquire t.capacity key with
-        | Error error -> reject_job entry job error
+        | Error error -> reject_job t sw entry job error
         | Ok None -> false
         | Ok (Some lease) -> claim_with_lease t sw entry job lease))
 ;;
@@ -394,6 +445,7 @@ let start ~sw ~clock ~registry ~capacity =
     ; running = Map.Poly.empty
     ; cursor = 0
     ; delivering = []
+    ; sleep = Eio.Time.sleep clock
     }
   in
   Eio.Fiber.fork ~sw (fun () -> run t sw clock registry);
