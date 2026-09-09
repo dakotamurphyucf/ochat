@@ -634,6 +634,13 @@
  (preprocess (pps ppx_jane ppx_expect)))
 
 (library
+ (name chatml_type_traversal_test)
+ (modules chatml_type_traversal_test)
+ (libraries core eio eio_main chatml chatml_typechecker chatml_compilation)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
  (name chatml_typechecker_test)
  (modules chatml_typechecker_test)
  (libraries
