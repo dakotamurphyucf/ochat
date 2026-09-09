@@ -53,6 +53,18 @@ type moderator_activation =
   ; run : unit -> (bool, Agent_protocol.Error.t) result
   }
 
+type background_executor =
+  { policy : Chat_response.One_off_request.policy
+  ; now : unit -> Agent_protocol.Timestamp.t
+  ; run :
+      job:Agent_protocol.Job.t
+      -> deadline:Agent_protocol.Timestamp.t
+      -> execute:Native_tool_invocation.executor
+      -> is_halted:(unit -> bool)
+      -> request:Chat_response.Background_request.t
+      -> (Background_execution.result, Agent_protocol.Error.t) result
+  }
+
 type t =
   { worker : Operation_worker.t
   ; parse_user_content :
@@ -68,6 +80,9 @@ type t =
   ; moderator_script_tools : Script_tool_calls.t option
     (** Host policy/disclosure services for v1 moderator native calls. Normal
         construction leaves this absent until v1 admission is installed. *)
+  ; background_executor : background_executor option
+    (** Qualified generic executor. Requires an actual job-owned actor scope;
+        configured moderators reject until their background handoff is installed. *)
   ; moderator_activation : moderator_activation option
     (** Deferred owned activation after installing the initial checkpoint. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result

@@ -94,6 +94,46 @@ let run_model_job entry job =
     complete entry job outcome
 ;;
 
+let failure_completion (failure : Agent_protocol.Error.t) =
+  let outcome =
+    Agent_protocol.Completion.Failed
+      { code = "background." ^ Agent_protocol.Error.code_to_string failure.code
+      ; message = failure.message
+      ; retryable = failure.retryable
+      ; details = failure.data
+      }
+  in
+  match Agent_protocol.Completion.validate outcome with
+  | Ok () -> outcome
+  | Error _ ->
+    Agent_protocol.Completion.Failed
+      { code = "background.host_failed"
+      ; message = "Background execution failed."
+      ; retryable = false
+      ; details = `Null
+      }
+;;
+
+let complete_background entry (job : Agent_protocol.Job.t) outcome =
+  ignore
+    (Agent_session.Session_actor.complete_background_job
+       entry.Session_registry.actor
+       ~job_id:job.id
+       ~generation:job.generation
+       ~attempt:job.attempt
+       outcome
+     : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
+;;
+
+let run_background_job entry job =
+  let outcome =
+    match Runtime_owner.execute_background_job entry.Session_registry.runtime job with
+    | Ok outcome -> outcome
+    | Error error -> failure_completion error
+  in
+  complete_background entry job outcome
+;;
+
 let register_running t (job : Agent_protocol.Job.t) job_sw =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if Atomic.get t.closed
@@ -117,10 +157,31 @@ let unregister_running t (job : Agent_protocol.Job.t) =
 ;;
 
 let run_claimed_job entry job =
-  try run_model_job entry job with
+  try
+    match job.Agent_protocol.Job.kind with
+    | Model_call -> run_model_job entry job
+    | Async_tool -> run_background_job entry job
+    | Nested_agent | Scheduled_event | Shell_process | Compaction ->
+      complete
+        entry
+        job
+        (Agent_session.Runtime_builder.Model_failed "job kind has no installed executor")
+  with
   | Eio.Cancel.Cancelled _ -> ()
   | exn ->
-    complete entry job (Agent_session.Runtime_builder.Model_failed (Exn.to_string exn))
+    (match job.kind with
+     | Async_tool ->
+       complete_background
+         entry
+         job
+         (failure_completion
+            (Agent_protocol.Error.create
+               Internal_error
+               ~message:"Background worker failed unexpectedly."
+               ~retryable:false
+               ()))
+     | _ ->
+       complete entry job (Agent_session.Runtime_builder.Model_failed (Exn.to_string exn)))
 ;;
 
 let dispatch t sw entry job lease =
@@ -180,7 +241,10 @@ let reject_job entry (job : Agent_protocol.Job.t) (error : Agent_protocol.Error.
       ~generation:job.generation
   with
   | Ok (Some claimed) ->
-    complete entry claimed (Agent_session.Runtime_builder.Model_failed error.message);
+    (match claimed.kind with
+     | Async_tool -> complete_background entry claimed (failure_completion error)
+     | _ ->
+       complete entry claimed (Agent_session.Runtime_builder.Model_failed error.message));
     true
   | Ok None | Error _ -> false
 ;;
@@ -215,8 +279,10 @@ let claim t sw entry (job : Agent_protocol.Job.t) =
 ;;
 
 let delivery_pending (job : Agent_protocol.Job.t) =
-  match job.status, job.delivery with
-  | (Succeeded | Failed _ | Cancelled | Interrupted _), Agent_protocol.Job.Pending -> true
+  match job.kind, job.status, job.delivery with
+  | ( Model_call
+    , (Succeeded | Failed _ | Cancelled | Interrupted _)
+    , Agent_protocol.Job.Pending ) -> true
   | _ -> false
 ;;
 

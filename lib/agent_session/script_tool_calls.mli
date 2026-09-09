@@ -11,6 +11,11 @@ type t
 (** Read the owning host's current lifecycle policy. *)
 val is_halted : t -> bool
 
+(** Bind this service to the actual background owner's lifecycle. Keeps all
+    capability, permission, disclosure and managed dispatch services intact.
+    The owning actor must still enforce invocation ownership/cancellation. *)
+val with_lifecycle : t -> is_halted:(unit -> bool) -> t
+
 (** Host dispatch accessors. These expose current binding/policy services, not
     permission to execute implementations outside an owned invocation. *)
 val current_capabilities : t -> Chat_response.Tool_capability.t

@@ -1873,7 +1873,7 @@ let checkpoint_entry t handle journal persistence actor =
 let close_entry t handle journal persistence runtime writer actor capacity =
   Exn.protect
     ~f:(fun () ->
-      Runtime_owner.close runtime;
+      Runtime_owner.close_and_wait runtime;
       ignore
         (checkpoint_entry t handle journal persistence actor
          : (unit, Agent_protocol.Error.t) result))
@@ -1888,7 +1888,7 @@ let close_entry t handle journal persistence runtime writer actor capacity =
 ;;
 
 let close_unregistered_entry runtime writer actor capacity =
-  Runtime_owner.close runtime;
+  Runtime_owner.close_and_wait runtime;
   Agent_session.Session_actor.shutdown actor;
   Option.iter capacity ~f:Session_capacity.release;
   Agent_store.Commit_writer.close writer

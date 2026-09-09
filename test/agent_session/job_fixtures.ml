@@ -8,7 +8,11 @@ module C = Chat_response.Tool_capability
 
 let deadline = Agent_protocol.Timestamp.of_string "2099-01-01T00:00:00Z" |> protocol_ok
 
-let add_claimed_job ?(payload = `Object [ "fixture", `String "owned tool job" ]) actor =
+let add_claimed_job
+      ?(payload = `Object [ "fixture", `String "owned tool job" ])
+      ?(retry_policy = J.Never)
+      actor
+  =
   let job =
     J.
       { id = Agent_protocol.Id.Job.create ()
@@ -17,7 +21,7 @@ let add_claimed_job ?(payload = `Object [ "fixture", `String "owned tool job" ])
       ; kind = Async_tool
       ; payload
       ; status = Queued
-      ; retry_policy = Never
+      ; retry_policy
       ; attempt = 0
       ; created_at = timestamp
       ; started_at = None

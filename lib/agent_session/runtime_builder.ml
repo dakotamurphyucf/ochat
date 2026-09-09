@@ -40,6 +40,18 @@ type moderator_activation =
   ; run : unit -> (bool, Agent_protocol.Error.t) result
   }
 
+type background_executor =
+  { policy : Chat_response.One_off_request.policy
+  ; now : unit -> Agent_protocol.Timestamp.t
+  ; run :
+      job:Agent_protocol.Job.t
+      -> deadline:Agent_protocol.Timestamp.t
+      -> execute:Native_tool_invocation.executor
+      -> is_halted:(unit -> bool)
+      -> request:Chat_response.Background_request.t
+      -> (Background_execution.result, Agent_protocol.Error.t) result
+  }
+
 type t =
   { worker : Operation_worker.t
   ; parse_user_content :
@@ -53,6 +65,7 @@ type t =
   ; moderator_manager : Manager.t option
   ; moderator_tools : Request.Tool.t list
   ; moderator_script_tools : Script_tool_calls.t option
+  ; background_executor : background_executor option
   ; moderator_activation : moderator_activation option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
@@ -932,7 +945,8 @@ let build_with_services
                   ~session_meta:`Null
                   ~now)
          | _ -> tools_service)
-    | _ -> None
+    | None, Some services -> Some (services.script_tools agent_runtime)
+    | _, None -> None
   in
   one_off_services := script_tools;
   let lifecycle =
@@ -1161,6 +1175,36 @@ let build_with_services
           moderator.Chat_response.In_memory_stream.manager)
     ; moderator_tools = tools
     ; moderator_script_tools = script_tools
+    ; background_executor =
+        (match script_tools, extension_services with
+         | Some script_tools, Some services ->
+           Some
+             { policy = services.one_off_policy
+             ; now
+             ; run =
+                 (fun ~job ~deadline ~execute ~is_halted ~request ->
+                   match moderator with
+                   | Some _ ->
+                     Error (failure "job-owned moderator handoff is not installed")
+                   | None ->
+                     Background_execution.run
+                       ~env
+                       ~job
+                       ~deadline
+                       ~execute
+                       ~request
+                       ~policy:services.one_off_policy
+                       ~script_tools:
+                         (Script_tool_calls.with_lifecycle script_tools ~is_halted)
+                       ~now
+                       ~moderate_tool:(fun _ _ -> Ok None)
+                       ~prepare_outcome:(fun outcome ->
+                         Agent_protocol.Invocation.validate_outcome outcome
+                         |> Result.map_error ~f:(fun error ->
+                           error.Agent_protocol.Error.message))
+                       ())
+             }
+         | _ -> None)
     ; moderator_activation
     ; start_moderator =
         (fun () ->

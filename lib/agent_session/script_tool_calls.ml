@@ -74,6 +74,7 @@ let native_dispatch t ~input ~capabilities =
 let is_halted t = t.is_halted ()
 let current_capabilities t = t.registry ()
 let authorize t = t.authorize
+let with_lifecycle t ~is_halted = { t with is_halted }
 let with_moderator_dispatch t ~dispatch = { t with moderator = Some dispatch }
 
 let validate_definition t definition =

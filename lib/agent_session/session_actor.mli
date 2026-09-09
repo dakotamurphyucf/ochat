@@ -466,6 +466,19 @@ val complete_job
   -> Runtime_builder.model_job_outcome
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
+(** Complete an Async_tool job's exact claimed attempt after its invocation scope
+    releases. Persists the full [Completion] envelope in [Job.result], with a
+    matching success/failure/cancel status; expiration is a resource-limit failure.
+    Retries require both an explicitly configured retry policy and a retryable
+    tool failure. Legacy model-job result encoding is unchanged. *)
+val complete_background_job
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> Agent_protocol.Completion.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
 (** Optional expected values perform checkpoint and complete job-record comparison
     in the same mailbox transaction as delivery. Scheduler ingress supplies both. *)
 val deliver_job

@@ -94,6 +94,16 @@ val execute_model_job
   -> payload:Jsonaf.t
   -> (Agent_session.Runtime_builder.model_job_outcome, Agent_protocol.Error.t) result
 
+(** Execute a qualified Async_tool request through retained runtime ownership and
+    the actor's exact job-attempt scope. Queue/retry time counts against the stored
+    execution budget from Job.created_at. Generic results retain Completion data;
+    configured moderators and unsupported runtime requests fail explicitly until
+    their owning integration is installed. Does not admit or finish the job. *)
+val execute_background_job
+  :  t
+  -> Agent_protocol.Job.t
+  -> (Agent_protocol.Completion.t, Agent_protocol.Error.t) result
+
 (** Atomically acknowledge a terminal model job and append its event using the
     same actor/checkpoint ownership as schedule delivery. *)
 val deliver_model_job_completion
@@ -107,6 +117,11 @@ val deliver_model_job_completion
     does not wait for callbacks and is safe to request from inside one. The actor
     must remain running through callback cleanup. *)
 val close : t -> unit
+
+(** Close and await background callback cleanup before shutting down the actor or
+    its persistence writer. Call from the external session lifecycle, never from a
+    retained background callback (which would await itself). *)
+val close_and_wait : t -> unit
 
 module For_testing : sig
   (** Hold loaded runtime ownership while installing a deterministic actor-state

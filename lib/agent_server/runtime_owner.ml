@@ -1,6 +1,10 @@
 open! Core
 
-type background_lease = { cancel : unit -> unit }
+type background_lease =
+  { cancel : unit -> unit
+  ; finished : unit Eio.Promise.t
+  ; finish : unit Eio.Promise.u
+  }
 
 type t =
   { actor : Agent_session.Session_actor.t
@@ -93,8 +97,11 @@ let raise_cleanup = function
 let with_background_runtime t f =
   Eio.Cancel.sub (fun context ->
     let active = Atomic.make true in
+    let finished, finish = Eio.Promise.create () in
     let lease =
-      { cancel =
+      { finished
+      ; finish
+      ; cancel =
           (fun () ->
             match Atomic.get active with
             | true -> Eio.Cancel.cancel context Exit
@@ -117,14 +124,17 @@ let with_background_runtime t f =
       Exn.protect
         ~finally:(fun () ->
           Atomic.set active false;
-          Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-            t.background_leases
-            <- List.filter t.background_leases ~f:(fun current ->
-                 not (phys_equal current lease));
-            match t.closed, t.background_leases with
-            | true, [] -> retire_closed_locked t
-            | _ -> Ok ())
-          |> raise_cleanup)
+          Exn.protect
+            ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
+            ~f:(fun () ->
+              Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+                t.background_leases
+                <- List.filter t.background_leases ~f:(fun current ->
+                     not (phys_equal current lease));
+                match t.closed, t.background_leases with
+                | true, [] -> retire_closed_locked t
+                | _ -> Ok ())
+              |> raise_cleanup))
         ~f:(fun () ->
           Eio.Fiber.check ();
           let result = f runtime in
@@ -540,6 +550,89 @@ let execute_model_job t ~recipe ~payload =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let execute_background_job t (job : Agent_protocol.Job.t) =
+  with_background_runtime t (fun runtime ->
+    let open Result.Let_syntax in
+    let%bind executor =
+      Result.of_option
+        runtime.background_executor
+        ~error:
+          (Agent_protocol.Error.create
+             Invalid_state
+             ~message:"generic background execution is not configured"
+             ~retryable:false
+             ())
+    in
+    let%bind request =
+      Chat_response.Background_request.of_json ~policy:executor.policy job.payload
+    in
+    let%bind deadline =
+      Result.try_with (fun () ->
+        Time_ns.add
+          (Agent_protocol.Timestamp.to_time_ns job.created_at)
+          (Time_ns.Span.of_sec
+             (Chat_response.Background_request.policy request).execution.wall_seconds)
+        |> Agent_protocol.Timestamp.of_time_ns)
+      |> Result.map_error ~f:(fun _ ->
+        Agent_protocol.Error.invalid_request
+          "background deadline is outside the supported timestamp range")
+    in
+    match Agent_protocol.Timestamp.compare deadline (executor.now ()) <= 0 with
+    | true -> Ok Agent_protocol.Completion.Expired
+    | false ->
+      let%bind result =
+        Agent_session.Session_actor.with_job_invocations
+          t.actor
+          ~job_id:job.id
+          ~generation:job.generation
+          ~attempt:job.attempt
+          ~deadline:(Some deadline)
+          (fun ~job ~execute ->
+             let is_halted () =
+               match Agent_session.Session_actor.state t.actor with
+               | Error _ -> true
+               | Ok state ->
+                 state.halted
+                 || Option.is_some state.failure
+                 || Agent_protocol.Session.equal_desired_state
+                      state.lifecycle.desired
+                      Stopped
+                 || not
+                      (List.exists state.jobs ~f:(fun current ->
+                         Agent_protocol.Id.Job.equal current.id job.id
+                         && Int.equal current.generation job.generation
+                         && Int.equal current.attempt job.attempt
+                         &&
+                         match current.status with
+                         | Running | Waiting_permission _ -> true
+                         | _ -> false))
+             in
+             executor.run ~job ~deadline ~execute ~is_halted ~request)
+      in
+      let%bind () =
+        match result.runtime_requests with
+        | [] -> Ok ()
+        | _ ->
+          Error
+            (Agent_protocol.Error.create
+               Invalid_state
+               ~message:"background runtime request consumption is not installed"
+               ~retryable:false
+               ())
+      in
+      (match result.resolved.status with
+       | Resolved (Complete value) -> Ok (Agent_protocol.Completion.Succeeded value)
+       | Resolved (Fail error) -> Ok (Agent_protocol.Completion.Failed error)
+       | Resolved (Cancelled reason) -> Ok (Agent_protocol.Completion.Cancelled reason)
+       | _ ->
+         Error
+           (Agent_protocol.Error.create
+              Invalid_state
+              ~message:"background execution did not produce a terminal outcome"
+              ~retryable:false
+              ())))
+;;
+
 let deliver_model_job_completion t (job : Agent_protocol.Job.t) =
   with_cancellable_access t (fun () ->
     let open Result.Let_syntax in
@@ -569,4 +662,13 @@ let close t =
   in
   List.iter leases ~f:(fun lease -> lease.cancel ());
   raise_cleanup retired
+;;
+
+let close_and_wait t =
+  close t;
+  let pending =
+    Eio.Mutex.use_ro t.mutex (fun () ->
+      List.map t.background_leases ~f:(fun lease -> lease.finished))
+  in
+  List.iter pending ~f:Eio.Promise.await
 ;;

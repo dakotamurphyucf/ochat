@@ -1,6 +1,8 @@
 open! Core
 
-(** Daemon-owned dispatcher for actor-persisted background model jobs. *)
+(** Daemon-owned dispatcher for actor-persisted model jobs and qualified Async_tool
+    requests. Generic jobs retain typed Completion results and pending delivery;
+    their event/notification adapter remains separate from legacy model events. *)
 
 type t
 

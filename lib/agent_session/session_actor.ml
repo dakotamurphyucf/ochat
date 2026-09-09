@@ -267,6 +267,9 @@ type _ request =
   | Complete_job :
       Agent_protocol.Id.Job.t * int * int * Runtime_builder.model_job_outcome
       -> Agent_protocol.Job.t request
+  | Complete_background_job :
+      Agent_protocol.Id.Job.t * int * int * Agent_protocol.Completion.t
+      -> Agent_protocol.Job.t request
   | Deliver_job :
       Agent_protocol.Id.Job.t
       * int
@@ -706,6 +709,12 @@ let activate_queued_start t =
   | _, _ -> Error (error Invalid_state "session has no queued start intent")
 ;;
 
+let background_terminal_result (job : Agent_protocol.Job.t) completion =
+  match job.kind with
+  | Async_tool -> Some (Agent_protocol.Completion.to_json completion)
+  | _ -> job.result
+;;
+
 let stopped_jobs t mode =
   if Agent_protocol.Session.equal_stop_mode mode Graceful
   then []
@@ -716,6 +725,7 @@ let stopped_jobs t mode =
         Some
           { job with
             status = Cancelled
+          ; result = background_terminal_result job (Cancelled "session stopped")
           ; completed_at = Some (t.services.now ())
           ; delivery =
               (match job.delivery with
@@ -4495,7 +4505,7 @@ let finish_job_scope t scope =
   | true -> Error (error Conflict "background callback left unfinished invocations")
 ;;
 
-let complete_job t job_id generation attempt outcome =
+let running_job_for_completion t job_id generation attempt =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
@@ -4509,13 +4519,53 @@ let complete_job t job_id generation attempt outcome =
     | true -> Error (error Conflict "job execution scope still owns its invocations")
   in
   match job.status with
-  | Agent_protocol.Job.Running ->
-    let job = complete_job_outcome t job outcome in
-    let%map _ = update_job t job in
-    job
+  | Agent_protocol.Job.Running -> Ok job
   | Queued | Waiting_permission _ -> Error (error Conflict "job is not running")
   | Succeeded | Failed _ | Cancelled | Interrupted _ ->
     Error (error Already_resolved "job is already terminal")
+;;
+
+let complete_job t job_id generation attempt outcome =
+  let open Result.Let_syntax in
+  let%bind job = running_job_for_completion t job_id generation attempt in
+  let job = complete_job_outcome t job outcome in
+  let%map _ = update_job t job in
+  job
+;;
+
+let complete_background_job t job_id generation attempt completion =
+  let open Result.Let_syntax in
+  let%bind job = running_job_for_completion t job_id generation attempt in
+  let%bind () =
+    match job.kind with
+    | Async_tool -> Ok ()
+    | _ -> Error (error Invalid_request "generic completion requires an async tool job")
+  in
+  let%bind () = Agent_protocol.Completion.validate completion in
+  let encoded = Agent_protocol.Completion.to_json completion in
+  let terminal status = terminal_job t job status (Some encoded) in
+  let job =
+    match completion with
+    | Agent_protocol.Completion.Succeeded _ -> terminal Succeeded
+    | Cancelled _ -> terminal Cancelled
+    | Expired ->
+      terminal (Failed (error Resource_limit "background job deadline elapsed"))
+    | Failed failure ->
+      (match failure.retryable, retry_limits job.retry_policy with
+       | true, Some (maximum, backoff_ms) when job.attempt < maximum ->
+         { (retry_job t job failure.message backoff_ms) with result = Some encoded }
+       | _ ->
+         terminal
+           (Failed
+              (Agent_protocol.Error.create
+                 Internal_error
+                 ~message:failure.message
+                 ~retryable:failure.retryable
+                 ~data:encoded
+                 ())))
+  in
+  let%map _ = update_job t job in
+  job
 ;;
 
 let check_expected_moderator_checkpoint t = function
@@ -4574,6 +4624,7 @@ let cancel_job_internal t job_id =
     let job =
       { job with
         status = Cancelled
+      ; result = background_terminal_result job (Cancelled "job cancelled")
       ; completed_at = Some (t.services.now ())
       ; delivery =
           (match job.delivery with
@@ -4596,6 +4647,15 @@ let interrupt_job t job_id generation attempt reason =
     let job =
       { job with
         status = Interrupted reason
+      ; result =
+          background_terminal_result
+            job
+            (Failed
+               { code = "background.interrupted"
+               ; message = reason
+               ; retryable = false
+               ; details = `Null
+               })
       ; completed_at = Some (t.services.now ())
       ; delivery =
           (match job.delivery with
@@ -5486,6 +5546,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Claim_job (job_id, generation) -> claim_job t job_id generation
   | Complete_job (job_id, generation, attempt, outcome) ->
     complete_job t job_id generation attempt outcome
+  | Complete_background_job (job_id, generation, attempt, outcome) ->
+    complete_background_job t job_id generation attempt outcome
   | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
     deliver_job t job_id generation expected expected_job moderator_snapshot
   | Cancel_job_internal job_id -> cancel_job_internal t job_id
@@ -5866,6 +5928,13 @@ let claim_job t ~job_id ~generation = call t (Claim_job (job_id, generation))
 
 let complete_job t ~job_id ~generation ~attempt outcome =
   call t ~priority:Priority (Complete_job (job_id, generation, attempt, outcome))
+;;
+
+let complete_background_job t ~job_id ~generation ~attempt outcome =
+  call
+    t
+    ~priority:Priority
+    (Complete_background_job (job_id, generation, attempt, outcome))
 ;;
 
 let deliver_job ?expected ?expected_job t ~job_id ~generation ~moderator_snapshot =

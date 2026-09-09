@@ -16,6 +16,7 @@ let runtime ?script_tools ~close () : Builder.t =
   ; moderator_manager = None
   ; moderator_tools = []
   ; moderator_script_tools = script_tools
+  ; background_executor = None
   ; moderator_activation = None
   ; start_moderator = (fun () -> Ok None)
   ; enqueue_internal_event = (fun ?prepare:_ _ -> failwith "unexpected event")
@@ -143,6 +144,7 @@ let%expect_test "close cancels callbacks and retires only after their cleanup fi
     let cleaning, cleaning_u = Eio.Promise.create () in
     let release, release_u = Eio.Promise.create () in
     let done_, done_u = Eio.Promise.create () in
+    let joined, joined_u = Eio.Promise.create () in
     let never, _ = Eio.Promise.create () in
     let closes = ref 0 in
     let owner =
@@ -169,8 +171,11 @@ let%expect_test "close cancels callbacks and retires only after their cleanup fi
       in
       Eio.Promise.resolve done_u cancelled);
     Eio.Promise.await entered;
-    Owner.close owner;
+    Eio.Fiber.fork ~sw (fun () ->
+      Owner.close_and_wait owner;
+      Eio.Promise.resolve joined_u ());
     Eio.Promise.await cleaning;
+    assert (Option.is_none (Eio.Promise.peek joined));
     [%test_eq: int] 0 !closes;
     [%test_eq: bool] true (Owner.is_loaded owner);
     reject "reload after close" (Owner.ensure_loaded owner);
@@ -180,6 +185,7 @@ let%expect_test "close cancels callbacks and retires only after their cleanup fi
          failwith "closed owner admitted work"));
     Eio.Promise.resolve release_u ();
     [%test_eq: bool] true (Eio.Promise.await done_);
+    Eio.Promise.await joined;
     Owner.close owner;
     print_s [%sexp (!closes : int), (Owner.is_loaded owner : bool)]);
   [%expect

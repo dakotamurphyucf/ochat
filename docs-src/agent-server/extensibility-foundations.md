@@ -114,10 +114,36 @@ callbacks; the final callback release retires the runtime after cleanup. The act
 must remain running until those callbacks have unwound. Callbacks must join their
 work and cannot retain the runtime for later use.
 
-These internal services are not an enabled background execution path.
-Scheduler dispatch, transactional capacity reservation, committed launch intent,
-job-owned moderator handoffs and generic completion delivery remain under
-implementation. A decoded request or
+Extensibility-qualified daemon hosts now dispatch persisted `Async_tool` requests
+through `Runtime_builder`, `Runtime_owner` and the ordinary job scheduler. Native
+tools, standalone handlers and submitted one-off scripts use the actor's actual
+job-attempt scope. The absolute deadline is the job creation time plus the stored
+wall-time budget, so queueing and retries do not reset that budget. This also works
+for native-only ChatMD prompts on explicitly qualified hosts. Default public
+feature availability is unchanged.
+
+Generic completion stores the complete `Completion` envelope in `Job.result`,
+readable through `job.get`. Retry requires both a retryable failure and an explicit
+job policy with attempts remaining. Stale attempts and active invocation scopes
+cannot complete the job. Cancellation and restart interruption replace any prior
+retry result with their terminal envelope. Legacy native tools that return error
+text retain that contract; the scheduler does not classify text as structured
+failure. Generic terminal delivery remains pending for its own event adapter and
+is never sent through the legacy model-job completion event.
+
+`Runtime_owner.close_and_wait` joins retained callback cleanup before the factory
+closes the actor and its persistence writer. It is for external session teardown;
+a callback closing its own owner must use nonblocking `close`. Daemon acceptance
+tests verify real file reads, script/standalone state isolation, typed failures,
+permission cancellation, and results retained across restart without model calls.
+Work interrupted by shutdown is recorded explicitly rather than automatically
+re-executed on restart.
+
+Configured moderators currently reject generic dispatch before any tool effect:
+the job-owned moderator checkpoint handoff is still required. Unconsumed runtime
+requests also fail explicitly. Transactional capacity reservation, committed
+launch intent, public background-start tools, progress/artifact surfaces and
+generic completion delivery remain under implementation. A decoded request or
 its content digest is not an authorization grant. Execution must still use the
 owning actor and current policy, moderation, approval and output-disclosure checks.
 
