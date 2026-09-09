@@ -27,6 +27,9 @@ type options =
   ; qualify_chatml_extensions : bool
     (** Internal integration qualification only. Defaults to false, has no CLI or
         configuration-file flag, and does not advertise public extension features. *)
+  ; authoring_validation_host : Chat_response.Authoring_validation.host option
+    (** Explicit target identity/policy for readonly helper qualification. None
+        by default; no model-supplied context or automatic public exposure. *)
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   }
 

@@ -35,6 +35,7 @@ type t =
   ; home : string
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
   ; qualify_chatml_extensions : bool
+  ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
   }
@@ -68,6 +69,7 @@ let create
       ~home
       ~model_post_stream
       ~qualify_chatml_extensions
+      ~authoring_validation_host
       ~durability
       ~limits
   =
@@ -98,6 +100,7 @@ let create
   ; home
   ; model_post_stream
   ; qualify_chatml_extensions
+  ; authoring_validation_host
   ; durability
   ; limits
   }
@@ -1067,6 +1070,7 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
     ; standalone_execution_limits =
         Agent_session.Standalone_tool_dispatch.declared_execution_limits
     ; one_off_policy = Chat_response.One_off_request.default_policy
+    ; authoring_validation_host = t.authoring_validation_host
     ; claim_lifecycle =
         (fun ~event ~snapshot handle ->
           let open Result.Let_syntax in

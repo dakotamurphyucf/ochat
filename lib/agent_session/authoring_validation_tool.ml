@@ -1,0 +1,52 @@
+open Core
+module V = Chat_response.Authoring_validation
+module N = Native_tool_invocation
+
+let name = Chatmd_shell_spec.Authoring_metadata.helper_name Validation
+
+let registration ~env ~host =
+  let module Definition = struct
+    type input = Jsonaf.t
+
+    let name = name
+
+    let description =
+      Some
+        "Validate inline ChatML source without evaluating it. Version 1 targets: \
+         one_off_script, standalone_tool, moderator. Returns source-bound diagnostics \
+         and deferred runtime checks; validation grants no execution authority. Topic: \
+         runtime.invocations.validation."
+    ;;
+
+    let type_ = "function"
+    let parameters = V.parameters
+    let input_of_string = Jsonaf.of_string
+  end
+  in
+  let require = Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message) in
+  let implementation =
+    Ochat_function.create_function
+      (module Definition)
+      ~strict:false
+      (fun json ->
+         let borrowed = N.borrow () |> require |> Result.ok_or_failwith in
+         let capabilities =
+           N.borrowed_capabilities borrowed |> require |> Result.ok_or_failwith
+         in
+         let report = V.validate ~env ~host ~capabilities json in
+         ignore
+           (N.borrowed_capabilities borrowed |> require |> Result.ok_or_failwith
+            : Chat_response.Tool_capability.t);
+         Openai.Responses.Tool_output.Output.Text (V.to_json report |> Jsonaf.to_string))
+  in
+  let implementation_revision =
+    Chatmd_shell_spec.Source_ref.digest
+      ("ochat.validate.inline.v1:" ^ V.host_fingerprint host)
+  in
+  Chat_response.Agent_runtime.
+    { implementation
+    ; implementation_revision
+    ; result_contract = Native_output
+    ; authoring_metadata = Some V.helper_metadata
+    }
+;;

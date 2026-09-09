@@ -15,6 +15,7 @@ type native_registration =
   { implementation : Ochat_function.t
   ; implementation_revision : string
   ; result_contract : Tool_capability.result_contract
+  ; authoring_metadata : Chatmd_shell_spec.Authoring_metadata.t option
   }
 
 type t =
@@ -457,7 +458,11 @@ let build_functions ~native_registrations ~sw ~ctx ~host ~run_agent shell_regist
           |> Chatmd_shell_spec.Source_ref.digest
         in
         List.map functions ~f:(fun implementation ->
-          { implementation; implementation_revision; result_contract = Native_output })))
+          { implementation
+          ; implementation_revision
+          ; result_contract = Native_output
+          ; authoring_metadata = None
+          })))
   |> Result.all
   |> Result.map ~f:List.concat
   |> Result.map_error ~f:List.return
@@ -580,6 +585,10 @@ let create_native
                        |> Chatmd_shell_spec.Source_ref.digest
                      in
                      Authoring_registration.create
+                       ~host_metadata:
+                         (List.filter_map registrations ~f:(fun value ->
+                            Option.map value.authoring_metadata ~f:(fun metadata ->
+                              function_name value.implementation, metadata)))
                        ~result_contracts:
                          (List.map registrations ~f:(fun value ->
                             function_name value.implementation, value.result_contract))

@@ -35,6 +35,10 @@ type extension_services =
   ; one_off_policy : Chat_response.One_off_request.policy
     (** Host ceiling for explicitly declared run_chatml. Supplying policy never
         adds the tool to a document that did not declare it. *)
+  ; authoring_validation_host : Chat_response.Authoring_validation.host option
+    (** Explicit readonly-helper target identity/policy. None leaves the helper
+        unavailable. A01 supplies the compatible installed runtime/corpus host;
+        internal qualification may supply its known target identity. *)
   ; claim_lifecycle : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
     (** Actual running-idle actor ownership. Never manufacture an operation. *)
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool

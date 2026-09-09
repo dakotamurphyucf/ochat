@@ -33,6 +33,7 @@
   tool
   tool_capability
   authoring_policy
+  authoring_validation
   generated_admission
   authoring_registration
   extension_compiler

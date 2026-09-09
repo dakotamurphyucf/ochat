@@ -169,7 +169,44 @@ let check_json env root documents =
            failwith
              (file ^ ": " ^ Sexp.to_string_hum ([%sexp_of: Agent_protocol.Error.t] error)))
       | Ok _ -> ()
-      | Error error -> failwith (file ^ ": " ^ error.message)))
+      | Error error -> failwith (file ^ ": " ^ error.message)));
+  let validation_pattern =
+    Re.(
+      compile
+        (seq
+           [ str "```json tool=ochat_validate\n"
+           ; group (non_greedy (rep any))
+           ; str "\n```"
+           ]))
+  in
+  let module V = Chat_response.Authoring_validation in
+  let host =
+    V.create_host
+      ~runtime_identity:"documentation-validation-target"
+      ~targets:[ One_off_script; Standalone_tool; Moderator ]
+      ~moderator_surface:Ordinary
+      ~compilation:Chatml_compilation.default_limits
+    |> Result.ok_or_failwith
+  in
+  let capabilities =
+    Chat_response.Tool_capability.create
+      ~owner:"documentation-validation"
+      ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "documentation-no-tools")
+      []
+    |> Result.map_error ~f:(fun error -> error.Chat_response.Tool_capability.message)
+    |> Result.ok_or_failwith
+  in
+  List.iter documents ~f:(fun file ->
+    Re.all validation_pattern (load env root file)
+    |> List.iter ~f:(fun block ->
+      let report =
+        V.validate ~env ~host ~capabilities (Re.Group.get block 1 |> Jsonaf.of_string)
+      in
+      require
+        (V.valid report)
+        (file
+         ^ ": invalid readonly validation example: "
+         ^ Jsonaf.to_string (V.to_json report))))
 ;;
 
 let temporary_root env =

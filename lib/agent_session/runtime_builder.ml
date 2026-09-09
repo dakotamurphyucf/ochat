@@ -29,6 +29,7 @@ type extension_services =
   ; standalone_execution_limits :
       Chat_response.Extension_compiler.t -> Chatml_execution.limits
   ; one_off_policy : Chat_response.One_off_request.policy
+  ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
   ; history : unit -> History_entry.t list
@@ -742,6 +743,12 @@ let build_with_services
       | Prompt.Chat_markdown.Tool (Builtin name) -> String.equal name Run_chatml_tool.name
       | _ -> false)
   in
+  let declares_validation =
+    List.exists elements ~f:(function
+      | Prompt.Chat_markdown.Tool (Builtin name) ->
+        String.equal name Authoring_validation_tool.name
+      | _ -> false)
+  in
   let native_registrations =
     match extension_services, declares_one_off with
     | Some services, true ->
@@ -778,11 +785,28 @@ let build_with_services
       ]
     | None, _ | Some _, false -> []
   in
+  let%bind native_registrations =
+    match declares_validation, extension_services with
+    | false, _ -> Ok native_registrations
+    | true, Some { authoring_validation_host = Some validation_host; _ } ->
+      Ok
+        (native_registrations
+         @ [ Authoring_validation_tool.registration ~env ~host:validation_host ])
+    | true, (None | Some { authoring_validation_host = None; _ }) ->
+      Error
+        (Agent_protocol.Error.create
+           Invalid_state
+           ~message:
+             "authoring.unavailable: readonly validation needs an explicit host target"
+           ~retryable:false
+           ())
+  in
   let%bind agent_runtime, definition, managed =
     create_agent_runtime
       ~extensions:
         (Option.is_some extension_services
          && (declares_one_off
+             || declares_validation
              || List.exists elements ~f:(function
                | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
                | _ -> false)))

@@ -982,6 +982,13 @@
  (inline_tests)
  (preprocess (pps ppx_jane)))
 
+(library
+ (name authoring_validation_test)
+ (modules authoring_validation_test)
+ (libraries core jsonaf chat_response chatmd_shell_spec eio eio_main ochat_function openai mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
 (executable
  (name generated_admission_test)
  (modules generated_admission_test)

@@ -149,6 +149,10 @@ type native_registration =
   { implementation : Ochat_function.t
   ; implementation_revision : string
   ; result_contract : Tool_capability.result_contract
+  ; authoring_metadata : Chatmd_shell_spec.Authoring_metadata.t option
+    (** Trusted metadata on this implementation, retained in its capability
+        identity and selection. The host still must fulfill the corresponding
+        authoring policy before general model-visible exposure. *)
   }
 
 (** Prepare a definition for an extensibility-aware host. Validates the captured

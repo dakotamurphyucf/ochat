@@ -306,6 +306,15 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                     |> Result.ok_or_failwith
                   in
                   registry_ref := Some registry;
+                  (match C.find registry ~name:"run_chatml" with
+                   | Error _ -> ()
+                   | Ok binding ->
+                     let metadata = C.metadata binding in
+                     let help = Option.value_exn metadata.authoring in
+                     assert (
+                       Chatmd_shell_spec.Authoring_metadata.equal_help
+                         help
+                         (Chat_response.Authoring_validation.help One_off_script)));
                   Agent_session.Script_tool_calls.create
                     ~registry:(fun () -> Option.value_exn !registry_ref)
                     ~moderator_names:
@@ -345,6 +354,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
             ; standalone_execution_limits =
                 Agent_session.Standalone_tool_dispatch.declared_execution_limits
             ; one_off_policy = Chat_response.One_off_request.default_policy
+            ; authoring_validation_host = None
             ; lifecycle_started = (fun _ -> false)
             ; claim_lifecycle =
                 (fun ~event ->

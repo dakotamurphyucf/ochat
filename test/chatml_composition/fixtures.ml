@@ -33,7 +33,7 @@ let call_events calls =
   |> Stdlib.List.to_seq
 ;;
 
-let with_daemon ~sources ~calls f =
+let with_daemon ?validation_host ~sources ~calls f =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -78,6 +78,7 @@ let with_daemon ~sources ~calls f =
               ~options:
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
+                ; authoring_validation_host = validation_host
                 ; model_post_stream = Some post_stream
                 }
               ()

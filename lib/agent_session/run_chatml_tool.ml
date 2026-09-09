@@ -184,9 +184,10 @@ let registration ~env ~policy ~services =
 
     let description =
       Some
-        "Execute a one-off ChatML main(input) program using an explicit subset of this \
-         invocation's tools. Returns one structured outcome; creates no agent session \
-         and makes no model request."
+        "Execute a one-off ChatML main : json -> json task using an explicit tool \
+         subset. Calls use f(x, y). Returns one structured outcome without creating a \
+         session. Authoring topics: chatml.syntax.calls, runtime.invocations.one-off, \
+         runtime.invocations.validation."
     ;;
 
     let type_ = "function"
@@ -235,5 +236,11 @@ let registration ~env ~policy ~services =
     ; implementation_revision =
         Chatmd_shell_spec.Source_ref.digest "ochat.run-chatml.native.v1"
     ; result_contract = Chat_response.Tool_capability.Invocation_v1
+    ; authoring_metadata =
+        Some
+          Chatmd_shell_spec.Authoring_metadata.
+            { authoring = Some (Chat_response.Authoring_validation.help One_off_script)
+            ; helper = None
+            }
     }
 ;;

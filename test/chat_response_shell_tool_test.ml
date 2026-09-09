@@ -290,6 +290,7 @@ let%expect_test
         R.
           { implementation
           ; result_contract = contract
+          ; authoring_metadata = None
           ; implementation_revision = Chatmd_shell_spec.Source_ref.digest revision
           }
       in
@@ -333,9 +334,22 @@ let%expect_test
       assert (
         phys_equal (C.native_implementation actual |> Option.value_exn) implementation);
       assert (C.equal_result_contract (C.result_contract actual) Invocation_v1);
+      let metadata =
+        Chatmd_shell_spec.Authoring_metadata.
+          { authoring = Some (Chat_response.Authoring_validation.help One_off_script)
+          ; helper = None
+          }
+      in
+      let authored = { selected with authoring_metadata = Some metadata } in
+      let authored_binding =
+        prepare [ authored ] source |> agent_runtime_or_fail |> binding
+      in
+      assert (
+        Chatmd_shell_spec.Authoring_metadata.equal (C.metadata authored_binding) metadata);
       List.iter
         [ registration Native_output "host-echo-v1"
         ; registration Invocation_v1 "host-echo-v2"
+        ; authored
         ]
         ~f:(fun changed ->
           let other = prepare [ changed ] source |> agent_runtime_or_fail |> binding in

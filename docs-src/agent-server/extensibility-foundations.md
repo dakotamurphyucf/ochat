@@ -58,6 +58,79 @@ persistence checks. Versioned queue ingress currently accepts validated
 `Internal_event` envelopes. Legacy model-job events keep their legacy path;
 the versioned `Job_completed` adapter remains part of background-work integration.
 
+## Readonly inline-script validation
+
+`Authoring_validation` checks candidates without constructing a ChatML runtime.
+It uses the bounded Eio-domain compiler and static entrypoint contracts for
+`one_off_script`, `standalone_tool`, and `moderator`. The host supplies the exact
+runtime identity, supported targets, ordinary/delegated moderator surface and
+compiler limits. The request cannot replace that context.
+
+An extensibility-qualified host can register the explicit
+`<tool name="ochat_validate"/>` helper by supplying
+`authoring_validation_host` in its extension services or internal daemon options.
+The option defaults to absent, and a declaration without the host fails before
+session execution. There is no public CLI/configuration flag for this internal
+qualification path. A01 will supply the compatible installed runtime/corpus
+context before general authoring exposure.
+
+For example, the readonly helper accepts:
+
+```json tool=ochat_validate
+{
+  "version": 1,
+  "target": "one_off_script",
+  "source": "let main input = Task.pure(input)",
+  "tools": []
+}
+```
+
+Standalone candidates also require `input_schema` and `output_schema` using
+the supported Ochat schema subset. Schemas are not accepted on the other inline
+targets. Generated ChatMD files, imports and bundles are outside this service's
+`inline_script` scope; their validation remains part of generated admission and
+the later authoring integration.
+
+The report contains `valid`, the candidate source hash and source reference, a
+validation identity, compiler/capability fingerprints, runtime identity,
+topic-linked diagnostics, and separate `checked` and `deferred` lists. Parser and
+type errors retain their source spans. Request, schema and selection errors use
+their request paths rather than inventing positions inside the ChatML source.
+Whole candidate source and unrelated capability descriptions are not echoed.
+Diagnostic text and paths are byte-bounded without splitting UTF-8 characters.
+
+`valid: true` means syntax, types, entrypoints and the declared capability subset
+passed; provided schema definitions also passed. It does not evaluate global
+initializers or prove that the workflow will succeed. All actual tool calls,
+current permissions, input/output values, external effects and moderator state
+serialization still require execution-time checks. For example, a closure can
+be a well-typed moderator state while failing the runtime's serialization rule.
+ChatMD declaration checks are also listed as deferred because no ChatMD bundle
+was submitted here.
+
+Validation identities bind source, target, schema content, exact selected live
+bindings, the host's runtime/target contracts and compiler policy. The helper's
+native implementation identity also includes this host context. A receipt grants
+no authority: execution services still compile/admit the supplied source and
+recheck current capabilities. Caller cancellation propagates through joined
+compiler cleanup, and the existing cooperative timing limitations apply.
+
+The helper uses the normal native invocation borrow to obtain the caller's
+capability ceiling. Its ordinary tool call/output bookkeeping still occurs;
+validation creates no Script invocation, child session, model request or tool
+effect from the candidate. Offline daemon tests verify this with initializers
+that would fail if evaluated and source that declares a real file-tool call.
+
+`Authoring_validation.topics` and `help` provide stable topic dependencies for
+A01's shared corpus and coverage manifest. `run_chatml` now carries its authored
+task/package/helper metadata on the actual native registration, with short
+entrypoint/call-syntax/topic pointers in the descriptor. Selection preserves the
+metadata and it participates in capability identity. These hooks do not insert
+a primer, load reference prose or fulfill automatic context policy on their own.
+
+The service contracts are [Authoring_validation](../../lib/chat_response/authoring_validation.mli)
+and [Authoring_validation_tool](../../lib/agent_session/authoring_validation_tool.mli).
+
 ## Moderator tool dispatch internals
 
 The executable X02 fixture in `test/chatml_extensibility_fixtures/x02-review/`
