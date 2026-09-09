@@ -31,6 +31,11 @@ val borrow : unit -> (borrowed, Agent_protocol.Error.t) result
 
 val borrowed_invocation : borrowed -> Agent_protocol.Invocation.t
 
+(** Budget ancestry captured at native dispatch, including across a host domain
+    handoff. Execution must pass it to [Chatml_execution.run]; it cannot reset or
+    extend the owning scope's limits/lifetime. *)
+val borrowed_execution_context : borrowed -> Chatml_execution.context
+
 (** Actual selected native bindings verified by the dispatch boundary, never a
     registration closure's broader registry. Fails before capability validation
     or after scope expiration. Reading this registry does not skip current policy. *)

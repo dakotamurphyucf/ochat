@@ -79,8 +79,11 @@ Allocates an environment containing a hash table of binding cells and an optiona
 host execution control. Use `define_var`, `find_var` and `update_var` to access
 bindings. A fresh environment gives each program its own globals.
 
-Execution control supplies checkpoints, allocation accounting, builtin admission
-and value checks. With no control, the evaluator installs no resource budgets.
+Execution control supplies checkpoints, allocation accounting, builtin admission,
+value checks and host-effect boundaries. Before dispatch, the host runtime reports
+the operation name and whether it is spawned; returned values pass the after-effect
+hook before debug rendering or continuation use. With no control, the evaluator
+installs no resource budgets.
 These callbacks implement host policy; they do not grant tools or permissions.
 
 ### `copy_env` – shallow clone an environment

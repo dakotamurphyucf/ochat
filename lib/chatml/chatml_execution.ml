@@ -8,6 +8,8 @@ type limits =
   ; max_array_items : int
   ; max_depth : int
   ; allocation_bytes : int
+  ; max_calls : int
+  ; max_invocation_depth : int
   }
 
 type policy =
@@ -28,197 +30,377 @@ let default_limits =
   ; max_array_items = 16_384
   ; max_depth = 128
   ; allocation_bytes = 64 * 1024 * 1024
+  ; max_calls = 100
+  ; max_invocation_depth = 8
   }
 ;;
 
-exception Fuel_exhausted
-exception Value_exhausted
-exception Allocation_exhausted
+exception Budget_exhausted of error
+
+type budget =
+  { limits : limits
+  ; active : bool Atomic.t
+  ; failure : error option Atomic.t
+  }
+
+type frame =
+  { active : bool Atomic.t
+  ; ancestors : frame list
+    (* Each entry retains remaining invocation depth at this frame. *)
+  ; budgets : (int * budget * Chatml.Chatml_lang.execution_control) list
+  }
+
+let frame_key = Eio.Fiber.create_key ()
+
+type context = frame list
+
+let capture_context ?(inherited = []) () =
+  let contains frame ancestor =
+    phys_equal frame ancestor || List.mem frame.ancestors ancestor ~equal:phys_equal
+  in
+  (* A descendant already retains every ancestor's budget and lifetime. Keep
+     only maximal frames so repeated native handoffs don't expand ancestry. *)
+  List.fold
+    (Option.to_list (Eio.Fiber.get frame_key) @ inherited)
+    ~init:[]
+    ~f:(fun selected frame ->
+      if List.exists selected ~f:(fun other -> contains other frame)
+      then selected
+      else frame :: List.filter selected ~f:(fun other -> not (contains frame other)))
+;;
+
+let rec exhaust budget failure =
+  match Atomic.get budget.failure with
+  | Some failure -> raise (Budget_exhausted failure)
+  | None ->
+    if Atomic.compare_and_set budget.failure None (Some failure)
+    then raise (Budget_exhausted failure)
+    else exhaust budget failure
+;;
+
+let check_budget (budget : budget) =
+  match Atomic.get budget.active, Atomic.get budget.failure with
+  | false, _ ->
+    raise
+      (Budget_exhausted
+         { code = "chatml.inactive_scope"
+         ; message = "The owning execution scope has ended."
+         })
+  | true, Some failure -> raise (Budget_exhausted failure)
+  | true, None -> ()
+;;
+
+let rec consume budget counter amount failure =
+  check_budget budget;
+  let remaining = Atomic.get counter in
+  if amount < 0 || amount > remaining then exhaust budget failure;
+  if not (Atomic.compare_and_set counter remaining (remaining - amount))
+  then consume budget counter amount failure
+;;
 
 let error code message = Error { code; message }
 
-let run_bounded ~limits ~env ~config ~program ~entrypoint ~arguments () =
-  if
-    limits.fuel <= 0
-    || limits.max_tasks < 0
-    || (not (Float.is_finite limits.wall_seconds))
-    || Float.(limits.wall_seconds <= 0.)
-    || limits.max_value_bytes <= 0
-    || limits.max_array_items <= 0
-    || limits.max_depth <= 0
-    || limits.allocation_bytes <= 0
-  then error "chatml.invalid_limits" "unsupported execution resource limits"
-  else (
-    let remaining = ref limits.fuel in
-    let until_poll = ref 0 in
-    let clock = Eio.Stdenv.mono_clock env in
-    let started = Eio.Time.Mono.now clock in
-    let checkpoint () =
-      match !remaining with
-      | 0 -> raise Fuel_exhausted
-      | _ ->
-        decr remaining;
-        decr until_poll;
-        if !until_poll <= 0
-        then (
-          until_poll := 64;
-          Eio.Fiber.yield ();
-          let elapsed = Mtime.span started (Eio.Time.Mono.now clock) in
-          if Float.(Mtime.Span.to_float_ns elapsed >= limits.wall_seconds *. 1e9)
-          then raise Eio.Time.Timeout)
-    in
-    let allocated = ref 0 in
-    let allocate bytes =
-      if bytes < 0 || bytes > limits.allocation_bytes - !allocated
-      then raise Allocation_exhausted;
-      allocated := !allocated + bytes
-    in
-    let array_size count =
-      if count > limits.max_array_items then raise Value_exhausted;
-      if count > (limits.allocation_bytes - !allocated) / 16
-      then raise Allocation_exhausted;
-      if count >= 0 then allocate (16 * count)
-    in
-    let string_size count =
-      if count > limits.max_value_bytes then raise Value_exhausted;
-      if count >= 0 then allocate count
-    in
-    let measure_value value =
-      let bytes = ref 0 in
-      let add count =
-        if count > limits.max_value_bytes - !bytes then raise Value_exhausted;
-        bytes := !bytes + count
-      in
-      let rec visit depth (value : Chatml.Chatml_lang.value) =
-        checkpoint ();
-        if depth > limits.max_depth then raise Value_exhausted;
-        add 16;
-        match value with
-        | VString text -> add (String.length text)
-        | VArray values ->
-          if Array.length values > limits.max_array_items then raise Value_exhausted;
-          Array.iter values ~f:(visit (depth + 1))
-        | VRecord fields ->
-          if Map.length fields > limits.max_array_items then raise Value_exhausted;
-          Map.iteri fields ~f:(fun ~key ~data ->
-            add (String.length key);
-            visit (depth + 1) data)
-        | VVariant (tag, fields) ->
-          add (String.length tag);
-          List.iter fields ~f:(visit (depth + 1))
-        | VRef cell -> visit (depth + 1) !cell
-        | VInt _
-        | VFloat _
-        | VBool _
-        | VUnit
-        | VClosure _
-        | VBuiltin _
-        | VModule _
-        | VTask _ -> ()
-      in
-      visit 0 value;
-      !bytes
-    in
-    let check_value value = ignore (measure_value value : int) in
-    let before_builtin ~name (args : Chatml.Chatml_lang.value list) =
-      checkpoint ();
-      List.iter args ~f:check_value;
-      match name, args with
-      | ("Array.make" | "Array.init" | "Array.literal"), VInt count :: _ ->
-        array_size count
-      | "Array.append", [ VArray a; VArray b ] ->
-        array_size (Array.length a + Array.length b)
-      | ( ("Array.copy" | "Array.reverse" | "Array.map" | "Array.mapi" | "array_copy")
-        , VArray values :: _ ) -> array_size (Array.length values)
-      | "Array.sub", [ _; _; VInt count ] -> array_size count
-      | "String.concat", [ VString a; VString b ] ->
-        string_size (String.length a + String.length b)
-      | "String.slice", [ _; _; VInt count ] -> string_size count
-      | ("String.trim" | "String.to_upper" | "String.to_lower"), [ VString text ] ->
-        string_size (String.length text)
-      | "String.replace_all", [ VString text; VString pattern; VString replacement ]
-        when not (String.is_empty pattern) ->
-        let size = ref (String.length text) in
-        let rec count pos =
-          checkpoint ();
-          match String.substr_index text ~pos ~pattern with
-          | None -> ()
-          | Some index ->
-            let retained = !size - String.length pattern in
-            if String.length replacement > limits.max_value_bytes - retained
-            then raise Value_exhausted;
-            size := retained + String.length replacement;
-            count (index + String.length pattern)
-        in
-        count 0;
-        string_size !size
-      | "String.split", [ VString text; VString separator ]
-        when not (String.is_empty separator) ->
-        let rec count pos total =
-          checkpoint ();
-          if total > limits.max_array_items then raise Value_exhausted;
-          match String.substr_index text ~pos ~pattern:separator with
-          | None -> total
-          | Some index -> count (index + String.length separator) (total + 1)
-        in
-        array_size (count 0 1);
-        string_size (String.length text)
-      | ("Json.parse" | "Json.parse_opt"), [ VString text ] ->
-        (* Bound parser expansion conservatively before entering Jsonaf. *)
-        if String.length text > (limits.allocation_bytes - !allocated) / 32
-        then raise Allocation_exhausted;
-        allocate (32 * String.length text)
-      | ("Json.stringify" | "Json.pretty" | "to_string"), [ value ] ->
-        (* Include escaping and formatting expansion before allocating text. *)
-        let size = measure_value value in
-        if size > limits.max_value_bytes / 6 then raise Value_exhausted;
-        string_size (6 * size)
-      | "Hashtbl.set", VRef cell :: _ ->
-        (match !cell with
-         | VArray values -> array_size (Array.length values + 1)
-         | _ -> ())
-      | _ -> allocate 16
-    in
-    let control : Chatml.Chatml_lang.execution_control =
-      { checkpoint; allocate; before_builtin; check_value }
-    in
-    try
-      Eio.Time.Timeout.run_exn
-        (Eio.Time.Timeout.seconds clock limits.wall_seconds)
-        (fun () ->
-           List.iter arguments ~f:check_value;
-           Chatml_host_runtime.run_entrypoint
-             ~control
-             ~limits:{ fuel = limits.fuel; max_tasks = limits.max_tasks }
-             config
-             program
-             ~entrypoint
-             ~arguments
-             ()
-           |> Result.map ~f:(fun value ->
-             check_value value;
-             value)
-           |> Result.map_error ~f:(fun message ->
-             let message = String.prefix message (16 * 1024) in
-             { code = "chatml.execution_failed"; message }))
-    with
-    | Fuel_exhausted -> error "chatml.execution_limit" "ChatML execution fuel exhausted"
-    | Value_exhausted ->
-      error "chatml.value_limit" "ChatML value size or depth limit exceeded"
-    | Allocation_exhausted ->
-      error "chatml.allocation_limit" "ChatML allocation budget exhausted"
-    | Eio.Time.Timeout ->
-      error "chatml.execution_timeout" "ChatML execution deadline exceeded"
-    | Eio.Cancel.Cancelled _ as exn -> raise exn
-    | Stack_overflow ->
-      error "chatml.execution_limit" "ChatML execution stack limit exceeded")
+let valid_limits limits =
+  not
+    (limits.fuel <= 0
+     || limits.max_tasks < 0
+     || (not (Float.is_finite limits.wall_seconds))
+     || Float.(limits.wall_seconds <= 0.)
+     || limits.max_value_bytes <= 0
+     || limits.max_array_items <= 0
+     || limits.max_depth <= 0
+     || limits.allocation_bytes <= 0
+     || limits.max_calls < 0
+     || limits.max_invocation_depth <= 0)
 ;;
 
-let run ?(policy = Bounded default_limits) ~env ~config ~program ~entrypoint ~arguments ()
+let make_control ~env budget =
+  let limits = budget.limits in
+  let fuel_failure =
+    { code = "chatml.execution_limit"; message = "ChatML execution fuel exhausted" }
+  in
+  let allocation_failure =
+    { code = "chatml.allocation_limit"; message = "ChatML allocation budget exhausted" }
+  in
+  let value_failure () =
+    exhaust
+      budget
+      { code = "chatml.value_limit"
+      ; message = "ChatML value size or depth limit exceeded"
+      }
+  in
+  let remaining = Atomic.make limits.fuel in
+  let until_poll = Atomic.make 0 in
+  let clock = Eio.Stdenv.mono_clock env in
+  let started = Eio.Time.Mono.now clock in
+  let checkpoint () =
+    consume budget remaining 1 fuel_failure;
+    if Atomic.fetch_and_add until_poll (-1) <= 0
+    then (
+      Atomic.set until_poll 64;
+      Eio.Fiber.yield ();
+      check_budget budget;
+      let elapsed = Mtime.span started (Eio.Time.Mono.now clock) in
+      if Float.(Mtime.Span.to_float_ns elapsed >= limits.wall_seconds *. 1e9)
+      then
+        exhaust
+          budget
+          { code = "chatml.execution_timeout"
+          ; message = "ChatML execution deadline exceeded"
+          })
+  in
+  let allocation_remaining = Atomic.make limits.allocation_bytes in
+  let allocate bytes = consume budget allocation_remaining bytes allocation_failure in
+  let array_size count =
+    if count > limits.max_array_items then value_failure ();
+    if count > Atomic.get allocation_remaining / 16 then exhaust budget allocation_failure;
+    if count >= 0 then allocate (16 * count)
+  in
+  let string_size count =
+    if count > limits.max_value_bytes then value_failure ();
+    if count >= 0 then allocate count
+  in
+  let measure_value value =
+    let bytes = ref 0 in
+    let add count =
+      if count > limits.max_value_bytes - !bytes then value_failure ();
+      bytes := !bytes + count
+    in
+    let rec visit depth (value : Chatml.Chatml_lang.value) =
+      checkpoint ();
+      if depth > limits.max_depth then value_failure ();
+      add 16;
+      match value with
+      | VString text -> add (String.length text)
+      | VArray values ->
+        if Array.length values > limits.max_array_items then value_failure ();
+        Array.iter values ~f:(visit (depth + 1))
+      | VRecord fields ->
+        if Map.length fields > limits.max_array_items then value_failure ();
+        Map.iteri fields ~f:(fun ~key ~data ->
+          add (String.length key);
+          visit (depth + 1) data)
+      | VVariant (tag, fields) ->
+        add (String.length tag);
+        List.iter fields ~f:(visit (depth + 1))
+      | VRef cell -> visit (depth + 1) !cell
+      | VInt _
+      | VFloat _
+      | VBool _
+      | VUnit
+      | VClosure _
+      | VBuiltin _
+      | VModule _
+      | VTask _ -> ()
+    in
+    visit 0 value;
+    !bytes
+  in
+  let check_value value = ignore (measure_value value : int) in
+  let before_builtin ~name (args : Chatml.Chatml_lang.value list) =
+    checkpoint ();
+    List.iter args ~f:check_value;
+    match name, args with
+    | ("Array.make" | "Array.init" | "Array.literal"), VInt count :: _ -> array_size count
+    | "Array.append", [ VArray a; VArray b ] ->
+      array_size (Array.length a + Array.length b)
+    | ( ("Array.copy" | "Array.reverse" | "Array.map" | "Array.mapi" | "array_copy")
+      , VArray values :: _ ) -> array_size (Array.length values)
+    | "Array.sub", [ _; _; VInt count ] -> array_size count
+    | "String.concat", [ VString a; VString b ] ->
+      string_size (String.length a + String.length b)
+    | "String.slice", [ _; _; VInt count ] -> string_size count
+    | ("String.trim" | "String.to_upper" | "String.to_lower"), [ VString text ] ->
+      string_size (String.length text)
+    | "String.replace_all", [ VString text; VString pattern; VString replacement ]
+      when not (String.is_empty pattern) ->
+      let size = ref (String.length text) in
+      let rec count pos =
+        checkpoint ();
+        match String.substr_index text ~pos ~pattern with
+        | None -> ()
+        | Some index ->
+          let retained = !size - String.length pattern in
+          if String.length replacement > limits.max_value_bytes - retained
+          then value_failure ();
+          size := retained + String.length replacement;
+          count (index + String.length pattern)
+      in
+      count 0;
+      string_size !size
+    | "String.split", [ VString text; VString separator ]
+      when not (String.is_empty separator) ->
+      let rec count pos total =
+        checkpoint ();
+        if total > limits.max_array_items then value_failure ();
+        match String.substr_index text ~pos ~pattern:separator with
+        | None -> total
+        | Some index -> count (index + String.length separator) (total + 1)
+      in
+      array_size (count 0 1);
+      string_size (String.length text)
+    | ("Json.parse" | "Json.parse_opt"), [ VString text ] ->
+      (* Bound parser expansion conservatively before entering Jsonaf. *)
+      if String.length text > Atomic.get allocation_remaining / 32
+      then exhaust budget allocation_failure;
+      allocate (32 * String.length text)
+    | ("Json.stringify" | "Json.pretty" | "to_string"), [ value ] ->
+      (* Include escaping and formatting expansion before allocating text. *)
+      let size = measure_value value in
+      if size > limits.max_value_bytes / 6 then value_failure ();
+      string_size (6 * size)
+    | "Hashtbl.set", VRef cell :: _ ->
+      (match !cell with
+       | VArray values -> array_size (Array.length values + 1)
+       | _ -> ())
+    | _ -> allocate 16
+  in
+  let calls = Atomic.make limits.max_calls in
+  let tasks = Atomic.make limits.max_tasks in
+  let before_effect ~name ~spawned =
+    if spawned
+    then
+      consume
+        budget
+        tasks
+        1
+        { code = "chatml.task_limit"; message = "ChatML spawned-task budget exhausted" };
+    match name with
+    | "Tool.call" | "Tool.spawn" ->
+      consume
+        budget
+        calls
+        1
+        { code = "chatml.call_limit"; message = "ChatML tool-call budget exhausted" }
+    | _ -> ()
+  in
+  { Chatml.Chatml_lang.checkpoint
+  ; allocate
+  ; before_builtin
+  ; check_value
+  ; before_effect
+  ; after_effect = (fun value -> allocate (measure_value value))
+  }
+;;
+
+let run
+      ?(policy = Bounded default_limits)
+      ?(context = [])
+      ~env
+      ~config
+      ~program
+      ~entrypoint
+      ~arguments
+      ()
   =
+  let execute () =
+    let parents = capture_context ~inherited:context () in
+    let ancestors =
+      List.concat_map parents ~f:(fun parent -> parent :: parent.ancestors)
+      |> List.fold ~init:[] ~f:(fun seen frame ->
+        if List.mem seen frame ~equal:phys_equal then seen else frame :: seen)
+    in
+    let inherited =
+      List.concat_map parents ~f:(fun parent -> parent.budgets)
+      |> List.fold ~init:[] ~f:(fun budgets (remaining, budget, control) ->
+        match List.exists budgets ~f:(fun (_, other, _) -> phys_equal budget other) with
+        | false -> budgets @ [ remaining, budget, control ]
+        | true ->
+          List.map budgets ~f:(fun (current, other, control) ->
+            ( (if phys_equal budget other then Int.min current remaining else current)
+            , other
+            , control )))
+    in
+    let check_ancestors () =
+      List.iter ancestors ~f:(fun frame ->
+        if not (Atomic.get frame.active)
+        then
+          raise
+            (Budget_exhausted
+               { code = "chatml.inactive_scope"
+               ; message = "The owning execution scope has ended."
+               }));
+      List.iter inherited ~f:(fun (_, budget, _) -> check_budget budget)
+    in
+    check_ancestors ();
+    let inherited =
+      List.map inherited ~f:(fun (remaining, budget, control) ->
+        if remaining <= 1
+        then
+          exhaust
+            budget
+            { code = "chatml.invocation_depth"
+            ; message = "ChatML invocation depth exhausted"
+            };
+        remaining - 1, budget, control)
+    in
+    let active = Atomic.make true in
+    let budgets =
+      match policy with
+      | Unrestricted -> inherited
+      | Bounded limits ->
+        let budget = { limits; active; failure = Atomic.make None } in
+        inherited @ [ limits.max_invocation_depth, budget, make_control ~env budget ]
+    in
+    let frame = { active; ancestors; budgets } in
+    let each f =
+      if not (Atomic.get active)
+      then
+        raise
+          (Budget_exhausted
+             { code = "chatml.inactive_scope"
+             ; message = "The execution scope has ended."
+             });
+      check_ancestors ();
+      List.iter budgets ~f:(fun (_, budget, control) ->
+        check_budget budget;
+        f control)
+    in
+    let control =
+      match budgets with
+      | [] -> None
+      | _ ->
+        Some
+          Chatml.Chatml_lang.
+            { checkpoint = (fun () -> each (fun c -> c.checkpoint ()))
+            ; allocate = (fun bytes -> each (fun c -> c.allocate bytes))
+            ; check_value = (fun value -> each (fun c -> c.check_value value))
+            ; before_builtin =
+                (fun ~name args -> each (fun c -> c.before_builtin ~name args))
+            ; before_effect =
+                (fun ~name ~spawned -> each (fun c -> c.before_effect ~name ~spawned))
+            ; after_effect = (fun value -> each (fun c -> c.after_effect value))
+            }
+    in
+    let run_program () =
+      Option.iter control ~f:(fun c -> List.iter arguments ~f:c.check_value);
+      Chatml_host_runtime.run_entrypoint ?control config program ~entrypoint ~arguments ()
+      |> Result.map ~f:(fun value ->
+        Option.iter control ~f:(fun c -> c.check_value value);
+        value)
+      |> Result.map_error ~f:(fun message ->
+        { code = "chatml.execution_failed"; message = String.prefix message (16 * 1024) })
+    in
+    Exn.protect
+      ~finally:(fun () -> Atomic.set active false)
+      ~f:(fun () ->
+        Eio.Fiber.with_binding frame_key frame (fun () ->
+          match policy with
+          | Unrestricted -> run_program ()
+          | Bounded limits ->
+            Eio.Time.Timeout.run_exn
+              (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) limits.wall_seconds)
+              run_program))
+  in
   match policy with
-  | Bounded limits -> run_bounded ~limits ~env ~config ~program ~entrypoint ~arguments ()
-  | Unrestricted ->
-    Chatml_host_runtime.run_entrypoint config program ~entrypoint ~arguments ()
-    |> Result.map_error ~f:(fun message -> { code = "chatml.execution_failed"; message })
+  | Bounded limits when not (valid_limits limits) ->
+    error "chatml.invalid_limits" "unsupported execution resource limits"
+  | Unrestricted | Bounded _ ->
+    (try execute () with
+     | Budget_exhausted failure -> Error failure
+     | Eio.Time.Timeout ->
+       error "chatml.execution_timeout" "ChatML execution deadline exceeded"
+     | Eio.Cancel.Cancelled _ as exn -> raise exn
+     | Stack_overflow ->
+       error "chatml.execution_limit" "ChatML execution stack limit exceeded")
 ;;

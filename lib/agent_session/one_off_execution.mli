@@ -16,14 +16,16 @@ type result =
     initializes no session or root model turn and creates no synthetic moderator
     declaration. An authorized selected tool may itself call a model.
 
-    [limits] and [max_nested_calls] are host-selected per-invocation policy.
+    [limits], [max_nested_calls] and [max_invocation_depth] are host-selected policy.
     The deadline is narrowed against the parent's and covers the owned callback,
-    including policy/tool waits. Recursive shared fuel/allocation/call budgets and
-    idle/event-owned descendants still need host integration before public tool
-    exposure. [runtime_requests] must be consumed by the owning runtime. *)
+    including policy/tool waits. Nested ChatML execution inherits active resource
+    budgets through the native borrow, including host domain handoffs. Idle/event
+    descendants and final public registration still need integration.
+    [runtime_requests] must be consumed by the owning runtime. *)
 val run
   :  ?observer:Agent_protocol.Invocation.observer
   -> ?allocation_bytes:int
+  -> ?max_invocation_depth:int
   -> env:Eio_unix.Stdenv.base
   -> prepared:Chat_response.One_off_script.t
   -> borrowed:Native_tool_invocation.borrowed

@@ -1584,7 +1584,7 @@ Parser/type failures retain their original span against the submitted source has
 a compiler location retain whole-source provenance. This API provides static
 preparation for the future run/authoring tools; it does not expose `run_chatml` or
 borrow execution authority. The owned execution service is described below.
-Public registration, shared recursive budgets and authoring-context/helper
+Public registration, remaining host integrations and authoring-context/helper
 installation remain required.
 
 ## Standalone execution primitives
@@ -1603,15 +1603,36 @@ operations from the supplied host configuration are installed.
   estimates cumulative language allocation, and enforces a cooperative elapsed
   time budget that includes tool waits. Host limit failures cannot be caught by
   source-level `Task.catch`.
-- `Unrestricted` omits resource budgets and automatic pure-evaluation yields.
-  Caller cancellation still propagates through cooperative host operations.
+- `Unrestricted` adds no local budget. At a root it omits resource budgets and
+  automatic pure-evaluation yields. Inside a bounded run, all inherited ceilings
+  still apply. Caller cancellation propagates through cooperative host operations.
 
 The default bounded policy is 100,000 fuel, 1,024 spawned tasks, 30 seconds,
-1 MiB per checked value, 16,384 array elements, depth 128 and 64 MiB of estimated
-allocation. Trusted hosts can supply other positive limits without hardcoded
+1 MiB per checked value, 16,384 array elements, value depth 128, 64 MiB of estimated
+allocation, 100 tool-call attempts and 8 nested ChatML execution levels (including
+the current run). Trusted hosts can supply other positive limits without hardcoded
 policy ceilings, or choose unrestricted execution. These are resource policies,
 not language restrictions or authority grants. The core host task interpreter
 also omits task/fuel limits when none are supplied.
+
+Nested runs debit their own and every active ancestor's fuel, allocation, tool-call
+and spawned-task counters. Value checks apply at every level. Counters use atomic
+updates, so concurrent children share the same allowance. Exhaustion remains
+attached to the failed owner: catching a child result or requesting unrestricted
+execution cannot erase an exhausted parent budget. A stricter child-only failure
+can be handled while its parent still has resources.
+
+`capture_context` retains opaque budget ancestry for a host domain handoff. `run`
+merges captured and ambient contexts without double charging the same owner or
+discarding stricter depth allowances. Descendants already retain their ancestors,
+so repeated handoffs do not keep expanding the context. Closed scopes cannot be
+reused as fresh executions. Native invocation borrows retain this context, and
+one-off execution passes it through even when a host uses another Eio domain.
+
+Actual Tool.call/Tool.spawn dispatch attempts consume the shared call allowance;
+spawned effects also consume the task allowance. Host-returned values are checked
+and charged before debug rendering or continuation execution. A result-limit
+failure after a native effect does not undo that effect or replay it.
 
 Allocation accounting estimates language operations, not actual OCaml heap use.
 Builtin implementations are checked at their boundaries; arbitrary native code
@@ -1739,8 +1760,12 @@ out-of-root request without content disclosure, policy denial and revocation,
 argument rewrite and rejection, unselected recursive calls, a prepared artifact
 broader than its caller, pure initializer limits, timeout, bounded output and
 cancellation. The native wrapper in this fixture is test-only. Final public tool
-registration/response integration, shared recursive fuel/allocation/call/depth
-budgets, idle/event-owned descendants and authoring integration remain pending.
+registration/response integration, remaining stateful-moderator/resource audits,
+idle/event-owned descendants and authoring integration remain pending. Additional
+fixtures prove recursive call/depth limits across actual actor-owned one-off
+execution and Eio domain handoffs; generic execution tests cover aggregate fuel,
+allocation/value limits, concurrent children, child-only recovery and expired
+captured contexts.
 
 ## Authoring policy admission plans
 

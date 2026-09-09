@@ -18,6 +18,7 @@ type borrowed =
   ; active : bool Atomic.t
   ; execute : executor
   ; ceiling : C.t option
+  ; execution_context : Chatml_execution.context
   }
 
 let scope_key = Eio.Fiber.create_key ()
@@ -39,6 +40,7 @@ let borrow () =
 ;;
 
 let borrowed_invocation scope = scope.invocation
+let borrowed_execution_context scope = scope.execution_context
 
 let borrowed_capabilities scope =
   match Atomic.get scope.active, scope.ceiling with
@@ -60,20 +62,32 @@ let select_tools scope ~names =
   { scope with ceiling = Some selected }
 ;;
 
-let with_scope ?ceiling ~execute invocation f =
-  let execute, ceiling =
+let with_scope ?ceiling ?execution_context ~execute invocation f =
+  let execute, ceiling, execution_context =
     match Eio.Fiber.get scope_key with
     | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
       (* Preserve the real actor executor rather than inheriting a direct-child
          adapter from the parent. Each lexical scope still owns its lifetime. *)
-      scope.execute, Option.first_some ceiling scope.ceiling
-    | None | Some _ -> execute, ceiling
+      ( scope.execute
+      , Option.first_some ceiling scope.ceiling
+      , Option.value execution_context ~default:scope.execution_context )
+    | None | Some _ ->
+      ( execute
+      , ceiling
+      , Option.value_or_thunk execution_context ~default:(fun () ->
+          Chatml_execution.capture_context ()) )
+  in
+  let execution_context =
+    Chatml_execution.capture_context ~inherited:execution_context ()
   in
   let active = Atomic.make true in
   Exn.protect
     ~finally:(fun () -> Atomic.set active false)
     ~f:(fun () ->
-      Eio.Fiber.with_binding scope_key { invocation; active; execute; ceiling } f)
+      Eio.Fiber.with_binding
+        scope_key
+        { invocation; active; execute; ceiling; execution_context }
+        f)
 ;;
 
 let execute_borrowed scope ~invocation f =
@@ -115,7 +129,12 @@ let execute_borrowed scope ~invocation f =
     (* Actor admission can yield while the native callback returns. A retained
        executor must not start effects after its lending scope has expired. *)
     let%bind () = check_active () in
-    with_scope ~ceiling ~execute:scope.execute dispatched (fun () -> f ~dispatched))
+    with_scope
+      ~ceiling
+      ~execution_context:scope.execution_context
+      ~execute:scope.execute
+      dispatched
+      (fun () -> f ~dispatched))
 ;;
 
 let fail code message = I.Fail { code; message; retryable = false; details = `Null }

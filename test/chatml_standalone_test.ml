@@ -487,6 +487,8 @@ let%expect_test "host resource policy can be unrestricted or exceed suggested de
            ; max_array_items = 2_000_000
            ; max_depth = 512
            ; allocation_bytes = 512 * 1024 * 1024
+           ; max_calls = 100_000
+           ; max_invocation_depth = 512
            })
     in
     print_s

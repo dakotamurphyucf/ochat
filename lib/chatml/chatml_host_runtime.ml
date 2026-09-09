@@ -1039,7 +1039,11 @@ let dispatch_effect
   : (effect_result, string) result
   =
   Option.iter session.env.control ~f:(fun control ->
+    control.before_effect ~name:eff.op ~spawned;
     List.iter eff.args ~f:control.check_value);
+  let check_result value =
+    Option.iter session.env.control ~f:(fun control -> control.after_effect value)
+  in
   Debug_log.emitf
     "[chatml-runtime] dispatch_effect phase=%s spawned=%b op=%s args=[%s]"
     exec.phase
@@ -1068,6 +1072,7 @@ let dispatch_effect
              | External_async ->
                (match op.perform session eff.args with
                 | Ok value ->
+                  check_result value;
                   Debug_log.emitf
                     "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
                     exec.phase
@@ -1109,6 +1114,7 @@ let dispatch_effect
                (match op.perform session eff.args with
                 | Error msg -> Error msg
                 | Ok value ->
+                  check_result value;
                   exec.local_effects_rev <- eff :: exec.local_effects_rev;
                   Debug_log.emitf
                     "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
@@ -1119,6 +1125,7 @@ let dispatch_effect
              | External_sync | Diagnostic ->
                (match op.perform session eff.args with
                 | Ok value ->
+                  check_result value;
                   Debug_log.emitf
                     "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
                     exec.phase

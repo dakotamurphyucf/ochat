@@ -22,6 +22,9 @@ let%expect_test "prepared one-off programs execute under their native caller's a
     ; `Timeout
     ; `Output_limit
     ; `Cancel
+    ; `Recursive_calls
+    ; `Recursive_depth
+    ; `Recursive_domain
     ]
     ~f:(fun mode ->
       let native_calls = ref 0
@@ -233,7 +236,10 @@ let main input = Task.bind(Tool.call("|}
                           |> Result.ok_or_failwith
                       }
                     in
-                    let result =
+                    let root_call =
+                      I.equal_origin (N.borrowed_invocation borrowed).context.origin Model
+                    in
+                    let execute () =
                       X.run
                         ~env
                         ~prepared
@@ -241,7 +247,14 @@ let main input = Task.bind(Tool.call("|}
                         ~script_tools:tools
                         ~input:(field fields "input")
                         ~limits
-                        ~max_nested_calls:10
+                        ~max_nested_calls:
+                          (match mode, root_call with
+                           | (`Recursive_calls | `Recursive_domain), true -> 1
+                           | _ -> 10)
+                        ~max_invocation_depth:
+                          (match mode, root_call with
+                           | `Recursive_depth, true -> 1
+                           | _ -> 32)
                         ~now:Agent_protocol.Timestamp.now
                         ~moderate_tool:(fun _ _ ->
                           match mode with
@@ -271,6 +284,12 @@ let main input = Task.bind(Tool.call("|}
                         ~prepare_outcome:(fun _ -> Ok ())
                         ()
                       |> protocol_ok
+                    in
+                    let result =
+                      match mode, root_call with
+                      | `Recursive_domain, false ->
+                        Eio.Domain_manager.run (Eio.Stdenv.domain_mgr env) execute
+                      | _ -> execute ()
                     in
                     assert (List.is_empty result.runtime_requests);
                     assert (
@@ -330,13 +349,27 @@ let main input = Task.bind(Tool.call("|}
                 | `Rewrite -> "missing.txt"
                 | _ -> "report.txt"
               in
+              let file_input =
+                `Object [ "root", `String "data"; "file", `String filename ]
+              in
+              let source, script_input, names =
+                match mode with
+                | `Recursive_calls | `Recursive_depth | `Recursive_domain ->
+                  ( {|let main input = Task.bind(Tool.call("run_chatml", input), fun ignored -> Task.pure(`String("ignored")))|}
+                  , `Object
+                      [ "source", `String source
+                      ; "input", file_input
+                      ; "tools", `Array [ `String "read_file" ]
+                      ]
+                  , [ `String "read_file"; `String "run_chatml" ] )
+                | _ -> source, file_input, [ `String "read_file" ]
+              in
               let payload =
                 Jsonaf.to_string
                   (`Object
                       [ "source", `String source
-                      ; ( "input"
-                        , `Object [ "root", `String "data"; "file", `String filename ] )
-                      ; "tools", `Array [ `String "read_file" ]
+                      ; "input", script_input
+                      ; "tools", `Array names
                       ])
               in
               let id =
@@ -446,6 +479,10 @@ let main input = Task.bind(Tool.call("|}
              | `Timeout -> [ "chatml.execution_timeout" ]
              | `Output_limit -> [ "invocation.output_limit" ]
              | `Cancel -> []
+             | `Recursive_calls | `Recursive_domain ->
+               [ "chatml.call_limit"; "chatml.call_limit" ]
+             | `Recursive_depth ->
+               [ "chatml.invocation_depth"; "chatml.invocation_depth" ]
            in
            [%test_eq: string list] expected (List.sort !summaries ~compare:String.compare);
            print_s
@@ -463,6 +500,9 @@ let main input = Task.bind(Tool.call("|}
                   | `Timeout
                   | `Output_limit
                   | `Cancel
+                  | `Recursive_calls
+                  | `Recursive_depth
+                  | `Recursive_domain
                   ])
              , (!native_calls : int)
              , (List.sort !summaries ~compare:String.compare : string list)
@@ -482,5 +522,8 @@ let main input = Task.bind(Tool.call("|}
     (Timeout 0 (chatml.execution_timeout) 1 0)
     (Output_limit 1 (invocation.output_limit) 2 0)
     (Cancel 0 () 1 1)
+    (Recursive_calls 0 (chatml.call_limit chatml.call_limit) 3 0)
+    (Recursive_depth 0 (chatml.invocation_depth chatml.invocation_depth) 3 0)
+    (Recursive_domain 0 (chatml.call_limit chatml.call_limit) 3 0)
     |}]
 ;;

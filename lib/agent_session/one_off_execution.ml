@@ -27,6 +27,7 @@ let checked failure f =
 let run
       ?observer
       ?(allocation_bytes = Chatml_execution.default_limits.allocation_bytes)
+      ?(max_invocation_depth = Chatml_execution.default_limits.max_invocation_depth)
       ~env
       ~prepared
       ~borrowed
@@ -51,6 +52,7 @@ let run
       || limits.max_array_items <= 0
       || allocation_bytes <= 0
       || max_nested_calls < 0
+      || max_invocation_depth <= 0
       || Int64.(Duration.bytes_to_int64 limits.max_value_bytes <= 0L)
       || Int64.(Duration.bytes_to_int64 limits.max_output_bytes <= 0L)
     then Error (Agent_protocol.Error.invalid_request "invalid one-off execution policy")
@@ -171,10 +173,13 @@ let run
             ; max_array_items = limits.max_array_items
             ; max_depth = limits.max_depth
             ; allocation_bytes
+            ; max_calls = max_nested_calls
+            ; max_invocation_depth
             }
           in
           Chatml_execution.run
             ~policy:(Bounded execution_limits)
+            ~context:(N.borrowed_execution_context borrowed)
             ~env
             ~config
             ~program:(P.program prepared)
