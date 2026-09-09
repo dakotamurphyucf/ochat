@@ -1,0 +1,6 @@
+<developer>Use compare_reports to inspect two approved reports.</developer>
+<tool name="read_file"><read id="reports" path="${workspace}/reports"/></tool>
+<script id="compare" language="chatml" kind="tool" src="compare.chatml"/>
+<tool name="compare_reports" type="chatml" script="compare" entrypoint="run" input_schema="input.json" output_schema="output.json">
+  <uses tool="read_file"/>
+</tool>

@@ -1,0 +1,1 @@
+{"type":"object","properties":{"invocation_count":{"type":"number"},"left":{"type":"string"},"right":{"type":"string"}},"required":["invocation_count","left","right"],"additionalProperties":false}

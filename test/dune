@@ -864,9 +864,17 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name agent_server_test_support)
+ (modules agent_server_test_support)
+ (libraries core eio ochat.agent_protocol ochat.agent_client ochat.agent_server)
+ (preprocess
+  (pps ppx_jane)))
+
+(library
  (name agent_server_restart_test)
  (modules agent_server_restart_test)
  (libraries
+  agent_server_test_support
   core
   eio
   eio_main

@@ -12,7 +12,9 @@ open Chatml_lang
 val jsonaf_to_value : Jsonaf.t -> value
 
 (** Convert a ChatML value representing builtin JSON into {!Jsonaf.t},
-    returning a descriptive error on shape mismatch. *)
+    returning a descriptive error on shape mismatch or non-finite numbers.
+    Finite floats use valid JSON syntax that round-trips their value; original
+    numeric spelling is not retained. *)
 val value_to_jsonaf_result : value -> (Jsonaf.t, string) result
 
 (** Host-boundary conversions. With [control], preflight projected value bounds

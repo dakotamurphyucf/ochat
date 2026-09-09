@@ -195,6 +195,10 @@ let main input = Work.loop(input)|}
 let main input = Task.catch(Task.bind(Task.pure(input), fun value -> loop(value)),
   fun message -> Task.pure(`String("caught")))|}
         )
+      ; ( "task recursion"
+        , {|let rec loop input = Task.bind(Task.pure(input), fun next -> loop(next))
+let main input = Task.catch(loop(input), fun ignored -> Task.pure(`String("caught")))|}
+        )
       ]
     in
     List.iter cases ~f:(fun (name, source) ->
@@ -219,6 +223,7 @@ let main input = Task.catch(Task.bind(Task.pure(input), fun value -> loop(value)
     ("builtin callback" chatml.execution_limit)
     (module chatml.execution_limit)
     ("caught continuation" chatml.execution_limit)
+    ("task recursion" chatml.execution_limit)
     |}]
 ;;
 

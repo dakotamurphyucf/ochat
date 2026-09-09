@@ -1,0 +1,11 @@
+(library
+ (name chatml_composition_test)
+ (libraries
+  core eio eio_main mirage-crypto-rng.unix agent_server_test_support
+  ochat.agent_protocol ochat.agent_client ochat.agent_server)
+ (inline_tests)
+ (preprocessor_deps
+  (glob_files_rec ../chatml_extensibility_fixtures/x01-report/*)
+  (glob_files_rec ../chatml_extensibility_fixtures/x04-standalone/*))
+ (preprocess
+  (pps ppx_jane ppx_blob ppx_expect)))

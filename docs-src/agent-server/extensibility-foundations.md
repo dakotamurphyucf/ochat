@@ -1876,6 +1876,18 @@ moderator is rejected before initialization; coordinated moderation requires the
 versioned extensibility interface. Ordinary hosts still reject the declaration,
 and the daemon's qualification flag remains disabled by default until A01.
 
+The executable source bundles in
+`test/chatml_extensibility_fixtures/x01-report/` and `x04-standalone/` exercise
+useful synchronous work through a qualified daemon. X01 reads two scoped report
+files and groups failed checks; an out-of-root read produces the same native
+denial as a direct model tool call. X04 loads a standalone script and schemas,
+performs two selected reads, validates input/output, and initializes mutable
+globals independently for calls submitted in the same provider batch. Neither
+example needs a moderator or creates another session. Their offline provider
+uses the ordinary tool-call/continuation pair; executing the scripts adds no
+model request. The asynchronous X04 variant remains part of background-work
+qualification. Run `dune build @test/chatml_composition/runtest` for these cases.
+
 `Native_tool_moderation` carries the owning invocation's pre-tool callback and
 observer through synchronous nesting. Its callback expires with its lexical scope;
 an actual native borrow restores that same context across a domain handoff.

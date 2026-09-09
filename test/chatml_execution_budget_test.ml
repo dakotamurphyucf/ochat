@@ -41,6 +41,87 @@ let configuration on_tool_call : R.runtime_config =
 let null = L.VVariant ("Null", [])
 let tool_ok = L.VVariant ("Ok", [ null ])
 
+let%expect_test "spawned-task exhaustion precedes effects and cannot be caught as success"
+  =
+  Eio_main.run (fun env ->
+    let program =
+      Chatml_compilation.compile
+        ~env
+        ~target:Moderator_v1
+        ~source:
+          {|let initial_state = `Null
+let on_event ctx state event = Task.catch(
+  Task.bind(Tool.spawn("first", state), fun ignored ->
+    Task.bind(Tool.spawn("second", state), fun ignored -> Task.pure(state))),
+  fun ignored -> Task.bind(Tool.call("after", state), fun result -> Task.pure(state)))|}
+        ()
+      |> Result.map_error ~f:(fun error -> error.Chatml_compilation.message)
+      |> Result.ok_or_failwith
+    in
+    List.iter [ 0; 1; 2 ] ~f:(fun max_tasks ->
+      let spawned = ref []
+      and after = ref 0 in
+      let config : R.runtime_config =
+        { surface = Chatml.Chatml_extension_surface.moderator_v1
+        ; operations =
+            R.default_operations
+              ~handlers:
+                { R.default_handlers with
+                  on_tool_spawn =
+                    (fun _ ~name ~args:_ ->
+                      spawned := name :: !spawned;
+                      Ok ("fixture-" ^ name))
+                ; on_tool_call =
+                    (fun _ ~name:_ ~args:_ ->
+                      incr after;
+                      Ok tool_ok)
+                }
+              ()
+        }
+      in
+      let runner =
+        X.create_runner ~env ~policy:(Bounded { X.default_limits with max_tasks }) ()
+      in
+      let session =
+        X.run_scoped runner (fun () ->
+          R.instantiate_session
+            ~control:(X.runner_control runner)
+            config
+            program
+            ~entrypoints:
+              { initial_state_name = "initial_state"; on_event_name = "on_event" })
+        |> Result.map_error ~f:(fun error -> error.X.message)
+        |> Result.join
+        |> Result.ok_or_failwith
+      in
+      let outcome =
+        X.run_scoped runner (fun () ->
+          R.handle_event
+            session
+            ~context:
+              (L.VRecord (String.Map.singleton "phase" (L.VString "session_start")))
+            ~event:(L.VVariant ("Session_start", [])))
+      in
+      let status =
+        match outcome with
+        | Ok (Ok ()) -> "ok"
+        | Ok (Error message) -> failwith message
+        | Error error -> error.X.code
+      in
+      print_s
+        [%sexp
+          (max_tasks : int)
+        , (status : string)
+        , (List.rev !spawned : string list)
+        , (!after : int)]));
+  [%expect
+    {|
+    (0 chatml.task_limit () 0)
+    (1 chatml.task_limit (first) 0)
+    (2 ok (first second) 0)
+    |}]
+;;
+
 let%expect_test "nested execution shares ceilings and cannot hide ancestor exhaustion" =
   Eio_main.run (fun env ->
     let root =

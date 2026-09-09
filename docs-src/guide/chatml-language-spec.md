@@ -1775,6 +1775,9 @@ Parses JSON text into a `json` value. Raises a runtime failure on invalid JSON i
 Like parse, but returns `None` instead of raising on parse errors.
 - Json.stringify : json -> string
 Produces a compact JSON string representation.
+Finite numeric values use valid JSON number syntax, including whole-valued
+floats (`1.0` becomes `1`). Non-finite values cannot be exported as JSON. Numeric
+spelling is not preserved when JSON passes through ChatML's float representation.
 - Json.pretty : json -> string
 Produces a human-readable formatted JSON representation.
 - Json.validate : string -> bool

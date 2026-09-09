@@ -1,0 +1,45 @@
+(* read_file returns two metadata lines before the file body. *)
+let after_line text = match String.find(text, "\n") with
+  | `Some(index) -> String.slice(text, index + 1, String.length(text) - index - 1)
+  | `None -> fail("expected a complete read_file response")
+
+let field text key = match Json.get_field(text, key) with
+  | `Some(`String(value)) -> value
+  | _ -> fail("expected string field " ++ key)
+
+let add_failure groups check =
+  if Array.exists(groups, fun group -> group.check == check) then
+    Array.map(groups, fun group ->
+      if group.check == check then { check = check; failures = group.failures +. 1.0 }
+      else group)
+  else Array.append(groups, [{ check = check; failures = 1.0 }])
+
+let add_report groups report = match report with
+  | `Array(checks) -> Array.fold(checks, groups, fun acc item ->
+      let status = field(item, "status") in
+      if status == "failed" then add_failure(acc, field(item, "check"))
+      else if status == "passed" then acc
+      else fail("unsupported report status"))
+  | _ -> fail("expected an array of checks")
+
+let rec read_reports files index groups =
+  if index == Array.length(files) then Task.pure(groups)
+  else match files[index] with
+    | `String(file) -> Task.bind(Tool.call("read_file", `Object([
+        { key = "root"; value = `String("reports") },
+        { key = "file"; value = `String(file) }
+      ])), fun result -> match result with
+        | `Ok(`String(text)) ->
+          let report = Json.parse(after_line(after_line(text))) in
+          read_reports(files, index + 1, add_report(groups, report))
+        | `Ok(_) -> Task.fail("read_file returned a non-text result")
+        | `Error(code) -> Task.fail(code))
+    | _ -> Task.fail("expected report filenames")
+
+let main input = match input with
+  | `Array(files) -> Task.bind(read_reports(files, 0, []), fun groups ->
+      Task.pure(`Array(Array.map(groups, fun group -> `Object([
+        { key = "check"; value = `String(group.check) },
+        { key = "failures"; value = `Number(group.failures) }
+      ])))))
+  | _ -> Task.fail("expected an array of report filenames")

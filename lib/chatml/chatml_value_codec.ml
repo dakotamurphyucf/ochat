@@ -64,7 +64,10 @@ let rec value_to_jsonaf_result (value : value) : (Jsonaf.t, string) result =
   | VVariant ("Bool", [ VBool true ]) -> Ok `True
   | VVariant ("Bool", [ VBool false ]) -> Ok `False
   | VVariant ("String", [ VString s ]) -> Ok (`String s)
-  | VVariant ("Number", [ VFloat f ]) -> Ok (`Number (Float.to_string f))
+  | VVariant ("Number", [ VFloat f ]) ->
+    (match Float.is_finite f with
+     | true -> Ok (Jsonaf.Export.jsonaf_of_float f)
+     | false -> Error "JSON numbers must be finite")
   | VVariant ("Array", [ VArray values ]) ->
     values
     |> Array.to_list
