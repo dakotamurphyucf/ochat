@@ -81,11 +81,18 @@ let%test_unit "foreign reconfigured and stale capability references never rebind
   let binding = C.find first ~name:"shared" |> get in
   let reference = C.reference binding in
   List.iter
-    [ registry ~owner:"different-owner" [ tool "shared" calls ]
-    ; registry ~resource:"root=broader" [ tool "shared" calls ]
-    ; registry [ tool "shared" calls ]
+    [ registry ~owner:"different-owner" [ tool "shared" calls ], false
+    ; registry ~resource:"root=broader" [ tool "shared" calls ], false
+    ; registry [ tool "shared" calls ], true
     ]
-    ~f:(fun replacement ->
+    ~f:(fun (replacement, same_permission) ->
+      let replacement_binding = C.find replacement ~name:"shared" |> get in
+      assert (
+        Bool.equal
+          same_permission
+          (String.equal
+             (C.permission_fingerprint binding)
+             (C.permission_fingerprint replacement_binding)));
       assert (
         Result.is_error
           (C.resolve replacement ~id:reference.id ~fingerprint:reference.fingerprint)));

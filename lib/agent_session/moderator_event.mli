@@ -1,9 +1,11 @@
-(** Actor handoff supplied by [Session_actor.with_idle_queued_moderator_event_tools].
-    The claim must persist ownership before calling the handler, and atomically
+(** Actor handoff supplied by the current-snapshot actor APIs or worker
+    capabilities. Invoke [snapshot] after acquiring the moderator gate and outside
+    the actor mailbox, then persist ownership before calling the handler. Atomically
     persist the supplied checkpoint and runtime requests before returning from
     [commit]. It must retain ownership through the callback's return. *)
 type claim =
-  snapshot:Session.Moderator_state.Identity_snapshot.t
+  snapshot:
+    (unit -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
@@ -42,7 +44,7 @@ val run_queued_idle
   -> unit
   -> (Chat_response.Moderation.Outcome.t option, Agent_protocol.Error.t) result
 
-(** Ordinary event composition using [Session_actor.with_ordinary_moderator_event].
+(** Ordinary event composition using [Session_actor.with_current_moderator_event].
     The claim must be bound to this same event and its real operation (or idle
     startup/resume). Compares the captured event, executes the compiled v1 handler
     with its scoped native capabilities and commits checkpoint/request intent.
@@ -59,6 +61,46 @@ val run_ordinary
   -> now:(unit -> Agent_protocol.Timestamp.t)
   -> unit
   -> (Chat_response.Moderation.Outcome.t option, Agent_protocol.Error.t) result
+
+(** One owned startup/resume attempt for a constructed runtime. This coordinator
+    runs only after the host installs the initial checkpoint. It adds no authority:
+    [claim] must bind the event to the actual idle or foreground actor operation. *)
+module Lifecycle : sig
+  type t
+
+  type outcome =
+    | Unavailable
+    | Activated of Chat_response.Moderation.Outcome.t
+    | Already_active
+
+  val create : manager:Chat_response.Moderator_manager.t -> resume:bool -> t
+
+  (** Non-blocking readiness probe for the idle supervisor. Completed/failed
+      attempts are not polled again. A halted restored manager needs no activation. *)
+  val pending : t -> bool
+
+  (** Concurrent callers serialize outside the actor through the shared execution
+      coordinator. Recursive/cyclic activation fails before waiting. Unavailable
+      actors leave activation ready for a later runnable boundary; successful
+      execution is not repeated by another caller. Failure/cancellation remains
+      failed for this runtime. Actor lifecycle admission additionally rejects
+      unresolved/failed/interrupted startup or resume receipts for the same
+      source/generation across runtime rebuilds. Explicit reset/replacement is
+      needed before retrying those effects.
+
+      Activated requests are already durable; consume their retained intent via
+      the owning scheduler rather than forwarding them independently. *)
+  val run
+    :  t
+    -> claim:(event:Chat_response.Moderation.Event.t -> claim)
+    -> ?script_tools:Script_tool_calls.t
+    -> history:(unit -> History_entry.t list)
+    -> available_tools:Openai.Responses.Request.Tool.t list
+    -> session_meta:Jsonaf.t
+    -> now:(unit -> Agent_protocol.Timestamp.t)
+    -> unit
+    -> (outcome, Agent_protocol.Error.t) result
+end
 
 (** Bind ordinary events, queued events and deferred observations to an actual
     foreground worker. The installed checkpoint/source must already match the

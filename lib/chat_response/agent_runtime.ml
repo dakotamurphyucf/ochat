@@ -427,7 +427,12 @@ let validate_functions functions =
 ;;
 
 let build_functions ~sw ~ctx ~host ~run_agent shell_registry tools =
-  List.map tools ~f:(fun declaration ->
+  (* Extension declarations are consumed by the prepared definition and owned
+     dispatcher. They never receive a legacy/no-op runner. *)
+  List.filter tools ~f:(function
+    | CM.Extension _ -> false
+    | _ -> true)
+  |> List.map ~f:(fun declaration ->
     functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry declaration
     |> Result.map ~f:(fun functions ->
       let revision =
@@ -465,7 +470,8 @@ let moderator_process_handler t =
   | None, None | Some _, None | None, Some _ -> None
 ;;
 
-let create
+let create_native
+      ~extension_resources
       ~sw
       ~ctx
       ~host
@@ -481,9 +487,8 @@ let create
   =
   if
     List.exists prompt_elements ~f:(function
-      | CM.Extension_script _
-      | Tool (Extension _ | Inherited _)
-      | Authoring_context _ | Authoring_help _ -> true
+      | CM.Extension_script _ | Tool (Extension _) -> not extension_resources
+      | Tool (Inherited _) | Authoring_context _ | Authoring_help _ -> true
       | _ -> false)
   then
     Error
@@ -573,4 +578,95 @@ let create
               ; shell_security_status
               ; moderator_shell_runtime = moderator_runtime shell_manifest
               }))))
+;;
+
+let create = create_native ~extension_resources:false
+
+type extension_resources =
+  { native : t
+  ; definition : Extension_compiler.definition
+  }
+
+let prepare_extensions
+      ~sw
+      ~ctx
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ?extension_snapshots
+      ?persist_extension_snapshots
+      ~run_agent
+      ()
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    if List.length prompt_elements > 16_384
+    then Error [ diagnostic "chatml.definition_limit" "too many definition elements" ]
+    else (
+      try
+        ignore (CM.validate_declarations prompt_elements);
+        Ok ()
+      with
+      | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
+      | _ ->
+        Error
+          [ diagnostic
+              "chatml.invalid_definition"
+              "invalid captured extension declarations"
+          ])
+  in
+  let%bind native =
+    create_native
+      ~extension_resources:true
+      ~sw
+      ~ctx
+      ~host
+      ~platform
+      ~prompt_elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ?extension_snapshots
+      ?persist_extension_snapshots
+      ~run_agent
+      ()
+  in
+  let%bind capabilities =
+    Lazy.force native.capabilities
+    |> Result.map_error ~f:(fun error ->
+      [ diagnostic error.Tool_capability.code error.message ])
+  in
+  let%bind definition =
+    Extension_compiler.prepare_definition_in_domain
+      ~env:(Ctx.env ctx)
+      ~capabilities
+      prompt_elements
+    |> Result.map_error
+         ~f:
+           (List.map ~f:(fun (error : D.t) ->
+              { code = error.code; message = error.message; source = error.source }))
+  in
+  let native_names =
+    Tool_capability.references capabilities
+    |> List.map ~f:(fun reference -> reference.Tool_capability.name)
+    |> String.Set.of_list
+  in
+  let%map () =
+    match
+      List.find (Extension_compiler.prepared_tools definition) ~f:(fun prepared ->
+        Set.mem native_names (Extension_compiler.declaration prepared).name)
+    with
+    | None -> Ok ()
+    | Some prepared ->
+      Error
+        [ diagnostic
+            "agent.duplicate_tool_name"
+            ("extension conflicts with a constructed native tool: "
+             ^ (Extension_compiler.declaration prepared).name)
+        ]
+  in
+  { native; definition }
 ;;

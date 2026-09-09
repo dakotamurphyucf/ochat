@@ -343,6 +343,14 @@ val request_review
   -> review:(unit -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
   -> (Agent_protocol.Permission.resolution, Agent_protocol.Error.t) result
 
+(** Read the actor's current unexpired generic invocation grants, using the same
+    exact/prefix matching as foreground worker authorization. *)
+val invocation_granted
+  :  t
+  -> tool_name:string
+  -> identity_digest:string
+  -> (bool, Agent_protocol.Error.t) result
+
 (** Resolves an existing pending permission without a client attachment.
     Daemon-owned timeout/reviewer services use this compare-and-set path. *)
 val resolve_permission_as_system
@@ -597,6 +605,19 @@ val with_ordinary_moderator_event
             -> (unit, Agent_protocol.Error.t) result)
       -> (unit, Agent_protocol.Error.t) result)
   -> (bool, Agent_protocol.Error.t) result
+
+(** Read the manager checkpoint after acquiring exclusive moderator ownership,
+    outside the actor mailbox. This prevents another concurrent tool from changing
+    the checkpoint between its read and event admission. The callback must only
+    read the manager snapshot. Fixed-snapshot variants above remain available for
+    explicit checkpoint assertions. *)
+val with_current_moderator_event
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t option
+  -> event:Chat_response.Moderation.Event.t
+  -> Moderator_event.claim
+
+val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
 
 (** Explicitly retire a retained failed/interrupted queue head at its original
     checkpoint. Available while quiescent running-idle or stopped, without an

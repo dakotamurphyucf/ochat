@@ -33,7 +33,12 @@ exception Dispatch_error of Agent_protocol.Error.t
     for a later safe point. The caller still owns subsequent/idle wakeups and
     ordinary-event tool authority routing before public installation. *)
 val create
-  :  ?script_tools:Script_tool_calls.t
+  :  ?revalidate:
+       (Chat_response.In_memory_stream.Tool_dispatch.request -> (unit, string) result)
+       (** Pure binding/policy revalidation immediately after the final-target
+      authorizer returns, before handler execution. Normal extension hosts must
+      supply it; the default preserves older internal callers. *)
+  -> ?script_tools:Script_tool_calls.t
   -> ?observe_nested:bool
   -> definition:Chat_response.Extension_compiler.definition
   -> manager:Chat_response.Moderator_manager.t

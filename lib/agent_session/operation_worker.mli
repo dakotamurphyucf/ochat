@@ -131,16 +131,22 @@ module Capabilities : sig
           Concurrent drainers cannot both receive the same record. Each claim
           revalidates operation ownership; this is not an idle-session API. *)
     ; with_moderator_event :
-        snapshot:Session.Moderator_state.Identity_snapshot.t
+        snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
         -> event:Chat_response.Moderation.Event.t
         -> event_handler
         -> (bool, Agent_protocol.Error.t) result
       (** Capture an ordinary moderator event for this exact active operation.
+          Read [snapshot] under exclusive moderator ownership, outside the actor
+          mailbox, so competing tool commits cannot make a queued read stale.
           Executes outside the actor under the shared moderator gate, with an
           event-owned native executor. Checkpoint/outcome/request intent commit
           before local installation. This does not consume scheduling intent. *)
     ; with_queued_moderator_event :
-        snapshot:Session.Moderator_state.Identity_snapshot.t
+        snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
         -> event_handler
         -> (bool, Agent_protocol.Error.t) result
       (** Consume one queued event under this operation, using the same native

@@ -327,6 +327,315 @@ let start_daemon sw env config root =
   |> protocol_ok
 ;;
 
+let%expect_test
+    "qualified moderator lifecycle uses daemon permissions and survives restart"
+  =
+  let module A = Agent_session.Session_actor in
+  let module E = Agent_protocol.Moderator_execution in
+  let module H = Agent_client.Session_handle in
+  List.iter [ `Allow; `Ask; `Deny; `Cancel ] ~f:(fun mode ->
+    Eio_main.run (fun env ->
+      Mirage_crypto_rng_unix.use_default ();
+      let root = temporary_root env in
+      Exn.protect
+        ~finally:(fun () ->
+          Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+        ~f:(fun () ->
+          let workspace = Filename.concat root "workspace" in
+          Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / workspace / "value.txt")
+            "approved value";
+          let prompt_file = Filename.concat root "root.chatmd" in
+          Eio.Path.save
+            ~create:(`Exclusive 0o600)
+            Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+            {|<developer>Offline persisted lifecycle fixture.</developer>
+<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let read = fun () -> Tool.call("read_file", `Object([{key = "root"; value = `String("data")}; {key = "file"; value = `String("value.txt")}]))
+let advance = fun state amount -> Task.bind(read(), fun result -> match result with
+  | `Error(code) -> Task.fail(code)
+  | `Ok(value) -> Task.pure(state + amount))
+let on_event = fun ctx state event -> match event with
+  | `Session_start -> advance(state, 10)
+  | `Session_resume -> advance(state, 100)
+  | _ -> Task.pure(state)
+</script>|};
+          let profile =
+            { permission_profile with
+              tool_default =
+                (match mode with
+                 | `Allow -> Allow
+                 | `Ask | `Cancel -> Ask
+                 | `Deny -> Deny)
+            }
+          in
+          let configuration = config ~profile root workspace prompt_file in
+          let model_calls = ref 0 in
+          let start sw =
+            Agent_server.Daemon.start
+              ~sw
+              ~env
+              ~config:configuration
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options:
+                { Agent_server.Daemon.default_options with
+                  qualify_chatml_extensions = true
+                ; model_post_stream =
+                    Some
+                      (fun ~sw:_ ~inputs:_ ->
+                        incr model_calls;
+                        failwith "idle lifecycle must not call a provider")
+                }
+              ()
+            |> protocol_ok
+          in
+          let entry daemon id =
+            Agent_server.Session_registry.find (Agent_server.Daemon.registry daemon) id
+            |> Option.value_exn
+          in
+          let snapshot_value state =
+            match state.Agent_session.Session_state.moderator with
+            | Some (`Object [ ("identity_snapshot_sexp", `String encoded) ]) ->
+              let snapshot =
+                Session.Moderator_state.Identity_snapshot.t_of_sexp
+                  (Sexp.of_string encoded)
+              in
+              (match snapshot.current_state with
+               | Session.Snapshot.Int value -> value
+               | _ -> failwith "unexpected lifecycle state")
+            | _ -> failwith "missing lifecycle checkpoint"
+          in
+          let await actor predicate =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+              let rec loop () =
+                let state = A.state actor |> protocol_ok in
+                match predicate state with
+                | true -> state
+                | false ->
+                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                  loop ()
+              in
+              loop ())
+          in
+          let finished phase state =
+            List.exists
+              state.Agent_session.Session_state.moderator_executions
+              ~f:(fun receipt ->
+                E.equal_phase receipt.context.phase phase
+                &&
+                match receipt.status with
+                | Completed _ | Failed _ | Interrupted _ -> true
+                | Running -> false)
+          in
+          let id, first_value, invocation_owned, permission_states =
+            Eio.Switch.run (fun sw ->
+              let daemon = start sw in
+              let client = connection daemon (principal ()) in
+              initialize client;
+              let created, _ = create_session client in
+              let actor = (entry daemon created.id).actor in
+              let stopped = A.state actor |> protocol_ok in
+              assert (List.is_empty stopped.invocations);
+              assert (List.is_empty stopped.moderator_executions);
+              let handle =
+                H.attach
+                  ~sw
+                  ~clock:(Eio.Stdenv.clock env)
+                  ~connection:client
+                  ~session_id:created.id
+                  ~mode:Read_write
+                  ()
+                |> protocol_ok
+              in
+              H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+              let invocation_owned =
+                match mode with
+                | `Allow | `Deny -> true
+                | `Ask | `Cancel ->
+                  let waiting =
+                    await actor (fun state ->
+                      List.exists state.permissions ~f:(fun permission ->
+                        Agent_protocol.Permission.equal_state permission.state Pending))
+                  in
+                  let permission =
+                    List.find_exn waiting.permissions ~f:(fun permission ->
+                      Agent_protocol.Permission.equal_state permission.state Pending)
+                  in
+                  assert (Option.is_none waiting.active_operation);
+                  let owned =
+                    match permission.owner with
+                    | Operation _ -> false
+                    | Invocation id ->
+                      List.exists waiting.invocations ~f:(fun invocation ->
+                        Agent_protocol.Id.Invocation.equal invocation.context.id id
+                        && Option.is_some invocation.parent_event)
+                  in
+                  (match mode with
+                   | `Cancel -> H.stop handle ~mode:Cancel |> protocol_ok |> ignore
+                   | `Ask ->
+                     H.respond_permission
+                       handle
+                       ~permission_id:permission.id
+                       ~permission_generation:permission.generation
+                       ~choice:Approve_session
+                       ~reason:None
+                     |> protocol_ok
+                     |> ignore
+                   | `Allow | `Deny -> assert false);
+                  owned
+              in
+              let settled = await actor (finished Session_start) in
+              let value = snapshot_value settled in
+              let permission_states =
+                List.map settled.permissions ~f:(fun p -> p.state)
+              in
+              H.close handle;
+              Agent_client.Connection.close client;
+              Agent_server.Daemon.shutdown daemon |> protocol_ok;
+              created.id, value, invocation_owned, permission_states)
+          in
+          let resumed_value, native_calls =
+            Eio.Switch.run (fun sw ->
+              let daemon = start sw in
+              let client = connection daemon (principal ()) in
+              initialize client;
+              Agent_client.Connection.request
+                client
+                (Session_get { session_id = id; history = None })
+              |> protocol_ok
+              |> ignore;
+              let actor = (entry daemon id).actor in
+              let restarted_handle =
+                match mode with
+                | `Allow | `Ask | `Deny -> None
+                | `Cancel ->
+                  let handle =
+                    H.attach
+                      ~sw
+                      ~clock:(Eio.Stdenv.clock env)
+                      ~connection:client
+                      ~session_id:id
+                      ~mode:Read_write
+                      ()
+                    |> protocol_ok
+                  in
+                  H.start handle ~queue_if_limited:false |> protocol_ok |> ignore;
+                  Some handle
+              in
+              let settled =
+                match mode with
+                | `Allow | `Ask -> await actor (finished Session_resume)
+                | `Deny | `Cancel ->
+                  (* Failed lifecycle receipts must not replay their effects. *)
+                  ignore
+                    (Agent_server.Runtime_owner.drain_idle_moderator
+                       (entry daemon id).runtime
+                     : (bool, Agent_protocol.Error.t) result);
+                  A.state actor |> protocol_ok
+              in
+              let value = snapshot_value settled in
+              let calls = List.length settled.invocations in
+              Option.iter restarted_handle ~f:H.close;
+              Agent_client.Connection.close client;
+              Agent_server.Daemon.shutdown daemon |> protocol_ok;
+              value, calls)
+          in
+          print_s
+            [%sexp
+              { mode : [ `Allow | `Ask | `Deny | `Cancel ]
+              ; first_value : int
+              ; resumed_value : int
+              ; invocation_owned : bool
+              ; permission_states : Agent_protocol.Permission.state list
+              ; native_calls : int
+              ; model_calls = (!model_calls : int)
+              }])));
+  [%expect
+    {|
+    ((mode Allow) (first_value 10) (resumed_value 110) (invocation_owned true)
+     (permission_states ()) (native_calls 2) (model_calls 0))
+    ((mode Ask) (first_value 10) (resumed_value 110) (invocation_owned true)
+     (permission_states (Approved)) (native_calls 2) (model_calls 0))
+    ((mode Deny) (first_value 0) (resumed_value 0) (invocation_owned true)
+     (permission_states ()) (native_calls 1) (model_calls 0))
+    ((mode Cancel) (first_value 0) (resumed_value 0) (invocation_owned true)
+     (permission_states (Cancelled)) (native_calls 1) (model_calls 0))
+    |}]
+;;
+
+let%expect_test "qualified runtime initialization failure releases its preparation scope" =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        let prompt_file = Filename.concat root "root.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          {|<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = fail("initializer rejected")
+let on_event = fun ctx state event -> Task.pure(state + 1)
+</script>|};
+        let failures, registered =
+          Eio.Switch.run (fun sw ->
+            let daemon =
+              Agent_server.Daemon.start
+                ~sw
+                ~env
+                ~config:(config root workspace prompt_file)
+                ~tool_dir:root
+                ~home:root
+                ~process_start_identity:None
+                ~options:
+                  { Agent_server.Daemon.default_options with
+                    qualify_chatml_extensions = true
+                  ; model_post_stream =
+                      Some
+                        (fun ~sw:_ ~inputs:_ ->
+                          failwith "failed initialization must not call a model")
+                  }
+                ()
+              |> protocol_ok
+            in
+            let client = connection daemon (principal ()) in
+            initialize client;
+            let failures =
+              List.map [ "first"; "second" ] ~f:(fun key ->
+                match
+                  Agent_client.Connection.request
+                    client
+                    (Session_create (create_request ~key ()))
+                with
+                | Ok _ -> failwith "poisoned initializer was admitted"
+                | Error error ->
+                  String.is_substring error.message ~substring:"initializer rejected")
+            in
+            let registered =
+              List.length
+                (Agent_server.Session_registry.entries
+                   (Agent_server.Daemon.registry daemon))
+            in
+            Agent_client.Connection.close client;
+            Agent_server.Daemon.shutdown daemon |> protocol_ok;
+            failures, registered)
+        in
+        (* Reaching this point also joins both failed preparations' resource scopes. *)
+        print_s [%sexp { failures : bool list; registered : int }]));
+  [%expect {| ((failures (true true)) (registered 0)) |}]
+;;
+
 let server_health connection ~include_details =
   Agent_client.Connection.request
     connection

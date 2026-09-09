@@ -155,7 +155,7 @@ let drain_loaded_queued_events t runtime manager =
   let open Result.Let_syntax in
   let history = ref [] in
   let claim ~snapshot handle =
-    A.with_idle_queued_moderator_event_tools
+    A.with_current_idle_queued_moderator_event_tools
       t.actor
       ~snapshot
       (fun ~executing ~event ~execute ~commit ->
@@ -312,11 +312,15 @@ let snapshot_has_pending_events t =
     let%map observer =
       Agent_session.Runtime_builder.moderator_snapshot_observer state.moderator
     in
-    (queued
-     && (not halted)
-     && not
-          (Option.exists observer ~f:(fun observer ->
-             Agent_session.Queued_moderator_event.has_unsettled_claim ~state ~observer)))
+    Option.exists t.runtime ~f:(fun runtime ->
+      Option.exists runtime.moderator_activation ~f:(fun activation ->
+        activation.pending ()))
+    || (queued
+        && (not halted)
+        && not
+             (Option.exists observer ~f:(fun observer ->
+                Agent_session.Queued_moderator_event.has_unsettled_claim ~state ~observer))
+       )
     || List.exists state.invocations ~f:Agent_session.Observation_follow_up.pending
     || List.exists
          state.moderator_executions
@@ -338,15 +342,23 @@ let drain_idle_moderator_locked t =
       if applied
       then Ok true
       else (
-        let%bind more_observations = drain_loaded_observations t runtime in
-        let%bind applied =
-          Agent_session.Session_actor.apply_moderator_follow_up t.actor
+        let%bind activated =
+          match runtime.moderator_activation with
+          | None -> Ok false
+          | Some activation -> activation.run ()
         in
-        if applied
+        if activated
         then Ok true
         else (
-          let%map more_events = drain_loaded_idle_moderator t runtime in
-          more_observations || more_events))
+          let%bind more_observations = drain_loaded_observations t runtime in
+          let%bind applied =
+            Agent_session.Session_actor.apply_moderator_follow_up t.actor
+          in
+          if applied
+          then Ok true
+          else (
+            let%map more_events = drain_loaded_idle_moderator t runtime in
+            more_observations || more_events)))
     | None ->
       Error
         (Agent_protocol.Error.create

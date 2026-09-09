@@ -111,3 +111,45 @@ val create
         -> string)
   -> unit
   -> (t, diagnostic list) result
+
+(** Native resources plus the complete captured, non-evaluated extension
+    definition. Extension declarations are not backed by a dummy native runner
+    and are not added to [native.functions]. The owning session host must install
+    the prepared dispatcher and moderator event services before advertising them. *)
+type extension_resources =
+  { native : t
+  ; definition : Extension_compiler.definition
+  }
+
+(** Prepare a definition for an extensibility-aware host. Validates the captured
+    declarations, constructs native resources through the same shell authorization
+    and resource bindings as [create], then compiles all versioned scripts in an
+    Eio domain against those exact live capabilities. No script initializer or
+    handler runs here. Cross-kind collisions include dynamically expanded native
+    tool names. Inherited/generated and authoring declarations still require their
+    respective host services and are rejected. Resources remain owned by [sw];
+    the caller must release that scope after failed preparation or runtime teardown.
+    This internal preparation entrypoint does not enable public feature flags. *)
+val prepare_extensions
+  :  sw:Eio.Switch.t
+  -> ctx:Eio_unix.Stdenv.base Ctx.t
+  -> host:Shell_runtime.Host.t
+  -> platform:Chatmd_shell_spec.Shell_spec.platform
+  -> prompt_elements:Prompt.Chat_markdown.top_level_elements list
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> ?extension_snapshots:Session.Shell_state.Extension_snapshot.t list
+  -> ?persist_extension_snapshots:
+       (Session.Shell_state.Extension_snapshot.t list -> (unit, string) result)
+  -> run_agent:
+       (?prompt_dir:Eio.Fs.dir_ty Eio.Path.t
+        -> ?session_id:string
+        -> ?observer:Agent_response_loop.observer
+        -> source:string
+        -> ctx:Eio_unix.Stdenv.base Ctx.t
+        -> string
+        -> Prompt.Chat_markdown.content_item list
+        -> string)
+  -> unit
+  -> (extension_resources, diagnostic list) result

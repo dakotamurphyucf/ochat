@@ -48,6 +48,12 @@ val implementation : binding -> Ochat_function.t
     Selection cannot edit it, and a same-name registration does not inherit it. *)
 val metadata : binding -> Chatmd_shell_spec.Authoring_metadata.t
 
+(** Configuration identity for host permission grants. Stable across equivalent
+    registrations, but changes with owner, resources, implementation, interface
+    or metadata. Unlike a live reference fingerprint, it excludes the random
+    capability ID. It never resolves or authorizes a live binding by itself. *)
+val permission_fingerprint : binding -> string
+
 (** Select exact registered names. Empty selects none; duplicates/missing names
     reject. The resulting registry retains the same bindings and implementations. *)
 val select : t -> names:string list -> (t, error) result

@@ -24,6 +24,9 @@ type options =
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
+  ; qualify_chatml_extensions : bool
+    (** Internal integration qualification only. Defaults to false, has no CLI or
+        configuration-file flag, and does not advertise public extension features. *)
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   }
 

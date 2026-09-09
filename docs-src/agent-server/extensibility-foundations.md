@@ -6,6 +6,43 @@ are still under implementation; none of their feature flags is enabled yet.
 This page describes the available storage and client protocol contracts, not a
 runnable extension tutorial.
 
+The internal `Agent_runtime.prepare_extensions` path now prepares the full captured
+definition against the exact authorized native resources. `Runtime_builder.build_with_extensions`
+consumes it with explicit host services, creates real moderator tool descriptors,
+and installs owned native/moderator dispatch. The daemon binds these services only
+when its internal `Daemon.options.qualify_chatml_extensions` option is true. This
+defaults to false and has no CLI or configuration-file switch; public feature
+flags remain disabled pending qualification.
+
+The daemon binding checks native invocation ownership, session generation and the
+pinned permission-profile digest. Native approval requests belong to the actual
+persisted invocation, including during idle lifecycle execution without a model
+operation. Shell calls retain their configured shell authorization service. Each
+qualified runtime owns a child resource switch, released and joined on runtime
+close, failed preparation or caller cancellation.
+
+Native permission grants use the host binding's configuration fingerprint plus
+the pinned permission profile and input. This fingerprint includes owner,
+implementation, resource configuration, interface and metadata, and excludes the
+random live capability ID. Equivalent reconstructed resources can therefore reuse
+a persisted exact grant; a changed owner or resource configuration cannot. Live
+capability resolution still requires its exact current ID and fingerprint.
+
+For the extension builder, `start_moderator` returns a prepared checkpoint without
+running startup tools. The host installs it before idle or first-turn activation.
+Concurrent startup callers serialize through the shared execution coordinator;
+stopped actors do not activate. Failed or interrupted startup/resume effects are
+not automatically repeated across runtime rebuilds for the same source/generation.
+An explicit reset or source replacement is required before retrying them.
+Startup becomes resume only after a completed lifecycle receipt for that source
+and generation. A stopped session may have an initial checkpoint before its
+startup handler has ever executed.
+
+Owned event claims read their manager checkpoint after acquiring the actor's
+moderator gate, outside the mailbox. This prevents concurrent tool commits from
+making a queued event's earlier checkpoint read stale. Fixed-snapshot APIs remain
+available for explicit checkpoint assertions.
+
 ## Moderator tool dispatch internals
 
 `Moderator_manager.Registry.of_definition` binds an already validated extension
@@ -678,11 +715,10 @@ failure, revocation before dispatch and during authorization, halt during
 authorization, disclosure failure, redacted history and permanent publication
 rejection. A trap legacy runner ensures claimed native names never fall through.
 
-This adapter is still an internal installation hook. Normal `Runtime_builder`
-construction and general script-origin routing remain unconnected; the scoped
-native bridge above is available to internal moderator dispatch. Standalone routing,
-durable observation delivery, host-wide policy integration and public qualification remain required. No new
-feature flag is enabled.
+This adapter is installed by the internal extension builder and qualified daemon
+option described above. The scoped native bridge is available to moderator
+dispatch. General standalone routing, the remaining host-wide admission audit and
+public qualification are still required. No new feature flag is enabled.
 
 ### Atomic model-call intent
 
@@ -1008,10 +1044,10 @@ calls and a trailing assistant message. They check receipts, no extra provider
 turn, unchanged state for stopped calls, zero native execution and no operation
 failure. A held first handler plus queued second invocation proves termination
 is rechecked before admission; a subsequent third call remains stopped too.
-This is not public feature availability: normal `Runtime_builder` construction,
-shared nested/standalone routing, host-wide admission integration,
-broader audit and cross-host qualification still need
-qualification. No extension feature flag is enabled by installing this adapter.
+The internal extension builder now installs this adapter with daemon host services.
+Remaining shared nested/standalone routing, admission audit and cross-host
+qualification are still required. No extension feature flag is enabled by
+installing this adapter.
 
 ### Synchronous call coordination
 

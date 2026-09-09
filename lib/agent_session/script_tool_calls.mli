@@ -23,6 +23,24 @@ val create
        (Agent_protocol.Invocation.t -> (unit, Agent_protocol.Error.t) result)
   -> t
 
+(** Reuse the same live native registry, policy and disclosure service for model
+    calls. The stream still supplies final-target authorization; the owning host
+    should delegate these native names to this policy service to avoid duplicate
+    approval requests. This does not grant additional capabilities. *)
+val native_dispatch
+  :  t
+  -> input:Operation_worker.Input.t
+  -> capabilities:Operation_worker.Capabilities.t
+  -> Chat_response.In_memory_stream.Tool_dispatch.t
+
+(** Recheck the captured definition's exact live native selection. Extra current
+    tools do not widen it; missing/replaced bindings fail. This is a pure policy
+    boundary check and must also run after any authorization wait. *)
+val validate_definition
+  :  t
+  -> Chat_response.Extension_compiler.definition
+  -> (unit, string) result
+
 (** Bind calls to the dispatched parent for the duration of [f]. Escaped callbacks
     fail after the scope ends. The actor must still recognize the active parent.
     Each scope allows at most 100 attempts, matching the moderator context ABI.

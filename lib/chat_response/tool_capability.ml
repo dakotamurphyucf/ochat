@@ -25,6 +25,7 @@ type binding =
   { reference : reference
   ; implementation : Ochat_function.t
   ; metadata : Metadata.t
+  ; permission_fingerprint : string
   }
 
 type t = binding String.Map.t
@@ -33,6 +34,7 @@ let error code message = Error { code; message }
 let reference binding = binding.reference
 let implementation binding = binding.implementation
 let metadata binding = binding.metadata
+let permission_fingerprint binding = binding.permission_fingerprint
 let references t = Map.data t |> List.map ~f:reference
 
 let valid_digest value =
@@ -122,6 +124,18 @@ let create ?(metadata = []) ~owner ~resource_fingerprint registrations =
                   |> Sexp.to_string
                   |> digest
                 in
+                let permission_fingerprint =
+                  [%sexp
+                    ("ochat.capability-permission.v1" : string)
+                  , (metadata : Metadata.t)
+                  , (owner : string)
+                  , (name : string)
+                  , (implementation_revision : string)
+                  , (resource_fingerprint : string)
+                  , (interface : string)]
+                  |> Sexp.to_string
+                  |> digest
+                in
                 let reference =
                   { version = 1
                   ; id
@@ -136,7 +150,7 @@ let create ?(metadata = []) ~owner ~resource_fingerprint registrations =
                   (Map.set
                      registry
                      ~key:name
-                     ~data:{ reference; implementation; metadata })))))
+                     ~data:{ reference; implementation; metadata; permission_fingerprint })))))
 ;;
 
 let find t ~name =

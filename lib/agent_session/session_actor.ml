@@ -3053,7 +3053,12 @@ let with_queued_event_borrow t ~claim f =
   with_moderator_gate t (fun () ->
     let open Result.Let_syntax in
     Eio.Fiber.yield ();
-    let%bind claimed = Eio.Cancel.protect (fun () -> call t claim) in
+    let%bind claim = claim () in
+    let%bind claimed =
+      match claim with
+      | None -> Ok None
+      | Some claim -> Eio.Cancel.protect (fun () -> call t claim)
+    in
     match claimed with
     | None -> Ok false
     | Some borrow ->
@@ -3103,15 +3108,18 @@ let with_queued_event_borrow t ~claim f =
 let with_idle_queued_moderator_event t ~snapshot f =
   with_queued_event_borrow
     t
-    ~claim:
-      (Claim_queued_event (Agent_protocol.Id.Moderator_execution.create (), None, snapshot))
+    ~claim:(fun () ->
+      Ok
+        (Some
+           (Claim_queued_event
+              (Agent_protocol.Id.Moderator_execution.create (), None, snapshot))))
     (fun ~borrow:_ ~event ~commit -> f ~event ~commit)
 ;;
 
 let with_queued_moderator_retirement t ~id ~snapshot ~reason f =
   with_queued_event_borrow
     t
-    ~claim:(Claim_queued_retirement (id, snapshot, reason))
+    ~claim:(fun () -> Ok (Some (Claim_queued_retirement (id, snapshot, reason))))
     (fun ~borrow:_ ~event ~commit ->
        f ~event ~commit:(fun ~snapshot ->
          commit
@@ -3137,9 +3145,11 @@ let with_event_tools t ~claim f =
 let with_queued_moderator_event_tools t ~operation_id ~snapshot f =
   with_event_tools
     t
-    ~claim:
-      (Claim_queued_event
-         (Agent_protocol.Id.Moderator_execution.create (), operation_id, snapshot))
+    ~claim:(fun () ->
+      Ok
+        (Some
+           (Claim_queued_event
+              (Agent_protocol.Id.Moderator_execution.create (), operation_id, snapshot))))
     f
 ;;
 
@@ -3150,10 +3160,49 @@ let with_idle_queued_moderator_event_tools t =
 let with_ordinary_moderator_event t ~operation_id ~snapshot ~event f =
   with_event_tools
     t
-    ~claim:
-      (Claim_ordinary_event
-         (Agent_protocol.Id.Moderator_execution.create (), operation_id, snapshot, event))
+    ~claim:(fun () ->
+      Ok
+        (Some
+           (Claim_ordinary_event
+              ( Agent_protocol.Id.Moderator_execution.create ()
+              , operation_id
+              , snapshot
+              , event ))))
     f
+;;
+
+let with_current_moderator_event t ~operation_id ~event ~snapshot f =
+  with_event_tools
+    t
+    ~claim:(fun () ->
+      Result.map (snapshot ()) ~f:(fun snapshot ->
+        Some
+          (Claim_ordinary_event
+             ( Agent_protocol.Id.Moderator_execution.create ()
+             , operation_id
+             , snapshot
+             , event ))))
+    f
+;;
+
+let with_current_queued_moderator_event_tools t ~operation_id ~snapshot f =
+  with_event_tools
+    t
+    ~claim:(fun () ->
+      Result.map (snapshot ()) ~f:(fun snapshot ->
+        match
+          snapshot.Session.Moderator_state.Identity_snapshot.queued_internal_events
+        with
+        | [] -> None
+        | _ ->
+          Some
+            (Claim_queued_event
+               (Agent_protocol.Id.Moderator_execution.create (), operation_id, snapshot))))
+    f
+;;
+
+let with_current_idle_queued_moderator_event_tools t =
+  with_current_queued_moderator_event_tools t ~operation_id:None
 ;;
 
 let with_moderator_invocation t operation_id ~invocation f =
@@ -3246,9 +3295,14 @@ let worker_capabilities t operation_id id_source buffer =
     ; with_moderator_observation = with_moderator_observation t operation_id
     ; with_next_moderator_observation = with_next_moderator_observation t operation_id
     ; with_moderator_event =
-        with_ordinary_moderator_event t ~operation_id:(Some operation_id)
+        (fun ~snapshot ~event ->
+          with_current_moderator_event
+            t
+            ~operation_id:(Some operation_id)
+            ~event
+            ~snapshot)
     ; with_queued_moderator_event =
-        with_queued_moderator_event_tools t ~operation_id:(Some operation_id)
+        with_current_queued_moderator_event_tools t ~operation_id:(Some operation_id)
     ; manage_moderator_follow_up =
         (fun ~observer -> call t (Manage_moderator_follow_up (operation_id, observer)))
     ; admit_moderator_turn = (fun () -> call t (Admit_moderator_turn operation_id))
@@ -5261,6 +5315,10 @@ let skip_schedule t ~schedule_id ~generation =
 let claim_idle_moderator t = call t Claim_idle_moderator
 let apply_observation_follow_up t = call t Apply_observation_follow_up
 let apply_moderator_follow_up t = call t Apply_observation_follow_up
+
+let invocation_granted t ~tool_name ~identity_digest =
+  call t (Invocation_granted (tool_name, identity_digest))
+;;
 
 let complete_idle_moderator t drain =
   call t ~priority:Priority (Complete_idle_moderator drain)

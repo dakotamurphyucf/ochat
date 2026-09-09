@@ -19,6 +19,18 @@ type model_job_outcome =
 
 type model_post_stream = Chat_response.In_memory_stream.post_stream
 
+type extension_services =
+  { script_tools : Agent_runtime.t -> Script_tool_calls.t
+  ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
+  ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
+  ; history : unit -> History_entry.t list
+  }
+
+type moderator_activation =
+  { pending : unit -> bool
+  ; run : unit -> (bool, Agent_protocol.Error.t) result
+  }
+
 type t =
   { worker : Operation_worker.t
   ; parse_user_content :
@@ -32,6 +44,7 @@ type t =
   ; moderator_manager : Manager.t option
   ; moderator_tools : Request.Tool.t list
   ; moderator_script_tools : Script_tool_calls.t option
+  ; moderator_activation : moderator_activation option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event : Jsonaf.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; drain_internal_events :
@@ -139,6 +152,7 @@ let run_agent
 ;;
 
 let create_agent_runtime
+      ~extensions
       ~sw
       ~ctx
       ~host
@@ -148,18 +162,36 @@ let create_agent_runtime
       ~approval_store
       ~response_dir
   =
-  Agent_runtime.create
-    ~sw
-    ~ctx
-    ~host
-    ~platform:(Agent_runtime.platform ())
-    ~prompt_elements:elements
-    ~manifest_authorizer
-    ~approval_provider
-    ~approval_store
-    ~run_agent:(run_agent ~manifest_authorizer ~approval_provider ~response_dir)
-    ()
-  |> map_diagnostics
+  match extensions with
+  | false ->
+    Agent_runtime.create
+      ~sw
+      ~ctx
+      ~host
+      ~platform:(Agent_runtime.platform ())
+      ~prompt_elements:elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ~run_agent:(run_agent ~manifest_authorizer ~approval_provider ~response_dir)
+      ()
+    |> map_diagnostics
+    |> Result.map ~f:(fun native -> native, None)
+  | true ->
+    Agent_runtime.prepare_extensions
+      ~sw
+      ~ctx
+      ~host
+      ~platform:(Agent_runtime.platform ())
+      ~prompt_elements:elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store
+      ~run_agent:(run_agent ~manifest_authorizer ~approval_provider ~response_dir)
+      ()
+    |> map_diagnostics
+    |> Result.map ~f:(fun resources ->
+      resources.Agent_runtime.native, Some resources.definition)
 ;;
 
 let initial_items ~ctx ~elements ~manifest_authorizer ~approval_provider ~response_dir =
@@ -228,6 +260,7 @@ let model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_di
 ;;
 
 let create_moderator
+      ~definition
       ~sw
       ~env
       ~ctx
@@ -245,11 +278,22 @@ let create_moderator
       ~snapshot
   =
   let open Result.Let_syntax in
-  let%bind _, artifact =
+  let legacy_artifact () =
     Manager.Registry.of_elements
       ~surface:Chatml.Chatml_builtin_surface.ui_moderator_surface
       Manager.Registry.empty
       elements
+  in
+  let%bind _, artifact =
+    (match definition with
+     | Some definition ->
+       let%bind registry, artifact =
+         Manager.Registry.of_definition Manager.Registry.empty definition
+       in
+       (match artifact with
+        | Some _ -> Ok (registry, artifact)
+        | None -> legacy_artifact ())
+     | None -> legacy_artifact ())
     |> Result.map_error ~f:failure
   in
   match artifact with
@@ -333,7 +377,7 @@ let create_moderator
               ]))
     in
     let start () =
-      if !started
+      if Option.is_some (Manager.extension_definition manager) || !started
       then current_snapshot ()
       else (
         let now_ms =
@@ -635,7 +679,8 @@ let parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_di
     History_entry.create_with_id ~id item
 ;;
 
-let build
+let build_with_services
+      ~extension_services
       ~sw
       ~env
       ~paths
@@ -669,8 +714,13 @@ let build
   let cache = cache storage_paths in
   let ctx = context ~env paths cache in
   let%bind host = host ~env ~paths ~session_id ~elements in
-  let%bind agent_runtime =
+  let%bind agent_runtime, definition =
     create_agent_runtime
+      ~extensions:
+        (Option.is_some extension_services
+         && List.exists elements ~f:(function
+           | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
+           | _ -> false))
       ~sw
       ~ctx
       ~host
@@ -680,8 +730,40 @@ let build
       ~approval_store
       ~response_dir
   in
+  let%bind () =
+    match definition with
+    | None -> Ok ()
+    | Some definition ->
+      if
+        List.exists
+          (Chat_response.Extension_compiler.prepared_tools definition)
+          ~f:(fun prepared ->
+            match
+              (Chat_response.Extension_compiler.declaration prepared).implementation
+            with
+            | Standalone _ -> true
+            | Moderator _ -> false)
+      then
+        Error (failure "standalone ChatML tool execution is not installed on this host")
+      else Ok ()
+  in
   let comp_tools, tool_tbl = Ochat_function.functions agent_runtime.functions in
   let tools = Chat_response.Tool.convert_tools comp_tools in
+  let tools =
+    tools
+    @ (Option.to_list definition
+       |> List.concat_map ~f:(fun definition ->
+         Chat_response.Extension_compiler.prepared_tools definition
+         |> List.map ~f:(fun prepared ->
+           let tool = Chat_response.Extension_compiler.declaration prepared in
+           Request.Tool.Function
+             { name = tool.name
+             ; description = tool.description
+             ; parameters = Jsonaf.of_string tool.input_schema.source_text
+             ; strict = false
+             ; type_ = "function"
+             })))
+  in
   let%bind initial_history, initial_end =
     match existing_history with
     | Some history -> Ok (history, next_history_sequence)
@@ -704,6 +786,7 @@ let build
   in
   let%bind moderator, start_moderator_once =
     create_moderator
+      ~definition
       ~sw
       ~env
       ~ctx
@@ -721,9 +804,116 @@ let build
       ~snapshot:restored_moderator_snapshot
   in
   let%bind moderator_snapshot = moderator_snapshot moderator in
+  let script_tools =
+    match definition, extension_services with
+    | Some _, Some services -> Some (services.script_tools agent_runtime)
+    | _ -> None
+  in
+  let lifecycle =
+    match definition, moderator, extension_services with
+    | Some _, Some (moderator, _), Some services
+      when Option.is_some (Manager.extension_definition moderator.manager) ->
+      Some
+        (Moderator_event.Lifecycle.create
+           ~manager:moderator.manager
+           ~resume:
+             (Option.exists
+                (Manager.invocation_observer moderator.manager)
+                ~f:services.lifecycle_started))
+    | _ -> None
+  in
+  let now () =
+    Eio.Time.now (Eio.Stdenv.clock env)
+    |> Time_ns.Span.of_sec
+    |> Time_ns.of_span_since_epoch
+    |> Agent_protocol.Timestamp.of_time_ns
+  in
+  let activate lifecycle ~claim ~history =
+    Moderator_event.Lifecycle.run
+      lifecycle
+      ~claim
+      ?script_tools
+      ~history
+      ~available_tools:tools
+      ~session_meta:`Null
+      ~now
+      ()
+  in
+  let moderator_activation =
+    match lifecycle, extension_services with
+    | Some lifecycle, Some services ->
+      Some
+        { pending = (fun () -> Moderator_event.Lifecycle.pending lifecycle)
+        ; run =
+            (fun () ->
+              activate lifecycle ~claim:services.claim_lifecycle ~history:services.history
+              |> Result.map ~f:(function
+                | Activated _ -> true
+                | Unavailable | Already_active -> false))
+        }
+    | _ -> None
+  in
+  let moderator_events =
+    match lifecycle, moderator with
+    | Some lifecycle, Some (moderator, _) ->
+      Some
+        (fun ~input ~capabilities ->
+          let%bind activation =
+            activate
+              lifecycle
+              ~claim:(fun ~event ->
+                capabilities.Operation_worker.Capabilities.with_moderator_event ~event)
+              ~history:(fun () -> input.Operation_worker.Input.history)
+          in
+          match activation with
+          | Unavailable ->
+            Error (failure "foreground moderator activation was not admitted")
+          | Activated _ | Already_active ->
+            Moderator_event.foreground_handlers
+              ?script_tools
+              ~capabilities
+              ~manager:moderator.manager
+              ~session_meta:`Null
+              ~now
+              ())
+    | _ -> None
+  in
+  let dispatch_tool =
+    Option.map script_tools ~f:(fun script_tools ->
+      fun ~input ~capabilities ->
+      let native = Script_tool_calls.native_dispatch script_tools ~input ~capabilities in
+      let moderator =
+        match definition, moderator with
+        | Some definition, Some (moderator, _) ->
+          [ Moderator_tool_dispatch.create
+              ~script_tools
+              ~definition
+              ~manager:moderator.manager
+              ~input
+              ~capabilities
+              ~available_tools:tools
+              ~session_meta:`Null
+              ~now
+              ~validate_work:(fun _ ->
+                Error "background work completion is not installed")
+              ~admit:(fun _ ->
+                Script_tool_calls.validate_definition script_tools definition)
+              ~revalidate:(fun _ ->
+                Script_tool_calls.validate_definition script_tools definition)
+              ~prepare_outcome:(fun outcome ->
+                Agent_protocol.Invocation.validate_outcome outcome
+                |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+              ()
+          ]
+        | _ -> []
+      in
+      Chat_response.In_memory_stream.Tool_dispatch.chain (moderator @ [ native ]))
+  in
   let config, model, reasoning = model_config elements in
   let worker =
     Turn_worker.create
+      ?dispatch_tool
+      ?moderator_events
       { env
       ; response_dir
       ; tools
@@ -741,7 +931,13 @@ let build
       ; prompt_cache_retention = None
       ; post_stream = model_post_stream
       ; agent_page_classifications = agent_runtime.classifications
-      ; delegated_permission_tools = agent_runtime.shell_tool_names
+      ; delegated_permission_tools =
+          (match script_tools with
+           | None -> agent_runtime.shell_tool_names
+           | Some _ ->
+             String.Set.of_list
+               (List.map agent_runtime.functions ~f:(fun fn ->
+                  fn.Ochat_function.info.function_.name)))
       ; redact_tool_payload =
           (fun ~name payload ->
             Option.value_map
@@ -765,7 +961,8 @@ let build
         Option.map moderator ~f:(fun (moderator, _) ->
           moderator.Chat_response.In_memory_stream.manager)
     ; moderator_tools = tools
-    ; moderator_script_tools = None
+    ; moderator_script_tools = script_tools
+    ; moderator_activation
     ; start_moderator =
         (fun () ->
           let open Result.Let_syntax in
@@ -780,4 +977,10 @@ let build
     }
   in
   Ok runtime
+;;
+
+let build = build_with_services ~extension_services:None
+
+let build_with_extensions ~services =
+  build_with_services ~extension_services:(Some services)
 ;;

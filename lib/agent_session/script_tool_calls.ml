@@ -38,6 +38,30 @@ let create
   }
 ;;
 
+let native_dispatch t ~input ~capabilities =
+  Native_tool_dispatch.create
+    ~input
+    ~capabilities
+    ~registry:t.registry
+    ~now:t.now
+    ~is_halted:t.is_halted
+    ~admit:t.authorize
+    ~prepare_output:t.prepare_output
+;;
+
+let validate_definition t definition =
+  let captured = EC.definition_capabilities definition in
+  let names = List.map (C.references captured) ~f:(fun reference -> reference.C.name) in
+  let open Result.Let_syntax in
+  let%bind selected =
+    C.select (t.registry ()) ~names
+    |> Result.map_error ~f:(fun _ -> "captured native capability is no longer available")
+  in
+  match String.equal (C.fingerprint selected) (C.fingerprint captured) with
+  | true -> Ok ()
+  | false -> Error "captured native capability bindings changed"
+;;
+
 let tool_error code = Ok (M.Tool_error code)
 let fail code message = I.Fail { code; message; retryable = false; details = `Null }
 

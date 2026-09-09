@@ -39,7 +39,10 @@ val enqueue_internal_event
   -> (Jsonaf.t option, Agent_protocol.Error.t) result
 
 (** [drain_idle_moderator] handles pending invocation observations and queued
-    internal events when the actor can grant an idle moderator borrow. Each
+    internal events when the actor can grant an idle moderator borrow. An installed
+    runtime's deferred startup/resume activation is also polled while runnable,
+    before observation/queued-event handling. It never activates a stopped actor;
+    failed activation is not bypassed by later idle event work. Each
     observation and v1 event batch is bounded to 32 handlers; durable follow-up
     requests are consumed together before another event drain, even when no
     internal event or observation is queued. Only the installed v1 source can

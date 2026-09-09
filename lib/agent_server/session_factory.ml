@@ -34,6 +34,7 @@ type t =
   ; tool_dir : string
   ; home : string
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
+  ; qualify_chatml_extensions : bool
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
   }
@@ -66,6 +67,7 @@ let create
       ~tool_dir
       ~home
       ~model_post_stream
+      ~qualify_chatml_extensions
       ~durability
       ~limits
   =
@@ -95,6 +97,7 @@ let create
   ; tool_dir
   ; home
   ; model_post_stream
+  ; qualify_chatml_extensions
   ; durability
   ; limits
   }
@@ -887,6 +890,216 @@ let shell_approval_provider t profile actor_ref =
   | Policy, _ -> policy_shell_provider t profile actor_ref
 ;;
 
+let extension_actor actor_ref =
+  Result.of_option
+    !actor_ref
+    ~error:(unavailable Invalid_state "extension runtime is not installed in a session")
+;;
+
+let authorize_extension_native t actor_ref profile native invocation binding =
+  let module A = Agent_session.Session_actor in
+  let module I = Agent_protocol.Invocation in
+  let module Policy = Agent_session.Permission_policy in
+  let open Result.Let_syntax in
+  let%bind actor = extension_actor actor_ref in
+  let%bind state = A.state actor in
+  let%bind () =
+    match Agent_session.Native_tool_invocation.current_scope () with
+    | Active current
+      when I.equal_context current.context invocation.I.context
+           && Agent_protocol.Id.Session.equal
+                current.context.session_id
+                state.identity.session_id
+           && current.context.generation = state.identity.generation
+           && String.equal
+                profile.Policy.revision_digest
+                state.spec.permission_profile_digest -> Ok ()
+    | Active _ | Expired | Unbound ->
+      Error
+        (unavailable
+           Permission_denied
+           "native invocation has no current scoped authority")
+  in
+  if
+    Set.mem
+      native.Chat_response.Agent_runtime.shell_tool_names
+      invocation.context.tool_name
+  then Ok ()
+  else (
+    let identity_digest =
+      String.concat
+        ~sep:"\000"
+        [ "ochat.native-permission.v2"
+        ; profile.Policy.revision_digest
+        ; invocation.context.tool_name
+        ; invocation.context.implementation_revision
+        ; Chat_response.Tool_capability.permission_fingerprint binding
+        ; Jsonaf.to_string invocation.context.input
+        ]
+      |> Chatmd_shell_spec.Source_ref.digest
+    in
+    let request : Policy.invocation =
+      { tool_name = invocation.context.tool_name
+      ; identity_digest
+      ; invocation_display = invocation.context.tool_name ^ "(<redacted>)"
+      ; effects = [ "tool_invocation" ]
+      }
+    in
+    let%bind granted =
+      A.invocation_granted actor ~tool_name:request.tool_name ~identity_digest
+    in
+    match granted with
+    | true -> Ok ()
+    | false ->
+      let decision =
+        Policy.decide
+          profile
+          ~responder_available:(shell_responder_available t state)
+          request
+      in
+      let permission choices =
+        Agent_protocol.Permission.
+          { id = Agent_protocol.Id.Permission.create ()
+          ; session_id = state.identity.session_id
+          ; generation = state.identity.generation
+          ; owner = Invocation invocation.context.id
+          ; call_id =
+              Option.value
+                invocation.context.provider_call_id
+                ~default:(Agent_protocol.Id.Invocation.to_string invocation.context.id)
+          ; tool_name = request.tool_name
+          ; runtime_identity = Some identity_digest
+          ; invocation_display = request.invocation_display
+          ; rationale = None
+          ; effects = request.effects
+          ; choices
+          ; created_at = now t
+          ; expires_at = shell_permission_expiry t profile
+          ; state = Pending
+          ; resolution = None
+          }
+      in
+      let accept (resolution : Agent_protocol.Permission.resolution) =
+        match resolution.choice with
+        | Deny ->
+          Error (unavailable Permission_denied "native tool invocation was denied")
+        | Approve_once | Approve_session | Approve_prefix | Durable_exact -> Ok ()
+      in
+      (match decision with
+       | Allow_now -> Ok ()
+       | Deny_now reason -> Error (unavailable Permission_denied reason)
+       | Request_permission ->
+         let permission =
+           permission
+             [ Approve_once; Approve_session; Approve_prefix; Durable_exact; Deny ]
+         in
+         let fallback =
+           match profile.fallback with
+           | Fallback_allow -> Agent_protocol.Permission.Approve_once
+           | Fallback_deny | Fallback_allow_if_policy | Fallback_reviewer _ -> Deny
+         in
+         let%bind resolution =
+           match profile.fallback with
+           | Fallback_reviewer _ ->
+             A.request_permission_with_review_fallback
+               actor
+               ~permission
+               ~timeout_seconds:(shell_permission_timeout profile)
+               ~fallback
+               ~review_on_timeout:(fun () ->
+                 review_permission t actor_ref profile request)
+           | Fallback_allow | Fallback_deny | Fallback_allow_if_policy ->
+             A.request_permission
+               actor
+               ~permission
+               ~timeout_seconds:(shell_permission_timeout profile)
+               ~fallback
+         in
+         accept resolution
+       | Request_review ->
+         let%bind resolution =
+           A.request_review
+             actor
+             ~permission:(permission [ Approve_once; Deny ])
+             ~review:(fun () -> review_permission t actor_ref profile request)
+         in
+         (match resolution.choice with
+          | Approve_once | Deny -> accept resolution
+          | Approve_session | Approve_prefix | Durable_exact ->
+            Error
+              (unavailable Permission_denied "reviewer returned an invalid grant scope"))))
+;;
+
+let extension_services t profile actor_ref ~(state : Agent_session.Session_state.t) =
+  let module A = Agent_session.Session_actor in
+  Agent_session.Runtime_builder.
+    { script_tools =
+        (fun native ->
+          let registry =
+            Lazy.force native.Chat_response.Agent_runtime.capabilities
+            |> Result.map_error ~f:(fun error ->
+              error.Chat_response.Tool_capability.message)
+            |> Result.ok_or_failwith
+          in
+          Agent_session.Script_tool_calls.create
+            ~registry:(fun () -> registry)
+            ~moderator_names:String.Set.empty
+            ~now:(fun () -> now t)
+            ~is_halted:(fun () ->
+              match Result.bind (extension_actor actor_ref) ~f:A.state with
+              | Error _ -> true
+              | Ok state ->
+                state.halted
+                || Option.is_some state.failure
+                || Agent_protocol.Session.equal_desired_state
+                     state.lifecycle.desired
+                     Stopped
+                || Option.exists state.active_operation ~f:(fun operation ->
+                  match operation.state with
+                  | Cancelling | Cancelled | Failed _ | Interrupted _ -> true
+                  | Starting | Running | Completed -> false))
+            ~requires_active_moderator:(fun _ -> false)
+            ~authorize:(authorize_extension_native t actor_ref profile native)
+            ~prepare_output:(function
+              | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
+              | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
+            ~defer_observation:(fun _ -> Ok ()))
+    ; claim_lifecycle =
+        (fun ~event ~snapshot handle ->
+          let open Result.Let_syntax in
+          let%bind actor = extension_actor actor_ref in
+          A.with_current_moderator_event actor ~operation_id:None ~event ~snapshot handle)
+    ; lifecycle_started =
+        (fun observer ->
+          List.exists state.moderator_executions ~f:(fun receipt ->
+            receipt.context.generation = state.identity.generation
+            && Agent_protocol.Invocation.equal_observer receipt.context.source observer
+            && (match receipt.context.phase with
+                | Session_start | Session_resume -> true
+                | Turn_start
+                | Message_appended
+                | Pre_tool_call
+                | Post_tool_response
+                | Turn_end
+                | Internal_event -> false)
+            &&
+            match receipt.status with
+            | Completed _ -> true
+            | Running | Failed _ | Interrupted _ -> false))
+    ; history =
+        (fun () ->
+          let result =
+            let open Result.Let_syntax in
+            let%bind actor = extension_actor actor_ref in
+            let%bind state = A.state actor in
+            Agent_session.History_codec.all_of_protocol
+              state.conversation.canonical_history
+          in
+          Result.map_error result ~f:(fun error -> error.Agent_protocol.Error.message)
+          |> Result.ok_or_failwith)
+    }
+;;
+
 let add_bound_job actor_ref pending job =
   match !actor_ref with
   | Some actor ->
@@ -1033,11 +1246,79 @@ let flush_pending_jobs actor jobs =
 let install_moderator_if_changed actor moderator_snapshot =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state actor in
-  if Option.equal Poly.equal state.moderator moderator_snapshot
+  if Option.equal Jsonaf.exactly_equal state.moderator moderator_snapshot
   then Ok ()
   else
     Agent_session.Session_actor.change_moderator actor moderator_snapshot
     |> Result.map ~f:(fun _ -> ())
+;;
+
+let prepare_extension_runtime_scope t build =
+  let ready, ready_u = Eio.Promise.create () in
+  let stop, stop_u = Eio.Promise.create () in
+  let exited, exited_u = Eio.Promise.create () in
+  let stopping = Atomic.make false in
+  let delivered = ref false in
+  let signal_stop () =
+    if not (Atomic.exchange stopping true) then Eio.Promise.resolve stop_u ()
+  in
+  let stop_and_join () =
+    Eio.Cancel.protect (fun () ->
+      signal_stop ();
+      Eio.Promise.await exited)
+  in
+  let deliver result =
+    delivered := true;
+    Eio.Promise.resolve ready_u result
+  in
+  Eio.Fiber.fork ~sw:t.sw (fun () ->
+    Exn.protect
+      ~finally:(fun () -> Eio.Promise.resolve exited_u ())
+      ~f:(fun () ->
+        try
+          Eio.Cancel.sub (fun context ->
+            Eio.Switch.run (fun sw ->
+              Eio.Fiber.fork_daemon ~sw (fun () ->
+                Eio.Promise.await stop;
+                Eio.Cancel.cancel context Exit;
+                `Stop_daemon);
+              match build sw with
+              | Error error ->
+                deliver (Ok (Error error));
+                signal_stop ();
+                Eio.Promise.await stop
+              | Ok runtime ->
+                let close_started = Atomic.make false in
+                let close () =
+                  Eio.Cancel.protect (fun () ->
+                    if Atomic.exchange close_started true
+                    then Eio.Promise.await exited
+                    else
+                      Exn.protect
+                        ~f:runtime.Agent_session.Runtime_builder.close
+                        ~finally:stop_and_join)
+                in
+                deliver (Ok (Ok { runtime with close }));
+                Eio.Promise.await stop))
+        with
+        | exn ->
+          let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+          (match !delivered, Atomic.get stopping with
+           | false, _ -> deliver (Error (exn, backtrace))
+           | true, true -> ()
+           | true, false -> Exn.raise_with_original_backtrace exn backtrace)));
+  match Eio.Promise.await ready with
+  | Ok (Ok runtime) -> Ok runtime
+  | Ok (Error error) ->
+    stop_and_join ();
+    Error error
+  | Error (exn, backtrace) ->
+    stop_and_join ();
+    Exn.raise_with_original_backtrace exn backtrace
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    stop_and_join ();
+    Exn.raise_with_original_backtrace exn backtrace
 ;;
 
 let prepare_runtime_at_paths
@@ -1061,9 +1342,16 @@ let prepare_runtime_at_paths
   in
   let approval_provider = shell_approval_provider t profile actor_ref in
   let approval_store = shell_approval_store state actor_ref shell_state in
-  let%map runtime =
-    Agent_session.Runtime_builder.build
-      ~sw:t.sw
+  let build =
+    match t.qualify_chatml_extensions with
+    | false -> Agent_session.Runtime_builder.build
+    | true ->
+      Agent_session.Runtime_builder.build_with_extensions
+        ~services:(extension_services t profile actor_ref ~state)
+  in
+  let construct sw =
+    build
+      ~sw
       ~env:t.env
       ~paths
       ~storage_paths
@@ -1082,6 +1370,11 @@ let prepare_runtime_at_paths
       ~review_permission:(review_permission t actor_ref profile)
       ~schedule_services:(schedule_services t state actor_ref pending_schedule_operations)
       ~job_services:(job_services t state actor_ref pending_jobs)
+  in
+  let%map runtime =
+    match t.qualify_chatml_extensions with
+    | false -> construct t.sw
+    | true -> prepare_extension_runtime_scope t construct
   in
   runtime, shell_state
 ;;

@@ -20,6 +20,7 @@ type options =
   ; reviewer_resolver : Catalog_builder.reviewer_resolver option
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
+  ; qualify_chatml_extensions : bool
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   }
 
@@ -108,6 +109,7 @@ let default_options =
   ; reviewer_resolver = None
   ; policy_evaluator_resolver = None
   ; model_post_stream = None
+  ; qualify_chatml_extensions = false
   ; oauth_resolver = None
   }
 ;;
@@ -727,6 +729,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~tool_dir
       ~home
       ~model_post_stream:options.model_post_stream
+      ~qualify_chatml_extensions:options.qualify_chatml_extensions
       ~durability:(durability config.server)
       ~limits:factory_limits
   in

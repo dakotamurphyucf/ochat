@@ -69,12 +69,16 @@ module Capabilities = struct
             -> (unit, Agent_protocol.Error.t) result)
         -> (bool, Agent_protocol.Error.t) result
     ; with_moderator_event :
-        snapshot:Session.Moderator_state.Identity_snapshot.t
+        snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
         -> event:Chat_response.Moderation.Event.t
         -> event_handler
         -> (bool, Agent_protocol.Error.t) result
     ; with_queued_moderator_event :
-        snapshot:Session.Moderator_state.Identity_snapshot.t
+        snapshot:
+          (unit
+           -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
         -> event_handler
         -> (bool, Agent_protocol.Error.t) result
     ; manage_moderator_follow_up :

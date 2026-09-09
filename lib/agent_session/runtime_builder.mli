@@ -16,6 +16,25 @@ type model_job_outcome =
 
 type model_post_stream = Chat_response.In_memory_stream.post_stream
 
+type extension_services =
+  { script_tools : Chat_response.Agent_runtime.t -> Script_tool_calls.t
+    (** Bind shared native policy/disclosure to the exact constructed runtime.
+        This service owns generic native tool approval; delegated shell tools
+        still use the authorized shell runtime's policy and approval broker. *)
+  ; claim_lifecycle : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
+    (** Actual running-idle actor ownership. Never manufacture an operation. *)
+  ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
+    (** Whether the current source/generation has a completed lifecycle receipt.
+        An initial prepared checkpoint alone does not mean startup executed. *)
+  ; history : unit -> History_entry.t list
+    (** Current canonical history, read after an actor claim without entering the manager. *)
+  }
+
+type moderator_activation =
+  { pending : unit -> bool
+  ; run : unit -> (bool, Agent_protocol.Error.t) result
+  }
+
 type t =
   { worker : Operation_worker.t
   ; parse_user_content :
@@ -31,6 +50,8 @@ type t =
   ; moderator_script_tools : Script_tool_calls.t option
     (** Host policy/disclosure services for v1 moderator native calls. Normal
         construction leaves this absent until v1 admission is installed. *)
+  ; moderator_activation : moderator_activation option
+    (** Deferred owned activation after installing the initial checkpoint. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event : Jsonaf.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; drain_internal_events :
@@ -87,6 +108,38 @@ val moderator_snapshot_observer
     effects on external tools/files are not rolled back by session transactions. *)
 val build
   :  sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> revision:Prompt_revision.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> history_namespace:string
+  -> next_history_sequence:int
+  -> existing_history:History_entry.t list option
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> permission_profile:Permission_policy.t
+  -> model_post_stream:model_post_stream option
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (t, Agent_protocol.Error.t) result
+
+(** Construct an extensibility-aware runtime from the captured prompt revision
+    and the actual authorized native resources. Installs owned foreground dispatch
+    and event services. [start_moderator] returns the prepared initial checkpoint;
+    startup/resume effects wait for [moderator_activation] or the first foreground
+    operation, after actor installation. Standalone and background completion
+    services remain unavailable until implemented. Public feature negotiation is
+    unchanged; ordinary hosts continue using [build]. *)
+val build_with_extensions
+  :  services:extension_services
+  -> sw:Eio.Switch.t
   -> env:Eio_unix.Stdenv.base
   -> paths:Runtime_paths.t
   -> storage_paths:Runtime_paths.t

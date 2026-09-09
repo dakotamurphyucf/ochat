@@ -138,7 +138,7 @@ let agent_runtime_or_fail = function
     |> failwith
 ;;
 
-let agent_runtime env sw root source manifest_authorizer approval_provider =
+let with_agent_runtime_input env root source f =
   let elements = CM.parse_chat_inputs ~source:"agent.chatmd" ~dir:root source in
   let cache = Chat_response.Cache.create ~max_size:1 () in
   let ctx = Chat_response.Ctx.create ~env ~dir:root ~tool_dir:root ~cache in
@@ -156,18 +156,23 @@ let agent_runtime env sw root source manifest_authorizer approval_provider =
       ~prompt_elements:elements
     |> agent_runtime_or_fail
   in
-  Chat_response.Agent_runtime.create
-    ~sw
-    ~ctx
-    ~host
-    ~platform:S.Macos
-    ~prompt_elements:elements
-    ~manifest_authorizer
-    ~approval_provider
-    ~approval_store:(Shell_access.Approval.create_store ())
-    ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
-      failwith "unexpected nested agent")
-    ()
+  f ~ctx ~host ~elements
+;;
+
+let agent_runtime env sw root source manifest_authorizer approval_provider =
+  with_agent_runtime_input env root source (fun ~ctx ~host ~elements ->
+    Chat_response.Agent_runtime.create
+      ~sw
+      ~ctx
+      ~host
+      ~platform:S.Macos
+      ~prompt_elements:elements
+      ~manifest_authorizer
+      ~approval_provider
+      ~approval_store:(Shell_access.Approval.create_store ())
+      ~run_agent:(fun ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+        failwith "unexpected nested agent")
+      ())
 ;;
 
 let runtime_function runtime name =
@@ -251,6 +256,113 @@ let%expect_test "agent runtime resolves read_file roots and publishes their guid
     {|
     description=true true true
     output=true
+    |}]
+;;
+
+let%expect_test
+    "extension resources retain captured code and exact approved native bindings"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    Eio.Switch.run (fun sw ->
+      let module R = Chat_response.Agent_runtime in
+      let module C = Chat_response.Tool_capability in
+      let module E = Chat_response.Extension_compiler in
+      let root = Eio.Path.(Eio.Stdenv.cwd env / "_build" / "extension-resources") in
+      Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 Eio.Path.(root / "allowed");
+      Eio.Path.save
+        ~create:(`Or_truncate 0o600)
+        Eio.Path.(root / "allowed" / "value.txt")
+        "bound value";
+      Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / "schema.json") "true";
+      let script =
+        {|let poison = fail("initializer must not run")
+let initial_state = 0
+let on_event = fun ctx state event -> match event with
+| `Tool_invoked(p) -> Task.bind(Invocation.resolve(p.context.invocation_id, `Complete(p.input)), fun ignored -> Task.pure(state))
+| _ -> Task.pure(state)|}
+      in
+      Eio.Path.save ~create:(`Or_truncate 0o600) Eio.Path.(root / "handler.chatml") script;
+      let source =
+        {|<tool name="read_file"><read id="source" path="allowed"/></tool>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1" src="handler.chatml"/>
+<tool name="counter" type="moderator" moderator="owner" input_schema="schema.json" output_schema="schema.json"/>|}
+      in
+      let normal_disabled =
+        match
+          agent_runtime
+            env
+            sw
+            root
+            source
+            Shell_runtime.Manifest_authorizer.assume_authorized
+            Shell_runtime.Approval_broker.None_available
+        with
+        | Error [ { code = "chatml.extension_unavailable"; _ } ] -> true
+        | _ -> false
+      in
+      let resources =
+        with_agent_runtime_input env root source (fun ~ctx ~host ~elements ->
+          Eio.Path.save
+            ~create:(`Or_truncate 0o600)
+            Eio.Path.(root / "handler.chatml")
+            "not valid ChatML";
+          Eio.Path.save
+            ~create:(`Or_truncate 0o600)
+            Eio.Path.(root / "schema.json")
+            "not JSON";
+          R.prepare_extensions
+            ~sw
+            ~ctx
+            ~host
+            ~platform:S.Macos
+            ~prompt_elements:elements
+            ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+            ~approval_provider:Shell_runtime.Approval_broker.None_available
+            ~approval_store:(Shell_access.Approval.create_store ())
+            ~run_agent:
+              (fun
+                ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+              failwith "unexpected nested agent")
+            ()
+          |> agent_runtime_or_fail)
+      in
+      let native = runtime_function resources.native "read_file" in
+      let selected = E.definition_capabilities resources.definition in
+      let binding =
+        C.find selected ~name:"read_file"
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+      in
+      let native_names =
+        List.map resources.native.functions ~f:(fun fn ->
+          fn.Ochat_function.info.function_.name)
+      in
+      let prepared_names =
+        List.map (E.prepared_tools resources.definition) ~f:(fun tool ->
+          (E.declaration tool).name)
+      in
+      let pinned =
+        List.for_all (E.compiled_scripts resources.definition) ~f:(fun (captured, _) ->
+          String.equal (Chatmd_shell_spec.Extension_spec.script_text captured) script)
+      in
+      let output =
+        (C.implementation binding).run {|{"root":"source","file":"value.txt"}|}
+        |> output_text
+      in
+      print_s
+        [%sexp
+          { normal_disabled : bool
+          ; native_names : string list
+          ; prepared_names : string list
+          ; exact_native = (phys_equal native (C.implementation binding) : bool)
+          ; pinned : bool
+          ; scoped_read = (String.is_substring output ~substring:"bound value" : bool)
+          }]));
+  [%expect
+    {|
+    ((normal_disabled true) (native_names (read_file)) (prepared_names (counter))
+     (exact_native true) (pinned true) (scoped_read true))
     |}]
 ;;
 

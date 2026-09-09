@@ -126,6 +126,16 @@ let ordinary_phase = function
   | Internal_event _ -> conflict "internal events require the queued event handoff"
 ;;
 
+let lifecycle_phase = function
+  | E.Session_start | Session_resume -> true
+  | Turn_start
+  | Message_appended
+  | Pre_tool_call
+  | Post_tool_response
+  | Turn_end
+  | Internal_event -> false
+;;
+
 let claim_ordinary ~state ~id ~(snapshot : S.t) ~operation_id ~event ~now =
   let open Result.Let_syntax in
   let%bind () = installed ~state ~snapshot in
@@ -145,10 +155,14 @@ let claim_ordinary ~state ~id ~(snapshot : S.t) ~operation_id ~event ~now =
       List.exists state.moderator_executions ~f:(fun receipt ->
         receipt.context.generation = state.identity.generation
         && P.Invocation.equal_observer receipt.context.source source
-        && E.equal_phase receipt.context.phase phase
-        && Option.equal P.Id.Operation.equal receipt.context.operation_id operation_id
-        && String.equal receipt.context.checkpoint_sha256 checkpoint_sha256
-        && Jsonaf.exactly_equal receipt.context.event captured
+        && ((lifecycle_phase phase && lifecycle_phase receipt.context.phase)
+            || (E.equal_phase receipt.context.phase phase
+                && Option.equal
+                     P.Id.Operation.equal
+                     receipt.context.operation_id
+                     operation_id
+                && String.equal receipt.context.checkpoint_sha256 checkpoint_sha256
+                && Jsonaf.exactly_equal receipt.context.event captured))
         &&
         match receipt.status with
         | Running | Failed _ | Interrupted _ -> true

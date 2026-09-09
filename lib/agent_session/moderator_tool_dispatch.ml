@@ -76,6 +76,7 @@ let prepare_request
 ;;
 
 let dispatch
+      ~revalidate
       ~script_tools
       ~observe_nested
       ~cache
@@ -187,9 +188,12 @@ let dispatch
                     "The tool invocation is not authorized by the current policy."
                 in
                 let%bind () = checked denied (fun () -> admit request) in
-                checked denied (fun () ->
-                  authorize ();
-                  Ok ()))
+                let%bind () =
+                  checked denied (fun () ->
+                    authorize ();
+                    Ok ())
+                in
+                checked denied (fun () -> revalidate request))
               ~prepare_resolution:(fun ~resolved ~outcome ~snapshot ->
                 let open Result.Let_syntax in
                 let%bind () =
@@ -295,6 +299,7 @@ let dispatch
 ;;
 
 let create
+      ?(revalidate = fun _ -> Ok ())
       ?script_tools
       ?(observe_nested = false)
       ~definition
@@ -336,6 +341,7 @@ let create
     ; validate_original
     ; run =
         dispatch
+          ~revalidate
           ~script_tools
           ~observe_nested
           ~cache
