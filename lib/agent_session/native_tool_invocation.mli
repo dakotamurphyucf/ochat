@@ -20,9 +20,9 @@ type scope =
 
 val current_scope : unit -> scope
 
-(** Expiring borrow of the current native invocation's real actor executor.
-    This conveys admission/result persistence only: no tool registry, native
-    runner, foreground history, moderator ownership or policy bypass. *)
+(** Expiring borrow of the current native invocation's real actor executor and
+    verified capability ceiling. It provides admission/result persistence and
+    narrowing, without foreground history, moderator ownership or a policy bypass. *)
 type borrowed
 
 (** Fails outside an active native callback, including a fiber whose inherited
@@ -31,12 +31,28 @@ val borrow : unit -> (borrowed, Agent_protocol.Error.t) result
 
 val borrowed_invocation : borrowed -> Agent_protocol.Invocation.t
 
+(** Actual selected native bindings verified by the dispatch boundary, never a
+    registration closure's broader registry. Fails before capability validation
+    or after scope expiration. Reading this registry does not skip current policy. *)
+val borrowed_capabilities
+  :  borrowed
+  -> (Chat_response.Tool_capability.t, Agent_protocol.Error.t) result
+
+(** Narrow this borrow to exact names already in its verified ceiling. The new
+    borrow shares the same lifetime; it cannot restore previously removed tools.
+    Its direct child's context must use the narrowed registry fingerprint. *)
+val select_tools
+  :  borrowed
+  -> names:string list
+  -> (borrowed, Agent_protocol.Error.t) result
+
 (** Admit a Script-origin direct child with the same session/generation and a
-    deadline no later than its parent's. Uses the lending scope's actor executor,
+    deadline no later than its parent's and the selected ceiling's fingerprint.
+    Uses the lending scope's actor executor,
     rechecking expiration both before admission and before the callback. The child
     callback receives its own scoped identity and may borrow it for descendants;
     its borrow expires on return, restoring the enclosing scope. The host
-    still validates selected capabilities, shared budgets and current policy;
+    still validates shared budgets and current policy;
     native effects must pass through [run_scoped]. Existing actor ownership rules
     apply, so borrowing never grants a new event/idle/foreground owner. The caller
     must join child work within the native callback's cancellation scope. *)

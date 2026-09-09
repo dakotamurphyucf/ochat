@@ -88,9 +88,10 @@ type prepared_call =
 
 let with_scope
       ?prepare
+      ?(max_nested_calls = Chat_response.Moderator_invocation.max_nested_calls)
       t
       ~selected
-      ~script
+      ~limits
       ~origin
       ~observer
       ~valid_parent
@@ -115,7 +116,6 @@ let with_scope
   in
   let active = Atomic.make true in
   let attempts = Atomic.make 0 in
-  let limits = script.Chatmd_shell_spec.Extension_spec.limits in
   let validate_value value =
     let open Result.Let_syntax in
     let%bind () = I.validate_outcome (Complete value) in
@@ -142,9 +142,7 @@ let with_scope
   let call ~name ~args =
     if (not (Atomic.get active)) || not valid_parent
     then tool_error "invocation.inactive_scope"
-    else if
-      Atomic.fetch_and_add attempts 1
-      >= Chat_response.Moderator_invocation.max_nested_calls
+    else if Atomic.fetch_and_add attempts 1 >= max_nested_calls
     then tool_error "invocation.nested_call_limit"
     else if Set.mem t.moderator_names name
     then tool_error "moderator_reentrancy"
@@ -247,7 +245,7 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
   with_scope
     t
     ~selected
-    ~script:(EC.script prepared)
+    ~limits:(EC.execution_limits prepared)
     ~origin:Moderator
     ~observer:
       (Some
@@ -260,8 +258,18 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
     f
 ;;
 
-let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderate f =
-  let selected = EC.capabilities prepared in
+let with_script_native_calls
+      ?observer
+      ?max_nested_calls
+      t
+      ~selected
+      ~limits
+      ~execute
+      ~valid_parent
+      ~(parent : I.t)
+      ~moderate
+      f
+  =
   let kind (reference : C.reference) =
     match C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint with
     | Ok binding when String.equal (C.implementation binding).info.type_ "custom" ->
@@ -350,6 +358,22 @@ let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderat
               "The redirected tool is not selected."
           | Some reference -> route reference args Passed None))
   in
+  with_scope
+    ~prepare
+    ?max_nested_calls
+    t
+    ~selected
+    ~limits
+    ~origin:Script
+    ~observer
+    ~valid_parent
+    ~execute
+    ~parent:(Invocation parent)
+    f
+;;
+
+let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderate f =
+  let selected = EC.capabilities prepared in
   let valid_parent =
     match parent.status, (EC.declaration prepared).implementation with
     | Dispatching, Standalone _ ->
@@ -358,16 +382,48 @@ let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderat
       && String.equal parent.context.capability_fingerprint (C.fingerprint selected)
     | _ -> false
   in
-  with_scope
-    ~prepare
+  with_script_native_calls
+    ?observer
     t
     ~selected
-    ~script:(EC.script prepared)
-    ~origin:Script
-    ~observer
+    ~limits:(EC.execution_limits prepared)
     ~valid_parent
     ~execute:capabilities.Operation_worker.Capabilities.with_invocation
-    ~parent:(Invocation parent)
+    ~parent
+    ~moderate
+    f
+;;
+
+let validate_one_off t prepared =
+  Chat_response.One_off_script.revalidate prepared ~capabilities:(t.registry ())
+  |> Result.map_error ~f:(fun error -> error.C.message)
+;;
+
+let with_one_off ?observer t ~prepared ~limits ~max_nested_calls ~borrowed ~moderate f =
+  let module P = Chat_response.One_off_script in
+  let parent = Native_tool_invocation.borrowed_invocation borrowed in
+  let selected = P.capabilities prepared in
+  let valid_parent =
+    match parent.status, parent.context.origin with
+    | Dispatching, Script ->
+      String.equal parent.context.implementation_revision (P.fingerprint prepared)
+      && String.equal parent.context.capability_fingerprint (C.fingerprint selected)
+      &&
+        (match Native_tool_invocation.borrowed_capabilities borrowed with
+        | Ok ceiling -> String.equal (C.fingerprint ceiling) (C.fingerprint selected)
+        | Error _ -> false)
+    | _ -> false
+  in
+  with_script_native_calls
+    ?observer
+    ~max_nested_calls
+    t
+    ~selected
+    ~limits
+    ~valid_parent
+    ~execute:(Native_tool_invocation.execute_borrowed borrowed)
+    ~parent
+    ~moderate
     f
 ;;
 
@@ -395,7 +451,7 @@ let with_moderator_scope t ~definition ~execute ~parent ~valid_parent f =
     with_scope
       { t with moderator_names }
       ~selected:(EC.definition_capabilities definition)
-      ~script
+      ~limits:script.limits
       ~origin:Moderator
       ~observer:(Some observer)
       ~valid_parent:(valid_parent observer)

@@ -17,6 +17,7 @@ type borrowed =
   { invocation : I.t
   ; active : bool Atomic.t
   ; execute : executor
+  ; ceiling : C.t option
   }
 
 let scope_key = Eio.Fiber.create_key ()
@@ -39,18 +40,40 @@ let borrow () =
 
 let borrowed_invocation scope = scope.invocation
 
-let with_scope ~execute invocation f =
-  match Eio.Fiber.get scope_key with
-  | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
-    (* Borrowed admission already installed the exact child scope with the actor
-       executor. Replacing it with the caller's direct-child-only adapter would
-       incorrectly constrain this child's own descendants to its parent. *)
-    f ()
-  | None | Some _ ->
-    let active = Atomic.make true in
-    Exn.protect
-      ~finally:(fun () -> Atomic.set active false)
-      ~f:(fun () -> Eio.Fiber.with_binding scope_key { invocation; active; execute } f)
+let borrowed_capabilities scope =
+  match Atomic.get scope.active, scope.ceiling with
+  | true, Some selected -> Ok selected
+  | _ ->
+    Error
+      (Agent_protocol.Error.invalid_request
+         "borrowed scope has no active verified tool capabilities")
+;;
+
+let select_tools scope ~names =
+  let open Result.Let_syntax in
+  let%bind ceiling = borrowed_capabilities scope in
+  let%map selected =
+    C.select ceiling ~names
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.invalid_request error.C.message)
+  in
+  { scope with ceiling = Some selected }
+;;
+
+let with_scope ?ceiling ~execute invocation f =
+  let execute, ceiling =
+    match Eio.Fiber.get scope_key with
+    | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
+      (* Preserve the real actor executor rather than inheriting a direct-child
+         adapter from the parent. Each lexical scope still owns its lifetime. *)
+      scope.execute, Option.first_some ceiling scope.ceiling
+    | None | Some _ -> execute, ceiling
+  in
+  let active = Atomic.make true in
+  Exn.protect
+    ~finally:(fun () -> Atomic.set active false)
+    ~f:(fun () ->
+      Eio.Fiber.with_binding scope_key { invocation; active; execute; ceiling } f)
 ;;
 
 let execute_borrowed scope ~invocation f =
@@ -62,6 +85,7 @@ let execute_borrowed scope ~invocation f =
   in
   let open Result.Let_syntax in
   let%bind () = check_active () in
+  let%bind ceiling = borrowed_capabilities scope in
   let parent = scope.invocation.context in
   let child = invocation.I.context in
   let deadline_within_parent =
@@ -80,6 +104,7 @@ let execute_borrowed scope ~invocation f =
            && Option.is_none child.call_entry_id
            && Option.is_none child.parent_job
            && Option.is_none invocation.parent_event
+           && String.equal child.capability_fingerprint (C.fingerprint ceiling)
            && deadline_within_parent -> Ok ()
     | _ ->
       Error
@@ -90,7 +115,7 @@ let execute_borrowed scope ~invocation f =
     (* Actor admission can yield while the native callback returns. A retained
        executor must not start effects after its lending scope has expired. *)
     let%bind () = check_active () in
-    with_scope ~execute:scope.execute dispatched (fun () -> f ~dispatched))
+    with_scope ~ceiling ~execute:scope.execute dispatched (fun () -> f ~dispatched))
 ;;
 
 let fail code message = I.Fail { code; message; retryable = false; details = `Null }
@@ -101,6 +126,29 @@ let checked failure f =
   | Error _ -> Error failure
   | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
   | exception _ -> Error failure
+;;
+
+let with_selected_capabilities selected f =
+  let failure =
+    fail
+      "invocation.unselected_tool"
+      "Native dispatch would widen its borrowed tool capabilities."
+  in
+  match Eio.Fiber.get scope_key with
+  | None -> Error failure
+  | Some scope ->
+    let open Result.Let_syntax in
+    let%bind () =
+      checked failure (fun () ->
+        match scope.ceiling with
+        | None -> Ok ()
+        | Some ceiling ->
+          List.fold (C.references selected) ~init:(Ok ()) ~f:(fun result reference ->
+            let%bind () = result in
+            C.resolve ceiling ~id:reference.id ~fingerprint:reference.fingerprint
+            |> Result.map ~f:ignore))
+    in
+    with_scope ~ceiling:selected ~execute:scope.execute scope.invocation f
 ;;
 
 let run_scoped
@@ -145,7 +193,7 @@ let run_scoped
                && String.equal c.tool_name reference.name
                && String.equal c.implementation_revision reference.implementation_revision
                && String.equal c.capability_fingerprint (C.fingerprint selected)
-             then Ok binding
+             then Ok (binding, selected)
              else
                Error
                  C.
@@ -153,59 +201,60 @@ let run_scoped
                    ; message = "invocation context does not match selected capability"
                    })
       in
-      let%bind binding = resolve () in
-      let%bind () =
-        checked
-          (fail
-             "invocation.invalid_input"
-             "The tool arguments do not satisfy its input schema.")
-          (fun () ->
-             let%bind schema = S.compile reference.input_schema in
-             S.validate schema dispatched.context.input)
-      in
-      let%bind () =
-        checked
-          (fail "invocation.permission_denied" "Tool execution was not authorized.")
-          (fun () -> authorize dispatched binding)
-      in
-      (* An approval wait may have replaced or narrowed the selected registry.
-         Never dispatch the binding captured before that wait. *)
-      let%bind () = check_halted () in
-      let%bind binding = resolve () in
-      let implementation = C.implementation binding in
-      let%bind payload =
-        match implementation.info.type_, dispatched.context.input with
-        | "function", input -> Ok (Jsonaf.to_string input)
-        | "custom", `String input -> Ok input
-        | "custom", _ ->
-          Error (fail "invocation.invalid_input" "Custom tools require string input.")
-        | _ ->
-          Error
+      let%bind binding, selected = resolve () in
+      with_selected_capabilities selected (fun () ->
+        let%bind () =
+          checked
             (fail
-               "invocation.unsupported_kind"
-               "The registered tool kind is unsupported.")
-      in
-      let%bind output =
-        checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
-          Ok
-            (implementation.run_with_progress
-               ~invocation:Ochat_function.Invocation.silent
-               payload))
-      in
-      let%bind value =
-        checked
-          (fail
-             "invocation.disclosure_rejected"
-             "The tool result could not be disclosed.")
-          (fun () -> prepare_output output)
-      in
-      let outcome = I.Complete value in
-      let%map () =
-        checked
-          (fail "invocation.invalid_output" "The tool returned an invalid result.")
-          (fun () -> I.validate_outcome outcome)
-      in
-      outcome
+               "invocation.invalid_input"
+               "The tool arguments do not satisfy its input schema.")
+            (fun () ->
+               let%bind schema = S.compile reference.input_schema in
+               S.validate schema dispatched.context.input)
+        in
+        let%bind () =
+          checked
+            (fail "invocation.permission_denied" "Tool execution was not authorized.")
+            (fun () -> authorize dispatched binding)
+        in
+        (* An approval wait may have replaced or narrowed the selected registry.
+         Never dispatch the binding captured before that wait. *)
+        let%bind () = check_halted () in
+        let%bind binding, _ = resolve () in
+        let implementation = C.implementation binding in
+        let%bind payload =
+          match implementation.info.type_, dispatched.context.input with
+          | "function", input -> Ok (Jsonaf.to_string input)
+          | "custom", `String input -> Ok input
+          | "custom", _ ->
+            Error (fail "invocation.invalid_input" "Custom tools require string input.")
+          | _ ->
+            Error
+              (fail
+                 "invocation.unsupported_kind"
+                 "The registered tool kind is unsupported.")
+        in
+        let%bind output =
+          checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
+            Ok
+              (implementation.run_with_progress
+                 ~invocation:Ochat_function.Invocation.silent
+                 payload))
+        in
+        let%bind value =
+          checked
+            (fail
+               "invocation.disclosure_rejected"
+               "The tool result could not be disclosed.")
+            (fun () -> prepare_output output)
+        in
+        let outcome = I.Complete value in
+        let%map () =
+          checked
+            (fail "invocation.invalid_output" "The tool returned an invalid result.")
+            (fun () -> I.validate_outcome outcome)
+        in
+        outcome)
     in
     with_scope ~execute dispatched (fun () ->
       match

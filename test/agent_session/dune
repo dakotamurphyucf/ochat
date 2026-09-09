@@ -16,6 +16,7 @@
   moderator_routing_tests
   observations_tests
   one_off_preparation_tests
+  one_off_execution_tests
   permissions_tests
   persistence_tests
   standalone_tests

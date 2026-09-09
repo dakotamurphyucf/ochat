@@ -99,6 +99,31 @@ val with_standalone
       -> 'a)
   -> 'a
 
+(** Revalidate the one-off artifact's exact selected live bindings against this
+    host's current registry. Does not run source or authorizing callbacks. *)
+val validate_one_off : t -> Chat_response.One_off_script.t -> (unit, string) result
+
+(** Reuse standalone native moderation/routing and disclosure for a prepared
+    one-off program under its actual borrowed Script invocation. The source and
+    capability fingerprints must match that dispatched child. No synthetic tool
+    declaration or moderator event is constructed. [max_nested_calls] is host
+    policy for this call scope; shared recursive budgets remain the caller's job. *)
+val with_one_off
+  :  ?observer:Agent_protocol.Invocation.observer
+  -> t
+  -> prepared:Chat_response.One_off_script.t
+  -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
+  -> max_nested_calls:int
+  -> borrowed:Native_tool_invocation.borrowed
+  -> moderate:
+       (Chat_response.Moderation.Tool_call.t
+        -> (Chat_response.Moderation.Tool_moderation.t option, string) result)
+  -> ((name:string
+       -> args:Jsonaf.t
+       -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)
+      -> 'a)
+  -> 'a
+
 (** Tool.call scope for an already claimed Tool_observed event. Captures the
     moderator's admitted registry directly from the complete definition, so no
     synthetic moderator-handled tool is required. Checks the exact script source,

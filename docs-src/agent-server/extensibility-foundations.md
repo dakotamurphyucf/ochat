@@ -1583,8 +1583,9 @@ Parser/type failures retain their original span against the submitted source has
 `one-off-<hash>.chatml` is a logical source label, not a file to load. Errors without
 a compiler location retain whole-source provenance. This API provides static
 preparation for the future run/authoring tools; it does not expose `run_chatml` or
-borrow execution authority. Runtime connection, inherited capability/budget
-propagation and authoring-context/helper installation remain required.
+borrow execution authority. The owned execution service is described below.
+Public registration, shared recursive budgets and authoring-context/helper
+installation remain required.
 
 ## Standalone execution primitives
 
@@ -1686,13 +1687,19 @@ persists admission, dispatch and terminal outcomes.
 
 The child callback receives its own scoped identity. It can borrow that scope for
 descendants, and returning restores the enclosing scope. Native dispatch preserves
-an already installed child scope instead of replacing its executor with the
-parent's direct-child adapter. Both retained handles and inherited fiber bindings
+the actual actor executor rather than replacing it with the parent's direct-child
+adapter. Each nested lexical scope has its own lifetime. Retained handles and inherited fiber bindings
 expire when their owning callback returns. Expiration is checked before actor
 admission and again before the callback, since admission may yield.
 
-This handle carries persistence/admission access only. Hosts must still select
-capabilities, enforce shared resource limits and route native effects through
+Native dispatch also retains its verified selected registry in the scope.
+`borrowed_capabilities` exposes that exact ceiling to trusted host services;
+`select_tools` can narrow it but cannot restore removed tools or extend its
+lifetime. A borrowed child must carry the narrowed registry fingerprint. Native
+dispatch within that child cannot replace it with a broader registry. Capability
+access fails before verification and after scope expiration.
+
+Hosts must still enforce shared resource limits and route native effects through
 `run_scoped` for schema, current policy, revocation and disclosure checks. Child
 work must be joined within the caller's cancellation scope. Existing actor rules
 for foreground, idle moderator and event ownership are unchanged; this API does
@@ -1703,6 +1710,37 @@ The actor fixture covers nested native and script callbacks, restored identity,
 denial, revocation during authorization, cancellation, forged lineage/deadline
 rejection and expired handles while another enclosing callback is active. Script
 children retain terminal records without provider call IDs or output entries.
+
+### Owned one-off execution
+
+`Agent_session.One_off_execution.run` connects a prepared one-off artifact to an
+active borrowed native invocation. It checks the artifact against the caller's
+exact capability ceiling, including when the artifact was prepared earlier from
+a broader registry. It then records a `Script` child named `chatml.main`, with the
+source/contract identity in its implementation revision and a deadline narrowed
+against the parent's. The program receives fresh globals and JSON input through
+`main`; its JSON result becomes a validated `Complete` outcome.
+
+`Script_tool_calls.with_one_off` shares the standalone native call path: original
+schema checks, pre-tool moderation, selected-target rewriting/redirects, current
+authorization and binding revalidation, and output disclosure. The current registry
+is checked before initialization as well as at native dispatch. No standalone
+declaration or moderator event is invented to run the program. The whole owned
+callback has a deadline, including moderation, native tool and disclosure waits.
+Pure evaluation/value/allocation limits use the existing execution service.
+
+The result contains the persisted invocation and any moderator runtime requests;
+the owning runtime must consume those requests. Program and nested native records
+have no provider call IDs or tool-output entries. Only the real model-originated
+caller publishes provider output.
+
+Actor fixtures exercise real scoped file reads, concurrent fresh globals, an
+out-of-root request without content disclosure, policy denial and revocation,
+argument rewrite and rejection, unselected recursive calls, a prepared artifact
+broader than its caller, pure initializer limits, timeout, bounded output and
+cancellation. The native wrapper in this fixture is test-only. Final public tool
+registration/response integration, shared recursive fuel/allocation/call/depth
+budgets, idle/event-owned descendants and authoring integration remain pending.
 
 ## Authoring policy admission plans
 

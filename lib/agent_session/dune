@@ -20,6 +20,7 @@
   invocation_recovery
   moderator_tool_dispatch
   standalone_tool_dispatch
+  one_off_execution
   moderator_observation
   moderator_event
   observation_follow_up
