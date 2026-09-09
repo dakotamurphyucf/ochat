@@ -129,126 +129,161 @@ let run
         }
       in
       let execute control =
-        let%bind () =
-          checked
-            (fail
-               "invocation.stale_binding"
-               "Selected script tools are no longer available.")
-            (fun () -> Script_tool_calls.validate_one_off script_tools prepared)
-        in
-        let%bind () =
-          checked (fail "invocation.session_ended" "The session has ended.") (fun () ->
-            if Script_tool_calls.is_halted script_tools then Error () else Ok ())
-        in
-        let%bind argument =
-          checked
-            (fail
-               "invocation.invalid_input"
-               "The one-off input exceeds its value limits.")
-            (fun () ->
-               let%bind () =
-                 I.validate_outcome (Complete input)
-                 |> Result.map_error ~f:(fun _ -> "invalid input")
+        Script_tool_calls.with_job_scope
+          script_tools
+          ~owner:(Agent_protocol.Job.Invocation dispatched.context.id)
+          ~selected:(P.capabilities prepared)
+          ~error:(fail "invocation.background_unavailable")
+          (fun jobs ->
+             let start_effects = ref [] in
+             let%bind () =
+               checked
+                 (fail
+                    "invocation.stale_binding"
+                    "Selected script tools are no longer available.")
+                 (fun () -> Script_tool_calls.validate_one_off script_tools prepared)
+             in
+             let%bind () =
+               checked
+                 (fail "invocation.session_ended" "The session has ended.")
+                 (fun () ->
+                    if Script_tool_calls.is_halted script_tools then Error () else Ok ())
+             in
+             let%bind argument =
+               checked
+                 (fail
+                    "invocation.invalid_input"
+                    "The one-off input exceeds its value limits.")
+                 (fun () ->
+                    let%bind () =
+                      I.validate_outcome (Complete input)
+                      |> Result.map_error ~f:(fun _ -> "invalid input")
+                    in
+                    let value = V.import_json ?control input in
+                    let%map _ =
+                      Chat_response.Moderator_invocation.snapshot_state ~limits value
+                    in
+                    value)
+             in
+             let%bind child_borrow =
+               checked
+                 (fail "invocation.inactive_scope" "The script invocation scope expired.")
+                 N.borrow
+             in
+             let run on_tool_call =
+               let handlers =
+                 { R.default_handlers with
+                   on_tool_call =
+                     (fun _ ~name ~args ->
+                       let%bind args = V.export_json ?control args in
+                       let%map result = on_tool_call ~name ~args in
+                       match result with
+                       | Chat_response.Moderation.Capabilities.Tool_ok value ->
+                         L.VVariant ("Ok", [ V.import_json ?control value ])
+                       | Tool_error message -> L.VVariant ("Error", [ L.VString message ]))
+                 }
                in
-               let value = V.import_json ?control input in
-               let%map _ =
-                 Chat_response.Moderator_invocation.snapshot_state ~limits value
+               let config : R.runtime_config =
+                 { surface = Chatml.Chatml_extension_surface.one_off_v1
+                 ; operations = R.default_operations ~handlers ()
+                 }
                in
-               value)
-        in
-        let%bind child_borrow =
-          checked
-            (fail "invocation.inactive_scope" "The script invocation scope expired.")
-            N.borrow
-        in
-        let run on_tool_call =
-          let handlers =
-            { R.default_handlers with
-              on_tool_call =
-                (fun _ ~name ~args ->
-                  let%bind args = V.export_json ?control args in
-                  let%map result = on_tool_call ~name ~args in
-                  match result with
-                  | Chat_response.Moderation.Capabilities.Tool_ok value ->
-                    L.VVariant ("Ok", [ V.import_json ?control value ])
-                  | Tool_error message -> L.VVariant ("Error", [ L.VString message ]))
-            }
-          in
-          let config : R.runtime_config =
-            { surface = Chatml.Chatml_extension_surface.one_off_v1
-            ; operations = R.default_operations ~handlers ()
-            }
-          in
-          Chatml_execution.run_in_scope
-            ~control
-            ~config
-            ~program:(P.program prepared)
-            ~entrypoint:P.entrypoint
-            ~arguments:[ argument ]
-            ()
-        in
-        let%bind value =
-          Script_tool_calls.with_one_off
-            ?observer
-            script_tools
-            ~prepared
-            ~limits
-            ~max_nested_calls
-            ~borrowed:child_borrow
-            ~moderate:(fun call ->
-              let%map outcome = moderate_tool dispatched call in
-              match outcome with
-              | None -> None
-              | Some outcome ->
-                requests
-                := !requests @ outcome.Chat_response.Moderation.Outcome.runtime_requests;
-                (match
-                   Chat_response.Runtime_semantics.should_end_session
-                     outcome.runtime_requests
-                 with
-                 | Some _ ->
-                   Some
-                     (Chat_response.Moderation.Tool_moderation.Reject
-                        "The session has ended.")
-                 | None -> outcome.tool_moderation))
-            run
-          |> Result.map_error ~f:(fun error ->
-            fail error.Chatml_execution.code error.message)
-        in
-        let%bind outcome =
-          checked
-            (fail
-               "invocation.invalid_output"
-               "The one-off program returned invalid JSON.")
-            (fun () ->
-               let%bind value = V.export_json ?control value in
-               let outcome = I.Complete value in
-               let%map () =
-                 I.validate_outcome outcome
-                 |> Result.map_error ~f:(fun _ -> "invalid output")
+               let config =
+                 match jobs with
+                 | None -> config
+                 | Some jobs -> Script_job_service.install ?control jobs config
                in
-               outcome)
-        in
-        let%bind () =
-          if
-            Int64.(
-              of_int (String.length (Jsonaf.to_string (I.outcome_to_json outcome)))
-              > Duration.bytes_to_int64 limits.max_output_bytes)
-          then
-            Error
-              (fail
-                 "invocation.output_limit"
-                 "The one-off result exceeds its output limit.")
-          else Ok ()
-        in
-        let%map () =
-          checked
-            (fail
-               "invocation.disclosure_rejected"
-               "The one-off result could not be disclosed.")
-            (fun () -> prepare_outcome outcome)
-        in
-        outcome
+               let prepare_result =
+                 Option.map jobs ~f:(fun _ ~value:_ ~local_effects ->
+                   start_effects := local_effects;
+                   Ok ignore)
+               in
+               Chatml_execution.run_in_scope
+                 ?prepare_result
+                 ~control
+                 ~config
+                 ~program:(P.program prepared)
+                 ~entrypoint:P.entrypoint
+                 ~arguments:[ argument ]
+                 ()
+             in
+             let%bind value =
+               Script_tool_calls.with_one_off
+                 ?observer
+                 script_tools
+                 ~prepared
+                 ~limits
+                 ~max_nested_calls
+                 ~borrowed:child_borrow
+                 ~moderate:(fun call ->
+                   let%map outcome = moderate_tool dispatched call in
+                   match outcome with
+                   | None -> None
+                   | Some outcome ->
+                     requests
+                     := !requests
+                        @ outcome.Chat_response.Moderation.Outcome.runtime_requests;
+                     (match
+                        Chat_response.Runtime_semantics.should_end_session
+                          outcome.runtime_requests
+                      with
+                      | Some _ ->
+                        Some
+                          (Chat_response.Moderation.Tool_moderation.Reject
+                             "The session has ended.")
+                      | None -> outcome.tool_moderation))
+                 run
+               |> Result.map_error ~f:(fun error ->
+                 fail error.Chatml_execution.code error.message)
+             in
+             let%bind outcome =
+               checked
+                 (fail
+                    "invocation.invalid_output"
+                    "The one-off program returned invalid JSON.")
+                 (fun () ->
+                    let%bind value = V.export_json ?control value in
+                    let outcome = I.Complete value in
+                    let%map () =
+                      I.validate_outcome outcome
+                      |> Result.map_error ~f:(fun _ -> "invalid output")
+                    in
+                    outcome)
+             in
+             let%bind () =
+               if
+                 Int64.(
+                   of_int (String.length (Jsonaf.to_string (I.outcome_to_json outcome)))
+                   > Duration.bytes_to_int64 limits.max_output_bytes)
+               then
+                 Error
+                   (fail
+                      "invocation.output_limit"
+                      "The one-off result exceeds its output limit.")
+               else Ok ()
+             in
+             let%bind () =
+               checked
+                 (fail
+                    "invocation.disclosure_rejected"
+                    "The one-off result could not be disclosed.")
+                 (fun () -> prepare_outcome outcome)
+             in
+             let%map () =
+               checked
+                 (fail
+                    "invocation.background_rejected"
+                    "The background starts could not be committed.")
+                 (fun () ->
+                    match jobs with
+                    | None -> Ok ()
+                    | Some jobs ->
+                      let%bind ordinary = Script_job_service.select jobs !start_effects in
+                      (match ordinary with
+                       | [] -> Ok ()
+                       | _ -> Error "one-off returned unsupported local effects"))
+             in
+             outcome)
       in
       let outcome =
         if Float.(remaining <= 0.)

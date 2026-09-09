@@ -343,6 +343,13 @@ Tool.call         : string -> json -> [ `Ok(json) | `Error(string) ] task
 Tool.spawn        : string -> json -> string task
 ```
 
+Extensibility-v1 compiler surfaces compile `Tool.spawn` as the transactional
+`Job.start_tool` operation. Its host service is currently installed for qualified
+standalone and one-off execution; moderator integration remains in progress.
+See [qualified script job operations](../agent-server/extensibility-foundations.md#qualified-script-job-operations)
+for launch commits, rollback, status and cancellation. The legacy moderator surface
+continues to use its existing asynchronous host handler.
+
 ### `Model`
 
 Host-managed model recipes:

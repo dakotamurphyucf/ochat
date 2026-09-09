@@ -5,6 +5,42 @@ module Surface = Chatml_builtin_surface
 let record fields = S.TRecord (TRow_extend (fields, TRow_empty))
 let variant cases = S.TVariant (TRow_extend (cases, TRow_empty))
 let option ty = variant [ "None", S.TUnit; "Some", ty ]
+
+let task_builtin ~name ~op ~parameters ~result ~spawn : S.builtin =
+  { name
+  ; scheme = S.TFun (parameters, S.task_ty result)
+  ; impl =
+      (fun args ->
+        if List.length args <> List.length parameters
+        then failwith (op ^ ": invalid arity");
+        let task_effect : Chatml_lang.eff = { op; args } in
+        Chatml_lang.VTask (if spawn then TSpawn task_effect else TPerform task_effect))
+  }
+;;
+
+let job_module : S.builtin_module =
+  let operation name parameters result =
+    task_builtin ~name ~op:("Job." ^ name) ~parameters ~result ~spawn:false
+  in
+  { name = "Job"
+  ; exports =
+      [ operation "start_tool" [ S.TString; S.json_ty ] S.TString
+      ; operation "start_script" [ S.json_ty ] S.TString
+      ; operation "get" [ S.TString ] S.json_ty
+      ; operation "cancel" [ S.TString ] S.TUnit
+      ]
+  }
+;;
+
+let job_spawn =
+  task_builtin
+    ~name:"spawn"
+    ~op:"Job.start_tool"
+    ~parameters:[ S.TString; S.json_ty ]
+    ~result:S.TString
+    ~spawn:false
+;;
+
 let work_ref_ty = variant [ "Job", S.TString; "Subscription", S.TString ]
 
 let tool_error_ty =
@@ -86,7 +122,9 @@ let one_off_v1 =
         Some
           { entry with
             exports =
-              List.filter entry.exports ~f:(fun value -> String.equal value.name "call")
+              job_spawn
+              :: List.filter entry.exports ~f:(fun value ->
+                String.equal value.name "call")
           }
       | _ -> None)
   in
@@ -96,7 +134,7 @@ let one_off_v1 =
         List.filter Surface.core_surface.globals ~f:(fun value ->
           not (String.equal value.name "print"))
     }
-    { Surface.empty with modules }
+    { Surface.empty with modules = job_module :: modules }
 ;;
 
 let tool_v1 =
@@ -170,18 +208,6 @@ let moderator_event_ty =
     ]
 ;;
 
-let task_builtin ~name ~op ~parameters ~result ~spawn : S.builtin =
-  { name
-  ; scheme = S.TFun (parameters, S.task_ty result)
-  ; impl =
-      (fun args ->
-        if List.length args <> List.length parameters
-        then failwith (op ^ ": invalid arity");
-        let task_effect : Chatml_lang.eff = { op; args } in
-        Chatml_lang.VTask (if spawn then TSpawn task_effect else TPerform task_effect))
-  }
-;;
-
 let moderator_v1 =
   let invocation : S.builtin_module =
     { name = "Invocation"
@@ -199,6 +225,7 @@ let moderator_v1 =
     List.filter_map S.moderator_modules ~f:(fun entry ->
       let replacement =
         match entry.name with
+        | "Tool" -> Some job_spawn
         | "Runtime" ->
           Some
             (task_builtin
@@ -226,7 +253,7 @@ let moderator_v1 =
   in
   Surface.merge
     { Surface.empty with
-      modules = invocation :: overrides
+      modules = job_module :: invocation :: overrides
     ; type_aliases =
         tool_v1.type_aliases
         @ List.map

@@ -1443,8 +1443,55 @@ New job records optionally retain versioned `launch` metadata. Legacy jobs omit
 it. The actor validates ancestry on restoration and forbids changing launch
 provenance on an existing job. Scheduler capacity uses this derived depth rather
 than a caller-supplied payload depth. This is internal transaction integration;
-script-facing `Job.start_tool`, `Job.start_script`, status/cancel, progress and
-artifact integration, and automatic notification delivery remain unfinished.
+the script-facing interfaces below are installed on qualified standalone and
+one-off dispatch paths. Stateful moderator and common nested managed-tool
+integration, progress/artifacts and automatic notification delivery remain unfinished.
+
+### Qualified script job operations
+
+The extensibility compiler surfaces include these operations. A compiler surface
+does not install a host service or enable general model-visible availability.
+Qualified standalone tools and one-off executions now use the actor/scheduler
+service; other embeddings fail when the operation is not installed.
+
+| Operation | Contract |
+|---|---|
+| `Job.start_tool(name, input)` | Stage one selected tool with schema-checked JSON input; return its job ID. |
+| `Tool.spawn(name, input)` | Alias of the same transactional start on extensibility surfaces. The legacy moderator surface retains its existing spawn operation. |
+| `Job.start_script(request)` | Stage a statically prepared `main : json -> json task` program using the one-off request shape: source, input, explicit tools and optional lowering of host limits. |
+| `Job.get(id)` | Read the caller's own provisional ticket or a current-generation generic job in its session, after checking its captured tools against the caller's selection. |
+| `Job.cancel(id)` | Cancel immediately; return unit. Cancellation of existing work is not reversed by `Task.catch`. |
+
+Tool names and requested script dependencies must stay within the executing
+script's captured registry. Reading or cancelling another generic job also requires
+its pinned tools to fit that registry; a job ID cannot restore removed authority.
+The check does not compile or run the saved request. Script compilation neither runs initializers nor loads
+source paths; bindings are rechecked after the compiler domain returns. Requests
+retain source/configuration and resource-policy pins for worker admission. New
+launches debit both the call and spawned-task budgets and use the same hierarchical
+capacity as running workers. They cannot evade nesting limits by inserting an
+extra script invocation between jobs.
+
+`Job.get` returns a version-1 JSON object containing `id`, `status`, `attempt`,
+`created_at`, `completed_at` and `completion`. It omits executable payloads, source,
+capability pins and permission identifiers. Status is `queued`, `running`,
+`waiting_permission`, `succeeded`, `failed`, `cancelled` or `interrupted`.
+Completion is null while nonterminal, otherwise the protocol's typed completion
+envelope. Hosts may apply additional output disclosure policy.
+
+Cancelling a provisional ticket releases capacity immediately and preserves a
+cancelled record for the owner's eventual `Pending(Job(id), acknowledgement)`.
+Its committed attempt stays zero and it never publishes a reservation to a worker.
+A caught failed start is removed instead. Invalid initial acknowledgements and
+rejected output policy abort all of that script scope's provisional starts before
+host errors become tool failure outcomes.
+
+The qualified daemon tests exercise these functions through normal model tool
+dispatch, persisted invocations, native file reads and real worker scheduling.
+They also cover nested one-off launches, selected-tool confinement, cancelled
+ticket inspection and rejection of an invalid initial acknowledgement. General
+feature advertisement still waits for A01; these tests use the internal qualification
+option and simulated model streams, with no live provider requests.
 
 Publication uses `Runtime_notification(delivery_id)` provenance and commits its
 history entry and receipt together. It requires the originating initial response

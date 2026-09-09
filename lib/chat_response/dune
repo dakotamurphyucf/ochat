@@ -41,6 +41,7 @@
   one_off_script
   one_off_request
   background_request
+  background_job_operations
   mcp_discovery_cache
   fork
   compact_history)

@@ -36,6 +36,7 @@ type t =
   ; defer_observation : I.t -> (unit, Agent_protocol.Error.t) result
   ; managed : (t -> Native_tool_invocation.managed_dispatch) option
   ; moderator : (t -> moderator_dispatch) option
+  ; jobs : Script_job_service.t option
   }
 
 let create
@@ -59,6 +60,7 @@ let create
   ; defer_observation
   ; managed = None
   ; moderator = None
+  ; jobs = None
   }
 ;;
 
@@ -80,6 +82,15 @@ let with_lifecycle t ~is_halted = { t with is_halted }
 let with_durable_requests t = { t with durable_requests = true }
 let durable_requests t = t.durable_requests
 let with_moderator_dispatch t ~dispatch = { t with moderator = Some dispatch }
+let with_job_service t jobs = { t with jobs = Some jobs }
+
+let with_job_scope t ~owner ~selected ~error f =
+  match t.jobs with
+  | None -> f None
+  | Some service ->
+    Script_job_service.with_scope service ~owner ~selected ~error (fun scope ->
+      f (Some scope))
+;;
 
 let validate_definition t definition =
   let captured = EC.definition_capabilities definition in

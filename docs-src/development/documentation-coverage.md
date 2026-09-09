@@ -247,6 +247,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/run_chatml_tool.mli` | [contract](../../lib/agent_session/run_chatml_tool.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/runtime_builder.mli` | [contract](../../lib/agent_session/runtime_builder.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/runtime_paths.mli` | [contract](../../lib/agent_session/runtime_paths.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/script_job_service.mli` | [contract](../../lib/agent_session/script_job_service.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/script_tool_calls.mli` | [contract](../../lib/agent_session/script_tool_calls.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/security_grant.mli` | [contract](../../lib/agent_session/security_grant.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_session/session_actor.mli` | [contract](../../lib/agent_session/session_actor.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -301,6 +302,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/authoring_policy.mli` | [contract](../../lib/chat_response/authoring_policy.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_registration.mli` | [contract](../../lib/chat_response/authoring_registration.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_validation.mli` | [contract](../../lib/chat_response/authoring_validation.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
+| `lib/chat_response/background_job_operations.mli` | [contract](../../lib/chat_response/background_job_operations.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/background_request.mli` | [contract](../../lib/chat_response/background_request.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_moderation.mli` | [contract](../../lib/chat_response/chatml_moderation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_moderator.mli` | [contract](../../lib/chat_response/chatml_moderator.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |

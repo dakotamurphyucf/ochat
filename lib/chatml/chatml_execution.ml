@@ -390,7 +390,12 @@ let make_control ~env budget =
   let calls = Atomic.make limits.max_calls in
   let tasks = Atomic.make limits.max_tasks in
   let before_effect ~name ~spawned =
-    if spawned
+    let starts_job =
+      match name with
+      | "Job.start_tool" | "Job.start_script" -> true
+      | _ -> false
+    in
+    if spawned || starts_job
     then
       consume
         budget
@@ -398,7 +403,7 @@ let make_control ~env budget =
         1
         { code = "chatml.task_limit"; message = "ChatML spawned-task budget exhausted" };
     match name with
-    | "Tool.call" | "Tool.spawn" ->
+    | "Tool.call" | "Tool.spawn" | "Job.start_tool" | "Job.start_script" ->
       consume
         budget
         calls
@@ -595,6 +600,7 @@ let with_host_budget ?context ~policy ~env f =
 ;;
 
 let run_in_scope
+      ?prepare_result
       ~(control : Chatml.Chatml_lang.execution_control option)
       ~config
       ~program
@@ -603,9 +609,23 @@ let run_in_scope
       ()
   =
   Option.iter control ~f:(fun c -> List.iter arguments ~f:c.check_value);
-  Chatml_host_runtime.run_entrypoint ?control config program ~entrypoint ~arguments ()
+  let prepare_result =
+    Option.map prepare_result ~f:(fun prepare ~value ~local_effects ->
+      Option.iter control ~f:(fun c -> c.check_value value);
+      prepare ~value ~local_effects)
+  in
+  Chatml_host_runtime.run_entrypoint
+    ?control
+    ?prepare_result
+    config
+    program
+    ~entrypoint
+    ~arguments
+    ()
   |> Result.map ~f:(fun value ->
-    Option.iter control ~f:(fun c -> c.check_value value);
+    (match prepare_result with
+     | None -> Option.iter control ~f:(fun c -> c.check_value value)
+     | Some _ -> ());
     value)
   |> Result.map_error ~f:(fun message ->
     { code = "chatml.execution_failed"; message = String.prefix message (16 * 1024) })

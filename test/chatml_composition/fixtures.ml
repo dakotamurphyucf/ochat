@@ -33,7 +33,7 @@ let call_events calls =
   |> Stdlib.List.to_seq
 ;;
 
-let with_daemon ?validation_host ~sources ~calls f =
+let with_daemon ?validation_host ?settle ~sources ~calls f =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -158,7 +158,9 @@ let with_daemon ?validation_host ~sources ~calls f =
                (Agent_store.Session_store.list_sessions
                   (Agent_server.Daemon.store daemon)));
           assert (Option.is_none final.moderator);
-          assert (List.is_empty final.jobs);
+          (match settle with
+           | None -> assert (List.is_empty final.jobs)
+           | Some _ -> ());
           assert (List.is_empty final.schedules);
           List.iter final.invocations ~f:(fun invocation ->
             assert (
@@ -169,9 +171,19 @@ let with_daemon ?validation_host ~sources ~calls f =
               assert (
                 List.exists final.conversation.canonical_history ~f:(fun entry ->
                   Agent_protocol.History.Id.equal entry.id output_id))
-            | Script -> assert (Option.is_some invocation.context.parent_invocation)
+            | Script ->
+              assert (
+                Option.is_some invocation.context.parent_invocation
+                || (Option.is_some settle && Option.is_some invocation.context.parent_job))
             | Moderator | Delegated_agent | External_adapter ->
               failwith "unexpected invocation origin");
+          let final =
+            match settle with
+            | None -> final
+            | Some settle ->
+              settle env entry;
+              A.state entry.actor |> protocol_ok
+          in
           f final;
           H.close handle;
           Agent_client.Connection.close client;

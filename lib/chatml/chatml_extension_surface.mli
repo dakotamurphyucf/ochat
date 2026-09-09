@@ -11,14 +11,15 @@ val limits_ty : Chatml_builtin_spec.ty
 val capability_ty : Chatml_builtin_spec.ty
 val origin_ty : Chatml_builtin_spec.ty
 
-(** Pure core computation, Task composition, diagnostic Log operations and
-    Tool.call. No stdout print, model/process access, conversation mutation,
-    session administration, timers, spawning or UI operations. *)
+(** Pure core computation, Task composition, diagnostic Log operations, Tool.call
+    and the Job interface. Tool.spawn aliases Job.start_tool. Job operations require
+    explicit host installation; starts reserve transactional intent, never execute
+    before the owning commit. No stdout print, ambient model/process access,
+    conversation mutation, session administration, timers or UI operations. *)
 val one_off_v1 : Chatml_builtin_surface.surface
 
 (** Adds typed tool_context, tool_outcome, tool_error, work_ref, tool_limits
-    and tool_capability aliases. Approved background operations will be added
-    with the separately qualified job service. No moderator state is required. *)
+    and tool_capability aliases. No moderator state is required. *)
 val tool_v1 : Chatml_builtin_surface.surface
 
 (** Host types for non-executing compilation with required_bindings.

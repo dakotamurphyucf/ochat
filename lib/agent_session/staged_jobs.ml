@@ -7,7 +7,7 @@ type capacity =
   }
 
 type entry =
-  { job : P.Job.t
+  { mutable job : P.Job.t
   ; capacity : capacity
   ; mutable selected : bool
   }
@@ -69,9 +69,9 @@ let retire t ~matches ~commit =
   t := remaining;
   Eio.Cancel.protect (fun () ->
     List.iter (List.rev retiring) ~f:(fun entry ->
-      match commit && entry.selected with
-      | true -> entry.capacity.publish ()
-      | false -> entry.capacity.abort ()))
+      match commit && entry.selected, entry.job.status with
+      | true, Queued -> entry.capacity.publish ()
+      | _ -> entry.capacity.abort ()))
 ;;
 
 let commit t ~owner = retire t ~matches:(fun entry -> owned entry owner) ~commit:true
@@ -90,4 +90,32 @@ let abort t ~owner ~id =
   | Some entry ->
     retire t ~matches:(phys_equal entry) ~commit:false;
     Ok ()
+;;
+
+let find_entry t ~owner ~id =
+  match List.find !t ~f:(fun entry -> P.Id.Job.equal entry.job.id id) with
+  | Some entry when not (owned entry owner) ->
+    invalid "job reservation belongs to another transaction"
+  | entry -> Ok entry
+;;
+
+let find t ~owner ~id =
+  Result.map (find_entry t ~owner ~id) ~f:(Option.map ~f:(fun entry -> entry.job))
+;;
+
+let cancel t ~owner ~id ~now =
+  let open Result.Let_syntax in
+  let%map entry = find_entry t ~owner ~id in
+  Option.map entry ~f:(fun entry ->
+    (match entry.job.status with
+     | Queued ->
+       entry.job
+       <- { entry.job with
+            status = Cancelled
+          ; completed_at = Some now
+          ; result = Some (P.Completion.to_json (Cancelled "cancelled before launch"))
+          };
+       Eio.Cancel.protect entry.capacity.abort
+     | _ -> ());
+    entry.job)
 ;;

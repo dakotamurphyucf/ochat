@@ -42,6 +42,13 @@ val of_json
     resource limits. A digest is an audit pin, not proof of authorization. *)
 val fingerprint : t -> string
 
+(** Pure authority-pin check, without compiling or executing the saved request.
+    A job ID alone does not grant access to a different script's selected tools. *)
+val validate_capabilities
+  :  t
+  -> capabilities:Tool_capability.t
+  -> (unit, Agent_protocol.Error.t) result
+
 type execution = private
   | Tool of
       { capabilities : Tool_capability.t

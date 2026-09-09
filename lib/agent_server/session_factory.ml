@@ -1034,6 +1034,73 @@ let authorize_extension_native t actor_ref profile native invocation binding =
               (unavailable Permission_denied "reviewer returned an invalid grant scope"))))
 ;;
 
+let extension_jobs t actor_ref registry =
+  let module A = Agent_session.Session_actor in
+  let module Jobs = Agent_session.Script_job_service in
+  let host : Jobs.host =
+    { stage =
+        (fun owner request ->
+          let open Result.Let_syntax in
+          let%bind actor = extension_actor actor_ref in
+          let%bind job = A.prepare_background_job_launch actor ~owner request in
+          let%bind state = A.state actor in
+          let key =
+            Job_capacity.Key.create
+              ~principal_id:state.identity.creating_principal
+              ~prompt:
+                (Option.value_map
+                   state.spec.prompt_definition_id
+                   ~default:"<local>"
+                   ~f:Agent_protocol.Id.Prompt_definition.to_string)
+              ~workspace_conflict_domain:state.spec.workspace_instance.conflict_domain
+              ~session_id:job.session_id
+              ~kind:job.kind
+              ~nested_depth:(Option.value_exn job.launch).nested_depth
+          in
+          let%bind reservation = Job_capacity.reserve_job t.job_capacity key ~job in
+          let%bind reservation =
+            Result.of_option
+              reservation
+              ~error:(unavailable Resource_limit "background job capacity is exhausted")
+          in
+          let%map () =
+            A.stage_background_job
+              actor
+              ~job
+              ~capacity:
+                { publish = (fun () -> Job_capacity.publish reservation)
+                ; abort = (fun () -> Job_capacity.abort reservation)
+                }
+          in
+          job)
+    ; select =
+        (fun owner ids ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.select_background_jobs actor ~owner ~ids))
+    ; abort =
+        (fun owner id ->
+          ignore
+            (Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+               A.abort_background_job actor ~owner ~id)
+             : (unit, Agent_protocol.Error.t) result))
+    ; get =
+        (fun owner id ->
+          let open Result.Let_syntax in
+          let%bind actor = extension_actor actor_ref in
+          A.read_script_job actor ~owner ~id)
+    ; cancel =
+        (fun owner id ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.cancel_script_job actor ~owner ~id))
+    }
+  in
+  Jobs.create
+    ~env:t.env
+    ~policy:Chat_response.One_off_request.default_policy
+    ~current_capabilities:(fun () -> registry)
+    ~host
+;;
+
 let extension_services t profile actor_ref ~(state : Agent_session.Session_state.t) =
   let module A = Agent_session.Session_actor in
   Agent_session.Runtime_builder.
@@ -1067,7 +1134,11 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
             ~prepare_output:(function
               | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
               | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
-            ~defer_observation:(fun _ -> Ok ()))
+            ~defer_observation:(fun _ -> Ok ())
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_job_service
+            tools
+            (extension_jobs t actor_ref registry))
     ; standalone_execution_limits =
         Agent_session.Standalone_tool_dispatch.declared_execution_limits
     ; one_off_policy = Chat_response.One_off_request.default_policy

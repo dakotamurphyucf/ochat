@@ -51,8 +51,8 @@ let%expect_test "spawned-task exhaustion precedes effects and cannot be caught a
         ~source:
           {|let initial_state = `Null
 let on_event ctx state event = Task.catch(
-  Task.bind(Tool.spawn("first", state), fun ignored ->
-    Task.bind(Tool.spawn("second", state), fun ignored -> Task.pure(state))),
+  Task.bind(Model.spawn("first", state), fun ignored ->
+    Task.bind(Model.spawn("second", state), fun ignored -> Task.pure(state))),
   fun ignored -> Task.bind(Tool.call("after", state), fun result -> Task.pure(state)))|}
         ()
       |> Result.map_error ~f:(fun error -> error.Chatml_compilation.message)
@@ -67,10 +67,10 @@ let on_event ctx state event = Task.catch(
             R.default_operations
               ~handlers:
                 { R.default_handlers with
-                  on_tool_spawn =
-                    (fun _ ~name ~args:_ ->
-                      spawned := name :: !spawned;
-                      Ok ("fixture-" ^ name))
+                  on_model_spawn =
+                    (fun _ ~recipe ~payload:_ ->
+                      spawned := recipe :: !spawned;
+                      Ok ("fixture-" ^ recipe))
                 ; on_tool_call =
                     (fun _ ~name:_ ~args:_ ->
                       incr after;

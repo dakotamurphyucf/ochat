@@ -22,6 +22,22 @@ val contains
   -> id:Agent_protocol.Id.Job.t
   -> bool
 
+val find
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> id:Agent_protocol.Id.Job.t
+  -> (Agent_protocol.Job.t option, Agent_protocol.Error.t) result
+
+(** Retain a cancelled ticket for its owner's eventual acknowledgement while
+    immediately releasing capacity. A committed cancelled ticket never publishes
+    its reservation. Missing IDs return None for the durable-job lookup. *)
+val cancel
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> id:Agent_protocol.Id.Job.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (Agent_protocol.Job.t option, Agent_protocol.Error.t) result
+
 val select
   :  t
   -> owner:Agent_protocol.Job.launch_owner

@@ -115,6 +115,22 @@ val has_staged_background_job
   -> id:Agent_protocol.Id.Job.t
   -> (bool, Agent_protocol.Error.t) result
 
+(** Host-internal scoped reads/cancellation. The active caller sees its own
+    provisional jobs and current-generation durable jobs of this session.
+    The script host must project/redact results rather than expose raw payloads.
+    Cancellation is immediate and is not reversed by catching a later error. *)
+val read_script_job
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> id:Agent_protocol.Id.Job.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+val cancel_script_job
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> id:Agent_protocol.Id.Job.t
+  -> (unit, Agent_protocol.Error.t) result
+
 module Extension_change : sig
   type t =
     | Invocation of Agent_protocol.Invocation.t

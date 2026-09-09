@@ -18,6 +18,7 @@
   extension_invariants
   job_launch
   staged_jobs
+  script_job_service
   invocation_history
   invocation_recovery
   moderator_tool_dispatch

@@ -21,6 +21,19 @@ val with_lifecycle : t -> is_halted:(unit -> bool) -> t
     and follow-up consumption; this setting adds no execution authority. *)
 val with_durable_requests : t -> t
 
+(** Qualified host injection; does not change this service's tool ceiling. *)
+val with_job_service : t -> Script_job_service.t -> t
+
+(** The caller must pass its verified, active owner and exact dependency subset.
+    Failure/exception aborts starts before error adaptation into a tool outcome. *)
+val with_job_scope
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> selected:Chat_response.Tool_capability.t
+  -> error:(string -> 'error)
+  -> (Script_job_service.scope option -> ('a, 'error) result)
+  -> ('a, 'error) result
+
 val durable_requests : t -> bool
 
 (** Host dispatch accessors. These expose current binding/policy services, not

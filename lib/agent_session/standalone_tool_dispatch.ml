@@ -119,122 +119,162 @@ let create
         Chat_response.Runtime_request_scope.collect (fun () ->
           capabilities.with_invocation ~invocation (fun ~dispatched ->
             let execute control =
-              let open Result.Let_syntax in
-              let%bind () =
-                checked
-                  (fail "invocation.invalid_input" "The tool arguments are invalid.")
-                  (fun () ->
-                     validate prepared ~kind:request.kind ~payload:request.payload)
-              in
-              let check_halted () =
-                checked
-                  (fail "invocation.session_ended" "The session has ended.")
-                  (fun () -> if is_halted () then Error () else Ok ())
-              in
-              let%bind () = check_halted () in
-              let%bind () =
-                checked
-                  (fail
-                     "invocation.permission_denied"
-                     "Tool execution was not authorized.")
-                  (fun () ->
-                     let%bind () = admit request in
-                     authorize ();
-                     revalidate request)
-              in
-              let%bind () = check_halted () in
-              let%bind scope =
-                checked
-                  (fail
-                     "invocation.stale_binding"
-                     "The standalone handler binding is invalid.")
-                  (fun () ->
-                     ABI.create_standalone
+              Script_tool_calls.with_job_scope
+                script_tools
+                ~owner:(Agent_protocol.Job.Invocation dispatched.context.id)
+                ~selected:(EC.capabilities prepared)
+                ~error:(fail "invocation.background_unavailable")
+                (fun jobs ->
+                   let open Result.Let_syntax in
+                   let start_effects = ref [] in
+                   let%bind () =
+                     checked
+                       (fail "invocation.invalid_input" "The tool arguments are invalid.")
+                       (fun () ->
+                          validate prepared ~kind:request.kind ~payload:request.payload)
+                   in
+                   let check_halted () =
+                     checked
+                       (fail "invocation.session_ended" "The session has ended.")
+                       (fun () -> if is_halted () then Error () else Ok ())
+                   in
+                   let%bind () = check_halted () in
+                   let%bind () =
+                     checked
+                       (fail
+                          "invocation.permission_denied"
+                          "Tool execution was not authorized.")
+                       (fun () ->
+                          let%bind () = admit request in
+                          authorize ();
+                          revalidate request)
+                   in
+                   let%bind () = check_halted () in
+                   let%bind scope =
+                     checked
+                       (fail
+                          "invocation.stale_binding"
+                          "The standalone handler binding is invalid.")
+                       (fun () ->
+                          ABI.create_standalone
+                            ~control
+                            ~prepared
+                            ~invocation:dispatched
+                            ~limits:(EC.execution_limits prepared)
+                            ~validate_work:(fun work ->
+                              match jobs with
+                              | None -> Error "background completion is not installed"
+                              | Some jobs -> Script_job_service.validate_work jobs work))
+                   in
+                   let run on_tool_call =
+                     let handlers =
+                       { R.default_handlers with
+                         on_tool_call =
+                           (fun _ ~name ~args ->
+                             let%bind args =
+                               Chatml.Chatml_value_codec.export_json ?control args
+                             in
+                             let%map result = on_tool_call ~name ~args in
+                             match result with
+                             | Chat_response.Moderation.Capabilities.Tool_ok value ->
+                               L.VVariant
+                                 ( "Ok"
+                                 , [ Chatml.Chatml_value_codec.import_json ?control value
+                                   ] )
+                             | Tool_error message ->
+                               L.VVariant ("Error", [ L.VString message ]))
+                       }
+                     in
+                     let config : R.runtime_config =
+                       { surface = Chatml.Chatml_extension_surface.tool_v1
+                       ; operations = R.default_operations ~handlers ()
+                       }
+                     in
+                     let config =
+                       match jobs with
+                       | None -> config
+                       | Some jobs -> Script_job_service.install ?control jobs config
+                     in
+                     let prepare_result =
+                       Option.map jobs ~f:(fun _ ~value:_ ~local_effects ->
+                         start_effects := local_effects;
+                         Ok ignore)
+                     in
+                     let entrypoint =
+                       match (EC.declaration prepared).implementation with
+                       | Standalone { entrypoint; _ } -> entrypoint
+                       | Moderator _ -> assert false
+                     in
+                     Chatml_execution.run_in_scope
+                       ?prepare_result
                        ~control
+                       ~config
+                       ~program:(EC.program prepared)
+                       ~entrypoint
+                       ~arguments:[ ABI.context scope; ABI.input scope ]
+                       ()
+                   in
+                   let%bind value =
+                     Script_tool_calls.with_standalone
+                       ?observer
+                       script_tools
                        ~prepared
-                       ~invocation:dispatched
-                       ~limits:(EC.execution_limits prepared)
-                       ~validate_work:(fun _ ->
-                         Error "background completion is not installed"))
-              in
-              let run on_tool_call =
-                let handlers =
-                  { R.default_handlers with
-                    on_tool_call =
-                      (fun _ ~name ~args ->
-                        let%bind args =
-                          Chatml.Chatml_value_codec.export_json ?control args
-                        in
-                        let%map result = on_tool_call ~name ~args in
-                        match result with
-                        | Chat_response.Moderation.Capabilities.Tool_ok value ->
-                          L.VVariant
-                            ( "Ok"
-                            , [ Chatml.Chatml_value_codec.import_json ?control value ] )
-                        | Tool_error message -> L.VVariant ("Error", [ L.VString message ]))
-                  }
-                in
-                let config : R.runtime_config =
-                  { surface = Chatml.Chatml_extension_surface.tool_v1
-                  ; operations = R.default_operations ~handlers ()
-                  }
-                in
-                let entrypoint =
-                  match (EC.declaration prepared).implementation with
-                  | Standalone { entrypoint; _ } -> entrypoint
-                  | Moderator _ -> assert false
-                in
-                Chatml_execution.run_in_scope
-                  ~control
-                  ~config
-                  ~program:(EC.program prepared)
-                  ~entrypoint
-                  ~arguments:[ ABI.context scope; ABI.input scope ]
-                  ()
-              in
-              let%bind value =
-                Script_tool_calls.with_standalone
-                  ?observer
-                  script_tools
-                  ~prepared
-                  ~capabilities
-                  ~parent:dispatched
-                  ~moderate:(fun call ->
-                    let%map outcome = moderate_tool dispatched call in
-                    match outcome with
-                    | None -> None
-                    | Some outcome ->
-                      Chat_response.Runtime_request_scope.emit
-                        outcome.Chat_response.Moderation.Outcome.runtime_requests
-                      |> Result.ok_or_failwith;
-                      (match
-                         Chat_response.Runtime_semantics.should_end_session
-                           outcome.runtime_requests
-                       with
-                       | Some _ ->
-                         Some
-                           (Chat_response.Moderation.Tool_moderation.Reject
-                              "The session has ended.")
-                       | None -> outcome.tool_moderation))
-                  run
-                |> Result.map_error ~f:(fun error ->
-                  fail error.Chatml_execution.code error.message)
-              in
-              let%bind outcome =
-                checked
-                  (fail
-                     "invocation.invalid_output"
-                     "The standalone handler returned an invalid outcome.")
-                  (fun () -> ABI.decode_outcome ?control scope value)
-              in
-              let%map () =
-                checked
-                  (fail
-                     "invocation.disclosure_rejected"
-                     "The tool outcome did not pass the host output policy.")
-                  (fun () -> prepare_outcome outcome)
-              in
-              outcome
+                       ~capabilities
+                       ~parent:dispatched
+                       ~moderate:(fun call ->
+                         let%map outcome = moderate_tool dispatched call in
+                         match outcome with
+                         | None -> None
+                         | Some outcome ->
+                           Chat_response.Runtime_request_scope.emit
+                             outcome.Chat_response.Moderation.Outcome.runtime_requests
+                           |> Result.ok_or_failwith;
+                           (match
+                              Chat_response.Runtime_semantics.should_end_session
+                                outcome.runtime_requests
+                            with
+                            | Some _ ->
+                              Some
+                                (Chat_response.Moderation.Tool_moderation.Reject
+                                   "The session has ended.")
+                            | None -> outcome.tool_moderation))
+                       run
+                     |> Result.map_error ~f:(fun error ->
+                       fail error.Chatml_execution.code error.message)
+                   in
+                   let%bind outcome =
+                     checked
+                       (fail
+                          "invocation.invalid_output"
+                          "The standalone handler returned an invalid outcome.")
+                       (fun () -> ABI.decode_outcome ?control scope value)
+                   in
+                   let%bind () =
+                     checked
+                       (fail
+                          "invocation.disclosure_rejected"
+                          "The tool outcome did not pass the host output policy.")
+                       (fun () -> prepare_outcome outcome)
+                   in
+                   let%map () =
+                     checked
+                       (fail
+                          "invocation.background_rejected"
+                          "The background starts could not be committed.")
+                       (fun () ->
+                          match jobs with
+                          | None -> Ok ()
+                          | Some jobs ->
+                            let%bind ordinary =
+                              Script_job_service.select jobs !start_effects
+                            in
+                            (match ordinary with
+                             | [] -> Ok ()
+                             | _ ->
+                               Error
+                                 "standalone handler returned unsupported local effects"))
+                   in
+                   outcome)
             in
             match
               Stream_invocation.rejection_outcome

@@ -327,6 +327,8 @@ let rebind t current =
   | false -> invalid "background capability configuration changed; re-admission required"
 ;;
 
+let validate_capabilities t ~capabilities = Result.map (rebind t capabilities) ~f:ignore
+
 let prepare ~env ~current_capabilities ~policy t =
   let open Result.Let_syntax in
   let%bind () = validate_policy ~ceiling:policy t.policy in

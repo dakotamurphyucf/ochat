@@ -94,7 +94,11 @@ val with_host_budget
     pass the control from its current [with_control] or persistent runner scope.
     Argument/result bounds still apply; this does not grant tool authority. *)
 val run_in_scope
-  :  control:Chatml.Chatml_lang.execution_control option
+  :  ?prepare_result:
+       (value:Chatml.Chatml_lang.value
+        -> local_effects:Chatml.Chatml_lang.eff list
+        -> (unit -> unit, string) result)
+  -> control:Chatml.Chatml_lang.execution_control option
   -> config:Chatml_host_runtime.runtime_config
   -> program:Chatml_host_runtime.compiled_script
   -> entrypoint:string

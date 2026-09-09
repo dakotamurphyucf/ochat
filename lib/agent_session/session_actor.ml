@@ -165,6 +165,12 @@ type _ request =
   | Has_staged_background_job :
       Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t
       -> bool request
+  | Read_script_job :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t
+      -> Agent_protocol.Job.t request
+  | Cancel_script_job :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t
+      -> unit request
   | Claim_job_invocation :
       job_scope * Agent_protocol.Invocation.t
       -> invocation_execution request
@@ -604,6 +610,9 @@ let abort_background_job t ~owner ~id =
 let has_staged_background_job t ~owner ~id =
   call t (Has_staged_background_job (owner, id))
 ;;
+
+let read_script_job t ~owner ~id = call t (Read_script_job (owner, id))
+let cancel_script_job t ~owner ~id = call t (Cancel_script_job (owner, id))
 
 let commit_extensions_internal t generation expected_revision changes =
   let open Result.Let_syntax in
@@ -6064,6 +6073,28 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     let open Result.Let_syntax in
     let%map () = background_owner_active t owner in
     Staged_jobs.contains t.staged_jobs ~owner ~id
+  | Read_script_job (owner, id) ->
+    let open Result.Let_syntax in
+    let%bind () = background_owner_active t owner in
+    let%bind staged = Staged_jobs.find t.staged_jobs ~owner ~id in
+    (match staged with
+     | Some job -> Ok job
+     | None ->
+       let%bind job = find_job t id in
+       let%map () = validate_job_generation t job t.state.identity.generation in
+       job)
+  | Cancel_script_job (owner, id) ->
+    let open Result.Let_syntax in
+    let%bind () = background_owner_active t owner in
+    let%bind staged =
+      Staged_jobs.cancel t.staged_jobs ~owner ~id ~now:(t.services.now ())
+    in
+    (match staged with
+     | Some _ -> Ok ()
+     | None ->
+       let%bind job = find_job t id in
+       let%bind () = validate_job_generation t job t.state.identity.generation in
+       Result.map (cancel_job_internal t id) ~f:ignore)
   | Snapshot -> Ok (current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
   | Change_moderator moderator -> change_moderator t moderator
