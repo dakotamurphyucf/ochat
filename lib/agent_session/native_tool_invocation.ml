@@ -13,22 +13,84 @@ type scope =
   | Active of I.t
   | Expired
 
+type borrowed =
+  { invocation : I.t
+  ; active : bool Atomic.t
+  ; execute : executor
+  }
+
 let scope_key = Eio.Fiber.create_key ()
 
 let current_scope () =
   match Eio.Fiber.get scope_key with
   | None -> Unbound
-  | Some (invocation, active) ->
-    (match Atomic.get active with
-     | true -> Active invocation
+  | Some scope ->
+    (match Atomic.get scope.active with
+     | true -> Active scope.invocation
      | false -> Expired)
 ;;
 
-let with_scope invocation f =
-  let active = Atomic.make true in
-  Exn.protect
-    ~finally:(fun () -> Atomic.set active false)
-    ~f:(fun () -> Eio.Fiber.with_binding scope_key (invocation, active) f)
+let borrow () =
+  match Eio.Fiber.get scope_key with
+  | Some scope when Atomic.get scope.active -> Ok scope
+  | None | Some _ ->
+    Error (Agent_protocol.Error.invalid_request "native invocation scope is not active")
+;;
+
+let borrowed_invocation scope = scope.invocation
+
+let with_scope ~execute invocation f =
+  match Eio.Fiber.get scope_key with
+  | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
+    (* Borrowed admission already installed the exact child scope with the actor
+       executor. Replacing it with the caller's direct-child-only adapter would
+       incorrectly constrain this child's own descendants to its parent. *)
+    f ()
+  | None | Some _ ->
+    let active = Atomic.make true in
+    Exn.protect
+      ~finally:(fun () -> Atomic.set active false)
+      ~f:(fun () -> Eio.Fiber.with_binding scope_key { invocation; active; execute } f)
+;;
+
+let execute_borrowed scope ~invocation f =
+  let check_active () =
+    match Atomic.get scope.active with
+    | true -> Ok ()
+    | false ->
+      Error (Agent_protocol.Error.invalid_request "borrowed invocation scope expired")
+  in
+  let open Result.Let_syntax in
+  let%bind () = check_active () in
+  let parent = scope.invocation.context in
+  let child = invocation.I.context in
+  let deadline_within_parent =
+    match parent.deadline, child.deadline with
+    | None, _ -> true
+    | Some parent, Some child -> Agent_protocol.Timestamp.compare child parent <= 0
+    | Some _, None -> false
+  in
+  let%bind () =
+    match child.origin, child.parent_invocation with
+    | Script, Some parent_id
+      when Agent_protocol.Id.Invocation.equal parent_id parent.id
+           && Agent_protocol.Id.Session.equal child.session_id parent.session_id
+           && Int.equal child.generation parent.generation
+           && Option.is_none child.provider_call_id
+           && Option.is_none child.call_entry_id
+           && Option.is_none child.parent_job
+           && Option.is_none invocation.parent_event
+           && deadline_within_parent -> Ok ()
+    | _ ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "borrowed execution requires a script child of the current invocation")
+  in
+  scope.execute ~invocation (fun ~dispatched ->
+    (* Actor admission can yield while the native callback returns. A retained
+       executor must not start effects after its lending scope has expired. *)
+    let%bind () = check_active () in
+    with_scope ~execute:scope.execute dispatched (fun () -> f ~dispatched))
 ;;
 
 let fail code message = I.Fail { code; message; retryable = false; details = `Null }
@@ -57,7 +119,7 @@ let run_scoped
       | Ok false -> Ok ()
       | Ok true | Error _ -> Error failure
     in
-    let execute () =
+    let execute_native () =
       let open Result.Let_syntax in
       let%bind () = check_halted () in
       let resolve () =
@@ -145,7 +207,7 @@ let run_scoped
       in
       outcome
     in
-    with_scope dispatched (fun () ->
+    with_scope ~execute dispatched (fun () ->
       match
         Option.bind dispatched.routing ~f:(fun routing ->
           Stream_invocation.rejection_outcome routing.preparation)
@@ -153,7 +215,7 @@ let run_scoped
       | Some outcome -> Ok outcome
       | None ->
         Ok
-          (match execute () with
+          (match execute_native () with
            | Ok outcome | Error outcome -> outcome)))
 ;;
 

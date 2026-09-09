@@ -12,6 +12,7 @@ stay beside those tests. Test modules depend on fixtures, not on other test modu
 | Moderator ownership and lifecycle | `moderator_handoff_tests.ml`, `moderator_lifecycle_tests.ml` |
 | Moderator queue delivery and observations | `event_delivery_tests.ml`, `observations_tests.ml` |
 | Native calls and stream routing | `moderator_native_calls_tests.ml`, `moderator_routing_tests.ml` |
+| Borrowed native execution and lifetime | `borrowed_execution_tests.ml` |
 | Standalone ChatML handlers | `standalone_tests.ml` |
 | Permission and compaction workflows | `permissions_tests.ml`, `compaction_tests.ml` |
 

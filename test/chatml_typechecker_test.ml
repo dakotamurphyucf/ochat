@@ -2081,6 +2081,11 @@ let%expect_test "recursive unification preserves payload constraints and binder 
   check "payload mismatch after back edge" (graph TInt) (graph String);
   check "inferred against explicit" (graph TInt) (declared "node" TInt);
   check "explicit against inferred" (declared "node" TInt) (graph TInt);
+  let shared_free = Var (ref (Free ("shared_free", 0))) in
+  check
+    "shared free payload under alpha renamed binders"
+    (declared "a" shared_free)
+    (declared "b" shared_free);
   let shared = Var (ref (Free ("shared", 0))) in
   check
     "sibling constraints are rechecked"
@@ -2108,6 +2113,7 @@ let%expect_test "recursive unification preserves payload constraints and binder 
     ("payload mismatch after back edge" "Cannot unify int with string")
     ("inferred against explicit" unified)
     ("explicit against inferred" unified)
+    ("shared free payload under alpha renamed binders" unified)
     ("sibling constraints are rechecked" "Cannot unify int with string")
     ("alpha renamed binders" unified)
     ("different enclosing binder" "Recursive type variables do not match")

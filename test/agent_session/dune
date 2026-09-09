@@ -3,6 +3,7 @@
  (modules
   fixtures
   actor_tests
+  borrowed_execution_tests
   compaction_tests
   event_delivery_tests
   follow_up_tests

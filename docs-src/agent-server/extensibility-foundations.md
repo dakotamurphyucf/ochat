@@ -1641,6 +1641,35 @@ still belong to E04 and A01; this installation does not complete those phases.
 The actor suite is organized in [focused test modules](../../test/agent_session/README.md),
 with shared fixtures and the retained `@test/runtest-agent_session_test` entrypoint.
 
+### Borrowing native invocation execution
+
+`Native_tool_invocation.borrow` obtains an opaque, expiring handle to the current
+native callback's actual actor executor. `execute_borrowed` admits a direct
+`Script` child with the same session and generation and a deadline no later than
+its parent's. Provider-call, history-call and background/event parent identities
+cannot be supplied through this borrow. The actor still validates ownership and
+persists admission, dispatch and terminal outcomes.
+
+The child callback receives its own scoped identity. It can borrow that scope for
+descendants, and returning restores the enclosing scope. Native dispatch preserves
+an already installed child scope instead of replacing its executor with the
+parent's direct-child adapter. Both retained handles and inherited fiber bindings
+expire when their owning callback returns. Expiration is checked before actor
+admission and again before the callback, since admission may yield.
+
+This handle carries persistence/admission access only. Hosts must still select
+capabilities, enforce shared resource limits and route native effects through
+`run_scoped` for schema, current policy, revocation and disclosure checks. Child
+work must be joined within the caller's cancellation scope. Existing actor rules
+for foreground, idle moderator and event ownership are unchanged; this API does
+not grant a new owner or enable a model-visible tool. General script descendants
+under idle/event moderator ownership still need their actor integration.
+
+The actor fixture covers nested native and script callbacks, restored identity,
+denial, revocation during authorization, cancellation, forged lineage/deadline
+rejection and expired handles while another enclosing callback is active. Script
+children retain terminal records without provider call IDs or output entries.
+
 ## Authoring policy admission plans
 
 `Chatmd_shell_spec.Authoring_metadata` describes which registered tools create

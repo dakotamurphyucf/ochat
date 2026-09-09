@@ -20,6 +20,28 @@ type scope =
 
 val current_scope : unit -> scope
 
+(** Expiring borrow of the current native invocation's real actor executor.
+    This conveys admission/result persistence only: no tool registry, native
+    runner, foreground history, moderator ownership or policy bypass. *)
+type borrowed
+
+(** Fails outside an active native callback, including a fiber whose inherited
+    binding has expired. Never falls back to a different foreground operation. *)
+val borrow : unit -> (borrowed, Agent_protocol.Error.t) result
+
+val borrowed_invocation : borrowed -> Agent_protocol.Invocation.t
+
+(** Admit a Script-origin direct child with the same session/generation and a
+    deadline no later than its parent's. Uses the lending scope's actor executor,
+    rechecking expiration both before admission and before the callback. The child
+    callback receives its own scoped identity and may borrow it for descendants;
+    its borrow expires on return, restoring the enclosing scope. The host
+    still validates selected capabilities, shared budgets and current policy;
+    native effects must pass through [run_scoped]. Existing actor ownership rules
+    apply, so borrowing never grants a new event/idle/foreground owner. The caller
+    must join child work within the native callback's cancellation scope. *)
+val execute_borrowed : borrowed -> executor
+
 (** Common native dispatch for a host-owned scope. Performs the same current
     capability, policy, input and output checks as [run]. In particular, [execute]
     must be a real actor-backed scope, not a direct call to the supplied callback.

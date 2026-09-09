@@ -128,6 +128,11 @@ path. Sibling fields still check their constraints after earlier fields bind
 mutable type variables. Comparing different recursive payloads or different
 enclosing binders continues to fail.
 
+A shared free inference variable is independent of recursive binder names. Its
+cell identity remains equal inside alpha-renamed `Mu` scopes. This exception does
+not apply to bound variables or shared syntax containing recursive references;
+those still require the corresponding binder environments.
+
 For example, a function returning `Null` or `Array` of recursive results can be
 inferred and checked against the host's `json` contract without a result annotation:
 

@@ -632,6 +632,10 @@ let rec unify (state : infer_state) lhs rhs =
         if List.length a1 <> List.length a2
         then raise (Type_error "Type constructor arity mismatch");
         List.iter2_exn a1 a2 ~f:(go active env_l env_r)
+      (* A free inference variable has no recursive binder interpretation. The
+         same cell remains equal under alpha-renamed Mu scopes; do not pass this
+         identity through the occurs check or relax identity for bound syntax. *)
+      | Var ({ contents = Free _ } as left), Var right when phys_equal left right -> ()
       | Var { contents = Bound t1 }, t2 | t1, Var { contents = Bound t2 } ->
         go active env_l env_r t1 t2
       (* KEY CHANGE: Mu/Mu uses environments, not substitution. *)
