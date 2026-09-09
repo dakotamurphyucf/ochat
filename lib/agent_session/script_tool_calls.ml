@@ -340,6 +340,7 @@ let with_scope_results
 let tool_result (resolved : I.t) =
   match resolved.status with
   | Resolved (Complete value) -> M.Tool_ok value
+  | Resolved (Pending (_, acknowledgement)) -> M.Tool_ok acknowledgement
   | Resolved (Fail error) -> Tool_error error.code
   | Resolved (Cancelled _) -> Tool_error "invocation.cancelled"
   | _ -> Tool_error "invocation.invalid_outcome"
@@ -628,105 +629,154 @@ let call_background ?observer t ~borrowed ~limits ~max_nested_calls ~moderate ~n
     (fun call -> Result.join (call ~name ~args))
 ;;
 
-let run_managed t service execution borrowed =
+let run_managed t service execution borrowed with_result =
   let module ABI = Chat_response.Moderator_invocation in
   let module R = Chatml_host_runtime in
   let module L = Chatml.Chatml_lang in
   let module V = Chatml.Chatml_value_codec in
   let module N = Native_tool_invocation in
   let prepared = Managed.prepared execution in
+  let parent = Managed.invocation execution in
+  let selected = EC.capabilities prepared in
   let execute control =
-    let open Result.Let_syntax in
-    let parent = Managed.invocation execution in
-    let%bind entrypoint =
-      match (EC.declaration prepared).implementation with
-      | Standalone { entrypoint; _ } -> Ok entrypoint
-      | Moderator _ ->
-        Error
-          (fail
-             "invocation.managed_dispatch_required"
-             "Moderator tool handoff is not installed.")
-    in
-    let%bind scope =
-      checked
-        (fail "invocation.invalid_input" "The standalone arguments are invalid.")
-        (fun () ->
-           ABI.create_managed_standalone
-             ~control
-             ~execution
+    with_job_scope
+      t
+      ~owner:(Agent_protocol.Job.Invocation parent.context.id)
+      ~selected
+      ~error:(fail "invocation.background_unavailable")
+      (fun jobs ->
+         let open Result.Let_syntax in
+         let start_effects = ref [] in
+         let validate_work work =
+           match jobs with
+           | None -> Error "background completion is not installed"
+           | Some jobs -> Script_job_service.validate_work jobs work
+         in
+         let%bind entrypoint =
+           match (EC.declaration prepared).implementation with
+           | Standalone { entrypoint; _ } -> Ok entrypoint
+           | Moderator _ ->
+             Error
+               (fail
+                  "invocation.managed_dispatch_required"
+                  "Moderator tool handoff is not installed.")
+         in
+         let%bind scope =
+           checked
+             (fail "invocation.invalid_input" "The standalone arguments are invalid.")
+             (fun () ->
+                ABI.create_managed_standalone
+                  ~control
+                  ~execution
+                  ~limits:(EC.execution_limits prepared)
+                  ~validate_work)
+         in
+         let%bind moderation =
+           checked
+             (fail
+                "invocation.pre_tool_failed"
+                "The tool moderation scope is unavailable.")
+             Native_tool_moderation.current
+         in
+         let%bind ceiling =
+           checked
+             (fail "invocation.inactive_scope" "The tool scope is no longer active.")
+             (fun () -> N.borrowed_capabilities borrowed)
+         in
+         let valid_parent =
+           I.equal parent (N.borrowed_invocation borrowed)
+           && String.equal (C.fingerprint selected) (C.fingerprint ceiling)
+         in
+         let%bind () =
+           match valid_parent with
+           | true -> Ok ()
+           | false ->
+             Error
+               (fail
+                  "invocation.inactive_scope"
+                  "The managed tool scope does not own this invocation.")
+         in
+         let%bind value =
+           with_script_native_calls
+             ?observer:(Native_tool_moderation.observer moderation)
+             ?moderator_execute:(N.moderator_executor borrowed)
+             t
+             ~selected
              ~limits:(EC.execution_limits prepared)
-             ~validate_work:(fun _ -> Error "background completion is not installed"))
-    in
-    let%bind moderation =
-      checked
-        (fail "invocation.pre_tool_failed" "The tool moderation scope is unavailable.")
-        Native_tool_moderation.current
-    in
-    let selected = EC.capabilities prepared in
-    let%bind ceiling =
-      checked
-        (fail "invocation.inactive_scope" "The tool scope is no longer active.")
-        (fun () -> N.borrowed_capabilities borrowed)
-    in
-    let valid_parent =
-      I.equal parent (N.borrowed_invocation borrowed)
-      && String.equal (C.fingerprint selected) (C.fingerprint ceiling)
-    in
-    let%bind value =
-      with_script_native_calls
-        ?observer:(Native_tool_moderation.observer moderation)
-        ?moderator_execute:(N.moderator_executor borrowed)
-        t
-        ~selected
-        ~limits:(EC.execution_limits prepared)
-        ~execute:(N.execute_borrowed borrowed)
-        ~valid_parent
-        ~parent
-        ~moderate:(Native_tool_moderation.prepare moderation)
-        (fun on_tool_call ->
-           let handlers =
-             { R.default_handlers with
-               on_tool_call =
-                 (fun _ ~name ~args ->
-                   let%bind args = V.export_json ?control args in
-                   let%map result = on_tool_call ~name ~args in
-                   match result with
-                   | M.Tool_ok value -> L.VVariant ("Ok", [ V.import_json ?control value ])
-                   | Tool_error message -> L.VVariant ("Error", [ L.VString message ]))
-             }
-           in
-           let config : R.runtime_config =
-             { surface = Chatml.Chatml_extension_surface.tool_v1
-             ; operations = R.default_operations ~handlers ()
-             }
-           in
-           Chatml_execution.run_in_scope
-             ~control
-             ~config
-             ~program:(EC.program prepared)
-             ~entrypoint
-             ~arguments:[ ABI.context scope; ABI.input scope ]
-             ())
-      |> Result.map_error ~f:(fun error ->
-        fail error.Chatml_execution.code "Standalone execution failed.")
-    in
-    checked
-      (fail
-         "invocation.invalid_output"
-         "The standalone handler returned an invalid outcome.")
-      (fun () -> ABI.decode_outcome ?control scope value)
+             ~execute:(N.execute_borrowed borrowed)
+             ~valid_parent
+             ~parent
+             ~moderate:(Native_tool_moderation.prepare moderation)
+             (fun on_tool_call ->
+                let handlers =
+                  { R.default_handlers with
+                    on_tool_call =
+                      (fun _ ~name ~args ->
+                        let%bind args = V.export_json ?control args in
+                        let%map result = on_tool_call ~name ~args in
+                        match result with
+                        | M.Tool_ok value ->
+                          L.VVariant ("Ok", [ V.import_json ?control value ])
+                        | Tool_error message -> L.VVariant ("Error", [ L.VString message ]))
+                  }
+                in
+                let config : R.runtime_config =
+                  { surface = Chatml.Chatml_extension_surface.tool_v1
+                  ; operations = R.default_operations ~handlers ()
+                  }
+                in
+                let config =
+                  match jobs with
+                  | None -> config
+                  | Some jobs -> Script_job_service.install ?control jobs config
+                in
+                let prepare_result =
+                  Option.map jobs ~f:(fun _ ~value:_ ~local_effects ->
+                    start_effects := local_effects;
+                    Ok ignore)
+                in
+                Chatml_execution.run_in_scope
+                  ?prepare_result
+                  ~control
+                  ~config
+                  ~program:(EC.program prepared)
+                  ~entrypoint
+                  ~arguments:[ ABI.context scope; ABI.input scope ]
+                  ())
+           |> Result.map_error ~f:(fun error ->
+             fail error.Chatml_execution.code "Standalone execution failed.")
+         in
+         let%bind outcome =
+           checked
+             (fail
+                "invocation.invalid_output"
+                "The standalone handler returned an invalid outcome.")
+             (fun () -> ABI.decode_outcome ?control scope value)
+         in
+         let%bind result = with_result ~validate_work ~outcome in
+         let%map () =
+           checked
+             (fail
+                "invocation.background_rejected"
+                "The background starts could not be committed.")
+             (fun () ->
+                match jobs with
+                | None -> Ok ()
+                | Some jobs ->
+                  let%bind ordinary = Script_job_service.select jobs !start_effects in
+                  (match ordinary with
+                   | [] -> Ok ()
+                   | _ -> Error "standalone returned unsupported local effects"))
+         in
+         result)
   in
-  Ok
-    (match
-       Chatml_execution.with_control
-         ~context:(N.borrowed_execution_context borrowed)
-         ~policy:(Bounded (service.execution_limits prepared))
-         ~env:service.env
-         execute
-       |> Result.map_error ~f:(fun error -> fail error.code error.message)
-       |> Result.join
-     with
-     | Ok outcome | Error outcome -> outcome)
+  Chatml_execution.with_control
+    ~context:(N.borrowed_execution_context borrowed)
+    ~policy:(Bounded (service.execution_limits prepared))
+    ~env:service.env
+    execute
+  |> Result.map_error ~f:(fun error -> fail error.code error.message)
+  |> Result.join
 ;;
 
 let with_managed_tools t ~env ~definition ~execution_limits =
@@ -737,7 +787,9 @@ let with_managed_tools t ~env ~definition ~execution_limits =
         (fun scope ->
           { Native_tool_invocation.definition
           ; current = scope.registry
-          ; run = (fun execution borrowed -> run_managed scope service execution borrowed)
+          ; run =
+              (fun execution borrowed with_result ->
+                run_managed scope service execution borrowed with_result)
           })
   }
 ;;

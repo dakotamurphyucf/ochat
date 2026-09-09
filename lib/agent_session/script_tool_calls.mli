@@ -5,7 +5,11 @@ open Core
     observations and events. This
     uses the persisted invocation service, never a raw runner or provider history.
     A prepared script's captured capability subset is the authority ceiling;
-    the current registry is checked again after authorizing waits. *)
+    the current registry is checked again after authorizing waits.
+    The compact Tool.call API returns Complete's value or Pending's initial
+    acknowledgement in Ok. The persisted invocation retains the full work
+    reference; tools that need to expose that ID in a compact reply should include
+    it in their acknowledgement schema. Fail/cancellation retain Error codes. *)
 type t
 
 (** Read the owning host's current lifecycle policy. *)

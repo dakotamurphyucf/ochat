@@ -111,21 +111,32 @@ val with_dispatched_scope
 (** Host-owned managed implementation dispatch. The callback receives a verified
     source-bound admission and a borrow limited to that implementation's declared
     dependencies. It must execute that compiled target and validate its result;
-    caller-provided one-off source must never receive this delegated borrow. *)
+    caller-provided one-off source must never receive this delegated borrow.
+    [run] keeps the handler's resource/budget scope active through the continuation,
+    which performs common disclosure, schema and owned-work validation. It must
+    release provisional work on continuation failure and select surviving starts
+    only after continuation success. Internal host failures remain Error outcomes
+    until cleanup; explicitly returned tool failures pass through the continuation. *)
 type managed_dispatch =
   { definition : Chat_response.Managed_tool_registry.t
   ; current : unit -> Chat_response.Tool_capability.t
   ; run :
+      'a.
       Chat_response.Managed_tool_registry.execution
       -> borrowed
-      -> (Agent_protocol.Invocation.outcome, string) result
+      -> (validate_work:(Agent_protocol.Invocation.work -> (unit, string) result)
+          -> outcome:Agent_protocol.Invocation.outcome
+          -> ('a, Agent_protocol.Invocation.outcome) result)
+      -> ('a, Agent_protocol.Invocation.outcome) result
   }
 
 (** Common owned dispatch with managed targets installed. Performs capability,
     schema and policy checks and repeats managed admission after authorization.
     Managed outcomes use the same disclosure and canonical persistence path as
     native Invocation_v1 results. No implementation runs on a missing/stale
-    binding; the caller's selected registry is restored after execution. *)
+    binding; the caller's selected registry is restored after execution.
+    Managed Pending requires its live handler's work validator and revalidates
+    the disclosed acknowledgement against the declared success schema. *)
 val run_scoped_with_managed
   :  managed:managed_dispatch option
   -> moderator_execute:moderator_executor option

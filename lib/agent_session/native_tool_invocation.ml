@@ -40,7 +40,14 @@ type borrowed =
 type managed_dispatch =
   { definition : Managed.t
   ; current : unit -> C.t
-  ; run : Managed.execution -> borrowed -> (I.outcome, string) result
+  ; run :
+      'a.
+      Managed.execution
+      -> borrowed
+      -> (validate_work:(I.work -> (unit, string) result)
+          -> outcome:I.outcome
+          -> ('a, I.outcome) result)
+      -> ('a, I.outcome) result
   }
 
 let scope_key = Eio.Fiber.create_key ()
@@ -415,88 +422,98 @@ let run_scoped_with_managed
         let%bind () = check_halted () in
         let%bind binding, selected = resolve () in
         let%bind target = target binding selected in
-        let%bind output =
-          match target with
-          | `Native implementation ->
-            let%bind payload =
-              match implementation.info.type_, dispatched.context.input with
-              | "function", input -> Ok (Jsonaf.to_string input)
-              | "custom", `String input -> Ok input
-              | "custom", _ ->
-                Error
-                  (fail "invocation.invalid_input" "Custom tools require string input.")
-              | _ ->
-                Error
-                  (fail
-                     "invocation.unsupported_kind"
-                     "The registered tool kind is unsupported.")
-            in
+        let validate_output ~validate_work output =
+          let%bind value =
+            checked
+              (fail
+                 "invocation.disclosure_rejected"
+                 "The tool result could not be disclosed.")
+              (fun () -> prepare_output output)
+          in
+          let%bind outcome =
+            checked
+              (fail "invocation.invalid_output" "The tool returned an invalid result.")
+              (fun () ->
+                 let%bind () = I.validate_outcome (I.Complete value) in
+                 match C.result_contract binding with
+                 | Native_output -> Ok (I.Complete value)
+                 | Invocation_v1 ->
+                   (match value with
+                    | `String encoded ->
+                      I.outcome_of_json (Jsonaf.of_string encoded)
+                      |> Result.bind ~f:(function
+                        | (I.Complete _ | Fail _ | Cancelled _) as outcome -> Ok outcome
+                        | Pending (work, _) as outcome ->
+                          validate_work work
+                          |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+                          |> Result.map ~f:(fun () -> outcome))
+                    | _ ->
+                      Error
+                        (Agent_protocol.Error.invalid_request
+                           "expected disclosed native outcome text")))
+          in
+          let%map () =
+            checked
+              (fail "invocation.invalid_output" "The tool returned an invalid result.")
+              (fun () ->
+                 let%bind () = I.validate_outcome outcome in
+                 match target, outcome with
+                 | `Managed (_, execution), (Complete value | Pending (_, value)) ->
+                   S.validate
+                     (Chat_response.Extension_compiler.output_schema
+                        (Managed.prepared execution))
+                     value
+                   |> Result.map_error ~f:(fun _ ->
+                     Agent_protocol.Error.invalid_request
+                       "disclosed managed result does not match its schema")
+                 | _ -> Ok ())
+          in
+          outcome
+        in
+        match target with
+        | `Native implementation ->
+          let%bind payload =
+            match implementation.info.type_, dispatched.context.input with
+            | "function", input -> Ok (Jsonaf.to_string input)
+            | "custom", `String input -> Ok input
+            | "custom", _ ->
+              Error (fail "invocation.invalid_input" "Custom tools require string input.")
+            | _ ->
+              Error
+                (fail
+                   "invocation.unsupported_kind"
+                   "The registered tool kind is unsupported.")
+          in
+          let%bind output =
             checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
               Ok
                 (implementation.run_with_progress
                    ~invocation:Ochat_function.Invocation.silent
                    payload))
-          | `Managed (service, execution) ->
+          in
+          validate_output
+            ~validate_work:(fun _ ->
+              Error "native pending work requires an ownership validator")
+            output
+        | `Managed (service, execution) ->
+          let%bind result =
             checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
-              (* Only the verified declared implementation receives these tools.
-                 with_scope preserves the real actor executor when a one-off's
-                 direct-child adapter admitted this invocation. Its caller's
-                 borrow and selection are restored when this callback returns. *)
               with_managed_scope execution (fun borrowed ->
-                let%bind outcome =
-                  service.run execution borrowed
-                  |> Result.map_error ~f:Agent_protocol.Error.invalid_request
-                in
-                let%map () = I.validate_outcome outcome in
-                Openai.Responses.Tool_output.Output.Text
-                  (Jsonaf.to_string (I.outcome_to_json outcome))))
-        in
-        let%bind value =
-          checked
-            (fail
-               "invocation.disclosure_rejected"
-               "The tool result could not be disclosed.")
-            (fun () -> prepare_output output)
-        in
-        let%bind outcome =
-          checked
-            (fail "invocation.invalid_output" "The tool returned an invalid result.")
-            (fun () ->
-               let%bind () = I.validate_outcome (I.Complete value) in
-               match C.result_contract binding with
-               | Native_output -> Ok (I.Complete value)
-               | Invocation_v1 ->
-                 (match value with
-                  | `String encoded ->
-                    I.outcome_of_json (Jsonaf.of_string encoded)
-                    |> Result.bind ~f:(function
-                      | (I.Complete _ | Fail _ | Cancelled _) as outcome -> Ok outcome
-                      | Pending _ ->
-                        Error
-                          (Agent_protocol.Error.invalid_request
-                             "native pending work requires an ownership validator"))
-                  | _ ->
-                    Error
-                      (Agent_protocol.Error.invalid_request
-                         "expected disclosed native outcome text")))
-        in
-        let%map () =
-          checked
-            (fail "invocation.invalid_output" "The tool returned an invalid result.")
-            (fun () ->
-               let%bind () = I.validate_outcome outcome in
-               match target, outcome with
-               | `Managed (_, execution), Complete value ->
-                 S.validate
-                   (Chat_response.Extension_compiler.output_schema
-                      (Managed.prepared execution))
-                   value
-                 |> Result.map_error ~f:(fun _ ->
-                   Agent_protocol.Error.invalid_request
-                     "disclosed managed result does not match its schema")
-               | _ -> Ok ())
-        in
-        outcome)
+                Ok
+                  (service.run execution borrowed (fun ~validate_work ~outcome ->
+                     let%bind () =
+                       checked
+                         (fail
+                            "invocation.invalid_output"
+                            "The tool returned an invalid result.")
+                         (fun () -> I.validate_outcome outcome)
+                     in
+                     validate_output
+                       ~validate_work
+                       (Openai.Responses.Tool_output.Output.Text
+                          (Jsonaf.to_string (I.outcome_to_json outcome)))))))
+          in
+          result)
     in
     with_scope ?moderator_execute ~execute dispatched (fun () ->
       match

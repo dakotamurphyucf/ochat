@@ -1444,8 +1444,8 @@ it. The actor validates ancestry on restoration and forbids changing launch
 provenance on an existing job. Scheduler capacity uses this derived depth rather
 than a caller-supplied payload depth. This is internal transaction integration;
 the script-facing interfaces below are installed on qualified standalone and
-one-off dispatch paths. Stateful moderator and common nested managed-tool
-integration, progress/artifacts and automatic notification delivery remain unfinished.
+one-off dispatch paths, including nested managed standalone calls. Stateful
+moderator integration, progress/artifacts and automatic notification delivery remain unfinished.
 
 ### Qualified script job operations
 
@@ -1485,6 +1485,20 @@ Its committed attempt stays zero and it never publishes a reservation to a worke
 A caught failed start is removed instead. Invalid initial acknowledgements and
 rejected output policy abort all of that script scope's provisional starts before
 host errors become tool failure outcomes.
+
+Nested managed standalone calls keep their script budget and job scope active
+through the common output policy. The final disclosed acknowledgement must still
+match the declared schema and reference work started by that invocation. Failed
+disclosure, rewritten invalid acknowledgements and foreign work references release
+reservations before the host records a failure; they cannot accidentally commit
+jobs merely because host errors are represented as tool failure outcomes.
+
+`Tool.call` keeps its compact `Ok(json)`/`Error(string)` interface. A complete
+result returns its value; a pending result returns its initial acknowledgement.
+The nested invocation durably retains the full work reference. An author who needs
+the ID in a compact reply should include it in the acknowledgement schema. The
+parent receives one result and the internal invocation creates no extra provider
+tool output.
 
 The qualified daemon tests exercise these functions through normal model tool
 dispatch, persisted invocations, native file reads and real worker scheduling.
