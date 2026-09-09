@@ -30,6 +30,10 @@ type error =
   }
 [@@deriving sexp]
 
+(** Control failure raised inside a live budget. Host error adapters must let
+    this propagate to the owning execution scope, like caller cancellation. *)
+exception Budget_exhausted of error
+
 val default_limits : limits
 
 (** Opaque active budget ancestry for a host domain/executor handoff. Capturing
@@ -61,6 +65,30 @@ val runner_control : runner -> Chatml.Chatml_lang.execution_control
     [context] merges explicit caller ancestry with the current fiber's budgets,
     preserving their lifetimes and ceilings across host domain handoffs. *)
 val run_scoped : ?context:context -> runner -> (unit -> 'a) -> ('a, error) result
+
+(** Share one execution budget across host projection, program evaluation and
+    result conversion. The supplied control must be passed to controlled codecs
+    and [run_in_scope]; it expires when the callback returns. The callback must
+    propagate control exceptions and perform required checks before committing
+    effects; the scope does not retroactively invalidate a host commit. *)
+val with_control
+  :  ?policy:policy
+  -> ?context:context
+  -> env:< mono_clock : _ Eio.Time.Mono.t ; .. >
+  -> (Chatml.Chatml_lang.execution_control option -> 'a)
+  -> ('a, error) result
+
+(** Evaluate without opening a second budget/depth scope. The owning host must
+    pass the control from its current [with_control] or persistent runner scope.
+    Argument/result bounds still apply; this does not grant tool authority. *)
+val run_in_scope
+  :  control:Chatml.Chatml_lang.execution_control option
+  -> config:Chatml_host_runtime.runtime_config
+  -> program:Chatml_host_runtime.compiled_script
+  -> entrypoint:string
+  -> arguments:Chatml.Chatml_lang.value list
+  -> unit
+  -> (Chatml.Chatml_lang.value, error) result
 
 (** Run a fresh standalone task entrypoint. Defaults to [Bounded default_limits].
     Bounded evaluation polls cancellation at regular expression intervals. Nested

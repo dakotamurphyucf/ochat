@@ -933,6 +933,13 @@
  (preprocess (pps ppx_jane ppx_expect)))
 
 (library
+ (name chatml_projection_budget_test)
+ (modules chatml_projection_budget_test)
+ (libraries core eio eio_main chatml chatml_execution chatml_compilation chatml_host_runtime chat_response)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
  (name chatml_rendering_budget_test)
  (modules chatml_rendering_budget_test)
  (libraries core eio eio_main jsonaf chatml chatml_host_runtime chatml_execution)

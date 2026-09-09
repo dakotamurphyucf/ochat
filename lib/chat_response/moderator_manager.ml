@@ -160,11 +160,14 @@ let with_execution_lock t f =
   | Error error -> Error (Execution_gate.error_message error)
 ;;
 
-let run_controlled execution f =
-  match execution with
-  | None -> f ()
-  | Some runner ->
-    Chatml_execution.run_scoped runner f
+let run_controlled ?context execution f =
+  match execution, context with
+  | None, Some _ ->
+    Error
+      "invocation.execution_scope_missing: inherited budgets require a controlled runner"
+  | None, None -> f ()
+  | Some runner, context ->
+    Chatml_execution.run_scoped ?context runner f
     |> Result.map_error ~f:(fun error -> error.code ^ ": " ^ error.message)
     |> Result.join
 ;;
@@ -1137,7 +1140,8 @@ let handle_event_entries_transactional_unlocked
       ~finally:(fun () -> t.invocation_tool_call := previous)
       ~f:(fun () ->
         run_controlled t.execution (fun () ->
-          let context = Moderation.Context.to_value context in
+          let control = Option.map t.execution ~f:Chatml_execution.runner_control in
+          let context = Moderation.Context.to_value ?control context in
           let copy value = Result.bind (checked value) ~f:Value_codec.Snapshot.to_value in
           let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
           match consume_queued with
@@ -1246,107 +1250,112 @@ let handle_invocation_entries
       ~prepare_resolution
   =
   with_execution_lock t (fun () ->
-    let open Result.Let_syntax in
-    let%bind script, definition =
-      match t.artifact.extension with
-      | Some value -> Ok value
-      | None ->
-        Error "invocation.legacy_moderator: Tool_invoked requires extensibility-v1"
-    in
-    let%bind prepared =
-      match
-        List.find (Extension_compiler.prepared_tools definition) ~f:(fun tool ->
-          String.equal
-            (Extension_compiler.declaration tool).name
-            invocation.Agent_protocol.Invocation.context.tool_name)
-      with
-      | Some tool when phys_equal (Extension_compiler.program tool) t.artifact.compiled ->
-        Ok tool
-      | _ -> Error "invocation.wrong_handler: tool is not owned by this moderator"
-    in
-    let%bind scope =
-      match managed with
-      | None ->
-        Moderator_invocation.create
-          ~prepared
-          ~invocation
-          ~limits:script.limits
-          ~validate_work
-      | Some execution
-        when phys_equal prepared (Managed_tool_registry.prepared execution)
-             && Agent_protocol.Invocation.equal
-                  invocation
-                  (Managed_tool_registry.invocation execution) ->
-        Moderator_invocation.create_managed
-          ~execution
-          ~limits:script.limits
-          ~validate_work
-      | Some _ ->
-        Error "invocation.wrong_handler: managed admission belongs to another definition"
-    in
-    let%bind () =
-      if Runtime.is_halted t.runtime
-      then (
-        Option.iter on_failure ~f:(fun f -> f Moderator_invocation.Session_ended);
-        Error "invocation.session_ended: moderator session ended")
-      else Ok ()
-    in
-    let%bind () = authorize () in
-    let context =
-      Moderation.Entry_projection.project_context
-        ~session_id:(Agent_protocol.Id.Session.to_string invocation.context.session_id)
-        ~now_ms
-        ~phase:Moderation.Phase.Tool_invoked
-        ~history
-        ~available_tools
-        ~session_meta
-    in
-    let outcome = ref Moderation.Outcome.empty in
-    let prepare_commit ~resolved ~(transaction : Runtime.transaction) =
-      let%bind decoded = Runtime.decode_local_effects transaction.local_effects in
-      let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
-      let%bind overlay, install_overlay =
-        prepare_identity_overlay
-          t
+    run_controlled ?context:execution_context t.execution (fun () ->
+      let open Result.Let_syntax in
+      let control = Option.map t.execution ~f:Chatml_execution.runner_control in
+      let%bind script, definition =
+        match t.artifact.extension with
+        | Some value -> Ok value
+        | None ->
+          Error "invocation.legacy_moderator: Tool_invoked requires extensibility-v1"
+      in
+      let%bind prepared =
+        match
+          List.find (Extension_compiler.prepared_tools definition) ~f:(fun tool ->
+            String.equal
+              (Extension_compiler.declaration tool).name
+              invocation.Agent_protocol.Invocation.context.tool_name)
+        with
+        | Some tool when phys_equal (Extension_compiler.program tool) t.artifact.compiled
+          -> Ok tool
+        | _ -> Error "invocation.wrong_handler: tool is not owned by this moderator"
+      in
+      let%bind scope =
+        match managed with
+        | None ->
+          Moderator_invocation.create
+            ~control
+            ~prepared
+            ~invocation
+            ~limits:script.limits
+            ~validate_work
+        | Some execution
+          when phys_equal prepared (Managed_tool_registry.prepared execution)
+               && Agent_protocol.Invocation.equal
+                    invocation
+                    (Managed_tool_registry.invocation execution) ->
+          Moderator_invocation.create_managed
+            ~control
+            ~execution
+            ~limits:script.limits
+            ~validate_work
+        | Some _ ->
+          Error
+            "invocation.wrong_handler: managed admission belongs to another definition"
+      in
+      let%bind () =
+        if Runtime.is_halted t.runtime
+        then (
+          Option.iter on_failure ~f:(fun f -> f Moderator_invocation.Session_ended);
+          Error "invocation.session_ended: moderator session ended")
+        else Ok ()
+      in
+      let%bind () = authorize () in
+      let context =
+        Moderation.Entry_projection.project_context_with_control
+          ~control
+          ~session_id:(Agent_protocol.Id.Session.to_string invocation.context.session_id)
+          ~now_ms
           ~phase:Moderation.Phase.Tool_invoked
-          prepared.overlay_ops
+          ~history
+          ~available_tools
+          ~session_meta
       in
-      let%bind snapshot =
-        identity_snapshot_of_state
-          t
-          ~current_state:transaction.new_state
-          ~queued_events:transaction.queued_events
-          ~halted:transaction.halted
-          ~overlay
+      let outcome = ref Moderation.Outcome.empty in
+      let prepare_commit ~resolved ~(transaction : Runtime.transaction) =
+        let%bind decoded = Runtime.decode_local_effects transaction.local_effects in
+        let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+        let%bind overlay, install_overlay =
+          prepare_identity_overlay
+            t
+            ~phase:Moderation.Phase.Tool_invoked
+            prepared.overlay_ops
+        in
+        let%bind snapshot =
+          identity_snapshot_of_state
+            t
+            ~current_state:transaction.new_state
+            ~queued_events:transaction.queued_events
+            ~halted:transaction.halted
+            ~overlay
+        in
+        let%map install_resolution =
+          prepare_resolution ~resolved ~outcome:prepared ~snapshot
+        in
+        fun () ->
+          install_overlay ();
+          install_resolution ();
+          (* Include the resolution effect removed before ordinary effect decoding. *)
+          t.processed_effect_count
+          <- t.processed_effect_count + List.length transaction.local_effects + 1;
+          outcome := prepared
       in
-      let%map install_resolution =
-        prepare_resolution ~resolved ~outcome:prepared ~snapshot
+      t.last_history <- history;
+      let%map resolved =
+        let previous = !(t.invocation_tool_call) in
+        t.invocation_tool_call := on_tool_call;
+        Exn.protect
+          ~f:(fun () ->
+            Moderator_invocation.run
+              ?on_failure
+              ?control
+              scope
+              ~runtime:t.runtime
+              ~context:(Moderation.Context.to_value ?control context)
+              ~prepare_commit)
+          ~finally:(fun () -> t.invocation_tool_call := previous)
       in
-      fun () ->
-        install_overlay ();
-        install_resolution ();
-        (* Include the resolution effect removed before ordinary effect decoding. *)
-        t.processed_effect_count
-        <- t.processed_effect_count + List.length transaction.local_effects + 1;
-        outcome := prepared
-    in
-    t.last_history <- history;
-    let%map resolved =
-      let previous = !(t.invocation_tool_call) in
-      t.invocation_tool_call := on_tool_call;
-      Exn.protect
-        ~f:(fun () ->
-          Moderator_invocation.run
-            ?on_failure
-            ?execution:t.execution
-            ?execution_context
-            scope
-            ~runtime:t.runtime
-            ~context:(Moderation.Context.to_value context)
-            ~prepare_commit)
-        ~finally:(fun () -> t.invocation_tool_call := previous)
-    in
-    resolved, !outcome)
+      resolved, !outcome))
 ;;
 
 let handle_observation_entries
@@ -1481,9 +1490,10 @@ let handle_observation_entries
         ~finally:(fun () -> t.invocation_tool_call := previous)
         ~f:(fun () ->
           run_controlled t.execution (fun () ->
+            let control = Option.map t.execution ~f:Chatml_execution.runner_control in
             Runtime.handle_event
               t.runtime
-              ~context:(Moderation.Context.to_value context)
+              ~context:(Moderation.Context.to_value ?control context)
               ~event
               ~copy_state:(fun value ->
                 Result.bind (checked value) ~f:Value_codec.Snapshot.to_value)

@@ -19,7 +19,9 @@ let checked failure f =
   match f () with
   | Ok value -> Ok value
   | Error _ -> Error failure
-  | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+  | exception
+      ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout | Chatml_execution.Budget_exhausted _)
+       as exn) -> raise exn
   | exception _ -> Error failure
 ;;
 
@@ -116,7 +118,7 @@ let create
       let resolved, runtime_requests =
         Chat_response.Runtime_request_scope.collect (fun () ->
           capabilities.with_invocation ~invocation (fun ~dispatched ->
-            let execute () =
+            let execute control =
               let open Result.Let_syntax in
               let%bind () =
                 checked
@@ -148,6 +150,7 @@ let create
                      "The standalone handler binding is invalid.")
                   (fun () ->
                      ABI.create_standalone
+                       ~control
                        ~prepared
                        ~invocation:dispatched
                        ~limits:(EC.execution_limits prepared)
@@ -160,13 +163,14 @@ let create
                     on_tool_call =
                       (fun _ ~name ~args ->
                         let%bind args =
-                          Chatml.Chatml_value_codec.value_to_jsonaf_result args
+                          Chatml.Chatml_value_codec.export_json ?control args
                         in
                         let%map result = on_tool_call ~name ~args in
                         match result with
                         | Chat_response.Moderation.Capabilities.Tool_ok value ->
                           L.VVariant
-                            ("Ok", [ Chatml.Chatml_value_codec.jsonaf_to_value value ])
+                            ( "Ok"
+                            , [ Chatml.Chatml_value_codec.import_json ?control value ] )
                         | Tool_error message -> L.VVariant ("Error", [ L.VString message ]))
                   }
                 in
@@ -180,9 +184,8 @@ let create
                   | Standalone { entrypoint; _ } -> entrypoint
                   | Moderator _ -> assert false
                 in
-                Chatml_execution.run
-                  ~policy:(Bounded (execution_limits prepared))
-                  ~env
+                Chatml_execution.run_in_scope
+                  ~control
                   ~config
                   ~program:(EC.program prepared)
                   ~entrypoint
@@ -222,7 +225,7 @@ let create
                   (fail
                      "invocation.invalid_output"
                      "The standalone handler returned an invalid outcome.")
-                  (fun () -> ABI.decode_outcome scope value)
+                  (fun () -> ABI.decode_outcome ?control scope value)
               in
               let%map () =
                 checked
@@ -240,7 +243,14 @@ let create
             | Some outcome -> Ok outcome
             | None ->
               Ok
-                (match execute () with
+                (match
+                   Chatml_execution.with_control
+                     ~policy:(Bounded (execution_limits prepared))
+                     ~env
+                     execute
+                   |> Result.map_error ~f:(fun error -> fail error.code error.message)
+                   |> Result.join
+                 with
                  | Ok outcome | Error outcome -> outcome))
           |> require)
       in

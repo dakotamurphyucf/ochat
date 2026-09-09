@@ -198,7 +198,7 @@ module Context = struct
     }
   [@@deriving sexp]
 
-  let to_value = Moderation.Context.to_value
+  let to_value value = Moderation.Context.to_value value
   let last_item t = List.last t.items
   let last_user_item t = last_matching t.items ~f:Item.is_user
   let last_assistant_item t = last_matching t.items ~f:Item.is_assistant

@@ -209,6 +209,70 @@ let make_control ~env budget =
     !bytes, !deepest
   in
   let check_value value = ignore (measure_value value : int * int) in
+  let before_json_import json =
+    (* Measure the projected ChatML representation without allocating it. In
+       particular an object adds an array, entry records and key strings. *)
+    let bytes = ref 0 in
+    let add count =
+      if count > limits.max_value_bytes - !bytes then value_failure ();
+      bytes := !bytes + count
+    in
+    let node depth =
+      checkpoint ();
+      if depth > limits.max_depth then value_failure ();
+      add 16
+    in
+    let sequence values f =
+      let count = ref 0 in
+      List.iter values ~f:(fun value ->
+        Int.incr count;
+        if !count > limits.max_array_items then value_failure ();
+        f value)
+    in
+    let rec walk depth = function
+      | `Null ->
+        node depth;
+        add 4
+      | `True | `False ->
+        node depth;
+        add 4;
+        node (depth + 1)
+      | `Number text ->
+        node depth;
+        add 6;
+        node (depth + 1);
+        (* Parsing a numeric lexeme can cost more than the resulting float. *)
+        add (String.length text)
+      | `String text ->
+        node depth;
+        add 6;
+        node (depth + 1);
+        add (String.length text)
+      | `Array values ->
+        node depth;
+        add 5;
+        node (depth + 1);
+        sequence values (walk (depth + 2))
+      | `Object fields ->
+        node depth;
+        add 6;
+        node (depth + 1);
+        sequence fields (fun (key, value) ->
+          node (depth + 2);
+          add 8;
+          node (depth + 3);
+          add (String.length key);
+          walk (depth + 3) value)
+    in
+    walk 0 json;
+    allocate !bytes
+  in
+  let before_json_export value =
+    let size = fst (measure_value value) in
+    (* Reserve conversion/serialization work, including JSON string escaping. *)
+    if size > Atomic.get allocation_remaining / 6 then exhaust budget allocation_failure;
+    allocate (6 * size)
+  in
   let check_json_text text =
     (* Jsonaf has no execution-control callback. Check lexical nesting before
        entering it, ignoring delimiters in strings and escaped quotes. This is
@@ -346,6 +410,8 @@ let make_control ~env budget =
   ; allocate
   ; before_builtin
   ; check_value
+  ; before_json_import
+  ; before_json_export
   ; before_effect
   ; after_effect = (fun value -> allocate (fst (measure_value value)))
   }
@@ -424,6 +490,10 @@ let with_scope ?(policy = Bounded default_limits) ?(context = []) ~env f =
             { checkpoint = (fun () -> each (fun c -> c.checkpoint ()))
             ; allocate = (fun bytes -> each (fun c -> c.allocate bytes))
             ; check_value = (fun value -> each (fun c -> c.check_value value))
+            ; before_json_import =
+                (fun value -> each (fun c -> c.before_json_import value))
+            ; before_json_export =
+                (fun value -> each (fun c -> c.before_json_export value))
             ; before_builtin =
                 (fun ~name args -> each (fun c -> c.before_builtin ~name args))
             ; before_effect =
@@ -479,6 +549,8 @@ let create_runner ~env ~policy () =
     { checkpoint = (fun () -> apply (fun c -> c.checkpoint ()))
     ; allocate = (fun bytes -> apply (fun c -> c.allocate bytes))
     ; check_value = (fun value -> apply (fun c -> c.check_value value))
+    ; before_json_import = (fun value -> apply (fun c -> c.before_json_import value))
+    ; before_json_export = (fun value -> apply (fun c -> c.before_json_export value))
     ; before_builtin = (fun ~name args -> apply (fun c -> c.before_builtin ~name args))
     ; before_effect =
         (fun ~name ~spawned -> apply (fun c -> c.before_effect ~name ~spawned))
@@ -498,15 +570,27 @@ let create_runner ~env ~policy () =
 
 let runner_control runner = runner.control
 let run_scoped ?context runner f = runner.run ?context f
+let with_control = with_scope
+
+let run_in_scope
+      ~(control : Chatml.Chatml_lang.execution_control option)
+      ~config
+      ~program
+      ~entrypoint
+      ~arguments
+      ()
+  =
+  Option.iter control ~f:(fun c -> List.iter arguments ~f:c.check_value);
+  Chatml_host_runtime.run_entrypoint ?control config program ~entrypoint ~arguments ()
+  |> Result.map ~f:(fun value ->
+    Option.iter control ~f:(fun c -> c.check_value value);
+    value)
+  |> Result.map_error ~f:(fun message ->
+    { code = "chatml.execution_failed"; message = String.prefix message (16 * 1024) })
+;;
 
 let run ?policy ?context ~env ~config ~program ~entrypoint ~arguments () =
-  with_scope ?policy ?context ~env (fun control ->
-    Option.iter control ~f:(fun c -> List.iter arguments ~f:c.check_value);
-    Chatml_host_runtime.run_entrypoint ?control config program ~entrypoint ~arguments ()
-    |> Result.map ~f:(fun value ->
-      Option.iter control ~f:(fun c -> c.check_value value);
-      value)
-    |> Result.map_error ~f:(fun message ->
-      { code = "chatml.execution_failed"; message = String.prefix message (16 * 1024) }))
+  with_control ?policy ?context ~env (fun control ->
+    run_in_scope ~control ~config ~program ~entrypoint ~arguments ())
   |> Result.join
 ;;

@@ -75,10 +75,10 @@ let check_value
   | Failure message -> error code message
 ;;
 
-let json ~max_bytes value =
+let json ?control ~max_bytes value =
   let open Result.Let_syntax in
   let%bind () = check_value ~max_bytes value in
-  let%bind json = V.value_to_jsonaf_result value in
+  let%bind json = V.export_json ?control value in
   (* The shared schema validator also rejects duplicate object keys and invalid
      JSON numbers before any payload reaches the protocol. *)
   let%bind any =
@@ -178,14 +178,14 @@ let ms timestamp =
   |> fun ns -> Int63.(to_int_exn (ns / of_int 1_000_000))
 ;;
 
-let prepare_input ~prepared ~(limits : S.limits) value =
+let prepare_input ?control ~prepared ~(limits : S.limits) value =
   let open Result.Let_syntax in
   let%bind () = protocol (I.validate_outcome (Complete value)) in
   let%bind () =
     Schema.validate (EC.input_schema prepared) value
     |> Result.map_error ~f:(fun _ -> "invocation.invalid_input: input schema mismatch")
   in
-  let input = V.jsonaf_to_value value in
+  let input = V.import_json ?control value in
   let%map () =
     check_value
       ~code:"invocation.invalid_input"
@@ -198,6 +198,7 @@ let prepare_input ~prepared ~(limits : S.limits) value =
 ;;
 
 let create_for
+      ~control
       ~managed
       ~implementation
       ~prepared
@@ -252,14 +253,18 @@ let create_for
     then Ok ()
     else error "invocation.stale_binding" "invocation does not match the prepared handler"
   in
-  let%bind input = prepare_input ~prepared ~limits c.input in
+  let%bind input = prepare_input ?control ~prepared ~limits c.input in
+  let record fields =
+    Option.iter control ~f:(fun c -> c.L.allocate (64 * List.length fields));
+    record fields
+  in
   let capability (r : Tool_capability.reference) =
     record
       [ "id", string (Id.Capability.to_string r.id)
       ; "name", string r.name
       ; "implementation_revision", string r.implementation_revision
       ; "fingerprint", string r.fingerprint
-      ; "input_schema", V.jsonaf_to_value r.input_schema
+      ; "input_schema", V.import_json ?control r.input_schema
       ]
   in
   let limits_value =
@@ -274,6 +279,8 @@ let create_for
       ; "max_invocation_depth", int 8
       ]
   in
+  let references = Tool_capability.references capabilities in
+  Option.iter control ~f:(fun c -> c.L.allocate (16 * List.length references));
   let context =
     record
       [ "version", int 1
@@ -295,21 +302,19 @@ let create_for
       ; "created_at_ms", int (ms c.created_at)
       ; "deadline_ms", option (fun t -> int (ms t)) c.deadline
       ; "limits", limits_value
-      ; ( "available_tools"
-        , L.VArray
-            (Tool_capability.references capabilities
-             |> List.map ~f:capability
-             |> Array.of_list) )
+      ; "available_tools", L.VArray (references |> List.map ~f:capability |> Array.of_list)
       ]
   in
+  Option.iter control ~f:(fun c -> c.L.check_value context);
   Ok { prepared; invocation; limits; validate_work; context; input }
 ;;
 
 let create = create_for ~managed:None ~implementation:`Moderator
 let create_standalone = create_for ~managed:None ~implementation:`Standalone
 
-let create_managed_standalone ~execution ~limits ~validate_work =
+let create_managed_standalone ~control ~execution ~limits ~validate_work =
   create_for
+    ~control
     ~managed:(Some execution)
     ~implementation:`Standalone
     ~prepared:(Managed_tool_registry.prepared execution)
@@ -318,8 +323,9 @@ let create_managed_standalone ~execution ~limits ~validate_work =
     ~validate_work
 ;;
 
-let create_managed ~execution ~limits ~validate_work =
+let create_managed ~control ~execution ~limits ~validate_work =
   create_for
+    ~control
     ~managed:(Some execution)
     ~implementation:`Moderator
     ~prepared:(Managed_tool_registry.prepared execution)
@@ -328,7 +334,7 @@ let create_managed ~execution ~limits ~validate_work =
     ~validate_work
 ;;
 
-let decode t value =
+let decode ?control t value =
   let open Result.Let_syntax in
   let max_bytes = bytes t.limits.max_output_bytes in
   let%bind () =
@@ -341,7 +347,7 @@ let decode t value =
   let%bind outcome =
     match value with
     | L.VVariant ("Complete", [ value ]) ->
-      Result.map (json ~max_bytes value) ~f:(fun value -> I.Complete value)
+      Result.map (json ?control ~max_bytes value) ~f:(fun value -> I.Complete value)
     | VVariant ("Pending", [ VVariant (tag, [ VString id ]); value ]) ->
       let%bind work =
         match tag with
@@ -351,7 +357,7 @@ let decode t value =
           |> Result.map ~f:(fun id -> I.Subscription id)
         | _ -> error "invocation.invalid_work" "expected Job or Subscription"
       in
-      let%map value = json ~max_bytes value in
+      let%map value = json ?control ~max_bytes value in
       I.Pending (work, value)
     | VVariant ("Fail", [ VRecord fields ]) when Map.length fields = 4 ->
       let%bind code =
@@ -369,7 +375,7 @@ let decode t value =
       in
       let%map details =
         V.expect_record_field "tool_error" fields "details"
-        |> Result.bind ~f:(json ~max_bytes)
+        |> Result.bind ~f:(json ?control ~max_bytes)
       in
       I.Fail { code; message; retryable; details }
     | _ -> error "invocation.invalid_output" "expected Complete, Pending or Fail"
@@ -424,7 +430,7 @@ type failure =
   | Handler_failed
   | Session_ended
 
-let run_impl ?task_limits t ~runtime ~context ~prepare_commit ~failure_kind =
+let run_impl ?control ?task_limits t ~runtime ~context ~prepare_commit ~failure_kind =
   let open Result.Let_syntax in
   let%bind () =
     match (EC.declaration t.prepared).implementation with
@@ -469,7 +475,7 @@ let run_impl ?task_limits t ~runtime ~context ~prepare_commit ~failure_kind =
       | [ { args = [ L.VString id; value ]; _ } ] ->
         if String.equal id (Id.Invocation.to_string t.invocation.context.id)
         then
-          decode t value
+          decode ?control t value
           |> Result.map_error ~f:(fun message ->
             failure_kind := Invalid_output;
             message)
@@ -524,6 +530,7 @@ let run_impl ?task_limits t ~runtime ~context ~prepare_commit ~failure_kind =
 
 let run
       ?(on_failure = ignore)
+      ?control
       ?execution
       ?execution_context
       t
@@ -533,12 +540,14 @@ let run
   =
   let failure_kind = ref Handler_failed in
   let result =
-    match execution, execution_context with
-    | None, Some _ ->
+    match execution, execution_context, control with
+    | Some _, _, Some _ ->
+      Error "invocation.execution_scope_conflict: use a runner or its active control"
+    | None, Some _, _ ->
       Error
         "invocation.execution_scope_missing: inherited budgets require a controlled \
          runner"
-    | None, None ->
+    | None, None, None ->
       run_impl
         ~task_limits:R.{ fuel = t.limits.fuel; max_tasks = t.limits.max_tasks }
         t
@@ -546,9 +555,19 @@ let run
         ~context
         ~prepare_commit
         ~failure_kind
-    | Some runner, execution_context ->
+    | None, None, Some control ->
+      (try run_impl ~control t ~runtime ~context ~prepare_commit ~failure_kind with
+       | Chatml_execution.Budget_exhausted error ->
+         Error (error.code ^ ": " ^ error.message))
+    | Some runner, execution_context, None ->
       Chatml_execution.run_scoped ?context:execution_context runner (fun () ->
-        run_impl t ~runtime ~context ~prepare_commit ~failure_kind)
+        run_impl
+          ~control:(Chatml_execution.runner_control runner)
+          t
+          ~runtime
+          ~context
+          ~prepare_commit
+          ~failure_kind)
       |> Result.map_error ~f:(fun error -> error.code ^ ": " ^ error.message)
       |> Result.join
   in

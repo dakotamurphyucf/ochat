@@ -1160,6 +1160,7 @@ let%test_unit "dispatch applies the effective array limit before projection" =
     expect
       "array item limit"
       (MI.create
+         ~control:None
          ~prepared
          ~invocation
          ~limits:

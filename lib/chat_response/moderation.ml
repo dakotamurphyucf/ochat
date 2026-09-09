@@ -298,16 +298,38 @@ module Context = struct
     }
   [@@deriving sexp]
 
-  let to_value (t : t) : Lang.value =
-    record_value
-      [ "session_id", Lang.VString t.session_id
-      ; "now_ms", Lang.VInt t.now_ms
-      ; "phase", Lang.VString (Phase.to_string t.phase)
-      ; "items", Lang.VArray (Array.of_list_map t.items ~f:Item.to_value)
-      ; ( "available_tools"
-        , Lang.VArray (Array.of_list_map t.available_tools ~f:Tool_desc.to_value) )
-      ; "session_meta", lang_value_of_jsonaf t.session_meta
-      ]
+  let to_value ?control (t : t) : Lang.value =
+    let record fields =
+      Option.iter control ~f:(fun c -> c.Lang.allocate (64 * List.length fields));
+      record_value fields
+    in
+    let array values f =
+      Option.iter control ~f:(fun c -> c.Lang.allocate (16 * List.length values));
+      Lang.VArray (Array.of_list_map values ~f)
+    in
+    let item (t : Item.t) =
+      record
+        [ "id", Lang.VString t.id; "value", Value_codec.import_json ?control t.value ]
+    in
+    let tool (t : Tool_desc.t) =
+      record
+        [ "name", Lang.VString t.name
+        ; "description", Lang.VString t.description
+        ; "input_schema", Value_codec.import_json ?control t.input_schema
+        ]
+    in
+    let value =
+      record
+        [ "session_id", Lang.VString t.session_id
+        ; "now_ms", Lang.VInt t.now_ms
+        ; "phase", Lang.VString (Phase.to_string t.phase)
+        ; "items", array t.items item
+        ; "available_tools", array t.available_tools tool
+        ; "session_meta", Value_codec.import_json ?control t.session_meta
+        ]
+    in
+    Option.iter control ~f:(fun c -> c.Lang.check_value value);
+    value
   ;;
 end
 
@@ -449,6 +471,32 @@ module Entry_projection = struct
       ; now_ms
       ; phase
       ; items = project_history history
+      ; available_tools = List.map available_tools ~f:Tool_desc.of_request_tool
+      ; session_meta
+      }
+  ;;
+
+  let project_context_with_control
+        ~control
+        ~session_id
+        ~now_ms
+        ~phase
+        ~history
+        ~available_tools
+        ~session_meta
+    =
+    let items =
+      List.map history ~f:(fun entry ->
+        Option.iter control ~f:(fun c -> c.Lang.checkpoint ());
+        let item = project_item entry in
+        Option.iter control ~f:(fun c -> c.Lang.before_json_import item.value);
+        item)
+    in
+    Context.
+      { session_id
+      ; now_ms
+      ; phase
+      ; items
       ; available_tools = List.map available_tools ~f:Tool_desc.of_request_tool
       ; session_meta
       }

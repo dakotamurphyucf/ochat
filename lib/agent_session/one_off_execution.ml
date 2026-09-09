@@ -20,7 +20,9 @@ let checked failure f =
   match f () with
   | Ok value -> Ok value
   | Error _ -> Error failure
-  | exception ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn) -> raise exn
+  | exception
+      ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout | Chatml_execution.Budget_exhausted _)
+       as exn) -> raise exn
   | exception _ -> Error failure
 ;;
 
@@ -113,7 +115,20 @@ let run
           (Agent_protocol.Timestamp.to_time_ns (now ()))
         |> Time_ns.Span.to_sec
       in
-      let execute () =
+      let execution_limits : Chatml_execution.limits =
+        { fuel = limits.fuel
+        ; max_tasks = limits.max_tasks
+        ; wall_seconds = remaining
+        ; max_value_bytes =
+            Duration.bytes_to_int64 limits.max_value_bytes |> Int64.to_int_exn
+        ; max_array_items = limits.max_array_items
+        ; max_depth = limits.max_depth
+        ; allocation_bytes
+        ; max_calls = max_nested_calls
+        ; max_invocation_depth
+        }
+      in
+      let execute control =
         let%bind () =
           checked
             (fail
@@ -135,7 +150,7 @@ let run
                  I.validate_outcome (Complete input)
                  |> Result.map_error ~f:(fun _ -> "invalid input")
                in
-               let value = V.jsonaf_to_value input in
+               let value = V.import_json ?control input in
                let%map _ =
                  Chat_response.Moderator_invocation.snapshot_state ~limits value
                in
@@ -151,11 +166,11 @@ let run
             { R.default_handlers with
               on_tool_call =
                 (fun _ ~name ~args ->
-                  let%bind args = V.value_to_jsonaf_result args in
+                  let%bind args = V.export_json ?control args in
                   let%map result = on_tool_call ~name ~args in
                   match result with
                   | Chat_response.Moderation.Capabilities.Tool_ok value ->
-                    L.VVariant ("Ok", [ V.jsonaf_to_value value ])
+                    L.VVariant ("Ok", [ V.import_json ?control value ])
                   | Tool_error message -> L.VVariant ("Error", [ L.VString message ]))
             }
           in
@@ -164,23 +179,8 @@ let run
             ; operations = R.default_operations ~handlers ()
             }
           in
-          let execution_limits : Chatml_execution.limits =
-            { fuel = limits.fuel
-            ; max_tasks = limits.max_tasks
-            ; wall_seconds = remaining
-            ; max_value_bytes =
-                Duration.bytes_to_int64 limits.max_value_bytes |> Int64.to_int_exn
-            ; max_array_items = limits.max_array_items
-            ; max_depth = limits.max_depth
-            ; allocation_bytes
-            ; max_calls = max_nested_calls
-            ; max_invocation_depth
-            }
-          in
-          Chatml_execution.run
-            ~policy:(Bounded execution_limits)
-            ~context:(N.borrowed_execution_context borrowed)
-            ~env
+          Chatml_execution.run_in_scope
+            ~control
             ~config
             ~program:(P.program prepared)
             ~entrypoint:P.entrypoint
@@ -221,7 +221,7 @@ let run
                "invocation.invalid_output"
                "The one-off program returned invalid JSON.")
             (fun () ->
-               let%bind value = V.value_to_jsonaf_result value in
+               let%bind value = V.export_json ?control value in
                let outcome = I.Complete value in
                let%map () =
                  I.validate_outcome outcome
@@ -255,9 +255,13 @@ let run
         then fail "chatml.execution_timeout" "The script deadline elapsed."
         else (
           match
-            Eio.Time.Timeout.run_exn
-              (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) remaining)
+            Chatml_execution.with_control
+              ~policy:(Bounded execution_limits)
+              ~context:(N.borrowed_execution_context borrowed)
+              ~env
               execute
+            |> Result.map_error ~f:(fun error -> fail error.code error.message)
+            |> Result.join
           with
           | Ok outcome | Error outcome -> outcome
           | exception Eio.Time.Timeout ->

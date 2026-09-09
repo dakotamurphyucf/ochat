@@ -21,6 +21,8 @@ let%expect_test "prepared one-off programs execute under their native caller's a
     ; `Loop
     ; `Timeout
     ; `Output_limit
+    ; `Input_budget
+    ; `Output_budget
     ; `Cancel
     ; `Recursive_calls
     ; `Recursive_depth
@@ -150,6 +152,8 @@ let%expect_test "prepared one-off programs execute under their native caller's a
                 "let rec loop x = loop(x)\n\
                  let poison = loop(0)\n\
                  let main input = Task.pure(input)"
+              | `Output_budget ->
+                "let main input = Task.pure(`String(\"" ^ String.make 12_800 'x' ^ "\"))"
               | _ ->
                 {|let count = [0]
 let main input = Task.bind(Tool.call("|}
@@ -243,6 +247,11 @@ let main input = Task.bind(Tool.call("|}
                       X.run
                         ~env
                         ~prepared
+                        ~allocation_bytes:
+                          (match mode with
+                           | `Input_budget -> 128
+                           | `Output_budget -> 8192
+                           | _ -> Chatml_execution.default_limits.allocation_bytes)
                         ~borrowed
                         ~script_tools:tools
                         ~input:(field fields "input")
@@ -478,6 +487,7 @@ let main input = Task.bind(Tool.call("|}
              | `Loop -> [ "chatml.execution_limit" ]
              | `Timeout -> [ "chatml.execution_timeout" ]
              | `Output_limit -> [ "invocation.output_limit" ]
+             | `Input_budget | `Output_budget -> [ "chatml.allocation_limit" ]
              | `Cancel -> []
              | `Recursive_calls | `Recursive_domain ->
                [ "chatml.call_limit"; "chatml.call_limit" ]
@@ -499,6 +509,8 @@ let main input = Task.bind(Tool.call("|}
                   | `Loop
                   | `Timeout
                   | `Output_limit
+                  | `Input_budget
+                  | `Output_budget
                   | `Cancel
                   | `Recursive_calls
                   | `Recursive_depth
@@ -521,6 +533,8 @@ let main input = Task.bind(Tool.call("|}
     (Loop 0 (chatml.execution_limit) 1 0)
     (Timeout 0 (chatml.execution_timeout) 1 0)
     (Output_limit 1 (invocation.output_limit) 2 0)
+    (Input_budget 0 (chatml.allocation_limit) 1 0)
+    (Output_budget 0 (chatml.allocation_limit) 1 0)
     (Cancel 0 () 1 1)
     (Recursive_calls 0 (chatml.call_limit chatml.call_limit) 3 0)
     (Recursive_depth 0 (chatml.invocation_depth chatml.invocation_depth) 3 0)

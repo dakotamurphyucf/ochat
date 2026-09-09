@@ -13,7 +13,8 @@ val max_nested_calls : int
     the ChatML value projection's depth, array and byte limits. Limits must come
     from a validated script declaration. Performs no effects or authorization. *)
 val prepare_input
-  :  prepared:Extension_compiler.t
+  :  ?control:L.execution_control
+  -> prepared:Extension_compiler.t
   -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
   -> Jsonaf.t
   -> (L.value, string) result
@@ -24,9 +25,13 @@ val prepare_input
     This checks identity/input, not current authorization or actor ownership.
     [validate_work] must recheck that Pending refers to admitted work owned by
     this invocation's session/generation with a valid completion path. It must
-    not publish or mutate state. *)
+    not publish or mutate state. [control] charges input/schema/context projection
+    within the caller's current execution scope and checks the combined context.
+    [None] retains the low-level declaration/protocol bounds without a shared
+    execution budget. *)
 val create
-  :  prepared:Extension_compiler.t
+  :  control:L.execution_control option
+  -> prepared:Extension_compiler.t
   -> invocation:I.t
   -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
   -> validate_work:(I.work -> (unit, string) result)
@@ -40,7 +45,8 @@ val invocation : t -> I.t
     and input values without constructing or delivering a moderator event.
     Authorization and persisted ownership remain the host's responsibility. *)
 val create_standalone
-  :  prepared:Extension_compiler.t
+  :  control:L.execution_control option
+  -> prepared:Extension_compiler.t
   -> invocation:I.t
   -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
   -> validate_work:(I.work -> (unit, string) result)
@@ -51,7 +57,8 @@ val create_standalone
     [available_tools] contains only the declared implementation's dependencies.
     The private admission links both identities without rewriting persisted data. *)
 val create_managed_standalone
-  :  execution:Managed_tool_registry.execution
+  :  control:L.execution_control option
+  -> execution:Managed_tool_registry.execution
   -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
   -> validate_work:(I.work -> (unit, string) result)
   -> (t, string) result
@@ -60,7 +67,8 @@ val create_managed_standalone
     acquire the moderator or authorize execution; the actor/manager owner must
     atomically commit its result and proposed state. *)
 val create_managed
-  :  execution:Managed_tool_registry.execution
+  :  control:L.execution_control option
+  -> execution:Managed_tool_registry.execution
   -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
   -> validate_work:(I.work -> (unit, string) result)
   -> (t, string) result
@@ -74,7 +82,11 @@ val origin_value : I.origin -> L.value
 (** Shared result validation for a returned standalone outcome or a moderator
     resolution. Checks JSON projection, success schema, error envelopes, owned
     Pending references and serialized size. Does not resolve or publish. *)
-val decode_outcome : t -> L.value -> (I.outcome, string) result
+val decode_outcome
+  :  ?control:L.execution_control
+  -> t
+  -> L.value
+  -> (I.outcome, string) result
 
 (** Add the v1 transactional resolution operation and JSON-only emit/timer
     adapters to the normal host registry. No tool implementation runs here. *)
@@ -122,12 +134,16 @@ val snapshot_state
 
     [execution] is the runner whose control was installed in [runtime]. It
     bounds pure evaluation and task effects under the current lexical scope.
-    Without it this low-level adapter retains only legacy task-step limits;
-    the v1 moderator manager always supplies its owned runner. [execution_context]
+    [control] is the alternative for a caller that already opened that runner's
+    scope around input/context projection; it must be the runtime's active
+    control. Do not combine it with [execution] or [execution_context].
+    Without either control path this adapter retains only legacy task-step limits.
+    The v1 moderator manager opens its owned runner before projection. [execution_context]
     carries caller budget ancestry across host domain handoffs. Supplying that
     context without a controlled runner is rejected. *)
 val run
   :  ?on_failure:(failure -> unit)
+  -> ?control:L.execution_control
   -> ?execution:Chatml_execution.runner
   -> ?execution_context:Chatml_execution.context
   -> t

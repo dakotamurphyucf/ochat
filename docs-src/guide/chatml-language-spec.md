@@ -238,6 +238,14 @@ preemption of a native builtin. An estimate can exceed the actual output size.
 Trusted root execution may select `Unrestricted`; nested execution cannot remove
 an ancestor's limits. The language itself does not impose these host budgets.
 
+One-off and standalone handlers share one execution scope across input/context
+projection, evaluation and outcome conversion. Stateful tool invocations open the
+moderator's owned scope before projecting their context. Controlled JSON imports
+check the projected variant/array/object-entry structure before conversion;
+exports reserve an escaping-aware conversion/serialization estimate. Host error
+adapters preserve budget exhaustion as a control failure. These scopes do not
+grant tools or change invocation ownership.
+
 Host runtime debug logging uses separate, lazy previews capped by bytes, visited
 nodes and depth. Disabled logging does not format values. Enabled logging can
 truncate large or cyclic values without consuming script fuel after a state

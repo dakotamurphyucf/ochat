@@ -247,6 +247,8 @@ type execution_control =
   ; allocate : int -> unit
   ; before_builtin : name:string -> value list -> unit
   ; check_value : value -> unit
+  ; before_json_import : Jsonaf.t -> unit
+  ; before_json_export : value -> unit
   ; before_effect : name:string -> spawned:bool -> unit
   ; after_effect : value -> unit
   }

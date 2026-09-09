@@ -96,7 +96,9 @@ let checked error f =
   match f () with
   | Ok value -> Ok value
   | Error _ -> Error error
-  | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
+  | exception
+      ((Eio.Cancel.Cancelled _ | Eio.Time.Timeout | Chatml_execution.Budget_exhausted _)
+       as exn) -> raise exn
   | exception _ -> Error error
 ;;
 
@@ -514,9 +516,9 @@ let run_managed t service execution borrowed =
   let module L = Chatml.Chatml_lang in
   let module V = Chatml.Chatml_value_codec in
   let module N = Native_tool_invocation in
-  let execute () =
+  let prepared = Managed.prepared execution in
+  let execute control =
     let open Result.Let_syntax in
-    let prepared = Managed.prepared execution in
     let parent = Managed.invocation execution in
     let%bind entrypoint =
       match (EC.declaration prepared).implementation with
@@ -532,6 +534,7 @@ let run_managed t service execution borrowed =
         (fail "invocation.invalid_input" "The standalone arguments are invalid.")
         (fun () ->
            ABI.create_managed_standalone
+             ~control
              ~execution
              ~limits:(EC.execution_limits prepared)
              ~validate_work:(fun _ -> Error "background completion is not installed"))
@@ -567,10 +570,10 @@ let run_managed t service execution borrowed =
              { R.default_handlers with
                on_tool_call =
                  (fun _ ~name ~args ->
-                   let%bind args = V.value_to_jsonaf_result args in
+                   let%bind args = V.export_json ?control args in
                    let%map result = on_tool_call ~name ~args in
                    match result with
-                   | M.Tool_ok value -> L.VVariant ("Ok", [ V.jsonaf_to_value value ])
+                   | M.Tool_ok value -> L.VVariant ("Ok", [ V.import_json ?control value ])
                    | Tool_error message -> L.VVariant ("Error", [ L.VString message ]))
              }
            in
@@ -579,10 +582,8 @@ let run_managed t service execution borrowed =
              ; operations = R.default_operations ~handlers ()
              }
            in
-           Chatml_execution.run
-             ~context:(N.borrowed_execution_context borrowed)
-             ~policy:(Bounded (service.execution_limits prepared))
-             ~env:service.env
+           Chatml_execution.run_in_scope
+             ~control
              ~config
              ~program:(EC.program prepared)
              ~entrypoint
@@ -595,10 +596,18 @@ let run_managed t service execution borrowed =
       (fail
          "invocation.invalid_output"
          "The standalone handler returned an invalid outcome.")
-      (fun () -> ABI.decode_outcome scope value)
+      (fun () -> ABI.decode_outcome ?control scope value)
   in
   Ok
-    (match execute () with
+    (match
+       Chatml_execution.with_control
+         ~context:(N.borrowed_execution_context borrowed)
+         ~policy:(Bounded (service.execution_limits prepared))
+         ~env:service.env
+         execute
+       |> Result.map_error ~f:(fun error -> fail error.code error.message)
+       |> Result.join
+     with
      | Ok outcome | Error outcome -> outcome)
 ;;
 
