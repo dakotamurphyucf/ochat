@@ -37,9 +37,14 @@ let%test_unit "actor handoff persists actual manager state and resolution atomic
                  ~now_ms:0
                  ~validate_work:(fun _ -> Error "no pending work")
                  ~prepare_resolution:(fun ~resolved ~outcome:_ ~snapshot ->
-                   commit ~resolved ~snapshot
-                   |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
-                   |> Result.map ~f:(fun () -> ignore))
+                   Ok
+                     { Chat_response.Moderator_manager.persist =
+                         (fun () ->
+                           commit ~resolved ~snapshot
+                           |> Result.map_error ~f:(fun e ->
+                             e.Agent_protocol.Error.message))
+                     ; install = ignore
+                     })
                |> Result.map ~f:(fun _ -> ())
                |> Result.map_error ~f:handoff_error)
         in

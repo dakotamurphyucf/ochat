@@ -199,10 +199,14 @@ let%expect_test "idle moderator tools preserve authority, outcomes and scope lif
                            ~session_meta:`Null
                            ~now_ms:0
                            ~prepare_observation:(fun ~observed ~outcome:_ ~snapshot ->
-                             commit ~resolved:observed ~snapshot
-                             |> Result.map_error ~f:(fun error ->
-                               error.Agent_protocol.Error.message)
-                             |> Result.map ~f:(fun () -> fun () -> ()))
+                             Ok
+                               { M.persist =
+                                   (fun () ->
+                                     commit ~resolved:observed ~snapshot
+                                     |> Result.map_error ~f:(fun error ->
+                                       error.Agent_protocol.Error.message))
+                               ; install = ignore
+                               })
                        in
                        (match handled with
                         | Ok _ ->

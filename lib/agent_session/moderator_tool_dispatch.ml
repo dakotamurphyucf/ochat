@@ -165,8 +165,15 @@ let dispatch
                   "The tool arguments do not satisfy its input schema.");
           Error "invalid tool arguments")
         else (
-          let handle ?on_tool_call () =
+          let handle ?on_tool_call ?job_scope () =
+            let jobs = Option.map job_scope ~f:Script_job_service.moderator_transaction in
+            let validate_work work =
+              match job_scope with
+              | None -> validate_work work
+              | Some scope -> Script_job_service.validate_work scope work
+            in
             M.handle_invocation_entries
+              ?jobs
               ?on_tool_call
               manager
               ~invocation:dispatched
@@ -206,20 +213,27 @@ let dispatch
                       (fun () -> prepare_outcome outcome)
                   | _ -> Error "handler did not resolve"
                 in
-                let%map () = save resolved snapshot |> message in
-                observed := Some outcome;
-                fun () -> ())
+                Ok
+                  { M.persist = (fun () -> save resolved snapshot |> message)
+                  ; install = (fun () -> observed := Some outcome)
+                  })
             |> Result.map ~f:(fun _ -> ())
           in
           match script_tools with
           | None -> handle ()
           | Some tools ->
-            Script_tool_calls.with_invocation
+            Script_tool_calls.with_job_scope
               tools
-              ~prepared
-              ~capabilities
-              ~parent:dispatched
-              (fun on_tool_call -> handle ~on_tool_call ()))
+              ~owner:(P.Job.Invocation dispatched.context.id)
+              ~selected:(EC.capabilities prepared)
+              ~error:Fn.id
+              (fun job_scope ->
+                 Script_tool_calls.with_invocation
+                   tools
+                   ~prepared
+                   ~capabilities
+                   ~parent:dispatched
+                   (fun on_tool_call -> handle ~on_tool_call ?job_scope ())))
       in
       let result =
         try run () with

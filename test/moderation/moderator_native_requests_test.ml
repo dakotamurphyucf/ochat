@@ -122,7 +122,7 @@ let%expect_test
               saved := Some snapshot;
               match mode with
               | `Rejected_save -> Error "snapshot save rejected"
-              | _ -> Ok (fun () -> incr installs))
+              | _ -> Ok (M.memory_commit (fun () -> incr installs)))
         in
         assert (Result.is_error (S.with_context !leaked (fun () -> S.emit [])));
         let after = M.identity_snapshot manager |> ok in

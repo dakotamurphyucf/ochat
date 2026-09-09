@@ -33,7 +33,7 @@ let call_events calls =
   |> Stdlib.List.to_seq
 ;;
 
-let with_daemon ?validation_host ?settle ~sources ~calls f =
+let with_daemon ?validation_host ?settle ?(expect_moderator = false) ~sources ~calls f =
   Eio_main.run (fun env ->
     Mirage_crypto_rng_unix.use_default ();
     let root = temporary_root env in
@@ -84,6 +84,17 @@ let with_daemon ?validation_host ?settle ~sources ~calls f =
               ()
             |> protocol_ok
           in
+          List.iter
+            (Agent_session.Prompt_catalog.entries (Agent_server.Daemon.prompts daemon))
+            ~f:(fun entry ->
+              match entry.availability with
+              | Ready _ -> ()
+              | Disabled -> failwith "composition prompt is disabled"
+              | Unavailable diagnostics ->
+                raise_s
+                  [%sexp
+                    (diagnostics
+                     : Agent_session.Prompt_revision_builder.Diagnostic.t list)]);
           let client = connection daemon (principal ()) in
           initialize client;
           let session, _ = create_session ~start_immediately:true client in
@@ -157,7 +168,7 @@ let with_daemon ?validation_host ?settle ~sources ~calls f =
             (List.length
                (Agent_store.Session_store.list_sessions
                   (Agent_server.Daemon.store daemon)));
-          assert (Option.is_none final.moderator);
+          [%test_eq: bool] expect_moderator (Option.is_some final.moderator);
           (match settle with
            | None -> assert (List.is_empty final.jobs)
            | Some _ -> ());

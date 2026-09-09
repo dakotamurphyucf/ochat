@@ -12,6 +12,29 @@ type handlers =
   ; rollback_start : Id.t -> unit
   }
 
+type transaction =
+  { handlers : handlers
+  ; prepare : Id.t list -> (unit -> unit, string) result
+  }
+
+let dynamic_handlers current =
+  let active f =
+    match current () with
+    | None -> Error "background job transaction is not installed"
+    | Some transaction -> f transaction.handlers
+  in
+  { start_tool = (fun ~name ~input -> active (fun h -> h.start_tool ~name ~input))
+  ; start_script = (fun request -> active (fun h -> h.start_script request))
+  ; get = (fun id -> active (fun h -> h.get id))
+  ; cancel = (fun id -> active (fun h -> h.cancel id))
+  ; rollback_start =
+      (fun id ->
+        match current () with
+        | Some transaction -> transaction.handlers.rollback_start id
+        | None -> failwith "recorded job start lost its active transaction")
+  }
+;;
+
 let id = function
   | L.VString value ->
     Id.of_string value

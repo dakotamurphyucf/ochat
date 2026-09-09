@@ -389,7 +389,7 @@ let%expect_test "queued events retain actor ownership through checkpoint install
               ~event:Session_start
               ~authorize:(fun () -> Ok ())
               ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-              ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+              ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
             |> Result.ok_or_failwith
             |> ignore;
             let before = M.identity_snapshot manager |> Result.ok_or_failwith in
@@ -460,15 +460,22 @@ let%expect_test "queued events retain actor ownership through checkpoint install
                         | `Bad_tail -> { snapshot with queued_internal_events = [] }
                         | _ -> snapshot
                       in
-                      commit ~snapshot ~requests
-                      |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
-                      |> Result.map ~f:(fun () ->
-                        (* The durable checkpoint is installed; the live manager has
+                      Ok
+                        { M.persist =
+                            (fun () ->
+                              commit ~snapshot ~requests
+                              |> Result.map_error ~f:(fun e ->
+                                e.Agent_protocol.Error.message)
+                              |> Result.map ~f:(fun () ->
+                                (* The durable checkpoint is installed; the live manager has
                          not installed it yet. Ownership must cover this gap. *)
-                        assert (Result.is_error (A.change_moderator actor None));
-                        assert (
-                          Option.is_none (A.claim_idle_moderator actor |> protocol_ok));
-                        fun () -> ()))
+                                assert (Result.is_error (A.change_moderator actor None));
+                                assert (
+                                  Option.is_none
+                                    (A.claim_idle_moderator actor |> protocol_ok));
+                                ()))
+                        ; install = ignore
+                        })
                   |> Result.map ~f:ignore
                   |> Result.map_error ~f:handoff_error)
            in
@@ -661,7 +668,7 @@ let%expect_test
           ~event:Session_start
           ~authorize:(fun () -> Ok ())
           ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-          ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+          ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
         |> Result.ok_or_failwith
         |> ignore;
         let before = M.identity_snapshot manager |> Result.ok_or_failwith in
@@ -703,15 +710,20 @@ let%expect_test
                | true -> Error "effect finished but result failed"
                | false -> Ok (Tool_ok `Null))
              ~prepare_event:(fun ~outcome:_ ~snapshot ->
-               commit
-                 ~snapshot
-                 ~requests:
-                   { request_turn = false
-                   ; request_compaction = false
-                   ; end_session = None
-                   }
-               |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
-               |> Result.map ~f:(fun () -> ignore))
+               Ok
+                 { M.persist =
+                     (fun () ->
+                       commit
+                         ~snapshot
+                         ~requests:
+                           { request_turn = false
+                           ; request_compaction = false
+                           ; end_session = None
+                           }
+                       |> Result.map_error ~f:(fun error ->
+                         error.Agent_protocol.Error.message))
+                 ; install = ignore
+                 })
            |> Result.map ~f:ignore
            |> Result.map_error ~f:handoff_error)
        in
@@ -909,7 +921,7 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
             ~event:Session_start
             ~authorize:(fun () -> Ok ())
             ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
           |> Result.ok_or_failwith
           |> ignore;
           let before = M.identity_snapshot manager |> Result.ok_or_failwith in
@@ -1009,16 +1021,20 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
                     | Ok { status = Resolved (Complete value); _ } -> Ok (Tool_ok value)
                     | _ -> Error "native call did not complete")
                   ~prepare_event:(fun ~outcome:_ ~snapshot ->
-                    commit
-                      ~snapshot
-                      ~requests:
-                        { request_turn = false
-                        ; request_compaction = false
-                        ; end_session = None
-                        }
-                    |> Result.map_error ~f:(fun error ->
-                      error.Agent_protocol.Error.message)
-                    |> Result.map ~f:(fun () -> ignore))
+                    Ok
+                      { M.persist =
+                          (fun () ->
+                            commit
+                              ~snapshot
+                              ~requests:
+                                { request_turn = false
+                                ; request_compaction = false
+                                ; end_session = None
+                                }
+                            |> Result.map_error ~f:(fun error ->
+                              error.Agent_protocol.Error.message))
+                      ; install = ignore
+                      })
                 |> Result.map ~f:ignore
                 |> Result.map_error ~f:handoff_error)
          in
@@ -1155,7 +1171,7 @@ let%expect_test
             ~event:Session_start
             ~authorize:(fun () -> Ok ())
             ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
           |> Result.ok_or_failwith
           |> ignore;
           let before = M.identity_snapshot manager |> Result.ok_or_failwith in

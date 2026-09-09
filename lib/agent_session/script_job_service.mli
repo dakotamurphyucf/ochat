@@ -57,6 +57,13 @@ val install
   -> Chatml_host_runtime.runtime_config
   -> Chatml_host_runtime.runtime_config
 
+(** For a moderator whose save happens inside the callback. Prepare performs
+    liveness/selection checks before that save; its acknowledgement marks committed
+    only after success. Final scope cleanup performs no late budget/registry check
+    after acknowledgement. Manager-owned codecs use the manager's live runner
+    control rather than storing it beyond its lexical lifetime here. *)
+val moderator_transaction : scope -> Chat_response.Background_job_operations.transaction
+
 (** Validate/select exact surviving starts after all output/disclosure checks.
     Returns ordinary effects for the moderator's normal transactional decoder. *)
 val select

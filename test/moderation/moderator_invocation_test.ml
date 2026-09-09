@@ -122,7 +122,8 @@ let call
     ~session_meta:`Null
     ~now_ms:0
     ~validate_work
-    ~prepare_resolution
+    ~prepare_resolution:(fun ~resolved ~outcome ~snapshot ->
+      Result.map (prepare_resolution ~resolved ~outcome ~snapshot) ~f:M.memory_commit)
 ;;
 
 let state manager = (M.identity_snapshot manager |> ok).current_state
@@ -199,7 +200,7 @@ let%expect_test
         | `Commit ->
           (* Exercise the persisted snapshot codec before restoring another manager. *)
           saved := Binable.of_string (module S) (Binable.to_string (module S) snapshot);
-          Ok (fun () -> incr installs)
+          Ok (M.memory_commit (fun () -> incr installs))
         | `Reject -> Error "event save rejected"
         | `Raise -> raise Exit
         | `Cancel ->
@@ -344,7 +345,7 @@ let%expect_test
         ~prepare_event:(fun ~outcome:_ ~snapshot ->
           incr preparations;
           saved := snapshot;
-          Ok ignore)
+          Ok (M.memory_commit ignore))
     in
     expect
       "invalid_internal_event"
@@ -411,7 +412,7 @@ let%expect_test
         ~event:Session_start
         ~authorize:(fun () -> Ok ())
         ~on_tool_call:(fun ~name:_ ~args:_ -> failwith "startup must not call tools")
-        ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+        ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
       |> ok
       |> ignore;
       let before = M.identity_snapshot manager |> ok in
@@ -449,7 +450,7 @@ let%expect_test
         match mode with
         | `Commit ->
           saved := Binable.of_string (module S) (Binable.to_string (module S) snapshot);
-          Ok (fun () -> incr installs)
+          Ok (M.memory_commit (fun () -> incr installs))
         | `Reject -> Error "queue save rejected"
         | `Cancel ->
           Eio.Promise.resolve enter ();
@@ -517,7 +518,7 @@ let%expect_test
           ~on_tool_call
           ~prepare_event:(fun ~outcome:_ ~snapshot ->
             saved := snapshot;
-            Ok (fun () -> incr commits_after_restore))
+            Ok (M.memory_commit (fun () -> incr commits_after_restore)))
       in
       (match mode with
        | `Commit ->
@@ -613,7 +614,7 @@ let%expect_test "observation handlers can retain coalesced runtime follow-up int
              | _ -> assert false);
             assert snapshot.halted;
             receipt := Some observed;
-            Ok ignore)
+            Ok (M.memory_commit ignore))
         |> ok
       in
       let observed = Option.value_exn !receipt in

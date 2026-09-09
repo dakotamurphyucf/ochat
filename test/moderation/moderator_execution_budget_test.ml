@@ -160,7 +160,8 @@ let%expect_test "event projection and state copying fail before tools or persist
           ~on_tool_call:(fun ~name:_ ~args:_ ->
             incr native_calls;
             Ok (Tool_ok `Null))
-          ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (fun () -> incr installs))
+          ~prepare_event:(fun ~outcome:_ ~snapshot:_ ->
+            Ok (M.memory_commit (fun () -> incr installs)))
       in
       print_s
         [%sexp
@@ -253,7 +254,7 @@ let%expect_test "failed pure continuations roll back and later events get fresh 
           Ok (Tool_ok `Null))
         ~prepare_event:(fun ~outcome:_ ~snapshot ->
           saved := snapshot;
-          Ok (fun () -> incr installs))
+          Ok (M.memory_commit (fun () -> incr installs)))
     in
     let failure = code (deliver Session_start) in
     print_s
@@ -306,7 +307,8 @@ let%expect_test "pure event evaluation observes Eio cancellation and releases th
         ~on_tool_call:(fun ~name:_ ~args:_ ->
           Eio.Promise.resolve enter ();
           Ok (Tool_ok `Null))
-        ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (fun () -> incr commits))
+        ~prepare_event:(fun ~outcome:_ ~snapshot:_ ->
+          Ok (M.memory_commit (fun () -> incr commits)))
     in
     let cancelled =
       try

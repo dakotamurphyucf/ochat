@@ -676,9 +676,14 @@ let%test_unit
                          in
                          let save () = commit ~resolved:observed ~snapshot in
                          escaped := Some save;
-                         save ()
-                         |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
-                         |> Result.map ~f:(fun () -> fun () -> ()))
+                         Ok
+                           { M.persist =
+                               (fun () ->
+                                 save ()
+                                 |> Result.map_error ~f:(fun e ->
+                                   e.Agent_protocol.Error.message))
+                           ; install = ignore
+                           })
                      |> Result.map_error ~f:handoff_error
                    in
                    match result, mode with

@@ -895,7 +895,7 @@ let%expect_test
             ~event:Session_start
             ~authorize:(fun () -> Ok ())
             ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
           |> Result.ok_or_failwith
           |> ignore;
           let snapshot =

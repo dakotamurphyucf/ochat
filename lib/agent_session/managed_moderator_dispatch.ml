@@ -97,136 +97,162 @@ let create
              in
              let%bind caller = N.borrow () |> message in
              N.with_managed_scope admission (fun borrowed ->
-               Calls.with_managed_invocation
+               Calls.with_job_scope
                  tools
-                 ~execution:admission
-                 ~borrowed
-                 (fun on_tool_call ->
-                    M.handle_invocation_entries
-                      ~managed:admission
-                      ~execution_context:(N.borrowed_execution_context caller)
-                      ~on_tool_call
-                      manager
-                      ~invocation:dispatched
-                      ~history:(history ())
-                      ~available_tools
-                      ~session_meta
-                      ~now_ms:
-                        (Agent_protocol.Timestamp.to_time_ns (now ())
-                         |> Time_ns.to_int_ns_since_epoch
-                         |> fun n -> n / 1_000_000)
-                      ~validate_work:(fun _ ->
-                        Error "background completion is not installed")
-                      ~on_failure:(fun kind ->
-                        (* Preserve a more specific host admission/disclosure failure. *)
-                        match !failure with
-                        | I.Fail { code = "invocation.handler_failed"; _ } ->
-                          failure := Moderator_tool_dispatch.handler_failure kind
-                        | _ -> ())
-                      ~authorize:(fun () ->
-                        let%bind () = check_live () in
-                        let%bind () =
-                          checked
-                            (fail
-                               "invocation.permission_denied"
-                               "Tool execution was not authorized.")
-                            (fun () ->
-                               Calls.authorize
-                                 tools
+                 ~owner:(Agent_protocol.Job.Invocation dispatched.context.id)
+                 ~selected:(EC.capabilities prepared)
+                 ~error:Agent_protocol.Error.invalid_request
+                 (fun job_scope ->
+                    let jobs =
+                      Option.map job_scope ~f:Script_job_service.moderator_transaction
+                    in
+                    let validate_work work =
+                      match job_scope with
+                      | None -> Error "background completion is not installed"
+                      | Some scope -> Script_job_service.validate_work scope work
+                    in
+                    Calls.with_managed_invocation
+                      tools
+                      ~execution:admission
+                      ~borrowed
+                      (fun on_tool_call ->
+                         M.handle_invocation_entries
+                           ?jobs
+                           ~managed:admission
+                           ~execution_context:(N.borrowed_execution_context caller)
+                           ~on_tool_call
+                           manager
+                           ~invocation:dispatched
+                           ~history:(history ())
+                           ~available_tools
+                           ~session_meta
+                           ~now_ms:
+                             (Agent_protocol.Timestamp.to_time_ns (now ())
+                              |> Time_ns.to_int_ns_since_epoch
+                              |> fun n -> n / 1_000_000)
+                           ~validate_work
+                           ~on_failure:(fun kind ->
+                             (* Preserve a more specific host admission/disclosure failure. *)
+                             match !failure with
+                             | I.Fail { code = "invocation.handler_failed"; _ } ->
+                               failure := Moderator_tool_dispatch.handler_failure kind
+                             | _ -> ())
+                           ~authorize:(fun () ->
+                             let%bind () = check_live () in
+                             let%bind () =
+                               checked
+                                 (fail
+                                    "invocation.permission_denied"
+                                    "Tool execution was not authorized.")
+                                 (fun () ->
+                                    Calls.authorize
+                                      tools
+                                      dispatched
+                                      (Managed.binding admission)
+                                    |> message)
+                             in
+                             let%bind () = check_live () in
+                             Result.map (admit ()) ~f:ignore)
+                           ~prepare_resolution:(fun ~resolved ~outcome ~snapshot ->
+                             let%bind raw =
+                               match resolved.I.status with
+                               | Resolved outcome -> Ok outcome
+                               | _ -> Error "moderator did not resolve"
+                             in
+                             let%bind disclosed =
+                               checked
+                                 (fail
+                                    "invocation.disclosure_rejected"
+                                    "The moderator result could not be disclosed.")
+                                 (fun () ->
+                                    prepare_output
+                                      (Openai.Responses.Tool_output.Output.Text
+                                         (Jsonaf.to_string (I.outcome_to_json raw)))
+                                    |> message)
+                             in
+                             let%bind disclosed =
+                               checked
+                                 (fail
+                                    "invocation.invalid_output"
+                                    "The moderator returned an invalid disclosed outcome.")
+                                 (fun () ->
+                                    let%bind outcome =
+                                      match disclosed with
+                                      | `String text ->
+                                        I.outcome_of_json (Jsonaf.of_string text)
+                                        |> message
+                                      | _ -> Error "expected disclosed outcome text"
+                                    in
+                                    let%map () =
+                                      match outcome with
+                                      | Complete value | Pending (_, value) ->
+                                        let%bind () =
+                                          match outcome with
+                                          | Pending (work, _) -> validate_work work
+                                          | _ -> Ok ()
+                                        in
+                                        Chatmd_shell_spec.Tool_schema.validate
+                                          (EC.output_schema prepared)
+                                          value
+                                        |> Result.map_error ~f:(fun _ ->
+                                          "disclosed output schema mismatch")
+                                      | Fail _ | Cancelled _ -> Ok ()
+                                    in
+                                    outcome)
+                             in
+                             let%bind resolved =
+                               I.resolve
                                  dispatched
-                                 (Managed.binding admission)
-                               |> message)
-                        in
-                        let%bind () = check_live () in
-                        Result.map (admit ()) ~f:ignore)
-                      ~prepare_resolution:(fun ~resolved ~outcome ~snapshot ->
-                        let%bind raw =
-                          match resolved.I.status with
-                          | Resolved outcome -> Ok outcome
-                          | _ -> Error "moderator did not resolve"
-                        in
-                        let%bind disclosed =
-                          checked
-                            (fail
-                               "invocation.disclosure_rejected"
-                               "The moderator result could not be disclosed.")
-                            (fun () ->
-                               prepare_output
-                                 (Openai.Responses.Tool_output.Output.Text
-                                    (Jsonaf.to_string (I.outcome_to_json raw)))
-                               |> message)
-                        in
-                        let%bind disclosed =
-                          checked
-                            (fail
-                               "invocation.invalid_output"
-                               "The moderator returned an invalid disclosed outcome.")
-                            (fun () ->
-                               let%bind outcome =
-                                 match disclosed with
-                                 | `String text ->
-                                   I.outcome_of_json (Jsonaf.of_string text) |> message
-                                 | _ -> Error "expected disclosed outcome text"
-                               in
-                               let%map () =
-                                 match outcome with
-                                 | Complete value ->
-                                   Chatmd_shell_spec.Tool_schema.validate
-                                     (EC.output_schema prepared)
-                                     value
-                                   |> Result.map_error ~f:(fun _ ->
-                                     "disclosed output schema mismatch")
-                                 | Fail _ | Cancelled _ -> Ok ()
-                                 | Pending _ ->
-                                   Error
-                                     "background ownership validation is not installed"
-                               in
-                               outcome)
-                        in
-                        let%bind resolved =
-                          I.resolve
-                            dispatched
-                            ~session_id:dispatched.context.session_id
-                            ~generation:dispatched.context.generation
-                            disclosed
-                          |> message
-                        in
-                        let%bind resolved =
-                          match Calls.durable_requests tools with
-                          | false -> Ok resolved
-                          | true ->
-                            let requests =
-                              outcome.Chat_response.Moderation.Outcome.runtime_requests
-                            in
-                            I.record_handler_intent
-                              resolved
-                              ~requests:
-                                { request_turn =
-                                    Chat_response.Runtime_semantics.request_turn requests
-                                ; request_compaction =
-                                    Chat_response.Runtime_semantics.request_compaction
-                                      requests
-                                ; end_session =
-                                    Chat_response.Runtime_semantics.should_end_session
-                                      requests
-                                }
-                            |> message
-                        in
-                        let%map () =
-                          checked
-                            (fail
-                               "invocation.commit_failed"
-                               "The moderator result could not be committed.")
-                            (fun () -> save resolved snapshot |> message)
-                        in
-                        fun () ->
-                          requests
-                          := match Calls.durable_requests tools with
-                             | true -> []
-                             | false ->
-                               outcome.Chat_response.Moderation.Outcome.runtime_requests)
-                    |> Result.map ~f:ignore
-                    |> Result.map_error ~f:Agent_protocol.Error.invalid_request))
+                                 ~session_id:dispatched.context.session_id
+                                 ~generation:dispatched.context.generation
+                                 disclosed
+                               |> message
+                             in
+                             let%bind resolved =
+                               match Calls.durable_requests tools with
+                               | false -> Ok resolved
+                               | true ->
+                                 let requests =
+                                   outcome
+                                     .Chat_response.Moderation.Outcome.runtime_requests
+                                 in
+                                 I.record_handler_intent
+                                   resolved
+                                   ~requests:
+                                     { request_turn =
+                                         Chat_response.Runtime_semantics.request_turn
+                                           requests
+                                     ; request_compaction =
+                                         Chat_response.Runtime_semantics
+                                         .request_compaction
+                                           requests
+                                     ; end_session =
+                                         Chat_response.Runtime_semantics
+                                         .should_end_session
+                                           requests
+                                     }
+                                 |> message
+                             in
+                             Ok
+                               { M.persist =
+                                   (fun () ->
+                                     checked
+                                       (fail
+                                          "invocation.commit_failed"
+                                          "The moderator result could not be committed.")
+                                       (fun () -> save resolved snapshot |> message))
+                               ; install =
+                                   (fun () ->
+                                     requests
+                                     := match Calls.durable_requests tools with
+                                        | true -> []
+                                        | false ->
+                                          outcome
+                                            .Chat_response.Moderation.Outcome
+                                             .runtime_requests)
+                               })
+                         |> Result.map ~f:ignore
+                         |> Result.map_error ~f:Agent_protocol.Error.invalid_request)))
              |> message
            in
            let result =

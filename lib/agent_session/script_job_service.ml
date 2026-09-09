@@ -26,7 +26,13 @@ type scope =
   ; active : bool Atomic.t
   ; mutable issued : P.Id.Job.t list
   ; mutable control : Chatml.Chatml_lang.execution_control option
+  ; mutable commit_state : commit_state
   }
+
+and commit_state =
+  | Open
+  | Prepared
+  | Committed
 
 let create ~env ~policy ~current_capabilities ~host =
   { env; policy; current_capabilities; host }
@@ -60,9 +66,9 @@ let view (job : P.Job.t) =
 ;;
 
 let check scope =
-  match Atomic.get scope.active with
-  | false -> Error "background script scope has ended"
-  | true ->
+  match Atomic.get scope.active, scope.commit_state with
+  | false, _ | true, (Prepared | Committed) -> Error "background script scope has ended"
+  | true, Open ->
     let open Result.Let_syntax in
     let names =
       List.map (C.references scope.selected) ~f:(fun reference -> reference.C.name)
@@ -85,7 +91,14 @@ let abort_all scope = List.iter scope.issued ~f:(abort scope)
 
 let with_scope service ~owner ~selected ~error f =
   let scope =
-    { service; owner; selected; active = Atomic.make true; issued = []; control = None }
+    { service
+    ; owner
+    ; selected
+    ; active = Atomic.make true
+    ; issued = []
+    ; control = None
+    ; commit_state = Open
+    }
   in
   Exn.protect
     ~finally:(fun () -> Atomic.set scope.active false)
@@ -97,9 +110,15 @@ let with_scope service ~owner ~selected ~error f =
             ~f:(fun () ->
               let open Result.Let_syntax in
               let%bind value = f scope in
-              Eio.Fiber.yield ();
-              Option.iter scope.control ~f:(fun control -> control.checkpoint ());
-              let%map () = check scope |> Result.map_error ~f:error in
+              let%map () =
+                match scope.commit_state with
+                | Committed -> Ok ()
+                | Prepared -> Error (error "background commit was not acknowledged")
+                | Open ->
+                  Eio.Fiber.yield ();
+                  Option.iter scope.control ~f:(fun control -> control.checkpoint ());
+                  check scope |> Result.map_error ~f:error
+              in
               value)
         with
         | exn ->
@@ -123,8 +142,7 @@ let stage scope request =
     job.id)
 ;;
 
-let install ?control scope config =
-  scope.control <- control;
+let handlers scope =
   let open Result.Let_syntax in
   let accessible_job id =
     let%bind () = check scope in
@@ -194,7 +212,28 @@ let install ?control scope config =
     ; rollback_start = abort scope
     }
   in
-  Ops.install ?control ~handlers config
+  handlers
+;;
+
+let install ?control scope config =
+  scope.control <- control;
+  Ops.install ?control ~handlers:(handlers scope) config
+;;
+
+let moderator_transaction scope : Ops.transaction =
+  { handlers = handlers scope
+  ; prepare =
+      (fun ids ->
+        let open Result.Let_syntax in
+        let%bind () = check scope in
+        let%bind () = scope.service.host.select scope.owner ids |> message in
+        Eio.Fiber.yield ();
+        let%map () = check scope in
+        scope.commit_state <- Prepared;
+        fun () ->
+          scope.commit_state <- Committed;
+          scope.issued <- [])
+  }
 ;;
 
 let select scope effects =

@@ -45,88 +45,115 @@ let run
     let%bind claimed =
       claim
         ~snapshot:(fun () -> M.identity_snapshot manager |> Result.map_error ~f:failed)
-        (fun ~executing ~event:selected ~execute ~commit ->
-           let with_tools f =
+        (fun ~(executing : P.Moderator_execution.t) ~event:selected ~execute ~commit ->
+           let with_jobs f =
              match script_tools with
-             | Some script_tools ->
-               Script_tool_calls.with_event script_tools ~definition ~execute ~executing f
-             | None ->
-               f (fun ~name:_ ~args:_ ->
-                 Ok
-                   (Chat_response.Moderation.Capabilities.Tool_error
-                      "invocation.unavailable"))
+             | None -> f None
+             | Some tools ->
+               Script_tool_calls.with_job_scope
+                 tools
+                 ~owner:(P.Job.Moderator_event executing.context.id)
+                 ~selected:
+                   (Chat_response.Extension_compiler.definition_capabilities definition)
+                 ~error:failed
+                 f
            in
-           with_tools (fun on_tool_call ->
-             let session_id = P.Id.Session.to_string executing.context.session_id in
-             let now_ms =
-               P.Timestamp.to_time_ns (now ())
-               |> Time_ns.to_int_ns_since_epoch
-               |> fun n -> n / 1_000_000
+           with_jobs (fun job_scope ->
+             let jobs =
+               Option.map job_scope ~f:Script_job_service.moderator_transaction
              in
-             let history = history () in
-             let authorize ~event =
-               match
-                 Sexp.equal
-                   (Session.Snapshot.sexp_of_t selected)
-                   (Session.Snapshot.sexp_of_t event)
-               with
-               | true -> Ok ()
-               | false -> Error "event no longer matches its actor claim"
+             let with_tools f =
+               match script_tools with
+               | Some script_tools ->
+                 Script_tool_calls.with_event
+                   script_tools
+                   ~definition
+                   ~execute
+                   ~executing
+                   f
+               | None ->
+                 f (fun ~name:_ ~args:_ ->
+                   Ok
+                     (Chat_response.Moderation.Capabilities.Tool_error
+                        "invocation.unavailable"))
              in
-             let prepare_event
-                   ~outcome:(prepared : Chat_response.Moderation.Outcome.t)
-                   ~snapshot
-               =
-               let requests : P.Invocation.follow_up =
-                 { request_turn =
-                     Chat_response.Runtime_semantics.request_turn
-                       prepared.runtime_requests
-                 ; request_compaction =
-                     Chat_response.Runtime_semantics.request_compaction
-                       prepared.runtime_requests
-                 ; end_session =
-                     Chat_response.Runtime_semantics.should_end_session
-                       prepared.runtime_requests
-                 }
+             with_tools (fun on_tool_call ->
+               let session_id = P.Id.Session.to_string executing.context.session_id in
+               let now_ms =
+                 P.Timestamp.to_time_ns (now ())
+                 |> Time_ns.to_int_ns_since_epoch
+                 |> fun n -> n / 1_000_000
                in
-               commit ~snapshot ~requests
-               |> Result.map_error ~f:(fun error -> error.P.Error.message)
-               |> Result.map ~f:(fun () -> fun () -> outcome := Some prepared)
-             in
-             (match event with
-              | Queued ->
-                M.handle_next_event_entries_transactional
-                  manager
-                  ~session_id
-                  ~now_ms
-                  ~history
-                  ~available_tools
-                  ~session_meta
-                  ~authorize
-                  ~on_tool_call
-                  ~prepare_event
-                |> Result.map ~f:ignore
-              | Ordinary event ->
-                let open Result.Let_syntax in
-                let%bind captured =
-                  Chat_response.Moderation.Event.to_value event
-                  |> Session.Snapshot.of_value
-                in
-                M.handle_event_entries_transactional
-                  manager
-                  ~session_id
-                  ~now_ms
-                  ~history
-                  ~available_tools
-                  ~session_meta
-                  ~event
-                  ~authorize:(fun () -> authorize ~event:captured)
-                  ~on_tool_call
-                  ~prepare_event
-                |> Result.map ~f:ignore)
-             |> Result.map_error ~f:(fun message ->
-               Chatml.Chatml_debug_log.emitf "event_failed: %s" message;
-               failed "moderator event failed")))
+               let history = history () in
+               let authorize ~event =
+                 match
+                   Sexp.equal
+                     (Session.Snapshot.sexp_of_t selected)
+                     (Session.Snapshot.sexp_of_t event)
+                 with
+                 | true -> Ok ()
+                 | false -> Error "event no longer matches its actor claim"
+               in
+               let prepare_event
+                     ~outcome:(prepared : Chat_response.Moderation.Outcome.t)
+                     ~snapshot
+                 =
+                 let requests : P.Invocation.follow_up =
+                   { request_turn =
+                       Chat_response.Runtime_semantics.request_turn
+                         prepared.runtime_requests
+                   ; request_compaction =
+                       Chat_response.Runtime_semantics.request_compaction
+                         prepared.runtime_requests
+                   ; end_session =
+                       Chat_response.Runtime_semantics.should_end_session
+                         prepared.runtime_requests
+                   }
+                 in
+                 Ok
+                   { M.persist =
+                       (fun () ->
+                         commit ~snapshot ~requests
+                         |> Result.map_error ~f:(fun error -> error.P.Error.message))
+                   ; install = (fun () -> outcome := Some prepared)
+                   }
+               in
+               (match event with
+                | Queued ->
+                  M.handle_next_event_entries_transactional
+                    ?jobs
+                    manager
+                    ~session_id
+                    ~now_ms
+                    ~history
+                    ~available_tools
+                    ~session_meta
+                    ~authorize
+                    ~on_tool_call
+                    ~prepare_event
+                  |> Result.map ~f:ignore
+                | Ordinary event ->
+                  let open Result.Let_syntax in
+                  let%bind captured =
+                    Chat_response.Moderation.Event.to_value event
+                    |> Session.Snapshot.of_value
+                  in
+                  M.handle_event_entries_transactional
+                    ?jobs
+                    manager
+                    ~session_id
+                    ~now_ms
+                    ~history
+                    ~available_tools
+                    ~session_meta
+                    ~event
+                    ~authorize:(fun () -> authorize ~event:captured)
+                    ~on_tool_call
+                    ~prepare_event
+                  |> Result.map ~f:ignore)
+               |> Result.map_error ~f:(fun message ->
+                 Chatml.Chatml_debug_log.emitf "event_failed: %s" message;
+                 failed "moderator event failed"))))
     in
     (match claimed, !outcome with
      | false, None -> Ok None

@@ -140,7 +140,15 @@ type t =
   ; mutable subscriptions : subscription list
   ; mutable suspended_phase : Moderation.Phase.t option
   ; invocation_tool_call : tool_call option ref
+  ; job_transaction : Background_job_operations.transaction option ref
   }
+
+type prepared_commit =
+  { persist : unit -> (unit, string) result
+  ; install : unit -> unit
+  }
+
+let memory_commit install = { persist = (fun () -> Ok ()); install }
 
 type pending_ui_request = Runtime.pending_ui_request =
   | Ask_text of { prompt : string }
@@ -324,6 +332,7 @@ let create
   : (t, string) result
   =
   let invocation_tool_call = ref None in
+  let job_transaction = ref None in
   let capabilities =
     { capabilities with
       on_tool_call =
@@ -383,6 +392,16 @@ let create
   let open Result.Let_syntax in
   let%bind execution = execution_runner ?env ?policy:execution_policy artifact in
   let control = Option.map execution ~f:Chatml_execution.runner_control in
+  let config =
+    match artifact.extension with
+    | None -> config
+    | Some _ ->
+      Background_job_operations.install
+        ?control
+        ~handlers:
+          (Background_job_operations.dynamic_handlers (fun () -> !job_transaction))
+        config
+  in
   let%bind runtime =
     run_controlled execution (fun () ->
       Runtime.instantiate_session ?control config artifact.compiled ~entrypoints)
@@ -434,6 +453,7 @@ let create
     ; subscriptions = []
     ; suspended_phase = None
     ; invocation_tool_call
+    ; job_transaction
     }
 ;;
 
@@ -1087,7 +1107,29 @@ let identity_snapshot_of_state ?control t ~current_state ~queued_events ~halted 
     }
 ;;
 
+let with_job_transaction t jobs f =
+  let previous = !(t.job_transaction) in
+  t.job_transaction := jobs;
+  Exn.protect ~finally:(fun () -> t.job_transaction := previous) ~f
+;;
+
+let persist_prepared ?control jobs ids (prepared : prepared_commit) =
+  let open Result.Let_syntax in
+  let%bind acknowledge_jobs =
+    match jobs, ids with
+    | None, [] -> Ok ignore
+    | None, _ :: _ -> Error "background starts require an owning transaction"
+    | Some transaction, _ -> transaction.Background_job_operations.prepare ids
+  in
+  Option.iter control ~f:(fun control -> control.Chatml.Chatml_lang.checkpoint ());
+  let%map () = prepared.persist () in
+  fun () ->
+    prepared.install ();
+    acknowledge_jobs ()
+;;
+
 let handle_event_entries_transactional_unlocked
+      ?jobs
       t
       ~session_id
       ~now_ms
@@ -1138,7 +1180,10 @@ let handle_event_entries_transactional_unlocked
     let%bind () = authorize () in
     let outcome = ref Moderation.Outcome.empty in
     let prepare (transaction : Runtime.transaction) =
-      let%bind decoded = decode_effects t transaction.local_effects in
+      let%bind starts, local_effects =
+        Background_job_operations.split_starts transaction.local_effects
+      in
+      let%bind decoded = decode_effects t local_effects in
       let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
       let%bind overlay, install_overlay =
         prepare_identity_overlay t ~phase prepared.overlay_ops
@@ -1152,7 +1197,8 @@ let handle_event_entries_transactional_unlocked
           ~halted:transaction.halted
           ~overlay
       in
-      let%map install = prepare_event ~outcome:prepared ~snapshot in
+      let%bind commit = prepare_event ~outcome:prepared ~snapshot in
+      let%map install = persist_prepared ?control jobs starts commit in
       fun () ->
         install_overlay ();
         install ();
@@ -1167,38 +1213,42 @@ let handle_event_entries_transactional_unlocked
       Exn.protect
         ~finally:(fun () -> t.invocation_tool_call := previous)
         ~f:(fun () ->
-          let context = Moderation.Context.to_value ?control context in
-          let copy value = Result.bind (checked value) ~f:Value_codec.Snapshot.to_value in
-          let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
-          match consume_queued with
-          | false ->
-            Runtime.handle_event
-              t.runtime
-              ~context
-              ~event
-              ~copy_state:copy
-              ~validate_state
-              ~prepare_transaction:prepare
-              ~validate_suspension:(fun () ->
-                Error "event.suspended: cannot retain a UI continuation")
-          | true ->
-            let%bind consumed =
-              Runtime.handle_next_queued_event
+          with_job_transaction t jobs (fun () ->
+            let context = Moderation.Context.to_value ?control context in
+            let copy value =
+              Result.bind (checked value) ~f:Value_codec.Snapshot.to_value
+            in
+            let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
+            match consume_queued with
+            | false ->
+              Runtime.handle_event
                 t.runtime
                 ~context
+                ~event
                 ~copy_state:copy
-                ~copy_event:copy
                 ~validate_state
                 ~prepare_transaction:prepare
-            in
-            (match consumed with
-             | Some () -> Ok ()
-             | None -> Error "event.queue_changed: selected event no longer queued"))
+                ~validate_suspension:(fun () ->
+                  Error "event.suspended: cannot retain a UI continuation")
+            | true ->
+              let%bind consumed =
+                Runtime.handle_next_queued_event
+                  t.runtime
+                  ~context
+                  ~copy_state:copy
+                  ~copy_event:copy
+                  ~validate_state
+                  ~prepare_transaction:prepare
+              in
+              (match consumed with
+               | Some () -> Ok ()
+               | None -> Error "event.queue_changed: selected event no longer queued")))
     in
     !outcome)
 ;;
 
 let handle_event_entries_transactional
+      ?jobs
       t
       ~session_id
       ~now_ms
@@ -1212,6 +1262,7 @@ let handle_event_entries_transactional
   =
   with_execution_lock t (fun () ->
     handle_event_entries_transactional_unlocked
+      ?jobs
       t
       ~session_id
       ~now_ms
@@ -1226,6 +1277,7 @@ let handle_event_entries_transactional
 ;;
 
 let handle_next_event_entries_transactional
+      ?jobs
       t
       ~session_id
       ~now_ms
@@ -1243,6 +1295,7 @@ let handle_next_event_entries_transactional
     | Some event ->
       let%map outcome =
         handle_event_entries_transactional_unlocked
+          ?jobs
           t
           ~session_id
           ~now_ms
@@ -1261,6 +1314,7 @@ let handle_next_event_entries_transactional
 ;;
 
 let handle_invocation_entries
+      ?jobs
       ?(authorize = fun () -> Ok ())
       ?managed
       ?execution_context
@@ -1339,7 +1393,10 @@ let handle_invocation_entries
       in
       let outcome = ref Moderation.Outcome.empty in
       let prepare_commit ~resolved ~(transaction : Runtime.transaction) =
-        let%bind decoded = Runtime.decode_local_effects transaction.local_effects in
+        let%bind starts, local_effects =
+          Background_job_operations.split_starts transaction.local_effects
+        in
+        let%bind decoded = Runtime.decode_local_effects local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
         let%bind overlay, install_overlay =
           prepare_identity_overlay
@@ -1356,9 +1413,8 @@ let handle_invocation_entries
             ~halted:transaction.halted
             ~overlay
         in
-        let%map install_resolution =
-          prepare_resolution ~resolved ~outcome:prepared ~snapshot
-        in
+        let%bind commit = prepare_resolution ~resolved ~outcome:prepared ~snapshot in
+        let%map install_resolution = persist_prepared ?control jobs starts commit in
         fun () ->
           install_overlay ();
           install_resolution ();
@@ -1373,19 +1429,21 @@ let handle_invocation_entries
         t.invocation_tool_call := on_tool_call;
         Exn.protect
           ~f:(fun () ->
-            Moderator_invocation.run
-              ?on_failure
-              ?control
-              scope
-              ~runtime:t.runtime
-              ~context:(Moderation.Context.to_value ?control context)
-              ~prepare_commit)
+            with_job_transaction t jobs (fun () ->
+              Moderator_invocation.run
+                ?on_failure
+                ?control
+                scope
+                ~runtime:t.runtime
+                ~context:(Moderation.Context.to_value ?control context)
+                ~prepare_commit))
           ~finally:(fun () -> t.invocation_tool_call := previous)
       in
       resolved, !outcome))
 ;;
 
 let handle_observation_entries
+      ?jobs
       ?on_tool_call
       ?(retain_follow_up = false)
       t
@@ -1468,7 +1526,10 @@ let handle_observation_entries
       in
       let outcome = ref Moderation.Outcome.empty in
       let prepare (transaction : Runtime.transaction) =
-        let%bind decoded = decode_effects t transaction.local_effects in
+        let%bind starts, local_effects =
+          Background_job_operations.split_starts transaction.local_effects
+        in
+        let%bind decoded = decode_effects t local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
         let%bind overlay, install_overlay =
           prepare_identity_overlay
@@ -1507,7 +1568,8 @@ let handle_observation_entries
           I.complete_observation ?follow_up invocation
           |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
         in
-        let%map install = prepare_observation ~observed ~outcome:prepared ~snapshot in
+        let%bind commit = prepare_observation ~observed ~outcome:prepared ~snapshot in
+        let%map install = persist_prepared ?control jobs starts commit in
         fun () ->
           install_overlay ();
           install ();
@@ -1522,16 +1584,17 @@ let handle_observation_entries
         Exn.protect
           ~finally:(fun () -> t.invocation_tool_call := previous)
           ~f:(fun () ->
-            Runtime.handle_event
-              t.runtime
-              ~context:(Moderation.Context.to_value ?control context)
-              ~event
-              ~copy_state:(fun value ->
-                Result.bind (checked value) ~f:Value_codec.Snapshot.to_value)
-              ~validate_state:(fun value -> Result.map (checked value) ~f:(fun _ -> ()))
-              ~validate_suspension:(fun () ->
-                Error "observation.suspended: cannot retain a UI continuation")
-              ~prepare_transaction:prepare)
+            with_job_transaction t jobs (fun () ->
+              Runtime.handle_event
+                t.runtime
+                ~context:(Moderation.Context.to_value ?control context)
+                ~event
+                ~copy_state:(fun value ->
+                  Result.bind (checked value) ~f:Value_codec.Snapshot.to_value)
+                ~validate_state:(fun value -> Result.map (checked value) ~f:(fun _ -> ()))
+                ~validate_suspension:(fun () ->
+                  Error "observation.suspended: cannot retain a UI continuation")
+                ~prepare_transaction:prepare))
       in
       !outcome))
 ;;

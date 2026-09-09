@@ -68,7 +68,7 @@ let%expect_test "ordinary moderator events own foreground calls and preserve que
             ~event:Session_start
             ~authorize:(fun () -> Ok ())
             ~on_tool_call:(fun ~name:_ ~args:_ -> assert false)
-            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok ignore)
+            ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (M.memory_commit ignore))
           |> Result.ok_or_failwith
           |> ignore;
           let initial_snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in

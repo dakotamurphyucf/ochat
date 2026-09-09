@@ -44,6 +44,17 @@ end
     execution. Synchronous legacy calls remain supported when uncontended. *)
 type t
 
+(** Host preparation performs validation only. The manager selects job starts and
+    checks its live budget, then invokes persist. Install is infallible/non-yielding
+    and runs after persistence succeeds, with no further validation. *)
+type prepared_commit =
+  { persist : unit -> (unit, string) result
+  ; install : unit -> unit
+  }
+
+(** In-memory embeddings/tests with no durable owner. Does not grant job services. *)
+val memory_commit : (unit -> unit) -> prepared_commit
+
 type pending_ui_request = Runtime.pending_ui_request =
   | Ask_text of { prompt : string }
   | Ask_choice of
@@ -162,10 +173,13 @@ val handle_event_entries
     is required and scoped to this execution, with no legacy callback fallback.
     It must enforce current capabilities, policy and durable child ownership.
 
-    All local validation precedes [prepare_event], which receives the complete
-    prospective state, queued events, halt and identity overlay. The host must
-    atomically persist that snapshot with the event's receipt and runtime intent,
-    returning an infallible, non-yielding installer. Error, exception or
+    Local outcome validation precedes [prepare_event], which receives the complete
+    prospective state, queued events, halt and identity overlay. The host validates
+    its handoff and returns a [prepared_commit] without saving yet. The manager
+    then selects surviving [jobs] starts and checks its live execution budget.
+    [persist] must atomically save the snapshot, event receipt, runtime intent and
+    selected launches. Its infallible, non-yielding [install] runs only on success.
+    Error, exception or
     cancellation before commit restores serializable state and discards local
     effects; external effects are not undone or retried. Callbacks must not
     re-enter the manager. The host owns cancellation-safe persistence.
@@ -177,7 +191,8 @@ val handle_event_entries
     continuations are rejected. This engine boundary does not acquire an actor
     borrow, impose a host deadline or provide interactive permission ownership. *)
 val handle_event_entries_transactional
-  :  t
+  :  ?jobs:Background_job_operations.transaction
+  -> t
   -> session_id:string
   -> now_ms:int
   -> history:History_entry.t list
@@ -192,7 +207,7 @@ val handle_event_entries_transactional
   -> prepare_event:
        (outcome:Moderation.Outcome.t
         -> snapshot:Session.Moderator_state.Identity_snapshot.t
-        -> (unit -> unit, string) result)
+        -> (prepared_commit, string) result)
   -> (Moderation.Outcome.t, string) result
 
 (** Transactionally consume one queued v1 internal event. Shares validation,
@@ -202,13 +217,15 @@ val handle_event_entries_transactional
     its durable queue and claim ownership before handler execution.
 
     [prepare_event]'s snapshot removes exactly that head, preserves the tail,
-    and appends any new emits. The live queue changes only after this preparation
-    succeeds. Failure/cancellation leaves state and the entire queue untouched.
+    and appends any new emits. The live queue changes only after the returned
+    commit's persistence succeeds. Failure/cancellation before persistence leaves
+    state and the entire queue untouched.
     The host must persist failed/interrupted claims to prevent replay of external
     effects; this method does not retry, claim or retire failures itself.
     Returns [Ok None] for an empty queue without calling either callback. *)
 val handle_next_event_entries_transactional
-  :  t
+  :  ?jobs:Background_job_operations.transaction
+  -> t
   -> session_id:string
   -> now_ms:int
   -> history:History_entry.t list
@@ -222,16 +239,18 @@ val handle_next_event_entries_transactional
   -> prepare_event:
        (outcome:Moderation.Outcome.t
         -> snapshot:Session.Moderator_state.Identity_snapshot.t
-        -> (unit -> unit, string) result)
+        -> (prepared_commit, string) result)
   -> (Moderation.Outcome.t option, string) result
 
 (** Execute the dedicated extensibility-v1 Tool_invoked event under the manager
     lock. Only a dispatched invocation matching a prepared tool owned by this
     moderator is accepted. [prepare_resolution] receives an immutable prospective
     identity snapshot (new state, full queued events, halt and overlay), allowing
-    the host to persist it atomically with [resolved]. All local validation and
-    serialization precede this callback. Failure discards buffered state and
-    resolution/overlay effects; its returned installer must not fail or yield.
+    the host to validate a deferred commit that persists it atomically with
+    [resolved]. Local serialization precedes this callback; job selection and
+    the final live-budget check follow it, before [persist]. Failure before
+    persistence discards buffered state and resolution/overlay effects; the
+    returned [install] must not fail or yield.
     The callback runs under the manager lock and must not re-enter it. The host
     owns cancellation-safe persistence. This does not perform actor borrowing, authorization, durable
     publication, post-tool routing or terminal-error reconciliation. The owning
@@ -249,7 +268,8 @@ val handle_next_event_entries_transactional
     private dependencies. [execution_context] retains inherited budgets across
     domain handoffs; it cannot reset the caller's limits. *)
 val handle_invocation_entries
-  :  ?authorize:(unit -> (unit, string) result)
+  :  ?jobs:Background_job_operations.transaction
+  -> ?authorize:(unit -> (unit, string) result)
   -> ?managed:Managed_tool_registry.execution
   -> ?execution_context:Chatml_execution.context
   -> ?on_failure:(Moderator_invocation.failure -> unit)
@@ -268,14 +288,16 @@ val handle_invocation_entries
        (resolved:Agent_protocol.Invocation.t
         -> outcome:Moderation.Outcome.t
         -> snapshot:Session.Moderator_state.Identity_snapshot.t
-        -> (unit -> unit, string) result)
+        -> (prepared_commit, string) result)
   -> (Agent_protocol.Invocation.t * Moderation.Outcome.t, string) result
 
 (** Deliver a source-bound, already claimed nested outcome through Tool_observed.
     It has no provider call ID and cannot resolve the original invocation again.
     The host must hold the exclusive actor borrow and persist [observed] with the
-    prospective snapshot in [prepare_observation], returning an infallible,
-    non-yielding installer. Local state rolls back on error; external effects do
+    prospective snapshot using the deferred commit returned by
+    [prepare_observation]. Job selection and the final budget check precede its
+    [persist]; [install] must be infallible and non-yielding. Local state rolls
+    back on failure before persistence; external effects do
     not. This method does not itself claim, retry or schedule observations.
     [retain_follow_up] additionally stores coalesced runtime requests in the
     observation acknowledgement. Hosts using it must durably apply that intent
@@ -285,7 +307,8 @@ val handle_invocation_entries
     Optional Tool.call routing has the same scoped authority requirements as
     [handle_invocation_entries]. *)
 val handle_observation_entries
-  :  ?on_tool_call:
+  :  ?jobs:Background_job_operations.transaction
+  -> ?on_tool_call:
        (name:string
         -> args:Jsonaf.t
         -> (Moderation.Capabilities.tool_call_result, string) result)
@@ -300,7 +323,7 @@ val handle_observation_entries
        (observed:Agent_protocol.Invocation.t
         -> outcome:Moderation.Outcome.t
         -> snapshot:Session.Moderator_state.Identity_snapshot.t
-        -> (unit -> unit, string) result)
+        -> (prepared_commit, string) result)
   -> (Moderation.Outcome.t, string) result
 
 (** [pending_ui_request t] exposes the current live-session approval request,

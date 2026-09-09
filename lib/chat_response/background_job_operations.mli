@@ -10,6 +10,16 @@ type handlers =
   ; rollback_start : Agent_protocol.Id.Job.t -> unit
   }
 
+(** One active moderator transaction. Prepare selects IDs after validation and
+    returns an infallible acknowledgement to call only after the owning save. *)
+type transaction =
+  { handlers : handlers
+  ; prepare : Agent_protocol.Id.Job.t list -> (unit -> unit, string) result
+  }
+
+(** Dispatch through the current lexical transaction; absence fails closed. *)
+val dynamic_handlers : (unit -> transaction option) -> handlers
+
 (** Start operations reserve only; the actor publishes them with the owning
     transaction. Catch rollback calls rollback_start before recovery. Get/cancel
     are immediate host operations; cancellation of existing work is not undone
