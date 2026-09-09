@@ -253,6 +253,138 @@ let rec value_to_string (v : value) : string =
       Printf.sprintf "`%s(%s)" slug inside)
 ;;
 
+(* Diagnostic previews have their own small host budget. They never evaluate a
+   task or traverse closure environments, and never consume execution fuel after
+   a transaction has committed. Public to_string keeps its normal semantics. *)
+let render_debug ?(max_bytes = 4096) ?(max_nodes = 256) ?(max_depth = 16) render =
+  let exception Truncated in
+  let max_bytes = Int.max 0 max_bytes in
+  let output = Buffer.create (Int.min max_bytes 1024) in
+  let remaining = ref max_nodes in
+  let add text =
+    let available = max_bytes - Buffer.length output in
+    if String.length text <= available
+    then Buffer.add_string output text
+    else (
+      Buffer.add_substring output text ~pos:0 ~len:available;
+      raise Truncated)
+  in
+  let separated iter f =
+    let first = ref true in
+    iter (fun value ->
+      (match !first with
+       | true -> first := false
+       | false -> add ", ");
+      f value)
+  in
+  let rec visit depth value =
+    if !remaining <= 0 then raise Truncated;
+    decr remaining;
+    if depth >= max_depth
+    then add "..."
+    else (
+      let child = visit (depth + 1) in
+      let task value = child (VTask value) in
+      let render_eff eff =
+        add "{operation = ";
+        add eff.op;
+        add ", args = [";
+        separated (fun f -> List.iter eff.args ~f) child;
+        add "]}"
+      in
+      match value with
+      | VInt n -> add (Int.to_string n)
+      | VFloat n -> add (Float.to_string n)
+      | VBool value -> add (Bool.to_string value)
+      | VString text -> add text
+      | VUnit -> add "()"
+      | VClosure _ -> add "<closure>"
+      | VBuiltin _ -> add "<builtin>"
+      | VModule _ -> add "<module>"
+      | VRef cell ->
+        add "ref(";
+        child !cell;
+        add ")"
+      | VArray values ->
+        add "[|";
+        separated (fun f -> Array.iter values ~f) child;
+        add "|]"
+      | VRecord fields ->
+        add "{ ";
+        let first = ref true in
+        Map.iteri fields ~f:(fun ~key ~data ->
+          (match !first with
+           | true -> first := false
+           | false -> add "; ");
+          add key;
+          add " = ";
+          child data);
+        add " }"
+      | VVariant (tag, fields) ->
+        add "`";
+        add tag;
+        (match fields with
+         | [] -> ()
+         | _ ->
+           add "(";
+           separated (fun f -> List.iter fields ~f) child;
+           add ")")
+      | VTask (TPure value) ->
+        add "pure(";
+        child value;
+        add ")"
+      | VTask (TFail text) ->
+        add "fail(";
+        add text;
+        add ")"
+      | VTask (TBind (nested, fn)) ->
+        add "bind(";
+        task nested;
+        add ", ";
+        child fn;
+        add ")"
+      | VTask (TMap (nested, fn)) ->
+        add "map(";
+        task nested;
+        add ", ";
+        child fn;
+        add ")"
+      | VTask (TCatch (nested, fn)) ->
+        add "catch(";
+        task nested;
+        add ", ";
+        child fn;
+        add ")"
+      | VTask (TPerform eff) ->
+        add "perform(";
+        render_eff eff;
+        add ")"
+      | VTask (TSpawn eff) ->
+        add "spawn(";
+        render_eff eff;
+        add ")")
+  in
+  match render (visit 0) add with
+  | () -> Buffer.contents output
+  | exception Truncated ->
+    String.prefix (Buffer.contents output) (Int.max 0 (max_bytes - 3))
+    ^ String.prefix "..." max_bytes
+;;
+
+let value_to_debug_string ?max_bytes ?max_nodes ?max_depth value =
+  render_debug ?max_bytes ?max_nodes ?max_depth (fun visit _ -> visit value)
+;;
+
+let values_to_debug_string ?max_bytes ?max_nodes ?max_depth values =
+  render_debug ?max_bytes ?max_nodes ?max_depth (fun visit add ->
+    let first = ref true in
+    List.iter values ~f:(fun value ->
+      (match !first with
+       | true -> first := false
+       | false -> add ", ");
+      visit value))
+;;
+
 let indent depth = String.make depth ' '
 
 let indent_block depth text =

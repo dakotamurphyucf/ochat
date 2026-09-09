@@ -63,6 +63,24 @@ val module_scheme : builtin_module -> ty
     and host tooling. *)
 val value_to_string : value -> string
 
+(** Bounded diagnostic previews, independent of execution policy. Stop at byte,
+    node or depth budgets (defaults 4096/256/16) and mark truncation with [...].
+    Cyclic references/tasks cannot cause unbounded traversal; closures/modules
+    remain opaque. These do not change the language's [to_string] semantics. *)
+val value_to_debug_string
+  :  ?max_bytes:int
+  -> ?max_nodes:int
+  -> ?max_depth:int
+  -> value
+  -> string
+
+val values_to_debug_string
+  :  ?max_bytes:int
+  -> ?max_nodes:int
+  -> ?max_depth:int
+  -> value list
+  -> string
+
 (** Render a runtime value using a multiline layout intended for logs and
     debugging. *)
 val value_to_pretty_string : value -> string

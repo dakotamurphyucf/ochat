@@ -74,6 +74,10 @@ val run_scoped : ?context:context -> runner -> (unit -> 'a) -> ('a, error) resul
     cancellation. A single builtin is checked before/after invocation, so this
     is not a hard deadline or heap sandbox. Allocation accounting estimates
     language operations and host-returned values, not actual OCaml heap use.
+    JSON parsing/validation preflights lexical nesting and parser expansion;
+    string delimiters and escapes do not count as nesting. Rendering preflights
+    deferred task payloads too, and pretty JSON reserves indentation overhead.
+    Conservative estimates can reject a value whose actual output would fit.
     Host effect results are checked before debug rendering or continuation use;
     failure after an effect cannot undo it. Selected-tool policy and
     serialized output bounds remain the owning host's responsibility.

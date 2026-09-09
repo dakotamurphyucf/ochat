@@ -160,8 +160,9 @@ let make_control ~env budget =
     if count > limits.max_value_bytes then value_failure ();
     if count >= 0 then allocate count
   in
-  let measure_value value =
+  let measure_value ?(render_tasks = false) value =
     let bytes = ref 0 in
+    let deepest = ref 0 in
     let add count =
       if count > limits.max_value_bytes - !bytes then value_failure ();
       bytes := !bytes + count
@@ -169,6 +170,7 @@ let make_control ~env budget =
     let rec visit depth (value : Chatml.Chatml_lang.value) =
       checkpoint ();
       if depth > limits.max_depth then value_failure ();
+      deepest := Int.max !deepest depth;
       add 16;
       match value with
       | VString text -> add (String.length text)
@@ -184,6 +186,16 @@ let make_control ~env budget =
         add (String.length tag);
         List.iter fields ~f:(visit (depth + 1))
       | VRef cell -> visit (depth + 1) !cell
+      | VTask task when render_tasks ->
+        (match task with
+         | TPure value -> visit (depth + 1) value
+         | TBind (task, fn) | TMap (task, fn) | TCatch (task, fn) ->
+           visit (depth + 1) (VTask task);
+           visit (depth + 1) fn
+         | TFail message -> add (String.length message)
+         | TPerform eff | TSpawn eff ->
+           add (String.length eff.op);
+           List.iter eff.args ~f:(visit (depth + 1)))
       | VInt _
       | VFloat _
       | VBool _
@@ -194,9 +206,31 @@ let make_control ~env budget =
       | VTask _ -> ()
     in
     visit 0 value;
-    !bytes
+    !bytes, !deepest
   in
-  let check_value value = ignore (measure_value value : int) in
+  let check_value value = ignore (measure_value value : int * int) in
+  let check_json_text text =
+    (* Jsonaf has no execution-control callback. Check lexical nesting before
+       entering it, ignoring delimiters in strings and escaped quotes. This is
+       a resource preflight, not a second JSON validator. Jsonaf still diagnoses
+       syntax errors. Poll in chunks so scanning a scalar also cooperates. *)
+    let depth = ref 0 in
+    let in_string = ref false in
+    let escaped = ref false in
+    String.iteri text ~f:(fun index character ->
+      if index mod 256 = 0 then checkpoint ();
+      match !in_string, !escaped, character with
+      | true, true, _ -> escaped := false
+      | true, false, '\\' -> escaped := true
+      | true, false, '"' -> in_string := false
+      | true, false, _ -> ()
+      | false, _, '"' -> in_string := true
+      | false, _, ('[' | '{') ->
+        Int.incr depth;
+        if !depth > limits.max_depth then value_failure ()
+      | false, _, (']' | '}') -> depth := Int.max 0 (!depth - 1)
+      | false, _, _ -> ())
+  in
   let before_builtin ~name (args : Chatml.Chatml_lang.value list) =
     checkpoint ();
     List.iter args ~f:check_value;
@@ -204,8 +238,28 @@ let make_control ~env budget =
     | ("Array.make" | "Array.init" | "Array.literal"), VInt count :: _ -> array_size count
     | "Array.append", [ VArray a; VArray b ] ->
       array_size (Array.length a + Array.length b)
-    | ( ("Array.copy" | "Array.reverse" | "Array.map" | "Array.mapi" | "array_copy")
+    | ( ( "Array.copy"
+        | "Array.reverse"
+        | "Array.map"
+        | "Array.mapi"
+        | "Array.filter"
+        | "array_copy" )
       , VArray values :: _ ) -> array_size (Array.length values)
+    | "record_keys", [ VRecord fields ] -> array_size (Map.length fields)
+    | ( ("Json.object_keys" | "Json.remove_field")
+      , VVariant ("Object", [ VArray entries ]) :: _ ) ->
+      array_size (Array.length entries)
+    | "Json.set_field", [ VVariant ("Object", [ VArray entries ]); VString key; _ ] ->
+      let exists =
+        Array.exists entries ~f:(function
+          | VRecord fields ->
+            (match Map.find fields "key" with
+             | Some (VString candidate) -> String.equal candidate key
+             | _ -> false)
+          | _ -> false)
+      in
+      array_size (Array.length entries + if exists then 0 else 1)
+    | "Json.get_path", [ _; VArray path ] -> array_size (Array.length path)
     | "Array.sub", [ _; _; VInt count ] -> array_size count
     | "String.concat", [ VString a; VString b ] ->
       string_size (String.length a + String.length b)
@@ -239,19 +293,33 @@ let make_control ~env budget =
       in
       array_size (count 0 1);
       string_size (String.length text)
-    | ("Json.parse" | "Json.parse_opt"), [ VString text ] ->
+    | ("Json.parse" | "Json.parse_opt" | "Json.validate"), [ VString text ] ->
       (* Bound parser expansion conservatively before entering Jsonaf. *)
+      check_json_text text;
       if String.length text > Atomic.get allocation_remaining / 32
       then exhaust budget allocation_failure;
       allocate (32 * String.length text)
-    | ("Json.stringify" | "Json.pretty" | "to_string"), [ value ] ->
+    | ("Json.stringify" | "Json.pretty" | "to_string" | "print"), [ value ] ->
       (* Include escaping and formatting expansion before allocating text. *)
-      let size = measure_value value in
-      if size > limits.max_value_bytes / 6 then value_failure ();
-      string_size (6 * size)
+      let size, depth = measure_value ~render_tasks:true value in
+      let expansion =
+        match name with
+        | "Json.pretty" ->
+          (* Pretty JSON can indent each node to its nesting depth. Check the
+             multiplication before it can overflow under a large host policy. *)
+          if depth > (Int.max_value - 6) / 2 then value_failure ();
+          6 + (2 * depth)
+        | _ -> 6
+      in
+      if size > limits.max_value_bytes / expansion then value_failure ();
+      string_size (expansion * size)
     | "Hashtbl.set", VRef cell :: _ ->
       (match !cell with
        | VArray values -> array_size (Array.length values + 1)
+       | _ -> ())
+    | "Hashtbl.remove", VRef cell :: _ ->
+      (match !cell with
+       | VArray values -> array_size (Array.length values)
        | _ -> ())
     | _ -> allocate 16
   in
@@ -279,7 +347,7 @@ let make_control ~env budget =
   ; before_builtin
   ; check_value
   ; before_effect
-  ; after_effect = (fun value -> allocate (measure_value value))
+  ; after_effect = (fun value -> allocate (fst (measure_value value)))
   }
 ;;
 

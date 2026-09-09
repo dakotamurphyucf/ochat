@@ -224,6 +224,25 @@ Copied closure/module environments retain the same host control. The generic
 evaluator has no resource budget by default; bounded agent execution installs
 host-selected checks. Resource policy and tool authority are separate.
 
+`Chatml_execution` supplies bounded execution for hosts that need it. Its checks
+cover pure evaluation, task interpretation, nested execution and estimated
+allocations. Preflight checks reserve space for array copies, maps and filters,
+JSON object edits, and hash-table updates before those operations run. JSON parsing and validation scan nesting
+before entering the native parser, with cancellation checkpoints during that
+scan; quoted brackets and escaped quotes do not count as nesting. Rendering with
+`to_string` or `print` checks deferred task payloads as well as ordinary values,
+and pretty JSON reserves additional space for indentation.
+
+These are conservative resource estimates, not an OCaml heap sandbox or hard
+preemption of a native builtin. An estimate can exceed the actual output size.
+Trusted root execution may select `Unrestricted`; nested execution cannot remove
+an ancestor's limits. The language itself does not impose these host budgets.
+
+Host runtime debug logging uses separate, lazy previews capped by bytes, visited
+nodes and depth. Disabled logging does not format values. Enabled logging can
+truncate large or cyclic values without consuming script fuel after a state
+commit. Normal language `to_string` output is unchanged by these debug previews.
+
 Function calls use a trampoline. Tail calls are now **tail-position-aware**:
 
 - closure applications in tail position produce `TailCall`

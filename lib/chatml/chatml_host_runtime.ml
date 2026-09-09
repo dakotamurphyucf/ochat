@@ -7,7 +7,16 @@ module Eval = Chatml.Chatml_eval
 module Builtin_surface = Chatml.Chatml_builtin_surface
 module Builtin_modules = Chatml_builtin_modules
 module Builtin_spec = Chatml.Chatml_builtin_spec
-module Debug_log = Chatml.Chatml_debug_log
+
+module Debug_log = struct
+  (* Ordinary diagnostic failures must not invalidate a committed transaction.
+     Unrecognized exceptions (including host cancellation) still propagate. *)
+  let emit render =
+    try Chatml.Chatml_debug_log.emit render with
+    | Failure _ | Invalid_argument _ | Sys_error _ -> ()
+  ;;
+end
+
 module Value_codec = Chatml.Chatml_value_codec
 
 type compiled_script =
@@ -177,10 +186,10 @@ let string_of_log_level (level : log_level) : string =
   | Error_level -> "error"
 ;;
 
-let value_to_string = Builtin_spec.value_to_pretty_string
+let value_to_string value = Builtin_spec.value_to_debug_string value
 
 let values_to_string (values : Lang.value list) : string =
-  values |> List.map ~f:value_to_string |> String.concat ~sep:", "
+  Builtin_spec.values_to_debug_string values
 ;;
 
 let allow_all_phases (_phase : string) : (unit, string) result = Ok ()
@@ -200,7 +209,11 @@ let not_configured (name : string) : (unit, string) result =
 let default_handlers : default_handlers =
   { on_log =
       (fun _session ~level ~message ->
-        Debug_log.emitf "[chatml-log][%s] %s" (string_of_log_level level) message;
+        Debug_log.emit (fun () ->
+          Printf.sprintf
+            "[chatml-log][%s] %s"
+            (string_of_log_level level)
+            (String.prefix message 4096));
         Ok ())
   ; on_turn_effect = (fun _session _effect -> Ok ())
   ; on_tool_moderation = (fun _session _action -> Ok ())
@@ -855,12 +868,13 @@ let instantiate_session
                 | Ok on_event ->
                   Option.iter control ~f:(fun control ->
                     control.check_value initial_state);
-                  Debug_log.emitf
-                    "[chatml-runtime] instantiate_session initial_state=%s \
-                     entrypoints={initial_state=%s; on_event=%s}"
-                    (value_to_string initial_state)
-                    entrypoints.initial_state_name
-                    entrypoints.on_event_name;
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] instantiate_session initial_state=%s \
+                       entrypoints={initial_state=%s; on_event=%s}"
+                      (value_to_string initial_state)
+                      entrypoints.initial_state_name
+                      entrypoints.on_event_name);
                   Ok
                     { env
                     ; state = initial_state
@@ -924,11 +938,12 @@ let restore
     Error "Cannot restore moderator runtime during active task interpretation"
   | None, Some _ -> Error "Cannot restore moderator runtime while waiting for UI input"
   | None, None ->
-    Debug_log.emitf
-      "[chatml-runtime] restore state=%s queued_events=[%s] halted=%b"
-      (value_to_string state)
-      (values_to_string queued_events)
-      halted;
+    Debug_log.emit (fun () ->
+      Printf.sprintf
+        "[chatml-runtime] restore state=%s queued_events=[%s] halted=%b"
+        (value_to_string state)
+        (values_to_string queued_events)
+        halted);
     session.state <- state;
     Queue.clear session.queue;
     List.iter queued_events ~f:(fun event -> Queue.enqueue session.queue event);
@@ -1046,12 +1061,13 @@ let dispatch_effect
   let check_result value =
     Option.iter session.env.control ~f:(fun control -> control.after_effect value)
   in
-  Debug_log.emitf
-    "[chatml-runtime] dispatch_effect phase=%s spawned=%b op=%s args=[%s]"
-    exec.phase
-    spawned
-    eff.op
-    (values_to_string eff.args);
+  Debug_log.emit (fun () ->
+    Printf.sprintf
+      "[chatml-runtime] dispatch_effect phase=%s spawned=%b op=%s args=[%s]"
+      exec.phase
+      spawned
+      (String.prefix eff.op 256)
+      (values_to_string eff.args));
   if spawned
   then (
     match decode_pending_ui_request eff with
@@ -1075,18 +1091,20 @@ let dispatch_effect
                (match op.perform session eff.args with
                 | Ok value ->
                   check_result value;
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
-                    exec.phase
-                    eff.op
-                    (value_to_string value);
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (value_to_string value));
                   Ok (Effect_value value)
                 | Error msg ->
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_error phase=%s op=%s error=%s"
-                    exec.phase
-                    eff.op
-                    msg;
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_error phase=%s op=%s error=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (String.prefix msg 4096));
                   Error msg)
              | _ -> Error (Printf.sprintf "Operation '%s' is not spawnable" op.name)))))
   else (
@@ -1118,28 +1136,31 @@ let dispatch_effect
                 | Ok value ->
                   check_result value;
                   exec.local_effects_rev <- eff :: exec.local_effects_rev;
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
-                    exec.phase
-                    eff.op
-                    (value_to_string value);
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (value_to_string value));
                   Ok (Effect_value value))
              | External_sync | Diagnostic ->
                (match op.perform session eff.args with
                 | Ok value ->
                   check_result value;
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
-                    exec.phase
-                    eff.op
-                    (value_to_string value);
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (value_to_string value));
                   Ok (Effect_value value)
                 | Error msg ->
-                  Debug_log.emitf
-                    "[chatml-runtime] dispatch_effect_error phase=%s op=%s error=%s"
-                    exec.phase
-                    eff.op
-                    msg;
+                  Debug_log.emit (fun () ->
+                    Printf.sprintf
+                      "[chatml-runtime] dispatch_effect_error phase=%s op=%s error=%s"
+                      exec.phase
+                      (String.prefix eff.op 256)
+                      (String.prefix msg 4096));
                   Error msg)))))
 ;;
 
@@ -1343,17 +1364,20 @@ let log_committed_exec
       ~(new_state : Lang.value)
   : unit
   =
-  Debug_log.emitf
-    "[chatml-runtime] handle_event_ok phase=%s old_state=%s new_state=%s effects=[%s] \
-     emitted=[%s] halted=%b"
-    exec.phase
-    (value_to_string old_state)
-    (value_to_string new_state)
-    (List.map (List.rev exec.local_effects_rev) ~f:(fun eff ->
-       Printf.sprintf "%s(%s)" eff.op (values_to_string eff.args))
-     |> String.concat ~sep:"; ")
-    (values_to_string (List.rev exec.emitted_rev))
-    session.halted
+  Debug_log.emit (fun () ->
+    Printf.sprintf
+      "[chatml-runtime] handle_event_ok phase=%s old_state=%s new_state=%s \
+       recent_effects=[%s] recent_emitted=[%s] halted=%b"
+      exec.phase
+      (value_to_string old_state)
+      (value_to_string new_state)
+      (List.take exec.local_effects_rev 16
+       |> List.rev_map ~f:(fun eff ->
+         Printf.sprintf "%s(%s)" (String.prefix eff.op 256) (values_to_string eff.args))
+       |> String.concat ~sep:"; "
+       |> fun text -> String.prefix text 4096)
+      (values_to_string (List.rev (List.take exec.emitted_rev 32)))
+      session.halted)
 ;;
 
 type prepare_commit = local_effects:Lang.eff list -> (unit -> unit, string) result
@@ -1424,12 +1448,13 @@ let handle_event_impl
     | Ok phase ->
       Option.iter session.env.control ~f:(fun control ->
         control.check_value session.state);
-      Debug_log.emitf
-        "[chatml-runtime] handle_event_start phase=%s state=%s event=%s context=%s"
-        phase
-        (value_to_string session.state)
-        (value_to_string event)
-        (value_to_string context);
+      Debug_log.emit (fun () ->
+        Printf.sprintf
+          "[chatml-runtime] handle_event_start phase=%s state=%s event=%s context=%s"
+          phase
+          (value_to_string session.state)
+          (value_to_string event)
+          (value_to_string context));
       let exec =
         { phase
         ; local_effects_rev = []
@@ -1466,12 +1491,13 @@ let handle_event_impl
           in
           match result with
           | Error msg ->
-            Debug_log.emitf
-              "[chatml-runtime] handle_event_error phase=%s state=%s event=%s error=%s"
-              phase
-              (value_to_string old_state)
-              (value_to_string event)
-              msg;
+            Debug_log.emit (fun () ->
+              Printf.sprintf
+                "[chatml-runtime] handle_event_error phase=%s state=%s event=%s error=%s"
+                phase
+                (value_to_string old_state)
+                (value_to_string event)
+                (String.prefix msg 4096));
             Error msg
           | Ok (Task_value new_state) ->
             let open Result.Let_syntax in
@@ -1495,13 +1521,14 @@ let handle_event_impl
             let open Result.Let_syntax in
             let%map () = validate_suspension () in
             session.suspended_exec <- Some suspended_exec;
-            Debug_log.emitf
-              "[chatml-runtime] handle_event_suspended phase=%s state=%s request=%s"
-              phase
-              (value_to_string old_state)
-              (match suspended_exec.request with
-               | Ask_text { prompt } -> "ask_text:" ^ prompt
-               | Ask_choice { prompt; _ } -> "ask_choice:" ^ prompt)))
+            Debug_log.emit (fun () ->
+              Printf.sprintf
+                "[chatml-runtime] handle_event_suspended phase=%s state=%s request=%s"
+                phase
+                (value_to_string old_state)
+                (match suspended_exec.request with
+                 | Ask_text { prompt } -> "ask_text:" ^ String.prefix prompt 4096
+                 | Ask_choice { prompt; _ } -> "ask_choice:" ^ String.prefix prompt 4096))))
 ;;
 
 let handle_event = handle_event_impl ~consume_queued:false
@@ -1598,8 +1625,9 @@ let enqueue_internal_event (session : session) (event : Lang.value)
   =
   let open Result.Let_syntax in
   let%map install = prepare_enqueue_internal_event session event in
-  Debug_log.emitf
-    "[chatml-runtime] enqueue_internal_event event=%s"
-    (value_to_string event);
+  Debug_log.emit (fun () ->
+    Printf.sprintf
+      "[chatml-runtime] enqueue_internal_event event=%s"
+      (value_to_string event));
   install ()
 ;;
