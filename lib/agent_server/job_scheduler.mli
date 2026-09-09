@@ -19,7 +19,9 @@ val start
   -> t
 
 (** [cancel t job_id] cooperatively cancels the running Eio worker, if any.
-    Actor state remains authoritative for whether cancellation was accepted. *)
+    Actor state remains authoritative for whether cancellation was accepted.
+    Workers retain their claimed attempt; a retry waits for prior worker cleanup,
+    and stale completion/cleanup cannot affect a newer attempt. *)
 val cancel : t -> Agent_protocol.Id.Job.t -> unit
 
 val close : t -> unit

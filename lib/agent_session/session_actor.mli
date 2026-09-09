@@ -423,10 +423,13 @@ val claim_job
   -> generation:int
   -> (Agent_protocol.Job.t option, Agent_protocol.Error.t) result
 
+(** Complete only the exact claimed attempt. Late callbacks from an older retry
+    cannot finish or mutate the newer attempt, including its delivery state. *)
 val complete_job
   :  t
   -> job_id:Agent_protocol.Id.Job.t
   -> generation:int
+  -> attempt:int
   -> Runtime_builder.model_job_outcome
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
@@ -471,10 +474,13 @@ val cancel_job_internal_with_command_audit
   -> job_id:Agent_protocol.Id.Job.t
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
+(** Interrupt only the exact claimed attempt; stale cancellation/cleanup must not
+    interrupt a newer retry. Recovered workers use the persisted attempt. *)
 val interrupt_job
   :  t
   -> job_id:Agent_protocol.Id.Job.t
   -> generation:int
+  -> attempt:int
   -> reason:string
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 

@@ -166,6 +166,7 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
           actor
           ~job_id:job.id
           ~generation:0
+          ~attempt:claimed.attempt
           (Agent_session.Runtime_builder.Model_succeeded
              (`Object [ "answer", `String "done" ]))
         |> protocol_ok
@@ -246,15 +247,17 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
           }
       in
       Agent_session.Session_actor.add_job actor job |> protocol_ok |> ignore;
-      Agent_session.Session_actor.claim_job actor ~job_id:job.id ~generation:0
-      |> protocol_ok
-      |> Option.value_exn
-      |> ignore;
+      let first_claim =
+        Agent_session.Session_actor.claim_job actor ~job_id:job.id ~generation:0
+        |> protocol_ok
+        |> Option.value_exn
+      in
       let retry =
         Agent_session.Session_actor.complete_job
           actor
           ~job_id:job.id
           ~generation:0
+          ~attempt:first_claim.attempt
           (Agent_session.Runtime_builder.Model_failed "temporary")
         |> protocol_ok
       in
@@ -271,11 +274,40 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
         |> protocol_ok
         |> Option.value_exn
       in
+      let before_stale = Agent_session.Session_actor.state actor |> protocol_ok in
+      let conflict = function
+        | Error { Agent_protocol.Error.code = Conflict; _ } -> true
+        | Ok _ | Error _ -> false
+      in
+      let stale_completion =
+        Agent_session.Session_actor.complete_job
+          actor
+          ~job_id:job.id
+          ~generation:0
+          ~attempt:first_claim.attempt
+          (Agent_session.Runtime_builder.Model_succeeded (`String "late first result"))
+        |> conflict
+      in
+      let stale_interruption =
+        Agent_session.Session_actor.interrupt_job
+          actor
+          ~job_id:job.id
+          ~generation:0
+          ~attempt:first_claim.attempt
+          ~reason:"late first cleanup"
+        |> conflict
+      in
+      let after_stale = Agent_session.Session_actor.state actor |> protocol_ok in
+      assert (stale_completion && stale_interruption);
+      [%test_eq: int64]
+        before_stale.counters.transaction_sequence
+        after_stale.counters.transaction_sequence;
       let terminal =
         Agent_session.Session_actor.complete_job
           actor
           ~job_id:job.id
           ~generation:0
+          ~attempt:second_claim.attempt
           (Agent_session.Runtime_builder.Model_failed "permanent")
         |> protocol_ok
       in
@@ -288,6 +320,8 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
           ; retry_result = (retry.result : Jsonaf.t option)
           ; early_claim_blocked = (Option.is_none early_claim : bool)
           ; second_attempt = (second_claim.attempt : int)
+          ; stale_completion : bool
+          ; stale_interruption : bool
           ; terminal_status = (terminal.status : Agent_protocol.Job.status)
           ; terminal_delivery = (terminal.delivery : Agent_protocol.Job.delivery)
           }]));
@@ -296,7 +330,8 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
     ((retry_status Queued) (retry_attempt 1)
      (retry_due (2026-08-15T12:00:00.500000000Z))
      (retry_result ((Object ((last_error (String temporary))))))
-     (early_claim_blocked true) (second_attempt 2)
+     (early_claim_blocked true) (second_attempt 2) (stale_completion true)
+     (stale_interruption true)
      (terminal_status
       (Failed
        ((code Internal_error) (message permanent) (retryable false)

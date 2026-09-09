@@ -244,7 +244,7 @@ type _ request =
   | Add_job : Agent_protocol.Job.t -> Agent_protocol.Job.t request
   | Claim_job : Agent_protocol.Id.Job.t * int -> Agent_protocol.Job.t option request
   | Complete_job :
-      Agent_protocol.Id.Job.t * int * Runtime_builder.model_job_outcome
+      Agent_protocol.Id.Job.t * int * int * Runtime_builder.model_job_outcome
       -> Agent_protocol.Job.t request
   | Deliver_job :
       Agent_protocol.Id.Job.t
@@ -257,7 +257,9 @@ type _ request =
   | Cancel_job :
       Agent_protocol.Id.Attachment.t * Agent_protocol.Id.Job.t
       -> Agent_protocol.Job.t request
-  | Interrupt_job : Agent_protocol.Id.Job.t * int * string -> Agent_protocol.Job.t request
+  | Interrupt_job :
+      Agent_protocol.Id.Job.t * int * int * string
+      -> Agent_protocol.Job.t request
   | Change_schedule :
       Agent_protocol.Id.Attachment.t
       * [ `Created | `Cancelled ]
@@ -4123,10 +4125,17 @@ let complete_job_outcome t (job : Agent_protocol.Job.t) = function
      | None | Some _ -> terminal_job t job (Failed (job_failure message)) None)
 ;;
 
-let complete_job t job_id generation outcome =
+let validate_job_attempt (job : Agent_protocol.Job.t) attempt =
+  match Int.equal job.attempt attempt with
+  | true -> Ok ()
+  | false -> Error (error Conflict "job callback belongs to a stale execution attempt")
+;;
+
+let complete_job t job_id generation attempt outcome =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
+  let%bind () = validate_job_attempt job attempt in
   match job.status with
   | Agent_protocol.Job.Running ->
     let job = complete_job_outcome t job outcome in
@@ -4205,10 +4214,11 @@ let cancel_job_internal t job_id =
   | Succeeded | Failed _ | Cancelled -> Ok job
 ;;
 
-let interrupt_job t job_id generation reason =
+let interrupt_job t job_id generation attempt reason =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
+  let%bind () = validate_job_attempt job attempt in
   match job.status with
   | Agent_protocol.Job.Running ->
     let job =
@@ -5085,13 +5095,15 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Change_job (attachment_id, job) -> change_job t attachment_id job
   | Add_job job -> add_job t job
   | Claim_job (job_id, generation) -> claim_job t job_id generation
-  | Complete_job (job_id, generation, outcome) -> complete_job t job_id generation outcome
+  | Complete_job (job_id, generation, attempt, outcome) ->
+    complete_job t job_id generation attempt outcome
   | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
     deliver_job t job_id generation expected expected_job moderator_snapshot
   | Cancel_job_internal job_id -> cancel_job_internal t job_id
   | Cancel_job (attachment_id, job_id) ->
     with_writer t attachment_id (fun () -> cancel_job_internal t job_id)
-  | Interrupt_job (job_id, generation, reason) -> interrupt_job t job_id generation reason
+  | Interrupt_job (job_id, generation, attempt, reason) ->
+    interrupt_job t job_id generation attempt reason
   | Change_schedule (attachment_id, event, schedule) ->
     change_schedule t attachment_id event schedule
   | Add_schedule schedule -> add_schedule t schedule
@@ -5461,8 +5473,8 @@ let change_job t ~attachment_id job = call t (Change_job (attachment_id, job))
 let add_job t job = call t (Add_job job)
 let claim_job t ~job_id ~generation = call t (Claim_job (job_id, generation))
 
-let complete_job t ~job_id ~generation outcome =
-  call t ~priority:Priority (Complete_job (job_id, generation, outcome))
+let complete_job t ~job_id ~generation ~attempt outcome =
+  call t ~priority:Priority (Complete_job (job_id, generation, attempt, outcome))
 ;;
 
 let deliver_job ?expected ?expected_job t ~job_id ~generation ~moderator_snapshot =
@@ -5480,8 +5492,8 @@ let cancel_job_internal_with_command_audit t ~command_audit ~job_id =
   call t ~priority:Priority ~command_audit (Cancel_job_internal job_id)
 ;;
 
-let interrupt_job t ~job_id ~generation ~reason =
-  call t ~priority:Priority (Interrupt_job (job_id, generation, reason))
+let interrupt_job t ~job_id ~generation ~attempt ~reason =
+  call t ~priority:Priority (Interrupt_job (job_id, generation, attempt, reason))
 ;;
 
 let change_schedule t ~attachment_id ~event schedule =

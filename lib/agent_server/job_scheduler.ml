@@ -1,10 +1,16 @@
 open! Core
 
+type running_job =
+  { generation : int
+  ; attempt : int
+  ; sw : Eio.Switch.t
+  }
+
 type t =
   { closed : bool Atomic.t
   ; capacity : Job_capacity.t
   ; mutex : Eio.Mutex.t
-  ; mutable running : (Agent_protocol.Id.Job.t, Eio.Switch.t) Map.Poly.t
+  ; mutable running : (Agent_protocol.Id.Job.t, running_job) Map.Poly.t
   ; mutable cursor : int
   ; mutable delivering : Session_registry.entry list
   }
@@ -20,6 +26,7 @@ let reconcile_job entry (job : Agent_protocol.Job.t) =
       entry.Session_registry.actor
       ~job_id:job.id
       ~generation:job.generation
+      ~attempt:job.attempt
       ~reason:interrupted_reason
     |> Result.map ~f:(fun (_ : Agent_protocol.Job.t) -> ())
   | Queued | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
@@ -67,6 +74,7 @@ let complete entry job outcome =
        entry.Session_registry.actor
        ~job_id:job.Agent_protocol.Job.id
        ~generation:job.generation
+       ~attempt:job.attempt
        outcome
      : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
 ;;
@@ -86,16 +94,26 @@ let run_model_job entry job =
     complete entry job outcome
 ;;
 
-let register_running t job_id job_sw =
+let register_running t (job : Agent_protocol.Job.t) job_sw =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if Atomic.get t.closed
     then Eio.Switch.fail job_sw Job_cancelled
-    else t.running <- Map.set t.running ~key:job_id ~data:job_sw)
+    else
+      t.running
+      <- Map.set
+           t.running
+           ~key:job.id
+           ~data:{ generation = job.generation; attempt = job.attempt; sw = job_sw })
 ;;
 
-let unregister_running t job_id =
+let unregister_running t (job : Agent_protocol.Job.t) =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    t.running <- Map.remove t.running job_id)
+    match Map.find t.running job.id with
+    | Some running
+      when Int.equal running.generation job.generation
+           && Int.equal running.attempt job.attempt ->
+      t.running <- Map.remove t.running job.id
+    | None | Some _ -> ())
 ;;
 
 let run_claimed_job entry job =
@@ -111,12 +129,12 @@ let dispatch t sw entry job lease =
       ~f:(fun () ->
         try
           Eio.Switch.run (fun job_sw ->
-            register_running t job.Agent_protocol.Job.id job_sw;
+            register_running t job job_sw;
             run_claimed_job entry job)
         with
         | Job_cancelled | Eio.Cancel.Cancelled _ -> ())
       ~finally:(fun () ->
-        unregister_running t job.id;
+        unregister_running t job;
         Job_capacity.release lease))
 ;;
 
@@ -183,13 +201,17 @@ let claim_with_lease t sw entry (job : Agent_protocol.Job.t) lease =
 ;;
 
 let claim t sw entry (job : Agent_protocol.Job.t) =
-  match capacity_key entry job with
-  | Error error -> reject_job entry job error
-  | Ok key ->
-    (match Job_capacity.try_acquire t.capacity key with
+  let already_running = Eio.Mutex.use_ro t.mutex (fun () -> Map.mem t.running job.id) in
+  match already_running with
+  | true -> false
+  | false ->
+    (match capacity_key entry job with
      | Error error -> reject_job entry job error
-     | Ok None -> false
-     | Ok (Some lease) -> claim_with_lease t sw entry job lease)
+     | Ok key ->
+       (match Job_capacity.try_acquire t.capacity key with
+        | Error error -> reject_job entry job error
+        | Ok None -> false
+        | Ok (Some lease) -> claim_with_lease t sw entry job lease))
 ;;
 
 let delivery_pending (job : Agent_protocol.Job.t) =
@@ -248,7 +270,11 @@ let cancel_terminal_worker t (job : Agent_protocol.Job.t) =
   | Cancelled | Interrupted _ ->
     Eio.Mutex.use_ro t.mutex (fun () ->
       Map.find t.running job.id
-      |> Option.iter ~f:(fun sw -> Eio.Switch.fail sw Job_cancelled))
+      |> Option.iter ~f:(fun running ->
+        if
+          Int.equal running.generation job.generation
+          && Int.equal running.attempt job.attempt
+        then Eio.Switch.fail running.sw Job_cancelled))
   | _ -> ()
 ;;
 
@@ -311,13 +337,13 @@ let start ~sw ~clock ~registry ~capacity =
 let cancel t job_id =
   Eio.Mutex.use_ro t.mutex (fun () ->
     Map.find t.running job_id
-    |> Option.iter ~f:(fun sw -> Eio.Switch.fail sw Job_cancelled))
+    |> Option.iter ~f:(fun running -> Eio.Switch.fail running.sw Job_cancelled))
 ;;
 
 let close t =
   Atomic.set t.closed true;
   Eio.Mutex.use_ro t.mutex (fun () ->
-    Map.iter t.running ~f:(fun sw -> Eio.Switch.fail sw Job_cancelled))
+    Map.iter t.running ~f:(fun running -> Eio.Switch.fail running.sw Job_cancelled))
 ;;
 
 let is_running t = not (Atomic.get t.closed)

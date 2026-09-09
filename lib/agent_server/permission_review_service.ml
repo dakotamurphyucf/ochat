@@ -77,6 +77,7 @@ let complete actor job result =
     actor
     ~job_id:job.Agent_protocol.Job.id
     ~generation:job.generation
+    ~attempt:job.attempt
     outcome
   |> Result.map_error ~f:persistence_error
   |> Result.map ~f:(fun _ -> result)
@@ -90,6 +91,7 @@ let interrupt actor job =
          actor
          ~job_id:job.Agent_protocol.Job.id
          ~generation:job.generation
+         ~attempt:job.attempt
          ~reason:"permission reviewer was cancelled"
        : (Agent_protocol.Job.t, Agent_protocol.Error.t) result))
 ;;

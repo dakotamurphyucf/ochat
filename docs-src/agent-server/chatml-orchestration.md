@@ -8,8 +8,9 @@ for a completion or timer.
 
 See the [moderator language/runtime reference](../guide/chatml-moderator-runtime.md)
 for full builtin signatures, event constructors, task syntax and helper modules.
-The older phase documents describe shared or compatibility hosts; their statement
-that no generalized job API existed must not be applied to the newer agent host.
+The agent host has durable model jobs and protocol-level job inspection and
+cancellation. Generic tool/script job execution is still being integrated;
+the current agent-host `Tool.spawn` callback is not configured.
 
 ## Async work and timers
 
@@ -33,6 +34,13 @@ Jobs are claimed before execution, record terminal state, and release capacity o
 terminal/failed-start paths. Reviewers also use durable, non-redeliverable jobs.
 Unknown external effects after restart require reconciliation; persisted records
 and pending delivery are not serialized OCaml stacks or running child processes.
+
+Worker completion and interruption identify both the session generation and the
+claimed job attempt. A late callback from an older retry cannot complete or
+interrupt the current attempt, nor write a new state transaction. The scheduler
+retains that identity through cleanup and waits for the prior worker to release
+ownership before claiming a retry. Session-wide job cancellation still targets
+the current job, and terminal results retain the existing first-winner behavior.
 
 ## Safe points and state
 

@@ -1145,6 +1145,7 @@ let cancelled_call actor (job : Agent_protocol.Job.t) =
          actor
          ~job_id:job.id
          ~generation:job.generation
+         ~attempt:job.attempt
          ~reason:"synchronous model call was cancelled"
        : (Agent_protocol.Job.t, Agent_protocol.Error.t) result));
   Ok
@@ -1184,6 +1185,7 @@ let job_services t state actor_ref pending =
       actor
       ~job_id:job.Agent_protocol.Job.id
       ~generation:job.generation
+      ~attempt:job.attempt
       outcome
     |> Result.map_error ~f:(fun error -> error.message)
     |> Result.bind ~f:(fun _ -> result)
@@ -1205,6 +1207,7 @@ let job_services t state actor_ref pending =
              actor
              ~job_id:job.Agent_protocol.Job.id
              ~generation:job.generation
+             ~attempt:job.attempt
              ~reason:"synchronous model call was cancelled"
            : (Agent_protocol.Job.t, Agent_protocol.Error.t) result));
       raise exn
