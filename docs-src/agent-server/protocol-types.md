@@ -1395,13 +1395,26 @@ type t =
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 
+(** Validate artifact result ownership and lifecycle, including values restored
+    from non-JSON snapshots. Legacy result representations remain unchanged. *)
+val validate_result : t -> (unit, Error.t) result
+
+(** Read the inline completion or explicit artifact descriptor without loading
+    any bytes. Validates exact artifact session/job/generation/attempt ownership. *)
+val terminal_result : t -> (Stored_completion.t option, Error.t) result
+
 (** Interpret terminal results at the completion/delivery boundary. Async_tool
     results must contain a valid Completion envelope matching their terminal
     status. Other kinds retain the legacy raw-success/error-status encoding;
     JSON that resembles an envelope is still ordinary model output. Nonterminal
     jobs return None, including queued retries retaining an earlier failure.
-    This read neither changes delivery ownership nor executes work. *)
-val terminal_completion : t -> (Completion.t option, Error.t) result
+    Artifact results require a host loader; absence fails explicitly rather than
+    treating a reference as the business result. This read neither changes delivery
+    ownership nor executes work. *)
+val terminal_completion
+  :  ?load_artifact:(Job_artifact.t -> (Completion.t, Error.t) result)
+  -> t
+  -> (Completion.t option, Error.t) result
 
 module List_request : sig
   type t =
@@ -2903,6 +2916,49 @@ val to_json : t -> Jsonaf.t
 (** [of_json json] rejects snapshots whose top-level revision differs from the
     embedded session summary. *)
 val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
+## stored_completion
+
+[JSON codec](../../lib/agent_protocol/stored_completion.ml) · [interface](../../lib/agent_protocol/stored_completion.mli)
+
+```ocaml
+(** Explicit async-job completion storage. Inline values retain their existing
+    Completion encoding. Artifact envelopes occur only at this storage boundary,
+    never by interpreting an arbitrary business JSON object's shape. *)
+type outcome =
+  | Succeeded
+  | Failed
+  | Cancelled
+  | Expired
+[@@deriving equal, sexp]
+
+type t =
+  | Inline of Completion.t
+  | Artifact of
+      { outcome : outcome
+      ; reference : Job_artifact.t
+      }
+[@@deriving sexp]
+
+val outcome : t -> outcome
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Bind an actual validated completion to a prepared artifact, verifying its
+    serialized length and digest. Does not grant read or publication authority. *)
+val artifact : Job_artifact.t -> Completion.t -> (t, Error.t) result
+
+(** Compare a validated completion with an inline value or the artifact's outcome,
+    byte length and digest. Does not read files or run effects. *)
+val matches : t -> Completion.t -> (bool, Error.t) result
+
+(** Load and revalidate an artifact's exact outcome and content. The host loader
+    must enforce ownership, disclosure, bounded reads and raw byte verification. *)
+val materialize
+  :  load:(Job_artifact.t -> (Completion.t, Error.t) result)
+  -> t
+  -> (Completion.t, Error.t) result
 ```
 
 ## subscription

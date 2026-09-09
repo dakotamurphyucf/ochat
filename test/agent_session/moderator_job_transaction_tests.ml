@@ -66,6 +66,8 @@ let%expect_test "moderator saves select jobs before persistence and never reject
            ; abort =
                (fun owner id -> A.abort_background_job actor ~owner ~id |> protocol_ok)
            ; get = (fun owner id -> A.read_script_job actor ~owner ~id)
+           ; materialize =
+               (fun owner expected -> A.read_script_job_result actor ~owner ~expected)
            ; cancel = (fun owner id -> A.cancel_script_job actor ~owner ~id)
            }
          in

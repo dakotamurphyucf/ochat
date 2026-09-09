@@ -16,6 +16,10 @@ let with_background_daemon
       ?(sources = [])
       ?model_post_stream
       ?(expected_model_calls = 0)
+      ?(max_request_bytes =
+        Agent_server.Daemon.default_options.protocol_limits.max_request_bytes)
+      ?(job_result_max_bytes =
+        Agent_server.Daemon.default_options.factory_limits.job_result_max_bytes)
       ?(after_recovery = fun _env _client _entry _before -> ())
       ?(check_restored =
         fun job restored ->
@@ -79,6 +83,15 @@ let with_background_daemon
               ~options:
                 { Agent_server.Daemon.default_options with
                   qualify_chatml_extensions = true
+                ; protocol_limits =
+                    { Agent_server.Daemon.default_options.protocol_limits with
+                      max_request_bytes
+                    }
+                ; factory_limits =
+                    { Agent_server.Daemon.default_options.factory_limits with
+                      job_result_max_bytes
+                    ; job_result_inline_bytes = Int.min (64 * 1024) job_result_max_bytes
+                    }
                 ; model_post_stream =
                     Some
                       (fun ~sw ~inputs ->
@@ -98,6 +111,18 @@ let with_background_daemon
                 Agent_server.Daemon.shutdown daemon |> protocol_ok;
                 stage := "first daemon stopped")
               ~f:(fun () ->
+                List.iter
+                  (Agent_session.Prompt_catalog.entries
+                     (Agent_server.Daemon.prompts daemon))
+                  ~f:(fun entry ->
+                    match entry.availability with
+                    | Ready _ -> ()
+                    | Unavailable diagnostics ->
+                      raise_s
+                        [%sexp
+                          (diagnostics
+                           : Agent_session.Prompt_revision_builder.Diagnostic.t list)]
+                    | Disabled -> failwith "background fixture prompt is disabled");
                 let client = connection daemon (principal ()) in
                 Exn.protect
                   ~finally:(fun () -> Agent_client.Connection.close client)

@@ -154,6 +154,7 @@ let%expect_test "permission requests persist before wait and resolve by generati
                   Agent_protocol.Id.Attachment.of_string "att_actor_permission"
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -236,6 +237,7 @@ let%expect_test "session approval creates a durable invocation grant" =
                 (fun () ->
                   Agent_protocol.Id.Attachment.of_string "att_actor_grant" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -318,6 +320,7 @@ let%expect_test "permission timeout applies configured unattended fallback" =
                   Agent_protocol.Id.Attachment.of_string "att_actor_timeout"
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in

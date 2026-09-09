@@ -27,6 +27,7 @@ let job_module : S.builtin_module =
       [ operation "start_tool" [ S.TString; S.json_ty ] S.TString
       ; operation "start_script" [ S.json_ty ] S.TString
       ; operation "get" [ S.TString ] S.json_ty
+      ; operation "read_result" [ S.TString ] S.json_ty
       ; operation "cancel" [ S.TString ] S.TUnit
       ]
   }

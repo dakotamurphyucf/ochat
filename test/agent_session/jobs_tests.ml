@@ -21,6 +21,7 @@ let%expect_test "schedule delivery is generation-checked and actor-committed" =
                   Agent_protocol.Id.Attachment.of_string "att_schedule_test"
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -126,6 +127,7 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
                 (fun () ->
                   Agent_protocol.Id.Attachment.of_string "att_job_test" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -227,6 +229,7 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
                 (fun () ->
                   Agent_protocol.Id.Attachment.of_string "att_retry_test" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in

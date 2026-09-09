@@ -101,6 +101,8 @@ let default_options =
       ; event_replay_capacity = 100_000
       ; max_attachments_per_session = 1_024
       ; subscriber_queue_capacity = 512
+      ; job_result_inline_bytes = 64 * 1024
+      ; job_result_max_bytes = 9 * 1024 * 1024
       }
   ; quota_limits =
       { global_running_sessions = 256

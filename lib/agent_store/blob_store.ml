@@ -55,6 +55,7 @@ module Upload = struct
 end
 
 let eio_path t path = Eio.Path.(Eio.Stdenv.fs t.env / path)
+let max_upload_bytes t = t.max_upload_bytes
 
 let create ~env ~temporary_directory ~durable_directory ~max_upload_bytes =
   if

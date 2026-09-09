@@ -28,7 +28,7 @@ let prepare store ~sw ~session ~job ~creating_principal ~now ~max_bytes completi
   let%bind () = P.Completion.validate completion |> protocol in
   let%bind () =
     match job.P.Job.kind, job.status with
-    | Async_tool, Running
+    | Async_tool, (Running | Waiting_completion _)
       when job.attempt > 0
            && P.Id.Session.equal job.session_id (Session_store.Handle.session_id session)
       -> Ok ()
@@ -164,3 +164,122 @@ let load store ~sw ~session ~max_bytes reference =
   in
   P.Completion.of_json json |> protocol
 ;;
+
+module Publisher = struct
+  type t =
+    { blobs : Blob_store.t
+    ; sw : Eio.Switch.t
+    ; session : Session_store.Handle.t
+    ; principal : P.Id.Principal.t
+    ; inline_bytes : int
+    ; max_bytes : int
+    ; mutex : Eio.Mutex.t
+    ; mutable pending : prepared list
+    }
+
+  let create ~blobs ~sw ~session ~principal ~inline_bytes ~max_bytes =
+    match
+      inline_bytes >= 0
+      && max_bytes > 0
+      && inline_bytes <= max_bytes
+      && Int64.(of_int max_bytes <= Blob_store.max_upload_bytes blobs)
+    with
+    | false -> Error (P.Error.invalid_request "invalid job result storage policy")
+    | true ->
+      Ok
+        { blobs
+        ; sw
+        ; session
+        ; principal
+        ; inline_bytes
+        ; max_bytes
+        ; mutex = Eio.Mutex.create ()
+        ; pending = []
+        }
+  ;;
+
+  let prune t jobs =
+    let current, stale =
+      List.partition_tf t.pending ~f:(fun prepared ->
+        let reference = reference prepared in
+        List.exists jobs ~f:(fun job ->
+          P.Id.Job.equal reference.job_id job.P.Job.id
+          && Int.equal reference.generation job.generation
+          && Int.equal reference.attempt job.attempt
+          &&
+          match job.status with
+          | Running | Waiting_completion _ -> true
+          | _ -> false))
+    in
+    t.pending <- current;
+    (* Attempted writes must survive until durable orphan reconciliation. *)
+    List.iter stale ~f:(fun prepared ->
+      ignore (discard prepared : (unit, Store_error.t) result))
+  ;;
+
+  let check_completion t completion =
+    let open Result.Let_syntax in
+    let%bind () = P.Completion.validate completion in
+    match
+      String.length (P.Completion.to_json completion |> Jsonaf.to_string) <= t.max_bytes
+    with
+    | true -> Ok ()
+    | false ->
+      Error
+        (P.Error.create
+           Resource_limit
+           ~message:"job completion exceeds the host storage limit"
+           ~retryable:false
+           ())
+  ;;
+
+  let publish t ~jobs ~job ~now completion ~persist =
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      let open Result.Let_syntax in
+      prune t jobs;
+      let%bind () = check_completion t completion in
+      let content = P.Completion.to_json completion |> Jsonaf.to_string in
+      let cached =
+        List.find t.pending ~f:(fun prepared ->
+          P.Id.Job.equal (reference prepared).job_id job.P.Job.id)
+      in
+      match cached, String.length content <= t.inline_bytes with
+      | None, true -> persist (P.Stored_completion.Inline completion)
+      | _, _ ->
+        let%bind prepared =
+          match cached with
+          | Some prepared -> Ok prepared
+          | None ->
+            let%map prepared =
+              prepare
+                t.blobs
+                ~sw:t.sw
+                ~session:t.session
+                ~job
+                ~creating_principal:t.principal
+                ~now
+                ~max_bytes:t.max_bytes
+                completion
+              |> Result.map_error ~f:Store_error.to_protocol_error
+            in
+            t.pending <- prepared :: t.pending;
+            prepared
+        in
+        let%bind stored = P.Stored_completion.artifact (reference prepared) completion in
+        let%map result = commit prepared ~persist:(fun _ -> persist stored) in
+        t.pending
+        <- List.filter t.pending ~f:(fun other -> not (phys_equal other prepared));
+        result)
+  ;;
+
+  let load t reference =
+    load t.blobs ~sw:t.sw ~session:t.session ~max_bytes:t.max_bytes reference
+    |> Result.map_error ~f:(fun failure ->
+      let retryable = (Store_error.to_protocol_error failure).retryable in
+      P.Error.create
+        Blob_unavailable
+        ~message:"The saved job result is unavailable or failed verification."
+        ~retryable
+        ())
+  ;;
+end

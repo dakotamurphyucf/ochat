@@ -318,6 +318,7 @@ let validate t =
   in
   let%bind () =
     List.fold_result t.jobs ~init:() ~f:(fun () job ->
+      let%bind () = Agent_protocol.Job.validate_result job in
       let%bind () =
         match job.Agent_protocol.Job.progress with
         | None -> Ok ()

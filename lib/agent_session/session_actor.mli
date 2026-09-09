@@ -15,6 +15,9 @@ type services =
   ; create_attachment_id : unit -> Agent_protocol.Id.Attachment.t
   ; create_reclaim_token : unit -> string
   ; state_committed : Session_state.t -> Agent_protocol.Event.Durable.t list -> unit
+  ; job_results : Agent_store.Job_result_store.Publisher.t option
+    (** Optional session-owned artifact publication/loading. Absence keeps inline
+        publication and fails explicitly when an existing artifact needs loading. *)
   }
 
 type submission =
@@ -146,6 +149,14 @@ val cancel_script_job
   -> owner:Agent_protocol.Job.launch_owner
   -> id:Agent_protocol.Id.Job.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Load the exact terminal record checked by the script host. Rechecks active
+    ownership, generation and record identity before bounded verified IO. *)
+val read_script_job_result
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> expected:Agent_protocol.Job.t
+  -> (Agent_protocol.Completion.t, Agent_protocol.Error.t) result
 
 module Extension_change : sig
   type t =

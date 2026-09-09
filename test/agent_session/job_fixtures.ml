@@ -102,6 +102,7 @@ let with_actor ?(reject_save = fun _ -> false) ?(now = fun () -> timestamp) f =
             { now
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "background-fixture")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in

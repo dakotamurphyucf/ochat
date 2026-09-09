@@ -68,6 +68,7 @@ val open_session
   -> (Handle.t, Store_error.t) result
 
 val load : t -> Handle.t -> (string, Store_error.t) result
+val max_upload_bytes : t -> int64
 
 (** Bounded streaming load, checking actual length and SHA-256 against metadata
     before returning bytes. Fails on growth, truncation or changed contents. *)

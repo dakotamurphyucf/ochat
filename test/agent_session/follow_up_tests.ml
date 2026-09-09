@@ -240,6 +240,7 @@ let%expect_test
                     { now = Agent_protocol.Timestamp.now
                     ; create_attachment_id = Agent_protocol.Id.Attachment.create
                     ; create_reclaim_token = (fun () -> "follow-up-test")
+                    ; job_results = None
                     ; state_committed =
                         (fun committed events ->
                           List.iter events ~f:(fun event ->

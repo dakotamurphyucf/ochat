@@ -43,3 +43,44 @@ val load
   -> max_bytes:int
   -> Agent_protocol.Job_artifact.t
   -> (Agent_protocol.Completion.t, Store_error.t) result
+
+(** Per-session publication service. The actor must validate the live attempt and
+    completion contract before calling it. Large completions are written once;
+    failed persistence retries reuse their exact prepared reference. *)
+module Publisher : sig
+  type t
+
+  val create
+    :  blobs:Blob_store.t
+    -> sw:Eio.Switch.t
+    -> session:Session_store.Handle.t
+    -> principal:Agent_protocol.Id.Principal.t
+    -> inline_bytes:int
+    -> max_bytes:int
+    -> (t, Agent_protocol.Error.t) result
+
+  (** [jobs] is the current authoritative session state. Stale preparations are
+      evicted from memory, retaining any potentially referenced artifact for
+      separate durable orphan reconciliation. The persistence callback must not
+      reenter this publisher. *)
+  val publish
+    :  t
+    -> jobs:Agent_protocol.Job.t list
+    -> job:Agent_protocol.Job.t
+    -> now:Agent_protocol.Timestamp.t
+    -> Agent_protocol.Completion.t
+    -> persist:(Agent_protocol.Stored_completion.t -> ('a, Agent_protocol.Error.t) result)
+    -> ('a, Agent_protocol.Error.t) result
+
+  val load
+    :  t
+    -> Agent_protocol.Job_artifact.t
+    -> (Agent_protocol.Completion.t, Agent_protocol.Error.t) result
+
+  (** Check the result ceiling before publication. A host can record a small
+      control failure directly if the business completion cannot be stored. *)
+  val check_completion
+    :  t
+    -> Agent_protocol.Completion.t
+    -> (unit, Agent_protocol.Error.t) result
+end

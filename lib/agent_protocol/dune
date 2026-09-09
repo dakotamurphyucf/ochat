@@ -27,6 +27,7 @@
   extension_status
   extension_capabilities
   completion
+  stored_completion
   subscription
   delivery
   schedule
@@ -43,6 +44,6 @@
   command
   method_result)
  (private_modules protocol_error extension_codec)
- (libraries core jsonaf base64 mirage-crypto-rng uutf ochat.history_entry)
+ (libraries core jsonaf base64 digestif mirage-crypto-rng uutf ochat.history_entry)
  (preprocess
   (pps ppx_jane)))

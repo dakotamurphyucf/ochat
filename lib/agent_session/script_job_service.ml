@@ -9,6 +9,7 @@ type host =
   ; select : P.Job.launch_owner -> P.Id.Job.t list -> (unit, P.Error.t) result
   ; abort : P.Job.launch_owner -> P.Id.Job.t -> unit
   ; get : P.Job.launch_owner -> P.Id.Job.t -> (P.Job.t, P.Error.t) result
+  ; materialize : P.Job.launch_owner -> P.Job.t -> (P.Completion.t, P.Error.t) result
   ; cancel : P.Job.launch_owner -> P.Id.Job.t -> (unit, P.Error.t) result
   }
 
@@ -42,7 +43,7 @@ let message result = Result.map_error result ~f:(fun error -> error.P.Error.mess
 
 let view (job : P.Job.t) =
   let open Result.Let_syntax in
-  let%map completion = P.Job.terminal_completion job in
+  let%map completion = P.Job.terminal_result job in
   let status =
     match job.status with
     | Queued -> "queued"
@@ -63,7 +64,8 @@ let view (job : P.Job.t) =
     ; "created_at", P.Timestamp.to_json job.created_at
     ; ( "completed_at"
       , Option.value_map job.completed_at ~default:`Null ~f:P.Timestamp.to_json )
-    ; "completion", Option.value_map completion ~default:`Null ~f:P.Completion.to_json
+    ; ( "completion"
+      , Option.value_map completion ~default:`Null ~f:P.Stored_completion.to_json )
     ]
 ;;
 
@@ -207,6 +209,19 @@ let handlers scope =
         (fun id ->
           let%bind job = accessible_job id in
           view job |> message)
+    ; read_result =
+        (fun id ->
+          let%bind job = accessible_job id in
+          let%bind stored = P.Job.terminal_result job |> message in
+          match stored with
+          | None -> Ok `Null
+          | Some (Inline completion) -> Ok (P.Completion.to_json completion)
+          | Some (Artifact _) ->
+            let%bind completion =
+              scope.service.host.materialize scope.owner job |> message
+            in
+            let%map () = check scope in
+            P.Completion.to_json completion)
     ; cancel =
         (fun id ->
           let%bind _ = accessible_job id in

@@ -17,6 +17,8 @@ type limits =
   ; event_replay_capacity : int
   ; max_attachments_per_session : int
   ; subscriber_queue_capacity : int
+  ; job_result_inline_bytes : int
+  ; job_result_max_bytes : int
   }
 
 type t

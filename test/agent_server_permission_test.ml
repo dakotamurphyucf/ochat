@@ -84,6 +84,7 @@ let actor ~sw ~env state =
       { now = (fun () -> timestamp env)
       ; create_attachment_id = Agent_protocol.Id.Attachment.create
       ; create_reclaim_token = (fun () -> "review-reclaim-token")
+      ; job_results = None
       ; state_committed = (fun _ _ -> ())
       }
 ;;

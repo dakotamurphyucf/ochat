@@ -18,6 +18,10 @@ type host =
       Agent_protocol.Job.launch_owner
       -> Agent_protocol.Id.Job.t
       -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+  ; materialize :
+      Agent_protocol.Job.launch_owner
+      -> Agent_protocol.Job.t
+      -> (Agent_protocol.Completion.t, Agent_protocol.Error.t) result
   ; cancel :
       Agent_protocol.Job.launch_owner
       -> Agent_protocol.Id.Job.t

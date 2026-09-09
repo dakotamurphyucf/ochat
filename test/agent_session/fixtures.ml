@@ -374,6 +374,7 @@ let with_handoff_actor ?(reject = fun _ -> false) ~make_worker f =
             { now = Agent_protocol.Timestamp.now
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "handoff-test")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -733,6 +734,7 @@ let audit_actor ?(with_invocation = false) ~sw ~env ~workspace_instance ~reject_
         { now = Agent_protocol.Timestamp.now
         ; create_attachment_id = Agent_protocol.Id.Attachment.create
         ; create_reclaim_token = (fun () -> "audit-token")
+        ; job_results = None
         ; state_committed = (fun _ _ -> ())
         }
   in

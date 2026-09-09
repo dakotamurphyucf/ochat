@@ -58,6 +58,7 @@ let%expect_test "session actor publishes committed events to multiple subscriber
                     (sprintf "att_actor_%d" !attachment_sequence)
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -181,6 +182,7 @@ let%expect_test "session actor enforces its configured attachment limit" =
                     (sprintf "att_limited_%d" !attachment_sequence)
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -222,6 +224,7 @@ let%expect_test "owner-bound actor stops after its owner disconnect grace" =
                 (fun () ->
                   Agent_protocol.Id.Attachment.of_string "att_actor_owner" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -270,6 +273,7 @@ let%expect_test "owner-bound actor permits one owner and supports grace reclaim"
                     (sprintf "att_actor_owner_%d" !attachment_sequence)
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -347,6 +351,7 @@ let%expect_test "read-only attachments cannot mutate actor state" =
                   Agent_protocol.Id.Attachment.of_string "att_actor_read_only"
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -392,6 +397,7 @@ let%expect_test "history IDs are allocated only from actor-committed blocks" =
                 (fun () ->
                   Agent_protocol.Id.Attachment.of_string "att_actor_unused" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -448,6 +454,7 @@ let%expect_test "durable history source adapts the response engine contract" =
                   Agent_protocol.Id.Attachment.of_string "att_source_unused"
                   |> protocol_ok)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -516,6 +523,7 @@ let%expect_test "foreground worker commits history before terminal operation" =
             { now = (fun () -> Agent_protocol.Timestamp.now ())
             ; create_attachment_id = (fun () -> attachment_id)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -640,6 +648,7 @@ let%expect_test
             { now = (fun () -> timestamp)
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "test-token")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -706,6 +715,7 @@ let%expect_test
             { now = (fun () -> !now)
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "lease-test")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in

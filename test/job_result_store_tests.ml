@@ -368,3 +368,126 @@ let%expect_test "failed adoption restores temporary data before a safe retry" =
     ((after_rename true) (restored_and_retried true))
     |}]
 ;;
+
+let%expect_test "publisher retries preserve exact artifacts and typed job ownership" =
+  with_store (fun env sw blobs _reopen session _second ->
+    let running = job session in
+    let completion = P.Completion.Succeeded (`String (String.make 512 'x')) in
+    let publisher =
+      Store.Publisher.create
+        ~blobs
+        ~sw
+        ~session
+        ~principal
+        ~inline_bytes:64
+        ~max_bytes:4096
+      |> protocol_ok
+    in
+    let path =
+      Filename.concat (Agent_store.Session_store.Handle.directory session) "job.json"
+    in
+    let attempts = ref 0 in
+    let reference = ref None in
+    let persist stored =
+      incr attempts;
+      (match stored, !reference with
+       | P.Stored_completion.Artifact { reference = actual; _ }, None ->
+         reference := Some actual
+       | Artifact { reference = actual; _ }, Some expected ->
+         assert (P.Id.Blob.equal actual.blob.id expected.blob.id)
+       | _ -> failwith "publication did not retain one artifact");
+      let terminal =
+        { running with
+          status = Succeeded
+        ; completed_at = Some timestamp
+        ; result = Some (P.Stored_completion.to_json stored)
+        }
+      in
+      let open Result.Let_syntax in
+      let%bind () =
+        Agent_store.Durable_file.replace
+          ~env
+          ~durability:Flush_file_and_directory
+          ~path
+          (P.Job.to_json terminal |> Jsonaf.to_string)
+        |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
+      in
+      match !attempts with
+      | 1 ->
+        Error
+          (P.Error.create
+             Persistence_error
+             ~message:"lost acknowledgement"
+             ~retryable:true
+             ())
+      | _ -> Ok terminal
+    in
+    let publish =
+      Store.Publisher.publish
+        publisher
+        ~jobs:[ running ]
+        ~job:running
+        ~now:timestamp
+        ~persist
+    in
+    assert (Result.is_error (publish completion));
+    assert (Result.is_error (publish (P.Completion.Succeeded (`String "changed"))));
+    [%test_eq: int] 1 !attempts;
+    let terminal = publish completion |> protocol_ok in
+    [%test_eq: int] 2 !attempts;
+    let restored =
+      Agent_store.Durable_file.load ~env ~path
+      |> store_ok
+      |> Jsonaf.of_string
+      |> P.Job.of_json
+      |> protocol_ok
+    in
+    assert (
+      P.Completion.equal
+        completion
+        (P.Job.terminal_completion
+           ~load_artifact:(Store.Publisher.load publisher)
+           restored
+         |> protocol_ok
+         |> Option.value_exn));
+    List.iter
+      [ { terminal with id = P.Id.Job.create () }
+      ; { terminal with session_id = P.Id.Session.create () }
+      ; { terminal with generation = 1 }
+      ; { terminal with attempt = 2 }
+      ; { terminal with status = Running }
+      ; { terminal with status = Cancelled }
+      ; { terminal with completed_at = None }
+      ]
+      ~f:(fun invalid -> assert (Result.is_error (P.Job.of_json (P.Job.to_json invalid))));
+    let stored = P.Job.terminal_result terminal |> protocol_ok |> Option.value_exn in
+    assert (
+      Result.is_error
+        (P.Stored_completion.materialize stored ~load:(fun _ ->
+           Ok (P.Completion.Succeeded (`String "forged")))));
+    let ordinary = P.Completion.Succeeded (P.Stored_completion.to_json stored) in
+    let nested =
+      P.Stored_completion.Inline ordinary
+      |> P.Stored_completion.to_json
+      |> P.Stored_completion.of_json
+      |> protocol_ok
+    in
+    assert (P.Stored_completion.matches nested ordinary |> protocol_ok);
+    let legacy = { terminal with kind = Model_call } in
+    assert (
+      P.Completion.equal
+        ordinary
+        (P.Job.terminal_completion legacy |> protocol_ok |> Option.value_exn));
+    print_endline
+      "saved artifact reused after lost acknowledgement; changed retry rejected";
+    print_endline
+      "seven job ownership/lifecycle mutations and a forged loaded completion rejected";
+    print_endline
+      "nested business JSON and legacy model output retain their ordinary meaning");
+  [%expect
+    {|
+    saved artifact reused after lost acknowledgement; changed retry rejected
+    seven job ownership/lifecycle mutations and a forged loaded completion rejected
+    nested business JSON and legacy model output retain their ordinary meaning
+    |}]
+;;

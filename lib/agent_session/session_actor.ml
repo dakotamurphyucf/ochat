@@ -13,6 +13,7 @@ type services =
   ; create_attachment_id : unit -> Agent_protocol.Id.Attachment.t
   ; create_reclaim_token : unit -> string
   ; state_committed : Session_state.t -> Agent_protocol.Event.Durable.t list -> unit
+  ; job_results : Agent_store.Job_result_store.Publisher.t option
   }
 
 type submission =
@@ -169,6 +170,9 @@ type _ request =
   | Read_script_job :
       Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t
       -> Agent_protocol.Job.t request
+  | Read_script_job_result :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Job.t
+      -> Agent_protocol.Completion.t request
   | Cancel_script_job :
       Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t
       -> unit request
@@ -623,6 +627,11 @@ let has_staged_background_job t ~owner ~id =
 ;;
 
 let read_script_job t ~owner ~id = call t (Read_script_job (owner, id))
+
+let read_script_job_result t ~owner ~expected =
+  call t (Read_script_job_result (owner, expected))
+;;
+
 let cancel_script_job t ~owner ~id = call t (Cancel_script_job (owner, id))
 
 let commit_extensions_internal t generation expected_revision changes =
@@ -4931,7 +4940,7 @@ let cancelled_job_dependencies t (parent : Agent_protocol.Job.t) =
        | true -> Error (error Invalid_state "job dependency cycle")
        | false ->
          let%bind child = find_job t dependency.job_id in
-         let%bind terminal = Agent_protocol.Job.terminal_completion child in
+         let%bind terminal = Agent_protocol.Job.terminal_result child in
          (match terminal with
           | Some _ -> Ok []
           | None ->
@@ -5188,6 +5197,25 @@ let complete_background_job ?(waiting = false) t job_id generation attempt compl
     | _ -> Error (error Invalid_request "generic completion requires an async tool job")
   in
   let%bind () = Agent_protocol.Completion.validate completion in
+  let completion, storage_limited =
+    match t.services.job_results with
+    | Some publisher
+      when Result.is_error
+             (Agent_store.Job_result_store.Publisher.check_completion
+                publisher
+                completion) ->
+      ( (match completion with
+         | Cancelled _ | Expired -> completion
+         | Succeeded _ | Failed _ ->
+           Agent_protocol.Completion.Failed
+             { code = "background.result_limit"
+             ; message = "The completed result exceeds the host storage limit."
+             ; retryable = false
+             ; details = `Null
+             })
+      , true )
+    | _ -> completion, false
+  in
   let%bind () = finish_background_scopes t job_id generation attempt in
   let%bind job =
     match job.status, waiting with
@@ -5201,6 +5229,7 @@ let complete_background_job ?(waiting = false) t job_id generation attempt compl
     | Succeeded _ | Failed _ -> Ok []
   in
   let terminal status = terminal_job t job status (Some encoded) in
+  let running = job in
   let job =
     match completion with
     | Agent_protocol.Completion.Succeeded _ -> terminal Succeeded
@@ -5226,8 +5255,30 @@ let complete_background_job ?(waiting = false) t job_id generation attempt compl
                  ~data:encoded
                  ())))
   in
-  let%map _ = update_jobs t (job :: cancelled) in
-  job
+  let persist stored =
+    let status =
+      match job.status, stored with
+      | Failed failure, Agent_protocol.Stored_completion.Artifact _ ->
+        Agent_protocol.Job.Failed { failure with data = `Null }
+      | status, _ -> status
+    in
+    let job =
+      { job with status; result = Some (Agent_protocol.Stored_completion.to_json stored) }
+    in
+    let%map _ = update_jobs t (job :: cancelled) in
+    job
+  in
+  match job.status, t.services.job_results, storage_limited with
+  | Queued, _, _ | _, None, _ | _, _, true ->
+    persist (Agent_protocol.Stored_completion.Inline completion)
+  | _, Some publisher, false ->
+    Agent_store.Job_result_store.Publisher.publish
+      publisher
+      ~jobs:t.state.jobs
+      ~job:running
+      ~now:(t.services.now ())
+      completion
+      ~persist
 ;;
 
 let refresh_background_job t job_id generation attempt =
@@ -5241,7 +5292,28 @@ let refresh_background_job t job_id generation attempt =
       Job_dependency.validate ~invocations:t.state.invocations ~jobs:t.state.jobs job
     in
     let%bind target = find_job t dependency.job_id in
-    let%bind completion = Agent_protocol.Job.terminal_completion target in
+    let load_artifact =
+      Option.map t.services.job_results ~f:(fun publisher ->
+        Agent_store.Job_result_store.Publisher.load publisher)
+    in
+    let%bind completion =
+      match Agent_protocol.Job.terminal_completion ?load_artifact target with
+      | Ok completion -> Ok completion
+      | Error failure when not failure.retryable ->
+        Ok
+          (Some
+             (Agent_protocol.Completion.Failed
+                { code = "background.artifact_unavailable"
+                ; message =
+                    "The saved background result is unavailable or failed verification."
+                ; retryable = false
+                ; details = `Null
+                }))
+      | Error _
+        when Agent_protocol.Timestamp.compare (t.services.now ()) dependency.deadline >= 0
+        -> Ok (Some Agent_protocol.Completion.Expired)
+      | Error _ as failure -> failure
+    in
     (match completion with
      | Some completion ->
        let completion =
@@ -6255,6 +6327,28 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        let%bind job = find_job t id in
        let%map () = validate_job_generation t job t.state.identity.generation in
        job_with_progress t job)
+  | Read_script_job_result (owner, expected) ->
+    let open Result.Let_syntax in
+    let%bind () = background_owner_active t owner in
+    let%bind job = find_job t expected.id in
+    let%bind () = validate_job_generation t job t.state.identity.generation in
+    let%bind () =
+      match
+        Jsonaf.exactly_equal
+          (Agent_protocol.Job.to_json job)
+          (Agent_protocol.Job.to_json expected)
+      with
+      | true -> Ok ()
+      | false -> Error (error Conflict "job changed before artifact materialization")
+    in
+    let load_artifact =
+      Option.map t.services.job_results ~f:(fun publisher ->
+        Agent_store.Job_result_store.Publisher.load publisher)
+    in
+    let%bind completion = Agent_protocol.Job.terminal_completion ?load_artifact job in
+    Result.of_option
+      completion
+      ~error:(error Invalid_state "job has no terminal completion")
   | Cancel_script_job (owner, id) ->
     let open Result.Let_syntax in
     let%bind () = background_owner_active t owner in

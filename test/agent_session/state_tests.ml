@@ -878,6 +878,7 @@ let%expect_test
                 (fun () ->
                   Agent_protocol.Id.Attachment.of_string "att_extension" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "fixture")
+            ; job_results = None
             ; state_committed =
                 (fun _ events ->
                   Int.incr callbacks;

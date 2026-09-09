@@ -8,6 +8,7 @@ type handlers =
   { start_tool : name:string -> input:Jsonaf.t -> (Id.t, string) result
   ; start_script : Jsonaf.t -> (Id.t, string) result
   ; get : Id.t -> (Jsonaf.t, string) result
+  ; read_result : Id.t -> (Jsonaf.t, string) result
   ; cancel : Id.t -> (unit, string) result
   ; rollback_start : Id.t -> unit
   }
@@ -26,6 +27,7 @@ let dynamic_handlers current =
   { start_tool = (fun ~name ~input -> active (fun h -> h.start_tool ~name ~input))
   ; start_script = (fun request -> active (fun h -> h.start_script request))
   ; get = (fun id -> active (fun h -> h.get id))
+  ; read_result = (fun id -> active (fun h -> h.read_result id))
   ; cancel = (fun id -> active (fun h -> h.cancel id))
   ; rollback_start =
       (fun id ->
@@ -113,6 +115,9 @@ let install ?control ~handlers (config : R.runtime_config) =
         | _ -> Error "Job.start_script: expected a one-off script request")
     ; immediate "Job.get" (fun id ->
         let%map value = handlers.get id in
+        V.import_json ?control value)
+    ; immediate "Job.read_result" (fun id ->
+        let%map value = handlers.read_result id in
         V.import_json ?control value)
     ; immediate "Job.cancel" (fun id ->
         let%map () = handlers.cancel id in

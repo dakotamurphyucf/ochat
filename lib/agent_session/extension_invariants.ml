@@ -75,13 +75,13 @@ let completion_for_work ~jobs ~subscriptions = function
     let open Result.Let_syntax in
     let%bind s = subscription subscriptions id in
     (match s.result with
-     | Some result -> Ok result
+     | Some result -> Ok (P.Stored_completion.Inline result)
      | None -> invalid "subscription is not terminal")
   | Job id ->
     let open Result.Let_syntax in
     let%bind j = job jobs id in
     let%bind completion =
-      P.Job.terminal_completion j
+      P.Job.terminal_result j
       |> Result.map_error ~f:(fun error ->
         P.Error.create
           Journal_corrupt
@@ -259,7 +259,8 @@ let validate
                 work
             in
             let%bind result = completion_for_work ~jobs ~subscriptions work in
-            if not (P.Completion.equal result c.completion)
+            let%bind matches = P.Stored_completion.matches result c.completion in
+            if not matches
             then invalid "delivery result differs from its terminal work"
             else if
               List.exists !seen_work ~f:(fun old ->

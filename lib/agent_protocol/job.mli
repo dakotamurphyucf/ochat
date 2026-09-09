@@ -92,13 +92,26 @@ type t =
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 
+(** Validate artifact result ownership and lifecycle, including values restored
+    from non-JSON snapshots. Legacy result representations remain unchanged. *)
+val validate_result : t -> (unit, Error.t) result
+
+(** Read the inline completion or explicit artifact descriptor without loading
+    any bytes. Validates exact artifact session/job/generation/attempt ownership. *)
+val terminal_result : t -> (Stored_completion.t option, Error.t) result
+
 (** Interpret terminal results at the completion/delivery boundary. Async_tool
     results must contain a valid Completion envelope matching their terminal
     status. Other kinds retain the legacy raw-success/error-status encoding;
     JSON that resembles an envelope is still ordinary model output. Nonterminal
     jobs return None, including queued retries retaining an earlier failure.
-    This read neither changes delivery ownership nor executes work. *)
-val terminal_completion : t -> (Completion.t option, Error.t) result
+    Artifact results require a host loader; absence fails explicitly rather than
+    treating a reference as the business result. This read neither changes delivery
+    ownership nor executes work. *)
+val terminal_completion
+  :  ?load_artifact:(Job_artifact.t -> (Completion.t, Error.t) result)
+  -> t
+  -> (Completion.t option, Error.t) result
 
 module List_request : sig
   type t =

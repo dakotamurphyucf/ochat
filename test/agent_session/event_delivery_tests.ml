@@ -81,6 +81,7 @@ let%expect_test "external event delivery commits receipts before changing the li
             { now = (fun () -> timestamp)
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "queue-delivery")
+            ; job_results = None
             ; state_committed = (fun _ _ -> ())
             }
       in
@@ -251,6 +252,7 @@ let%expect_test "two session event owners reject a wait cycle and release both b
                   { now = (fun () -> timestamp)
                   ; create_attachment_id = Agent_protocol.Id.Attachment.create
                   ; create_reclaim_token = (fun () -> "cycle-test")
+                  ; job_results = None
                   ; state_committed = (fun _ _ -> ())
                   }
             in

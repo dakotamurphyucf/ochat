@@ -174,8 +174,48 @@ let launch_of_json json =
       (Protocol_error.invalid_request "job launch depth differs from parent ownership")
 ;;
 
-let terminal_completion t =
+let validate_stored_completion t stored =
   let open Result.Let_syntax in
+  let%bind () =
+    match t.status, Stored_completion.outcome stored with
+    | Succeeded, Succeeded
+    | Failed _, (Failed | Expired)
+    | Cancelled, Cancelled
+    | Interrupted _, Failed -> Ok ()
+    | _ ->
+      Error
+        (Protocol_error.invalid_request "async tool completion differs from job status")
+  in
+  match stored with
+  | Inline completion -> Completion.validate completion
+  | Artifact { reference; _ } ->
+    let%bind _ = Job_artifact.of_json (Job_artifact.to_json reference) in
+    (match
+       Id.Session.equal reference.session_id t.session_id
+       && Id.Job.equal reference.job_id t.id
+       && Int.equal reference.generation t.generation
+       && Int.equal reference.attempt t.attempt
+       && Option.is_some t.completed_at
+     with
+     | true -> Ok ()
+     | false ->
+       Error
+         (Protocol_error.invalid_request "job artifact differs from its terminal owner"))
+;;
+
+let validate_result t =
+  match t.kind, t.result with
+  | Async_tool, Some (`Object fields as encoded)
+    when Option.exists (List.Assoc.find fields "type" ~equal:String.equal) ~f:(function
+           | `String "artifact" -> true
+           | _ -> false) ->
+    Result.bind (Stored_completion.of_json encoded) ~f:(validate_stored_completion t)
+  | _ -> Ok ()
+;;
+
+let terminal_result t =
+  let open Result.Let_syntax in
+  let%bind () = validate_result t in
   match t.status with
   | Queued | Running | Waiting_permission _ | Waiting_completion _ -> Ok None
   | Succeeded | Failed _ | Cancelled | Interrupted _ ->
@@ -188,40 +228,54 @@ let terminal_completion t =
             ~error:
               (Protocol_error.invalid_request "terminal async tool job has no completion")
         in
-        let%bind completion = Completion.of_json encoded in
-        (match t.status, completion with
-         | Succeeded, Completion.Succeeded _
-         | Failed _, (Completion.Failed _ | Expired)
-         | Cancelled, Completion.Cancelled _
-         | Interrupted _, Completion.Failed _ -> Ok completion
-         | _ ->
-           Error
-             (Protocol_error.invalid_request
-                "async tool completion differs from job status"))
+        let%bind stored = Stored_completion.of_json encoded in
+        let%map () = validate_stored_completion t stored in
+        stored
       | Model_call | Nested_agent | Scheduled_event | Shell_process | Compaction ->
-        (match t.status with
-         | Succeeded -> Ok (Completion.Succeeded (Option.value t.result ~default:`Null))
-         | Failed error ->
-           Ok
-             (Completion.Failed
-                { code = Protocol_error.code_to_string error.code
-                ; message = error.message
-                ; retryable = error.retryable
-                ; details = error.data
-                })
-         | Cancelled -> Ok (Completion.Cancelled "job cancelled")
-         | Interrupted reason ->
-           Ok
-             (Completion.Failed
-                { code = "interrupted"
-                ; message = reason
-                ; retryable = false
-                ; details = `Null
-                })
-         | Queued | Running | Waiting_permission _ | Waiting_completion _ -> assert false)
+        let%bind completion =
+          match t.status with
+          | Succeeded -> Ok (Completion.Succeeded (Option.value t.result ~default:`Null))
+          | Failed error ->
+            Ok
+              (Completion.Failed
+                 { code = Protocol_error.code_to_string error.code
+                 ; message = error.message
+                 ; retryable = error.retryable
+                 ; details = error.data
+                 })
+          | Cancelled -> Ok (Completion.Cancelled "job cancelled")
+          | Interrupted reason ->
+            Ok
+              (Completion.Failed
+                 { code = "interrupted"
+                 ; message = reason
+                 ; retryable = false
+                 ; details = `Null
+                 })
+          | Queued | Running | Waiting_permission _ | Waiting_completion _ -> assert false
+        in
+        let%map () = Completion.validate completion in
+        Stored_completion.Inline completion
     in
-    let%map () = Completion.validate completion in
-    Some completion
+    Ok (Some completion)
+;;
+
+let unavailable_artifact _ =
+  Error
+    (Protocol_error.create
+       Blob_unavailable
+       ~message:"job completion requires an authorized artifact loader"
+       ~retryable:false
+       ())
+;;
+
+let terminal_completion ?(load_artifact = unavailable_artifact) t =
+  let open Result.Let_syntax in
+  let%bind stored = terminal_result t in
+  match stored with
+  | None -> Ok None
+  | Some stored ->
+    Stored_completion.materialize ~load:load_artifact stored |> Result.map ~f:Option.some
 ;;
 
 let kind_values =
@@ -501,7 +555,7 @@ let of_json json =
   let%bind delivery = Json_codec.required_as fields "delivery" delivery_of_json in
   let%bind launch = Json_codec.optional_as fields "launch" launch_of_json in
   let%bind progress = Json_codec.optional_as fields "progress" Job_progress.of_json in
-  let%map () =
+  let%bind () =
     match status with
     | Waiting_completion dependency ->
       (match kind, started_at, next_run_at, completed_at, result with
@@ -512,23 +566,27 @@ let of_json json =
        | _ -> Error (Protocol_error.invalid_request "invalid waiting job lifecycle"))
     | _ -> Ok ()
   in
-  { id
-  ; session_id
-  ; generation
-  ; kind
-  ; payload
-  ; status
-  ; retry_policy
-  ; attempt
-  ; created_at
-  ; started_at
-  ; next_run_at
-  ; completed_at
-  ; result
-  ; delivery
-  ; launch
-  ; progress
-  }
+  let t =
+    { id
+    ; session_id
+    ; generation
+    ; kind
+    ; payload
+    ; status
+    ; retry_policy
+    ; attempt
+    ; created_at
+    ; started_at
+    ; next_run_at
+    ; completed_at
+    ; result
+    ; delivery
+    ; launch
+    ; progress
+    }
+  in
+  let%map () = validate_result t in
+  t
 ;;
 
 module List_request = struct

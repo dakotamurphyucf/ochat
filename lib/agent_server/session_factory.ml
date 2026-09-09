@@ -15,6 +15,8 @@ type limits =
   ; event_replay_capacity : int
   ; max_attachments_per_session : int
   ; subscriber_queue_capacity : int
+  ; job_result_inline_bytes : int
+  ; job_result_max_bytes : int
   }
 
 type t =
@@ -1089,6 +1091,10 @@ let extension_jobs t actor_ref registry =
           let open Result.Let_syntax in
           let%bind actor = extension_actor actor_ref in
           A.read_script_job actor ~owner ~id)
+    ; materialize =
+        (fun owner expected ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.read_script_job_result actor ~owner ~expected))
     ; cancel =
         (fun owner id ->
           Result.bind (extension_actor actor_ref) ~f:(fun actor ->
@@ -1726,7 +1732,38 @@ let prune_snapshot t handle journal _installed =
   Agent_store.Journal.seal_checkpoint journal
 ;;
 
-let actor_services t handle journal persistence durable_events capacity runtime_owner =
+let actor_services
+      t
+      handle
+      journal
+      persistence
+      durable_events
+      capacity
+      runtime_owner
+      ~creating_principal
+  =
+  let open Result.Let_syntax in
+  let data_root = Agent_store.Session_store.data_root t.store in
+  let%bind result_blobs =
+    Agent_store.Blob_store.create
+      ~env:t.env
+      ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path data_root)
+      ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
+      ~max_upload_bytes:(Int64.of_int t.limits.job_result_max_bytes)
+    |> Result.map_error ~f:protocol_of_store
+  in
+  let principal =
+    Option.value_or_thunk creating_principal ~default:Agent_protocol.Id.Principal.create
+  in
+  let%map job_results =
+    Agent_store.Job_result_store.Publisher.create
+      ~blobs:result_blobs
+      ~sw:t.sw
+      ~session:handle
+      ~principal
+      ~inline_bytes:t.limits.job_result_inline_bytes
+      ~max_bytes:t.limits.job_result_max_bytes
+  in
   let last_snapshot_sequence = ref 0L in
   let last_snapshot_at = ref (Eio.Time.now (Eio.Stdenv.clock t.env)) in
   let snapshot_due state =
@@ -1760,6 +1797,7 @@ let actor_services t handle journal persistence durable_events capacity runtime_
   in
   Agent_session.Session_actor.
     { now = (fun () -> now t)
+    ; job_results = Some job_results
     ; create_attachment_id = Agent_protocol.Id.Attachment.create
     ; create_reclaim_token =
         (fun () ->
@@ -2067,6 +2105,17 @@ let create_loaded_entry
       initial_events
   in
   let runtime_owner = ref None in
+  let%bind services =
+    actor_services
+      t
+      handle
+      journal
+      persistence
+      durable_events
+      capacity
+      runtime_owner
+      ~creating_principal:state.identity.creating_principal
+  in
   let actor =
     Agent_session.Session_actor.create_with_owner_lease_duration
       ~schedule_permission_timeouts:false
@@ -2080,15 +2129,7 @@ let create_loaded_entry
       ~initial_state:state
       ~persistence:(Agent_session.Session_persistence.actor_persistence persistence)
       ~operation_worker:(Some runtime.Agent_session.Runtime_builder.worker)
-      ~services:
-        (actor_services
-           t
-           handle
-           journal
-           persistence
-           durable_events
-           capacity
-           runtime_owner)
+      ~services
   in
   actor_ref := Some actor;
   match
@@ -2166,6 +2207,17 @@ let create_unloaded_entry
       initial_events
   in
   let runtime_owner = ref None in
+  let%bind services =
+    actor_services
+      t
+      handle
+      journal
+      persistence
+      durable_events
+      capacity
+      runtime_owner
+      ~creating_principal:state.identity.creating_principal
+  in
   let actor =
     Agent_session.Session_actor.create_with_owner_lease_duration
       ~schedule_permission_timeouts:false
@@ -2179,15 +2231,7 @@ let create_unloaded_entry
       ~initial_state:state
       ~persistence:(Agent_session.Session_persistence.actor_persistence persistence)
       ~operation_worker:None
-      ~services:
-        (actor_services
-           t
-           handle
-           journal
-           persistence
-           durable_events
-           capacity
-           runtime_owner)
+      ~services
   in
   let runtime =
     Runtime_owner.create ~actor ~initial:None ~build:(fun () ->

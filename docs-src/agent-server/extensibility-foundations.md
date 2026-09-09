@@ -1446,8 +1446,9 @@ than a caller-supplied payload depth. This is internal transaction integration;
 the script-facing interfaces below are installed on qualified standalone and
 one-off dispatch paths, including nested managed standalone calls, and qualified
 stateful moderator handlers, events and observations. Bounded native progress is
-available through job reads; artifact results and automatic notification delivery
-remain unfinished.
+available through job reads. Artifact publication and verified result reads are
+installed on the qualified daemon; orphan reconciliation, final race qualification
+and automatic notification delivery remain unfinished.
 
 ### Qualified script job operations
 
@@ -1462,6 +1463,7 @@ actor/scheduler service; other embeddings fail when the operation is not install
 | `Tool.spawn(name, input)` | Alias of the same transactional start on extensibility surfaces. The legacy moderator surface retains its existing spawn operation. |
 | `Job.start_script(request)` | Stage a statically prepared `main : json -> json task` program using the one-off request shape: source, input, explicit tools and optional lowering of host limits. |
 | `Job.get(id)` | Read the caller's own provisional ticket or a current-generation generic job in its session, after checking its captured tools against the caller's selection. |
+| `Job.read_result(id)` | Return null while nonterminal, otherwise load the full completion envelope through the same ownership and captured-tool checks. Artifact reads are bounded and verified. |
 | `Job.cancel(id)` | Cancel immediately; return unit. Cancellation of existing work is not reversed by `Task.catch`. |
 
 Tool names and requested script dependencies must stay within the executing
@@ -1478,8 +1480,11 @@ extra script invocation between jobs.
 `created_at`, `completed_at` and `completion`. It omits executable payloads, source,
 capability pins and permission identifiers. Status is `queued`, `running`,
 `waiting_permission`, `waiting_completion`, `succeeded`, `failed`, `cancelled` or `interrupted`.
-Completion is null while nonterminal, otherwise the protocol's typed completion
-envelope. Hosts may apply additional output disclosure policy.
+Completion is null while nonterminal, otherwise an inline completion envelope or
+an explicit artifact descriptor. `Job.read_result` materializes the completion;
+it neither reruns the operation nor consumes the result. Hosts may apply additional
+output disclosure policy. Materialized values still pass through the script's
+ordinary import and execution budgets.
 
 Qualified job reads can also contain a transient `progress` snapshot. Native
 runners emit the existing `Ochat_function.Progress` updates after normal tool
@@ -1503,7 +1508,7 @@ the parent job. Only exact selected native bindings receive the display observer
 and that observer expires when the runner returns. Terminal results still follow
 their independent outcome, schema, disclosure and persistence rules.
 
-### Result artifact storage foundation
+### Artifact-backed terminal results
 
 `Agent_store.Job_result_store` stores an already validated completion in a
 session-owned blob. Its versioned `Job_artifact` reference binds the blob's digest
@@ -1524,10 +1529,43 @@ session or an existing destination and restores temporary data if its metadata
 save fails. Job-result blob reads require the same `send_messages` scope as job
 reads, in addition to the transport's session access checks.
 
-This storage service is not yet connected to scheduler completion commits,
-dependency materialization, artifact-backed `Job.get`, or orphan reconciliation.
-Ordinary job completion still uses the existing inline representation. General
-model-visible availability remains gated on authoring qualification.
+The daemon installs one publisher per session. Its host options default to inline
+results up to 64 KiB and a 9 MiB storage ceiling; these options do not replace the
+tool's captured output/schema limits or the language's execution policy. Actor
+completion commits use the publisher after checking the live attempt and finishing
+its invocation scopes. Failed commit retries reuse the same prepared reference.
+Retryable failures that queue another attempt retain their existing inline diagnostic.
+An otherwise valid completion above the host storage ceiling becomes a small inline
+`background.result_limit` failure. This control diagnostic remains recordable even
+under a very small configured result limit; publication does not retry the external
+operation or endlessly retry an oversized payload. Publisher configuration cannot
+advertise a ceiling above the underlying blob store's limit.
+The daemon uses a result writer with that storage policy over the existing blob
+directories; HTTP uploads keep their separate request-size limit. Lowering the
+network request limit does not disable sessions or reduce the result storage ceiling.
+Cancellation and expiry retain their control outcomes even when a deliberately tiny
+data ceiling cannot fit their envelopes, preserving dependency cancellation behavior.
+
+`Stored_completion` preserves the existing inline encoding and adds a version-1
+`type: "artifact"` envelope containing `outcome` and `reference`. Only an async
+job's result field interprets that envelope. A business value inside a successful
+completion, or legacy model output resembling the envelope, remains ordinary JSON.
+JSON and snapshot restoration reject artifact references with a mismatched session,
+job, generation, attempt, terminal outcome or missing completion timestamp.
+
+Waiting parents load the child's verified completion, then apply their captured
+completion schema and output bounds before publishing their own result. A corrupt
+or unavailable saved result produces an explicit failure without exposing storage
+paths. Transient reads can retry until the captured deadline. The actor rechecks
+the exact terminal record and active owner for script materialization; a job ID
+does not bypass the script's selected tools. Transport clients can read the saved
+blob in bounded chunks using `blob.read`.
+
+Safe orphan reconciliation and final artifact race/failure qualification remain
+outstanding. Stale in-memory preparations may be evicted, but possibly referenced
+blobs are retained. Large invocation audit records can still retain the original
+outcome; this change removes large payloads from job results, not all historical
+copies. General model-visible availability remains gated on authoring qualification.
 
 Cancelling a provisional ticket releases capacity immediately and preserves a
 cancelled record for the owner's eventual `Pending(Job(id), acknowledgement)`.

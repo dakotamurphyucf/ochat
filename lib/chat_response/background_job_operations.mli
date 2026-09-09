@@ -6,6 +6,7 @@ type handlers =
   { start_tool : name:string -> input:Jsonaf.t -> (Agent_protocol.Id.Job.t, string) result
   ; start_script : Jsonaf.t -> (Agent_protocol.Id.Job.t, string) result
   ; get : Agent_protocol.Id.Job.t -> (Jsonaf.t, string) result
+  ; read_result : Agent_protocol.Id.Job.t -> (Jsonaf.t, string) result
   ; cancel : Agent_protocol.Id.Job.t -> (unit, string) result
   ; rollback_start : Agent_protocol.Id.Job.t -> unit
   }
