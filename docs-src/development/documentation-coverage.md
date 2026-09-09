@@ -161,6 +161,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_protocol/initialize.mli` | [contract](../../lib/agent_protocol/initialize.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/invocation.mli` | [contract](../../lib/agent_protocol/invocation.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/job.mli` | [contract](../../lib/agent_protocol/job.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/agent_protocol/job_progress.mli` | [contract](../../lib/agent_protocol/job_progress.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/json_codec.mli` | [contract](../../lib/agent_protocol/json_codec.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/method_result.mli` | [contract](../../lib/agent_protocol/method_result.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
 | `lib/agent_protocol/moderator_execution.mli` | [contract](../../lib/agent_protocol/moderator_execution.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
@@ -223,6 +224,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/invocation_recovery.mli` | [contract](../../lib/agent_session/invocation_recovery.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_session/job_dependency.mli` | [contract](../../lib/agent_session/job_dependency.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/job_launch.mli` | [contract](../../lib/agent_session/job_launch.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
+| `lib/agent_session/job_progress_buffer.mli` | [contract](../../lib/agent_session/job_progress_buffer.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/live_event_buffer.mli` | [contract](../../lib/agent_session/live_event_buffer.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/mailbox.mli` | [contract](../../lib/agent_session/mailbox.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/managed_moderator_dispatch.mli` | [contract](../../lib/agent_session/managed_moderator_dispatch.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |

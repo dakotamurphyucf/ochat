@@ -45,6 +45,7 @@ let%expect_test "external event delivery commits receipts before changing the li
         ; result = Some `Null
         ; delivery = Pending
         ; launch = None
+        ; progress = None
         }
       in
       let initial =

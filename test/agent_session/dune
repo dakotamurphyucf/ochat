@@ -22,6 +22,8 @@
   job_delivery_tests
   job_fixtures
   job_dependency_tests
+  job_progress_tests
+  job_progress_authority_tests
   managed_nested_tests
   managed_job_tests
   managed_moderator_owner_tests

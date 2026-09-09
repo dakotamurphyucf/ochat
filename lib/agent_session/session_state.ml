@@ -318,6 +318,17 @@ let validate t =
   in
   let%bind () =
     List.fold_result t.jobs ~init:() ~f:(fun () job ->
+      let%bind () =
+        match job.Agent_protocol.Job.progress with
+        | None -> Ok ()
+        | Some _ ->
+          Error
+            (Agent_protocol.Error.create
+               Journal_corrupt
+               ~message:"transient job progress cannot be durable state"
+               ~retryable:false
+               ())
+      in
       Job_launch.validate
         ~invocations:t.invocations
         ~events:t.moderator_executions

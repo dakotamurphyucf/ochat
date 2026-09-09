@@ -83,6 +83,9 @@ type t =
     (** Optional versioned launch provenance. Legacy jobs omit this field.
         Host admission binds the invocation/event owner and actual parent attempt;
         user scripts cannot choose their nesting depth. *)
+  ; progress : Job_progress.t option [@sexp.option]
+    (** Transient read projection only. Durable job records omit progress, and
+        terminal results never depend on retaining these display updates. *)
   }
 [@@deriving sexp]
 

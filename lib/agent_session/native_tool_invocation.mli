@@ -138,7 +138,8 @@ type managed_dispatch =
     Managed Pending requires its live handler's work validator and revalidates
     the disclosed acknowledgement against the declared success schema. *)
 val run_scoped_with_managed
-  :  managed:managed_dispatch option
+  :  on_progress:(Agent_protocol.Invocation.t -> Ochat_function.Progress.t -> unit) option
+  -> managed:managed_dispatch option
   -> moderator_execute:moderator_executor option
   -> execute:executor
   -> registry:(unit -> Chat_response.Tool_capability.t)

@@ -185,6 +185,7 @@ let submit ?created_at entry payload =
       ; result = None
       ; delivery = Pending
       ; launch = None
+      ; progress = None
       }
   in
   A.add_job entry.actor job |> protocol_ok |> ignore;

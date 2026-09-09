@@ -1767,8 +1767,7 @@ let handle_job_get t context request =
   let%bind entry, _ =
     find_visible_entry t context request.Agent_protocol.Job.Get_request.session_id
   in
-  let%bind state = Agent_session.Session_actor.state entry.actor in
-  let%map job = find_job state request.job_id in
+  let%map job = Agent_session.Session_actor.read_job entry.actor ~job_id:request.job_id in
   Agent_protocol.Method_result.Job_get job
 ;;
 

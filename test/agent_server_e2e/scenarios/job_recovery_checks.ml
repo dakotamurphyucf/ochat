@@ -29,6 +29,7 @@ let job session retry_policy =
     ; result = None
     ; delivery = Pending
     ; launch = None
+    ; progress = None
     }
 ;;
 

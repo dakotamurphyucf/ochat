@@ -968,6 +968,7 @@ let%expect_test "graceful shutdown checkpoints the latest durable state" =
               ; result = Some `Null
               ; delivery = Not_required
               ; launch = None
+              ; progress = None
               }
           in
           Agent_session.Session_actor.add_job entry.actor job |> protocol_ok |> ignore;
@@ -1969,6 +1970,7 @@ let%expect_test "running model jobs recover interrupted and redeliver without re
               ; result = None
               ; delivery = Pending
               ; launch = None
+              ; progress = None
               }
           in
           Agent_session.Session_actor.add_job entry.actor job |> protocol_ok |> ignore;

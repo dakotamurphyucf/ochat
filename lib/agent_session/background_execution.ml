@@ -77,6 +77,9 @@ let run
       | Script { prepared; input; _ } ->
         Chat_response.One_off_script.capabilities prepared, input
     in
+    let script_tools =
+      Script_tool_calls.with_progress_ceiling script_tools ~ceiling:selected
+    in
     let%bind root =
       I.create
         { id = Agent_protocol.Id.Invocation.create ()

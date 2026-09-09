@@ -83,6 +83,7 @@ type t =
   ; result : Jsonaf.t option
   ; delivery : delivery
   ; launch : launch option [@sexp.option]
+  ; progress : Job_progress.t option [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -446,6 +447,7 @@ let to_json t =
     ; optional_field "result" t.result Fn.id
     ; Some ("delivery", delivery_to_json t.delivery)
     ; optional_field "launch" t.launch launch_to_json
+    ; optional_field "progress" t.progress Job_progress.to_json
     ]
     |> List.filter_opt
   in
@@ -498,6 +500,7 @@ let of_json json =
   let result = Json_codec.optional fields "result" in
   let%bind delivery = Json_codec.required_as fields "delivery" delivery_of_json in
   let%bind launch = Json_codec.optional_as fields "launch" launch_of_json in
+  let%bind progress = Json_codec.optional_as fields "progress" Job_progress.of_json in
   let%map () =
     match status with
     | Waiting_completion dependency ->
@@ -524,6 +527,7 @@ let of_json json =
   ; result
   ; delivery
   ; launch
+  ; progress
   }
 ;;
 

@@ -1445,8 +1445,9 @@ provenance on an existing job. Scheduler capacity uses this derived depth rather
 than a caller-supplied payload depth. This is internal transaction integration;
 the script-facing interfaces below are installed on qualified standalone and
 one-off dispatch paths, including nested managed standalone calls, and qualified
-stateful moderator handlers, events and observations. Progress/artifacts and
-automatic notification delivery remain unfinished.
+stateful moderator handlers, events and observations. Bounded native progress is
+available through job reads; artifact results and automatic notification delivery
+remain unfinished.
 
 ### Qualified script job operations
 
@@ -1479,6 +1480,28 @@ capability pins and permission identifiers. Status is `queued`, `running`,
 `waiting_permission`, `waiting_completion`, `succeeded`, `failed`, `cancelled` or `interrupted`.
 Completion is null while nonterminal, otherwise the protocol's typed completion
 envelope. Hosts may apply additional output disclosure policy.
+
+Qualified job reads can also contain a transient `progress` snapshot. Native
+runners emit the existing `Ochat_function.Progress` updates after normal tool
+admission. The snapshot groups text by channel (`assistant`, `reasoning`, `stdout`,
+`stderr`, `activity`), with an accepted-update sequence and a truncation flag per
+channel. Updates are limited to 4 KiB, channel text to an 8 KiB UTF-8 suffix, and
+each attempt to 4096 accepted updates. Invalid or oversized updates are discarded.
+This is best-effort display data: queue pressure can lose updates, so the snapshot
+must not be treated as complete stdout/stderr or the final tool result.
+
+Progress ingress has separate bounded queue capacity and lower priority than
+commands, cancellation and completion commits. Its buffers belong to the actual
+job attempt and disappear when the worker scope ends, including on restart. They
+are not canonical history, durable events or saved job state. `job.get` exposes
+the live projection; job lists and session snapshots retain durable job records.
+Script `Job.get` includes null progress when no live projection is available.
+
+Progress also respects the root job's captured tool selection. A managed tool may
+execute private native dependencies without exposing their raw progress through
+the parent job. Only exact selected native bindings receive the display observer,
+and that observer expires when the runner returns. Terminal results still follow
+their independent outcome, schema, disclosure and persistence rules.
 
 Cancelling a provisional ticket releases capacity immediately and preserves a
 cancelled record for the owner's eventual `Pending(Job(id), acknowledgement)`.

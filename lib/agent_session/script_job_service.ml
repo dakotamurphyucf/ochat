@@ -58,6 +58,7 @@ let view (job : P.Job.t) =
     [ "version", `Number "1"
     ; "id", P.Id.Job.to_json job.id
     ; "status", `String status
+    ; "progress", Option.value_map job.progress ~default:`Null ~f:P.Job_progress.to_json
     ; "attempt", `Number (Int.to_string job.attempt)
     ; "created_at", P.Timestamp.to_json job.created_at
     ; ( "completed_at"

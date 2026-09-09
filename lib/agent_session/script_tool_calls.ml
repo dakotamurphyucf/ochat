@@ -37,6 +37,8 @@ type t =
   ; managed : (t -> Native_tool_invocation.managed_dispatch) option
   ; moderator : (t -> moderator_dispatch) option
   ; jobs : Script_job_service.t option
+  ; progress : (I.t -> Ochat_function.Progress.t -> unit) option
+  ; progress_ceiling : C.t option
   }
 
 let create
@@ -61,6 +63,8 @@ let create
   ; managed = None
   ; moderator = None
   ; jobs = None
+  ; progress = None
+  ; progress_ceiling = None
   }
 ;;
 
@@ -83,6 +87,17 @@ let with_durable_requests t = { t with durable_requests = true }
 let durable_requests t = t.durable_requests
 let with_moderator_dispatch t ~dispatch = { t with moderator = Some dispatch }
 let with_job_service t jobs = { t with jobs = Some jobs }
+let with_progress t ~emit = { t with progress = Some emit }
+let with_progress_ceiling t ~ceiling = { t with progress_ceiling = Some ceiling }
+
+let progress_for t (reference : C.reference) =
+  match t.progress, t.progress_ceiling with
+  | Some emit, Some ceiling ->
+    (match C.resolve ceiling ~id:reference.id ~fingerprint:reference.fingerprint with
+     | Ok _ -> Some emit
+     | Error _ -> None)
+  | _ -> None
+;;
 
 let with_job_scope t ~owner ~selected ~error f =
   match t.jobs with
@@ -291,6 +306,7 @@ let with_scope_results
                      ~prepare_output
                  | _ ->
                    Native_tool_invocation.run_scoped_with_managed
+                     ~on_progress:(progress_for t reference)
                      ~managed:(Option.map t.managed ~f:(fun install -> install t))
                      ~moderator_execute
                      ~execute

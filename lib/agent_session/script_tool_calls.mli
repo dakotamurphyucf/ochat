@@ -28,6 +28,19 @@ val with_durable_requests : t -> t
 (** Qualified host injection; does not change this service's tool ceiling. *)
 val with_job_service : t -> Script_job_service.t -> t
 
+(** Host display observer for native descendants, after normal tool admission.
+    The host must preserve ownership, disclosure and bounded/nonblocking delivery.
+    The callback expires when its actual native runner returns. *)
+val with_progress
+  :  t
+  -> emit:(Agent_protocol.Invocation.t -> Ochat_function.Progress.t -> unit)
+  -> t
+
+(** Bind progress disclosure to the root job's verified captured selection.
+    Nested managed calls cannot expose progress from private dependencies outside
+    that ceiling, even though they may execute those dependencies. *)
+val with_progress_ceiling : t -> ceiling:Chat_response.Tool_capability.t -> t
+
 (** The caller must pass its verified, active owner and exact dependency subset.
     Failure/exception aborts starts before error adaptation into a tool outcome. *)
 val with_job_scope

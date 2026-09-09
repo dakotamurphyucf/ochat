@@ -787,6 +787,7 @@ let model_job t state ~recipe ~payload ~delivery =
     ; result = None
     ; delivery
     ; launch = None
+    ; progress = None
     }
 ;;
 
@@ -1138,7 +1139,15 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           |> fun tools ->
           Agent_session.Script_tool_calls.with_job_service
             tools
-            (extension_jobs t actor_ref registry))
+            (extension_jobs t actor_ref registry)
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_progress
+            tools
+            ~emit:(fun invocation progress ->
+              match extension_actor actor_ref with
+              | Error _ -> ()
+              | Ok actor ->
+                A.publish_job_progress actor ~invocation_id:invocation.context.id progress))
     ; standalone_execution_limits =
         Agent_session.Standalone_tool_dispatch.declared_execution_limits
     ; one_off_policy = Chat_response.One_off_request.default_policy

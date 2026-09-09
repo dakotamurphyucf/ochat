@@ -115,6 +115,22 @@ val has_staged_background_job
   -> id:Agent_protocol.Id.Job.t
   -> (bool, Agent_protocol.Error.t) result
 
+(** Read a job with optional live progress from its current attempt. Progress
+    disappears when the worker scope ends and is never a durable result. *)
+val read_job
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Nonblocking, lossy progress ingress. Only the actual live native invocation's
+    background scope may accept it. Invalid/oversized updates and mailbox pressure
+    drop progress without changing tool completion or durable state. *)
+val publish_job_progress
+  :  t
+  -> invocation_id:Agent_protocol.Id.Invocation.t
+  -> Ochat_function.Progress.t
+  -> unit
+
 (** Host-internal scoped reads/cancellation. The active caller sees its own
     provisional jobs and current-generation durable jobs of this session.
     The script host must project/redact results rather than expose raw payloads.

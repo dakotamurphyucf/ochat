@@ -327,6 +327,7 @@ let with_selected_capabilities selected f =
 ;;
 
 let run_scoped_with_managed
+      ~on_progress
       ~managed
       ~moderator_execute
       ~execute
@@ -486,10 +487,19 @@ let run_scoped_with_managed
           in
           let%bind output =
             checked (fail "invocation.handler_failed" "Tool execution failed.") (fun () ->
-              Ok
-                (implementation.run_with_progress
-                   ~invocation:Ochat_function.Invocation.silent
-                   payload))
+              let active = Atomic.make true in
+              let invocation =
+                match on_progress with
+                | None -> Ochat_function.Invocation.silent
+                | Some emit ->
+                  Ochat_function.Invocation.create (fun update ->
+                    match Atomic.get active with
+                    | true -> emit dispatched update
+                    | false -> ())
+              in
+              Exn.protect
+                ~finally:(fun () -> Atomic.set active false)
+                ~f:(fun () -> Ok (implementation.run_with_progress ~invocation payload)))
           in
           validate_output
             ~validate_work:(fun _ ->
@@ -527,10 +537,13 @@ let run_scoped_with_managed
            | Ok outcome | Error outcome -> outcome)))
 ;;
 
-let run_scoped = run_scoped_with_managed ~managed:None ~moderator_execute:None
+let run_scoped =
+  run_scoped_with_managed ~on_progress:None ~managed:None ~moderator_execute:None
+;;
 
 let run ~capabilities =
   run_scoped_with_managed
+    ~on_progress:None
     ~managed:None
     ~moderator_execute:
       (Some capabilities.Operation_worker.Capabilities.with_moderator_invocation)

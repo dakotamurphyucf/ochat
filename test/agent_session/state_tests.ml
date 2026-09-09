@@ -909,6 +909,7 @@ let%expect_test
           ; result = None
           ; delivery = Not_required
           ; launch = None
+          ; progress = None
           }
       in
       let changes =

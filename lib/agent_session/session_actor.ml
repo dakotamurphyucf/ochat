@@ -43,6 +43,7 @@ end
 
 type job_scope =
   { job : Agent_protocol.Job.t
+  ; progress : Job_progress_buffer.t
   ; deadline : Agent_protocol.Timestamp.t option
   ; cancelled : unit Eio.Promise.t
   ; cancel_signal : unit Eio.Promise.u
@@ -297,6 +298,10 @@ type _ request =
       Agent_protocol.Id.Attachment.t * Agent_protocol.Job.t
       -> Agent_protocol.Session.t request
   | Add_job : Agent_protocol.Job.t -> Agent_protocol.Job.t request
+  | Read_job : Agent_protocol.Id.Job.t -> Agent_protocol.Job.t request
+  | Publish_job_progress :
+      Agent_protocol.Id.Invocation.t * Ochat_function.Progress.t
+      -> unit request
   | Claim_job : Agent_protocol.Id.Job.t * int -> Agent_protocol.Job.t option request
   | Complete_job :
       Agent_protocol.Id.Job.t * int * int * Runtime_builder.model_job_outcome
@@ -2315,6 +2320,7 @@ let prepare_background_job t owner request =
     ; result = None
     ; delivery = Pending
     ; launch = Some launch
+    ; progress = None
     }
 ;;
 
@@ -4726,6 +4732,43 @@ let find_job t job_id =
   |> Result.of_option ~error:(error Invalid_request "job was not found")
 ;;
 
+let job_with_progress t (job : Agent_protocol.Job.t) =
+  let progress =
+    List.find_map t.job_scopes ~f:(fun scope ->
+      match
+        scope.active
+        && (not scope.cancel_requested)
+        && Agent_protocol.Id.Job.equal scope.job.id job.id
+        && Int.equal scope.job.generation job.generation
+        && Int.equal scope.job.attempt job.attempt
+      with
+      | true -> Job_progress_buffer.snapshot scope.progress
+      | false -> None)
+  in
+  { job with progress }
+;;
+
+let publish_job_progress_internal t id progress =
+  match
+    List.find t.invocation_executions ~f:(fun execution ->
+      execution.accepts_children
+      && Agent_protocol.Id.Invocation.equal execution.dispatched.context.id id)
+  with
+  | None -> ()
+  | Some execution ->
+    let scope =
+      match execution.owner with
+      | Background_job scope -> Some scope
+      | Invocation_moderator borrow -> borrow.job_scope
+      | Event_moderator borrow -> borrow.job_scope
+      | Foreground _ -> None
+    in
+    Option.iter scope ~f:(fun scope ->
+      match job_scope_can_execute t scope with
+      | Ok () -> Job_progress_buffer.update scope.progress progress
+      | Error _ -> ())
+;;
+
 let validate_job_generation t (job : Agent_protocol.Job.t) generation =
   if job.generation <> generation || t.state.identity.generation <> generation
   then Error (error Conflict "job belongs to a stale session generation")
@@ -4937,6 +4980,7 @@ let claim_job_scope t job_id generation attempt deadline =
   let cancelled, cancel_signal = Eio.Promise.create () in
   let scope =
     { job
+    ; progress = Job_progress_buffer.create ()
     ; deadline
     ; cancelled
     ; cancel_signal
@@ -6186,6 +6230,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Commit_extensions (generation, revision, changes) ->
     commit_extensions_internal t generation revision changes
   | State -> Ok t.state
+  | Read_job id -> Result.map (find_job t id) ~f:(job_with_progress t)
+  | Publish_job_progress (id, progress) ->
+    publish_job_progress_internal t id progress;
+    Ok ()
   | Prepare_background_job (owner, request) -> prepare_background_job t owner request
   | Stage_background_job (job, capacity) -> stage_background_job_internal t job capacity
   | Select_background_jobs (owner, ids) ->
@@ -6206,7 +6254,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
      | None ->
        let%bind job = find_job t id in
        let%map () = validate_job_generation t job t.state.identity.generation in
-       job)
+       job_with_progress t job)
   | Cancel_script_job (owner, id) ->
     let open Result.Let_syntax in
     let%bind () = background_owner_active t owner in
@@ -6674,6 +6722,21 @@ let revoke_grant_with_command_audit t ~command_audit ~attachment_id ~grant_id ~r
 
 let change_job t ~attachment_id job = call t (Change_job (attachment_id, job))
 let add_job t job = call t (Add_job job)
+let read_job t ~job_id = call t (Read_job job_id)
+
+let publish_job_progress t ~invocation_id progress =
+  match Job_progress_buffer.valid progress with
+  | false -> ()
+  | true ->
+    let _promise, resolver = Eio.Promise.create () in
+    ignore
+      (Mailbox.try_push
+         t.mailbox
+         ~priority:Transient
+         (Pack (None, Publish_job_progress (invocation_id, progress), resolver))
+       : bool)
+;;
+
 let claim_job t ~job_id ~generation = call t (Claim_job (job_id, generation))
 
 let complete_job t ~job_id ~generation ~attempt outcome =

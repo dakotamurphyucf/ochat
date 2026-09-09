@@ -385,6 +385,7 @@ let seeded_job state =
     ; result = None
     ; delivery = Not_required
     ; launch = None
+    ; progress = None
     }
 ;;
 

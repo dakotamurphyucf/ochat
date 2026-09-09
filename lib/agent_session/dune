@@ -18,6 +18,7 @@
   extension_invariants
   job_launch
   job_dependency
+  job_progress_buffer
   staged_jobs
   script_job_service
   invocation_history

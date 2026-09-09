@@ -1386,6 +1386,9 @@ type t =
     (** Optional versioned launch provenance. Legacy jobs omit this field.
         Host admission binds the invocation/event owner and actual parent attempt;
         user scripts cannot choose their nesting depth. *)
+  ; progress : Job_progress.t option [@sexp.option]
+    (** Transient read projection only. Durable job records omit progress, and
+        terminal results never depend on retaining these display updates. *)
   }
 [@@deriving sexp]
 
@@ -1447,6 +1450,41 @@ module Cancel_result : sig
   val to_json : t -> Jsonaf.t
   val of_json : Jsonaf.t -> (t, Error.t) result
 end
+```
+
+## job_progress
+
+[JSON codec](../../lib/agent_protocol/job_progress.ml) · [interface](../../lib/agent_protocol/job_progress.mli)
+
+```ocaml
+(** Best-effort transient display state. It is not a terminal result, canonical
+    history or a durable replay stream. Channels retain bounded text suffixes. *)
+type channel =
+  | Assistant
+  | Reasoning
+  | Stdout
+  | Stderr
+  | Activity
+[@@deriving compare, equal, sexp]
+
+type item =
+  { channel : channel
+  ; text : string
+  ; truncated : bool
+  }
+[@@deriving sexp]
+
+type t =
+  { sequence : int
+  ; channels : item list
+  }
+[@@deriving sexp]
+
+val max_update_bytes : int
+val max_channel_bytes : int
+val max_updates : int
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
 ```
 
 ## json_codec
