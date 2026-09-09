@@ -238,33 +238,35 @@ let rec_name_mem (needle : name) (haystack : name list) : bool =
   List.exists haystack ~f:(String.equal needle)
 ;;
 
-let rec substitute_rec_var ~(target : name) ~(replacement : typ) (ty : typ) : typ =
+let rec substitute_rec_var
+          ?(checkpoint = fun () -> ())
+          ~(target : name)
+          ~(replacement : typ)
+          (ty : typ)
+  : typ
+  =
+  checkpoint ();
+  let substitute = substitute_rec_var ~checkpoint ~target ~replacement in
   match ty with
-  | Fun (params, ret) ->
-    Fun
-      ( List.map params ~f:(substitute_rec_var ~target ~replacement)
-      , substitute_rec_var ~target ~replacement ret )
+  | Fun (params, ret) -> Fun (List.map params ~f:substitute, substitute ret)
   | Generic _ | Var _ | TInt | TFloat | Boolean | String | Empty_row | Unit -> ty
-  | Con (name, args) ->
-    Con (name, List.map args ~f:(substitute_rec_var ~target ~replacement))
+  | Con (name, args) -> Con (name, List.map args ~f:substitute)
   | Mu (binder, body) when String.equal binder target -> Mu (binder, body)
-  | Mu (binder, body) -> Mu (binder, substitute_rec_var ~target ~replacement body)
+  | Mu (binder, body) -> Mu (binder, substitute body)
   | Rec_var binder when String.equal binder target -> replacement
   | Rec_var _ -> ty
-  | Ref t -> Ref (substitute_rec_var ~target ~replacement t)
-  | Record row -> Record (substitute_rec_var ~target ~replacement row)
-  | Variant row -> Variant (substitute_rec_var ~target ~replacement row)
-  | Tuple ts -> Tuple (List.map ts ~f:(substitute_rec_var ~target ~replacement))
-  | Array t -> Array (substitute_rec_var ~target ~replacement t)
-  | Row (fields, tail) ->
-    Row
-      ( Env.map fields ~f:(substitute_rec_var ~target ~replacement)
-      , substitute_rec_var ~target ~replacement tail )
+  | Ref t -> Ref (substitute t)
+  | Record row -> Record (substitute row)
+  | Variant row -> Variant (substitute row)
+  | Tuple ts -> Tuple (List.map ts ~f:substitute)
+  | Array t -> Array (substitute t)
+  | Row (fields, tail) -> Row (Env.map fields ~f:substitute, substitute tail)
 ;;
 
-let unfold_mu (ty : typ) : typ =
+let unfold_mu ?checkpoint (ty : typ) : typ =
   match ty with
-  | Mu (binder, body) as mu -> substitute_rec_var ~target:binder ~replacement:mu body
+  | Mu (binder, body) as mu ->
+    substitute_rec_var ?checkpoint ~target:binder ~replacement:mu body
   | other -> other
 ;;
 
@@ -351,7 +353,7 @@ let has_recursive_type (ty : typ) : bool =
   aux [] ty
 ;;
 
-let check_contractive (ty : typ) : (unit, string) result =
+let check_contractive ?(checkpoint = fun () -> ()) (ty : typ) : (unit, string) result =
   let rec check_list
             (seen : tv ref list)
             ~(target : name option)
@@ -383,6 +385,7 @@ let check_contractive (ty : typ) : (unit, string) result =
         (ty : typ)
     : (unit, string) result
     =
+    checkpoint ();
     match ty with
     | Fun (params, ret) ->
       (match check_list seen ~target ~guarded:true ~scope params with
@@ -430,14 +433,16 @@ let check_contractive (ty : typ) : (unit, string) result =
 
 (** --------------------------------------------------------------------- *)
 
-let merge_fields row =
-  let rec aux (seen : tv ref list) (seen_rec : name list) = function
+let merge_fields ?(checkpoint = fun () -> ()) row =
+  let rec aux (seen : tv ref list) (seen_rec : name list) ty =
+    checkpoint ();
+    match ty with
     | Var ({ contents = Bound ty } as tv) ->
       if tv_ref_mem tv seen then Env.empty, Var tv else aux (tv :: seen) seen_rec ty
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then Env.empty, mu
-      else aux seen (binder :: seen_rec) (unfold_mu mu)
+      else aux seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
     | Var _ as var -> Env.empty, var
     | Record r -> aux seen seen_rec r
@@ -458,9 +463,11 @@ let merge_fields row =
 
 (** --------------------------------------------------------------------- *)
 
-let occurs tv ty =
+let occurs ?(checkpoint = fun () -> ()) tv ty =
   let found = ref false in
-  let rec aux (seen : tv ref list) = function
+  let rec aux (seen : tv ref list) ty =
+    checkpoint ();
+    match ty with
     | Fun (ps, r) ->
       List.iter ps ~f:(aux seen);
       aux seen r
@@ -494,27 +501,30 @@ let occurs tv ty =
 
 (** --------------------------------------------------------------------- *)
 
-let ensure_contractive_type (ty : typ) : unit =
-  match check_contractive ty with
+let ensure_contractive_type ?checkpoint (ty : typ) : unit =
+  match check_contractive ?checkpoint ty with
   | Ok () -> ()
   | Error msg -> raise (Type_error msg)
 ;;
 
-let resolve_bound_type (ty : typ) : typ =
-  let rec aux (seen : tv ref list) (seen_rec : name list) = function
+let resolve_bound_type ?(checkpoint = fun () -> ()) (ty : typ) : typ =
+  let rec aux (seen : tv ref list) (seen_rec : name list) ty =
+    checkpoint ();
+    match ty with
     | Var ({ contents = Bound bound_ty } as tv) ->
       if tv_ref_mem tv seen then Var tv else aux (tv :: seen) seen_rec bound_ty
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then mu
-      else aux seen (binder :: seen_rec) (unfold_mu mu)
+      else aux seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
     | other -> other
   in
   aux [] [] ty
 ;;
 
-let rec can_infer_mu_through (ty : typ) : bool =
-  match resolve_bound_type ty with
+let rec can_infer_mu_through ?(checkpoint = fun () -> ()) (ty : typ) : bool =
+  checkpoint ();
+  match resolve_bound_type ~checkpoint ty with
   (* allow recursive *data* types *)
   | Variant _ | Record _ | Row _ | Tuple _ | Con _ -> true
   (* optionally allow recursion through rows wrapped in Record/Variant already covered *)
@@ -526,7 +536,7 @@ let rec can_infer_mu_through (ty : typ) : bool =
   | TInt | TFloat | Boolean | String | Unit -> false
   | Generic _ -> false
   | Var { contents = Free _ } -> false
-  | Var { contents = Bound t } -> can_infer_mu_through t
+  | Var { contents = Bound t } -> can_infer_mu_through ~checkpoint t
   | Mu _ -> true (* allow cycles involving explicit Mu types *)
   | Rec_var _ ->
     true (* likewise, though Rec_var shouldn't appear without Mu when well-formed *)
@@ -542,10 +552,11 @@ module MuEnv = struct
   let add = Map.set
 end
 
-let ensure_guarded_cycle (target : tv ref) (ty : typ) : unit =
+let ensure_guarded_cycle ?(checkpoint = fun () -> ()) (target : tv ref) (ty : typ) : unit =
   let rec bad (seen_tv : tv ref list) (seen_mu : name list) ~(guarded : bool) (t : typ)
     : bool
     =
+    checkpoint ();
     match t with
     (* If we hit the target var again, it's only OK if we're under a "guard". *)
     | Var tv' when phys_equal target tv' -> not guarded
@@ -562,7 +573,7 @@ let ensure_guarded_cycle (target : tv ref) (ty : typ) : unit =
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_mu
       then false
-      else bad seen_tv (binder :: seen_mu) ~guarded (unfold_mu mu)
+      else bad seen_tv (binder :: seen_mu) ~guarded (unfold_mu ~checkpoint mu)
     | Rec_var _ ->
       (* A well-formed program should not have unbound Rec_var here.
          For guardedness of inferred cycles, ignore it. *)
@@ -646,11 +657,11 @@ let rec unify (state : infer_state) lhs rhs =
         go active env_l' env_r' body1 body2
       (* Keep equi-recursive rule for Mu vs non-Mu by unfolding one step. *)
       | (Mu _ as mu), t ->
-        ensure_contractive_type mu;
-        go active env_l env_r (unfold_mu mu) t
+        ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) mu;
+        go active env_l env_r (unfold_mu ~checkpoint:(fun () -> checkpoint state) mu) t
       | t, (Mu _ as mu) ->
-        ensure_contractive_type mu;
-        go active env_l env_r t (unfold_mu mu)
+        ensure_contractive_type ~checkpoint:(fun () -> checkpoint state) mu;
+        go active env_l env_r t (unfold_mu ~checkpoint:(fun () -> checkpoint state) mu)
       (* KEY CHANGE: Rec_var equality consults the environments. *)
       | Rec_var x, Rec_var y ->
         (match MuEnv.find env_l x, MuEnv.find env_r y with
@@ -663,10 +674,11 @@ let rec unify (state : infer_state) lhs rhs =
         raise (Type_error "Cannot unify recursive type variable with non-recursive type")
       (* Your occurs-knot case (possibly gated to reject Fun recursion like x(x)) *)
       | Var ({ contents = Free _ } as tv), t | t, Var ({ contents = Free _ } as tv) ->
-        if occurs tv t
+        if occurs ~checkpoint:(fun () -> checkpoint state) tv t
         then (
-          if not (can_infer_mu_through t) then raise (Type_error "Recursive types");
-          ensure_guarded_cycle tv t;
+          if not (can_infer_mu_through ~checkpoint:(fun () -> checkpoint state) t)
+          then raise (Type_error "Recursive types");
+          ensure_guarded_cycle ~checkpoint:(fun () -> checkpoint state) tv t;
           tv := Bound t (* cyclic bind; NO Rec_var/Mu synthesis *))
         else tv := Bound t
       | Ref t1, Ref t2 | Array t1, Array t2 -> go active env_l env_r t1 t2
@@ -688,11 +700,14 @@ let rec unify (state : infer_state) lhs rhs =
       | _ ->
         raise
           (Type_error
-             (Printf.sprintf "Cannot unify %s with %s" (show_type lhs) (show_type rhs))))
+             (Printf.sprintf
+                "Cannot unify %s with %s"
+                (show_type_for_diagnostic state lhs)
+                (show_type_for_diagnostic state rhs))))
   and go_rows active env_l env_r lhs rhs =
     (* same as unify_rows but replace calls to [unify state] with [go env_l env_r] *)
-    let map_l, tail_l = merge_fields lhs in
-    let map_r, tail_r = merge_fields rhs in
+    let map_l, tail_l = merge_fields ~checkpoint:(fun () -> checkpoint state) lhs in
+    let map_r, tail_r = merge_fields ~checkpoint:(fun () -> checkpoint state) rhs in
     let rec collect l r missing_l missing_r =
       match l, r with
       | (lbl_l, ty_l) :: tl, (lbl_r, ty_r) :: tr ->
@@ -733,135 +748,184 @@ let rec unify (state : infer_state) lhs rhs =
 
 (* Print human-readable type names used in diagnostics. *)
 
-and show_type ty =
-  let rec show_type_with_seen (seen : tv ref list) (seen_rec : name list) = function
-    | TInt -> "int"
-    | TFloat -> "float"
-    | Boolean -> "bool"
-    | String -> "string"
-    | Unit -> "unit"
-    | Array t -> Printf.sprintf "%s array" (show_postfix_arg seen seen_rec t)
-    | Ref t -> Printf.sprintf "ref(%s)" (show_type_with_seen seen seen_rec t)
+and render_type ?(poll = fun () -> ()) ?bounds ty =
+  let exception Truncated in
+  let output = Buffer.create 128 in
+  let nodes = ref 0 in
+  let step depth =
+    poll ();
+    Int.incr nodes;
+    match bounds with
+    | Some (_, max_nodes, max_depth) when !nodes > max_nodes || depth > max_depth ->
+      raise Truncated
+    | _ -> ()
+  in
+  let add text =
+    match bounds with
+    | Some (max_bytes, _, _) when String.length text > max_bytes - Buffer.length output ->
+      Buffer.add_substring output text ~pos:0 ~len:(max_bytes - Buffer.length output);
+      raise Truncated
+    | _ -> Buffer.add_string output text
+  in
+  let separated separator values f =
+    let first = ref true in
+    List.iter values ~f:(fun value ->
+      (match !first with
+       | true -> first := false
+       | false -> add separator);
+      f value)
+  in
+  let rec show depth seen seen_rec ty =
+    step depth;
+    let child = show (depth + 1) seen seen_rec in
+    match ty with
+    | TInt -> add "int"
+    | TFloat -> add "float"
+    | Boolean -> add "bool"
+    | String -> add "string"
+    | Unit -> add "unit"
+    | Array t ->
+      postfix depth seen seen_rec t;
+      add " array"
+    | Ref t ->
+      add "ref(";
+      child t;
+      add ")"
     | Fun (ps, r) ->
-      let params =
-        ps |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
-      in
-      Printf.sprintf "(%s -> %s)" params (show_type_with_seen seen seen_rec r)
+      add "(";
+      separated ", " ps child;
+      add " -> ";
+      child r;
+      add ")"
     | Mu (binder, body) ->
-      if rec_name_mem binder seen_rec
-      then binder
-      else
-        Printf.sprintf
-          "mu %s. %s"
-          binder
-          (show_type_with_seen seen (binder :: seen_rec) body)
-    | Rec_var binder -> binder
-    | Record row -> Printf.sprintf "{%s}" (show_row_with_seen seen seen_rec row)
+      (match rec_name_mem binder seen_rec with
+       | true -> add binder
+       | false ->
+         add "mu ";
+         add binder;
+         add ". ";
+         show (depth + 1) seen (binder :: seen_rec) body)
+    | Rec_var binder -> add binder
+    | Record row ->
+      add "{";
+      show_row_fields depth seen seen_rec false row;
+      add "}"
     | Tuple ts ->
-      ts
-      |> List.map ~f:(show_type_with_seen seen seen_rec)
-      |> String.concat ~sep:" * "
-      |> Printf.sprintf "(%s)"
-    | Variant row -> Printf.sprintf "[%s]" (show_variant_row_with_seen seen seen_rec row)
-    | Row _ as row -> show_row_with_seen seen seen_rec row
-    | Empty_row -> ""
-    | Generic n -> n
-    | Var { contents = Free (n, _) } -> Printf.sprintf "'%s" n
+      add "(";
+      separated " * " ts child;
+      add ")"
+    | Variant row ->
+      add "[";
+      show_row_fields depth seen seen_rec true row;
+      add "]"
+    | Row _ as row -> show_row_fields depth seen seen_rec false row
+    | Empty_row -> ()
+    | Generic n -> add n
+    | Var { contents = Free (n, _) } ->
+      add "'";
+      add n
     | Var ({ contents = Bound t } as tv) ->
-      if tv_ref_mem tv seen then "'rec" else show_type_with_seen (tv :: seen) seen_rec t
+      (match tv_ref_mem tv seen with
+       | true -> add "'rec"
+       | false -> show (depth + 1) (tv :: seen) seen_rec t)
     | Con ("task", [ arg ]) ->
-      Printf.sprintf "%s task" (show_postfix_arg seen seen_rec arg)
-    | Con (n, [ arg ]) ->
-      Printf.sprintf "%s(%s)" n (show_type_with_seen seen seen_rec arg)
+      postfix depth seen seen_rec arg;
+      add " task"
     | Con (n, args) ->
-      let inside =
-        args |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
-      in
-      Printf.sprintf "%s(%s)" n inside
-  and show_postfix_arg (seen : tv ref list) (seen_rec : name list) (ty : typ) =
-    match resolve_bound_type_for_display_with_seen seen ty with
-    | Fun _ -> Printf.sprintf "(%s)" (show_type_with_seen seen seen_rec ty)
-    | _ -> show_type_with_seen seen seen_rec ty
-  and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
+      add n;
+      add "(";
+      separated ", " args child;
+      add ")"
+  and postfix depth seen seen_rec ty =
+    match resolve (depth + 1) seen ty with
+    | Fun _ ->
+      add "(";
+      show (depth + 1) seen seen_rec ty;
+      add ")"
+    | _ -> show (depth + 1) seen seen_rec ty
+  and row_fields depth seen seen_rec row =
+    step depth;
     match row with
     | Var ({ contents = Bound ty } as tv) ->
       if tv_ref_mem tv seen
       then Env.empty, Var tv
-      else row_fields_and_tail_with_seen (tv :: seen) seen_rec ty
+      else row_fields (depth + 1) (tv :: seen) seen_rec ty
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then Env.empty, mu
-      else row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu mu)
+      else
+        row_fields
+          (depth + 1)
+          seen
+          (binder :: seen_rec)
+          (unfold_mu ~checkpoint:(fun () -> step depth) mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
-    | Record r -> row_fields_and_tail_with_seen seen seen_rec r
-    | Variant r -> row_fields_and_tail_with_seen seen seen_rec r
+    | Record r | Variant r -> row_fields (depth + 1) seen seen_rec r
     | Row (fs, rest) ->
-      let rest_fields, tail = row_fields_and_tail_with_seen seen seen_rec rest in
-      Env.merge fs rest_fields, tail
+      let rest_fields, tail = row_fields (depth + 1) seen seen_rec rest in
+      let fields =
+        Env.fold fs ~init:rest_fields ~f:(fun ~key ~data acc ->
+          step depth;
+          Env.add key data acc)
+      in
+      fields, tail
     | Empty_row -> Env.empty, Empty_row
     | Var _ as var -> Env.empty, var
     | Generic _ as generic -> Env.empty, generic
     | other -> Env.empty, other
-  and show_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
-    let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
-    let fields_str =
-      Env.bindings fields
-      |> List.map ~f:(fun (k, v) ->
-        Printf.sprintf "%s: %s" k (show_type_with_seen seen seen_rec v))
-      |> String.concat ~sep:"; "
-    in
-    let tail_str =
-      match tail with
-      | Empty_row -> ""
-      | _ when String.is_empty fields_str -> "..."
-      | _ -> "; ..."
-    in
-    fields_str ^ tail_str
-  and resolve_bound_type_for_display_with_seen (seen : tv ref list) ty =
+  and resolve depth seen ty =
+    step depth;
     match ty with
     | Var ({ contents = Bound bound_ty } as tv) ->
-      if tv_ref_mem tv seen
-      then Var tv
-      else resolve_bound_type_for_display_with_seen (tv :: seen) bound_ty
+      if tv_ref_mem tv seen then Var tv else resolve (depth + 1) (tv :: seen) bound_ty
     | _ -> ty
-  and variant_payload_components_with_seen
-        (seen : tv ref list)
-        (_seen_rec : name list)
-        payload_ty
-    =
-    match resolve_bound_type_for_display_with_seen seen payload_ty with
-    | Unit -> []
-    | Tuple ts -> ts
-    | ty -> [ ty ]
-  and show_variant_payload_with_seen (seen : tv ref list) (seen_rec : name list) ty =
-    match variant_payload_components_with_seen seen seen_rec ty with
-    | [] -> ""
-    | [ single ] -> Printf.sprintf "(%s)" (show_type_with_seen seen seen_rec single)
-    | many ->
-      let inside =
-        many |> List.map ~f:(show_type_with_seen seen seen_rec) |> String.concat ~sep:", "
-      in
-      Printf.sprintf "(%s)" inside
-  and show_variant_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
-    let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
-    let fields_str =
-      Env.bindings fields
-      |> List.map ~f:(fun (tag, payload_ty) ->
-        Printf.sprintf
-          "`%s%s"
-          tag
-          (show_variant_payload_with_seen seen seen_rec payload_ty))
-      |> String.concat ~sep:" | "
-    in
-    let tail_str =
-      match tail with
-      | Empty_row -> ""
-      | _ when String.is_empty fields_str -> "..."
-      | _ -> " | ..."
-    in
-    fields_str ^ tail_str
+  and show_row_fields depth seen seen_rec variant row =
+    let fields, tail = row_fields (depth + 1) seen seen_rec row in
+    let separator = if variant then " | " else "; " in
+    let first = ref true in
+    Env.iter fields ~f:(fun key value ->
+      (match !first with
+       | true -> first := false
+       | false -> add separator);
+      match variant with
+      | false ->
+        add key;
+        add ": ";
+        show (depth + 1) seen seen_rec value
+      | true ->
+        add "`";
+        add key;
+        let payload =
+          match resolve (depth + 1) seen value with
+          | Unit -> []
+          | Tuple ts -> ts
+          | ty -> [ ty ]
+        in
+        (match payload with
+         | [] -> ()
+         | _ ->
+           add "(";
+           separated ", " payload (show (depth + 1) seen seen_rec);
+           add ")"));
+    match tail with
+    | Empty_row -> ()
+    | _ ->
+      if not !first then add separator;
+      add "..."
   in
-  show_type_with_seen [] [] ty
+  match show 0 [] [] ty with
+  | () -> Buffer.contents output
+  | exception Truncated ->
+    let max_bytes, _, _ = Option.value_exn bounds in
+    String.prefix (Buffer.contents output) (Int.max 0 (max_bytes - 3))
+    ^ String.prefix "..." max_bytes
+
+and show_type ty = render_type ty
+
+and show_type_for_diagnostic state ty =
+  (* This limits an error preview, not the type system or trusted evaluation.
+     A shared DAG may have a small representation and exponential full display. *)
+  render_type ~poll:(fun () -> checkpoint state) ~bounds:(8192, 1024, 128) ty
 
 and row_fields_and_tail row =
   let rec aux (seen : tv ref list) (seen_rec : name list) row =
@@ -938,8 +1002,9 @@ and show_variant_row row =
   in
   fields_str ^ tail_str
 
-and ensure_equality_type ty =
+and ensure_equality_type ?(checkpoint = fun () -> ()) ty =
   let rec ensure_equality_type_with_seen (seen : tv ref list) (seen_rec : name list) ty =
+    checkpoint ();
     match resolve_bound_type_for_display_with_seen seen ty with
     | TInt | TFloat | Boolean | String | Unit | Generic _ -> ()
     | Var { contents = Free _ } -> ()
@@ -966,6 +1031,7 @@ and ensure_equality_type ty =
     | Fun _ -> raise (Type_error "Equality is not supported for functions")
     | Row _ | Empty_row -> ensure_equality_row_with_seen seen seen_rec ty
   and ensure_equality_row_with_seen (seen : tv ref list) (seen_rec : name list) row =
+    checkpoint ();
     let fields, tail = row_fields_and_tail_with_seen seen seen_rec row in
     Env.iter fields ~f:(fun _field ty -> ensure_equality_type_with_seen seen seen_rec ty);
     match tail with
@@ -980,6 +1046,7 @@ and ensure_equality_type ty =
       else ensure_equality_row_with_seen (tv :: seen) seen_rec t
     | _ -> ()
   and resolve_bound_type_for_display_with_seen (seen : tv ref list) ty =
+    checkpoint ();
     match ty with
     | Var ({ contents = Bound bound_ty } as tv) ->
       if tv_ref_mem tv seen
@@ -987,6 +1054,7 @@ and ensure_equality_type ty =
       else resolve_bound_type_for_display_with_seen (tv :: seen) bound_ty
     | _ -> ty
   and row_fields_and_tail_with_seen (seen : tv ref list) (seen_rec : name list) row =
+    checkpoint ();
     match row with
     | Var ({ contents = Bound ty } as tv) ->
       if tv_ref_mem tv seen
@@ -995,7 +1063,8 @@ and ensure_equality_type ty =
     | Mu (binder, _body) as mu ->
       if rec_name_mem binder seen_rec
       then Env.empty, mu
-      else row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu mu)
+      else
+        row_fields_and_tail_with_seen seen (binder :: seen_rec) (unfold_mu ~checkpoint mu)
     | Rec_var _ as rec_var -> Env.empty, rec_var
     | Record r -> row_fields_and_tail_with_seen seen seen_rec r
     | Variant r -> row_fields_and_tail_with_seen seen seen_rec r
@@ -1910,7 +1979,7 @@ and infer_binary_prim
     Boolean
   | BEq | BNeq ->
     unify state lhs_ty rhs_ty;
-    ensure_equality_type lhs_ty;
+    ensure_equality_type ~checkpoint:(fun () -> checkpoint state) lhs_ty;
     Boolean
 
 and row_tail_equivalent (lhs : typ) (rhs : typ) : bool =

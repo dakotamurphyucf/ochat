@@ -627,6 +627,13 @@
   (pps ppx_jane ppx_expect)))
 
 (library
+ (name chatml_diagnostic_budget_test)
+ (modules chatml_diagnostic_budget_test)
+ (libraries core eio_main chatml_typechecker chatml_compilation chatml_host_runtime)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
+
+(library
  (name chatml_typechecker_test)
  (modules chatml_typechecker_test)
  (libraries
