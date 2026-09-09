@@ -76,7 +76,23 @@ limits must fit current host ceilings and are retained when host defaults grow.
 Script preparation checks the compiler contract, recompiles without evaluating
 initializers, and rechecks live bindings after the compiler-domain wait.
 
-These are request/reconstruction APIs, not an enabled background execution path.
+The internal actor `with_job_invocations` service gives an already claimed job
+attempt one temporary execution scope. Script roots reference that job;
+descendants require an active parent in the same scope and cannot extend its
+deadline. Calls and outcomes use actor persistence and permission ownership
+without creating a foreground operation or provider history. Foreground completion
+preserves concurrent job invocations and their outstanding permission waits.
+
+Cancellation and interruption save the job transition and cancelled permissions
+together before notifying execution contexts or waiters. Each invocation also
+listens for scope closure, including callers on another Eio switch. Returning
+without joining child invocations fails and cancels their unfinished outcomes;
+retained executors cannot start further calls. Completion/retry waits for the
+scope to finish, and failed cleanup persistence retains an inactive owner for
+reconciliation. This actor service still requires normal tool authorization and
+does not itself install a generic worker or admit a new background job.
+
+These internal services are not an enabled background execution path.
 Transactional capacity reservation, committed launch intent, actor-owned generic
 workers and completion delivery remain under implementation. A decoded request or
 its content digest is not an authorization grant. Execution must still use the

@@ -71,10 +71,22 @@ type queued_event_borrow =
   ; mutable cancel_requested : bool
   }
 
+type job_scope =
+  { job : Agent_protocol.Job.t
+  ; deadline : Agent_protocol.Timestamp.t option
+  ; cancelled : unit Eio.Promise.t
+  ; cancel_signal : unit Eio.Promise.u
+  ; mutable active : bool
+  ; mutable cancel_requested : bool
+  ; mutable unfinished_on_return : bool
+  ; mutable cancel : (unit -> unit) option
+  }
+
 type invocation_owner =
   | Foreground of Agent_protocol.Id.Operation.t
   | Invocation_moderator of moderator_borrow
   | Event_moderator of queued_event_borrow
+  | Background_job of job_scope
 
 type invocation_execution =
   { owner : invocation_owner
@@ -121,6 +133,15 @@ type _ request =
       -> invocation_execution request
   | Claim_event_invocation :
       queued_event_borrow * Agent_protocol.Invocation.t
+      -> invocation_execution request
+  | Claim_job_scope :
+      Agent_protocol.Id.Job.t * int * int * Agent_protocol.Timestamp.t option
+      -> job_scope request
+  | Set_job_scope_cancel : job_scope * (unit -> unit) -> unit request
+  | Seal_job_scope : job_scope -> unit request
+  | Finish_job_scope : job_scope -> unit request
+  | Claim_job_invocation :
+      job_scope * Agent_protocol.Invocation.t
       -> invocation_execution request
   | Finish_invocation :
       invocation_execution * Agent_protocol.Invocation.outcome
@@ -355,6 +376,7 @@ type t =
   ; mutable foreground_moderator :
       (Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer) option
   ; mutable invocation_executions : invocation_execution list
+  ; mutable job_scopes : job_scope list
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
@@ -363,6 +385,63 @@ type t =
   }
 
 let error code message = Agent_protocol.Error.create code ~message ~retryable:false ()
+
+let job_scope_current t scope =
+  match
+    ( List.mem t.job_scopes scope ~equal:phys_equal
+    , List.find t.state.jobs ~f:(fun job ->
+        Agent_protocol.Id.Job.equal job.id scope.job.id) )
+  with
+  | true, Some job
+    when Int.equal job.generation scope.job.generation
+         && Int.equal job.generation t.state.identity.generation
+         && Int.equal job.attempt scope.job.attempt
+         && Agent_protocol.Job.equal_kind job.kind scope.job.kind
+         && Jsonaf.exactly_equal job.payload scope.job.payload -> Ok job
+  | _ -> Error (error Conflict "background callback no longer owns this job attempt")
+;;
+
+let job_scope_can_execute t scope =
+  let open Result.Let_syntax in
+  let%bind job = job_scope_current t scope in
+  match job.status, t.state.lifecycle.desired, t.state.halted, t.state.failure with
+  | (Running | Waiting_permission _), Running, false, None
+    when scope.active
+         && (not scope.cancel_requested)
+         && Option.for_all scope.deadline ~f:(fun deadline ->
+           Agent_protocol.Timestamp.compare (t.services.now ()) deadline < 0) -> Ok ()
+  | _ -> Error (error Conflict "background job cannot admit another invocation")
+;;
+
+let job_execution_owned_by scope execution =
+  match execution.owner with
+  | Background_job owner -> phys_equal owner scope
+  | _ -> false
+;;
+
+let signal_job_scope scope =
+  match Eio.Promise.peek scope.cancelled with
+  | Some () -> ()
+  | None -> Eio.Promise.resolve scope.cancel_signal ()
+;;
+
+let cancel_job_scope scope =
+  scope.cancel_requested <- true;
+  signal_job_scope scope;
+  Option.iter scope.cancel ~f:(fun cancel -> cancel ())
+;;
+
+let cancel_job_scopes t jobs =
+  List.iter t.job_scopes ~f:(fun scope ->
+    match
+      List.exists jobs ~f:(fun (job : Agent_protocol.Job.t) ->
+        Agent_protocol.Id.Job.equal job.id scope.job.id
+        && Int.equal job.generation scope.job.generation
+        && Int.equal job.attempt scope.job.attempt)
+    with
+    | true -> cancel_job_scope scope
+    | false -> ())
+;;
 
 let moderator_is_borrowed t =
   Option.is_some t.moderator_borrow || Option.is_some t.queued_event_borrow
@@ -569,7 +648,7 @@ let change_moderator t moderator =
 
 let change_workspace t workspace =
   match t.state.lifecycle.observed, t.state.active_operation with
-  | Agent_protocol.Session.Stopped, None ->
+  | Agent_protocol.Session.Stopped, None when List.is_empty t.job_scopes ->
     transition t ~delta:(Session_delta.Workspace_changed workspace) ~payloads:[]
   | ( ( Queued_for_slot
       | Starting
@@ -676,7 +755,11 @@ let pending_invocation_permissions t ~matches =
     | Operation _ -> false)
 ;;
 
-let permission_resume_observed t ~resolved ~fallback =
+let permission_resume_observed
+      t
+      ~resolved
+      ~(fallback : Agent_protocol.Session.observed_state)
+  =
   match t.state.lifecycle.desired, t.state.active_operation with
   | Stopped, None -> Agent_protocol.Session.Stopped
   | _ ->
@@ -687,7 +770,16 @@ let permission_resume_observed t ~resolved ~fallback =
               (List.exists resolved ~f:(Agent_protocol.Id.Permission.equal permission.id)))
      with
      | Some permission -> Waiting_for_permission permission.id
-     | None -> fallback)
+     | None ->
+       (match fallback with
+        | (Running_turn id | Compacting id)
+          when not
+                 (Option.exists t.state.active_operation ~f:(fun operation ->
+                    Agent_protocol.Id.Operation.equal operation.id id)) ->
+          (match t.state.lifecycle.desired with
+           | Running -> Idle
+           | Stopped -> Stopped)
+        | _ -> fallback))
 ;;
 
 let cleanup_invocation_permissions t ids =
@@ -761,6 +853,7 @@ let stop_transition t mode lifecycle deltas payloads =
          @ List.map permissions ~f:(fun permission ->
            Agent_protocol.Event.Durable.Payload.Permission_resolved permission))
   in
+  cancel_job_scopes t jobs;
   resolve_cleaned_permission_waiters t permissions;
   result
 ;;
@@ -783,11 +876,12 @@ let stop_internal t mode =
     let%map session =
       match t.state.lifecycle.desired, t.state.lifecycle.observed with
       | Stopped, Stopped
-        when not
-               (List.exists t.state.invocations ~f:Observation_follow_up.pending
-                || List.exists
-                     t.state.moderator_executions
-                     ~f:Observation_follow_up.pending_event) ->
+        when List.is_empty (stopped_jobs t mode)
+             && not
+                  (List.exists t.state.invocations ~f:Observation_follow_up.pending
+                   || List.exists
+                        t.state.moderator_executions
+                        ~f:Observation_follow_up.pending_event) ->
         Ok (Session_state.summary t.state)
       | _, _ -> stop_transition t mode { desired = Stopped; observed = Stopped } [] []
     in
@@ -912,6 +1006,8 @@ let validate_administrative_state t attachment_id expected_revision =
   then Error (error Conflict "session has an active foreground operation")
   else if t.idle_moderator_borrowed
   then Error (error Conflict "session moderator is processing background work")
+  else if not (List.is_empty t.job_scopes)
+  then Error (error Conflict "session has an active background execution scope")
   else (
     match t.state.lifecycle.observed with
     | Agent_protocol.Session.Stopped -> Ok ()
@@ -1157,7 +1253,7 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
              Option.exists borrow.operation_id ~f:(owned execution.dispatched.context.id)
              && (not (borrow.committed || borrow.cancel_requested))
              && Option.exists t.moderator_borrow ~f:(phys_equal borrow)
-           | Event_moderator _ -> false)
+           | Event_moderator _ | Background_job _ -> false)
        with
        | Some execution -> Ok execution.owner
        | None ->
@@ -1220,6 +1316,13 @@ let finish_invocation t execution outcome =
               | Cancelling -> true
               | _ -> false))
        | _ -> Error (error Conflict "event invocation scope has ended"))
+    | Background_job scope ->
+      let%map job = job_scope_current t scope in
+      scope.cancel_requested
+      ||
+        (match job.status with
+        | Running | Waiting_permission _ -> false
+        | Queued | Succeeded | Failed _ | Cancelled | Interrupted _ -> true)
   in
   let%bind () =
     if List.exists t.invocation_executions ~f:(phys_equal execution)
@@ -1232,6 +1335,7 @@ let finish_invocation t execution outcome =
       Agent_protocol.Invocation.Cancelled
         (match execution.owner with
          | Foreground _ -> "operation cancelled"
+         | Background_job _ -> "background job cancelled"
          | Invocation_moderator { operation_id = Some _; _ } ->
            "moderator scope cancelled"
          | Invocation_moderator { operation_id = None; _ } | Event_moderator _ ->
@@ -1295,7 +1399,7 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
             &&
             match execution.owner with
             | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
-            | Invocation_moderator _ | Event_moderator _ -> false)
+            | Invocation_moderator _ | Event_moderator _ | Background_job _ -> false)
         in
         (match invocation.context.origin, parent with
          | Script, Some parent
@@ -1870,7 +1974,7 @@ let validate_moderator_borrow t borrow =
 let invocation_execution_owned_by borrow execution =
   match execution.owner with
   | Invocation_moderator owner -> phys_equal owner borrow
-  | Foreground _ | Event_moderator _ -> false
+  | Foreground _ | Event_moderator _ | Background_job _ -> false
 ;;
 
 let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
@@ -2246,7 +2350,23 @@ let terminal_lifecycle t =
     { desired = t.state.lifecycle.desired
     ; observed =
         (match t.state.lifecycle.desired with
-         | Running -> Idle
+         | Running ->
+           (match
+              List.find t.state.permissions ~f:(fun permission ->
+                Agent_protocol.Permission.equal_state permission.state Pending
+                &&
+                match permission.owner with
+                | Operation _ -> false
+                | Invocation id ->
+                  List.exists t.invocation_executions ~f:(fun execution ->
+                    Agent_protocol.Id.Invocation.equal execution.dispatched.context.id id
+                    &&
+                    match execution.owner with
+                    | Background_job _ -> true
+                    | _ -> false))
+            with
+            | Some permission -> Waiting_for_permission permission.id
+            | None -> Idle)
          | Stopped -> Stopped)
     }
 ;;
@@ -2372,6 +2492,7 @@ let pending_for_operation t (operation : Agent_protocol.Operation.t) permission 
       &&
       match execution.owner with
       | Foreground id -> Agent_protocol.Id.Operation.equal id operation.id
+      | Background_job _ -> false
       | Event_moderator borrow ->
         Option.exists
           borrow.receipt.context.operation_id
@@ -2871,8 +2992,14 @@ let worker_terminal t operation_id outcome =
     let open Result.Let_syntax in
     let borrow = t.moderator_borrow in
     let event_borrow = t.queued_event_borrow in
+    let foreground, background =
+      List.partition_tf t.invocation_executions ~f:(fun execution ->
+        match execution.owner with
+        | Background_job _ -> false
+        | _ -> true)
+    in
     let%bind unfinished =
-      List.map t.invocation_executions ~f:(fun execution ->
+      List.map foreground ~f:(fun execution ->
         Agent_protocol.Invocation.cancel
           execution.dispatched
           ~reason:"worker exited before recording the invocation outcome"
@@ -2934,7 +3061,7 @@ let worker_terminal t operation_id outcome =
     t.queued_event_borrow <- None;
     t.foreground_moderator <- None;
     t.idle_moderator_borrowed <- false;
-    t.invocation_executions <- [];
+    t.invocation_executions <- background;
     t.active_cancel <- None;
     let%bind () =
       match reconcile_foreground_invocations t with
@@ -3103,6 +3230,72 @@ let with_invocation_claim t claim f =
 
 let with_invocation t operation_id ~invocation f =
   with_invocation_claim t (Claim_invocation (operation_id, invocation)) f
+;;
+
+let with_job_invocations t ~job_id ~generation ~attempt ~deadline f =
+  let open Result.Let_syntax in
+  let%bind scope =
+    Eio.Cancel.protect (fun () ->
+      call t (Claim_job_scope (job_id, generation, attempt, deadline)))
+  in
+  let active = Atomic.make true in
+  let finish () =
+    Atomic.set active false;
+    Eio.Cancel.protect (fun () -> call t (Finish_job_scope scope))
+  in
+  let execute ~invocation callback =
+    match Atomic.get active with
+    | false -> Error (error Conflict "background invocation scope has ended")
+    | true ->
+      with_invocation_claim
+        t
+        (Claim_job_invocation (scope, invocation))
+        (fun ~dispatched ->
+           match Atomic.get active with
+           | false -> Error (error Conflict "background invocation scope has ended")
+           | true ->
+             Eio.Fiber.check ();
+             (match Eio.Promise.peek scope.cancelled with
+              | Some () -> raise (Eio.Cancel.Cancelled Exit)
+              | None ->
+                Eio.Fiber.first
+                  (fun () -> callback ~dispatched)
+                  (fun () ->
+                     Eio.Promise.await scope.cancelled;
+                     raise (Eio.Cancel.Cancelled Exit))))
+  in
+  let run () =
+    Eio.Cancel.sub (fun context ->
+      Exn.protect
+        ~finally:(fun () ->
+          Atomic.set active false;
+          Exn.protect
+            ~finally:(fun () -> Eio.Cancel.cancel context Exit)
+            ~f:(fun () ->
+              Eio.Cancel.protect (fun () ->
+                ignore
+                  (call t (Seal_job_scope scope) : (unit, Agent_protocol.Error.t) result))))
+        ~f:(fun () ->
+          let%bind () =
+            call
+              t
+              (Set_job_scope_cancel
+                 ( scope
+                 , fun () ->
+                     match Atomic.get active with
+                     | true -> Eio.Cancel.cancel context Exit
+                     | false -> () ))
+          in
+          f ~job:scope.job ~execute))
+  in
+  match run () with
+  | result ->
+    let%bind () = finish () in
+    result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    ignore (finish () : (unit, Agent_protocol.Error.t) result);
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
 let run_moderator_callback t borrow f =
@@ -3698,6 +3891,7 @@ let permission_owner_active t (permission : Agent_protocol.Permission.t) =
             match operation.state with
             | Cancelling -> false
             | _ -> true)
+        | Background_job scope -> Result.is_ok (job_scope_can_execute t scope)
         | Invocation_moderator borrow ->
           (not (borrow.committed || borrow.cancel_requested))
           && Option.exists t.moderator_borrow ~f:(phys_equal borrow)
@@ -4008,12 +4202,18 @@ let add_shell_manifest_grant t grant =
   |> Result.map ~f:(fun _ -> ())
 ;;
 
-let change_job t attachment_id job =
+let change_job t attachment_id (job : Agent_protocol.Job.t) =
   with_writer t attachment_id (fun () ->
-    transition
-      t
-      ~delta:(Session_delta.Job_changed job)
-      ~payloads:[ Agent_protocol.Event.Durable.Payload.Job_state_changed job ])
+    match
+      List.exists t.job_scopes ~f:(fun scope ->
+        Agent_protocol.Id.Job.equal scope.job.id job.id)
+    with
+    | true -> Error (error Conflict "job execution owns its current record")
+    | false ->
+      transition
+        t
+        ~delta:(Session_delta.Job_changed job)
+        ~payloads:[ Agent_protocol.Event.Durable.Payload.Job_state_changed job ])
 ;;
 
 let find_job t job_id =
@@ -4028,10 +4228,38 @@ let validate_job_generation t (job : Agent_protocol.Job.t) generation =
 ;;
 
 let update_job t job =
-  transition
-    t
-    ~delta:(Session_delta.Job_changed job)
-    ~payloads:[ Agent_protocol.Event.Durable.Payload.Job_state_changed job ]
+  let cancelled =
+    match job.Agent_protocol.Job.status with
+    | Cancelled | Interrupted _ -> true
+    | Queued | Running | Waiting_permission _ | Succeeded | Failed _ -> false
+  in
+  let children =
+    List.filter t.invocation_executions ~f:(fun execution ->
+      match execution.owner with
+      | Background_job scope ->
+        cancelled
+        && Agent_protocol.Id.Job.equal scope.job.id job.id
+        && Int.equal scope.job.generation job.generation
+        && Int.equal scope.job.attempt job.attempt
+      | _ -> false)
+  in
+  let permissions, deltas, payloads =
+    cleanup_invocation_permissions
+      t
+      (List.map children ~f:(fun child -> child.dispatched.context.id))
+  in
+  let open Result.Let_syntax in
+  let%map session =
+    transition
+      t
+      ~delta:(Session_delta.Batch (Session_delta.Job_changed job :: deltas))
+      ~payloads:(Agent_protocol.Event.Durable.Payload.Job_state_changed job :: payloads)
+  in
+  (match cancelled with
+   | true -> cancel_job_scopes t [ job ]
+   | false -> ());
+  resolve_cleaned_permission_waiters t permissions;
+  session
 ;;
 
 let add_job t (job : Agent_protocol.Job.t) =
@@ -4055,6 +4283,14 @@ let claim_job t job_id generation =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
+  let%bind () =
+    match
+      List.exists t.job_scopes ~f:(fun scope ->
+        Agent_protocol.Id.Job.equal scope.job.id job_id)
+    with
+    | false -> Ok ()
+    | true -> Error (error Conflict "job's prior execution scope has not finished")
+  in
   match job.status with
   | Agent_protocol.Job.Queued when job_is_due t job ->
     if job.attempt = Int.max_value
@@ -4131,11 +4367,147 @@ let validate_job_attempt (job : Agent_protocol.Job.t) attempt =
   | false -> Error (error Conflict "job callback belongs to a stale execution attempt")
 ;;
 
+let claim_job_scope t job_id generation attempt deadline =
+  let open Result.Let_syntax in
+  let%bind job = find_job t job_id in
+  let%bind () = validate_job_generation t job generation in
+  let%bind () = validate_job_attempt job attempt in
+  let%bind () =
+    match
+      ( job.status
+      , List.exists t.job_scopes ~f:(fun scope ->
+          Agent_protocol.Id.Job.equal scope.job.id job_id) )
+    with
+    | Running, false -> Ok ()
+    | _ -> Error (error Conflict "job must be running without another execution owner")
+  in
+  let cancelled, cancel_signal = Eio.Promise.create () in
+  let scope =
+    { job
+    ; deadline
+    ; cancelled
+    ; cancel_signal
+    ; active = true
+    ; cancel_requested = false
+    ; unfinished_on_return = false
+    ; cancel = None
+    }
+  in
+  (* Validate before exposing the scope; undo the process-local reservation on
+     rejection. No durable state or runnable invocation is produced here. *)
+  t.job_scopes <- scope :: t.job_scopes;
+  match job_scope_can_execute t scope with
+  | Ok () -> Ok scope
+  | Error failure ->
+    t.job_scopes
+    <- List.filter t.job_scopes ~f:(fun other -> not (phys_equal scope other));
+    Error failure
+;;
+
+let claim_job_invocation t scope (invocation : Agent_protocol.Invocation.t) =
+  let open Result.Let_syntax in
+  let%bind () = job_scope_can_execute t scope in
+  let%bind () =
+    match
+      Agent_protocol.Id.Session.equal scope.job.session_id invocation.context.session_id
+      && Int.equal scope.job.generation invocation.context.generation
+    with
+    | true -> Ok ()
+    | false ->
+      Error (error Conflict "invocation belongs to another job session or generation")
+  in
+  let%bind () =
+    match invocation.context.parent_job with
+    | Some id
+      when Agent_protocol.Id.Job.equal id scope.job.id
+           && Agent_protocol.Invocation.equal_origin invocation.context.origin Script
+           && Option.is_none invocation.context.parent_invocation
+           && Option.is_none invocation.context.provider_call_id
+           && Option.is_none invocation.context.call_entry_id
+           && Option.is_none invocation.parent_event -> Ok ()
+    | None -> active_script_parent t ~owns:(job_execution_owned_by scope) invocation
+    | Some _ -> Error (error Conflict "invocation does not belong to this job scope")
+  in
+  let%bind () =
+    match scope.deadline, invocation.context.deadline with
+    | None, _ -> Ok ()
+    | Some parent, Some child when Agent_protocol.Timestamp.compare child parent <= 0 ->
+      Ok ()
+    | _ -> Error (error Conflict "job invocation cannot extend its execution deadline")
+  in
+  let%bind () =
+    match invocation.context.deadline with
+    | Some deadline
+      when Agent_protocol.Timestamp.compare (t.services.now ()) deadline >= 0 ->
+      Error (error Conflict "job invocation deadline has elapsed")
+    | _ -> Ok ()
+  in
+  let%bind admission = invocation_admission_deltas t invocation in
+  let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
+  let%bind _ =
+    transition
+      t
+      ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
+      ~payloads:[]
+  in
+  let execution = { owner = Background_job scope; dispatched; accepts_children = true } in
+  t.invocation_executions <- execution :: t.invocation_executions;
+  Ok execution
+;;
+
+let finish_job_scope t scope =
+  let open Result.Let_syntax in
+  let%bind () =
+    match List.mem t.job_scopes scope ~equal:phys_equal with
+    | true -> Ok ()
+    | false -> Error (error Conflict "background execution scope has ended")
+  in
+  scope.active <- false;
+  scope.cancel <- None;
+  let children = List.filter t.invocation_executions ~f:(job_execution_owned_by scope) in
+  let permissions, permission_deltas, payloads =
+    cleanup_invocation_permissions
+      t
+      (List.map children ~f:(fun child -> child.dispatched.context.id))
+  in
+  let%bind deltas =
+    List.map children ~f:(fun execution ->
+      execution.accepts_children <- false;
+      Agent_protocol.Invocation.cancel
+        execution.dispatched
+        ~reason:"background scope exited before recording the invocation outcome"
+      |> Result.map ~f:(fun invocation -> Session_delta.Invocation_changed invocation))
+    |> Result.all
+  in
+  let%bind () =
+    match deltas @ permission_deltas with
+    | [] -> Ok ()
+    | deltas ->
+      transition t ~delta:(Session_delta.Batch deltas) ~payloads |> Result.map ~f:ignore
+  in
+  resolve_cleaned_permission_waiters t permissions;
+  t.invocation_executions
+  <- List.filter t.invocation_executions ~f:(fun execution ->
+       not (job_execution_owned_by scope execution));
+  t.job_scopes <- List.filter t.job_scopes ~f:(fun other -> not (phys_equal scope other));
+  match scope.unfinished_on_return || not (List.is_empty children) with
+  | false -> Ok ()
+  | true -> Error (error Conflict "background callback left unfinished invocations")
+;;
+
 let complete_job t job_id generation attempt outcome =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
   let%bind () = validate_job_attempt job attempt in
+  let%bind () =
+    match
+      List.exists t.job_scopes ~f:(fun scope ->
+        Agent_protocol.Id.Job.equal scope.job.id job_id)
+    with
+    | false -> Ok ()
+    | true -> Error (error Conflict "job execution scope still owns its invocations")
+  in
   match job.status with
   | Agent_protocol.Job.Running ->
     let job = complete_job_outcome t job outcome in
@@ -4996,6 +5368,23 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     claim_idle_invocation t borrow invocation
   | Claim_event_invocation (borrow, invocation) ->
     claim_event_invocation t borrow invocation
+  | Claim_job_scope (id, generation, attempt, deadline) ->
+    claim_job_scope t id generation attempt deadline
+  | Claim_job_invocation (scope, invocation) -> claim_job_invocation t scope invocation
+  | Finish_job_scope scope -> finish_job_scope t scope
+  | Seal_job_scope scope ->
+    (match List.mem t.job_scopes scope ~equal:phys_equal with
+     | false -> Error (error Conflict "background execution scope has ended")
+     | true ->
+       scope.active <- false;
+       scope.unfinished_on_return
+       <- List.exists t.invocation_executions ~f:(job_execution_owned_by scope);
+       signal_job_scope scope;
+       Ok ())
+  | Set_job_scope_cancel (scope, cancel) ->
+    let open Result.Let_syntax in
+    let%map () = job_scope_can_execute t scope in
+    scope.cancel <- Some cancel
   | Finish_invocation (execution, outcome) -> finish_invocation t execution outcome
   | Claim_moderator_invocation (operation_id, invocation) ->
     claim_moderator_invocation t operation_id invocation
@@ -5136,6 +5525,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     Option.iter t.owner_timer_cancel ~f:(fun resolver -> Eio.Promise.resolve resolver ());
     t.owner_timer_cancel <- None;
     Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
+    List.iter t.job_scopes ~f:cancel_job_scope;
     Option.iter t.queued_event_borrow ~f:(fun borrow ->
       borrow.callback_active <- false;
       borrow.cancel_requested <- true;
@@ -5225,6 +5615,7 @@ let create_with_owner_lease_duration
     ; queued_event_borrow = None
     ; foreground_moderator = None
     ; invocation_executions = []
+    ; job_scopes = []
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state

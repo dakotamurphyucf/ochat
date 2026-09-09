@@ -98,6 +98,39 @@ val commit_extensions
   -> Extension_change.t list
   -> (Agent_protocol.Session.t, Agent_protocol.Error.t) result
 
+(** Host-owned invocation service for one already claimed background job attempt.
+    The callback receives the actor's actual job record and an expiring executor.
+    Only one scope may own a job at a time. Roots require Script origin and that
+    job's [parent_job], without foreground/event/provider identities. Descendants
+    require an active Script parent in this same scope and cannot widen deadlines.
+    The host derives [deadline] from durable admission/resource policy; it is an
+    admission ceiling, not a replacement for worker timeouts.
+
+    Invocations and outcomes use normal actor persistence and permission ownership,
+    without creating a foreground operation or provider history. Use the executor
+    through [Native_tool_invocation.run_scoped] or the equivalent owned script
+    adapter: this scope grants no tool capabilities, admission or policy bypass.
+    Cancellation/interrupt closes the callback's Eio cancellation context after the
+    durable job transition; cancelled permission waiters are resolved after save.
+    Foreground completion does not retire this job's invocations.
+
+    The callback must join its work. Returning expires the executor and cancels
+    in-flight invocation callbacks, including callers on another switch;
+    unfinished invocations are cancelled durably and reported as
+    an error. Job completion/retry must wait until this scope is released. A failed
+    cleanup save retains an inactive owner for reconciliation, preventing reuse.
+    Does not perform scheduler dispatch or transactional launch admission. *)
+val with_job_invocations
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> deadline:Agent_protocol.Timestamp.t option
+  -> (job:Agent_protocol.Job.t
+      -> execute:Native_tool_invocation.executor
+      -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** [set_operation_worker] installs or removes the process-local runtime
     capability. It does not mutate durable session state. Callers may remove
     the worker only while no foreground operation is active. *)
