@@ -226,7 +226,16 @@ let with_scope
          | exception (Eio.Cancel.Cancelled _ as exn) -> raise exn
          | exception _ -> tool_error "invocation.host_failed"))
   in
-  Exn.protect ~f:(fun () -> f call) ~finally:(fun () -> Atomic.set active false)
+  Exn.protect
+    ~finally:(fun () -> Atomic.set active false)
+    ~f:(fun () ->
+      match origin with
+      | Moderator ->
+        Native_tool_moderation.with_handler
+          ~observer
+          ~prepare:(fun _ -> Error "moderator_reentrancy")
+          (fun () -> f call)
+      | Model | Script | Delegated_agent | External_adapter -> f call)
 ;;
 
 let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
@@ -358,18 +367,19 @@ let with_script_native_calls
               "The redirected tool is not selected."
           | Some reference -> route reference args Passed None))
   in
-  with_scope
-    ~prepare
-    ?max_nested_calls
-    t
-    ~selected
-    ~limits
-    ~origin:Script
-    ~observer
-    ~valid_parent
-    ~execute
-    ~parent:(Invocation parent)
-    f
+  Native_tool_moderation.with_handler ~observer ~prepare:moderate (fun () ->
+    with_scope
+      ~prepare
+      ?max_nested_calls
+      t
+      ~selected
+      ~limits
+      ~origin:Script
+      ~observer
+      ~valid_parent
+      ~execute
+      ~parent:(Invocation parent)
+      f)
 ;;
 
 let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderate f =

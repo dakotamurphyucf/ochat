@@ -20,6 +20,7 @@ type borrowed =
   ; ceiling : C.t option
   ; execution_context : Chatml_execution.context
   ; runtime_context : Chat_response.Runtime_request_scope.t option
+  ; moderation_context : Native_tool_moderation.t option
   }
 
 let scope_key = Eio.Fiber.create_key ()
@@ -63,7 +64,15 @@ let select_tools scope ~names =
   { scope with ceiling = Some selected }
 ;;
 
-let with_scope ?ceiling ?execution_context ?runtime_context ~execute invocation f =
+let with_scope
+      ?ceiling
+      ?execution_context
+      ?runtime_context
+      ?moderation_context
+      ~execute
+      invocation
+      f
+  =
   let execute, ceiling, execution_context =
     match Eio.Fiber.get scope_key with
     | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
@@ -87,14 +96,25 @@ let with_scope ?ceiling ?execution_context ?runtime_context ~execute invocation 
       runtime_context
       ~default:Chat_response.Runtime_request_scope.capture
   in
+  let moderation_context =
+    Option.value_or_thunk moderation_context ~default:Native_tool_moderation.capture
+  in
   Exn.protect
     ~finally:(fun () -> Atomic.set active false)
     ~f:(fun () ->
       Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
-        Eio.Fiber.with_binding
-          scope_key
-          { invocation; active; execute; ceiling; execution_context; runtime_context }
-          f))
+        Native_tool_moderation.with_context moderation_context (fun () ->
+          Eio.Fiber.with_binding
+            scope_key
+            { invocation
+            ; active
+            ; execute
+            ; ceiling
+            ; execution_context
+            ; runtime_context
+            ; moderation_context
+            }
+            f)))
 ;;
 
 let execute_borrowed scope ~invocation f =
@@ -140,6 +160,7 @@ let execute_borrowed scope ~invocation f =
       ~ceiling
       ~execution_context:scope.execution_context
       ~runtime_context:scope.runtime_context
+      ~moderation_context:scope.moderation_context
       ~execute:scope.execute
       dispatched
       (fun () -> f ~dispatched))

@@ -1864,9 +1864,36 @@ success and failure after a native effect, retained turn/compaction requests,
 three persisted invocations and one canonical provider output. Separate checks
 cover explicit registration selection, changed contracts/revisions, domain
 handoffs and expired scopes. These request fixtures do not qualify the daemon's
-scheduling/restart behavior. Runtime-builder installation, moderator/event
-collection and authoring-helper integration remain pending; these internal
-services do not enable public `run_chatml` availability.
+scheduling/restart behavior.
+
+The extensibility-aware `Runtime_builder` now installs `run_chatml` for an explicit
+`<tool name="run_chatml"/>` declaration. Its `extension_services.one_off_policy`
+sets the host's request ceiling; supplying services does not add undeclared tools.
+Construction binds the actual native registry first, then installs the one-off
+service resolver before deferred moderator activation or model execution. A
+one-off-only document needs no moderator. Combining this tool with a legacy
+moderator is rejected before initialization; coordinated moderation requires the
+versioned extensibility interface. Ordinary hosts still reject the declaration,
+and the daemon's qualification flag remains disabled by default until A01.
+
+`Native_tool_moderation` carries the owning invocation's pre-tool callback and
+observer through synchronous nesting. Its callback expires with its lexical scope;
+an actual native borrow restores that same context across a domain handoff.
+Standalone and one-off scripts retain their owning pre-tool routing. An active
+moderator shadows the ambient callback with a reentrancy error, so a descendant
+cannot use a borrowed foreground callback to re-enter the same moderator.
+
+Captured-runtime tests run two model-submitted scripts through the real builder,
+scoped file reader, actor persistence and simulated provider stream. They cover
+no moderator, normal moderation, rejected nested reads, argument rewriting,
+session termination, recursive one-off calls, standalone-to-one-off composition
+and default-host rejection. Compiler failures retain source-bound diagnostics in
+the canonical model-facing failure; rejected limit escalation admits no Script
+child. Recursive
+execution adds native/script invocations without additional provider turns; all
+model-facing results have canonical publication records. Moderator/event request
+collection, generalized nested-extension ownership and authoring-helper
+integration remain pending before full feature qualification.
 
 ## Authoring policy admission plans
 

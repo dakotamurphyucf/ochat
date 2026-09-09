@@ -55,7 +55,20 @@ let%expect_test
   let module N = Agent_session.Native_tool_invocation in
   let module A = Agent_session.Session_actor in
   let module I = Agent_protocol.Invocation in
+  let module H = Agent_session.Native_tool_moderation in
   let requests = ref [] in
+  let handler = ref None in
+  let preparations = ref 0 in
+  let pre_call =
+    Chat_response.Moderation.Tool_call.
+      { id = "domain-child"
+      ; name = "read_file"
+      ; args = `Object []
+      ; kind = Function
+      ; payload_text = "{}"
+      ; meta = `Null
+      }
+  in
   let finished = ref false in
   with_handoff_actor
     ~make_worker:(fun env actor_ready ->
@@ -81,8 +94,13 @@ let%expect_test
               (* Domain workers have no ambient collector. Only the actual expiring
                actor borrow may restore the caller's context here. *)
               assert (Option.is_none (S.capture ()));
+              assert (Result.is_error (H.current ()));
               N.execute_borrowed borrow ~invocation:child (fun ~dispatched:_ ->
                 S.emit [ R.Request_compaction ] |> Result.ok_or_failwith;
+                let current = H.current () |> Result.ok_or_failwith in
+                handler := Some current;
+                assert (
+                  Option.is_none (H.prepare current pre_call |> Result.ok_or_failwith));
                 Ok (I.Complete `Null))
               |> protocol_ok
               |> fun (_ : I.t) -> ()))
@@ -91,17 +109,25 @@ let%expect_test
         let reference, invocation = native_context registry invocation in
         caps.commit_invocation_call ~invocation call |> protocol_ok;
         let resolved, collected =
-          S.collect (fun () ->
-            N.run
-              ~capabilities:caps
-              ~registry:(fun () -> registry)
-              ~reference
-              ~invocation
-              ~is_halted:(fun () -> false)
-              ~authorize:(fun _ _ -> Ok ())
-              ~prepare_output:(fun _ -> Ok (`String "disclosed"))
-            |> protocol_ok)
+          H.with_handler
+            ~observer:None
+            ~prepare:(fun _ ->
+              incr preparations;
+              Ok None)
+            (fun () ->
+               S.collect (fun () ->
+                 N.run
+                   ~capabilities:caps
+                   ~registry:(fun () -> registry)
+                   ~reference
+                   ~invocation
+                   ~is_halted:(fun () -> false)
+                   ~authorize:(fun _ _ -> Ok ())
+                   ~prepare_output:(fun _ -> Ok (`String "disclosed"))
+                 |> protocol_ok))
         in
+        assert (Int.equal !preparations 1);
+        assert (Result.is_error (H.prepare (Option.value_exn !handler) pre_call));
         requests := collected;
         let outcome =
           match resolved.status with

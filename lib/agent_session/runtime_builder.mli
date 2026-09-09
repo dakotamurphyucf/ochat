@@ -32,6 +32,9 @@ type extension_services =
   ; standalone_execution_limits :
       Chat_response.Extension_compiler.t -> Chatml_execution.limits
     (** Host-selected execution policy for captured standalone scripts. *)
+  ; one_off_policy : Chat_response.One_off_request.policy
+    (** Host ceiling for explicitly declared run_chatml. Supplying policy never
+        adds the tool to a document that did not declare it. *)
   ; claim_lifecycle : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
     (** Actual running-idle actor ownership. Never manufacture an operation. *)
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool

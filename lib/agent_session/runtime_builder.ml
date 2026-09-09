@@ -28,6 +28,7 @@ type extension_services =
   { script_tools : Agent_runtime.t -> Script_tool_calls.t
   ; standalone_execution_limits :
       Chat_response.Extension_compiler.t -> Chatml_execution.limits
+  ; one_off_policy : Chat_response.One_off_request.policy
   ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
   ; history : unit -> History_entry.t list
@@ -165,6 +166,7 @@ let run_agent
 
 let create_agent_runtime
       ~extensions
+      ~native_registrations
       ~sw
       ~ctx
       ~host
@@ -191,6 +193,7 @@ let create_agent_runtime
     |> Result.map ~f:(fun native -> native, None)
   | true ->
     Agent_runtime.prepare_extensions
+      ~native_registrations
       ~sw
       ~ctx
       ~host
@@ -733,13 +736,57 @@ let build_with_services
   let cache = cache storage_paths in
   let ctx = context ~env paths cache in
   let%bind host = host ~env ~paths ~session_id ~elements in
+  let one_off_services = ref None in
+  let declares_one_off =
+    List.exists elements ~f:(function
+      | Prompt.Chat_markdown.Tool (Builtin name) -> String.equal name Run_chatml_tool.name
+      | _ -> false)
+  in
+  let native_registrations =
+    match extension_services, declares_one_off with
+    | Some services, true ->
+      [ Run_chatml_tool.registration
+          ~env
+          ~policy:services.one_off_policy
+          ~services:(fun () ->
+            let%bind script_tools =
+              Result.of_option
+                !one_off_services
+                ~error:"one-off services are not installed"
+            in
+            let%map moderation = Native_tool_moderation.current () in
+            Run_chatml_tool.
+              { script_tools
+              ; observer = Native_tool_moderation.observer moderation
+              ; now =
+                  (fun () ->
+                    Eio.Time.now (Eio.Stdenv.clock env)
+                    |> Time_ns.Span.of_sec
+                    |> Time_ns.of_span_since_epoch
+                    |> Agent_protocol.Timestamp.of_time_ns)
+              ; moderate_tool =
+                  (fun _ call ->
+                    Native_tool_moderation.prepare moderation call
+                    |> Result.map ~f:(fun tool_moderation ->
+                      Some { Moderation.Outcome.empty with tool_moderation }))
+              ; prepare_outcome =
+                  (fun outcome ->
+                    Agent_protocol.Invocation.validate_outcome outcome
+                    |> Result.map_error ~f:(fun error ->
+                      error.Agent_protocol.Error.message))
+              })
+      ]
+    | None, _ | Some _, false -> []
+  in
   let%bind agent_runtime, definition =
     create_agent_runtime
       ~extensions:
         (Option.is_some extension_services
-         && List.exists elements ~f:(function
-           | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
-           | _ -> false))
+         && (declares_one_off
+             || List.exists elements ~f:(function
+               | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
+               | _ -> false)))
+      ~native_registrations
       ~sw
       ~ctx
       ~host
@@ -754,22 +801,23 @@ let build_with_services
     | None -> Ok ()
     | Some definition ->
       if
-        List.exists
-          (Chat_response.Extension_compiler.prepared_tools definition)
-          ~f:(fun prepared ->
-            match
-              (Chat_response.Extension_compiler.declaration prepared).implementation
-            with
-            | Standalone _ -> true
-            | Moderator _ -> false)
+        (declares_one_off
+         || List.exists
+              (Chat_response.Extension_compiler.prepared_tools definition)
+              ~f:(fun prepared ->
+                match
+                  (Chat_response.Extension_compiler.declaration prepared).implementation
+                with
+                | Standalone _ -> true
+                | Moderator _ -> false))
         && List.exists elements ~f:(function
           | Prompt.Chat_markdown.Script _ -> true
           | _ -> false)
       then
         Error
           (failure
-             "standalone tools with a legacy moderator require an extensibility-v1 \
-              moderator")
+             "one-off and standalone tools with a legacy moderator require an \
+              extensibility-v1 moderator")
       else Ok ()
   in
   let comp_tools, tool_tbl = Ochat_function.functions agent_runtime.functions in
@@ -834,6 +882,7 @@ let build_with_services
     | Some _, Some services -> Some (services.script_tools agent_runtime)
     | _ -> None
   in
+  one_off_services := script_tools;
   let lifecycle =
     match definition, moderator, extension_services with
     | Some _, Some (moderator, _), Some services
@@ -906,24 +955,63 @@ let build_with_services
   let dispatch_tool =
     Option.map script_tools ~f:(fun script_tools ->
       fun ~input ~capabilities ->
+      let event_handlers =
+        Option.map moderator ~f:(fun (moderator, _) ->
+          Moderator_event.foreground_handlers
+            ~script_tools
+            ~capabilities
+            ~manager:moderator.manager
+            ~session_meta:`Null
+            ~now
+            ())
+      in
+      let observer =
+        Option.bind moderator ~f:(fun (moderator, _) ->
+          Manager.invocation_observer moderator.manager)
+      in
+      let moderate_tool call =
+        match event_handlers, extension_services with
+        | None, _ -> Ok None
+        | Some (Error error), _ -> Error error.Agent_protocol.Error.message
+        | Some (Ok handlers), Some services ->
+          handlers.handle
+            ~history:(services.history ())
+            ~available_tools:tools
+            ~now_ms:
+              (Agent_protocol.Timestamp.to_time_ns (now ())
+               |> Time_ns.to_int_ns_since_epoch
+               |> fun n -> n / 1_000_000)
+            ~event:(Moderation.Event.Pre_tool_call call)
+        | Some _, None -> Error "moderator services are not installed"
+      in
       let native = Script_tool_calls.native_dispatch script_tools ~input ~capabilities in
+      let native =
+        { native with
+          run =
+            (fun request ~authorize ->
+              Native_tool_moderation.with_handler
+                ~observer
+                ~prepare:(fun call ->
+                  let%bind outcome = moderate_tool call in
+                  match outcome with
+                  | None -> Ok None
+                  | Some outcome ->
+                    let%map () =
+                      Chat_response.Runtime_request_scope.emit outcome.runtime_requests
+                    in
+                    (match
+                       Chat_response.Runtime_semantics.should_end_session
+                         outcome.runtime_requests
+                     with
+                     | Some _ ->
+                       Some (Moderation.Tool_moderation.Reject "The session has ended.")
+                     | None -> outcome.tool_moderation))
+                (fun () -> native.run request ~authorize))
+        }
+      in
       let standalone =
         match definition, extension_services with
         | Some definition, Some services ->
-          let event_handlers =
-            Option.map moderator ~f:(fun (moderator, _) ->
-              Moderator_event.foreground_handlers
-                ~script_tools
-                ~capabilities
-                ~manager:moderator.manager
-                ~session_meta:`Null
-                ~now
-                ())
-          in
-          let observer =
-            Option.bind moderator ~f:(fun (moderator, _) ->
-              Manager.invocation_observer moderator.manager)
-          in
           [ Standalone_tool_dispatch.create
               ?observer
               ~env
@@ -941,19 +1029,7 @@ let build_with_services
               ~prepare_outcome:(fun outcome ->
                 Agent_protocol.Invocation.validate_outcome outcome
                 |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
-              ~moderate_tool:(fun _ call ->
-                match event_handlers with
-                | None -> Ok None
-                | Some (Error error) -> Error error.Agent_protocol.Error.message
-                | Some (Ok handlers) ->
-                  handlers.handle
-                    ~history:(services.history ())
-                    ~available_tools:tools
-                    ~now_ms:
-                      (Agent_protocol.Timestamp.to_time_ns (now ())
-                       |> Time_ns.to_int_ns_since_epoch
-                       |> fun n -> n / 1_000_000)
-                    ~event:(Moderation.Event.Pre_tool_call call))
+              ~moderate_tool:(fun _ call -> moderate_tool call)
               ()
           ]
         | _ -> []
