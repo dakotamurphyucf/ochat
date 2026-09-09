@@ -368,6 +368,45 @@ module Event = struct
     | Turn_end -> Lang.VVariant ("Turn_end", [])
     | Internal_event event -> event
   ;;
+
+  let to_value_with_control ~control event =
+    let record fields =
+      Option.iter control ~f:(fun c -> c.Lang.allocate (64 * List.length fields));
+      record_value fields
+    in
+    let value =
+      match event with
+      | Item_appended item ->
+        Lang.VVariant
+          ( "Item_appended"
+          , [ record
+                [ "id", Lang.VString item.id
+                ; "value", Value_codec.import_json ?control item.value
+                ]
+            ] )
+      | Pre_tool_call call ->
+        Lang.VVariant
+          ( "Pre_tool_call"
+          , [ record
+                [ "id", Lang.VString call.id
+                ; "name", Lang.VString call.name
+                ; "args", Value_codec.import_json ?control call.args
+                ]
+            ] )
+      | Post_tool_response result ->
+        Lang.VVariant
+          ( "Post_tool_response"
+          , [ record
+                [ "call_id", Lang.VString result.call_id
+                ; "name", Lang.VString result.name
+                ; "result", Value_codec.import_json ?control result.result
+                ]
+            ] )
+      | _ -> to_value event
+    in
+    Option.iter control ~f:(fun c -> c.Lang.check_value value);
+    value
+  ;;
 end
 
 let natural_id_of_item (item : Res.Item.t) : string option =
@@ -423,13 +462,17 @@ module Projection = struct
     { t with item_ids = t.item_ids @ [ id ] }, projected_item
   ;;
 
-  let project_history (t : t) (items : Res.Item.t list) : t * Item.t list =
+  let project_history_with_control ~control (t : t) (items : Res.Item.t list)
+    : t * Item.t list
+    =
     let next_generated_id = ref t.next_generated_id in
     let ids_rev = ref [] in
     let items_rev = ref [] in
     List.iteri items ~f:(fun position item ->
+      Option.iter control ~f:(fun c -> c.Lang.checkpoint ());
       let snapshot = { item_ids = t.item_ids; next_generated_id = !next_generated_id } in
       let snapshot, projected_item, id = project_at snapshot ~position item in
+      Option.iter control ~f:(fun c -> c.Lang.before_json_import projected_item.value);
       next_generated_id := snapshot.next_generated_id;
       ids_rev := id :: !ids_rev;
       items_rev := projected_item :: !items_rev);
@@ -437,7 +480,10 @@ module Projection = struct
     , List.rev !items_rev )
   ;;
 
-  let project_context
+  let project_history t items = project_history_with_control ~control:None t items
+
+  let project_context_with_control
+        ~control
         ~(projection : t)
         ~session_id
         ~now_ms
@@ -447,13 +493,15 @@ module Projection = struct
         ~session_meta
     : t * Context.t
     =
-    let projection, items = project_history projection history in
+    let projection, items = project_history_with_control ~control projection history in
     let available_tools = List.map available_tools ~f:Tool_desc.of_request_tool in
     let context =
       Context.{ session_id; now_ms; phase; items; available_tools; session_meta }
     in
     projection, context
   ;;
+
+  let project_context = project_context_with_control ~control:None
 end
 
 module Entry_projection = struct

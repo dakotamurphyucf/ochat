@@ -57,6 +57,127 @@ let code = function
 let snapshot manager = M.identity_snapshot manager |> ok
 let same_snapshot a b = Sexp.equal (S.sexp_of_t a) (S.sexp_of_t b)
 
+let%expect_test "legacy manager diagnostics cannot recurse forever or invalidate a commit"
+  =
+  let module Debug = Chatml.Chatml_debug_log in
+  let script : Prompt.Chat_markdown.script =
+    { id = "logging"
+    ; language = "chatml"
+    ; kind = "moderator"
+    ; source =
+        Inline
+          "let initial_state = 0\nlet on_event ctx state event = Task.pure(state + 1)"
+    }
+  in
+  let _, artifact = M.Registry.compile_script M.Registry.empty script |> ok in
+  let manager =
+    M.create ~artifact ~capabilities:Chat_response.Moderation.Capabilities.default ()
+    |> ok
+  in
+  let cell = ref L.VUnit in
+  cell := L.VRef cell;
+  let deliver () =
+    M.handle_event
+      manager
+      ~session_id:"logging"
+      ~now_ms:0
+      ~history:[]
+      ~available_tools:[]
+      ~session_meta:`Null
+      ~event:(Internal_event (L.VRef cell))
+  in
+  Debug.clear_sink ();
+  print_endline (code (deliver ()));
+  let sink_failures = ref 0 in
+  Debug.set_sink (fun line ->
+    if String.is_prefix line ~prefix:"[moderator-manager] handle_event_ok"
+    then (
+      incr sink_failures;
+      failwith "diagnostic sink unavailable"));
+  Exn.protect ~finally:Debug.clear_sink ~f:(fun () ->
+    let outcome = deliver () in
+    let saved = M.snapshot manager |> ok in
+    print_s
+      [%sexp
+        (code outcome : string)
+      , (saved.current_state : Session.Snapshot.t)
+      , (!sink_failures : int)]);
+  [%expect
+    {|
+    ok
+    (ok (Int 2) 1)
+    |}]
+;;
+
+let%expect_test "event projection and state copying fail before tools or persistence" =
+  Eio_main.run (fun env ->
+    List.iter [ "state"; "context"; "event"; "allowed" ] ~f:(fun mode ->
+      let payload =
+        match mode with
+        | "state" | "allowed" -> String.make 12_800 'x'
+        | _ -> ""
+      in
+      let source =
+        "let initial_state = { count = 0; payload = \""
+        ^ payload
+        ^ "\" }\n"
+        ^ "let on_event ctx state event = Task.bind(Tool.call(\"native\", `Null), "
+        ^ "fun ignored -> Task.pure({ state with count = state.count + 1 }))"
+      in
+      let limits =
+        { X.default_limits with
+          allocation_bytes =
+            (match mode with
+             | "allowed" -> X.default_limits.allocation_bytes
+             | _ -> 8192)
+        ; max_invocation_depth = 1
+        }
+      in
+      let manager = create env ~policy:(Bounded limits) source |> ok in
+      let before = snapshot manager in
+      let native_calls = ref 0 in
+      let installs = ref 0 in
+      let outcome =
+        M.handle_event_entries_transactional
+          manager
+          ~session_id:"budget-fixture"
+          ~now_ms:0
+          ~history:[]
+          ~available_tools:[]
+          ~session_meta:
+            (match mode with
+             | "context" -> `String (String.make 12_800 'x')
+             | _ -> `Null)
+          ~event:
+            (match mode with
+             | "event" ->
+               Item_appended
+                 (Chat_response.Moderation.Item.create
+                    ~id:"large"
+                    ~value:(`String (String.make 12_800 'x')))
+             | _ -> Session_start)
+          ~authorize:(fun () -> Ok ())
+          ~on_tool_call:(fun ~name:_ ~args:_ ->
+            incr native_calls;
+            Ok (Tool_ok `Null))
+          ~prepare_event:(fun ~outcome:_ ~snapshot:_ -> Ok (fun () -> incr installs))
+      in
+      print_s
+        [%sexp
+          (mode : string)
+        , (code outcome : string)
+        , (!native_calls : int)
+        , (!installs : int)
+        , (same_snapshot before (snapshot manager) : bool)]));
+  [%expect
+    {|
+    (state chatml.allocation_limit 0 0 true)
+    (context chatml.allocation_limit 0 0 true)
+    (event chatml.allocation_limit 0 0 true)
+    (allowed ok 1 1 false)
+    |}]
+;;
+
 let%expect_test "initialization is bounded before a persistent runtime becomes usable" =
   Eio_main.run (fun env ->
     let recursive =

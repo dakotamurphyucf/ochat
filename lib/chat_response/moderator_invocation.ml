@@ -93,9 +93,9 @@ let json ?control ~max_bytes value =
   else Ok json
 ;;
 
-let internal_event payload =
+let internal_event ?control payload =
   let open Result.Let_syntax in
-  let%map _ = json ~max_bytes:(1024 * 1024) payload in
+  let%map _ = json ?control ~max_bytes:(1024 * 1024) payload in
   L.VVariant ("Internal_event", [ payload ])
 ;;
 
@@ -402,7 +402,7 @@ let decode ?control t value =
 
 let decode_outcome = decode
 
-let snapshot_state ~(limits : S.limits) value =
+let snapshot_state ?control ~(limits : S.limits) value =
   let open Result.Let_syntax in
   let%bind () =
     check_value
@@ -412,6 +412,7 @@ let snapshot_state ~(limits : S.limits) value =
       ~max_bytes:(bytes limits.max_value_bytes)
       value
   in
+  Option.iter control ~f:(fun c -> c.L.before_json_export value);
   let%bind snapshot = V.Snapshot.of_value value in
   if
     String.length (Jsonaf.to_string (V.Snapshot.to_jsonaf snapshot))
@@ -457,7 +458,7 @@ let run_impl ?control ?task_limits t ~runtime ~context ~prepare_commit ~failure_
     | _ -> error "invocation.wrong_context" "expected moderator context"
   in
   let checked_state value =
-    snapshot_state ~limits:t.limits value
+    snapshot_state ?control ~limits:t.limits value
     |> Result.map_error ~f:(fun message ->
       failure_kind := Invalid_state;
       message)

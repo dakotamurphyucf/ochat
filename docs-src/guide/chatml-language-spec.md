@@ -246,6 +246,13 @@ exports reserve an escaping-aware conversion/serialization estimate. Host error
 adapters preserve budget exhaustion as a control failure. These scopes do not
 grant tools or change invocation ownership.
 
+Ordinary lifecycle events and tool observations use the same owned-scope rule.
+Event/history projection and state/queue snapshot preparation are budgeted before
+the transaction installer runs. A projection or snapshot budget failure leaves
+the prior state intact. A moderator that observes an intentionally large request
+needs sufficient context limits even when the target tool rejects that request
+under stricter input limits.
+
 Host runtime debug logging uses separate, lazy previews capped by bytes, visited
 nodes and depth. Disabled logging does not format values. Enabled logging can
 truncate large or cyclic values without consuming script fuel after a state

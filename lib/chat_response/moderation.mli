@@ -130,6 +130,7 @@ module Event : sig
 
   val phase : t -> Phase.t
   val to_value : t -> Lang.value
+  val to_value_with_control : control:Lang.execution_control option -> t -> Lang.value
 end
 
 module Projection : sig
@@ -145,6 +146,17 @@ module Projection : sig
 
   val project_context
     :  projection:t
+    -> session_id:string
+    -> now_ms:int
+    -> phase:Phase.t
+    -> history:Res.Item.t list
+    -> available_tools:Res.Request.Tool.t list
+    -> session_meta:Jsonaf.t
+    -> t * Context.t
+
+  val project_context_with_control
+    :  control:Lang.execution_control option
+    -> projection:t
     -> session_id:string
     -> now_ms:int
     -> phase:Phase.t

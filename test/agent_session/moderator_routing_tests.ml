@@ -717,17 +717,19 @@ let%test_unit
           let manager, _, definition =
             handoff_definition
               ~events
-                (* Construct a value above the callee's input limit so this case
-                 still exercises validation after rewriting/redirecting. Pure
-                 evaluation otherwise rejects the array before routing it. *)
+                (* The observing moderator must be able to inspect the original
+                   oversized request and construct rewritten arguments. Keep the
+                   callee's stricter declaration limits below so these cases
+                   reach original/final input validation, rather than exhausting
+                   the observer while projecting its history/event. *)
               ?execution_policy:
                 (Option.some_if
-                   final_limit
+                   (original_limit || final_limit)
                    (Chatml_execution.Bounded
                       { Chatml_execution.default_limits with
                         max_array_items = 512
-                      ; max_depth = 32
-                      ; max_value_bytes = 256 * 1024
+                      ; max_depth = 128
+                      ; max_value_bytes = 1024 * 1024
                       }))
               ~script_limits:
                 (if original_limit || final_limit
@@ -1130,7 +1132,7 @@ let%test_unit
              Bool.equal
                (Option.is_some invocation.output_entry_id)
                (not (Poly.equal mode `Publish_rejected)));
-           assert (
+           let valid_outcome =
              match invocation.status with
              | Published (Complete `Null) ->
                Poly.equal mode `Success
@@ -1179,9 +1181,21 @@ let%test_unit
                assert (Poly.equal error.details `Null);
                assert (
                  not (String.is_substring error.message ~substring:"private diagnostic"));
-               String.equal error.code expected
+               if not (String.equal error.code expected)
+               then
+                 failwithf "moderator outcome: expected %s, got %s" expected error.code ();
+               true
              | Resolved (Complete `Null) -> Poly.equal mode `Publish_rejected
-             | _ -> false);
+             | _ -> false
+           in
+           if not valid_outcome
+           then
+             failwithf
+               "unexpected moderator outcome for input %d bytes: %s"
+               (String.length original_payload)
+               (Sexp.to_string
+                  (Agent_protocol.Invocation.sexp_of_status invocation.status))
+               ();
            assert (
              List.length state.conversation.canonical_history
              = if multi then 8 else if Poly.equal mode `Publish_rejected then 2 else 3);

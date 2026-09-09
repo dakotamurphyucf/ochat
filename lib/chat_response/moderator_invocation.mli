@@ -98,7 +98,7 @@ val ordinary_effects : L.eff list -> (L.eff list, string) result
 
 (** Validate a tagged JSON payload and wrap it in the v1 Internal_event envelope.
     Shared by emit/timer adapters and host event admission. *)
-val internal_event : L.value -> (L.value, string) result
+val internal_event : ?control:L.execution_control -> L.value -> (L.value, string) result
 
 type failure =
   | Unhandled
@@ -111,9 +111,11 @@ type failure =
   | Session_ended
 
 (** Bounded serializable state snapshot shared by all extensibility-v1 event
-    phases. Limits must come from a validated declaration. *)
+    phases. Limits must come from a validated declaration. An active [control]
+    also reserves the snapshot conversion/serialization estimate before copying. *)
 val snapshot_state
-  :  limits:Chatmd_shell_spec.Chatmd_script_spec.limits
+  :  ?control:L.execution_control
+  -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
   -> L.value
   -> (Chatml.Chatml_value_codec.Snapshot.t, string) result
 

@@ -5,7 +5,14 @@ module Runtime = Chatml_host_runtime
 module Res = Openai.Responses
 module Builtin_spec = Chatml.Chatml_builtin_spec
 module Builtin_surface = Chatml.Chatml_builtin_surface
-module Debug_log = Chatml.Chatml_debug_log
+
+module Debug_log = struct
+  let emit render =
+    try Chatml.Chatml_debug_log.emit render with
+    | Failure _ | Invalid_argument _ | Sys_error _ -> ()
+  ;;
+end
+
 module Value_codec = Chatml.Chatml_value_codec
 module Snapshot = Session.Snapshot
 
@@ -195,8 +202,10 @@ let execution_runner ?env ?policy (artifact : Registry.artifact) =
     Ok (Some (Chatml_execution.create_runner ~env ~policy ()))
 ;;
 
-let snapshot_of_jsonaf (json : Jsonaf.t) : (Snapshot.t, string) result =
-  Value_codec.Snapshot.of_value (Value_codec.jsonaf_to_value json)
+let snapshot_of_jsonaf ?control (json : Jsonaf.t) : (Snapshot.t, string) result =
+  let value = Value_codec.import_json ?control json in
+  Option.iter control ~f:(fun c -> c.before_json_export value);
+  Value_codec.Snapshot.of_value value
 ;;
 
 let jsonaf_of_snapshot ~name (snapshot : Snapshot.t) : (Jsonaf.t, string) result =
@@ -583,6 +592,7 @@ let apply_overlay_op (t : t) (op : Moderation.Overlay.op) : unit =
 ;;
 
 let project_context
+      ?control
       (t : t)
       ~session_id
       ~now_ms
@@ -592,7 +602,8 @@ let project_context
       ~session_meta
   =
   let projection, context =
-    Moderation.Projection.project_context
+    Moderation.Projection.project_context_with_control
+      ~control
       ~projection:t.projection
       ~session_id
       ~now_ms
@@ -824,20 +835,19 @@ let committed_outcome (t : t) : (Moderation.Outcome.t option, string) result =
     Some outcome
 ;;
 
-let handle_runtime_event ?prepare_commit t ~context ~event =
+let handle_runtime_event ?prepare_commit ~control t ~context ~event =
   match t.artifact.extension with
   | None -> Runtime.handle_event ?prepare_commit t.runtime ~context ~event
   | Some (script, _) ->
-    let snapshot = Moderator_invocation.snapshot_state ~limits:script.limits in
-    run_controlled t.execution (fun () ->
-      Runtime.handle_event
-        ?prepare_commit
-        t.runtime
-        ~context
-        ~event
-        ~copy_state:(fun value ->
-          Result.bind (snapshot value) ~f:Value_codec.Snapshot.to_value)
-        ~validate_state:(fun value -> Result.map (snapshot value) ~f:(fun _ -> ())))
+    let snapshot = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
+    Runtime.handle_event
+      ?prepare_commit
+      t.runtime
+      ~context
+      ~event
+      ~copy_state:(fun value ->
+        Result.bind (snapshot value) ~f:Value_codec.Snapshot.to_value)
+      ~validate_state:(fun value -> Result.map (snapshot value) ~f:(fun _ -> ()))
 ;;
 
 let handle_event_unlocked
@@ -850,59 +860,65 @@ let handle_event_unlocked
       ~(event : Moderation.Event.t)
   : (Moderation.Outcome.t, string) result
   =
-  let event_value = Moderation.Event.to_value event in
-  Debug_log.emitf
-    "[moderator-manager] handle_event session=%s event=%s"
-    session_id
-    (Builtin_spec.value_to_pretty_string event_value);
-  let context =
-    project_context
-      t
-      ~session_id
-      ~now_ms
-      ~phase:(Moderation.Event.phase event)
-      ~history
-      ~available_tools
-      ~session_meta
-  in
-  let open Result.Let_syntax in
-  let prepared_outcome = ref None in
-  let prepare_commit ~local_effects =
-    let%bind decoded = decode_effects t local_effects in
-    let%bind outcome = Moderation.Outcome.of_runtime_effects decoded in
-    let%map install =
-      match t.allocator with
-      | None -> Ok (fun () -> List.iter outcome.overlay_ops ~f:(apply_overlay_op t))
-      | Some _ ->
-        prepare_identity_ops t ~phase:(Moderation.Event.phase event) outcome.overlay_ops
+  run_controlled t.execution (fun () ->
+    let control = Option.map t.execution ~f:Chatml_execution.runner_control in
+    let event_value = Moderation.Event.to_value_with_control ~control event in
+    Debug_log.emit (fun () ->
+      Printf.sprintf
+        "[moderator-manager] handle_event session=%s event=%s"
+        session_id
+        (Builtin_spec.value_to_debug_string event_value));
+    let context =
+      project_context
+        ?control
+        t
+        ~session_id
+        ~now_ms
+        ~phase:(Moderation.Event.phase event)
+        ~history
+        ~available_tools
+        ~session_meta
     in
-    fun () ->
-      install ();
-      t.processed_effect_count <- t.processed_effect_count + List.length local_effects;
-      prepared_outcome := Some outcome
-  in
-  let%bind () =
-    handle_runtime_event
-      ?prepare_commit:(Option.map t.artifact.extension ~f:(fun _ -> prepare_commit))
-      t
-      ~context:(Moderation.Context.to_value context)
-      ~event:(Moderation.Event.to_value event)
-  in
-  let%map outcome =
-    match t.artifact.extension with
-    | Some _ -> Ok !prepared_outcome
-    | None -> committed_outcome t
-  in
-  let outcome = Option.value outcome ~default:Moderation.Outcome.empty in
-  Debug_log.emitf
-    "[moderator-manager] handle_event_ok session=%s overlay_ops=%d runtime_requests=%d \
-     emitted_events=%d tool_moderation=%b"
-    session_id
-    (List.length outcome.overlay_ops)
-    (List.length outcome.runtime_requests)
-    (List.length outcome.emitted_events)
-    (Option.is_some outcome.tool_moderation);
-  outcome
+    let open Result.Let_syntax in
+    let prepared_outcome = ref None in
+    let prepare_commit ~local_effects =
+      let%bind decoded = decode_effects t local_effects in
+      let%bind outcome = Moderation.Outcome.of_runtime_effects decoded in
+      let%map install =
+        match t.allocator with
+        | None -> Ok (fun () -> List.iter outcome.overlay_ops ~f:(apply_overlay_op t))
+        | Some _ ->
+          prepare_identity_ops t ~phase:(Moderation.Event.phase event) outcome.overlay_ops
+      in
+      fun () ->
+        install ();
+        t.processed_effect_count <- t.processed_effect_count + List.length local_effects;
+        prepared_outcome := Some outcome
+    in
+    let%bind () =
+      handle_runtime_event
+        ~control
+        ?prepare_commit:(Option.map t.artifact.extension ~f:(fun _ -> prepare_commit))
+        t
+        ~context:(Moderation.Context.to_value ?control context)
+        ~event:event_value
+    in
+    let%map outcome =
+      match t.artifact.extension with
+      | Some _ -> Ok !prepared_outcome
+      | None -> committed_outcome t
+    in
+    let outcome = Option.value outcome ~default:Moderation.Outcome.empty in
+    Debug_log.emit (fun () ->
+      Printf.sprintf
+        "[moderator-manager] handle_event_ok session=%s overlay_ops=%d \
+         runtime_requests=%d emitted_events=%d tool_moderation=%b"
+        session_id
+        (List.length outcome.overlay_ops)
+        (List.length outcome.runtime_requests)
+        (List.length outcome.emitted_events)
+        (Option.is_some outcome.tool_moderation));
+    outcome)
 ;;
 
 let stopped_outcome =
@@ -947,41 +963,45 @@ let handle_event_entries_unlocked
       ~session_meta
       ~event
   =
-  t.last_history <- history;
-  let context =
-    Moderation.Entry_projection.project_context
-      ~session_id
-      ~now_ms
-      ~phase:(Moderation.Event.phase event)
-      ~history
-      ~available_tools
-      ~session_meta
-  in
-  let open Result.Let_syntax in
-  let outcome = ref Moderation.Outcome.empty in
-  let prepare_commit ~local_effects =
-    let%bind decoded = decode_effects t local_effects in
-    let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
-    let%map install_overlay =
-      prepare_identity_ops t ~phase:(Moderation.Event.phase event) prepared.overlay_ops
+  run_controlled t.execution (fun () ->
+    let control = Option.map t.execution ~f:Chatml_execution.runner_control in
+    t.last_history <- history;
+    let context =
+      Moderation.Entry_projection.project_context_with_control
+        ~control
+        ~session_id
+        ~now_ms
+        ~phase:(Moderation.Event.phase event)
+        ~history
+        ~available_tools
+        ~session_meta
     in
-    fun () ->
-      install_overlay ();
-      t.processed_effect_count <- t.processed_effect_count + List.length local_effects;
-      outcome := prepared
-  in
-  let%map () =
-    handle_runtime_event
-      ~prepare_commit
-      t
-      ~context:(Moderation.Context.to_value context)
-      ~event:(Moderation.Event.to_value event)
-  in
-  t.suspended_phase
-  <- (match Runtime.pending_ui_request t.runtime with
-      | None -> None
-      | Some _ -> Some (Moderation.Event.phase event));
-  !outcome
+    let open Result.Let_syntax in
+    let outcome = ref Moderation.Outcome.empty in
+    let prepare_commit ~local_effects =
+      let%bind decoded = decode_effects t local_effects in
+      let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+      let%map install_overlay =
+        prepare_identity_ops t ~phase:(Moderation.Event.phase event) prepared.overlay_ops
+      in
+      fun () ->
+        install_overlay ();
+        t.processed_effect_count <- t.processed_effect_count + List.length local_effects;
+        outcome := prepared
+    in
+    let%map () =
+      handle_runtime_event
+        ~control
+        ~prepare_commit
+        t
+        ~context:(Moderation.Context.to_value ?control context)
+        ~event:(Moderation.Event.to_value_with_control ~control event)
+    in
+    t.suspended_phase
+    <- (match Runtime.pending_ui_request t.runtime with
+        | None -> None
+        | Some _ -> Some (Moderation.Event.phase event));
+    !outcome)
 ;;
 
 let handle_event_entries
@@ -1008,17 +1028,19 @@ let handle_event_entries
         ~event)
 ;;
 
-let identity_snapshot_of_state t ~current_state ~queued_events ~halted ~overlay =
+let identity_snapshot_of_state ?control t ~current_state ~queued_events ~halted ~overlay =
   let open Result.Let_syntax in
-  let%bind current_state = Value_codec.Snapshot.of_value current_state in
-  let%bind queued_internal_events =
-    Result.all (List.map queued_events ~f:Value_codec.Snapshot.of_value)
+  let snapshot value =
+    Option.iter control ~f:(fun c -> c.Chatml.Chatml_lang.before_json_export value);
+    Value_codec.Snapshot.of_value value
   in
+  let%bind current_state = snapshot current_state in
+  let%bind queued_internal_events = Result.all (List.map queued_events ~f:snapshot) in
   let inserted (inserted : Moderation.Identity_overlay.inserted) =
     let%map value =
       History_entry.item inserted.Moderation.Identity_overlay.entry
       |> Res.Item.jsonaf_of_t
-      |> snapshot_of_jsonaf
+      |> snapshot_of_jsonaf ?control
     in
     Session.Moderator_state.Identity_snapshot.Inserted.
       { entry_id = History_entry.id inserted.entry
@@ -1028,7 +1050,9 @@ let identity_snapshot_of_state t ~current_state ~queued_events ~halted ~overlay 
       }
   in
   let replacement (replacement : Moderation.Identity_overlay.replacement) =
-    let%map value = replacement.item |> Res.Item.jsonaf_of_t |> snapshot_of_jsonaf in
+    let%map value =
+      replacement.item |> Res.Item.jsonaf_of_t |> snapshot_of_jsonaf ?control
+    in
     Session.Moderator_state.Identity_snapshot.Replacement.
       { target_id = replacement.target_id
       ; change_id = replacement.change_id
@@ -1076,71 +1100,73 @@ let handle_event_entries_transactional_unlocked
       ~on_tool_call
       ~prepare_event
   =
-  let open Result.Let_syntax in
-  let%bind script =
-    match t.artifact.extension with
-    | Some (script, _) -> Ok script
-    | None -> Error "event.legacy_moderator: requires extensibility-v1"
-  in
-  let%bind () =
-    match Runtime.is_halted t.runtime with
-    | true -> Error "event.session_ended: moderator session ended"
-    | false -> Ok ()
-  in
-  let phase = Moderation.Event.phase event in
-  let%bind event =
-    match event with
-    | Moderation.Event.Internal_event
-        (Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ])) ->
-      Moderator_invocation.internal_event payload
-    | Internal_event _ ->
-      Error "event.invalid_internal_event: requires a v1 Internal_event envelope"
-    | _ -> Ok (Moderation.Event.to_value event)
-  in
-  let checked = Moderator_invocation.snapshot_state ~limits:script.limits in
-  let%bind _ = checked event in
-  let context =
-    Moderation.Entry_projection.project_context
-      ~session_id
-      ~now_ms
-      ~phase
-      ~history
-      ~available_tools
-      ~session_meta
-  in
-  let%bind () = authorize () in
-  let outcome = ref Moderation.Outcome.empty in
-  let prepare (transaction : Runtime.transaction) =
-    let%bind decoded = decode_effects t transaction.local_effects in
-    let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
-    let%bind overlay, install_overlay =
-      prepare_identity_overlay t ~phase prepared.overlay_ops
+  run_controlled t.execution (fun () ->
+    let open Result.Let_syntax in
+    let control = Option.map t.execution ~f:Chatml_execution.runner_control in
+    let%bind script =
+      match t.artifact.extension with
+      | Some (script, _) -> Ok script
+      | None -> Error "event.legacy_moderator: requires extensibility-v1"
     in
-    let%bind snapshot =
-      identity_snapshot_of_state
-        t
-        ~current_state:transaction.new_state
-        ~queued_events:transaction.queued_events
-        ~halted:transaction.halted
-        ~overlay
+    let%bind () =
+      match Runtime.is_halted t.runtime with
+      | true -> Error "event.session_ended: moderator session ended"
+      | false -> Ok ()
     in
-    let%map install = prepare_event ~outcome:prepared ~snapshot in
-    fun () ->
-      install_overlay ();
-      install ();
-      t.processed_effect_count
-      <- t.processed_effect_count + List.length transaction.local_effects;
-      outcome := prepared
-  in
-  t.last_history <- history;
-  let previous = !(t.invocation_tool_call) in
-  t.invocation_tool_call := Some on_tool_call;
-  let%map () =
-    Exn.protect
-      ~finally:(fun () -> t.invocation_tool_call := previous)
-      ~f:(fun () ->
-        run_controlled t.execution (fun () ->
-          let control = Option.map t.execution ~f:Chatml_execution.runner_control in
+    let phase = Moderation.Event.phase event in
+    let%bind event =
+      match event with
+      | Moderation.Event.Internal_event
+          (Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ])) ->
+        Moderator_invocation.internal_event ?control payload
+      | Internal_event _ ->
+        Error "event.invalid_internal_event: requires a v1 Internal_event envelope"
+      | _ -> Ok (Moderation.Event.to_value_with_control ~control event)
+    in
+    let checked = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
+    let%bind _ = checked event in
+    let context =
+      Moderation.Entry_projection.project_context_with_control
+        ~control
+        ~session_id
+        ~now_ms
+        ~phase
+        ~history
+        ~available_tools
+        ~session_meta
+    in
+    let%bind () = authorize () in
+    let outcome = ref Moderation.Outcome.empty in
+    let prepare (transaction : Runtime.transaction) =
+      let%bind decoded = decode_effects t transaction.local_effects in
+      let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+      let%bind overlay, install_overlay =
+        prepare_identity_overlay t ~phase prepared.overlay_ops
+      in
+      let%bind snapshot =
+        identity_snapshot_of_state
+          ?control
+          t
+          ~current_state:transaction.new_state
+          ~queued_events:transaction.queued_events
+          ~halted:transaction.halted
+          ~overlay
+      in
+      let%map install = prepare_event ~outcome:prepared ~snapshot in
+      fun () ->
+        install_overlay ();
+        install ();
+        t.processed_effect_count
+        <- t.processed_effect_count + List.length transaction.local_effects;
+        outcome := prepared
+    in
+    t.last_history <- history;
+    let previous = !(t.invocation_tool_call) in
+    t.invocation_tool_call := Some on_tool_call;
+    let%map () =
+      Exn.protect
+        ~finally:(fun () -> t.invocation_tool_call := previous)
+        ~f:(fun () ->
           let context = Moderation.Context.to_value ?control context in
           let copy value = Result.bind (checked value) ~f:Value_codec.Snapshot.to_value in
           let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
@@ -1167,9 +1193,9 @@ let handle_event_entries_transactional_unlocked
             in
             (match consumed with
              | Some () -> Ok ()
-             | None -> Error "event.queue_changed: selected event no longer queued")))
-  in
-  !outcome
+             | None -> Error "event.queue_changed: selected event no longer queued"))
+    in
+    !outcome)
 ;;
 
 let handle_event_entries_transactional
@@ -1323,6 +1349,7 @@ let handle_invocation_entries
         in
         let%bind snapshot =
           identity_snapshot_of_state
+            ?control
             t
             ~current_state:transaction.new_state
             ~queued_events:transaction.queued_events
@@ -1370,127 +1397,131 @@ let handle_observation_entries
       ~prepare_observation
   =
   with_execution_lock t (fun () ->
-    let open Result.Let_syntax in
-    let module I = Agent_protocol.Invocation in
-    let module L = Chatml.Chatml_lang in
-    let%bind script =
-      match t.artifact.extension with
-      | Some (script, _) -> Ok script
-      | None -> Error "observation.legacy_moderator: requires extensibility-v1"
-    in
-    let%bind () =
-      I.validate invocation
-      |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
-    in
-    let%bind result =
-      match invocation.observation, invocation.status with
-      | Some { status = Observing; observer }, (Resolved result | Published result)
-        when String.equal observer.script_id script.id
-             && String.equal observer.source_sha256 script.source_sha256 -> Ok result
-      | _ ->
-        Error
-          "observation.wrong_owner: requires a claimed outcome for this moderator source"
-    in
-    let%bind () =
-      match Runtime.is_halted t.runtime with
-      | true -> Error "observation.session_ended: moderator session ended"
-      | false -> Ok ()
-    in
-    let event =
-      let parent encode = function
-        | None -> L.VVariant ("None", [])
-        | Some id -> L.VVariant ("Some", [ L.VString (encode id) ])
+    run_controlled t.execution (fun () ->
+      let open Result.Let_syntax in
+      let control = Option.map t.execution ~f:Chatml_execution.runner_control in
+      let module I = Agent_protocol.Invocation in
+      let module L = Chatml.Chatml_lang in
+      let%bind script =
+        match t.artifact.extension with
+        | Some (script, _) -> Ok script
+        | None -> Error "observation.legacy_moderator: requires extensibility-v1"
       in
-      L.VVariant
-        ( "Tool_observed"
-        , [ L.VRecord
-              (String.Map.of_alist_exn
-                 [ "version", L.VInt 2
-                 ; ( "invocation_id"
-                   , L.VString
-                       (Agent_protocol.Id.Invocation.to_string invocation.context.id) )
-                 ; ( "parent_invocation"
-                   , parent
-                       Agent_protocol.Id.Invocation.to_string
-                       invocation.context.parent_invocation )
-                 ; ( "parent_event"
-                   , parent
-                       Agent_protocol.Id.Moderator_execution.to_string
-                       invocation.parent_event )
-                 ; "tool_name", L.VString invocation.context.tool_name
-                 ; "origin", Moderator_invocation.origin_value invocation.context.origin
-                 ; "outcome", Value_codec.jsonaf_to_value (I.outcome_to_json result)
-                 ])
-          ] )
-    in
-    let checked = Moderator_invocation.snapshot_state ~limits:script.limits in
-    let%bind _ = checked event in
-    let context =
-      Moderation.Entry_projection.project_context
-        ~session_id:(Agent_protocol.Id.Session.to_string invocation.context.session_id)
-        ~now_ms
-        ~phase:Moderation.Phase.Tool_observed
-        ~history
-        ~available_tools
-        ~session_meta
-    in
-    let outcome = ref Moderation.Outcome.empty in
-    let prepare (transaction : Runtime.transaction) =
-      let%bind decoded = decode_effects t transaction.local_effects in
-      let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
-      let%bind overlay, install_overlay =
-        prepare_identity_overlay
-          t
-          ~phase:Moderation.Phase.Tool_observed
-          prepared.overlay_ops
-      in
-      let%bind snapshot =
-        identity_snapshot_of_state
-          t
-          ~current_state:transaction.new_state
-          ~queued_events:transaction.queued_events
-          ~halted:transaction.halted
-          ~overlay
-      in
-      let%bind observed =
-        let follow_up =
-          match retain_follow_up with
-          | false -> None
-          | true ->
-            let requests : I.follow_up =
-              { request_turn = Runtime_semantics.request_turn prepared.runtime_requests
-              ; request_compaction =
-                  Runtime_semantics.request_compaction prepared.runtime_requests
-              ; end_session =
-                  Runtime_semantics.should_end_session prepared.runtime_requests
-              }
-            in
-            Option.some_if
-              (requests.request_turn
-               || requests.request_compaction
-               || Option.is_some requests.end_session)
-              requests
-        in
-        I.complete_observation ?follow_up invocation
+      let%bind () =
+        I.validate invocation
         |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
       in
-      let%map install = prepare_observation ~observed ~outcome:prepared ~snapshot in
-      fun () ->
-        install_overlay ();
-        install ();
-        t.processed_effect_count
-        <- t.processed_effect_count + List.length transaction.local_effects;
-        outcome := prepared
-    in
-    t.last_history <- history;
-    let previous = !(t.invocation_tool_call) in
-    t.invocation_tool_call := on_tool_call;
-    let%map () =
-      Exn.protect
-        ~finally:(fun () -> t.invocation_tool_call := previous)
-        ~f:(fun () ->
-          run_controlled t.execution (fun () ->
-            let control = Option.map t.execution ~f:Chatml_execution.runner_control in
+      let%bind result =
+        match invocation.observation, invocation.status with
+        | Some { status = Observing; observer }, (Resolved result | Published result)
+          when String.equal observer.script_id script.id
+               && String.equal observer.source_sha256 script.source_sha256 -> Ok result
+        | _ ->
+          Error
+            "observation.wrong_owner: requires a claimed outcome for this moderator \
+             source"
+      in
+      let%bind () =
+        match Runtime.is_halted t.runtime with
+        | true -> Error "observation.session_ended: moderator session ended"
+        | false -> Ok ()
+      in
+      let event =
+        let parent encode = function
+          | None -> L.VVariant ("None", [])
+          | Some id -> L.VVariant ("Some", [ L.VString (encode id) ])
+        in
+        L.VVariant
+          ( "Tool_observed"
+          , [ L.VRecord
+                (String.Map.of_alist_exn
+                   [ "version", L.VInt 2
+                   ; ( "invocation_id"
+                     , L.VString
+                         (Agent_protocol.Id.Invocation.to_string invocation.context.id) )
+                   ; ( "parent_invocation"
+                     , parent
+                         Agent_protocol.Id.Invocation.to_string
+                         invocation.context.parent_invocation )
+                   ; ( "parent_event"
+                     , parent
+                         Agent_protocol.Id.Moderator_execution.to_string
+                         invocation.parent_event )
+                   ; "tool_name", L.VString invocation.context.tool_name
+                   ; "origin", Moderator_invocation.origin_value invocation.context.origin
+                   ; ( "outcome"
+                     , Value_codec.import_json ?control (I.outcome_to_json result) )
+                   ])
+            ] )
+      in
+      let checked = Moderator_invocation.snapshot_state ?control ~limits:script.limits in
+      let%bind _ = checked event in
+      let context =
+        Moderation.Entry_projection.project_context_with_control
+          ~control
+          ~session_id:(Agent_protocol.Id.Session.to_string invocation.context.session_id)
+          ~now_ms
+          ~phase:Moderation.Phase.Tool_observed
+          ~history
+          ~available_tools
+          ~session_meta
+      in
+      let outcome = ref Moderation.Outcome.empty in
+      let prepare (transaction : Runtime.transaction) =
+        let%bind decoded = decode_effects t transaction.local_effects in
+        let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
+        let%bind overlay, install_overlay =
+          prepare_identity_overlay
+            t
+            ~phase:Moderation.Phase.Tool_observed
+            prepared.overlay_ops
+        in
+        let%bind snapshot =
+          identity_snapshot_of_state
+            ?control
+            t
+            ~current_state:transaction.new_state
+            ~queued_events:transaction.queued_events
+            ~halted:transaction.halted
+            ~overlay
+        in
+        let%bind observed =
+          let follow_up =
+            match retain_follow_up with
+            | false -> None
+            | true ->
+              let requests : I.follow_up =
+                { request_turn = Runtime_semantics.request_turn prepared.runtime_requests
+                ; request_compaction =
+                    Runtime_semantics.request_compaction prepared.runtime_requests
+                ; end_session =
+                    Runtime_semantics.should_end_session prepared.runtime_requests
+                }
+              in
+              Option.some_if
+                (requests.request_turn
+                 || requests.request_compaction
+                 || Option.is_some requests.end_session)
+                requests
+          in
+          I.complete_observation ?follow_up invocation
+          |> Result.map_error ~f:(fun e -> e.Agent_protocol.Error.message)
+        in
+        let%map install = prepare_observation ~observed ~outcome:prepared ~snapshot in
+        fun () ->
+          install_overlay ();
+          install ();
+          t.processed_effect_count
+          <- t.processed_effect_count + List.length transaction.local_effects;
+          outcome := prepared
+      in
+      t.last_history <- history;
+      let previous = !(t.invocation_tool_call) in
+      t.invocation_tool_call := on_tool_call;
+      let%map () =
+        Exn.protect
+          ~finally:(fun () -> t.invocation_tool_call := previous)
+          ~f:(fun () ->
             Runtime.handle_event
               t.runtime
               ~context:(Moderation.Context.to_value ?control context)
@@ -1500,9 +1531,9 @@ let handle_observation_entries
               ~validate_state:(fun value -> Result.map (checked value) ~f:(fun _ -> ()))
               ~validate_suspension:(fun () ->
                 Error "observation.suspended: cannot retain a UI continuation")
-              ~prepare_transaction:prepare))
-    in
-    !outcome)
+              ~prepare_transaction:prepare)
+      in
+      !outcome))
 ;;
 
 let pending_ui_request (t : t) : pending_ui_request option =
@@ -1559,11 +1590,12 @@ let rec drain_loop
     match Runtime.take_queued_event t.runtime with
     | None -> Ok (List.rev acc)
     | Some event ->
-      Debug_log.emitf
-        "[moderator-manager] drain_internal_event session=%s event=%s remaining=%d"
-        session_id
-        (Builtin_spec.value_to_pretty_string event)
-        remaining;
+      Debug_log.emit (fun () ->
+        Printf.sprintf
+          "[moderator-manager] drain_internal_event session=%s event=%s remaining=%d"
+          session_id
+          (Builtin_spec.value_to_debug_string event)
+          remaining);
       (match
          handle_event_unlocked
            t
