@@ -19,6 +19,7 @@
   invocation_history
   invocation_recovery
   moderator_tool_dispatch
+  standalone_tool_dispatch
   moderator_observation
   moderator_event
   observation_follow_up
@@ -59,6 +60,7 @@
   ochat.agent_store
   chatmd
   chat_response
+  chatml_execution
   context_compaction
   ochat.chatmd_shell_spec)
  (preprocess

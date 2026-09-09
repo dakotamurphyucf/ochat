@@ -1582,8 +1582,36 @@ Allocation accounting estimates language operations, not actual OCaml heap use.
 Builtin implementations are checked at their boundaries; arbitrary native code
 does not become preemptible. Hosts remain responsible for selected capabilities,
 current authorization, schemas, serialized output limits and persisted invocation
-ownership. Standalone actor dispatch and model-visible `run_chatml` installation
-remain E04 work; these primitives alone do not expose either feature.
+ownership. These primitives alone do not expose model-visible tools.
+
+`Agent_session.Standalone_tool_dispatch.create` is the internal stream adapter for
+prepared standalone declarations. It uses the actor's invocation lifecycle and
+canonical publication receipt, initializes fresh globals, passes the shared
+`tool_context` and validated JSON input to `run`, and validates the returned outcome
+before recording it. `Moderator_invocation.create_standalone`, `context`, `input`
+and `decode_outcome` share the ABI and schema checks with moderator tools without
+creating a moderator event. Pending references fail until an owned completion
+service is available.
+
+`Script_tool_calls.with_standalone` delegates native calls through the existing
+authority/disclosure service, with `Script` origin and the actual parent invocation.
+Its required host moderation callback runs after original-input schema checks.
+Argument rewrites and redirects retain routing fingerprints, and a redirected
+target must remain in the exact captured capability subset. Final native schema,
+current authorization and post-approval capability checks still apply. Pre-tool
+rejections are recorded without calling native authorization or implementation.
+An optional observation identity belongs to the conversation moderator; the
+standalone tool script is not an event observer. Script results do not create
+provider call IDs or tool-output history entries.
+
+The adapter's actor tests cover concurrent fresh globals, parent/native denial,
+revocation during approval, unselected tools, invalid results after native work,
+initializer limits and persisted canonical outcomes. Runtime-builder installation,
+owned pre/post moderator integration and the public `run_chatml` tool remain E04
+work. Current normal runtime construction still rejects standalone declarations.
+
+The actor suite is organized in [focused test modules](../../test/agent_session/README.md),
+with shared fixtures and the retained `@test/runtest-agent_session_test` entrypoint.
 
 ## Authoring policy admission plans
 

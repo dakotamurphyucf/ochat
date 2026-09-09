@@ -247,6 +247,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/session_persistence.mli` | [contract](../../lib/agent_session/session_persistence.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_session/session_state.mli` | [contract](../../lib/agent_session/session_state.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/session_transition.mli` | [contract](../../lib/agent_session/session_transition.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/standalone_tool_dispatch.mli` | [contract](../../lib/agent_session/standalone_tool_dispatch.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/start_queue.mli` | [contract](../../lib/agent_session/start_queue.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/stream_invocation.mli` | [contract](../../lib/agent_session/stream_invocation.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/subscriber.mli` | [contract](../../lib/agent_session/subscriber.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

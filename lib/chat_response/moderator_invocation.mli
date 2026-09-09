@@ -35,6 +35,25 @@ val create
 val event : t -> L.value
 val invocation : t -> I.t
 
+(** Shared standalone admission and ABI projection. Requires a dispatched
+    standalone declaration with the exact prepared identity. Produces context
+    and input values without constructing or delivering a moderator event.
+    Authorization and persisted ownership remain the host's responsibility. *)
+val create_standalone
+  :  prepared:Extension_compiler.t
+  -> invocation:I.t
+  -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
+  -> validate_work:(I.work -> (unit, string) result)
+  -> (t, string) result
+
+val context : t -> L.value
+val input : t -> L.value
+
+(** Shared result validation for a returned standalone outcome or a moderator
+    resolution. Checks JSON projection, success schema, error envelopes, owned
+    Pending references and serialized size. Does not resolve or publish. *)
+val decode_outcome : t -> L.value -> (I.outcome, string) result
+
 (** Add the v1 transactional resolution operation and JSON-only emit/timer
     adapters to the normal host registry. No tool implementation runs here. *)
 val operations : R.op_def list -> R.op_def list

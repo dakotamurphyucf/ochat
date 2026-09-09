@@ -77,7 +77,25 @@ type parent =
   | Invocation of I.t
   | Event of E.t
 
-let with_scope t ~selected ~script ~valid_parent ~execute ~parent f =
+type prepared_call =
+  { reference : C.reference
+  ; input : Jsonaf.t
+  ; routing : I.routing option
+  ; rejection : I.outcome option
+  }
+
+let with_scope
+      ?prepare
+      t
+      ~selected
+      ~script
+      ~origin
+      ~observer
+      ~valid_parent
+      ~execute
+      ~parent
+      f
+  =
   let session_id, generation, parent_invocation, parent_event, deadline =
     match parent with
     | Invocation parent ->
@@ -137,37 +155,48 @@ let with_scope t ~selected ~script ~valid_parent ~execute ~parent f =
         let execute () =
           let open Result.Let_syntax in
           let%bind () = checked `Input (fun () -> validate_value args) in
+          let id = Agent_protocol.Id.Invocation.create () in
+          let%bind prepared =
+            checked `Admission (fun () ->
+              match prepare with
+              | None -> Ok { reference; input = args; routing = None; rejection = None }
+              | Some prepare -> prepare ~id reference args)
+          in
+          let reference = prepared.reference in
           let%bind invocation =
             checked `Admission (fun () ->
               I.create
-                ~observer:{ script_id = script.id; source_sha256 = script.source_sha256 }
+                ?observer
                 ?parent_event
-                { id = Agent_protocol.Id.Invocation.create ()
+                ?routing:prepared.routing
+                { id
                 ; session_id
                 ; generation
-                ; origin = Moderator
+                ; origin
                 ; provider_call_id = None
                 ; call_entry_id = None
                 ; parent_invocation
                 ; parent_job = None
-                ; tool_name = name
+                ; tool_name = reference.name
                 ; implementation_revision = reference.implementation_revision
                 ; capability_fingerprint = C.fingerprint selected
-                ; input = args
+                ; input = prepared.input
                 ; created_at = t.now ()
                 ; deadline
                 })
           in
           let%bind resolved =
             checked `Admission (fun () ->
-              match t.requires_active_moderator reference with
-              | true ->
+              match prepared.rejection with
+              | Some outcome -> execute ~invocation (fun ~dispatched:_ -> Ok outcome)
+              | None when Option.is_none prepare && t.requires_active_moderator reference
+                ->
                 execute ~invocation (fun ~dispatched:_ ->
                   Ok
                     (fail
                        "moderator_reentrancy"
                        "Tool execution requires a decision from the active moderator."))
-              | false ->
+              | None ->
                 Native_tool_invocation.run_scoped
                   ~execute
                   ~registry
@@ -177,7 +206,11 @@ let with_scope t ~selected ~script ~valid_parent ~execute ~parent f =
                   ~authorize:t.authorize
                   ~prepare_output)
           in
-          let%map () = checked `Observation (fun () -> t.defer_observation resolved) in
+          let%map () =
+            match resolved.observation with
+            | None -> Ok ()
+            | Some _ -> checked `Observation (fun () -> t.defer_observation resolved)
+          in
           match resolved.status with
           | Resolved (Complete value) -> M.Tool_ok value
           | Resolved (Fail error) -> Tool_error error.code
@@ -212,6 +245,121 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
     t
     ~selected
     ~script:(EC.script prepared)
+    ~origin:Moderator
+    ~observer:
+      (Some
+         { script_id = (EC.script prepared).id
+         ; source_sha256 = (EC.script prepared).source_sha256
+         })
+    ~valid_parent
+    ~execute:capabilities.Operation_worker.Capabilities.with_invocation
+    ~parent:(Invocation parent)
+    f
+;;
+
+let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderate f =
+  let selected = EC.capabilities prepared in
+  let fingerprint payload =
+    I.
+      { sha256 = Chatmd_shell_spec.Source_ref.digest payload
+      ; byte_length = String.length payload
+      }
+  in
+  let prepare ~id (original : C.reference) input =
+    let original_payload = Jsonaf.to_string input in
+    let route reference input preparation rejection =
+      let routing : I.routing =
+        { kind =
+            (match
+               C.resolve selected ~id:reference.C.id ~fingerprint:reference.fingerprint
+             with
+             | Ok binding when String.equal (C.implementation binding).info.type_ "custom"
+               -> Custom
+             | _ -> Function)
+        ; original_name = original.name
+        ; original_payload = fingerprint original_payload
+        ; final_payload = fingerprint (Jsonaf.to_string input)
+        ; canonical_payload = None
+        ; preparation
+        }
+      in
+      Ok { reference; input; routing = Some routing; rejection }
+    in
+    let reject preparation code message =
+      route original input preparation (Some (fail code message))
+    in
+    let valid_input =
+      let open Result.Let_syntax in
+      let%bind schema = Chatmd_shell_spec.Tool_schema.compile original.input_schema in
+      Chatmd_shell_spec.Tool_schema.validate schema input
+    in
+    match valid_input with
+    | Error _ ->
+      reject Invalid_input "invocation.invalid_input" "The tool arguments are invalid."
+    | Ok () ->
+      let call : Chat_response.Moderation.Tool_call.t =
+        { id = Agent_protocol.Id.Invocation.to_string id
+        ; name = original.name
+        ; args = input
+        ; kind =
+            (match
+               C.resolve selected ~id:original.id ~fingerprint:original.fingerprint
+             with
+             | Ok binding when String.equal (C.implementation binding).info.type_ "custom"
+               -> Custom
+             | _ -> Function)
+        ; payload_text = original_payload
+        ; meta =
+            `Object
+              [ "origin", `String "script"
+              ; ( "parent_invocation"
+                , `String (Agent_protocol.Id.Invocation.to_string parent.context.id) )
+              ]
+        }
+      in
+      let decision = checked () (fun () -> moderate call) in
+      (match decision with
+       | Error () ->
+         reject Pre_tool_failed "invocation.pre_tool_failed" "Pre-tool moderation failed."
+       | Ok (Some (Chat_response.Moderation.Tool_moderation.Reject _)) ->
+         reject
+           Pre_tool_rejected
+           "invocation.pre_tool_rejected"
+           "Pre-tool moderation rejected the call."
+       | Ok action ->
+         let name, args =
+           match action with
+           | None | Some Approve -> original.name, input
+           | Some (Rewrite_args args) -> original.name, args
+           | Some (Redirect (name, args)) -> name, args
+           | Some (Reject _) -> assert false
+         in
+         (match
+            List.find (C.references selected) ~f:(fun reference ->
+              String.equal reference.name name)
+          with
+          | None ->
+            reject
+              Pre_tool_rejected
+              "invocation.unselected_tool"
+              "The redirected tool is not selected."
+          | Some reference -> route reference args Passed None))
+  in
+  let valid_parent =
+    match parent.status, (EC.declaration prepared).implementation with
+    | Dispatching, Standalone _ ->
+      String.equal parent.context.tool_name (EC.declaration prepared).name
+      && String.equal parent.context.implementation_revision (EC.fingerprint prepared)
+      && String.equal parent.context.capability_fingerprint (C.fingerprint selected)
+    | _ -> false
+  in
+  with_scope
+    ~prepare
+    t
+    ~selected
+    ~script:(EC.script prepared)
+    ~origin:Script
+    ~observer
     ~valid_parent
     ~execute:capabilities.Operation_worker.Capabilities.with_invocation
     ~parent:(Invocation parent)
@@ -243,6 +391,8 @@ let with_moderator_scope t ~definition ~execute ~parent ~valid_parent f =
       { t with moderator_names }
       ~selected:(EC.definition_capabilities definition)
       ~script
+      ~origin:Moderator
+      ~observer:(Some observer)
       ~valid_parent:(valid_parent observer)
       ~execute
       ~parent

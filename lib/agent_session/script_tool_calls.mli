@@ -1,6 +1,7 @@
 open Core
 
-(** Scoped native Tool.call bridge for moderator invocations, observations and events. This
+(** Scoped native Tool.call bridge for standalone handlers and moderator invocations,
+    observations and events. This
     uses the persisted invocation service, never a raw runner or provider history.
     A prepared script's captured capability subset is the authority ceiling;
     the current registry is checked again after authorizing waits. *)
@@ -64,6 +65,31 @@ val with_invocation
   -> prepared:Chat_response.Extension_compiler.t
   -> capabilities:Operation_worker.Capabilities.t
   -> parent:Agent_protocol.Invocation.t
+  -> ((name:string
+       -> args:Jsonaf.t
+       -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)
+      -> 'a)
+  -> 'a
+
+(** Native bridge for a standalone handler under its actual dispatched parent.
+    Child invocations use Script origin and retain the parent's session, generation
+    and deadline. Only the prepared native subset is accessible. If supplied,
+    [observer] must identify the owning conversation moderator, not the tool script.
+    [moderate] runs the required pre-tool hook under host ownership after original
+    schema checks. Rewrites and redirects retain routing fingerprints; final
+    targets must remain in the captured subset and pass native schema/authority
+    checks after approval. Rejections never reach native authorization or effects.
+    The host supplies current admission through [authorize] and owns observation
+    draining. This primitive does not install moderation or public dispatch. *)
+val with_standalone
+  :  ?observer:Agent_protocol.Invocation.observer
+  -> t
+  -> prepared:Chat_response.Extension_compiler.t
+  -> capabilities:Operation_worker.Capabilities.t
+  -> parent:Agent_protocol.Invocation.t
+  -> moderate:
+       (Chat_response.Moderation.Tool_call.t
+        -> (Chat_response.Moderation.Tool_moderation.t option, string) result)
   -> ((name:string
        -> args:Jsonaf.t
        -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)

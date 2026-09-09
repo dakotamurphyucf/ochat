@@ -1,0 +1,24 @@
+(library
+ (name agent_session_test)
+ (modules
+  fixtures
+  actor_tests
+  compaction_tests
+  event_delivery_tests
+  follow_up_tests
+  infrastructure_tests
+  invocation_tests
+  jobs_tests
+  moderator_handoff_tests
+  moderator_lifecycle_tests
+  moderator_native_calls_tests
+  moderator_routing_tests
+  observations_tests
+  permissions_tests
+  persistence_tests
+  standalone_tests
+  state_tests)
+ (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_session ochat.agent_server)
+ (inline_tests)
+ (preprocess
+  (pps ppx_jane ppx_expect)))

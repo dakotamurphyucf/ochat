@@ -148,10 +148,19 @@ type t =
   ; invocation : I.t
   ; limits : S.limits
   ; validate_work : I.work -> (unit, string) result
-  ; event : L.value
+  ; context : L.value
+  ; input : L.value
   }
 
-let event t = t.event
+let context t = t.context
+let input t = t.input
+
+let event t =
+  L.VVariant
+    ( "Tool_invoked"
+    , [ record [ "version", int 1; "context", t.context; "input", t.input ] ] )
+;;
+
 let invocation t = t.invocation
 
 let ms timestamp =
@@ -179,7 +188,7 @@ let prepare_input ~prepared ~(limits : S.limits) value =
   input
 ;;
 
-let create ~prepared ~invocation ~(limits : S.limits) ~validate_work =
+let create_for ~implementation ~prepared ~invocation ~(limits : S.limits) ~validate_work =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -203,9 +212,11 @@ let create ~prepared ~invocation ~(limits : S.limits) ~validate_work =
   let%bind () = protocol (I.validate invocation) in
   let c = invocation.I.context in
   let%bind () =
-    match invocation.status, (EC.declaration prepared).implementation with
-    | I.Dispatching, Moderator _ -> Ok ()
-    | _ -> error "invocation.not_dispatched" "expected a dispatched moderator tool"
+    match invocation.status, implementation, (EC.declaration prepared).implementation with
+    | I.Dispatching, `Moderator, Moderator _ | I.Dispatching, `Standalone, Standalone _ ->
+      Ok ()
+    | _ ->
+      error "invocation.not_dispatched" "expected a dispatched tool of the requested kind"
   in
   let capabilities = EC.capabilities prepared in
   let%bind () =
@@ -274,12 +285,11 @@ let create ~prepared ~invocation ~(limits : S.limits) ~validate_work =
              |> Array.of_list) )
       ]
   in
-  let event =
-    L.VVariant
-      ("Tool_invoked", [ record [ "version", int 1; "context", context; "input", input ] ])
-  in
-  Ok { prepared; invocation; limits; validate_work; event }
+  Ok { prepared; invocation; limits; validate_work; context; input }
 ;;
+
+let create = create_for ~implementation:`Moderator
+let create_standalone = create_for ~implementation:`Standalone
 
 let decode t value =
   let open Result.Let_syntax in
@@ -347,6 +357,8 @@ let decode t value =
   else Ok outcome
 ;;
 
+let decode_outcome = decode
+
 let snapshot_state ~(limits : S.limits) value =
   let open Result.Let_syntax in
   let%bind () =
@@ -377,6 +389,12 @@ type failure =
 
 let run_impl t ~runtime ~context ~prepare_commit ~failure_kind =
   let open Result.Let_syntax in
+  let%bind () =
+    match (EC.declaration t.prepared).implementation with
+    | Moderator _ -> Ok ()
+    | Standalone _ ->
+      error "invocation.wrong_handler" "standalone tools have no moderator event"
+  in
   let reject kind code message =
     failure_kind := kind;
     error code message
@@ -451,7 +469,7 @@ let run_impl t ~runtime ~context ~prepare_commit ~failure_kind =
     R.handle_event
       runtime
       ~context
-      ~event:t.event
+      ~event:(event t)
       ~limits:R.{ fuel = t.limits.fuel; max_tasks = t.limits.max_tasks }
       ~validate_suspension:(fun () ->
         reject
