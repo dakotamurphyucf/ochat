@@ -122,6 +122,20 @@ wall-time budget, so queueing and retries do not reset that budget. This also wo
 for native-only ChatMD prompts on explicitly qualified hosts. Default public
 feature availability is unchanged.
 
+The internal `Job_capacity` admission path can reserve a slot before the owning
+job/acknowledgement transaction commits. Staged reservations consume the existing
+hierarchical quotas but cannot execute. After durable commit, the host publishes
+the reservation and the scheduler transfers that slot to the worker without a
+second charge. Aborting an unpublished reservation releases it; caller cleanup
+cannot release a published or claimed worker's slot. This capacity service grants
+no tool authority and is not yet the script-facing `Job.start_*` integration.
+
+Cancellation before launch, generation reset, and session teardown retire unclaimed
+reservations. Claimed workers keep their slot until actual cleanup. A scheduler
+also cancels retained workers when their actor is removed from the registry,
+including workers still retrying a completion save. Recovered queued jobs without
+process-local reservations acquire ordinary current-host capacity before execution.
+
 Generic completion stores the complete `Completion` envelope in `Job.result`,
 readable through `job.get`. Retry requires both a retryable failure and an explicit
 job policy with attempts remaining. Stale attempts and active invocation scopes

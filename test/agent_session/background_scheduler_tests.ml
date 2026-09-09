@@ -6,7 +6,7 @@ module Scheduler = Agent_server.Job_scheduler
 module Owner = Agent_server.Runtime_owner
 module Registry = Agent_server.Session_registry
 
-let with_scheduler ?(retry_once = false) ~reject_save f =
+let with_capacity_scheduler ?(retry_once = false) ~reject_save f =
   with_actor ~reject_save (fun env sw actor _writer backend ->
     let calls = ref 0 in
     let capabilities = native_registry calls ~raises:false in
@@ -134,27 +134,38 @@ let with_scheduler ?(retry_once = false) ~reject_save f =
           registry
           scheduler
           start
+          capacity
           (Background_execution_tests.capture_tool capabilities policy)))
 ;;
 
-let submit ?target ?(retry_policy = J.Never) actor payload =
-  let job : J.t =
-    { id = Agent_protocol.Id.Job.create ()
-    ; session_id
-    ; generation = 0
-    ; kind = Async_tool
-    ; payload
-    ; status = Queued
-    ; retry_policy
-    ; attempt = 0
-    ; created_at = timestamp
-    ; started_at = None
-    ; next_run_at = None
-    ; completed_at = None
-    ; result = None
-    ; delivery = Pending
-    }
-  in
+let with_scheduler ?retry_once ~reject_save f =
+  with_capacity_scheduler
+    ?retry_once
+    ~reject_save
+    (fun env actor backend calls registry scheduler start _capacity request ->
+       f env actor backend calls registry scheduler start request)
+;;
+
+let new_job ?(retry_policy = J.Never) payload : J.t =
+  { id = Agent_protocol.Id.Job.create ()
+  ; session_id
+  ; generation = 0
+  ; kind = Async_tool
+  ; payload
+  ; status = Queued
+  ; retry_policy
+  ; attempt = 0
+  ; created_at = timestamp
+  ; started_at = None
+  ; next_run_at = None
+  ; completed_at = None
+  ; result = None
+  ; delivery = Pending
+  }
+;;
+
+let submit ?target ?retry_policy actor payload =
+  let job = new_job ?retry_policy payload in
   Option.iter target ~f:(fun target -> target := Some job.id);
   A.add_job actor job |> protocol_ok |> ignore;
   job

@@ -5,6 +5,7 @@
   actor_tests
   borrowed_execution_tests
   background_execution_tests
+  background_admission_tests
   background_completion_tests
   background_cleanup_tests
   background_scheduler_tests

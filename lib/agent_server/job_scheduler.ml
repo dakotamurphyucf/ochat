@@ -2,6 +2,7 @@ open! Core
 
 type running_job =
   { session_id : Agent_protocol.Id.Session.t
+  ; actor : Agent_session.Session_actor.t
   ; generation : int
   ; attempt : int
   ; sw : Eio.Switch.t
@@ -165,7 +166,7 @@ let run_background_job t entry job =
   complete_background t entry job outcome
 ;;
 
-let register_running t (job : Agent_protocol.Job.t) job_sw ~rejected =
+let register_running t (job : Agent_protocol.Job.t) job_sw ~actor ~rejected =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     if Atomic.get t.closed
     then Eio.Switch.fail job_sw Job_cancelled
@@ -176,6 +177,7 @@ let register_running t (job : Agent_protocol.Job.t) job_sw ~rejected =
            ~key:job.id
            ~data:
              { session_id = job.session_id
+             ; actor
              ; generation = job.generation
              ; attempt = job.attempt
              ; sw = job_sw
@@ -228,7 +230,12 @@ let dispatch t sw entry job lease rejection =
       ~f:(fun () ->
         try
           Eio.Switch.run (fun job_sw ->
-            register_running t job job_sw ~rejected:(Option.is_some rejection);
+            register_running
+              t
+              job
+              job_sw
+              ~actor:entry.Session_registry.actor
+              ~rejected:(Option.is_some rejection);
             match rejection with
             | None -> run_claimed_job t entry job
             | Some error ->
@@ -323,7 +330,7 @@ let claim t sw entry (job : Agent_protocol.Job.t) =
     (match capacity_key entry job with
      | Error error -> reject_job t sw entry job error
      | Ok key ->
-       (match Job_capacity.try_acquire t.capacity key with
+       (match Job_capacity.try_acquire_job t.capacity key ~job with
         | Error error -> reject_job t sw entry job error
         | Ok None -> false
         | Ok (Some lease) -> claim_with_lease t sw entry job lease))
@@ -399,6 +406,11 @@ let state_jobs t entry =
   match Agent_session.Session_actor.state entry.Session_registry.actor with
   | Error _ -> []
   | Ok state ->
+    Job_capacity.retire_previous_generations
+      t.capacity
+      ~session_id:state.identity.session_id
+      ~generation:state.identity.generation;
+    List.iter state.jobs ~f:(Job_capacity.retire_job t.capacity);
     List.iter state.jobs ~f:(cancel_terminal_worker t);
     if Agent_protocol.Session.equal_desired_state state.lifecycle.desired Stopped
     then []
@@ -424,6 +436,12 @@ let rotate entries cursor =
 let process t sw registry =
   let entries, cursor = rotate (Session_registry.entries registry) t.cursor in
   t.cursor <- cursor;
+  let actors = List.map entries ~f:(fun entry -> entry.Session_registry.actor) in
+  Eio.Mutex.use_ro t.mutex (fun () ->
+    Map.iter t.running ~f:(fun running ->
+      match List.mem actors running.actor ~equal:phys_equal with
+      | true -> ()
+      | false -> Eio.Switch.fail running.sw Job_cancelled));
   let states = List.map entries ~f:(fun entry -> entry, state_jobs t entry) in
   List.iter states ~f:(fun (entry, jobs) -> dispatch_delivery t sw entry jobs);
   List.iter states ~f:(fun (entry, jobs) -> claim_one t sw entry jobs)

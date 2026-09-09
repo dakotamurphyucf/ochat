@@ -9,7 +9,11 @@ open! Core
     and an already-terminal job supersede the pending save. Shutdown leaves an
     unsaved running attempt for normal interrupted-job recovery.
     Generic admission rejections use independent workers, with at most one unsaved
-    rejection per session, so persistence failure cannot block the shared scheduler. *)
+    rejection per session, so persistence failure cannot block the shared scheduler.
+    Published admission reservations transfer to workers without a second capacity
+    charge. Staged reservations cannot run; reset/terminal/teardown paths retire
+    unclaimed reservations. Removing an actor from the registry cancels its retained
+    workers, including completion-save retries, before their leases are released. *)
 
 type t
 

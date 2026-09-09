@@ -1879,6 +1879,9 @@ let close_entry t handle journal persistence runtime writer actor capacity =
          : (unit, Agent_protocol.Error.t) result))
     ~finally:(fun () ->
       Eio.Cancel.protect (fun () ->
+        Job_capacity.close_session
+          t.job_capacity
+          ~session_id:(Agent_store.Session_store.Handle.session_id handle);
         Agent_session.Session_actor.shutdown actor;
         Option.iter capacity ~f:Session_capacity.release;
         Agent_store.Commit_writer.close writer;
@@ -1887,17 +1890,23 @@ let close_entry t handle journal persistence runtime writer actor capacity =
            : (unit, Agent_store.Store_error.t) result)))
 ;;
 
-let close_unregistered_entry runtime writer actor capacity =
+let close_unregistered_entry t handle runtime writer actor capacity =
   Runtime_owner.close_and_wait runtime;
+  Job_capacity.close_session
+    t.job_capacity
+    ~session_id:(Agent_store.Session_store.Handle.session_id handle);
   Agent_session.Session_actor.shutdown actor;
   Option.iter capacity ~f:Session_capacity.release;
   Agent_store.Commit_writer.close writer
 ;;
 
-let close_unregistered_runtime runtime writer actor capacity =
+let close_unregistered_runtime t handle runtime writer actor capacity =
   Agent_session.Session_actor.shutdown actor;
   Option.iter capacity ~f:Session_capacity.release;
   runtime.Agent_session.Runtime_builder.close ();
+  Job_capacity.close_session
+    t.job_capacity
+    ~session_id:(Agent_store.Session_store.Handle.session_id handle);
   Agent_store.Commit_writer.close writer
 ;;
 
@@ -2005,7 +2014,7 @@ let create_loaded_entry
   with
   | Error _ as failure ->
     actor_ref := None;
-    close_unregistered_runtime runtime writer actor capacity;
+    close_unregistered_runtime t handle runtime writer actor capacity;
     failure
   | Ok () ->
     let runtime =
@@ -2036,7 +2045,7 @@ let create_loaded_entry
            | Error _ as failure ->
              actor_ref := None;
              runtime_owner := None;
-             close_unregistered_entry runtime writer actor capacity;
+             close_unregistered_entry t handle runtime writer actor capacity;
              failure)
         | Queued_for_slot
         | Starting
@@ -2049,7 +2058,7 @@ let create_loaded_entry
         | Failed _ -> Ok entry)
      | Error _ as failure ->
        actor_ref := None;
-       close_unregistered_entry runtime writer actor capacity;
+       close_unregistered_entry t handle runtime writer actor capacity;
        failure)
 ;;
 
@@ -2102,7 +2111,7 @@ let create_unloaded_entry
   match history_source t actor state.identity.session_id with
   | Error _ as failure ->
     runtime_owner := None;
-    close_unregistered_entry runtime writer actor capacity;
+    close_unregistered_entry t handle runtime writer actor capacity;
     failure
   | Ok history_ids ->
     Ok
