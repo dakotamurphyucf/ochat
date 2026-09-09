@@ -26,6 +26,7 @@ type result =
     moderator handoffs or public Job/Tool.spawn operations. *)
 val run
   :  ?observer:Agent_protocol.Invocation.observer
+  -> ?moderator_execute:Native_tool_invocation.moderator_executor
   -> env:Eio_unix.Stdenv.base
   -> job:Agent_protocol.Job.t
   -> deadline:Agent_protocol.Timestamp.t

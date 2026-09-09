@@ -46,7 +46,25 @@ let with_background_daemon
         save (Filename.concat workspace "secret.txt") "PRIVATE-BACKGROUND-SENTINEL";
         let configuration = config ~profile root workspace prompt in
         let requests = ref 0 in
-        Eio.Switch.run (fun sw ->
+        let stage = ref "starting first daemon" in
+        let live_switch = ref None in
+        let with_fixture_switch f =
+          Eio.Fiber.first
+            (fun () ->
+               Eio.Switch.run (fun sw ->
+                 live_switch := Some sw;
+                 f sw))
+            (fun () ->
+               Eio.Time.sleep (Eio.Stdenv.clock env) 30.;
+               let dump =
+                 Option.value_map
+                   !live_switch
+                   ~default:"no switch"
+                   ~f:(Format.asprintf "%a" Eio.Switch.dump)
+               in
+               failwith ("background fixture timed out: " ^ !stage ^ "\n" ^ dump))
+        in
+        with_fixture_switch (fun sw ->
           let start () =
             Agent_server.Daemon.start
               ~sw
@@ -70,7 +88,10 @@ let with_background_daemon
           let daemon = start () in
           let completed_state =
             Exn.protect
-              ~finally:(fun () -> Agent_server.Daemon.shutdown daemon |> protocol_ok)
+              ~finally:(fun () ->
+                stage := "stopping first daemon";
+                Agent_server.Daemon.shutdown daemon |> protocol_ok;
+                stage := "first daemon stopped")
               ~f:(fun () ->
                 let client = connection daemon (principal ()) in
                 Exn.protect
@@ -94,8 +115,10 @@ let with_background_daemon
                                 (Option.value_exn runtime.moderator_script_tools)))
                       |> protocol_ok
                     in
+                    stage := "running test callback";
                     Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 20. (fun () ->
                       f env client entry capabilities);
+                    stage := "checking final actor state";
                     [%test_eq: int] 0 !requests;
                     let state = A.state entry.actor |> protocol_ok in
                     [%test_eq: int]
@@ -103,9 +126,14 @@ let with_background_daemon
                       (List.length state.conversation.canonical_history);
                     state))
           in
+          stage := "starting recovered daemon";
           let recovered = start () in
+          stage := "reading recovered jobs";
           Exn.protect
-            ~finally:(fun () -> Agent_server.Daemon.shutdown recovered |> protocol_ok)
+            ~finally:(fun () ->
+              stage := "stopping recovered daemon";
+              Agent_server.Daemon.shutdown recovered |> protocol_ok;
+              stage := "recovered daemon stopped")
             ~f:(fun () ->
               let client = connection recovered (principal ()) in
               Exn.protect
@@ -121,7 +149,8 @@ let with_background_daemon
                     with
                     | Job_get restored -> check_restored job restored
                     | _ -> failwith "unexpected recovered job response");
-                  [%test_eq: int] 0 !requests)))))
+                  [%test_eq: int] 0 !requests));
+          stage := "joining fixture switch")))
 ;;
 
 let submit ?created_at entry payload =

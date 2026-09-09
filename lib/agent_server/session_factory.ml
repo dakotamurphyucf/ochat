@@ -1936,7 +1936,18 @@ let build_runtime_for_actor t handle actor =
     ~pending_schedule_operations
     ~pending_jobs
   |> Result.bind ~f:(fun (runtime, _shell) ->
-    Result.map (runtime.start_moderator ()) ~f:(fun _ -> runtime))
+    let prepared = ref false in
+    Exn.protect
+      ~finally:(fun () ->
+        match !prepared with
+        | true -> ()
+        | false -> Eio.Cancel.protect runtime.close)
+      ~f:(fun () ->
+        match runtime.start_moderator () with
+        | Ok _ ->
+          prepared := true;
+          Ok runtime
+        | Error error -> Error error))
 ;;
 
 let create_loaded_entry

@@ -120,6 +120,25 @@ val commit_extensions
     an error. Job completion/retry must wait until this scope is released. A failed
     cleanup save retains an inactive owner for reconciliation, preventing reuse.
     Does not perform scheduler dispatch or transactional launch admission. *)
+type job_execution =
+  { job : Agent_protocol.Job.t
+  ; execute : Native_tool_invocation.executor
+  ; moderator_execute : Native_tool_invocation.moderator_executor
+  ; claim_event : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
+  }
+
+(** Retain job-attempt ownership across native calls and moderator events. Event
+    claims use the actor's moderator gate and persist job identity with the
+    checkpoint receipt. Returned services expire at callback completion. *)
+val with_job_execution
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> deadline:Agent_protocol.Timestamp.t option
+  -> (job_execution -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 val with_job_invocations
   :  t
   -> job_id:Agent_protocol.Id.Job.t

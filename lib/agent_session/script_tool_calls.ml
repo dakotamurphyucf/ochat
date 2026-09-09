@@ -144,7 +144,7 @@ let with_scope_results
       , parent.context.generation
       , None
       , Some parent.context.id
-      , None )
+      , Option.bind parent.context.job ~f:(fun job -> job.deadline) )
   in
   let active = Atomic.make true in
   let attempts = Atomic.make 0 in

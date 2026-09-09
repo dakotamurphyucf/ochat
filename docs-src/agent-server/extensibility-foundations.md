@@ -139,9 +139,28 @@ permission cancellation, and results retained across restart without model calls
 Work interrupted by shutdown is recorded explicitly rather than automatically
 re-executed on restart.
 
-Configured moderators currently reject generic dispatch before any tool effect:
-the job-owned moderator checkpoint handoff is still required. Unconsumed runtime
-requests also fail explicitly. Transactional capacity reservation, committed
+Qualified background dispatch now invokes the configured v1 moderator's pre-tool
+handler under the actor's moderator gate. Its execution receipt records the exact
+job ID, attempt and inherited deadline, without claiming a foreground operation.
+The event can call its authorized tools, rewrite/reject the pending call, and
+commit moderator state and follow-up intent atomically. These job receipts use
+schema version 3; ordinary existing receipts retain version 2, and old receipts
+without a job field remain readable. Event descendants inherit the job deadline.
+
+Background calls to stateful moderator tools also use an actor-owned handoff.
+The actual moderator commits its state and the disclosed tool outcome together;
+its native descendants retain parent links and permission ownership. Cancellation
+cancels approvals for both the handler and its descendants before waking them.
+Late approvals, expired services and obsolete attempts cannot regain authority.
+Failed event checkpoint commits retain their failed receipt and prohibit automatic
+effect replay. Unjoined moderator callbacks retain an inactive job owner for
+reconciliation and cannot complete the job successfully.
+
+Pre-tool event requests are already durable and are consumed by the existing
+follow-up scheduler, not emitted a second time by the background adapter.
+Managed-handler/native runtime requests still require an owning persistence and
+consumption path; nonempty unconsumed requests currently fail explicitly after
+execution. Transactional capacity reservation, committed
 launch intent, public background-start tools, progress/artifact surfaces and
 generic completion delivery remain under implementation. A decoded request or
 its content digest is not an authorization grant. Execution must still use the

@@ -1647,12 +1647,22 @@ type phase =
   | Internal_event
 [@@deriving equal, sexp]
 
+type job_attempt =
+  { job_id : Id.Job.t
+  ; attempt : int
+  ; deadline : Timestamp.t option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
 type context =
   { id : Id.Moderator_execution.t
   ; session_id : Id.Session.t
   ; generation : int
   ; source : Invocation.observer
   ; operation_id : Id.Operation.t option
+  ; job : job_attempt option [@sexp.option]
+    (** Background tool event provenance. Mutually exclusive with operation_id;
+        only an actor-owned claimed job attempt may admit this context. *)
   ; phase : phase
   ; event : Jsonaf.t
     (** Captured engine event data. The actor validates its encoding and phase

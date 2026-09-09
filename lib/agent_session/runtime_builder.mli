@@ -60,6 +60,8 @@ type background_executor =
       job:Agent_protocol.Job.t
       -> deadline:Agent_protocol.Timestamp.t
       -> execute:Native_tool_invocation.executor
+      -> moderator_execute:Native_tool_invocation.moderator_executor
+      -> claim_event:(event:Chat_response.Moderation.Event.t -> Moderator_event.claim)
       -> is_halted:(unit -> bool)
       -> request:Chat_response.Background_request.t
       -> (Background_execution.result, Agent_protocol.Error.t) result
@@ -81,8 +83,8 @@ type t =
     (** Host policy/disclosure services for v1 moderator native calls. Normal
         construction leaves this absent until v1 admission is installed. *)
   ; background_executor : background_executor option
-    (** Qualified generic executor. Requires an actual job-owned actor scope;
-        configured moderators reject until their background handoff is installed. *)
+    (** Qualified generic executor. Requires the actor's actual job-attempt native,
+        moderator-tool and ordinary-event services. *)
   ; moderator_activation : moderator_activation option
     (** Deferred owned activation after installing the initial checkpoint. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
@@ -176,7 +178,8 @@ val build
     selected native subset, host execution limits, owned pre hooks and Script-origin
     observations. They may run without a moderator or alongside extensibility-v1;
     a legacy moderator combination is rejected before initialization. Background
-    completion remains unavailable. Public feature negotiation is unchanged;
+    jobs use explicit actor execution services; public launch and completion
+    delivery remain under implementation. Public feature negotiation is unchanged;
     ordinary hosts continue using [build]. *)
 val build_with_extensions
   :  services:extension_services

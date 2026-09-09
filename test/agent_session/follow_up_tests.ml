@@ -50,6 +50,7 @@ let%expect_test
                 ; generation = 0
                 ; source
                 ; operation_id = None
+                ; job = None
                 ; phase = Internal_event
                 ; event = `Null
                 ; checkpoint_sha256 = String.make 64 'b'

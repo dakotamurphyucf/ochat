@@ -241,3 +241,47 @@ let%expect_test
     (true 1 false)
     |}]
 ;;
+
+let%expect_test
+    "cancelled callback releases its lease even when cleanup waits for the owner mutex"
+  =
+  with_actor (fun _env sw actor _writer _backend ->
+    let entered, entered_u = Eio.Promise.create () in
+    let leaving, leaving_u = Eio.Promise.create () in
+    let finished, finished_u = Eio.Promise.create () in
+    let never, _ = Eio.Promise.create () in
+    let closes = ref 0 in
+    let owner =
+      Owner.create ~actor ~initial:None ~build:(fun () ->
+        Ok (runtime ~close:(fun () -> incr closes) ()))
+    in
+    Eio.Fiber.fork ~sw (fun () ->
+      let was_cancelled =
+        try
+          Eio.Cancel.sub (fun context ->
+            Owner.with_background_runtime owner (fun _ ->
+              Eio.Promise.resolve entered_u (fun () -> Eio.Cancel.cancel context Exit);
+              Exn.protect
+                ~finally:(fun () -> Eio.Promise.resolve leaving_u ())
+                ~f:(fun () ->
+                  Eio.Promise.await never;
+                  Ok ())))
+          |> protocol_ok;
+          false
+        with
+        | Eio.Cancel.Cancelled _ -> true
+      in
+      Eio.Promise.resolve finished_u was_cancelled);
+    let cancel = Eio.Promise.await entered in
+    Owner.For_testing.with_loaded_runtime owner (fun () ->
+      cancel ();
+      Eio.Promise.await leaving;
+      Eio.Fiber.yield ();
+      assert (Option.is_none (Eio.Promise.peek finished));
+      Ok ())
+    |> protocol_ok;
+    [%test_eq: bool] true (Eio.Promise.await finished);
+    Owner.close_and_wait owner;
+    print_s [%sexp (!closes : int), (Owner.is_loaded owner : bool)]);
+  [%expect {| (1 false) |}]
+;;

@@ -79,6 +79,7 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
     ; source =
         { script_id = snapshot.script_id; source_sha256 = snapshot.script_source_hash }
     ; operation_id
+    ; job = None
     ; phase = Internal_event
     ; event = encoded_event event
     ; checkpoint_sha256
@@ -136,7 +137,7 @@ let lifecycle_phase = function
   | Internal_event -> false
 ;;
 
-let claim_ordinary ~state ~id ~(snapshot : S.t) ~operation_id ~event ~now =
+let claim_ordinary_in_context ~job ~state ~id ~(snapshot : S.t) ~operation_id ~event ~now =
   let open Result.Let_syntax in
   let%bind () = installed ~state ~snapshot in
   let%bind phase = ordinary_phase event in
@@ -161,6 +162,7 @@ let claim_ordinary ~state ~id ~(snapshot : S.t) ~operation_id ~event ~now =
                      P.Id.Operation.equal
                      receipt.context.operation_id
                      operation_id
+                && Option.equal E.equal_job_attempt receipt.context.job job
                 && String.equal receipt.context.checkpoint_sha256 checkpoint_sha256
                 && Jsonaf.exactly_equal receipt.context.event captured))
         &&
@@ -179,6 +181,7 @@ let claim_ordinary ~state ~id ~(snapshot : S.t) ~operation_id ~event ~now =
     ; generation = state.identity.generation
     ; source
     ; operation_id
+    ; job
     ; phase
     ; event = captured
     ; checkpoint_sha256
@@ -186,6 +189,9 @@ let claim_ordinary ~state ~id ~(snapshot : S.t) ~operation_id ~event ~now =
     }
   |> Result.map ~f:(fun receipt -> receipt, event)
 ;;
+
+let claim_ordinary = claim_ordinary_in_context ~job:None
+let claim_job ~job = claim_ordinary_in_context ~job:(Some job) ~operation_id:None
 
 let complete_ordinary ~claimed ~(before : S.t) ~(snapshot : S.t) ~requests =
   let open Result.Let_syntax in

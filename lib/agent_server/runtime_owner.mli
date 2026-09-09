@@ -97,8 +97,9 @@ val execute_model_job
 (** Execute a qualified Async_tool request through retained runtime ownership and
     the actor's exact job-attempt scope. Queue/retry time counts against the stored
     execution budget from Job.created_at. Generic results retain Completion data;
-    configured moderators and unsupported runtime requests fail explicitly until
-    their owning integration is installed. Does not admit or finish the job. *)
+    moderator pre-tool requests use their persisted event intent. Unconsumed
+    managed-handler/native requests still fail explicitly until their owning
+    integration is installed. Does not admit or finish the job. *)
 val execute_background_job
   :  t
   -> Agent_protocol.Job.t

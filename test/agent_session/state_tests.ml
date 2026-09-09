@@ -18,6 +18,7 @@ let%expect_test
         ; generation = 0
         ; source = { script_id = "private-script"; source_sha256 = String.make 64 'a' }
         ; operation_id = None
+        ; job = None
         ; phase = Internal_event
         ; event = `String "private event payload"
         ; checkpoint_sha256 = String.make 64 'b'

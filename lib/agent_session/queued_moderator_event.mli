@@ -50,6 +50,17 @@ val complete
     receipt for this exact source/generation/operation/phase/checkpoint/event
     prevents automatic replay of failed effects. Completed handlers do not block
     a later occurrence of the same event. *)
+val claim_job
+  :  job:Agent_protocol.Moderator_execution.job_attempt
+  -> state:Session_state.t
+  -> id:Agent_protocol.Id.Moderator_execution.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> event:Chat_response.Moderation.Event.t
+  -> now:Agent_protocol.Timestamp.t
+  -> ( Agent_protocol.Moderator_execution.t * Session.Snapshot.t
+       , Agent_protocol.Error.t )
+       result
+
 val claim_ordinary
   :  state:Session_state.t
   -> id:Agent_protocol.Id.Moderator_execution.t

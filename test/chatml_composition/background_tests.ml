@@ -248,27 +248,65 @@ let%expect_test
     |}]
 ;;
 
-let%expect_test "configured moderator cannot be bypassed by background dispatch" =
+let%expect_test
+    "background moderator pre-tool event reads under its job and rejects the call"
+  =
   let agent =
     native_agent
     ^ {|
 <script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
 let initial_state = 0
-let on_event = fun ctx state event -> Task.pure(state)
+let on_event = fun ctx state event -> match event with
+| `Pre_tool_call(call) -> Task.bind(Tool.call("read_file", `Object([
+    {key = "root"; value = `String("reports")},
+    {key = "file"; value = `String("second.txt")}
+  ])), fun result -> match result with
+    | `Error(code) -> Task.fail(code)
+    | `Ok(value) -> Task.bind(Tool.reject("moderator inspected and rejected"),
+        fun ignored -> Task.pure(state + 1)))
+| _ -> Task.pure(state)
 </script>|}
   in
   with_background_daemon ~agent (fun env client entry capabilities ->
-    let before = A.state entry.actor |> protocol_ok in
     let job = submit entry (B.to_json (native capabilities "report.txt")) in
     let _, completion = await env client job in
     print_s [%sexp (completion : Completion.t)];
     let after = A.state entry.actor |> protocol_ok in
-    [%test_eq: int] (List.length before.invocations) (List.length after.invocations));
+    let events =
+      List.filter after.moderator_executions ~f:(fun receipt ->
+        Option.exists receipt.context.job ~f:(fun reference ->
+          Agent_protocol.Id.Job.equal reference.job_id job.id))
+    in
+    [%test_eq: int] 1 (List.length events);
+    let event = List.hd_exn events in
+    let reference = Option.value_exn event.context.job in
+    [%test_eq: int] 1 reference.attempt;
+    assert (Option.is_none event.context.operation_id);
+    print_s [%sexp (event.context.phase : Agent_protocol.Moderator_execution.phase)];
+    let children =
+      List.filter after.invocations ~f:(fun invocation ->
+        Option.exists
+          invocation.parent_event
+          ~f:(Agent_protocol.Id.Moderator_execution.equal event.context.id))
+    in
+    [%test_eq: int] 1 (List.length children);
+    let child = List.hd_exn children in
+    assert (
+      Option.equal
+        Agent_protocol.Timestamp.equal
+        reference.deadline
+        child.context.deadline);
+    print_s [%sexp (child.status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
     (Failed
-     ((code background.invalid_state)
-      (message "job-owned moderator handoff is not installed") (retryable false)
-      (details (Object ()))))
+     ((code invocation.pre_tool_rejected)
+      (message "Pre-tool moderation rejected the call.") (retryable false)
+      (details Null)))
+    Pre_tool_call
+    (Resolved
+     (Complete (String  "second.txt:1-1:\
+                       \n[total_lines=1]\
+                       \nsecond report")))
     |}]
 ;;

@@ -123,18 +123,21 @@ let with_background_runtime t f =
     | Ok runtime ->
       Exn.protect
         ~finally:(fun () ->
-          Atomic.set active false;
-          Exn.protect
-            ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
-            ~f:(fun () ->
-              Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-                t.background_leases
-                <- List.filter t.background_leases ~f:(fun current ->
-                     not (phys_equal current lease));
-                match t.closed, t.background_leases with
-                | true, [] -> retire_closed_locked t
-                | _ -> Ok ())
-              |> raise_cleanup))
+          (* Mutex protection starts only after acquiring it. Lease cleanup must
+             also survive cancellation while waiting for another owner callback. *)
+          Eio.Cancel.protect (fun () ->
+            Atomic.set active false;
+            Exn.protect
+              ~finally:(fun () -> Eio.Promise.resolve lease.finish ())
+              ~f:(fun () ->
+                Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+                  t.background_leases
+                  <- List.filter t.background_leases ~f:(fun current ->
+                       not (phys_equal current lease));
+                  match t.closed, t.background_leases with
+                  | true, [] -> retire_closed_locked t
+                  | _ -> Ok ())
+                |> raise_cleanup)))
         ~f:(fun () ->
           Eio.Fiber.check ();
           let result = f runtime in
@@ -581,13 +584,14 @@ let execute_background_job t (job : Agent_protocol.Job.t) =
     | true -> Ok Agent_protocol.Completion.Expired
     | false ->
       let%bind result =
-        Agent_session.Session_actor.with_job_invocations
+        Agent_session.Session_actor.with_job_execution
           t.actor
           ~job_id:job.id
           ~generation:job.generation
           ~attempt:job.attempt
           ~deadline:(Some deadline)
-          (fun ~job ~execute ->
+          (fun execution ->
+             let job = execution.job in
              let is_halted () =
                match Agent_session.Session_actor.state t.actor with
                | Error _ -> true
@@ -607,7 +611,14 @@ let execute_background_job t (job : Agent_protocol.Job.t) =
                          | Running | Waiting_permission _ -> true
                          | _ -> false))
              in
-             executor.run ~job ~deadline ~execute ~is_halted ~request)
+             executor.run
+               ~job
+               ~deadline
+               ~execute:execution.execute
+               ~moderator_execute:execution.moderator_execute
+               ~claim_event:execution.claim_event
+               ~is_halted
+               ~request)
       in
       let%bind () =
         match result.runtime_requests with

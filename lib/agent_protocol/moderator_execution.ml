@@ -19,12 +19,20 @@ type phase =
   | Internal_event
 [@@deriving equal, sexp]
 
+type job_attempt =
+  { job_id : Id.Job.t
+  ; attempt : int
+  ; deadline : Timestamp.t option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
 type context =
   { id : Id.Moderator_execution.t
   ; session_id : Id.Session.t
   ; generation : int
   ; source : Invocation.observer
   ; operation_id : Id.Operation.t option
+  ; job : job_attempt option [@sexp.option]
   ; phase : phase
   ; event : Jsonaf.t
   ; checkpoint_sha256 : string
@@ -92,6 +100,14 @@ let validate t =
     | Some id -> validate_id Id.Operation.to_json Id.Operation.of_json id
   in
   let%bind () = if c.generation < 0 then invalid "negative event generation" else Ok () in
+  let%bind () =
+    match c.job, c.operation_id, c.phase with
+    | None, _, _ -> Ok ()
+    | Some job, None, (Pre_tool_call | Post_tool_response) when job.attempt > 0 ->
+      validate_id Id.Job.to_json Id.Job.of_json job.job_id
+    | _ ->
+      invalid "job event requires a claimed attempt, tool phase and no model operation"
+  in
   let%bind () = text ~name:"moderator script ID" ~max:256 c.source.script_id in
   let%bind () = digest c.source.source_sha256 in
   let%bind () = digest c.checkpoint_sha256 in
@@ -322,7 +338,11 @@ let requests_to_json (r : Invocation.follow_up) =
 let to_json t =
   let c = t.context in
   `Object
-    ([ "schema_version", `Number "2"
+    ([ ( "schema_version"
+       , `Number
+           (match c.job with
+            | None -> "2"
+            | Some _ -> "3") )
      ; "id", Id.Moderator_execution.to_json c.id
      ; "session_id", Id.Session.to_json c.session_id
      ; "generation", `Number (Int.to_string c.generation)
@@ -338,6 +358,12 @@ let to_json t =
      ; "status", status_to_json t.status
      ]
      @ optional "operation_id" c.operation_id Id.Operation.to_json
+     @ optional "job" c.job (fun job ->
+       `Object
+         ([ "job_id", Id.Job.to_json job.job_id
+          ; "attempt", `Number (Int.to_string job.attempt)
+          ]
+          @ optional "deadline" job.deadline Timestamp.to_json))
      @ optional "requests" t.requests requests_to_json
      @ optional "intent" t.intent intent_to_json
      @ optional "compaction_operation_id" t.compaction_operation_id Id.Operation.to_json
@@ -423,6 +449,7 @@ let of_json json =
       ; "script_id"
       ; "source_sha256"
       ; "operation_id"
+      ; "job"
       ; "phase"
       ; "event"
       ; "checkpoint_sha256"
@@ -435,7 +462,7 @@ let of_json json =
       ]
   in
   let%bind version =
-    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:2)
+    Json_codec.required_as fields "schema_version" (Json_codec.bounded_int ~min:1 ~max:3)
   in
   let%bind () =
     match version, Option.is_some (Json_codec.optional fields "retirement") with
@@ -456,6 +483,23 @@ let of_json json =
   in
   let%bind operation_id =
     Json_codec.optional_as fields "operation_id" Id.Operation.of_json
+  in
+  let%bind job =
+    Json_codec.optional_as fields "job" (fun json ->
+      let%bind () =
+        if version < 3 then invalid "job event requires schema version 3" else Ok ()
+      in
+      let%bind fields = Json_codec.fields json in
+      let%bind () = closed fields [ "job_id"; "attempt"; "deadline" ] in
+      let%bind job_id = Json_codec.required_as fields "job_id" Id.Job.of_json in
+      let%bind attempt =
+        Json_codec.required_as
+          fields
+          "attempt"
+          (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+      in
+      let%map deadline = Json_codec.optional_as fields "deadline" Timestamp.of_json in
+      { job_id; attempt; deadline })
   in
   let%bind phase =
     Json_codec.required_as
@@ -491,6 +535,7 @@ let of_json json =
         ; generation
         ; source = { script_id; source_sha256 }
         ; operation_id
+        ; job
         ; phase
         ; event
         ; checkpoint_sha256

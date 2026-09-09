@@ -6,6 +6,7 @@
   borrowed_execution_tests
   background_execution_tests
   background_completion_tests
+  background_event_tests
   compaction_tests
   event_delivery_tests
   follow_up_tests

@@ -259,6 +259,27 @@ let validate t =
       let module E = Agent_protocol.Moderator_execution in
       let%bind () = E.validate execution in
       let c = execution.E.context in
+      let%bind () =
+        match c.job with
+        | None -> Ok ()
+        | Some _ when c.generation < t.identity.generation -> Ok ()
+        | Some reference ->
+          (match
+             List.find t.jobs ~f:(fun job ->
+               Agent_protocol.Id.Job.equal job.id reference.job_id)
+           with
+           | Some job
+             when job.generation = c.generation
+                  && Agent_protocol.Id.Session.equal job.session_id c.session_id
+                  && reference.attempt <= job.attempt -> Ok ()
+           | _ ->
+             Error
+               (Agent_protocol.Error.create
+                  Journal_corrupt
+                  ~message:"moderator event references an unknown or newer job attempt"
+                  ~retryable:false
+                  ()))
+      in
       if
         (not (Agent_protocol.Id.Session.equal c.session_id t.identity.session_id))
         || c.generation > t.identity.generation

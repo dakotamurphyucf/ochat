@@ -16,6 +16,7 @@ let failure code message = I.Fail { code; message; retryable = false; details = 
 
 let run
       ?observer
+      ?moderator_execute
       ~env
       ~(job : Agent_protocol.Job.t)
       ~deadline
@@ -93,93 +94,101 @@ let run
         }
     in
     execute ~invocation:root (fun ~dispatched ->
-      N.with_dispatched_scope ~execute ~selected ~invocation:dispatched (fun () ->
-        let%bind borrowed = N.borrow () in
-        let moderate call =
-          let%bind outcome = moderate_tool dispatched call in
-          match outcome with
-          | None -> Ok None
-          | Some (outcome : M.Outcome.t) ->
-            let%map () = Requests.emit outcome.runtime_requests in
-            (match
-               Chat_response.Runtime_semantics.should_end_session outcome.runtime_requests
-             with
-             | Some _ -> Some (M.Tool_moderation.Reject "The session has ended.")
-             | None -> outcome.tool_moderation)
-        in
-        let perform () =
-          Native_tool_moderation.with_handler ~observer ~prepare:moderate (fun () ->
-            match prepared with
-            | B.Tool { reference; input; _ } ->
-              Option.iter control ~f:(fun control ->
-                control.Chatml.Chatml_lang.before_effect ~name:"Tool.call" ~spawned:false);
-              Script_tool_calls.call_background
-                ?observer
-                script_tools
-                ~borrowed
-                ~limits
-                ~max_nested_calls:effective.execution.max_calls
-                ~moderate
-                ~name:reference.name
-                ~args:input
-              |> Result.map_error ~f:(fun code ->
-                failure code "The background tool call could not be completed.")
-            | Script { prepared; input; _ } ->
-              One_off_execution.run
-                ?observer
-                ~env
-                ~prepared
-                ~borrowed
-                ~script_tools
-                ~input
-                ~limits
-                ~allocation_bytes:effective.execution.allocation_bytes
-                ~max_nested_calls:effective.execution.max_calls
-                ~max_invocation_depth:effective.execution.max_invocation_depth
-                ~now
-                ~moderate_tool
-                ~prepare_outcome
-                ()
-              |> Result.map_error ~f:(fun _ ->
-                failure
-                  "background.execution_failed"
-                  "The background script could not be completed.")
-              |> Result.bind ~f:(fun result ->
-                let%bind () =
-                  Requests.emit result.runtime_requests
-                  |> Result.map_error ~f:(fun _ ->
-                    failure
-                      "background.request_scope"
-                      "Background runtime requests could not be retained.")
-                in
-                match result.resolved.status with
-                | Resolved outcome -> Ok outcome
-                | _ ->
-                  Error
-                    (failure
-                       "background.invalid_outcome"
-                       "Background script has no resolved outcome.")))
-        in
-        let outcome =
-          match perform () with
-          | Ok outcome | Error outcome -> outcome
-        in
-        let%bind () = I.validate_outcome outcome in
-        let%bind () =
-          Agent_protocol.Json_codec.validate_limits
-            ~max_depth:effective.execution.max_depth
-            ~max_bytes:effective.max_output_bytes
-            (I.outcome_to_json outcome)
-        in
-        let%bind () =
-          prepare_outcome outcome
-          |> Result.map_error ~f:(fun _ ->
-            Agent_protocol.Error.invalid_request
-              "background outcome failed host validation")
-        in
-        Option.iter control ~f:(fun control ->
-          control.Chatml.Chatml_lang.before_json_import (I.outcome_to_json outcome));
-        Ok outcome))
+      N.with_dispatched_scope
+        ~execute
+        ?moderator_execute
+        ~selected
+        ~invocation:dispatched
+        (fun () ->
+           let%bind borrowed = N.borrow () in
+           let moderate call =
+             let%bind outcome = moderate_tool dispatched call in
+             match outcome with
+             | None -> Ok None
+             | Some (outcome : M.Outcome.t) ->
+               let%map () = Requests.emit outcome.runtime_requests in
+               (match
+                  Chat_response.Runtime_semantics.should_end_session
+                    outcome.runtime_requests
+                with
+                | Some _ -> Some (M.Tool_moderation.Reject "The session has ended.")
+                | None -> outcome.tool_moderation)
+           in
+           let perform () =
+             Native_tool_moderation.with_handler ~observer ~prepare:moderate (fun () ->
+               match prepared with
+               | B.Tool { reference; input; _ } ->
+                 Option.iter control ~f:(fun control ->
+                   control.Chatml.Chatml_lang.before_effect
+                     ~name:"Tool.call"
+                     ~spawned:false);
+                 Script_tool_calls.call_background
+                   ?observer
+                   script_tools
+                   ~borrowed
+                   ~limits
+                   ~max_nested_calls:effective.execution.max_calls
+                   ~moderate
+                   ~name:reference.name
+                   ~args:input
+                 |> Result.map_error ~f:(fun code ->
+                   failure code "The background tool call could not be completed.")
+               | Script { prepared; input; _ } ->
+                 One_off_execution.run
+                   ?observer
+                   ~env
+                   ~prepared
+                   ~borrowed
+                   ~script_tools
+                   ~input
+                   ~limits
+                   ~allocation_bytes:effective.execution.allocation_bytes
+                   ~max_nested_calls:effective.execution.max_calls
+                   ~max_invocation_depth:effective.execution.max_invocation_depth
+                   ~now
+                   ~moderate_tool
+                   ~prepare_outcome
+                   ()
+                 |> Result.map_error ~f:(fun _ ->
+                   failure
+                     "background.execution_failed"
+                     "The background script could not be completed.")
+                 |> Result.bind ~f:(fun result ->
+                   let%bind () =
+                     Requests.emit result.runtime_requests
+                     |> Result.map_error ~f:(fun _ ->
+                       failure
+                         "background.request_scope"
+                         "Background runtime requests could not be retained.")
+                   in
+                   match result.resolved.status with
+                   | Resolved outcome -> Ok outcome
+                   | _ ->
+                     Error
+                       (failure
+                          "background.invalid_outcome"
+                          "Background script has no resolved outcome.")))
+           in
+           let outcome =
+             match perform () with
+             | Ok outcome | Error outcome -> outcome
+           in
+           let%bind () = I.validate_outcome outcome in
+           let%bind () =
+             Agent_protocol.Json_codec.validate_limits
+               ~max_depth:effective.execution.max_depth
+               ~max_bytes:effective.max_output_bytes
+               (I.outcome_to_json outcome)
+           in
+           let%bind () =
+             prepare_outcome outcome
+             |> Result.map_error ~f:(fun _ ->
+               Agent_protocol.Error.invalid_request
+                 "background outcome failed host validation")
+           in
+           Option.iter control ~f:(fun control ->
+             control.Chatml.Chatml_lang.before_json_import (I.outcome_to_json outcome));
+           Ok outcome))
   in
   let result, collected =
     Requests.collect (fun () ->

@@ -47,6 +47,8 @@ type background_executor =
       job:Agent_protocol.Job.t
       -> deadline:Agent_protocol.Timestamp.t
       -> execute:Native_tool_invocation.executor
+      -> moderator_execute:Native_tool_invocation.moderator_executor
+      -> claim_event:(event:Moderation.Event.t -> Moderator_event.claim)
       -> is_halted:(unit -> bool)
       -> request:Chat_response.Background_request.t
       -> (Background_execution.result, Agent_protocol.Error.t) result
@@ -1182,27 +1184,79 @@ let build_with_services
              { policy = services.one_off_policy
              ; now
              ; run =
-                 (fun ~job ~deadline ~execute ~is_halted ~request ->
-                   match moderator with
-                   | Some _ ->
-                     Error (failure "job-owned moderator handoff is not installed")
-                   | None ->
-                     Background_execution.run
-                       ~env
-                       ~job
-                       ~deadline
-                       ~execute
-                       ~request
-                       ~policy:services.one_off_policy
-                       ~script_tools:
-                         (Script_tool_calls.with_lifecycle script_tools ~is_halted)
-                       ~now
-                       ~moderate_tool:(fun _ _ -> Ok None)
-                       ~prepare_outcome:(fun outcome ->
-                         Agent_protocol.Invocation.validate_outcome outcome
-                         |> Result.map_error ~f:(fun error ->
-                           error.Agent_protocol.Error.message))
-                       ())
+                 (fun ~job
+                   ~deadline
+                   ~execute
+                   ~moderator_execute
+                   ~claim_event
+                   ~is_halted
+                   ~request ->
+                   let script_tools =
+                     Script_tool_calls.with_lifecycle script_tools ~is_halted
+                   in
+                   let observer =
+                     Option.bind moderator ~f:(fun (moderator, _) ->
+                       Manager.invocation_observer
+                         moderator.Chat_response.In_memory_stream.manager)
+                   in
+                   let moderate_tool _ call =
+                     match moderator with
+                     | None -> Ok None
+                     | Some (moderator, _) ->
+                       let open Result.Let_syntax in
+                       let event = Moderation.Event.Pre_tool_call call in
+                       let%bind outcome =
+                         Moderator_event.run_ordinary
+                           ~event
+                           ~claim:(claim_event ~event)
+                           ~script_tools
+                           ~manager:moderator.manager
+                           ~history:services.history
+                           ~available_tools:tools
+                           ~session_meta:`Null
+                           ~now
+                           ()
+                       in
+                       (match outcome with
+                        | None ->
+                          Error (failure "background moderator event was not admitted")
+                        | Some outcome ->
+                          let tool_moderation =
+                            match
+                              Chat_response.Runtime_semantics.should_end_session
+                                outcome.runtime_requests
+                            with
+                            | Some _ ->
+                              Some
+                                (Moderation.Tool_moderation.Reject
+                                   "The session has ended.")
+                            | None -> outcome.tool_moderation
+                          in
+                          (* The event checkpoint owns these durable requests. Its
+                             follow-up scheduler consumes them exactly once. *)
+                          Ok
+                            (Some { outcome with tool_moderation; runtime_requests = [] }))
+                   in
+                   Background_execution.run
+                     ?observer
+                     ~moderator_execute
+                     ~env
+                     ~job
+                     ~deadline
+                     ~execute
+                     ~request
+                     ~policy:services.one_off_policy
+                     ~script_tools
+                     ~now
+                     ~moderate_tool:(fun invocation call ->
+                       moderate_tool invocation call
+                       |> Result.map_error ~f:(fun error ->
+                         error.Agent_protocol.Error.message))
+                     ~prepare_outcome:(fun outcome ->
+                       Agent_protocol.Invocation.validate_outcome outcome
+                       |> Result.map_error ~f:(fun error ->
+                         error.Agent_protocol.Error.message))
+                     ())
              }
          | _ -> None)
     ; moderator_activation
