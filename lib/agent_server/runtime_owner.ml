@@ -1,15 +1,24 @@
 open! Core
 
+type background_lease = { cancel : unit -> unit }
+
 type t =
   { actor : Agent_session.Session_actor.t
   ; build : unit -> (Agent_session.Runtime_builder.t, Agent_protocol.Error.t) result
   ; mutex : Eio.Mutex.t
   ; mutable runtime : Agent_session.Runtime_builder.t option
   ; mutable closed : bool
+  ; mutable background_leases : background_lease list
   }
 
 let create ~actor ~initial ~build =
-  { actor; build; mutex = Eio.Mutex.create (); runtime = initial; closed = false }
+  { actor
+  ; build
+  ; mutex = Eio.Mutex.create ()
+  ; runtime = initial
+  ; closed = false
+  ; background_leases = []
+  }
 ;;
 
 let is_loaded t = Eio.Mutex.use_ro t.mutex (fun () -> Option.is_some t.runtime)
@@ -52,10 +61,82 @@ let ensure_loaded t =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> ensure_loaded_locked t)
 ;;
 
+let background_busy () =
+  Agent_protocol.Error.create
+    Conflict
+    ~message:"background execution still owns the loaded runtime"
+    ~retryable:true
+    ()
+;;
+
+(* Remove the reference before invoking cleanup, so a failed close cannot leave
+   the same runtime available for a second retirement or poison the owner mutex. *)
+let retire_closed_locked t =
+  let previous = t.runtime in
+  t.runtime <- None;
+  match
+    ignore
+      (Agent_session.Session_actor.set_operation_worker t.actor None
+       : (unit, Agent_protocol.Error.t) result);
+    Option.iter previous ~f:(fun runtime ->
+      runtime.Agent_session.Runtime_builder.close ())
+  with
+  | () -> Ok ()
+  | exception exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ())
+;;
+
+let raise_cleanup = function
+  | Ok () -> ()
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let with_background_runtime t f =
+  Eio.Cancel.sub (fun context ->
+    let active = Atomic.make true in
+    let lease =
+      { cancel =
+          (fun () ->
+            match Atomic.get active with
+            | true -> Eio.Cancel.cancel context Exit
+            | false -> ())
+      }
+    in
+    let admitted =
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+        let open Result.Let_syntax in
+        let%map () = ensure_loaded_locked t in
+        let runtime = Option.value_exn t.runtime in
+        t.background_leases <- lease :: t.background_leases;
+        runtime)
+    in
+    match admitted with
+    | Error _ as failure ->
+      Atomic.set active false;
+      failure
+    | Ok runtime ->
+      Exn.protect
+        ~finally:(fun () ->
+          Atomic.set active false;
+          Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+            t.background_leases
+            <- List.filter t.background_leases ~f:(fun current ->
+                 not (phys_equal current lease));
+            match t.closed, t.background_leases with
+            | true, [] -> retire_closed_locked t
+            | _ -> Ok ())
+          |> raise_cleanup)
+        ~f:(fun () ->
+          Eio.Fiber.check ();
+          let result = f runtime in
+          Eio.Fiber.check ();
+          result))
+;;
+
 let unload_locked t =
-  match t.runtime with
-  | None -> Ok ()
-  | Some runtime ->
+  match t.background_leases, t.runtime with
+  | _ :: _, _ -> Error (background_busy ())
+  | [], None -> Ok ()
+  | [], Some runtime ->
     let open Result.Let_syntax in
     let%map () = Agent_session.Session_actor.set_operation_worker t.actor None in
     runtime.close ();
@@ -83,6 +164,8 @@ let with_administration t f =
         Ok
           (if t.closed
            then Error (closed_error ())
+           else if not (List.is_empty t.background_leases)
+           then Error (background_busy ())
            else (
              match f () with
              | Error _ as failure -> failure
@@ -477,11 +560,13 @@ let deliver_model_job_completion t (job : Agent_protocol.Job.t) =
 ;;
 
 let close t =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
-    t.closed <- true;
-    ignore
-      (Agent_session.Session_actor.set_operation_worker t.actor None
-       : (unit, Agent_protocol.Error.t) result);
-    Option.iter t.runtime ~f:(fun runtime -> runtime.close ());
-    t.runtime <- None)
+  let leases, retired =
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      t.closed <- true;
+      match t.background_leases with
+      | [] -> [], retire_closed_locked t
+      | leases -> leases, Ok ())
+  in
+  List.iter leases ~f:(fun lease -> lease.cancel ());
+  raise_cleanup retired
 ;;

@@ -14,6 +14,24 @@ val is_loaded : t -> bool
 val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result
 val unload : t -> (unit, Agent_protocol.Error.t) result
 
+(** Retain one loaded runtime for a background worker without holding the owner
+    mutex while [f] executes. Independent workers may run concurrently or await
+    each other's results. Loading remains serialized; temporary unload and
+    administration return Conflict while any worker owns the runtime.
+
+    The callback must use the actual actor/job invocation and moderator services;
+    retaining this runtime grants no session or tool authority. Join all work
+    within [f] and do not retain the runtime after return. Callback exceptions and caller
+    cancellation release ownership without poisoning the mutex.
+
+    [close] rejects new work and cancels callback contexts. Retirement waits for
+    the final callback to unwind, so cleanup cannot close resources still in use.
+    This is lifetime ownership, not generic scheduler dispatch or job admission. *)
+val with_background_runtime
+  :  t
+  -> (Agent_session.Runtime_builder.t -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
 (** [with_administration t f] excludes concurrent runtime loading while [f]
     prepares and commits stopped state. Preserve the previous runtime on failure;
     retire it after success without turning an accepted commit into a failed
@@ -83,8 +101,11 @@ val deliver_model_job_completion
   -> Agent_protocol.Job.t
   -> (unit, Agent_protocol.Error.t) result
 
-(** [close] permanently prevents runtime reload, detaches the operation worker,
-    and closes the loaded runtime. The actor must still be running. *)
+(** [close] permanently prevents runtime reload and cancels background callbacks.
+    With no background owners, detaches the operation worker and closes the loaded
+    runtime immediately. Otherwise the final callback release retires it; [close]
+    does not wait for callbacks and is safe to request from inside one. The actor
+    must remain running through callback cleanup. *)
 val close : t -> unit
 
 module For_testing : sig

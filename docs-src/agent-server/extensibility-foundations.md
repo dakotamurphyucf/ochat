@@ -106,6 +106,14 @@ entries consume depth slots, and existing ancestor limits still apply. Result
 limits are checked before the job root's outcome is saved; a completed native
 effect cannot be undone if its returned output later exceeds those limits.
 
+`Runtime_owner.with_background_runtime` keeps the loaded runtime alive while an
+owned callback executes outside the loading/administration mutex. Independent jobs
+can therefore run concurrently and wait for each other. Unload and administration
+reject while callbacks retain the runtime. Closing rejects new work and cancels
+callbacks; the final callback release retires the runtime after cleanup. The actor
+must remain running until those callbacks have unwound. Callbacks must join their
+work and cannot retain the runtime for later use.
+
 These internal services are not an enabled background execution path.
 Scheduler dispatch, transactional capacity reservation, committed launch intent,
 job-owned moderator handoffs and generic completion delivery remain under
