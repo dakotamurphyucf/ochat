@@ -131,6 +131,17 @@ text retain that contract; the scheduler does not classify text as structured
 failure. Generic terminal delivery remains pending for its own event adapter and
 is never sent through the legacy model-job completion event.
 
+`Job.terminal_completion` decodes the typed result at the completion/delivery
+boundary and checks it against the job's terminal status. A queued retry returns
+no terminal completion even when its previous failure remains in `Job.result`.
+Delivery validation uses the decoded outcome, preserving structured failure
+details, cancellation reasons and expiry. Recovery rejects missing, malformed,
+contradictory or incorrectly wrapped results when a delivery references them.
+Legacy model-job results remain raw output, including JSON resembling a completion
+envelope. Pending delivery can be retained before its initial acknowledgement is
+published; notification history commits still require that acknowledgement and
+remain idempotent across snapshot recovery.
+
 If saving generic completion fails, the scheduler retains the result and its
 worker capacity and retries only persistence, using a cancellable backoff from
 50 milliseconds up to one second. It does not repeat tool effects or advance the

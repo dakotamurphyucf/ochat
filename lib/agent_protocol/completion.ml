@@ -1,12 +1,18 @@
 open Core
 open Extension_codec
 
+module Jsonaf = struct
+  include Jsonaf
+
+  let equal = exactly_equal
+end
+
 type t =
   | Succeeded of Jsonaf.t
   | Failed of Invocation.tool_error
   | Cancelled of string
   | Expired
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type wake =
   | Request_turn

@@ -60,6 +60,56 @@ let optional_field name value encode =
   Option.map value ~f:(fun value -> name, encode value)
 ;;
 
+let terminal_completion t =
+  let open Result.Let_syntax in
+  match t.status with
+  | Queued | Running | Waiting_permission _ -> Ok None
+  | Succeeded | Failed _ | Cancelled | Interrupted _ ->
+    let%bind completion =
+      match t.kind with
+      | Async_tool ->
+        let%bind encoded =
+          Result.of_option
+            t.result
+            ~error:
+              (Protocol_error.invalid_request "terminal async tool job has no completion")
+        in
+        let%bind completion = Completion.of_json encoded in
+        (match t.status, completion with
+         | Succeeded, Completion.Succeeded _
+         | Failed _, (Completion.Failed _ | Expired)
+         | Cancelled, Completion.Cancelled _
+         | Interrupted _, Completion.Failed _ -> Ok completion
+         | _ ->
+           Error
+             (Protocol_error.invalid_request
+                "async tool completion differs from job status"))
+      | Model_call | Nested_agent | Scheduled_event | Shell_process | Compaction ->
+        (match t.status with
+         | Succeeded -> Ok (Completion.Succeeded (Option.value t.result ~default:`Null))
+         | Failed error ->
+           Ok
+             (Completion.Failed
+                { code = Protocol_error.code_to_string error.code
+                ; message = error.message
+                ; retryable = error.retryable
+                ; details = error.data
+                })
+         | Cancelled -> Ok (Completion.Cancelled "job cancelled")
+         | Interrupted reason ->
+           Ok
+             (Completion.Failed
+                { code = "interrupted"
+                ; message = reason
+                ; retryable = false
+                ; details = `Null
+                })
+         | Queued | Running | Waiting_permission _ -> assert false)
+    in
+    let%map () = Completion.validate completion in
+    Some completion
+;;
+
 let kind_values =
   [ "model_call", Model_call
   ; "nested_agent", Nested_agent

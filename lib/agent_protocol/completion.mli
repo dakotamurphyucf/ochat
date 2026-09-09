@@ -4,7 +4,7 @@ type t =
   | Failed of Invocation.tool_error
   | Cancelled of string
   | Expired
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type wake =
   | Request_turn

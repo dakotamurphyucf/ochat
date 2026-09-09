@@ -70,8 +70,6 @@ let work_owner ~jobs ~subscriptions ~session_id ~generation = function
     owner ~session_id ~generation s.context.session_id s.context.generation
 ;;
 
-let same_completion a b = Sexp.equal (P.Completion.sexp_of_t a) (P.Completion.sexp_of_t b)
-
 let completion_for_work ~jobs ~subscriptions = function
   | P.Invocation.Subscription id ->
     let open Result.Let_syntax in
@@ -82,23 +80,18 @@ let completion_for_work ~jobs ~subscriptions = function
   | Job id ->
     let open Result.Let_syntax in
     let%bind j = job jobs id in
-    (match j.status with
-     | Succeeded -> Ok (P.Completion.Succeeded (Option.value j.result ~default:`Null))
-     | Failed error ->
-       Ok
-         (Failed
-            { code = P.Error.code_to_string error.code
-            ; message = error.message
-            ; retryable = error.retryable
-            ; details = error.data
-            })
-     | Cancelled -> Ok (Cancelled "job cancelled")
-     | Interrupted reason ->
-       Ok
-         (Failed
-            { code = "interrupted"; message = reason; retryable = false; details = `Null })
-     | Queued | Running | Waiting_permission _ ->
-       invalid "delivery references nonterminal job")
+    let%bind completion =
+      P.Job.terminal_completion j
+      |> Result.map_error ~f:(fun error ->
+        P.Error.create
+          Journal_corrupt
+          ~message:("invalid job completion: " ^ error.message)
+          ~retryable:false
+          ())
+    in
+    (match completion with
+     | Some completion -> Ok completion
+     | None -> invalid "delivery references nonterminal job")
 ;;
 
 let delivery_ready ~invocations (delivery : P.Delivery.t) =
@@ -260,7 +253,7 @@ let validate
                 work
             in
             let%bind result = completion_for_work ~jobs ~subscriptions work in
-            if not (same_completion result c.completion)
+            if not (P.Completion.equal result c.completion)
             then invalid "delivery result differs from its terminal work"
             else if
               List.exists !seen_work ~f:(fun old ->
