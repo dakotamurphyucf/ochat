@@ -310,46 +310,170 @@ let iter_chunks store ~sw handle ~chunk_size ~f =
           loop ()
         | exception End_of_file -> Ok ()
       in
-      loop ()
+      Exn.protect ~finally:(fun () -> Eio.Resource.close source) ~f:loop
     with
     | exn ->
       Error (Store_error.of_exn ~operation:"stream blob" ~path:handle.data_path exn))
 ;;
 
 let adopt store session handle =
-  if handle.Handle.metadata.durable
-  then Ok handle
-  else
+  let session_id = Session_store.Handle.session_id session in
+  match handle.Handle.metadata.target_session with
+  | Some id when not (Agent_protocol.Id.Session.equal id session_id) ->
+    Error (Store_error.Corrupt "blob is bound to another target session")
+  | target ->
+    (match handle.metadata.durable, target with
+     | true, Some _ -> Ok handle
+     | true, None -> Error (Store_error.Corrupt "durable blob has no target session")
+     | false, _ ->
+       Eio.Cancel.protect (fun () ->
+         let open Result.Let_syntax in
+         let directory =
+           Filename.concat (Session_store.Handle.directory session) "blobs"
+         in
+         let destination_data =
+           Filename.concat directory (blob_name handle.metadata.blob.id ".blob")
+         in
+         let destination_metadata =
+           Filename.concat directory (blob_name handle.metadata.blob.id ".sexp")
+         in
+         let%bind () =
+           try
+             Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 (eio_path store directory);
+             match
+               ( Eio.Path.kind ~follow:false (eio_path store destination_data)
+               , Eio.Path.kind ~follow:false (eio_path store destination_metadata) )
+             with
+             | `Not_found, `Not_found ->
+               Eio.Path.rename
+                 (eio_path store handle.data_path)
+                 (eio_path store destination_data);
+               Ok ()
+             | _ ->
+               Error (Store_error.Corrupt "blob adoption would overwrite existing data")
+           with
+           | exn ->
+             Error
+               (Store_error.of_exn
+                  ~operation:"adopt blob data"
+                  ~path:destination_data
+                  exn)
+         in
+         let metadata =
+           { handle.metadata with target_session = Some session_id; durable = true }
+         in
+         match save_metadata store destination_metadata metadata with
+         | Error failure ->
+           (try
+              Eio.Path.rename
+                (eio_path store destination_data)
+                (eio_path store handle.data_path);
+              (match
+                 Eio.Path.kind ~follow:false (eio_path store destination_metadata)
+               with
+               | `Not_found -> ()
+               | _ -> Eio.Path.unlink (eio_path store destination_metadata));
+              let%bind () = Durable_file.sync_directory ~env:store.env ~path:directory in
+              let%bind () =
+                Durable_file.sync_directory ~env:store.env ~path:store.temporary_directory
+              in
+              Error failure
+            with
+            | exn ->
+              Error
+                (Store_error.of_exn
+                   ~operation:"restore failed blob adoption"
+                   ~path:destination_data
+                   exn))
+         | Ok () ->
+           (try Eio.Path.unlink (eio_path store handle.metadata_path) with
+            | _ -> ());
+           handle.metadata <- metadata;
+           handle.data_path <- destination_data;
+           handle.metadata_path <- destination_metadata;
+           Ok handle))
+;;
+
+let load_verified store ~sw handle ~max_bytes =
+  let metadata = handle.Handle.metadata.blob in
+  match
+    max_bytes > 0
+    && Int64.(metadata.byte_length >= zero && metadata.byte_length <= of_int max_bytes)
+  with
+  | false -> Error (Store_error.Corrupt "blob exceeds the requested read limit")
+  | true ->
+    let buffer = Buffer.create (Int.min max_bytes 8192) in
+    let digest = ref Digestif.SHA256.empty in
+    let overflow = ref false in
     let open Result.Let_syntax in
-    let session_id = Session_store.Handle.session_id session in
-    let directory = Filename.concat (Session_store.Handle.directory session) "blobs" in
-    let destination_data =
-      Filename.concat directory (blob_name handle.metadata.blob.id ".blob")
-    in
-    let destination_metadata =
-      Filename.concat directory (blob_name handle.metadata.blob.id ".sexp")
+    let read =
+      iter_chunks store ~sw handle ~chunk_size:8192 ~f:(fun chunk ->
+        match
+          String.length chunk <= max_bytes - Buffer.length buffer && not !overflow
+        with
+        | false ->
+          overflow := true;
+          raise Exit
+        | true ->
+          Buffer.add_string buffer chunk;
+          digest := Digestif.SHA256.feed_string !digest chunk)
     in
     let%bind () =
+      match read, !overflow with
+      | _, true -> Error (Store_error.Corrupt "blob grew beyond its read limit")
+      | result, false -> result
+    in
+    (match
+       (not !overflow)
+       && Int64.equal metadata.byte_length (Int64.of_int (Buffer.length buffer))
+       && String.equal metadata.digest Digestif.SHA256.(get !digest |> to_hex)
+     with
+     | true -> Ok (Buffer.contents buffer)
+     | false ->
+       Error
+         (Store_error.Corrupt "blob content does not match its recorded length and digest"))
+;;
+
+let discard_unreferenced store session handle =
+  let id = handle.Handle.metadata.blob.id in
+  let directory = Filename.concat (Session_store.Handle.directory session) "blobs" in
+  let data_path = Filename.concat directory (blob_name id ".blob") in
+  let metadata_path = Filename.concat directory (blob_name id ".sexp") in
+  let open Result.Let_syntax in
+  let%bind () =
+    match handle.metadata.target_session with
+    | Some target
+      when Agent_protocol.Id.Session.equal
+             target
+             (Session_store.Handle.session_id session) -> Ok ()
+    | _ -> Error (Store_error.Corrupt "unreferenced blob belongs to another session")
+  in
+  let%bind current =
+    match load_metadata store metadata_path with
+    | Ok metadata -> Ok (Some metadata)
+    | Error (Store_error.Missing _ as error) ->
+      (match Eio.Path.kind ~follow:false (eio_path store data_path) with
+       | `Not_found -> Ok None
+       | _ -> Error error)
+    | Error error -> Error error
+  in
+  match
+    Option.for_all current ~f:(fun current ->
+      Sexp.equal ([%sexp_of: Metadata.t] current) ([%sexp_of: Metadata.t] handle.metadata))
+  with
+  | false -> Error (Store_error.Corrupt "blob changed before unreferenced cleanup")
+  | true ->
+    Eio.Cancel.protect (fun () ->
       try
-        Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 (eio_path store directory);
-        Eio.Path.rename
-          (eio_path store handle.data_path)
-          (eio_path store destination_data);
-        Ok ()
+        List.iter [ data_path; metadata_path ] ~f:(fun path ->
+          match Eio.Path.kind ~follow:false (eio_path store path) with
+          | `Not_found -> ()
+          | _ -> Eio.Path.unlink (eio_path store path));
+        Durable_file.sync_directory ~env:store.env ~path:directory
       with
       | exn ->
-        Error (Store_error.of_exn ~operation:"adopt blob data" ~path:destination_data exn)
-    in
-    let metadata =
-      { handle.metadata with target_session = Some session_id; durable = true }
-    in
-    let%bind () = save_metadata store destination_metadata metadata in
-    (try Eio.Path.unlink (eio_path store handle.metadata_path) with
-     | _ -> ());
-    handle.metadata <- metadata;
-    handle.data_path <- destination_data;
-    handle.metadata_path <- destination_metadata;
-    Ok handle
+        Error
+          (Store_error.of_exn ~operation:"discard unreferenced blob" ~path:data_path exn))
 ;;
 
 let expired ~now metadata =

@@ -20,6 +20,7 @@
   audit
   job
   job_progress
+  job_artifact
   invocation
   moderator_execution
   extension_codec

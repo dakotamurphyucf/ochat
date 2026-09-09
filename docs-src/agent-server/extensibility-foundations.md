@@ -1503,6 +1503,32 @@ the parent job. Only exact selected native bindings receive the display observer
 and that observer expires when the runner returns. Terminal results still follow
 their independent outcome, schema, disclosure and persistence rules.
 
+### Result artifact storage foundation
+
+`Agent_store.Job_result_store` stores an already validated completion in a
+session-owned blob. Its versioned `Job_artifact` reference binds the blob's digest
+and metadata to the exact session, job, generation and attempt. Preparation does
+not grant execution authority or replace schema and disclosure checks: the host
+must perform those checks before writing the completion.
+
+A preparation can retry persistence of the same reference without rewriting the
+blob or running the tool again. Once persistence has been attempted, the service
+will not discard the blob merely because the callback reports an error. The save
+may have succeeded before its acknowledgement failed. Removing such an artifact
+requires separate reconciliation proving it has no durable references. A preparation
+whose persistence was never attempted can be discarded idempotently.
+
+Reads verify the session and job binding, full metadata, bounded byte count and
+SHA-256 digest before decoding the completion. Adoption refuses another target
+session or an existing destination and restores temporary data if its metadata
+save fails. Job-result blob reads require the same `send_messages` scope as job
+reads, in addition to the transport's session access checks.
+
+This storage service is not yet connected to scheduler completion commits,
+dependency materialization, artifact-backed `Job.get`, or orphan reconciliation.
+Ordinary job completion still uses the existing inline representation. General
+model-visible availability remains gated on authoring qualification.
+
 Cancelling a provisional ticket releases capacity immediately and preserves a
 cancelled record for the owner's eventual `Pending(Job(id), acknowledgement)`.
 Its committed attempt stays zero and it never publishes a reservation to a worker.

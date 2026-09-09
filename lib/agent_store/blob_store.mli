@@ -69,6 +69,15 @@ val open_session
 
 val load : t -> Handle.t -> (string, Store_error.t) result
 
+(** Bounded streaming load, checking actual length and SHA-256 against metadata
+    before returning bytes. Fails on growth, truncation or changed contents. *)
+val load_verified
+  :  t
+  -> sw:Eio.Switch.t
+  -> Handle.t
+  -> max_bytes:int
+  -> (string, Store_error.t) result
+
 (** [read_range] reads at most [max_bytes] starting at [offset] without
     loading the complete blob. The offset may equal the blob length to obtain
     an empty terminal chunk, but may not exceed it. *)
@@ -90,8 +99,19 @@ val iter_chunks
   -> f:(string -> unit)
   -> (unit, Store_error.t) result
 
-(** [adopt] moves a temporary blob below a typed session handle. *)
+(** [adopt] moves a temporary blob below its allowed typed session handle without
+    overwriting an existing blob. A failed metadata save restores temporary data;
+    an already durable handle can be reused only by its original session. *)
 val adopt : t -> Session_store.Handle.t -> Handle.t -> (Handle.t, Store_error.t) result
+
+(** Discard a host-owned artifact known not to be referenced by a committed
+    transaction. Checks the exact session and unchanged metadata before removal;
+    callers must establish absence of durable references. *)
+val discard_unreferenced
+  :  t
+  -> Session_store.Handle.t
+  -> Handle.t
+  -> (unit, Store_error.t) result
 
 (** [cleanup_expired] removes only expired metadata/data pairs below the
     configured temporary blob directory. *)

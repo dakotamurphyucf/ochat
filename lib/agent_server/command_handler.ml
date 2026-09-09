@@ -578,7 +578,7 @@ let handle_blob_read t context request =
         (Agent_store.Blob_store.Handle.metadata handle)
     then Ok ()
     else
-      Error (error Permission_denied "export blob requires its original principal scopes")
+      Error (error Permission_denied "blob requires additional principal scopes")
   in
   if Int64.(request.offset > blob.byte_length)
   then Error (error Invalid_request "blob read offset exceeds the blob length")
