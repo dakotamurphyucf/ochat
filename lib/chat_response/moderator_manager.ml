@@ -323,6 +323,36 @@ let create
   in
   let handlers = Moderation.Capabilities.runtime_handlers capabilities in
   let handlers =
+    match artifact.extension with
+    | None -> handlers
+    | Some _ ->
+      { handlers with
+        on_tool_call =
+          (fun session ~name ~args ->
+            (* Native work may hand off to another domain. Collect there, then
+               deliver on this interpreter's context before its continuation.
+               Do not mutate the pending transaction from a worker domain. *)
+            let result, requests =
+              Runtime_request_scope.collect (fun () ->
+                handlers.on_tool_call session ~name ~args)
+            in
+            let open Result.Let_syntax in
+            let%bind () =
+              List.fold_result requests ~init:() ~f:(fun () request ->
+                let request_effect : Chatml.Chatml_lang.eff =
+                  match request with
+                  | Moderation.Runtime_request.Request_turn ->
+                    { op = "Runtime.request_turn"; args = [] }
+                  | Request_compaction -> { op = "Runtime.request_compaction"; args = [] }
+                  | End_session reason ->
+                    { op = "Runtime.end_session"; args = [ VString reason ] }
+                in
+                Runtime.perform_local_effect session request_effect)
+            in
+            result)
+      }
+  in
+  let handlers =
     Option.value_map on_process_run ~default:handlers ~f:(fun on_process_run ->
       { handlers with on_process_run })
   in

@@ -1880,8 +1880,10 @@ and the daemon's qualification flag remains disabled by default until A01.
 observer through synchronous nesting. Its callback expires with its lexical scope;
 an actual native borrow restores that same context across a domain handoff.
 Standalone and one-off scripts retain their owning pre-tool routing. An active
-moderator shadows the ambient callback with a reentrancy error, so a descendant
-cannot use a borrowed foreground callback to re-enter the same moderator.
+moderator uses its scoped native policy without borrowing a foreground pre-hook.
+If a tool requires an authorizing decision from that same active moderator, the
+descendant is rejected before native authorization or effects. Otherwise it can
+use the selected tool through the usual native permission checks.
 
 Captured-runtime tests run two model-submitted scripts through the real builder,
 scoped file reader, actor persistence and simulated provider stream. They cover
@@ -1891,9 +1893,34 @@ and default-host rejection. Compiler failures retain source-bound diagnostics in
 the canonical model-facing failure; rejected limit escalation admits no Script
 child. Recursive
 execution adds native/script invocations without additional provider turns; all
-model-facing results have canonical publication records. Moderator/event request
-collection, generalized nested-extension ownership and authoring-helper
-integration remain pending before full feature qualification.
+model-facing results have canonical publication records.
+
+Native requests made during a versioned moderator's `Tool.call` now join that
+moderator transaction. The manager collects them during the native call, including
+owned domain handoffs, then delivers them on the original interpreter before its
+continuation. `Chatml_host_runtime.perform_local_effect` uses the declared local
+operation, phase checks, execution controls and pending effect buffer. A native
+callback cannot mutate the pending transaction from another domain through this
+path. `Task.catch` restores these effects with its other local buffers; failed
+handlers or rejected snapshot saves leave the prior state and halt status intact.
+The native tool's external effects remain external and are not undone.
+
+Event and idle-observation executors also admit Script descendants of a parent
+that is still active under that exact owner. Session/generation and deadline
+boundaries are preserved, and supplied observation intent must match the owner's
+source. Logical Script nodes may omit observations. Descendants cannot manufacture
+provider, history, event or job ownership. The same owner tracks all descendants
+for cancellation, permission cleanup and completion before committing its event
+or observation.
+
+Captured builder cases exercise tool-using one-offs from foreground startup, idle
+startup and idle observations. A required active authorizing hook fails without
+executing the nested read or starting a provider turn. Actor admission tests reject
+unknown/expired parents, wider deadlines, foreign sessions and mismatched sources
+without entering callbacks or modifying persisted state. Transaction tests cover
+successful requests, caught and uncaught failures, rejected saves, invalid phases
+and domain handoffs. Generalized extension-to-extension routing, remaining resource
+audits and authoring-helper integration still require full qualification.
 
 ## Authoring policy admission plans
 

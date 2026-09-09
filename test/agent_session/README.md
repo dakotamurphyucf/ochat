@@ -10,6 +10,7 @@ stay beside those tests. Test modules depend on fixtures, not on other test modu
 | Durable state and publication | `state_tests.ml`, `invocation_tests.ml`, `persistence_tests.ml` |
 | Jobs and follow-up scheduling | `jobs_tests.ml`, `follow_up_tests.ml` |
 | Moderator ownership and lifecycle | `moderator_handoff_tests.ml`, `moderator_lifecycle_tests.ml` |
+| Event/idle descendant admission and scope expiration | `moderator_descendant_tests.ml` |
 | Captured runtime construction and native/script integration | `runtime_builder_tests.ml` |
 | Moderator queue delivery and observations | `event_delivery_tests.ml`, `observations_tests.ml` |
 | Native calls and stream routing | `moderator_native_calls_tests.ml`, `moderator_routing_tests.ml` |

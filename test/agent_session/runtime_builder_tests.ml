@@ -25,6 +25,10 @@ let%expect_test "captured runtime construction installs owned lifecycle and scri
     ; `One_off_recursive
     ; `One_off_compile
     ; `One_off_limit
+    ; `One_off_start
+    ; `One_off_idle
+    ; `One_off_observation
+    ; `One_off_required
     ]
     ~f:(fun mode ->
       let one_off =
@@ -36,7 +40,11 @@ let%expect_test "captured runtime construction installs owned lifecycle and scri
         | `One_off_end
         | `One_off_recursive
         | `One_off_compile
-        | `One_off_limit -> true
+        | `One_off_limit
+        | `One_off_start
+        | `One_off_idle
+        | `One_off_observation
+        | `One_off_required -> true
         | _ -> false
       in
       let tool_name = if one_off then "run_chatml" else "counter" in
@@ -94,7 +102,11 @@ let on_event = fun ctx state event -> match event with
             | `One_off_end
             | `One_off_recursive
             | `One_off_compile
-            | `One_off_limit ->
+            | `One_off_limit
+            | `One_off_start
+            | `One_off_idle
+            | `One_off_observation
+            | `One_off_required ->
               let file =
                 match mode with
                 | `Standalone_rewrite | `One_off_rewrite -> "missing.txt"
@@ -176,7 +188,37 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
           Eio.Path.save
             ~create:(`Or_truncate 0o600)
             Eio.Path.(root / "root.chatmd")
-            source;
+            (let program =
+               {|let main input = Task.bind(Tool.call("read_file", input), fun result -> match result with
+| `Ok(value) -> Task.pure(value) | `Error(code) -> Task.fail(code))|}
+             in
+             let run =
+               {|Tool.call("run_chatml", `Object([{key = "source"; value = `String(|}
+               ^ Jsonaf.to_string (`String program)
+               ^ {|)},
+{key = "input"; value = `Object([{key = "root"; value = `String("data")}, {key = "file"; value = `String("value.txt")}])},
+{key = "tools"; value = `Array([`String("read_file")])}]))|}
+             in
+             match mode with
+             | `One_off_start | `One_off_idle | `One_off_required ->
+               String.substr_replace_all
+                 source
+                 ~pattern:
+                   {|Tool.call("read_file", `Object([{key = "root"; value = `String("data")}, {key = "file"; value = `String("value.txt")}]))|}
+                 ~with_:run
+             | `One_off_observation ->
+               String.substr_replace_all
+                 source
+                 ~pattern:"| `Tool_observed(p) -> (match p.origin with"
+                 ~with_:
+                   ("| `Tool_observed(p) -> (match p.origin with\n"
+                    ^ "| `Moderator -> if state[0] == 10 then let ignored = state[0] <- \
+                       20 in Task.bind("
+                    ^ run
+                    ^ ", fun result -> match result with | `Error(code) -> \
+                       Task.fail(code) | `Ok(_) -> Task.pure(state)) else \
+                       Task.pure(state)")
+             | _ -> source);
           let definition =
             Agent_session.Prompt_definition.create
               ~id:prompt_id
@@ -258,7 +300,10 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                     ~moderator_names:(String.Set.singleton "counter")
                     ~now:Agent_protocol.Timestamp.now
                     ~is_halted:(fun () -> (A.state actor |> protocol_ok).halted)
-                    ~requires_active_moderator:(fun _ -> false)
+                    ~requires_active_moderator:(fun reference ->
+                      match mode with
+                      | `One_off_required -> String.equal reference.C.name "read_file"
+                      | _ -> false)
                     ~authorize:(fun invocation _ ->
                       match mode with
                       | `Denied ->
@@ -479,6 +524,22 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                    assert (
                      Agent_server.Runtime_owner.drain_idle_moderator owner |> protocol_ok);
                    [%test_eq: int] 1 !authorized
+                 | `One_off_idle | `One_off_observation ->
+                   let rec drain remaining =
+                     assert (remaining > 0);
+                     match
+                       Agent_server.Runtime_owner.drain_idle_moderator owner
+                       |> protocol_ok
+                     with
+                     | true -> drain (remaining - 1)
+                     | false -> ()
+                   in
+                   drain 20;
+                   [%test_eq: int]
+                     (match mode with
+                      | `One_off_idle -> 2
+                      | _ -> 3)
+                     !authorized
                  | _ -> ());
                 let entry =
                   Agent_session.History_codec.user_text ~id:history_id "count twice"
@@ -594,7 +655,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                 in
                 assert (List.is_empty observations);
                 (match mode with
-                 | `Denied -> [%test_eq: int] 1 (List.length failures)
+                 | `Denied | `One_off_required -> [%test_eq: int] 1 (List.length failures)
                  | _ ->
                    if not (List.is_empty failures)
                    then
@@ -624,6 +685,10 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                              | `One_off_recursive
                              | `One_off_compile
                              | `One_off_limit
+                             | `One_off_start
+                             | `One_off_idle
+                             | `One_off_observation
+                             | `One_off_required
                              ]
                     ; provider_calls = (!requests : int)
                     ; authorized_native_calls = (!authorized : int)
@@ -701,5 +766,17 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
      (policy_evaluations 0) (state 10)
      (published (chatml.limit_escalation chatml.limit_escalation))
      (operation_failed false) (observed 1))
+    ((mode One_off_start) (provider_calls 2) (authorized_native_calls 6)
+     (policy_evaluations 0) (state 13) (published (1 1)) (operation_failed false)
+     (observed 4))
+    ((mode One_off_idle) (provider_calls 2) (authorized_native_calls 6)
+     (policy_evaluations 0) (state 13) (published (1 1)) (operation_failed false)
+     (observed 4))
+    ((mode One_off_observation) (provider_calls 2) (authorized_native_calls 7)
+     (policy_evaluations 0) (state 23) (published (1 1)) (operation_failed false)
+     (observed 5))
+    ((mode One_off_required) (provider_calls 0) (authorized_native_calls 1)
+     (policy_evaluations 0) (state 0) (published ()) (operation_failed true)
+     (observed 0))
     |}]
 ;;

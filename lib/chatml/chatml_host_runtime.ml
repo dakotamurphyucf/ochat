@@ -1143,6 +1143,22 @@ let dispatch_effect
                   Error msg)))))
 ;;
 
+let perform_local_effect (session : session) (eff : Lang.eff) =
+  with_current_exec session ~name:"perform_local_effect" ~f:(fun exec ->
+    let open Result.Let_syntax in
+    let%bind operation = find_operation session eff.op in
+    let%bind () =
+      match operation.kind with
+      | Local_transactional -> Ok ()
+      | External_sync | External_async | Diagnostic ->
+        Error "host local-effect delivery requires a transactional operation"
+    in
+    let%bind result = dispatch_effect session exec ~spawned:false eff in
+    match result with
+    | Effect_value _ -> Ok ()
+    | Effect_suspend _ -> Error "host local-effect delivery cannot suspend")
+;;
+
 let rec continue_with_value
           (session : session)
           (exec : exec_ctx)

@@ -11,6 +11,7 @@
   invocation_tests
   jobs_tests
   moderator_handoff_tests
+  moderator_descendant_tests
   moderator_lifecycle_tests
   moderator_native_calls_tests
   moderator_routing_tests

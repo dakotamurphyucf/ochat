@@ -233,7 +233,15 @@ let with_scope
       | Moderator ->
         Native_tool_moderation.with_handler
           ~observer
-          ~prepare:(fun _ -> Error "moderator_reentrancy")
+          ~prepare:(fun call ->
+            match
+              List.find references ~f:(fun reference ->
+                String.equal reference.C.name call.Chat_response.Moderation.Tool_call.name)
+            with
+            | None -> Error "invocation.unselected_tool"
+            | Some reference when t.requires_active_moderator reference ->
+              Error "moderator_reentrancy"
+            | Some _ -> Ok None)
           (fun () -> f call)
       | Model | Script | Delegated_agent | External_adapter -> f call)
 ;;

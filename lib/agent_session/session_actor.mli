@@ -573,8 +573,11 @@ val with_idle_queued_moderator_event
       -> (unit, Agent_protocol.Error.t) result)
   -> (bool, Agent_protocol.Error.t) result
 
-(** Queued-event handoff with an actor-owned native executor. Only direct children
-    of this Running event with matching source observation intent can be admitted.
+(** Queued-event handoff with an actor-owned native executor. Direct children
+    of this Running event require matching source observation intent. Script
+    descendants require a still-active parent owned by this exact event borrow,
+    the same session/generation and no wider deadline. Any observer must match the
+    event source; logical Script nodes may omit observation intent.
     Route the executor through [Native_tool_invocation.run_scoped] for capability,
     policy and disclosure checks. Commit waits for all recorded child outcomes;
     failed outcome saves are cancelled at callback cleanup. Scope expires on
@@ -682,8 +685,11 @@ val with_idle_moderator_observation
   -> (bool, Agent_protocol.Error.t) result
 
 (** Idle observation handoff with a native invocation executor tied to this
-    borrow. Only Moderator children of the observing invocation, with the same
-    source-bound observation intent and session generation, can be admitted.
+    borrow. Direct Moderator children of the observing invocation require the same
+    source-bound observation intent and session generation. Script descendants
+    require an active parent owned by this exact borrow, the same generation,
+    a non-widening deadline and compatible observation intent. Logical Script
+    nodes may omit observations; they cannot gain provider/event/job identities.
     Calls and results are persisted outside provider history. The executor grants
     no tool authorization: route it through [Native_tool_invocation.run_scoped].
     It expires when the callback returns or commits and rejects calls after stop.

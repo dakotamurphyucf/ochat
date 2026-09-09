@@ -324,6 +324,15 @@ val emit_internal_event : session -> value -> (unit, string) result
     transactional context. *)
 val request_session_end : session -> reason:string -> (unit, string) result
 
+(** Deliver a host-selected local operation into the current transaction using
+    the same declared operation, phase checks, execution controls and effect
+    buffer as script dispatch. External/diagnostic operations are rejected before
+    execution. The owner must call this on its active interpreter context after
+    joining native work; it is not an asynchronous session mutation API.
+    Effects participate in Task.catch restoration, handler rollback, prospective
+    snapshot preparation and commit. Outside active interpretation it fails. *)
+val perform_local_effect : session -> eff -> (unit, string) result
+
 (** Handle one event:
 
     - invokes [on_event],

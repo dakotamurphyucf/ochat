@@ -1483,6 +1483,46 @@ let event_execution_owned_by borrow execution =
   | _ -> false
 ;;
 
+let active_script_parent t ~owns (invocation : Agent_protocol.Invocation.t) =
+  let open Result.Let_syntax in
+  let%bind parent =
+    match invocation.context.origin, invocation.context.parent_invocation with
+    | Script, Some parent
+      when Option.is_none invocation.parent_event
+           && Option.is_none invocation.context.parent_job
+           && Option.is_none invocation.context.provider_call_id
+           && Option.is_none invocation.context.call_entry_id ->
+      List.find t.invocation_executions ~f:(fun execution ->
+        execution.accepts_children
+        && owns execution
+        && Agent_protocol.Id.Invocation.equal execution.dispatched.context.id parent)
+      |> Result.of_option
+           ~error:(error Conflict "script parent is not active in this owner")
+    | _ -> Error (error Conflict "owned descendants require a script parent link")
+  in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:parent.dispatched.context.session_id
+      ~generation:parent.dispatched.context.generation
+      invocation.context.session_id
+      invocation.context.generation
+  in
+  match parent.dispatched.context.deadline, invocation.context.deadline with
+  | None, _ -> Ok ()
+  | Some parent, Some child when Agent_protocol.Timestamp.compare child parent <= 0 ->
+    Ok ()
+  | Some _, _ ->
+    Error (error Conflict "script descendant cannot extend its parent's deadline")
+;;
+
+let compatible_script_observer observer (invocation : Agent_protocol.Invocation.t) =
+  match invocation.observation with
+  | None -> Ok ()
+  | Some observation
+    when Agent_protocol.Invocation.equal_observer observer observation.observer -> Ok ()
+  | Some _ -> Error (error Conflict "script descendant has a different moderator source")
+;;
+
 let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
   let%bind () = queued_event_can_commit t borrow in
@@ -1491,7 +1531,19 @@ let claim_event_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
     | None, Some parent
       when Agent_protocol.Id.Moderator_execution.equal parent borrow.receipt.context.id ->
       Ok ()
+    | None, None ->
+      let%bind () =
+        active_script_parent t ~owns:(event_execution_owned_by borrow) invocation
+      in
+      compatible_script_observer borrow.receipt.context.source invocation
     | _ -> Error (error Conflict "invocation does not belong to this executing event")
+  in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      invocation.context.session_id
+      invocation.context.generation
   in
   let%bind () =
     Extension_invariants.invocation_event_owner
@@ -1802,6 +1854,11 @@ let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
       when Agent_protocol.Id.Invocation.equal parent borrow.invocation.context.id
            && Agent_protocol.Invocation.equal_observer child.observer observed.observer ->
       Ok ()
+    | Script, Some _, None, _, Some observed ->
+      let%bind () =
+        active_script_parent t ~owns:(idle_execution_owned_by borrow) invocation
+      in
+      compatible_script_observer observed.observer invocation
     | _ -> Error (error Conflict "idle invocation must belong to its observing moderator")
   in
   let%bind admission = invocation_admission_deltas t invocation in

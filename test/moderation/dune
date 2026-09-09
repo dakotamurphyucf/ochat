@@ -85,3 +85,10 @@
  (libraries core chat_response chatmd chatmd_shell_spec chatml chatml_execution eio eio_main history_entry session)
  (inline_tests)
  (preprocess (pps ppx_jane)))
+
+(library
+ (name moderator_native_requests_test)
+ (modules moderator_native_requests_test)
+ (libraries core chat_response chatmd chatml eio eio_main history_entry session)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
