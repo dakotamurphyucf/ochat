@@ -4,6 +4,7 @@
   fixtures
   actor_tests
   borrowed_execution_tests
+  background_execution_tests
   compaction_tests
   event_delivery_tests
   follow_up_tests
@@ -11,6 +12,7 @@
   invocation_tests
   jobs_tests
   job_execution_tests
+  job_fixtures
   managed_nested_tests
   managed_moderator_owner_tests
   managed_moderator_dispatch_tests

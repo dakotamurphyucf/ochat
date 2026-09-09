@@ -92,9 +92,24 @@ scope to finish, and failed cleanup persistence retains an inactive owner for
 reconciliation. This actor service still requires normal tool authorization and
 does not itself install a generic worker or admit a new background job.
 
+`Background_execution.run` composes reconstruction with that actor-owned executor.
+It compares the request with the persisted job intent before compilation or tool
+execution, then runs a native/managed tool or the exact one-off script. The shared
+tool bridge retains complete structured failures, applies pre-tool routing and
+current authorization, and uses disclosed outputs. The host must supply the
+actual moderation and outcome-validation hooks and consume returned runtime
+requests at its owning boundary.
+
+`Chatml_execution.with_host_budget` supplies aggregate limits across this work
+without counting a native wrapper as a ChatML invocation. Actual interpreter
+entries consume depth slots, and existing ancestor limits still apply. Result
+limits are checked before the job root's outcome is saved; a completed native
+effect cannot be undone if its returned output later exceeds those limits.
+
 These internal services are not an enabled background execution path.
-Transactional capacity reservation, committed launch intent, actor-owned generic
-workers and completion delivery remain under implementation. A decoded request or
+Scheduler dispatch, transactional capacity reservation, committed launch intent,
+job-owned moderator handoffs and generic completion delivery remain under
+implementation. A decoded request or
 its content digest is not an authorization grant. Execution must still use the
 owning actor and current policy, moderation, approval and output-disclosure checks.
 

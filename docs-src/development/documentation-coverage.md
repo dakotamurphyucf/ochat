@@ -212,6 +212,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/active_calls.mli` | [contract](../../lib/agent_session/active_calls.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/administration.mli` | [contract](../../lib/agent_session/administration.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/authoring_validation_tool.mli` | [contract](../../lib/agent_session/authoring_validation_tool.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
+| `lib/agent_session/background_execution.mli` | [contract](../../lib/agent_session/background_execution.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/chatmd_export.mli` | [contract](../../lib/agent_session/chatmd_export.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/compaction_archive.mli` | [contract](../../lib/agent_session/compaction_archive.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/durable_event_log.mli` | [contract](../../lib/agent_session/durable_event_log.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

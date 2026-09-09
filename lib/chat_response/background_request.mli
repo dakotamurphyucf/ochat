@@ -27,6 +27,9 @@ val script
 
 val to_json : t -> Jsonaf.t
 
+(** Effective stored budget, retained independently of later host defaults. *)
+val policy : t -> One_off_request.policy
+
 (** Strict versioned decoding and resource validation. Stored limits must still
     fit the current host ceiling; changing a default cannot enlarge old work.
     Decoding does not resolve tools, compile source or confer execution authority. *)

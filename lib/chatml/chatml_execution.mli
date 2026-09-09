@@ -78,6 +78,18 @@ val with_control
   -> (Chatml.Chatml_lang.execution_control option -> 'a)
   -> ('a, error) result
 
+(** Install a host-owned aggregate budget around native dispatch without counting
+    the host wrapper as a ChatML invocation. The first actual interpreter scope
+    consumes the first depth slot. Existing ancestor budgets/lifetimes still apply;
+    native wrappers cannot reset them. Use for background tool execution, retaining
+    controlled input/output conversion and charging the actual tool effect. *)
+val with_host_budget
+  :  ?context:context
+  -> policy:policy
+  -> env:< mono_clock : _ Eio.Time.Mono.t ; .. >
+  -> (Chatml.Chatml_lang.execution_control option -> 'a)
+  -> ('a, error) result
+
 (** Evaluate without opening a second budget/depth scope. The owning host must
     pass the control from its current [with_control] or persistent runner scope.
     Argument/result bounds still apply; this does not grant tool authority. *)

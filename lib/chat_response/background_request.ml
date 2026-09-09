@@ -32,6 +32,7 @@ type execution =
       }
 
 let invalid message = Error (Agent_protocol.Error.invalid_request message)
+let policy t = t.policy
 let digest = Chatmd_shell_spec.Source_ref.digest
 let number value = `Number (Int.to_string value)
 let seconds value = Jsonaf.Export.jsonaf_of_float value

@@ -156,6 +156,26 @@ val with_standalone
     host's current registry. Does not run source or authorizing callbacks. *)
 val validate_one_off : t -> Chat_response.One_off_script.t -> (unit, string) result
 
+(** Execute one selected target as a child of an actor-dispatched Script job root.
+    Uses the same pre-tool routing, native/managed dispatch, current policy,
+    disclosure and observation handling as synchronous script calls, while
+    retaining the complete structured outcome (including failure details).
+    The borrow must belong to the job's owned invocation service. A missing
+    moderator handoff is not permission to bypass a managed moderator target.
+    Admission/observation failures are returned separately from saved outcomes. *)
+val call_background
+  :  ?observer:Agent_protocol.Invocation.observer
+  -> t
+  -> borrowed:Native_tool_invocation.borrowed
+  -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
+  -> max_nested_calls:int
+  -> moderate:
+       (Chat_response.Moderation.Tool_call.t
+        -> (Chat_response.Moderation.Tool_moderation.t option, string) result)
+  -> name:string
+  -> args:Jsonaf.t
+  -> (Agent_protocol.Invocation.outcome, string) result
+
 (** Reuse standalone moderation/routing and disclosure for a prepared
     one-off program under its actual borrowed Script invocation. The source and
     capability fingerprints must match that dispatched child. No synthetic tool

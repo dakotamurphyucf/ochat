@@ -113,7 +113,9 @@ type prepared_call =
   ; rejection : I.outcome option
   }
 
-let with_scope
+let with_scope_results
+      ~result_of_invocation
+      ~result_of_error
       ?prepare
       ?moderator_execute
       ?(max_nested_calls = Chat_response.Moderator_invocation.max_nested_calls)
@@ -127,6 +129,7 @@ let with_scope
       ~parent
       f
   =
+  let tool_error code = Ok (result_of_error code) in
   let session_id, generation, parent_invocation, parent_event, deadline =
     match parent with
     | Invocation parent ->
@@ -287,11 +290,7 @@ let with_scope
             | None -> Ok ()
             | Some _ -> checked `Observation (fun () -> t.defer_observation resolved)
           in
-          match resolved.status with
-          | Resolved (Complete value) -> M.Tool_ok value
-          | Resolved (Fail error) -> Tool_error error.code
-          | Resolved (Cancelled _) -> Tool_error "invocation.cancelled"
-          | _ -> Tool_error "invocation.invalid_outcome"
+          result_of_invocation resolved
         in
         (match execute () with
          | Ok result -> Ok result
@@ -320,6 +319,45 @@ let with_scope
             | Some _ -> Ok None)
           (fun () -> f call)
       | Model | Script | Delegated_agent | External_adapter -> f call)
+;;
+
+let tool_result (resolved : I.t) =
+  match resolved.status with
+  | Resolved (Complete value) -> M.Tool_ok value
+  | Resolved (Fail error) -> Tool_error error.code
+  | Resolved (Cancelled _) -> Tool_error "invocation.cancelled"
+  | _ -> Tool_error "invocation.invalid_outcome"
+;;
+
+let with_scope
+      ?prepare
+      ?moderator_execute
+      ?max_nested_calls
+      t
+      ~selected
+      ~limits
+      ~origin
+      ~observer
+      ~valid_parent
+      ~execute
+      ~parent
+      f
+  =
+  with_scope_results
+    ~result_of_invocation:tool_result
+    ~result_of_error:(fun code -> M.Tool_error code)
+    ?prepare
+    ?moderator_execute
+    ?max_nested_calls
+    t
+    ~selected
+    ~limits
+    ~origin
+    ~observer
+    ~valid_parent
+    ~execute
+    ~parent
+    f
 ;;
 
 let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
@@ -393,7 +431,9 @@ let with_managed_invocation t ~execution ~borrowed f =
     f
 ;;
 
-let with_script_native_calls
+let with_script_native_results
+      ~result_of_invocation
+      ~result_of_error
       ?observer
       ?max_nested_calls
       ?moderator_execute
@@ -495,7 +535,9 @@ let with_script_native_calls
           | Some reference -> route reference args Passed None))
   in
   Native_tool_moderation.with_handler ~observer ~prepare:moderate (fun () ->
-    with_scope
+    with_scope_results
+      ~result_of_invocation
+      ~result_of_error
       ~prepare
       ?max_nested_calls
       ?moderator_execute
@@ -508,6 +550,66 @@ let with_script_native_calls
       ~execute
       ~parent:(Invocation parent)
       f)
+;;
+
+let with_script_native_calls
+      ?observer
+      ?max_nested_calls
+      ?moderator_execute
+      t
+      ~selected
+      ~limits
+      ~execute
+      ~valid_parent
+      ~parent
+      ~moderate
+      f
+  =
+  with_script_native_results
+    ~result_of_invocation:tool_result
+    ~result_of_error:(fun code -> M.Tool_error code)
+    ?observer
+    ?max_nested_calls
+    ?moderator_execute
+    t
+    ~selected
+    ~limits
+    ~execute
+    ~valid_parent
+    ~parent
+    ~moderate
+    f
+;;
+
+let call_background ?observer t ~borrowed ~limits ~max_nested_calls ~moderate ~name ~args =
+  let open Result.Let_syntax in
+  let%bind selected =
+    Native_tool_invocation.borrowed_capabilities borrowed
+    |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+  in
+  let parent = Native_tool_invocation.borrowed_invocation borrowed in
+  let valid_parent =
+    match parent.status, parent.context.origin with
+    | Dispatching, Script -> Option.is_some parent.context.parent_job
+    | _ -> false
+  in
+  with_script_native_results
+    ~result_of_invocation:(fun resolved ->
+      match resolved.I.status with
+      | Resolved outcome -> Ok outcome
+      | _ -> Error "invocation.invalid_outcome")
+    ~result_of_error:(fun code -> Error code)
+    ?observer
+    ~max_nested_calls
+    ?moderator_execute:(Native_tool_invocation.moderator_executor borrowed)
+    t
+    ~selected
+    ~limits
+    ~execute:(Native_tool_invocation.execute_borrowed borrowed)
+    ~valid_parent
+    ~parent
+    ~moderate
+    (fun call -> Result.join (call ~name ~args))
 ;;
 
 let run_managed t service execution borrowed =

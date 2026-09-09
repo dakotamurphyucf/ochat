@@ -47,7 +47,7 @@ type frame =
   { active : bool Atomic.t
   ; ancestors : frame list
     (* Each entry retains remaining invocation depth at this frame. *)
-  ; budgets : (int * budget * Chatml.Chatml_lang.execution_control) list
+  ; budgets : (int64 * budget * Chatml.Chatml_lang.execution_control) list
   }
 
 let frame_key = Eio.Fiber.create_key ()
@@ -417,7 +417,13 @@ let make_control ~env budget =
   }
 ;;
 
-let with_scope ?(policy = Bounded default_limits) ?(context = []) ~env f =
+let with_scope
+      ?(invocation = true)
+      ?(policy = Bounded default_limits)
+      ?(context = [])
+      ~env
+      f
+  =
   let execute () =
     let parents = capture_context ~inherited:context () in
     let ancestors =
@@ -432,7 +438,7 @@ let with_scope ?(policy = Bounded default_limits) ?(context = []) ~env f =
         | false -> budgets @ [ remaining, budget, control ]
         | true ->
           List.map budgets ~f:(fun (current, other, control) ->
-            ( (if phys_equal budget other then Int.min current remaining else current)
+            ( (if phys_equal budget other then Int64.min current remaining else current)
             , other
             , control )))
     in
@@ -449,15 +455,18 @@ let with_scope ?(policy = Bounded default_limits) ?(context = []) ~env f =
     in
     check_ancestors ();
     let inherited =
-      List.map inherited ~f:(fun (remaining, budget, control) ->
-        if remaining <= 1
-        then
-          exhaust
-            budget
-            { code = "chatml.invocation_depth"
-            ; message = "ChatML invocation depth exhausted"
-            };
-        remaining - 1, budget, control)
+      match invocation with
+      | false -> inherited
+      | true ->
+        List.map inherited ~f:(fun (remaining, budget, control) ->
+          if Int64.(remaining <= 1L)
+          then
+            exhaust
+              budget
+              { code = "chatml.invocation_depth"
+              ; message = "ChatML invocation depth exhausted"
+              };
+          Int64.pred remaining, budget, control)
     in
     let active = Atomic.make true in
     let budgets =
@@ -465,7 +474,16 @@ let with_scope ?(policy = Bounded default_limits) ?(context = []) ~env f =
       | Unrestricted -> inherited
       | Bounded limits ->
         let budget = { limits; active; failure = Atomic.make None } in
-        inherited @ [ limits.max_invocation_depth, budget, make_control ~env budget ]
+        let depth = Int64.of_int limits.max_invocation_depth in
+        (* Host-only scopes have no current ChatML frame. The extra slot is
+           consumed by the first actual invocation. Int64 can represent the
+           successor of every positive OCaml int without overflow. *)
+        let depth =
+          match invocation with
+          | true -> depth
+          | false -> Int64.succ depth
+        in
+        inherited @ [ depth, budget, make_control ~env budget ]
     in
     let frame = { active; ancestors; budgets } in
     let each f =
@@ -570,7 +588,11 @@ let create_runner ~env ~policy () =
 
 let runner_control runner = runner.control
 let run_scoped ?context runner f = runner.run ?context f
-let with_control = with_scope
+let with_control ?policy ?context ~env f = with_scope ?policy ?context ~env f
+
+let with_host_budget ?context ~policy ~env f =
+  with_scope ~invocation:false ?context ~policy ~env f
+;;
 
 let run_in_scope
       ~(control : Chatml.Chatml_lang.execution_control option)

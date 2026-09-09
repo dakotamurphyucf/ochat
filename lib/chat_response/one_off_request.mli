@@ -29,3 +29,6 @@ val decode : policy:policy -> Jsonaf.t -> (t, Chatmd_shell_spec.Diagnostic.t lis
 
 (** Adapt effective policy to the existing owned script service. *)
 val script_limits : t -> Chatmd_shell_spec.Chatmd_script_spec.limits
+
+(** The same adapter for a policy already validated by request admission. *)
+val script_limits_for : policy -> Chatmd_shell_spec.Chatmd_script_spec.limits

@@ -22,6 +22,7 @@
   managed_moderator_dispatch
   standalone_tool_dispatch
   one_off_execution
+  background_execution
   run_chatml_tool
   authoring_validation_tool
   moderator_observation
