@@ -21,11 +21,17 @@ type error =
   }
 [@@deriving sexp]
 
+type result_contract =
+  | Native_output
+  | Invocation_v1
+[@@deriving sexp, equal]
+
 type binding =
   { reference : reference
   ; implementation : Ochat_function.t
   ; metadata : Metadata.t
   ; permission_fingerprint : string
+  ; result_contract : result_contract
   }
 
 type t = binding String.Map.t
@@ -35,6 +41,7 @@ let reference binding = binding.reference
 let implementation binding = binding.implementation
 let metadata binding = binding.metadata
 let permission_fingerprint binding = binding.permission_fingerprint
+let result_contract binding = binding.result_contract
 let references t = Map.data t |> List.map ~f:reference
 
 let valid_digest value =
@@ -50,13 +57,22 @@ let json_shape =
   | Error _ -> assert false
 ;;
 
-let create ?(metadata = []) ~owner ~resource_fingerprint registrations =
+let create
+      ?(metadata = [])
+      ?(result_contracts = [])
+      ~owner
+      ~resource_fingerprint
+      registrations
+  =
   if
     String.is_empty owner
     || String.length owner > 256
     || not (valid_digest resource_fingerprint)
   then error "capability.invalid_registration" "invalid host identity or resource digest"
-  else if List.length registrations > 4096 || List.length metadata > 4096
+  else if
+    List.length registrations > 4096
+    || List.length metadata > 4096
+    || List.length result_contracts > 4096
   then error "capability.resource_limit" "too many registered tool capabilities"
   else (
     let names =
@@ -69,7 +85,18 @@ let create ?(metadata = []) ~owner ~resource_fingerprint registrations =
         List.mem names name ~equal:String.equal
         && Result.is_ok (Metadata.validate ~tool_name:name data))
     in
-    if not metadata_valid
+    let contracts_valid =
+      Option.is_none
+        (List.find_a_dup (List.map result_contracts ~f:fst) ~compare:String.compare)
+      && List.for_all result_contracts ~f:(fun (name, _) ->
+        List.mem names name ~equal:String.equal)
+    in
+    if not contracts_valid
+    then
+      error
+        "capability.invalid_result_contract"
+        "duplicate or unbound native result contract"
+    else if not metadata_valid
     then error "capability.invalid_metadata" "invalid or unbound authoring metadata"
     else (
       match List.find_a_dup names ~compare:String.compare with
@@ -86,6 +113,10 @@ let create ?(metadata = []) ~owner ~resource_fingerprint registrations =
             let metadata =
               List.Assoc.find metadata ~equal:String.equal name
               |> Option.value ~default:Metadata.empty
+            in
+            let result_contract =
+              List.Assoc.find result_contracts ~equal:String.equal name
+              |> Option.value ~default:Native_output
             in
             if
               String.is_empty name
@@ -110,6 +141,13 @@ let create ?(metadata = []) ~owner ~resource_fingerprint registrations =
                 let interface =
                   Openai.Completions.jsonaf_of_tool implementation.info
                   |> Jsonaf.to_string
+                in
+                let interface =
+                  match result_contract with
+                  | Native_output -> interface
+                  | Invocation_v1 ->
+                    [%sexp ("ochat.native-result.v1" : string), (interface : string)]
+                    |> Sexp.to_string
                 in
                 let fingerprint =
                   [%sexp
@@ -150,7 +188,13 @@ let create ?(metadata = []) ~owner ~resource_fingerprint registrations =
                   (Map.set
                      registry
                      ~key:name
-                     ~data:{ reference; implementation; metadata; permission_fingerprint })))))
+                     ~data:
+                       { reference
+                       ; implementation
+                       ; metadata
+                       ; permission_fingerprint
+                       ; result_contract
+                       })))))
 ;;
 
 let find t ~name =

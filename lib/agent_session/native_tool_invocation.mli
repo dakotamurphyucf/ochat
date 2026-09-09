@@ -66,7 +66,10 @@ val execute_borrowed : borrowed -> executor
 (** Common native dispatch for a host-owned scope. Performs the same current
     capability, policy, input and output checks as [run]. In particular, [execute]
     must be a real actor-backed scope, not a direct call to the supplied callback.
-    This grants no foreground/history authority. *)
+    This grants no foreground/history authority. An explicitly registered
+    [Tool_capability.Invocation_v1] result is decoded only after disclosure and
+    validated as the single invocation outcome. Ordinary native output stays
+    opaque. Pending envelopes are rejected until owned-work validation is installed. *)
 val run_scoped
   :  execute:executor
   -> registry:(unit -> Chat_response.Tool_capability.t)

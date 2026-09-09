@@ -13,6 +13,7 @@ type t
     existing bindings and metadata through selection instead. *)
 val create
   :  ?host_metadata:(string * Metadata.t) list
+  -> ?result_contracts:(string * Tool_capability.result_contract) list
   -> declarations:Spec.authoring_help list
   -> owner:string
   -> resource_fingerprint:string
@@ -29,6 +30,7 @@ val sources : t -> (string * Chatmd_shell_spec.Source_ref.t) list
     fulfill that plan before exposing tools, not merely advertise its intent. *)
 val resolve
   :  ?host_metadata:(string * Metadata.t) list
+  -> ?result_contracts:(string * Tool_capability.result_contract) list
   -> ?context:Spec.authoring_context
   -> ?catalog:Authoring_policy.catalog
   -> declarations:Spec.authoring_help list

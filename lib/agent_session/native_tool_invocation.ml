@@ -267,7 +267,28 @@ let run_scoped
                "The tool result could not be disclosed.")
             (fun () -> prepare_output output)
         in
-        let outcome = I.Complete value in
+        let%bind outcome =
+          checked
+            (fail "invocation.invalid_output" "The tool returned an invalid result.")
+            (fun () ->
+               let%bind () = I.validate_outcome (I.Complete value) in
+               match C.result_contract binding with
+               | Native_output -> Ok (I.Complete value)
+               | Invocation_v1 ->
+                 (match value with
+                  | `String encoded ->
+                    I.outcome_of_json (Jsonaf.of_string encoded)
+                    |> Result.bind ~f:(function
+                      | (I.Complete _ | Fail _ | Cancelled _) as outcome -> Ok outcome
+                      | Pending _ ->
+                        Error
+                          (Agent_protocol.Error.invalid_request
+                             "native pending work requires an ownership validator"))
+                  | _ ->
+                    Error
+                      (Agent_protocol.Error.invalid_request
+                         "expected disclosed native outcome text")))
+        in
         let%map () =
           checked
             (fail "invocation.invalid_output" "The tool returned an invalid result.")

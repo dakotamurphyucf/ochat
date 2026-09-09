@@ -19,6 +19,14 @@ type error =
   }
 [@@deriving sexp]
 
+(** Native text is opaque unless its actual host registration explicitly opts
+    into the versioned invocation outcome envelope. Submitted code, tool names
+    and output text cannot choose or change this contract. *)
+type result_contract =
+  | Native_output
+  | Invocation_v1
+[@@deriving sexp, equal]
+
 type binding
 type t
 
@@ -31,6 +39,7 @@ type t
     re-admission; this function never rebinds an old reference by name. *)
 val create
   :  ?metadata:(string * Chatmd_shell_spec.Authoring_metadata.t) list
+  -> ?result_contracts:(string * result_contract) list
   -> owner:string
   -> resource_fingerprint:string
   -> (string * Ochat_function.t) list
@@ -47,6 +56,12 @@ val implementation : binding -> Ochat_function.t
 (** Explicit authoring/helper metadata retained with this actual implementation.
     Selection cannot edit it, and a same-name registration does not inherit it. *)
 val metadata : binding -> Chatmd_shell_spec.Authoring_metadata.t
+
+(** Included in live and permission fingerprints, preserved by selection.
+    [Native_output] retains existing registration identities. The invocation
+    host decodes [Invocation_v1] only after normal output disclosure, validates
+    the outcome and enforces owned-work rules before accepting it. *)
+val result_contract : binding -> result_contract
 
 (** Configuration identity for host permission grants. Stable across equivalent
     registrations, but changes with owner, resources, implementation, interface

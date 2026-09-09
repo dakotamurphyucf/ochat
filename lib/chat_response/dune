@@ -36,6 +36,7 @@
   authoring_registration
   extension_compiler
   one_off_script
+  one_off_request
   mcp_discovery_cache
   fork
   compact_history)

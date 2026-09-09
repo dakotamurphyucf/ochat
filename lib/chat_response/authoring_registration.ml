@@ -12,7 +12,14 @@ let capabilities t = t.capabilities
 let sources t = t.sources
 let error code message = Error C.{ code; message }
 
-let create ?(host_metadata = []) ~declarations ~owner ~resource_fingerprint registrations =
+let create
+      ?(host_metadata = [])
+      ?result_contracts
+      ~declarations
+      ~owner
+      ~resource_fingerprint
+      registrations
+  =
   let open Result.Let_syntax in
   let%bind () =
     if
@@ -87,7 +94,9 @@ let create ?(host_metadata = []) ~declarations ~owner ~resource_fingerprint regi
         in
         revision, implementation)
   in
-  let%map capabilities = C.create ~metadata ~owner ~resource_fingerprint registrations in
+  let%map capabilities =
+    C.create ~metadata ?result_contracts ~owner ~resource_fingerprint registrations
+  in
   { capabilities
   ; sources =
       List.map declarations ~f:(fun declaration ->
@@ -97,6 +106,7 @@ let create ?(host_metadata = []) ~declarations ~owner ~resource_fingerprint regi
 
 let resolve
       ?host_metadata
+      ?result_contracts
       ?context
       ?catalog
       ~declarations
@@ -108,7 +118,13 @@ let resolve
   =
   let open Result.Let_syntax in
   let%bind registration =
-    create ?host_metadata ~declarations ~owner ~resource_fingerprint registrations
+    create
+      ?host_metadata
+      ?result_contracts
+      ~declarations
+      ~owner
+      ~resource_fingerprint
+      registrations
   in
   let%map policy =
     Authoring_policy.resolve_context

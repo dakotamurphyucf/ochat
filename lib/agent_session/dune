@@ -21,6 +21,7 @@
   moderator_tool_dispatch
   standalone_tool_dispatch
   one_off_execution
+  run_chatml_tool
   moderator_observation
   moderator_event
   observation_follow_up
@@ -62,6 +63,7 @@
   chatmd
   chat_response
   chatml_execution
+  mtime
   context_compaction
   ochat.chatmd_shell_spec)
  (preprocess

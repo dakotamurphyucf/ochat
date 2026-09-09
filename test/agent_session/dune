@@ -14,6 +14,8 @@
   moderator_lifecycle_tests
   moderator_native_calls_tests
   moderator_routing_tests
+  native_result_tests
+  run_chatml_tests
   observations_tests
   one_off_preparation_tests
   one_off_execution_tests

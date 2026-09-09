@@ -1801,6 +1801,49 @@ execution and Eio domain handoffs; generic execution tests cover aggregate fuel,
 allocation/value limits, concurrent children, child-only recovery and expired
 captured contexts.
 
+### Submitted one-off requests and native outcomes
+
+`Chat_response.One_off_request` defines the request schema and non-executing
+policy validation. `source`, `input` and an explicit `tools` array are required;
+an empty tool array grants no calls. Optional `timeout_ms` bounds compilation and
+execution together. Optional `limits` may lower fuel, task/call counts, invocation
+depth, allocation, value/output bytes, array size, value depth, source bytes and
+compiler time (`compile_timeout_ms`). Higher limits fail with
+`chatml.limit_escalation`; requests cannot choose unrestricted execution. Host
+defaults use the compiler and generic execution defaults plus a 1 MiB output bound.
+Capability selection still happens against the active caller's verified registry.
+
+`Agent_session.Run_chatml_tool.execute` connects this request to compilation and
+the owned one-off executor. Preparation failures return structured diagnostics
+with the submitted source identity and compiler span when available, before a
+Script child is admitted. Successful preparation creates the existing persisted
+Script invocation and retains inherited tool/resource limits. The total timeout
+is narrowed against the native parent's deadline; compiler cancellation remains
+cooperative and joins its domain. Host failures and timeouts may leave an owned
+child record even if the response cannot return its resolved record.
+
+The response separates the single invocation outcome from host-only child data
+and moderator runtime requests. `output` encodes that one outcome for the native
+boundary. The host must consume runtime requests before completing its owned
+response flow, including collected requests accompanying an execution failure.
+
+`Tool_capability.create ~result_contracts` explicitly binds native outcome
+interpretation to actual host registrations. `Native_output` is the default and
+retains existing identities and opaque output behavior. `Invocation_v1` changes
+the interface/permission fingerprint and decodes a versioned outcome only after
+normal disclosure. Selection preserves the contract; names, returned text and
+authored help metadata cannot opt into it. Complete, failure and cancellation
+outcomes are validated and published once. Pending native outcomes are rejected
+until a work-ownership validator is installed.
+
+Actor fixtures call the actual request service, proving source-bound compilation
+errors, source and tool-subset limits, rejection of increased limits, zero-call
+execution and recursive calls that cannot reset their parent's allowance. Separate
+native-result fixtures cover opaque lookalike text, malformed/unowned outcomes,
+disclosure and idempotent publication. Final ChatMD/native registration, runtime
+request consumption and authoring-helper integration remain pending; shipping
+these internal services does not expose `run_chatml` to a model.
+
 ## Authoring policy admission plans
 
 `Chatmd_shell_spec.Authoring_metadata` describes which registered tools create
