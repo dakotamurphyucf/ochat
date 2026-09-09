@@ -58,6 +58,30 @@ persistence checks. Versioned queue ingress currently accepts validated
 `Internal_event` envelopes. Legacy model-job events keep their legacy path;
 the versioned `Job_completed` adapter remains part of background-work integration.
 
+## Background request reconstruction
+
+The internal `Chat_response.Background_request` service captures a tool call or
+statically prepared one-off script as versioned JSON. It retains exact source and
+compiler contract for scripts, input, effective resource limits, and stable
+configuration fingerprints for only the selected tools. It serializes no live
+capability IDs, executable closures, mutable interpreter state or invocation
+borrows. The enclosing persisted job must supply session/generation, parent,
+deadline and execution-attempt ownership.
+
+Worker preparation explicitly re-admits these pins against the current host
+registry. Equivalent reconstructed registrations receive fresh live references;
+changes to owner, resources, implementation, interface or metadata reject the
+request. Extra tools in the current registry do not widen the selection. Stored
+limits must fit current host ceilings and are retained when host defaults grow.
+Script preparation checks the compiler contract, recompiles without evaluating
+initializers, and rechecks live bindings after the compiler-domain wait.
+
+These are request/reconstruction APIs, not an enabled background execution path.
+Transactional capacity reservation, committed launch intent, actor-owned generic
+workers and completion delivery remain under implementation. A decoded request or
+its content digest is not an authorization grant. Execution must still use the
+owning actor and current policy, moderation, approval and output-disclosure checks.
+
 ## Readonly inline-script validation
 
 `Authoring_validation` checks candidates without constructing a ChatML runtime.

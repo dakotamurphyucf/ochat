@@ -53,7 +53,8 @@ let protocol_types env root =
 let owner name =
   let name = String.lowercase name in
   let choices =
-    [ [ "shell" ], "../guide/chatmd-shell-host-integration.md"
+    [ [ "background_request" ], "../agent-server/extensibility-foundations.md"
+    ; [ "shell" ], "../guide/chatmd-shell-host-integration.md"
     ; ( [ "transport"; "protocol"; "http"; "stdio"; "client" ]
       , "../agent-server/protocol.md" )
     ; ( [ "persist"; "store"; "recovery"; "migration"; "retention" ]
