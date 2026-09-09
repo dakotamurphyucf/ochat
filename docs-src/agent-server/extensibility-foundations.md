@@ -1922,6 +1922,38 @@ successful requests, caught and uncaught failures, rejected saves, invalid phase
 and domain handoffs. Generalized extension-to-extension routing, remaining resource
 audits and authoring-helper integration still require full qualification.
 
+### Prepared managed capability bindings
+
+`Tool_capability` now distinguishes `Native` implementations from `Managed`
+standalone/moderator targets. `descriptor` supplies the interface for either kind;
+`native_implementation` returns an option and never manufactures an executable
+for a managed target. Native dispatch returns `invocation.managed_dispatch_required`
+before native authorization or execution when it receives a managed binding.
+Existing native identity formats and result contracts are preserved.
+
+`Managed_tool_registry.prepare` builds a non-evaluated registry from captured
+managed declarations and the host's existing capabilities. It validates script
+and schema digests, exact `<uses>` dependencies, declaration cycles and help
+metadata, then compiles against the combined registry. A standalone tool can
+therefore capture another managed tool's exact reference. Existing bindings retain
+their IDs and metadata; declarations cannot overwrite them or retag their help.
+Managed tools cannot claim native authoring-helper roles.
+
+The managed permission identity includes all captured scripts, tool/schema/help
+declarations, runtime contracts and base permission identities. This conservatively
+invalidates managed grants when that definition's authority changes. Equivalent
+re-admission keeps permission identities while obtaining fresh live references.
+Resolution checks exact IDs and fingerprints; revalidation rejects removed or
+re-registered dependencies. None of these operations authorizes an invocation.
+
+Tests compile standalone-to-standalone dependencies and a moderator target without
+evaluating initializers or invoking native tools. They cover source/schema
+identity changes, missing dependencies, declaration cycles, foreign live bindings,
+removed base authority and attempted metadata replacement. An actor test verifies
+that a managed target cannot fall through to a same-name native runner. This
+prepared registry is not yet installed in `Runtime_builder`; owned managed
+execution and its policy/disclosure integration remain implementation work.
+
 ## Authoring policy admission plans
 
 `Chatmd_shell_spec.Authoring_metadata` describes which registered tools create

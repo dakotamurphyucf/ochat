@@ -230,7 +230,7 @@ let run_scoped
              in
              let c = dispatched.I.context in
              let kind_matches =
-               match dispatched.routing, (C.implementation binding).info.type_ with
+               match dispatched.routing, (C.descriptor binding).type_ with
                | None, ("function" | "custom") -> true
                | Some { kind = I.Function; _ }, "function"
                | Some { kind = I.Custom; _ }, "custom" -> true
@@ -250,6 +250,15 @@ let run_scoped
                    })
       in
       let%bind binding, selected = resolve () in
+      let native binding =
+        C.native_implementation binding
+        |> Result.of_option
+             ~error:
+               (fail
+                  "invocation.managed_dispatch_required"
+                  "This tool requires its owned extension dispatcher.")
+      in
+      let%bind _ = native binding in
       with_selected_capabilities selected (fun () ->
         let%bind () =
           checked
@@ -269,7 +278,7 @@ let run_scoped
          Never dispatch the binding captured before that wait. *)
         let%bind () = check_halted () in
         let%bind binding, _ = resolve () in
-        let implementation = C.implementation binding in
+        let%bind implementation = native binding in
         let%bind payload =
           match implementation.info.type_, dispatched.context.input with
           | "function", input -> Ok (Jsonaf.to_string input)

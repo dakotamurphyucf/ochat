@@ -898,6 +898,13 @@
  (preprocess (pps ppx_jane)))
 
 (library
+ (name managed_tool_registry_test)
+ (modules managed_tool_registry_test)
+ (libraries core eio eio_main chatmd chat_response ochat_function ochat.chatmd_shell_spec mirage-crypto-rng.unix)
+ (inline_tests)
+ (preprocess (pps ppx_jane)))
+
+(library
  (name chatml_standalone_test)
  (modules chatml_standalone_test)
  (libraries core eio eio.mock eio_main mtime jsonaf chatml chatml_host_runtime chatml_compilation chatml_execution)

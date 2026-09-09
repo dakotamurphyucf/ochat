@@ -7,7 +7,15 @@ module A = Agent_session.Session_actor
 
 let%expect_test "native result contracts are host-bound, disclosed and published once" =
   List.iter
-    [ `Opaque; `Complete; `Fail; `Pending; `Malformed; `Redacted; `Invalid_redaction ]
+    [ `Opaque
+    ; `Complete
+    ; `Fail
+    ; `Pending
+    ; `Malformed
+    ; `Redacted
+    ; `Invalid_redaction
+    ; `Managed
+    ]
     ~f:(fun mode ->
       let calls = ref 0 in
       let base = native_registry calls ~raises:false in
@@ -15,7 +23,8 @@ let%expect_test "native result contracts are host-bound, disclosed and published
         C.find base ~name:"read_file"
         |> Result.map_error ~f:(fun error -> error.C.message)
         |> Result.ok_or_failwith
-        |> C.implementation
+        |> C.native_implementation
+        |> Option.value_exn
       in
       let raw =
         match mode with
@@ -32,7 +41,7 @@ let%expect_test "native result contracts are host-bound, disclosed and published
         | `Pending ->
           I.outcome_to_json (Pending (Job (Agent_protocol.Id.Job.create ()), `Null))
           |> Jsonaf.to_string
-        | `Opaque | `Complete | `Redacted | `Invalid_redaction ->
+        | `Opaque | `Complete | `Redacted | `Invalid_redaction | `Managed ->
           I.outcome_to_json (Complete (`String "private-value")) |> Jsonaf.to_string
       in
       let implementation =
@@ -70,6 +79,23 @@ let%expect_test "native result contracts are host-bound, disclosed and published
       let selected =
         match mode with
         | `Opaque -> opaque
+        | `Managed ->
+          C.extend_managed
+            (C.select opaque ~names:[]
+             |> fun result ->
+             Result.map_error result ~f:(fun error -> error.C.message)
+             |> Result.ok_or_failwith)
+            ~owner:"native-result-fixture"
+            ~resource_fingerprint:(Chatmd_shell_spec.Source_ref.digest "managed fixture")
+            [ { descriptor = implementation.info
+              ; target = Standalone { script = "source"; entrypoint = "run" }
+              ; implementation_revision =
+                  Chatmd_shell_spec.Source_ref.digest "managed source"
+              ; metadata = Chatmd_shell_spec.Authoring_metadata.empty
+              }
+            ]
+          |> Result.map_error ~f:(fun error -> error.C.message)
+          |> Result.ok_or_failwith
         | _ ->
           C.select structured ~names:[ "read_file" ]
           |> Result.map_error ~f:(fun error -> error.C.message)
@@ -91,7 +117,11 @@ let%expect_test "native result contracts are host-bound, disclosed and published
                 ~reference
                 ~invocation
                 ~is_halted:(fun () -> (A.state actor |> protocol_ok).halted)
-                ~authorize:(fun _ _ -> Ok ())
+                ~authorize:(fun _ _ ->
+                  (match mode with
+                   | `Managed -> failwith "managed target reached native authorization"
+                   | _ -> ());
+                  Ok ())
                 ~prepare_output:(function
                   | Text text ->
                     Ok
@@ -164,6 +194,7 @@ let%expect_test "native result contracts are host-bound, disclosed and published
                   | `Malformed
                   | `Redacted
                   | `Invalid_redaction
+                  | `Managed
                   ])
              , (!summary : string)
              , (!calls : int)
@@ -177,5 +208,6 @@ let%expect_test "native result contracts are host-bound, disclosed and published
     (Malformed invocation.invalid_output 1 1)
     (Redacted redacted 1 1)
     (Invalid_redaction invocation.invalid_output 1 1)
+    (Managed invocation.managed_dispatch_required 0 1)
     |}]
 ;;

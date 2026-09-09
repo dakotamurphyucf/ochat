@@ -387,7 +387,8 @@ let%test_unit "authored help binds actual registrations without overriding trust
     let admitted = create [ declaration ] |> cap_get in
     let registry = R.capabilities admitted in
     let binding = C.find registry ~name:"author" |> cap_get in
-    assert (phys_equal (C.implementation binding) implementation);
+    assert (
+      phys_equal (C.native_implementation binding |> Option.value_exn) implementation);
     assert (Option.equal M.equal_help (C.metadata binding).authoring (Some help));
     assert (Option.is_none (C.metadata binding).helper);
     assert (
@@ -454,7 +455,7 @@ let%test_unit "authored help binds actual registrations without overriding trust
     assert (P.inject_primer automatic);
     assert (List.length (P.added_helpers automatic) = 2);
     let author = C.find (P.capabilities automatic) ~name:"author" |> cap_get in
-    assert (phys_equal (C.implementation author) implementation);
+    assert (phys_equal (C.native_implementation author |> Option.value_exn) implementation);
     assert (List.length (R.sources registered) = 1);
     let context : S.authoring_context =
       { version = 1; policy = Manual; source_ref = declaration.source_ref }

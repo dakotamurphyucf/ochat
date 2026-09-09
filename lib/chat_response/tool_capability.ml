@@ -26,9 +26,21 @@ type result_contract =
   | Invocation_v1
 [@@deriving sexp, equal]
 
+type implementation =
+  | Native of Ochat_function.t
+  | Managed of Chatmd_shell_spec.Extension_spec.implementation
+
+type managed_registration =
+  { descriptor : Openai.Completions.tool
+  ; target : Chatmd_shell_spec.Extension_spec.implementation
+  ; implementation_revision : string
+  ; metadata : Metadata.t
+  }
+
 type binding =
   { reference : reference
-  ; implementation : Ochat_function.t
+  ; implementation : implementation
+  ; descriptor : Openai.Completions.tool
   ; metadata : Metadata.t
   ; permission_fingerprint : string
   ; result_contract : result_contract
@@ -39,6 +51,14 @@ type t = binding String.Map.t
 let error code message = Error { code; message }
 let reference binding = binding.reference
 let implementation binding = binding.implementation
+let descriptor binding = binding.descriptor
+
+let native_implementation binding =
+  match binding.implementation with
+  | Native implementation -> Some implementation
+  | Managed _ -> None
+;;
+
 let metadata binding = binding.metadata
 let permission_fingerprint binding = binding.permission_fingerprint
 let result_contract binding = binding.result_contract
@@ -55,6 +75,93 @@ let json_shape =
   match Schema.compile `True with
   | Ok value -> value
   | Error _ -> assert false
+;;
+
+let bind
+      ~owner
+      ~resource_fingerprint
+      ~implementation_revision
+      ~implementation
+      ~descriptor
+      ~metadata
+      ~result_contract
+  =
+  let info = descriptor.Openai.Completions.function_ in
+  let name = info.name in
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      String.is_empty owner
+      || String.length owner > 256
+      || String.is_empty name
+      || String.length name > 256
+      || (not (valid_digest resource_fingerprint))
+      || not (valid_digest implementation_revision)
+    then error "capability.invalid_registration" "invalid tool or host identity"
+    else Ok ()
+  in
+  let%bind () =
+    Schema.validate json_shape (Openai.Completions.jsonaf_of_tool descriptor)
+    |> Result.map_error ~f:(fun _ ->
+      { code = "capability.invalid_schema_data"
+      ; message = "tool schema is not bounded valid JSON"
+      })
+  in
+  let id = Id.create () in
+  let interface = Openai.Completions.jsonaf_of_tool descriptor |> Jsonaf.to_string in
+  let interface =
+    match implementation, result_contract with
+    | Native _, Native_output -> interface
+    | Native _, Invocation_v1 ->
+      [%sexp ("ochat.native-result.v1" : string), (interface : string)] |> Sexp.to_string
+    | Managed target, _ ->
+      [%sexp
+        ("ochat.managed-tool.v1" : string)
+      , (target : Chatmd_shell_spec.Extension_spec.implementation)
+      , (interface : string)]
+      |> Sexp.to_string
+  in
+  let fingerprint =
+    [%sexp
+      ("ochat.capability.v2" : string)
+    , (metadata : Metadata.t)
+    , (Id.to_string id : string)
+    , (owner : string)
+    , (name : string)
+    , (implementation_revision : string)
+    , (resource_fingerprint : string)
+    , (interface : string)]
+    |> Sexp.to_string
+    |> digest
+  in
+  let permission_fingerprint =
+    [%sexp
+      ("ochat.capability-permission.v1" : string)
+    , (metadata : Metadata.t)
+    , (owner : string)
+    , (name : string)
+    , (implementation_revision : string)
+    , (resource_fingerprint : string)
+    , (interface : string)]
+    |> Sexp.to_string
+    |> digest
+  in
+  Ok
+    { reference =
+        { version = 1
+        ; id
+        ; name
+        ; owner
+        ; implementation_revision
+        ; fingerprint
+        ; input_schema = info.parameters
+        }
+    ; implementation
+    ; descriptor
+    ; metadata
+    ; permission_fingerprint
+    ; result_contract
+    }
 ;;
 
 let create
@@ -118,83 +225,79 @@ let create
               List.Assoc.find result_contracts ~equal:String.equal name
               |> Option.value ~default:Native_output
             in
-            if
-              String.is_empty name
-              || String.length name > 256
-              || not (valid_digest implementation_revision)
-            then
-              error
-                "capability.invalid_registration"
-                "invalid tool name or implementation digest"
-            else (
-              match
-                Schema.validate
-                  json_shape
-                  (Openai.Completions.jsonaf_of_tool implementation.info)
-              with
-              | Error _ ->
-                error
-                  "capability.invalid_schema_data"
-                  "tool schema is not bounded valid JSON"
-              | Ok () ->
-                let id = Id.create () in
-                let interface =
-                  Openai.Completions.jsonaf_of_tool implementation.info
-                  |> Jsonaf.to_string
-                in
-                let interface =
-                  match result_contract with
-                  | Native_output -> interface
-                  | Invocation_v1 ->
-                    [%sexp ("ochat.native-result.v1" : string), (interface : string)]
-                    |> Sexp.to_string
-                in
-                let fingerprint =
-                  [%sexp
-                    ("ochat.capability.v2" : string)
-                  , (metadata : Metadata.t)
-                  , (Id.to_string id : string)
-                  , (owner : string)
-                  , (name : string)
-                  , (implementation_revision : string)
-                  , (resource_fingerprint : string)
-                  , (interface : string)]
-                  |> Sexp.to_string
-                  |> digest
-                in
-                let permission_fingerprint =
-                  [%sexp
-                    ("ochat.capability-permission.v1" : string)
-                  , (metadata : Metadata.t)
-                  , (owner : string)
-                  , (name : string)
-                  , (implementation_revision : string)
-                  , (resource_fingerprint : string)
-                  , (interface : string)]
-                  |> Sexp.to_string
-                  |> digest
-                in
-                let reference =
-                  { version = 1
-                  ; id
-                  ; name
-                  ; owner
-                  ; implementation_revision
-                  ; fingerprint
-                  ; input_schema = info.parameters
-                  }
-                in
-                Ok
-                  (Map.set
-                     registry
-                     ~key:name
-                     ~data:
-                       { reference
-                       ; implementation
-                       ; metadata
-                       ; permission_fingerprint
-                       ; result_contract
-                       })))))
+            let%map binding =
+              bind
+                ~owner
+                ~resource_fingerprint
+                ~implementation_revision
+                ~implementation:(Native implementation)
+                ~descriptor:implementation.info
+                ~metadata
+                ~result_contract
+            in
+            Map.set registry ~key:name ~data:binding)))
+;;
+
+let extend_managed t ~owner ~resource_fingerprint registrations =
+  let open Result.Let_syntax in
+  let%bind () =
+    if
+      String.is_empty owner
+      || String.length owner > 256
+      || not (valid_digest resource_fingerprint)
+    then error "capability.invalid_registration" "invalid managed host identity"
+    else if List.length registrations + Map.length t > 4096
+    then error "capability.resource_limit" "too many registered tool capabilities"
+    else Ok ()
+  in
+  List.fold_result
+    registrations
+    ~init:t
+    ~f:(fun registry (registration : managed_registration) ->
+      let name = registration.descriptor.function_.name in
+      let%bind () =
+        if Map.mem registry name
+        then
+          error
+            "capability.duplicate_name"
+            "managed tool conflicts with a registered name"
+        else Ok ()
+      in
+      let%bind () =
+        let script, valid_entrypoint =
+          match registration.target with
+          | Chatmd_shell_spec.Extension_spec.Moderator script -> script, true
+          | Standalone { script; entrypoint } -> script, String.equal entrypoint "run"
+        in
+        if
+          String.is_empty script
+          || String.length script > 256
+          || (not valid_entrypoint)
+          || not (String.equal registration.descriptor.type_ "function")
+        then error "capability.invalid_managed_target" "invalid managed tool target"
+        else Ok ()
+      in
+      let%bind () =
+        if
+          Option.is_some registration.metadata.helper
+          || Result.is_error (Metadata.validate ~tool_name:name registration.metadata)
+        then
+          error
+            "capability.invalid_metadata"
+            "managed tools cannot claim native helper roles"
+        else Ok ()
+      in
+      let%map binding =
+        bind
+          ~owner
+          ~resource_fingerprint
+          ~implementation_revision:registration.implementation_revision
+          ~implementation:(Managed registration.target)
+          ~descriptor:registration.descriptor
+          ~metadata:registration.metadata
+          ~result_contract:Invocation_v1
+      in
+      Map.set registry ~key:name ~data:binding)
 ;;
 
 let find t ~name =

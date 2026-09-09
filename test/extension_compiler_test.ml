@@ -85,7 +85,7 @@ let%test_unit
   with_definition source (fun script tool capabilities selected ->
     let prepared = Compiler.prepare ~scripts:[ script ] ~capabilities tool |> get in
     let bound = Caps.find (Compiler.capabilities prepared) ~name:"selected" |> cap_get in
-    assert (phys_equal (Caps.implementation bound) selected);
+    assert (phys_equal (Caps.native_implementation bound |> Option.value_exn) selected);
     assert (Result.is_error (Caps.find (Compiler.capabilities prepared) ~name:"other"));
     assert (
       Result.is_ok

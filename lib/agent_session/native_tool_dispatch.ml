@@ -35,7 +35,7 @@ let create
   let find name =
     List.find references ~f:(fun reference -> String.equal reference.C.name name)
   in
-  let prepare reference (request : D.request) =
+  let prepare (reference : C.reference) (request : D.request) =
     if Option.is_some request.source || Option.is_some request.parent_call_id
     then
       raise
@@ -75,7 +75,7 @@ let create
         |> Result.map_error ~f:(fun _ -> "invalid native registration")
       in
       let%bind () =
-        match kind, (C.implementation binding).info.type_ with
+        match kind, (C.descriptor binding).type_ with
         | Chat_response.Tool_call.Kind.Function, "function" | Custom, "custom" -> Ok ()
         | _ -> Error "native tool kind mismatch"
       in

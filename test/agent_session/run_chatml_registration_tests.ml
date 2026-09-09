@@ -35,7 +35,8 @@ let%expect_test
           C.find registry ~name:"read_file"
           |> Result.map_error ~f:(fun error -> error.C.message)
           |> Result.ok_or_failwith
-          |> C.implementation
+          |> C.native_implementation
+          |> Option.value_exn
         in
         let registry =
           C.create

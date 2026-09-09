@@ -48,7 +48,7 @@ let%test_unit "selection retains actual registered implementations and only narr
   let all = registry [ original; other ] in
   let selected = C.select all ~names:[ "selected" ] |> get in
   let binding = C.find selected ~name:"selected" |> get in
-  assert (phys_equal (C.implementation binding) original);
+  assert (phys_equal (C.native_implementation binding |> Option.value_exn) original);
   let reference = C.reference binding in
   assert (
     phys_equal
@@ -62,11 +62,14 @@ let%test_unit "selection retains actual registered implementations and only narr
   assert (
     Result.is_error (C.resolve empty ~id:reference.id ~fingerprint:reference.fingerprint));
   assert (!calls = 0);
-  assert (String.equal ((C.implementation binding).run "test" |> text) "test");
+  assert (
+    String.equal
+      ((C.native_implementation binding |> Option.value_exn).run "test" |> text)
+      "test");
   assert (!calls = 1);
   assert (
     String.equal
-      ((C.implementation binding).run_with_progress
+      ((C.native_implementation binding |> Option.value_exn).run_with_progress
          ~invocation:Ochat_function.Invocation.silent
          "observed"
        |> text)

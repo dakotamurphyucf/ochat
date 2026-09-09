@@ -1,6 +1,6 @@
 open Core
 
-(** Host-owned bindings to actual registered tool implementations. Public
+(** Host-owned bindings to native implementations and managed extension targets. Public
     reference data never grants authority; selecting/narrowing requires an
     existing registry. No function is executed by these operations. *)
 type reference = private
@@ -30,6 +30,17 @@ type result_contract =
 type binding
 type t
 
+type implementation =
+  | Native of Ochat_function.t
+  | Managed of Chatmd_shell_spec.Extension_spec.implementation
+
+type managed_registration =
+  { descriptor : Openai.Completions.tool
+  ; target : Chatmd_shell_spec.Extension_spec.implementation
+  ; implementation_revision : string
+  ; metadata : Chatmd_shell_spec.Authoring_metadata.t
+  }
+
 (** Register implementations already constructed under the host configuration. Each pair carries
     the host's digest of its declaration/implementation revision. The resource
     digest identifies the effective host configuration used to construct them.
@@ -48,10 +59,31 @@ val create
 val references : t -> reference list
 val reference : binding -> reference
 
-(** Recover the original implementation for the owning invocation service.
+(** Inspect the native runner or managed target for the owning invocation service.
+    A managed target must resolve to its matching prepared definition and dispatcher.
     The service must still perform per-call authorization, moderation, schema
     checks and output disclosure. This accessor is not an invocation endpoint. *)
-val implementation : binding -> Ochat_function.t
+val implementation : binding -> implementation
+
+(** Descriptor shared by native and owned managed dispatch. No executable is
+    synthesized for a managed target. *)
+val descriptor : binding -> Openai.Completions.tool
+
+val native_implementation : binding -> Ochat_function.t option
+
+(** Trusted admission of captured managed definitions alongside existing native
+    bindings. The host must validate sources/schemas/dependencies first, bind
+    revision/resource digests to that full authority, then install the matching
+    compiled owned dispatcher before exposure. Target kind participates in identity;
+    managed tools always return structured invocation outcomes and cannot claim
+    native authoring-helper roles. Existing bindings retain their exact IDs and
+    implementations; collisions cannot overwrite or rebind them. *)
+val extend_managed
+  :  t
+  -> owner:string
+  -> resource_fingerprint:string
+  -> managed_registration list
+  -> (t, error) result
 
 (** Explicit authoring/helper metadata retained with this actual implementation.
     Selection cannot edit it, and a same-name registration does not inherit it. *)

@@ -289,7 +289,7 @@ let with_script_native_calls
   =
   let kind (reference : C.reference) =
     match C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint with
-    | Ok binding when String.equal (C.implementation binding).info.type_ "custom" ->
+    | Ok binding when String.equal (C.descriptor binding).type_ "custom" ->
       Chat_response.Moderation.Tool_call.Custom
     | _ -> Function
   in

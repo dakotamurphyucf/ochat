@@ -64,7 +64,8 @@ let%expect_test "standalone handlers retain owned native calls and canonical out
              ~owner:"fixture"
              ~resource_fingerprint:
                (Chatmd_shell_spec.Source_ref.digest "standalone resources")
-             [ original.implementation_revision, C.implementation binding
+             [ ( original.implementation_revision
+               , C.native_implementation binding |> Option.value_exn )
              ; Chatmd_shell_spec.Source_ref.digest "alias v1", alias
              ]
            |> Result.map_error ~f:(fun error -> error.C.message)

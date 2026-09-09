@@ -143,11 +143,13 @@ let () =
           assert (phys_equal original selected);
           assert (
             String.is_substring
-              ((C.implementation selected).run {|{"root":"source","file":"allowed.txt"}|}
+              ((C.native_implementation selected |> Option.value_exn).run
+                 {|{"root":"source","file":"allowed.txt"}|}
                |> text)
               ~substring:"parent allowed data");
           let outside =
-            (C.implementation selected).run {|{"root":"source","file":"../secret.txt"}|}
+            (C.native_implementation selected |> Option.value_exn).run
+              {|{"root":"source","file":"../secret.txt"}|}
             |> text
           in
           assert (not (String.is_substring outside ~substring:"private outside marker"));
@@ -155,7 +157,8 @@ let () =
             String.is_substring outside ~substring:"outside the configured read roots");
           Eio.Path.symlink ~link_to:"../secret.txt" Eio.Path.(root / "lib" / "escape.txt");
           let symlink =
-            (C.implementation selected).run {|{"root":"source","file":"escape.txt"}|}
+            (C.native_implementation selected |> Option.value_exn).run
+              {|{"root":"source","file":"escape.txt"}|}
             |> text
           in
           assert (not (String.is_substring symlink ~substring:"private outside marker"));

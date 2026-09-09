@@ -227,13 +227,14 @@ let%expect_test "agent runtime resolves read_file roots and publishes their guid
     |> fun registry -> C.select registry ~names:[ "read_file" ] |> capability_ok
   in
   let binding = C.find selected ~name:"read_file" |> capability_ok in
-  assert (phys_equal (C.implementation binding) function_);
+  assert (phys_equal (C.native_implementation binding |> Option.value_exn) function_);
   Eio.Path.save
     ~create:(`Or_truncate 0o600)
     Eio.Path.(root / "outside.txt")
     "private outside marker";
   let outside =
-    (C.implementation binding).run {|{"root":"source","file":"../outside.txt"}|}
+    (C.native_implementation binding |> Option.value_exn).run
+      {|{"root":"source","file":"../outside.txt"}|}
     |> output_text
   in
   assert (not (String.is_substring outside ~substring:"private outside marker"));
@@ -329,7 +330,8 @@ let%expect_test
         |> Result.ok_or_failwith
       in
       let actual = binding resource in
-      assert (phys_equal (C.implementation actual) implementation);
+      assert (
+        phys_equal (C.native_implementation actual |> Option.value_exn) implementation);
       assert (C.equal_result_contract (C.result_contract actual) Invocation_v1);
       List.iter
         [ registration Native_output "host-echo-v1"
@@ -349,7 +351,9 @@ let%expect_test
       in
       let missing = Result.is_error (prepare [] source) in
       assert (Int.equal !calls 0);
-      let output = (C.implementation actual).run "{}" |> output_text in
+      let output =
+        (C.native_implementation actual |> Option.value_exn).run "{}" |> output_text
+      in
       print_s
         [%sexp
           { duplicate : bool; missing : bool; output : string; calls = (!calls : int) }]));
@@ -444,7 +448,8 @@ let on_event = fun ctx state event -> match event with
           String.equal (Chatmd_shell_spec.Extension_spec.script_text captured) script)
       in
       let output =
-        (C.implementation binding).run {|{"root":"source","file":"value.txt"}|}
+        (C.native_implementation binding |> Option.value_exn).run
+          {|{"root":"source","file":"value.txt"}|}
         |> output_text
       in
       print_s
@@ -452,7 +457,9 @@ let on_event = fun ctx state event -> match event with
           { normal_disabled : bool
           ; native_names : string list
           ; prepared_names : string list
-          ; exact_native = (phys_equal native (C.implementation binding) : bool)
+          ; exact_native =
+              (phys_equal native (C.native_implementation binding |> Option.value_exn)
+               : bool)
           ; pinned : bool
           ; scoped_read = (String.is_substring output ~substring:"bound value" : bool)
           }]));
