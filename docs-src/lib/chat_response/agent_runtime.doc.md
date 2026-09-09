@@ -138,6 +138,16 @@ type extension_resources =
   ; definition : Extension_compiler.definition
   }
 
+(** Trusted host implementations selected only by an explicit Builtin declaration
+    of the same name. Unselected registrations are never exposed. Revision and
+    result contract participate in capability identity; duplicate supplied names
+    are rejected. This does not grant invocation or authoring authority. *)
+type native_registration =
+  { implementation : Ochat_function.t
+  ; implementation_revision : string
+  ; result_contract : Tool_capability.result_contract
+  }
+
 (** Prepare a definition for an extensibility-aware host. Validates the captured
     declarations, constructs native resources through the same shell authorization
     and resource bindings as [create], then compiles all versioned scripts in an
@@ -148,7 +158,8 @@ type extension_resources =
     the caller must release that scope after failed preparation or runtime teardown.
     This internal preparation entrypoint does not enable public feature flags. *)
 val prepare_extensions
-  :  sw:Eio.Switch.t
+  :  ?native_registrations:native_registration list
+  -> sw:Eio.Switch.t
   -> ctx:Eio_unix.Stdenv.base Ctx.t
   -> host:Shell_runtime.Host.t
   -> platform:Chatmd_shell_spec.Shell_spec.platform

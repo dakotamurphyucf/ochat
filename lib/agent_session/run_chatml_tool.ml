@@ -164,3 +164,76 @@ let execute ?observer ~env ~policy ~script_tools ~now ~moderate_tool ~prepare_ou
         | exception Eio.Time.Timeout ->
           Ok { (timeout ()) with runtime_requests = !requests }))
 ;;
+
+type services =
+  { script_tools : Script_tool_calls.t
+  ; observer : I.observer option
+  ; now : unit -> Agent_protocol.Timestamp.t
+  ; moderate_tool :
+      I.t
+      -> Chat_response.Moderation.Tool_call.t
+      -> (Chat_response.Moderation.Outcome.t option, string) result
+  ; prepare_outcome : I.outcome -> (unit, string) result
+  }
+
+let registration ~env ~policy ~services =
+  let module Definition = struct
+    type input = Jsonaf.t
+
+    let name = name
+
+    let description =
+      Some
+        "Execute a one-off ChatML main(input) program using an explicit subset of this \
+         invocation's tools. Returns one structured outcome; creates no agent session \
+         and makes no model request."
+    ;;
+
+    let type_ = "function"
+    let parameters = parameters
+    let input_of_string = Jsonaf.of_string
+  end
+  in
+  let implementation =
+    Ochat_function.create_function
+      (module Definition)
+      ~strict:false
+      (fun request ->
+         (* Probe both lexical scopes before acquiring host services or compiling.
+         A callable descriptor alone does not provide an execution owner. *)
+         ignore
+           (N.borrow ()
+            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+            |> Result.ok_or_failwith
+            : N.borrowed);
+         Chat_response.Runtime_request_scope.emit [] |> Result.ok_or_failwith;
+         let services = services () |> Result.ok_or_failwith in
+         execute
+           ?observer:services.observer
+           ~env
+           ~policy
+           ~script_tools:services.script_tools
+           ~now:services.now
+           ~moderate_tool:(fun invocation call ->
+             let open Result.Let_syntax in
+             let%bind outcome = services.moderate_tool invocation call in
+             let%map () =
+               match outcome with
+               | None -> Ok ()
+               | Some outcome ->
+                 Chat_response.Runtime_request_scope.emit outcome.runtime_requests
+             in
+             outcome)
+           ~prepare_outcome:services.prepare_outcome
+           request
+         |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
+         |> Result.ok_or_failwith
+         |> output)
+  in
+  Chat_response.Agent_runtime.
+    { implementation
+    ; implementation_revision =
+        Chatmd_shell_spec.Source_ref.digest "ochat.run-chatml.native.v1"
+    ; result_contract = Chat_response.Tool_capability.Invocation_v1
+    }
+;;

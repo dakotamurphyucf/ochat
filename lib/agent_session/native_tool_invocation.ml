@@ -19,6 +19,7 @@ type borrowed =
   ; execute : executor
   ; ceiling : C.t option
   ; execution_context : Chatml_execution.context
+  ; runtime_context : Chat_response.Runtime_request_scope.t option
   }
 
 let scope_key = Eio.Fiber.create_key ()
@@ -62,7 +63,7 @@ let select_tools scope ~names =
   { scope with ceiling = Some selected }
 ;;
 
-let with_scope ?ceiling ?execution_context ~execute invocation f =
+let with_scope ?ceiling ?execution_context ?runtime_context ~execute invocation f =
   let execute, ceiling, execution_context =
     match Eio.Fiber.get scope_key with
     | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
@@ -81,13 +82,19 @@ let with_scope ?ceiling ?execution_context ~execute invocation f =
     Chatml_execution.capture_context ~inherited:execution_context ()
   in
   let active = Atomic.make true in
+  let runtime_context =
+    Option.value_or_thunk
+      runtime_context
+      ~default:Chat_response.Runtime_request_scope.capture
+  in
   Exn.protect
     ~finally:(fun () -> Atomic.set active false)
     ~f:(fun () ->
-      Eio.Fiber.with_binding
-        scope_key
-        { invocation; active; execute; ceiling; execution_context }
-        f)
+      Chat_response.Runtime_request_scope.with_context runtime_context (fun () ->
+        Eio.Fiber.with_binding
+          scope_key
+          { invocation; active; execute; ceiling; execution_context; runtime_context }
+          f))
 ;;
 
 let execute_borrowed scope ~invocation f =
@@ -132,6 +139,7 @@ let execute_borrowed scope ~invocation f =
     with_scope
       ~ceiling
       ~execution_context:scope.execution_context
+      ~runtime_context:scope.runtime_context
       ~execute:scope.execute
       dispatched
       (fun () -> f ~dispatched))

@@ -17,6 +17,7 @@
   in_memory_stream
   model_executor
   runtime_semantics
+  runtime_request_scope
   fetch
   chatml_turn_driver
   chatml_moderator

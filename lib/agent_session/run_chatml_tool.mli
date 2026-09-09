@@ -39,3 +39,27 @@ val execute
 (** Single versioned outcome envelope. Runtime requests and child invocation
     bookkeeping are host data, not embedded as a second model-visible result. *)
 val output : response -> Openai.Responses.Tool_output.Output.t
+
+type services =
+  { script_tools : Script_tool_calls.t
+  ; observer : Agent_protocol.Invocation.observer option
+  ; now : unit -> Agent_protocol.Timestamp.t
+  ; moderate_tool :
+      Agent_protocol.Invocation.t
+      -> Chat_response.Moderation.Tool_call.t
+      -> (Chat_response.Moderation.Outcome.t option, string) result
+  ; prepare_outcome : Agent_protocol.Invocation.outcome -> (unit, string) result
+  }
+
+(** Construct the actual opt-in native registration. The host supplies services
+    only for the owning session; retrieving them cannot widen the native borrow.
+    Native invocation and runtime-request scopes are required before any services
+    or compilation. Moderator requests are emitted as they occur, retaining order
+    across recursive calls, including failed computations. The owning dispatcher
+    must collect and consume those requests. This does not activate public tools
+    or fulfill A01 guidance requirements by itself. *)
+val registration
+  :  env:Eio_unix.Stdenv.base
+  -> policy:Chat_response.One_off_request.policy
+  -> services:(unit -> (services, string) result)
+  -> Chat_response.Agent_runtime.native_registration

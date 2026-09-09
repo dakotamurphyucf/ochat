@@ -16,6 +16,8 @@
   moderator_routing_tests
   native_result_tests
   run_chatml_tests
+  run_chatml_registration_tests
+  runtime_request_tests
   observations_tests
   one_off_preparation_tests
   one_off_execution_tests

@@ -11,6 +11,12 @@ type diagnostic =
   }
 [@@deriving sexp, compare, equal]
 
+type native_registration =
+  { implementation : Ochat_function.t
+  ; implementation_revision : string
+  ; result_contract : Tool_capability.result_contract
+  }
+
 type t =
   { functions : Ochat_function.t list
   ; capabilities : (Tool_capability.t, Tool_capability.error) result Lazy.t
@@ -426,26 +432,37 @@ let validate_functions functions =
       [ diagnostic "agent.duplicate_tool_name" ("duplicate exposed tool name: " ^ name) ]
 ;;
 
-let build_functions ~sw ~ctx ~host ~run_agent shell_registry tools =
+let build_functions ~native_registrations ~sw ~ctx ~host ~run_agent shell_registry tools =
   (* Extension declarations are consumed by the prepared definition and owned
      dispatcher. They never receive a legacy/no-op runner. *)
   List.filter tools ~f:(function
     | CM.Extension _ -> false
     | _ -> true)
   |> List.map ~f:(fun declaration ->
-    functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry declaration
-    |> Result.map ~f:(fun functions ->
-      let revision =
-        CM.sexp_of_tool declaration
-        |> Sexp.to_string
-        |> Chatmd_shell_spec.Source_ref.digest
-      in
-      List.map functions ~f:(fun implementation -> revision, implementation)))
+    let supplied =
+      match declaration with
+      | CM.Builtin name ->
+        List.find native_registrations ~f:(fun registration ->
+          String.equal name (function_name registration.implementation))
+      | _ -> None
+    in
+    match supplied with
+    | Some registration -> Ok [ registration ]
+    | None ->
+      functions_of_tool ~sw ~ctx ~host ~run_agent shell_registry declaration
+      |> Result.map ~f:(fun functions ->
+        let implementation_revision =
+          CM.sexp_of_tool declaration
+          |> Sexp.to_string
+          |> Chatmd_shell_spec.Source_ref.digest
+        in
+        List.map functions ~f:(fun implementation ->
+          { implementation; implementation_revision; result_contract = Native_output })))
   |> Result.all
   |> Result.map ~f:List.concat
   |> Result.map_error ~f:List.return
   |> Result.bind ~f:(fun registrations ->
-    validate_functions (List.map registrations ~f:snd)
+    validate_functions (List.map registrations ~f:(fun value -> value.implementation))
     |> Result.map ~f:(fun functions -> functions, registrations))
 ;;
 
@@ -472,6 +489,7 @@ let moderator_process_handler t =
 
 let create_native
       ~extension_resources
+      ?(native_registrations = [])
       ~sw
       ~ctx
       ~host
@@ -485,6 +503,11 @@ let create_native
       ~run_agent
       ()
   =
+  let open Result.Let_syntax in
+  let%bind _ =
+    validate_functions
+      (List.map native_registrations ~f:(fun value -> value.implementation))
+  in
   if
     List.exists prompt_elements ~f:(function
       | CM.Extension_script _ | Tool (Extension _) -> not extension_resources
@@ -518,7 +541,14 @@ let create_native
              ~persist_extension_snapshots
              declarations)
           ~f:(fun (shell_registry, shell_manifest, shell_security_status) ->
-            build_functions ~sw ~ctx ~host ~run_agent shell_registry declarations.tools
+            build_functions
+              ~native_registrations
+              ~sw
+              ~ctx
+              ~host
+              ~run_agent
+              shell_registry
+              declarations.tools
             |> Result.map ~f:(fun (functions, registrations) ->
               let capabilities =
                 lazy
@@ -550,13 +580,17 @@ let create_native
                        |> Chatmd_shell_spec.Source_ref.digest
                      in
                      Authoring_registration.create
+                       ~result_contracts:
+                         (List.map registrations ~f:(fun value ->
+                            function_name value.implementation, value.result_contract))
                        ~declarations:
                          (List.filter_map prompt_elements ~f:(function
                             | CM.Authoring_help help -> Some help
                             | _ -> None))
                        ~owner:host.session_id
                        ~resource_fingerprint
-                       registrations
+                       (List.map registrations ~f:(fun value ->
+                          value.implementation_revision, value.implementation))
                      |> Result.map ~f:Authoring_registration.capabilities
                    with
                    | (Eio.Cancel.Cancelled _ | Eio.Time.Timeout) as exn -> raise exn
@@ -580,7 +614,7 @@ let create_native
               }))))
 ;;
 
-let create = create_native ~extension_resources:false
+let create = create_native ~extension_resources:false ~native_registrations:[]
 
 type extension_resources =
   { native : t
@@ -588,6 +622,7 @@ type extension_resources =
   }
 
 let prepare_extensions
+      ?(native_registrations = [])
       ~sw
       ~ctx
       ~host
@@ -621,6 +656,7 @@ let prepare_extensions
   let%bind native =
     create_native
       ~extension_resources:true
+      ~native_registrations
       ~sw
       ~ctx
       ~host

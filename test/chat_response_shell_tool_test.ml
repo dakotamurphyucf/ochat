@@ -260,6 +260,103 @@ let%expect_test "agent runtime resolves read_file roots and publishes their guid
 ;;
 
 let%expect_test
+    "host registrations require explicit selection and preserve result contracts"
+  =
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    Eio.Switch.run (fun sw ->
+      let module R = Chat_response.Agent_runtime in
+      let module C = Chat_response.Tool_capability in
+      let module Definition = struct
+        type input = string
+
+        let name = "host_echo"
+        let description = Some "Return the input unchanged."
+        let type_ = "function"
+        let parameters = `Object [ "type", `String "object" ]
+        let input_of_string text = text
+      end
+      in
+      let calls = ref 0 in
+      let implementation =
+        Ochat_function.create_function
+          (module Definition)
+          (fun input ->
+             Int.incr calls;
+             Text input)
+      in
+      let registration contract revision =
+        R.
+          { implementation
+          ; result_contract = contract
+          ; implementation_revision = Chatmd_shell_spec.Source_ref.digest revision
+          }
+      in
+      let root = Eio.Path.(Eio.Stdenv.cwd env / "_build" / "host-registration") in
+      Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 root;
+      let prepare registrations source =
+        with_agent_runtime_input env root source (fun ~ctx ~host ~elements ->
+          R.prepare_extensions
+            ~native_registrations:registrations
+            ~sw
+            ~ctx
+            ~host
+            ~platform:S.Macos
+            ~prompt_elements:elements
+            ~manifest_authorizer:Shell_runtime.Manifest_authorizer.assume_authorized
+            ~approval_provider:Shell_runtime.Approval_broker.None_available
+            ~approval_store:(Shell_access.Approval.create_store ())
+            ~run_agent:
+              (fun
+                ?prompt_dir:_ ?session_id:_ ?observer:_ ~source:_ ~ctx:_ _ _ ->
+              failwith "unexpected agent")
+            ())
+      in
+      let selected = registration Invocation_v1 "host-echo-v1" in
+      let unused =
+        prepare [ selected ] "<system>No tools.</system>" |> agent_runtime_or_fail
+      in
+      assert (List.is_empty unused.native.functions);
+      let source = {|<tool name="host_echo"/>|} in
+      let resource = prepare [ selected ] source |> agent_runtime_or_fail in
+      let binding resource =
+        Lazy.force resource.R.native.capabilities
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+        |> fun registry ->
+        C.find registry ~name:"host_echo"
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+      in
+      let actual = binding resource in
+      assert (phys_equal (C.implementation actual) implementation);
+      assert (C.equal_result_contract (C.result_contract actual) Invocation_v1);
+      List.iter
+        [ registration Native_output "host-echo-v1"
+        ; registration Invocation_v1 "host-echo-v2"
+        ]
+        ~f:(fun changed ->
+          let other = prepare [ changed ] source |> agent_runtime_or_fail |> binding in
+          assert (
+            not
+              (String.equal
+                 (C.permission_fingerprint actual)
+                 (C.permission_fingerprint other))));
+      let duplicate =
+        match prepare [ selected; selected ] source with
+        | Error [ { code = "agent.duplicate_tool_name"; _ } ] -> true
+        | _ -> false
+      in
+      let missing = Result.is_error (prepare [] source) in
+      assert (Int.equal !calls 0);
+      let output = (C.implementation actual).run "{}" |> output_text in
+      print_s
+        [%sexp
+          { duplicate : bool; missing : bool; output : string; calls = (!calls : int) }]));
+  [%expect {| ((duplicate true) (missing true) (output {}) (calls 1)) |}]
+;;
+
+let%expect_test
     "extension resources retain captured code and exact approved native bindings"
   =
   Eio_main.run (fun env ->

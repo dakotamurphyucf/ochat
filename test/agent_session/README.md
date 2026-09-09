@@ -17,6 +17,7 @@ stay beside those tests. Test modules depend on fixtures, not on other test modu
 | One-off source and capability preparation | `one_off_preparation_tests.ml` |
 | Persisted one-off execution and scoped file tools | `one_off_execution_tests.ml` |
 | Submitted `run_chatml` requests and inherited policy | `run_chatml_tests.ml` |
+| Registered one-off outcomes and runtime-request ownership | `run_chatml_registration_tests.ml`, `runtime_request_tests.ml` |
 | Standalone ChatML handlers | `standalone_tests.ml` |
 | Permission and compaction workflows | `permissions_tests.ml`, `compaction_tests.ml` |
 

@@ -104,24 +104,26 @@ let create
         Stream_invocation.parse_input ~kind:request.kind ~payload:request.payload
       in
       let invocation = prepare reference request in
-      let resolved =
-        if Result.is_error value && Option.is_none request.rejection
-        then
-          capabilities.with_invocation ~invocation (fun ~dispatched:_ -> Ok invalid_input)
-          |> require
-        else
-          Native_tool_invocation.run
-            ~capabilities
-            ~registry
-            ~reference
-            ~invocation
-            ~is_halted
-            ~authorize:(fun dispatched binding ->
-              let open Result.Let_syntax in
-              let%map () = admit dispatched binding in
-              authorize ())
-            ~prepare_output
-          |> require
+      let resolved, runtime_requests =
+        Chat_response.Runtime_request_scope.collect (fun () ->
+          if Result.is_error value && Option.is_none request.rejection
+          then
+            capabilities.with_invocation ~invocation (fun ~dispatched:_ ->
+              Ok invalid_input)
+            |> require
+          else
+            Native_tool_invocation.run
+              ~capabilities
+              ~registry
+              ~reference
+              ~invocation
+              ~is_halted
+              ~authorize:(fun dispatched binding ->
+                let open Result.Let_syntax in
+                let%map () = admit dispatched binding in
+                authorize ())
+              ~prepare_output
+            |> require)
       in
       let outcome =
         match resolved.status with
@@ -131,7 +133,7 @@ let create
       Some
         D.
           { output = Text (Jsonaf.to_string (I.outcome_to_json outcome))
-          ; runtime_requests = []
+          ; runtime_requests
           ; commit_output =
               Some
                 (fun entry ->

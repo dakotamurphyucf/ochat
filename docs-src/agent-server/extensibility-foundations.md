@@ -1840,9 +1840,33 @@ Actor fixtures call the actual request service, proving source-bound compilation
 errors, source and tool-subset limits, rejection of increased limits, zero-call
 execution and recursive calls that cannot reset their parent's allowance. Separate
 native-result fixtures cover opaque lookalike text, malformed/unowned outcomes,
-disclosure and idempotent publication. Final ChatMD/native registration, runtime
-request consumption and authoring-helper integration remain pending; shipping
-these internal services does not expose `run_chatml` to a model.
+disclosure and idempotent publication.
+
+`Agent_runtime.prepare_extensions ~native_registrations` accepts actual host
+implementations with explicit revisions and native result contracts. It selects
+them only for matching builtin declarations in the captured ChatMD document;
+supplying a registration does not add it to the agent's tools. Duplicate host
+names are rejected, and the selected implementation retains its exact callable,
+revision and result contract in the capability registry.
+
+`Run_chatml_tool.registration` constructs the native one-off tool with its real
+request schema and `Invocation_v1` contract. Execution requires an active borrowed
+native invocation and an owned runtime-request collector before it obtains host
+services or compiles source. Moderator pre-hook requests enter the collector as
+they occur, including when the remaining computation fails. Native and standalone
+dispatchers return collected requests with their single canonical outcome. Requests
+are coalesced by kind, retaining the first end-session reason. Captured collectors
+can cross an owned domain handoff but cannot outlive their lexical scope or fall
+back to an unrelated ambient collector.
+
+Actor fixtures exercise the actual registration through native dispatch, checking
+success and failure after a native effect, retained turn/compaction requests,
+three persisted invocations and one canonical provider output. Separate checks
+cover explicit registration selection, changed contracts/revisions, domain
+handoffs and expired scopes. These request fixtures do not qualify the daemon's
+scheduling/restart behavior. Runtime-builder installation, moderator/event
+collection and authoring-helper integration remain pending; these internal
+services do not enable public `run_chatml` availability.
 
 ## Authoring policy admission plans
 
