@@ -35,6 +35,7 @@
   generated_admission
   authoring_registration
   extension_compiler
+  one_off_script
   mcp_discovery_cache
   fork
   compact_history)

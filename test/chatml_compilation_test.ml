@@ -73,7 +73,7 @@ let () =
       (compile ~limits:{ C.default_limits with max_source_bytes = 1 } C.One_off_v1 "long");
     expect_error
       "chatml.invalid_limits"
-      (compile ~limits:{ C.default_limits with wall_seconds = 31. } C.One_off_v1 "");
+      (compile ~limits:{ C.default_limits with wall_seconds = 0. } C.One_off_v1 "");
     let dir = Eio.Stdenv.cwd env in
     let loader =
       Source_loader.captured_filesystem ~root:dir ~sources:[ "schema.json", "true" ]

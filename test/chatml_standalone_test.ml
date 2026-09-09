@@ -15,6 +15,76 @@ let config ?(handlers = R.default_handlers) () : R.runtime_config =
   }
 ;;
 
+let%expect_test
+    "compiler host policy permits large trusted sources and preserves diagnostics"
+  =
+  let module C = Chatml_compilation in
+  Eio_main.run (fun env ->
+    let source =
+      "(* "
+      ^ String.make ((1024 * 1024) + 32) 'x'
+      ^ " *)\n\
+         let poison = fail(\"validation must not initialize\")\n\
+         let main input = Task.pure(input)"
+    in
+    List.iter
+      [ "default", C.Bounded C.default_limits, "chatml.source_limit"
+      ; ( "host budget"
+        , Bounded { wall_seconds = 60.; max_source_bytes = String.length source }
+        , "compiled" )
+      ; "unrestricted", Unrestricted, "compiled"
+      ]
+      ~f:(fun (name, policy, expected) ->
+        let result = C.compile_with_policy ~policy ~env ~target:One_off_v1 ~source () in
+        let actual =
+          match result with
+          | Ok _ -> "compiled"
+          | Error error -> error.C.code
+        in
+        [%test_eq: string] expected actual;
+        print_s
+          [%sexp
+            (name : string)
+          , ((match result with
+              | Ok _ -> "compiled"
+              | Error error -> error.C.code)
+             : string)]);
+    List.iter [ C.Unrestricted; Bounded C.default_limits ] ~f:(fun policy ->
+      match
+        C.compile_with_policy
+          ~policy
+          ~env
+          ~target:One_off_v1
+          ~source:"let main input =\n  missing(input)"
+          ()
+      with
+      | Ok _ -> failwith "invalid source compiled"
+      | Error error ->
+        let diagnostic = Option.value_exn error.diagnostic in
+        let span = Option.value_exn diagnostic.span in
+        print_s
+          [%sexp
+            (diagnostic.stage : R.compilation_stage)
+          , (span.left.line : int)
+          , (span.left.column : int)];
+        assert (String.is_substring error.message ~substring:diagnostic.message));
+    match
+      Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 0. (fun () ->
+        C.compile_with_policy ~policy:Unrestricted ~env ~target:One_off_v1 ~source ())
+    with
+    | _ -> failwith "unrestricted compiler swallowed caller cancellation"
+    | exception Eio.Time.Timeout -> print_endline "caller cancellation propagated");
+  [%expect
+    {|
+    (default chatml.source_limit)
+    ("host budget" compiled)
+    (unrestricted compiled)
+    (Typecheck 2 2)
+    (Typecheck 2 2)
+    caller cancellation propagated
+    |}]
+;;
+
 let summarize = function
   | Ok value ->
     Chatml.Chatml_value_codec.value_to_jsonaf_result value

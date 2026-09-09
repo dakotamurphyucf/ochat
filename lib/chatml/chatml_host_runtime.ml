@@ -749,20 +749,39 @@ let expect_callable (name : string) (value : Lang.value) : (Lang.value, string) 
   | _ -> Error (Printf.sprintf "Entrypoint '%s' is not callable" name)
 ;;
 
-let compile_script
+type compilation_stage =
+  | Parse
+  | Typecheck
+[@@deriving sexp, equal]
+
+type compilation_diagnostic =
+  { stage : compilation_stage
+  ; message : string
+  ; span : Source.span option
+  ; formatted : string
+  }
+[@@deriving sexp]
+
+let compile_script_detailed
       ?(checkpoint = fun () -> ())
       ?(surface = Builtin_surface.moderator_surface)
       ?(required_bindings = [])
       ~(source : string)
       ()
-  : (compiled_script, string) result
+  : (compiled_script, compilation_diagnostic) result
   =
   checkpoint ();
   let parsed = Parse.parse_program source in
   checkpoint ();
   let result =
     match parsed with
-    | Error diagnostic -> Error (Parse.format_diagnostic source diagnostic)
+    | Error diagnostic ->
+      Error
+        { stage = Parse
+        ; message = diagnostic.message
+        ; span = diagnostic.span
+        ; formatted = Parse.format_diagnostic source diagnostic
+        }
     | Ok program ->
       let checked =
         Typechecker.check_program_with_surface
@@ -773,13 +792,24 @@ let compile_script
       in
       checkpoint ();
       (match checked with
-       | Error diagnostic -> Error (Typechecker.format_diagnostic source diagnostic)
+       | Error diagnostic ->
+         Error
+           { stage = Typecheck
+           ; message = diagnostic.message
+           ; span = diagnostic.span
+           ; formatted = Typechecker.format_diagnostic source diagnostic
+           }
        | Ok checked ->
          let resolved = Resolver.resolve_checked_program checked program in
          Ok { surface; resolved; source_text = source })
   in
   checkpoint ();
   result
+;;
+
+let compile_script ?checkpoint ?surface ?required_bindings ~source () =
+  compile_script_detailed ?checkpoint ?surface ?required_bindings ~source ()
+  |> Result.map_error ~f:(fun diagnostic -> diagnostic.formatted)
 ;;
 
 let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =

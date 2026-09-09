@@ -207,6 +207,31 @@ val compile_script
   -> unit
   -> (compiled_script, string) result
 
+type compilation_stage =
+  | Parse
+  | Typecheck
+[@@deriving sexp, equal]
+
+(** Original parser/typechecker location and message, plus the legacy rendered
+    diagnostic. Spans refer to the exact submitted source, with no path loading. *)
+type compilation_diagnostic =
+  { stage : compilation_stage
+  ; message : string
+  ; span : Source.span option
+  ; formatted : string
+  }
+[@@deriving sexp]
+
+(** Same non-executing compilation as [compile_script], retaining structured
+    diagnostic data for validation/authoring consumers. *)
+val compile_script_detailed
+  :  ?checkpoint:(unit -> unit)
+  -> ?surface:Builtin_surface.surface
+  -> ?required_bindings:(string * Chatml.Chatml_builtin_spec.ty) list
+  -> source:string
+  -> unit
+  -> (compiled_script, compilation_diagnostic) result
+
 (** Surface recorded on a compiled script artifact. *)
 val compiled_surface : compiled_script -> Builtin_surface.surface
 

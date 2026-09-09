@@ -1536,9 +1536,14 @@ initializers, fetches dependencies, instantiates sessions or calls tools.
 Initializers that would fail at runtime can still pass compilation. The exact
 builtin/alias/entrypoint contract remains part of prepared cache identities.
 
-The default source budget is 256 KiB, capped at 1 MiB, and is checked before
-starting a domain. Diagnostics are capped at 16 KiB. The default cooperative time
-budget is 5 seconds, capped at 30 seconds, measured with a monotonic clock.
+The default source budget is 256 KiB and is checked before starting a domain.
+The default cooperative time budget is 5 seconds, measured with a monotonic clock.
+These are host policies: the generic compiler accepts other positive, finite
+budgets without universal source/time ceilings. `compile_with_policy ~policy:Unrestricted`
+omits source/time budgets while retaining cooperative caller cancellation. Authored
+extension admission retains its separately configured declaration/definition bounds;
+submitted source cannot select or raise its host's policy.
+Diagnostic message fields are capped at 16 KiB each.
 Checkpoints before and between compiler stages and within inference traversals
 yield to Eio, observe cancellation and check elapsed time. Work between checkpoints
 must finish before cancellation takes effect, so this is not a hard deadline or a process/memory sandbox. Eio
@@ -1551,6 +1556,35 @@ for shared source/target pairs, under an aggregate cooperative time budget.
 Compilation remains separate from dynamic initialization, state serialization,
 per-call authorization and feature qualification. No model-visible feature is
 enabled by these APIs alone.
+
+`Chatml_host_runtime.compile_script_detailed` preserves the parser/typechecker stage,
+original source span, concise message and rendered diagnostic. The existing
+`compile_script` API returns the same rendered text as before. The domain compiler
+retains structured details for parser/type errors and omits them for resource/host
+failures. This lets validation consumers report locations without parsing formatted
+error strings or rerunning the compiler.
+
+### One-off source preparation
+
+`Chat_response.One_off_script.prepare_in_domain` compiles a submitted source string
+against the dedicated `main : json -> json task` contract. The host supplies the
+caller's effective capability registry and explicit selected tool names. Missing
+or duplicate names fail before compilation. Source limits are checked before
+provenance hashing; no files, imports, initializers or tool effects are executed.
+
+The opaque artifact retains the exact bytes, source hash, compiled program and
+selected live bindings. Its identity includes the source, compiler surface and
+entrypoint contract, schemas and implementation/capability identities. It stores
+no evaluated globals. `revalidate` rejects removed or replaced selected bindings,
+while additional current tools never widen the artifact's selection.
+
+Validation diagnostics identify the `source`, `tools` or `limits` request field.
+Parser/type failures retain their original span against the submitted source hash;
+`one-off-<hash>.chatml` is a logical source label, not a file to load. Errors without
+a compiler location retain whole-source provenance. This API provides static
+preparation for the future run/authoring tools; it does not expose `run_chatml` or
+borrow execution authority. Runtime connection, inherited capability/budget
+propagation and authoring-context/helper installation remain required.
 
 ## Standalone execution primitives
 

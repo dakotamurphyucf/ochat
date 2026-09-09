@@ -16,10 +16,20 @@ type limits =
 
 val default_limits : limits
 
+type policy =
+  | Unrestricted
+  | Bounded of limits
+
 type error =
   { code : string
   ; message : string
+  ; diagnostic : Chatml_host_runtime.compilation_diagnostic option
+    (** Parser/typechecker details, including the original source span. Absent
+        for source/resource/host failures. Both message forms remain bounded. *)
   }
+
+(** Positive, finite host policy, without universal source/time ceilings. *)
+val validate_limits : limits -> (unit, error) result
 
 (** Versioned builtin/alias/entrypoint type identity, without implementations or
     credentials. Hosts include it in prepared/cache fingerprints. *)
@@ -35,6 +45,18 @@ val contract : target -> Sexp.t
     process/heap sandbox. No domain is abandoned after cancellation. *)
 val compile
   :  ?limits:limits
+  -> env:Eio_unix.Stdenv.base
+  -> target:target
+  -> source:string
+  -> unit
+  -> (Chatml_host_runtime.compiled_script, error) result
+
+(** Explicit host policy. [Unrestricted] removes source/time limits but keeps
+    cooperative caller cancellation and joined domain cleanup. It grants no tool
+    or session authority; agents cannot choose this policy through submitted code.
+    [compile] is the convenience wrapper for bounded compilation. *)
+val compile_with_policy
+  :  policy:policy
   -> env:Eio_unix.Stdenv.base
   -> target:target
   -> source:string

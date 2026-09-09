@@ -149,7 +149,7 @@ let prepare ?(max_source_bytes = 256 * 1024) ~scripts ~capabilities tool =
     in
     Chatml_host_runtime.compile_script ~surface ~required_bindings ~source ()
     |> Result.map_error ~f:(fun message ->
-      Chatml_compilation.{ code = "chatml.invalid_handler"; message })
+      Chatml_compilation.{ code = "chatml.invalid_handler"; message; diagnostic = None })
   in
   prepare_with ~compile ~max_source_bytes ~scripts ~capabilities tool
 ;;
