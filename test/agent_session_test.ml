@@ -4463,6 +4463,123 @@ let%expect_test "external event delivery commits receipts before changing the li
     |}]
 ;;
 
+let%expect_test "two session event owners reject a wait cycle and release both borrows" =
+  let module A = Agent_session.Session_actor in
+  let module M = Chat_response.Moderator_manager in
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+      Eio.Switch.run (fun sw ->
+        let actors =
+          Array.init 2 ~f:(fun index ->
+            let manager, _ = handoff_manager env in
+            let snapshot = M.identity_snapshot manager |> Result.ok_or_failwith in
+            let initial =
+              actor_state ~workspace_instance ~liveness:Detached ~start_immediately:true
+            in
+            let initial =
+              { initial with
+                identity =
+                  { initial.identity with
+                    session_id =
+                      (match index with
+                       | 0 -> session_id
+                       | _ -> second_session_id)
+                  }
+              ; lifecycle = { desired = Running; observed = Idle }
+              ; moderator =
+                  Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot)
+              }
+            in
+            let backend =
+              Agent_session.Memory_backend.create
+                ~event_capacity:32
+                ~initial_state:initial
+            in
+            let actor =
+              A.create
+                ~sw
+                ~clock:(Eio.Stdenv.clock env)
+                ~mailbox_capacity:16
+                ~compaction_env:None
+                ~initial_state:initial
+                ~operation_worker:None
+                ~persistence:(Agent_session.Memory_backend.persistence backend)
+                ~services:
+                  { now = (fun () -> timestamp)
+                  ; create_attachment_id = Agent_protocol.Id.Attachment.create
+                  ; create_reclaim_token = (fun () -> "cycle-test")
+                  ; state_committed = (fun _ _ -> ())
+                  }
+            in
+            actor, snapshot)
+        in
+        Exn.protect
+          ~finally:(fun () -> Array.iter actors ~f:(fun (actor, _) -> A.shutdown actor))
+          ~f:(fun () ->
+            let held = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
+            let proceed = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
+            let finished = Array.init 2 ~f:(fun _ -> Eio.Promise.create ()) in
+            Array.iteri actors ~f:(fun index (actor, snapshot) ->
+              Eio.Fiber.fork ~sw (fun () ->
+                let result = ref "missing" in
+                let claimed =
+                  A.with_current_moderator_event
+                    actor
+                    ~operation_id:None
+                    ~event:Session_start
+                    ~snapshot:(fun () -> Ok snapshot)
+                    (fun ~executing:_ ~event:_ ~execute:_ ~commit ->
+                       Eio.Promise.resolve (snd held.(index)) ();
+                       Eio.Promise.await (fst proceed.(index));
+                       let remote, _ = actors.((index + 1) mod 2) in
+                       (result
+                        := match A.with_moderator_checkpoint remote (fun () -> Ok ()) with
+                           | Ok () -> "acquired"
+                           | Error error -> error.message);
+                       commit
+                         ~snapshot
+                         ~requests:
+                           { request_turn = false
+                           ; request_compaction = false
+                           ; end_session = None
+                           })
+                  |> protocol_ok
+                in
+                assert claimed;
+                Eio.Promise.resolve (snd finished.(index)) !result));
+            Array.iter held ~f:(fun (promise, _) -> Eio.Promise.await promise);
+            (* Both mailboxes remain responsive while independent event borrows are held. *)
+            Array.iter actors ~f:(fun (actor, _) ->
+              let state = A.state actor |> protocol_ok in
+              assert (List.length state.moderator_executions = 1));
+            Array.iter proceed ~f:(fun (_, resolver) ->
+              Eio.Promise.resolve resolver ();
+              Eio.Fiber.yield ());
+            let outcomes =
+              Array.to_list finished
+              |> List.map ~f:(fun (promise, _) -> Eio.Promise.await promise)
+            in
+            let completed =
+              Array.to_list actors
+              |> List.map ~f:(fun (actor, _) ->
+                A.with_moderator_checkpoint actor (fun () -> Ok ()) |> protocol_ok;
+                List.for_all
+                  (A.state actor |> protocol_ok).moderator_executions
+                  ~f:(fun receipt ->
+                    match receipt.status with
+                    | Completed _ -> true
+                    | _ -> false))
+            in
+            print_s [%sexp { outcomes : string list; completed : bool list }]))));
+  [%expect
+    {|
+    ((outcomes
+      (acquired
+       "moderator_wait_cycle: synchronous call would create an owner wait cycle"))
+     (completed (true true)))
+    |}]
+;;
+
 let%expect_test
     "follow-up scheduling survives save failure and reload without repeating compaction"
   =

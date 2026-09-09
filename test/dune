@@ -865,8 +865,13 @@
   ochat.agent_client
   ochat.agent_server)
  (inline_tests)
+ (preprocessor_deps
+  (file chatml_extensibility_fixtures/x02-review/agent.chatmd)
+  (file chatml_extensibility_fixtures/x02-review/review.chatml)
+  (file chatml_extensibility_fixtures/x02-review/input.json)
+  (file chatml_extensibility_fixtures/x02-review/output.json))
  (preprocess
-  (pps ppx_jane ppx_expect)))
+  (pps ppx_jane ppx_blob ppx_expect)))
 
 (library
  (name tool_schema_test)

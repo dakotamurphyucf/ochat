@@ -1,0 +1,5 @@
+<developer>Use begin_review to create or retrieve a review for a revision.</developer>
+<script id="reviews" language="chatml" kind="moderator" api="extensibility-v1" src="review.chatml"/>
+<tool name="begin_review" type="moderator" moderator="reviews" input_schema="input.json" output_schema="output.json"/>
+<tool name="unhandled_review" type="moderator" moderator="reviews" input_schema="input.json" output_schema="output.json"/>
+<tool name="double_resolve" type="moderator" moderator="reviews" input_schema="input.json" output_schema="output.json"/>

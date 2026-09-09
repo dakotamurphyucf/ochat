@@ -438,16 +438,18 @@ let on_event = fun ctx state event -> match event with
               let daemon = start sw in
               let client = connection daemon (principal ()) in
               initialize client;
-              let created, _ = create_session client in
+              let created, creator_attachment = create_session client in
               let actor = (entry daemon created.id).actor in
               let stopped = A.state actor |> protocol_ok in
               assert (List.is_empty stopped.invocations);
               assert (List.is_empty stopped.moderator_executions);
+              let controller = connection daemon (principal ()) in
+              initialize controller;
               let handle =
                 H.attach
                   ~sw
                   ~clock:(Eio.Stdenv.clock env)
-                  ~connection:client
+                  ~connection:controller
                   ~session_id:created.id
                   ~mode:Read_write
                   ()
@@ -468,6 +470,11 @@ let on_event = fun ctx state event -> match event with
                       Agent_protocol.Permission.equal_state permission.state Pending)
                   in
                   assert (Option.is_none waiting.active_operation);
+                  Agent_client.Connection.request
+                    client
+                    (Session_get { session_id = created.id; history = None })
+                  |> protocol_ok
+                  |> ignore;
                   let owned =
                     match permission.owner with
                     | Operation _ -> false
@@ -479,14 +486,39 @@ let on_event = fun ctx state event -> match event with
                   (match mode with
                    | `Cancel -> H.stop handle ~mode:Cancel |> protocol_ok |> ignore
                    | `Ask ->
-                     H.respond_permission
-                       handle
-                       ~permission_id:permission.id
-                       ~permission_generation:permission.generation
-                       ~choice:Approve_session
-                       ~reason:None
-                     |> protocol_ok
-                     |> ignore
+                     let first, second =
+                       Eio.Fiber.pair
+                         (fun () ->
+                            H.respond_permission
+                              handle
+                              ~permission_id:permission.id
+                              ~permission_generation:permission.generation
+                              ~choice:Approve_session
+                              ~reason:None
+                            |> Result.map ~f:ignore)
+                         (fun () ->
+                            Agent_client.Connection.request
+                              client
+                              (Permission_respond
+                                 { session_id = created.id
+                                 ; attachment_id = creator_attachment.id
+                                 ; permission_id = permission.id
+                                 ; permission_generation = permission.generation
+                                 ; choice = Approve_session
+                                 ; reason = None
+                                 ; idempotency_key =
+                                     Agent_protocol.Idempotency_key.of_string
+                                       "competing-approval"
+                                     |> protocol_ok
+                                 })
+                            |> Result.map ~f:ignore)
+                     in
+                     assert (List.count [ first; second ] ~f:Result.is_ok = 1);
+                     List.iter [ first; second ] ~f:(function
+                       | Ok () -> ()
+                       | Error error ->
+                         assert (
+                           Agent_protocol.Error.equal_code error.code Already_resolved))
                    | `Allow | `Deny -> assert false);
                   owned
               in
@@ -496,6 +528,7 @@ let on_event = fun ctx state event -> match event with
                 List.map settled.permissions ~f:(fun p -> p.state)
               in
               H.close handle;
+              Agent_client.Connection.close controller;
               Agent_client.Connection.close client;
               Agent_server.Daemon.shutdown daemon |> protocol_ok;
               created.id, value, invocation_owned, permission_states)
@@ -782,6 +815,258 @@ let on_event = fun ctx state event -> match event with
     ((delivered (1 1)) (completed_events 2) (native_calls 2)
      (native_event_owned true) (delivery_cancelled true) (model_calls 0)
      (halt_reason ("timers complete")))
+    |}]
+;;
+
+let%expect_test
+    "X02 review references deduplicate concurrent requests and survive daemon restart"
+  =
+  let module A = Agent_session.Session_actor in
+  let module H = Agent_client.Session_handle in
+  let module I = Agent_protocol.Invocation in
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        List.iter
+          [ ( "agent.chatmd"
+            , [%blob "chatml_extensibility_fixtures/x02-review/agent.chatmd"] )
+          ; ( "review.chatml"
+            , [%blob "chatml_extensibility_fixtures/x02-review/review.chatml"] )
+          ; "input.json", [%blob "chatml_extensibility_fixtures/x02-review/input.json"]
+          ; "output.json", [%blob "chatml_extensibility_fixtures/x02-review/output.json"]
+          ]
+          ~f:(fun (name, source) ->
+            Eio.Path.save
+              ~create:(`Exclusive 0o600)
+              Eio.Path.(Eio.Stdenv.fs env / root / name)
+              source);
+        let configuration = config root workspace (Filename.concat root "agent.chatmd") in
+        let requests = ref 0 in
+        let call_events batch calls =
+          List.concat_mapi calls ~f:(fun index (name, revision) ->
+            let open Openai.Responses.Response_stream in
+            let id = sprintf "review-%d-%d" batch index in
+            [ Output_item_added
+                { item =
+                    Function_call
+                      { name
+                      ; arguments = ""
+                      ; call_id = id
+                      ; _type = "function_call"
+                      ; id = Some id
+                      ; status = None
+                      }
+                ; output_index = index
+                ; type_ = "response.output_item.added"
+                }
+            ; Function_call_arguments_done
+                { arguments = Jsonaf.to_string (`Object [ "revision", `String revision ])
+                ; item_id = id
+                ; output_index = index
+                ; type_ = "response.function_call_arguments.done"
+                }
+            ])
+          |> Stdlib.List.to_seq
+        in
+        let post_stream ~sw:_ ~inputs:_ =
+          incr requests;
+          match !requests with
+          | 1 -> call_events 1 [ "begin_review", "rev-a"; "begin_review", "rev-a" ]
+          | 2 ->
+            call_events
+              2
+              [ "begin_review", "rev-b"
+              ; "unhandled_review", "rev-x"
+              ; "double_resolve", "rev-x"
+              ]
+          | 3 | 5 -> Stdlib.Seq.empty
+          | 4 ->
+            call_events
+              4
+              [ "begin_review", "rev-a"
+              ; "begin_review", "rev-b"
+              ; "begin_review", "rev-c"
+              ]
+          | _ -> failwith "unexpected additional model turn"
+        in
+        let start sw =
+          Agent_server.Daemon.start
+            ~sw
+            ~env
+            ~config:configuration
+            ~tool_dir:root
+            ~home:root
+            ~process_start_identity:None
+            ~options:
+              { Agent_server.Daemon.default_options with
+                qualify_chatml_extensions = true
+              ; model_post_stream = Some post_stream
+              }
+            ()
+          |> protocol_ok
+        in
+        let run daemon sw client id expected_requests =
+          let handle =
+            H.attach
+              ~sw
+              ~clock:(Eio.Stdenv.clock env)
+              ~connection:client
+              ~session_id:id
+              ~mode:Read_write
+              ()
+            |> protocol_ok
+          in
+          let entry =
+            Agent_server.Session_registry.find (Agent_server.Daemon.registry daemon) id
+            |> Option.value_exn
+          in
+          let before_sequence =
+            Agent_session.Durable_event_log.latest_sequence entry.durable_events
+            |> Option.value ~default:0L
+          in
+          let submission =
+            H.send_message
+              handle
+              { kind = Plain_text
+              ; text = "review the requested revisions"
+              ; attachments = []
+              }
+            |> protocol_ok
+          in
+          let operation_id = Option.value_exn submission.operation_id in
+          let final =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+              let rec loop () =
+                let state = A.state entry.actor |> protocol_ok in
+                match state.active_operation with
+                | None when !requests >= expected_requests -> state
+                | _ ->
+                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                  loop ()
+              in
+              loop ())
+          in
+          let events =
+            match
+              Agent_session.Durable_event_log.replay
+                entry.durable_events
+                ~after_sequence:before_sequence
+                ~through_sequence:Int64.max_value
+            with
+            | Available events -> events
+            | Snapshot_required -> failwith "test lost operation completion evidence"
+          in
+          assert (
+            List.exists events ~f:(fun event ->
+              match
+                Agent_protocol.Event.Durable.Payload.of_json
+                  ~kind:event.kind
+                  event.payload
+                |> protocol_ok
+              with
+              | Operation_completed operation ->
+                Agent_protocol.Id.Operation.equal operation.id operation_id
+              | _ -> false));
+          List.iter final.invocations ~f:(fun invocation ->
+            assert (I.equal_origin invocation.context.origin Model);
+            let output_id = Option.value_exn invocation.output_entry_id in
+            assert (
+              List.exists final.conversation.canonical_history ~f:(fun entry ->
+                Agent_protocol.History.Id.equal entry.id output_id)));
+          H.close handle;
+          final
+        in
+        let output state call_id =
+          let invocation =
+            List.find_exn
+              state.Agent_session.Session_state.invocations
+              ~f:(fun invocation ->
+                Option.exists
+                  invocation.context.provider_call_id
+                  ~f:(String.equal call_id))
+          in
+          match invocation.status with
+          | Published (Complete (`String reference)) -> reference
+          | Published (Fail error) -> error.code
+          | _ -> failwith "review outcome was not published"
+        in
+        let reviews state =
+          match state.Agent_session.Session_state.moderator with
+          | Some (`Object [ ("identity_snapshot_sexp", `String value) ]) ->
+            let snapshot =
+              Session.Moderator_state.Identity_snapshot.t_of_sexp (Sexp.of_string value)
+            in
+            (match snapshot.current_state with
+             | Session.Snapshot.Array reviews -> List.length reviews
+             | _ -> failwith "review state is not an array")
+          | _ -> failwith "review state was not persisted"
+        in
+        let id, first =
+          Eio.Switch.run (fun sw ->
+            let daemon = start sw in
+            let client = connection daemon (principal ()) in
+            initialize client;
+            let session, _ = create_session ~start_immediately:true client in
+            let state = run daemon sw client session.id 3 in
+            Agent_client.Connection.close client;
+            Agent_server.Daemon.shutdown daemon |> protocol_ok;
+            session.id, state)
+        in
+        let changed_source =
+          String.substr_replace_all
+            [%blob "chatml_extensibility_fixtures/x02-review/review.chatml"]
+            ~pattern:"review-"
+            ~with_:"changed-"
+        in
+        Eio.Path.save
+          ~create:(`Or_truncate 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / root / "review.chatml")
+          changed_source;
+        let second =
+          Eio.Switch.run (fun sw ->
+            let daemon = start sw in
+            let client = connection daemon (principal ()) in
+            initialize client;
+            let state = run daemon sw client id 5 in
+            Agent_client.Connection.close client;
+            Agent_server.Daemon.shutdown daemon |> protocol_ok;
+            state)
+        in
+        assert (
+          Agent_protocol.Id.Prompt_revision.equal
+            first.spec.prompt_revision_id
+            second.spec.prompt_revision_id);
+        print_s
+          [%sexp
+            { first =
+                (List.map
+                   [ "review-1-0"
+                   ; "review-1-1"
+                   ; "review-2-0"
+                   ; "review-2-1"
+                   ; "review-2-2"
+                   ]
+                   ~f:(output first)
+                 : string list)
+            ; after_restart =
+                (List.map [ "review-4-0"; "review-4-1"; "review-4-2" ] ~f:(output second)
+                 : string list)
+            ; review_counts = ([ reviews first; reviews second ] : int list)
+            ; provider_requests = (!requests : int)
+            }]));
+  [%expect
+    {|
+    ((first
+      (review-1 review-1 review-2 invocation.unhandled
+       invocation.duplicate_resolution))
+     (after_restart (review-1 review-2 review-3)) (review_counts (2 3))
+     (provider_requests 5))
     |}]
 ;;
 

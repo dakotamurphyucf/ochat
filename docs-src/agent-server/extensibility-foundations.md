@@ -60,6 +60,15 @@ the versioned `Job_completed` adapter remains part of background-work integratio
 
 ## Moderator tool dispatch internals
 
+The executable X02 fixture in `test/chatml_extensibility_fixtures/x02-review/`
+implements `begin_review` entirely in ChatML moderator state. Concurrent requests
+for the same revision return the same stored review reference; another revision
+gets a distinct reference. Its daemon acceptance test also verifies explicit
+errors for an unhandled tool and double resolution, canonical result publication,
+and reference reuse after a daemon restart. Live script edits cannot replace the
+restored session's pinned implementation. These review references are example
+records, not generated agent sessions or background-work IDs.
+
 `Moderator_manager.Registry.of_definition` binds an already validated extension
 definition to a moderator manager. It reuses the compiled program and retains the
 exact tool bindings. Ordinary legacy moderator registration remains unchanged.
