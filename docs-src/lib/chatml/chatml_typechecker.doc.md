@@ -31,14 +31,15 @@ Running the checker:
 val infer_program : program -> unit
 ```
 
-1. Resets all internal mutable state (counters, level stack, span table).
+1. Allocates invocation-local inference state (counters, level stack, span table).
 2. Performs type inference on the supplied program.
 3. Prints either `"Type checking succeeded!"` or a formatted error message
    that includes the faulty source excerpt.
 
-The checker never raises a user-visible exception — all errors are captured
-and reported through the message channel instead.  The global span table is
-populated as a side effect and can later be queried by IDE tooling.
+Language type errors are formatted by this convenience entrypoint. Hosts should
+use `check_program` or `check_program_with_surface` for structured diagnostics.
+Inference state is local to a compilation; concurrent compilations do not share
+mutable type variables or a global span table. Host checkpoint exceptions propagate.
 
 ### `type_lookup_for_program`
 
@@ -60,54 +61,42 @@ This is the recommended entry-point for editor integrations.
 | ----------------------- | ----------------------- | ----- |
 | Polymorphic functions   | `let id = fun x -> x`   | `id : 'a -> 'a` |
 | Records                 | `{ foo = 1; bar = 2 }`  | Row polymorphic (open rows) |
-| Variants                | `` `Some 3 ``            | Row polymorphic |
-| Arrays                  | `[1;2;3]`               | Homogeneous |
-| References              | `ref 42`                | Mutable cell |
+| Variants                | `` `Some(3) ``           | Row polymorphic |
+| Arrays                  | `[1, 2, 3]`              | Homogeneous |
+| References              | `ref(42)`                | Mutable cell |
 
 The built-in environment ({!init_env} in the source) contains a small set of
 primitives such as arithmetic operators and a `print` function.  New
-bindings introduced by `let` are automatically generalised.
+non-expansive bindings introduced by `let` can be generalised. The value
+restriction prevents polymorphic mutable storage; bindings containing recursive
+types remain monomorphic.
 
 ---
 
 ## 4  Example usage
 
 ```ocaml
-open Chatml
+let source = {|let double x = x + x
+let answer = double(21)|}
 
-(* 1.  Parse some ChatML source. *)
-let src = """
-  let double = fun x -> x + x in
-  double 21
-""" in
+let program = Chatml.Chatml_parse.parse_program_exn source
 
-let prog =
-  src
-  |> Lexing.from_string
-  |> Chatml_parser.program Chatml_lexer.read
-  |> Chatml_resolver.resolve_program  (* optional resolver pass *)
-in
-
-(* 2.  Run the type-checker. *)
-Chatml_typechecker.infer_program prog;
-
-(* 3.  Query the type of an arbitrary span (here the whole program). *)
-let lookup = Chatml_typechecker.type_lookup_for_program prog in
-match lookup (snd prog) with
-| Some ty -> Format.printf "Program type: %s@." (Chatml_typechecker.show_type ty)
-| None    -> Format.printf "No type information available.@."
+let () =
+  match Chatml_typechecker.check_program program with
+  | Ok _checked -> print_endline "Type checking succeeded"
+  | Error diagnostic ->
+    print_endline (Chatml_typechecker.format_diagnostic source diagnostic)
 ```
 
-> **Note:** The example assumes that the resolver pass has already been run
-> so that the AST carries slot information.  The type-checker itself does
-> not require it but the subsequent interpreter does.
+The checker accepts the parsed AST. The compiler subsequently uses its type
+information during resolution; the evaluator executes the resolved AST.
 
 ---
 
 ## 5  Limitations & future work
 
-* **No exhaustiveness check**: `match` expressions are typed but not
-  checked for completeness.
+* Exhaustiveness and redundancy checks are conservative; they do not prove
+  arbitrary conditions or relationships between guards.
 * **No effect tracking**: references are supported but the type system does
   not track mutability or aliasing.
 * **Error messages** are decent but still lack hinting (e.g. missing
@@ -128,3 +117,29 @@ binding cannot bypass the check. The generic host compiler forwards this option.
 
 See [extension compiler surfaces](../../agent-server/extensibility-foundations.md#static-script-contracts)
 for the one-off and standalone tool contracts and their current integration limits.
+
+### Recursive types and cancellation
+
+Explicit recursive aliases use `Mu` binders; inferred recursive data types use
+cyclic type-variable graphs. Unification tracks active comparison pairs, including
+their binder environments, to terminate when a recursive structure refers back to
+an obligation already being checked. The assumptions are local to the current
+path. Sibling fields still check their constraints after earlier fields bind
+mutable type variables. Comparing different recursive payloads or different
+enclosing binders continues to fail.
+
+For example, a function returning `Null` or `Array` of recursive results can be
+inferred and checked against the host's `json` contract without a result annotation:
+
+```ocaml
+let rec tree n =
+  if n == 0 then `Null
+  else let child = tree(n - 1) in `Array([child, child])
+let main input = Task.pure(tree(2))
+```
+
+`check_program_with_surface` accepts an optional host `checkpoint`. Inference,
+instantiation, generalization and unification invoke it periodically. With no
+checkpoint, the typechecker imposes no resource policy. The Eio compiler service
+uses it to observe caller cancellation and elapsed-time budgets; work between
+checkpoints is still cooperative. Compilation never evaluates the function above.

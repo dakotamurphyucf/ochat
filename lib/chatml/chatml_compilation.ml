@@ -54,7 +54,7 @@ let contract target =
 
 (* Compilation owns its mutable inference/resolution state. Only immutable source,
    builtin type descriptions and the finished program cross the domain boundary.
-   Checkpoints deliberately live between stages: this is cooperative cancellation,
+   Checkpoints run between stages and within inference: this is cooperative cancellation,
    not a hard time or memory sandbox around arbitrary compiler code. *)
 let compile ?(limits = default_limits) ~env ~target ~source () =
   if

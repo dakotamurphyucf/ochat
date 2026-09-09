@@ -75,6 +75,13 @@
  (modules chatml_parser)
  (flags --table --dump))
 
+(library
+ (name chatml_execution)
+ (public_name ochat.chatml_execution)
+ (modules chatml_execution)
+ (libraries core eio eio.unix mtime chatml chatml_host_runtime)
+ (preprocess (pps ppx_jane)))
+
 (ocamllex chatml_lexer)
 
 (library

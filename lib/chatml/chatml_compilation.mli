@@ -29,9 +29,9 @@ val contract : target -> Sexp.t
     before starting a domain; diagnostics expose at most 16 KiB. Compilation never
     evaluates initializers or calls tools. Mutable compiler state is invocation-local.
 
-    Cancellation and elapsed time are checked between compiler stages. A stage
-    already running must finish before cancellation takes effect; the caller waits
-    for domain cleanup. This is a cooperative time budget, not a hard deadline or
+    Cancellation and elapsed time are checked between compiler stages and within
+    inference traversals. Work between checkpoints must finish before cancellation
+    takes effect; the caller waits for domain cleanup. This is a cooperative time budget, not a hard deadline or
     process/heap sandbox. No domain is abandoned after cancellation. *)
 val compile
   :  ?limits:limits

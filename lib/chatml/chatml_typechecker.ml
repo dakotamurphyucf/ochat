@@ -141,15 +141,27 @@ type infer_state =
   ; mutable id_checkpoints : int list
   ; mutable mu_id : int (* NEW: never reset *)
   ; span_types : typ SpanTbl.t
+  ; checkpoint : unit -> unit
+  ; mutable until_checkpoint : int
   }
 
-let create_state () : infer_state =
+let create_state ?(checkpoint = fun () -> ()) () : infer_state =
   { current_id = 0
   ; current_lvl = 0
   ; id_checkpoints = []
   ; mu_id = 0
   ; span_types = SpanTbl.create ()
+  ; checkpoint
+  ; until_checkpoint = 0
   }
+;;
+
+let checkpoint state =
+  state.until_checkpoint <- state.until_checkpoint - 1;
+  if state.until_checkpoint <= 0
+  then (
+    state.until_checkpoint <- 64;
+    state.checkpoint ())
 ;;
 
 let enter_level (state : infer_state) =
@@ -264,7 +276,9 @@ let unfold_mu (ty : typ) : typ =
 
 let instantiate (state : infer_state) ty =
   let table = Hashtbl.create (module String) in
-  let rec inst (seen : tv ref list) = function
+  let rec inst (seen : tv ref list) ty =
+    checkpoint state;
+    match ty with
     | Fun (ps, r) -> Fun (List.map ps ~f:(inst seen), inst seen r)
     | Generic x ->
       (match Hashtbl.find table x with
@@ -297,7 +311,9 @@ let instantiate (state : infer_state) ty =
   universally-quantified (Generic) type variables.
 *)
 let generalise (state : infer_state) ty =
-  let rec gen (seen : tv ref list) = function
+  let rec gen (seen : tv ref list) ty =
+    checkpoint state;
+    match ty with
     | Fun (params, ret) -> Fun (List.map params ~f:(gen seen), gen seen ret)
     | Var ({ contents = Bound t } as tvref) ->
       if tv_ref_mem tvref seen then Var tvref else gen (tvref :: seen) t
@@ -580,33 +596,57 @@ let rec unify (state : infer_state) lhs rhs =
       incr counter;
       !counter
   in
-  let rec go (env_l : MuEnv.t) (env_r : MuEnv.t) lhs rhs =
-    if phys_equal lhs rhs
+  let same_scope = Map.equal Int.equal in
+  let same_node lhs rhs =
+    phys_equal lhs rhs
+    ||
+    match lhs, rhs with
+    | Var left, Var right -> phys_equal left right
+    | _ -> false
+  in
+  (* Recursive data types are finite graphs. Retain assumptions only along the
+     current comparison path: siblings must still check their constraints after
+     earlier unifications have bound mutable variables. Binder environments are
+     part of the identity, so revisiting a node in another lexical scope does not
+     discharge a different obligation. Guardedness is checked when cycles form. *)
+  let rec go active (env_l : MuEnv.t) (env_r : MuEnv.t) lhs rhs =
+    checkpoint state;
+    if
+      (same_node lhs rhs && same_scope env_l env_r)
+      || List.exists active ~f:(fun (left, right, scope_l, scope_r) ->
+        same_node lhs left
+        && same_node rhs right
+        && same_scope env_l scope_l
+        && same_scope env_r scope_r)
     then ()
     else (
+      let active = (lhs, rhs, env_l, env_r) :: active in
       match lhs, rhs with
       | Fun (ps1, r1), Fun (ps2, r2) ->
         if List.length ps1 <> List.length ps2
         then raise (Type_error "Function arity mismatch");
-        List.iter2_exn ps1 ps2 ~f:(go env_l env_r);
-        go env_l env_r r1 r2
+        List.iter2_exn ps1 ps2 ~f:(go active env_l env_r);
+        go active env_l env_r r1 r2
       | Con (n1, a1), Con (n2, a2) ->
         if not (String.equal n1 n2) then raise (Type_error "Type constructor mismatch");
         if List.length a1 <> List.length a2
         then raise (Type_error "Type constructor arity mismatch");
-        List.iter2_exn a1 a2 ~f:(go env_l env_r)
+        List.iter2_exn a1 a2 ~f:(go active env_l env_r)
       | Var { contents = Bound t1 }, t2 | t1, Var { contents = Bound t2 } ->
-        go env_l env_r t1 t2
+        go active env_l env_r t1 t2
       (* KEY CHANGE: Mu/Mu uses environments, not substitution. *)
       | Mu (b1, body1), Mu (b2, body2) ->
         let id = next_mu_id () in
         let env_l' = MuEnv.add env_l ~key:b1 ~data:id in
         let env_r' = MuEnv.add env_r ~key:b2 ~data:id in
-        go env_l' env_r' body1 body2
+        go active env_l' env_r' body1 body2
       (* Keep equi-recursive rule for Mu vs non-Mu by unfolding one step. *)
-      | (Mu _ as mu), t | t, (Mu _ as mu) ->
+      | (Mu _ as mu), t ->
         ensure_contractive_type mu;
-        go env_l env_r (unfold_mu mu) t
+        go active env_l env_r (unfold_mu mu) t
+      | t, (Mu _ as mu) ->
+        ensure_contractive_type mu;
+        go active env_l env_r t (unfold_mu mu)
       (* KEY CHANGE: Rec_var equality consults the environments. *)
       | Rec_var x, Rec_var y ->
         (match MuEnv.find env_l x, MuEnv.find env_r y with
@@ -625,13 +665,13 @@ let rec unify (state : infer_state) lhs rhs =
           ensure_guarded_cycle tv t;
           tv := Bound t (* cyclic bind; NO Rec_var/Mu synthesis *))
         else tv := Bound t
-      | Ref t1, Ref t2 | Array t1, Array t2 -> go env_l env_r t1 t2
-      | Record r1, Record r2 | Variant r1, Variant r2 -> go env_l env_r r1 r2
+      | Ref t1, Ref t2 | Array t1, Array t2 -> go active env_l env_r t1 t2
+      | Record r1, Record r2 | Variant r1, Variant r2 -> go active env_l env_r r1 r2
       | Tuple ts1, Tuple ts2 ->
         if List.length ts1 <> List.length ts2
         then raise (Type_error "Tuple arity mismatch");
-        List.iter2_exn ts1 ts2 ~f:(go env_l env_r)
-      | (Row _ as row1), (Row _ as row2) -> go_rows env_l env_r row1 row2
+        List.iter2_exn ts1 ts2 ~f:(go active env_l env_r)
+      | (Row _ as row1), (Row _ as row2) -> go_rows active env_l env_r row1 row2
       | Row (fs, _), Empty_row | Empty_row, Row (fs, _) ->
         let lbl, _ = Env.choose fs in
         raise (Type_error (Printf.sprintf "Row does not contain label '%s'" lbl))
@@ -645,7 +685,7 @@ let rec unify (state : infer_state) lhs rhs =
         raise
           (Type_error
              (Printf.sprintf "Cannot unify %s with %s" (show_type lhs) (show_type rhs))))
-  and go_rows env_l env_r lhs rhs =
+  and go_rows active env_l env_r lhs rhs =
     (* same as unify_rows but replace calls to [unify state] with [go env_l env_r] *)
     let map_l, tail_l = merge_fields lhs in
     let map_r, tail_r = merge_fields rhs in
@@ -654,7 +694,7 @@ let rec unify (state : infer_state) lhs rhs =
       | (lbl_l, ty_l) :: tl, (lbl_r, ty_r) :: tr ->
         (match String.compare lbl_l lbl_r with
          | 0 ->
-           go env_l env_r ty_l ty_r;
+           go active env_l env_r ty_l ty_r;
            collect tl tr missing_l missing_r
          | c when c < 0 -> collect tl r missing_l (Env.add lbl_l ty_l missing_r)
          | _ -> collect l tr (Env.add lbl_r ty_r missing_l) missing_r)
@@ -666,22 +706,22 @@ let rec unify (state : infer_state) lhs rhs =
       collect (Env.bindings map_l) (Env.bindings map_r) Env.empty Env.empty
     in
     match Env.is_empty missing_l, Env.is_empty missing_r with
-    | true, true -> go env_l env_r tail_l tail_r
-    | true, false -> go env_l env_r tail_r (Row (missing_r, tail_l))
-    | false, true -> go env_l env_r tail_l (Row (missing_l, tail_r))
+    | true, true -> go active env_l env_r tail_l tail_r
+    | true, false -> go active env_r env_l tail_r (Row (missing_r, tail_l))
+    | false, true -> go active env_l env_r tail_l (Row (missing_l, tail_r))
     | false, false ->
       (match tail_l with
        | Var ({ contents = Free _ } as tv) ->
          let row_var = new_var state state.current_lvl in
-         go env_l env_r tail_r (Row (missing_r, row_var));
+         go active env_r env_l tail_r (Row (missing_r, row_var));
          (match !tv with
           | Bound _ -> raise (Type_error "Recursive row types")
           | _ -> ());
          tv := Bound (Row (missing_l, row_var))
-       | Empty_row -> go env_l env_r tail_l (Row (missing_l, new_var state 0))
+       | Empty_row -> go active env_l env_r tail_l (Row (missing_l, new_var state 0))
        | _ -> assert false)
   in
-  go MuEnv.empty MuEnv.empty lhs rhs
+  go [] MuEnv.empty MuEnv.empty lhs rhs
 
 (** --------------------------------------------------------------------- *)
 (** 8. Pretty printer for types (used in error messages)                   *)
@@ -1961,6 +2001,7 @@ and infer_expr_against_expected
     expected_ty
 
 and infer_expr (state : infer_state) (env : tenv) (types : type_env) expr =
+  checkpoint state;
   (* We first perform the usual inference work, then — if it succeeds — we
      record the resulting type in [state.span_types].  The resolver consults this
      table to choose an appropriate slot descriptor. *)
@@ -2246,12 +2287,13 @@ let infer_stmt (state : infer_state) (env : tenv) (types : type_env) (stmt : stm
     The snapshot produced on success is the only source of type information
     consulted by the resolver in production. *)
 let check_program_with_surface
+      ?checkpoint
       ?(required_bindings : (string * Builtin_spec.ty) list = [])
       (surface : Builtin_surface.surface)
       (prog : program)
   : (checked_program, diagnostic) result
   =
-  let state = create_state () in
+  let state = create_state ?checkpoint () in
   try
     let env = init_env_with_surface surface in
     let types : type_env = init_types_with_surface surface in

@@ -213,10 +213,30 @@ val compiled_surface : compiled_script -> Builtin_surface.surface
 (** Instantiate a compiled script in a fresh per-session environment and
     load the configured entrypoints. *)
 val instantiate_session
-  :  runtime_config
+  :  ?control:execution_control
+  -> runtime_config
   -> compiled_script
   -> entrypoints:compiled_entrypoints
   -> (session, string) result
+
+(** Evaluate a fresh program instance and invoke a task-returning entrypoint
+    directly, without initial_state/on_event conventions or lifecycle events.
+    Only diagnostic and synchronous external operations are installed; local
+    session effects, background task dispatch and UI suspension are unavailable.
+    [control] follows the environment into closures, builtin callbacks and task
+    continuations. Host cancellation/control exceptions propagate after cleanup.
+    The host must compile against the intended surface and enforce authority,
+    value/allocation/output limits and result validation. No persistent session
+    or model request is created by this function. *)
+val run_entrypoint
+  :  ?control:execution_control
+  -> ?limits:execution_limits
+  -> runtime_config
+  -> compiled_script
+  -> entrypoint:string
+  -> arguments:value list
+  -> unit
+  -> (value, string) result
 
 (** Current durable script state for the session. *)
 val current_state : session -> value

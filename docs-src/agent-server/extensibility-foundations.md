@@ -1539,9 +1539,9 @@ builtin/alias/entrypoint contract remains part of prepared cache identities.
 The default source budget is 256 KiB, capped at 1 MiB, and is checked before
 starting a domain. Diagnostics are capped at 16 KiB. The default cooperative time
 budget is 5 seconds, capped at 30 seconds, measured with a monotonic clock.
-Checkpoints before and between compiler stages yield to Eio, observe cancellation
-and check elapsed time. An already-running stage must finish before cancellation
-takes effect, so this is not a hard deadline or a process/memory sandbox. Eio
+Checkpoints before and between compiler stages and within inference traversals
+yield to Eio, observe cancellation and check elapsed time. Work between checkpoints
+must finish before cancellation takes effect, so this is not a hard deadline or a process/memory sandbox. Eio
 joins the domain before returning; cancelled work is not detached or abandoned.
 
 `Extension_compiler.prepare_in_domain` combines this compiler path with the same
@@ -1551,6 +1551,39 @@ for shared source/target pairs, under an aggregate cooperative time budget.
 Compilation remains separate from dynamic initialization, state serialization,
 per-call authorization and feature qualification. No model-visible feature is
 enabled by these APIs alone.
+
+## Standalone execution primitives
+
+`Chatml_host_runtime.run_entrypoint` initializes a fresh program environment,
+invokes a named function with supplied values and interprets its returned task.
+It needs no `initial_state`, `on_event`, synthetic lifecycle event, persistent
+session or model request. Its transient operation context is cleared on return,
+failure or caller cancellation. Only diagnostic and synchronous external
+operations from the supplied host configuration are installed.
+
+`Chatml_execution.run` adds an Eio execution policy:
+
+- `Bounded limits` shares fuel across initialization, expressions, builtin
+  callbacks and task continuations. It checks array/value sizes and nesting,
+  estimates cumulative language allocation, and enforces a cooperative elapsed
+  time budget that includes tool waits. Host limit failures cannot be caught by
+  source-level `Task.catch`.
+- `Unrestricted` omits resource budgets and automatic pure-evaluation yields.
+  Caller cancellation still propagates through cooperative host operations.
+
+The default bounded policy is 100,000 fuel, 1,024 spawned tasks, 30 seconds,
+1 MiB per checked value, 16,384 array elements, depth 128 and 64 MiB of estimated
+allocation. Trusted hosts can supply other positive limits without hardcoded
+policy ceilings, or choose unrestricted execution. These are resource policies,
+not language restrictions or authority grants. The core host task interpreter
+also omits task/fuel limits when none are supplied.
+
+Allocation accounting estimates language operations, not actual OCaml heap use.
+Builtin implementations are checked at their boundaries; arbitrary native code
+does not become preemptible. Hosts remain responsible for selected capabilities,
+current authorization, schemas, serialized output limits and persisted invocation
+ownership. Standalone actor dispatch and model-visible `run_chatml` installation
+remain E04 work; these primitives alone do not expose either feature.
 
 ## Authoring policy admission plans
 

@@ -24,8 +24,12 @@ module BuiltinModules : sig
   val add_surface : env -> Builtin_surface.surface -> unit
 
   (** Allocate a fresh environment pre-populated with the runtime bindings
-      from the supplied builtin surface. *)
-  val create_env_with_surface : Builtin_surface.surface -> env
+      from the supplied builtin surface. Optional execution control is retained
+      by installed builtins and checked before/after their implementation. *)
+  val create_env_with_surface
+    :  ?control:execution_control
+    -> Builtin_surface.surface
+    -> env
 
   (** Install the default core ChatML prelude into an existing
       environment. *)
@@ -40,7 +44,7 @@ end
 val add_surface : env -> Builtin_surface.surface -> unit
 
 (** Alias for {!BuiltinModules.create_env_with_surface}. *)
-val create_env_with_surface : Builtin_surface.surface -> env
+val create_env_with_surface : ?control:execution_control -> Builtin_surface.surface -> env
 
 (** Alias for {!BuiltinModules.add_global_builtins}. *)
 val add_global_builtins : env -> unit

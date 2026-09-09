@@ -216,8 +216,13 @@ After this pass:
 
 The evaluator uses:
 
-- a mutable hash-table environment for top-level/module/global bindings
+- an environment containing mutable binding cells and optional host execution
+  control for top-level/module/global bindings
 - a stack of frames for local lexical bindings
+
+Copied closure/module environments retain the same host control. The generic
+evaluator has no resource budget by default; bounded agent execution installs
+host-selected checks. Resource policy and tool authority are separate.
 
 Function calls use a trampoline. Tail calls are now **tail-position-aware**:
 

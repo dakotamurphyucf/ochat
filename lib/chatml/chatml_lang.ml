@@ -242,7 +242,14 @@ let format_runtime_error (source_text : string) (err : runtime_error) : string =
 (* 2) Runtime Value Types                                                  *)
 (***************************************************************************)
 
-type value =
+type execution_control =
+  { checkpoint : unit -> unit
+  ; allocate : int -> unit
+  ; before_builtin : name:string -> value list -> unit
+  ; check_value : value -> unit
+  }
+
+and value =
   | VInt of int
   | VBool of bool
   | VFloat of float
@@ -280,28 +287,32 @@ and clos =
   }
 
 and cell = value ref
-and env = (string, cell) Hashtbl.t
+
+and env =
+  { bindings : (string, cell) Hashtbl.t
+  ; control : execution_control option
+  }
 
 (***************************************************************************)
 (* 3) Environment Helpers                                                  *)
 (***************************************************************************)
 
-let create_env () : env = Hashtbl.create (module String)
+let create_env ?control () : env = { bindings = Hashtbl.create (module String); control }
 
 let copy_env (parent : env) : env =
-  let child = Hashtbl.create (module String) in
-  Hashtbl.iteri parent ~f:(fun ~key ~data -> Hashtbl.set child ~key ~data);
-  child
+  Option.iter parent.control ~f:(fun control ->
+    control.allocate (32 * Hashtbl.length parent.bindings));
+  { bindings = Hashtbl.copy parent.bindings; control = parent.control }
 ;;
 
-let find_var_cell (e : env) (x : string) : cell option = Hashtbl.find e x
+let find_var_cell (e : env) (x : string) : cell option = Hashtbl.find e.bindings x
 
 let find_var (e : env) (x : string) : value option =
-  Hashtbl.find e x |> Option.map ~f:(fun cell -> !cell)
+  Hashtbl.find e.bindings x |> Option.map ~f:(fun cell -> !cell)
 ;;
 
 let define_var (e : env) (x : string) (v : value) : unit =
-  Hashtbl.set e ~key:x ~data:(ref v)
+  Hashtbl.set e.bindings ~key:x ~data:(ref v)
 ;;
 
 let update_var (e : env) (x : string) (v : value) : unit =

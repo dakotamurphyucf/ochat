@@ -2051,8 +2051,69 @@ let%test_unit "recursive type mismatch diagnostic is cycle-safe" =
   if
     not
       (String.is_substring rendered ~substring:"mu expr."
-       && String.is_substring rendered ~substring:"with int")
+       && String.is_substring rendered ~substring:"Cannot unify"
+       && String.is_substring rendered ~substring:"int")
   then failwith rendered
+;;
+
+let%expect_test "recursive unification preserves payload constraints and binder scopes" =
+  let open Chatml_typechecker in
+  let record fields = Record (Row (Env.of_list fields, Empty_row)) in
+  let graph payload =
+    let knot = ref (Free ("knot", 0)) in
+    let ty = record [ "next", Var knot; "value", payload ] in
+    knot := Bound ty;
+    ty
+  in
+  let declared binder payload =
+    Mu (binder, record [ "next", Rec_var binder; "value", payload ])
+  in
+  let check name left right =
+    let state = create_state () in
+    let result =
+      match unify state left right with
+      | () -> "unified"
+      | exception Type_error message -> message
+    in
+    print_s [%sexp (name : string), (result : string)]
+  in
+  check "independent inferred cycles" (graph TInt) (graph TInt);
+  check "payload mismatch after back edge" (graph TInt) (graph String);
+  check "inferred against explicit" (graph TInt) (declared "node" TInt);
+  check "explicit against inferred" (declared "node" TInt) (graph TInt);
+  let shared = Var (ref (Free ("shared", 0))) in
+  check
+    "sibling constraints are rechecked"
+    (Tuple [ graph shared; graph shared ])
+    (Tuple [ graph TInt; graph String ]);
+  let nested outer inner parent =
+    Mu
+      ( outer
+      , record
+          [ "next", Rec_var outer
+          ; ( "nested"
+            , Mu (inner, record [ "parent", Rec_var parent; "self", Rec_var inner ]) )
+          ] )
+  in
+  check "alpha renamed binders" (nested "a" "b" "a") (nested "x" "y" "x");
+  check "different enclosing binder" (nested "a" "b" "a") (nested "x" "y" "y");
+  let shared_body = record [ "parent", Rec_var "a" ] in
+  check
+    "shared syntax under different binders"
+    (Mu ("a", record [ "child", Mu ("b", shared_body) ]))
+    (Mu ("c", record [ "child", Mu ("a", shared_body) ]));
+  [%expect
+    {|
+    ("independent inferred cycles" unified)
+    ("payload mismatch after back edge" "Cannot unify int with string")
+    ("inferred against explicit" unified)
+    ("explicit against inferred" unified)
+    ("sibling constraints are rechecked" "Cannot unify int with string")
+    ("alpha renamed binders" unified)
+    ("different enclosing binder" "Recursive type variables do not match")
+    ("shared syntax under different binders"
+     "Recursive type variables do not match")
+    |}]
 ;;
 
 let%test_unit "inferred recursive variant AST typechecks without annotations" =

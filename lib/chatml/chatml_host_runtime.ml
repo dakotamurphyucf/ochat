@@ -106,9 +106,8 @@ and exec_ctx =
   ; mutable local_effects_rev : Lang.eff list
   ; mutable emitted_rev : Lang.value list
   ; mutable end_session_requested : string option
-  ; mutable fuel : int
-  ; mutable tasks : int
-  ; max_tasks : int
+  ; mutable fuel : int option
+  ; mutable remaining_tasks : int option
   }
 
 and continuation_frame =
@@ -766,7 +765,11 @@ let compile_script
     | Error diagnostic -> Error (Parse.format_diagnostic source diagnostic)
     | Ok program ->
       let checked =
-        Typechecker.check_program_with_surface ~required_bindings surface program
+        Typechecker.check_program_with_surface
+          ~checkpoint
+          ~required_bindings
+          surface
+          program
       in
       checkpoint ();
       (match checked with
@@ -784,6 +787,7 @@ let compiled_surface (compiled : compiled_script) : Builtin_surface.surface =
 ;;
 
 let instantiate_session
+      ?control
       (config : runtime_config)
       (compiled : compiled_script)
       ~(entrypoints : compiled_entrypoints)
@@ -799,7 +803,7 @@ let instantiate_session
     (match operations_map config.operations with
      | Error msg -> Error msg
      | Ok operations ->
-       let env = Builtin_modules.create_env_with_surface config.surface in
+       let env = Builtin_modules.create_env_with_surface ?control config.surface in
        (try
           Eval.eval_program env compiled.resolved;
           match Lang.find_var env entrypoints.initial_state_name with
@@ -1004,6 +1008,8 @@ let dispatch_effect
       (eff : Lang.eff)
   : (effect_result, string) result
   =
+  Option.iter session.env.control ~f:(fun control ->
+    List.iter eff.args ~f:control.check_value);
   Debug_log.emitf
     "[chatml-runtime] dispatch_effect phase=%s spawned=%b op=%s args=[%s]"
     exec.phase
@@ -1145,41 +1151,118 @@ and interpret_task
       (task : Lang.task)
   : (task_result, string) result
   =
-  if exec.fuel <= 0
-  then Error "ChatML task fuel exhausted"
-  else (
-    exec.fuel <- exec.fuel - 1;
-    match task with
-    | Lang.TPure value -> continue_with_value session exec ~frames value
-    | Lang.TFail msg -> continue_with_error session exec ~frames msg
-    | Lang.TBind (next_task, k) ->
-      interpret_task session exec ~frames:(Bind_frame k :: frames) next_task
-    | Lang.TMap (next_task, f) ->
-      interpret_task session exec ~frames:(Map_frame f :: frames) next_task
-    | Lang.TCatch (next_task, handler) ->
-      let catch_frame =
-        Catch_frame
-          { handler
-          ; saved_local_effects_rev = exec.local_effects_rev
-          ; saved_emitted_rev = exec.emitted_rev
-          ; saved_end_session_requested = exec.end_session_requested
-          }
-      in
-      interpret_task session exec ~frames:(catch_frame :: frames) next_task
-    | Lang.TPerform eff ->
-      (match dispatch_effect session exec ~spawned:false eff with
-       | Error msg -> continue_with_error session exec ~frames msg
-       | Ok (Effect_value value) -> continue_with_value session exec ~frames value
-       | Ok (Effect_suspend request) -> Ok (Task_suspend { exec; frames; request }))
-    | Lang.TSpawn eff ->
-      if exec.tasks >= exec.max_tasks
-      then continue_with_error session exec ~frames "ChatML task limit exceeded"
-      else (
-        exec.tasks <- exec.tasks + 1;
-        match dispatch_effect session exec ~spawned:true eff with
+  Option.iter session.env.control ~f:(fun control -> control.checkpoint ());
+  let open Result.Let_syntax in
+  let%bind () =
+    match exec.fuel with
+    | Some remaining when remaining <= 0 -> Error "ChatML task fuel exhausted"
+    | Some remaining ->
+      exec.fuel <- Some (remaining - 1);
+      Ok ()
+    | None -> Ok ()
+  in
+  match task with
+  | Lang.TPure value -> continue_with_value session exec ~frames value
+  | Lang.TFail msg -> continue_with_error session exec ~frames msg
+  | Lang.TBind (next_task, k) ->
+    interpret_task session exec ~frames:(Bind_frame k :: frames) next_task
+  | Lang.TMap (next_task, f) ->
+    interpret_task session exec ~frames:(Map_frame f :: frames) next_task
+  | Lang.TCatch (next_task, handler) ->
+    let catch_frame =
+      Catch_frame
+        { handler
+        ; saved_local_effects_rev = exec.local_effects_rev
+        ; saved_emitted_rev = exec.emitted_rev
+        ; saved_end_session_requested = exec.end_session_requested
+        }
+    in
+    interpret_task session exec ~frames:(catch_frame :: frames) next_task
+  | Lang.TPerform eff ->
+    (match dispatch_effect session exec ~spawned:false eff with
+     | Error msg -> continue_with_error session exec ~frames msg
+     | Ok (Effect_value value) -> continue_with_value session exec ~frames value
+     | Ok (Effect_suspend request) -> Ok (Task_suspend { exec; frames; request }))
+  | Lang.TSpawn eff ->
+    (match exec.remaining_tasks with
+     | Some remaining when remaining <= 0 ->
+       continue_with_error session exec ~frames "ChatML task limit exceeded"
+     | remaining ->
+       exec.remaining_tasks <- Option.map remaining ~f:(fun remaining -> remaining - 1);
+       (match dispatch_effect session exec ~spawned:true eff with
         | Error msg -> continue_with_error session exec ~frames msg
         | Ok (Effect_value value) -> continue_with_value session exec ~frames value
         | Ok (Effect_suspend _) -> assert false))
+;;
+
+let run_entrypoint
+      ?control
+      ?limits
+      (config : runtime_config)
+      (compiled : compiled_script)
+      ~entrypoint
+      ~arguments
+      ()
+  =
+  let open Result.Let_syntax in
+  let%bind () =
+    ensure_surface_compatible
+      ~compiled_surface:compiled.surface
+      ~runtime_surface:config.surface
+  in
+  let%bind operations =
+    List.filter config.operations ~f:(fun operation ->
+      match operation.kind with
+      | Diagnostic | External_sync -> true
+      | Local_transactional | External_async -> false)
+    |> operations_map
+  in
+  let env = Builtin_modules.create_env_with_surface ?control config.surface in
+  try
+    Eval.eval_program env compiled.resolved;
+    let%bind fn =
+      match Lang.find_var env entrypoint with
+      | None -> Error (Printf.sprintf "Missing entrypoint '%s'" entrypoint)
+      | Some value -> expect_callable entrypoint value
+    in
+    let exec =
+      { phase = "standalone"
+      ; local_effects_rev = []
+      ; emitted_rev = []
+      ; end_session_requested = None
+      ; fuel = Option.map limits ~f:(fun (limits : execution_limits) -> limits.fuel)
+      ; remaining_tasks = Option.map limits ~f:(fun limits -> limits.max_tasks)
+      }
+    in
+    let session =
+      { env
+      ; state = Lang.VUnit
+      ; on_event = fn
+      ; queue = Queue.create ()
+      ; operations
+      ; source_text = compiled.source_text
+      ; current_exec = Some exec
+      ; suspended_exec = None
+      ; committed_local_effects_rev = []
+      ; ui_resume_active = false
+      ; halted = false
+      }
+    in
+    Exn.protect
+      ~finally:(fun () -> session.current_exec <- None)
+      ~f:(fun () ->
+        let%bind value =
+          Eval.apply_value_result fn arguments
+          |> Result.map_error ~f:(format_runtime_error session)
+        in
+        let%bind task = expect_task_value value in
+        let%bind outcome = interpret_task session exec ~frames:[] task in
+        match outcome with
+        | Task_value value -> Ok value
+        | Task_suspend _ -> Error "Standalone execution cannot suspend for UI input")
+  with
+  | Lang.Runtime_error error ->
+    Error (Lang.format_runtime_error compiled.source_text error)
 ;;
 
 let commit_exec
@@ -1267,7 +1350,7 @@ let handle_event_impl
       ?(validate_state = fun _ -> Ok ())
       ?(validate_suspension = fun () -> Ok ())
       ?(copy_state = fun state -> Ok state)
-      ?(limits = { fuel = Int.max_value; max_tasks = Int.max_value })
+      ?limits
       ~consume_queued
       (session : session)
       ~(context : Lang.value)
@@ -1295,9 +1378,8 @@ let handle_event_impl
         ; local_effects_rev = []
         ; emitted_rev = []
         ; end_session_requested = None
-        ; fuel = limits.fuel
-        ; tasks = 0
-        ; max_tasks = limits.max_tasks
+        ; fuel = Option.map limits ~f:(fun (limits : execution_limits) -> limits.fuel)
+        ; remaining_tasks = Option.map limits ~f:(fun limits -> limits.max_tasks)
         }
       in
       let old_state = session.state in

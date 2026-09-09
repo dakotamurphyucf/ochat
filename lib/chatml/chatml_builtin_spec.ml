@@ -200,7 +200,7 @@ let expect_ref (name : string) : value -> value ref = function
 let expect_record_like (name : string) : value -> string list = function
   | VRecord fields -> Map.to_alist fields |> List.map ~f:fst
   | VModule menv ->
-    Hashtbl.fold menv ~init:[] ~f:(fun ~key ~data:_ acc -> key :: acc)
+    Hashtbl.fold menv.bindings ~init:[] ~f:(fun ~key ~data:_ acc -> key :: acc)
     |> List.sort ~compare:String.compare
   | _ -> failwith (Printf.sprintf "%s: expected a record or module argument" name)
 ;;
