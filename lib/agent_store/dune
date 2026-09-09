@@ -13,6 +13,8 @@
   session_index
   session_store
   blob_store
+  blob_reference_scan
+  job_result_intent
   job_result_store
   transaction
   commit_writer

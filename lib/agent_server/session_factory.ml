@@ -1757,6 +1757,7 @@ let actor_services
   in
   let%map job_results =
     Agent_store.Job_result_store.Publisher.create
+      ~env:t.env
       ~blobs:result_blobs
       ~sw:t.sw
       ~session:handle

@@ -3,77 +3,13 @@ open Agent_store_test_fixtures
 module Store = Agent_store.Job_result_store
 module Blob = Agent_store.Blob_store
 module P = Agent_protocol
+module Intent = Agent_store.Job_result_intent
+open Job_store_fixtures
 
-let with_store ?(wrap_env = Fn.id) f =
-  with_temp_directory "ochat-job-result" (fun env directory ->
-    let env = wrap_env env in
-    Eio.Switch.run (fun sw ->
-      let root = Filename.concat directory "store" in
-      let sessions =
-        Agent_store.Session_store.create
-          ~env
-          ~sw
-          ~root
-          ~server_id
-          ~process_start_identity:None
-          ~lock_nonce:"job-artifact-test"
-        |> store_ok
-      in
-      let session name =
-        let metadata = metadata 0L in
-        let id = P.Id.Session.of_string name |> protocol_ok in
-        Agent_store.Session_store.create_session
-          sessions
-          ~sw
-          ~transaction_id:(P.Id.Transaction.create ())
-          ~actor_lock_nonce:name
-          { metadata with session = { metadata.session with id } }
-        |> store_ok
-      in
-      let first = session "ses_job_artifact_first"
-      and second = session "ses_job_artifact_second" in
-      let open_blobs () =
-        Blob.create
-          ~env
-          ~temporary_directory:(Filename.concat directory "temporary")
-          ~durable_directory:(Filename.concat directory "durable")
-          ~max_upload_bytes:100_000L
-        |> store_ok
-      in
-      Exn.protect
-        ~finally:(fun () ->
-          Agent_store.Session_store.close_session sessions first |> store_ok;
-          Agent_store.Session_store.close_session sessions second |> store_ok;
-          Agent_store.Session_store.close sessions |> store_ok)
-        ~f:(fun () -> f env sw (open_blobs ()) open_blobs first second)))
-;;
-
-let job session =
-  P.Job.
-    { id = P.Id.Job.create ()
-    ; session_id = Agent_store.Session_store.Handle.session_id session
-    ; generation = 0
-    ; kind = Async_tool
-    ; payload = `Null
-    ; status = Running
-    ; retry_policy = Never
-    ; attempt = 1
-    ; created_at = timestamp
-    ; started_at = Some timestamp
-    ; next_run_at = None
-    ; completed_at = None
-    ; result = None
-    ; delivery = Pending
-    ; launch = None
-    ; progress = None
-    }
-;;
-
-let principal = P.Id.Principal.of_string "pri_job_artifact" |> protocol_ok
-
-let prepare blobs sw session completion =
+let prepare env blobs sw session completion =
   Store.prepare
     blobs
+    ~env
     ~sw
     ~session
     ~job:(job session)
@@ -92,8 +28,11 @@ let%expect_test
       P.Completion.Succeeded
         (`Object [ "text", `String "saved résumé"; "count", `Number "3" ])
     in
-    let prepared = prepare blobs sw first completion in
+    let prepared = prepare env blobs sw first completion in
     let reference = Store.reference prepared in
+    [%test_eq: int]
+      1
+      (List.length (Intent.list ~env ~session:first ~max_count:8 |> store_ok));
     let commits = ref 0 in
     let saved =
       Filename.concat
@@ -131,12 +70,16 @@ let%expect_test
     in
     assert (Result.is_error (Store.commit prepared ~persist));
     assert (Result.is_error (Store.discard prepared));
+    [%test_eq: int]
+      1
+      (List.length (Intent.list ~env ~session:first ~max_count:8 |> store_ok));
     assert (
       P.Completion.equal
         completion
         (Store.load (reopen ()) ~sw ~session:first ~max_bytes:4096 (read_reference ())
          |> store_ok));
     Store.commit prepared ~persist |> protocol_ok;
+    assert (List.is_empty (Intent.list ~env ~session:first ~max_count:8 |> store_ok));
     assert (Result.is_error (Store.discard prepared));
     let restored = read_reference () in
     let blobs = reopen () in
@@ -175,7 +118,7 @@ let%expect_test
   =
   with_store (fun env sw blobs _reopen first _second ->
     let completion = P.Completion.Succeeded (`String "original completion") in
-    let prepared = prepare blobs sw first completion in
+    let prepared = prepare env blobs sw first completion in
     let reference = Store.reference prepared in
     assert (Result.is_error (Store.load blobs ~sw ~session:first ~max_bytes:4 reference));
     let path =
@@ -197,6 +140,7 @@ let%expect_test
         | _ -> failwith "modified result artifact was accepted");
     Store.discard prepared |> store_ok;
     Store.discard prepared |> store_ok;
+    assert (List.is_empty (Intent.list ~env ~session:first ~max_count:8 |> store_ok));
     assert (
       Result.is_error (Store.load blobs ~sw ~session:first ~max_bytes:4096 reference));
     let invoked = ref false in
@@ -210,6 +154,7 @@ let%expect_test
       Result.is_error
         (Store.prepare
            blobs
+           ~env
            ~sw
            ~session:first
            ~job:(job first)
@@ -280,45 +225,6 @@ let%expect_test
     {| foreign adoption rejected; collision preserved both blobs; original target succeeded |}]
 ;;
 
-let fail_metadata_rename (Eio.Resource.T (directory, handler) as native_directory) armed =
-  let module Original = (val Eio.Resource.get handler Eio.Fs.Pi.Dir) in
-  let module Directory = struct
-    include Original
-
-    let rename directory source _destination target =
-      match !armed, String.is_suffix target ~suffix:".sexp" with
-      | Some after_rename, true ->
-        armed := None;
-        if after_rename then Original.rename directory source native_directory target;
-        failwith "injected metadata rename failure"
-      | _ -> Original.rename directory source native_directory target
-    ;;
-  end
-  in
-  Eio.Resource.T
-    (directory, Eio.Resource.handler [ H (Eio.Fs.Pi.Dir, (module Directory)) ])
-;;
-
-let fault_env env armed =
-  let directory, path = Eio.Stdenv.fs env in
-  let fs = fail_metadata_rename directory armed, path in
-  object
-    method fs = fs
-    method cwd = env#cwd
-    method stdin = env#stdin
-    method stdout = env#stdout
-    method stderr = env#stderr
-    method net = env#net
-    method domain_mgr = env#domain_mgr
-    method process_mgr = env#process_mgr
-    method clock = env#clock
-    method mono_clock = env#mono_clock
-    method secure_random = env#secure_random
-    method debug = env#debug
-    method backend_id = env#backend_id
-  end
-;;
-
 let%expect_test "failed adoption restores temporary data before a safe retry" =
   List.iter [ false; true ] ~f:(fun after_rename ->
     let armed = ref None in
@@ -375,6 +281,7 @@ let%expect_test "publisher retries preserve exact artifacts and typed job owners
     let completion = P.Completion.Succeeded (`String (String.make 512 'x')) in
     let publisher =
       Store.Publisher.create
+        ~env
         ~blobs
         ~sw
         ~session

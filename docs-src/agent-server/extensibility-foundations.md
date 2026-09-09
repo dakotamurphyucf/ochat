@@ -1523,6 +1523,25 @@ may have succeeded before its acknowledgement failed. Removing such an artifact
 requires separate reconciliation proving it has no durable references. A preparation
 whose persistence was never attempted can be discarded idempotently.
 
+Before uploading bytes, preparation writes a checksummed versioned record beneath
+the session's private `result-preparations` directory. It binds the complete result
+reference and expected blob metadata, so a failed upload or interrupted adoption
+can be identified even when its data and metadata files are unpaired. This private
+record establishes managed preparation ownership; an HTTP upload's caller-supplied
+`allowed_use` label does not. Listing records rejects corruption, changed identities,
+symlinks and exceeded read/count limits before returning candidates.
+
+An acknowledged publication removes the preparation record. If that removal fails,
+publication still succeeds and the record remains for later reconciliation. A failed
+or ambiguous publication acknowledgement retains it. Proven-unreferenced discard
+removes blob data and metadata before removing the record, preserving retryability.
+
+`Blob_reference_scan` provides a conservative candidate-ID scan across byte chunks,
+including IDs embedded in historical payloads. It keeps split-ID suffixes within
+one root and distinguishes unrelated roots. The scanner does not validate storage
+or grant deletion authority: a collector must first validate every relevant durable
+root and serialize with the owning actor. That collector is not yet installed.
+
 Reads verify the session and job binding, full metadata, bounded byte count and
 SHA-256 digest before decoding the completion. Adoption refuses another target
 session or an existing destination and restores temporary data if its metadata

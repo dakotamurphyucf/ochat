@@ -6,6 +6,7 @@ type prepared
 
 val prepare
   :  Blob_store.t
+  -> env:Eio_unix.Stdenv.base
   -> sw:Eio.Switch.t
   -> session:Session_store.Handle.t
   -> job:Agent_protocol.Job.t
@@ -19,7 +20,10 @@ val reference : prepared -> Agent_protocol.Job_artifact.t
 
 (** Serialize commit/discard and protect the persistence acknowledgement from
     cancellation. A failed save leaves the same artifact prepared for retry;
-    success retains it and prevents discard. Once any save is attempted, discard
+    success retains it and prevents discard. A checksummed intent precedes artifact
+    bytes and remains until acknowledged publication or completed discard; failed
+    intent cleanup cannot turn an acknowledged publication into failure.
+    Once any save is attempted, discard
     requires separate durable reference reconciliation, even when the callback
     reports failure: a failed acknowledgement is not proof nothing persisted.
     The callback must not reenter this
@@ -51,7 +55,8 @@ module Publisher : sig
   type t
 
   val create
-    :  blobs:Blob_store.t
+    :  env:Eio_unix.Stdenv.base
+    -> blobs:Blob_store.t
     -> sw:Eio.Switch.t
     -> session:Session_store.Handle.t
     -> principal:Agent_protocol.Id.Principal.t

@@ -10,7 +10,9 @@ type phase =
 
 type prepared =
   { store : Blob_store.t
+  ; env : Eio_unix.Stdenv.base
   ; session : Session_store.Handle.t
+  ; intent : Job_result_intent.t
   ; handle : Blob_store.Handle.t
   ; reference : Artifact.t
   ; mutex : Eio.Mutex.t
@@ -23,7 +25,7 @@ let protocol result =
   Result.map_error result ~f:(fun error -> Store_error.Corrupt error.P.Error.message)
 ;;
 
-let prepare store ~sw ~session ~job ~creating_principal ~now ~max_bytes completion =
+let prepare store ~env ~sw ~session ~job ~creating_principal ~now ~max_bytes completion =
   let open Result.Let_syntax in
   let%bind () = P.Completion.validate completion |> protocol in
   let%bind () =
@@ -65,6 +67,22 @@ let prepare store ~sw ~session ~job ~creating_principal ~now ~max_bytes completi
     |> protocol
   in
   Eio.Cancel.protect (fun () ->
+    let expires_at =
+      Some
+        (P.Timestamp.to_time_ns now
+         |> fun at -> Time_ns.add at (Time_ns.Span.of_day 1.) |> P.Timestamp.of_time_ns)
+    in
+    let metadata : Blob_store.Metadata.t =
+      { blob
+      ; creating_principal
+      ; target_session = Some job.session_id
+      ; allowed_use = Artifact.allowed_use reference
+      ; created_at = now
+      ; expires_at
+      ; durable = false
+      }
+    in
+    let%bind intent = Job_result_intent.create ~env ~session ~reference ~metadata in
     let%bind upload =
       Blob_store.begin_upload
         store
@@ -77,11 +95,7 @@ let prepare store ~sw ~session ~job ~creating_principal ~now ~max_bytes completi
         ~display_name:(Some "job-result.json")
         ~allowed_use:(Artifact.allowed_use reference)
         ~created_at:now
-        ~expires_at:
-          (Some
-             (P.Timestamp.to_time_ns now
-              |> fun at ->
-              Time_ns.add at (Time_ns.Span.of_day 1.) |> P.Timestamp.of_time_ns))
+        ~expires_at
     in
     Exn.protect
       ~finally:(fun () -> Blob_store.abort upload)
@@ -90,7 +104,9 @@ let prepare store ~sw ~session ~job ~creating_principal ~now ~max_bytes completi
         let%bind handle = Blob_store.finish upload ~expected_digest:(Some digest) in
         let%map handle = Blob_store.adopt store session handle in
         { store
+        ; env
         ; session
+        ; intent
         ; handle
         ; reference
         ; mutex = Eio.Mutex.create ()
@@ -113,6 +129,14 @@ let commit prepared ~persist =
       let open Result.Let_syntax in
       let%map result = persist prepared.reference in
       prepared.phase <- Retained;
+      (* Publication already succeeded. A failed marker cleanup leaves an intent
+         for reconciliation; it cannot turn success into another publication. *)
+      ignore
+        (Job_result_intent.remove
+           ~env:prepared.env
+           ~session:prepared.session
+           prepared.intent
+         : (unit, Store_error.t) result);
       result)
 ;;
 
@@ -127,8 +151,14 @@ let discard prepared =
     | Discarded -> Ok ()
     | Prepared ->
       let open Result.Let_syntax in
-      let%map () =
+      let%bind () =
         Blob_store.discard_unreferenced prepared.store prepared.session prepared.handle
+      in
+      let%map () =
+        Job_result_intent.remove
+          ~env:prepared.env
+          ~session:prepared.session
+          prepared.intent
       in
       prepared.phase <- Discarded)
 ;;
@@ -168,6 +198,7 @@ let load store ~sw ~session ~max_bytes reference =
 module Publisher = struct
   type t =
     { blobs : Blob_store.t
+    ; env : Eio_unix.Stdenv.base
     ; sw : Eio.Switch.t
     ; session : Session_store.Handle.t
     ; principal : P.Id.Principal.t
@@ -177,7 +208,7 @@ module Publisher = struct
     ; mutable pending : prepared list
     }
 
-  let create ~blobs ~sw ~session ~principal ~inline_bytes ~max_bytes =
+  let create ~env ~blobs ~sw ~session ~principal ~inline_bytes ~max_bytes =
     match
       inline_bytes >= 0
       && max_bytes > 0
@@ -188,6 +219,7 @@ module Publisher = struct
     | true ->
       Ok
         { blobs
+        ; env
         ; sw
         ; session
         ; principal
@@ -253,6 +285,7 @@ module Publisher = struct
             let%map prepared =
               prepare
                 t.blobs
+                ~env:t.env
                 ~sw:t.sw
                 ~session:t.session
                 ~job

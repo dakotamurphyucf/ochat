@@ -273,12 +273,14 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/workspace_lease.mli` | [contract](../../lib/agent_session/workspace_lease.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/workspace_resolver.mli` | [contract](../../lib/agent_session/workspace_resolver.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_store/audit_store.mli` | [contract](../../lib/agent_store/audit_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/blob_reference_scan.mli` | [contract](../../lib/agent_store/blob_reference_scan.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/blob_store.mli` | [contract](../../lib/agent_store/blob_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/commit_writer.mli` | [contract](../../lib/agent_store/commit_writer.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/data_root.mli` | [contract](../../lib/agent_store/data_root.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/durable_file.mli` | [contract](../../lib/agent_store/durable_file.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/frame.mli` | [contract](../../lib/agent_store/frame.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/idempotency_store.mli` | [contract](../../lib/agent_store/idempotency_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/job_result_intent.mli` | [contract](../../lib/agent_store/job_result_intent.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/job_result_store.mli` | [contract](../../lib/agent_store/job_result_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/journal.mli` | [contract](../../lib/agent_store/journal.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/journal_segment.mli` | [contract](../../lib/agent_store/journal_segment.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
