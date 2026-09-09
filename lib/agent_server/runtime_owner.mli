@@ -94,6 +94,10 @@ val execute_model_job
   -> payload:Jsonaf.t
   -> (Agent_session.Runtime_builder.model_job_outcome, Agent_protocol.Error.t) result
 
+type background_result =
+  | Completed of Agent_protocol.Completion.t
+  | Pending of Agent_protocol.Job.dependency
+
 (** Execute a qualified Async_tool request through retained runtime ownership and
     the actor's exact job-attempt scope. Queue/retry time counts against the stored
     execution budget from Job.created_at. Generic results retain Completion data;
@@ -103,7 +107,7 @@ val execute_model_job
 val execute_background_job
   :  t
   -> Agent_protocol.Job.t
-  -> (Agent_protocol.Completion.t, Agent_protocol.Error.t) result
+  -> (background_result, Agent_protocol.Error.t) result
 
 (** Atomically acknowledge a terminal model job and append its event using the
     same actor/checkpoint ownership as schedule delivery. *)

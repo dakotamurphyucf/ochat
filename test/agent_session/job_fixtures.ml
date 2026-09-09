@@ -72,7 +72,7 @@ let reject label result =
   | Ok _ -> failwith (label ^ " was accepted")
 ;;
 
-let with_actor ?(reject_save = fun _ -> false) f =
+let with_actor ?(reject_save = fun _ -> false) ?(now = fun () -> timestamp) f =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let initial =
@@ -98,7 +98,7 @@ let with_actor ?(reject_save = fun _ -> false) f =
                   | false -> persistence.commit ~command_audit ~previous next)
             }
           ~services:
-            { now = (fun () -> timestamp)
+            { now
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "background-fixture")
             ; state_committed = (fun _ _ -> ())

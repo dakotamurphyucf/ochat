@@ -10,6 +10,7 @@ module M = Chat_response.Moderation
 type result =
   { resolved : I.t
   ; runtime_requests : M.Runtime_request.t list
+  ; pending : Script_tool_calls.background_target option
   }
 
 let failure code message = I.Fail { code; message; retryable = false; details = `Null }
@@ -60,6 +61,7 @@ let run
     { stored with execution = { stored.execution with wall_seconds = remaining } }
   in
   let limits = P.script_limits_for effective in
+  let pending = ref None in
   let work control =
     let%bind prepared =
       B.prepare
@@ -133,6 +135,17 @@ let run
                    ~args:input
                  |> Result.map_error ~f:(fun code ->
                    failure code "The background tool call could not be completed.")
+                 |> Result.bind ~f:(fun target ->
+                   match target.Script_tool_calls.invocation.status with
+                   | Resolved (Pending (_, acknowledgement)) ->
+                     pending := Some target;
+                     Ok (I.Complete acknowledgement)
+                   | Resolved outcome -> Ok outcome
+                   | _ ->
+                     Error
+                       (failure
+                          "background.invalid_target"
+                          "Background target has no saved outcome."))
                | Script { prepared; input; _ } ->
                  One_off_execution.run
                    ?observer
@@ -202,5 +215,5 @@ let run
       |> Result.join)
   in
   let%map resolved = result in
-  { resolved; runtime_requests = collected }
+  { resolved; runtime_requests = collected; pending = !pending }
 ;;

@@ -113,14 +113,28 @@ let invocation secret =
 let job_succeeded (job : Agent_protocol.Job.t) =
   match job.status, job.delivery with
   | Succeeded, Not_required -> true
-  | (Queued | Running | Waiting_permission _ | Failed _ | Cancelled | Interrupted _), _
+  | ( ( Queued
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Failed _
+      | Cancelled
+      | Interrupted _ )
+    , _ )
   | Succeeded, (Pending | Delivered _) -> false
 ;;
 
 let job_failed (job : Agent_protocol.Job.t) =
   match job.status, job.delivery with
   | Failed _, Not_required -> true
-  | (Queued | Running | Waiting_permission _ | Succeeded | Cancelled | Interrupted _), _
+  | ( ( Queued
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Succeeded
+      | Cancelled
+      | Interrupted _ )
+    , _ )
   | Failed _, (Pending | Delivered _) -> false
 ;;
 

@@ -104,7 +104,7 @@ let is_delivered (job : Agent_protocol.Job.t) =
 let is_terminal (job : Agent_protocol.Job.t) =
   match job.status with
   | Succeeded | Failed _ | Cancelled | Interrupted _ -> true
-  | Queued | Running | Waiting_permission _ -> false
+  | Queued | Running | Waiting_permission _ | Waiting_completion _ -> false
 ;;
 
 let is_complete snapshot =

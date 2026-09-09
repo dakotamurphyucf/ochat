@@ -48,6 +48,7 @@ let view (job : P.Job.t) =
     | Queued -> "queued"
     | Running -> "running"
     | Waiting_permission _ -> "waiting_permission"
+    | Waiting_completion _ -> "waiting_completion"
     | Succeeded -> "succeeded"
     | Failed _ -> "failed"
     | Cancelled -> "cancelled"

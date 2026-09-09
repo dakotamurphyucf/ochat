@@ -134,7 +134,8 @@ let summaries t =
 
 let job_requires_actor job =
   match job.Agent_protocol.Job.delivery, job.status with
-  | Pending, _ | _, (Queued | Running | Waiting_permission _) -> true
+  | Pending, _ | _, (Queued | Running | Waiting_permission _ | Waiting_completion _) ->
+    true
   | (Not_required | Delivered _), (Succeeded | Failed _ | Cancelled | Interrupted _) ->
     false
 ;;

@@ -598,6 +598,11 @@ let with_script_native_calls
     f
 ;;
 
+type background_target =
+  { invocation : I.t
+  ; completion_schema : Jsonaf.t option
+  }
+
 let call_background ?observer t ~borrowed ~limits ~max_nested_calls ~moderate ~name ~args =
   let open Result.Let_syntax in
   let%bind selected =
@@ -605,6 +610,20 @@ let call_background ?observer t ~borrowed ~limits ~max_nested_calls ~moderate ~n
     |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message)
   in
   let parent = Native_tool_invocation.borrowed_invocation borrowed in
+  let%bind binding =
+    C.find selected ~name |> Result.map_error ~f:(fun error -> error.C.message)
+  in
+  let%bind completion_schema =
+    match C.implementation binding, t.managed with
+    | Native _, _ -> Ok None
+    | Managed _, None -> Error "managed background target has no definition service"
+    | Managed _, Some managed ->
+      let%map prepared =
+        Managed.resolve (managed t).definition binding
+        |> Result.map_error ~f:(fun error -> error.C.message)
+      in
+      Option.map (EC.completion_schema prepared) ~f:Chatmd_shell_spec.Tool_schema.to_json
+  in
   let valid_parent =
     match parent.status, parent.context.origin with
     | Dispatching, Script -> Option.is_some parent.context.parent_job
@@ -613,7 +632,7 @@ let call_background ?observer t ~borrowed ~limits ~max_nested_calls ~moderate ~n
   with_script_native_results
     ~result_of_invocation:(fun resolved ->
       match resolved.I.status with
-      | Resolved outcome -> Ok outcome
+      | Resolved _ -> Ok { invocation = resolved; completion_schema }
       | _ -> Error "invocation.invalid_outcome")
     ~result_of_error:(fun code -> Error code)
     ?observer

@@ -657,8 +657,13 @@ let%expect_test "ChatML synchronous model calls persist intent and terminal stat
       let failed =
         match job.Agent_protocol.Job.status with
         | Failed _ -> true
-        | Queued | Running | Waiting_permission _ | Succeeded | Cancelled | Interrupted _
-          -> false
+        | Queued
+        | Running
+        | Waiting_permission _
+        | Waiting_completion _
+        | Succeeded
+        | Cancelled
+        | Interrupted _ -> false
       in
       let delivery_not_required =
         match job.delivery with
@@ -748,8 +753,13 @@ let%expect_test "ChatML startup model jobs persist and deliver while idle" =
       let failed =
         match job.Agent_protocol.Job.status with
         | Failed _ -> true
-        | Queued | Running | Waiting_permission _ | Succeeded | Cancelled | Interrupted _
-          -> false
+        | Queued
+        | Running
+        | Waiting_permission _
+        | Waiting_completion _
+        | Succeeded
+        | Cancelled
+        | Interrupted _ -> false
       in
       Agent_server.Embedded.close embedded;
       print_s

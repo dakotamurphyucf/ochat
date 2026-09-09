@@ -304,6 +304,12 @@ type _ request =
   | Complete_background_job :
       Agent_protocol.Id.Job.t * int * int * Agent_protocol.Completion.t
       -> Agent_protocol.Job.t request
+  | Defer_background_job :
+      Agent_protocol.Id.Job.t * int * int * Agent_protocol.Job.dependency
+      -> Agent_protocol.Job.t request
+  | Refresh_background_job :
+      Agent_protocol.Id.Job.t * int * int
+      -> Agent_protocol.Job.t request
   | Deliver_job :
       Agent_protocol.Id.Job.t
       * int
@@ -830,7 +836,7 @@ let stopped_jobs t mode =
   else
     List.filter_map t.state.jobs ~f:(fun (job : Agent_protocol.Job.t) ->
       match job.status with
-      | Queued | Running | Waiting_permission _ ->
+      | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
         Some
           { job with
             status = Cancelled
@@ -1451,7 +1457,8 @@ let finish_invocation t execution outcome requests commit_starts =
       ||
         (match job.status with
         | Running | Waiting_permission _ -> false
-        | Queued | Succeeded | Failed _ | Cancelled | Interrupted _ -> true)
+        | Waiting_completion _ | Queued | Succeeded | Failed _ | Cancelled | Interrupted _
+          -> true)
   in
   let%bind () =
     if List.exists t.invocation_executions ~f:(phys_equal execution)
@@ -2955,7 +2962,12 @@ let interrupt_permission_review_job t reason (job : Agent_protocol.Job.t) =
         ; completed_at = Some (t.services.now ())
         ; delivery = Pending
         }
-    | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ -> None)
+    | Waiting_permission _
+    | Waiting_completion _
+    | Succeeded
+    | Failed _
+    | Cancelled
+    | Interrupted _ -> None)
   else None
 ;;
 
@@ -4720,20 +4732,28 @@ let validate_job_generation t (job : Agent_protocol.Job.t) generation =
   else Ok ()
 ;;
 
-let update_job t job =
+let update_jobs t jobs =
   let cancelled =
-    match job.Agent_protocol.Job.status with
-    | Cancelled | Interrupted _ -> true
-    | Queued | Running | Waiting_permission _ | Succeeded | Failed _ -> false
+    List.filter jobs ~f:(fun job ->
+      match job.Agent_protocol.Job.status with
+      | Cancelled | Interrupted _ -> true
+      | Queued
+      | Running
+      | Waiting_permission _
+      | Waiting_completion _
+      | Succeeded
+      | Failed _ -> false)
+  in
+  let owns (scope : job_scope) =
+    List.exists cancelled ~f:(fun job ->
+      Agent_protocol.Id.Job.equal scope.job.id job.Agent_protocol.Job.id
+      && Int.equal scope.job.generation job.generation
+      && Int.equal scope.job.attempt job.attempt)
   in
   let children =
     List.filter t.invocation_executions ~f:(fun execution ->
-      cancelled
-      && List.exists t.job_scopes ~f:(fun scope ->
-        job_execution_owned_by scope execution
-        && Agent_protocol.Id.Job.equal scope.job.id job.id
-        && Int.equal scope.job.generation job.generation
-        && Int.equal scope.job.attempt job.attempt))
+      List.exists t.job_scopes ~f:(fun scope ->
+        job_execution_owned_by scope execution && owns scope))
   in
   let permissions, deltas, payloads =
     cleanup_invocation_permissions
@@ -4741,12 +4761,7 @@ let update_job t job =
       (List.map children ~f:(fun child -> child.dispatched.context.id)
        @
        match t.moderator_borrow with
-       | Some borrow
-         when cancelled
-              && Option.exists borrow.job_scope ~f:(fun scope ->
-                Agent_protocol.Id.Job.equal scope.job.id job.id
-                && Int.equal scope.job.generation job.generation
-                && Int.equal scope.job.attempt job.attempt) ->
+       | Some borrow when Option.exists borrow.job_scope ~f:owns ->
          [ borrow.invocation.context.id ]
        | _ -> [])
   in
@@ -4754,15 +4769,20 @@ let update_job t job =
   let%map session =
     transition
       t
-      ~delta:(Session_delta.Batch (Session_delta.Job_changed job :: deltas))
-      ~payloads:(Agent_protocol.Event.Durable.Payload.Job_state_changed job :: payloads)
+      ~delta:
+        (Session_delta.Batch
+           (List.map jobs ~f:(fun job -> Session_delta.Job_changed job) @ deltas))
+      ~payloads:
+        (List.map jobs ~f:(fun job ->
+           Agent_protocol.Event.Durable.Payload.Job_state_changed job)
+         @ payloads)
   in
-  (match cancelled with
-   | true -> cancel_job_scopes t [ job ]
-   | false -> ());
+  cancel_job_scopes t cancelled;
   resolve_cleaned_permission_waiters t permissions;
   session
 ;;
+
+let update_job t job = update_jobs t [ job ]
 
 let add_job t (job : Agent_protocol.Job.t) =
   if Agent_protocol.Id.Session.compare job.session_id t.state.identity.session_id <> 0
@@ -4810,8 +4830,13 @@ let claim_job t job_id generation =
       let%map _ = update_job t job in
       Some job)
   | Queued -> Ok None
-  | Running | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
-    Ok None
+  | Running
+  | Waiting_permission _
+  | Waiting_completion _
+  | Succeeded
+  | Failed _
+  | Cancelled
+  | Interrupted _ -> Ok None
 ;;
 
 let job_failure message =
@@ -4851,6 +4876,32 @@ let terminal_job t (job : Agent_protocol.Job.t) status result =
     | Pending | Delivered _ -> Pending
   in
   { job with status; result; completed_at = Some (t.services.now ()); delivery }
+;;
+
+let cancelled_job_dependencies t (parent : Agent_protocol.Job.t) =
+  let rec walk seen (job : Agent_protocol.Job.t) =
+    let open Result.Let_syntax in
+    match job.status with
+    | Waiting_completion dependency ->
+      let key = Agent_protocol.Id.Job.to_string dependency.job_id in
+      (match Set.mem seen key with
+       | true -> Error (error Invalid_state "job dependency cycle")
+       | false ->
+         let%bind child = find_job t dependency.job_id in
+         let%bind terminal = Agent_protocol.Job.terminal_completion child in
+         (match terminal with
+          | Some _ -> Ok []
+          | None ->
+            let%map rest = walk (Set.add seen key) child in
+            terminal_job
+              t
+              child
+              Cancelled
+              (background_terminal_result child (Cancelled "owning job stopped waiting"))
+            :: rest))
+    | _ -> Ok []
+  in
+  walk (String.Set.singleton (Agent_protocol.Id.Job.to_string parent.id)) parent
 ;;
 
 let complete_job_outcome t (job : Agent_protocol.Job.t) = function
@@ -5041,7 +5092,8 @@ let running_job_for_completion t job_id generation attempt =
   in
   match job.status with
   | Agent_protocol.Job.Running -> Ok job
-  | Queued | Waiting_permission _ -> Error (error Conflict "job is not running")
+  | Queued | Waiting_permission _ | Waiting_completion _ ->
+    Error (error Conflict "job is not running")
   | Succeeded | Failed _ | Cancelled | Interrupted _ ->
     Error (error Already_resolved "job is already terminal")
 ;;
@@ -5054,7 +5106,34 @@ let complete_job t job_id generation attempt outcome =
   job
 ;;
 
-let complete_background_job t job_id generation attempt completion =
+let finish_background_scopes t job_id generation attempt =
+  List.filter t.job_scopes ~f:(fun scope ->
+    (not scope.active)
+    && Agent_protocol.Id.Job.equal scope.job.id job_id
+    && Int.equal scope.job.generation generation
+    && Int.equal scope.job.attempt attempt)
+  |> List.fold_result ~init:() ~f:(fun () scope ->
+    match finish_job_scope t scope with
+    | Ok () -> Ok ()
+    | Error failure ->
+      (match List.mem t.job_scopes scope ~equal:phys_equal with
+       | true -> Error failure
+       | false -> Ok ()))
+;;
+
+let defer_background_job t job_id generation attempt dependency =
+  let open Result.Let_syntax in
+  let%bind () = finish_background_scopes t job_id generation attempt in
+  let%bind job = running_job_for_completion t job_id generation attempt in
+  let next = { job with status = Waiting_completion dependency; result = None } in
+  let%bind () =
+    Job_dependency.validate ~invocations:t.state.invocations ~jobs:t.state.jobs next
+  in
+  let%map _ = update_job t next in
+  next
+;;
+
+let complete_background_job ?(waiting = false) t job_id generation attempt completion =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
@@ -5065,22 +5144,18 @@ let complete_background_job t job_id generation attempt completion =
     | _ -> Error (error Invalid_request "generic completion requires an async tool job")
   in
   let%bind () = Agent_protocol.Completion.validate completion in
-  let%bind () =
-    List.filter t.job_scopes ~f:(fun scope ->
-      (not scope.active)
-      && Agent_protocol.Id.Job.equal scope.job.id job_id
-      && Int.equal scope.job.generation generation
-      && Int.equal scope.job.attempt attempt)
-    |> List.fold_result ~init:() ~f:(fun () scope ->
-      match finish_job_scope t scope with
-      | Ok () -> Ok ()
-      | Error failure ->
-        (match List.mem t.job_scopes scope ~equal:phys_equal with
-         | true -> Error failure
-         | false -> Ok ()))
+  let%bind () = finish_background_scopes t job_id generation attempt in
+  let%bind job =
+    match job.status, waiting with
+    | Waiting_completion _, true -> Ok job
+    | _ -> running_job_for_completion t job_id generation attempt
   in
-  let%bind job = running_job_for_completion t job_id generation attempt in
   let encoded = Agent_protocol.Completion.to_json completion in
+  let%bind cancelled =
+    match completion with
+    | Cancelled _ | Expired -> cancelled_job_dependencies t job
+    | Succeeded _ | Failed _ -> Ok []
+  in
   let terminal status = terminal_job t job status (Some encoded) in
   let job =
     match completion with
@@ -5089,7 +5164,12 @@ let complete_background_job t job_id generation attempt completion =
     | Expired ->
       terminal (Failed (error Resource_limit "background job deadline elapsed"))
     | Failed failure ->
-      (match failure.retryable, retry_limits job.retry_policy with
+      let retry =
+        match job.status with
+        | Waiting_completion _ -> None
+        | _ -> retry_limits job.retry_policy
+      in
+      (match failure.retryable, retry with
        | true, Some (maximum, backoff_ms) when job.attempt < maximum ->
          { (retry_job t job failure.message backoff_ms) with result = Some encoded }
        | _ ->
@@ -5102,8 +5182,37 @@ let complete_background_job t job_id generation attempt completion =
                  ~data:encoded
                  ())))
   in
-  let%map _ = update_job t job in
+  let%map _ = update_jobs t (job :: cancelled) in
   job
+;;
+
+let refresh_background_job t job_id generation attempt =
+  let open Result.Let_syntax in
+  let%bind job = find_job t job_id in
+  let%bind () = validate_job_generation t job generation in
+  let%bind () = validate_job_attempt job attempt in
+  match job.status with
+  | Waiting_completion dependency ->
+    let%bind () =
+      Job_dependency.validate ~invocations:t.state.invocations ~jobs:t.state.jobs job
+    in
+    let%bind target = find_job t dependency.job_id in
+    let%bind completion = Agent_protocol.Job.terminal_completion target in
+    (match completion with
+     | Some completion ->
+       let completion =
+         match target.completed_at with
+         | Some at when Agent_protocol.Timestamp.compare at dependency.deadline <= 0 ->
+           completion
+         | _ -> Agent_protocol.Completion.Expired
+       in
+       let%bind completion = Job_dependency.completion dependency completion in
+       complete_background_job ~waiting:true t job_id generation attempt completion
+     | None
+       when Agent_protocol.Timestamp.compare (t.services.now ()) dependency.deadline >= 0
+       -> complete_background_job ~waiting:true t job_id generation attempt Expired
+     | None -> Ok job)
+  | _ -> Ok job
 ;;
 
 let check_expected_moderator_checkpoint t = function
@@ -5149,7 +5258,7 @@ let deliver_job t job_id generation expected expected_job moderator_snapshot =
         ~payloads:[ Agent_protocol.Event.Durable.Payload.Job_state_changed job ]
     in
     job
-  | (Queued | Running | Waiting_permission _), _ ->
+  | (Queued | Running | Waiting_permission _ | Waiting_completion _), _ ->
     Error (error Conflict "job is not terminal")
   | _, (Not_required | Delivered _) -> Error (error Already_resolved "job is delivered")
 ;;
@@ -5157,8 +5266,18 @@ let deliver_job t job_id generation expected expected_job moderator_snapshot =
 let cancel_job_internal t job_id =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
+  let%bind job =
+    match job.status with
+    | Waiting_completion _ -> refresh_background_job t job_id job.generation job.attempt
+    | _ -> Ok job
+  in
   match job.status with
-  | Agent_protocol.Job.Queued | Running | Waiting_permission _ | Interrupted _ ->
+  | Agent_protocol.Job.Queued
+  | Running
+  | Waiting_permission _
+  | Waiting_completion _
+  | Interrupted _ ->
+    let%bind cancelled = cancelled_job_dependencies t job in
     let job =
       { job with
         status = Cancelled
@@ -5170,7 +5289,7 @@ let cancel_job_internal t job_id =
            | _ -> Pending)
       }
     in
-    let%map _ = update_job t job in
+    let%map _ = update_jobs t (job :: cancelled) in
     job
   | Succeeded | Failed _ | Cancelled -> Ok job
 ;;
@@ -5203,8 +5322,13 @@ let interrupt_job t job_id generation attempt reason =
     in
     let%map _ = update_job t job in
     job
-  | Queued | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
-    Ok job
+  | Queued
+  | Waiting_permission _
+  | Waiting_completion _
+  | Succeeded
+  | Failed _
+  | Cancelled
+  | Interrupted _ -> Ok job
 ;;
 
 let change_schedule t attachment_id event schedule =
@@ -6168,6 +6292,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     complete_job t job_id generation attempt outcome
   | Complete_background_job (job_id, generation, attempt, outcome) ->
     complete_background_job t job_id generation attempt outcome
+  | Defer_background_job (job_id, generation, attempt, dependency) ->
+    defer_background_job t job_id generation attempt dependency
+  | Refresh_background_job (job_id, generation, attempt) ->
+    refresh_background_job t job_id generation attempt
   | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
     deliver_job t job_id generation expected expected_job moderator_snapshot
   | Cancel_job_internal job_id -> cancel_job_internal t job_id
@@ -6557,6 +6685,17 @@ let complete_background_job t ~job_id ~generation ~attempt outcome =
     t
     ~priority:Priority
     (Complete_background_job (job_id, generation, attempt, outcome))
+;;
+
+let defer_background_job t ~job_id ~generation ~attempt dependency =
+  call
+    t
+    ~priority:Priority
+    (Defer_background_job (job_id, generation, attempt, dependency))
+;;
+
+let refresh_background_job t ~job_id ~generation ~attempt =
+  call t ~priority:Priority (Refresh_background_job (job_id, generation, attempt))
 ;;
 
 let deliver_job ?expected ?expected_job t ~job_id ~generation ~moderator_snapshot =

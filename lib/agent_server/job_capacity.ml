@@ -279,7 +279,7 @@ let try_acquire_job t key ~(job : Agent_protocol.Job.t) =
 let retire_job t (job : Agent_protocol.Job.t) =
   match job.status with
   | Queued | Running | Waiting_permission _ -> ()
-  | Succeeded | Failed _ | Cancelled | Interrupted _ ->
+  | Waiting_completion _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
     Eio.Cancel.protect (fun () ->
       Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
         match Map.find t.reservations job.id with

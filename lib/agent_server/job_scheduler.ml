@@ -33,8 +33,13 @@ let reconcile_job entry (job : Agent_protocol.Job.t) =
       ~attempt:job.attempt
       ~reason:interrupted_reason
     |> Result.map ~f:(fun (_ : Agent_protocol.Job.t) -> ())
-  | Queued | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
-    Ok ()
+  | Queued
+  | Waiting_permission _
+  | Waiting_completion _
+  | Succeeded
+  | Failed _
+  | Cancelled
+  | Interrupted _ -> Ok ()
 ;;
 
 let reconcile_entry entry =
@@ -133,19 +138,12 @@ let completion_still_owned entry (job : Agent_protocol.Job.t) =
       | _ -> false)
 ;;
 
-let complete_background t entry (job : Agent_protocol.Job.t) outcome =
+let save_background_result t entry (job : Agent_protocol.Job.t) persist =
   let rec save delay =
     match Atomic.get t.closed with
     | true -> ()
     | false ->
-      (match
-         Agent_session.Session_actor.complete_background_job
-           entry.Session_registry.actor
-           ~job_id:job.id
-           ~generation:job.generation
-           ~attempt:job.attempt
-           outcome
-       with
+      (match persist () with
        | Ok _ -> ()
        | Error _ ->
          (match completion_still_owned entry job with
@@ -157,13 +155,32 @@ let complete_background t entry (job : Agent_protocol.Job.t) outcome =
   save 0.05
 ;;
 
+let complete_background t entry (job : Agent_protocol.Job.t) outcome =
+  save_background_result t entry job (fun () ->
+    Agent_session.Session_actor.complete_background_job
+      entry.Session_registry.actor
+      ~job_id:job.id
+      ~generation:job.generation
+      ~attempt:job.attempt
+      outcome)
+;;
+
 let run_background_job t entry job =
   let outcome =
     match Runtime_owner.execute_background_job entry.Session_registry.runtime job with
     | Ok outcome -> outcome
-    | Error error -> failure_completion error
+    | Error error -> Runtime_owner.Completed (failure_completion error)
   in
-  complete_background t entry job outcome
+  match outcome with
+  | Completed outcome -> complete_background t entry job outcome
+  | Pending dependency ->
+    save_background_result t entry job (fun () ->
+      Agent_session.Session_actor.defer_background_job
+        entry.Session_registry.actor
+        ~job_id:job.id
+        ~generation:job.generation
+        ~attempt:job.attempt
+        dependency)
 ;;
 
 let register_running t (job : Agent_protocol.Job.t) job_sw ~actor ~rejected =
@@ -381,6 +398,7 @@ let claim_one t sw entry jobs =
        | Queued, (Pending | Delivered _) -> if not (claim t sw entry job) then loop rest
        | ( ( Running
            | Waiting_permission _
+           | Waiting_completion _
            | Succeeded
            | Failed _
            | Cancelled
@@ -444,6 +462,18 @@ let process t sw registry =
       | true -> ()
       | false -> Eio.Switch.fail running.sw Job_cancelled));
   let states = List.map entries ~f:(fun entry -> entry, state_jobs t entry) in
+  List.iter states ~f:(fun (entry, jobs) ->
+    List.iter jobs ~f:(fun job ->
+      match job.Agent_protocol.Job.status with
+      | Waiting_completion _ ->
+        ignore
+          (Agent_session.Session_actor.refresh_background_job
+             entry.Session_registry.actor
+             ~job_id:job.id
+             ~generation:job.generation
+             ~attempt:job.attempt
+           : (Agent_protocol.Job.t, Agent_protocol.Error.t) result)
+      | _ -> ()));
   List.iter states ~f:(fun (entry, jobs) -> dispatch_delivery t sw entry jobs);
   List.iter states ~f:(fun (entry, jobs) -> claim_one t sw entry jobs)
 ;;

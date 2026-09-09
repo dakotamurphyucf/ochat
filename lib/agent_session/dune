@@ -17,6 +17,7 @@
   session_state
   extension_invariants
   job_launch
+  job_dependency
   staged_jobs
   script_job_service
   invocation_history

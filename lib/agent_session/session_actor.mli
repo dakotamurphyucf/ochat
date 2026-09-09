@@ -548,13 +548,36 @@ val complete_job
     envelope in [Job.result], with a matching success/failure/cancel status;
     expiration is a resource-limit failure.
     Retries require both an explicitly configured retry policy and a retryable
-    tool failure. Legacy model-job result encoding is unchanged. *)
+    tool failure. A worker cannot complete an attempt after it enters a durable
+    dependency wait; only dependency reconciliation may finish that wait.
+    Legacy model-job result encoding is unchanged. *)
 val complete_background_job
   :  t
   -> job_id:Agent_protocol.Id.Job.t
   -> generation:int
   -> attempt:int
   -> Agent_protocol.Completion.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Release a completed worker into a durable wait on its actual target's Pending
+    job. Revalidates target ownership, generation, attempt and deadline. *)
+val defer_background_job
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
+  -> Agent_protocol.Job.dependency
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Reconcile a persisted dependency from saved terminal data or its deadline.
+    Never reruns work. Validates the captured completion schema/result budget and
+    preserves the original deadline. Terminal dependencies do not trigger parent
+    auto-retries. Expiry cancels unfinished owned dependencies atomically. *)
+val refresh_background_job
+  :  t
+  -> job_id:Agent_protocol.Id.Job.t
+  -> generation:int
+  -> attempt:int
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
 (** Optional expected values perform checkpoint and complete job-record comparison

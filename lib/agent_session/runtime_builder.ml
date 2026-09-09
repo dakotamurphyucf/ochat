@@ -601,7 +601,8 @@ let model_job_event (job : Agent_protocol.Job.t) =
       (Chatml.Chatml_lang.VVariant
          ( "Model_job_failed"
          , [ VString job_id; VString recipe; VString "job was cancelled" ] ))
-  | Queued | Running | Waiting_permission _ -> Error (failure "model job is not terminal")
+  | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
+    Error (failure "model job is not terminal")
 ;;
 
 let enqueue_model_job_completion moderator ?prepare job =

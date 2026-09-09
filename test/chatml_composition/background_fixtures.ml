@@ -16,6 +16,7 @@ let with_background_daemon
       ?(sources = [])
       ?model_post_stream
       ?(expected_model_calls = 0)
+      ?(after_recovery = fun _env _client _entry _before -> ())
       ?(check_restored =
         fun job restored ->
           assert (Jsonaf.exactly_equal (J.to_json job) (J.to_json restored)))
@@ -153,6 +154,13 @@ let with_background_daemon
                     with
                     | Job_get restored -> check_restored job restored
                     | _ -> failwith "unexpected recovered job response");
+                  let entry =
+                    Agent_server.Session_registry.find
+                      (Agent_server.Daemon.registry recovered)
+                      completed_state.identity.session_id
+                    |> Option.value_exn
+                  in
+                  after_recovery env client entry completed_state;
                   [%test_eq: int] expected_model_calls !requests));
           stage := "joining fixture switch")))
 ;;
@@ -195,7 +203,7 @@ let rec await env client (job : J.t) =
     | _ -> failwith "unexpected job.get response"
   in
   match current.status with
-  | Queued | Running | Waiting_permission _ ->
+  | Queued | Running | Waiting_permission _ | Waiting_completion _ ->
     Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
     await env client job
   | Succeeded | Failed _ | Cancelled | Interrupted _ ->

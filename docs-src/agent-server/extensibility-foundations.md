@@ -1444,15 +1444,16 @@ it. The actor validates ancestry on restoration and forbids changing launch
 provenance on an existing job. Scheduler capacity uses this derived depth rather
 than a caller-supplied payload depth. This is internal transaction integration;
 the script-facing interfaces below are installed on qualified standalone and
-one-off dispatch paths, including nested managed standalone calls. Stateful
-moderator integration, progress/artifacts and automatic notification delivery remain unfinished.
+one-off dispatch paths, including nested managed standalone calls, and qualified
+stateful moderator handlers, events and observations. Progress/artifacts and
+automatic notification delivery remain unfinished.
 
 ### Qualified script job operations
 
 The extensibility compiler surfaces include these operations. A compiler surface
 does not install a host service or enable general model-visible availability.
-Qualified standalone tools and one-off executions now use the actor/scheduler
-service; other embeddings fail when the operation is not installed.
+Qualified standalone tools, one-off executions and stateful moderators now use the
+actor/scheduler service; other embeddings fail when the operation is not installed.
 
 | Operation | Contract |
 |---|---|
@@ -1475,7 +1476,7 @@ extra script invocation between jobs.
 `Job.get` returns a version-1 JSON object containing `id`, `status`, `attempt`,
 `created_at`, `completed_at` and `completion`. It omits executable payloads, source,
 capability pins and permission identifiers. Status is `queued`, `running`,
-`waiting_permission`, `succeeded`, `failed`, `cancelled` or `interrupted`.
+`waiting_permission`, `waiting_completion`, `succeeded`, `failed`, `cancelled` or `interrupted`.
 Completion is null while nonterminal, otherwise the protocol's typed completion
 envelope. Hosts may apply additional output disclosure policy.
 
@@ -1499,6 +1500,36 @@ The nested invocation durably retains the full work reference. An author who nee
 the ID in a compact reply should include it in the acknowledgement schema. The
 parent receives one result and the internal invocation creates no extra provider
 tool output.
+
+Moderator preparation returns a deferred persistence callback and an infallible
+installer. The manager validates the prospective state and disclosed outcome,
+selects surviving job starts, checks its live budget, and then saves the checkpoint,
+outcome/receipt and launches atomically. Failed preparation or persistence releases
+provisional starts. After a successful save, installation acknowledges the commit
+without checking an expired runner or treating later registry changes as a failure.
+The same ordering applies to handlers, lifecycle/tool events, queued internal
+events and foreground/idle observations.
+
+When a background target itself returns `Pending`, its parent job enters
+`waiting_completion`. The target invocation retains ownership of its own job; the
+parent records a versioned dependency with that invocation/job identity, the
+original deadline, completion schema and output budget. The parent releases its
+worker slot and runtime access while waiting. Its internal root records only the
+initial acknowledgement; that acknowledgement is never reported as the parent's
+terminal job result. A saved wait survives restart without replaying the target.
+If the child was interrupted, that interruption becomes the parent's eventual
+failure. A crash before the wait saves leaves the parent subject to the ordinary
+running-job interruption rule.
+
+Dependency reconciliation checks the eventual value against the captured result
+contract. Invalid values become a bounded failure without copying rejected data
+into the parent result. Retryable child failures do not automatically rerun the
+parent's already-executed target. Expiry and cancellation atomically cancel
+unfinished owned dependency chains and retire their pending permissions; they
+cannot undo external effects. A child result saved by the retained deadline wins
+over a later cancellation request. Stale worker callbacks cannot overwrite a
+durable wait. Generic subscription-backed Pending and automatic model notification
+remain separate integration work.
 
 The qualified daemon tests exercise these functions through normal model tool
 dispatch, persisted invocations, native file reads and real worker scheduling.

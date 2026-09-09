@@ -188,7 +188,22 @@ let rec apply state = function
       | None -> Ok ()
       | Some previous
         when Option.equal Agent_protocol.Job.equal_launch previous.launch job.launch ->
-        Ok ()
+        (match previous.status, job.status with
+         | Waiting_completion before, Waiting_completion after
+           when Agent_protocol.Job.equal_dependency before after
+                && Int.equal previous.attempt job.attempt -> Ok ()
+         | ( Waiting_completion _
+           , (Waiting_completion _ | Queued | Running | Waiting_permission _) ) ->
+           Error
+             (Agent_protocol.Error.invalid_request "waiting job dependency is immutable")
+         | _, Waiting_completion _ ->
+           (match previous.status with
+            | Running when Int.equal previous.attempt job.attempt -> Ok ()
+            | _ ->
+              Error
+                (Agent_protocol.Error.invalid_request
+                   "only a running attempt can begin waiting"))
+         | _ -> Ok ())
       | Some _ ->
         Error (Agent_protocol.Error.invalid_request "job launch provenance is immutable")
     in

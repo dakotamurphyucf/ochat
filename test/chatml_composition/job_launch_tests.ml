@@ -85,7 +85,7 @@ let settle env (entry : Agent_server.Session_registry.entry) =
       let finished =
         List.for_all state.jobs ~f:(fun job ->
           match job.status with
-          | Queued | Running | Waiting_permission _ -> false
+          | Queued | Running | Waiting_permission _ | Waiting_completion _ -> false
           | Succeeded | Failed _ | Cancelled | Interrupted _ -> true)
       in
       match finished with

@@ -188,7 +188,7 @@ let rec until env predicate =
 let terminal backend job =
   match (current backend job).status with
   | Succeeded | Failed _ | Cancelled | Interrupted _ -> true
-  | Queued | Running | Waiting_permission _ -> false
+  | Queued | Running | Waiting_permission _ | Waiting_completion _ -> false
 ;;
 
 let pending_save target (transition : Agent_session.Session_transition.t) =

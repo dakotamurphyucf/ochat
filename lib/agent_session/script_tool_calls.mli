@@ -185,6 +185,11 @@ val with_standalone
     host's current registry. Does not run source or authorizing callbacks. *)
 val validate_one_off : t -> Chat_response.One_off_script.t -> (unit, string) result
 
+type background_target =
+  { invocation : Agent_protocol.Invocation.t
+  ; completion_schema : Jsonaf.t option
+  }
+
 (** Execute one selected target as a child of an actor-dispatched Script job root.
     Uses the same pre-tool routing, native/managed dispatch, current policy,
     disclosure and observation handling as synchronous script calls, while
@@ -203,7 +208,7 @@ val call_background
         -> (Chat_response.Moderation.Tool_moderation.t option, string) result)
   -> name:string
   -> args:Jsonaf.t
-  -> (Agent_protocol.Invocation.outcome, string) result
+  -> (background_target, string) result
 
 (** Reuse standalone moderation/routing and disclosure for a prepared
     one-off program under its actual borrowed Script invocation. The source and

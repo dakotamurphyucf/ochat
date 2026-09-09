@@ -1518,8 +1518,13 @@ let install_runtime_state state runtime shell =
 let runnable_job job =
   match job.Agent_protocol.Job.status with
   | Queued -> true
-  | Running | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ ->
-    false
+  | Running
+  | Waiting_permission _
+  | Waiting_completion _
+  | Succeeded
+  | Failed _
+  | Cancelled
+  | Interrupted _ -> false
 ;;
 
 let deliverable_job job =
@@ -2754,7 +2759,12 @@ let interrupted_reviewer_job now (job : Agent_protocol.Job.t) =
         }
     | Queued ->
       Some { job with status = Cancelled; completed_at = Some now; delivery = Pending }
-    | Waiting_permission _ | Succeeded | Failed _ | Cancelled | Interrupted _ -> None)
+    | Waiting_permission _
+    | Waiting_completion _
+    | Succeeded
+    | Failed _
+    | Cancelled
+    | Interrupted _ -> None)
   else None
 ;;
 

@@ -1312,10 +1312,24 @@ type kind =
   | Compaction
 [@@deriving compare, equal, sexp]
 
+(** A saved target invocation returned Pending backed by its own job. The parent
+    waits without a worker, retaining its original deadline across restart. *)
+type dependency =
+  { invocation_id : Id.Invocation.t
+  ; job_id : Id.Job.t
+  ; deadline : Timestamp.t
+  ; completion_schema : Jsonaf.t option [@sexp.option]
+    (** Captured from the admitted target definition, never supplied by a script. *)
+  ; max_output_bytes : int
+  ; max_output_depth : int
+  }
+[@@deriving equal, sexp]
+
 type status =
   | Queued
   | Running
   | Waiting_permission of Id.Permission.t
+  | Waiting_completion of dependency
   | Succeeded
   | Failed of Error.t
   | Cancelled

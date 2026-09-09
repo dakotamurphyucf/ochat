@@ -1999,8 +1999,13 @@ let%expect_test "running model jobs recover interrupted and redeliver without re
           let interrupted =
             match recovered.Agent_protocol.Job.status with
             | Interrupted _ -> true
-            | Queued | Running | Waiting_permission _ | Succeeded | Failed _ | Cancelled
-              -> false
+            | Queued
+            | Running
+            | Waiting_permission _
+            | Waiting_completion _
+            | Succeeded
+            | Failed _
+            | Cancelled -> false
           in
           Agent_client.Connection.close second_connection;
           Agent_server.Daemon.shutdown second_daemon |> protocol_ok;

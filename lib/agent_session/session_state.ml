@@ -325,6 +325,16 @@ let validate t =
         job)
   in
   let%bind () =
+    List.fold_result t.jobs ~init:() ~f:(fun () job ->
+      Job_dependency.validate ~invocations:t.invocations ~jobs:t.jobs job)
+    |> Result.map_error ~f:(fun error ->
+      Agent_protocol.Error.create
+        Journal_corrupt
+        ~message:error.message
+        ~retryable:false
+        ())
+  in
+  let%bind () =
     List.fold_result t.permissions ~init:() ~f:(fun () permission ->
       match permission.owner with
       | Operation _ -> Ok ()

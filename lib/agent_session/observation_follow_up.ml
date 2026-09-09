@@ -297,7 +297,7 @@ let handler_readiness ~(state : Session_state.t) invocation =
      | None -> `Discard "handler job is no longer retained"
      | Some job ->
        (match job.status with
-        | Queued | Running | Waiting_permission _ -> `Wait
+        | Queued | Running | Waiting_permission _ | Waiting_completion _ -> `Wait
         | Succeeded | Failed _ -> `Ready
         | Cancelled | Interrupted _ -> `Discard "handler job was cancelled or interrupted"))
 ;;

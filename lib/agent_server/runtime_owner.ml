@@ -553,6 +553,10 @@ let execute_model_job t ~recipe ~payload =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+type background_result =
+  | Completed of Agent_protocol.Completion.t
+  | Pending of Agent_protocol.Job.dependency
+
 let execute_background_job t (job : Agent_protocol.Job.t) =
   with_background_runtime t (fun runtime ->
     let open Result.Let_syntax in
@@ -581,7 +585,7 @@ let execute_background_job t (job : Agent_protocol.Job.t) =
           "background deadline is outside the supported timestamp range")
     in
     match Agent_protocol.Timestamp.compare deadline (executor.now ()) <= 0 with
-    | true -> Ok Agent_protocol.Completion.Expired
+    | true -> Ok (Completed Agent_protocol.Completion.Expired)
     | false ->
       let%bind result =
         Agent_session.Session_actor.with_job_execution
@@ -631,10 +635,30 @@ let execute_background_job t (job : Agent_protocol.Job.t) =
                ~retryable:false
                ())
       in
-      (match result.resolved.status with
-       | Resolved (Complete value) -> Ok (Agent_protocol.Completion.Succeeded value)
-       | Resolved (Fail error) -> Ok (Agent_protocol.Completion.Failed error)
-       | Resolved (Cancelled reason) -> Ok (Agent_protocol.Completion.Cancelled reason)
+      (match result.pending, result.resolved.status with
+       | Some target, Resolved (Complete _) ->
+         (match target.invocation.status, target.invocation.context.deadline with
+          | Resolved (Pending (Job job_id, _)), Some deadline ->
+            let policy = Chat_response.Background_request.policy request in
+            Ok
+              (Pending
+                 { invocation_id = target.invocation.context.id
+                 ; job_id
+                 ; deadline
+                 ; completion_schema = target.completion_schema
+                 ; max_output_bytes = policy.max_output_bytes
+                 ; max_output_depth = policy.execution.max_depth
+                 })
+          | _ ->
+            Error
+              (Agent_protocol.Error.invalid_request
+                 "background Pending target has no supported owned job"))
+       | None, Resolved (Complete value) ->
+         Ok (Completed (Agent_protocol.Completion.Succeeded value))
+       | _, Resolved (Fail error) ->
+         Ok (Completed (Agent_protocol.Completion.Failed error))
+       | _, Resolved (Cancelled reason) ->
+         Ok (Completed (Agent_protocol.Completion.Cancelled reason))
        | _ ->
          Error
            (Agent_protocol.Error.create

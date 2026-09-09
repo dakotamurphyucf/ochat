@@ -3,6 +3,10 @@ open Core
 type result =
   { resolved : Agent_protocol.Invocation.t
   ; runtime_requests : Chat_response.Moderation.Runtime_request.t list
+  ; pending : Script_tool_calls.background_target option
+    (** When present, the root saved only an acknowledgement. The host must persist
+        a job dependency on this target's owned Pending work, not complete the job
+        from the root's value. *)
   }
 
 (** Execute a reconstructible request under an already claimed job's actor

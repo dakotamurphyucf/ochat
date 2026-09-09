@@ -1,5 +1,11 @@
 open Core
 
+module Jsonaf = struct
+  include Jsonaf
+
+  let equal = exactly_equal
+end
+
 type kind =
   | Model_call
   | Nested_agent
@@ -9,10 +15,21 @@ type kind =
   | Compaction
 [@@deriving compare, equal, sexp]
 
+type dependency =
+  { invocation_id : Id.Invocation.t
+  ; job_id : Id.Job.t
+  ; deadline : Timestamp.t
+  ; completion_schema : Jsonaf.t option [@sexp.option]
+  ; max_output_bytes : int
+  ; max_output_depth : int
+  }
+[@@deriving equal, sexp]
+
 type status =
   | Queued
   | Running
   | Waiting_permission of Id.Permission.t
+  | Waiting_completion of dependency
   | Succeeded
   | Failed of Protocol_error.t
   | Cancelled
@@ -159,7 +176,7 @@ let launch_of_json json =
 let terminal_completion t =
   let open Result.Let_syntax in
   match t.status with
-  | Queued | Running | Waiting_permission _ -> Ok None
+  | Queued | Running | Waiting_permission _ | Waiting_completion _ -> Ok None
   | Succeeded | Failed _ | Cancelled | Interrupted _ ->
     let%bind completion =
       match t.kind with
@@ -200,7 +217,7 @@ let terminal_completion t =
                 ; retryable = false
                 ; details = `Null
                 })
-         | Queued | Running | Waiting_permission _ -> assert false)
+         | Queued | Running | Waiting_permission _ | Waiting_completion _ -> assert false)
     in
     let%map () = Completion.validate completion in
     Some completion
@@ -229,6 +246,7 @@ let status_name = function
   | Queued -> "queued"
   | Running -> "running"
   | Waiting_permission _ -> "waiting_permission"
+  | Waiting_completion _ -> "waiting_completion"
   | Succeeded -> "succeeded"
   | Failed _ -> "failed"
   | Cancelled -> "cancelled"
@@ -242,6 +260,17 @@ let status_to_json status =
   | Waiting_permission id ->
     `Object
       [ "type", `String "waiting_permission"; "permission_id", Id.Permission.to_json id ]
+  | Waiting_completion dependency ->
+    `Object
+      [ "type", `String "waiting_completion"
+      ; "schema_version", `Number "1"
+      ; "invocation_id", Id.Invocation.to_json dependency.invocation_id
+      ; "job_id", Id.Job.to_json dependency.job_id
+      ; "deadline", Timestamp.to_json dependency.deadline
+      ; "completion_schema", Option.value dependency.completion_schema ~default:`Null
+      ; "max_output_bytes", `Number (Int.to_string dependency.max_output_bytes)
+      ; "max_output_depth", `Number (Int.to_string dependency.max_output_depth)
+      ]
   | Failed error ->
     `Object [ "type", `String "failed"; "error", Protocol_error.to_json error ]
   | Interrupted reason ->
@@ -260,6 +289,65 @@ let status_of_json json =
       (Json_codec.required_as fields "permission_id" Id.Permission.of_json)
       ~f:(fun id -> Waiting_permission id)
   | "succeeded" -> Ok Succeeded
+  | "waiting_completion" ->
+    let%bind () =
+      Extension_codec.closed
+        fields
+        [ "type"
+        ; "schema_version"
+        ; "invocation_id"
+        ; "job_id"
+        ; "deadline"
+        ; "completion_schema"
+        ; "max_output_bytes"
+        ; "max_output_depth"
+        ]
+    in
+    let%bind version =
+      Json_codec.required_as
+        fields
+        "schema_version"
+        (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+    in
+    let%bind () =
+      match version with
+      | 1 -> Ok ()
+      | _ ->
+        Error
+          (Protocol_error.create
+             Incompatible_protocol
+             ~message:"unsupported job dependency schema"
+             ~retryable:false
+             ())
+    in
+    let%bind invocation_id =
+      Json_codec.required_as fields "invocation_id" Id.Invocation.of_json
+    in
+    let%bind job_id = Json_codec.required_as fields "job_id" Id.Job.of_json in
+    let%bind deadline = Json_codec.required_as fields "deadline" Timestamp.of_json in
+    let%bind completion_schema =
+      Json_codec.optional_as fields "completion_schema" (fun json -> Ok json)
+    in
+    let%bind max_output_bytes =
+      Json_codec.required_as
+        fields
+        "max_output_bytes"
+        (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+    in
+    let%map max_output_depth =
+      Json_codec.required_as
+        fields
+        "max_output_depth"
+        (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+    in
+    Waiting_completion
+      { invocation_id
+      ; job_id
+      ; deadline
+      ; completion_schema
+      ; max_output_bytes
+      ; max_output_depth
+      }
   | "failed" ->
     Result.map (Json_codec.required_as fields "error" Protocol_error.of_json) ~f:(fun e ->
       Failed e)
@@ -409,7 +497,18 @@ let of_json json =
   let%bind created_at, started_at, next_run_at, completed_at = decode_times fields in
   let result = Json_codec.optional fields "result" in
   let%bind delivery = Json_codec.required_as fields "delivery" delivery_of_json in
-  let%map launch = Json_codec.optional_as fields "launch" launch_of_json in
+  let%bind launch = Json_codec.optional_as fields "launch" launch_of_json in
+  let%map () =
+    match status with
+    | Waiting_completion dependency ->
+      (match kind, started_at, next_run_at, completed_at, result with
+       | Async_tool, Some _, None, None, None
+         when attempt > 0
+              && (not (Id.Job.equal id dependency.job_id))
+              && Timestamp.compare dependency.deadline created_at >= 0 -> Ok ()
+       | _ -> Error (Protocol_error.invalid_request "invalid waiting job lifecycle"))
+    | _ -> Ok ()
+  in
   { id
   ; session_id
   ; generation

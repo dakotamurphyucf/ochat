@@ -87,7 +87,7 @@ let record_result t now result =
 
 let job_uses_response_artifacts (job : Agent_protocol.Job.t) =
   match job.status with
-  | Running | Waiting_permission _ -> true
+  | Running | Waiting_permission _ | Waiting_completion _ -> true
   | Queued | Succeeded | Failed _ | Cancelled | Interrupted _ -> false
 ;;
 
