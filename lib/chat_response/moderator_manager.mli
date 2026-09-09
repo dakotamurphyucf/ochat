@@ -362,3 +362,20 @@ val retire_queued_event_entries
 (** [enqueue_internal_event t event] enqueues [event] after any active manager
     execution has completed for later replay via {!drain_internal_events}. *)
 val enqueue_internal_event : t -> Chatml.Chatml_lang.value -> (unit, string) result
+
+(** Prepare an external event append under the manager execution lock. The host
+    must own the actor checkpoint gate and atomically save the new checkpoint
+    with the delivery receipt, comparing [before] to the current durable state.
+    Rejection leaves the live queue unchanged. The event is detached from caller
+    mutable values before preparation. Save and local installation are protected
+    against cancellation; this does not run the event's handler. Versioned managers
+    currently accept only validated Internal_event envelopes; legacy job events
+    require their versioned completion adapter before admission. *)
+val enqueue_internal_event_entries
+  :  t
+  -> event:Chatml.Chatml_lang.value
+  -> prepare:
+       (before:Session.Moderator_state.Identity_snapshot.t
+        -> snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> (unit, string) result)
+  -> (Session.Moderator_state.Identity_snapshot.t, string) result

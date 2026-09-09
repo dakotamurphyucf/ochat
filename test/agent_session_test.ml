@@ -4260,6 +4260,209 @@ let handoff_manager env =
   manager, invocation
 ;;
 
+let%expect_test "external event delivery commits receipts before changing the live queue" =
+  let module A = Agent_session.Session_actor in
+  let module M = Chat_response.Moderator_manager in
+  let module B = Agent_session.Runtime_builder in
+  let module S = Session.Moderator_state.Identity_snapshot in
+  with_actor_workspace (fun env workspace_instance ->
+    Eio.Switch.run (fun sw ->
+      let manager, _ = handoff_manager env in
+      let snapshot () = M.identity_snapshot manager |> Result.ok_or_failwith in
+      let initial =
+        actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+      in
+      let schedule () : Agent_protocol.Schedule.t =
+        { id = Agent_protocol.Id.Schedule.create ()
+        ; session_id
+        ; generation = 0
+        ; payload = `Null
+        ; created_at = timestamp
+        ; next_due_at = timestamp
+        ; misfire = Deliver_once_immediately
+        ; status = Delivering
+        ; delivery_count = 0
+        ; last_delivery_at = None
+        }
+      in
+      let first = schedule ()
+      and second = schedule ()
+      and third = schedule () in
+      let job : Agent_protocol.Job.t =
+        { id = Agent_protocol.Id.Job.create ()
+        ; session_id
+        ; generation = 0
+        ; kind = Model_call
+        ; payload = `Null
+        ; status = Succeeded
+        ; retry_policy = Never
+        ; attempt = 1
+        ; created_at = timestamp
+        ; started_at = Some timestamp
+        ; next_run_at = None
+        ; completed_at = Some timestamp
+        ; result = Some `Null
+        ; delivery = Pending
+        }
+      in
+      let initial =
+        { initial with
+          moderator = Some (B.encode_moderator_snapshot (snapshot ()))
+        ; schedules = [ first; second; third ]
+        ; jobs = [ job ]
+        }
+      in
+      let backend =
+        Agent_session.Memory_backend.create ~event_capacity:128 ~initial_state:initial
+      in
+      let persistence = Agent_session.Memory_backend.persistence backend in
+      let reject = ref false in
+      let actor =
+        A.create
+          ~sw
+          ~clock:(Eio.Stdenv.clock env)
+          ~mailbox_capacity:32
+          ~compaction_env:None
+          ~initial_state:initial
+          ~operation_worker:None
+          ~persistence:
+            { commit =
+                (fun ~command_audit ~previous next ->
+                  match !reject with
+                  | true ->
+                    reject := false;
+                    Error (handoff_error "delivery save rejected")
+                  | false -> persistence.commit ~command_audit ~previous next)
+            }
+          ~services:
+            { now = (fun () -> timestamp)
+            ; create_attachment_id = Agent_protocol.Id.Attachment.create
+            ; create_reclaim_token = (fun () -> "queue-delivery")
+            ; state_committed = (fun _ _ -> ())
+            }
+      in
+      Exn.protect
+        ~finally:(fun () -> A.shutdown actor)
+        ~f:(fun () ->
+          let same = Option.equal Jsonaf.exactly_equal in
+          let current_matches () =
+            same
+              (Some (B.encode_moderator_snapshot (snapshot ())))
+              (A.state actor |> protocol_ok).moderator
+          in
+          let append ?(before_commit = fun () -> ()) label save =
+            A.with_moderator_checkpoint actor (fun () ->
+              let event =
+                Chat_response.Moderator_invocation.internal_event
+                  (Chatml.Chatml_lang.VVariant ("String", [ VString label ]))
+                |> Result.ok_or_failwith
+              in
+              M.enqueue_internal_event_entries
+                manager
+                ~event
+                ~prepare:(fun ~before ~snapshot ->
+                  before_commit ();
+                  save ~before ~snapshot
+                  |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+              |> Result.map_error ~f:handoff_error)
+          in
+          let save_schedule schedule ~before ~snapshot =
+            A.complete_schedule
+              ~expected:before
+              ~expected_schedule:schedule
+              actor
+              ~schedule_id:schedule.Agent_protocol.Schedule.id
+              ~generation:0
+              ~moderator_snapshot:(Some (B.encode_moderator_snapshot snapshot))
+            |> Result.map ~f:ignore
+          in
+          let save_job expected_job ~before ~snapshot =
+            A.deliver_job
+              ~expected:before
+              ~expected_job
+              actor
+              ~job_id:job.id
+              ~generation:0
+              ~moderator_snapshot:(Some (B.encode_moderator_snapshot snapshot))
+            |> Result.map ~f:ignore
+          in
+          let unchanged = snapshot () in
+          assert (
+            Result.is_error
+              (append
+                 "stale-timer"
+                 (save_schedule { first with payload = `String "different payload" })));
+          assert (
+            Result.is_error
+              (append
+                 "stale-job"
+                 (save_job
+                    { job with attempt = 0; result = Some (`String "previous attempt") })));
+          assert (Sexp.equal (S.sexp_of_t unchanged) (S.sexp_of_t (snapshot ())));
+          assert (current_matches ());
+          List.iter
+            [ "schedule", save_schedule first; "job", save_job job ]
+            ~f:(fun (label, save) ->
+              let before = snapshot () in
+              reject := true;
+              assert (Result.is_error (append label save));
+              assert (Sexp.equal (S.sexp_of_t before) (S.sexp_of_t (snapshot ())));
+              assert (current_matches ());
+              append label save |> protocol_ok |> ignore;
+              let delivered = snapshot () in
+              assert (Result.is_error (append label save));
+              assert (Sexp.equal (S.sexp_of_t delivered) (S.sexp_of_t (snapshot ())));
+              assert (current_matches ()));
+          let entered, entered_u = Eio.Promise.create () in
+          let release, release_u = Eio.Promise.create () in
+          let queued, queued_u = Eio.Promise.create () in
+          let first_done, first_done_u = Eio.Promise.create () in
+          let second_done, second_done_u = Eio.Promise.create () in
+          let second_prepared = ref false in
+          Eio.Fiber.fork ~sw (fun () ->
+            let result =
+              append "concurrent-first" (save_schedule second) ~before_commit:(fun () ->
+                Eio.Promise.resolve entered_u ();
+                Eio.Promise.await release)
+            in
+            Eio.Promise.resolve first_done_u result);
+          Eio.Promise.await entered;
+          Eio.Fiber.fork ~sw (fun () ->
+            Eio.Promise.resolve queued_u ();
+            let result =
+              append "concurrent-second" (save_schedule third) ~before_commit:(fun () ->
+                second_prepared := true)
+            in
+            Eio.Promise.resolve second_done_u result);
+          Eio.Promise.await queued;
+          Eio.Fiber.yield ();
+          assert (not !second_prepared);
+          let responsive = (A.state actor |> protocol_ok).moderator in
+          assert (same responsive (Agent_session.Memory_backend.state backend).moderator);
+          Eio.Promise.resolve release_u ();
+          Eio.Promise.await first_done |> protocol_ok |> ignore;
+          Eio.Promise.await second_done |> protocol_ok |> ignore;
+          let final = A.state actor |> protocol_ok in
+          print_s
+            [%sexp
+              { queue_length = (List.length (snapshot ()).queued_internal_events : int)
+              ; checkpoints_match = (current_matches () : bool)
+              ; deliveries =
+                  (List.map final.schedules ~f:(fun s -> s.delivery_count) : int list)
+              ; job_delivered =
+                  ((match (List.hd_exn final.jobs).delivery with
+                    | Delivered _ -> true
+                    | Pending | Not_required -> false)
+                   : bool)
+              ; second_prepared = (!second_prepared : bool)
+              }])));
+  [%expect
+    {|
+    ((queue_length 4) (checkpoints_match true) (deliveries (1 1 1))
+     (job_delivered true) (second_prepared true))
+    |}]
+;;
+
 let%expect_test
     "follow-up scheduling survives save failure and reload without repeating compaction"
   =
@@ -5166,14 +5369,16 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; moderator_script_tools = script_tools
            ; moderator_activation = None
            ; start_moderator = (fun () -> failwith "unexpected startup")
-           ; enqueue_internal_event = (fun _ -> failwith "unexpected external event")
+           ; enqueue_internal_event =
+               (fun ?prepare:_ _ -> failwith "unexpected external event")
            ; drain_internal_events =
                (fun _ ->
                  Int.incr internal_batches;
                  failwith "v1 owner used legacy event drain")
            ; execute_model_job =
                (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
-           ; enqueue_model_job_completion = (fun _ -> failwith "unexpected completion")
+           ; enqueue_model_job_completion =
+               (fun ?prepare:_ _ -> failwith "unexpected completion")
            ; close = (fun () -> ())
            }
          in
@@ -6884,12 +7089,13 @@ let%expect_test
                ; moderator_script_tools = script_tools
                ; moderator_activation = None
                ; start_moderator = (fun () -> failwith "unexpected startup")
-               ; enqueue_internal_event = (fun _ -> failwith "unexpected external event")
+               ; enqueue_internal_event =
+                   (fun ?prepare:_ _ -> failwith "unexpected external event")
                ; drain_internal_events = (fun _ -> failwith "legacy event drain used")
                ; execute_model_job =
                    (fun ~recipe:_ ~payload:_ -> failwith "unexpected model job")
                ; enqueue_model_job_completion =
-                   (fun _ -> failwith "unexpected completion")
+                   (fun ?prepare:_ _ -> failwith "unexpected completion")
                ; close = (fun () -> ())
                }
              in

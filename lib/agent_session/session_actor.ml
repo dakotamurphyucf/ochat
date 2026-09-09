@@ -247,7 +247,11 @@ type _ request =
       Agent_protocol.Id.Job.t * int * Runtime_builder.model_job_outcome
       -> Agent_protocol.Job.t request
   | Deliver_job :
-      Agent_protocol.Id.Job.t * int * Jsonaf.t option
+      Agent_protocol.Id.Job.t
+      * int
+      * Session.Moderator_state.Identity_snapshot.t option
+      * Agent_protocol.Job.t option
+      * Jsonaf.t option
       -> Agent_protocol.Job.t request
   | Cancel_job_internal : Agent_protocol.Id.Job.t -> Agent_protocol.Job.t request
   | Cancel_job :
@@ -270,7 +274,11 @@ type _ request =
       Agent_protocol.Id.Schedule.t * int
       -> Agent_protocol.Schedule.t request
   | Complete_schedule :
-      Agent_protocol.Id.Schedule.t * int * Jsonaf.t option
+      Agent_protocol.Id.Schedule.t
+      * int
+      * Session.Moderator_state.Identity_snapshot.t option
+      * Agent_protocol.Schedule.t option
+      * Jsonaf.t option
       -> Agent_protocol.Schedule.t request
   | Fail_schedule :
       Agent_protocol.Id.Schedule.t * int * Agent_protocol.Error.t
@@ -3049,6 +3057,8 @@ let with_moderator_gate t f =
     Error (error code (Chat_response.Execution_gate.error_message failure))
 ;;
 
+let with_moderator_checkpoint = with_moderator_gate
+
 let with_queued_event_borrow t ~claim f =
   with_moderator_gate t (fun () ->
     let open Result.Let_syntax in
@@ -3980,14 +3990,37 @@ let complete_job t job_id generation outcome =
     Error (error Already_resolved "job is already terminal")
 ;;
 
-let deliver_job t job_id generation moderator_snapshot =
+let check_expected_moderator_checkpoint t = function
+  | None -> Ok ()
+  | Some expected ->
+    (match t.state.moderator with
+     | Some installed
+       when Jsonaf.exactly_equal
+              installed
+              (Runtime_builder.encode_moderator_snapshot expected) -> Ok ()
+     | _ -> Error (error Conflict "moderator checkpoint changed before external delivery"))
+;;
+
+let deliver_job t job_id generation expected expected_job moderator_snapshot =
   let open Result.Let_syntax in
+  let%bind () = check_expected_moderator_checkpoint t expected in
   let%bind () =
     match moderator_is_borrowed t with
     | true -> Error (error Conflict "moderator callback owns the checkpoint")
     | false -> Ok ()
   in
   let%bind job = find_job t job_id in
+  let%bind () =
+    match expected_job with
+    | None -> Ok ()
+    | Some expected_job ->
+      if
+        Jsonaf.exactly_equal
+          (Agent_protocol.Job.to_json expected_job)
+          (Agent_protocol.Job.to_json job)
+      then Ok ()
+      else Error (error Conflict "job changed before completion delivery")
+  in
   let%bind () = validate_job_generation t job generation in
   match job.status, job.delivery with
   | (Succeeded | Failed _ | Cancelled | Interrupted _), Agent_protocol.Job.Pending ->
@@ -4130,14 +4163,33 @@ let retry_schedule t schedule_id generation =
     Error (error Already_resolved "schedule is already terminal")
 ;;
 
-let complete_schedule t schedule_id generation moderator_snapshot =
+let complete_schedule
+      t
+      schedule_id
+      generation
+      expected
+      expected_schedule
+      moderator_snapshot
+  =
   let open Result.Let_syntax in
+  let%bind () = check_expected_moderator_checkpoint t expected in
   let%bind () =
     match moderator_is_borrowed t with
     | true -> Error (error Conflict "moderator callback owns the checkpoint")
     | false -> Ok ()
   in
   let%bind schedule = find_schedule t schedule_id in
+  let%bind () =
+    match expected_schedule with
+    | None -> Ok ()
+    | Some expected_schedule ->
+      if
+        Jsonaf.exactly_equal
+          (Agent_protocol.Schedule.to_json expected_schedule)
+          (Agent_protocol.Schedule.to_json schedule)
+      then Ok ()
+      else Error (error Conflict "schedule changed before event delivery")
+  in
   let%bind () = validate_schedule_generation t schedule generation in
   match schedule.status with
   | Agent_protocol.Schedule.Delivering ->
@@ -4887,8 +4939,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Add_job job -> add_job t job
   | Claim_job (job_id, generation) -> claim_job t job_id generation
   | Complete_job (job_id, generation, outcome) -> complete_job t job_id generation outcome
-  | Deliver_job (job_id, generation, moderator_snapshot) ->
-    deliver_job t job_id generation moderator_snapshot
+  | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
+    deliver_job t job_id generation expected expected_job moderator_snapshot
   | Cancel_job_internal job_id -> cancel_job_internal t job_id
   | Cancel_job (attachment_id, job_id) ->
     with_writer t attachment_id (fun () -> cancel_job_internal t job_id)
@@ -4899,8 +4951,15 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Cancel_schedule_internal schedule_id -> cancel_schedule_internal t schedule_id
   | Claim_schedule (schedule_id, generation) -> claim_schedule t schedule_id generation
   | Retry_schedule (schedule_id, generation) -> retry_schedule t schedule_id generation
-  | Complete_schedule (schedule_id, generation, moderator_snapshot) ->
-    complete_schedule t schedule_id generation moderator_snapshot
+  | Complete_schedule
+      (schedule_id, generation, expected, expected_schedule, moderator_snapshot) ->
+    complete_schedule
+      t
+      schedule_id
+      generation
+      expected
+      expected_schedule
+      moderator_snapshot
   | Fail_schedule (schedule_id, generation, failure) ->
     fail_schedule t schedule_id generation failure
   | Skip_schedule (schedule_id, generation) -> skip_schedule t schedule_id generation
@@ -5259,8 +5318,8 @@ let complete_job t ~job_id ~generation outcome =
   call t ~priority:Priority (Complete_job (job_id, generation, outcome))
 ;;
 
-let deliver_job t ~job_id ~generation ~moderator_snapshot =
-  call t (Deliver_job (job_id, generation, moderator_snapshot))
+let deliver_job ?expected ?expected_job t ~job_id ~generation ~moderator_snapshot =
+  call t (Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot))
 ;;
 
 let cancel_job_internal t ~job_id = call t ~priority:Priority (Cancel_job_internal job_id)
@@ -5300,8 +5359,18 @@ let retry_schedule t ~schedule_id ~generation =
   call t ~priority:Priority (Retry_schedule (schedule_id, generation))
 ;;
 
-let complete_schedule t ~schedule_id ~generation ~moderator_snapshot =
-  call t (Complete_schedule (schedule_id, generation, moderator_snapshot))
+let complete_schedule
+      ?expected
+      ?expected_schedule
+      t
+      ~schedule_id
+      ~generation
+      ~moderator_snapshot
+  =
+  call
+    t
+    (Complete_schedule
+       (schedule_id, generation, expected, expected_schedule, moderator_snapshot))
 ;;
 
 let fail_schedule t ~schedule_id ~generation failure =

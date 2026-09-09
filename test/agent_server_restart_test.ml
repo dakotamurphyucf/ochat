@@ -636,6 +636,155 @@ let on_event = fun ctx state event -> Task.pure(state + 1)
   [%expect {| ((failures (true true)) (registered 0)) |}]
 ;;
 
+let%expect_test
+    "qualified timers deliver versioned events and native reads without a client turn"
+  =
+  let module A = Agent_session.Session_actor in
+  Eio_main.run (fun env ->
+    Mirage_crypto_rng_unix.use_default ();
+    let root = temporary_root env in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Path.rmtree ~missing_ok:true Eio.Path.(Eio.Stdenv.fs env / root))
+      ~f:(fun () ->
+        let workspace = Filename.concat root "workspace" in
+        Eio.Path.mkdir ~perm:0o700 Eio.Path.(Eio.Stdenv.fs env / workspace);
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / workspace / "value.txt")
+          "timer value";
+        let prompt_file = Filename.concat root "root.chatmd" in
+        Eio.Path.save
+          ~create:(`Exclusive 0o600)
+          Eio.Path.(Eio.Stdenv.fs env / prompt_file)
+          {|<tool name="read_file"><read id="data" path="${workspace}"/></tool>
+<script id="owner" language="chatml" kind="moderator" api="extensibility-v1">
+let initial_state = 0
+let on_event = fun ctx state event -> match event with
+| `Session_start -> Task.bind(Schedule.after_ms(0, `String("wake")), fun id -> Task.pure(state))
+| `Internal_event(payload) ->
+  Task.bind(Tool.call("read_file", `Object([{key = "root"; value = `String("data")}; {key = "file"; value = `String("value.txt")}])), fun result ->
+    match result with
+    | `Error(code) -> Task.fail(code)
+    | `Ok(value) ->
+      match state with
+      | 0 -> Task.bind(Schedule.after_ms(0, `String("finish")), fun id -> Task.pure(1))
+      | _ -> Task.bind(Runtime.end_session("timers complete"), fun ignored -> Task.pure(2)))
+| _ -> Task.pure(state)
+</script>|};
+        Eio.Switch.run (fun sw ->
+          let model_calls = ref 0 in
+          let daemon =
+            Agent_server.Daemon.start
+              ~sw
+              ~env
+              ~config:(config root workspace prompt_file)
+              ~tool_dir:root
+              ~home:root
+              ~process_start_identity:None
+              ~options:
+                { Agent_server.Daemon.default_options with
+                  qualify_chatml_extensions = true
+                ; model_post_stream =
+                    Some
+                      (fun ~sw:_ ~inputs:_ ->
+                        incr model_calls;
+                        failwith "unexpected model")
+                }
+              ()
+            |> protocol_ok
+          in
+          let client = connection daemon (principal ()) in
+          initialize client;
+          let session, _ = create_session ~start_immediately:true client in
+          let entry =
+            Agent_server.Session_registry.find
+              (Agent_server.Daemon.registry daemon)
+              session.id
+            |> Option.value_exn
+          in
+          let final =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 15. (fun () ->
+              let rec loop () =
+                let state = A.state entry.actor |> protocol_ok in
+                match state.halted with
+                | true -> state
+                | false ->
+                  Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
+                  loop ()
+              in
+              loop ())
+          in
+          let delivered =
+            List.map final.schedules ~f:(fun schedule -> schedule.delivery_count)
+          in
+          let completed_events =
+            List.count final.moderator_executions ~f:(fun receipt ->
+              match receipt.context.phase, receipt.status with
+              | Internal_event, Completed _ -> true
+              | _ -> false)
+          in
+          let native_event_owned =
+            List.for_all final.invocations ~f:(fun invocation ->
+              Option.is_some invocation.parent_event
+              && Option.is_none invocation.context.parent_invocation)
+          in
+          let delivery_cancelled =
+            Eio.Time.with_timeout_exn (Eio.Stdenv.clock env) 10. (fun () ->
+              Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
+              let held, held_u = Eio.Promise.create () in
+              let release, release_u = Eio.Promise.create () in
+              let released, released_u = Eio.Promise.create () in
+              Eio.Fiber.fork ~sw (fun () ->
+                A.with_moderator_checkpoint entry.actor (fun () ->
+                  Eio.Promise.resolve held_u ();
+                  Eio.Promise.await release;
+                  Ok ())
+                |> protocol_ok;
+                Eio.Promise.resolve released_u ());
+              Eio.Promise.await held;
+              let started, started_u = Eio.Promise.create () in
+              let cancelled =
+                Eio.Fiber.first
+                  (fun () ->
+                     Eio.Promise.resolve started_u ();
+                     Agent_server.Runtime_owner.deliver_schedule
+                       entry.runtime
+                       (List.hd_exn final.schedules)
+                     |> protocol_ok;
+                     false)
+                  (fun () ->
+                     Eio.Promise.await started;
+                     Eio.Fiber.yield ();
+                     true)
+              in
+              Eio.Promise.resolve release_u ();
+              Eio.Promise.await released;
+              Agent_server.Runtime_owner.ensure_loaded entry.runtime |> protocol_ok;
+              let after = A.state entry.actor |> protocol_ok in
+              assert (Option.equal Jsonaf.exactly_equal final.moderator after.moderator);
+              cancelled)
+          in
+          Agent_client.Connection.close client;
+          Agent_server.Daemon.shutdown daemon |> protocol_ok;
+          print_s
+            [%sexp
+              { delivered : int list
+              ; completed_events : int
+              ; native_calls = (List.length final.invocations : int)
+              ; native_event_owned : bool
+              ; delivery_cancelled : bool
+              ; model_calls = (!model_calls : int)
+              ; halt_reason = (final.halt_reason : string option)
+              }])));
+  [%expect
+    {|
+    ((delivered (1 1)) (completed_events 2) (native_calls 2)
+     (native_event_owned true) (delivery_cancelled true) (model_calls 0)
+     (halt_reason ("timers complete")))
+    |}]
+;;
+
 let server_health connection ~include_details =
   Agent_client.Connection.request
     connection

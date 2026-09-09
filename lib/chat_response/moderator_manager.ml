@@ -1711,3 +1711,27 @@ let enqueue_internal_event_unlocked (t : t) (event : Chatml.Chatml_lang.value)
 let enqueue_internal_event t event =
   with_execution_lock t (fun () -> enqueue_internal_event_unlocked t event)
 ;;
+
+let enqueue_internal_event_entries t ~event ~prepare =
+  with_execution_lock t (fun () ->
+    let open Result.Let_syntax in
+    let%bind event =
+      match t.artifact.extension, event with
+      | None, _ -> Ok event
+      | Some _, Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
+        Moderator_invocation.internal_event payload
+      | Some _, _ ->
+        Error "event.invalid_external_event: unsupported extensibility-v1 envelope"
+    in
+    let%bind before = identity_snapshot_unlocked t in
+    let%bind encoded = Value_codec.Snapshot.of_value event in
+    let%bind event = Value_codec.Snapshot.to_value encoded in
+    let%bind install = Runtime.prepare_enqueue_internal_event t.runtime event in
+    let snapshot =
+      { before with queued_internal_events = before.queued_internal_events @ [ encoded ] }
+    in
+    Eio.Cancel.protect (fun () ->
+      let%map () = prepare ~before ~snapshot in
+      install ();
+      snapshot))
+;;

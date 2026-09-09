@@ -1446,15 +1446,19 @@ let resume_ui_request
        Ok ())
 ;;
 
+let prepare_enqueue_internal_event (session : session) (event : Lang.value) =
+  match session.halted with
+  | true -> Error "Session has ended"
+  | false -> Ok (fun () -> Queue.enqueue session.queue event)
+;;
+
 let enqueue_internal_event (session : session) (event : Lang.value)
   : (unit, string) result
   =
-  if session.halted
-  then Error "Session has ended"
-  else (
-    Debug_log.emitf
-      "[chatml-runtime] enqueue_internal_event event=%s"
-      (value_to_string event);
-    Queue.enqueue session.queue event;
-    Ok ())
+  let open Result.Let_syntax in
+  let%map install = prepare_enqueue_internal_event session event in
+  Debug_log.emitf
+    "[chatml-runtime] enqueue_internal_event event=%s"
+    (value_to_string event);
+  install ()
 ;;

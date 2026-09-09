@@ -111,12 +111,37 @@ let parse_user_content t ~id content =
            ()))
 ;;
 
-let enqueue_internal_event t payload =
-  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+let with_cancellable_access t f =
+  let outcome =
+    Eio.Mutex.use_rw ~protect:false t.mutex (fun () ->
+      match f () with
+      | result -> Ok result
+      | exception (Eio.Cancel.Cancelled _ as exn) ->
+        Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
+  in
+  match outcome with
+  | Ok result -> result
+  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+;;
+
+let deliver_schedule t (schedule : Agent_protocol.Schedule.t) =
+  with_cancellable_access t (fun () ->
     let open Result.Let_syntax in
-    let%bind () = ensure_loaded_locked t in
+    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
     match t.runtime with
-    | Some runtime -> runtime.enqueue_internal_event payload
+    | Some runtime ->
+      Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
+        runtime.enqueue_internal_event schedule.payload ~prepare:(fun ~before ~snapshot ->
+          Agent_session.Session_actor.complete_schedule
+            ~expected:before
+            ~expected_schedule:schedule
+            t.actor
+            ~schedule_id:schedule.id
+            ~generation:schedule.generation
+            ~moderator_snapshot:
+              (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
+          |> Result.map ~f:ignore)
+        |> Result.map ~f:ignore)
     | None ->
       Error
         (Agent_protocol.Error.create
@@ -418,8 +443,23 @@ let execute_model_job t ~recipe ~payload =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
-let enqueue_model_job_completion t job =
-  with_loaded_runtime t (fun runtime -> runtime.enqueue_model_job_completion job)
+let deliver_model_job_completion t (job : Agent_protocol.Job.t) =
+  with_cancellable_access t (fun () ->
+    let open Result.Let_syntax in
+    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
+    let runtime = Option.value_exn t.runtime in
+    Agent_session.Session_actor.with_moderator_checkpoint t.actor (fun () ->
+      runtime.enqueue_model_job_completion job ~prepare:(fun ~before ~snapshot ->
+        Agent_session.Session_actor.deliver_job
+          ~expected:before
+          ~expected_job:job
+          t.actor
+          ~job_id:job.id
+          ~generation:job.generation
+          ~moderator_snapshot:
+            (Some (Agent_session.Runtime_builder.encode_moderator_snapshot snapshot))
+        |> Result.map ~f:ignore)
+      |> Result.map ~f:ignore))
 ;;
 
 let close t =

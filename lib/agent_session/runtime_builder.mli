@@ -16,6 +16,14 @@ type model_job_outcome =
 
 type model_post_stream = Chat_response.In_memory_stream.post_stream
 
+(** Host preparation for external queue ingress. Compare [before] and save
+    [snapshot] atomically with the delivery receipt under actor ownership. An
+    error leaves the live queue unchanged; success must mean durable acceptance. *)
+type prepare_enqueue =
+  before:Session.Moderator_state.Identity_snapshot.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> (unit, Agent_protocol.Error.t) result
+
 type extension_services =
   { script_tools : Chat_response.Agent_runtime.t -> Script_tool_calls.t
     (** Bind shared native policy/disclosure to the exact constructed runtime.
@@ -53,7 +61,10 @@ type t =
   ; moderator_activation : moderator_activation option
     (** Deferred owned activation after installing the initial checkpoint. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
-  ; enqueue_internal_event : Jsonaf.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
+  ; enqueue_internal_event :
+      ?prepare:prepare_enqueue
+      -> Jsonaf.t
+      -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
@@ -61,7 +72,9 @@ type t =
       -> payload:Jsonaf.t
       -> (model_job_outcome, Agent_protocol.Error.t) result
   ; enqueue_model_job_completion :
-      Agent_protocol.Job.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
+      ?prepare:prepare_enqueue
+      -> Agent_protocol.Job.t
+      -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; close : unit -> unit
   }
 

@@ -96,22 +96,11 @@ let drain_idle_moderator entry =
 ;;
 
 let deliver_claimed entry observed (schedule : Agent_protocol.Schedule.t) =
-  match
-    Runtime_owner.enqueue_internal_event entry.Session_registry.runtime schedule.payload
-  with
+  match Runtime_owner.deliver_schedule entry.Session_registry.runtime schedule with
   | Error error ->
     fail_claim entry schedule error;
     unload_if_stopped entry observed
-  | Ok moderator_snapshot ->
-    (match
-       Agent_session.Session_actor.complete_schedule
-         entry.actor
-         ~schedule_id:schedule.id
-         ~generation:schedule.generation
-         ~moderator_snapshot
-     with
-     | Ok _ -> ()
-     | Error error -> fail_claim entry schedule error);
+  | Ok () ->
     drain_idle_moderator entry;
     unload_if_stopped entry observed
 ;;

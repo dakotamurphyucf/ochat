@@ -199,21 +199,12 @@ let delivery_pending (job : Agent_protocol.Job.t) =
 ;;
 
 let deliver entry (job : Agent_protocol.Job.t) =
-  match Runtime_owner.enqueue_model_job_completion entry.Session_registry.runtime job with
+  match Runtime_owner.deliver_model_job_completion entry.Session_registry.runtime job with
   | Error _ -> ()
-  | Ok moderator_snapshot ->
-    (match
-       Agent_session.Session_actor.deliver_job
-         entry.actor
-         ~job_id:job.id
-         ~generation:job.generation
-         ~moderator_snapshot
-     with
-     | Error _ -> ()
-     | Ok _ ->
-       ignore
-         (Runtime_owner.drain_idle_moderator entry.runtime
-          : (bool, Agent_protocol.Error.t) result))
+  | Ok () ->
+    ignore
+      (Runtime_owner.drain_idle_moderator entry.runtime
+       : (bool, Agent_protocol.Error.t) result)
 ;;
 
 let deliver_pending entry jobs =

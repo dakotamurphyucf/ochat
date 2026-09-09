@@ -19,6 +19,11 @@ type model_job_outcome =
 
 type model_post_stream = Chat_response.In_memory_stream.post_stream
 
+type prepare_enqueue =
+  before:Session.Moderator_state.Identity_snapshot.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> (unit, Agent_protocol.Error.t) result
+
 type extension_services =
   { script_tools : Agent_runtime.t -> Script_tool_calls.t
   ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
@@ -46,7 +51,10 @@ type t =
   ; moderator_script_tools : Script_tool_calls.t option
   ; moderator_activation : moderator_activation option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
-  ; enqueue_internal_event : Jsonaf.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
+  ; enqueue_internal_event :
+      ?prepare:prepare_enqueue
+      -> Jsonaf.t
+      -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; drain_internal_events :
       History_entry.t list -> (moderator_drain, Agent_protocol.Error.t) result
   ; execute_model_job :
@@ -54,7 +62,9 @@ type t =
       -> payload:Jsonaf.t
       -> (model_job_outcome, Agent_protocol.Error.t) result
   ; enqueue_model_job_completion :
-      Agent_protocol.Job.t -> (Jsonaf.t option, Agent_protocol.Error.t) result
+      ?prepare:prepare_enqueue
+      -> Agent_protocol.Job.t
+      -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; close : unit -> unit
   }
 
@@ -482,21 +492,27 @@ let moderator_snapshot_observer snapshot =
       })
 ;;
 
-let enqueue_internal_value moderator value =
+let enqueue_internal_value ?prepare moderator value =
   match moderator with
   | None -> Error (failure "session prompt has no ChatML moderator")
-  | Some ((moderator, _) as moderator_pair) ->
+  | Some (moderator, _) ->
     let open Result.Let_syntax in
-    let%bind () =
-      Manager.enqueue_internal_event
+    let%map snapshot =
+      Manager.enqueue_internal_event_entries
         moderator.Chat_response.In_memory_stream.manager
-        value
+        ~event:value
+        ~prepare:(fun ~before ~snapshot ->
+          match prepare with
+          | None -> Ok ()
+          | Some prepare ->
+            prepare ~before ~snapshot
+            |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
       |> Result.map_error ~f:failure
     in
-    moderator_snapshot (Some moderator_pair)
+    Some (encode_moderator_snapshot snapshot)
 ;;
 
-let enqueue_internal_event moderator payload =
+let enqueue_internal_event moderator ?prepare payload =
   let open Result.Let_syntax in
   let%bind snapshot =
     Chatml.Chatml_value_codec.Snapshot.of_jsonaf payload |> Result.map_error ~f:failure
@@ -504,7 +520,7 @@ let enqueue_internal_event moderator payload =
   let%bind value =
     Chatml.Chatml_value_codec.Snapshot.to_value snapshot |> Result.map_error ~f:failure
   in
-  enqueue_internal_value moderator value
+  enqueue_internal_value ?prepare moderator value
 ;;
 
 let execute_model_job moderator session_id ~recipe ~payload =
@@ -566,8 +582,8 @@ let model_job_event (job : Agent_protocol.Job.t) =
   | Queued | Running | Waiting_permission _ -> Error (failure "model job is not terminal")
 ;;
 
-let enqueue_model_job_completion moderator job =
-  Result.bind (model_job_event job) ~f:(enqueue_internal_value moderator)
+let enqueue_model_job_completion moderator ?prepare job =
+  Result.bind (model_job_event job) ~f:(enqueue_internal_value ?prepare moderator)
 ;;
 
 let collapse_drain_outcomes outcomes =

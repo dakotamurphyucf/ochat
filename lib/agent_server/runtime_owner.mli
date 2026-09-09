@@ -30,13 +30,13 @@ val parse_user_content
   -> Agent_protocol.Session.Message_content.t
   -> (History_entry.t, Agent_protocol.Error.t) result
 
-(** [enqueue_internal_event] loads the pinned runtime if necessary, appends one
-    ChatML internal event, and returns the resulting serializable moderator
-    snapshot. *)
-val enqueue_internal_event
+(** Load the pinned runtime and prepare one external event under the actor
+    checkpoint gate. Persist the schedule delivery and queue checkpoint together
+    before installing the live append. Rejection does not mutate the live queue. *)
+val deliver_schedule
   :  t
-  -> Jsonaf.t
-  -> (Jsonaf.t option, Agent_protocol.Error.t) result
+  -> Agent_protocol.Schedule.t
+  -> (unit, Agent_protocol.Error.t) result
 
 (** [drain_idle_moderator] handles pending invocation observations and queued
     internal events when the actor can grant an idle moderator borrow. An installed
@@ -74,10 +74,12 @@ val execute_model_job
   -> payload:Jsonaf.t
   -> (Agent_session.Runtime_builder.model_job_outcome, Agent_protocol.Error.t) result
 
-val enqueue_model_job_completion
+(** Atomically acknowledge a terminal model job and append its event using the
+    same actor/checkpoint ownership as schedule delivery. *)
+val deliver_model_job_completion
   :  t
   -> Agent_protocol.Job.t
-  -> (Jsonaf.t option, Agent_protocol.Error.t) result
+  -> (unit, Agent_protocol.Error.t) result
 
 (** [close] permanently prevents runtime reload, detaches the operation worker,
     and closes the loaded runtime. The actor must still be running. *)

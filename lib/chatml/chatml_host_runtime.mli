@@ -340,3 +340,8 @@ val resume_ui_request
     replay mechanism. Unlike [Runtime.emit], this is host-driven and does not
     require an active handler execution. *)
 val enqueue_internal_event : session -> value -> (unit, string) result
+
+(** Prepare a queue append without changing live state. The owning host must
+    serialize state/queue access until it invokes the non-yielding installer,
+    exactly once after successful durable preparation. No script executes. *)
+val prepare_enqueue_internal_event : session -> value -> (unit -> unit, string) result

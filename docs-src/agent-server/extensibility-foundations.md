@@ -43,6 +43,21 @@ moderator gate, outside the mailbox. This prevents concurrent tool commits from
 making a queued event's earlier checkpoint read stale. Fixed-snapshot APIs remain
 available for explicit checkpoint assertions.
 
+External timer and model-job delivery now prepares a detached queue append under
+the manager lock and the actor checkpoint gate. The actor compares both the old
+checkpoint and the captured schedule/job record, then saves the delivery receipt
+and new checkpoint in one transaction. Only a successful save installs the live
+queue update. Failed saves, duplicate delivery and stale job attempts or timer
+payloads cannot leave an extra event in memory. A cancelled waiter releases the
+runtime-owner mutex; cancellation cannot split the durable save from installation.
+
+`Runtime_owner.deliver_schedule` and `deliver_model_job_completion` own this
+boundary. The lower-level builder queue functions accept an optional preparation
+callback for embedded hosts; those hosts must supply equivalent ownership and
+persistence checks. Versioned queue ingress currently accepts validated
+`Internal_event` envelopes. Legacy model-job events keep their legacy path;
+the versioned `Job_completed` adapter remains part of background-work integration.
+
 ## Moderator tool dispatch internals
 
 `Moderator_manager.Registry.of_definition` binds an already validated extension

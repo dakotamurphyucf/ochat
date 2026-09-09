@@ -430,8 +430,12 @@ val complete_job
   -> Runtime_builder.model_job_outcome
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
+(** Optional expected values perform checkpoint and complete job-record comparison
+    in the same mailbox transaction as delivery. Scheduler ingress supplies both. *)
 val deliver_job
-  :  t
+  :  ?expected:Session.Moderator_state.Identity_snapshot.t
+  -> ?expected_job:Agent_protocol.Job.t
+  -> t
   -> job_id:Agent_protocol.Id.Job.t
   -> generation:int
   -> moderator_snapshot:Jsonaf.t option
@@ -518,8 +522,12 @@ val retry_schedule
   -> generation:int
   -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
 
+(** Optional expected values compare the old checkpoint and captured schedule
+    before saving delivery plus the new moderator checkpoint atomically. *)
 val complete_schedule
-  :  t
+  :  ?expected:Session.Moderator_state.Identity_snapshot.t
+  -> ?expected_schedule:Agent_protocol.Schedule.t
+  -> t
   -> schedule_id:Agent_protocol.Id.Schedule.t
   -> generation:int
   -> moderator_snapshot:Jsonaf.t option
@@ -618,6 +626,14 @@ val with_current_moderator_event
   -> Moderator_event.claim
 
 val with_current_idle_queued_moderator_event_tools : t -> Moderator_event.claim
+
+(** Serialize external checkpoint preparation with owned moderator execution.
+    This does not run a handler or grant tool authority. Delivery commits must
+    also compare the prepared [expected] checkpoint in the actor mailbox. *)
+val with_moderator_checkpoint
+  :  t
+  -> (unit -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
 
 (** Explicitly retire a retained failed/interrupted queue head at its original
     checkpoint. Available while quiescent running-idle or stopped, without an
