@@ -900,7 +900,7 @@
 (library
  (name chatml_standalone_test)
  (modules chatml_standalone_test)
- (libraries core eio eio_main jsonaf chatml chatml_host_runtime chatml_compilation chatml_execution)
+ (libraries core eio eio.mock eio_main mtime jsonaf chatml chatml_host_runtime chatml_compilation chatml_execution)
  (inline_tests)
  (preprocess (pps ppx_jane ppx_expect)))
 

@@ -59,8 +59,10 @@ val deliver_schedule
     Native child results join subsequent bounded observation work. A runtime
     without these services returns invocation.unavailable for Tool.call. A
     completed event also requests another probe for newly created observations.
-    V1 handler cancellation releases the owner mutex before propagating, allowing
-    later polling and administration. Runtime installation and legacy draining
+    V1 handler cancellation releases the owner mutex. Cancellation confined to
+    the owned event returns Interrupted, keeping the shared scheduler alive;
+    cancellation of the caller still propagates. Later polling and administration
+    remain usable. Runtime installation and legacy draining
     retain their protected lifecycle boundaries. Normal v1 declaration admission
     remains separate; this does not enable public features. *)
 val drain_idle_moderator : t -> (bool, Agent_protocol.Error.t) result

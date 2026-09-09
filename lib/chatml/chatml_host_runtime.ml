@@ -853,6 +853,8 @@ let instantiate_session
                (match expect_callable entrypoints.on_event_name on_event with
                 | Error msg -> Error msg
                 | Ok on_event ->
+                  Option.iter control ~f:(fun control ->
+                    control.check_value initial_state);
                   Debug_log.emitf
                     "[chatml-runtime] instantiate_session initial_state=%s \
                      entrypoints={initial_state=%s; on_event=%s}"
@@ -1404,6 +1406,8 @@ let handle_event_impl
     match phase_of_context context with
     | Error msg -> Error msg
     | Ok phase ->
+      Option.iter session.env.control ~f:(fun control ->
+        control.check_value session.state);
       Debug_log.emitf
         "[chatml-runtime] handle_event_start phase=%s state=%s event=%s context=%s"
         phase
@@ -1455,6 +1459,8 @@ let handle_event_impl
             Error msg
           | Ok (Task_value new_state) ->
             let open Result.Let_syntax in
+            Option.iter session.env.control ~f:(fun control ->
+              control.check_value new_state);
             let%bind () = validate_state new_state in
             let%map commit_host =
               prepare_runtime_commit

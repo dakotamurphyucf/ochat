@@ -717,6 +717,18 @@ let%test_unit
           let manager, _, definition =
             handoff_definition
               ~events
+                (* Construct a value above the callee's input limit so this case
+                 still exercises validation after rewriting/redirecting. Pure
+                 evaluation otherwise rejects the array before routing it. *)
+              ?execution_policy:
+                (Option.some_if
+                   final_limit
+                   (Chatml_execution.Bounded
+                      { Chatml_execution.default_limits with
+                        max_array_items = 512
+                      ; max_depth = 32
+                      ; max_value_bytes = 256 * 1024
+                      }))
               ~script_limits:
                 (if original_limit || final_limit
                  then {|max_array_items="256" max_depth="32" max_value="256KiB"|}

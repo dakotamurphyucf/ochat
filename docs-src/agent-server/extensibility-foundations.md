@@ -1640,6 +1640,40 @@ does not become preemptible. Hosts remain responsible for selected capabilities,
 current authorization, schemas, serialized output limits and persisted invocation
 ownership. These primitives alone do not expose model-visible tools.
 
+Persistent moderator environments use `Chatml_execution.create_runner`,
+`runner_control` and `run_scoped`. The environment retains a control proxy while
+each initialization or event gets fresh local counters and inherited parent
+budgets. Closures from initialization therefore use the active event's controls.
+The proxy expires with its lexical scope, including for unrestricted hosts;
+retaining a fiber does not extend permission to evaluate that environment. The
+runner does not serialize access: the moderator execution gate still owns that
+responsibility. The execution service needs only an Eio monotonic clock.
+
+`Moderator_manager.create` and `create_entries` require `env` for extensibility-v1
+artifacts. The persisted runtime builder supplies it. The default policy uses the
+script's declared fuel, task, wall-time, value, array and depth limits plus the
+execution service's allocation, call-count and invocation-depth defaults. A trusted
+embedder can supply `execution_policy`; this does not change capability checks or
+the separate input, output and durable-state contracts. Legacy moderators retain
+their existing behavior.
+
+Controls cover v1 initialization, ordinary lifecycle/pre/post handlers,
+transactional events and queued events, moderator tools, and observations. Pure
+evaluation is checked before it constructs a task and inside continuations. Local
+state and queued effects roll back on failure or cancellation, and a later event
+can run with a fresh budget. Already-performed native effects remain performed.
+Persistent state is checked before initialization logging and before transaction
+preparation. Host history/context projections are not treated as one script-created
+value; per-invocation input and script-visible operation/result checks still apply.
+Further auditing of host projections, rendering and effective-limit reporting remains.
+
+Focused tests cover recursive initializers, allocation exhaustion, a native effect
+followed by a pure loop, state/queue rollback, repeated successful events after
+failure, pure-computation cancellation, and expired unrestricted control proxies.
+An idle session's stop cancels its owned event and returns an interruption after
+releasing runtime ownership. It does not cancel the daemon's shared scheduler.
+Cancellation of the drain caller or daemon itself still propagates.
+
 `Agent_session.Standalone_tool_dispatch.create` is the internal stream adapter for
 prepared standalone declarations. It uses the actor's invocation lifecycle and
 canonical publication receipt, initializes fresh globals, passes the shared
@@ -1760,7 +1794,7 @@ out-of-root request without content disclosure, policy denial and revocation,
 argument rewrite and rejection, unselected recursive calls, a prepared artifact
 broader than its caller, pure initializer limits, timeout, bounded output and
 cancellation. The native wrapper in this fixture is test-only. Final public tool
-registration/response integration, remaining stateful-moderator/resource audits,
+registration/response integration, remaining resource audits,
 idle/event-owned descendants and authoring integration remain pending. Additional
 fixtures prove recursive call/depth limits across actual actor-owned one-off
 execution and Eio domain handoffs; generic execution tests cover aggregate fuel,

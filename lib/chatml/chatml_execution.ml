@@ -283,16 +283,7 @@ let make_control ~env budget =
   }
 ;;
 
-let run
-      ?(policy = Bounded default_limits)
-      ?(context = [])
-      ~env
-      ~config
-      ~program
-      ~entrypoint
-      ~arguments
-      ()
-  =
+let with_scope ?(policy = Bounded default_limits) ?(context = []) ~env f =
   let execute () =
     let parents = capture_context ~inherited:context () in
     let ancestors =
@@ -372,15 +363,7 @@ let run
             ; after_effect = (fun value -> each (fun c -> c.after_effect value))
             }
     in
-    let run_program () =
-      Option.iter control ~f:(fun c -> List.iter arguments ~f:c.check_value);
-      Chatml_host_runtime.run_entrypoint ?control config program ~entrypoint ~arguments ()
-      |> Result.map ~f:(fun value ->
-        Option.iter control ~f:(fun c -> c.check_value value);
-        value)
-      |> Result.map_error ~f:(fun message ->
-        { code = "chatml.execution_failed"; message = String.prefix message (16 * 1024) })
-    in
+    let run_program () = f control in
     Exn.protect
       ~finally:(fun () -> Atomic.set active false)
       ~f:(fun () ->
@@ -396,11 +379,66 @@ let run
   | Bounded limits when not (valid_limits limits) ->
     error "chatml.invalid_limits" "unsupported execution resource limits"
   | Unrestricted | Bounded _ ->
-    (try execute () with
+    (try Ok (execute ()) with
      | Budget_exhausted failure -> Error failure
      | Eio.Time.Timeout ->
        error "chatml.execution_timeout" "ChatML execution deadline exceeded"
      | Eio.Cancel.Cancelled _ as exn -> raise exn
      | Stack_overflow ->
        error "chatml.execution_limit" "ChatML execution stack limit exceeded")
+;;
+
+type runner =
+  { control : Chatml.Chatml_lang.execution_control
+  ; run : 'a. (unit -> 'a) -> ('a, error) result
+  }
+
+let create_runner ~env ~policy () =
+  let key = Eio.Fiber.create_key () in
+  let inactive () =
+    raise
+      (Budget_exhausted
+         { code = "chatml.inactive_scope"
+         ; message = "The persistent runtime has no active execution scope."
+         })
+  in
+  let apply (f : Chatml.Chatml_lang.execution_control -> unit) =
+    match Eio.Fiber.get key with
+    | Some (active, control) when Atomic.get active -> Option.iter control ~f
+    | Some _ | None -> inactive ()
+  in
+  let control : Chatml.Chatml_lang.execution_control =
+    { checkpoint = (fun () -> apply (fun c -> c.checkpoint ()))
+    ; allocate = (fun bytes -> apply (fun c -> c.allocate bytes))
+    ; check_value = (fun value -> apply (fun c -> c.check_value value))
+    ; before_builtin = (fun ~name args -> apply (fun c -> c.before_builtin ~name args))
+    ; before_effect =
+        (fun ~name ~spawned -> apply (fun c -> c.before_effect ~name ~spawned))
+    ; after_effect = (fun value -> apply (fun c -> c.after_effect value))
+    }
+  in
+  { control
+  ; run =
+      (fun f ->
+        with_scope ~env ~policy (fun control ->
+          let active = Atomic.make true in
+          Exn.protect
+            ~finally:(fun () -> Atomic.set active false)
+            ~f:(fun () -> Eio.Fiber.with_binding key (active, control) f)))
+  }
+;;
+
+let runner_control runner = runner.control
+let run_scoped runner f = runner.run f
+
+let run ?policy ?context ~env ~config ~program ~entrypoint ~arguments () =
+  with_scope ?policy ?context ~env (fun control ->
+    Option.iter control ~f:(fun c -> List.iter arguments ~f:c.check_value);
+    Chatml_host_runtime.run_entrypoint ?control config program ~entrypoint ~arguments ()
+    |> Result.map ~f:(fun value ->
+      Option.iter control ~f:(fun c -> c.check_value value);
+      value)
+    |> Result.map_error ~f:(fun message ->
+      { code = "chatml.execution_failed"; message = String.prefix message (16 * 1024) }))
+  |> Result.join
 ;;

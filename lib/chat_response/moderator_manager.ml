@@ -121,6 +121,7 @@ type tool_call =
 type t =
   { artifact : Registry.artifact
   ; runtime : Runtime.session
+  ; execution : Chatml_execution.runner option
   ; execution_gate : Execution_gate.t
   ; mutable overlay : Moderation.Overlay.t
   ; mutable identity_overlay : Moderation.Identity_overlay.t
@@ -157,6 +158,38 @@ let with_execution_lock t f =
   match Execution_gate.with_access t.execution_gate f with
   | Ok result -> result
   | Error error -> Error (Execution_gate.error_message error)
+;;
+
+let run_controlled execution f =
+  match execution with
+  | None -> f ()
+  | Some runner ->
+    Chatml_execution.run_scoped runner f
+    |> Result.map_error ~f:(fun error -> error.code ^ ": " ^ error.message)
+    |> Result.join
+;;
+
+let execution_runner ?env ?policy (artifact : Registry.artifact) =
+  match artifact.extension, env with
+  | None, _ -> Ok None
+  | Some _, None ->
+    Error "chatml.execution_host_required: extensibility-v1 requires an Eio environment"
+  | Some (script, _), Some env ->
+    let module D = Chatmd_shell_spec.Duration in
+    let policy =
+      Option.value_or_thunk policy ~default:(fun () ->
+        Chatml_execution.Bounded
+          { Chatml_execution.default_limits with
+            fuel = script.limits.fuel
+          ; max_tasks = script.limits.max_tasks
+          ; wall_seconds = D.to_seconds script.limits.wall_time
+          ; max_value_bytes =
+              D.bytes_to_int64 script.limits.max_value_bytes |> Int64.to_int_exn
+          ; max_array_items = script.limits.max_array_items
+          ; max_depth = script.limits.max_depth
+          })
+    in
+    Ok (Some (Chatml_execution.create_runner ~env ~policy ()))
 ;;
 
 let snapshot_of_jsonaf (json : Jsonaf.t) : (Snapshot.t, string) result =
@@ -271,6 +304,8 @@ let restored_runtime_values (snapshot : Session.Moderator_snapshot.t)
 let create
       ~(artifact : Registry.artifact)
       ~(capabilities : Moderation.Capabilities.t)
+      ?env
+      ?execution_policy
       ?on_process_run
       ?snapshot
       ()
@@ -304,7 +339,12 @@ let create
       { config with operations = Moderator_invocation.operations config.operations }
   in
   let open Result.Let_syntax in
-  let%bind runtime = Runtime.instantiate_session config artifact.compiled ~entrypoints in
+  let%bind execution = execution_runner ?env ?policy:execution_policy artifact in
+  let control = Option.map execution ~f:Chatml_execution.runner_control in
+  let%bind runtime =
+    run_controlled execution (fun () ->
+      Runtime.instantiate_session ?control config artifact.compiled ~entrypoints)
+  in
   let%bind overlay, next_overlay_message_id =
     match snapshot with
     | None -> Ok (Moderation.Overlay.empty, 1)
@@ -340,6 +380,7 @@ let create
   Ok
     { artifact
     ; runtime
+    ; execution
     ; execution_gate = Execution_gate.create ()
     ; overlay
     ; identity_overlay = Moderation.Identity_overlay.empty
@@ -405,12 +446,14 @@ let create_entries
       ~(artifact : Registry.artifact)
       ~(capabilities : Moderation.Capabilities.t)
       ~allocator
+      ?env
+      ?execution_policy
       ?on_process_run
       ?snapshot
       ()
   =
   let open Result.Let_syntax in
-  let%bind t = create ~artifact ~capabilities ?on_process_run () in
+  let%bind t = create ~artifact ~capabilities ?env ?execution_policy ?on_process_run () in
   let%bind identity_overlay =
     match snapshot with
     | None -> Ok Moderation.Identity_overlay.empty
@@ -753,15 +796,15 @@ let handle_runtime_event ?prepare_commit t ~context ~event =
   | None -> Runtime.handle_event ?prepare_commit t.runtime ~context ~event
   | Some (script, _) ->
     let snapshot = Moderator_invocation.snapshot_state ~limits:script.limits in
-    Runtime.handle_event
-      ?prepare_commit
-      t.runtime
-      ~context
-      ~event
-      ~limits:{ fuel = script.limits.fuel; max_tasks = script.limits.max_tasks }
-      ~copy_state:(fun value ->
-        Result.bind (snapshot value) ~f:Value_codec.Snapshot.to_value)
-      ~validate_state:(fun value -> Result.map (snapshot value) ~f:(fun _ -> ()))
+    run_controlled t.execution (fun () ->
+      Runtime.handle_event
+        ?prepare_commit
+        t.runtime
+        ~context
+        ~event
+        ~copy_state:(fun value ->
+          Result.bind (snapshot value) ~f:Value_codec.Snapshot.to_value)
+        ~validate_state:(fun value -> Result.map (snapshot value) ~f:(fun _ -> ())))
 ;;
 
 let handle_event_unlocked
@@ -1063,38 +1106,34 @@ let handle_event_entries_transactional_unlocked
     Exn.protect
       ~finally:(fun () -> t.invocation_tool_call := previous)
       ~f:(fun () ->
-        let context = Moderation.Context.to_value context in
-        let limits : Runtime.execution_limits =
-          { fuel = script.limits.fuel; max_tasks = script.limits.max_tasks }
-        in
-        let copy value = Result.bind (checked value) ~f:Value_codec.Snapshot.to_value in
-        let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
-        match consume_queued with
-        | false ->
-          Runtime.handle_event
-            t.runtime
-            ~context
-            ~event
-            ~limits
-            ~copy_state:copy
-            ~validate_state
-            ~prepare_transaction:prepare
-            ~validate_suspension:(fun () ->
-              Error "event.suspended: cannot retain a UI continuation")
-        | true ->
-          let%bind consumed =
-            Runtime.handle_next_queued_event
+        run_controlled t.execution (fun () ->
+          let context = Moderation.Context.to_value context in
+          let copy value = Result.bind (checked value) ~f:Value_codec.Snapshot.to_value in
+          let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
+          match consume_queued with
+          | false ->
+            Runtime.handle_event
               t.runtime
               ~context
-              ~limits
+              ~event
               ~copy_state:copy
-              ~copy_event:copy
               ~validate_state
               ~prepare_transaction:prepare
-          in
-          (match consumed with
-           | Some () -> Ok ()
-           | None -> Error "event.queue_changed: selected event no longer queued"))
+              ~validate_suspension:(fun () ->
+                Error "event.suspended: cannot retain a UI continuation")
+          | true ->
+            let%bind consumed =
+              Runtime.handle_next_queued_event
+                t.runtime
+                ~context
+                ~copy_state:copy
+                ~copy_event:copy
+                ~validate_state
+                ~prepare_transaction:prepare
+            in
+            (match consumed with
+             | Some () -> Ok ()
+             | None -> Error "event.queue_changed: selected event no longer queued")))
   in
   !outcome
 ;;
@@ -1254,6 +1293,7 @@ let handle_invocation_entries
         ~f:(fun () ->
           Moderator_invocation.run
             ?on_failure
+            ?execution:t.execution
             scope
             ~runtime:t.runtime
             ~context:(Moderation.Context.to_value context)
@@ -1394,17 +1434,17 @@ let handle_observation_entries
       Exn.protect
         ~finally:(fun () -> t.invocation_tool_call := previous)
         ~f:(fun () ->
-          Runtime.handle_event
-            t.runtime
-            ~context:(Moderation.Context.to_value context)
-            ~event
-            ~limits:{ fuel = script.limits.fuel; max_tasks = script.limits.max_tasks }
-            ~copy_state:(fun value ->
-              Result.bind (checked value) ~f:Value_codec.Snapshot.to_value)
-            ~validate_state:(fun value -> Result.map (checked value) ~f:(fun _ -> ()))
-            ~validate_suspension:(fun () ->
-              Error "observation.suspended: cannot retain a UI continuation")
-            ~prepare_transaction:prepare)
+          run_controlled t.execution (fun () ->
+            Runtime.handle_event
+              t.runtime
+              ~context:(Moderation.Context.to_value context)
+              ~event
+              ~copy_state:(fun value ->
+                Result.bind (checked value) ~f:Value_codec.Snapshot.to_value)
+              ~validate_state:(fun value -> Result.map (checked value) ~f:(fun _ -> ()))
+              ~validate_suspension:(fun () ->
+                Error "observation.suspended: cannot retain a UI continuation")
+              ~prepare_transaction:prepare))
     in
     !outcome)
 ;;

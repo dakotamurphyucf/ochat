@@ -53,6 +53,7 @@
   chatml
   chatml_runtime
   chatml_compilation
+  chatml_execution
   chatml_moderator_runtime
   session
   lru_cache

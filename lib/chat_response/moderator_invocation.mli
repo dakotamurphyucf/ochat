@@ -99,9 +99,15 @@ val snapshot_state
 
     [on_failure] receives a host classification, independent of any diagnostic
     text supplied by a script. It runs after failed execution has rolled back;
-    the callback must not re-enter the owning moderator. *)
+    the callback must not re-enter the owning moderator.
+
+    [execution] is the runner whose control was installed in [runtime]. It
+    bounds pure evaluation and task effects under the current lexical scope.
+    Without it this low-level adapter retains only legacy task-step limits;
+    the v1 moderator manager always supplies its owned runner. *)
 val run
   :  ?on_failure:(failure -> unit)
+  -> ?execution:Chatml_execution.runner
   -> t
   -> runtime:R.session
   -> context:L.value

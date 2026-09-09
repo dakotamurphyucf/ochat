@@ -236,7 +236,10 @@ val compile_script_detailed
 val compiled_surface : compiled_script -> Builtin_surface.surface
 
 (** Instantiate a compiled script in a fresh per-session environment and
-    load the configured entrypoints. *)
+    load the configured entrypoints. [control] follows closures into later
+    events. A persistent owner must supply a control valid for every execution,
+    such as a dynamically scoped host proxy, rather than retaining an expired
+    initializer budget. Initial state is checked before diagnostic rendering. *)
 val instantiate_session
   :  ?control:execution_control
   -> runtime_config

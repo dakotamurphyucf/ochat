@@ -81,10 +81,16 @@ val invocation_observer : t -> Agent_protocol.Invocation.observer option
 val extension_definition : t -> Extension_compiler.definition option
 
 (** [create ~artifact ~capabilities ?snapshot ()] instantiates a fresh runtime
-    session for [artifact], optionally restoring persisted durable state. *)
+    session for [artifact], optionally restoring persisted durable state.
+    Extensibility-v1 requires [env]. Initialization and each event receive fresh
+    lexical controls under declared limits, with inherited parent budgets.
+    [execution_policy] is a trusted host override; submitted code cannot set it.
+    Legacy artifacts retain their existing execution behavior. *)
 val create
   :  artifact:Registry.artifact
   -> capabilities:Moderation.Capabilities.t
+  -> ?env:Eio_unix.Stdenv.base
+  -> ?execution_policy:Chatml_execution.policy
   -> ?on_process_run:
        (Runtime.session
         -> command:string
@@ -98,6 +104,8 @@ val create_entries
   :  artifact:Registry.artifact
   -> capabilities:Moderation.Capabilities.t
   -> allocator:History_entry.Allocator.t
+  -> ?env:Eio_unix.Stdenv.base
+  -> ?execution_policy:Chatml_execution.policy
   -> ?on_process_run:
        (Runtime.session
         -> command:string

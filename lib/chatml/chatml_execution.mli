@@ -39,6 +39,27 @@ type context
 
 val capture_context : ?inherited:context -> unit -> context
 
+(** A persistent environment keeps this runner's control proxy while each
+    initialization/event receives a fresh lexical budget. The proxy consults
+    the current fiber's binding; use outside [run_scoped] fails. Nested runs
+    inherit ambient budgets. The runner grants neither tool authority nor
+    synchronization: the owner must serialize mutable runtime access. *)
+type runner
+
+val create_runner
+  :  env:< mono_clock : _ Eio.Time.Mono.t ; .. >
+  -> policy:policy
+  -> unit
+  -> runner
+
+val runner_control : runner -> Chatml.Chatml_lang.execution_control
+
+(** Run an owned initialization/event under the runner's policy. Host
+    cancellation propagates and lexical bindings expire even on failure.
+    Checks that protect a transaction must happen before its irreversible
+    commit; this wrapper does not retroactively validate or undo host effects. *)
+val run_scoped : runner -> (unit -> 'a) -> ('a, error) result
+
 (** Run a fresh standalone task entrypoint. Defaults to [Bounded default_limits].
     Bounded evaluation polls cancellation at regular expression intervals. Nested
     runs debit all active ancestor budgets, even with larger or unrestricted local
@@ -63,7 +84,7 @@ val capture_context : ?inherited:context -> unit -> context
 val run
   :  ?policy:policy
   -> ?context:context
-  -> env:Eio_unix.Stdenv.base
+  -> env:< mono_clock : _ Eio.Time.Mono.t ; .. >
   -> config:Chatml_host_runtime.runtime_config
   -> program:Chatml_host_runtime.compiled_script
   -> entrypoint:string

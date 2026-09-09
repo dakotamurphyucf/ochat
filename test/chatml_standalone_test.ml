@@ -409,11 +409,17 @@ let main input =
          Task.pure(input))"
     in
     let captured = ref None in
+    let clock = Eio_mock.Clock.Mono.make () in
+    let timed_env =
+      object
+        method mono_clock = clock
+      end
+    in
     let never, _ = Eio.Promise.create () in
     let deadline =
       X.run
         ~policy:(Bounded { X.default_limits with wall_seconds = 0.01 })
-        ~env
+        ~env:timed_env
         ~config:
           (config
              ~handlers:
@@ -421,6 +427,7 @@ let main input =
                  on_tool_call =
                    (fun session ~name:_ ~args:_ ->
                      captured := Some session;
+                     Eio_mock.Clock.Mono.set_time clock (Mtime.of_uint64_ns 10_000_000L);
                      Eio.Promise.await never)
                }
              ())
@@ -435,6 +442,7 @@ let main input =
       [%sexp { single : string; repeated : string; deadline : string; inactive : bool }]);
   [%expect
     {|
+    +mock time is now 0.01
     ((single null) (repeated chatml.allocation_limit)
      (deadline chatml.execution_timeout) (inactive true))
     |}]

@@ -403,7 +403,21 @@ let drain_idle_moderator t =
   in
   match outcome with
   | Ok result -> result
-  | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
+  | Error (exn, backtrace) ->
+    (* Stopping one idle session cancels its owned event sub-context. Once that
+       scope has unwound, the scheduler's caller may still be live. Propagating
+       that local cancellation out of its worker would fail the shared daemon
+       switch and strand other requests. Caller/shutdown cancellation must still
+       propagate. The event borrow has already recorded its interruption. *)
+    (match Eio.Fiber.is_cancelled () with
+     | true -> Exn.raise_with_original_backtrace exn backtrace
+     | false ->
+       Error
+         (Agent_protocol.Error.create
+            Interrupted
+            ~message:"idle moderator execution was cancelled"
+            ~retryable:false
+            ()))
 ;;
 
 let with_loaded_runtime t f =

@@ -81,7 +81,7 @@ let setup
   let allocator =
     History_entry.Allocator.create ~namespace:"invocation-fixture" ~next_sequence:0 |> ok
   in
-  let manager = M.create_entries ~artifact ~capabilities ~allocator () |> ok in
+  let manager = M.create_entries ~env ~artifact ~capabilities ~allocator () |> ok in
   let prepared = List.hd_exn (EC.prepared_tools definition) in
   let make ?(input = `Null) () =
     I.create
@@ -256,6 +256,7 @@ let%expect_test
       in
       let restored =
         M.create_entries
+          ~env
           ~artifact:(Option.value_exn artifact)
           ~capabilities
           ~allocator
@@ -492,6 +493,7 @@ let%expect_test
       in
       let restored =
         M.create_entries
+          ~env
           ~artifact:(Option.value_exn artifact)
           ~capabilities:Chat_response.Moderation.Capabilities.default
           ~allocator

@@ -352,6 +352,7 @@ let create_moderator
     in
     let%bind manager =
       Manager.create_entries
+        ~env
         ~artifact
         ~capabilities
         ~allocator

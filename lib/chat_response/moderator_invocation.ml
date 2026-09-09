@@ -388,7 +388,7 @@ type failure =
   | Handler_failed
   | Session_ended
 
-let run_impl t ~runtime ~context ~prepare_commit ~failure_kind =
+let run_impl ?task_limits t ~runtime ~context ~prepare_commit ~failure_kind =
   let open Result.Let_syntax in
   let%bind () =
     match (EC.declaration t.prepared).implementation with
@@ -471,7 +471,7 @@ let run_impl t ~runtime ~context ~prepare_commit ~failure_kind =
       runtime
       ~context
       ~event:(event t)
-      ~limits:R.{ fuel = t.limits.fuel; max_tasks = t.limits.max_tasks }
+      ?limits:task_limits
       ~validate_suspension:(fun () ->
         reject
           Suspended
@@ -486,9 +486,24 @@ let run_impl t ~runtime ~context ~prepare_commit ~failure_kind =
   | None -> reject Suspended "invocation.suspended" "tool handler did not complete"
 ;;
 
-let run ?(on_failure = ignore) t ~runtime ~context ~prepare_commit =
+let run ?(on_failure = ignore) ?execution t ~runtime ~context ~prepare_commit =
   let failure_kind = ref Handler_failed in
-  let result = run_impl t ~runtime ~context ~prepare_commit ~failure_kind in
+  let result =
+    match execution with
+    | None ->
+      run_impl
+        ~task_limits:R.{ fuel = t.limits.fuel; max_tasks = t.limits.max_tasks }
+        t
+        ~runtime
+        ~context
+        ~prepare_commit
+        ~failure_kind
+    | Some runner ->
+      Chatml_execution.run_scoped runner (fun () ->
+        run_impl t ~runtime ~context ~prepare_commit ~failure_kind)
+      |> Result.map_error ~f:(fun error -> error.code ^ ": " ^ error.message)
+      |> Result.join
+  in
   (match result with
    | Error _ -> on_failure !failure_kind
    | Ok _ -> ());

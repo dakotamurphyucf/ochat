@@ -3,6 +3,28 @@ module X = Chatml_execution
 module R = Chatml_host_runtime
 module L = Chatml.Chatml_lang
 
+let%expect_test "persistent control proxies expire even for unrestricted execution" =
+  Eio_main.run (fun env ->
+    Eio.Switch.run (fun sw ->
+      let runner = X.create_runner ~env ~policy:Unrestricted () in
+      let ready, release = Eio.Promise.create () in
+      let result, finish = Eio.Promise.create () in
+      X.run_scoped runner (fun () ->
+        (X.runner_control runner).checkpoint ();
+        Eio.Fiber.fork ~sw (fun () ->
+          Eio.Promise.await ready;
+          let outcome =
+            Exn.does_raise (fun () -> (X.runner_control runner).checkpoint ())
+          in
+          Eio.Promise.resolve finish outcome))
+      |> Result.map_error ~f:(fun error -> error.X.code)
+      |> Result.ok_or_failwith;
+      Eio.Promise.resolve release ();
+      let outcome = Eio.Promise.await result in
+      print_s [%sexp (outcome : bool)]));
+  [%expect {| true |}]
+;;
+
 let compile env source =
   Chatml_compilation.compile ~env ~target:One_off_v1 ~source ()
   |> Result.map_error ~f:(fun error -> error.Chatml_compilation.message)
