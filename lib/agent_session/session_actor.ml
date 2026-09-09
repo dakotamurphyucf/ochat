@@ -55,8 +55,13 @@ type moderator_borrow =
   ; mutable cancel_requested : bool
   }
 
+type event_borrow_kind =
+  | Queued
+  | Ordinary
+
 type queued_event_borrow =
-  { receipt : Agent_protocol.Moderator_execution.t
+  { kind : event_borrow_kind
+  ; receipt : Agent_protocol.Moderator_execution.t
   ; before : Session.Moderator_state.Identity_snapshot.t
   ; event : Session.Snapshot.t
   ; retirement_reason : string option
@@ -78,8 +83,19 @@ type invocation_execution =
   }
 
 type _ request =
+  | Manage_moderator_follow_up :
+      Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer
+      -> unit request
+  | Admit_moderator_turn : Agent_protocol.Id.Operation.t -> unit request
+  | Claim_ordinary_event :
+      Agent_protocol.Id.Moderator_execution.t
+      * Agent_protocol.Id.Operation.t option
+      * Session.Moderator_state.Identity_snapshot.t
+      * Chat_response.Moderation.Event.t
+      -> queued_event_borrow option request
   | Claim_queued_event :
       Agent_protocol.Id.Moderator_execution.t
+      * Agent_protocol.Id.Operation.t option
       * Session.Moderator_state.Identity_snapshot.t
       -> queued_event_borrow option request
   | Claim_queued_retirement :
@@ -326,6 +342,8 @@ type t =
   ; mutable idle_moderator_borrowed : bool
   ; mutable moderator_borrow : moderator_borrow option
   ; mutable queued_event_borrow : queued_event_borrow option
+  ; mutable foreground_moderator :
+      (Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer) option
   ; mutable invocation_executions : invocation_execution list
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
@@ -737,6 +755,17 @@ let stop_transition t mode lifecycle deltas payloads =
   result
 ;;
 
+let cancel_event_for_operation t operation_id =
+  Option.iter t.queued_event_borrow ~f:(fun borrow ->
+    if
+      Option.exists
+        borrow.receipt.context.operation_id
+        ~f:(Agent_protocol.Id.Operation.equal operation_id)
+    then (
+      borrow.cancel_requested <- true;
+      Option.iter borrow.cancel ~f:(fun cancel -> cancel ())))
+;;
+
 let stop_internal t mode =
   match t.state.active_operation with
   | None ->
@@ -786,7 +815,9 @@ let stop_internal t mode =
         []
     in
     if Agent_protocol.Session.equal_stop_mode mode Cancel
-    then Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
+    then (
+      cancel_event_for_operation t operation.id;
+      Option.iter t.active_cancel ~f:(fun cancel -> cancel ()));
     Ok session
 ;;
 
@@ -1151,7 +1182,16 @@ let finish_invocation t execution outcome =
     | Event_moderator borrow ->
       (match t.queued_event_borrow with
        | Some current when phys_equal current borrow && t.idle_moderator_borrowed ->
-         Ok borrow.cancel_requested
+         Ok
+           (borrow.cancel_requested
+            || Option.exists t.state.active_operation ~f:(fun operation ->
+              Option.exists
+                borrow.receipt.context.operation_id
+                ~f:(Agent_protocol.Id.Operation.equal operation.id)
+              &&
+              match operation.state with
+              | Cancelling -> true
+              | _ -> false))
        | _ -> Error (error Conflict "event invocation scope has ended"))
   in
   let%bind () =
@@ -1254,19 +1294,78 @@ let idle_moderator_eligible t =
   && not (has_pending_permission t)
 ;;
 
-let claim_queued_event t id snapshot =
+let claim_queued_event t id operation_id snapshot =
   let open Result.Let_syntax in
-  match idle_moderator_eligible t with
+  let%bind available =
+    match operation_id with
+    | None -> Ok (idle_moderator_eligible t)
+    | Some id ->
+      let%map _ = running_operation t id in
+      not (t.idle_moderator_borrowed || moderator_is_borrowed t)
+  in
+  match available with
   | false -> Ok None
   | true ->
     let%bind receipt, event =
-      Queued_moderator_event.claim ~state:t.state ~id ~snapshot ~now:(t.services.now ())
+      (match operation_id with
+       | None -> Queued_moderator_event.claim
+       | Some operation_id -> Queued_moderator_event.claim_foreground ~operation_id)
+        ~state:t.state
+        ~id
+        ~snapshot
+        ~now:(t.services.now ())
     in
     let%bind _ =
       transition t ~delta:(Session_delta.Moderator_execution_changed receipt) ~payloads:[]
     in
     let borrow =
-      { receipt
+      { kind = Queued
+      ; receipt
+      ; before = snapshot
+      ; event
+      ; retirement_reason = None
+      ; callback_active = true
+      ; committed = false
+      ; cancel = None
+      ; cancel_requested = false
+      }
+    in
+    t.queued_event_borrow <- Some borrow;
+    t.idle_moderator_borrowed <- true;
+    Ok (Some borrow)
+;;
+
+let claim_ordinary_event t id operation_id snapshot event =
+  let open Result.Let_syntax in
+  let%bind available =
+    match operation_id with
+    | None ->
+      (match event with
+       | Chat_response.Moderation.Event.Session_start | Session_resume ->
+         Ok (idle_moderator_eligible t)
+       | _ -> Error (error Invalid_state "ordinary event requires an active operation"))
+    | Some id ->
+      let%map _ = running_operation t id in
+      not (t.idle_moderator_borrowed || moderator_is_borrowed t)
+  in
+  match available with
+  | false -> Ok None
+  | true ->
+    let%bind receipt, event =
+      Queued_moderator_event.claim_ordinary
+        ~state:t.state
+        ~id
+        ~snapshot
+        ~operation_id
+        ~event
+        ~now:(t.services.now ())
+    in
+    let%bind _ =
+      transition t ~delta:(Session_delta.Moderator_execution_changed receipt) ~payloads:[]
+    in
+    let borrow =
+      { kind = Ordinary
+      ; receipt
       ; before = snapshot
       ; event
       ; retirement_reason = None
@@ -1284,6 +1383,13 @@ let claim_queued_event t id snapshot =
 let validate_queued_event_borrow t borrow =
   match t.queued_event_borrow with
   | Some current when phys_equal current borrow && t.idle_moderator_borrowed ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match borrow.receipt.context.operation_id with
+      | Some id -> Result.map (current_operation t id) ~f:ignore
+      | None when Option.is_none t.state.active_operation -> Ok ()
+      | None -> Error (error Conflict "idle event no longer owns the moderator")
+    in
     Extension_invariants.owner
       ~session_id:t.state.identity.session_id
       ~generation:t.state.identity.generation
@@ -1318,7 +1424,8 @@ let claim_queued_retirement t id snapshot reason =
         ~reason
     in
     let borrow =
-      { receipt
+      { kind = Queued
+      ; receipt
       ; before = snapshot
       ; event
       ; retirement_reason = Some reason
@@ -1336,21 +1443,30 @@ let claim_queued_retirement t id snapshot reason =
 let queued_event_can_commit t borrow =
   let open Result.Let_syntax in
   let%bind () = validate_queued_event_borrow t borrow in
-  match
-    ( borrow.retirement_reason
-    , t.state.lifecycle.desired
-    , t.state.lifecycle.observed
-    , t.state.failure )
-  with
-  | (Some _, Running, Idle, _ | Some _, Stopped, Stopped, _)
-    when borrow.callback_active
-         && (not (borrow.committed || borrow.cancel_requested))
-         && Option.is_none t.state.active_operation -> Ok ()
-  | None, Running, Idle, None
-    when borrow.callback_active
-         && (not (borrow.committed || borrow.cancel_requested || t.state.halted))
-         && Option.is_none t.state.active_operation -> Ok ()
-  | _ -> Error (error Conflict "queued event cannot commit after completion or stop")
+  match borrow.receipt.context.operation_id with
+  | Some id ->
+    let%bind _ = running_operation t id in
+    if
+      borrow.callback_active
+      && not (borrow.committed || borrow.cancel_requested || t.state.halted)
+    then Ok ()
+    else Error (error Conflict "foreground event cannot commit after completion or stop")
+  | None ->
+    (match
+       ( borrow.retirement_reason
+       , t.state.lifecycle.desired
+       , t.state.lifecycle.observed
+       , t.state.failure )
+     with
+     | (Some _, Running, Idle, _ | Some _, Stopped, Stopped, _)
+       when borrow.callback_active
+            && (not (borrow.committed || borrow.cancel_requested))
+            && Option.is_none t.state.active_operation -> Ok ()
+     | None, Running, Idle, None
+       when borrow.callback_active
+            && (not (borrow.committed || borrow.cancel_requested || t.state.halted))
+            && Option.is_none t.state.active_operation -> Ok ()
+     | _ -> Error (error Conflict "queued event cannot commit after completion or stop"))
 ;;
 
 let event_execution_owned_by borrow execution =
@@ -1400,7 +1516,9 @@ let commit_queued_event t borrow snapshot requests =
   let%bind completed =
     match borrow.retirement_reason with
     | None ->
-      Queued_moderator_event.complete
+      (match borrow.kind with
+       | Queued -> Queued_moderator_event.complete
+       | Ordinary -> Queued_moderator_event.complete_ordinary)
         ~claimed:borrow.receipt
         ~before:borrow.before
         ~snapshot
@@ -2132,7 +2250,11 @@ let pending_for_operation t (operation : Agent_protocol.Operation.t) permission 
       &&
       match execution.owner with
       | Foreground id -> Agent_protocol.Id.Operation.equal id operation.id
-      | Idle_moderator _ | Event_moderator _ -> false)
+      | Event_moderator borrow ->
+        Option.exists
+          borrow.receipt.context.operation_id
+          ~f:(Agent_protocol.Id.Operation.equal operation.id)
+      | Idle_moderator _ -> false)
 ;;
 
 let cancel_operation_permission t operation reason permission =
@@ -2535,6 +2657,81 @@ let outcome_requests_compaction = function
   | Cancelled _ | Failed _ -> false
 ;;
 
+let follow_up_deltas (plan : Observation_follow_up.t) =
+  List.map plan.invocations ~f:Observation_follow_up.delta
+  @ List.map plan.events ~f:Observation_follow_up.event_delta
+;;
+
+let managed_moderator t operation_id =
+  let open Result.Let_syntax in
+  let%bind observer =
+    match t.foreground_moderator with
+    | Some (id, observer) when Agent_protocol.Id.Operation.equal id operation_id ->
+      Ok observer
+    | _ -> Error (error Conflict "foreground moderator routing is not installed")
+  in
+  let%bind installed = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+  match installed with
+  | Some installed when Agent_protocol.Invocation.equal_observer observer installed ->
+    Ok observer
+  | _ -> Error (error Conflict "foreground moderator source changed")
+;;
+
+let manage_moderator_follow_up t operation_id observer =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind installed = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+  match installed with
+  | Some installed when Agent_protocol.Invocation.equal_observer observer installed ->
+    t.foreground_moderator <- Some (operation_id, observer);
+    Ok ()
+  | _ -> Error (error Conflict "foreground routing requires the installed moderator")
+;;
+
+let admit_moderator_turn t operation_id =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind observer = managed_moderator t operation_id in
+  let%bind halted = Runtime_builder.moderator_snapshot_is_halted t.state.moderator in
+  let%bind () =
+    match halted, moderator_is_borrowed t with
+    | true, _ -> Error (error Conflict "halted moderator cannot admit a provider request")
+    | false, true ->
+      Error (error Conflict "provider admission cannot interrupt a moderator event")
+    | false, false -> Ok ()
+  in
+  let%bind plan = Observation_follow_up.admit_turn ~state:t.state ~observer in
+  match follow_up_deltas plan with
+  | [] -> Ok ()
+  | deltas ->
+    transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
+;;
+
+let foreground_terminal_requests t operation_id outcome =
+  let open Result.Let_syntax in
+  match t.foreground_moderator with
+  | None -> Ok []
+  | Some _ ->
+    let%bind observer = managed_moderator t operation_id in
+    let end_reason, failed =
+      match outcome with
+      | Operation_worker.Completed summary ->
+        end_session_reason summary.runtime_requests, false
+      | Failed _ | Cancelled _ -> None, true
+    in
+    let%map plan =
+      match end_reason with
+      | None -> Observation_follow_up.finish_foreground ~state:t.state ~observer ~failed
+      | Some _ ->
+        Observation_follow_up.plan
+          ~state:t.state
+          ~observer:(Some observer)
+          ~halted:true
+          ~compaction_operation_id:(Agent_protocol.Id.Operation.create ())
+    in
+    follow_up_deltas plan
+;;
+
 let worker_terminal t operation_id outcome =
   match t.state.active_operation with
   | None -> Ok ()
@@ -2543,6 +2740,7 @@ let worker_terminal t operation_id outcome =
   | Some operation ->
     let open Result.Let_syntax in
     let borrow = t.moderator_borrow in
+    let event_borrow = t.queued_event_borrow in
     let%bind unfinished =
       List.map t.invocation_executions ~f:(fun execution ->
         Agent_protocol.Invocation.cancel
@@ -2562,25 +2760,50 @@ let worker_terminal t operation_id outcome =
              (Agent_protocol.Invocation.Cancelled
                 "worker exited with an active moderator borrow"))
     in
+    let%bind event_delta =
+      match event_borrow with
+      | Some borrow when not borrow.committed ->
+        let%map interrupted =
+          Agent_protocol.Moderator_execution.interrupt
+            borrow.receipt
+            ~reason:"worker exited before recording its moderator event"
+        in
+        Session_delta.Moderator_execution_changed interrupted
+      | _ -> Ok (Session_delta.Batch [])
+    in
     let outcome =
-      match Option.is_some borrow || not (List.is_empty unfinished), outcome with
+      match
+        ( Option.is_some borrow
+          || Option.is_some event_borrow
+          || not (List.is_empty unfinished)
+        , outcome )
+      with
       | true, Operation_worker.Completed _ ->
         Operation_worker.Failed
           (error Internal_error "worker completed with an active invocation")
       | _ -> outcome
     in
     let%bind delta, payloads = terminal_delta t operation outcome in
+    let%bind follow_up = foreground_terminal_requests t operation_id outcome in
     let permissions, jobs = operation_terminal_cleanup t operation outcome in
     let%bind _ =
       transition
         t
         ~delta:
           (Session_delta.Batch
-             (unfinished @ [ borrow_delta; delta; cleanup_delta permissions jobs ]))
+             (follow_up
+              @ unfinished
+              @ [ borrow_delta; event_delta; delta; cleanup_delta permissions jobs ]))
         ~payloads:(payloads @ cleanup_payloads permissions jobs)
     in
     resolve_cleaned_permission_waiters t permissions;
     t.moderator_borrow <- None;
+    Option.iter event_borrow ~f:(fun borrow ->
+      borrow.callback_active <- false;
+      borrow.cancel <- None);
+    t.queued_event_borrow <- None;
+    t.foreground_moderator <- None;
+    t.idle_moderator_borrowed <- false;
     t.invocation_executions <- [];
     t.active_cancel <- None;
     let%bind () =
@@ -2614,6 +2837,7 @@ let cancel_operation_internal t attachment_id operation_id =
               (summary_with_operation t operation)
           ]
     in
+    cancel_event_for_operation t operation.id;
     Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
     Ok session
 ;;
@@ -2880,7 +3104,7 @@ let with_idle_queued_moderator_event t ~snapshot f =
   with_queued_event_borrow
     t
     ~claim:
-      (Claim_queued_event (Agent_protocol.Id.Moderator_execution.create (), snapshot))
+      (Claim_queued_event (Agent_protocol.Id.Moderator_execution.create (), None, snapshot))
     (fun ~borrow:_ ~event ~commit -> f ~event ~commit)
 ;;
 
@@ -2896,22 +3120,40 @@ let with_queued_moderator_retirement t ~id ~snapshot ~reason f =
              { request_turn = false; request_compaction = false; end_session = None }))
 ;;
 
-let with_idle_queued_moderator_event_tools t ~snapshot f =
-  with_queued_event_borrow
+let with_event_tools t ~claim f =
+  with_queued_event_borrow t ~claim (fun ~borrow ~event ~commit ->
+    let active = Atomic.make true in
+    let execute ~invocation callback =
+      match Atomic.get active with
+      | false -> Error (error Conflict "event invocation scope has ended")
+      | true ->
+        with_invocation_claim t (Claim_event_invocation (borrow, invocation)) callback
+    in
+    Exn.protect
+      ~finally:(fun () -> Atomic.set active false)
+      ~f:(fun () -> f ~executing:borrow.receipt ~event ~execute ~commit))
+;;
+
+let with_queued_moderator_event_tools t ~operation_id ~snapshot f =
+  with_event_tools
     t
     ~claim:
-      (Claim_queued_event (Agent_protocol.Id.Moderator_execution.create (), snapshot))
-    (fun ~borrow ~event ~commit ->
-       let active = Atomic.make true in
-       let execute ~invocation callback =
-         match Atomic.get active with
-         | false -> Error (error Conflict "event invocation scope has ended")
-         | true ->
-           with_invocation_claim t (Claim_event_invocation (borrow, invocation)) callback
-       in
-       Exn.protect
-         ~finally:(fun () -> Atomic.set active false)
-         ~f:(fun () -> f ~executing:borrow.receipt ~event ~execute ~commit))
+      (Claim_queued_event
+         (Agent_protocol.Id.Moderator_execution.create (), operation_id, snapshot))
+    f
+;;
+
+let with_idle_queued_moderator_event_tools t =
+  with_queued_moderator_event_tools t ~operation_id:None
+;;
+
+let with_ordinary_moderator_event t ~operation_id ~snapshot ~event f =
+  with_event_tools
+    t
+    ~claim:
+      (Claim_ordinary_event
+         (Agent_protocol.Id.Moderator_execution.create (), operation_id, snapshot, event))
+    f
 ;;
 
 let with_moderator_invocation t operation_id ~invocation f =
@@ -3003,6 +3245,13 @@ let worker_capabilities t operation_id id_source buffer =
     ; with_moderator_invocation = with_moderator_invocation t operation_id
     ; with_moderator_observation = with_moderator_observation t operation_id
     ; with_next_moderator_observation = with_next_moderator_observation t operation_id
+    ; with_moderator_event =
+        with_ordinary_moderator_event t ~operation_id:(Some operation_id)
+    ; with_queued_moderator_event =
+        with_queued_moderator_event_tools t ~operation_id:(Some operation_id)
+    ; manage_moderator_follow_up =
+        (fun ~observer -> call t (Manage_moderator_follow_up (operation_id, observer)))
+    ; admit_moderator_turn = (fun () -> call t (Admit_moderator_turn operation_id))
     ; with_invocation = with_invocation t operation_id
     ; consume_deferred = (fun () -> call t (Consume_deferred operation_id))
     ; request_permission =
@@ -3271,7 +3520,17 @@ let permission_owner_active t (permission : Agent_protocol.Permission.t) =
           t.idle_moderator_borrowed
           && borrow.callback_active
           && (not (borrow.committed || borrow.cancel_requested))
-          && Option.exists t.queued_event_borrow ~f:(phys_equal borrow))
+          && Option.exists t.queued_event_borrow ~f:(phys_equal borrow)
+          &&
+            (match borrow.receipt.context.operation_id with
+            | None -> Option.is_none t.state.active_operation
+            | Some id ->
+              Option.exists t.state.active_operation ~f:(fun operation ->
+                Agent_protocol.Id.Operation.equal id operation.id
+                &&
+                match operation.state with
+                | Cancelling -> false
+                | _ -> true)))
     in
     (match t.state.lifecycle.desired, live, t.state.halted, t.state.failure with
      | Running, true, false, None -> Ok ()
@@ -4451,7 +4710,13 @@ let detach t attachment_id =
 
 let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   fun t -> function
-  | Claim_queued_event (id, snapshot) -> claim_queued_event t id snapshot
+  | Manage_moderator_follow_up (operation_id, observer) ->
+    manage_moderator_follow_up t operation_id observer
+  | Admit_moderator_turn operation_id -> admit_moderator_turn t operation_id
+  | Claim_ordinary_event (id, operation_id, snapshot, event) ->
+    claim_ordinary_event t id operation_id snapshot event
+  | Claim_queued_event (id, operation_id, snapshot) ->
+    claim_queued_event t id operation_id snapshot
   | Claim_queued_retirement (id, snapshot, reason) ->
     claim_queued_retirement t id snapshot reason
   | Commit_queued_event (borrow, snapshot, requests) ->
@@ -4686,6 +4951,7 @@ let create_with_owner_lease_duration
     ; idle_moderator_borrowed = false
     ; moderator_borrow = None
     ; queued_event_borrow = None
+    ; foreground_moderator = None
     ; invocation_executions = []
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence

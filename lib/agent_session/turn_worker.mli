@@ -39,5 +39,11 @@ val create
        (input:Operation_worker.Input.t
         -> capabilities:Operation_worker.Capabilities.t
         -> Chat_response.In_memory_stream.Tool_dispatch.t)
+  -> ?moderator_events:
+       (input:Operation_worker.Input.t
+        -> capabilities:Operation_worker.Capabilities.t
+        -> ( Chat_response.In_memory_stream.moderator_event_handlers
+             , Agent_protocol.Error.t )
+             result)
   -> Config.t
   -> Operation_worker.t

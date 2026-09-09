@@ -63,6 +63,7 @@ let runtime_with_moderator history manager =
       ; session_id = "session-1"
       ; session_meta = `Null
       ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      ; event_handlers = None
       }
   in
   App_runtime.create
@@ -259,6 +260,7 @@ let%expect_test "pending approval prompt is visible without mutating canonical h
       ; session_id = "session-1"
       ; session_meta = `Null
       ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      ; event_handlers = None
       }
   in
   let model = model_of_history [] in
@@ -322,6 +324,7 @@ let%expect_test "runtime visible history reflects restored moderator snapshot" =
       ; session_id = "session-1"
       ; session_meta = `Null
       ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      ; event_handlers = None
       }
   in
   let runtime =
@@ -373,6 +376,7 @@ let%expect_test "runtime refresh_messages uses moderated visible history" =
       ; session_id = "session-1"
       ; session_meta = `Null
       ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      ; event_handlers = None
       }
   in
   let model = model_of_history history in
@@ -429,6 +433,7 @@ let%expect_test "runtime refresh_messages reindexes tool metadata for moderated 
       ; session_id = "session-1"
       ; session_meta = `Null
       ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      ; event_handlers = None
       }
   in
   let model = model_of_history history in
@@ -494,6 +499,7 @@ let%expect_test "runtime refresh_messages clamps selected message after moderate
       ; session_id = "session-1"
       ; session_meta = `Null
       ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      ; event_handlers = None
       }
   in
   let model = model_of_history history in
@@ -579,6 +585,7 @@ let%expect_test "runtime visible history reflects explicit session_resume modera
       ; session_id = "session-1"
       ; session_meta = `Null
       ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      ; event_handlers = None
       }
   in
   let runtime =

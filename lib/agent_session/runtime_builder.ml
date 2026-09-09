@@ -314,6 +314,7 @@ let create_moderator
         ; session_id = session_text
         ; session_meta = `Null
         ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+        ; event_handlers = None
         }
     in
     let moderator_pair = moderator, executor in

@@ -101,11 +101,35 @@ exception Post_tool_moderation_failed of History_entry.t * string
     deadline. Each received event resets the deadline. *)
 exception Openai_stream_idle_timeout of float
 
+(** Host-owned event routing for identity-bearing streams. The host must claim
+    durable event ownership, install the prospective checkpoint atomically, and
+    define how returned runtime requests are consumed. Legacy raw-item APIs reject
+    these handlers rather than discarding identity or bypassing ownership. *)
+type moderator_event_handlers =
+  { before_model_call : unit -> (unit, string) result
+    (** Called once before provider dispatch, after turn preparation and budget
+        checks. A failed acknowledgement prevents the provider call. Transient
+        model forks have no moderator and never invoke this callback. *)
+  ; handle :
+      history:History_entry.t list
+      -> available_tools:Openai.Responses.Request.Tool.t list
+      -> now_ms:int
+      -> event:Moderation.Event.t
+      -> (Moderation.Outcome.t option, string) result
+  ; drain :
+      history:History_entry.t list
+      -> available_tools:Openai.Responses.Request.Tool.t list
+      -> now_ms:int
+      -> max_events:int
+      -> (Moderation.Outcome.t list, string) result
+  }
+
 type moderator =
   { manager : Moderator_manager.t
   ; session_id : string
   ; session_meta : Jsonaf.t
   ; runtime_policy : Runtime_semantics.policy
+  ; event_handlers : moderator_event_handlers option
   }
 
 type pending_ui_request = Moderator_manager.pending_ui_request =

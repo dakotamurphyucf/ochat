@@ -210,7 +210,12 @@ let create_moderator
          ())
   in
   Chat_response.In_memory_stream.
-    { manager; session_id = "session-1"; session_meta = `Null; runtime_policy }
+    { manager
+    ; session_id = "session-1"
+    ; session_meta = `Null
+    ; runtime_policy
+    ; event_handlers = None
+    }
 ;;
 
 let runtime_policy_with_budget budget =

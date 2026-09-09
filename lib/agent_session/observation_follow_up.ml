@@ -153,6 +153,49 @@ let result action entries =
   }
 ;;
 
+let current_entries ~(state : Session_state.t) ~observer =
+  (List.filter state.invocations ~f:pending |> List.map ~f:(fun i -> Observation i))
+  @ (List.filter state.moderator_executions ~f:pending_event
+     |> List.map ~f:(fun e -> Event e))
+  |> List.filter ~f:(fun entry ->
+    let session_id, generation, owner = entry_owner entry in
+    generation = state.identity.generation
+    && P.Id.Session.equal session_id state.identity.session_id
+    && Option.exists owner ~f:(I.equal_observer observer))
+;;
+
+let turn_only entry =
+  match entry with
+  | Observation
+      { observation = Some { follow_up = Some (Pending_follow_up requests); _ }; _ }
+  | Event { requests = Some requests; intent = Some Pending; _ } ->
+    requests.request_turn
+    && (not requests.request_compaction)
+    && Option.is_none requests.end_session
+  | _ -> false
+;;
+
+let admit_turn ~state ~observer =
+  current_entries ~state ~observer
+  |> List.filter ~f:turn_only
+  |> List.map ~f:apply_entry
+  |> Result.all
+  |> Result.map ~f:(result Turn)
+;;
+
+let finish_foreground ~state ~observer ~failed =
+  current_entries ~state ~observer
+  |> List.filter ~f:(fun entry ->
+    turn_only entry
+    || (failed
+        && Option.exists (entry_requests entry) ~f:(fun requests ->
+          Option.is_none requests.end_session)))
+  |> List.map ~f:(fun entry ->
+    discard_entry entry ~reason:"foreground worker ended without admitting this request")
+  |> Result.all
+  |> Result.map ~f:(result Checkpoint)
+;;
+
 let plan ~(state : Session_state.t) ~observer ~halted ~compaction_operation_id =
   let open Result.Let_syntax in
   let pending =

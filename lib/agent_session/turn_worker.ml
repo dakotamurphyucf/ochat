@@ -365,7 +365,22 @@ let moderate_submission config input on_runtime_request =
   | Compaction -> ()
 ;;
 
-let run ?dispatch_tool config ~sw ~input capabilities =
+let run ?dispatch_tool ?moderator_events config ~sw ~input capabilities =
+  let config =
+    match config.Config.moderator, moderator_events with
+    | Some moderator, Some make ->
+      let handlers = make ~input ~capabilities |> require_ok in
+      { config with moderator = Some { moderator with event_handlers = Some handlers } }
+    | _, None -> config
+    | None, Some _ ->
+      raise
+        (Worker_failure
+           (Agent_protocol.Error.create
+              Invalid_state
+              ~message:"owned event routing requires a moderator"
+              ~retryable:false
+              ()))
+  in
   let runtime_requests = ref [] in
   moderate_submission config input (fun request ->
     runtime_requests := request :: !runtime_requests);
@@ -429,9 +444,9 @@ let run ?dispatch_tool config ~sw ~input capabilities =
     }
 ;;
 
-let create ?dispatch_tool config =
+let create ?dispatch_tool ?moderator_events config =
   Operation_worker.create ~run:(fun ~sw ~input capabilities ->
-    match run ?dispatch_tool config ~sw ~input capabilities with
+    match run ?dispatch_tool ?moderator_events config ~sw ~input capabilities with
     | outcome -> outcome
     | exception Worker_failure failure -> Operation_worker.Failed failure
     | exception Moderator_tool_dispatch.Dispatch_error failure ->

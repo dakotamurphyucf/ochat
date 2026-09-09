@@ -54,6 +54,26 @@ val discard_compaction
   -> reason:string
   -> (Agent_protocol.Invocation.t list, Agent_protocol.Error.t) result
 
+(** A foreground provider admission satisfies current turn-only requests. Mixed
+    compaction/turn requests and waiting-compaction receipts stay pending for the
+    actor scheduler. Save these changes before dispatching the provider request;
+    a rejected save must prevent dispatch. *)
+val admit_turn
+  :  state:Session_state.t
+  -> observer:Agent_protocol.Invocation.observer
+  -> (t, Agent_protocol.Error.t) result
+
+(** Settle requests the managed foreground loop did not admit, including budget
+    rejection and disabled follow-up policy. Successful completion preserves
+    compaction intent for the idle scheduler; failed/cancelled workers discard
+    their unscheduled continuation work. End-session intent is settled separately
+    with the actual halt. Save these changes with the worker's terminal state. *)
+val finish_foreground
+  :  state:Session_state.t
+  -> observer:Agent_protocol.Invocation.observer
+  -> failed:bool
+  -> (t, Agent_protocol.Error.t) result
+
 (* [compaction_operation_id] must identify the operation committed with [Compact]. *)
 
 (** Coalesce both event and observation requests for the current source/generation

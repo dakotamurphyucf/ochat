@@ -41,3 +41,43 @@ val run_queued_idle
   -> now:(unit -> Agent_protocol.Timestamp.t)
   -> unit
   -> (Chat_response.Moderation.Outcome.t option, Agent_protocol.Error.t) result
+
+(** Ordinary event composition using [Session_actor.with_ordinary_moderator_event].
+    The claim must be bound to this same event and its real operation (or idle
+    startup/resume). Compares the captured event, executes the compiled v1 handler
+    with its scoped native capabilities and commits checkpoint/request intent.
+    No queue head is consumed. Returned requests are already durable; the host
+    must pair their consumption with its actual scheduling/action boundary. *)
+val run_ordinary
+  :  event:Chat_response.Moderation.Event.t
+  -> claim:claim
+  -> ?script_tools:Script_tool_calls.t
+  -> manager:Chat_response.Moderator_manager.t
+  -> history:(unit -> History_entry.t list)
+  -> available_tools:Openai.Responses.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> unit
+  -> (Chat_response.Moderation.Outcome.t option, Agent_protocol.Error.t) result
+
+(** Bind ordinary events, queued events and deferred observations to an actual
+    foreground worker. The installed checkpoint/source must already match the
+    actor. Native calls use scoped invocation executors; missing native services
+    return an explicit unavailable result. Safe-point draining is bounded to 256
+    total event/observation callbacks and ends immediately on halt.
+
+    Turn-only requests use the existing stream policy/budget and are acknowledged
+    before provider dispatch. Compaction requests (including their dependent turn)
+    remain durable for the actor's idle follow-up scheduler. The worker's terminal
+    transaction retires unadmitted turns and settles an actual end-session action.
+    Install these handlers before emitting the submitted-item event. *)
+val foreground_handlers
+  :  ?script_tools:Script_tool_calls.t
+  -> capabilities:Operation_worker.Capabilities.t
+  -> manager:Chat_response.Moderator_manager.t
+  -> session_meta:Jsonaf.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> unit
+  -> ( Chat_response.In_memory_stream.moderator_event_handlers
+       , Agent_protocol.Error.t )
+       result

@@ -272,7 +272,13 @@ let moderator_of_source
   in
   let capabilities = Chat_response.Moderation.Capabilities.default in
   let manager = ok_or_fail (Manager.create ~artifact ~capabilities ()) in
-  Stream.{ manager; session_id = "session-1"; session_meta = `Null; runtime_policy }
+  Stream.
+    { manager
+    ; session_id = "session-1"
+    ; session_meta = `Null
+    ; runtime_policy
+    ; event_handlers = None
+    }
 ;;
 
 let moderator () = moderator_of_source moderator_source

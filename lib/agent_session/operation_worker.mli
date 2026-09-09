@@ -14,6 +14,20 @@ module Input : sig
 end
 
 module Capabilities : sig
+  type event_handler =
+    executing:Agent_protocol.Moderator_execution.t
+    -> event:Session.Snapshot.t
+    -> execute:
+         (invocation:Agent_protocol.Invocation.t
+          -> (dispatched:Agent_protocol.Invocation.t
+              -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+          -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result)
+    -> commit:
+         (snapshot:Session.Moderator_state.Identity_snapshot.t
+          -> requests:Agent_protocol.Invocation.follow_up
+          -> (unit, Agent_protocol.Error.t) result)
+    -> (unit, Agent_protocol.Error.t) result
+
   type t =
     { id_source : History_entry.Id_source.t
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
@@ -116,6 +130,32 @@ module Capabilities : sig
           A recorded [Pending] initial tool outcome is eligible.
           Concurrent drainers cannot both receive the same record. Each claim
           revalidates operation ownership; this is not an idle-session API. *)
+    ; with_moderator_event :
+        snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> event:Chat_response.Moderation.Event.t
+        -> event_handler
+        -> (bool, Agent_protocol.Error.t) result
+      (** Capture an ordinary moderator event for this exact active operation.
+          Executes outside the actor under the shared moderator gate, with an
+          event-owned native executor. Checkpoint/outcome/request intent commit
+          before local installation. This does not consume scheduling intent. *)
+    ; with_queued_moderator_event :
+        snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> event_handler
+        -> (bool, Agent_protocol.Error.t) result
+      (** Consume one queued event under this operation, using the same native
+          scope and transaction as ordinary boundary events. Failed heads are
+          retained and block automatic replay across later operations. *)
+    ; manage_moderator_follow_up :
+        observer:Agent_protocol.Invocation.observer
+        -> (unit, Agent_protocol.Error.t) result
+      (** Bind the foreground stream's request-consumption contract to its exact
+          installed moderator. Terminal cleanup settles unadmitted requests with
+          the operation outcome. Call before emitting any owned stream events. *)
+    ; admit_moderator_turn : unit -> (unit, Agent_protocol.Error.t) result
+      (** Persist acceptance of pending turn-only requests immediately before
+          provider dispatch. Requires managed foreground routing and the same
+          active operation/source. Failed persistence must prevent dispatch. *)
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

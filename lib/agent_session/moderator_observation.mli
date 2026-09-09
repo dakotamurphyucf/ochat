@@ -99,3 +99,23 @@ val drain_idle_with_tools
   -> now:(unit -> Agent_protocol.Timestamp.t)
   -> unit
   -> (result, Agent_protocol.Error.t) Result.t
+
+(** Foreground draining with one native Tool.call scope per claimed observation.
+    The worker capabilities bind each claim and native child to the active
+    operation. Unlike [drain], follow-up requests remain durably retained: the
+    host must consume their intent at its scheduling boundary and must not also
+    schedule the returned requests independently. [definition] must be the exact
+    definition installed in [manager]. *)
+val drain_foreground_with_tools
+  :  ?max_observations:int
+  -> script_tools:Script_tool_calls.t
+  -> definition:Chat_response.Extension_compiler.definition
+  -> capabilities:Operation_worker.Capabilities.t
+  -> observer:Agent_protocol.Invocation.observer
+  -> manager:Chat_response.Moderator_manager.t
+  -> history:(unit -> History_entry.t list)
+  -> available_tools:Openai.Responses.Request.Tool.t list
+  -> session_meta:Jsonaf.t
+  -> now:(unit -> Agent_protocol.Timestamp.t)
+  -> unit
+  -> (result, Agent_protocol.Error.t) Result.t

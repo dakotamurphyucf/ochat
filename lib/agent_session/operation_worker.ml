@@ -10,6 +10,20 @@ module Input = struct
 end
 
 module Capabilities = struct
+  type event_handler =
+    executing:Agent_protocol.Moderator_execution.t
+    -> event:Session.Snapshot.t
+    -> execute:
+         (invocation:Agent_protocol.Invocation.t
+          -> (dispatched:Agent_protocol.Invocation.t
+              -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
+          -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result)
+    -> commit:
+         (snapshot:Session.Moderator_state.Identity_snapshot.t
+          -> requests:Agent_protocol.Invocation.follow_up
+          -> (unit, Agent_protocol.Error.t) result)
+    -> (unit, Agent_protocol.Error.t) result
+
   type t =
     { id_source : History_entry.Id_source.t
     ; commit_entry : History_entry.t -> (unit, Agent_protocol.Error.t) result
@@ -54,6 +68,19 @@ module Capabilities = struct
                   -> (unit, Agent_protocol.Error.t) result)
             -> (unit, Agent_protocol.Error.t) result)
         -> (bool, Agent_protocol.Error.t) result
+    ; with_moderator_event :
+        snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> event:Chat_response.Moderation.Event.t
+        -> event_handler
+        -> (bool, Agent_protocol.Error.t) result
+    ; with_queued_moderator_event :
+        snapshot:Session.Moderator_state.Identity_snapshot.t
+        -> event_handler
+        -> (bool, Agent_protocol.Error.t) result
+    ; manage_moderator_follow_up :
+        observer:Agent_protocol.Invocation.observer
+        -> (unit, Agent_protocol.Error.t) result
+    ; admit_moderator_turn : unit -> (unit, Agent_protocol.Error.t) result
     ; consume_deferred : unit -> (History_entry.t list, Agent_protocol.Error.t) result
     ; request_permission :
         permission:Agent_protocol.Permission.t

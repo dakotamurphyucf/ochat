@@ -177,6 +177,7 @@ let%expect_test "Chat-TUI requires the moderator to share its live allocator" =
       ; session_id = "session"
       ; session_meta = `Null
       ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+      ; event_handlers = None
       }
   in
   let check history_allocator =

@@ -22,10 +22,48 @@ val claim
        , Agent_protocol.Error.t )
        result
 
+(** Same queued-event validation with actual foreground operation provenance.
+    The actor must establish operation ownership before invoking this helper. *)
+val claim_foreground
+  :  operation_id:Agent_protocol.Id.Operation.t
+  -> state:Session_state.t
+  -> id:Agent_protocol.Id.Moderator_execution.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> now:Agent_protocol.Timestamp.t
+  -> ( Agent_protocol.Moderator_execution.t * Session.Snapshot.t
+       , Agent_protocol.Error.t )
+       result
+
 (** Validate unchanged source and preservation of the old queue tail. The trusted
     engine supplies the prospective snapshot and runtime requests; the actor must
     atomically save both this receipt and that checkpoint while retaining its borrow. *)
 val complete
+  :  claimed:Agent_protocol.Moderator_execution.t
+  -> before:Session.Moderator_state.Identity_snapshot.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> requests:Agent_protocol.Invocation.follow_up
+  -> (Agent_protocol.Moderator_execution.t, Agent_protocol.Error.t) result
+
+(** Capture an ordinary lifecycle/tool-boundary event against the exact installed
+    checkpoint. Internal events require [claim]. The actor must establish the
+    supplied operation ownership before calling this pure helper. An unsettled
+    receipt for this exact source/generation/operation/phase/checkpoint/event
+    prevents automatic replay of failed effects. Completed handlers do not block
+    a later occurrence of the same event. *)
+val claim_ordinary
+  :  state:Session_state.t
+  -> id:Agent_protocol.Id.Moderator_execution.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> operation_id:Agent_protocol.Id.Operation.t option
+  -> event:Chat_response.Moderation.Event.t
+  -> now:Agent_protocol.Timestamp.t
+  -> ( Agent_protocol.Moderator_execution.t * Session.Snapshot.t
+       , Agent_protocol.Error.t )
+       result
+
+(** Ordinary events preserve the existing queue and may append emits. Their
+    checkpoint/outcome/request intent must commit in one actor transaction. *)
+val complete_ordinary
   :  claimed:Agent_protocol.Moderator_execution.t
   -> before:Session.Moderator_state.Identity_snapshot.t
   -> snapshot:Session.Moderator_state.Identity_snapshot.t

@@ -41,7 +41,7 @@ let has_unsettled_claim ~state ~(observer : P.Invocation.observer) =
     | Completed _ -> false)
 ;;
 
-let claim ~state ~id ~(snapshot : S.t) ~now =
+let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
   let open Result.Let_syntax in
   let%bind () = installed ~state ~snapshot in
   let%bind event =
@@ -78,7 +78,7 @@ let claim ~state ~id ~(snapshot : S.t) ~now =
     ; generation = state.identity.generation
     ; source =
         { script_id = snapshot.script_id; source_sha256 = snapshot.script_source_hash }
-    ; operation_id = None
+    ; operation_id
     ; phase = Internal_event
     ; event = encoded_event event
     ; checkpoint_sha256
@@ -86,6 +86,9 @@ let claim ~state ~id ~(snapshot : S.t) ~now =
     }
   |> Result.map ~f:(fun receipt -> receipt, event)
 ;;
+
+let claim = claim_in_context ~operation_id:None
+let claim_foreground ~operation_id = claim_in_context ~operation_id:(Some operation_id)
 
 let complete ~claimed ~before ~(snapshot : S.t) ~requests =
   let open Result.Let_syntax in
@@ -108,6 +111,81 @@ let complete ~claimed ~before ~(snapshot : S.t) ~requests =
     with
     | true -> Ok ()
     | false -> conflict "queued event checkpoint must preserve the unconsumed queue tail"
+  in
+  E.complete claimed ~checkpoint_sha256:(checkpoint snapshot) ~requests
+;;
+
+let ordinary_phase = function
+  | Chat_response.Moderation.Event.Session_start -> Ok E.Session_start
+  | Session_resume -> Ok E.Session_resume
+  | Turn_start -> Ok E.Turn_start
+  | Item_appended _ -> Ok E.Message_appended
+  | Pre_tool_call _ -> Ok E.Pre_tool_call
+  | Post_tool_response _ -> Ok E.Post_tool_response
+  | Turn_end -> Ok E.Turn_end
+  | Internal_event _ -> conflict "internal events require the queued event handoff"
+;;
+
+let claim_ordinary ~state ~id ~(snapshot : S.t) ~operation_id ~event ~now =
+  let open Result.Let_syntax in
+  let%bind () = installed ~state ~snapshot in
+  let%bind phase = ordinary_phase event in
+  let%bind event =
+    Chat_response.Moderation.Event.to_value event
+    |> Session.Snapshot.of_value
+    |> Result.map_error ~f:P.Error.invalid_request
+  in
+  let captured = encoded_event event in
+  let checkpoint_sha256 = checkpoint snapshot in
+  let source : P.Invocation.observer =
+    { script_id = snapshot.script_id; source_sha256 = snapshot.script_source_hash }
+  in
+  let%bind () =
+    match
+      List.exists state.moderator_executions ~f:(fun receipt ->
+        receipt.context.generation = state.identity.generation
+        && P.Invocation.equal_observer receipt.context.source source
+        && E.equal_phase receipt.context.phase phase
+        && Option.equal P.Id.Operation.equal receipt.context.operation_id operation_id
+        && String.equal receipt.context.checkpoint_sha256 checkpoint_sha256
+        && Jsonaf.exactly_equal receipt.context.event captured
+        &&
+        match receipt.status with
+        | Running | Failed _ | Interrupted _ -> true
+        | Completed _ -> false)
+    with
+    | true ->
+      conflict
+        "ordinary moderator event was already claimed; automatic replay is forbidden"
+    | false -> Ok ()
+  in
+  E.create
+    { id
+    ; session_id = state.identity.session_id
+    ; generation = state.identity.generation
+    ; source
+    ; operation_id
+    ; phase
+    ; event = captured
+    ; checkpoint_sha256
+    ; created_at = now
+    }
+  |> Result.map ~f:(fun receipt -> receipt, event)
+;;
+
+let complete_ordinary ~claimed ~(before : S.t) ~(snapshot : S.t) ~requests =
+  let open Result.Let_syntax in
+  let%bind () =
+    match
+      String.equal snapshot.script_id before.script_id
+      && String.equal snapshot.script_source_hash before.script_source_hash
+      && List.is_prefix
+           snapshot.queued_internal_events
+           ~prefix:before.queued_internal_events
+           ~equal:same_value
+    with
+    | true -> Ok ()
+    | false -> conflict "ordinary event must preserve its source and existing queue"
   in
   E.complete claimed ~checkpoint_sha256:(checkpoint snapshot) ~requests
 ;;

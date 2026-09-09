@@ -98,3 +98,23 @@ let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
         ~observing
         (fun on_tool_call -> handle ~observing ~commit ~on_tool_call:(Some on_tool_call))))
 ;;
+
+let drain_foreground_with_tools
+      ?max_observations
+      ~script_tools
+      ~definition
+      ~capabilities
+      ~observer
+  =
+  drain_with_claim ?max_observations ~retain_follow_up:true ~claim:(fun handle ->
+    capabilities.Operation_worker.Capabilities.with_next_moderator_observation
+      ~observer
+      (fun ~observing ~commit ->
+         Script_tool_calls.with_observation
+           script_tools
+           ~definition
+           ~execute:capabilities.with_invocation
+           ~observing
+           (fun on_tool_call ->
+              handle ~observing ~commit ~on_tool_call:(Some on_tool_call))))
+;;

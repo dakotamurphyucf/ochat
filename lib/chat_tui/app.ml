@@ -316,7 +316,13 @@ module Setup = struct
         ~session_id
         ~manager;
       let moderator =
-        Stream_moderator.{ manager; session_id; session_meta = `Null; runtime_policy }
+        Stream_moderator.
+          { manager
+          ; session_id
+          ; session_meta = `Null
+          ; runtime_policy
+          ; event_handlers = None
+          }
       in
       let startup_event =
         match identity_snapshot, legacy_snapshot with

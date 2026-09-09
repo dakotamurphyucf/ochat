@@ -106,11 +106,28 @@ type stream_state =
   ; run_again : bool
   }
 
+type moderator_event_handlers =
+  { before_model_call : unit -> (unit, string) result
+  ; handle :
+      history:History_entry.t list
+      -> available_tools:Openai.Responses.Request.Tool.t list
+      -> now_ms:int
+      -> event:Moderation.Event.t
+      -> (Moderation.Outcome.t option, string) result
+  ; drain :
+      history:History_entry.t list
+      -> available_tools:Openai.Responses.Request.Tool.t list
+      -> now_ms:int
+      -> max_events:int
+      -> (Moderation.Outcome.t list, string) result
+  }
+
 type moderator =
   { manager : Moderator_manager.t
   ; session_id : string
   ; session_meta : Jsonaf.t
   ; runtime_policy : Runtime_semantics.policy
+  ; event_handlers : moderator_event_handlers option
   }
 
 type pending_ui_request = Moderator_manager.pending_ui_request =
@@ -298,6 +315,8 @@ let run_moderation_event
   =
   match moderator with
   | None -> Ok None
+  | Some { event_handlers = Some _; _ } ->
+    Error "owned moderator events require identity-bearing history"
   | Some moderator ->
     Result.map
       (Moderator_manager.handle_event
@@ -321,6 +340,8 @@ let run_moderation_event_entries
   =
   match moderator with
   | None -> Ok None
+  | Some { event_handlers = Some handlers; _ } ->
+    handlers.handle ~history ~available_tools ~now_ms ~event
   | Some moderator ->
     Result.map
       (Moderator_manager.handle_event_entries
@@ -366,6 +387,8 @@ let drain_moderator_safe_point
   let _ = safe_point in
   match moderator with
   | None -> Ok []
+  | Some { event_handlers = Some _; _ } ->
+    Error "owned moderator events require identity-bearing history"
   | Some moderator ->
     Moderator_manager.drain_internal_events
       ~max_events:moderator.runtime_policy.budget.max_internal_event_drain
@@ -387,6 +410,12 @@ let drain_moderator_safe_point_entries
   let _ = safe_point in
   match moderator with
   | None -> Ok []
+  | Some ({ event_handlers = Some handlers; _ } as moderator) ->
+    handlers.drain
+      ~history
+      ~available_tools
+      ~now_ms
+      ~max_events:moderator.runtime_policy.budget.max_internal_event_drain
   | Some moderator ->
     Moderator_manager.drain_internal_events_entries
       ~max_events:moderator.runtime_policy.budget.max_internal_event_drain
@@ -689,11 +718,9 @@ let finish_turn ~(moderator : moderator option) ~available_tools ~now_ms ~histor
   runtime_requests_of_outcomes_result ~source:"turn_end" (outcomes_to_list outer ~drained)
 ;;
 
-let moderate_tool_call
+let moderate_tool_call_with_event
       ~(moderator : moderator option)
-      ~available_tools
-      ~now_ms
-      ~history
+      ~run_event
       ~(kind : Tool_call.Kind.t)
       ~(name : string)
       ~(payload : string)
@@ -706,7 +733,6 @@ let moderate_tool_call
   let original_call_item =
     Tool_call.call_item ~kind ~name ~payload ~call_id ~id:item_id
   in
-  let history_with_call = history @ [ original_call_item ] in
   let tool_call =
     match Moderation.Tool_call.of_response_item original_call_item with
     | None ->
@@ -714,18 +740,14 @@ let moderate_tool_call
     | Some tool_call -> tool_call
   in
   let%bind outer =
-    run_moderation_event
-      ~moderator
-      ~available_tools
-      ~now_ms
-      ~history:history_with_call
-      ~event:(Moderation.Event.Pre_tool_call tool_call)
+    run_event ~original_call_item ~event:(Moderation.Event.Pre_tool_call tool_call)
   in
   let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind runtime_requests, action =
     match outer with
     | None -> Ok ([], None)
-    | Some outer -> Ok (outer.runtime_requests, outer.tool_moderation)
+    | Some (outer : Moderation.Outcome.t) ->
+      Ok (outer.runtime_requests, outer.tool_moderation)
   in
   Ok
     (match action with
@@ -766,11 +788,26 @@ let moderate_tool_call
        })
 ;;
 
-let handle_tool_result
-      ~(moderator : moderator option)
+let moderate_tool_call ~moderator ~available_tools ~now_ms ~history =
+  moderate_tool_call_with_event ~moderator ~run_event:(fun ~original_call_item ~event ->
+    run_moderation_event
+      ~moderator
       ~available_tools
       ~now_ms
-      ~history
+      ~history:(history @ [ original_call_item ])
+      ~event)
+;;
+
+let moderate_tool_call_entries ~moderator ~available_tools ~now_ms ~history =
+  moderate_tool_call_with_event ~moderator ~run_event:(fun ~original_call_item:_ ~event ->
+    run_moderation_event_entries ~moderator ~available_tools ~now_ms ~history ~event)
+;;
+
+let handle_tool_result_with_events
+      ~(moderator : moderator option)
+      ~run_event
+      ~project_appended
+      ~drain
       ~(name : string)
       ~(kind : Tool_call.Kind.t)
       ~(item : Res.Item.t)
@@ -791,41 +828,50 @@ let handle_tool_result
     | None -> failwith "Expected tool output item when handling a moderated tool result."
     | Some tool_result -> tool_result
   in
-  let%bind outer =
-    run_moderation_event
-      ~moderator
-      ~available_tools
-      ~now_ms
-      ~history
-      ~event:(Moderation.Event.Post_tool_response tool_result)
-  in
+  let%bind outer = run_event ~event:(Moderation.Event.Post_tool_response tool_result) in
   let%bind () = ensure_not_waiting_on_ui moderator in
   let%bind item_appended =
     match moderator, outer with
     | None, _ -> Ok None
     | Some _, Some outer when requests_end_session outer -> Ok None
     | Some _, _ ->
-      let%bind appended_item = projected_appended_item history in
-      run_moderation_event
-        ~moderator
-        ~available_tools
-        ~now_ms
-        ~history
-        ~event:(Moderation.Event.Item_appended appended_item)
+      let%bind appended_item = project_appended () in
+      run_event ~event:(Moderation.Event.Item_appended appended_item)
   in
   let%bind () = ensure_not_waiting_on_ui moderator in
-  let%bind drained =
-    drain_moderator_safe_point
-      ~moderator
-      ~available_tools
-      ~now_ms
-      ~history
-      ~safe_point:Post_tool_result_boundary
-  in
+  let%bind drained = drain () in
   let outcomes =
     outcomes_to_list outer ~drained:(outcomes_to_list item_appended ~drained)
   in
   runtime_requests_of_outcomes_result ~source:"post_tool_response" outcomes
+;;
+
+let handle_tool_result ~moderator ~available_tools ~now_ms ~history =
+  handle_tool_result_with_events
+    ~moderator
+    ~run_event:(run_moderation_event ~moderator ~available_tools ~now_ms ~history)
+    ~project_appended:(fun () -> projected_appended_item history)
+    ~drain:(fun () ->
+      drain_moderator_safe_point
+        ~moderator
+        ~available_tools
+        ~now_ms
+        ~history
+        ~safe_point:Post_tool_result_boundary)
+;;
+
+let handle_tool_result_entries ~moderator ~available_tools ~now_ms ~history =
+  handle_tool_result_with_events
+    ~moderator
+    ~run_event:(run_moderation_event_entries ~moderator ~available_tools ~now_ms ~history)
+    ~project_appended:(fun () -> projected_appended_entry history)
+    ~drain:(fun () ->
+      drain_moderator_safe_point_entries
+        ~moderator
+        ~available_tools
+        ~now_ms
+        ~history
+        ~safe_point:Post_tool_result_boundary)
 ;;
 
 let log_parsing_error ~env ~datadir json exn =
@@ -1231,7 +1277,7 @@ let dispatch_tool
   { result with runtime_requests = runtime_requests @ result.runtime_requests }
 ;;
 
-let prepare_tool_call (c : ctx) ~hist ~kind ~name ~payload ~call_id ~item_id =
+let prepare_tool_call (c : ctx) ~hist ~st ~kind ~name ~payload ~call_id ~item_id =
   let reject reason message =
     ( { call_item = Tool_call.call_item ~kind ~name ~payload ~call_id ~id:(Some item_id)
       ; kind
@@ -1252,16 +1298,22 @@ let prepare_tool_call (c : ctx) ~hist ~kind ~name ~payload ~call_id ~item_id =
   | Ok () ->
     let result =
       try
-        moderate_tool_call
-          ~moderator:c.moderator
-          ~available_tools:c.tools
-          ~now_ms:(now_ms c.env)
-          ~history:(History_entry.items hist)
-          ~kind
-          ~name
-          ~payload
-          ~call_id
-          ~item_id:(Some item_id)
+        let moderate =
+          match c.moderator with
+          | Some { event_handlers = Some _; _ } ->
+            moderate_tool_call_entries
+              ~moderator:c.moderator
+              ~available_tools:c.tools
+              ~now_ms:(now_ms c.env)
+              ~history:(history_with_new_entries ~hist st)
+          | _ ->
+            moderate_tool_call
+              ~moderator:c.moderator
+              ~available_tools:c.tools
+              ~now_ms:(now_ms c.env)
+              ~history:(History_entry.items hist)
+        in
+        moderate ~kind ~name ~payload ~call_id ~item_id:(Some item_id)
       with
       | Eio.Cancel.Cancelled _ as exn -> raise exn
       | exn ->
@@ -1338,6 +1390,7 @@ let schedule_function_done
       prepare_tool_call
         c
         ~hist
+        ~st
         ~kind:Tool_call.Kind.Function
         ~name
         ~payload:arguments
@@ -1444,6 +1497,7 @@ let schedule_custom_done
       prepare_tool_call
         c
         ~hist
+        ~st
         ~kind:Tool_call.Kind.Custom
         ~name
         ~payload:input
@@ -1689,9 +1743,7 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
            ~result
          : Res.Item.t);
       c.on_history_tool_out candidate_entry;
-      let history =
-        History_entry.items (List.append hist (List.rev (candidate_entry :: entries_rev)))
-      in
+      let history = List.append hist (List.rev (candidate_entry :: entries_rev)) in
       let runtime_requests =
         if
           Option.is_some
@@ -1700,14 +1752,22 @@ let await_calls (c : ctx) ~(hist : History_entry.t list) (st : stream_state) =
         then []
         else (
           try
-            handle_tool_result
-              ~moderator:c.moderator
-              ~available_tools:c.tools
-              ~now_ms:(now_ms c.env)
-              ~history
-              ~name
-              ~kind:tool_kind
-              ~item:candidate_item
+            let handle_result =
+              match c.moderator with
+              | Some { event_handlers = Some _; _ } ->
+                handle_tool_result_entries
+                  ~moderator:c.moderator
+                  ~available_tools:c.tools
+                  ~now_ms:(now_ms c.env)
+                  ~history
+              | _ ->
+                handle_tool_result
+                  ~moderator:c.moderator
+                  ~available_tools:c.tools
+                  ~now_ms:(now_ms c.env)
+                  ~history:(History_entry.items history)
+            in
+            handle_result ~name ~kind:tool_kind ~item:candidate_item
             |> Result.map_error ~f:(fun message ->
               Post_tool_moderation_failed (candidate_entry, message))
             |> function
@@ -1765,6 +1825,10 @@ let run_turn (root_ctx : ctx) ~sw ~(history : History_entry.t list) =
     then hist
     else (
       let inputs = prepared.inputs in
+      (match c.moderator with
+       | Some { event_handlers = Some handlers; _ } ->
+         handlers.before_model_call () |> Result.ok_or_failwith
+       | _ -> ());
       log_request c ~inputs;
       c.scope <- History_stream_event.Registry.create_scope c.registry;
       let events =

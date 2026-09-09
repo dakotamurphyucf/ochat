@@ -37,7 +37,7 @@ let to_in_memory_moderator
       ({ manager; session_id; session_meta; runtime_policy } : moderator)
   : In_memory_stream.moderator
   =
-  { manager; session_id; session_meta; runtime_policy }
+  { manager; session_id; session_meta; runtime_policy; event_handlers = None }
 ;;
 
 let map_moderator moderator = Option.map moderator ~f:to_in_memory_moderator

@@ -89,7 +89,13 @@ let create_moderator
       Moderator_manager.create ~artifact ~capabilities ?on_process_run ()
     in
     let moderator =
-      Stream_moderator.{ manager; session_id; session_meta = `Null; runtime_policy }
+      Stream_moderator.
+        { manager
+        ; session_id
+        ; session_meta = `Null
+        ; runtime_policy
+        ; event_handlers = None
+        }
     in
     let now_ms = now_ms env in
     let%bind outcome =
@@ -154,7 +160,13 @@ let create_moderator_entries
         ()
     in
     let moderator =
-      Stream_moderator.{ manager; session_id; session_meta = `Null; runtime_policy }
+      Stream_moderator.
+        { manager
+        ; session_id
+        ; session_meta = `Null
+        ; runtime_policy
+        ; event_handlers = None
+        }
     in
     let now_ms = now_ms env in
     let%bind outcome =

@@ -576,6 +576,28 @@ val with_idle_queued_moderator_event_tools
       -> (unit, Agent_protocol.Error.t) result)
   -> (bool, Agent_protocol.Error.t) result
 
+(** Ordinary v1 lifecycle or foreground boundary event under the shared event
+    owner. None operation ownership is limited to startup/resume on a running idle
+    session. Other phases require the actual active operation. Claim is saved
+    before execution; checkpoint, outcome and request intent commit atomically.
+    The handler retains the actor borrow through infallible manager installation,
+    and native calls use the exact event-owned executor. No event queue head is
+    consumed. Failure retains evidence without replaying external effects. *)
+val with_ordinary_moderator_event
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t option
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> event:Chat_response.Moderation.Event.t
+  -> (executing:Agent_protocol.Moderator_execution.t
+      -> event:Session.Snapshot.t
+      -> execute:Native_tool_invocation.executor
+      -> commit:
+           (snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> requests:Agent_protocol.Invocation.follow_up
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (bool, Agent_protocol.Error.t) result
+
 (** Explicitly retire a retained failed/interrupted queue head at its original
     checkpoint. Available while quiescent running-idle or stopped, without an
     active callback/permission. The callback prepares a manager queue-only change;

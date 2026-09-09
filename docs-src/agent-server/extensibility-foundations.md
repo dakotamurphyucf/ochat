@@ -580,7 +580,7 @@ the same calls execute no native work. A failing fallback callback in both cases
 proves observations do not use unscoped Tool.call. Neither path starts a model turn
 or manufactures provider history during the drain.
 
-**Ordinary-event routing and normal v1 runtime construction are still required.** The stream
+**Normal v1 runtime construction is still required.** The stream
 option remains off by default pending that integration. Tests exercise the
 explicit foreground handoff with real compiled handlers, competing claims,
 cancellation, rejected saves, wrong source/snapshot, mutable-state rollback,
@@ -596,8 +596,49 @@ revocation/replacement during approval, moderator reentrancy, unknown/unselected
 tools, schema/value limits, disclosure, observer failure and parent rollback.
 They also check callback restoration, absence of child provider history, and
 agreement between live and persisted state. Scope tests cover call limits and
-escaped/closed-parent callbacks. General standalone/script routing, ordinary-event
+escaped/closed-parent callbacks. General standalone/script routing, normal-runtime
 Tool.call installation and complete admission-attempt auditing remain open.
+
+### Owned foreground event routing
+
+`Moderator_event.foreground_handlers` connects an installed compiled moderator to
+`Turn_worker.create ~moderator_events`. The worker binds the handlers to its actual
+operation before delivering the submitted-item event. The host must install the
+initial checkpoint first; a worker with a stale source fails without replacing it.
+Ordinary events and queued
+events use separate durable execution receipts; each handler gets an expiring
+native-tool scope. Ordinary completion preserves the existing queue, while queued
+completion consumes its selected head. Deferred native observations share the
+bounded safe-point drain, with at most 256 total callbacks per drain.
+
+The streaming loop preserves canonical entry IDs at pre-tool and post-tool
+boundaries. Before a call is admitted, its pending arguments are available in the
+pre-tool event; no provisional canonical history entry is invented. Post-tool
+handling sees the committed result entry. Raw-item APIs reject owned handlers
+instead of silently dropping their identity requirements. Transient model forks
+have no moderator and cannot acknowledge requests owned by the root session.
+
+Execution completion retains scheduling intent; it does not count as scheduling.
+Turn-only requests pass through the stream's existing policy and consecutive-turn
+budget. Immediately before provider dispatch, the actor saves their acceptance.
+A rejected save prevents that provider call. Budget rejection, disabled follow-up
+policy and worker failure retire unadmitted turn requests in the same transaction
+as the worker's terminal state, so the idle scheduler cannot bypass the decision.
+
+Requests for compaction, including a dependent turn, stay pending for the shared
+idle scheduler. They are not also forwarded to the stream's legacy compaction
+consumer. Successful foreground completion preserves them; failed or cancelled
+managed workers discard unscheduled continuation work. End-session intent settles
+with the actual terminal halt. A halted checkpoint stops model execution even
+when no further moderator callback can run.
+
+The offline compiled-manager/actor/stream fixture exercises ordinary and queued
+turn requests, observation-requested turns, native model calls, compaction/turn
+intent, early and final halt, budget exhaustion, disabled follow-ups and rejected
+admission persistence and a stale installed source. The ordinary-event fixture additionally covers rollback
+after a native effect, rejected checkpoint and terminal saves, cancellation and
+idle resume. These are internal installation tests: normal ChatMD construction,
+startup/resume wiring and complete public qualification remain required.
 
 ### Composed native and moderator stream dispatch
 
