@@ -151,6 +151,7 @@ let new_job ?(retry_policy = J.Never) payload : J.t =
   ; session_id
   ; generation = 0
   ; kind = Async_tool
+  ; launch = None
   ; payload
   ; status = Queued
   ; retry_policy

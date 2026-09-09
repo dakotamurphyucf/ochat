@@ -164,6 +164,8 @@ let release lease =
 let valid_key (key : Key.t) (job : Agent_protocol.Job.t) =
   String.equal key.session (Agent_protocol.Id.Session.to_string job.session_id)
   && Agent_protocol.Job.equal_kind key.kind job.kind
+  && Option.for_all job.launch ~f:(fun launch ->
+    Int.equal key.nested_depth launch.nested_depth)
 ;;
 
 let reserve_job t key ~(job : Agent_protocol.Job.t) =

@@ -111,6 +111,16 @@ type prepare_transaction = transaction -> (unit -> unit, string) result
 (** Runtime classification of task operations. *)
 type op_kind =
   | Local_transactional
+  | Local_transactional_with_result of { rollback : value list -> unit }
+  (** Records [result :: original_arguments] under the same operation name.
+        Useful for host-issued reservation IDs that must be associated with the
+        precise surviving effect after Task.catch rollback. The operation may
+        reserve resources but must not materialize external work before commit.
+        [rollback] receives the recorded arguments, newest first, for effects
+        discarded by Task.catch, before its recovery handler runs. It must be
+        infallible, idempotent and only release provisional resources. The host
+        still owns cleanup on whole-transaction failure, cancellation or rejection.
+        Like other transactional operations, this kind cannot be spawned. *)
   | External_sync
   | External_async
   | Diagnostic
@@ -249,8 +259,16 @@ val instantiate_session
 
 (** Evaluate a fresh program instance and invoke a task-returning entrypoint
     directly, without initial_state/on_event conventions or lifecycle events.
-    Only diagnostic and synchronous external operations are installed; local
-    session effects, background task dispatch and UI suspension are unavailable.
+    Only diagnostic and synchronous external operations are installed by default.
+    Supplying [prepare_result] also installs result-recording transactional
+    operations. After interpretation, the callback receives the final value and
+    surviving effects, with recorded results prepended to their arguments. It must
+    validate the value/effects and prepare their owning commit before returning an
+    infallible, non-yielding installer. Rejection skips installation. The host owns
+    abort/release of uncommitted reservations on whole-execution failure; catch
+    rollback invokes each operation's provisional-resource cleanup callback.
+    Ordinary local session effects, background task dispatch and UI suspension
+    remain unavailable.
     [control] follows the environment into closures, builtin callbacks and task
     continuations. Host cancellation/control exceptions propagate after cleanup.
     The host must compile against the intended surface and enforce authority,
@@ -259,6 +277,8 @@ val instantiate_session
 val run_entrypoint
   :  ?control:execution_control
   -> ?limits:execution_limits
+  -> ?prepare_result:
+       (value:value -> local_effects:eff list -> (unit -> unit, string) result)
   -> runtime_config
   -> compiled_script
   -> entrypoint:string

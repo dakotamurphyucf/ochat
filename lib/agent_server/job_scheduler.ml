@@ -255,8 +255,9 @@ let dispatch t sw entry job lease rejection =
 ;;
 
 let nested_depth (job : Agent_protocol.Job.t) =
-  match job.payload with
-  | `Object fields ->
+  match job.launch, job.payload with
+  | Some launch, _ -> Ok launch.nested_depth
+  | None, `Object fields ->
     (match List.Assoc.find fields "nested_depth" ~equal:String.equal with
      | None -> Ok 0
      | Some (`Number encoded) ->
@@ -266,7 +267,7 @@ let nested_depth (job : Agent_protocol.Job.t) =
           Error (Agent_protocol.Error.invalid_request "job nested_depth is invalid"))
      | Some _ ->
        Error (Agent_protocol.Error.invalid_request "job nested_depth is invalid"))
-  | _ -> Ok 0
+  | None, _ -> Ok 0
 ;;
 
 let capacity_key entry job =

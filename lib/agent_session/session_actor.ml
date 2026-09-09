@@ -152,6 +152,19 @@ type _ request =
   | Set_job_scope_cancel : job_scope * (unit -> unit) -> unit request
   | Seal_job_scope : job_scope -> unit request
   | Finish_job_scope : job_scope -> unit request
+  | Prepare_background_job :
+      Agent_protocol.Job.launch_owner * Chat_response.Background_request.t
+      -> Agent_protocol.Job.t request
+  | Stage_background_job : Agent_protocol.Job.t * Staged_jobs.capacity -> unit request
+  | Select_background_jobs :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t list
+      -> unit request
+  | Abort_background_job :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t
+      -> unit request
+  | Has_staged_background_job :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t
+      -> bool request
   | Claim_job_invocation :
       job_scope * Agent_protocol.Invocation.t
       -> invocation_execution request
@@ -159,6 +172,7 @@ type _ request =
       invocation_execution
       * Agent_protocol.Invocation.outcome
       * Agent_protocol.Invocation.follow_up option
+      * bool
       -> Agent_protocol.Invocation.t request
   | Claim_moderator_invocation :
       Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.t
@@ -394,6 +408,7 @@ type t =
       (Agent_protocol.Id.Operation.t * Agent_protocol.Invocation.observer) option
   ; mutable invocation_executions : invocation_execution list
   ; mutable job_scopes : job_scope list
+  ; staged_jobs : Staged_jobs.t
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
@@ -544,6 +559,50 @@ let transition t ~delta ~payloads =
   in
   let%map () = install t transition in
   Agent_protocol.Session.(Session_state.summary t.state)
+;;
+
+let with_staged_transaction t owner f =
+  match f () with
+  | Ok _ as result ->
+    Staged_jobs.commit t.staged_jobs ~owner;
+    result
+  | Error _ as result ->
+    Staged_jobs.abort_owner t.staged_jobs ~owner;
+    result
+  | exception exn ->
+    let backtrace = Stdlib.Printexc.get_raw_backtrace () in
+    Staged_jobs.abort_owner t.staged_jobs ~owner;
+    Stdlib.Printexc.raise_with_backtrace exn backtrace
+;;
+
+let staged_job_changes t owner =
+  let jobs = Staged_jobs.selected t.staged_jobs ~owner in
+  ( List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
+  , List.map jobs ~f:(fun job ->
+      Agent_protocol.Event.Durable.Payload.Job_state_changed job) )
+;;
+
+let prepare_background_job_launch t ~owner request =
+  call t (Prepare_background_job (owner, request))
+;;
+
+let stage_background_job t ~job ~capacity =
+  Eio.Cancel.protect (fun () ->
+    match call t (Stage_background_job (job, capacity)) with
+    | Ok () -> Ok ()
+    | Error _ as result ->
+      capacity.Staged_jobs.abort ();
+      result)
+;;
+
+let select_background_jobs t ~owner ~ids = call t (Select_background_jobs (owner, ids))
+
+let abort_background_job t ~owner ~id =
+  Eio.Cancel.protect (fun () -> call t (Abort_background_job (owner, id)))
+;;
+
+let has_staged_background_job t ~owner ~id =
+  call t (Has_staged_background_job (owner, id))
 ;;
 
 let commit_extensions_internal t generation expected_revision changes =
@@ -946,6 +1005,9 @@ let stop_internal t mode =
        borrow.cancel_requested <- true;
        Option.iter borrow.cancel ~f:(fun cancel -> cancel ())
      | _ -> ());
+    (match mode with
+     | Cancel -> Staged_jobs.abort_all t.staged_jobs
+     | Graceful -> ());
     session
   | Some operation ->
     let lifecycle =
@@ -971,6 +1033,7 @@ let stop_internal t mode =
     in
     if Agent_protocol.Session.equal_stop_mode mode Cancel
     then (
+      Staged_jobs.abort_all t.staged_jobs;
       cancel_event_for_operation t operation.id;
       Option.iter t.active_cancel ~f:(fun cancel -> cancel ()));
     Ok session
@@ -1330,8 +1393,9 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
   Ok execution
 ;;
 
-let finish_invocation t execution outcome requests =
+let finish_invocation t execution outcome requests commit_starts =
   let open Result.Let_syntax in
+  let owner = Agent_protocol.Job.Invocation execution.dispatched.context.id in
   let%bind cancelled =
     match execution.owner with
     | Foreground operation_id ->
@@ -1401,6 +1465,9 @@ let finish_invocation t execution outcome requests =
   (* The callback has returned. Even when outcome persistence fails and the
      execution stays registered for cleanup, it cannot authorize new children. *)
   execution.accepts_children <- false;
+  (match commit_starts && not cancelled, outcome with
+   | true, (Complete _ | Fail _ | Pending _) -> ()
+   | false, _ | true, Cancelled _ -> Staged_jobs.abort_owner t.staged_jobs ~owner);
   let%bind resolved =
     Agent_protocol.Invocation.resolve
       execution.dispatched
@@ -1417,13 +1484,14 @@ let finish_invocation t execution outcome requests =
   let permissions, permission_deltas, permission_payloads =
     cleanup_invocation_permissions t [ execution.dispatched.context.id ]
   in
+  let job_deltas, job_payloads = staged_job_changes t owner in
   let%bind _ =
     transition
       t
       ~delta:
         (Session_delta.Batch
-           (Session_delta.Invocation_changed resolved :: permission_deltas))
-      ~payloads:permission_payloads
+           ((Session_delta.Invocation_changed resolved :: permission_deltas) @ job_deltas))
+      ~payloads:(permission_payloads @ job_payloads)
   in
   resolve_cleaned_permission_waiters t permissions;
   t.invocation_executions
@@ -1878,15 +1946,20 @@ let commit_queued_event t borrow snapshot requests =
        | _ ->
          Error (error Invalid_state "failed-head retirement cannot schedule new work"))
   in
+  let job_deltas, job_payloads =
+    staged_job_changes t (Agent_protocol.Job.Moderator_event borrow.receipt.context.id)
+  in
   let%bind _ =
     transition
       t
       ~delta:
         (Session_delta.Batch
-           [ Moderator_execution_changed completed
-           ; Moderator_changed (Some (Runtime_builder.encode_moderator_snapshot snapshot))
-           ])
-      ~payloads:[]
+           ([ Session_delta.Moderator_execution_changed completed
+            ; Moderator_changed
+                (Some (Runtime_builder.encode_moderator_snapshot snapshot))
+            ]
+            @ job_deltas))
+      ~payloads:job_payloads
   in
   borrow.committed <- true;
   Ok ()
@@ -1896,6 +1969,7 @@ let finish_queued_event t borrow interrupted =
   let open Result.Let_syntax in
   let%bind () = validate_queued_event_borrow t borrow in
   borrow.callback_active <- false;
+  Staged_jobs.abort_owner t.staged_jobs ~owner:(Moderator_event borrow.receipt.context.id);
   borrow.cancel <- None;
   let children =
     List.filter t.invocation_executions ~f:(event_execution_owned_by borrow)
@@ -1908,6 +1982,9 @@ let finish_queued_event t borrow interrupted =
   let%bind children_deltas =
     List.map children ~f:(fun execution ->
       execution.accepts_children <- false;
+      Staged_jobs.abort_owner
+        t.staged_jobs
+        ~owner:(Invocation execution.dispatched.context.id);
       Agent_protocol.Invocation.cancel
         execution.dispatched
         ~reason:"event exited before recording its native outcome"
@@ -2140,6 +2217,143 @@ let invocation_execution_owned_by borrow execution =
   | Foreground _ | Event_moderator _ | Background_job _ -> false
 ;;
 
+let background_owner_active t owner =
+  let open Result.Let_syntax in
+  let moderator (borrow : moderator_borrow) =
+    let%bind () = validate_moderator_borrow t borrow in
+    match borrow.callback_finished || borrow.committed || borrow.cancel_requested with
+    | true -> Error (error Conflict "background launch owner has finished")
+    | false ->
+      (match borrow.job_scope, borrow.operation_id with
+       | Some scope, None -> job_scope_can_execute t scope
+       | None, Some id -> Result.map (running_operation t id) ~f:ignore
+       | None, None ->
+         (match
+            t.state.lifecycle.desired, t.state.lifecycle.observed, t.state.failure
+          with
+          | Running, Idle, None when not t.state.halted -> Ok ()
+          | _ -> Error (error Conflict "background launch owner is not running"))
+       | Some _, Some _ -> Error (error Conflict "invalid background launch scope"))
+  in
+  let event borrow =
+    let%bind () = queued_event_can_commit t borrow in
+    match borrow.retirement_reason with
+    | None -> Ok ()
+    | Some _ -> Error (error Conflict "event retirement cannot launch background work")
+  in
+  match owner with
+  | Agent_protocol.Job.Moderator_event id ->
+    (match t.queued_event_borrow with
+     | Some borrow
+       when Agent_protocol.Id.Moderator_execution.equal borrow.receipt.context.id id ->
+       event borrow
+     | _ -> Error (error Conflict "background launch event is not executing"))
+  | Invocation id ->
+    (match
+       List.find t.invocation_executions ~f:(fun execution ->
+         execution.accepts_children
+         && Agent_protocol.Id.Invocation.equal execution.dispatched.context.id id)
+     with
+     | Some execution ->
+       (match execution.owner with
+        | Foreground id -> Result.map (running_operation t id) ~f:ignore
+        | Background_job scope -> job_scope_can_execute t scope
+        | Invocation_moderator borrow -> moderator borrow
+        | Event_moderator borrow -> event borrow)
+     | None ->
+       (match t.moderator_borrow with
+        | Some borrow
+          when Agent_protocol.Id.Invocation.equal borrow.invocation.context.id id ->
+          moderator borrow
+        | _ -> Error (error Conflict "background launch invocation is not executing")))
+;;
+
+let derive_background_launch t owner =
+  let open Result.Let_syntax in
+  let%bind () = background_owner_active t owner in
+  Job_launch.derive
+    ~session_id:t.state.identity.session_id
+    ~generation:t.state.identity.generation
+    ~invocations:t.state.invocations
+    ~events:t.state.moderator_executions
+    ~jobs:t.state.jobs
+    ~owner
+;;
+
+let prepare_background_job t owner request =
+  let open Result.Let_syntax in
+  let%map launch = derive_background_launch t owner in
+  Agent_protocol.Job.
+    { id = Agent_protocol.Id.Job.create ()
+    ; session_id = t.state.identity.session_id
+    ; generation = t.state.identity.generation
+    ; kind = Async_tool
+    ; payload = Chat_response.Background_request.to_json request
+    ; status = Queued
+    ; retry_policy = Never
+    ; attempt = 0
+    ; created_at = t.services.now ()
+    ; started_at = None
+    ; next_run_at = None
+    ; completed_at = None
+    ; result = None
+    ; delivery = Pending
+    ; launch = Some launch
+    }
+;;
+
+let stage_background_job_internal t (job : Agent_protocol.Job.t) capacity =
+  let open Result.Let_syntax in
+  let result =
+    let%bind launch =
+      Result.of_option job.launch ~error:(error Invalid_request "job has no launch owner")
+    in
+    let%bind expected = derive_background_launch t launch.owner in
+    let%bind () =
+      Extension_invariants.owner
+        ~session_id:t.state.identity.session_id
+        ~generation:t.state.identity.generation
+        job.session_id
+        job.generation
+    in
+    let%bind () =
+      match
+        ( Agent_protocol.Job.equal_launch launch expected
+        , job.kind
+        , job.status
+        , job.retry_policy
+        , job.attempt
+        , job.started_at
+        , job.next_run_at
+        , job.completed_at
+        , job.result
+        , job.delivery )
+      with
+      | true, Async_tool, Queued, Never, 0, None, None, None, None, Pending -> Ok ()
+      | _ ->
+        Error
+          (error
+             Invalid_request
+             "staged launch must be a fresh job with current ancestry")
+    in
+    let%bind _ = Agent_protocol.Job.of_json (Agent_protocol.Job.to_json job) in
+    let%bind () =
+      match
+        List.exists t.state.jobs ~f:(fun existing ->
+          Agent_protocol.Id.Job.equal existing.id job.id)
+      with
+      | true -> Error (error Conflict "background job already exists")
+      | false -> Ok ()
+    in
+    Staged_jobs.stage t.staged_jobs ~job ~capacity
+  in
+  match result with
+  | Ok () -> Ok ()
+  | Error _ as failure ->
+    Eio.Cancel.protect capacity.Staged_jobs.abort;
+    failure
+;;
+
 let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
   let open Result.Let_syntax in
   let%bind () = validate_moderator_borrow t borrow in
@@ -2273,15 +2487,22 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
           resolved
       | _ -> Error (error Invalid_state "moderator commit requires a resolved invocation"))
   in
+  let owner = Agent_protocol.Job.Invocation borrow.invocation.context.id in
+  (match borrow.kind, resolved.status with
+   | Invocation, Resolved (Cancelled _) -> Staged_jobs.abort_owner t.staged_jobs ~owner
+   | _ -> ());
+  let job_deltas, job_payloads = staged_job_changes t owner in
   let%bind _ =
     transition
       t
       ~delta:
         (Session_delta.Batch
-           [ Invocation_changed resolved
-           ; Moderator_changed (Some (Runtime_builder.encode_moderator_snapshot snapshot))
-           ])
-      ~payloads:[]
+           ([ Session_delta.Invocation_changed resolved
+            ; Moderator_changed
+                (Some (Runtime_builder.encode_moderator_snapshot snapshot))
+            ]
+            @ job_deltas))
+      ~payloads:job_payloads
   in
   borrow.committed <- true;
   Ok ()
@@ -2333,6 +2554,7 @@ let finish_moderator_invocation t borrow failure =
   let open Result.Let_syntax in
   let%bind () = validate_moderator_borrow t borrow in
   borrow.callback_finished <- true;
+  Staged_jobs.abort_owner t.staged_jobs ~owner:(Invocation borrow.invocation.context.id);
   borrow.cancel <- None;
   borrow.accepts_children <- false;
   let was_committed = borrow.committed in
@@ -2348,6 +2570,9 @@ let finish_moderator_invocation t borrow failure =
   let%bind children =
     List.map unfinished ~f:(fun execution ->
       execution.accepts_children <- false;
+      Staged_jobs.abort_owner
+        t.staged_jobs
+        ~owner:(Invocation execution.dispatched.context.id);
       Agent_protocol.Invocation.cancel
         execution.dispatched
         ~reason:
@@ -3192,6 +3417,10 @@ let worker_terminal t operation_id outcome =
     in
     let%bind unfinished =
       List.map foreground ~f:(fun execution ->
+        execution.accepts_children <- false;
+        Staged_jobs.abort_owner
+          t.staged_jobs
+          ~owner:(Invocation execution.dispatched.context.id);
         Agent_protocol.Invocation.cancel
           execution.dispatched
           ~reason:"worker exited before recording the invocation outcome"
@@ -3202,6 +3431,9 @@ let worker_terminal t operation_id outcome =
       match borrow with
       | None -> Ok (Session_delta.Batch [])
       | Some borrow ->
+        Staged_jobs.abort_owner
+          t.staged_jobs
+          ~owner:(Invocation borrow.invocation.context.id);
         uncommitted_borrow_delta
           t
           borrow
@@ -3212,6 +3444,9 @@ let worker_terminal t operation_id outcome =
     let%bind event_delta =
       match event_borrow with
       | Some borrow when not borrow.committed ->
+        Staged_jobs.abort_owner
+          t.staged_jobs
+          ~owner:(Moderator_event borrow.receipt.context.id);
         let%map interrupted =
           Agent_protocol.Moderator_execution.interrupt
             borrow.receipt
@@ -3380,9 +3615,9 @@ let with_invocation_claim t claim f =
   let open Result.Let_syntax in
   Eio.Fiber.yield ();
   let%bind execution = Eio.Cancel.protect (fun () -> call t claim) in
-  let finish ?requests outcome =
+  let finish ?requests ?(commit_starts = false) outcome =
     Eio.Cancel.protect (fun () ->
-      call t (Finish_invocation (execution, outcome, requests)))
+      call t (Finish_invocation (execution, outcome, requests, commit_starts)))
   in
   let failed =
     Agent_protocol.Invocation.Fail
@@ -3402,9 +3637,9 @@ let with_invocation_claim t claim f =
   in
   match run () with
   | Ok outcome, collected ->
-    let outcome, collected =
+    let outcome, collected, commit_starts =
       match Agent_protocol.Invocation.validate_outcome outcome with
-      | Ok () -> outcome, collected
+      | Ok () -> outcome, collected, true
       | Error _ ->
         ( Agent_protocol.Invocation.Fail
             { code = "invocation.invalid_output"
@@ -3412,7 +3647,8 @@ let with_invocation_claim t claim f =
             ; retryable = false
             ; details = `Null
             }
-        , [] )
+        , []
+        , false )
     in
     let requests : Agent_protocol.Invocation.follow_up =
       { request_turn = Chat_response.Runtime_semantics.request_turn collected
@@ -3420,7 +3656,7 @@ let with_invocation_claim t claim f =
       ; end_session = Chat_response.Runtime_semantics.should_end_session collected
       }
     in
-    finish ~requests outcome
+    finish ~requests ~commit_starts outcome
   | Error failure, _ ->
     let%bind _ = finish failed in
     Error failure
@@ -4756,6 +4992,9 @@ let finish_job_scope t scope =
   let%bind deltas =
     List.map children ~f:(fun execution ->
       execution.accepts_children <- false;
+      Staged_jobs.abort_owner
+        t.staged_jobs
+        ~owner:(Invocation execution.dispatched.context.id);
       Agent_protocol.Invocation.cancel
         execution.dispatched
         ~reason:"background scope exited before recording the invocation outcome"
@@ -5718,7 +5957,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Claim_queued_retirement (id, snapshot, reason) ->
     claim_queued_retirement t id snapshot reason
   | Commit_queued_event (borrow, snapshot, requests) ->
-    commit_queued_event t borrow snapshot requests
+    let open Result.Let_syntax in
+    let%bind () = validate_queued_event_borrow t borrow in
+    with_staged_transaction t (Moderator_event borrow.receipt.context.id) (fun () ->
+      commit_queued_event t borrow snapshot requests)
   | Finish_queued_event (borrow, interrupted) -> finish_queued_event t borrow interrupted
   | Set_queued_event_cancel (borrow, cancel) ->
     Result.map (queued_event_can_commit t borrow) ~f:(fun () ->
@@ -5762,8 +6004,15 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     let open Result.Let_syntax in
     let%map () = job_scope_can_execute t scope in
     scope.cancel <- Some cancel
-  | Finish_invocation (execution, outcome, requests) ->
-    finish_invocation t execution outcome requests
+  | Finish_invocation (execution, outcome, requests, commit_starts) ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match List.mem t.invocation_executions execution ~equal:phys_equal with
+      | true -> Ok ()
+      | false -> Error (error Conflict "invocation callback no longer owns its result")
+    in
+    with_staged_transaction t (Invocation execution.dispatched.context.id) (fun () ->
+      finish_invocation t execution outcome requests commit_starts)
   | Claim_moderator_invocation (operation_id, invocation) ->
     claim_moderator_invocation t operation_id invocation
   | Claim_moderator_observation (operation_id, invocation_id) ->
@@ -5778,7 +6027,10 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
         borrow)
     else Ok None
   | Commit_moderator_invocation (borrow, resolved, snapshot) ->
-    commit_moderator_invocation t borrow resolved snapshot
+    let open Result.Let_syntax in
+    let%bind () = validate_moderator_borrow t borrow in
+    with_staged_transaction t (Invocation borrow.invocation.context.id) (fun () ->
+      commit_moderator_invocation t borrow resolved snapshot)
   | Finish_moderator_invocation (borrow, failure) ->
     finish_moderator_invocation t borrow failure
   | Set_idle_moderator_cancel (borrow, cancel) ->
@@ -5801,6 +6053,17 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Commit_extensions (generation, revision, changes) ->
     commit_extensions_internal t generation revision changes
   | State -> Ok t.state
+  | Prepare_background_job (owner, request) -> prepare_background_job t owner request
+  | Stage_background_job (job, capacity) -> stage_background_job_internal t job capacity
+  | Select_background_jobs (owner, ids) ->
+    let open Result.Let_syntax in
+    let%bind () = background_owner_active t owner in
+    Staged_jobs.select t.staged_jobs ~owner ~ids
+  | Abort_background_job (owner, id) -> Staged_jobs.abort t.staged_jobs ~owner ~id
+  | Has_staged_background_job (owner, id) ->
+    let open Result.Let_syntax in
+    let%map () = background_owner_active t owner in
+    Staged_jobs.contains t.staged_jobs ~owner ~id
   | Snapshot -> Ok (current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
   | Change_moderator moderator -> change_moderator t moderator
@@ -5910,6 +6173,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Owner_expired generation -> owner_expired t generation
   | Checkpoint persist -> persist t.state
   | Shutdown ->
+    Staged_jobs.abort_all t.staged_jobs;
     Option.iter t.owner_timer_cancel ~f:(fun resolver -> Eio.Promise.resolve resolver ());
     t.owner_timer_cancel <- None;
     Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
@@ -6004,6 +6268,7 @@ let create_with_owner_lease_duration
     ; foreground_moderator = None
     ; invocation_executions = []
     ; job_scopes = []
+    ; staged_jobs = Staged_jobs.create ()
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state

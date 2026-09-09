@@ -731,6 +731,7 @@ let%expect_test
           ; completed_at = None
           ; result = None
           ; delivery = Pending
+          ; launch = None
           }
       in
       ignore

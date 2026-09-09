@@ -16,7 +16,8 @@ let key actor (job : J.t) =
     ~workspace_conflict_domain:state.spec.workspace_instance.conflict_domain
     ~session_id:job.session_id
     ~kind:job.kind
-    ~nested_depth:0
+    ~nested_depth:
+      (Option.value_map job.launch ~default:0 ~f:(fun launch -> launch.nested_depth))
 ;;
 
 let reserve capacity key job =

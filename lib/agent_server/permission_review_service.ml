@@ -41,6 +41,7 @@ let create_job ~now state reviewer invocation =
     ; completed_at = None
     ; result = None
     ; delivery = Not_required
+    ; launch = None
     }
 ;;
 

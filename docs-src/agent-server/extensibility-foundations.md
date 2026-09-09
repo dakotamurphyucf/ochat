@@ -1416,6 +1416,36 @@ state and broadcasts events only after persistence succeeds. It is not an RPC or
 an authorization boundary. No external effect is rolled back by rejecting a local
 transaction.
 
+The host-internal actor API can stage generic background requests under a live native
+invocation, managed tool handler or moderator event. Preparation derives the
+owning invocation/event, parent job attempt and nesting depth from actor records.
+The host reserves shared scheduler capacity, stages the unchanged prepared job,
+and selects the exact job IDs in the surviving transaction effect log. These
+host-internal APIs do not capture authority themselves: the request must already
+be captured from the current borrowed tool registry and execution policy.
+
+The owner saves selected jobs in the same durable transaction as its outcome or
+moderator checkpoint. Only after that save succeeds does the actor publish their
+capacity reservations. Failed persistence, callback failure, cancellation and
+unselected starts release provisional capacity. A handled explicit failure value
+can still commit selected work; an exception or invalid callback result cannot.
+An acknowledgement cannot refer to a discarded start or another launch owner.
+
+ChatML hosts can register a result-recording transactional operation whose effect
+arguments include the returned reservation ID. `Task.catch` releases discarded
+reservations before its recovery handler runs, including with nested catches.
+Identical requests remain distinct operations. Hosts still clean up the surviving
+reservations on whole-transaction failure. Standalone entrypoints accept these
+operations only when the host provides a result/effect preparation callback;
+ordinary one-off execution retains its existing restricted operation set.
+
+New job records optionally retain versioned `launch` metadata. Legacy jobs omit
+it. The actor validates ancestry on restoration and forbids changing launch
+provenance on an existing job. Scheduler capacity uses this derived depth rather
+than a caller-supplied payload depth. This is internal transaction integration;
+script-facing `Job.start_tool`, `Job.start_script`, status/cancel, progress and
+artifact integration, and automatic notification delivery remain unfinished.
+
 Publication uses `Runtime_notification(delivery_id)` provenance and commits its
 history entry and receipt together. It requires the originating initial response
 to be published. The current foundation permits publication only while the

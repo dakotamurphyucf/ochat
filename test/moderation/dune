@@ -53,7 +53,7 @@
 
 (library
  (name chatml_moderator_runtime_test)
- (modules chatml_moderator_runtime_test)
+ (modules chatml_moderator_runtime_test recorded_result_tests)
  (libraries core chatml chatml_builtin_modules chatml_moderator_runtime)
  (inline_tests)
  (preprocess

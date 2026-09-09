@@ -384,6 +384,7 @@ let seeded_job state =
     ; completed_at = Some state.identity.updated_at
     ; result = None
     ; delivery = Not_required
+    ; launch = None
     }
 ;;
 

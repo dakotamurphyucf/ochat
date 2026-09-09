@@ -149,6 +149,7 @@ let%expect_test "model jobs are claimed, completed, and delivered atomically" =
           ; completed_at = None
           ; result = None
           ; delivery = Pending
+          ; launch = None
           }
       in
       Agent_session.Session_actor.add_job actor job |> protocol_ok |> ignore;
@@ -244,6 +245,7 @@ let%expect_test "durable job retry policy persists backoff before terminal deliv
           ; completed_at = None
           ; result = None
           ; delivery = Pending
+          ; launch = None
           }
       in
       Agent_session.Session_actor.add_job actor job |> protocol_ok |> ignore;

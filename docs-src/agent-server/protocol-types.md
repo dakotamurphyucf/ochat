@@ -1341,6 +1341,18 @@ type delivery =
   | Delivered of Timestamp.t
 [@@deriving sexp]
 
+type launch_owner =
+  | Invocation of Id.Invocation.t
+  | Moderator_event of Id.Moderator_execution.t
+[@@deriving equal, sexp]
+
+type launch =
+  { owner : launch_owner
+  ; parent_job : (Id.Job.t * int) option [@sexp.option]
+  ; nested_depth : int
+  }
+[@@deriving equal, sexp]
+
 type t =
   { id : Id.Job.t
   ; session_id : Id.Session.t
@@ -1356,6 +1368,10 @@ type t =
   ; completed_at : Timestamp.t option
   ; result : Jsonaf.t option
   ; delivery : delivery
+  ; launch : launch option [@sexp.option]
+    (** Optional versioned launch provenance. Legacy jobs omit this field.
+        Host admission binds the invocation/event owner and actual parent attempt;
+        user scripts cannot choose their nesting depth. *)
   }
 [@@deriving sexp]
 

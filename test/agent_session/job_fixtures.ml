@@ -29,6 +29,7 @@ let add_claimed_job
       ; completed_at = None
       ; result = None
       ; delivery = Pending
+      ; launch = None
       }
   in
   A.add_job actor job |> protocol_ok |> ignore;

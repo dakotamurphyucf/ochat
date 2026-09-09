@@ -786,6 +786,7 @@ let model_job t state ~recipe ~payload ~delivery =
     ; completed_at = None
     ; result = None
     ; delivery
+    ; launch = None
     }
 ;;
 

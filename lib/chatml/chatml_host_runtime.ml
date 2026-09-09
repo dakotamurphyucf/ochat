@@ -62,6 +62,7 @@ type pending_ui_request =
 
 type op_kind =
   | Local_transactional
+  | Local_transactional_with_result of { rollback : Lang.value list -> unit }
   | External_sync
   | External_async
   | Diagnostic
@@ -1131,12 +1132,18 @@ let dispatch_effect
             (match op.kind with
              | External_async ->
                Error (Printf.sprintf "Operation '%s' must be spawned" op.name)
-             | Local_transactional ->
+             | Local_transactional | Local_transactional_with_result _ ->
                (match op.perform session eff.args with
                 | Error msg -> Error msg
                 | Ok value ->
                   check_result value;
-                  exec.local_effects_rev <- eff :: exec.local_effects_rev;
+                  let recorded =
+                    match op.kind with
+                    | Local_transactional_with_result _ ->
+                      { eff with args = value :: eff.args }
+                    | _ -> eff
+                  in
+                  exec.local_effects_rev <- recorded :: exec.local_effects_rev;
                   Debug_log.emit (fun () ->
                     Printf.sprintf
                       "[chatml-runtime] dispatch_effect_ok phase=%s op=%s result=%s"
@@ -1171,7 +1178,7 @@ let perform_local_effect (session : session) (eff : Lang.eff) =
     let%bind operation = find_operation session eff.op in
     let%bind () =
       match operation.kind with
-      | Local_transactional -> Ok ()
+      | Local_transactional | Local_transactional_with_result _ -> Ok ()
       | External_sync | External_async | Diagnostic ->
         Error "host local-effect delivery requires a transactional operation"
     in
@@ -1212,9 +1219,19 @@ and continue_with_error
   | Bind_frame _ :: rest | Map_frame _ :: rest ->
     continue_with_error session exec ~frames:rest msg
   | Catch_frame catch_frame :: rest ->
+    let discarded =
+      List.take
+        exec.local_effects_rev
+        (List.length exec.local_effects_rev
+         - List.length catch_frame.saved_local_effects_rev)
+    in
     exec.local_effects_rev <- catch_frame.saved_local_effects_rev;
     exec.emitted_rev <- catch_frame.saved_emitted_rev;
     exec.end_session_requested <- catch_frame.saved_end_session_requested;
+    List.iter discarded ~f:(fun eff ->
+      match find_operation session eff.Lang.op with
+      | Ok { kind = Local_transactional_with_result { rollback }; _ } -> rollback eff.args
+      | _ -> ());
     let open Result.Let_syntax in
     let%bind next_task =
       continuation_task_result session catch_frame.handler [ Lang.VString msg ]
@@ -1275,6 +1292,7 @@ and interpret_task
 let run_entrypoint
       ?control
       ?limits
+      ?prepare_result
       (config : runtime_config)
       (compiled : compiled_script)
       ~entrypoint
@@ -1291,6 +1309,7 @@ let run_entrypoint
     List.filter config.operations ~f:(fun operation ->
       match operation.kind with
       | Diagnostic | External_sync -> true
+      | Local_transactional_with_result _ -> Option.is_some prepare_result
       | Local_transactional | External_async -> false)
     |> operations_map
   in
@@ -1335,7 +1354,15 @@ let run_entrypoint
         let%bind task = expect_task_value value in
         let%bind outcome = interpret_task session exec ~frames:[] task in
         match outcome with
-        | Task_value value -> Ok value
+        | Task_value value ->
+          let%map install =
+            match prepare_result with
+            | None -> Ok ignore
+            | Some prepare ->
+              prepare ~value ~local_effects:(List.rev exec.local_effects_rev)
+          in
+          install ();
+          value
         | Task_suspend _ -> Error "Standalone execution cannot suspend for UI input")
   with
   | Lang.Runtime_error error ->

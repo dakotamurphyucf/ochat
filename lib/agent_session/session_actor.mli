@@ -74,6 +74,47 @@ val create_with_owner_lease_duration
 val snapshot : t -> (Agent_protocol.Snapshot.t, Agent_protocol.Error.t) result
 val state : t -> (Session_state.t, Agent_protocol.Error.t) result
 
+(** Host-only transactional background admission. The caller captures the opaque
+    request from the current borrowed tool authority before preparing a job.
+    Preparation derives ancestry from a live callback and does not reserve or
+    execute work. Do not expose these functions as raw RPCs or model tools. *)
+val prepare_background_job_launch
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> Chat_response.Background_request.t
+  -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
+
+(** Transfer a shared-capacity reservation for the unchanged prepared job to its
+    live owner. Failure releases the reservation; publish/abort callbacks must be
+    infallible and idempotent. Staging is invisible to durable job readers. *)
+val stage_background_job
+  :  t
+  -> job:Agent_protocol.Job.t
+  -> capacity:Staged_jobs.capacity
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Select exactly the job IDs in the surviving transaction effect log. Saving
+    the owner outcome/checkpoint atomically persists these jobs, then publishes
+    reservations. Rejection or callback exit releases provisional reservations. *)
+val select_background_jobs
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> ids:Agent_protocol.Id.Job.t list
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Idempotent catch-rollback cleanup, also allowed after the callback ends. *)
+val abort_background_job
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> id:Agent_protocol.Id.Job.t
+  -> (unit, Agent_protocol.Error.t) result
+
+val has_staged_background_job
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> id:Agent_protocol.Id.Job.t
+  -> (bool, Agent_protocol.Error.t) result
+
 module Extension_change : sig
   type t =
     | Invocation of Agent_protocol.Invocation.t

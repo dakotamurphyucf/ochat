@@ -205,7 +205,13 @@ let validate
             work
         in
         (match work with
-         | Job _ -> Ok ()
+         | Job id ->
+           let%bind job = job jobs id in
+           (match job.launch with
+            | None -> Ok ()
+            | Some { owner = Invocation owner; _ }
+              when P.Id.Invocation.equal owner i.context.id -> Ok ()
+            | Some _ -> invalid "pending job belongs to another launch owner")
          | Subscription id ->
            let%bind s = subscription subscriptions id in
            if P.Id.Invocation.compare i.context.id s.context.invocation_id = 0

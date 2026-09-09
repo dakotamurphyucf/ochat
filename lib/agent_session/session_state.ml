@@ -317,6 +317,14 @@ let validate t =
       ~schedules:t.schedules
   in
   let%bind () =
+    List.fold_result t.jobs ~init:() ~f:(fun () job ->
+      Job_launch.validate
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~jobs:t.jobs
+        job)
+  in
+  let%bind () =
     List.fold_result t.permissions ~init:() ~f:(fun () permission ->
       match permission.owner with
       | Operation _ -> Ok ()

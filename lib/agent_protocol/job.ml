@@ -38,6 +38,18 @@ type delivery =
   | Delivered of Timestamp.t
 [@@deriving sexp]
 
+type launch_owner =
+  | Invocation of Id.Invocation.t
+  | Moderator_event of Id.Moderator_execution.t
+[@@deriving equal, sexp]
+
+type launch =
+  { owner : launch_owner
+  ; parent_job : (Id.Job.t * int) option [@sexp.option]
+  ; nested_depth : int
+  }
+[@@deriving equal, sexp]
+
 type t =
   { id : Id.Job.t
   ; session_id : Id.Session.t
@@ -53,11 +65,95 @@ type t =
   ; completed_at : Timestamp.t option
   ; result : Jsonaf.t option
   ; delivery : delivery
+  ; launch : launch option [@sexp.option]
   }
 [@@deriving sexp]
 
 let optional_field name value encode =
   Option.map value ~f:(fun value -> name, encode value)
+;;
+
+let launch_to_json launch =
+  let kind, id =
+    match launch.owner with
+    | Invocation id -> "invocation", Id.Invocation.to_json id
+    | Moderator_event id -> "moderator_event", Id.Moderator_execution.to_json id
+  in
+  `Object
+    ([ "schema_version", `Number "1"
+     ; "owner_type", `String kind
+     ; "owner_id", id
+     ; "nested_depth", `Number (Int.to_string launch.nested_depth)
+     ]
+     @ Option.to_list
+         (Option.map launch.parent_job ~f:(fun (id, attempt) ->
+            ( "parent_job"
+            , `Object
+                [ "id", Id.Job.to_json id; "attempt", `Number (Int.to_string attempt) ] )))
+    )
+;;
+
+let launch_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind () =
+    Extension_codec.closed
+      fields
+      [ "schema_version"; "owner_type"; "owner_id"; "parent_job"; "nested_depth" ]
+  in
+  let%bind version =
+    Json_codec.required_as
+      fields
+      "schema_version"
+      (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+  in
+  let%bind () =
+    match version with
+    | 1 -> Ok ()
+    | _ ->
+      Error
+        (Protocol_error.create
+           Incompatible_protocol
+           ~message:"unsupported job launch schema"
+           ~retryable:false
+           ())
+  in
+  let%bind kind = Json_codec.required_as fields "owner_type" Json_codec.string in
+  let%bind owner =
+    match kind with
+    | "invocation" ->
+      Json_codec.required_as fields "owner_id" Id.Invocation.of_json
+      |> Result.map ~f:(fun id -> Invocation id)
+    | "moderator_event" ->
+      Json_codec.required_as fields "owner_id" Id.Moderator_execution.of_json
+      |> Result.map ~f:(fun id -> Moderator_event id)
+    | _ -> Error (Protocol_error.invalid_request "unknown job launch owner")
+  in
+  let%bind parent_job =
+    Json_codec.optional_as fields "parent_job" (fun json ->
+      let%bind fields = Json_codec.fields json in
+      let%bind () = Extension_codec.closed fields [ "id"; "attempt" ] in
+      let%bind id = Json_codec.required_as fields "id" Id.Job.of_json in
+      let%map attempt =
+        Json_codec.required_as
+          fields
+          "attempt"
+          (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+      in
+      id, attempt)
+  in
+  let%bind nested_depth =
+    Json_codec.required_as
+      fields
+      "nested_depth"
+      (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
+  in
+  match parent_job, nested_depth with
+  | None, 0 -> Ok { owner; parent_job; nested_depth }
+  | Some _, depth when depth > 0 -> Ok { owner; parent_job; nested_depth }
+  | _ ->
+    Error
+      (Protocol_error.invalid_request "job launch depth differs from parent ownership")
 ;;
 
 let terminal_completion t =
@@ -261,6 +357,7 @@ let to_json t =
     ; optional_field "completed_at" t.completed_at Timestamp.to_json
     ; optional_field "result" t.result Fn.id
     ; Some ("delivery", delivery_to_json t.delivery)
+    ; optional_field "launch" t.launch launch_to_json
     ]
     |> List.filter_opt
   in
@@ -311,7 +408,8 @@ let of_json json =
   let%bind status, retry_policy, attempt = decode_execution fields in
   let%bind created_at, started_at, next_run_at, completed_at = decode_times fields in
   let result = Json_codec.optional fields "result" in
-  let%map delivery = Json_codec.required_as fields "delivery" delivery_of_json in
+  let%bind delivery = Json_codec.required_as fields "delivery" delivery_of_json in
+  let%map launch = Json_codec.optional_as fields "launch" launch_of_json in
   { id
   ; session_id
   ; generation
@@ -326,6 +424,7 @@ let of_json json =
   ; completed_at
   ; result
   ; delivery
+  ; launch
   }
 ;;
 

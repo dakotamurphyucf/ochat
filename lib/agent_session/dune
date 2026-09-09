@@ -16,6 +16,8 @@
   security_grant
   session_state
   extension_invariants
+  job_launch
+  staged_jobs
   invocation_history
   invocation_recovery
   moderator_tool_dispatch
