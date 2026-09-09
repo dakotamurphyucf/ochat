@@ -26,6 +26,8 @@ type prepare_enqueue =
 
 type extension_services =
   { script_tools : Agent_runtime.t -> Script_tool_calls.t
+  ; standalone_execution_limits :
+      Chat_response.Extension_compiler.t -> Chatml_execution.limits
   ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
   ; history : unit -> History_entry.t list
@@ -759,8 +761,14 @@ let build_with_services
             with
             | Standalone _ -> true
             | Moderator _ -> false)
+        && List.exists elements ~f:(function
+          | Prompt.Chat_markdown.Script _ -> true
+          | _ -> false)
       then
-        Error (failure "standalone ChatML tool execution is not installed on this host")
+        Error
+          (failure
+             "standalone tools with a legacy moderator require an extensibility-v1 \
+              moderator")
       else Ok ()
   in
   let comp_tools, tool_tbl = Ochat_function.functions agent_runtime.functions in
@@ -898,7 +906,58 @@ let build_with_services
     Option.map script_tools ~f:(fun script_tools ->
       fun ~input ~capabilities ->
       let native = Script_tool_calls.native_dispatch script_tools ~input ~capabilities in
-      let moderator =
+      let standalone =
+        match definition, extension_services with
+        | Some definition, Some services ->
+          let event_handlers =
+            Option.map moderator ~f:(fun (moderator, _) ->
+              Moderator_event.foreground_handlers
+                ~script_tools
+                ~capabilities
+                ~manager:moderator.manager
+                ~session_meta:`Null
+                ~now
+                ())
+          in
+          let observer =
+            Option.bind moderator ~f:(fun (moderator, _) ->
+              Manager.invocation_observer moderator.manager)
+          in
+          [ Standalone_tool_dispatch.create
+              ?observer
+              ~env
+              ~definition
+              ~input
+              ~capabilities
+              ~script_tools
+              ~now
+              ~is_halted:(fun () -> Script_tool_calls.is_halted script_tools)
+              ~execution_limits:services.standalone_execution_limits
+              ~admit:(fun _ ->
+                Script_tool_calls.validate_definition script_tools definition)
+              ~revalidate:(fun _ ->
+                Script_tool_calls.validate_definition script_tools definition)
+              ~prepare_outcome:(fun outcome ->
+                Agent_protocol.Invocation.validate_outcome outcome
+                |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+              ~moderate_tool:(fun _ call ->
+                match event_handlers with
+                | None -> Ok None
+                | Some (Error error) -> Error error.Agent_protocol.Error.message
+                | Some (Ok handlers) ->
+                  handlers.handle
+                    ~history:(services.history ())
+                    ~available_tools:tools
+                    ~now_ms:
+                      (Agent_protocol.Timestamp.to_time_ns (now ())
+                       |> Time_ns.to_int_ns_since_epoch
+                       |> fun n -> n / 1_000_000)
+                    ~event:(Moderation.Event.Pre_tool_call call))
+              ()
+          ]
+        | _ -> []
+      in
+      let moderator_dispatch =
         match definition, moderator with
         | Some definition, Some (moderator, _) ->
           [ Moderator_tool_dispatch.create
@@ -923,7 +982,8 @@ let build_with_services
           ]
         | _ -> []
       in
-      Chat_response.In_memory_stream.Tool_dispatch.chain (moderator @ [ native ]))
+      Chat_response.In_memory_stream.Tool_dispatch.chain
+        (standalone @ moderator_dispatch @ [ native ]))
   in
   let config, model, reasoning = model_config elements in
   let worker =

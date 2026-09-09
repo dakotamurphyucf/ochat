@@ -14,11 +14,62 @@ let%expect_test "standalone handlers retain owned native calls and canonical out
     ; `Child_revoked
     ; `Invalid_output
     ; `Run_limit
+    ; `Custom
+    ; `Pre_reject
+    ; `Pre_failed
+    ; `Invalid_original
+    ; `Invalid_rewrite
+    ; `Rewrite
+    ; `Redirect
+    ; `Redirect_unselected
+    ; `Oversized_rewrite
     ]
     ~f:(fun mode ->
       let calls = ref 0
-      and native_approvals = ref 0 in
-      let registry = ref (native_registry calls ~raises:false) in
+      and native_approvals = ref 0
+      and pre_calls = ref 0 in
+      let custom =
+        match mode with
+        | `Custom -> true
+        | _ -> false
+      in
+      let initial = native_registry ~custom calls ~raises:false in
+      let module Alias = struct
+        type input = string
+
+        let name = "alias_file"
+        let description = Some "redirect target"
+        let type_ = "function"
+        let parameters = `Object [ "type", `String "object" ]
+        let input_of_string input = input
+      end
+      in
+      let alias =
+        Ochat_function.create_function
+          (module Alias)
+          (fun input ->
+             assert (String.equal input "{}");
+             Int.incr calls;
+             Openai.Responses.Tool_output.Output.Text "alias output")
+      in
+      let original = List.hd_exn (C.references initial) in
+      let binding =
+        C.resolve initial ~id:original.id ~fingerprint:original.fingerprint
+        |> Result.map_error ~f:(fun error -> error.C.message)
+        |> Result.ok_or_failwith
+      in
+      let registry =
+        ref
+          (C.create
+             ~owner:"fixture"
+             ~resource_fingerprint:
+               (Chatmd_shell_spec.Source_ref.digest "standalone resources")
+             [ original.implementation_revision, C.implementation binding
+             ; Chatmd_shell_spec.Source_ref.digest "alias v1", alias
+             ]
+           |> Result.map_error ~f:(fun error -> error.C.message)
+           |> Result.ok_or_failwith)
+      in
       with_handoff_actor
         ~make_worker:(fun env actor_ready ->
           let dir = Eio.Stdenv.cwd env in
@@ -30,7 +81,13 @@ let never = loop(0)
 let run ctx input = Task.pure(`Complete(`String("unreachable")))|}
             | _ ->
               {|let count = [0]
-let run ctx input = Task.bind(Tool.call("read_file", `Object([])), fun result ->
+let run ctx input = Task.bind(Tool.call("read_file", |}
+              ^ (match mode with
+                 | `Custom -> {|`String("{}")|}
+                 | `Invalid_original -> "`Null"
+                 | `Rewrite -> {|`Object([{key = "before"; value = `String("rewrite")}])|}
+                 | _ -> "`Object([])")
+              ^ {|), fun result ->
   let ignored = count[0] <- count[0] + 1 in
   match result with
   | `Ok(value) -> |}
@@ -47,10 +104,11 @@ let run ctx input = Task.bind(Tool.call("read_file", `Object([])), fun result ->
           let uses =
             match mode with
             | `Unselected -> ""
+            | `Redirect -> {|<uses tool="read_file"/><uses tool="alias_file"/>|}
             | _ -> {|<uses tool="read_file"/>|}
           in
           let source =
-            {|<script id="standalone" language="chatml" kind="tool">|}
+            {|<script id="standalone" language="chatml" kind="tool" max_value="256KiB">|}
             ^ body
             ^ {|</script><tool name="summary" type="chatml" script="standalone"
 entrypoint="run" input_schema="input.json" output_schema="output.json">|}
@@ -121,10 +179,40 @@ entrypoint="run" input_schema="input.json" output_schema="output.json">|}
                   Agent_session.Script_tool_calls.validate_definition
                     script_tools
                     definition)
-                ~moderate_tool:(fun _ _ -> Ok None)
+                ~moderate_tool:(fun _ call ->
+                  Int.incr pre_calls;
+                  assert (String.equal call.name "read_file");
+                  (match mode with
+                   | `Custom -> assert (String.equal call.payload_text "{}")
+                   | _ -> ());
+                  let decision
+                    : (Chat_response.Moderation.Tool_moderation.t option, string) result
+                    =
+                    match mode with
+                    | `Pre_reject -> Ok (Some (Reject "private rejection"))
+                    | `Pre_failed -> Error "private pre diagnostic"
+                    | `Invalid_rewrite -> Ok (Some (Rewrite_args `Null))
+                    | `Rewrite -> Ok (Some (Rewrite_args (`Object [])))
+                    | `Redirect | `Redirect_unselected ->
+                      Ok (Some (Redirect ("alias_file", `Object [])))
+                    | `Oversized_rewrite ->
+                      Ok
+                        (Some
+                           (Rewrite_args
+                              (`Object [ "huge", `String (String.make (300 * 1024) 'x') ])))
+                    | _ -> Ok None
+                  in
+                  Result.map
+                    decision
+                    ~f:
+                      (Option.map ~f:(fun action ->
+                         { Chat_response.Moderation.Outcome.empty with
+                           tool_moderation = Some action
+                         })))
                 ~prepare_outcome:(fun outcome ->
                   I.validate_outcome outcome
                   |> Result.map_error ~f:(fun error -> error.Agent_protocol.Error.message))
+                ()
             in
             let call_once call_id =
               let id =
@@ -207,7 +295,24 @@ entrypoint="run" input_schema="input.json" output_schema="output.json">|}
              assert (Option.is_none child.context.provider_call_id);
              assert (Option.is_none child.context.call_entry_id);
              assert (Option.is_none child.output_entry_id);
-             assert (Option.is_none child.observation));
+             assert (Option.is_none child.observation);
+             let routing = Option.value_exn child.routing in
+             assert (String.equal routing.original_name "read_file");
+             assert (Option.is_none routing.canonical_payload);
+             match mode with
+             | `Custom ->
+               [%test_eq: string]
+                 (Chatmd_shell_spec.Source_ref.digest "{}")
+                 routing.original_payload.sha256;
+               [%test_eq: int] 2 routing.final_payload.byte_length
+             | `Rewrite ->
+               assert (
+                 not
+                   (I.equal_payload_fingerprint
+                      routing.original_payload
+                      routing.final_payload))
+             | `Redirect -> [%test_eq: string] "alias_file" child.context.tool_name
+             | _ -> ());
            let saved = Agent_session.Memory_backend.state backend in
            assert (List.equal I.equal state.invocations saved.invocations);
            print_s
@@ -219,27 +324,55 @@ entrypoint="run" input_schema="input.json" output_schema="output.json">|}
                         | `Child_revoked
                         | `Invalid_output
                         | `Run_limit
+                        | `Custom
+                        | `Pre_reject
+                        | `Pre_failed
+                        | `Invalid_original
+                        | `Invalid_rewrite
+                        | `Rewrite
+                        | `Redirect
+                        | `Redirect_unselected
+                        | `Oversized_rewrite
                         ]
                ; outcomes : string list
                ; native_calls = (!calls : int)
                ; native_approvals = (!native_approvals : int)
+               ; pre_calls = (!pre_calls : int)
                ; children = (List.length children : int)
                }]));
   [%expect
     {|
     ((mode Success) (outcomes (1:disclosed 1:disclosed)) (native_calls 2)
-     (native_approvals 2) (children 2))
+     (native_approvals 2) (pre_calls 2) (children 2))
     ((mode Unselected) (outcomes (invocation.unselected_tool)) (native_calls 0)
-     (native_approvals 0) (children 0))
+     (native_approvals 0) (pre_calls 0) (children 0))
     ((mode Parent_denied) (outcomes (invocation.permission_denied))
-     (native_calls 0) (native_approvals 0) (children 0))
+     (native_calls 0) (native_approvals 0) (pre_calls 0) (children 0))
     ((mode Child_denied) (outcomes (invocation.permission_denied))
-     (native_calls 0) (native_approvals 1) (children 1))
+     (native_calls 0) (native_approvals 1) (pre_calls 1) (children 1))
     ((mode Child_revoked) (outcomes (invocation.stale_binding)) (native_calls 0)
-     (native_approvals 1) (children 1))
+     (native_approvals 1) (pre_calls 1) (children 1))
     ((mode Invalid_output) (outcomes (invocation.invalid_output))
-     (native_calls 1) (native_approvals 1) (children 1))
+     (native_calls 1) (native_approvals 1) (pre_calls 1) (children 1))
     ((mode Run_limit) (outcomes (chatml.execution_limit)) (native_calls 0)
-     (native_approvals 0) (children 0))
+     (native_approvals 0) (pre_calls 0) (children 0))
+    ((mode Custom) (outcomes (1:disclosed)) (native_calls 1) (native_approvals 1)
+     (pre_calls 1) (children 1))
+    ((mode Pre_reject) (outcomes (invocation.pre_tool_rejected)) (native_calls 0)
+     (native_approvals 0) (pre_calls 1) (children 1))
+    ((mode Pre_failed) (outcomes (invocation.pre_tool_failed)) (native_calls 0)
+     (native_approvals 0) (pre_calls 1) (children 1))
+    ((mode Invalid_original) (outcomes (invocation.invalid_input))
+     (native_calls 0) (native_approvals 0) (pre_calls 0) (children 1))
+    ((mode Invalid_rewrite) (outcomes (invocation.invalid_input))
+     (native_calls 0) (native_approvals 0) (pre_calls 1) (children 1))
+    ((mode Rewrite) (outcomes (1:disclosed)) (native_calls 1)
+     (native_approvals 1) (pre_calls 1) (children 1))
+    ((mode Redirect) (outcomes (1:disclosed)) (native_calls 1)
+     (native_approvals 1) (pre_calls 1) (children 1))
+    ((mode Redirect_unselected) (outcomes (invocation.unselected_tool))
+     (native_calls 0) (native_approvals 0) (pre_calls 1) (children 1))
+    ((mode Oversized_rewrite) (outcomes (invocation.invalid_input))
+     (native_calls 0) (native_approvals 0) (pre_calls 1) (children 0))
     |}]
 ;;

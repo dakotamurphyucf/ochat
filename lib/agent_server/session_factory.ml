@@ -1064,6 +1064,8 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
               | Openai.Responses.Tool_output.Output.Text text -> Ok (`String text)
               | output -> Ok (Openai.Responses.Tool_output.Output.jsonaf_of_t output))
             ~defer_observation:(fun _ -> Ok ()))
+    ; standalone_execution_limits =
+        Agent_session.Standalone_tool_dispatch.declared_execution_limits
     ; claim_lifecycle =
         (fun ~event ~snapshot handle ->
           let open Result.Let_syntax in

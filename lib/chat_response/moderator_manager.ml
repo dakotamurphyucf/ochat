@@ -1323,7 +1323,7 @@ let handle_observation_entries
                        Agent_protocol.Id.Moderator_execution.to_string
                        invocation.parent_event )
                  ; "tool_name", L.VString invocation.context.tool_name
-                 ; "origin", L.VVariant ("Moderator", [])
+                 ; "origin", Moderator_invocation.origin_value invocation.context.origin
                  ; "outcome", Value_codec.jsonaf_to_value (I.outcome_to_json result)
                  ])
           ] )

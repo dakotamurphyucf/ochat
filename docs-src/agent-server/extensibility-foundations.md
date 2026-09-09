@@ -978,9 +978,9 @@ input, pre-tool rejection, permission denial, unhandled calls, duplicate resolut
 wrong invocation IDs, invalid output/state, disclosure rejection, handler failure and failed result
 commits. Classification comes from the failing host stage, not parsing a script's
 diagnostic text. Raw exception diagnostics are not placed in model-visible output.
-Host persistence failures propagate without rerunning the handler. Known standalone
-declarations report an unavailable execution service; they never fall through to a
-same-named native runner.
+Host persistence failures propagate without rerunning the handler. The qualified
+runtime composes the standalone adapter before moderator/native dispatch, so a
+standalone declaration never falls through to a same-named native runner.
 Transient fork calls cannot use the root actor's invocation ownership.
 
 With the internal dispatch service installed, pre-tool script errors, host
@@ -1598,17 +1598,45 @@ authority/disclosure service, with `Script` origin and the actual parent invocat
 Its required host moderation callback runs after original-input schema checks.
 Argument rewrites and redirects retain routing fingerprints, and a redirected
 target must remain in the exact captured capability subset. Final native schema,
-current authorization and post-approval capability checks still apply. Pre-tool
+current authorization and post-approval capability checks still apply. Rewritten
+values must also fit the script projection limits. Custom tools retain raw-string
+payloads and routing fingerprints rather than JSON-quoted text. Pre-tool
 rejections are recorded without calling native authorization or implementation.
 An optional observation identity belongs to the conversation moderator; the
 standalone tool script is not an event observer. Script results do not create
 provider call IDs or tool-output history entries.
 
 The adapter's actor tests cover concurrent fresh globals, parent/native denial,
-revocation during approval, unselected tools, invalid results after native work,
-initializer limits and persisted canonical outcomes. Runtime-builder installation,
-owned pre/post moderator integration and the public `run_chatml` tool remain E04
-work. Current normal runtime construction still rejects standalone declarations.
+revocation during approval, selected/unselected redirects, original and rewritten
+input validation, custom payloads, invalid results after native work, initializer
+limits and persisted canonical outcomes.
+
+`Runtime_builder.build_with_extensions` installs this adapter and binds the exact
+native resources captured during construction. `standalone_execution_limits` is
+an explicit host callback; the daemon's qualification path uses captured script
+limits with the execution service's default allocation budget. Standalone tools
+can run without a moderator or alongside an extensibility-v1 moderator. Combining
+them with a legacy moderator is currently rejected before legacy initialization.
+The normal daemon feature flags remain disabled pending authoring qualification.
+
+With a moderator, nested native calls pass through actor-owned `Pre_tool_call`
+events. Their runtime requests join the standalone dispatch result, including a
+terminal session decision. The completed native invocation retains observation
+intent for that conversation moderator. Existing foreground/idle drains publish
+`Tool_observed` with the actual `Script` origin and acknowledge it under ownership.
+Only actual model calls receive provider-compatible tool output entries.
+
+Concurrent callbacks may commit a halt while another event waits for ownership.
+The waiting foreground handler rechecks the committed halt and returns the terminal
+decision. Failed handlers with no committed halt retain their failure. This lets
+already admitted provider calls finish their result publication without starting
+more native effects or another provider request. Runtime-builder fixtures exercise
+this alongside concurrent fresh globals, nested pre rejection, permitted file
+argument rewriting and standalone execution without a moderator.
+
+The public one-off `run_chatml` tool, generalized extension-to-extension selection,
+effective budget/deadline projection and remaining authoring/qualification work
+still belong to E04 and A01; this installation does not complete those phases.
 
 The actor suite is organized in [focused test modules](../../test/agent_session/README.md),
 with shared fixtures and the retained `@test/runtest-agent_session_test` entrypoint.

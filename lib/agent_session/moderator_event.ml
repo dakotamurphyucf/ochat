@@ -124,7 +124,9 @@ let run
                   ~on_tool_call
                   ~prepare_event
                 |> Result.map ~f:ignore)
-             |> Result.map_error ~f:(fun _ -> failed "moderator event failed")))
+             |> Result.map_error ~f:(fun message ->
+               Chatml.Chatml_debug_log.emitf "event_failed: %s" message;
+               failed "moderator event failed")))
     in
     (match claimed, !outcome with
      | false, None -> Ok None
@@ -255,11 +257,11 @@ let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now 
         }
   in
   let handle ~history ~available_tools ~now_ms:_ ~event =
-    (let%bind halted = halted () in
-     match halted with
+    (let%bind stopped = halted () in
+     match stopped with
      | Some outcome -> Ok (Some outcome)
      | None ->
-       let%bind outcome =
+       let result =
          run_ordinary
            ~event
            ~claim:(capabilities.with_moderator_event ~event)
@@ -271,9 +273,18 @@ let foreground_handlers ?script_tools ~capabilities ~manager ~session_meta ~now 
            ~now
            ()
        in
-       (match outcome with
-        | Some outcome -> Ok (Some (foreground_outcome outcome))
-        | None -> Error (failed "foreground moderator event was not admitted")))
+       (match result with
+        | Ok (Some outcome) -> Ok (Some (foreground_outcome outcome))
+        | Ok None -> Error (failed "foreground moderator event was not admitted")
+        | Error error ->
+          (* Another callback may commit a halt while this one waits for ownership.
+             Preserve that terminal decision rather than fail the owning operation
+             for a hook that must no longer execute. Failed uncommitted handlers
+             leave the manager unhalted and retain their original failure. *)
+          let%bind stopped = halted () in
+          (match stopped with
+           | Some outcome -> Ok (Some outcome)
+           | None -> Error error)))
     |> Result.map_error ~f:(fun error -> error.P.Error.message)
   in
   let drain ~history ~available_tools ~now_ms:_ ~max_events =

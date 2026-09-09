@@ -29,6 +29,9 @@ type extension_services =
     (** Bind shared native policy/disclosure to the exact constructed runtime.
         This service owns generic native tool approval; delegated shell tools
         still use the authorized shell runtime's policy and approval broker. *)
+  ; standalone_execution_limits :
+      Chat_response.Extension_compiler.t -> Chatml_execution.limits
+    (** Host-selected execution policy for captured standalone scripts. *)
   ; claim_lifecycle : event:Chat_response.Moderation.Event.t -> Moderator_event.claim
     (** Actual running-idle actor ownership. Never manufacture an operation. *)
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
@@ -147,9 +150,12 @@ val build
     and the actual authorized native resources. Installs owned foreground dispatch
     and event services. [start_moderator] returns the prepared initial checkpoint;
     startup/resume effects wait for [moderator_activation] or the first foreground
-    operation, after actor installation. Standalone and background completion
-    services remain unavailable until implemented. Public feature negotiation is
-    unchanged; ordinary hosts continue using [build]. *)
+    operation, after actor installation. Prepared standalone tools run with their
+    selected native subset, host execution limits, owned pre hooks and Script-origin
+    observations. They may run without a moderator or alongside extensibility-v1;
+    a legacy moderator combination is rejected before initialization. Background
+    completion remains unavailable. Public feature negotiation is unchanged;
+    ordinary hosts continue using [build]. *)
 val build_with_extensions
   :  services:extension_services
   -> sw:Eio.Switch.t

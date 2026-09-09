@@ -49,6 +49,8 @@ let native_dispatch t ~input ~capabilities =
     ~prepare_output:t.prepare_output
 ;;
 
+let is_halted t = t.is_halted ()
+
 let validate_definition t definition =
   let captured = EC.definition_capabilities definition in
   let names = List.map (C.references captured) ~f:(fun reference -> reference.C.name) in
@@ -163,6 +165,7 @@ let with_scope
               | Some prepare -> prepare ~id reference args)
           in
           let reference = prepared.reference in
+          let%bind () = checked `Input (fun () -> validate_value prepared.input) in
           let%bind invocation =
             checked `Admission (fun () ->
               I.create
@@ -259,6 +262,17 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
 
 let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderate f =
   let selected = EC.capabilities prepared in
+  let kind (reference : C.reference) =
+    match C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint with
+    | Ok binding when String.equal (C.implementation binding).info.type_ "custom" ->
+      Chat_response.Moderation.Tool_call.Custom
+    | _ -> Function
+  in
+  let payload reference input =
+    match kind reference, input with
+    | Custom, `String text -> text
+    | Function, _ | Custom, _ -> Jsonaf.to_string input
+  in
   let fingerprint payload =
     I.
       { sha256 = Chatmd_shell_spec.Source_ref.digest payload
@@ -266,19 +280,16 @@ let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderat
       }
   in
   let prepare ~id (original : C.reference) input =
-    let original_payload = Jsonaf.to_string input in
+    let original_payload = payload original input in
     let route reference input preparation rejection =
       let routing : I.routing =
         { kind =
-            (match
-               C.resolve selected ~id:reference.C.id ~fingerprint:reference.fingerprint
-             with
-             | Ok binding when String.equal (C.implementation binding).info.type_ "custom"
-               -> Custom
-             | _ -> Function)
+            (match kind reference with
+             | Custom -> Custom
+             | Function -> Function)
         ; original_name = original.name
         ; original_payload = fingerprint original_payload
-        ; final_payload = fingerprint (Jsonaf.to_string input)
+        ; final_payload = fingerprint (payload reference input)
         ; canonical_payload = None
         ; preparation
         }
@@ -301,13 +312,7 @@ let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderat
         { id = Agent_protocol.Id.Invocation.to_string id
         ; name = original.name
         ; args = input
-        ; kind =
-            (match
-               C.resolve selected ~id:original.id ~fingerprint:original.fingerprint
-             with
-             | Ok binding when String.equal (C.implementation binding).info.type_ "custom"
-               -> Custom
-             | _ -> Function)
+        ; kind = kind original
         ; payload_text = original_payload
         ; meta =
             `Object

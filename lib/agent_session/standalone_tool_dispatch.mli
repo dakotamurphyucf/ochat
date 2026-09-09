@@ -5,15 +5,24 @@
 
     The host supplies execution budgets, lifecycle checks, final-target admission
     and post-wait revalidation, disclosure, and the scoped native policy service.
-    [moderate_tool] supplies owned pre-tool decisions for nested native calls;
-    the host remains responsible for post-tool observations and public installation.
-    Pending is rejected
+    [moderate_tool] supplies owned pre-tool outcomes for nested native calls;
+    their runtime requests are retained in the dispatch result even when execution
+    fails. End-session outcomes prevent the native effect. [observer] binds durable
+    nested observation intent to the conversation moderator. The host remains
+    responsible for draining observations and public installation. Pending is rejected
     until an owned completion service is installed. Known standalone names stay
     claimed on rejection; other kinds return None for the next dispatcher. *)
 exception Dispatch_error of Agent_protocol.Error.t
 
+(** Use the captured script's declared budgets and the execution service's default
+    allocation budget. Hosts may supply their own policy via [execution_limits]. *)
+val declared_execution_limits
+  :  Chat_response.Extension_compiler.t
+  -> Chatml_execution.limits
+
 val create
-  :  env:Eio_unix.Stdenv.base
+  :  ?observer:Agent_protocol.Invocation.observer
+  -> env:Eio_unix.Stdenv.base
   -> definition:Chat_response.Extension_compiler.definition
   -> input:Operation_worker.Input.t
   -> capabilities:Operation_worker.Capabilities.t
@@ -28,5 +37,6 @@ val create
   -> moderate_tool:
        (Agent_protocol.Invocation.t
         -> Chat_response.Moderation.Tool_call.t
-        -> (Chat_response.Moderation.Tool_moderation.t option, string) result)
+        -> (Chat_response.Moderation.Outcome.t option, string) result)
+  -> unit
   -> Chat_response.In_memory_stream.Tool_dispatch.t

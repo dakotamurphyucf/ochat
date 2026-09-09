@@ -20,6 +20,15 @@ let option f = function
 
 let string x = L.VString x
 let int x = L.VInt x
+
+let origin_value = function
+  | I.Model -> L.VVariant ("Model", [])
+  | Moderator -> L.VVariant ("Moderator", [])
+  | Script -> L.VVariant ("Script", [])
+  | Delegated_agent -> L.VVariant ("Delegated_agent", [])
+  | External_adapter -> L.VVariant ("External_adapter", [])
+;;
+
 let max_nested_calls = 100
 let bytes x = D.bytes_to_int64 x |> Int64.to_int_exn
 
@@ -228,14 +237,6 @@ let create_for ~implementation ~prepared ~invocation ~(limits : S.limits) ~valid
     else error "invocation.stale_binding" "invocation does not match the prepared handler"
   in
   let%bind input = prepare_input ~prepared ~limits c.input in
-  let origin =
-    match c.origin with
-    | I.Model -> "Model"
-    | Moderator -> "Moderator"
-    | Script -> "Script"
-    | Delegated_agent -> "Delegated_agent"
-    | External_adapter -> "External_adapter"
-  in
   let capability (r : Tool_capability.reference) =
     record
       [ "id", string (Id.Capability.to_string r.id)
@@ -264,7 +265,7 @@ let create_for ~implementation ~prepared ~invocation ~(limits : S.limits) ~valid
       ; "provider_call_id", option string c.provider_call_id
       ; "session_id", string (Id.Session.to_string c.session_id)
       ; "generation", int c.generation
-      ; "origin", L.VVariant (origin, [])
+      ; "origin", origin_value c.origin
       ; ( "parent_invocation"
         , option (fun id -> string (Id.Invocation.to_string id)) c.parent_invocation )
       ; ( "parent_event"

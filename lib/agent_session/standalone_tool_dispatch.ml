@@ -23,7 +23,21 @@ let checked failure f =
   | exception _ -> Error failure
 ;;
 
+let declared_execution_limits prepared =
+  let limits = EC.execution_limits prepared in
+  { Chatml_execution.default_limits with
+    fuel = limits.fuel
+  ; max_tasks = limits.max_tasks
+  ; wall_seconds = Chatmd_shell_spec.Duration.to_seconds limits.wall_time
+  ; max_value_bytes =
+      Chatmd_shell_spec.Duration.bytes_to_int64 limits.max_value_bytes |> Int64.to_int_exn
+  ; max_array_items = limits.max_array_items
+  ; max_depth = limits.max_depth
+  }
+;;
+
 let create
+      ?observer
       ~env
       ~definition
       ~input
@@ -36,6 +50,7 @@ let create
       ~revalidate
       ~prepare_outcome
       ~moderate_tool
+      ()
   =
   let cache = Stream_invocation.cache () in
   let find name =
@@ -98,6 +113,7 @@ let create
     | None -> None
     | Some prepared ->
       let invocation = prepare prepared request in
+      let requests = ref [] in
       let resolved =
         capabilities.with_invocation ~invocation (fun ~dispatched ->
           let execute () =
@@ -172,11 +188,28 @@ let create
             in
             let%bind value =
               Script_tool_calls.with_standalone
+                ?observer
                 script_tools
                 ~prepared
                 ~capabilities
                 ~parent:dispatched
-                ~moderate:(moderate_tool dispatched)
+                ~moderate:(fun call ->
+                  let%map outcome = moderate_tool dispatched call in
+                  match outcome with
+                  | None -> None
+                  | Some outcome ->
+                    requests
+                    := !requests
+                       @ outcome.Chat_response.Moderation.Outcome.runtime_requests;
+                    (match
+                       Chat_response.Runtime_semantics.should_end_session
+                         outcome.runtime_requests
+                     with
+                     | Some _ ->
+                       Some
+                         (Chat_response.Moderation.Tool_moderation.Reject
+                            "The session has ended.")
+                     | None -> outcome.tool_moderation))
                 run
               |> Result.map_error ~f:(fun error ->
                 fail error.Chatml_execution.code error.message)
@@ -216,7 +249,7 @@ let create
       Some
         D.
           { output = Text (Jsonaf.to_string (I.outcome_to_json outcome))
-          ; runtime_requests = []
+          ; runtime_requests = !requests
           ; commit_output =
               Some
                 (fun entry ->

@@ -146,7 +146,7 @@ type t = private
     (** Durable reason that no provider result will be published. The recorded
         outcome is preserved. Present only on resolved model invocations; codec 4. *)
   ; observation : observation option [@sexp.option]
-    (** Non-authorizing nested moderator observation intent, fixed at admission.
+    (** Non-authorizing nested script/moderator observation intent, fixed at admission.
         Handling disposition is independent of the tool outcome; codec 5. *)
   ; parent_event : Id.Moderator_execution.t option [@sexp.option]
     (** Direct ordinary-event owner; exclusive with invocation/job parents. Codec 9.

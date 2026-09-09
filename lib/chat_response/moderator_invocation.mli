@@ -49,6 +49,9 @@ val create_standalone
 val context : t -> L.value
 val input : t -> L.value
 
+(** Shared origin projection for invocation contexts and observation events. *)
+val origin_value : I.origin -> L.value
+
 (** Shared result validation for a returned standalone outcome or a moderator
     resolution. Checks JSON projection, success schema, error envelopes, owned
     Pending references and serialized size. Does not resolve or publish. *)

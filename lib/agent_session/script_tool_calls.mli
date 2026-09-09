@@ -7,6 +7,9 @@ open Core
     the current registry is checked again after authorizing waits. *)
 type t
 
+(** Read the owning host's current lifecycle policy. *)
+val is_halted : t -> bool
+
 val create
   :  registry:(unit -> Chat_response.Tool_capability.t)
   -> moderator_names:String.Set.t
