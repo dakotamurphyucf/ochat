@@ -57,8 +57,10 @@ val runner_control : runner -> Chatml.Chatml_lang.execution_control
 (** Run an owned initialization/event under the runner's policy. Host
     cancellation propagates and lexical bindings expire even on failure.
     Checks that protect a transaction must happen before its irreversible
-    commit; this wrapper does not retroactively validate or undo host effects. *)
-val run_scoped : runner -> (unit -> 'a) -> ('a, error) result
+    commit; this wrapper does not retroactively validate or undo host effects.
+    [context] merges explicit caller ancestry with the current fiber's budgets,
+    preserving their lifetimes and ceilings across host domain handoffs. *)
+val run_scoped : ?context:context -> runner -> (unit -> 'a) -> ('a, error) result
 
 (** Run a fresh standalone task entrypoint. Defaults to [Bounded default_limits].
     Bounded evaluation polls cancellation at regular expression intervals. Nested

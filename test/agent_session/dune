@@ -11,6 +11,8 @@
   invocation_tests
   jobs_tests
   managed_nested_tests
+  managed_moderator_owner_tests
+  managed_moderator_dispatch_tests
   moderator_handoff_tests
   moderator_descendant_tests
   moderator_lifecycle_tests

@@ -12,6 +12,17 @@ type managed_service =
   ; execution_limits : EC.t -> Chatml_execution.limits
   }
 
+type moderator_dispatch =
+  execute:Native_tool_invocation.moderator_executor
+  -> native_execute:Native_tool_invocation.executor
+  -> selected:C.t
+  -> reference:C.reference
+  -> invocation:I.t
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (I.t, Agent_protocol.Error.t) result
+
 type t =
   { registry : unit -> C.t
   ; moderator_names : String.Set.t
@@ -23,6 +34,7 @@ type t =
       Openai.Responses.Tool_output.Output.t -> (Jsonaf.t, Agent_protocol.Error.t) result
   ; defer_observation : I.t -> (unit, Agent_protocol.Error.t) result
   ; managed : (t -> Native_tool_invocation.managed_dispatch) option
+  ; moderator : (t -> moderator_dispatch) option
   }
 
 let create
@@ -44,6 +56,7 @@ let create
   ; prepare_output
   ; defer_observation
   ; managed = None
+  ; moderator = None
   }
 ;;
 
@@ -59,6 +72,9 @@ let native_dispatch t ~input ~capabilities =
 ;;
 
 let is_halted t = t.is_halted ()
+let current_capabilities t = t.registry ()
+let authorize t = t.authorize
+let with_moderator_dispatch t ~dispatch = { t with moderator = Some dispatch }
 
 let validate_definition t definition =
   let captured = EC.definition_capabilities definition in
@@ -97,6 +113,7 @@ type prepared_call =
 
 let with_scope
       ?prepare
+      ?moderator_execute
       ?(max_nested_calls = Chat_response.Moderator_invocation.max_nested_calls)
       t
       ~selected
@@ -142,6 +159,16 @@ let with_scope
     value
   in
   let references = C.references selected in
+  let reentrant name =
+    Set.mem t.moderator_names name
+    ||
+    match Native_tool_moderation.active_moderator (), C.find selected ~name with
+    | Some owner, Ok binding ->
+      (match C.implementation binding with
+       | Managed (Moderator script) -> String.equal script owner.script_id
+       | _ -> false)
+    | _ -> false
+  in
   let names = List.map references ~f:(fun reference -> reference.C.name) in
   let registry () =
     match C.select (t.registry ()) ~names with
@@ -153,7 +180,7 @@ let with_scope
     then tool_error "invocation.inactive_scope"
     else if Atomic.fetch_and_add attempts 1 >= max_nested_calls
     then tool_error "invocation.nested_call_limit"
-    else if Set.mem t.moderator_names name
+    else if reentrant name
     then tool_error "moderator_reentrancy"
     else (
       match
@@ -214,16 +241,44 @@ let with_scope
                     (fail
                        "moderator_reentrancy"
                        "Tool execution requires a decision from the active moderator."))
+              | None when reentrant reference.name ->
+                execute ~invocation (fun ~dispatched:_ ->
+                  Ok
+                    (fail
+                       "moderator_reentrancy"
+                       "Tool execution would re-enter the active moderator."))
               | None ->
-                Native_tool_invocation.run_scoped_with_managed
-                  ~managed:(Option.map t.managed ~f:(fun install -> install t))
-                  ~execute
-                  ~registry
-                  ~reference
-                  ~invocation
-                  ~is_halted:t.is_halted
-                  ~authorize:t.authorize
-                  ~prepare_output)
+                let moderator_target =
+                  match
+                    C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+                  with
+                  | Ok binding ->
+                    (match C.implementation binding with
+                     | Managed (Moderator _) -> true
+                     | _ -> false)
+                  | Error _ -> false
+                in
+                (match moderator_target, t.moderator, moderator_execute with
+                 | true, Some install, Some moderator_execute ->
+                   install
+                     t
+                     ~execute:moderator_execute
+                     ~native_execute:execute
+                     ~selected
+                     ~reference
+                     ~invocation
+                     ~prepare_output
+                 | _ ->
+                   Native_tool_invocation.run_scoped_with_managed
+                     ~managed:(Option.map t.managed ~f:(fun install -> install t))
+                     ~moderator_execute
+                     ~execute
+                     ~registry
+                     ~reference
+                     ~invocation
+                     ~is_halted:t.is_halted
+                     ~authorize:t.authorize
+                     ~prepare_output))
           in
           let%map () =
             match resolved.observation with
@@ -250,6 +305,7 @@ let with_scope
       match origin with
       | Moderator ->
         Native_tool_moderation.with_handler
+          ?active_moderator:observer
           ~observer
           ~prepare:(fun call ->
             match
@@ -278,6 +334,8 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
     { t with moderator_names = Set.add t.moderator_names (EC.declaration prepared).name }
   in
   with_scope
+    ~moderator_execute:
+      capabilities.Operation_worker.Capabilities.with_moderator_invocation
     t
     ~selected
     ~limits:(EC.execution_limits prepared)
@@ -293,9 +351,50 @@ let with_invocation t ~prepared ~capabilities ~(parent : I.t) f =
     f
 ;;
 
+let with_managed_invocation t ~execution ~borrowed f =
+  let prepared = Managed.prepared execution in
+  let parent = Managed.invocation execution in
+  let selected = EC.capabilities prepared in
+  let moderator_names =
+    List.fold (C.references selected) ~init:t.moderator_names ~f:(fun names reference ->
+      match C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint with
+      | Ok binding ->
+        (match C.implementation binding with
+         | Managed (Moderator script) when String.equal script (EC.script prepared).id ->
+           Set.add names reference.name
+         | _ -> names)
+      | Error _ -> names)
+  in
+  let valid_parent =
+    I.equal parent (Native_tool_invocation.borrowed_invocation borrowed)
+    && (match (EC.declaration prepared).implementation with
+        | Moderator _ -> true
+        | Standalone _ -> false)
+    &&
+    match Native_tool_invocation.borrowed_capabilities borrowed with
+    | Ok ceiling -> String.equal (C.fingerprint selected) (C.fingerprint ceiling)
+    | Error _ -> false
+  in
+  with_scope
+    { t with moderator_names }
+    ~selected
+    ~limits:(EC.execution_limits prepared)
+    ~origin:Moderator
+    ~observer:
+      (Some
+         { script_id = (EC.script prepared).id
+         ; source_sha256 = (EC.script prepared).source_sha256
+         })
+    ~valid_parent
+    ~execute:(Native_tool_invocation.execute_borrowed borrowed)
+    ~parent:(Invocation parent)
+    f
+;;
+
 let with_script_native_calls
       ?observer
       ?max_nested_calls
+      ?moderator_execute
       t
       ~selected
       ~limits
@@ -397,6 +496,7 @@ let with_script_native_calls
     with_scope
       ~prepare
       ?max_nested_calls
+      ?moderator_execute
       t
       ~selected
       ~limits
@@ -454,6 +554,7 @@ let run_managed t service execution borrowed =
     let%bind value =
       with_script_native_calls
         ?observer:(Native_tool_moderation.observer moderation)
+        ?moderator_execute:(N.moderator_executor borrowed)
         t
         ~selected
         ~limits:(EC.execution_limits prepared)
@@ -526,6 +627,8 @@ let with_standalone ?observer t ~prepared ~capabilities ~(parent : I.t) ~moderat
   in
   with_script_native_calls
     ?observer
+    ~moderator_execute:
+      capabilities.Operation_worker.Capabilities.with_moderator_invocation
     t
     ~selected
     ~limits:(EC.execution_limits prepared)
@@ -559,6 +662,7 @@ let with_one_off ?observer t ~prepared ~limits ~max_nested_calls ~borrowed ~mode
   with_script_native_calls
     ?observer
     ~max_nested_calls
+    ?moderator_execute:(Native_tool_invocation.moderator_executor borrowed)
     t
     ~selected
     ~limits

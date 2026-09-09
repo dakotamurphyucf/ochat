@@ -24,6 +24,7 @@ let%expect_test "captured runtime construction installs owned lifecycle and scri
     ; `One_off_end
     ; `One_off_recursive
     ; `One_off_managed
+    ; `One_off_moderator
     ; `One_off_compile
     ; `One_off_limit
     ; `One_off_start
@@ -41,6 +42,7 @@ let%expect_test "captured runtime construction installs owned lifecycle and scri
         | `One_off_end
         | `One_off_recursive
         | `One_off_managed
+        | `One_off_moderator
         | `One_off_compile
         | `One_off_limit
         | `One_off_start
@@ -104,6 +106,7 @@ let on_event = fun ctx state event -> match event with
             | `One_off_end
             | `One_off_recursive
             | `One_off_managed
+            | `One_off_moderator
             | `One_off_compile
             | `One_off_limit
             | `One_off_start
@@ -157,6 +160,8 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                   ~with_:
                     (match mode with
                      | `One_off_managed -> {|<tool name="run_chatml"/>|} ^ standalone
+                     | `One_off_moderator ->
+                       {|<tool name="run_chatml"/><tool name="counter" type="moderator" moderator="owner" input_schema="input.json" output_schema="output.json"/>|}
                      | _ -> if one_off then {|<tool name="run_chatml"/>|} else standalone)
               in
               let pre =
@@ -305,7 +310,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                     ~registry:(fun () -> Option.value_exn !registry_ref)
                     ~moderator_names:
                       (match mode with
-                       | `One_off_managed -> String.Set.empty
+                       | `One_off_managed | `One_off_moderator -> String.Set.empty
                        | _ -> String.Set.singleton "counter")
                     ~now:Agent_protocol.Timestamp.now
                     ~is_halted:(fun () -> (A.state actor |> protocol_ok).halted)
@@ -408,7 +413,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                   ]
               in
               (match mode with
-               | `One_off_managed ->
+               | `One_off_managed | `One_off_moderator ->
                  request
                    {|let main input = Task.bind(Tool.call("counter", input), fun result -> match result with
 | `Ok(value) -> Task.pure(value) | `Error(code) -> Task.fail(code))|}
@@ -527,7 +532,8 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                   (List.sort
                      (match mode with
                       | `Standalone_one_off -> [ tool_name; "read_file"; "run_chatml" ]
-                      | `One_off_managed -> [ "counter"; "read_file"; "run_chatml" ]
+                      | `One_off_managed | `One_off_moderator ->
+                        [ "counter"; "read_file"; "run_chatml" ]
                       | _ -> [ tool_name; "read_file" ])
                      ~compare:String.compare)
                   (List.sort names ~compare:String.compare);
@@ -700,6 +706,7 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
                              | `One_off_end
                              | `One_off_recursive
                              | `One_off_managed
+                             | `One_off_moderator
                              | `One_off_compile
                              | `One_off_limit
                              | `One_off_start
@@ -778,6 +785,9 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
     ((mode One_off_managed) (provider_calls 2) (authorized_native_calls 7)
      (policy_evaluations 0) (state 14) (published (1 1)) (operation_failed false)
      (observed 5))
+    ((mode One_off_moderator) (provider_calls 2) (authorized_native_calls 7)
+     (policy_evaluations 0) (state 14) (published (11 12))
+     (operation_failed false) (observed 5))
     ((mode One_off_compile) (provider_calls 2) (authorized_native_calls 3)
      (policy_evaluations 0) (state 10)
      (published (chatml.type_error chatml.type_error)) (operation_failed false)

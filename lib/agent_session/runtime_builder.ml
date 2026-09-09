@@ -877,15 +877,37 @@ let build_with_services
       ~snapshot:restored_moderator_snapshot
   in
   let%bind moderator_snapshot = moderator_snapshot moderator in
+  let now () =
+    Eio.Time.now (Eio.Stdenv.clock env)
+    |> Time_ns.Span.of_sec
+    |> Time_ns.of_span_since_epoch
+    |> Agent_protocol.Timestamp.of_time_ns
+  in
   let script_tools =
     match managed, extension_services with
     | Some definition, Some services ->
+      let tools_service =
+        Script_tool_calls.with_managed_tools
+          (services.script_tools agent_runtime)
+          ~env
+          ~definition
+          ~execution_limits:services.standalone_execution_limits
+      in
       Some
-        (Script_tool_calls.with_managed_tools
-           (services.script_tools agent_runtime)
-           ~env
-           ~definition
-           ~execution_limits:services.standalone_execution_limits)
+        (match moderator with
+         | Some (moderator, _)
+           when Option.is_some (Manager.extension_definition moderator.manager) ->
+           Script_tool_calls.with_moderator_dispatch
+             tools_service
+             ~dispatch:
+               (Managed_moderator_dispatch.create
+                  ~definition
+                  ~manager:moderator.manager
+                  ~history:services.history
+                  ~available_tools:tools
+                  ~session_meta:`Null
+                  ~now)
+         | _ -> tools_service)
     | _ -> None
   in
   one_off_services := script_tools;
@@ -901,12 +923,6 @@ let build_with_services
                 (Manager.invocation_observer moderator.manager)
                 ~f:services.lifecycle_started))
     | _ -> None
-  in
-  let now () =
-    Eio.Time.now (Eio.Stdenv.clock env)
-    |> Time_ns.Span.of_sec
-    |> Time_ns.of_span_since_epoch
-    |> Agent_protocol.Timestamp.of_time_ns
   in
   let activate lifecycle ~claim ~history =
     Moderator_event.Lifecycle.run

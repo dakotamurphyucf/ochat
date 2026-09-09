@@ -11,6 +11,14 @@ type error =
 val create : unit -> t
 val error_message : error -> string
 
+(** Reusable coordination metadata for a scoped host executor. Restoring it
+    merges destination ancestry and ignores expired leases; it grants neither
+    tool authority nor a longer ownership lifetime. *)
+type context
+
+val capture_context : unit -> context
+val with_context : context -> (unit -> 'a) -> 'a
+
 (** Capture the current owner ancestry for a host-controlled execution handoff,
     such as [Eio.Domain_manager.run dm (inherit_context f)]. Eio domain workers do not
     automatically inherit fiber-local variables. The returned function combines

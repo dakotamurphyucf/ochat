@@ -73,7 +73,7 @@ type queued_event_borrow =
 
 type invocation_owner =
   | Foreground of Agent_protocol.Id.Operation.t
-  | Idle_moderator of moderator_borrow
+  | Invocation_moderator of moderator_borrow
   | Event_moderator of queued_event_borrow
 
 type invocation_execution =
@@ -1137,27 +1137,37 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
     else Ok ()
   in
   let%bind admission = invocation_admission_deltas t invocation in
-  let%bind () =
+  let%bind owner =
     match invocation.context.parent_invocation with
-    | None -> Ok ()
+    | None -> Ok (Foreground operation_id)
     | Some parent ->
       let owned id op =
         Agent_protocol.Id.Invocation.compare id parent = 0
         && Agent_protocol.Id.Operation.compare op operation_id = 0
       in
-      if
-        List.exists t.invocation_executions ~f:(fun execution ->
-          execution.accepts_children
-          &&
-          match execution.owner with
-          | Foreground op -> owned execution.dispatched.context.id op
-          | Idle_moderator _ | Event_moderator _ -> false)
-        || Option.exists t.moderator_borrow ~f:(fun borrow ->
-          borrow.accepts_children
-          && (not borrow.committed)
-          && Option.exists borrow.operation_id ~f:(owned borrow.invocation.context.id))
-      then Ok ()
-      else Error (error Conflict "parent invocation is not executing in this operation")
+      (match
+         List.find t.invocation_executions ~f:(fun execution ->
+           execution.accepts_children
+           &&
+           match execution.owner with
+           | Foreground op -> owned execution.dispatched.context.id op
+           | Invocation_moderator borrow ->
+             Option.exists borrow.operation_id ~f:(owned execution.dispatched.context.id)
+             && (not (borrow.committed || borrow.cancel_requested))
+             && Option.exists t.moderator_borrow ~f:(phys_equal borrow)
+           | Event_moderator _ -> false)
+       with
+       | Some execution -> Ok execution.owner
+       | None ->
+         (match
+            Option.find t.moderator_borrow ~f:(fun borrow ->
+              borrow.accepts_children
+              && (not borrow.committed)
+              && Option.exists borrow.operation_id ~f:(owned borrow.invocation.context.id))
+          with
+          | Some borrow -> Ok (Invocation_moderator borrow)
+          | None ->
+            Error (error Conflict "parent invocation is not executing in this operation")))
   in
   let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
   let%bind _ =
@@ -1166,9 +1176,7 @@ let claim_invocation t operation_id (invocation : Agent_protocol.Invocation.t) =
       ~delta:(Session_delta.Batch (admission @ [ Invocation_changed dispatched ]))
       ~payloads:[]
   in
-  let execution =
-    { owner = Foreground operation_id; dispatched; accepts_children = true }
-  in
+  let execution = { owner; dispatched; accepts_children = true } in
   t.invocation_executions <- execution :: t.invocation_executions;
   Ok execution
 ;;
@@ -1182,11 +1190,20 @@ let finish_invocation t execution outcome =
       (match operation.state with
        | Cancelling -> true
        | _ -> false)
-    | Idle_moderator borrow ->
+    | Invocation_moderator borrow ->
       (match t.moderator_borrow with
-       | Some current when phys_equal current borrow && t.idle_moderator_borrowed ->
-         Ok borrow.cancel_requested
-       | _ -> Error (error Conflict "idle invocation scope has ended"))
+       | Some current when phys_equal current borrow ->
+         (match borrow.operation_id with
+          | None when t.idle_moderator_borrowed -> Ok borrow.cancel_requested
+          | Some id ->
+            let%map operation = current_operation t id in
+            borrow.cancel_requested
+            ||
+              (match operation.state with
+              | Cancelling -> true
+              | _ -> false)
+          | None -> Error (error Conflict "moderator invocation scope has ended"))
+       | _ -> Error (error Conflict "moderator invocation scope has ended"))
     | Event_moderator borrow ->
       (match t.queued_event_borrow with
        | Some current when phys_equal current borrow && t.idle_moderator_borrowed ->
@@ -1213,7 +1230,10 @@ let finish_invocation t execution outcome =
       Agent_protocol.Invocation.Cancelled
         (match execution.owner with
          | Foreground _ -> "operation cancelled"
-         | Idle_moderator _ | Event_moderator _ -> "idle moderator cancelled")
+         | Invocation_moderator { operation_id = Some _; _ } ->
+           "moderator scope cancelled"
+         | Invocation_moderator { operation_id = None; _ } | Event_moderator _ ->
+           "idle moderator cancelled")
     | false -> outcome
   in
   (* The callback has returned. Even when outcome persistence fails and the
@@ -1261,6 +1281,34 @@ let claim_moderator_invocation t operation_id (invocation : Agent_protocol.Invoc
         ~generation:t.state.identity.generation
         invocation.context.session_id
         invocation.context.generation
+    in
+    let%bind () =
+      match invocation.context.parent_invocation with
+      | None when Option.is_none invocation.context.parent_job -> Ok ()
+      | Some parent ->
+        let parent =
+          List.find t.invocation_executions ~f:(fun execution ->
+            execution.accepts_children
+            && Agent_protocol.Id.Invocation.equal execution.dispatched.context.id parent
+            &&
+            match execution.owner with
+            | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
+            | Invocation_moderator _ | Event_moderator _ -> false)
+        in
+        (match invocation.context.origin, parent with
+         | Script, Some parent
+           when Option.is_none invocation.context.parent_job
+                && Option.is_none invocation.context.provider_call_id
+                && Option.is_none invocation.context.call_entry_id ->
+           (match parent.dispatched.context.deadline, invocation.context.deadline with
+            | None, _ -> Ok ()
+            | Some parent, Some child
+              when Agent_protocol.Timestamp.compare child parent <= 0 -> Ok ()
+            | _ ->
+              Error (error Conflict "nested moderator cannot extend its parent deadline"))
+         | _ -> Error (error Conflict "nested moderator requires an active script caller"))
+      | None ->
+        Error (error Conflict "foreground moderator cannot borrow background ownership")
     in
     let%bind admission = invocation_admission_deltas t invocation in
     let%bind dispatched = Agent_protocol.Invocation.dispatch invocation in
@@ -1817,9 +1865,9 @@ let validate_moderator_borrow t borrow =
   | _ -> Error (error Conflict "moderator borrow is no longer owned by this callback")
 ;;
 
-let idle_execution_owned_by borrow execution =
+let invocation_execution_owned_by borrow execution =
   match execution.owner with
-  | Idle_moderator owner -> phys_equal owner borrow
+  | Invocation_moderator owner -> phys_equal owner borrow
   | Foreground _ | Event_moderator _ -> false
 ;;
 
@@ -1856,7 +1904,7 @@ let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
       Ok ()
     | Script, Some _, None, _, Some observed ->
       let%bind () =
-        active_script_parent t ~owns:(idle_execution_owned_by borrow) invocation
+        active_script_parent t ~owns:(invocation_execution_owned_by borrow) invocation
       in
       compatible_script_observer observed.observer invocation
     | _ -> Error (error Conflict "idle invocation must belong to its observing moderator")
@@ -1870,7 +1918,7 @@ let claim_idle_invocation t borrow (invocation : Agent_protocol.Invocation.t) =
       ~payloads:[]
   in
   let execution =
-    { owner = Idle_moderator borrow; dispatched; accepts_children = true }
+    { owner = Invocation_moderator borrow; dispatched; accepts_children = true }
   in
   t.invocation_executions <- execution :: t.invocation_executions;
   Ok execution
@@ -1881,8 +1929,11 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
   let open Result.Let_syntax in
   let%bind () = validate_moderator_borrow t borrow in
   let%bind () =
-    match List.exists t.invocation_executions ~f:(idle_execution_owned_by borrow) with
-    | true -> Error (error Conflict "idle native invocations still require completion")
+    match
+      List.exists t.invocation_executions ~f:(invocation_execution_owned_by borrow)
+    with
+    | true ->
+      Error (error Conflict "moderator child invocations still require completion")
     | false -> Ok ()
   in
   let%bind () =
@@ -1991,25 +2042,29 @@ let finish_moderator_invocation t borrow failure =
   borrow.accepts_children <- false;
   let was_committed = borrow.committed in
   let unfinished =
-    List.filter t.invocation_executions ~f:(idle_execution_owned_by borrow)
+    List.filter t.invocation_executions ~f:(invocation_execution_owned_by borrow)
   in
   let permissions, permission_deltas, permission_payloads =
     cleanup_invocation_permissions
       t
-      (List.map unfinished ~f:(fun child -> child.dispatched.context.id))
+      (borrow.invocation.context.id
+       :: List.map unfinished ~f:(fun child -> child.dispatched.context.id))
   in
   let%bind children =
     List.map unfinished ~f:(fun execution ->
       execution.accepts_children <- false;
       Agent_protocol.Invocation.cancel
         execution.dispatched
-        ~reason:"idle moderator exited before recording the invocation outcome"
+        ~reason:
+          (match borrow.operation_id with
+           | None -> "idle moderator exited before recording the invocation outcome"
+           | Some _ -> "moderator exited before recording the invocation outcome")
       |> Result.map ~f:(fun invocation -> Session_delta.Invocation_changed invocation))
     |> Result.all
   in
   let%bind delta = uncommitted_borrow_delta t borrow failure in
   let%bind () =
-    if was_committed && List.is_empty children
+    if was_committed && List.is_empty children && List.is_empty permission_deltas
     then Ok ()
     else
       Result.map
@@ -2022,7 +2077,7 @@ let finish_moderator_invocation t borrow failure =
   resolve_cleaned_permission_waiters t permissions;
   t.invocation_executions
   <- List.filter t.invocation_executions ~f:(fun execution ->
-       not (idle_execution_owned_by borrow execution));
+       not (invocation_execution_owned_by borrow execution));
   t.moderator_borrow <- None;
   (match borrow.operation_id with
    | None -> t.idle_moderator_borrowed <- false
@@ -2319,7 +2374,15 @@ let pending_for_operation t (operation : Agent_protocol.Operation.t) permission 
         Option.exists
           borrow.receipt.context.operation_id
           ~f:(Agent_protocol.Id.Operation.equal operation.id)
-      | Idle_moderator _ -> false)
+      | Invocation_moderator borrow ->
+        Option.exists
+          borrow.operation_id
+          ~f:(Agent_protocol.Id.Operation.equal operation.id))
+    || Option.exists t.moderator_borrow ~f:(fun borrow ->
+      Agent_protocol.Id.Invocation.equal id borrow.invocation.context.id
+      && Option.exists
+           borrow.operation_id
+           ~f:(Agent_protocol.Id.Operation.equal operation.id))
 ;;
 
 let cancel_operation_permission t operation reason permission =
@@ -3633,10 +3696,19 @@ let permission_owner_active t (permission : Agent_protocol.Permission.t) =
             match operation.state with
             | Cancelling -> false
             | _ -> true)
-        | Idle_moderator borrow ->
-          t.idle_moderator_borrowed
-          && (not (borrow.committed || borrow.cancel_requested))
+        | Invocation_moderator borrow ->
+          (not (borrow.committed || borrow.cancel_requested))
           && Option.exists t.moderator_borrow ~f:(phys_equal borrow)
+          &&
+            (match borrow.operation_id with
+            | None -> t.idle_moderator_borrowed && Option.is_none t.state.active_operation
+            | Some id ->
+              Option.exists t.state.active_operation ~f:(fun operation ->
+                Agent_protocol.Id.Operation.equal operation.id id
+                &&
+                match operation.state with
+                | Cancelling -> false
+                | _ -> true))
         | Event_moderator borrow ->
           t.idle_moderator_borrowed
           && borrow.callback_active
@@ -3652,6 +3724,24 @@ let permission_owner_active t (permission : Agent_protocol.Permission.t) =
                 match operation.state with
                 | Cancelling -> false
                 | _ -> true)))
+      || Option.exists t.moderator_borrow ~f:(fun borrow ->
+        borrow.accepts_children
+        && (match borrow.kind with
+            | Invocation -> true
+            | Observation -> false)
+        && (not (borrow.committed || borrow.cancel_requested))
+        && Agent_protocol.Id.Invocation.equal id borrow.invocation.context.id
+        && Int.equal borrow.invocation.context.generation permission.generation
+        &&
+        match borrow.operation_id with
+        | None -> false
+        | Some id ->
+          Option.exists t.state.active_operation ~f:(fun operation ->
+            Agent_protocol.Id.Operation.equal operation.id id
+            &&
+            match operation.state with
+            | Cancelling -> false
+            | _ -> true))
     in
     (match t.state.lifecycle.desired, live, t.state.halted, t.state.failure with
      | Running, true, false, None -> Ok ()

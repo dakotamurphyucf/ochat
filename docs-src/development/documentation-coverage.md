@@ -221,6 +221,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/invocation_recovery.mli` | [contract](../../lib/agent_session/invocation_recovery.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_session/live_event_buffer.mli` | [contract](../../lib/agent_session/live_event_buffer.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/mailbox.mli` | [contract](../../lib/agent_session/mailbox.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/managed_moderator_dispatch.mli` | [contract](../../lib/agent_session/managed_moderator_dispatch.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/memory_backend.mli` | [contract](../../lib/agent_session/memory_backend.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/moderator_event.mli` | [contract](../../lib/agent_session/moderator_event.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/agent_session/moderator_observation.mli` | [contract](../../lib/agent_session/moderator_observation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |

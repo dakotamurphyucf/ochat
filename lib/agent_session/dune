@@ -19,6 +19,7 @@
   invocation_history
   invocation_recovery
   moderator_tool_dispatch
+  managed_moderator_dispatch
   standalone_tool_dispatch
   one_off_execution
   run_chatml_tool

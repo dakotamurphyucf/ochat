@@ -317,9 +317,15 @@ let admit t ~current ~selected ~(reference : C.reference) ~invocation =
   in
   let%bind prepared = resolve t binding in
   let context = invocation.I.context in
+  let function_call =
+    match invocation.routing with
+    | None | Some { kind = Function; _ } -> true
+    | Some { kind = Custom; _ } -> false
+  in
   match invocation.status with
   | Dispatching
-    when String.equal context.tool_name reference.name
+    when function_call
+         && String.equal context.tool_name reference.name
          && String.equal context.implementation_revision reference.implementation_revision
          && String.equal context.capability_fingerprint (C.fingerprint selected)
          && Result.is_ok (I.validate invocation) -> Ok { prepared; binding; invocation }

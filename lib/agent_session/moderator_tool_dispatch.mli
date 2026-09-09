@@ -4,6 +4,11 @@
     extension declaration. *)
 exception Dispatch_error of Agent_protocol.Error.t
 
+(** Stable host outcomes shared by model and nested moderator dispatch. *)
+val handler_failure
+  :  Chat_response.Moderator_invocation.failure
+  -> Agent_protocol.Invocation.outcome
+
 (** [admit] must verify the live selected capability/revision and execution
     authority; it runs inside both actor and manager ownership, immediately
     before the handler, followed by the stream's final-target authorizer.

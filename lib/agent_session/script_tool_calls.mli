@@ -11,6 +11,32 @@ type t
 (** Read the owning host's current lifecycle policy. *)
 val is_halted : t -> bool
 
+(** Host dispatch accessors. These expose current binding/policy services, not
+    permission to execute implementations outside an owned invocation. *)
+val current_capabilities : t -> Chat_response.Tool_capability.t
+
+val authorize
+  :  t
+  -> Agent_protocol.Invocation.t
+  -> Chat_response.Tool_capability.binding
+  -> (unit, Agent_protocol.Error.t) result
+
+type moderator_dispatch =
+  execute:Native_tool_invocation.moderator_executor
+  -> native_execute:Native_tool_invocation.executor
+  -> selected:Chat_response.Tool_capability.t
+  -> reference:Chat_response.Tool_capability.reference
+  -> invocation:Agent_protocol.Invocation.t
+  -> prepare_output:
+       (Openai.Responses.Tool_output.Output.t
+        -> (Jsonaf.t, Agent_protocol.Error.t) result)
+  -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
+
+(** Install the owning manager's atomic handoff, separate from ordinary native
+    admission. The factory receives the actual caller scope and must preserve its
+    reentrancy restrictions. It must recheck authority after all owner/policy waits. *)
+val with_moderator_dispatch : t -> dispatch:(t -> moderator_dispatch) -> t
+
 val create
   :  registry:(unit -> Chat_response.Tool_capability.t)
   -> moderator_names:String.Set.t
@@ -81,6 +107,20 @@ val with_invocation
   -> prepared:Chat_response.Extension_compiler.t
   -> capabilities:Operation_worker.Capabilities.t
   -> parent:Agent_protocol.Invocation.t
+  -> ((name:string
+       -> args:Jsonaf.t
+       -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)
+      -> 'a)
+  -> 'a
+
+(** Native/standalone children of an actual managed moderator handler. The
+    private admission and delegated borrow must identify the same dispatched
+    handler. Child origin is Moderator, and tools belonging to its active
+    moderator fail before attempting another handoff. *)
+val with_managed_invocation
+  :  t
+  -> execution:Chat_response.Managed_tool_registry.execution
+  -> borrowed:Native_tool_invocation.borrowed
   -> ((name:string
        -> args:Jsonaf.t
        -> (Chat_response.Moderation.Capabilities.tool_call_result, string) result)

@@ -390,7 +390,7 @@ let with_scope ?(policy = Bounded default_limits) ?(context = []) ~env f =
 
 type runner =
   { control : Chatml.Chatml_lang.execution_control
-  ; run : 'a. (unit -> 'a) -> ('a, error) result
+  ; run : 'a. ?context:context -> (unit -> 'a) -> ('a, error) result
   }
 
 let create_runner ~env ~policy () =
@@ -419,8 +419,8 @@ let create_runner ~env ~policy () =
   in
   { control
   ; run =
-      (fun f ->
-        with_scope ~env ~policy (fun control ->
+      (fun ?context f ->
+        with_scope ?context ~env ~policy (fun control ->
           let active = Atomic.make true in
           Exn.protect
             ~finally:(fun () -> Atomic.set active false)
@@ -429,7 +429,7 @@ let create_runner ~env ~policy () =
 ;;
 
 let runner_control runner = runner.control
-let run_scoped runner f = runner.run f
+let run_scoped ?context runner f = runner.run ?context f
 
 let run ?policy ?context ~env ~config ~program ~entrypoint ~arguments () =
   with_scope ?policy ?context ~env (fun control ->

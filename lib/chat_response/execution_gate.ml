@@ -56,21 +56,28 @@ let bind mode value f =
     Exn.protect ~f ~finally:(fun () -> Domain.DLS.set synchronous_ancestry previous)
 ;;
 
+type context = lease list
+
+let capture_context () = snd (current_ancestry ())
+
+let with_context captured f =
+  let mode, current = current_ancestry () in
+  let combined =
+    locked (fun () ->
+      let seen = Int.Hash_set.create () in
+      List.filter (captured @ current) ~f:(fun lease ->
+        if (not lease.active) || Hash_set.mem seen lease.owner.id
+        then false
+        else (
+          Hash_set.add seen lease.owner.id;
+          true)))
+  in
+  bind mode combined f
+;;
+
 let inherit_context f =
-  let _, captured = current_ancestry () in
-  fun () ->
-    let mode, current = current_ancestry () in
-    let combined =
-      locked (fun () ->
-        let seen = Int.Hash_set.create () in
-        List.filter (captured @ current) ~f:(fun lease ->
-          if (not lease.active) || Hash_set.mem seen lease.owner.id
-          then false
-          else (
-            Hash_set.add seen lease.owner.id;
-            true)))
-    in
-    bind mode combined f
+  let captured = capture_context () in
+  fun () -> with_context captured f
 ;;
 
 let without_context f =

@@ -1980,7 +1980,57 @@ to prove fresh globals, and reject direct access to the private dependency. Case
 cover denied permissions, dependencies revoked during authorization, pre-tool
 rejection, invalid output and nested depth limits. They inspect persisted outcomes
 and canonical history. General model-visible availability remains gated on A01;
-nested moderator-tool handoff and full E04 qualification remain separate work.
+full E04 qualification remains separate work.
+
+### Nested moderator-handled tools
+
+Qualified runtime construction also installs `Managed_moderator_dispatch`.
+A one-off or standalone script can call a selected moderator-handled tool through
+the owning actor's moderator handoff. It does not first admit a native wrapper or
+create a provider-history entry. The invocation keeps its caller's selection and
+the registered managed revision; a private admission connects it to the exact
+compiled handler in the manager.
+
+The actor rechecks that a nested caller is still live in the same operation after
+waiting for the moderator gate. The call must have Script origin, a real parent,
+no provider/job identity, and a deadline no later than its parent's. Borrowed
+executors also recheck their lexical lifetime and selected capability fingerprint.
+A caller that finishes while its child waits for the gate cannot start a handler
+later.
+
+The handler uses its captured dependencies under current policy. Its native and
+script descendants remain owned by that moderator borrow, including foreground
+descendants. The moderator cannot commit while those children still need a result;
+an abandoned borrow cancels their unfinished records and cleans up pending
+permissions. The moderator invocation itself can own a permission request.
+
+Success commits the disclosed tool outcome and proposed moderator snapshot in one
+actor transaction. The manager installs its state only after that save succeeds.
+Permission denial, revoked bindings, handler failure, invalid disclosure and
+failed saves retain a canonical failure with the previous moderator state. External
+native effects are not undone or retried. Runtime requests are forwarded after
+commit while the originating request scope is still bound.
+
+An active moderator identity follows nested native and one-off calls. Calling back
+into that moderator returns `moderator_reentrancy` before another handoff, even if
+the intermediate one-off service was created outside the handler. Borrowed
+executors also preserve the execution gate's active ancestry across Eio domain
+handoffs, so a native extension cannot accidentally wait on its own moderator.
+The metadata grants no tool authority and does not extend an owner's lifetime.
+
+`Chatml_execution.run_scoped` and the manager invocation API accept explicit
+caller budget context for domain handoffs. The controlled moderator runner merges
+that context with its own limits. A pure moderator loop still consumes the calling
+one-off's fuel; exhaustion rolls back its state and buffered requests. Supplying
+inherited budget context without a controlled runner is rejected.
+
+Offline tests cover captured ChatMD construction, one-off and standalone callers,
+native descendants, permission ownership, expired queued callers, failed atomic
+saves, disclosure validation, cancellation, reentrancy through `run_chatml`, native
+cross-domain reentrancy and inherited fuel across a domain handoff. They compare
+actor/backend snapshots and verify that nested calls add no provider-history
+entries. Background work and generated child-session tools retain their later
+phase requirements.
 
 ## Authoring policy admission plans
 

@@ -243,9 +243,15 @@ val handle_next_event_entries_transactional
     [on_tool_call] overrides the legacy callback only during this invocation,
     under the execution lock, and is restored on success, failure or cancellation.
     The host must bind it to the active parent's selected capabilities, persistence
-    and policy. It must not synchronously re-enter the manager for pre/post hooks. *)
+    and policy. It must not synchronously re-enter the manager for pre/post hooks.
+    [managed] must identify this exact compiled handler and dispatched call;
+    it preserves the caller's recorded selection while exposing the handler's
+    private dependencies. [execution_context] retains inherited budgets across
+    domain handoffs; it cannot reset the caller's limits. *)
 val handle_invocation_entries
   :  ?authorize:(unit -> (unit, string) result)
+  -> ?managed:Managed_tool_registry.execution
+  -> ?execution_context:Chatml_execution.context
   -> ?on_failure:(Moderator_invocation.failure -> unit)
   -> ?on_tool_call:
        (name:string

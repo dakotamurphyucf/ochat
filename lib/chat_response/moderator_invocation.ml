@@ -318,6 +318,16 @@ let create_managed_standalone ~execution ~limits ~validate_work =
     ~validate_work
 ;;
 
+let create_managed ~execution ~limits ~validate_work =
+  create_for
+    ~managed:(Some execution)
+    ~implementation:`Moderator
+    ~prepared:(Managed_tool_registry.prepared execution)
+    ~invocation:(Managed_tool_registry.invocation execution)
+    ~limits
+    ~validate_work
+;;
+
 let decode t value =
   let open Result.Let_syntax in
   let max_bytes = bytes t.limits.max_output_bytes in
@@ -512,11 +522,23 @@ let run_impl ?task_limits t ~runtime ~context ~prepare_commit ~failure_kind =
   | None -> reject Suspended "invocation.suspended" "tool handler did not complete"
 ;;
 
-let run ?(on_failure = ignore) ?execution t ~runtime ~context ~prepare_commit =
+let run
+      ?(on_failure = ignore)
+      ?execution
+      ?execution_context
+      t
+      ~runtime
+      ~context
+      ~prepare_commit
+  =
   let failure_kind = ref Handler_failed in
   let result =
-    match execution with
-    | None ->
+    match execution, execution_context with
+    | None, Some _ ->
+      Error
+        "invocation.execution_scope_missing: inherited budgets require a controlled \
+         runner"
+    | None, None ->
       run_impl
         ~task_limits:R.{ fuel = t.limits.fuel; max_tasks = t.limits.max_tasks }
         t
@@ -524,8 +546,8 @@ let run ?(on_failure = ignore) ?execution t ~runtime ~context ~prepare_commit =
         ~context
         ~prepare_commit
         ~failure_kind
-    | Some runner ->
-      Chatml_execution.run_scoped runner (fun () ->
+    | Some runner, execution_context ->
+      Chatml_execution.run_scoped ?context:execution_context runner (fun () ->
         run_impl t ~runtime ~context ~prepare_commit ~failure_kind)
       |> Result.map_error ~f:(fun error -> error.code ^ ": " ^ error.message)
       |> Result.join

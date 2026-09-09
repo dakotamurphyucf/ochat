@@ -9,6 +9,16 @@ type executor =
   -> (dispatched:I.t -> (I.outcome, Agent_protocol.Error.t) result)
   -> (I.t, Agent_protocol.Error.t) result
 
+type moderator_executor =
+  invocation:I.t
+  -> (dispatched:I.t
+      -> commit:
+           (resolved:I.t
+            -> snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (unit, Agent_protocol.Error.t) result
+
 type scope =
   | Unbound
   | Active of I.t
@@ -18,7 +28,10 @@ type borrowed =
   { invocation : I.t
   ; active : bool Atomic.t
   ; execute : executor
+  ; moderator_execute : moderator_executor option
   ; ceiling : C.t option
+  ; child_origin : I.origin
+  ; coordination_context : Chat_response.Execution_gate.context
   ; execution_context : Chatml_execution.context
   ; runtime_context : Chat_response.Runtime_request_scope.t option
   ; moderation_context : Native_tool_moderation.t option
@@ -73,6 +86,8 @@ let select_tools scope ~names =
 
 let with_scope
       ?ceiling
+      ?moderator_execute
+      ?(child_origin = I.Script)
       ?execution_context
       ?runtime_context
       ?moderation_context
@@ -80,16 +95,18 @@ let with_scope
       invocation
       f
   =
-  let execute, ceiling, execution_context =
+  let execute, moderator_execute, ceiling, execution_context =
     match Eio.Fiber.get scope_key with
     | Some scope when Atomic.get scope.active && I.equal scope.invocation invocation ->
       (* Preserve the real actor executor rather than inheriting a direct-child
          adapter from the parent. Each lexical scope still owns its lifetime. *)
       ( scope.execute
+      , Option.first_some scope.moderator_execute moderator_execute
       , Option.first_some ceiling scope.ceiling
       , Option.value execution_context ~default:scope.execution_context )
     | None | Some _ ->
       ( execute
+      , moderator_execute
       , ceiling
       , Option.value_or_thunk execution_context ~default:(fun () ->
           Chatml_execution.capture_context ()) )
@@ -116,7 +133,10 @@ let with_scope
             { invocation
             ; active
             ; execute
+            ; moderator_execute
             ; ceiling
+            ; child_origin
+            ; coordination_context = Chat_response.Execution_gate.capture_context ()
             ; execution_context
             ; runtime_context
             ; moderation_context
@@ -124,15 +144,16 @@ let with_scope
             f)))
 ;;
 
-let execute_borrowed scope ~invocation f =
-  let check_active () =
-    match Atomic.get scope.active with
-    | true -> Ok ()
-    | false ->
-      Error (Agent_protocol.Error.invalid_request "borrowed invocation scope expired")
-  in
+let check_active scope =
+  match Atomic.get scope.active with
+  | true -> Ok ()
+  | false ->
+    Error (Agent_protocol.Error.invalid_request "borrowed invocation scope expired")
+;;
+
+let check_child scope invocation =
   let open Result.Let_syntax in
-  let%bind () = check_active () in
+  let%bind () = check_active scope in
   let%bind ceiling = borrowed_capabilities scope in
   let parent = scope.invocation.context in
   let child = invocation.I.context in
@@ -142,10 +163,11 @@ let execute_borrowed scope ~invocation f =
     | Some parent, Some child -> Agent_protocol.Timestamp.compare child parent <= 0
     | Some _, None -> false
   in
-  let%bind () =
+  let%map () =
     match child.origin, child.parent_invocation with
-    | Script, Some parent_id
-      when Agent_protocol.Id.Invocation.equal parent_id parent.id
+    | origin, Some parent_id
+      when I.equal_origin origin scope.child_origin
+           && Agent_protocol.Id.Invocation.equal parent_id parent.id
            && Agent_protocol.Id.Session.equal child.session_id parent.session_id
            && Int.equal child.generation parent.generation
            && Option.is_none child.provider_call_id
@@ -159,18 +181,109 @@ let execute_borrowed scope ~invocation f =
         (Agent_protocol.Error.invalid_request
            "borrowed execution requires a script child of the current invocation")
   in
-  scope.execute ~invocation (fun ~dispatched ->
-    (* Actor admission can yield while the native callback returns. A retained
+  ceiling
+;;
+
+let execute_borrowed scope ~invocation f =
+  let open Result.Let_syntax in
+  let%bind ceiling = check_child scope invocation in
+  Chat_response.Execution_gate.with_context scope.coordination_context (fun () ->
+    scope.execute ~invocation (fun ~dispatched ->
+      (* Actor admission can yield while the native callback returns. A retained
        executor must not start effects after its lending scope has expired. *)
-    let%bind () = check_active () in
-    with_scope
-      ~ceiling
-      ~execution_context:scope.execution_context
-      ~runtime_context:scope.runtime_context
-      ~moderation_context:scope.moderation_context
-      ~execute:scope.execute
-      dispatched
-      (fun () -> f ~dispatched))
+      let%bind () = check_active scope in
+      with_scope
+        ~ceiling
+        ?moderator_execute:scope.moderator_execute
+        ~execution_context:scope.execution_context
+        ~runtime_context:scope.runtime_context
+        ~moderation_context:scope.moderation_context
+        ~execute:scope.execute
+        dispatched
+        (fun () -> f ~dispatched)))
+;;
+
+let execute_moderator_borrowed scope ~invocation f =
+  let open Result.Let_syntax in
+  let%bind () =
+    match invocation.I.context.origin with
+    | Script -> Ok ()
+    | _ ->
+      Error
+        (Agent_protocol.Error.invalid_request "moderator handoff requires a Script child")
+  in
+  let%bind ceiling = check_child scope invocation in
+  let%bind execute =
+    Result.of_option
+      scope.moderator_execute
+      ~error:
+        (Agent_protocol.Error.invalid_request
+           "borrowed moderator executor is unavailable")
+  in
+  Chat_response.Execution_gate.with_context scope.coordination_context (fun () ->
+    execute ~invocation (fun ~dispatched ~commit ->
+      let%bind () = check_active scope in
+      with_scope
+        ~ceiling
+        ?moderator_execute:scope.moderator_execute
+        ~execution_context:scope.execution_context
+        ~runtime_context:scope.runtime_context
+        ~moderation_context:scope.moderation_context
+        ~execute:scope.execute
+        dispatched
+        (fun () -> f ~dispatched ~commit)))
+;;
+
+let moderator_executor scope =
+  Option.map scope.moderator_execute ~f:(fun _ -> execute_moderator_borrowed scope)
+;;
+
+let with_managed_scope execution f =
+  let open Result.Let_syntax in
+  let%bind scope = borrow () in
+  let%bind selected = borrowed_capabilities scope in
+  let reference = C.reference (Managed.binding execution) in
+  let%bind () =
+    match I.equal scope.invocation (Managed.invocation execution) with
+    | false ->
+      Error
+        (Agent_protocol.Error.invalid_request
+           "managed admission belongs to another invocation")
+    | true ->
+      C.resolve selected ~id:reference.id ~fingerprint:reference.fingerprint
+      |> Result.map ~f:ignore
+      |> Result.map_error ~f:(fun error ->
+        Agent_protocol.Error.invalid_request error.C.message)
+  in
+  let prepared = Managed.prepared execution in
+  let child_origin =
+    match (Chat_response.Extension_compiler.declaration prepared).implementation with
+    | Standalone _ -> I.Script
+    | Moderator _ -> I.Moderator
+  in
+  with_scope
+    ~ceiling:(Chat_response.Extension_compiler.capabilities prepared)
+    ~child_origin
+    ?moderator_execute:scope.moderator_execute
+    ~execution_context:scope.execution_context
+    ~runtime_context:scope.runtime_context
+    ~moderation_context:scope.moderation_context
+    ~execute:scope.execute
+    scope.invocation
+    (fun () -> Result.bind (borrow ()) ~f)
+;;
+
+let with_dispatched_scope ~execute ?moderator_execute ~selected ~invocation f =
+  let open Result.Let_syntax in
+  let%bind () = I.validate invocation in
+  match invocation.status with
+  | Dispatching
+    when String.equal invocation.context.capability_fingerprint (C.fingerprint selected)
+    -> with_scope ~execute ?moderator_execute ~ceiling:selected invocation f
+  | _ ->
+    Error
+      (Agent_protocol.Error.invalid_request
+         "expected an actor-dispatched capability selection")
 ;;
 
 let fail code message = I.Fail { code; message; retryable = false; details = `Null }
@@ -208,6 +321,7 @@ let with_selected_capabilities selected f =
 
 let run_scoped_with_managed
       ~managed
+      ~moderator_execute
       ~execute
       ~registry
       ~(reference : C.reference)
@@ -328,26 +442,14 @@ let run_scoped_with_managed
                  with_scope preserves the real actor executor when a one-off's
                  direct-child adapter admitted this invocation. Its caller's
                  borrow and selection are restored when this callback returns. *)
-              with_scope
-                ~ceiling:
-                  (Chat_response.Extension_compiler.capabilities
-                     (Managed.prepared execution))
-                ~execute
-                dispatched
-                (fun () ->
-                   let%bind borrowed =
-                     borrow ()
-                     |> Result.map_error ~f:(fun error ->
-                       error.Agent_protocol.Error.message)
-                   in
-                   let%bind outcome = service.run execution borrowed in
-                   let%map () =
-                     I.validate_outcome outcome
-                     |> Result.map_error ~f:(fun error ->
-                       error.Agent_protocol.Error.message)
-                   in
-                   Openai.Responses.Tool_output.Output.Text
-                     (Jsonaf.to_string (I.outcome_to_json outcome))))
+              with_managed_scope execution (fun borrowed ->
+                let%bind outcome =
+                  service.run execution borrowed
+                  |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+                in
+                let%map () = I.validate_outcome outcome in
+                Openai.Responses.Tool_output.Output.Text
+                  (Jsonaf.to_string (I.outcome_to_json outcome))))
         in
         let%bind value =
           checked
@@ -396,7 +498,7 @@ let run_scoped_with_managed
         in
         outcome)
     in
-    with_scope ~execute dispatched (fun () ->
+    with_scope ?moderator_execute ~execute dispatched (fun () ->
       match
         Option.bind dispatched.routing ~f:(fun routing ->
           Stream_invocation.rejection_outcome routing.preparation)
@@ -408,8 +510,12 @@ let run_scoped_with_managed
            | Ok outcome | Error outcome -> outcome)))
 ;;
 
-let run_scoped = run_scoped_with_managed ~managed:None
+let run_scoped = run_scoped_with_managed ~managed:None ~moderator_execute:None
 
 let run ~capabilities =
-  run_scoped ~execute:capabilities.Operation_worker.Capabilities.with_invocation
+  run_scoped_with_managed
+    ~managed:None
+    ~moderator_execute:
+      (Some capabilities.Operation_worker.Capabilities.with_moderator_invocation)
+    ~execute:capabilities.Operation_worker.Capabilities.with_invocation
 ;;

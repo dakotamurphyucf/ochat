@@ -1232,6 +1232,8 @@ let handle_next_event_entries_transactional
 
 let handle_invocation_entries
       ?(authorize = fun () -> Ok ())
+      ?managed
+      ?execution_context
       ?on_failure
       ?on_tool_call
       t
@@ -1263,11 +1265,24 @@ let handle_invocation_entries
       | _ -> Error "invocation.wrong_handler: tool is not owned by this moderator"
     in
     let%bind scope =
-      Moderator_invocation.create
-        ~prepared
-        ~invocation
-        ~limits:script.limits
-        ~validate_work
+      match managed with
+      | None ->
+        Moderator_invocation.create
+          ~prepared
+          ~invocation
+          ~limits:script.limits
+          ~validate_work
+      | Some execution
+        when phys_equal prepared (Managed_tool_registry.prepared execution)
+             && Agent_protocol.Invocation.equal
+                  invocation
+                  (Managed_tool_registry.invocation execution) ->
+        Moderator_invocation.create_managed
+          ~execution
+          ~limits:script.limits
+          ~validate_work
+      | Some _ ->
+        Error "invocation.wrong_handler: managed admission belongs to another definition"
     in
     let%bind () =
       if Runtime.is_halted t.runtime
@@ -1324,6 +1339,7 @@ let handle_invocation_entries
           Moderator_invocation.run
             ?on_failure
             ?execution:t.execution
+            ?execution_context
             scope
             ~runtime:t.runtime
             ~context:(Moderation.Context.to_value context)

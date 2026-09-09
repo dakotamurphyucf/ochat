@@ -7,7 +7,8 @@ open Core
 type t
 
 val with_handler
-  :  observer:Agent_protocol.Invocation.observer option
+  :  ?active_moderator:Agent_protocol.Invocation.observer
+  -> observer:Agent_protocol.Invocation.observer option
   -> prepare:
        (Chat_response.Moderation.Tool_call.t
         -> (Chat_response.Moderation.Tool_moderation.t option, string) result)
@@ -20,6 +21,10 @@ val capture : unit -> t option
 val with_context : t option -> (unit -> 'a) -> 'a
 val current : unit -> (t, string) result
 val observer : t -> Agent_protocol.Invocation.observer option
+
+(** Active moderator handler inherited through native/one-off descendants. The
+    original handler's lifetime is retained, never extended by nested handlers. *)
+val active_moderator : unit -> Agent_protocol.Invocation.observer option
 
 (** Fails after the lexical owner returns, before entering the callback. *)
 val prepare

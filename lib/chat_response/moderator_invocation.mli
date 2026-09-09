@@ -56,6 +56,15 @@ val create_managed_standalone
   -> validate_work:(I.work -> (unit, string) result)
   -> (t, string) result
 
+(** Moderator ABI for the same private managed admission contract. Does not
+    acquire the moderator or authorize execution; the actor/manager owner must
+    atomically commit its result and proposed state. *)
+val create_managed
+  :  execution:Managed_tool_registry.execution
+  -> limits:Chatmd_shell_spec.Chatmd_script_spec.limits
+  -> validate_work:(I.work -> (unit, string) result)
+  -> (t, string) result
+
 val context : t -> L.value
 val input : t -> L.value
 
@@ -114,10 +123,13 @@ val snapshot_state
     [execution] is the runner whose control was installed in [runtime]. It
     bounds pure evaluation and task effects under the current lexical scope.
     Without it this low-level adapter retains only legacy task-step limits;
-    the v1 moderator manager always supplies its owned runner. *)
+    the v1 moderator manager always supplies its owned runner. [execution_context]
+    carries caller budget ancestry across host domain handoffs. Supplying that
+    context without a controlled runner is rejected. *)
 val run
   :  ?on_failure:(failure -> unit)
   -> ?execution:Chatml_execution.runner
+  -> ?execution_context:Chatml_execution.context
   -> t
   -> runtime:R.session
   -> context:L.value

@@ -8,6 +8,18 @@ type executor =
       -> (Agent_protocol.Invocation.outcome, Agent_protocol.Error.t) result)
   -> (Agent_protocol.Invocation.t, Agent_protocol.Error.t) result
 
+(** Actor-owned handoff whose commit atomically saves moderator state and result.
+    It has no provider-history or general session mutation capability. *)
+type moderator_executor =
+  invocation:Agent_protocol.Invocation.t
+  -> (dispatched:Agent_protocol.Invocation.t
+      -> commit:
+           (resolved:Agent_protocol.Invocation.t
+            -> snapshot:Session.Moderator_state.Identity_snapshot.t
+            -> (unit, Agent_protocol.Error.t) result)
+      -> (unit, Agent_protocol.Error.t) result)
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Fiber-local identity for native policy/approval adapters. This identifies the
     current actor-dispatched invocation, not authority to approve it. Nested scopes
     shadow their parent; fibers inheriting the binding and surviving its scope
@@ -51,7 +63,8 @@ val select_tools
   -> names:string list
   -> (borrowed, Agent_protocol.Error.t) result
 
-(** Admit a Script-origin direct child with the same session/generation and a
+(** Admit a direct child with the scope's origin (Script for a native borrow,
+    Moderator only for a verified managed moderator handler), the same session/generation and a
     deadline no later than its parent's and the selected ceiling's fingerprint.
     Uses the lending scope's actor executor,
     rechecking expiration both before admission and before the callback. The child
@@ -62,6 +75,38 @@ val select_tools
     apply, so borrowing never grants a new event/idle/foreground owner. The caller
     must join child work within the native callback's cancellation scope. *)
 val execute_borrowed : borrowed -> executor
+
+(** Optional moderator handoff inherited from the actual foreground actor scope.
+    The returned adapter requires the same direct Script child, selected ceiling,
+    deadline and lifetime checks as [execute_borrowed], before waiting and again
+    on entry. It never performs ordinary native admission first. Permission,
+    source identity, reentrancy and schema checks remain the dispatcher's job.
+    Acquiring this adapter does not keep its lending scope alive. *)
+val moderator_executor : borrowed -> moderator_executor option
+
+(** Enter only the implementation identified by an exact managed admission in
+    the current actor-dispatched scope. Verifies the admitted target is selected,
+    then lends its captured dependencies to [f]; the caller's ceiling is restored
+    afterwards. Standalone children use Script origin; actual moderator handler
+    children use Moderator origin. Native child callbacks start their own Script
+    borrows. Only trusted host dispatch may call this function, and [f] must run
+    the admitted compiled handler after current policy checks, never caller source. *)
+val with_managed_scope
+  :  Chat_response.Managed_tool_registry.execution
+  -> (borrowed -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
+
+(** Trusted actor callback adapter for moderator dispatch. Establishes only the
+    already dispatched identity and caller selection, so existing permission
+    adapters can identify its owner. The host must supply real actor executors;
+    this validates protocol/selection identity, not tool authorization. *)
+val with_dispatched_scope
+  :  execute:executor
+  -> ?moderator_execute:moderator_executor
+  -> selected:Chat_response.Tool_capability.t
+  -> invocation:Agent_protocol.Invocation.t
+  -> (unit -> ('a, Agent_protocol.Error.t) result)
+  -> ('a, Agent_protocol.Error.t) result
 
 (** Host-owned managed implementation dispatch. The callback receives a verified
     source-bound admission and a borrow limited to that implementation's declared
@@ -83,6 +128,7 @@ type managed_dispatch =
     binding; the caller's selected registry is restored after execution. *)
 val run_scoped_with_managed
   :  managed:managed_dispatch option
+  -> moderator_execute:moderator_executor option
   -> execute:executor
   -> registry:(unit -> Chat_response.Tool_capability.t)
   -> reference:Chat_response.Tool_capability.reference
