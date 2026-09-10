@@ -78,6 +78,7 @@ let with_actor
       ?(now = fun () -> timestamp)
       ?(make_job_results = fun _ _ _ -> None)
       ?(subscription_limits = Agent_session.Staged_subscriptions.default_limits)
+      ?(schedule_limits = Agent_session.Staged_schedules.default_limits)
       f
   =
   with_actor_workspace (fun env workspace_instance ->
@@ -110,6 +111,7 @@ let with_actor
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "background-fixture")
             ; job_results
+            ; schedule_limits
             ; subscription_limits
             ; state_committed = (fun _ _ -> ())
             }

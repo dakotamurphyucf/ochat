@@ -1869,6 +1869,7 @@ let handle_schedule_create t context command_audit request =
            ; status = Scheduled
            ; delivery_count = 0
            ; last_delivery_at = None
+           ; ownership = None
            }
        in
        let%map session =

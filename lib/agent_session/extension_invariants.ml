@@ -186,11 +186,22 @@ let validate
            with
            | None -> invalid "subscription references an unknown timer"
            | Some timer ->
-             owner
-               ~session_id:c.session_id
-               ~generation:c.generation
-               timer.session_id
-               timer.generation)))
+             let%bind () =
+               owner
+                 ~session_id:c.session_id
+                 ~generation:c.generation
+                 timer.session_id
+                 timer.generation
+             in
+             (match timer.ownership with
+              | None -> Ok ()
+              | Some ownership ->
+                (match c.source, ownership.subscription with
+                 | Some source, Some (id, epoch)
+                   when P.Invocation.equal_observer source ownership.source
+                        && P.Id.Subscription.equal id c.id
+                        && Int.equal epoch s.epoch -> Ok ()
+                 | _ -> invalid "subscription timer has a different source or epoch")))))
   in
   let%bind () =
     List.fold_result invocations ~init:() ~f:(fun () (i : P.Invocation.t) ->

@@ -219,16 +219,21 @@ let rec apply state = function
             ~id_of:(fun value -> value.Agent_protocol.Job.id)
       }
   | Schedule_changed schedule ->
-    Ok
-      { state with
-        schedules =
-          replace_by
-            Agent_protocol.Id.Schedule.compare
-            schedule.id
-            schedule
-            state.schedules
-            ~id_of:(fun value -> value.Agent_protocol.Schedule.id)
-      }
+    let open Result.Let_syntax in
+    let previous =
+      List.find state.schedules ~f:(fun old ->
+        Agent_protocol.Id.Schedule.equal old.id schedule.id)
+    in
+    let%map () = Agent_protocol.Schedule.validate_transition ~previous schedule in
+    { state with
+      schedules =
+        replace_by
+          Agent_protocol.Id.Schedule.compare
+          schedule.id
+          schedule
+          state.schedules
+          ~id_of:(fun value -> value.Agent_protocol.Schedule.id)
+    }
   | (Invocation_changed invocation | Invocation_reconciled invocation) as delta ->
     let open Result.Let_syntax in
     let recovery =

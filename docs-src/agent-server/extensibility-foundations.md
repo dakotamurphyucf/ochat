@@ -1486,6 +1486,31 @@ The sweep provides host deadline enforcement. Transactional script timer creatio
 subscription timer arming and notification delivery remain separate integration
 work; it does not expose a new model-facing expiry operation.
 
+The actor also has source-bound timer staging for the extensibility adapter.
+Timer creation reserves a host ID, captures the live moderator invocation or event,
+and records payload, due time and misfire policy. Selected timer mutations save
+with the moderator checkpoint and subscription mutations. Rejected saves, discarded
+effects and abandoned callbacks release their reservations; an uncommitted timer
+cannot be claimed by the scheduler. A scheduler claim that wins before a staged
+cancellation commits invalidates that cancellation's stale predecessor.
+
+Owned timer records use a version-2 JSON envelope containing the schedule and its
+ownership record. Existing unowned timers retain the original flat encoding and
+snapshot representation. Older readers reject the owned envelope rather than
+silently discarding ownership. Source, creator, identity, payload and timing are
+immutable after admission. Binding a still-scheduled timer to a subscription epoch
+is allowed once; the timer and subscription references must agree in the resulting
+checkpoint. Changed sources, unavailable creators and stale or future active epochs
+are rejected during aggregate validation.
+
+The host can configure timer admission through `Session_factory.limits.schedules`:
+defaults allow 256 active timers per session, 64 per moderator source, 4096 retained
+records, a 24-hour delay and a 64 KiB/64-level payload budget. Reservations count
+until their transaction finishes. This staging interface is internal; the compiled
+ChatML timer transaction adapter, script-facing subscription arming and epoch-aware
+event delivery remain separate integration work. General feature advertisement
+remains gated on A01.
+
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6
 without that lineage, schema 5 with

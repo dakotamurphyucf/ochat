@@ -19,6 +19,7 @@ let schedule () : P.Schedule.t =
   ; status = Scheduled
   ; delivery_count = 0
   ; last_delivery_at = None
+  ; ownership = None
   }
 ;;
 

@@ -25,6 +25,7 @@ let%expect_test "compaction atomically replaces history and advances its generat
             ; create_attachment_id = (fun () -> attachment_id)
             ; create_reclaim_token = (fun () -> "test-reclaim-token")
             ; job_results = None
+            ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -101,6 +102,7 @@ let compaction_cancel_actor ~sw env workspace_instance state_committed =
           Agent_protocol.Id.Attachment.of_string "att_compact_cancel" |> protocol_ok)
     ; create_reclaim_token = (fun () -> "compaction-cancel-reclaim")
     ; job_results = None
+    ; schedule_limits = Agent_session.Staged_schedules.default_limits
     ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
     ; state_committed
     }

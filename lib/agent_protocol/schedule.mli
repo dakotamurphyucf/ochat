@@ -19,6 +19,15 @@ type due =
   | After_ms of int
 [@@deriving sexp]
 
+(** Host-captured moderator authority and optional one-time subscription epoch
+    binding. A legacy schedule without this record grants no script authority. *)
+type ownership =
+  { source : Invocation.observer
+  ; creator : Job.launch_owner
+  ; subscription : (Id.Subscription.t * int) option [@sexp.option]
+  }
+[@@deriving equal, sexp]
+
 type t =
   { id : Id.Schedule.t
   ; session_id : Id.Session.t
@@ -30,11 +39,21 @@ type t =
   ; status : status
   ; delivery_count : int
   ; last_delivery_at : Timestamp.t option
+  ; ownership : ownership option [@sexp.option]
+    (** Owned schedules use a version-2 JSON envelope. Legacy records retain
+        their original flat encoding; old readers reject the owned envelope. *)
   }
 [@@deriving sexp]
 
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
+
+(** Validate owned records and their lifecycle without changing the legacy
+    unowned schedule contract. Binding is allowed once while still scheduled;
+    source, creator, identity, payload and due time stay immutable. *)
+val validate : t -> (unit, Error.t) result
+
+val validate_transition : previous:t option -> t -> (unit, Error.t) result
 
 module List_request : sig
   type t =

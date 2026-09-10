@@ -241,7 +241,9 @@ let%expect_test
                     ; create_attachment_id = Agent_protocol.Id.Attachment.create
                     ; create_reclaim_token = (fun () -> "follow-up-test")
                     ; job_results = None
-                    ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
+                    ; schedule_limits = Agent_session.Staged_schedules.default_limits
+                    ; subscription_limits =
+                        Agent_session.Staged_subscriptions.default_limits
                     ; state_committed =
                         (fun committed events ->
                           List.iter events ~f:(fun event ->

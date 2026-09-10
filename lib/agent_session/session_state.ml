@@ -325,6 +325,14 @@ let validate t =
         subscription)
   in
   let%bind () =
+    List.fold_result t.schedules ~init:() ~f:(fun () schedule ->
+      Schedule_ownership.validate
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~subscriptions:t.subscriptions
+        schedule)
+  in
+  let%bind () =
     List.fold_result t.jobs ~init:() ~f:(fun () job ->
       let%bind () = Agent_protocol.Job.validate_result job in
       let%bind () =

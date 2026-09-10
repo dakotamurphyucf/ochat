@@ -19,6 +19,7 @@ type services =
     (** Optional session-owned artifact publication/loading. Absence keeps inline
         publication and fails explicitly when an existing artifact needs loading. *)
   ; subscription_limits : Staged_subscriptions.limits
+  ; schedule_limits : Staged_schedules.limits
   }
 
 type submission =
@@ -177,6 +178,47 @@ val read_script_subscription
     retained older generations. Failed persistence changes nothing and may be
     retried; a sweep with no due work does not advance the session revision. *)
 val expire_subscriptions : t -> (int, Agent_protocol.Error.t) result
+
+(** Host-only source-bound schedule transaction adapter. Creation captures the
+    actual moderator invocation/event and enforces shared admission budgets.
+    Selected mutations save with that owner's checkpoint; abort and stop release
+    reservations. Legacy unowned schedules cannot be claimed through this API. *)
+val create_script_schedule
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> delay_ms:int
+  -> payload:Jsonaf.t
+  -> misfire:Agent_protocol.Schedule.misfire
+  -> (int * Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
+
+val stage_schedule_mutation
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> previous:Agent_protocol.Schedule.t option
+  -> next:Agent_protocol.Schedule.t
+  -> (int, Agent_protocol.Error.t) result
+
+val select_schedule_mutations
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> receipts:int list
+  -> (unit, Agent_protocol.Error.t) result
+
+val abort_schedule_mutation
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> receipt:int
+  -> (unit, Agent_protocol.Error.t) result
+
+val read_script_schedule
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> id:Agent_protocol.Id.Schedule.t
+  -> (Agent_protocol.Schedule.t, Agent_protocol.Error.t) result
 
 (** Read a job with optional live progress from its current attempt. Progress
     disappears when the worker scope ends and is never a durable result. *)

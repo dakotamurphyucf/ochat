@@ -21,6 +21,7 @@ type limits =
   ; job_result_recovery_max_bytes : int
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
   ; subscriptions : Agent_session.Staged_subscriptions.limits
+  ; schedules : Agent_session.Staged_schedules.limits
   }
 
 type t =
@@ -741,6 +742,7 @@ let schedule_services t state actor_ref pending =
           ; status = Scheduled
           ; delivery_count = 0
           ; last_delivery_at = None
+          ; ownership = None
           }
       in
       add_bound_schedule actor_ref pending schedule)
@@ -1846,6 +1848,7 @@ let actor_services
     { now = (fun () -> now t)
     ; job_results = Some job_results
     ; subscription_limits = t.limits.subscriptions
+    ; schedule_limits = t.limits.schedules
     ; create_attachment_id = Agent_protocol.Id.Attachment.create
     ; create_reclaim_token =
         (fun () ->

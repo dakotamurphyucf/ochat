@@ -15,6 +15,7 @@ type services =
   ; state_committed : Session_state.t -> Agent_protocol.Event.Durable.t list -> unit
   ; job_results : Agent_store.Job_result_store.Publisher.t option
   ; subscription_limits : Staged_subscriptions.limits
+  ; schedule_limits : Staged_schedules.limits
   }
 
 type submission =
@@ -183,6 +184,28 @@ type _ request =
       * Agent_protocol.Id.Subscription.t
       -> Agent_protocol.Subscription.t request
   | Expire_subscriptions : int request
+  | Stage_schedule_mutation :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Agent_protocol.Schedule.t option
+      * Agent_protocol.Schedule.t
+      -> int request
+  | Create_script_schedule :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * int
+      * Jsonaf.t
+      * Agent_protocol.Schedule.misfire
+      -> (int * Agent_protocol.Schedule.t) request
+  | Select_schedule_mutations :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Invocation.observer * int list
+      -> unit request
+  | Abort_schedule_mutation : Agent_protocol.Job.launch_owner * int -> unit request
+  | Read_script_schedule :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Agent_protocol.Id.Schedule.t
+      -> Agent_protocol.Schedule.t request
   | Select_background_jobs :
       Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t list
       -> unit request
@@ -460,6 +483,7 @@ type t =
   ; mutable job_scopes : job_scope list
   ; staged_jobs : Staged_jobs.t
   ; staged_subscriptions : Staged_subscriptions.t
+  ; staged_schedules : Staged_schedules.t
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
@@ -614,12 +638,14 @@ let transition t ~delta ~payloads =
 
 let abort_staged_work t ~owner =
   Staged_jobs.abort_owner t.staged_jobs ~owner;
-  Staged_subscriptions.release_owner t.staged_subscriptions ~owner
+  Staged_subscriptions.release_owner t.staged_subscriptions ~owner;
+  Staged_schedules.release_owner t.staged_schedules ~owner
 ;;
 
 let abort_all_staged_work t =
   Staged_jobs.abort_all t.staged_jobs;
-  Staged_subscriptions.abort_all t.staged_subscriptions
+  Staged_subscriptions.abort_all t.staged_subscriptions;
+  Staged_schedules.abort_all t.staged_schedules
 ;;
 
 let with_staged_transaction t owner f =
@@ -627,6 +653,7 @@ let with_staged_transaction t owner f =
   | Ok _ as result ->
     Staged_jobs.commit t.staged_jobs ~owner;
     Staged_subscriptions.release_owner t.staged_subscriptions ~owner;
+    Staged_schedules.release_owner t.staged_schedules ~owner;
     result
   | Error _ as result ->
     abort_staged_work t ~owner;
@@ -644,18 +671,26 @@ let lookup_subscription t id =
 
 let staged_work_changes t owner =
   let open Result.Let_syntax in
-  let%map subscriptions =
+  let%bind subscriptions =
     Staged_subscriptions.selected
       t.staged_subscriptions
       ~owner
       ~lookup:(lookup_subscription t)
   in
+  let%map schedules =
+    Staged_schedules.selected t.staged_schedules ~owner ~lookup:(fun id ->
+      List.find t.state.schedules ~f:(fun value ->
+        Agent_protocol.Id.Schedule.equal value.id id))
+  in
   let jobs = Staged_jobs.selected t.staged_jobs ~owner in
   ( List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
     @ List.map subscriptions ~f:(fun subscription ->
       Session_delta.Subscription_changed subscription)
+    @ List.map schedules ~f:(fun schedule -> Session_delta.Schedule_changed schedule)
   , List.map jobs ~f:(fun job ->
-      Agent_protocol.Event.Durable.Payload.Job_state_changed job) )
+      Agent_protocol.Event.Durable.Payload.Job_state_changed job)
+    @ List.map schedules ~f:(fun schedule ->
+      Agent_protocol.Event.Durable.Payload.Schedule_state_changed schedule) )
 ;;
 
 let prepare_background_job_launch t ~owner request =
@@ -704,6 +739,26 @@ let read_script_subscription t ~owner ~source ~id =
 ;;
 
 let expire_subscriptions t = call t Expire_subscriptions
+
+let stage_schedule_mutation t ~owner ~source ~previous ~next =
+  call t (Stage_schedule_mutation (owner, source, previous, next))
+;;
+
+let create_script_schedule t ~owner ~source ~delay_ms ~payload ~misfire =
+  call t (Create_script_schedule (owner, source, delay_ms, payload, misfire))
+;;
+
+let select_schedule_mutations t ~owner ~source ~receipts =
+  call t (Select_schedule_mutations (owner, source, receipts))
+;;
+
+let abort_schedule_mutation t ~owner ~receipt =
+  Eio.Cancel.protect (fun () -> call t (Abort_schedule_mutation (owner, receipt)))
+;;
+
+let read_script_schedule t ~owner ~source ~id =
+  call t (Read_script_schedule (owner, source, id))
+;;
 
 let expire_subscriptions_internal t =
   let module P = Agent_protocol in
@@ -2453,6 +2508,152 @@ let subscription_owner_active t owner source =
                  source -> Ok None
      | _ ->
        Error (error Permission_denied "subscription requires its moderator event borrow"))
+;;
+
+let schedule_owned t source (schedule : Agent_protocol.Schedule.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      schedule.session_id
+      schedule.generation
+  in
+  match schedule.ownership with
+  | Some ownership when Agent_protocol.Invocation.equal_observer ownership.source source
+    -> Ok ()
+  | _ ->
+    Error
+      (error
+         Permission_denied
+         "schedule belongs to a different or unbound moderator source")
+;;
+
+let provisional_schedule t owner id =
+  match Staged_schedules.find t.staged_schedules ~owner ~id with
+  | Some value -> Some value
+  | None ->
+    List.find t.state.schedules ~f:(fun value ->
+      Agent_protocol.Id.Schedule.equal value.id id)
+;;
+
+let schedule_span milliseconds =
+  Result.try_with (fun () -> Time_ns.Span.of_int_ms milliseconds)
+  |> Result.map_error ~f:(fun _ ->
+    error Invalid_request "schedule delay exceeds timestamp range")
+;;
+
+let stage_schedule_mutation_internal
+      t
+      owner
+      source
+      previous
+      (next : Agent_protocol.Schedule.t)
+  =
+  let open Result.Let_syntax in
+  let%bind _ = subscription_owner_active t owner source in
+  let%bind () = schedule_owned t source next in
+  let%bind () = Agent_protocol.Schedule.validate_transition ~previous next in
+  let%bind () =
+    match
+      Option.equal
+        (fun a b ->
+           Jsonaf.exactly_equal
+             (Agent_protocol.Schedule.to_json a)
+             (Agent_protocol.Schedule.to_json b))
+        previous
+        (provisional_schedule t owner next.id)
+    with
+    | true -> Ok ()
+    | false -> Error (error Conflict "schedule changed before staging")
+  in
+  let%bind () =
+    match previous with
+    | Some _ -> Ok ()
+    | None ->
+      let limits = t.services.schedule_limits in
+      let%bind () = Staged_schedules.validate_limits limits in
+      let%bind maximum_delay = schedule_span limits.max_delay_ms in
+      let%bind () =
+        match next.ownership with
+        | Some ownership
+          when Agent_protocol.Job.equal_launch_owner ownership.creator owner
+               && Agent_protocol.Timestamp.compare next.created_at (t.services.now ())
+                  <= 0
+               && Time_ns.Span.compare
+                    (Time_ns.diff
+                       (Agent_protocol.Timestamp.to_time_ns next.next_due_at)
+                       (Agent_protocol.Timestamp.to_time_ns next.created_at))
+                    maximum_delay
+                  <= 0 -> Ok ()
+        | _ ->
+          Error
+            (error
+               Permission_denied
+               "schedule creation has a different owner or invalid timing")
+      in
+      let reserved = Staged_schedules.reservations t.staged_schedules in
+      let active schedule =
+        match schedule.Agent_protocol.Schedule.status with
+        | Scheduled | Delivering -> true
+        | _ -> false
+      in
+      let source_active schedule =
+        active schedule
+        && Option.exists schedule.ownership ~f:(fun ownership ->
+          Agent_protocol.Invocation.equal_observer ownership.source source)
+      in
+      let%bind () =
+        match
+          List.count t.state.schedules ~f:active + reserved < limits.max_active
+          && List.count t.state.schedules ~f:source_active + reserved
+             < limits.max_per_source
+          && List.length t.state.schedules + reserved < limits.max_retained
+        with
+        | true -> Ok ()
+        | false -> Error (error Resource_limit "schedule admission capacity exhausted")
+      in
+      Agent_protocol.Json_codec.validate_limits
+        ~max_bytes:limits.max_payload_bytes
+        ~max_depth:limits.max_payload_depth
+        next.payload
+  in
+  Staged_schedules.stage t.staged_schedules ~owner ~previous ~next
+;;
+
+let create_script_schedule_internal t owner source delay_ms payload misfire =
+  let open Result.Let_syntax in
+  let%bind _ = subscription_owner_active t owner source in
+  let%bind () =
+    match delay_ms >= 0 && delay_ms <= t.services.schedule_limits.max_delay_ms with
+    | true -> Ok ()
+    | false -> Error (error Invalid_request "schedule delay exceeds host policy")
+  in
+  let created_at = t.services.now () in
+  let%bind span = schedule_span delay_ms in
+  let%bind next_due_at =
+    Result.try_with (fun () ->
+      Time_ns.add (Agent_protocol.Timestamp.to_time_ns created_at) span
+      |> Agent_protocol.Timestamp.of_time_ns)
+    |> Result.map_error ~f:(fun _ ->
+      error Invalid_request "schedule due time exceeds timestamp range")
+  in
+  let schedule : Agent_protocol.Schedule.t =
+    { id = Agent_protocol.Id.Schedule.create ()
+    ; session_id = t.state.identity.session_id
+    ; generation = t.state.identity.generation
+    ; payload
+    ; created_at
+    ; next_due_at
+    ; misfire
+    ; status = Scheduled
+    ; delivery_count = 0
+    ; last_delivery_at = None
+    ; ownership = Some { source; creator = owner; subscription = None }
+    }
+  in
+  let%map receipt = stage_schedule_mutation_internal t owner source None schedule in
+  receipt, schedule
 ;;
 
 let subscription_owned t source (subscription : Agent_protocol.Subscription.t) =
@@ -6787,6 +6988,28 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     let%map () = subscription_owned t source subscription in
     subscription
   | Expire_subscriptions -> expire_subscriptions_internal t
+  | Stage_schedule_mutation (owner, source, previous, next) ->
+    stage_schedule_mutation_internal t owner source previous next
+  | Create_script_schedule (owner, source, delay_ms, payload, misfire) ->
+    create_script_schedule_internal t owner source delay_ms payload misfire
+  | Select_schedule_mutations (owner, source, receipts) ->
+    let open Result.Let_syntax in
+    let%bind _ = subscription_owner_active t owner source in
+    Staged_schedules.select t.staged_schedules ~owner ~receipts ~lookup:(fun id ->
+      List.find t.state.schedules ~f:(fun value ->
+        Agent_protocol.Id.Schedule.equal value.id id))
+  | Abort_schedule_mutation (owner, receipt) ->
+    Staged_schedules.abort t.staged_schedules ~owner ~receipt
+  | Read_script_schedule (owner, source, id) ->
+    let open Result.Let_syntax in
+    let%bind _ = subscription_owner_active t owner source in
+    let%bind value =
+      Result.of_option
+        (provisional_schedule t owner id)
+        ~error:(error Invalid_state "schedule is not retained")
+    in
+    let%map () = schedule_owned t source value in
+    value
   | Select_background_jobs (owner, ids) ->
     let open Result.Let_syntax in
     let%bind () = background_owner_active t owner in
@@ -6966,6 +7189,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        , t.idle_moderator_borrowed
        , Staged_jobs.is_empty t.staged_jobs
          && Staged_subscriptions.is_empty t.staged_subscriptions
+         && Staged_schedules.is_empty t.staged_schedules
        , Active_calls.snapshot t.active_calls )
      with
      | None, None, [], [], None, None, None, false, true, ([], []) ->
@@ -7046,6 +7270,9 @@ let create_with_owner_lease_duration
   (match Staged_subscriptions.validate_limits services.subscription_limits with
    | Ok () -> ()
    | Error error -> invalid_arg error.message);
+  (match Staged_schedules.validate_limits services.schedule_limits with
+   | Ok () -> ()
+   | Error error -> invalid_arg error.message);
   let t =
     { sw
     ; sleep = (fun seconds -> Eio.Time.sleep clock seconds)
@@ -7072,6 +7299,7 @@ let create_with_owner_lease_duration
     ; job_scopes = []
     ; staged_jobs = Staged_jobs.create ()
     ; staged_subscriptions = Staged_subscriptions.create ()
+    ; staged_schedules = Staged_schedules.create ()
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state
