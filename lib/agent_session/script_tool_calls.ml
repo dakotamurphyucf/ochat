@@ -40,6 +40,7 @@ type t =
   ; subscriptions : Script_subscription_service.t option
   ; schedules : Script_schedule_service.t option
   ; notifications : Script_notification_service.t option
+  ; ingress : Script_ingress_service.t option
   ; progress : (I.t -> Ochat_function.Progress.t -> unit) option
   ; progress_ceiling : C.t option
   }
@@ -69,6 +70,7 @@ let create
   ; subscriptions = None
   ; schedules = None
   ; notifications = None
+  ; ingress = None
   ; progress = None
   ; progress_ceiling = None
   }
@@ -105,6 +107,7 @@ let with_notification_service t notifications =
 ;;
 
 let with_progress t ~emit = { t with progress = Some emit }
+let with_ingress_service t ingress = { t with ingress = Some ingress }
 let with_progress_ceiling t ~ceiling = { t with progress_ceiling = Some ceiling }
 
 let progress_for t (reference : C.reference) =
@@ -125,6 +128,13 @@ let with_job_scope t ~owner ~selected ~error f =
 ;;
 
 let with_moderator_work t ~owner ~selected ~source ~originating ~error f =
+  let f ~jobs ~subscriptions ~schedules ~notifications =
+    match t.ingress with
+    | None -> f ~jobs ~subscriptions ~schedules ~notifications ~ingress:None
+    | Some service ->
+      Script_ingress_service.with_scope service ~owner ~source ~error (fun scope ->
+        f ~jobs ~subscriptions ~schedules ~notifications ~ingress:(Some scope))
+  in
   with_job_scope t ~owner ~selected ~error (fun jobs ->
     let with_schedules f =
       match t.schedules with

@@ -171,6 +171,7 @@ let dispatch
                 ?subscription_scope
                 ?schedule_scope
                 ?notification_scope
+                ?ingress_scope
                 ()
             =
             let jobs = Option.map job_scope ~f:Script_job_service.moderator_transaction in
@@ -187,6 +188,9 @@ let dispatch
                 notification_scope
                 ~f:Script_notification_service.moderator_transaction
             in
+            let ingress =
+              Option.map ingress_scope ~f:Script_ingress_service.moderator_transaction
+            in
             let validate_work =
               Script_tool_calls.validate_pending_work
                 ~jobs:job_scope
@@ -198,6 +202,7 @@ let dispatch
               ?subscriptions
               ?schedules
               ?notifications
+              ?ingress
               ?on_tool_call
               manager
               ~invocation:dispatched
@@ -259,7 +264,8 @@ let dispatch
               (fun ~jobs:job_scope
                 ~subscriptions:subscription_scope
                 ~schedules:schedule_scope
-                ~notifications:notification_scope ->
+                ~notifications:notification_scope
+                ~ingress:ingress_scope ->
                  Script_tool_calls.with_invocation
                    tools
                    ~prepared
@@ -272,6 +278,7 @@ let dispatch
                         ?subscription_scope
                         ?schedule_scope
                         ?notification_scope
+                        ?ingress_scope
                         ())))
       in
       let result =

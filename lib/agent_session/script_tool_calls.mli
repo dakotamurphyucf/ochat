@@ -31,6 +31,7 @@ val with_job_service : t -> Script_job_service.t -> t
 val with_subscription_service : t -> Script_subscription_service.t -> t
 val with_schedule_service : t -> Script_schedule_service.t -> t
 val with_notification_service : t -> Script_notification_service.t -> t
+val with_ingress_service : t -> Script_ingress_service.t -> t
 
 (** Host display observer for native descendants, after normal tool admission.
     The host must preserve ownership, disclosure and bounded/nonblocking delivery.
@@ -71,6 +72,7 @@ val with_moderator_work
       -> subscriptions:Script_subscription_service.scope option
       -> schedules:Script_schedule_service.scope option
       -> notifications:Script_notification_service.scope option
+      -> ingress:Script_ingress_service.scope option
       -> ('a, 'error) result)
   -> ('a, 'error) result
 

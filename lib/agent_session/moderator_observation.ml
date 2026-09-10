@@ -42,6 +42,7 @@ let drain_with_claim
                ~subscription_scope
                ~schedule_scope
                ~notification_scope
+               ~ingress_scope
              ->
              let jobs =
                Option.map job_scope ~f:Script_job_service.moderator_transaction
@@ -59,11 +60,15 @@ let drain_with_claim
                  notification_scope
                  ~f:Script_notification_service.moderator_transaction
              in
+             let ingress =
+               Option.map ingress_scope ~f:Script_ingress_service.moderator_transaction
+             in
              M.handle_observation_entries
                ?jobs
                ?subscriptions
                ?schedules
                ?notifications
+               ?ingress
                ?on_tool_call
                ~retain_follow_up
                manager
@@ -123,7 +128,8 @@ let drain ?max_observations ?on_tool_call ~capabilities ~observer =
            ~job_scope:None
            ~subscription_scope:None
            ~schedule_scope:None
-           ~notification_scope:None))
+           ~notification_scope:None
+           ~ingress_scope:None))
 ;;
 
 let drain_idle ?max_observations ?on_tool_call ~claim =
@@ -136,7 +142,8 @@ let drain_idle ?max_observations ?on_tool_call ~claim =
         ~job_scope:None
         ~subscription_scope:None
         ~schedule_scope:None
-        ~notification_scope:None))
+        ~notification_scope:None
+        ~ingress_scope:None))
 ;;
 
 let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
@@ -160,6 +167,7 @@ let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
              ~subscriptions:subscription_scope
              ~schedules:schedule_scope
              ~notifications:notification_scope
+             ~ingress:ingress_scope
            ->
            Script_tool_calls.with_observation
              script_tools
@@ -174,7 +182,8 @@ let drain_idle_with_tools ?max_observations ~script_tools ~definition ~claim =
                   ~job_scope
                   ~subscription_scope
                   ~schedule_scope
-                  ~notification_scope))))
+                  ~notification_scope
+                  ~ingress_scope))))
 ;;
 
 let drain_foreground_with_tools
@@ -200,6 +209,7 @@ let drain_foreground_with_tools
                 ~subscriptions:subscription_scope
                 ~schedules:schedule_scope
                 ~notifications:notification_scope
+                ~ingress:ingress_scope
               ->
               Script_tool_calls.with_observation
                 script_tools
@@ -214,5 +224,6 @@ let drain_foreground_with_tools
                      ~job_scope
                      ~subscription_scope
                      ~schedule_scope
-                     ~notification_scope))))
+                     ~notification_scope
+                     ~ingress_scope))))
 ;;

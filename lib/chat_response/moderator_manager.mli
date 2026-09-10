@@ -201,6 +201,7 @@ val handle_event_entries_transactional
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
   -> ?notifications:Notification_operations.transaction
+  -> ?ingress:Ingress_operations.transaction
   -> t
   -> session_id:string
   -> now_ms:int
@@ -237,6 +238,7 @@ val handle_next_event_entries_transactional
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
   -> ?notifications:Notification_operations.transaction
+  -> ?ingress:Ingress_operations.transaction
   -> t
   -> session_id:string
   -> now_ms:int
@@ -284,6 +286,7 @@ val handle_invocation_entries
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
   -> ?notifications:Notification_operations.transaction
+  -> ?ingress:Ingress_operations.transaction
   -> ?authorize:(unit -> (unit, string) result)
   -> ?managed:Managed_tool_registry.execution
   -> ?execution_context:Chatml_execution.context
@@ -326,6 +329,7 @@ val handle_observation_entries
   -> ?subscriptions:Subscription_operations.transaction
   -> ?schedules:Schedule_operations.transaction
   -> ?notifications:Notification_operations.transaction
+  -> ?ingress:Ingress_operations.transaction
   -> ?on_tool_call:
        (name:string
         -> args:Jsonaf.t

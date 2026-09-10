@@ -291,6 +291,25 @@ let notification_module : S.builtin_module =
   }
 ;;
 
+let ingress_module : S.builtin_module =
+  let mutation name parameters result =
+    task_builtin ~name ~op:("Ingress." ^ name) ~parameters ~result ~spawn:false
+    |> project_receipt "Ingress_receipt"
+  in
+  { name = "Ingress"
+  ; exports =
+      [ mutation "register" [ S.TString; S.TInt; S.TString; S.json_ty ] S.TString
+      ; mutation "revoke" [ S.TString; S.TString ] S.json_ty
+      ; task_builtin
+          ~name:"get"
+          ~op:"Ingress.get"
+          ~parameters:[ S.TString ]
+          ~result:S.json_ty
+          ~spawn:false
+      ]
+  }
+;;
+
 let moderator_event_ty =
   variant
     [ "Session_start", S.TUnit
@@ -355,7 +374,8 @@ let moderator_v1 =
   Surface.merge
     { Surface.empty with
       modules =
-        notification_module
+        ingress_module
+        :: notification_module
         :: schedule_module
         :: subscription_module
         :: job_module

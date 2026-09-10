@@ -144,6 +144,7 @@ type t =
   ; subscription_transaction : Subscription_operations.transaction option ref
   ; schedule_transaction : Schedule_operations.transaction option ref
   ; notification_transaction : Notification_operations.transaction option ref
+  ; ingress_transaction : Ingress_operations.transaction option ref
   }
 
 type prepared_commit =
@@ -339,6 +340,7 @@ let create
   let subscription_transaction = ref None in
   let schedule_transaction = ref None in
   let notification_transaction = ref None in
+  let ingress_transaction = ref None in
   let capabilities =
     { capabilities with
       on_tool_call =
@@ -421,6 +423,10 @@ let create
            ~handlers:
              (Notification_operations.dynamic_handlers (fun () ->
                 !notification_transaction))
+      |> Ingress_operations.install
+           ?control
+           ~handlers:
+             (Ingress_operations.dynamic_handlers (fun () -> !ingress_transaction))
   in
   let%bind runtime =
     run_controlled execution (fun () ->
@@ -477,6 +483,7 @@ let create
     ; subscription_transaction
     ; schedule_transaction
     ; notification_transaction
+    ; ingress_transaction
     }
 ;;
 
@@ -1130,21 +1137,24 @@ let identity_snapshot_of_state ?control t ~current_state ~queued_events ~halted 
     }
 ;;
 
-let with_work_transactions t jobs subscriptions schedules notifications f =
+let with_work_transactions t jobs subscriptions schedules notifications ingress f =
   let previous = !(t.job_transaction) in
   let previous_subscriptions = !(t.subscription_transaction) in
   let previous_schedules = !(t.schedule_transaction) in
   let previous_notifications = !(t.notification_transaction) in
+  let previous_ingress = !(t.ingress_transaction) in
   t.job_transaction := jobs;
   t.subscription_transaction := subscriptions;
   t.schedule_transaction := schedules;
   t.notification_transaction := notifications;
+  t.ingress_transaction := ingress;
   Exn.protect
     ~finally:(fun () ->
       t.job_transaction := previous;
       t.subscription_transaction := previous_subscriptions;
       t.schedule_transaction := previous_schedules;
-      t.notification_transaction := previous_notifications)
+      t.notification_transaction := previous_notifications;
+      t.ingress_transaction := previous_ingress)
     ~f
 ;;
 
@@ -1158,6 +1168,8 @@ let persist_prepared
       schedule_receipts
       notifications
       notification_receipts
+      ingress
+      ingress_receipts
       (prepared : prepared_commit)
   =
   let open Result.Let_syntax in
@@ -1186,6 +1198,12 @@ let persist_prepared
     | Some transaction, _ ->
       transaction.Notification_operations.prepare notification_receipts
   in
+  let%bind acknowledge_ingress =
+    match ingress, ingress_receipts with
+    | None, [] -> Ok ignore
+    | None, _ :: _ -> Error "ingress mutations require an owning transaction"
+    | Some transaction, _ -> transaction.Ingress_operations.prepare ingress_receipts
+  in
   Option.iter control ~f:(fun control -> control.Chatml.Chatml_lang.checkpoint ());
   let%map () = prepared.persist () in
   fun () ->
@@ -1193,7 +1211,8 @@ let persist_prepared
     acknowledge_jobs ();
     acknowledge_subscriptions ();
     acknowledge_schedules ();
-    acknowledge_notifications ()
+    acknowledge_notifications ();
+    acknowledge_ingress ()
 ;;
 
 let handle_event_entries_transactional_unlocked
@@ -1201,6 +1220,7 @@ let handle_event_entries_transactional_unlocked
       ?subscriptions
       ?schedules
       ?notifications
+      ?ingress
       t
       ~session_id
       ~now_ms
@@ -1272,6 +1292,9 @@ let handle_event_entries_transactional_unlocked
       let%bind notification_mutations, local_effects =
         Notification_operations.split_mutations local_effects
       in
+      let%bind ingress_mutations, local_effects =
+        Ingress_operations.split_mutations local_effects
+      in
       let%bind decoded = decode_effects t local_effects in
       let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
       let%bind overlay, install_overlay =
@@ -1298,6 +1321,8 @@ let handle_event_entries_transactional_unlocked
           schedule_mutations
           notifications
           notification_mutations
+          ingress
+          ingress_mutations
           commit
       in
       fun () ->
@@ -1314,38 +1339,45 @@ let handle_event_entries_transactional_unlocked
       Exn.protect
         ~finally:(fun () -> t.invocation_tool_call := previous)
         ~f:(fun () ->
-          with_work_transactions t jobs subscriptions schedules notifications (fun () ->
-            let context = Moderation.Context.to_value ?control context in
-            let copy value =
-              Result.bind (checked value) ~f:Value_codec.Snapshot.to_value
-            in
-            let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
-            match consume_queued with
-            | false ->
-              Runtime.handle_event
-                t.runtime
-                ~context
-                ~event
-                ~copy_state:copy
-                ~validate_state
-                ~prepare_transaction:prepare
-                ~validate_suspension:(fun () ->
-                  Error "event.suspended: cannot retain a UI continuation")
-            | true ->
-              let%bind consumed =
-                Runtime.handle_next_queued_event
-                  t.runtime
-                  ~context
-                  ~copy_state:copy
-                  ~copy_event:(fun value ->
-                    let%bind value = Schedule_delivery.script_event value in
-                    Result.bind (Ingress_delivery.script_event value) ~f:copy)
-                  ~validate_state
-                  ~prepare_transaction:prepare
-              in
-              (match consumed with
-               | Some () -> Ok ()
-               | None -> Error "event.queue_changed: selected event no longer queued")))
+          with_work_transactions
+            t
+            jobs
+            subscriptions
+            schedules
+            notifications
+            ingress
+            (fun () ->
+               let context = Moderation.Context.to_value ?control context in
+               let copy value =
+                 Result.bind (checked value) ~f:Value_codec.Snapshot.to_value
+               in
+               let validate_state value = Result.map (checked value) ~f:(fun _ -> ()) in
+               match consume_queued with
+               | false ->
+                 Runtime.handle_event
+                   t.runtime
+                   ~context
+                   ~event
+                   ~copy_state:copy
+                   ~validate_state
+                   ~prepare_transaction:prepare
+                   ~validate_suspension:(fun () ->
+                     Error "event.suspended: cannot retain a UI continuation")
+               | true ->
+                 let%bind consumed =
+                   Runtime.handle_next_queued_event
+                     t.runtime
+                     ~context
+                     ~copy_state:copy
+                     ~copy_event:(fun value ->
+                       let%bind value = Schedule_delivery.script_event value in
+                       Result.bind (Ingress_delivery.script_event value) ~f:copy)
+                     ~validate_state
+                     ~prepare_transaction:prepare
+                 in
+                 (match consumed with
+                  | Some () -> Ok ()
+                  | None -> Error "event.queue_changed: selected event no longer queued")))
     in
     !outcome)
 ;;
@@ -1355,6 +1387,7 @@ let handle_event_entries_transactional
       ?subscriptions
       ?schedules
       ?notifications
+      ?ingress
       t
       ~session_id
       ~now_ms
@@ -1372,6 +1405,7 @@ let handle_event_entries_transactional
       ?subscriptions
       ?schedules
       ?notifications
+      ?ingress
       t
       ~session_id
       ~now_ms
@@ -1390,6 +1424,7 @@ let handle_next_event_entries_transactional
       ?subscriptions
       ?schedules
       ?notifications
+      ?ingress
       t
       ~session_id
       ~now_ms
@@ -1411,6 +1446,7 @@ let handle_next_event_entries_transactional
           ?subscriptions
           ?schedules
           ?notifications
+          ?ingress
           t
           ~session_id
           ~now_ms
@@ -1433,6 +1469,7 @@ let handle_invocation_entries
       ?subscriptions
       ?schedules
       ?notifications
+      ?ingress
       ?(authorize = fun () -> Ok ())
       ?managed
       ?execution_context
@@ -1523,6 +1560,9 @@ let handle_invocation_entries
         let%bind notification_mutations, local_effects =
           Notification_operations.split_mutations local_effects
         in
+        let%bind ingress_mutations, local_effects =
+          Ingress_operations.split_mutations local_effects
+        in
         let%bind decoded = Runtime.decode_local_effects local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
         let%bind overlay, install_overlay =
@@ -1552,6 +1592,8 @@ let handle_invocation_entries
             schedule_mutations
             notifications
             notification_mutations
+            ingress
+            ingress_mutations
             commit
         in
         fun () ->
@@ -1568,14 +1610,21 @@ let handle_invocation_entries
         t.invocation_tool_call := on_tool_call;
         Exn.protect
           ~f:(fun () ->
-            with_work_transactions t jobs subscriptions schedules notifications (fun () ->
-              Moderator_invocation.run
-                ?on_failure
-                ?control
-                scope
-                ~runtime:t.runtime
-                ~context:(Moderation.Context.to_value ?control context)
-                ~prepare_commit))
+            with_work_transactions
+              t
+              jobs
+              subscriptions
+              schedules
+              notifications
+              ingress
+              (fun () ->
+                 Moderator_invocation.run
+                   ?on_failure
+                   ?control
+                   scope
+                   ~runtime:t.runtime
+                   ~context:(Moderation.Context.to_value ?control context)
+                   ~prepare_commit))
           ~finally:(fun () -> t.invocation_tool_call := previous)
       in
       resolved, !outcome))
@@ -1586,6 +1635,7 @@ let handle_observation_entries
       ?subscriptions
       ?schedules
       ?notifications
+      ?ingress
       ?on_tool_call
       ?(retain_follow_up = false)
       t
@@ -1680,6 +1730,9 @@ let handle_observation_entries
         let%bind notification_mutations, local_effects =
           Notification_operations.split_mutations local_effects
         in
+        let%bind ingress_mutations, local_effects =
+          Ingress_operations.split_mutations local_effects
+        in
         let%bind decoded = decode_effects t local_effects in
         let%bind prepared = Moderation.Outcome.of_runtime_effects decoded in
         let%bind overlay, install_overlay =
@@ -1731,6 +1784,8 @@ let handle_observation_entries
             schedule_mutations
             notifications
             notification_mutations
+            ingress
+            ingress_mutations
             commit
         in
         fun () ->
@@ -1747,17 +1802,25 @@ let handle_observation_entries
         Exn.protect
           ~finally:(fun () -> t.invocation_tool_call := previous)
           ~f:(fun () ->
-            with_work_transactions t jobs subscriptions schedules notifications (fun () ->
-              Runtime.handle_event
-                t.runtime
-                ~context:(Moderation.Context.to_value ?control context)
-                ~event
-                ~copy_state:(fun value ->
-                  Result.bind (checked value) ~f:Value_codec.Snapshot.to_value)
-                ~validate_state:(fun value -> Result.map (checked value) ~f:(fun _ -> ()))
-                ~validate_suspension:(fun () ->
-                  Error "observation.suspended: cannot retain a UI continuation")
-                ~prepare_transaction:prepare))
+            with_work_transactions
+              t
+              jobs
+              subscriptions
+              schedules
+              notifications
+              ingress
+              (fun () ->
+                 Runtime.handle_event
+                   t.runtime
+                   ~context:(Moderation.Context.to_value ?control context)
+                   ~event
+                   ~copy_state:(fun value ->
+                     Result.bind (checked value) ~f:Value_codec.Snapshot.to_value)
+                   ~validate_state:(fun value ->
+                     Result.map (checked value) ~f:(fun _ -> ()))
+                   ~validate_suspension:(fun () ->
+                     Error "observation.suspended: cannot retain a UI continuation")
+                   ~prepare_transaction:prepare))
       in
       !outcome))
 ;;

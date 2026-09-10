@@ -1201,6 +1201,43 @@ let extension_notifications actor_ref =
   Service.create ~host
 ;;
 
+let extension_ingress actor_ref =
+  let module A = Agent_session.Session_actor in
+  let module Service = Agent_session.Script_ingress_service in
+  let with_actor f = Result.bind (extension_actor actor_ref) ~f in
+  let host : Service.host =
+    { register =
+        (fun owner source ~subscription_id ~expected_epoch ~namespace ~schema ->
+          with_actor (fun actor ->
+            A.create_script_ingress
+              actor
+              ~owner
+              ~source
+              ~subscription_id
+              ~expected_epoch
+              ~namespace
+              ~schema))
+    ; get =
+        (fun owner source id ->
+          with_actor (fun actor -> A.read_script_ingress actor ~owner ~source ~id))
+    ; revoke =
+        (fun owner source id ~reason ->
+          with_actor (fun actor ->
+            A.revoke_script_ingress actor ~owner ~source ~id ~reason))
+    ; select =
+        (fun owner source receipts ->
+          with_actor (fun actor ->
+            A.select_ingress_mutations actor ~owner ~source ~receipts))
+    ; abort =
+        (fun owner receipt ->
+          ignore
+            (with_actor (fun actor -> A.abort_ingress_mutation actor ~owner ~receipt)
+             : (unit, Agent_protocol.Error.t) result))
+    }
+  in
+  Service.create ~host
+;;
+
 let extension_schedules actor_ref =
   let module A = Agent_session.Session_actor in
   let module Service = Agent_session.Script_schedule_service in
@@ -1317,6 +1354,10 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
           Agent_session.Script_tool_calls.with_notification_service
             tools
             (extension_notifications actor_ref)
+          |> fun tools ->
+          Agent_session.Script_tool_calls.with_ingress_service
+            tools
+            (extension_ingress actor_ref)
           |> fun tools ->
           Agent_session.Script_tool_calls.with_progress
             tools

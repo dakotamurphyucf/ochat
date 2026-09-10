@@ -48,6 +48,7 @@
   schedule_operations
   schedule_delivery
   ingress_delivery
+  ingress_operations
   mcp_discovery_cache
   fork
   compact_history)

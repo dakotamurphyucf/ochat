@@ -74,7 +74,12 @@ let run
              let with_work f =
                match script_tools with
                | None ->
-                 f ~jobs:None ~subscriptions:None ~schedules:None ~notifications:None
+                 f
+                   ~jobs:None
+                   ~subscriptions:None
+                   ~schedules:None
+                   ~notifications:None
+                   ~ingress:None
                | Some tools ->
                  Script_tool_calls.with_moderator_work
                    tools
@@ -92,6 +97,7 @@ let run
                     ~subscriptions:subscription_scope
                     ~schedules:schedule_scope
                     ~notifications:notification_scope
+                    ~ingress:ingress_scope
                   ->
                   let jobs =
                     Option.map job_scope ~f:Script_job_service.moderator_transaction
@@ -110,6 +116,11 @@ let run
                     Option.map
                       notification_scope
                       ~f:Script_notification_service.moderator_transaction
+                  in
+                  let ingress =
+                    Option.map
+                      ingress_scope
+                      ~f:Script_ingress_service.moderator_transaction
                   in
                   let with_tools f =
                     match script_tools with
@@ -176,6 +187,7 @@ let run
                          ?subscriptions
                          ?schedules
                          ?notifications
+                         ?ingress
                          manager
                          ~session_id
                          ~now_ms
@@ -197,6 +209,7 @@ let run
                          ?subscriptions
                          ?schedules
                          ?notifications
+                         ?ingress
                          manager
                          ~session_id
                          ~now_ms

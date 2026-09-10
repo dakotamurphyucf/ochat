@@ -2294,9 +2294,31 @@ cannot become a native event constructor. Payload numbers use the normal ChatML
 JSON projection when presented to the script; their durable original text remains
 in the receipt and private frame.
 
-Compiled ingress operations, authenticated ingress dispatch and the helper
-workflow are not installed yet. The runtime-owner submission adapter currently
-accepts a producer identity only from a trusted host caller. No CLI, public
+Qualified daemon moderators now expose three task operations:
+
+```ocaml
+let* registration = Ingress.register(subscription, 0, "external.report", `Bool(true)) in
+let* status = Ingress.get(registration) in
+Task.pure(registration)
+```
+
+`register(subscription_id, expected_epoch, namespace, schema)` returns a registration
+ID. `get(id)` returns version-1 JSON status with the registration/subscription IDs,
+exact string epoch, namespace, lifetime, revocation reason, configured limits and
+accepted receipt metadata. Status does not include producer credentials or payloads.
+`revoke(id, reason)` returns the updated status. Registration and revocation share
+the moderator's transaction: `Task.catch` rolls back discarded mutations and
+durable acknowledgement happens only after the owning checkpoint is saved. Reads
+can inspect that scope's provisional state. These operations are unavailable to
+standalone and one-off scripts; the runtime captures producer and policy itself.
+
+The actor-backed scope is installed for root/managed moderator invocations,
+observations, ordinary events and queued events. Actual daemon composition tests
+exercise compiled registration and caught registration/revocation rollback,
+runtime unload/reload, host submission and subscription completion with no extra
+model request. The runtime-owner submission adapter currently accepts a producer
+identity only from a trusted host caller. Authenticated helper dispatch and the
+helper workflow remain uninstalled. No CLI, public
 protocol method, model tool or listener is enabled by these records. An admission
 receipt does not mean a moderator handled the data or that a subscription/model
 turn completed.
