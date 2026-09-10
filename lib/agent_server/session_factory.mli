@@ -30,6 +30,7 @@ val create
   -> env:Eio_unix.Stdenv.base
   -> store:Agent_store.Session_store.t
   -> idempotency_store:Agent_store.Idempotency_store.t
+  -> blob_store:Agent_store.Blob_store.t
   -> prompts:Agent_session.Prompt_catalog.t
   -> workspaces:Agent_session.Workspace_catalog.t
   -> permission_profiles:Agent_session.Permission_policy.t list

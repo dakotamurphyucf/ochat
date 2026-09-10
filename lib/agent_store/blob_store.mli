@@ -32,6 +32,38 @@ val create
   -> max_upload_bytes:int64
   -> (t, Store_error.t) result
 
+(** Create a host-selected size policy over the same storage and coordinator.
+    All live facades over these directories must derive from one created store;
+    independent create calls do not coordinate. This is a host API, not a grant
+    for a tool or descendant to raise its captured limits. *)
+val with_max_upload_bytes : t -> max_upload_bytes:int64 -> (t, Store_error.t) result
+
+type retention
+
+(** Hold the shared storage coordinator through f, deferring with Ok None when
+    any upload or read is active. New uploads, reads, adoption, staged writes and
+    expiry wait until f returns. Ordinary readers run concurrently without holding
+    the mutex across network backpressure. Uploads release their activity on
+    finish, abort or switch cleanup; reads release it on every return/cancellation.
+    Acquire actor, response-cache and publisher locks first.
+    The callback must not reenter public store operations, await actors or use the
+    token concurrently. Establish all retained roots before deletion. The token
+    expires on callback exit, including exceptions; this supplies serialization,
+    not evidence that any particular artifact is unreferenced. *)
+val with_retention
+  :  t
+  -> f:(retention -> ('a, Store_error.t) result)
+  -> ('a option, Store_error.t) result
+
+(** The existing exact-handle discard under a live retention scope, without
+    reentering the coordinator. The caller must prove absence of every reference.
+    Rejects use after the callback has returned. *)
+val discard_retained_unreferenced
+  :  retention
+  -> Session_store.Handle.t
+  -> Handle.t
+  -> (unit, Store_error.t) result
+
 (** [begin_upload] creates an exclusive server-owned partial file. *)
 val begin_upload
   :  t
@@ -91,7 +123,8 @@ val read_range
   -> (string, Store_error.t) result
 
 (** [iter_chunks] reads a blob through Eio and invokes [f] with bounded
-    chunks. The callback must not retain or mutate internal storage state. *)
+    chunks. The callback must not retain or mutate internal storage state or
+    reenter this store (including another facade sharing its coordinator). *)
 val iter_chunks
   :  t
   -> sw:Eio.Switch.t

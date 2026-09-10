@@ -26,6 +26,7 @@ type t =
   ; env : Eio_unix.Stdenv.base
   ; store : Agent_store.Session_store.t
   ; idempotency_store : Agent_store.Idempotency_store.t
+  ; blob_store : Agent_store.Blob_store.t
   ; prompts : Agent_session.Prompt_catalog.t
   ; workspaces : Agent_session.Workspace_catalog.t
   ; catalog_mutex : Eio.Mutex.t
@@ -63,6 +64,7 @@ let create
       ~env
       ~store
       ~idempotency_store
+      ~blob_store
       ~prompts
       ~workspaces
       ~permission_profiles
@@ -92,6 +94,7 @@ let create
   ; env
   ; store
   ; idempotency_store
+  ; blob_store
   ; prompts
   ; workspaces
   ; catalog_mutex = Eio.Mutex.create ()
@@ -1745,12 +1748,9 @@ let actor_services
       ~creating_principal
   =
   let open Result.Let_syntax in
-  let data_root = Agent_store.Session_store.data_root t.store in
   let%bind result_blobs =
-    Agent_store.Blob_store.create
-      ~env:t.env
-      ~temporary_directory:(Agent_store.Data_root.temporary_blobs_path data_root)
-      ~durable_directory:(Agent_store.Data_root.durable_blobs_path data_root)
+    Agent_store.Blob_store.with_max_upload_bytes
+      t.blob_store
       ~max_upload_bytes:(Int64.of_int t.limits.job_result_max_bytes)
     |> Result.map_error ~f:protocol_of_store
   in

@@ -13,11 +13,18 @@ module Metadata = struct
   [@@deriving sexp]
 end
 
+type coordination =
+  { mutex : Eio.Mutex.t
+  ; mutable active_uploads : int
+  ; mutable active_reads : int
+  }
+
 type t =
   { env : Eio_unix.Stdenv.base
   ; temporary_directory : string
   ; durable_directory : string
   ; max_upload_bytes : int64
+  ; coordination : coordination
   }
 
 type store = t
@@ -51,6 +58,8 @@ module Upload = struct
     ; mutable length : int64
     ; mutable digest : Digestif.SHA256.ctx
     ; mutable closed : bool
+    ; mutable release_hook : Eio.Switch.hook
+    ; mutable counted : bool
     }
 end
 
@@ -75,11 +84,24 @@ let create ~env ~temporary_directory ~durable_directory ~max_upload_bytes =
       let fs = Eio.Stdenv.fs env in
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 Eio.Path.(fs / temporary_directory);
       Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 Eio.Path.(fs / durable_directory);
-      Ok { env; temporary_directory; durable_directory; max_upload_bytes }
+      Ok
+        { env
+        ; temporary_directory
+        ; durable_directory
+        ; max_upload_bytes
+        ; coordination =
+            { mutex = Eio.Mutex.create (); active_uploads = 0; active_reads = 0 }
+        }
     with
     | exn ->
       Error
         (Store_error.of_exn ~operation:"create blob store" ~path:temporary_directory exn))
+;;
+
+let with_max_upload_bytes store ~max_upload_bytes =
+  match Int64.(max_upload_bytes > zero) with
+  | false -> Error (Store_error.Corrupt "maximum upload size must be positive")
+  | true -> Ok { store with max_upload_bytes }
 ;;
 
 let blob_name id suffix = Agent_protocol.Id.Blob.to_string id ^ suffix
@@ -123,6 +145,8 @@ let begin_upload
         ; length = Int64.zero
         ; digest = Digestif.SHA256.empty
         ; closed = false
+        ; release_hook = Eio.Switch.null_hook
+        ; counted = false
         }
   with
   | exn ->
@@ -720,4 +744,189 @@ let cleanup_expired ?(protect = fun _ -> Ok false) store ~now =
          ~operation:"cleanup temporary blobs"
          ~path:store.temporary_directory
          exn)
+;;
+
+(* Composite storage operations above call their lexical, unguarded helpers.
+   Public entrypoints below acquire the shared coordinator once. Never call a
+   public entrypoint from a retention callback. *)
+type retention =
+  { store : t
+  ; mutable active : bool
+  }
+
+let coordinated store f =
+  (* Individual operations preserve recoverable files and upload accounting on
+     failure. An IO error or cancelled reader must not poison the shared mutex. *)
+  let outcome =
+    Eio.Mutex.use_rw ~protect:false store.coordination.mutex (fun () ->
+      try Ok (f ()) with
+      | exn -> Error exn)
+  in
+  match outcome with
+  | Ok value -> value
+  | Error exn -> raise exn
+;;
+
+let discard_retained_unreferenced retention session handle =
+  match retention.active with
+  | false -> Error (Store_error.Corrupt "blob retention scope has ended")
+  | true -> discard_unreferenced retention.store session handle
+;;
+
+let with_retention store ~f =
+  coordinated store (fun () ->
+    Eio.Cancel.protect (fun () ->
+      match store.coordination.active_uploads, store.coordination.active_reads with
+      | 0, 0 ->
+        let retention = { store; active = true } in
+        Exn.protect
+          ~finally:(fun () -> retention.active <- false)
+          ~f:(fun () -> Result.map (f retention) ~f:Option.some)
+      | _ -> Ok None))
+;;
+
+let reading store f =
+  let entered = ref false in
+  Exn.protect
+    ~finally:(fun () ->
+      match !entered with
+      | false -> ()
+      | true ->
+        Eio.Cancel.protect (fun () ->
+          coordinated store (fun () ->
+            store.coordination.active_reads <- store.coordination.active_reads - 1)))
+    ~f:(fun () ->
+      coordinated store (fun () ->
+        store.coordination.active_reads <- store.coordination.active_reads + 1;
+        entered := true);
+      f ())
+;;
+
+let release_upload upload =
+  Eio.Switch.remove_hook upload.Upload.release_hook;
+  upload.release_hook <- Eio.Switch.null_hook;
+  match upload.counted with
+  | false -> ()
+  | true ->
+    upload.counted <- false;
+    upload.store.coordination.active_uploads
+    <- upload.store.coordination.active_uploads - 1
+;;
+
+let begin_upload
+      store
+      ~sw
+      ~id
+      ~creating_principal
+      ~target_session
+      ~kind
+      ~media_type
+      ~display_name
+      ~allowed_use
+      ~created_at
+      ~expires_at
+  =
+  (* Register before acquiring the mutex: an already-finished switch invokes
+     its release hook immediately. The holder and upload accounting are only
+     accessed under the coordinator. *)
+  let holder = ref None in
+  let hook = ref Eio.Switch.null_hook in
+  try
+    hook
+    := Eio.Switch.on_release_cancellable sw (fun () ->
+         coordinated store (fun () ->
+           Option.iter !holder ~f:(fun upload ->
+             abort upload;
+             release_upload upload)));
+    coordinated store (fun () ->
+      Eio.Switch.check sw;
+      match
+        begin_upload
+          store
+          ~sw
+          ~id
+          ~creating_principal
+          ~target_session
+          ~kind
+          ~media_type
+          ~display_name
+          ~allowed_use
+          ~created_at
+          ~expires_at
+      with
+      | Error _ as failure ->
+        Eio.Switch.remove_hook !hook;
+        failure
+      | Ok upload ->
+        upload.release_hook <- !hook;
+        upload.counted <- true;
+        store.coordination.active_uploads <- store.coordination.active_uploads + 1;
+        holder := Some upload;
+        Ok upload)
+  with
+  | exn ->
+    Eio.Switch.remove_hook !hook;
+    Error
+      (Store_error.of_exn
+         ~operation:"begin coordinated blob upload"
+         ~path:store.temporary_directory
+         exn)
+;;
+
+let abort upload =
+  Eio.Cancel.protect (fun () ->
+    coordinated upload.Upload.store (fun () ->
+      Exn.protect ~finally:(fun () -> release_upload upload) ~f:(fun () -> abort upload)))
+;;
+
+let write_string upload chunk =
+  coordinated upload.Upload.store (fun () ->
+    Exn.protect
+      ~finally:(fun () -> if upload.closed then release_upload upload)
+      ~f:(fun () -> write_string upload chunk))
+;;
+
+let finish upload ~expected_digest =
+  coordinated upload.Upload.store (fun () ->
+    Exn.protect
+      ~finally:(fun () -> if upload.closed then release_upload upload)
+      ~f:(fun () -> finish upload ~expected_digest))
+;;
+
+let open_temporary store id = reading store (fun () -> open_temporary store id)
+
+let open_session store session id =
+  reading store (fun () -> open_session store session id)
+;;
+
+let load store handle = reading store (fun () -> load store handle)
+
+let read_range store ~sw handle ~offset ~max_bytes =
+  reading store (fun () -> read_range store ~sw handle ~offset ~max_bytes)
+;;
+
+let iter_chunks store ~sw handle ~chunk_size ~f =
+  reading store (fun () -> iter_chunks store ~sw handle ~chunk_size ~f)
+;;
+
+let adopt store session handle = coordinated store (fun () -> adopt store session handle)
+
+let load_verified store ~sw handle ~max_bytes =
+  reading store (fun () -> load_verified store ~sw handle ~max_bytes)
+;;
+
+let load_staged_content store ~sw session ~metadata ~max_bytes =
+  reading store (fun () -> load_staged_content store ~sw session ~metadata ~max_bytes)
+;;
+
+let ensure_staged_content store ~sw session ~metadata content =
+  coordinated store (fun () -> ensure_staged_content store ~sw session ~metadata content)
+;;
+
+let discard_unreferenced store session handle =
+  coordinated store (fun () -> discard_unreferenced store session handle)
+;;
+
+let cleanup_expired ?protect store ~now =
+  coordinated store (fun () -> cleanup_expired ?protect store ~now)
 ;;

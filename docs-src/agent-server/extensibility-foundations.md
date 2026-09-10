@@ -1607,6 +1607,17 @@ These reference APIs still need to be combined with historical roots, blob/expor
 consumers and active preparations before making a complete deletion decision.
 No automatic artifact deletion is installed.
 
+The daemon now creates one coordinated blob store. HTTP uploads, exports and
+per-session result writers share it; result writers derive their own size policy
+without creating a separate storage coordinator. A retention callback defers while
+uploads or readers are active and excludes new storage operations until it returns.
+Readers register their activity without holding the mutex during streaming, so a
+slow download does not block another upload or a job result. Completion, abort,
+switch shutdown and read cancellation release their activity. Normal IO failures
+do not poison the coordinator. Scoped discard tokens expire when their callback
+returns or raises. This establishes storage exclusion, not an unreferenced-artifact
+proof; actor/cache/publisher ordering and complete root validation still apply.
+
 Reads verify the session and job binding, full metadata, bounded byte count and
 SHA-256 digest before decoding the completion. Adoption refuses another target
 session or an existing destination and restores temporary data if its metadata

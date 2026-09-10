@@ -726,6 +726,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~env
       ~store
       ~idempotency_store
+      ~blob_store
       ~prompts
       ~workspaces:built.Catalog_builder.workspaces
       ~permission_profiles:built.permission_profiles
