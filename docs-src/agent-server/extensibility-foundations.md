@@ -2199,8 +2199,24 @@ termination preserves every committed entry and skips provider execution.
 Idle callback drains honor the saved host pause flags and per-drain limit; see the
 [qualified daemon policy](../chatml-budget-policy.md#qualified-daemon-host) for
 pause/resume, retained accounting and activation behavior.
-The remaining recovery/composition qualification, approved
-completion/ingress adapters and standalone local-host installation remain open. See
+Crash qualification uses compiled notification publication in an independent
+daemon process. It stops after journal sync at pending publication, committed data
+with a pending wake, and accepted wake, then verifies `SIGKILL` and two reopenings.
+Pending wakes produce one coalesced follow-up; an accepted wake is not replayed
+after its operation is interrupted. Data and delivery IDs remain stable. A crash
+after acceptance but before the provider call therefore retains an interrupted
+operation rather than silently executing it again. This checks process crashes,
+not power-loss behavior. The offline scenario is
+`dune exec test/agent_server_e2e/agent_server_e2e.exe -- --scenario crash-matrix --case notification.wake-no-replay`.
+
+Compaction retains delivery receipts and pending wake decisions. Already committed
+notification frames may move into the archived history and summary; resuming their
+wakes does not insert the original frames again. Unpublished notifications still
+insert their data once after compaction. Stale pre-compaction delivery proposals
+are rejected and prepared again against current state.
+
+Remaining composition qualification, approved completion/ingress adapters, broader
+lifecycle recovery and standalone local-host installation remain open. See
 [safe-point input semantics](../chatml-safe-point-and-effective-history.md#notification-data-and-wake-requests).
 
 ## Recovery classifications

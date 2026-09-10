@@ -82,6 +82,8 @@ let run_child env arguments =
   | [ "journal"; count; directory ] -> run_journal_child env count directory
   | [ "side-effect"; config_path; marker ] ->
     Crash_side_effect_host.run env ~config_path ~marker
+  | [ "notification"; config_path; boundary ] ->
+    Crash_notification_host.run env ~config_path ~boundary
   | _ -> F.fail "invalid crash child arguments"
 ;;
 
@@ -261,6 +263,7 @@ let cases =
   ; "journal.partial-write-sigkill", test_journal_boundaries
   ; "sigkill.acknowledged-session", test_sigkill_committed_session
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test
+  ; "notification.wake-no-replay", Crash_notification_wake.test
   ; "idempotency.unknown-outcome", test_unknown_outcome
   ; "sigkill.process-supervision", test_forced_process
   ]
