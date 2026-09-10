@@ -165,6 +165,14 @@ type _ request =
       * Agent_protocol.Subscription.t option
       * Agent_protocol.Subscription.t
       -> int request
+  | Create_script_subscription :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * string
+      * int
+      * Agent_protocol.Completion.wake
+      * Jsonaf.t option
+      -> (int * Agent_protocol.Subscription.t) request
   | Select_subscription_mutations :
       Agent_protocol.Job.launch_owner * Agent_protocol.Invocation.observer * int list
       -> unit request
@@ -666,6 +674,20 @@ let select_background_jobs t ~owner ~ids = call t (Select_background_jobs (owner
 
 let stage_subscription_mutation t ~owner ~source ~previous ~next =
   call t (Stage_subscription_mutation (owner, source, previous, next))
+;;
+
+let create_script_subscription
+      t
+      ~owner
+      ~source
+      ~kind
+      ~lifetime_ms
+      ~wake
+      ~completion_schema
+  =
+  call
+    t
+    (Create_script_subscription (owner, source, kind, lifetime_ms, wake, completion_schema))
 ;;
 
 let select_subscription_mutations t ~owner ~source ~receipts =
@@ -2409,6 +2431,11 @@ let provisional_subscription t owner id =
   | None -> lookup_subscription t id
 ;;
 
+let subscription_parent_job t =
+  Option.bind t.moderator_borrow ~f:(fun borrow ->
+    Option.map borrow.job_scope ~f:(fun scope -> scope.job.id, scope.job.attempt))
+;;
+
 let stage_subscription_mutation_internal
       t
       owner
@@ -2450,6 +2477,19 @@ let stage_subscription_mutation_internal
             (error
                Permission_denied
                "subscription creation requires its dispatched moderator tool")
+      in
+      let%bind () =
+        match
+          Option.equal
+            (fun (id, attempt) (other_id, other_attempt) ->
+               Agent_protocol.Id.Job.equal id other_id && Int.equal attempt other_attempt)
+            next.context.parent_job
+            (subscription_parent_job t)
+        with
+        | true -> Ok ()
+        | false ->
+          Error
+            (error Permission_denied "subscription has a different creating job attempt")
       in
       let limits = t.services.subscription_limits in
       let reserved = Staged_subscriptions.reservations t.staged_subscriptions in
@@ -2506,6 +2546,61 @@ let stage_subscription_mutation_internal
     | _ -> Ok ()
   in
   Staged_subscriptions.stage t.staged_subscriptions ~owner ~previous ~next
+;;
+
+let create_script_subscription_internal
+      t
+      owner
+      source
+      kind
+      lifetime_ms
+      wake
+      completion_schema
+  =
+  let open Result.Let_syntax in
+  let%bind originating = subscription_owner_active t owner source in
+  let%bind invocation =
+    Result.of_option
+      originating
+      ~error:
+        (error
+           Permission_denied
+           "subscription creation requires a dispatched moderator tool")
+  in
+  let%bind () =
+    match
+      lifetime_ms > 0 && lifetime_ms <= t.services.subscription_limits.max_lifetime_ms
+    with
+    | true -> Ok ()
+    | false -> Error (error Invalid_request "subscription lifetime exceeds host policy")
+  in
+  let created_at = t.services.now () in
+  let deadline =
+    Time_ns.add
+      (Agent_protocol.Timestamp.to_time_ns created_at)
+      (Time_ns.Span.of_int_ms lifetime_ms)
+    |> Agent_protocol.Timestamp.of_time_ns
+  in
+  let%bind subscription =
+    Agent_protocol.Subscription.create
+      { id = Agent_protocol.Id.Subscription.create ()
+      ; session_id = invocation.context.session_id
+      ; generation = invocation.context.generation
+      ; invocation_id = invocation.context.id
+      ; source = Some source
+      ; parent_job = subscription_parent_job t
+      ; kind
+      ; created_at
+      ; deadline
+      ; completion_schema
+      ; wake
+      ; ingress_capability = None
+      }
+  in
+  let%map receipt =
+    stage_subscription_mutation_internal t owner source None subscription
+  in
+  receipt, subscription
 ;;
 
 let derive_background_launch t owner =
@@ -4986,7 +5081,7 @@ let validate_job_generation t (job : Agent_protocol.Job.t) generation =
   else Ok ()
 ;;
 
-let update_jobs t jobs =
+let update_jobs ?(subscriptions = []) t jobs =
   let cancelled =
     List.filter jobs ~f:(fun job ->
       match job.Agent_protocol.Job.status with
@@ -5025,7 +5120,10 @@ let update_jobs t jobs =
       t
       ~delta:
         (Session_delta.Batch
-           (List.map jobs ~f:(fun job -> Session_delta.Job_changed job) @ deltas))
+           (List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
+            @ List.map subscriptions ~f:(fun value ->
+              Session_delta.Subscription_changed value)
+            @ deltas))
       ~payloads:
         (List.map jobs ~f:(fun job ->
            Agent_protocol.Event.Durable.Payload.Job_state_changed job)
@@ -5132,28 +5230,62 @@ let terminal_job t (job : Agent_protocol.Job.t) status result =
   { job with status; result; completed_at = Some (t.services.now ()); delivery }
 ;;
 
-let cancelled_job_dependencies t (parent : Agent_protocol.Job.t) =
+let validate_job_dependency t job =
+  Job_dependency.validate
+    ~invocations:t.state.invocations
+    ~events:t.state.moderator_executions
+    ~jobs:t.state.jobs
+    ~subscriptions:t.state.subscriptions
+    job
+;;
+
+let retained_subscription t id =
+  Result.of_option
+    (lookup_subscription t id)
+    ~error:(error Invalid_state "subscription dependency is missing")
+;;
+
+let cancelled_work_dependencies t (parent : Agent_protocol.Job.t) =
   let rec walk seen (job : Agent_protocol.Job.t) =
     let open Result.Let_syntax in
     match job.status with
     | Waiting_completion dependency ->
-      let key = Agent_protocol.Id.Job.to_string dependency.job_id in
-      (match Set.mem seen key with
-       | true -> Error (error Invalid_state "job dependency cycle")
-       | false ->
-         let%bind child = find_job t dependency.job_id in
-         let%bind terminal = Agent_protocol.Job.terminal_result child in
-         (match terminal with
-          | Some _ -> Ok []
+      let%bind () = validate_job_dependency t job in
+      (match dependency.work with
+       | Subscription id ->
+         let%bind subscription = retained_subscription t id in
+         (match subscription.result with
+          | Some _ -> Ok ([], [])
           | None ->
-            let%map rest = walk (Set.add seen key) child in
-            terminal_job
-              t
-              child
-              Cancelled
-              (background_terminal_result child (Cancelled "owning job stopped waiting"))
-            :: rest))
-    | _ -> Ok []
+            let%map terminal, _ =
+              Agent_protocol.Subscription.finish
+                subscription
+                ~expected_epoch:subscription.epoch
+                ~now:(t.services.now ())
+                (Cancelled "owning job stopped waiting")
+            in
+            [], [ terminal ])
+       | Job id ->
+         let key = Agent_protocol.Id.Job.to_string id in
+         (match Set.mem seen key with
+          | true -> Error (error Invalid_state "job dependency cycle")
+          | false ->
+            let%bind child = find_job t id in
+            let%bind terminal = Agent_protocol.Job.terminal_result child in
+            (match terminal with
+             | Some _ -> Ok ([], [])
+             | None ->
+               let%map rest, subscriptions = walk (Set.add seen key) child in
+               ( terminal_job
+                   t
+                   child
+                   Cancelled
+                   (background_terminal_result
+                      child
+                      (Cancelled "owning job stopped waiting"))
+                 :: rest
+               , subscriptions ))))
+    | _ -> Ok ([], [])
   in
   walk (String.Set.singleton (Agent_protocol.Id.Job.to_string parent.id)) parent
 ;;
@@ -5379,9 +5511,7 @@ let defer_background_job t job_id generation attempt dependency =
   let%bind () = finish_background_scopes t job_id generation attempt in
   let%bind job = running_job_for_completion t job_id generation attempt in
   let next = { job with status = Waiting_completion dependency; result = None } in
-  let%bind () =
-    Job_dependency.validate ~invocations:t.state.invocations ~jobs:t.state.jobs next
-  in
+  let%bind () = validate_job_dependency t next in
   let%map _ = update_job t next in
   next
 ;;
@@ -5431,10 +5561,10 @@ let complete_background_job
     | _ -> running_job_for_completion t job_id generation attempt
   in
   let encoded = Agent_protocol.Completion.to_json completion in
-  let%bind cancelled =
+  let%bind cancelled, subscriptions =
     match completion with
-    | Cancelled _ | Expired -> cancelled_job_dependencies t job
-    | Succeeded _ | Failed _ -> Ok []
+    | Cancelled _ | Expired -> cancelled_work_dependencies t job
+    | Succeeded _ | Failed _ -> Ok ([], [])
   in
   let terminal status =
     let terminal = terminal_job t job status (Some encoded) in
@@ -5478,7 +5608,7 @@ let complete_background_job
     let job =
       { job with status; result = Some (Agent_protocol.Stored_completion.to_json stored) }
     in
-    let%map _ = update_jobs t (job :: cancelled) in
+    let%map _ = update_jobs ~subscriptions t (job :: cancelled) in
     job
   in
   match job.status, t.services.job_results, storage_limited with
@@ -5518,9 +5648,7 @@ let recover_background_results t max_count max_total_bytes =
       let%bind job = find_job t previous.id in
       match job.status with
       | Running | Waiting_completion _ ->
-        let%bind () =
-          Job_dependency.validate ~invocations:t.state.invocations ~jobs:t.state.jobs job
-        in
+        let%bind () = validate_job_dependency t job in
         complete_background_job
           ~waiting:true
           ~completed_at
@@ -5540,9 +5668,7 @@ let refresh_background_job t job_id generation attempt =
   let%bind () = validate_job_attempt job attempt in
   match job.status with
   | Waiting_completion dependency ->
-    let%bind () =
-      Job_dependency.validate ~invocations:t.state.invocations ~jobs:t.state.jobs job
-    in
+    let%bind () = validate_job_dependency t job in
     let selected =
       Option.bind t.services.job_results ~f:(fun publisher ->
         Agent_store.Job_result_store.Publisher.pending_completion publisher ~job)
@@ -5551,34 +5677,44 @@ let refresh_background_job t job_id generation attempt =
      | Some completion ->
        complete_background_job ~waiting:true t job_id generation attempt completion
      | None ->
-       let%bind target = find_job t dependency.job_id in
-       let load_artifact =
-         Option.map t.services.job_results ~f:(fun publisher ->
-           Agent_store.Job_result_store.Publisher.load publisher)
-       in
-       let%bind completion =
-         match Agent_protocol.Job.terminal_completion ?load_artifact target with
-         | Ok completion -> Ok completion
-         | Error failure when not failure.retryable ->
-           Ok
-             (Some
-                (Agent_protocol.Completion.Failed
-                   { code = "background.artifact_unavailable"
-                   ; message =
-                       "The saved background result is unavailable or failed \
-                        verification."
-                   ; retryable = false
-                   ; details = `Null
-                   }))
-         | Error _
-           when Agent_protocol.Timestamp.compare (t.services.now ()) dependency.deadline
-                >= 0 -> Ok (Some Agent_protocol.Completion.Expired)
-         | Error _ as failure -> failure
+       let%bind completion, completed_at =
+         match dependency.work with
+         | Subscription id ->
+           let%map target = retained_subscription t id in
+           target.result, target.completed_at
+         | Job id ->
+           let%bind target = find_job t id in
+           let load_artifact =
+             Option.map t.services.job_results ~f:(fun publisher ->
+               Agent_store.Job_result_store.Publisher.load publisher)
+           in
+           let%map completion =
+             match Agent_protocol.Job.terminal_completion ?load_artifact target with
+             | Ok completion -> Ok completion
+             | Error failure when not failure.retryable ->
+               Ok
+                 (Some
+                    (Agent_protocol.Completion.Failed
+                       { code = "background.artifact_unavailable"
+                       ; message =
+                           "The saved background result is unavailable or failed \
+                            verification."
+                       ; retryable = false
+                       ; details = `Null
+                       }))
+             | Error _
+               when Agent_protocol.Timestamp.compare
+                      (t.services.now ())
+                      dependency.deadline
+                    >= 0 -> Ok (Some Agent_protocol.Completion.Expired)
+             | Error _ as failure -> failure
+           in
+           completion, target.completed_at
        in
        (match completion with
         | Some completion ->
           let completion =
-            match target.completed_at with
+            match completed_at with
             | Some at when Agent_protocol.Timestamp.compare at dependency.deadline <= 0 ->
               completion
             | _ -> Agent_protocol.Completion.Expired
@@ -5655,7 +5791,7 @@ let cancel_job_internal t job_id =
   | Waiting_permission _
   | Waiting_completion _
   | Interrupted _ ->
-    let%bind cancelled = cancelled_job_dependencies t job in
+    let%bind cancelled, subscriptions = cancelled_work_dependencies t job in
     let job =
       { job with
         status = Cancelled
@@ -5667,7 +5803,7 @@ let cancel_job_internal t job_id =
            | _ -> Pending)
       }
     in
-    let%map _ = update_jobs t (job :: cancelled) in
+    let%map _ = update_jobs ~subscriptions t (job :: cancelled) in
     job
   | Succeeded | Failed _ | Cancelled -> Ok job
 ;;
@@ -6572,6 +6708,16 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Stage_background_job (job, capacity) -> stage_background_job_internal t job capacity
   | Stage_subscription_mutation (owner, source, previous, next) ->
     stage_subscription_mutation_internal t owner source previous next
+  | Create_script_subscription (owner, source, kind, lifetime_ms, wake, completion_schema)
+    ->
+    create_script_subscription_internal
+      t
+      owner
+      source
+      kind
+      lifetime_ms
+      wake
+      completion_schema
   | Select_subscription_mutations (owner, source, receipts) ->
     let open Result.Let_syntax in
     let%bind _ = subscription_owner_active t owner source in

@@ -1457,6 +1457,15 @@ The source is immutable across updates. A subscription's source authority does
 not depend on an optional invocation observation record. Older binaries that
 support only subscription codec 1 cannot read newly bound codec 2 records.
 
+Subscriptions created inside a background job use codec 3, adding the immutable
+parent job ID and execution attempt. The actor captures these from the active
+moderator execution; scripts cannot supply or change them. Older codec 1/2 records
+retain their original absence of attempt binding. They cannot become a current
+background job's dependency by inference. Restore checks invocation ancestry,
+session, generation and retained attempt; a waiting parent additionally requires
+that exact current attempt. Codec 3 requires a moderator source binding, and older
+binaries that understand only codec 1/2 cannot read these records.
+
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6
 without that lineage, schema 5 with
@@ -1827,8 +1836,8 @@ The same ordering applies to handlers, lifecycle/tool events, queued internal
 events and foreground/idle observations.
 
 When a background target itself returns `Pending`, its parent job enters
-`waiting_completion`. The target invocation retains ownership of its own job; the
-parent records a versioned dependency with that invocation/job identity, the
+`waiting_completion`. The target invocation retains ownership of its job or
+subscription; the parent records a versioned dependency with that invocation/work identity, the
 original deadline, completion schema and output budget. The parent releases its
 worker slot and runtime access while waiting. Its internal root records only the
 initial acknowledgement; that acknowledgement is never reported as the parent's
@@ -1844,8 +1853,15 @@ parent's already-executed target. Expiry and cancellation atomically cancel
 unfinished owned dependency chains and retire their pending permissions; they
 cannot undo external effects. A child result saved by the retained deadline wins
 over a later cancellation request. Stale worker callbacks cannot overwrite a
-durable wait. Generic subscription-backed Pending and automatic model notification
-remain separate integration work.
+durable wait. Job dependencies preserve the existing version-1 JSON and snapshot
+encoding; subscription dependencies use version-2 waiting-status JSON with a
+tagged work reference. Subscription results follow the same original deadline and
+completion contract. Cancelling a parent saves cancellation of an active owned
+subscription in the same transaction, preserving any already terminal winner.
+This does not cancel unrelated work that the subscription may be watching.
+Subscription-backed waits release worker capacity and survive daemon restart
+without rerunning the creating handler. Autonomous subscription expiry, timer
+linkage and automatic model notification remain separate integration work.
 
 The qualified daemon tests exercise these functions through normal model tool
 dispatch, persisted invocations, native file reads and real worker scheduling.

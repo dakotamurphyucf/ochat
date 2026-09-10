@@ -16,6 +16,7 @@ let with_background_daemon
       ?(sources = [])
       ?model_post_stream
       ?(expected_model_calls = 0)
+      ?per_session_jobs
       ?(max_request_bytes =
         Agent_server.Daemon.default_options.protocol_limits.max_request_bytes)
       ?(job_result_max_bytes =
@@ -52,6 +53,17 @@ let with_background_daemon
         save (Filename.concat workspace "reports/second.txt") "second report";
         save (Filename.concat workspace "secret.txt") "PRIVATE-BACKGROUND-SENTINEL";
         let configuration = config ~profile root workspace prompt in
+        let configuration =
+          match per_session_jobs with
+          | None -> configuration
+          | Some per_session ->
+            { configuration with
+              server =
+                { configuration.server with
+                  job_limits = { configuration.server.job_limits with per_session }
+                }
+            }
+        in
         let requests = ref 0 in
         let stage = ref "starting first daemon" in
         let live_switch = ref None in

@@ -8,6 +8,9 @@ type context =
   ; source : Invocation.observer option [@sexp.option]
     (** Codec 2 binds the creating moderator source. Codec 1 records decode with
         None and must not acquire current-moderator authority implicitly. *)
+  ; parent_job : (Id.Job.t * int) option [@sexp.option]
+    (** Codec 3 pins the actor-owned creating job attempt. Absence on older
+        records must not be upgraded to the current attempt implicitly. *)
   ; kind : string
   ; created_at : Timestamp.t
   ; deadline : Timestamp.t

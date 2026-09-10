@@ -17,13 +17,41 @@ type kind =
 
 type dependency =
   { invocation_id : Id.Invocation.t
-  ; job_id : Id.Job.t
+  ; work : Invocation.work
   ; deadline : Timestamp.t
   ; completion_schema : Jsonaf.t option [@sexp.option]
   ; max_output_bytes : int
   ; max_output_depth : int
   }
 [@@deriving equal, sexp]
+
+let dependency_of_sexp_generated = dependency_of_sexp
+let sexp_of_dependency_generated = sexp_of_dependency
+
+let dependency_of_sexp sexp =
+  let sexp =
+    match sexp with
+    | Sexp.List fields ->
+      Sexp.List
+        (List.map fields ~f:(function
+           | Sexp.List [ Atom "job_id"; id ] ->
+             Sexp.List [ Atom "work"; List [ Atom "Job"; id ] ]
+           | field -> field))
+    | other -> other
+  in
+  dependency_of_sexp_generated sexp
+;;
+
+let sexp_of_dependency dependency =
+  match sexp_of_dependency_generated dependency with
+  | Sexp.List fields ->
+    Sexp.List
+      (List.map fields ~f:(function
+         | Sexp.List [ Atom "work"; List [ Atom "Job"; id ] ] ->
+           Sexp.List [ Atom "job_id"; id ]
+         | field -> field))
+  | other -> other
+;;
 
 type status =
   | Queued
@@ -316,11 +344,16 @@ let status_to_json status =
     `Object
       [ "type", `String "waiting_permission"; "permission_id", Id.Permission.to_json id ]
   | Waiting_completion dependency ->
+    let version, target =
+      match dependency.work with
+      | Invocation.Job id -> "1", ("job_id", Id.Job.to_json id)
+      | Subscription _ -> "2", ("work", Invocation.work_to_json dependency.work)
+    in
     `Object
       [ "type", `String "waiting_completion"
-      ; "schema_version", `Number "1"
+      ; "schema_version", `Number version
       ; "invocation_id", Id.Invocation.to_json dependency.invocation_id
-      ; "job_id", Id.Job.to_json dependency.job_id
+      ; target
       ; "deadline", Timestamp.to_json dependency.deadline
       ; "completion_schema", Option.value dependency.completion_schema ~default:`Null
       ; "max_output_bytes", `Number (Int.to_string dependency.max_output_bytes)
@@ -345,19 +378,6 @@ let status_of_json json =
       ~f:(fun id -> Waiting_permission id)
   | "succeeded" -> Ok Succeeded
   | "waiting_completion" ->
-    let%bind () =
-      Extension_codec.closed
-        fields
-        [ "type"
-        ; "schema_version"
-        ; "invocation_id"
-        ; "job_id"
-        ; "deadline"
-        ; "completion_schema"
-        ; "max_output_bytes"
-        ; "max_output_depth"
-        ]
-    in
     let%bind version =
       Json_codec.required_as
         fields
@@ -366,7 +386,7 @@ let status_of_json json =
     in
     let%bind () =
       match version with
-      | 1 -> Ok ()
+      | 1 | 2 -> Ok ()
       | _ ->
         Error
           (Protocol_error.create
@@ -375,10 +395,32 @@ let status_of_json json =
              ~retryable:false
              ())
     in
+    let%bind () =
+      Extension_codec.closed
+        fields
+        ([ "type"
+         ; "schema_version"
+         ; "invocation_id"
+         ; "deadline"
+         ; "completion_schema"
+         ; "max_output_bytes"
+         ; "max_output_depth"
+         ]
+         @
+         match version with
+         | 1 -> [ "job_id" ]
+         | _ -> [ "work" ])
+    in
     let%bind invocation_id =
       Json_codec.required_as fields "invocation_id" Id.Invocation.of_json
     in
-    let%bind job_id = Json_codec.required_as fields "job_id" Id.Job.of_json in
+    let%bind work =
+      match version with
+      | 1 ->
+        Result.map (Json_codec.required_as fields "job_id" Id.Job.of_json) ~f:(fun id ->
+          Invocation.Job id)
+      | _ -> Json_codec.required_as fields "work" Invocation.work_of_json
+    in
     let%bind deadline = Json_codec.required_as fields "deadline" Timestamp.of_json in
     let%bind completion_schema =
       Json_codec.optional_as fields "completion_schema" (fun json -> Ok json)
@@ -397,7 +439,7 @@ let status_of_json json =
     in
     Waiting_completion
       { invocation_id
-      ; job_id
+      ; work
       ; deadline
       ; completion_schema
       ; max_output_bytes
@@ -561,7 +603,9 @@ let of_json json =
       (match kind, started_at, next_run_at, completed_at, result with
        | Async_tool, Some _, None, None, None
          when attempt > 0
-              && (not (Id.Job.equal id dependency.job_id))
+              && (match dependency.work with
+                  | Invocation.Job target -> not (Id.Job.equal id target)
+                  | Subscription _ -> true)
               && Timestamp.compare dependency.deadline created_at >= 0 -> Ok ()
        | _ -> Error (Protocol_error.invalid_request "invalid waiting job lifecycle"))
     | _ -> Ok ()

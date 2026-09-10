@@ -14,6 +14,7 @@ type context =
   ; generation : int
   ; invocation_id : Id.Invocation.t
   ; source : Invocation.observer option [@sexp.option]
+  ; parent_job : (Id.Job.t * int) option [@sexp.option]
   ; kind : string
   ; created_at : Timestamp.t
   ; deadline : Timestamp.t
@@ -57,6 +58,14 @@ let validate t =
   in
   let%bind () = optional_validate t.job_id (validate_id Id.Job.to_json Id.Job.of_json) in
   let%bind () = text ~name:"subscription kind" ~max:128 c.kind in
+  let%bind () =
+    optional_validate c.parent_job (fun (id, attempt) ->
+      let%bind () = validate_id Id.Job.to_json Id.Job.of_json id in
+      match c.source, attempt > 0 with
+      | Some _, true -> Ok ()
+      | _ ->
+        invalid "subscription parent attempt requires a bound source and positive attempt")
+  in
   let%bind () =
     optional_validate c.source (fun source ->
       let%bind () = text ~name:"subscription moderator ID" ~max:256 source.script_id in
@@ -181,9 +190,10 @@ let to_json t =
   `Object
     ([ ( "schema_version"
        , `Number
-           (match c.source with
-            | None -> "1"
-            | Some _ -> "2") )
+           (match c.parent_job, c.source with
+            | Some _, _ -> "3"
+            | None, None -> "1"
+            | None, Some _ -> "2") )
      ; "id", Id.Subscription.to_json c.id
      ; "session_id", Id.Session.to_json c.session_id
      ; "generation", `Number (Int.to_string c.generation)
@@ -199,6 +209,8 @@ let to_json t =
          [ "script_id", `String source.script_id
          ; "source_sha256", `String source.source_sha256
          ])
+     @ optional "parent_job" c.parent_job (fun (id, attempt) ->
+       `Object [ "job_id", Id.Job.to_json id; "attempt", `Number (Int.to_string attempt) ])
      @ optional "completion_schema" c.completion_schema Fn.id
      @ optional "ingress_capability" c.ingress_capability Id.Capability.to_json
      @ optional "timer_id" t.timer_id Id.Schedule.to_json
@@ -215,7 +227,7 @@ let of_json json =
   let%bind version = Json_codec.required_as fields "schema_version" integer in
   let%bind () =
     match version with
-    | 1 | 2 -> Ok ()
+    | 1 | 2 | 3 -> Ok ()
     | _ -> failure Incompatible_protocol "unsupported subscription version"
   in
   let%bind () =
@@ -238,7 +250,11 @@ let of_json json =
        ; "result"
        ; "completed_at"
        ]
-       @ if version = 2 then [ "source" ] else [])
+       @
+       match version with
+       | 1 -> []
+       | 2 -> [ "source" ]
+       | _ -> [ "source"; "parent_job" ])
   in
   let%bind source =
     match version with
@@ -252,6 +268,22 @@ let of_json json =
         Json_codec.required_as fields "source_sha256" Json_codec.string
       in
       Some Invocation.{ script_id; source_sha256 }
+  in
+  let%bind parent_job =
+    match version with
+    | 3 ->
+      let%bind json = Json_codec.required fields "parent_job" in
+      let%bind fields = Json_codec.fields json in
+      let%bind () = closed fields [ "job_id"; "attempt" ] in
+      let%bind id = Json_codec.required_as fields "job_id" Id.Job.of_json in
+      let%map attempt =
+        Json_codec.required_as
+          fields
+          "attempt"
+          (Json_codec.bounded_int ~min:1 ~max:Int.max_value)
+      in
+      Some (id, attempt)
+    | _ -> Ok None
   in
   let%bind id = Json_codec.required_as fields "id" Id.Subscription.of_json in
   let%bind session_id = Json_codec.required_as fields "session_id" Id.Session.of_json in
@@ -280,6 +312,7 @@ let of_json json =
     ; generation
     ; invocation_id
     ; source
+    ; parent_job
     ; kind
     ; created_at
     ; deadline

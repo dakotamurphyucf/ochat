@@ -38,7 +38,7 @@ let completion dependency outcome =
       }
 ;;
 
-let validate ~invocations ~jobs (parent : J.t) =
+let validate ~invocations ~events ~jobs ~subscriptions (parent : J.t) =
   let invalid message = Error (P.Error.invalid_request message) in
   match parent.status with
   | Waiting_completion dependency ->
@@ -51,25 +51,46 @@ let validate ~invocations ~jobs (parent : J.t) =
       |> Result.of_option
            ~error:(P.Error.invalid_request "job dependency invocation is missing")
     in
-    let%bind child =
-      List.find jobs ~f:(fun job -> P.Id.Job.equal job.J.id dependency.job_id)
-      |> Result.of_option
-           ~error:(P.Error.invalid_request "job dependency target is missing")
-    in
     let%bind () =
       match invocation.status with
-      | (Resolved (Pending (Job id, _)) | Published (Pending (Job id, _)))
-        when P.Id.Job.equal id child.id -> Ok ()
+      | (Resolved (Pending (work, _)) | Published (Pending (work, _)))
+        when P.Invocation.equal_work work dependency.work -> Ok ()
       | _ -> invalid "job dependency does not match its invocation's Pending outcome"
     in
-    let%bind () =
-      match child.kind, child.launch with
-      | Async_tool, Some { owner = Invocation owner; parent_job = Some (id, attempt); _ }
-        when P.Id.Invocation.equal owner invocation.context.id
-             && P.Id.Job.equal id parent.id
-             && Int.equal attempt parent.attempt
-             && not (P.Id.Job.equal child.id parent.id) -> Ok ()
-      | _ -> invalid "job dependency does not belong to this parent attempt"
+    let%bind target_session, target_generation =
+      match dependency.work with
+      | P.Invocation.Job target ->
+        let%bind child =
+          List.find jobs ~f:(fun job -> P.Id.Job.equal job.J.id target)
+          |> Result.of_option
+               ~error:(P.Error.invalid_request "job dependency target is missing")
+        in
+        (match child.kind, child.launch with
+         | ( Async_tool
+           , Some { owner = Invocation owner; parent_job = Some (id, attempt); _ } )
+           when P.Id.Invocation.equal owner invocation.context.id
+                && P.Id.Job.equal id parent.id
+                && Int.equal attempt parent.attempt
+                && not (P.Id.Job.equal child.id parent.id) ->
+           Ok (child.session_id, child.generation)
+         | _ -> invalid "job dependency does not belong to this parent attempt")
+      | Subscription target ->
+        let%bind child =
+          List.find subscriptions ~f:(fun subscription ->
+            P.Id.Subscription.equal subscription.P.Subscription.context.id target)
+          |> Result.of_option
+               ~error:
+                 (P.Error.invalid_request "subscription dependency target is missing")
+        in
+        let%bind () = P.Subscription.validate child in
+        let%bind () = Job_launch.validate_subscription ~invocations ~events ~jobs child in
+        (match child.context.parent_job with
+         | Some (id, attempt)
+           when P.Id.Job.equal id parent.id
+                && Int.equal attempt parent.attempt
+                && P.Id.Invocation.equal child.context.invocation_id invocation.context.id
+           -> Ok (child.context.session_id, child.context.generation)
+         | _ -> invalid "subscription dependency does not belong to this parent attempt")
     in
     let%bind () =
       match invocation.context.deadline with
@@ -77,9 +98,9 @@ let validate ~invocations ~jobs (parent : J.t) =
       | _ -> invalid "job dependency changed its invocation deadline"
     in
     (match
-       P.Id.Session.equal parent.session_id child.session_id
+       P.Id.Session.equal parent.session_id target_session
        && P.Id.Session.equal parent.session_id invocation.context.session_id
-       && Int.equal parent.generation child.generation
+       && Int.equal parent.generation target_generation
        && Int.equal parent.generation invocation.context.generation
      with
      | true -> Ok ()

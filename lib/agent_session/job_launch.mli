@@ -19,3 +19,12 @@ val validate
   -> jobs:Agent_protocol.Job.t list
   -> Agent_protocol.Job.t
   -> (unit, Agent_protocol.Error.t) result
+
+(** Validate a subscription's optional retained creating job attempt against its
+    invocation/event ancestry. Historical parent attempts may have advanced. *)
+val validate_subscription
+  :  invocations:Agent_protocol.Invocation.t list
+  -> events:Agent_protocol.Moderator_execution.t list
+  -> jobs:Agent_protocol.Job.t list
+  -> Agent_protocol.Subscription.t
+  -> (unit, Agent_protocol.Error.t) result

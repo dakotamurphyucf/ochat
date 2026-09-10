@@ -66,7 +66,7 @@ let%expect_test
            let dependency =
              J.
                { invocation_id = invocation.context.id
-               ; job_id = child.id
+               ; work = Job child.id
                ; deadline
                ; completion_schema = None
                ; max_output_bytes = 1_000_000
@@ -111,7 +111,7 @@ let%expect_test
            assert (Result.is_ok (Agent_session.Session_state.validate restored));
            let forged =
              { waiting with
-               status = Waiting_completion { dependency with job_id = parent.id }
+               status = Waiting_completion { dependency with work = Job parent.id }
              }
            in
            assert (

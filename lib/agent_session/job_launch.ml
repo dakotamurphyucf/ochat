@@ -138,3 +138,30 @@ let validate ~invocations ~events ~jobs (job : J.t) =
   Result.map_error result ~f:(fun error ->
     P.Error.create Journal_corrupt ~message:error.message ~retryable:false ())
 ;;
+
+let validate_subscription ~invocations ~events ~jobs (subscription : P.Subscription.t) =
+  let c = subscription.context in
+  match c.parent_job with
+  | None -> Ok ()
+  | Some (id, attempt) ->
+    let open Result.Let_syntax in
+    let%bind ancestor =
+      ancestor
+        ~session_id:c.session_id
+        ~generation:c.generation
+        ~invocations
+        ~events
+        (Invocation c.invocation_id)
+    in
+    let%bind parent =
+      parent ~session_id:c.session_id ~generation:c.generation ~jobs ancestor
+    in
+    (match parent with
+     | Some (job, event_attempt)
+       when P.Id.Job.equal job.id id
+            && attempt > 0
+            && attempt <= job.attempt
+            && Option.value_map event_attempt ~default:true ~f:(Int.equal attempt) ->
+       Ok ()
+     | _ -> invalid "subscription creating job attempt differs from its ancestry")
+;;

@@ -1119,7 +1119,18 @@ let extension_subscriptions t actor_ref =
   let module A = Agent_session.Session_actor in
   let module Service = Agent_session.Script_subscription_service in
   let host : Service.host =
-    { stage =
+    { create =
+        (fun owner source ~kind ~lifetime_ms ~wake ~completion_schema ->
+          Result.bind (extension_actor actor_ref) ~f:(fun actor ->
+            A.create_script_subscription
+              actor
+              ~owner
+              ~source
+              ~kind
+              ~lifetime_ms
+              ~wake
+              ~completion_schema))
+    ; stage =
         (fun owner source ~previous ~next ->
           Result.bind (extension_actor actor_ref) ~f:(fun actor ->
             A.stage_subscription_mutation actor ~owner ~source ~previous ~next))

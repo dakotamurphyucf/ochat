@@ -3,7 +3,15 @@ open Core
 (** Narrow host adapter; each callback revalidates the actual actor borrow,
     source and generation. This service constructs data, never acquires authority. *)
 type host =
-  { stage :
+  { create :
+      Agent_protocol.Job.launch_owner
+      -> Agent_protocol.Invocation.observer
+      -> kind:string
+      -> lifetime_ms:int
+      -> wake:Agent_protocol.Completion.wake
+      -> completion_schema:Jsonaf.t option
+      -> (int * Agent_protocol.Subscription.t, Agent_protocol.Error.t) result
+  ; stage :
       Agent_protocol.Job.launch_owner
       -> Agent_protocol.Invocation.observer
       -> previous:Agent_protocol.Subscription.t option

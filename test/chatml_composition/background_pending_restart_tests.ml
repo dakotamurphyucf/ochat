@@ -56,7 +56,7 @@ let%expect_test "restart resumes a durable wait without replaying its target inv
        let state = A.state entry.actor |> protocol_ok in
        let child =
          List.find_exn state.jobs ~f:(fun job ->
-           Agent_protocol.Id.Job.equal dependency.job_id job.id)
+           Agent_protocol.Invocation.equal_work dependency.work (Job job.id))
        in
        assert (Option.is_none child.result);
        print_endline "parent is waiting while the child's native permission is unresolved");
@@ -95,7 +95,12 @@ let run ctx input = Task.bind(Job.start_tool("pending", input), fun id ->
          |> protocol_ok
          |> ignore);
        let middle = waiting env entry.actor parent.id in
-       let leaf = waiting env entry.actor middle.job_id in
+       let middle_id =
+         match middle.work with
+         | Job id -> id
+         | Subscription _ -> failwith "expected intermediate job dependency"
+       in
+       let leaf = waiting env entry.actor middle_id in
        let permission = Background_moderator_tests.pending_permission env entry.actor in
        [%test_eq: string] "read_file" permission.tool_name;
        A.cancel_job_internal entry.actor ~job_id:parent.id |> protocol_ok |> ignore;
@@ -103,7 +108,7 @@ let run ctx input = Task.bind(Job.start_tool("pending", input), fun id ->
        [%test_eq: int] 3 (List.length state.jobs);
        assert (
          List.exists state.jobs ~f:(fun job ->
-           Agent_protocol.Id.Job.equal job.id leaf.job_id));
+           Agent_protocol.Invocation.equal_work (Job job.id) leaf.work));
        List.iter state.jobs ~f:(fun job ->
          let _, completion = await env client job in
          match completion with

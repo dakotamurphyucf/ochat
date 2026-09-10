@@ -16,13 +16,14 @@ let before =
 let after = { before with current_state = Session.Snapshot.Int 1 }
 let encode = Agent_session.Runtime_builder.encode_moderator_snapshot
 
-let make_subscription invocation =
+let make_subscription ?parent_job invocation =
   S.create
     { id = P.Id.Subscription.create ()
     ; session_id
     ; generation = 0
     ; invocation_id = invocation.I.context.id
     ; source = Some source
+    ; parent_job
     ; kind = "fixture"
     ; created_at = timestamp
     ; deadline =
@@ -90,7 +91,11 @@ let%expect_test
                         services.moderator_execute ~invocation (fun ~dispatched ~commit ->
                           assert (Option.is_none dispatched.observation);
                           let owner = J.Invocation dispatched.context.id in
-                          let value = make_subscription dispatched in
+                          let value =
+                            make_subscription
+                              ~parent_job:(parent.id, parent.attempt)
+                              dispatched
+                          in
                           retained := Some (owner, value);
                           let stage previous next =
                             A.stage_subscription_mutation
@@ -102,7 +107,12 @@ let%expect_test
                           in
                           let first = stage None value |> protocol_ok in
                           assert (
-                            Result.is_error (stage None (make_subscription dispatched)));
+                            Result.is_error
+                              (stage
+                                 None
+                                 (make_subscription
+                                    ~parent_job:(parent.id, parent.attempt)
+                                    dispatched)));
                           A.abort_subscription_mutation actor ~owner ~receipt:first
                           |> protocol_ok;
                           let creation = stage None value |> protocol_ok in

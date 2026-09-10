@@ -135,6 +135,19 @@ val stage_subscription_mutation
   -> next:Agent_protocol.Subscription.t
   -> (int, Agent_protocol.Error.t) result
 
+(** Atomically construct and stage a subscription under the actual moderator
+    borrow. The actor generates identity/time and captures its creating job
+    attempt; neither the script nor its service chooses ancestry. *)
+val create_script_subscription
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> kind:string
+  -> lifetime_ms:int
+  -> wake:Agent_protocol.Completion.wake
+  -> completion_schema:Jsonaf.t option
+  -> (int * Agent_protocol.Subscription.t, Agent_protocol.Error.t) result
+
 val select_subscription_mutations
   :  t
   -> owner:Agent_protocol.Job.launch_owner

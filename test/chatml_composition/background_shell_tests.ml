@@ -199,7 +199,7 @@ let%expect_test "X03 restart preserves an interrupted shell mutation without ree
        := Some (Eio.Path.load (file "fixture-work.pid") |> String.strip |> Pid.of_string);
        let child =
          List.find_exn (A.state entry.actor |> protocol_ok).jobs ~f:(fun job ->
-           P.Id.Job.equal job.id dependency.job_id)
+           P.Invocation.equal_work (Job job.id) dependency.work)
        in
        match child.status with
        | Running -> ()

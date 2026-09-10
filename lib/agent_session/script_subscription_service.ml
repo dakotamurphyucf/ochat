@@ -15,7 +15,15 @@ let origin_values = function
 ;;
 
 type host =
-  { stage :
+  { create :
+      P.Job.launch_owner
+      -> P.Invocation.observer
+      -> kind:string
+      -> lifetime_ms:int
+      -> wake:P.Completion.wake
+      -> completion_schema:Jsonaf.t option
+      -> (int * S.t, P.Error.t) result
+  ; stage :
       P.Job.launch_owner
       -> P.Invocation.observer
       -> previous:S.t option
@@ -166,7 +174,7 @@ let handlers scope : Ops.handlers =
             scope.originating
             ~error:"subscription creation requires an originating moderator tool"
         in
-        let prepared, invocation = origin_values origin in
+        let prepared, _invocation = origin_values origin in
         let lifetime_ms =
           Option.value lifetime_ms ~default:scope.service.limits.default_lifetime_ms
         in
@@ -177,34 +185,25 @@ let handlers scope : Ops.handlers =
           | true -> Ok ()
           | false -> Error "subscription lifetime exceeds host policy"
         in
-        let created_at = scope.service.now () in
-        let deadline =
-          Time_ns.add
-            (P.Timestamp.to_time_ns created_at)
-            (Time_ns.Span.of_int_ms lifetime_ms)
-          |> P.Timestamp.of_time_ns
+        let completion_schema =
+          Option.map
+            (EC.completion_schema prepared)
+            ~f:Chatmd_shell_spec.Tool_schema.to_json
         in
-        let%bind subscription =
-          S.create
-            { id = P.Id.Subscription.create ()
-            ; session_id = invocation.context.session_id
-            ; generation = invocation.context.generation
-            ; invocation_id = invocation.context.id
-            ; source = Some scope.source
-            ; kind
-            ; created_at
-            ; deadline
-            ; completion_schema =
-                Option.map
-                  (EC.completion_schema prepared)
-                  ~f:Chatmd_shell_spec.Tool_schema.to_json
-            ; wake
-            ; ingress_capability = None
-            }
-          |> message
-        in
-        let%map receipt = stage scope ~previous:None ~next:subscription in
-        receipt, subscription.context.id)
+        Eio.Cancel.protect (fun () ->
+          let%map receipt, subscription =
+            scope.service.host.create
+              scope.owner
+              scope.source
+              ~kind
+              ~lifetime_ms
+              ~wake
+              ~completion_schema
+            |> message
+          in
+          scope.issued <- receipt :: scope.issued;
+          scope.created <- (receipt, subscription.context.id) :: scope.created;
+          receipt, subscription.context.id))
   ; get = get scope
   ; finish =
       (fun ~id ~expected_epoch completion ->

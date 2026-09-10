@@ -13,6 +13,7 @@ let subscription () =
     ; generation = 3
     ; invocation_id = get (Id.Invocation.of_string "inv_example")
     ; source = None
+    ; parent_job = None
     ; kind = "agent_response"
     ; created_at = timestamp
     ; deadline = later
@@ -108,7 +109,7 @@ let%expect_test "expiry and subscription codec reject impossible durable states"
        (replace (Subscription.to_json expired) "timer_id" (`String "sch_stale")));
   report
     (Subscription.of_json
-       (replace (Subscription.to_json s) "schema_version" (`Number "3")));
+       (replace (Subscription.to_json s) "schema_version" (`Number "4")));
   report
     (Subscription.of_json
        (replace (Subscription.to_json s) "ingress_capability" (`String "ses_forged")));
@@ -163,6 +164,53 @@ let%expect_test
     (((script_id watcher)
       (source_sha256
        aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)))
+    |}]
+;;
+
+let%expect_test "subscription attempt binding is versioned and immutable" =
+  let legacy = subscription () in
+  let source : Invocation.observer =
+    { script_id = "watcher"; source_sha256 = String.make 64 'a' }
+  in
+  let bound =
+    Subscription.create
+      { legacy.context with
+        source = Some source
+      ; parent_job = Some (get (Id.Job.of_string "job_parent"), 2)
+      }
+    |> get
+  in
+  let encoded = Subscription.to_json bound in
+  let restored = Subscription.of_json encoded |> get in
+  assert (Subscription.equal bound restored);
+  let replace = Agent_invocation_test.replace_field in
+  List.iter [ "1"; "2"; "4" ] ~f:(fun version ->
+    report (Subscription.of_json (replace encoded "schema_version" (`Number version))));
+  report
+    (Subscription.of_json
+       (replace (Subscription.to_json legacy) "schema_version" (`Number "3")));
+  report (Subscription.create { bound.context with source = None });
+  report
+    (Subscription.create
+       { bound.context with parent_job = Some (get (Id.Job.of_string "job_parent"), 0) });
+  let changed =
+    Subscription.create
+      { bound.context with parent_job = Some (get (Id.Job.of_string "job_parent"), 3) }
+    |> get
+  in
+  report (Subscription.validate_transition ~previous:(Some restored) changed);
+  let unbound = Subscription.create { bound.context with parent_job = None } |> get in
+  report (Subscription.validate_transition ~previous:(Some restored) unbound);
+  [%expect
+    {|
+    invalid_request
+    invalid_request
+    incompatible_protocol
+    invalid_request
+    invalid_request
+    invalid_request
+    conflict
+    conflict
     |}]
 ;;
 

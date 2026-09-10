@@ -205,6 +205,7 @@ let extension_fixture workspace_instance =
       ; generation = 0
       ; invocation_id = admitted.context.id
       ; source = None
+      ; parent_job = None
       ; kind = "fixture"
       ; created_at = timestamp
       ; deadline =

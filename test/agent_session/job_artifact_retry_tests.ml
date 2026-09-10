@@ -77,7 +77,7 @@ let%expect_test
            ~generation:0
            ~attempt:parent.attempt
            { invocation_id = invocation.context.id
-           ; job_id = child.id
+           ; work = Job child.id
            ; deadline
            ; completion_schema = None
            ; max_output_bytes = 4096

@@ -77,6 +77,7 @@ let%expect_test
                   ; generation = 0
                   ; invocation_id = invocation.context.id
                   ; source = None
+                  ; parent_job = None
                   ; kind
                   ; created_at
                   ; deadline
@@ -258,6 +259,7 @@ let%expect_test
         ; generation = 0
         ; invocation_id = invocation.context.id
         ; source = None
+        ; parent_job = None
         ; kind = "watch"
         ; created_at
         ; deadline

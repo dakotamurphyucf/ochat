@@ -691,12 +691,12 @@ let execute_background_job t (job : Agent_protocol.Job.t) =
       (match result.pending, result.resolved.status with
        | Some target, Resolved (Complete _) ->
          (match target.invocation.status, target.invocation.context.deadline with
-          | Resolved (Pending (Job job_id, _)), Some deadline ->
+          | Resolved (Pending (work, _)), Some deadline ->
             let policy = Chat_response.Background_request.policy request in
             Ok
               (Pending
                  { invocation_id = target.invocation.context.id
-                 ; job_id
+                 ; work
                  ; deadline
                  ; completion_schema = target.completion_schema
                  ; max_output_bytes = policy.max_output_bytes
@@ -705,7 +705,7 @@ let execute_background_job t (job : Agent_protocol.Job.t) =
           | _ ->
             Error
               (Agent_protocol.Error.invalid_request
-                 "background Pending target has no supported owned job"))
+                 "background Pending target has no owned work or deadline"))
        | None, Resolved (Complete value) ->
          Ok (Completed (Agent_protocol.Completion.Succeeded value))
        | _, Resolved (Fail error) ->

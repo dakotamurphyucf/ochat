@@ -1312,11 +1312,14 @@ type kind =
   | Compaction
 [@@deriving compare, equal, sexp]
 
-(** A saved target invocation returned Pending backed by its own job. The parent
-    waits without a worker, retaining its original deadline across restart. *)
+(** A saved target invocation returned Pending backed by owned work. The parent
+    waits without a worker, retaining its original deadline across restart.
+    Job targets retain waiting-status JSON version 1 and legacy [job_id]
+    S-expression encoding. Subscription targets use JSON version 2 with tagged
+    [work]; their records must bind the actual creating parent job attempt. *)
 type dependency =
   { invocation_id : Id.Invocation.t
-  ; job_id : Id.Job.t
+  ; work : Invocation.work
   ; deadline : Timestamp.t
   ; completion_schema : Jsonaf.t option [@sexp.option]
     (** Captured from the admitted target definition, never supplied by a script. *)
@@ -2976,6 +2979,9 @@ type context =
   ; source : Invocation.observer option [@sexp.option]
     (** Codec 2 binds the creating moderator source. Codec 1 records decode with
         None and must not acquire current-moderator authority implicitly. *)
+  ; parent_job : (Id.Job.t * int) option [@sexp.option]
+    (** Codec 3 pins the actor-owned creating job attempt. Absence on older
+        records must not be upgraded to the current attempt implicitly. *)
   ; kind : string
   ; created_at : Timestamp.t
   ; deadline : Timestamp.t

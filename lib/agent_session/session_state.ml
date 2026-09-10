@@ -317,6 +317,14 @@ let validate t =
       ~schedules:t.schedules
   in
   let%bind () =
+    List.fold_result t.subscriptions ~init:() ~f:(fun () subscription ->
+      Job_launch.validate_subscription
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~jobs:t.jobs
+        subscription)
+  in
+  let%bind () =
     List.fold_result t.jobs ~init:() ~f:(fun () job ->
       let%bind () = Agent_protocol.Job.validate_result job in
       let%bind () =
@@ -338,7 +346,12 @@ let validate t =
   in
   let%bind () =
     List.fold_result t.jobs ~init:() ~f:(fun () job ->
-      Job_dependency.validate ~invocations:t.invocations ~jobs:t.jobs job)
+      Job_dependency.validate
+        ~invocations:t.invocations
+        ~events:t.moderator_executions
+        ~jobs:t.jobs
+        ~subscriptions:t.subscriptions
+        job)
     |> Result.map_error ~f:(fun error ->
       Agent_protocol.Error.create
         Journal_corrupt
