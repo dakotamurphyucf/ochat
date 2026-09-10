@@ -174,6 +174,49 @@ let completion_ty =
     ]
 ;;
 
+let wake_policy_ty =
+  variant [ "Request_turn", S.TUnit; "Next_turn", S.TUnit; "No_wake", S.TUnit ]
+;;
+
+let subscription_module : S.builtin_module =
+  let operation name parameters result ~mutation =
+    let builtin =
+      task_builtin ~name ~op:("Subscription." ^ name) ~parameters ~result ~spawn:false
+    in
+    match mutation with
+    | false -> builtin
+    | true ->
+      { builtin with
+        impl =
+          (fun args ->
+            match builtin.impl args with
+            | Chatml_lang.VTask task ->
+              let project =
+                Chatml_lang.VBuiltin
+                  (function
+                    | [ Chatml_lang.VVariant ("Subscription_receipt", [ VInt _; value ]) ]
+                      -> value
+                    | _ -> failwith "invalid host subscription receipt")
+              in
+              Chatml_lang.VTask (TMap (task, project))
+            | _ -> assert false)
+      }
+  in
+  { name = "Subscription"
+  ; exports =
+      [ operation
+          "create"
+          [ S.TString; option S.TInt; wake_policy_ty ]
+          S.TString
+          ~mutation:true
+      ; operation "get" [ S.TString ] S.json_ty ~mutation:false
+      ; operation "complete" [ S.TString; S.TInt; S.json_ty ] S.json_ty ~mutation:true
+      ; operation "fail" [ S.TString; S.TInt; tool_error_ty ] S.json_ty ~mutation:true
+      ; operation "cancel" [ S.TString; S.TInt; S.TString ] S.json_ty ~mutation:true
+      ]
+  }
+;;
+
 let work_completion_ty =
   record
     [ "version", S.TInt
@@ -254,11 +297,12 @@ let moderator_v1 =
   in
   Surface.merge
     { Surface.empty with
-      modules = job_module :: invocation :: overrides
+      modules = subscription_module :: job_module :: invocation :: overrides
     ; type_aliases =
         tool_v1.type_aliases
         @ List.map
             [ "tool_invocation", invocation_event_ty
+            ; "wake_policy", wake_policy_ty
             ; "completion", completion_ty
             ; "work_completion", work_completion_ty
             ; "moderator_event", moderator_event_ty

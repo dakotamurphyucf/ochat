@@ -45,6 +45,7 @@ end
 type t
 
 (** Host preparation performs validation only. The manager selects job starts and
+    subscription mutations against the supplied live transactions and
     checks its live budget, then invokes persist. Install is infallible/non-yielding
     and runs after persistence succeeds, with no further validation. *)
 type prepared_commit =
@@ -176,9 +177,14 @@ val handle_event_entries
     Local outcome validation precedes [prepare_event], which receives the complete
     prospective state, queued events, halt and identity overlay. The host validates
     its handoff and returns a [prepared_commit] without saving yet. The manager
-    then selects surviving [jobs] starts and checks its live execution budget.
+    then selects surviving [jobs] starts and [subscriptions] mutations and checks
+    its live execution budget. Both transaction handlers are lexically installed
+    only for this execution; absent services fail closed.
     [persist] must atomically save the snapshot, event receipt, runtime intent and
-    selected launches. Its infallible, non-yielding [install] runs only on success.
+    selected launches and subscription changes. Its infallible, non-yielding
+    [install] runs only on success, followed by both service acknowledgements.
+    The host discards all provisional work on whole-handler failure; Task.catch
+    rollback removes discarded subscription mutations in reverse order.
     Error, exception or
     cancellation before commit restores serializable state and discards local
     effects; external effects are not undone or retried. Callbacks must not
@@ -192,6 +198,7 @@ val handle_event_entries
     borrow, impose a host deadline or provide interactive permission ownership. *)
 val handle_event_entries_transactional
   :  ?jobs:Background_job_operations.transaction
+  -> ?subscriptions:Subscription_operations.transaction
   -> t
   -> session_id:string
   -> now_ms:int
@@ -225,6 +232,7 @@ val handle_event_entries_transactional
     Returns [Ok None] for an empty queue without calling either callback. *)
 val handle_next_event_entries_transactional
   :  ?jobs:Background_job_operations.transaction
+  -> ?subscriptions:Subscription_operations.transaction
   -> t
   -> session_id:string
   -> now_ms:int
@@ -247,7 +255,7 @@ val handle_next_event_entries_transactional
     moderator is accepted. [prepare_resolution] receives an immutable prospective
     identity snapshot (new state, full queued events, halt and overlay), allowing
     the host to validate a deferred commit that persists it atomically with
-    [resolved]. Local serialization precedes this callback; job selection and
+    [resolved]. Local serialization precedes this callback; job/subscription selection and
     the final live-budget check follow it, before [persist]. Failure before
     persistence discards buffered state and resolution/overlay effects; the
     returned [install] must not fail or yield.
@@ -269,6 +277,7 @@ val handle_next_event_entries_transactional
     domain handoffs; it cannot reset the caller's limits. *)
 val handle_invocation_entries
   :  ?jobs:Background_job_operations.transaction
+  -> ?subscriptions:Subscription_operations.transaction
   -> ?authorize:(unit -> (unit, string) result)
   -> ?managed:Managed_tool_registry.execution
   -> ?execution_context:Chatml_execution.context
@@ -295,7 +304,7 @@ val handle_invocation_entries
     It has no provider call ID and cannot resolve the original invocation again.
     The host must hold the exclusive actor borrow and persist [observed] with the
     prospective snapshot using the deferred commit returned by
-    [prepare_observation]. Job selection and the final budget check precede its
+    [prepare_observation]. Job/subscription selection and the final budget check precede its
     [persist]; [install] must be infallible and non-yielding. Local state rolls
     back on failure before persistence; external effects do
     not. This method does not itself claim, retry or schedule observations.
@@ -308,6 +317,7 @@ val handle_invocation_entries
     [handle_invocation_entries]. *)
 val handle_observation_entries
   :  ?jobs:Background_job_operations.transaction
+  -> ?subscriptions:Subscription_operations.transaction
   -> ?on_tool_call:
        (name:string
         -> args:Jsonaf.t

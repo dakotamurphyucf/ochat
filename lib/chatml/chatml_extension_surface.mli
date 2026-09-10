@@ -32,12 +32,18 @@ val completion_ty : Chatml_builtin_spec.ty
 val work_completion_ty : Chatml_builtin_spec.ty
 val moderator_event_ty : Chatml_builtin_spec.ty
 
-(** Opt-in extensibility-v1 moderator contract. Adds Invocation.resolve and
+(** Opt-in extensibility-v1 moderator contract. Adds Invocation.resolve,
+    moderator-owned Subscription create/get/complete/fail/cancel operations and
     typed Tool_invoked/Job_completed/Subscription_expired events. Runtime.emit
     and Schedule.after_ms accept JSON data only, using distinct host operations
     Runtime.emit_json and Schedule.after_ms_json. Their host adapters must wrap
     payloads as Internal_event; they must never decode caller JSON as a native
     event constructor. Legacy surfaces and their event behavior are unchanged.
+    Subscription.create takes kind, optional lifetime_ms and wake_policy
+    (Request_turn/Next_turn/No_wake), returning a task of string identity. Get
+    returns JSON status; complete/fail/cancel take identity, expected epoch and
+    respectively JSON success, tool_error or cancellation reason, returning the
+    retained JSON status. Internal transaction receipts are hidden from scripts.
     Operation availability still requires a qualified host implementation. *)
 val moderator_v1 : Chatml_builtin_surface.surface
 

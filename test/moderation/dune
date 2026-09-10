@@ -74,7 +74,7 @@
 
 (library
  (name moderator_invocation_test)
- (modules moderator_invocation_test)
+ (modules moderator_invocation_test moderator_invocation_fixtures subscription_transaction_tests)
  (libraries core chat_response chatmd chatmd_shell_spec chatml chatml_host_runtime eio eio_main agent_protocol history_entry session)
  (inline_tests)
  (preprocess (pps ppx_jane)))

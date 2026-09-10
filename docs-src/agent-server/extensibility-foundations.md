@@ -6,6 +6,30 @@ are still under implementation; none of their feature flags is enabled yet.
 This page describes the available storage and client protocol contracts, not a
 runnable extension tutorial.
 
+The extensibility-v1 moderator compiler also defines `Subscription.create`,
+`get`, `complete`, `fail` and `cancel`. These currently require an explicitly
+injected host transaction; daemon actor-backed admission, expiry and notification
+delivery are still being implemented. One-off and standalone tool surfaces do
+not include this module.
+
+`create(kind, lifetime_ms, wake_policy)` returns a task of subscription ID. The
+lifetime is `None` for the host default or `Some(positive_ms)`; wake policy is
+`Request_turn`, `Next_turn` or `No_wake`. `get(id)` returns JSON status.
+`complete(id, expected_epoch, payload)`, `fail(id, expected_epoch, tool_error)` and
+`cancel(id, expected_epoch, reason)` return the retained JSON status. Host
+callbacks must enforce source ownership, generation, schemas, quotas, lifetime
+and first-terminal-winner semantics; defining the compiler surface grants none
+of those permissions. Cancellation of a subscription does not imply cancellation
+of a watched child or external process.
+
+The manager stages subscription mutations with the moderator transaction.
+`Task.catch` rollback identifies individual updates, including repeated terminal
+updates that return the same result, using private receipts hidden from the
+script. Surviving job starts and subscription mutations are selected before the
+owning save and acknowledged only after it succeeds. An ordinary or queued event
+save failure leaves moderator state and the queue unchanged. The owning host
+must discard all remaining provisional work on whole-handler failure.
+
 The internal `Agent_runtime.prepare_extensions` path now prepares the full captured
 definition against the exact authorized native resources. `Runtime_builder.build_with_extensions`
 consumes it with explicit host services, creates real moderator tool descriptors,
