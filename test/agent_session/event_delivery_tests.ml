@@ -279,7 +279,7 @@ let%expect_test "two session event owners reject a wait cycle and release both b
                     ~operation_id:None
                     ~event:Session_start
                     ~snapshot:(fun () -> Ok snapshot)
-                    (fun ~executing:_ ~event:_ ~execute:_ ~commit ->
+                    (fun ~executing:_ ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
                        Eio.Promise.resolve (snd held.(index)) ();
                        Eio.Promise.await (fst proceed.(index));
                        let remote, _ = actors.((index + 1) mod 2) in
@@ -962,7 +962,7 @@ let%expect_test "event-owned native calls retain lineage and expire with their c
            A.with_idle_queued_moderator_event_tools
              actor
              ~snapshot:before
-             (fun ~executing ~event:_ ~execute ~commit ->
+             (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
                 let native_callback = !on_call in
                 (on_call
                  := fun () ->
@@ -1240,13 +1240,13 @@ let%expect_test
              A.with_current_idle_queued_moderator_event_tools
                actor
                ~snapshot
-               (fun ~executing ~event ~execute ~commit ->
+               (fun ~executing ~retirement_reason ~event ~execute ~commit ->
                   let event =
                     match mode with
                     | `Mismatched_head -> Session.Snapshot.String "wrong head"
                     | _ -> event
                   in
-                  f ~executing ~event ~execute ~commit)
+                  f ~executing ~retirement_reason ~event ~execute ~commit)
            in
            let history () =
              (A.state actor |> protocol_ok).conversation.canonical_history

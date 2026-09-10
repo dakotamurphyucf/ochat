@@ -29,6 +29,99 @@ let encoded_event event =
     [ "snapshot_sexp", `String (Sexp.to_string_mach (Session.Snapshot.sexp_of_t event)) ]
 ;;
 
+let captured_timer event =
+  Result.bind (Session.Snapshot.to_value event) ~f:Chat_response.Schedule_delivery.decode
+  |> Result.map_error ~f:P.Error.invalid_request
+;;
+
+let receipt_timer (receipt : E.t) =
+  let open Result.Let_syntax in
+  match receipt.context.phase, receipt.context.event with
+  | Internal_event, `Object fields ->
+    (match List.Assoc.find fields ~equal:String.equal "snapshot_sexp" with
+     | Some (`String sexp) ->
+       let%bind event =
+         Result.try_with (fun () -> Session.Snapshot.t_of_sexp (Sexp.of_string sexp))
+         |> Result.map_error ~f:(fun _ ->
+           P.Error.invalid_request "invalid captured queued event snapshot")
+       in
+       captured_timer event
+     | _ -> Ok None)
+  | _ -> Ok None
+;;
+
+let timer_retirement_reason ~state ~(observer : P.Invocation.observer) ~event ~now =
+  let open Result.Let_syntax in
+  let%bind timer = captured_timer event in
+  match timer with
+  | None -> Ok None
+  | Some timer ->
+    let%bind ownership =
+      Result.of_option
+        timer.ownership
+        ~error:(P.Error.invalid_request "queued timer requires captured ownership")
+    in
+    let retained =
+      List.find state.Session_state.schedules ~f:(fun retained ->
+        P.Id.Schedule.equal retained.id timer.id)
+    in
+    let matches_delivery =
+      match retained with
+      | Some
+          ({ status = Delivered; delivery_count = 1; last_delivery_at = Some _; _ } as
+           retained) ->
+        let claimed =
+          { retained with
+            status = Delivering
+          ; delivery_count = 0
+          ; last_delivery_at = None
+          }
+        in
+        Jsonaf.exactly_equal (P.Schedule.to_json claimed) (P.Schedule.to_json timer)
+      | _ -> false
+    in
+    (match
+       P.Id.Session.equal state.identity.session_id timer.session_id
+       && state.identity.generation = timer.generation
+       && P.Invocation.equal_observer observer ownership.source
+       && matches_delivery
+     with
+     | false -> Ok (Some "timer.stale_delivery")
+     | true ->
+       let%bind previous =
+         List.map state.moderator_executions ~f:receipt_timer |> Result.all
+       in
+       (match
+          List.exists
+            previous
+            ~f:
+              (Option.exists ~f:(fun (previous : P.Schedule.t) ->
+                 P.Id.Schedule.equal previous.id timer.id))
+        with
+        | true -> Ok (Some "timer.duplicate_delivery")
+        | false ->
+          (match ownership.subscription with
+           | None -> Ok None
+           | Some (id, epoch) ->
+             let active =
+               List.exists state.subscriptions ~f:(fun subscription ->
+                 P.Id.Subscription.equal subscription.context.id id
+                 && P.Id.Session.equal subscription.context.session_id timer.session_id
+                 && subscription.context.generation = timer.generation
+                 && Option.equal
+                      P.Invocation.equal_observer
+                      subscription.context.source
+                      (Some ownership.source)
+                 && subscription.epoch = epoch
+                 && Option.equal P.Id.Schedule.equal subscription.timer_id (Some timer.id)
+                 && Option.is_none subscription.result
+                 && P.Timestamp.compare now subscription.context.deadline < 0)
+             in
+             (match active with
+              | true -> Ok None
+              | false -> Ok (Some "timer.stale_subscription")))))
+;;
+
 let has_unsettled_claim ~state ~(observer : P.Invocation.observer) =
   List.exists state.Session_state.moderator_executions ~f:(fun receipt ->
     receipt.context.generation = state.identity.generation
@@ -52,6 +145,7 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
   let%bind () =
     let checked =
       let%bind value = Session.Snapshot.to_value event in
+      let%bind value = Chat_response.Schedule_delivery.script_event value in
       match value with
       | Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
         Chat_response.Moderator_invocation.internal_event payload |> Result.map ~f:ignore

@@ -1507,9 +1507,10 @@ records from retained older generations, including when the session is stopped.
 It cannot create a subscription, change its context or record a success. Ordinary
 script mutations retain current-generation and source checks. This transition is
 a new journal constructor; older binaries cannot replay journals containing it.
-The sweep provides host deadline enforcement. Transactional script timer creation,
-subscription timer arming and notification delivery remain separate integration
-work; it does not expose a new model-facing expiry operation.
+The sweep provides host deadline enforcement independently of moderator callbacks.
+It does not expose a new model-facing expiry operation. Transactional timer creation
+and arming use the actor staging described below; notification delivery remains
+separate integration work.
 
 The actor also has source-bound timer staging for the extensibility adapter.
 Timer creation reserves a host ID, captures the live moderator invocation or event,
@@ -1533,11 +1534,28 @@ defaults allow 256 active timers per session, 64 per moderator source, 4096 reta
 records, a 24-hour delay and a 64 KiB/64-level payload budget. Reservations count
 until their transaction finishes. The compiled ChatML adapter and subscription
 arming now use this internal staging interface in the qualified daemon. Owned
-timer payloads are wrapped as internal JSON data, so constructor-like text cannot
-become a native tool event. The loaded moderator source is checked before enqueue.
-Queued timer provenance, epoch-aware queue claim/retirement and notification
-delivery remain separate integration work. General feature advertisement remains
-gated on A01.
+timer payloads appear as internal JSON data to scripts, so constructor-like text
+cannot become a native tool event. The durable queue retains a private host frame
+containing the exact claimed timer record. Its protocol numbers bypass the ChatML
+JSON float projection so identity and payload spellings survive capture unchanged.
+Delivery requires the installed source and a checkpoint that appends exactly that
+frame; the schedule's delivered state and queue append save together.
+
+Before running a queued timer, the actor checks its retained delivered record,
+session, generation, moderator source and previous timer execution receipts. A
+bound subscription must still be active, before its deadline, and point to that
+timer at the captured epoch. A duplicate ID, missing or mismatched delivery, expired
+subscription or obsolete binding is retired without invoking user code. Distinct
+timers with identical payloads remain distinct deliveries; ordinary internal JSON
+has no timer authority.
+
+Automatic retirement saves its claim, interrupted disposition, retirement receipt
+and removal of only the queue head in one transaction. A rejected save leaves no
+intermediate claim and does not pop the live queue. Foreground retirement retains
+the active operation's identity. A handler that actually started and failed still
+uses explicit failure retirement; this path does not retry its external effects.
+Remaining lifecycle/clock qualification and notification delivery are separate
+work. General feature advertisement remains gated on A01.
 
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6

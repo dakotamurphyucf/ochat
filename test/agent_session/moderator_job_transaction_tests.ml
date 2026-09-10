@@ -100,7 +100,7 @@ let%expect_test "moderator saves select jobs before persistence and never reject
                 services.claim_event
                   ~event
                   ~snapshot:(fun () -> Ok before)
-                  (fun ~executing ~event:_ ~execute:_ ~commit ->
+                  (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
                      Jobs.with_scope
                        jobs
                        ~owner:(Moderator_event executing.context.id)

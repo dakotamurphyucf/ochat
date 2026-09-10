@@ -27,7 +27,7 @@ let with_event ?(snapshot = Setup.before) actor parent f =
        services.claim_event
          ~event
          ~snapshot:(fun () -> Ok snapshot)
-         (fun ~executing ~event:_ ~execute:_ ~commit ->
+         (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
             f (J.Moderator_event executing.context.id) commit))
 ;;
 

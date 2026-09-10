@@ -12,6 +12,7 @@ end
 module Capabilities = struct
   type event_handler =
     executing:Agent_protocol.Moderator_execution.t
+    -> retirement_reason:string option
     -> event:Session.Snapshot.t
     -> execute:
          (invocation:Agent_protocol.Invocation.t

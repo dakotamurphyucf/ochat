@@ -299,7 +299,7 @@ let%expect_test
            services.claim_event
              ~event
              ~snapshot:(fun () -> Ok before)
-             (fun ~executing ~event:_ ~execute:_ ~commit:save ->
+             (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit:save ->
                 let owner = J.Moderator_event executing.context.id in
                 let current =
                   A.read_script_subscription actor ~owner ~source ~id:value.context.id

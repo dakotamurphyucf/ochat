@@ -1,12 +1,16 @@
 (** Actor handoff supplied by the current-snapshot actor APIs or worker
     capabilities. Invoke [snapshot] after acquiring the moderator gate and outside
-    the actor mailbox, then persist ownership before calling the handler. Atomically
+    the actor mailbox, then persist ownership before calling the handler. A nonempty
+    [retirement_reason] selects host-only removal of a stale timer: no script or
+    tool execution is permitted, and claim, retirement and queue removal commit
+    atomically without an intermediate persisted callback claim. Atomically
     persist the supplied checkpoint and runtime requests before returning from
     [commit]. It must retain ownership through the callback's return. *)
 type claim =
   snapshot:
     (unit -> (Session.Moderator_state.Identity_snapshot.t, Agent_protocol.Error.t) result)
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> retirement_reason:string option
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
       -> commit:
@@ -23,7 +27,9 @@ type claim =
     results carry durable observation intent; wakeup failure cannot erase them.
 
     Returns None for an empty queue or unavailable actor. Failure/cancellation
-    retain the actor's event disposition and do not retry effects or retire heads.
+    retain the actor's event disposition and do not retry effects. Stale or duplicate
+    timer frames are retired without a handler; failed handler heads still require
+    explicit retirement.
     The returned runtime requests are already durable: a host must apply their
     retained intent, not schedule the returned requests independently. [history]
     reads current canonical history after the claim without entering the manager.

@@ -541,6 +541,7 @@ let native_context ?(input = `Object []) registry invocation =
 let handoff_definition
       ?capability_registry
       ?execution_policy
+      ?snapshot
       ?(declare_tool = true)
       ?(events = "| _ -> Task.pure(state)")
       ?(script_limits = "")
@@ -612,6 +613,7 @@ let handoff_definition
     M.create_entries
       ~env
       ?execution_policy
+      ?snapshot
       ~artifact:(Option.value_exn artifact)
       ~capabilities:moderator_capabilities
       ~allocator

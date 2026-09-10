@@ -117,7 +117,7 @@ let%expect_test "event and idle descendants require a live parent in the exact o
               ~operation_id:None
               ~event:Session_start
               ~snapshot:(fun () -> Ok (snapshot ()))
-              (fun ~executing ~event:_ ~execute ~commit ->
+              (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
                  let invocation =
                    I.create ~observer ~parent_event:executing.context.id context
                    |> protocol_ok

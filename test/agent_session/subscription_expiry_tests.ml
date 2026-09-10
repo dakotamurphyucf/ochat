@@ -203,7 +203,7 @@ let%expect_test "expiry and moderator completion choose the first persisted winn
                 services.claim_event
                   ~event
                   ~snapshot:(fun () -> Ok Setup.before)
-                  (fun ~executing ~event:_ ~execute:_ ~commit:save ->
+                  (fun ~executing ~retirement_reason:_ ~event:_ ~execute:_ ~commit:save ->
                      let owner = J.Moderator_event executing.context.id in
                      let completed =
                        Setup.finish subscription (Succeeded (`String "won"))

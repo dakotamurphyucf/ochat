@@ -283,7 +283,11 @@ let%expect_test "job starts commit atomically with managed handler and event che
                       services.claim_event
                         ~event
                         ~snapshot:(fun () -> Ok before)
-                        (fun ~executing ~event:_ ~execute:_ ~commit ->
+                        (fun ~executing
+                          ~retirement_reason:_
+                          ~event:_
+                          ~execute:_
+                          ~commit ->
                            start (J.Moderator_event executing.context.id) |> ignore;
                            commit
                              ~snapshot:after

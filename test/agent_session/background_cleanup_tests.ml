@@ -84,7 +84,7 @@ let%expect_test
                   services.claim_event
                     ~event
                     ~snapshot:(fun () -> Ok before)
-                    (fun ~executing:_ ~event:_ ~execute:_ ~commit ->
+                    (fun ~executing:_ ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
                        incr effects;
                        let save () =
                          commit
@@ -149,7 +149,7 @@ let%expect_test
                      ; meta = `Null
                      })
                 ~snapshot:(fun () -> Ok before)
-                (fun ~executing:_ ~event:_ ~execute:_ ~commit ->
+                (fun ~executing:_ ~retirement_reason:_ ~event:_ ~execute:_ ~commit ->
                    commit
                      ~snapshot:before
                      ~requests:

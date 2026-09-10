@@ -1827,8 +1827,22 @@ let claim_queued_event t id operation_id snapshot =
         ~snapshot
         ~now:(t.services.now ())
     in
-    let%bind _ =
-      transition t ~delta:(Session_delta.Moderator_execution_changed receipt) ~payloads:[]
+    let%bind retirement_reason =
+      Queued_moderator_event.timer_retirement_reason
+        ~state:t.state
+        ~observer:receipt.context.source
+        ~event
+        ~now:(t.services.now ())
+    in
+    let%bind () =
+      match retirement_reason with
+      | Some _ -> Ok ()
+      | None ->
+        transition
+          t
+          ~delta:(Session_delta.Moderator_execution_changed receipt)
+          ~payloads:[]
+        |> Result.map ~f:ignore
     in
     let borrow =
       { kind = Queued
@@ -1836,7 +1850,7 @@ let claim_queued_event t id operation_id snapshot =
       ; receipt
       ; before = snapshot
       ; event
-      ; retirement_reason = None
+      ; retirement_reason
       ; callback_active = true
       ; committed = false
       ; cancel = None
@@ -2138,6 +2152,30 @@ let commit_queued_event t borrow snapshot requests =
     | true -> Error (error Conflict "event native invocations still require completion")
     | false -> Ok ()
   in
+  let%bind receipt, admission_deltas =
+    match borrow.retirement_reason, borrow.receipt.status with
+    | Some reason, Running ->
+      let%bind current_reason =
+        Queued_moderator_event.timer_retirement_reason
+          ~state:t.state
+          ~observer:borrow.receipt.context.source
+          ~event:borrow.event
+          ~now:(t.services.now ())
+      in
+      let%bind () =
+        match current_reason with
+        | Some current when String.equal current reason -> Ok ()
+        | _ -> Error (error Conflict "timer retirement no longer matches its admission")
+      in
+      let%map interrupted =
+        Agent_protocol.Moderator_execution.interrupt borrow.receipt ~reason
+      in
+      ( interrupted
+      , [ Session_delta.Moderator_execution_changed borrow.receipt
+        ; Moderator_execution_changed interrupted
+        ] )
+    | _ -> Ok (borrow.receipt, [])
+  in
   let%bind completed =
     match borrow.retirement_reason with
     | None ->
@@ -2156,7 +2194,7 @@ let commit_queued_event t borrow snapshot requests =
        with
        | false, false, None ->
          Queued_moderator_event.retire
-           ~claimed:borrow.receipt
+           ~claimed:receipt
            ~before:borrow.before
            ~snapshot
            ~reason
@@ -2171,10 +2209,11 @@ let commit_queued_event t borrow snapshot requests =
       t
       ~delta:
         (Session_delta.Batch
-           ([ Session_delta.Moderator_execution_changed completed
-            ; Moderator_changed
-                (Some (Runtime_builder.encode_moderator_snapshot snapshot))
-            ]
+           (admission_deltas
+            @ [ Session_delta.Moderator_execution_changed completed
+              ; Moderator_changed
+                  (Some (Runtime_builder.encode_moderator_snapshot snapshot))
+              ]
             @ job_deltas))
       ~payloads:job_payloads
   in
@@ -4490,7 +4529,13 @@ let with_event_tools t ~claim f =
     in
     Exn.protect
       ~finally:(fun () -> Atomic.set active false)
-      ~f:(fun () -> f ~executing:borrow.receipt ~event ~execute ~commit))
+      ~f:(fun () ->
+        f
+          ~executing:borrow.receipt
+          ~retirement_reason:borrow.retirement_reason
+          ~event
+          ~execute
+          ~commit))
 ;;
 
 let with_queued_moderator_event_tools t ~operation_id ~snapshot f =
@@ -6227,6 +6272,35 @@ let complete_schedule
   let%bind () = validate_schedule_generation t schedule generation in
   match schedule.status with
   | Agent_protocol.Schedule.Delivering ->
+    let%bind () =
+      match schedule.ownership, expected with
+      | None, _ -> Ok ()
+      | Some ownership, Some before ->
+        let%bind event =
+          Chat_response.Schedule_delivery.capture schedule
+          |> Result.bind ~f:Session.Snapshot.of_value
+          |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+        in
+        let after =
+          { before with
+            queued_internal_events = before.queued_internal_events @ [ event ]
+          }
+        in
+        (match
+           String.equal before.script_id ownership.source.script_id
+           && String.equal before.script_source_hash ownership.source.source_sha256
+           && Option.equal
+                Jsonaf.exactly_equal
+                moderator_snapshot
+                (Some (Runtime_builder.encode_moderator_snapshot after))
+         with
+         | true -> Ok ()
+         | false ->
+           Error
+             (error Conflict "owned timer delivery must append its captured frame only"))
+      | Some _, None ->
+        Error (error Conflict "owned timer delivery requires its installed checkpoint")
+    in
     if schedule.delivery_count = Int.max_value
     then Error (error Invalid_state "schedule delivery count overflow")
     else (

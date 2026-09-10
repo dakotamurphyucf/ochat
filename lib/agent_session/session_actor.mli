@@ -878,6 +878,7 @@ val with_idle_queued_moderator_event_tools
   :  t
   -> snapshot:Session.Moderator_state.Identity_snapshot.t
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> retirement_reason:string option
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
       -> commit:
@@ -900,6 +901,7 @@ val with_ordinary_moderator_event
   -> snapshot:Session.Moderator_state.Identity_snapshot.t
   -> event:Chat_response.Moderation.Event.t
   -> (executing:Agent_protocol.Moderator_execution.t
+      -> retirement_reason:string option
       -> event:Session.Snapshot.t
       -> execute:Native_tool_invocation.executor
       -> commit:

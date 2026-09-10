@@ -304,11 +304,8 @@ let deliver_schedule t (schedule : Agent_protocol.Schedule.t) =
         | None -> Ok schedule.payload
         | Some _ ->
           let module V = Chatml.Chatml_value_codec in
-          let value =
-            Chatml.Chatml_lang.VVariant
-              ("Internal_event", [ V.jsonaf_to_value schedule.payload ])
-          in
-          V.Snapshot.of_value value
+          Chat_response.Schedule_delivery.capture schedule
+          |> Result.bind ~f:V.Snapshot.of_value
           |> Result.map ~f:V.Snapshot.to_jsonaf
           |> Result.map_error ~f:Agent_protocol.Error.invalid_request
       in
@@ -365,14 +362,14 @@ let drain_loaded_queued_events t runtime manager =
     A.with_current_idle_queued_moderator_event_tools
       t.actor
       ~snapshot
-      (fun ~executing ~event ~execute ~commit ->
+      (fun ~executing ~retirement_reason ~event ~execute ~commit ->
          let%bind state = A.state t.actor in
          let%bind entries =
            Agent_session.History_codec.all_of_protocol
              state.conversation.canonical_history
          in
          history := entries;
-         handle ~executing ~event ~execute ~commit)
+         handle ~executing ~retirement_reason ~event ~execute ~commit)
   in
   let rec loop remaining handled =
     match remaining with

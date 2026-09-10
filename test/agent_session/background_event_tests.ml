@@ -57,7 +57,7 @@ let%expect_test
                   services.claim_event
                     ~event
                     ~snapshot:(fun () -> Ok before)
-                    (fun ~executing ~event:_ ~execute ~commit ->
+                    (fun ~executing ~retirement_reason:_ ~event:_ ~execute ~commit ->
                        let observer = executing.context.source in
                        let invocation =
                          I.create

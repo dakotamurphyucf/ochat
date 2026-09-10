@@ -420,7 +420,9 @@ val enqueue_internal_event : t -> Chatml.Chatml_lang.value -> (unit, string) res
     Rejection leaves the live queue unchanged. The event is detached from caller
     mutable values before preparation. Save and local installation are protected
     against cancellation; this does not run the event's handler. Versioned managers
-    currently accept only validated Internal_event envelopes; legacy job events
+    accept validated Internal_event envelopes and host-captured Schedule_delivery
+    frames. The actor must validate timer provenance before handler execution;
+    scripts receive only their Internal_event payload. Legacy job events
     require their versioned completion adapter before admission. *)
 val enqueue_internal_event_entries
   :  t

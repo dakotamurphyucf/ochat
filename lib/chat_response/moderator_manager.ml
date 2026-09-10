@@ -1207,6 +1207,13 @@ let handle_event_entries_transactional_unlocked
     let phase = Moderation.Event.phase event in
     let%bind event =
       match event with
+      | Moderation.Event.Internal_event value ->
+        Schedule_delivery.script_event value
+        |> Result.map ~f:(fun value -> Moderation.Event.Internal_event value)
+      | _ -> Ok event
+    in
+    let%bind event =
+      match event with
       | Moderation.Event.Internal_event
           (Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ])) ->
         Moderator_invocation.internal_event ?control payload
@@ -1301,7 +1308,8 @@ let handle_event_entries_transactional_unlocked
                   t.runtime
                   ~context
                   ~copy_state:copy
-                  ~copy_event:copy
+                  ~copy_event:(fun value ->
+                    Result.bind (Schedule_delivery.script_event value) ~f:copy)
                   ~validate_state
                   ~prepare_transaction:prepare
               in
@@ -2021,7 +2029,11 @@ let enqueue_internal_event_entries t ~event ~prepare =
       | Some _, Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
         Moderator_invocation.internal_event payload
       | Some _, _ ->
-        Error "event.invalid_external_event: unsupported extensibility-v1 envelope"
+        let%bind timer = Schedule_delivery.decode event in
+        (match timer with
+         | Some _ -> Ok event
+         | None ->
+           Error "event.invalid_external_event: unsupported extensibility-v1 envelope")
     in
     let%bind before = identity_snapshot_unlocked t in
     let%bind encoded = Value_codec.Snapshot.of_value event in

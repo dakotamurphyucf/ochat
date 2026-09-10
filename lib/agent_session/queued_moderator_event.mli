@@ -7,6 +7,17 @@ val has_unsettled_claim
   -> observer:Agent_protocol.Invocation.observer
   -> bool
 
+(** Authorize a captured timer against its retained delivered record, moderator
+    source, subscription epoch/deadline and prior claims. Ordinary internal data
+    returns None. A reason requests retirement without executing script code.
+    Evaluate before persisting a new receipt; recheck before atomic retirement. *)
+val timer_retirement_reason
+  :  state:Session_state.t
+  -> observer:Agent_protocol.Invocation.observer
+  -> event:Session.Snapshot.t
+  -> now:Agent_protocol.Timestamp.t
+  -> (string option, Agent_protocol.Error.t) result
+
 (** Pure admission and completion checks for actor-owned queued moderator events.
     Failed/interrupted claims block queued execution for that source/generation,
     including after other handlers change the checkpoint. Explicit retirement is
