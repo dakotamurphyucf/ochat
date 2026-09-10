@@ -170,6 +170,14 @@ val read_script_subscription
   -> id:Agent_protocol.Id.Subscription.t
   -> (Agent_protocol.Subscription.t, Agent_protocol.Error.t) result
 
+(** Host scheduler sweep of retained subscriptions whose absolute deadline has
+    passed. Expiry advances the epoch and cancels a linked outstanding schedule
+    in the same durable transaction. Terminal winners and linked jobs are kept.
+    Runs without borrowing/loading a moderator, including stopped sessions and
+    retained older generations. Failed persistence changes nothing and may be
+    retried; a sweep with no due work does not advance the session revision. *)
+val expire_subscriptions : t -> (int, Agent_protocol.Error.t) result
+
 (** Read a job with optional live progress from its current attempt. Progress
     disappears when the worker scope ends and is never a durable result. *)
 val read_job

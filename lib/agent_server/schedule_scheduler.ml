@@ -48,11 +48,13 @@ let rec reconcile_schedule entry startup_time (schedule : Agent_protocol.Schedul
 ;;
 
 let reconcile_entry startup_time entry =
-  Result.bind
-    (Agent_session.Session_actor.state entry.Session_registry.actor)
-    ~f:(fun state ->
-      List.fold_result state.schedules ~init:() ~f:(fun () schedule ->
-        reconcile_schedule entry startup_time schedule))
+  let open Result.Let_syntax in
+  let%bind _ =
+    Agent_session.Session_actor.expire_subscriptions entry.Session_registry.actor
+  in
+  let%bind state = Agent_session.Session_actor.state entry.actor in
+  List.fold_result state.schedules ~init:() ~f:(fun () schedule ->
+    reconcile_schedule entry startup_time schedule)
 ;;
 
 let reconcile_recovered ~registry ~startup_time =
@@ -146,7 +148,15 @@ let dispatch_entry t sw now entry =
 
 let process t sw clock registry =
   let now = timestamp clock in
-  Session_registry.entries registry |> List.iter ~f:(dispatch_entry t sw now)
+  Session_registry.entries registry
+  |> List.iter ~f:(fun entry ->
+    (* Expiry must keep running while an earlier timer callback owns the runtime.
+       This actor-only sweep does not invoke user code; failed saves retry on the
+       next scheduler pass. *)
+    ignore
+      (Agent_session.Session_actor.expire_subscriptions entry.Session_registry.actor
+       : (int, Agent_protocol.Error.t) result);
+    dispatch_entry t sw now entry)
 ;;
 
 let rec run t sw clock registry =

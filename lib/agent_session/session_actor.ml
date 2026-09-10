@@ -182,6 +182,7 @@ type _ request =
       * Agent_protocol.Invocation.observer
       * Agent_protocol.Id.Subscription.t
       -> Agent_protocol.Subscription.t request
+  | Expire_subscriptions : int request
   | Select_background_jobs :
       Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t list
       -> unit request
@@ -700,6 +701,53 @@ let abort_subscription_mutation t ~owner ~receipt =
 
 let read_script_subscription t ~owner ~source ~id =
   call t (Read_script_subscription (owner, source, id))
+;;
+
+let expire_subscriptions t = call t Expire_subscriptions
+
+let expire_subscriptions_internal t =
+  let module P = Agent_protocol in
+  let now = t.services.now () in
+  let due =
+    List.filter t.state.subscriptions ~f:(fun subscription ->
+      Option.is_none subscription.result
+      && P.Timestamp.compare subscription.context.deadline now <= 0)
+  in
+  match due with
+  | [] -> Ok 0
+  | _ ->
+    let open Result.Let_syntax in
+    let%bind terminal =
+      List.map due ~f:(fun subscription ->
+        P.Subscription.finish subscription ~expected_epoch:subscription.epoch ~now Expired
+        |> Result.map ~f:fst)
+      |> Result.all
+    in
+    let timer_ids =
+      List.filter_map due ~f:(fun subscription -> subscription.timer_id)
+      |> Hash_set.of_list (module P.Id.Schedule)
+    in
+    let cancelled =
+      List.filter_map t.state.schedules ~f:(fun schedule ->
+        match Hash_set.mem timer_ids schedule.id, schedule.status with
+        | true, (P.Schedule.Scheduled | Delivering) ->
+          Some { schedule with status = P.Schedule.Cancelled }
+        | _ -> None)
+    in
+    let%map _ =
+      transition
+        t
+        ~delta:
+          (Session_delta.Batch
+             (List.map terminal ~f:(fun subscription ->
+                Session_delta.Subscription_expired subscription)
+              @ List.map cancelled ~f:(fun schedule ->
+                Session_delta.Schedule_changed schedule)))
+        ~payloads:
+          (List.map cancelled ~f:(fun schedule ->
+             P.Event.Durable.Payload.Schedule_cancelled schedule))
+    in
+    List.length terminal
 ;;
 
 let abort_background_job t ~owner ~id =
@@ -6738,6 +6786,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     in
     let%map () = subscription_owned t source subscription in
     subscription
+  | Expire_subscriptions -> expire_subscriptions_internal t
   | Select_background_jobs (owner, ids) ->
     let open Result.Let_syntax in
     let%bind () = background_owner_active t owner in

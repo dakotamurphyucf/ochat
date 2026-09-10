@@ -22,6 +22,7 @@ let with_background_daemon
       ?(job_result_max_bytes =
         Agent_server.Daemon.default_options.factory_limits.job_result_max_bytes)
       ?(after_recovery = fun _env _client _entry _before -> ())
+      ?(before_recovery = fun _env _before -> ())
       ?(check_restored =
         fun job restored ->
           assert (Jsonaf.exactly_equal (J.to_json job) (J.to_json restored)))
@@ -168,6 +169,7 @@ let with_background_daemon
                       (List.length state.conversation.canonical_history);
                     state))
           in
+          before_recovery env completed_state;
           stage := "starting recovered daemon";
           let recovered = start () in
           stage := "reading recovered jobs";

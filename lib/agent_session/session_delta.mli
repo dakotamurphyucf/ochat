@@ -28,6 +28,9 @@ type t =
   (** Recovery-only interruption of an existing execution or discard of retained
       runtime intent. Cannot create receipts or successful outcomes. *)
   | Subscription_changed of Agent_protocol.Subscription.t
+  | Subscription_expired of Agent_protocol.Subscription.t
+  (** Host expiry of an existing subscription, including retained older
+      generations. Cannot create a record, change its context or record success. *)
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Moderator_changed of Jsonaf.t option

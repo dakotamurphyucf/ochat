@@ -1466,6 +1466,26 @@ session, generation and retained attempt; a waiting parent additionally requires
 that exact current attempt. Codec 3 requires a moderator source binding, and older
 binaries that understand only codec 1/2 cannot read these records.
 
+The daemon's existing schedule service sweeps subscription deadlines on startup
+and during normal operation. This actor-only operation runs independently of a
+busy moderator callback and does not load a runtime or call a model. At the
+deadline, it saves `Expired`, advances the epoch and cancels a linked outstanding
+schedule in one transaction. A previously claimed timer cannot commit its stale
+checkpoint after cancellation. Linked jobs and unrelated schedules are preserved.
+If persistence fails, the next pass retries against unchanged durable state; a
+sweep with no overdue work creates no revision or event. A terminal result already
+saved wins over later expiry, while an uncommitted moderator completion loses to
+expiry that saves first.
+
+An internal `Subscription_expired` journal transition permits expiry of existing
+records from retained older generations, including when the session is stopped.
+It cannot create a subscription, change its context or record a success. Ordinary
+script mutations retain current-generation and source checks. This transition is
+a new journal constructor; older binaries cannot replay journals containing it.
+The sweep provides host deadline enforcement. Transactional script timer creation,
+subscription timer arming and notification delivery remain separate integration
+work; it does not expose a new model-facing expiry operation.
+
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6
 without that lineage, schema 5 with
@@ -1860,8 +1880,9 @@ completion contract. Cancelling a parent saves cancellation of an active owned
 subscription in the same transaction, preserving any already terminal winner.
 This does not cancel unrelated work that the subscription may be watching.
 Subscription-backed waits release worker capacity and survive daemon restart
-without rerunning the creating handler. Autonomous subscription expiry, timer
-linkage and automatic model notification remain separate integration work.
+without rerunning the creating handler. The host expiry sweep also runs after
+an overdue restart without calling the handler. Transactional timer linkage and
+automatic model notification remain separate integration work.
 
 The qualified daemon tests exercise these functions through normal model tool
 dispatch, persisted invocations, native file reads and real worker scheduling.

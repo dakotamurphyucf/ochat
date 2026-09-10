@@ -22,6 +22,7 @@ type t =
   | Moderator_execution_changed of Agent_protocol.Moderator_execution.t
   | Moderator_execution_reconciled of Agent_protocol.Moderator_execution.t
   | Subscription_changed of Agent_protocol.Subscription.t
+  | Subscription_expired of Agent_protocol.Subscription.t
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Moderator_changed of Jsonaf.t option
@@ -360,19 +361,33 @@ let rec apply state = function
           state.invocations
           ~id_of:(fun value -> value.Agent_protocol.Invocation.context.id)
     }
-  | Subscription_changed subscription ->
+  | (Subscription_changed subscription | Subscription_expired subscription) as delta ->
     let open Result.Let_syntax in
     let c = subscription.Agent_protocol.Subscription.context in
+    let expiry =
+      match delta with
+      | Subscription_expired _ -> true
+      | _ -> false
+    in
     let%bind () =
       Extension_invariants.owner
         ~session_id:state.identity.session_id
-        ~generation:state.identity.generation
+        ~generation:(if expiry then c.generation else state.identity.generation)
         c.session_id
         c.generation
     in
     let previous =
       List.find state.subscriptions ~f:(fun old ->
         Agent_protocol.Id.Subscription.compare old.context.id c.id = 0)
+    in
+    let%bind () =
+      match expiry, previous, subscription.result with
+      | false, _, _ -> Ok ()
+      | true, Some _, Some Expired when c.generation <= state.identity.generation -> Ok ()
+      | _ ->
+        Error
+          (Agent_protocol.Error.invalid_request
+             "subscription expiry requires an existing record and an expired result")
     in
     let%map () = Agent_protocol.Subscription.validate_transition ~previous subscription in
     { state with
