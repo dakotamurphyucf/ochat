@@ -127,7 +127,7 @@ let job_succeeded (job : Agent_protocol.Job.t) =
       | Cancelled
       | Interrupted _ )
     , _ )
-  | Succeeded, (Pending | Delivered _) -> false
+  | Succeeded, (Pending | Delivered _ | Discarded _) -> false
 ;;
 
 let job_failed (job : Agent_protocol.Job.t) =
@@ -141,7 +141,7 @@ let job_failed (job : Agent_protocol.Job.t) =
       | Cancelled
       | Interrupted _ )
     , _ )
-  | Failed _, (Pending | Delivered _) -> false
+  | Failed _, (Pending | Delivered _ | Discarded _) -> false
 ;;
 
 let permission state now secret =

@@ -219,11 +219,13 @@ let rec apply state = function
       }
   | Job_changed job ->
     let open Result.Let_syntax in
+    let previous =
+      List.find state.jobs ~f:(fun previous ->
+        Agent_protocol.Id.Job.equal previous.id job.id)
+    in
+    let%bind () = Agent_protocol.Job.validate_delivery_transition ~previous job in
     let%bind () =
-      match
-        List.find state.jobs ~f:(fun previous ->
-          Agent_protocol.Id.Job.equal previous.id job.id)
-      with
+      match previous with
       | None -> Ok ()
       | Some previous
         when Option.equal Agent_protocol.Job.equal_launch previous.launch job.launch ->

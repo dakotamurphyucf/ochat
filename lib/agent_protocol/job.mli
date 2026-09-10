@@ -49,11 +49,17 @@ type retry_policy =
       }
 [@@deriving sexp]
 
+type discard_reason = Authority_changed [@@deriving equal, sexp]
+
 type delivery =
   | Not_required
   | Pending
   | Delivered of Timestamp.t
-[@@deriving sexp]
+  | Discarded of
+      { at : Timestamp.t
+      ; reason : discard_reason
+      }
+[@@deriving equal, sexp]
 
 type launch_owner =
   | Invocation of Id.Invocation.t
@@ -98,9 +104,15 @@ type t =
 val to_json : t -> Jsonaf.t
 val of_json : Jsonaf.t -> (t, Error.t) result
 
-(** Validate artifact result ownership and lifecycle, including values restored
-    from non-JSON snapshots. Legacy result representations remain unchanged. *)
+(** Validate artifact result ownership and discarded-delivery lifecycle, including
+    values restored from non-JSON snapshots. Legacy result representations remain
+    unchanged. *)
 val validate_result : t -> (unit, Error.t) result
+
+(** A discarded delivery preserves its terminal job exactly and cannot be revived.
+    This checks incremental journal changes; decoding a retained snapshot does not
+    require the previous pending record. *)
+val validate_delivery_transition : previous:t option -> t -> (unit, Error.t) result
 
 (** Read the inline completion or explicit artifact descriptor without loading
     any bytes. Validates exact artifact session/job/generation/attempt ownership. *)

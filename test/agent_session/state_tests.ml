@@ -218,7 +218,7 @@ let%expect_test
         }]);
   [%expect
     {|
-    ((schema 8)
+    ((schema 9)
      (recovered
       ((mex_failed failed) (mex_pending completed.pending)
        (mex_running interrupted) (mex_waiting completed.waiting_compaction)))
@@ -545,11 +545,11 @@ let%expect_test
       [%sexp
         (Result.is_error
            (Agent_session.Session_state.upgrade_schema
-              { initial with schema_version = 9 })
+              { initial with schema_version = 10 })
          : bool)]);
   [%expect
     {|
-    ((version 8) (records 0))
+    ((version 9) (records 0))
     true
     true
     true
@@ -653,7 +653,7 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           }];
       Agent_store.Session_store.close_session store handle |> store_ok;
       Agent_store.Session_store.close store |> store_ok));
-  [%expect {| ((version 8) (records 0)) |}]
+  [%expect {| ((version 9) (records 0)) |}]
 ;;
 
 let%expect_test
@@ -869,7 +869,7 @@ let%expect_test "schema-3 invocation snapshots migrate without losing pending pu
         ((List.hd_exn restored.invocations).status : Agent_protocol.Invocation.status)]);
   [%expect
     {|
-    ((version 8) (invocations 1) (subscriptions 0) (deliveries 0))
+    ((version 9) (invocations 1) (subscriptions 0) (deliveries 0))
     (Resolved (Complete Null))
     |}]
 ;;

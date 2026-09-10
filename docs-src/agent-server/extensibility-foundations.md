@@ -1822,6 +1822,22 @@ the job's delivered marker in one transaction. Native callbacks then publish at 
 current turn's input boundary or an idle safe point; no moderator is required.
 Historical unowned deliveries do not gain this automatic behavior.
 
+If a prompt upgrade changes the publisher or its delegated dependencies before
+intent admission, the adapter durably marks the pending job delivery `discarded`
+with reason `authority_changed` and a timestamp. It does not load the result
+artifact, create a notification, or change the job's outcome. This removes the
+obsolete delivery from automatic retry while preserving the original result for
+authorized inspection. Stale requests, failed saves and other admission failures
+leave delivery pending. A discarded delivery cannot be revived by journal replay
+or a later permission change.
+
+Session-state schema 9 retains this disposition and safely upgrades schema 8
+snapshots. Older snapshots cannot contain the new disposition; unknown delivery
+versions or reasons fail decoding. Back up the complete data root before rolling
+back to a binary that cannot read schema 9; do not edit stored version numbers to
+bypass migration checks. The nested JSON delivery record uses version 1, separate
+from the session-state and invocation schema versions.
+
 The provider receives one supported User-role runtime data message after the original
 tool acknowledgement. A completion can join an existing continuation or request a
 later turn under the existing automatic-turn policy and budgets. Disabling extra

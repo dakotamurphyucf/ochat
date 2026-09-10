@@ -4130,56 +4130,73 @@ let deliver_standalone_completion_internal t revision expected current_capabilit
     | _ -> Error (error Invalid_request "standalone completion has no invocation owner")
   in
   let%bind () =
+    match job.delivery with
+    | Pending -> Ok ()
+    | Delivered _ | Not_required | Discarded _ ->
+      Error (error Already_resolved "standalone job delivery is resolved")
+  in
+  match
     Standalone_completion_contract.authorize
       ~invocation
       ~job
       ~current_capabilities
       ~policy
-  in
-  let%bind () =
-    match job.delivery with
-    | Pending -> Ok ()
-    | Delivered _ | Not_required ->
-      Error (error Already_resolved "standalone job is delivered")
-  in
-  let load_artifact =
-    Option.map t.services.job_results ~f:(fun publisher ->
-      Agent_store.Job_result_store.Publisher.load publisher)
-  in
-  let%bind completion = P.Job.terminal_completion ?load_artifact job in
-  let%bind completion =
-    Result.of_option
-      completion
-      ~error:(error Invalid_state "standalone job has no terminal result")
-  in
-  let now = t.services.now () in
-  let%bind plan =
-    Standalone_delivery.prepare
-      ~state:t.state
-      ~notification_limits:t.services.notification_limits
-      ~invocation_id:invocation.context.id
-      ~job_id:job.id
-      ~completion
-      ~current_capabilities
-      ~delivery_id:(P.Id.Delivery.create ())
-      ~now
-      ~wake:Request_turn
-  in
-  let%bind () =
-    Standalone_delivery.revalidate
-      ~state:t.state
-      ~staged:(Staged_notifications.values t.staged_notifications)
-      ~limits:t.services.notification_limits
-      plan
-  in
-  let job = { job with delivery = Delivered now } in
-  let%map _ =
-    transition
-      t
-      ~delta:(Session_delta.Batch [ Delivery_changed plan.delivery; Job_changed job ])
-      ~payloads:[ P.Event.Durable.Payload.Job_state_changed job ]
-  in
-  ()
+  with
+  | Error { code = Permission_denied; _ } ->
+    let now = t.services.now () in
+    let at =
+      match job.completed_at with
+      | Some completed when P.Timestamp.compare completed now > 0 -> completed
+      | _ -> now
+    in
+    let job = { job with delivery = Discarded { at; reason = Authority_changed } } in
+    let%map _ =
+      transition
+        t
+        ~delta:(Session_delta.Job_changed job)
+        ~payloads:[ P.Event.Durable.Payload.Job_state_changed job ]
+    in
+    ()
+  | Error error -> Error error
+  | Ok () ->
+    let load_artifact =
+      Option.map t.services.job_results ~f:(fun publisher ->
+        Agent_store.Job_result_store.Publisher.load publisher)
+    in
+    let%bind completion = P.Job.terminal_completion ?load_artifact job in
+    let%bind completion =
+      Result.of_option
+        completion
+        ~error:(error Invalid_state "standalone job has no terminal result")
+    in
+    let now = t.services.now () in
+    let%bind plan =
+      Standalone_delivery.prepare
+        ~state:t.state
+        ~notification_limits:t.services.notification_limits
+        ~invocation_id:invocation.context.id
+        ~job_id:job.id
+        ~completion
+        ~current_capabilities
+        ~delivery_id:(P.Id.Delivery.create ())
+        ~now
+        ~wake:Request_turn
+    in
+    let%bind () =
+      Standalone_delivery.revalidate
+        ~state:t.state
+        ~staged:(Staged_notifications.values t.staged_notifications)
+        ~limits:t.services.notification_limits
+        plan
+    in
+    let job = { job with delivery = Delivered now } in
+    let%map _ =
+      transition
+        t
+        ~delta:(Session_delta.Batch [ Delivery_changed plan.delivery; Job_changed job ])
+        ~payloads:[ P.Event.Durable.Payload.Job_state_changed job ]
+    in
+    ()
 ;;
 
 let validate_notification_plan t (plan : Notification_delivery.t) =
@@ -6543,6 +6560,7 @@ let terminal_job t (job : Agent_protocol.Job.t) status result =
     match job.delivery with
     | Agent_protocol.Job.Not_required -> Agent_protocol.Job.Not_required
     | Pending | Delivered _ -> Pending
+    | Discarded _ as delivery -> delivery
   in
   { job with status; result; completed_at = Some (t.services.now ()); delivery }
 ;;
@@ -7130,7 +7148,8 @@ let deliver_job t job_id generation expected expected_job moderator_snapshot =
     job
   | (Queued | Running | Waiting_permission _ | Waiting_completion _), _ ->
     Error (error Conflict "job is not terminal")
-  | _, (Not_required | Delivered _) -> Error (error Already_resolved "job is delivered")
+  | _, (Not_required | Delivered _ | Discarded _) ->
+    Error (error Already_resolved "job delivery is resolved")
 ;;
 
 let cancel_job_internal t job_id =
@@ -7141,12 +7160,9 @@ let cancel_job_internal t job_id =
     | Waiting_completion _ -> refresh_background_job t job_id job.generation job.attempt
     | _ -> Ok job
   in
-  match job.status with
-  | Agent_protocol.Job.Queued
-  | Running
-  | Waiting_permission _
-  | Waiting_completion _
-  | Interrupted _ ->
+  match job.status, job.delivery with
+  | _, Agent_protocol.Job.Discarded _ -> Ok job
+  | (Queued | Running | Waiting_permission _ | Waiting_completion _ | Interrupted _), _ ->
     let%bind cancelled, subscriptions = cancelled_work_dependencies t job in
     let job =
       { job with
@@ -7161,7 +7177,7 @@ let cancel_job_internal t job_id =
     in
     let%map _ = update_jobs ~subscriptions t (job :: cancelled) in
     job
-  | Succeeded | Failed _ | Cancelled -> Ok job
+  | (Succeeded | Failed _ | Cancelled), _ -> Ok job
 ;;
 
 let interrupt_job t job_id generation attempt reason =

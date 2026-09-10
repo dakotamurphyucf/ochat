@@ -77,11 +77,17 @@ type retry_policy =
       }
 [@@deriving sexp]
 
+type discard_reason = Authority_changed [@@deriving equal, sexp]
+
 type delivery =
   | Not_required
   | Pending
   | Delivered of Timestamp.t
-[@@deriving sexp]
+  | Discarded of
+      { at : Timestamp.t
+      ; reason : discard_reason
+      }
+[@@deriving equal, sexp]
 
 type launch_owner =
   | Invocation of Id.Invocation.t
@@ -273,7 +279,20 @@ let validate_stored_completion t stored =
          (Protocol_error.invalid_request "job artifact differs from its terminal owner"))
 ;;
 
+let validate_delivery t =
+  match t.delivery, t.status, t.completed_at with
+  | ( Discarded { at; _ }
+    , (Succeeded | Failed _ | Cancelled | Interrupted _)
+    , Some completed )
+    when Timestamp.compare at completed >= 0 -> Ok ()
+  | Discarded _, _, _ ->
+    Error (Protocol_error.invalid_request "discarded delivery requires a terminal job")
+  | (Not_required | Pending | Delivered _), _, _ -> Ok ()
+;;
+
 let validate_result t =
+  let open Result.Let_syntax in
+  let%bind () = validate_delivery t in
   match t.kind, t.result with
   | Async_tool, Some (`Object fields as encoded)
     when Option.exists (List.Assoc.find fields "type" ~equal:String.equal) ~f:(function
@@ -552,6 +571,13 @@ let delivery_to_json = function
   | Pending -> `Object [ "type", `String "pending" ]
   | Delivered at ->
     `Object [ "type", `String "delivered"; "delivered_at", Timestamp.to_json at ]
+  | Discarded { at; reason = Authority_changed } ->
+    `Object
+      [ "type", `String "discarded"
+      ; "schema_version", `Number "1"
+      ; "discarded_at", Timestamp.to_json at
+      ; "reason", `String "authority_changed"
+      ]
 ;;
 
 let delivery_of_json json =
@@ -559,12 +585,37 @@ let delivery_of_json json =
   let%bind fields = Json_codec.fields json in
   let%bind encoded = Json_codec.required_as fields "type" Json_codec.string in
   match encoded with
-  | "not_required" -> Ok Not_required
-  | "pending" -> Ok Pending
+  | "not_required" ->
+    let%map () = Extension_codec.closed fields [ "type" ] in
+    Not_required
+  | "pending" ->
+    let%map () = Extension_codec.closed fields [ "type" ] in
+    Pending
   | "delivered" ->
+    let%bind () = Extension_codec.closed fields [ "type"; "delivered_at" ] in
     Result.map
       (Json_codec.required_as fields "delivered_at" Timestamp.of_json)
       ~f:(fun x -> Delivered x)
+  | "discarded" ->
+    let%bind () =
+      Extension_codec.closed fields [ "type"; "schema_version"; "discarded_at"; "reason" ]
+    in
+    let%bind _ =
+      Json_codec.required_as
+        fields
+        "schema_version"
+        (Json_codec.bounded_int ~min:1 ~max:1)
+    in
+    let%bind at = Json_codec.required_as fields "discarded_at" Timestamp.of_json in
+    let%map reason =
+      Json_codec.required_as
+        fields
+        "reason"
+        (Json_codec.enum
+           ~name:"job delivery discard reason"
+           [ "authority_changed", Authority_changed ])
+    in
+    Discarded { at; reason }
   | _ -> Error (Protocol_error.invalid_request "unknown job delivery state")
 ;;
 
@@ -590,6 +641,30 @@ let to_json t =
     |> List.filter_opt
   in
   `Object fields
+;;
+
+let validate_delivery_transition ~previous t =
+  let open Result.Let_syntax in
+  let%bind () = validate_delivery t in
+  match previous, t.delivery with
+  | Some ({ delivery = Discarded _; _ } as previous), _ ->
+    (match Jsonaf.exactly_equal (to_json previous) (to_json t) with
+     | true -> Ok ()
+     | false -> Error (Protocol_error.invalid_request "discarded job is immutable"))
+  | Some previous, Discarded _ ->
+    let%bind () = validate_delivery { previous with delivery = t.delivery } in
+    (match previous.delivery with
+     | Pending
+       when Jsonaf.exactly_equal
+              (to_json { previous with delivery = t.delivery })
+              (to_json t) -> Ok ()
+     | _ ->
+       Error
+         (Protocol_error.invalid_request
+            "only an unchanged pending terminal job can discard delivery"))
+  | None, Discarded _ ->
+    Error (Protocol_error.invalid_request "discarded delivery requires an existing job")
+  | _, (Not_required | Pending | Delivered _) -> Ok ()
 ;;
 
 let decode_identity fields =

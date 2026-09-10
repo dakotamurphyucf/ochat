@@ -1827,7 +1827,7 @@ let runnable_job job =
 let deliverable_job job =
   match job.Agent_protocol.Job.delivery with
   | Pending -> true
-  | Not_required | Delivered _ -> false
+  | Not_required | Delivered _ | Discarded _ -> false
 ;;
 
 let active_schedule schedule =

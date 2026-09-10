@@ -55,6 +55,7 @@ let rebind (contract : P.Completion_contract.t) ~current_capabilities =
     | false -> Error (denied ())
   in
   B.rebind_capabilities ~pins:contract.capability_pins ~capabilities:current_capabilities
+  |> Result.map_error ~f:(fun _ -> denied ())
 ;;
 
 let validate_result (contract : P.Completion_contract.t) completion =

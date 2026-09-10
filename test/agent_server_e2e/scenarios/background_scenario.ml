@@ -98,7 +98,7 @@ let await_requests env provider count =
 let is_delivered (job : Agent_protocol.Job.t) =
   match job.delivery with
   | Delivered _ -> true
-  | Pending | Not_required -> false
+  | Pending | Not_required | Discarded _ -> false
 ;;
 
 let is_terminal (job : Agent_protocol.Job.t) =

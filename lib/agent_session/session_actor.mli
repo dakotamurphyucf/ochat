@@ -690,7 +690,10 @@ val admit_standalone_delivery
 
 (** Host adapter path under a pinned runtime lease. Recheck revision, actual owner,
     job and current authority before bounded artifact loading. Save the checked
-    intent with its job's delivered marker atomically; publish only at a safe point. *)
+    intent with its job's delivered marker atomically; publish only at a safe point.
+    If current publisher or dependency authority is unavailable, durably discard
+    the pending delivery without loading its artifact or changing its result.
+    Stale requests and other failures leave pending delivery retryable. *)
 val deliver_standalone_completion
   :  t
   -> revision:int64

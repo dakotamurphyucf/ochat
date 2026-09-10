@@ -30,7 +30,7 @@ let schedule_delivered = function
 
 let job_delivered = function
   | Agent_protocol.Job.Delivered _ -> true
-  | Not_required | Pending -> false
+  | Not_required | Pending | Discarded _ -> false
 ;;
 
 let temporary_root env =
@@ -688,7 +688,7 @@ let%expect_test "ChatML synchronous model calls persist intent and terminal stat
       let delivery_not_required =
         match job.delivery with
         | Agent_protocol.Job.Not_required -> true
-        | Pending | Delivered _ -> false
+        | Pending | Delivered _ | Discarded _ -> false
       in
       Agent_server.Embedded.close embedded;
       print_s

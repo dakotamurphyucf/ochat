@@ -113,11 +113,25 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 8
+let current_schema_version = 9
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    List.exists t.jobs ~f:(fun job ->
+      match job.Agent_protocol.Job.delivery with
+      | Discarded _ -> true
+      | _ -> false)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"discarded job deliveries require session schema 9"
+         ~retryable:false
+         ())
+  else if t.schema_version = 8
+  then Ok { t with schema_version = current_schema_version }
   else if not (List.is_empty t.ingress_registrations)
   then
     Error

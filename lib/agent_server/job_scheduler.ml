@@ -411,7 +411,8 @@ let claim_one t sw entry jobs =
     | [] -> ()
     | (job : Agent_protocol.Job.t) :: rest ->
       (match job.status, job.delivery with
-       | Agent_protocol.Job.Queued, Agent_protocol.Job.Not_required -> loop rest
+       | Agent_protocol.Job.Queued, (Agent_protocol.Job.Not_required | Discarded _) ->
+         loop rest
        | Queued, (Pending | Delivered _) -> if not (claim t sw entry job) then loop rest
        | ( ( Running
            | Waiting_permission _

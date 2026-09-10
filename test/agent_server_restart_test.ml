@@ -3,7 +3,7 @@ open Agent_server_test_support
 
 let job_delivered = function
   | Agent_protocol.Job.Delivered _ -> true
-  | Not_required | Pending -> false
+  | Not_required | Pending | Discarded _ -> false
 ;;
 
 let reset_session connection session attachment =

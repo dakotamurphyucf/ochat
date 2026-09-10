@@ -203,7 +203,7 @@ let%expect_test "external event delivery commits receipts before changing the li
               ; job_delivered =
                   ((match (List.hd_exn final.jobs).delivery with
                     | Delivered _ -> true
-                    | Pending | Not_required -> false)
+                    | Pending | Not_required | Discarded _ -> false)
                    : bool)
               ; second_prepared = (!second_prepared : bool)
               }])));
