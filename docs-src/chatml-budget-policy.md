@@ -116,9 +116,12 @@ The local TUI continues to use its one-time notice presentation. Daemon rate
 timestamps use the protocol wall clock, retain future entries conservatively on
 rollback, and share inclusive-window semantics; cutoff arithmetic cannot wrap.
 
-This covers host-started follow-up admission. It does not yet install idle
-notification delivery or pending-wake recovery. The daemon's internal-event drain
-pause/batch integration remains separate; the local TUI behavior below is unchanged.
+Idle notification wakes now use this host admission policy. Budget rejection keeps
+their committed data and discards the requested wake; several eligible receipts
+can share one operation. A user that starts before the idle poll satisfies eligible
+saved wakes in its own provider admission and consumes no extra automatic turn.
+The daemon's internal-event drain pause/batch integration remains separate; the
+local TUI behavior below is unchanged.
 
 ### `max_self_triggered_turns`
 

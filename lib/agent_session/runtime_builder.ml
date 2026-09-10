@@ -33,7 +33,20 @@ type extension_services =
   ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
   ; history : unit -> History_entry.t list
+  ; idle_notifications :
+      source:Agent_protocol.Invocation.observer
+      -> tools:Script_tool_calls.t
+      -> unit
+      -> (bool, Agent_protocol.Error.t) result
   ; notification_input :
+      source:Agent_protocol.Invocation.observer
+      -> tools:Script_tool_calls.t
+      -> operation_id:Agent_protocol.Id.Operation.t
+      -> unit
+      -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+           , Agent_protocol.Error.t )
+           result
+  ; initial_notification_input :
       source:Agent_protocol.Invocation.observer
       -> tools:Script_tool_calls.t
       -> operation_id:Agent_protocol.Id.Operation.t
@@ -74,6 +87,7 @@ type t =
   ; mutable moderator_snapshot : Jsonaf.t option
   ; moderator_manager : Manager.t option
   ; moderator_tools : Request.Tool.t list
+  ; idle_notifications : (unit -> (bool, Agent_protocol.Error.t) result) option
   ; moderator_script_tools : Script_tool_calls.t option
   ; background_executor : background_executor option
   ; moderator_activation : moderator_activation option
@@ -1145,11 +1159,30 @@ let build_with_services
           ~operation_id:input.Operation_worker.Input.operation.id)
     | _ -> None
   in
+  let initial_notification_input =
+    match extension_services, script_tools, moderator with
+    | Some services, Some tools, Some (moderator, _) ->
+      Option.map (Manager.invocation_observer moderator.manager) ~f:(fun source ->
+        fun ~input ->
+        services.initial_notification_input
+          ~source
+          ~tools
+          ~operation_id:input.Operation_worker.Input.operation.id)
+    | _ -> None
+  in
+  let idle_notifications =
+    match extension_services, script_tools, moderator with
+    | Some services, Some tools, Some (moderator, _) ->
+      Option.map (Manager.invocation_observer moderator.manager) ~f:(fun source ->
+        services.idle_notifications ~source ~tools)
+    | _ -> None
+  in
   let worker =
     Turn_worker.create
       ?dispatch_tool
       ?moderator_events
       ?notification_input
+      ?initial_notification_input
       { env
       ; response_dir
       ; tools
@@ -1197,6 +1230,7 @@ let build_with_services
         Option.map moderator ~f:(fun (moderator, _) ->
           moderator.Chat_response.In_memory_stream.manager)
     ; moderator_tools = tools
+    ; idle_notifications
     ; moderator_script_tools = script_tools
     ; background_executor =
         (match script_tools, extension_services with

@@ -261,8 +261,16 @@ disposition remain host responsibilities. Under its internal qualification switc
 the extensibility daemon now supplies foreground batches after rechecking the
 publisher's captured capability selection and atomically committing data and receipt.
 It accepts a requested wake at actual model admission, or discards it when the
-operation ends without admission. Idle delivery, scheduling policy and pending-wake
-recovery are still under development.
+operation ends without admission. The idle producer also commits quiet data and
+coalesces requested wakes under the retained host scheduling policy. Acceptance
+and operation admission share a save; rejection preserves the data with a discarded
+wake. Restored pending wakes reuse their original history identity.
+
+A worker that starts before the idle poll claims eligible saved wakes before its
+first provider call. It appends only newly committed entries and emits their data
+callbacks once. Already committed history is neither appended nor re-emitted. The
+current user operation can satisfy the wake without adding an automatic turn.
+Idle-drain policy and the remaining recovery/adapter qualification are still open.
 
 The moderator observes inserted data through `Item_appended`. A script can retain
 state and request a turn from `Turn_end`; requesting a turn directly from

@@ -2109,9 +2109,9 @@ Staged reservations count toward capacity; admission never evicts retained work.
 
 Actual ChatML/daemon tests cover immediate, queued, observation, end-of-turn and
 nested publication, including invalid acknowledgement rollback. Publication first
-creates a durable pending intent. The foreground consumer then commits eligible
-data automatically, after the original tool response is published. Idle delivery
-and host scheduling policy remain unfinished execution-service work. These surfaces
+creates a durable pending intent. Foreground and idle consumers then commit eligible
+data automatically, after the original tool response is published. Idle publication
+uses the retained host follow-up policy. These surfaces
 do not advertise a generally available notification feature yet.
 
 Owned notification commits now check acknowledgement ancestry. A nested ChatML
@@ -2148,8 +2148,13 @@ wake on restore. `No_wake` and `Next_turn` carry no automatic-turn request. Drop
 or reopening a retained receipt, or using the history-insertion delta to settle a
 wake, is rejected. The foreground consumer tracks new requested wakes and settles
 only the deliveries supplied to its operation. The before-model admission checkpoint
-accepts them; terminal cleanup discards any unadmitted requests. Idle scheduling and
-recovery of a pending wake after a crash remain separate integration work.
+accepts them; terminal cleanup discards any unadmitted requests. Idle scheduling
+records wake acceptance after the new operation and lifecycle in the same save.
+Budget rejection still saves eligible data, then discards only the requested wake.
+Restored committed notifications with `Pending_wake` are eligible for scheduling
+without inserting another history entry. Their publisher and disclosure ceiling
+are rechecked before acceptance; revoked requests retain a discarded wake and their
+original committed result.
 
 The shared turn driver now accepts batches that separate notification data from
 user-driven continuation. Quiet data remains in history without requesting a model
@@ -2177,8 +2182,22 @@ Suppressed handler/event requests retain a discarded intent and durable notice;
 runtime reload cannot reset the limit. Genuine deferred user input coalesces as a
 user turn and resets the count, while retaining the independent rate history.
 See [budget policy](../chatml-budget-policy.md#qualified-daemon-host).
-Idle notification insertion, pending-wake recovery, idle-drain policy and standalone
-local-host installation remain open. See
+The idle producer waits for runtime activation and a quiescent running actor. It
+processes bounded publication and restored-wake batches independently; waiting
+acknowledgements cannot consume the restored-wake batch. Stop/compaction intent
+takes precedence. Quiet data commits without a model call, and eligible requested
+wakes coalesce with pending follow-up work or genuine deferred user input. Explicit
+stop leaves queued data inspectable; a later authorized start can deliver it.
+
+If a user starts first, a worker hook prepares new data and claims eligible saved
+wakes before that operation's first provider call. Only newly committed entries are
+appended to its input and receive item-appended callbacks. Restored data is not
+re-emitted. The actual user operation satisfies those wakes, without consuming an
+additional automatic follow-up or leaving a duplicate turn queued. Callback
+termination preserves every committed entry and skips provider execution.
+
+Idle-drain policy, the remaining recovery/composition qualification, approved
+completion/ingress adapters and standalone local-host installation remain open. See
 [safe-point input semantics](../chatml-safe-point-and-effective-history.md#notification-data-and-wake-requests).
 
 ## Recovery classifications

@@ -601,6 +601,26 @@ val consume_notifications
        , Agent_protocol.Error.t )
        result
 
+(** Commit eligible idle data and settle its requested wake with actual operation
+    admission, or with budget rejection. Existing pending wake receipts never
+    insert a second history entry. Stop/compaction intent takes precedence. *)
+val deliver_idle_notifications
+  :  t
+  -> Notification_delivery.idle
+  -> (bool, Agent_protocol.Error.t) result
+
+(** Before the first provider call, claim eligible restored wakes for this
+    already-started operation and insert ready new data. The worker appends only
+    returned new entries to its input snapshot. Actual before-model admission
+    settles the claims; terminal cleanup discards any unadmitted requests. *)
+val consume_initial_notifications
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> Notification_delivery.idle
+  -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+       , Agent_protocol.Error.t )
+       result
+
 val cancel_operation
   :  t
   -> attachment_id:Agent_protocol.Id.Attachment.t

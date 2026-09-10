@@ -33,7 +33,11 @@ end
 (** [create config] delivers the committed submitted user entry to the
     moderator exactly once before the first turn-start boundary. Moderator
     requests to end the session at that boundary skip provider execution.
-    Automatic follow-up turns do not re-emit the submission event. *)
+    Automatic follow-up turns do not re-emit the submission event. The optional
+    initial notification hook supplies only newly committed entries and claims
+    restored wakes for the upcoming provider admission. New data receives its
+    item-appended callbacks once; restored history is not appended or re-emitted.
+    All committed data is retained if a callback ends the session. *)
 val create
   :  ?dispatch_tool:
        (input:Operation_worker.Input.t
@@ -46,6 +50,12 @@ val create
              , Agent_protocol.Error.t )
              result)
   -> ?notification_input:
+       (input:Operation_worker.Input.t
+        -> unit
+        -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+             , Agent_protocol.Error.t )
+             result)
+  -> ?initial_notification_input:
        (input:Operation_worker.Input.t
         -> unit
         -> ( Chat_response.In_memory_stream.Safe_point_input.batch

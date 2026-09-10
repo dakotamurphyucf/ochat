@@ -344,6 +344,10 @@ type _ request =
   | Consume_notifications :
       Agent_protocol.Id.Operation.t * Notification_delivery.t
       -> Chat_response.In_memory_stream.Safe_point_input.batch request
+  | Deliver_idle_notifications : Notification_delivery.idle -> bool request
+  | Consume_initial_notifications :
+      Agent_protocol.Id.Operation.t * Notification_delivery.idle
+      -> Chat_response.In_memory_stream.Safe_point_input.batch request
   | Has_writer_attachment : bool request
   | Invocation_granted : string * string -> bool request
   | Worker_ready : Agent_protocol.Id.Operation.t * (unit -> unit) -> unit request
@@ -3763,20 +3767,8 @@ let consume_deferred t operation_id =
   decoded
 ;;
 
-let consume_notifications_internal t operation_id (plan : Notification_delivery.t) =
+let validate_notification_plan t (plan : Notification_delivery.t) =
   let open Result.Let_syntax in
-  let%bind _ = running_operation t operation_id in
-  let%bind () =
-    match
-      List.exists t.invocation_executions ~f:(fun execution ->
-        match execution.owner with
-        | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
-        | _ -> false)
-    with
-    | true ->
-      Error (error Conflict "notification insertion waits for the foreground tool batch")
-    | false -> Ok ()
-  in
   let%bind () =
     Extension_invariants.owner
       ~session_id:t.state.identity.session_id
@@ -3785,24 +3777,26 @@ let consume_notifications_internal t operation_id (plan : Notification_delivery.
       plan.generation
   in
   let%bind installed = Runtime_builder.moderator_snapshot_observer t.state.moderator in
-  let%bind () =
-    match
-      ( Int64.equal plan.revision t.state.counters.revision
-      , installed
-      , moderator_is_borrowed t )
-    with
-    | true, Some source, false
-      when Agent_protocol.Invocation.equal_observer source plan.source -> Ok ()
-    | _ -> Error (error Conflict "notification snapshot or source changed")
-  in
-  let%bind deltas, entries, ids, wake =
+  match
+    ( Int64.equal plan.revision t.state.counters.revision
+    , installed
+    , moderator_is_borrowed t )
+  with
+  | true, Some source, false
+    when Agent_protocol.Invocation.equal_observer source plan.source -> Ok ()
+  | _ -> Error (error Conflict "notification snapshot or source changed")
+;;
+
+let notification_changes t (plan : Notification_delivery.t) =
+  let open Result.Let_syntax in
+  let%map deltas, entries, committed =
     List.fold_result
       plan.actions
-      ~init:([], [], [], false)
-      ~f:(fun (deltas, entries, ids, wake) action ->
+      ~init:([], [], [])
+      ~f:(fun (deltas, entries, committed) action ->
         match action with
         | Notification_delivery.Fail value ->
-          Ok (Session_delta.Delivery_changed value :: deltas, entries, ids, wake)
+          Ok (Session_delta.Delivery_changed value :: deltas, entries, committed)
         | Publish value ->
           let%bind id =
             History_entry.Id.create
@@ -3823,10 +3817,42 @@ let consume_notifications_internal t operation_id (plan : Notification_delivery.
           in
           ( Session_delta.Delivery_committed (value, entry) :: deltas
           , entry :: entries
-          , value.context.id :: ids
-          , wake || Agent_protocol.Completion.equal_wake value.context.wake Request_turn ))
+          , value :: committed ))
   in
-  let entries = List.rev entries in
+  List.rev deltas, List.rev entries, List.rev committed
+;;
+
+let notification_payloads = function
+  | [] -> []
+  | entries -> [ Agent_protocol.Event.Durable.Payload.History_appended entries ]
+;;
+
+let consume_notifications_internal
+      ?(wakes = [])
+      ?(discarded_wakes = [])
+      t
+      operation_id
+      plan
+  =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind () =
+    match
+      List.exists t.invocation_executions ~f:(fun execution ->
+        match execution.owner with
+        | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
+        | _ -> false)
+    with
+    | true ->
+      Error (error Conflict "notification insertion waits for the foreground tool batch")
+    | false -> Ok ()
+  in
+  let%bind () = validate_notification_plan t plan in
+  let%bind deltas, entries, committed = notification_changes t plan in
+  let deltas =
+    deltas
+    @ List.map discarded_wakes ~f:(fun value -> Session_delta.Delivery_wake_changed value)
+  in
   let%bind decoded = History_codec.all_of_protocol entries in
   let%map () =
     match deltas with
@@ -3834,11 +3860,8 @@ let consume_notifications_internal t operation_id (plan : Notification_delivery.
     | _ ->
       transition
         t
-        ~delta:(Session_delta.Batch (List.rev deltas))
-        ~payloads:
-          (match entries with
-           | [] -> []
-           | _ -> [ Agent_protocol.Event.Durable.Payload.History_appended entries ])
+        ~delta:(Session_delta.Batch deltas)
+        ~payloads:(notification_payloads entries)
       |> Result.map ~f:ignore
   in
   let existing =
@@ -3846,7 +3869,15 @@ let consume_notifications_internal t operation_id (plan : Notification_delivery.
     | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
     | _ -> []
   in
+  let ids =
+    List.map (committed @ wakes) ~f:(fun value ->
+      value.Agent_protocol.Delivery.context.id)
+  in
   t.notification_inputs <- Some (operation_id, ids @ existing);
+  let wake =
+    List.exists (committed @ wakes) ~f:(fun value ->
+      Agent_protocol.Completion.equal_wake value.context.wake Request_turn)
+  in
   Chat_response.In_memory_stream.Safe_point_input.notification_entries
     ~request_turn:wake
     decoded
@@ -6973,6 +7004,8 @@ let drain_payloads (drain : Runtime_builder.moderator_drain) =
 
 let start_idle_turn_unchecked
       ?(extra_deltas = [])
+      ?(extra_payloads = [])
+      ?(notification_wakes = [])
       t
       (drain : Runtime_builder.moderator_drain)
       ~reason
@@ -6982,6 +7015,12 @@ let start_idle_turn_unchecked
   let%bind () = reconcile_foreground_invocations t in
   let operation = create_turn_operation t reason in
   let lifecycle = lifecycle_for_operation t operation.id in
+  let%bind wake_deltas =
+    List.map notification_wakes ~f:(fun value ->
+      Agent_protocol.Delivery.accept_wake value ~operation_id:operation.id
+      |> Result.map ~f:(fun value -> Session_delta.Delivery_wake_changed value))
+    |> Result.all
+  in
   let deferred = t.state.conversation.deferred_user_entries in
   let deltas =
     extra_deltas
@@ -6989,6 +7028,7 @@ let start_idle_turn_unchecked
       ; Active_operation_changed (Some operation)
       ; Lifecycle_changed lifecycle
       ]
+    @ wake_deltas
     |> fun values ->
     if adopt_deferred then Session_delta.Deferred_entries_adopted :: values else values
   in
@@ -6997,6 +7037,7 @@ let start_idle_turn_unchecked
     @ (if adopt_deferred && not (List.is_empty deferred)
        then [ Agent_protocol.Event.Durable.Payload.History_appended deferred ]
        else [])
+    @ extra_payloads
     @ [ Agent_protocol.Event.Durable.Payload.Operation_started operation
       ; Session_state_changed
           { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
@@ -7036,6 +7077,8 @@ let suppress_follow_up_deltas t deltas ~reason =
 
 let start_idle_turn
       ?(extra_deltas = [])
+      ?(extra_payloads = [])
+      ?(notification_wakes = [])
       t
       (drain : Runtime_builder.moderator_drain)
       ~reason
@@ -7061,19 +7104,33 @@ let start_idle_turn
   in
   match decision with
   | Allow_automatic_turn ->
-    start_idle_turn_unchecked ~extra_deltas t drain ~reason ~adopt_deferred
+    start_idle_turn_unchecked
+      ~extra_deltas
+      ~extra_payloads
+      ~notification_wakes
+      t
+      drain
+      ~reason
+      ~adopt_deferred
   | Suppress_automatic_turn { notice_key; notice_text } ->
     let open Result.Let_syntax in
     let%bind extra_deltas =
       suppress_follow_up_deltas t extra_deltas ~reason:notice_text
     in
+    let%bind wake_deltas =
+      List.map notification_wakes ~f:(fun value ->
+        Agent_protocol.Delivery.discard_wake value ~reason:notice_text
+        |> Result.map ~f:(fun value -> Session_delta.Delivery_wake_changed value))
+      |> Result.all
+    in
     transition
       t
       ~delta:
         (Session_delta.Batch
-           (extra_deltas @ [ Moderator_changed drain.moderator_snapshot ]))
+           (extra_deltas @ wake_deltas @ [ Moderator_changed drain.moderator_snapshot ]))
       ~payloads:
-        (drain_payloads drain
+        (extra_payloads
+         @ drain_payloads drain
          @ [ Agent_protocol.Event.Durable.Payload.Moderator_notification
                (`Object [ "key", `String notice_key; "message", `String notice_text ])
            ])
@@ -7153,6 +7210,86 @@ let stop_from_idle_moderator
   in
   cancel_job_scopes t jobs;
   resolve_cleaned_permission_waiters t permissions
+;;
+
+let deliver_idle_notifications_internal t (proposal : Notification_delivery.idle) =
+  let open Result.Let_syntax in
+  match idle_moderator_eligible t with
+  | false -> Ok false
+  | true ->
+    let%bind () = validate_notification_plan t proposal.pending in
+    let%bind halted = Runtime_builder.moderator_snapshot_is_halted t.state.moderator in
+    (match halted with
+     | true -> Ok false
+     | false ->
+       let%bind follow_up =
+         Observation_follow_up.plan
+           ~state:t.state
+           ~observer:(Some proposal.pending.source)
+           ~halted:false
+           ~compaction_operation_id:(Agent_protocol.Id.Operation.create ())
+       in
+       (match follow_up.action with
+        | Stop _ | Compact -> Ok false
+        | Checkpoint | Turn ->
+          let%bind deltas, entries, committed = notification_changes t proposal.pending in
+          let deltas =
+            deltas
+            @ List.map proposal.discarded_wakes ~f:(fun value ->
+              Session_delta.Delivery_wake_changed value)
+          in
+          let notification_wakes =
+            proposal.wakes
+            @ List.filter committed ~f:(fun value ->
+              match value.wake_disposition with
+              | Some Pending_wake -> true
+              | _ -> false)
+          in
+          (match deltas, notification_wakes with
+           | [], [] -> Ok false
+           | _ ->
+             let extra_deltas = deltas @ follow_up_deltas t follow_up in
+             let extra_payloads = notification_payloads entries in
+             let drain : Runtime_builder.moderator_drain =
+               { moderator_snapshot = t.state.moderator
+               ; runtime_requests = []
+               ; notifications = []
+               ; remaining_events = false
+               }
+             in
+             let adopt_deferred =
+               not (List.is_empty t.state.conversation.deferred_user_entries)
+             in
+             let needs_turn =
+               adopt_deferred
+               || (not (List.is_empty notification_wakes))
+               ||
+               match follow_up.action with
+               | Turn -> true
+               | _ -> false
+             in
+             let%map () =
+               match needs_turn, t.operation_worker with
+               | false, _ ->
+                 transition
+                   t
+                   ~delta:(Session_delta.Batch extra_deltas)
+                   ~payloads:extra_payloads
+                 |> Result.map ~f:ignore
+               | true, None ->
+                 Error
+                   (error Invalid_state "notification wake requires an installed worker")
+               | true, Some _ ->
+                 start_idle_turn
+                   ~extra_deltas
+                   ~extra_payloads
+                   ~notification_wakes
+                   t
+                   drain
+                   ~reason:Idle_followup
+                   ~adopt_deferred
+             in
+             true)))
 ;;
 
 let apply_observation_follow_up t =
@@ -7902,6 +8039,14 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Consume_deferred operation_id -> consume_deferred t operation_id
   | Consume_notifications (operation_id, plan) ->
     consume_notifications_internal t operation_id plan
+  | Deliver_idle_notifications plan -> deliver_idle_notifications_internal t plan
+  | Consume_initial_notifications (operation_id, proposal) ->
+    consume_notifications_internal
+      ~wakes:proposal.wakes
+      ~discarded_wakes:proposal.discarded_wakes
+      t
+      operation_id
+      proposal.pending
   | Commit_worker_moderator (operation_id, snapshot) ->
     commit_worker_moderator t operation_id snapshot
   | Has_writer_attachment -> Ok (has_writer_attachment t)
@@ -8269,6 +8414,12 @@ let consume_deferred t ~operation_id = call t (Consume_deferred operation_id)
 
 let consume_notifications t ~operation_id plan =
   call t (Consume_notifications (operation_id, plan))
+;;
+
+let deliver_idle_notifications t plan = call t (Deliver_idle_notifications plan)
+
+let consume_initial_notifications t ~operation_id plan =
+  call t (Consume_initial_notifications (operation_id, plan))
 ;;
 
 let cancel_operation t ~attachment_id ~operation_id =

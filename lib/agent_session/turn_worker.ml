@@ -355,18 +355,21 @@ let moderator_snapshot = function
              ]))
 ;;
 
+let moderate_appended_history config history on_runtime_request =
+  Chat_response.In_memory_stream.handle_item_appended_entries
+    ~moderator:config.Config.moderator
+    ~on_runtime_request
+    ~available_tools:config.tools
+    ~now_ms:(Eio.Time.now (Eio.Stdenv.clock config.env) *. 1_000. |> Float.to_int)
+    ~history
+  |> Result.map_error ~f:(fun message ->
+    Agent_protocol.Error.create Invalid_state ~message ~retryable:false ())
+  |> require_ok
+;;
+
 let moderate_submission config input on_runtime_request =
   match input.Operation_worker.Input.operation.kind with
-  | Turn User_submit ->
-    Chat_response.In_memory_stream.handle_item_appended_entries
-      ~moderator:config.Config.moderator
-      ~on_runtime_request
-      ~available_tools:config.tools
-      ~now_ms:(Eio.Time.now (Eio.Stdenv.clock config.env) *. 1_000. |> Float.to_int)
-      ~history:input.history
-    |> Result.map_error ~f:(fun message ->
-      Agent_protocol.Error.create Invalid_state ~message ~retryable:false ())
-    |> require_ok
+  | Turn User_submit -> moderate_appended_history config input.history on_runtime_request
   | Turn (Moderator_request | Idle_followup | Recovery_retry | Administrative)
   | Compaction -> ()
 ;;
@@ -375,6 +378,7 @@ let run
       ?dispatch_tool
       ?moderator_events
       ?notification_input
+      ?initial_notification_input
       config
       ~sw
       ~input
@@ -403,18 +407,42 @@ let run
     capabilities.commit_moderator (moderator_snapshot config.moderator) |> require_ok
   in
   checkpoint_moderator ();
+  let ended () =
+    Option.is_some (Chat_response.Runtime_semantics.should_end_session !runtime_requests)
+  in
+  let initial_entries =
+    match ended (), initial_notification_input with
+    | true, _ | _, None -> []
+    | false, Some prepare ->
+      (prepare ~input () |> require_ok)
+        .Chat_response.In_memory_stream.Safe_point_input.entries
+  in
+  let history = input.Operation_worker.Input.history @ initial_entries in
+  let rec notify seen = function
+    | [] -> ()
+    | _ when ended () -> ()
+    | entry :: remaining ->
+      let seen = seen @ [ entry ] in
+      moderate_appended_history config seen (fun request ->
+        runtime_requests := request :: !runtime_requests);
+      notify seen remaining
+  in
+  notify input.history initial_entries;
+  (match initial_entries with
+   | [] -> ()
+   | _ -> checkpoint_moderator ());
   let final_history =
     if
       Option.is_some
         (Chat_response.Runtime_semantics.should_end_session !runtime_requests)
-    then input.Operation_worker.Input.history
+    then history
     else
       Chat_response.In_memory_stream.run_completion_stream_in_memory_entries
         ~env:config.Config.env
         ~datadir:config.response_dir
         ~allocator:(allocator capabilities)
         ~id_source:capabilities.id_source
-        ~history:input.Operation_worker.Input.history
+        ~history
         ~tools:(Some config.tools)
         ~tool_tbl:config.tool_tbl
         ?temperature:config.temperature
@@ -462,13 +490,20 @@ let run
     }
 ;;
 
-let create ?dispatch_tool ?moderator_events ?notification_input config =
+let create
+      ?dispatch_tool
+      ?moderator_events
+      ?notification_input
+      ?initial_notification_input
+      config
+  =
   Operation_worker.create ~run:(fun ~sw ~input capabilities ->
     match
       run
         ?dispatch_tool
         ?moderator_events
         ?notification_input
+        ?initial_notification_input
         config
         ~sw
         ~input

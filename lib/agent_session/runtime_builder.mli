@@ -45,8 +45,21 @@ type extension_services =
     (** Whether the current source/generation has a completed lifecycle receipt.
         An initial prepared checkpoint alone does not mean startup executed. *)
   ; history : unit -> History_entry.t list
+  ; idle_notifications :
+      source:Agent_protocol.Invocation.observer
+      -> tools:Script_tool_calls.t
+      -> unit
+      -> (bool, Agent_protocol.Error.t) result
     (** Current canonical history, read after an actor claim without entering the manager. *)
   ; notification_input :
+      source:Agent_protocol.Invocation.observer
+      -> tools:Script_tool_calls.t
+      -> operation_id:Agent_protocol.Id.Operation.t
+      -> unit
+      -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+           , Agent_protocol.Error.t )
+           result
+  ; initial_notification_input :
       source:Agent_protocol.Invocation.observer
       -> tools:Script_tool_calls.t
       -> operation_id:Agent_protocol.Id.Operation.t
@@ -89,6 +102,9 @@ type t =
   ; mutable moderator_snapshot : Jsonaf.t option
   ; moderator_manager : Chat_response.Moderator_manager.t option
   ; moderator_tools : Openai.Responses.Request.Tool.t list
+  ; idle_notifications : (unit -> (bool, Agent_protocol.Error.t) result) option
+    (** Qualified bounded idle data/wake producer using the pinned actor and
+        current selected disclosure services. Called after activation. *)
   ; moderator_script_tools : Script_tool_calls.t option
     (** Host policy/disclosure services for v1 moderator native calls. Normal
         construction leaves this absent until v1 admission is installed. *)

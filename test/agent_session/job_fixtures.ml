@@ -75,6 +75,7 @@ let reject label result =
 
 let with_actor
       ?(reject_save = fun _ -> false)
+      ?(prepare_state = Fn.id)
       ?(now = fun () -> timestamp)
       ?monotonic_now
       ?(make_job_results = fun _ _ _ -> None)
@@ -87,6 +88,7 @@ let with_actor
     Eio.Switch.run (fun sw ->
       let initial =
         actor_state ~workspace_instance ~liveness:Detached ~start_immediately:false
+        |> prepare_state
       in
       let backend =
         Agent_session.Memory_backend.create ~event_capacity:128 ~initial_state:initial

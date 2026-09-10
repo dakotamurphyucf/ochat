@@ -36,6 +36,7 @@
   notification_access_tests
   notification_disclosure_tests
   notification_delivery_tests
+  notification_idle_tests
   automatic_turn_budget_tests
   notification_readiness_tests
   subscription_clock_tests

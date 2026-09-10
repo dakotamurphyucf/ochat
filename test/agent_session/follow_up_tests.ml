@@ -695,6 +695,7 @@ let%expect_test "runtime owner drains observation batches and applies durable te
            ; moderator_tools = []
            ; moderator_script_tools = script_tools
            ; background_executor = None
+           ; idle_notifications = None
            ; moderator_activation = None
            ; start_moderator = (fun () -> failwith "unexpected startup")
            ; enqueue_internal_event =
@@ -1058,6 +1059,7 @@ let%expect_test
                ; moderator_tools = []
                ; moderator_script_tools = script_tools
                ; background_executor = None
+               ; idle_notifications = None
                ; moderator_activation = None
                ; start_moderator = (fun () -> failwith "unexpected startup")
                ; enqueue_internal_event =

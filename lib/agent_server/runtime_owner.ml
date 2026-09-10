@@ -495,6 +495,15 @@ let drain_loaded_observations t runtime =
     drain.budget_exhausted
 ;;
 
+let drain_loaded_notifications runtime =
+  match runtime.Agent_session.Runtime_builder.moderator_activation with
+  | Some activation when activation.pending () -> Ok false
+  | _ ->
+    (match runtime.idle_notifications with
+     | None -> Ok false
+     | Some deliver -> deliver ())
+;;
+
 let snapshot_has_pending_events t =
   let open Result.Let_syntax in
   let%bind state = Agent_session.Session_actor.state t.actor in
@@ -537,7 +546,10 @@ let snapshot_has_pending_events t =
     || List.exists
          state.moderator_executions
          ~f:Agent_session.Observation_follow_up.pending_event
-    || ((not halted) && Option.exists observer ~f:(pending_observation state)))
+    || ((not halted) && Option.exists observer ~f:(pending_observation state))
+    || ((not halted)
+        && Option.is_some observer
+        && Agent_session.Notification_delivery.has_idle_work state))
   else Ok false
 ;;
 
@@ -550,7 +562,12 @@ let drain_idle_moderator_locked t =
     let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
     match t.runtime with
     | Some runtime ->
-      let%bind applied = Agent_session.Session_actor.apply_moderator_follow_up t.actor in
+      let%bind notifications = drain_loaded_notifications runtime in
+      let%bind applied =
+        match notifications with
+        | true -> Ok true
+        | false -> Agent_session.Session_actor.apply_moderator_follow_up t.actor
+      in
       if applied
       then Ok true
       else (
