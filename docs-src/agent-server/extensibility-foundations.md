@@ -1730,6 +1730,37 @@ the parent job. Only exact selected native bindings receive the display observer
 and that observer expires when the runner returns. Terminal results still follow
 their independent outcome, schema, disclosure and persistence rules.
 
+### Moderator-owned generic completion events
+
+Qualified daemon moderators receive terminal generic tool/script jobs through an
+`Internal_event` data object with `kind: "background_job_completed"`, `job_id`,
+`attempt` (an exact decimal string), and `result` (an inline completion envelope
+or explicit artifact reference). `Job.read_result(job_id)` performs the current
+authorized read when the handler needs the full result. Legacy model jobs retain
+their existing `Model_job_succeeded` / `Model_job_failed` contract.
+
+Jobs started under a live moderator borrow now capture `launch.moderator_source`
+in launch schema2. Historical schema1 records remain readable and omit this field.
+The source cannot change on an existing job, and it must agree with any retained
+creating observer/event. A source-free job never acquires a source simply because
+a different moderator was loaded later. Source-free standalone host-managed
+conversation delivery remains separate implementation work.
+
+The host atomically saves the job's delivered marker and its exact private queue
+frame. The actor validates the retained source, generation, attempt, result and
+prior claims before running a handler. The script's current tool selection is
+checked before projecting the result: queued data cannot bypass a revoked read
+permission. A changed or forged attempt is retired without consuming a valid
+delivery's identity. Failed saves change neither the marker nor the queue.
+
+The [X03 shell bundle](../../test/chatml_extensibility_fixtures/x03-background-shell/README.md)
+publishes a correlated notification after its initial Pending acknowledgement.
+Success requests one model turn; failure/cancellation data uses No_wake. Completion
+does not create another provider tool result. If its completion handler fails,
+the original result and one failed-event receipt remain. The failed source is not
+automatically replayed after new input or reload; it requires explicit reconciliation.
+This also prevents repeating shell effects performed before the handler failed.
+
 ### Artifact-backed terminal results
 
 `Agent_store.Job_result_store` stores an already validated completion in a

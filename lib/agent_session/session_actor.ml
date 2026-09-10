@@ -3583,13 +3583,25 @@ let finish_script_subscription_internal t owner source id expected_epoch complet
 let derive_background_launch t owner =
   let open Result.Let_syntax in
   let%bind () = background_owner_active t owner in
-  Job_launch.derive
-    ~session_id:t.state.identity.session_id
-    ~generation:t.state.identity.generation
-    ~invocations:t.state.invocations
-    ~events:t.state.moderator_executions
-    ~jobs:t.state.jobs
-    ~owner
+  let%bind launch =
+    Job_launch.derive
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      ~invocations:t.state.invocations
+      ~events:t.state.moderator_executions
+      ~jobs:t.state.jobs
+      ~owner
+  in
+  let%map moderator_source =
+    let%bind observer = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+    match observer with
+    | Some source ->
+      (match subscription_owner_active t owner source with
+       | Ok _ -> Ok (Some source)
+       | Error _ -> Ok None)
+    | None -> Ok None
+  in
+  { launch with moderator_source }
 ;;
 
 let prepare_background_job t owner request =
@@ -6922,6 +6934,41 @@ let deliver_job t job_id generation expected expected_job moderator_snapshot =
   let%bind () = validate_job_generation t job generation in
   match job.status, job.delivery with
   | (Succeeded | Failed _ | Cancelled | Interrupted _), Agent_protocol.Job.Pending ->
+    let%bind () =
+      match job.kind, job.launch with
+      | Async_tool, Some _ ->
+        (match expected, moderator_snapshot with
+         | Some before, Some after ->
+           let observer : Agent_protocol.Invocation.observer =
+             { script_id = before.script_id; source_sha256 = before.script_source_hash }
+           in
+           let%bind frame = Background_job_event.frame ~state:t.state ~observer job in
+           let%bind event =
+             Chat_response.Background_delivery.capture frame
+             |> Session.Snapshot.of_value
+             |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+           in
+           let appended =
+             { before with
+               queued_internal_events = before.queued_internal_events @ [ event ]
+             }
+           in
+           (match
+              Jsonaf.exactly_equal
+                (Runtime_builder.encode_moderator_snapshot appended)
+                after
+            with
+            | true -> Ok ()
+            | false ->
+              Error
+                (error
+                   Conflict
+                   "background delivery must append its captured terminal frame only"))
+         | _ ->
+           Error
+             (error Conflict "background delivery requires an exact moderator checkpoint"))
+      | _ -> Ok ()
+    in
     let job = { job with delivery = Delivered (t.services.now ()) } in
     let%map _ =
       transition

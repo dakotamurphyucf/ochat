@@ -1451,6 +1451,9 @@ type launch =
   { owner : launch_owner
   ; parent_job : (Id.Job.t * int) option [@sexp.option]
   ; nested_depth : int
+  ; moderator_source : Invocation.observer option [@sexp.option]
+    (** Optional schema2 source captured under the creating moderator's live
+        borrow. Absence never acquires the source of a subsequently loaded script. *)
   }
 [@@deriving equal, sexp]
 

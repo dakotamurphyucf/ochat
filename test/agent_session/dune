@@ -11,6 +11,8 @@
   background_cleanup_tests
   background_scheduler_tests
   background_event_tests
+  background_delivery_tests
+  background_disclosure_tests
   handler_intent_tests
   compaction_tests
   event_delivery_tests

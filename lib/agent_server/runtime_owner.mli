@@ -146,6 +146,13 @@ val deliver_model_job_completion
   -> Agent_protocol.Job.t
   -> (unit, Agent_protocol.Error.t) result
 
+(** Save a source-bound generic terminal event and its job acknowledgement
+    atomically. The moderator's current job selection is checked before projection. *)
+val deliver_background_job_completion
+  :  t
+  -> Agent_protocol.Job.t
+  -> (unit, Agent_protocol.Error.t) result
+
 (** [close] permanently prevents runtime reload and cancels background callbacks.
     With no background owners, detaches the operation worker and closes the loaded
     runtime immediately. Otherwise the final callback release retires it; [close]

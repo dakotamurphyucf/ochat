@@ -40,10 +40,26 @@ let%expect_test
   =
   List.iter [ Success; Cancel_job; Stop_session ] ~f:(fun finish ->
     let worker_pid = ref None in
+    let received = ref false in
     with_daemon
       ~sources
       ~expect_moderator:true
-      ~expected_requests:3
+      ~expected_requests:
+        (match finish with
+         | Success -> 4
+         | Cancel_job | Stop_session -> 3)
+      ~inspect_request:(fun request inputs ->
+        match request with
+        | 4 ->
+          [%test_eq: int]
+            1
+            (List.count inputs ~f:(function
+               | Openai.Responses.Item.Input_message
+                   { role = User; content = Text { text; _ } :: _; _ } ->
+                 String.is_prefix text ~prefix:"Ochat runtime notification."
+               | _ -> false));
+          received := true
+        | _ -> ())
       ~calls:[ "begin", "begin_work", `Object [] ]
       ~after_turn:(fun env handle entry ->
         let state = A.state entry.actor |> protocol_ok in
@@ -106,7 +122,49 @@ let%expect_test
           | `No_such_process -> true
           | `Ok -> false);
         [%test_eq: string] "started\n" (Eio.Path.load (file "fixture-work.started")))
-      ~settle:Job_launch_tests.settle
+      ~settle:(fun env entry ->
+        Job_launch_tests.settle env entry;
+        let await_delivery () =
+          wait env (fun () ->
+            let state =
+              A.state entry.Agent_server.Session_registry.actor |> protocol_ok
+            in
+            let model_ready =
+              match finish with
+              | Success -> !received
+              | Cancel_job | Stop_session -> true
+            in
+            model_ready
+            && Option.is_none state.active_operation
+            && List.length state.deliveries = 1
+            && List.for_all state.deliveries ~f:(fun delivery ->
+              match delivery.status with
+              | Committed _ -> true
+              | _ -> false))
+        in
+        match await_delivery () with
+        | () -> ()
+        | exception Eio.Time.Timeout ->
+          let state = A.state entry.actor |> protocol_ok in
+          raise_s
+            [%sexp
+              "background notification did not settle"
+            , (finish : finish)
+            , (List.map state.jobs ~f:(fun job ->
+                 ( job.status
+                 , job.delivery
+                 , Agent_session.Background_job_event.source ~state job ))
+               : (P.Job.status
+                 * P.Job.delivery
+                 * (P.Invocation.observer option, P.Error.t) result)
+                   list)
+            , (state.deliveries : P.Delivery.t list)
+            , (List.map state.moderator_executions ~f:(fun event ->
+                 event.context.phase, event.status, event.retirement)
+               : (P.Moderator_execution.phase
+                 * P.Moderator_execution.status
+                 * P.Moderator_execution.retirement option)
+                   list)])
       (fun state ->
          let invocation = model_invocation state "begin" in
          let id =
@@ -118,6 +176,33 @@ let%expect_test
          let job = List.hd_exn state.jobs in
          assert (P.Id.Job.equal job.id id);
          [%test_eq: int] 1 job.attempt;
+         let delivery = List.hd_exn state.deliveries in
+         assert (
+           Option.equal P.Invocation.equal_work delivery.context.work (Some (Job id)));
+         let acknowledgement = Option.value_exn invocation.output_entry_id in
+         let history = state.conversation.canonical_history in
+         let ack_index, _ =
+           List.findi_exn history ~f:(fun _ entry ->
+             P.History.Id.equal entry.id acknowledgement)
+         in
+         let notification_index, _ =
+           List.findi_exn history ~f:(fun _ entry ->
+             match entry.P.History.provenance with
+             | Runtime_notification _ -> true
+             | _ -> false)
+         in
+         assert (ack_index < notification_index);
+         [%test_eq: int]
+           1
+           (List.count history ~f:(fun entry ->
+              match
+                Agent_session.History_codec.of_protocol entry
+                |> protocol_ok
+                |> History_entry.item
+              with
+              | Openai.Responses.Item.Function_call_output { call_id = "begin"; _ } ->
+                true
+              | _ -> false));
          let completion = P.Job.terminal_completion job |> protocol_ok in
          (match finish, completion with
           | Success, Some (Succeeded (`String text)) ->

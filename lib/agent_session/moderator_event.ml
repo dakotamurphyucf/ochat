@@ -153,7 +153,20 @@ let run
                           (Session.Snapshot.sexp_of_t selected)
                           (Session.Snapshot.sexp_of_t event)
                       with
-                      | true -> Ok ()
+                      | true ->
+                        let open Result.Let_syntax in
+                        let%bind value = Session.Snapshot.to_value event in
+                        let%bind background =
+                          Chat_response.Background_delivery.decode value
+                        in
+                        (match background, job_scope with
+                         | None, _ -> Ok ()
+                         | Some frame, Some scope ->
+                           Script_job_service.validate_notification_access
+                             scope
+                             frame.job_id
+                         | Some _, None ->
+                           Error "background completion requires job disclosure authority")
                       | false -> Error "event no longer matches its actor claim"
                     in
                     let prepare_event

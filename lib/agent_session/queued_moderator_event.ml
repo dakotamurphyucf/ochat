@@ -217,6 +217,40 @@ let timer_retirement_reason
               | None -> Ok (Some "timer.stale_subscription")))))
 ;;
 
+let background_retirement_reason ~state ~observer ~event =
+  let open Result.Let_syntax in
+  let decode event =
+    Session.Snapshot.to_value event
+    |> Result.bind ~f:Chat_response.Background_delivery.decode
+    |> Result.map_error ~f:P.Error.invalid_request
+  in
+  let%bind captured = decode event in
+  match captured with
+  | None -> Ok None
+  | Some frame ->
+    (match
+       List.find state.Session_state.jobs ~f:(fun job ->
+         P.Id.Job.equal job.id frame.job_id)
+     with
+     | None -> Ok (Some "background.unknown_job")
+     | Some job ->
+       (match job.delivery, Background_job_event.frame ~state ~observer job with
+        | Delivered _, Ok expected
+          when Chat_response.Background_delivery.equal expected frame ->
+          let%map claims =
+            List.map state.moderator_executions ~f:(fun receipt ->
+              let%bind snapshot = receipt_snapshot receipt in
+              match snapshot with
+              | None -> Ok false
+              | Some event ->
+                let%map previous = decode event in
+                Option.exists previous ~f:(Chat_response.Background_delivery.equal frame))
+            |> Result.all
+          in
+          Option.some_if (List.exists claims ~f:Fn.id) "background.duplicate_delivery"
+        | _ -> Ok (Some "background.stale_or_forged_delivery")))
+;;
+
 let delivery_retirement_reason ~state ~observer ~event ~subscription_expired =
   let open Result.Let_syntax in
   let%bind timer =
@@ -224,7 +258,13 @@ let delivery_retirement_reason ~state ~observer ~event ~subscription_expired =
   in
   match timer with
   | Some _ -> Ok timer
-  | None -> ingress_retirement_reason ~state ~observer ~event ~subscription_expired
+  | None ->
+    let%bind ingress =
+      ingress_retirement_reason ~state ~observer ~event ~subscription_expired
+    in
+    (match ingress with
+     | Some _ -> Ok ingress
+     | None -> background_retirement_reason ~state ~observer ~event)
 ;;
 
 let has_unsettled_claim ~state ~(observer : P.Invocation.observer) =
@@ -252,6 +292,7 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
       let%bind value = Session.Snapshot.to_value event in
       let%bind value = Chat_response.Schedule_delivery.script_event value in
       let%bind value = Chat_response.Ingress_delivery.script_event value in
+      let%bind value = Chat_response.Background_delivery.script_event value in
       match value with
       | Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
         Chat_response.Moderator_invocation.internal_event payload |> Result.map ~f:ignore

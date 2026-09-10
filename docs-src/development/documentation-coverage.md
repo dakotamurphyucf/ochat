@@ -220,6 +220,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/authoring_validation_tool.mli` | [contract](../../lib/agent_session/authoring_validation_tool.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/agent_session/automatic_turn_budget.mli` | [contract](../../lib/agent_session/automatic_turn_budget.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/background_execution.mli` | [contract](../../lib/agent_session/background_execution.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
+| `lib/agent_session/background_job_event.mli` | [contract](../../lib/agent_session/background_job_event.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/agent_session/chatmd_export.mli` | [contract](../../lib/agent_session/chatmd_export.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/compaction_archive.mli` | [contract](../../lib/agent_session/compaction_archive.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/delivery_ownership.mli` | [contract](../../lib/agent_session/delivery_ownership.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
@@ -336,6 +337,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_response/authoring_registration.mli` | [contract](../../lib/chat_response/authoring_registration.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/chat_response/authoring_validation.mli` | [contract](../../lib/chat_response/authoring_validation.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/chat_response/automatic_turn_policy.mli` | [contract](../../lib/chat_response/automatic_turn_policy.mli) | [integration](../agent-server/concepts.md) | Public interface + current host guide. |
+| `lib/chat_response/background_delivery.mli` | [contract](../../lib/chat_response/background_delivery.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/background_job_operations.mli` | [contract](../../lib/chat_response/background_job_operations.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |
 | `lib/chat_response/background_request.mli` | [contract](../../lib/chat_response/background_request.mli) | [integration](../agent-server/extensibility-foundations.md) | Public interface + current host guide. |
 | `lib/chat_response/chatml_moderation.mli` | [contract](../../lib/chat_response/chatml_moderation.mli) | [integration](../agent-server/chatml-orchestration.md) | Public interface + current host guide. |

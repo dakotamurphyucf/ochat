@@ -33,7 +33,12 @@ let%expect_test
     let parent =
       { parent with
         launch =
-          Some { owner = Invocation root.context.id; parent_job = None; nested_depth = 0 }
+          Some
+            { owner = Invocation root.context.id
+            ; parent_job = None
+            ; nested_depth = 0
+            ; moderator_source = None
+            }
       }
     in
     let sub = P.Id.Subscription.create () in
@@ -90,6 +95,7 @@ let%expect_test
             { owner = Invocation completed.context.id
             ; parent_job = None
             ; nested_depth = 0
+            ; moderator_source = None
             }
       }
     in

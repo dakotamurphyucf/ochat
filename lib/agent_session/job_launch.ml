@@ -97,7 +97,7 @@ let derive ~session_id ~generation ~invocations ~events ~jobs ~owner =
       invalid "job launch cannot borrow an obsolete event attempt"
     | Some (job, _) -> Ok (Some (job.id, job.attempt))
   in
-  J.{ owner; parent_job; nested_depth }
+  J.{ owner; parent_job; nested_depth; moderator_source = None }
 ;;
 
 let validate ~invocations ~events ~jobs (job : J.t) =
@@ -107,6 +107,27 @@ let validate ~invocations ~events ~jobs (job : J.t) =
     | None -> Ok ()
     | Some launch ->
       let%bind _ = J.of_json (J.to_json job) in
+      let%bind () =
+        match launch.moderator_source with
+        | None -> Ok ()
+        | Some source ->
+          let retained =
+            match launch.owner with
+            | Invocation id ->
+              List.find invocations ~f:(fun invocation ->
+                P.Id.Invocation.equal invocation.P.Invocation.context.id id)
+              |> Option.bind ~f:(fun invocation -> invocation.observation)
+              |> Option.map ~f:(fun observation -> observation.P.Invocation.observer)
+            | Moderator_event id ->
+              List.find events ~f:(fun event ->
+                P.Id.Moderator_execution.equal event.P.Moderator_execution.context.id id)
+              |> Option.map ~f:(fun event -> event.context.source)
+          in
+          (match retained with
+           | Some actual when not (P.Invocation.equal_observer source actual) ->
+             invalid "job moderator source differs from its creating observer/event"
+           | _ -> Ok ())
+      in
       let%bind ancestor =
         ancestor
           ~session_id:job.session_id

@@ -361,15 +361,26 @@ let claim t sw entry (job : Agent_protocol.Job.t) =
 ;;
 
 let delivery_pending (job : Agent_protocol.Job.t) =
-  match job.kind, job.status, job.delivery with
+  match job.kind, job.status, job.delivery, job.launch with
   | ( Model_call
     , (Succeeded | Failed _ | Cancelled | Interrupted _)
-    , Agent_protocol.Job.Pending ) -> true
+    , Agent_protocol.Job.Pending
+    , _ )
+  | ( Async_tool
+    , (Succeeded | Failed _ | Cancelled | Interrupted _)
+    , Agent_protocol.Job.Pending
+    , Some _ ) -> true
   | _ -> false
 ;;
 
 let deliver entry (job : Agent_protocol.Job.t) =
-  match Runtime_owner.deliver_model_job_completion entry.Session_registry.runtime job with
+  let delivery =
+    match job.kind with
+    | Async_tool ->
+      Runtime_owner.deliver_background_job_completion entry.Session_registry.runtime job
+    | _ -> Runtime_owner.deliver_model_job_completion entry.Session_registry.runtime job
+  in
+  match delivery with
   | Error _ -> ()
   | Ok () ->
     ignore

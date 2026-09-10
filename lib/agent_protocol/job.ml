@@ -92,6 +92,7 @@ type launch =
   { owner : launch_owner
   ; parent_job : (Id.Job.t * int) option [@sexp.option]
   ; nested_depth : int
+  ; moderator_source : Invocation.observer option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -126,11 +127,22 @@ let launch_to_json launch =
     | Moderator_event id -> "moderator_event", Id.Moderator_execution.to_json id
   in
   `Object
-    ([ "schema_version", `Number "1"
+    ([ ( "schema_version"
+       , `Number
+           (match launch.moderator_source with
+            | None -> "1"
+            | Some _ -> "2") )
      ; "owner_type", `String kind
      ; "owner_id", id
      ; "nested_depth", `Number (Int.to_string launch.nested_depth)
      ]
+     @ Option.to_list
+         (Option.map launch.moderator_source ~f:(fun source ->
+            ( "moderator_source"
+            , `Object
+                [ "script_id", `String source.Invocation.script_id
+                ; "source_sha256", `String source.source_sha256
+                ] )))
      @ Option.to_list
          (Option.map launch.parent_job ~f:(fun (id, attempt) ->
             ( "parent_job"
@@ -145,7 +157,13 @@ let launch_of_json json =
   let%bind () =
     Extension_codec.closed
       fields
-      [ "schema_version"; "owner_type"; "owner_id"; "parent_job"; "nested_depth" ]
+      [ "schema_version"
+      ; "owner_type"
+      ; "owner_id"
+      ; "parent_job"
+      ; "nested_depth"
+      ; "moderator_source"
+      ]
   in
   let%bind version =
     Json_codec.required_as
@@ -155,7 +173,7 @@ let launch_of_json json =
   in
   let%bind () =
     match version with
-    | 1 -> Ok ()
+    | 1 | 2 -> Ok ()
     | _ ->
       Error
         (Protocol_error.create
@@ -165,6 +183,29 @@ let launch_of_json json =
            ())
   in
   let%bind kind = Json_codec.required_as fields "owner_type" Json_codec.string in
+  let%bind moderator_source =
+    Json_codec.optional_as fields "moderator_source" (fun json ->
+      let%bind fields = Json_codec.fields json in
+      let%bind () = Extension_codec.closed fields [ "script_id"; "source_sha256" ] in
+      let%bind script_id = Json_codec.required_as fields "script_id" Json_codec.string in
+      let%bind source_sha256 =
+        Json_codec.required_as fields "source_sha256" Json_codec.string
+      in
+      match
+        (not (String.is_empty script_id))
+        && String.length source_sha256 = 64
+        && String.for_all source_sha256 ~f:(function
+          | '0' .. '9' | 'a' .. 'f' -> true
+          | _ -> false)
+      with
+      | true -> Ok Invocation.{ script_id; source_sha256 }
+      | false -> Error (Protocol_error.invalid_request "invalid job moderator source"))
+  in
+  let%bind () =
+    match version, moderator_source with
+    | 1, None | 2, Some _ -> Ok ()
+    | _ -> Error (Protocol_error.invalid_request "job launch source requires schema 2")
+  in
   let%bind owner =
     match kind with
     | "invocation" ->
@@ -195,8 +236,9 @@ let launch_of_json json =
       (Json_codec.bounded_int ~min:0 ~max:Int.max_value)
   in
   match parent_job, nested_depth with
-  | None, 0 -> Ok { owner; parent_job; nested_depth }
-  | Some _, depth when depth > 0 -> Ok { owner; parent_job; nested_depth }
+  | None, 0 -> Ok { owner; parent_job; nested_depth; moderator_source }
+  | Some _, depth when depth > 0 ->
+    Ok { owner; parent_job; nested_depth; moderator_source }
   | _ ->
     Error
       (Protocol_error.invalid_request "job launch depth differs from parent ownership")

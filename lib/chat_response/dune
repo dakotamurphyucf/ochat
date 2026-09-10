@@ -43,6 +43,7 @@
   one_off_request
   background_request
   background_job_operations
+  background_delivery
   subscription_operations
   notification_operations
   schedule_operations

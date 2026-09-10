@@ -1246,13 +1246,25 @@ let handle_event_entries_transactional_unlocked
       | true -> Error "event.session_ended: moderator session ended"
       | false -> Ok ()
     in
+    let%bind background_result =
+      match event with
+      | Moderation.Event.Internal_event value ->
+        Background_delivery.decode value |> Result.map ~f:Option.is_some
+      | _ -> Ok false
+    in
+    let%bind () =
+      match background_result with
+      | true -> authorize ()
+      | false -> Ok ()
+    in
     let phase = Moderation.Event.phase event in
     let%bind event =
       match event with
       | Moderation.Event.Internal_event value ->
-        Result.bind
-          (Schedule_delivery.script_event value)
-          ~f:Ingress_delivery.script_event
+        Result.bind (Schedule_delivery.script_event value) ~f:(fun value ->
+          Result.bind
+            (Ingress_delivery.script_event value)
+            ~f:Background_delivery.script_event)
         |> Result.map ~f:(fun value -> Moderation.Event.Internal_event value)
       | _ -> Ok event
     in
@@ -1277,7 +1289,11 @@ let handle_event_entries_transactional_unlocked
         ~available_tools
         ~session_meta
     in
-    let%bind () = authorize () in
+    let%bind () =
+      match background_result with
+      | true -> Ok ()
+      | false -> authorize ()
+    in
     let outcome = ref Moderation.Outcome.empty in
     let prepare (transaction : Runtime.transaction) =
       let%bind starts, local_effects =
@@ -1371,7 +1387,8 @@ let handle_event_entries_transactional_unlocked
                      ~copy_state:copy
                      ~copy_event:(fun value ->
                        let%bind value = Schedule_delivery.script_event value in
-                       Result.bind (Ingress_delivery.script_event value) ~f:copy)
+                       let%bind value = Ingress_delivery.script_event value in
+                       Result.bind (Background_delivery.script_event value) ~f:copy)
                      ~validate_state
                      ~prepare_transaction:prepare
                  in
@@ -2146,7 +2163,12 @@ let enqueue_internal_event_entries t ~event ~prepare =
            (match ingress with
             | Some _ -> Ok event
             | None ->
-              Error "event.invalid_external_event: unsupported extensibility-v1 envelope"))
+              let%bind background = Background_delivery.decode event in
+              (match background with
+               | Some _ -> Ok event
+               | None ->
+                 Error
+                   "event.invalid_external_event: unsupported extensibility-v1 envelope")))
     in
     let%bind before = identity_snapshot_unlocked t in
     let%bind encoded = Value_codec.Snapshot.of_value event in

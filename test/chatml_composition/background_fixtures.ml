@@ -25,6 +25,14 @@ let with_background_daemon
       ?(before_recovery = fun _env _before -> ())
       ?(check_restored =
         fun job restored ->
+          let restored =
+            match job.J.delivery, restored.J.delivery, job.kind, job.launch with
+            | Pending, Delivered _, Async_tool, Some _ ->
+              (* Recovery may enqueue a newly supported generic completion.
+                 Every identity, source pin and terminal result must stay exact. *)
+              { restored with delivery = job.delivery }
+            | _ -> restored
+          in
           assert (Jsonaf.exactly_equal (J.to_json job) (J.to_json restored)))
       f
   =
@@ -247,9 +255,9 @@ let rec await env client (job : J.t) =
     Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
     await env client job
   | Succeeded | Failed _ | Cancelled | Interrupted _ ->
-    (match current.delivery with
-     | Pending -> ()
-     | _ -> failwith "generic job delivered as model event");
+    (match current.delivery, current.launch with
+     | Pending, _ | Delivered _, Some _ -> ()
+     | _ -> failwith "generic job has an unsupported delivery state");
     current, Completion.of_json (Option.value_exn current.result) |> protocol_ok
 ;;
 

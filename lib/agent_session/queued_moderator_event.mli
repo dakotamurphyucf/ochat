@@ -25,7 +25,10 @@ val timer_retirement_reason
        (Agent_protocol.Subscription.t -> (bool, Agent_protocol.Error.t) result)
   -> (string option, Agent_protocol.Error.t) result
 
-(** Shared timer/external-data admission guard. Ingress frames require the exact
+(** Shared timer/external-data/background-result admission guard. Generic results
+    require the retained delivered job, matching source/attempt/result and no prior
+    claim. Live script disclosure is checked separately before projection.
+    Ingress frames require the exact
     retained receipt and payload, current source/generation, active subscription
     epoch and no prior claim. Revoking a producer prevents future submissions;
     previously accepted data still belongs to its subscription and may run. *)
