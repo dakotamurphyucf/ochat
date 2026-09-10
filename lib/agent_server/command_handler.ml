@@ -577,8 +577,7 @@ let handle_blob_read t context request =
         (Connection_context.principal context)
         (Agent_store.Blob_store.Handle.metadata handle)
     then Ok ()
-    else
-      Error (error Permission_denied "blob requires additional principal scopes")
+    else Error (error Permission_denied "blob requires additional principal scopes")
   in
   if Int64.(request.offset > blob.byte_length)
   then Error (error Invalid_request "blob read offset exceeds the blob length")
@@ -1028,7 +1027,7 @@ let handle_session_stop t context command_audit request =
        in
        let%bind () =
          match session.observed_state with
-         | Agent_protocol.Session.Stopped -> Runtime_owner.unload entry.runtime
+         | Agent_protocol.Session.Stopped -> Runtime_owner.unload_and_wait entry.runtime
          | Queued_for_slot
          | Starting
          | Recovering

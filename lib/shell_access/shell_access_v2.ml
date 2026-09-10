@@ -2293,12 +2293,9 @@ module Executor = struct
     then invalid_arg "wall_time_seconds must be positive";
     Option.iter limits.idle_time_seconds ~f:(fun seconds ->
       if Float.(seconds <= 0.) then invalid_arg "idle_time_seconds must be positive");
+    if limits.max_stdin_bytes < 0 then invalid_arg "max_stdin_bytes must be nonnegative";
     List.iter
-      [ limits.max_stdin_bytes
-      ; limits.max_stdout_bytes
-      ; limits.max_stderr_bytes
-      ; limits.max_total_bytes
-      ]
+      [ limits.max_stdout_bytes; limits.max_stderr_bytes; limits.max_total_bytes ]
       ~f:(fun value -> if value <= 0 then invalid_arg "output limits must be positive")
   ;;
 

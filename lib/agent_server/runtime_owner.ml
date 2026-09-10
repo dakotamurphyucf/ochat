@@ -12,6 +12,7 @@ type t =
   ; mutex : Eio.Mutex.t
   ; mutable runtime : Agent_session.Runtime_builder.t option
   ; mutable closed : bool
+  ; mutable unloading : bool
   ; mutable background_leases : background_lease list
   }
 
@@ -21,6 +22,7 @@ let create ~actor ~initial ~build =
   ; mutex = Eio.Mutex.create ()
   ; runtime = initial
   ; closed = false
+  ; unloading = false
   ; background_leases = []
   }
 ;;
@@ -49,6 +51,13 @@ let closed_error () =
 let ensure_loaded_locked t =
   match t.closed, t.runtime with
   | true, _ -> Error (closed_error ())
+  | false, _ when t.unloading ->
+    Error
+      (Agent_protocol.Error.create
+         Conflict
+         ~message:"session runtime is waiting for background cleanup"
+         ~retryable:true
+         ())
   | false, Some _ -> Ok ()
   | false, None ->
     (match t.build () with
@@ -75,7 +84,7 @@ let background_busy () =
 
 (* Remove the reference before invoking cleanup, so a failed close cannot leave
    the same runtime available for a second retirement or poison the owner mutex. *)
-let retire_closed_locked t =
+let retire_runtime_locked t =
   let previous = t.runtime in
   t.runtime <- None;
   match
@@ -135,7 +144,7 @@ let with_background_runtime t f =
                   <- List.filter t.background_leases ~f:(fun current ->
                        not (phys_equal current lease));
                   match t.closed, t.background_leases with
-                  | true, [] -> retire_closed_locked t
+                  | true, [] -> retire_runtime_locked t
                   | _ -> Ok ())
                 |> raise_cleanup)))
         ~f:(fun () ->
@@ -158,6 +167,31 @@ let unload_locked t =
 
 let unload t = Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> unload_locked t)
 
+let unload_and_wait t =
+  (* A committed stop must join cleanup before closing runtime/workspace resources.
+     Waiting with the mutex held would prevent the lease finalizers from releasing. *)
+  Eio.Cancel.protect (fun () ->
+    let open Result.Let_syntax in
+    let%bind leases =
+      Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+        match t.closed, t.unloading with
+        | true, _ -> Error (closed_error ())
+        | false, true -> Error (background_busy ())
+        | false, false ->
+          t.unloading <- true;
+          Ok t.background_leases)
+    in
+    Exn.protect
+      ~finally:(fun () ->
+        Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> t.unloading <- false))
+      ~f:(fun () ->
+        List.iter leases ~f:(fun lease -> lease.cancel ());
+        List.iter leases ~f:(fun lease -> Eio.Promise.await lease.finished);
+        Eio.Mutex.use_rw ~protect:true t.mutex (fun () -> retire_runtime_locked t)
+        |> raise_cleanup;
+        Ok ()))
+;;
+
 let with_unloaded t f =
   let result =
     (* An actor request continues after its caller cancels. Keep the owner until
@@ -166,8 +200,8 @@ let with_unloaded t f =
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
       try
         Ok
-          (match t.closed, t.runtime, t.background_leases with
-           | false, None, [] -> Result.map (f ()) ~f:Option.some
+          (match t.closed, t.unloading, t.runtime, t.background_leases with
+           | false, false, None, [] -> Result.map (f ()) ~f:Option.some
            | _ -> Ok None)
       with
       | exn -> Error (exn, Stdlib.Printexc.get_raw_backtrace ()))
@@ -196,7 +230,7 @@ let with_administration t f =
         Ok
           (if t.closed
            then Error (closed_error ())
-           else if not (List.is_empty t.background_leases)
+           else if t.unloading || not (List.is_empty t.background_leases)
            then Error (background_busy ())
            else (
              match f () with
@@ -711,7 +745,7 @@ let close t =
     Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
       t.closed <- true;
       match t.background_leases with
-      | [] -> [], retire_closed_locked t
+      | [] -> [], retire_runtime_locked t
       | leases -> leases, Ok ())
   in
   List.iter leases ~f:(fun lease -> lease.cancel ());

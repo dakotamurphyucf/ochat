@@ -64,6 +64,7 @@ module Limits : sig
     { wall_time_seconds : float
     ; idle_time_seconds : float option
     ; max_stdin_bytes : int
+      (** Nonnegative; zero forbids input bytes while permitting empty stdin. *)
     ; max_stdout_bytes : int
     ; max_stderr_bytes : int
     ; max_total_bytes : int

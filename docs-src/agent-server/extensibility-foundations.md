@@ -1790,6 +1790,30 @@ ticket inspection and rejection of an invalid initial acknowledgement. General
 feature advertisement still waits for A01; these tests use the internal qualification
 option and simulated model streams, with no live provider requests.
 
+The X03 shell fixture now exercises a real bounded shell process behind a
+moderator-owned `Pending` acknowledgement. The root finishes that turn and handles
+another input while the process remains running. Success retains distinct stdout,
+stderr and exit status. Job cancellation and session stop reap the actual process;
+an external mutation made before cancellation remains visible. Restart reports an
+interrupted attempt and does not rerun the helper or duplicate that mutation.
+Its script tool reads `work.sh` from the configured `tool_dir`; arbitrary shell
+path arguments are not implicitly copied into the prompt artifact. Correlated
+completion notification and wake-up remain the separate E06 part of X03.
+
+After committing stop, the daemon excludes new runtime admission, cancels and
+joins background leases outside the runtime-owner mutex, then unloads before
+workspace cleanup. It no longer reports a transient busy-runtime failure merely
+because the stopped job is still unwinding. This cleanup survives caller
+cancellation. Retirement removes the old runtime reference before closing it, so
+a close failure cannot leave a partially closed runtime installed. A later
+authorized start can build a fresh runtime.
+
+X04 also has an asynchronous standalone bundle: a wrapper starts the original
+two-read comparison as an owned job and returns its job ID in the acknowledgement.
+Parallel calls retain independent script state, their selected read capability,
+and the declared completion schema. They create no extra session or background
+model request; notifications require the separate delivery adapter.
+
 Publication uses `Runtime_notification(delivery_id)` provenance and commits its
 history entry and receipt together. It requires the originating initial response
 to be published. The current foundation permits publication only while the

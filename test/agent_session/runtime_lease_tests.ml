@@ -28,6 +28,82 @@ let runtime ?script_tools ~close () : Builder.t =
 ;;
 
 let%expect_test
+    "committed stop joins cleanup, excludes admission and retires even when close fails"
+  =
+  List.iter [ false; true ] ~f:(fun fail_close ->
+    with_actor (fun _env sw actor _writer _backend ->
+      let entered, enter = Eio.Promise.create () in
+      let cleaning, cleaning_u = Eio.Promise.create () in
+      let release, release_u = Eio.Promise.create () in
+      let never, _ = Eio.Promise.create () in
+      let cleaned = ref false
+      and closes = ref 0
+      and fail_once = ref fail_close in
+      let build () =
+        Ok
+          (runtime
+             ~close:(fun () ->
+               assert !cleaned;
+               incr closes;
+               match !fail_once with
+               | false -> ()
+               | true ->
+                 fail_once := false;
+                 failwith "injected runtime close failure")
+             ())
+      in
+      let owner = Owner.create ~actor ~initial:None ~build in
+      let worker =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+          Result.try_with (fun () ->
+            Owner.with_background_runtime owner (fun _ ->
+              Eio.Promise.resolve enter ();
+              Exn.protect
+                ~finally:(fun () ->
+                  Eio.Cancel.protect (fun () ->
+                    Eio.Promise.resolve cleaning_u ();
+                    Eio.Promise.await release;
+                    cleaned := true))
+                ~f:(fun () ->
+                  Eio.Promise.await never;
+                  Ok ()))))
+      in
+      Eio.Promise.await entered;
+      let stopped =
+        Eio.Fiber.fork_promise ~sw (fun () ->
+          Result.try_with (fun () -> Owner.unload_and_wait owner))
+      in
+      Eio.Promise.await cleaning;
+      [%test_eq: int] 0 !closes;
+      (match Owner.ensure_loaded owner with
+       | Error { code = Conflict; retryable = true; _ } -> ()
+       | _ -> failwith "new runtime admission escaped pending cleanup");
+      Eio.Promise.resolve release_u ();
+      (match Eio.Promise.await_exn worker with
+       | Error (Eio.Cancel.Cancelled _) -> ()
+       | _ -> failwith "worker cancellation was lost");
+      (match fail_close, Eio.Promise.await_exn stopped with
+       | false, Ok (Ok ()) -> ()
+       | true, Error (Failure message)
+         when String.equal message "injected runtime close failure" -> ()
+       | _ -> failwith "stop produced an unexpected cleanup outcome");
+      assert (not (Owner.is_loaded owner));
+      [%test_eq: int] 1 !closes;
+      Owner.ensure_loaded owner |> protocol_ok;
+      Owner.unload_and_wait owner |> protocol_ok;
+      [%test_eq: int] 2 !closes;
+      print_s
+        [%sexp
+          (fail_close : bool)
+        , "cleanup joined before close; admission excluded; owner reusable"]));
+  [%expect
+    {|
+    (false "cleanup joined before close; admission excluded; owner reusable")
+    (true "cleanup joined before close; admission excluded; owner reusable")
+    |}]
+;;
+
+let%expect_test
     "retention excludes job scopes and keeps runtime ownership until a cancelled \
      caller's checkpoint finishes"
   =

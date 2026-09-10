@@ -1,0 +1,10 @@
+<developer>Use compare_reports_async to compare approved reports without waiting for the reads.</developer>
+<tool name="read_file"><read id="reports" path="${workspace}/reports"/></tool>
+<script id="compare" language="chatml" kind="tool" src="compare.chatml"/>
+<tool name="compare_reports" type="chatml" script="compare" entrypoint="run" input_schema="input.json" output_schema="output.json">
+  <uses tool="read_file"/>
+</tool>
+<script id="compare_async" language="chatml" kind="tool" src="async.chatml"/>
+<tool name="compare_reports_async" type="chatml" script="compare_async" entrypoint="run" input_schema="input.json" output_schema="accepted.json" completion_schema="output.json">
+  <uses tool="compare_reports"/>
+</tool>

@@ -14,6 +14,14 @@ val is_loaded : t -> bool
 val ensure_loaded : t -> (unit, Agent_protocol.Error.t) result
 val unload : t -> (unit, Agent_protocol.Error.t) result
 
+(** After committing a session stop, exclude new runtime admission, cancel and
+    join existing background leases, then unload before workspace cleanup. Waits
+    outside the owner mutex so worker finalizers can finish. Keep the actor alive
+    through this call, and call from outside a retained background callback.
+    Accepted-stop cleanup survives caller cancellation; the
+    owner remains reusable for a later authorized session start. *)
+val unload_and_wait : t -> (unit, Agent_protocol.Error.t) result
+
 (** Run maintenance only with no installed runtime or background lease, excluding
     reload until the callback finishes. [None] defers; this does not unload an
     active runtime. Acquire this owner before the actor checkpoint. Exceptions
