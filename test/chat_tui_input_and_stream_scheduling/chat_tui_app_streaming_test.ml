@@ -496,7 +496,8 @@ let%expect_test
     (match Chat_tui.Model.active_page model with
      | Chat_tui.Model.Page_id.Chat -> "Chat"
      | Agent -> "Agent"
-     | Shell_security -> "Shell_security")
+     | Shell_security -> "Shell_security"
+     | Work -> "Work")
     (match runtime.Chat_tui.App_runtime.op with
      | Some (Streaming { id; _ }) -> Int.equal id op_id
      | _ -> false);
@@ -541,6 +542,7 @@ let%expect_test
        | Chat_tui.Model.Page_id.Chat -> "Chat"
        | Agent -> "Agent"
        | Shell_security -> "Shell_security"
+       | Work -> "Work"
        : string)
     , (List.length messages_after_error : int)
     , (List.length (Chat_tui.Model.messages model) : int)
@@ -637,6 +639,7 @@ let%expect_test "successful completion clears transient Agent state immediately"
        | Chat_tui.Model.Page_id.Chat -> "Chat"
        | Agent -> "Agent"
        | Shell_security -> "Shell_security"
+       | Work -> "Work"
        : string)
     , (!drawn > draws_before : bool)];
   [%expect {| (0 Chat true) |}]
@@ -804,6 +807,7 @@ let%expect_test "early Ctrl-G opens Agent when the first tool starts" =
        | Chat_tui.Model.Page_id.Chat -> "Chat"
        | Agent -> "Agent"
        | Shell_security -> "Shell_security"
+       | Work -> "Work"
        : string)
     , (runtime.Chat_tui.App_runtime.pending_agent_toggle : int option)];
   [%expect {| (Agent ()) |}]
@@ -842,6 +846,7 @@ let%expect_test "early Ctrl-G toggles off and terminal events clear pending inte
        | Chat_tui.Model.Page_id.Chat -> "Chat"
        | Agent -> "Agent"
        | Shell_security -> "Shell_security"
+       | Work -> "Work"
        : string)];
   Chat_tui.Model.clear_agent_calls model;
   send_input (`Key (`ASCII 'G', [ `Ctrl ]));
@@ -867,6 +872,7 @@ let%expect_test "early Ctrl-G toggles off and terminal events clear pending inte
        | Chat_tui.Model.Page_id.Chat -> "Chat"
        | Agent -> "Agent"
        | Shell_security -> "Shell_security"
+       | Work -> "Work"
        : string)];
   [%expect
     {|

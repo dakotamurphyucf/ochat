@@ -923,6 +923,7 @@ let run ?(typeahead_config = Type_ahead_config.default) (ctx : Context.t) =
         | App_events.Disabled, _ -> false
         | App_events.Normal, Model.Page_id.Agent -> true
         | App_events.Normal, Model.Page_id.Shell_security -> true
+        | App_events.Normal, Model.Page_id.Work -> true
         | App_events.Normal, Chat ->
           (match Model.chat_materialization model with
            | Model.Chat_page_state.Corridor | Warm -> true

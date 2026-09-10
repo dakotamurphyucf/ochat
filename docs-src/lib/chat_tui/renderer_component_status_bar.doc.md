@@ -7,6 +7,8 @@
 - connection phase when present (connected, reconnecting attempt, disconnected,
   or failure code);
 - independent animated agent activity: Thinking, Writing, Working, or Compacting;
+- active attached-session job count and a `:work` navigation hint when a work
+  projection is available;
 - independent typeahead status, such as `[suggesting]` or the one-time sanitized
   `[typeahead unavailable]` notice.
 

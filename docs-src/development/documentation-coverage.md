@@ -391,6 +391,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_tui/agent_projection.mli` | [contract](../../lib/chat_tui/agent_projection.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/agent_security_projection.mli` | [contract](../../lib/chat_tui/agent_security_projection.mli) | [integration](../agent-server/permissions-and-security.md) | Public interface + current host guide. |
 | `lib/chat_tui/agent_session_client.mli` | [contract](../../lib/chat_tui/agent_session_client.mli) | [integration](../agent-server/protocol.md) | Public interface + current host guide. |
+| `lib/chat_tui/agent_work_view.mli` | [contract](../../lib/chat_tui/agent_work_view.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/app.mli` | [contract](../../lib/chat_tui/app.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/app_compaction.mli` | [contract](../../lib/chat_tui/app_compaction.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/app_context.mli` | [contract](../../lib/chat_tui/app_context.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
@@ -413,6 +414,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_tui/controller_normal.mli` | [contract](../../lib/chat_tui/controller_normal.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/controller_shell_security.mli` | [contract](../../lib/chat_tui/controller_shell_security.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chat_tui/controller_types.mli` | [contract](../../lib/chat_tui/controller_types.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
+| `lib/chat_tui/controller_work.mli` | [contract](../../lib/chat_tui/controller_work.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/conversation.mli` | [contract](../../lib/chat_tui/conversation.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/highlight_grammar_discovery.mli` | [contract](../../lib/chat_tui/highlight_grammar_discovery.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/highlight_grammars.mli` | [contract](../../lib/chat_tui/highlight_grammars.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
@@ -445,6 +447,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/chat_tui/renderer_page_agent.mli` | [contract](../../lib/chat_tui/renderer_page_agent.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/renderer_page_chat.mli` | [contract](../../lib/chat_tui/renderer_page_chat.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/renderer_page_shell_security.mli` | [contract](../../lib/chat_tui/renderer_page_shell_security.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
+| `lib/chat_tui/renderer_page_work.mli` | [contract](../../lib/chat_tui/renderer_page_work.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/renderer_pages.mli` | [contract](../../lib/chat_tui/renderer_pages.mli) | [integration](../guide/chat_tui.md) | Public interface + current host guide. |
 | `lib/chat_tui/renderer_shell_approval.mli` | [contract](../../lib/chat_tui/renderer_shell_approval.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
 | `lib/chat_tui/renderer_shell_border.mli` | [contract](../../lib/chat_tui/renderer_shell_border.mli) | [integration](../guide/chatmd-shell-host-integration.md) | Public interface + current host guide. |
@@ -700,6 +703,7 @@ are qualified in entry points, with complete current tutorials in agent-server.
 | [page](../lib/chat_tui/agent_projection.doc.md) | `docs-src/lib/chat_tui/agent_projection.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/chat_tui/agent_security_projection.doc.md) | `docs-src/lib/chat_tui/agent_security_projection.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/chat_tui/agent_session_client.doc.md) | `docs-src/lib/chat_tui/agent_session_client.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
+| [page](../lib/chat_tui/agent_work_view.doc.md) | `docs-src/lib/chat_tui/agent_work_view.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/chat_tui/app.doc.md) | `docs-src/lib/chat_tui/app.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/chat_tui/app_compaction.doc.md) | `docs-src/lib/chat_tui/app_compaction.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |
 | [page](../lib/chat_tui/app_events.doc.md) | `docs-src/lib/chat_tui/app_events.doc.md` | Retained reference; host-sensitive entry points reconciled; unrelated algorithms not rewritten. |

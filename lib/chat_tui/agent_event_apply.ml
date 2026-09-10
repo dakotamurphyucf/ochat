@@ -312,5 +312,11 @@ let apply t ~model ~viewport_height projection =
     (apply_live_events t model (Agent_projection.live_events projection))
     ~f:(fun () ->
       finish_agent_operation model projection;
+      Agent_projection.snapshot projection
+      |> Agent_work_view.of_snapshot
+      |> Model.update_session_work model
+      |> ignore;
+      (* The attached-session controller redraws after every projection. Work
+         metadata must not request unnecessary Chat history materialization. *)
       damage)
 ;;

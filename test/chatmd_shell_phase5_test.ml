@@ -799,7 +799,7 @@ let%test_unit "shell page and modal preserve draft; broad grants require confirm
      : Chat_tui.Controller_types.reaction);
   (match Chat_tui.Model.active_page model with
    | Shell_security -> ()
-   | Chat | Agent -> failwith "shell command did not open Shell Security");
+   | Chat | Agent | Work -> failwith "shell command did not open Shell Security");
   assert (
     [%equal: string * int * int option]
       draft

@@ -148,7 +148,7 @@ variables, confinement rules, and host-wide access.
 
 ---
 
-## Chat, Agent, and Shell Security pages
+## Chat, Agent, Work, and Shell Security pages
 
 The **Chat page** contains the canonical transcript, history viewport, status
 bar, and draft editor. The **Agent page** is a transient live view of tool calls
@@ -156,6 +156,29 @@ that are executing now. The **Shell Security page** shows effective runtime
 authority, persisted grants, audit replay, and interrupted requests. Press
 `Ctrl-g` for Agent while calls are active, or run `:shell` for Shell Security.
 Starting a call does not switch pages automatically.
+
+For attached sessions, `:work` (or `:jobs`) opens the **Work page**. It shows
+background jobs, invocation acknowledgements, subscriptions, timers, moderator
+events, and notification delivery from the current session generation. Active
+items appear first; job entries show execution and completion-delivery states
+separately. For example, **Background work acknowledged** describes the initial
+tool response, while **Succeeded · completion pending** means execution has
+finished and its completion still awaits delivery. **Completion handed off**
+means the runtime accepted delivery; it does not promise a new model response.
+
+Use `j`/`k`, arrows, or the mouse wheel to scroll, `PageUp`/`PageDown` to move by
+a page, `Home`/`End` to reach either end, and `Esc` to return to Chat. The Work
+page stays open when a new turn starts and preserves its visible item during
+updates where possible. The status bar includes a `:work` hint and active-job
+count. During a disconnect, the page labels the displayed state as last known.
+Changing session generation or receiving a narrower permission projection removes
+old or inaccessible entries.
+
+This overview displays metadata, not tool arguments, output, free-form progress
+text, or credential-bearing errors. A progress update number is shown when the
+received job projection includes one. Browsing or closing the page does not start,
+cancel, or acknowledge runtime work. The legacy file-backed TUI has no attached
+session work projection and explains that limitation when the page is opened.
 
 The Agent header and selector list calls in start order. Tool names are not
 unique, so the selector also shows a shortened call ID. Use:
@@ -206,6 +229,7 @@ produces one final canonical output through the existing Chat transcript path.
 | `:e` / `:edit` | copy the selected canonical row's displayed text into the editor in **Plain** Insert mode |
 | `:noh` / `:nohlsearch` | clear last-search highlight *(currently may be slower on very large histories due to cache invalidation strategy)* |
 | `:shell` / `:security` | open Shell Security and refresh its management snapshot |
+| `:work` / `:jobs` | inspect attached-session work and notification status |
 
 ---
 

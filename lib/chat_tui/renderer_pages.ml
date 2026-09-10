@@ -5,4 +5,5 @@ let render ~size ~model =
   | Model.Page_id.Chat -> Renderer_page_chat.render ~size ~model
   | Model.Page_id.Agent -> Renderer_page_agent.render ~size ~model
   | Model.Page_id.Shell_security -> Renderer_page_shell_security.render ~size ~model
+  | Model.Page_id.Work -> Renderer_page_work.render ~size ~model
 ;;

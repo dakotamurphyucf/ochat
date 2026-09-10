@@ -831,6 +831,7 @@
  (modules chat_tui_agent_client_test)
  (libraries
   core
+  chat_tui_projection_support
   ochat.agent_protocol
   ochat.agent_client
   ochat.chat_tui
@@ -840,6 +841,23 @@
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))
+
+(library
+ (name chat_tui_projection_support)
+ (modules chat_tui_projection_support)
+ (libraries
+  core ochat.agent_protocol ochat.agent_client ochat.chat_tui openai notty
+  ochat.notty_scroll_box)
+ (preprocess (pps ppx_jane)))
+
+(library
+ (name chat_tui_work_test)
+ (modules chat_tui_work_test)
+ (libraries
+  core chat_tui_projection_support ochat.agent_protocol ochat.agent_client
+  ochat.agent_server ochat.chat_tui notty)
+ (inline_tests)
+ (preprocess (pps ppx_jane ppx_expect)))
 
 (library
  (name agent_server_gap_test)

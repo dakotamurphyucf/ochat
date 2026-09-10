@@ -18,6 +18,7 @@
   chat_page_layout
   agent_page_selector
   agent_page_layout
+  agent_work_view
   shell_security_page_state
   input_display
   renderer_virtual_list
@@ -40,6 +41,7 @@
   renderer_lang
   renderer_page_chat
   renderer_page_agent
+  renderer_page_work
   renderer_shell_security_palette
   renderer_shell_border
   renderer_page_shell_security
@@ -53,6 +55,7 @@
   controller
   controller_types
   controller_agent
+  controller_work
   controller_shell_security
   controller_normal
   controller_shared

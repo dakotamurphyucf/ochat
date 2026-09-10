@@ -50,6 +50,7 @@ let page_name model =
   | Chat -> "Chat"
   | Agent -> "Agent"
   | Shell_security -> "Shell_security"
+  | Work -> "Work"
 ;;
 
 let%expect_test "Agent calls preserve ordering, selection, and isolated progress" =

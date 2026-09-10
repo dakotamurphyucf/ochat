@@ -20,11 +20,29 @@ let ready env child =
   Pty.await_text child ~clock:(Eio.Stdenv.clock env) "TUI-fixture-ready"
 ;;
 
+let escape_to_normal env child =
+  let before_escape = String.length (Pty.output child) in
+  Pty.send child "\027";
+  F.await env (fun () ->
+    let fresh = String.drop_prefix (Pty.output child) before_escape in
+    Option.some_if (String.is_substring fresh ~substring:"NORMAL") ())
+  |> ignore
+;;
+
+let inspect_work env child =
+  escape_to_normal env child;
+  Pty.send child ":work\r";
+  Pty.await_text child ~clock:(Eio.Stdenv.clock env) "Session work";
+  (* Escape followed immediately by i is an Alt-i terminal sequence. Wait for
+     the new Chat frame before sending the separate Insert-mode key. *)
+  escape_to_normal env child;
+  Pty.send child "i"
+;;
+
 let submit child text = Pty.send child (text ^ "\027\r")
 
 let quit env child =
-  Pty.send child "\027";
-  Pty.await_text child ~clock:(Eio.Stdenv.clock env) "NORMAL";
+  escape_to_normal env child;
   Pty.send child ":q\r";
   let status = Pty.await_exit child ~clock:(Eio.Stdenv.clock env) in
   F.require (Poly.equal status (`Exited 0)) "TUI did not exit successfully";
@@ -69,6 +87,7 @@ let local env temporary ~columns ~rows ~message =
         [ "--local"; "-file"; Config.prompt_path fixture ]
     in
     ready env child;
+    inspect_work env child;
     if message then local_message env temporary child;
     quit env child);
   let remaining =
@@ -127,6 +146,7 @@ let connected http env temporary =
       spawn ~sw env fixture ~columns:100 ~rows:30 (connected_arguments fixture http)
     in
     ready env child;
+    inspect_work env child;
     let session = only_session env connection in
     F.require
       (Agent_protocol.Session.equal_desired_state session.desired_state Running)

@@ -23,6 +23,7 @@ below are supported, not arbitrary first-letter abbreviation.
 | w | Submit_input |
 | c, cmp, compact | Compact_context |
 | shell, security | Open Shell Security; generation-tagged management refresh |
+| work, jobs | Open the attached-session Work overview; Redraw |
 | d, delete | Return Delete_history with the selected canonical occurrence ID |
 | e, edit | Copy the selected canonical row's displayed text into Plain Insert mode |
 | noh, nohlsearch | Clear search highlight; Redraw |
