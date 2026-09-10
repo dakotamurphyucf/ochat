@@ -2330,8 +2330,18 @@ demonstrates schema-checked external completion, public acknowledgement discover
 and a later notification requesting one model turn. Its offline composition uses
 real Unix peer authentication, submission-only helper scopes and two separate
 gateway processes. Reconnected retries retain one receipt, one queued handler
-and one conversation notification. This qualification does not yet cover ingress
-process-crash interruption or authenticated HTTP.
+and one conversation notification. The same source also runs over real loopback
+HTTP with the production hashed-token authenticator. Missing/invalid bearer
+credentials, insufficient scopes and foreign producers are denied; submission-only
+credentials do not grant transcript access.
+
+The `ingress.lost-ack-no-replay` crash scenario kills the daemon after the first
+ingress receipt's actual journal sync, before the HTTP acknowledgement can return.
+Two process reopenings and authenticated retries preserve the original receipt.
+The saved queue produces one handler, one notification and one model continuation;
+the second reopening does not repeat them. This proves recovery of durable
+acceptance with a lost reply, not exactly-once execution of arbitrary external
+effects. Later lifecycle interruption cases remain part of the recovery audit.
 
 ### Execution recovery
 

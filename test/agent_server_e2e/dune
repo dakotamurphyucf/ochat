@@ -86,8 +86,10 @@
   ochat.agent_transport_socket
   piaf
   uri)
+ (preprocessor_deps
+  (glob_files_rec ../chatml_extensibility_fixtures/x08-external-completion/*))
  (preprocess
-  (pps ppx_jane)))
+  (pps ppx_jane ppx_blob)))
 
 (rule
  (alias agent-e2e-tui-auto)

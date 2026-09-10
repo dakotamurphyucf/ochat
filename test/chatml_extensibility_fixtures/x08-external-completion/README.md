@@ -57,5 +57,17 @@ registration from the attached client's public tool output. It runs the actual
 - One queued handler produces one User-role runtime notification and one model
   continuation, with no duplicate completion output.
 
-This demonstrates Unix/helper reconnect. Process-crash interruption, broader host
-recovery and authenticated HTTP qualification are tracked separately.
+`test/chatml_composition/ingress_http_tests.ml` runs the same compiled source over
+real loopback HTTP with the production hashed static-token authenticator. Separate
+owner, submission-only, observer and foreign-principal credentials prove that
+bearer authentication, scope and producer identity all apply. Completion and a
+fresh HTTP connection's retry retain one acknowledgement, handler, notification
+and model continuation. Missing and invalid credentials cannot initialize; the
+submission-only credential cannot read the transcript.
+
+The `crash-matrix` case `ingress.lost-ack-no-replay` embeds this exact source and
+kills a real daemon after ingress journal sync but before its HTTP reply. Retrying
+after two process reopenings preserves the receipt and produces one handler,
+notification and model continuation. This covers a lost acknowledgement after
+durable acceptance; broader lifecycle interruption and host recovery remain
+tracked separately.
