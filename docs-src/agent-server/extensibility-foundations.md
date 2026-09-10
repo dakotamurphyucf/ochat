@@ -1528,8 +1528,25 @@ the first filesystem write. Failed intent, upload or metadata writes therefore r
 the same identity. Retries reuse matching complete files, rebuild matching partial
 uploads, and reject conflicting bytes, metadata or symlinks before changing files.
 They reestablish file and directory durability after ambiguous acknowledgements.
-This handles retries within the running process; startup recovery of unpublished
-preparations is not yet installed.
+On daemon restart, recovery validates private preparations before the scheduler
+interrupts unfinished running jobs. Complete durable, temporary or partial-file
+contents can be recovered when their exact length and digest match the saved
+selection. Missing or incomplete data does not imply completion and never causes
+tool replay. The recovered result keeps its original reference and selection time.
+
+Recovery applies only to current async job attempts. Terminal jobs, cancelled jobs
+and older generations or attempts remain unchanged. Conflicting selected values,
+corrupt data and links fail recovery; matching historical records can recover an
+available complete copy without treating missing older copies as success. Normal
+actor completion persistence still governs publication, including failures during
+recovery itself. No result notification is delivered before that commit.
+
+The host's `factory_limits.job_result_recovery_max_count` defaults to 4096 records
+per session, and `job_result_recovery_max_bytes` defaults to 64 MiB of aggregate
+selected payloads. Each payload also remains subject to `job_result_max_bytes`.
+Exceeding a recovery budget prevents readiness and preserves the files; the operator
+can adjust these host options. These are storage-recovery limits, not ChatML
+language limits. Orphan cleanup remains separate and is not yet installed.
 
 A waiting parent also reuses its already selected completion while publication is
 pending. It does not reread a subsequently damaged child artifact or change that

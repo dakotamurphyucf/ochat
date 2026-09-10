@@ -345,6 +345,125 @@ module Publisher = struct
       | _ -> None)
   ;;
 
+  let restore t ~jobs ~generation ~max_count ~max_total_bytes =
+    Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+      let open Result.Let_syntax in
+      let invalid message = Error (P.Error.invalid_request message) in
+      let%bind () =
+        match max_count >= 0 && max_total_bytes >= 0 with
+        | true -> Ok ()
+        | false -> invalid "job result recovery limits must be nonnegative"
+      in
+      let%bind intents =
+        Job_result_intent.list ~env:t.env ~session:t.session ~max_count
+        |> Result.map_error ~f:Store_error.to_protocol_error
+      in
+      let%bind selected =
+        List.fold_result intents ~init:[] ~f:(fun selected intent ->
+          let reference = Job_result_intent.reference intent in
+          match
+            List.find jobs ~f:(fun job ->
+              P.Id.Session.equal reference.session_id job.P.Job.session_id
+              && P.Id.Job.equal reference.job_id job.id
+              && Int.equal reference.generation generation
+              && Int.equal reference.generation job.generation
+              && Int.equal reference.attempt job.attempt
+              &&
+              match job.kind, job.status with
+              | Async_tool, (Running | Waiting_completion _) -> true
+              | _ -> false)
+          with
+          | None -> Ok selected
+          | Some job ->
+            (match
+               List.find selected ~f:(fun (other, _) ->
+                 P.Id.Job.equal job.id other.P.Job.id)
+             with
+             | None -> Ok ((job, intent) :: selected)
+             | Some (_, previous) ->
+               let prior = Job_result_intent.reference previous in
+               (match
+                  String.equal reference.blob.digest prior.blob.digest
+                  && Int64.equal reference.blob.byte_length prior.blob.byte_length
+                with
+                | true -> Ok ((job, intent) :: selected)
+                | false -> invalid "conflicting prepared completions for one job attempt")))
+      in
+      let%bind _ =
+        List.fold_result selected ~init:max_total_bytes ~f:(fun remaining (_, intent) ->
+          let size = (Job_result_intent.reference intent).blob.byte_length in
+          match Int64.(size <= of_int remaining && size <= of_int t.max_bytes) with
+          | true -> Ok (remaining - Int64.to_int_exn size)
+          | false ->
+            Error
+              (P.Error.create
+                 Resource_limit
+                 ~message:"prepared job results exceed the recovery byte budget"
+                 ~retryable:false
+                 ()))
+      in
+      let%bind restored =
+        List.fold_result (List.rev selected) ~init:[] ~f:(fun restored (job, intent) ->
+          let metadata = Job_result_intent.metadata intent in
+          let%bind content =
+            Blob_store.load_staged_content
+              t.blobs
+              ~sw:t.sw
+              t.session
+              ~metadata
+              ~max_bytes:t.max_bytes
+            |> Result.map_error ~f:Store_error.to_protocol_error
+          in
+          match content with
+          | None -> Ok restored
+          | Some _
+            when List.exists restored ~f:(fun (other, _, _) ->
+                   P.Id.Job.equal other.P.Job.id job.id) -> Ok restored
+          | Some content ->
+            let%bind json =
+              Result.try_with (fun () -> Jsonaf.of_string content)
+              |> Result.map_error ~f:(fun _ ->
+                P.Error.invalid_request "invalid staged completion JSON")
+            in
+            let%bind completion = P.Completion.of_json json in
+            let reference = Job_result_intent.reference intent in
+            let%bind _ = P.Stored_completion.artifact reference completion in
+            let%bind () =
+              match
+                List.find t.pending ~f:(fun prepared ->
+                  P.Id.Job.equal prepared.reference.job_id job.id)
+              with
+              | None -> Ok ()
+              | Some prepared ->
+                (match P.Id.Blob.equal prepared.reference.blob.id reference.blob.id with
+                 | true -> Ok ()
+                 | false -> invalid "live result preparation conflicts with recovery")
+            in
+            let prepared =
+              { store = t.blobs
+              ; env = t.env
+              ; session = t.session
+              ; intent
+              ; reference
+              ; completion
+              ; mutex = Eio.Mutex.create ()
+              ; phase = Attempted
+              }
+            in
+            Ok ((job, prepared, metadata.created_at) :: restored))
+      in
+      (* Publish no partial selection if any root or budget check failed. No files
+         are mutated here. Attempted is conservative across lost acknowledgements. *)
+      List.iter restored ~f:(fun (job, prepared, _) ->
+        t.pending
+        <- prepared
+           :: List.filter t.pending ~f:(fun old ->
+             not (P.Id.Job.equal old.reference.job_id job.P.Job.id)));
+      Ok
+        (List.rev_map restored ~f:(fun (job, prepared, at) ->
+           job, prepared.completion, at)))
+  ;;
+
   let load t reference =
     load t.blobs ~sw:t.sw ~session:t.session ~max_bytes:t.max_bytes reference
     |> Result.map_error ~f:(fun failure ->

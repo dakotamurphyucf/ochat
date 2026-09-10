@@ -734,7 +734,7 @@
 
 (library
  (name agent_store_test)
- (modules agent_store_test agent_store_test_fixtures job_store_fixtures job_result_store_tests blob_reference_scan_tests job_result_intent_tests job_result_retry_tests)
+ (modules agent_store_test agent_store_test_fixtures job_store_fixtures job_result_store_tests blob_reference_scan_tests job_result_intent_tests job_result_retry_tests job_result_recovery_tests)
  (libraries core eio eio_main mirage-crypto-rng.unix ochat.agent_store)
  (inline_tests)
  (preprocess

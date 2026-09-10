@@ -607,6 +607,16 @@ val refresh_background_job
   -> attempt:int
   -> (Agent_protocol.Job.t, Agent_protocol.Error.t) result
 
+(** Recover verified private result preparations before startup interruption.
+    Requires an idle execution host. Uses current generation/attempt ownership and
+    normal completion persistence without replaying a tool. Bounds the number of
+    scanned intents and their aggregate selected payload size. *)
+val recover_background_results
+  :  t
+  -> max_count:int
+  -> max_total_bytes:int
+  -> (unit, Agent_protocol.Error.t) result
+
 (** Optional expected values perform checkpoint and complete job-record comparison
     in the same mailbox transaction as delivery. Scheduler ingress supplies both. *)
 val deliver_job

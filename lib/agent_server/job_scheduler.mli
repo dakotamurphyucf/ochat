@@ -17,11 +17,14 @@ open! Core
 
 type t
 
-(** [reconcile_recovered ~registry] durably interrupts recovered running jobs.
+(** Recover complete private result preparations before durably interrupting the
+    remaining running jobs. Count and byte budgets apply per session.
     Return the first actor/persistence failure so startup cannot clear an
     incomplete index-recovery marker. *)
 val reconcile_recovered
   :  registry:Session_registry.t
+  -> max_count:int
+  -> max_total_bytes:int
   -> (unit, Agent_protocol.Error.t) result
 
 val start

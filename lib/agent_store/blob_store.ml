@@ -435,6 +435,54 @@ let load_verified store ~sw handle ~max_bytes =
          (Store_error.Corrupt "blob content does not match its recorded length and digest"))
 ;;
 
+let load_staged_content store ~sw session ~(metadata : Metadata.t) ~max_bytes =
+  let invalid message = Error (Store_error.Corrupt message) in
+  let open Result.Let_syntax in
+  let%bind () =
+    match
+      (not metadata.durable)
+      && Option.exists
+           metadata.target_session
+           ~f:(Agent_protocol.Id.Session.equal (Session_store.Handle.session_id session))
+    with
+    | true -> Ok ()
+    | false -> invalid "staged result belongs to another session"
+  in
+  let directory = Filename.concat (Session_store.Handle.directory session) "blobs" in
+  let locations =
+    [ directory, ".blob", false
+    ; store.temporary_directory, ".blob", false
+    ; store.temporary_directory, ".part", true
+    ]
+  in
+  let rec read = function
+    | [] -> Ok None
+    | (directory, suffix, partial) :: rest ->
+      let%bind () =
+        match Eio.Path.kind ~follow:false (eio_path store directory) with
+        | `Directory | `Not_found -> Ok ()
+        | _ -> invalid "staged result directory is not a regular directory"
+      in
+      let path = Filename.concat directory (blob_name metadata.blob.id suffix) in
+      (match Eio.Path.kind ~follow:false (eio_path store path) with
+       | `Not_found -> read rest
+       | `Regular_file ->
+         let size =
+           (Eio.Path.stat ~follow:false (eio_path store path)).size
+           |> Optint.Int63.to_int64
+         in
+         (match partial && Int64.(size < metadata.blob.byte_length) with
+          | true -> Ok None
+          | false ->
+            let handle = { Handle.metadata; data_path = path; metadata_path = path } in
+            let%map content = load_verified store ~sw handle ~max_bytes in
+            Some content)
+       | _ -> invalid "staged result data is not a regular file")
+  in
+  try read locations with
+  | exn -> Error (Store_error.of_exn ~operation:"load staged result" ~path:directory exn)
+;;
+
 let ensure_staged_content store ~sw session ~(metadata : Metadata.t) content =
   let session_id = Session_store.Handle.session_id session in
   let invalid message = Error (Store_error.Corrupt message) in

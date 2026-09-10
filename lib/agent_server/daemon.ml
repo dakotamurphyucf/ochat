@@ -103,6 +103,8 @@ let default_options =
       ; subscriber_queue_capacity = 512
       ; job_result_inline_bytes = 64 * 1024
       ; job_result_max_bytes = 9 * 1024 * 1024
+      ; job_result_recovery_max_count = 4096
+      ; job_result_recovery_max_bytes = 64 * 1024 * 1024
       }
   ; quota_limits =
       { global_running_sessions = 256
@@ -757,7 +759,12 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
      : (int, Agent_store.Store_error.t) result);
   let%bind () = Start_scheduler.seed_recovered ~registry ~queue:start_queue in
   let startup_time = timestamp env in
-  let%bind () = Job_scheduler.reconcile_recovered ~registry in
+  let%bind () =
+    Job_scheduler.reconcile_recovered
+      ~registry
+      ~max_count:factory_limits.job_result_recovery_max_count
+      ~max_total_bytes:factory_limits.job_result_recovery_max_bytes
+  in
   let%bind () = Schedule_scheduler.reconcile_recovered ~registry ~startup_time in
   let%bind () = Session_factory.complete_index_recovery factory recovered in
   let start_scheduler =

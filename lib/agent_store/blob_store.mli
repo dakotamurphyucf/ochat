@@ -105,6 +105,19 @@ val iter_chunks
     an already durable handle can be reused only by its original session. *)
 val adopt : t -> Session_store.Handle.t -> Handle.t -> (Handle.t, Store_error.t) result
 
+(** Read complete staged bytes using metadata from a validated private intent.
+    Checks session, regular paths, length, digest and read limit, even when blob
+    metadata was not installed. Missing data or a shorter partial returns None.
+    Does not repair, publish or delete anything. Serialize with the stage owner;
+    the caller must validate the intent and subsequent adoption checks all files. *)
+val load_staged_content
+  :  t
+  -> sw:Eio.Switch.t
+  -> Session_store.Handle.t
+  -> metadata:Metadata.t
+  -> max_bytes:int
+  -> (string option, Store_error.t) result
+
 (** Idempotently complete a host-owned staged write using the same ID and bytes.
     Requires a durable private preparation intent and exclusive ownership from the
     caller; allowed_use is not ownership proof. Existing files must match the

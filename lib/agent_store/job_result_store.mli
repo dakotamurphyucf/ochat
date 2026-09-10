@@ -99,4 +99,22 @@ module Publisher : sig
     :  t
     -> job:Agent_protocol.Job.t
     -> Agent_protocol.Completion.t option
+
+  (** Reconstruct selections from complete, verified private preparations for
+      current async job attempts. Missing/partial data is left for interruption;
+      terminal or superseded attempts are ignored. Conflicting completions and
+      count/aggregate byte excess fail before changing the cache. Does no writes
+      or tool execution. Call before startup interruption, serialized with the
+      actor; publish through its normal completion transition. The timestamp is
+      when the completion was originally selected. *)
+  val restore
+    :  t
+    -> jobs:Agent_protocol.Job.t list
+    -> generation:int
+    -> max_count:int
+    -> max_total_bytes:int
+    -> ( (Agent_protocol.Job.t * Agent_protocol.Completion.t * Agent_protocol.Timestamp.t)
+           list
+         , Agent_protocol.Error.t )
+         result
 end

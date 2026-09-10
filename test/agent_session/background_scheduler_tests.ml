@@ -363,7 +363,11 @@ let%expect_test
        until env (fun () -> !rejected >= 2);
        Scheduler.close scheduler;
        until env (fun () -> Scheduler.running_count scheduler = 0);
-       Scheduler.reconcile_recovered ~registry |> protocol_ok;
+       Scheduler.reconcile_recovered
+         ~registry
+         ~max_count:4096
+         ~max_total_bytes:(64 * 1024 * 1024)
+       |> protocol_ok;
        (match (current backend first).status with
         | Interrupted _ -> ()
         | _ -> failwith "lost completion was replayable");

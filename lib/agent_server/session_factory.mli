@@ -19,6 +19,8 @@ type limits =
   ; subscriber_queue_capacity : int
   ; job_result_inline_bytes : int
   ; job_result_max_bytes : int
+  ; job_result_recovery_max_count : int
+  ; job_result_recovery_max_bytes : int
   }
 
 type t

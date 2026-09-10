@@ -42,16 +42,22 @@ let reconcile_job entry (job : Agent_protocol.Job.t) =
   | Interrupted _ -> Ok ()
 ;;
 
-let reconcile_entry entry =
-  Result.bind
-    (Agent_session.Session_actor.state entry.Session_registry.actor)
-    ~f:(fun state ->
-      List.fold_result state.jobs ~init:() ~f:(fun () job -> reconcile_job entry job))
+let reconcile_entry entry ~max_count ~max_total_bytes =
+  let open Result.Let_syntax in
+  let%bind () =
+    Agent_session.Session_actor.recover_background_results
+      entry.Session_registry.actor
+      ~max_count
+      ~max_total_bytes
+  in
+  let%bind state = Agent_session.Session_actor.state entry.actor in
+  List.fold_result state.jobs ~init:() ~f:(fun () job -> reconcile_job entry job)
 ;;
 
-let reconcile_recovered ~registry =
+let reconcile_recovered ~registry ~max_count ~max_total_bytes =
   Session_registry.entries registry
-  |> List.fold_result ~init:() ~f:(fun () entry -> reconcile_entry entry)
+  |> List.fold_result ~init:() ~f:(fun () entry ->
+    reconcile_entry entry ~max_count ~max_total_bytes)
 ;;
 
 let payload_fields = function

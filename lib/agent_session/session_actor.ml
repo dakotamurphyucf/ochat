@@ -319,6 +319,7 @@ type _ request =
   | Refresh_background_job :
       Agent_protocol.Id.Job.t * int * int
       -> Agent_protocol.Job.t request
+  | Recover_background_results : int * int -> unit request
   | Deliver_job :
       Agent_protocol.Id.Job.t
       * int
@@ -5186,7 +5187,15 @@ let defer_background_job t job_id generation attempt dependency =
   next
 ;;
 
-let complete_background_job ?(waiting = false) t job_id generation attempt completion =
+let complete_background_job
+      ?(waiting = false)
+      ?completed_at
+      t
+      job_id
+      generation
+      attempt
+      completion
+  =
   let open Result.Let_syntax in
   let%bind job = find_job t job_id in
   let%bind () = validate_job_generation t job generation in
@@ -5228,7 +5237,12 @@ let complete_background_job ?(waiting = false) t job_id generation attempt compl
     | Cancelled _ | Expired -> cancelled_job_dependencies t job
     | Succeeded _ | Failed _ -> Ok []
   in
-  let terminal status = terminal_job t job status (Some encoded) in
+  let terminal status =
+    let terminal = terminal_job t job status (Some encoded) in
+    match completed_at with
+    | None -> terminal
+    | Some at -> { terminal with completed_at = Some at }
+  in
   let running = job in
   let job =
     match completion with
@@ -5279,6 +5293,45 @@ let complete_background_job ?(waiting = false) t job_id generation attempt compl
       ~now:(t.services.now ())
       completion
       ~persist
+;;
+
+let recover_background_results t max_count max_total_bytes =
+  let open Result.Let_syntax in
+  let%bind () =
+    match
+      t.job_scopes, t.invocation_executions, t.moderator_borrow, t.queued_event_borrow
+    with
+    | [], [], None, None -> Ok ()
+    | _ -> Error (error Conflict "result recovery requires an idle execution host")
+  in
+  match t.services.job_results with
+  | None -> Ok ()
+  | Some publisher ->
+    let%bind restored =
+      Agent_store.Job_result_store.Publisher.restore
+        publisher
+        ~jobs:t.state.jobs
+        ~generation:t.state.identity.generation
+        ~max_count
+        ~max_total_bytes
+    in
+    List.fold_result restored ~init:() ~f:(fun () (previous, completion, completed_at) ->
+      let%bind job = find_job t previous.id in
+      match job.status with
+      | Running | Waiting_completion _ ->
+        let%bind () =
+          Job_dependency.validate ~invocations:t.state.invocations ~jobs:t.state.jobs job
+        in
+        complete_background_job
+          ~waiting:true
+          ~completed_at
+          t
+          job.id
+          job.generation
+          job.attempt
+          completion
+        |> Result.map ~f:ignore
+      | _ -> Ok ())
 ;;
 
 let refresh_background_job t job_id generation attempt =
@@ -6448,6 +6501,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     defer_background_job t job_id generation attempt dependency
   | Refresh_background_job (job_id, generation, attempt) ->
     refresh_background_job t job_id generation attempt
+  | Recover_background_results (max_count, max_total_bytes) ->
+    recover_background_results t max_count max_total_bytes
   | Deliver_job (job_id, generation, expected, expected_job, moderator_snapshot) ->
     deliver_job t job_id generation expected expected_job moderator_snapshot
   | Cancel_job_internal job_id -> cancel_job_internal t job_id
@@ -6863,6 +6918,10 @@ let defer_background_job t ~job_id ~generation ~attempt dependency =
 
 let refresh_background_job t ~job_id ~generation ~attempt =
   call t ~priority:Priority (Refresh_background_job (job_id, generation, attempt))
+;;
+
+let recover_background_results t ~max_count ~max_total_bytes =
+  call t ~priority:Priority (Recover_background_results (max_count, max_total_bytes))
 ;;
 
 let deliver_job ?expected ?expected_job t ~job_id ~generation ~moderator_snapshot =
