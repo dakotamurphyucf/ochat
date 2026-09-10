@@ -280,7 +280,8 @@ val read_script_job_result
     discarded or failed handlers leave no notification. Host service disclosure
     checks must precede calls involving job results. *)
 val create_script_notification
-  :  t
+  :  ?disclosure_pins:(string * string) list
+  -> t
   -> owner:Agent_protocol.Job.launch_owner
   -> source:Agent_protocol.Invocation.observer
   -> correlation:Chat_response.Notification_operations.correlation
@@ -581,6 +582,17 @@ val consume_deferred
   :  t
   -> operation_id:Agent_protocol.Id.Operation.t
   -> (History_entry.t list, Agent_protocol.Error.t) result
+
+(** Commit a disclosure-checked proposal at this foreground operation's input
+    boundary. Saves delivery/history atomically and retains consumed wake IDs for
+    the next actual model admission or terminal disposition. *)
+val consume_notifications
+  :  t
+  -> operation_id:Agent_protocol.Id.Operation.t
+  -> Notification_delivery.t
+  -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+       , Agent_protocol.Error.t )
+       result
 
 val cancel_operation
   :  t

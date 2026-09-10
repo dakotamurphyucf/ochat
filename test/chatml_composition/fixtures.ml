@@ -39,6 +39,7 @@ let with_daemon
       ?after_turn
       ?(inspect_request = fun _ _ -> ())
       ?(expected_requests = 2)
+      ?(initial_requests = 2)
       ?(expected_schedules = 0)
       ?(expect_moderator = false)
       ~sources
@@ -145,7 +146,7 @@ let with_daemon
                   let rec wait () =
                     let state = A.state entry.actor |> protocol_ok in
                     match state.active_operation with
-                    | None when !requests >= 2 -> state
+                    | None when !requests >= initial_requests -> state
                     | _ ->
                       Eio.Time.sleep (Eio.Stdenv.clock env) 0.01;
                       wait ()
@@ -173,7 +174,7 @@ let with_daemon
                   | Operation_completed operation ->
                     Agent_protocol.Id.Operation.equal operation.id operation_id
                   | _ -> false));
-              [%test_eq: int] 2 !requests;
+              [%test_eq: int] initial_requests !requests;
               [%test_eq: int]
                 1
                 (List.length

@@ -45,5 +45,11 @@ val create
         -> ( Chat_response.In_memory_stream.moderator_event_handlers
              , Agent_protocol.Error.t )
              result)
+  -> ?notification_input:
+       (input:Operation_worker.Input.t
+        -> unit
+        -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+             , Agent_protocol.Error.t )
+             result)
   -> Config.t
   -> Operation_worker.t

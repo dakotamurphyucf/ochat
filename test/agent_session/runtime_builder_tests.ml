@@ -361,6 +361,9 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
             ; one_off_policy = Chat_response.One_off_request.default_policy
             ; authoring_validation_host = None
             ; lifecycle_started = (fun _ -> false)
+            ; notification_input =
+                (fun ~source:_ ~tools:_ ~operation_id:_ () ->
+                  Ok Chat_response.In_memory_stream.Safe_point_input.empty)
             ; claim_lifecycle =
                 (fun ~event ->
                   A.with_current_moderator_event actor ~operation_id:None ~event)

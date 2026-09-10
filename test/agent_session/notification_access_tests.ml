@@ -12,8 +12,9 @@ let notices actor =
   Notices.create
     ~host:
       { create =
-          (fun owner source ~correlation ~completion ~wake ->
+          (fun owner source ~correlation ~completion ~wake ~disclosure_pins ->
             A.create_script_notification
+              ~disclosure_pins
               actor
               ~owner
               ~source
@@ -91,6 +92,7 @@ let%expect_test
                  notice_service
                  ~owner
                  ~source:Setup.source
+                 ~selected
                  ~jobs:(Some job_scope)
                  ~error:P.Error.invalid_request
                  (fun scope ->
@@ -153,6 +155,7 @@ let%expect_test
                     notice_service
                     ~owner
                     ~source:Setup.source
+                    ~selected:narrow
                     ~jobs:(Some job_scope)
                     ~error:P.Error.invalid_request
                     (fun scope ->

@@ -40,8 +40,9 @@ match result with | `Ok(value) -> Task.pure(value) | `Error(code) -> Task.fail(c
        | Ok () -> ()
        | Error reason -> raise_s [%sexp (reason : N.blockage)]);
       let id =
-        History_entry.Id.create ~namespace:"nested-notification" ~sequence:0
-        |> Result.ok_or_failwith
+        match delivery.status with
+        | Committed { history_id; _ } -> history_id
+        | _ -> failwith "nested notification was not automatically delivered"
       in
       let entry = Agent_session.Notification_history.create ~id delivery |> protocol_ok in
       let committed =

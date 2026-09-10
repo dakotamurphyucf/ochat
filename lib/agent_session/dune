@@ -58,6 +58,7 @@
   history_codec
   notification_history
   notification_readiness
+  notification_delivery
   chatmd_export
   durable_event_log
   live_event_buffer

@@ -46,6 +46,16 @@ type extension_services =
         An initial prepared checkpoint alone does not mean startup executed. *)
   ; history : unit -> History_entry.t list
     (** Current canonical history, read after an actor claim without entering the manager. *)
+  ; notification_input :
+      source:Agent_protocol.Invocation.observer
+      -> tools:Script_tool_calls.t
+      -> operation_id:Agent_protocol.Id.Operation.t
+      -> unit
+      -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+           , Agent_protocol.Error.t )
+           result
+    (** Host checks the loaded runtime pin, prepares current disclosure and commits
+        through the actor at this operation's post-tool input boundary. *)
   }
 
 type moderator_activation =

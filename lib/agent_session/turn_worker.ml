@@ -188,13 +188,17 @@ let require_ok = function
   | Error failure -> raise (Worker_failure failure)
 ;;
 
-let safe_point_input capabilities =
+let safe_point_input ?notification_input capabilities =
   Chat_response.In_memory_stream.Safe_point_input.
     { consume_entries =
         (fun () ->
           capabilities.Operation_worker.Capabilities.consume_deferred ()
           |> require_ok
-          |> user_entries)
+          |> user_entries
+          |> fun users ->
+          match notification_input with
+          | None -> users
+          | Some consume -> append users (consume () |> require_ok))
     ; consume_compatibility_text = (fun () -> None)
     }
 ;;
@@ -367,7 +371,15 @@ let moderate_submission config input on_runtime_request =
   | Compaction -> ()
 ;;
 
-let run ?dispatch_tool ?moderator_events config ~sw ~input capabilities =
+let run
+      ?dispatch_tool
+      ?moderator_events
+      ?notification_input
+      config
+      ~sw
+      ~input
+      capabilities
+  =
   let config =
     match config.Config.moderator, moderator_events with
     | Some moderator, Some make ->
@@ -431,7 +443,11 @@ let run ?dispatch_tool ?moderator_events config ~sw ~input capabilities =
           runtime_requests := request :: !runtime_requests)
         ~history_compaction:config.history_compaction
         ~parallel_tool_calls:config.parallel_tool_calls
-        ~safe_point_input:(safe_point_input capabilities)
+        ~safe_point_input:
+          (safe_point_input
+             ?notification_input:
+               (Option.map notification_input ~f:(fun make -> make ~input))
+             capabilities)
         ~model:config.model
         ?prompt_cache_key:config.prompt_cache_key
         ?prompt_cache_retention:config.prompt_cache_retention
@@ -446,9 +462,18 @@ let run ?dispatch_tool ?moderator_events config ~sw ~input capabilities =
     }
 ;;
 
-let create ?dispatch_tool ?moderator_events config =
+let create ?dispatch_tool ?moderator_events ?notification_input config =
   Operation_worker.create ~run:(fun ~sw ~input capabilities ->
-    match run ?dispatch_tool ?moderator_events config ~sw ~input capabilities with
+    match
+      run
+        ?dispatch_tool
+        ?moderator_events
+        ?notification_input
+        config
+        ~sw
+        ~input
+        capabilities
+    with
     | outcome -> outcome
     | exception Worker_failure failure -> Operation_worker.Failed failure
     | exception Moderator_tool_dispatch.Dispatch_error failure ->

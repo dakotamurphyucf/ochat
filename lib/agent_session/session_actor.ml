@@ -224,6 +224,7 @@ type _ request =
       * Chat_response.Notification_operations.correlation
       * Agent_protocol.Completion.t
       * Agent_protocol.Completion.wake
+      * (string * string) list option
       -> (int * Agent_protocol.Delivery.t) request
   | Read_script_notification :
       Agent_protocol.Job.launch_owner
@@ -339,6 +340,9 @@ type _ request =
       Agent_protocol.Id.Operation.t * Jsonaf.t option
       -> unit request
   | Consume_deferred : Agent_protocol.Id.Operation.t -> History_entry.t list request
+  | Consume_notifications :
+      Agent_protocol.Id.Operation.t * Notification_delivery.t
+      -> Chat_response.In_memory_stream.Safe_point_input.batch request
   | Has_writer_attachment : bool request
   | Invocation_granted : string * string -> bool request
   | Worker_ready : Agent_protocol.Id.Operation.t * (unit -> unit) -> unit request
@@ -512,6 +516,8 @@ type t =
   ; staged_subscriptions : Staged_subscriptions.t
   ; staged_schedules : Staged_schedules.t
   ; staged_notifications : Staged_notifications.t
+  ; mutable notification_inputs :
+      (Agent_protocol.Id.Operation.t * Agent_protocol.Id.Delivery.t list) option
   ; extension_clock : Extension_clock.t
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
@@ -773,8 +779,19 @@ let prepare_background_job_launch t ~owner request =
   call t (Prepare_background_job (owner, request))
 ;;
 
-let create_script_notification t ~owner ~source ~correlation ~completion ~wake =
-  call t (Create_script_notification (owner, source, correlation, completion, wake))
+let create_script_notification
+      ?disclosure_pins
+      t
+      ~owner
+      ~source
+      ~correlation
+      ~completion
+      ~wake
+  =
+  call
+    t
+    (Create_script_notification
+       (owner, source, correlation, completion, wake, disclosure_pins))
 ;;
 
 let read_script_notification t ~owner ~source ~id =
@@ -3111,6 +3128,7 @@ let create_script_notification_internal
       (correlation : Chat_response.Notification_operations.correlation)
       completion
       wake
+      disclosure_pins
   =
   let open Result.Let_syntax in
   let module P = Agent_protocol in
@@ -3224,6 +3242,7 @@ let create_script_notification_internal
   in
   let%bind delivery =
     P.Delivery.create
+      ?disclosure_pins
       { id = P.Id.Delivery.create ()
       ; session_id = t.state.identity.session_id
       ; generation = t.state.identity.generation
@@ -3736,6 +3755,121 @@ let consume_deferred t operation_id =
   let%bind decoded = History_codec.all_of_protocol entries in
   let%map _ = adopt_deferred t in
   decoded
+;;
+
+let consume_notifications_internal t operation_id (plan : Notification_delivery.t) =
+  let open Result.Let_syntax in
+  let%bind _ = running_operation t operation_id in
+  let%bind () =
+    match
+      List.exists t.invocation_executions ~f:(fun execution ->
+        match execution.owner with
+        | Foreground id -> Agent_protocol.Id.Operation.equal id operation_id
+        | _ -> false)
+    with
+    | true ->
+      Error (error Conflict "notification insertion waits for the foreground tool batch")
+    | false -> Ok ()
+  in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      plan.session_id
+      plan.generation
+  in
+  let%bind installed = Runtime_builder.moderator_snapshot_observer t.state.moderator in
+  let%bind () =
+    match
+      ( Int64.equal plan.revision t.state.counters.revision
+      , installed
+      , moderator_is_borrowed t )
+    with
+    | true, Some source, false
+      when Agent_protocol.Invocation.equal_observer source plan.source -> Ok ()
+    | _ -> Error (error Conflict "notification snapshot or source changed")
+  in
+  let%bind deltas, entries, ids, wake =
+    List.fold_result
+      plan.actions
+      ~init:([], [], [], false)
+      ~f:(fun (deltas, entries, ids, wake) action ->
+        match action with
+        | Notification_delivery.Fail value ->
+          Ok (Session_delta.Delivery_changed value :: deltas, entries, ids, wake)
+        | Publish value ->
+          let%bind id =
+            History_entry.Id.create
+              ~namespace:
+                ("notification/" ^ Agent_protocol.Id.Delivery.to_string value.context.id)
+              ~sequence:0
+            |> Result.map_error ~f:(error Invalid_state)
+          in
+          let%bind entry = Notification_history.create ~id value in
+          let now = t.services.now () in
+          let now =
+            if Agent_protocol.Timestamp.compare now value.context.created_at < 0
+            then value.context.created_at
+            else now
+          in
+          let%map value =
+            Agent_protocol.Delivery.commit ~track_wake:true value ~history_id:id ~now
+          in
+          ( Session_delta.Delivery_committed (value, entry) :: deltas
+          , entry :: entries
+          , value.context.id :: ids
+          , wake || Agent_protocol.Completion.equal_wake value.context.wake Request_turn ))
+  in
+  let entries = List.rev entries in
+  let%bind decoded = History_codec.all_of_protocol entries in
+  let%map () =
+    match deltas with
+    | [] -> Ok ()
+    | _ ->
+      transition
+        t
+        ~delta:(Session_delta.Batch (List.rev deltas))
+        ~payloads:
+          (match entries with
+           | [] -> []
+           | _ -> [ Agent_protocol.Event.Durable.Payload.History_appended entries ])
+      |> Result.map ~f:ignore
+  in
+  let existing =
+    match t.notification_inputs with
+    | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
+    | _ -> []
+  in
+  t.notification_inputs <- Some (operation_id, ids @ existing);
+  Chat_response.In_memory_stream.Safe_point_input.notification_entries
+    ~request_turn:wake
+    decoded
+;;
+
+let notification_wake_deltas t operation_id ~accept =
+  let open Result.Let_syntax in
+  let ids =
+    match t.notification_inputs with
+    | Some (id, ids) when Agent_protocol.Id.Operation.equal id operation_id -> ids
+    | _ -> []
+  in
+  List.filter t.state.deliveries ~f:(fun value ->
+    List.mem ids value.context.id ~equal:Agent_protocol.Id.Delivery.equal
+    &&
+    match value.wake_disposition with
+    | Some Pending_wake -> true
+    | _ -> false)
+  |> List.map ~f:(fun value ->
+    let%map value =
+      match accept with
+      | true -> Agent_protocol.Delivery.accept_wake value ~operation_id
+      | false ->
+        Agent_protocol.Delivery.discard_wake
+          value
+          ~reason:"foreground ended without admitting this notification wake"
+    in
+    Session_delta.Delivery_wake_changed value)
+  |> Result.all
 ;;
 
 let worker_ready t operation_id cancel =
@@ -4393,7 +4527,8 @@ let admit_moderator_turn t operation_id =
     | false, false -> Ok ()
   in
   let%bind plan = Observation_follow_up.admit_turn ~state:t.state ~observer in
-  match follow_up_deltas t plan with
+  let%bind notifications = notification_wake_deltas t operation_id ~accept:true in
+  match follow_up_deltas t plan @ notifications with
   | [] -> Ok ()
   | deltas ->
     transition t ~delta:(Session_delta.Batch deltas) ~payloads:[] |> Result.map ~f:ignore
@@ -4487,13 +4622,15 @@ let worker_terminal t operation_id outcome =
     in
     let%bind delta, payloads = terminal_delta t operation outcome in
     let%bind follow_up = foreground_terminal_requests t operation_id outcome in
+    let%bind notifications = notification_wake_deltas t operation_id ~accept:false in
     let permissions, jobs = operation_terminal_cleanup t operation outcome in
     let%bind _ =
       transition
         t
         ~delta:
           (Session_delta.Batch
-             (follow_up
+             (notifications
+              @ follow_up
               @ unfinished
               @ [ borrow_delta; event_delta; delta; cleanup_delta permissions jobs ]))
         ~payloads:(payloads @ cleanup_payloads permissions jobs)
@@ -4505,6 +4642,7 @@ let worker_terminal t operation_id outcome =
       borrow.cancel <- None);
     t.queued_event_borrow <- None;
     t.foreground_moderator <- None;
+    t.notification_inputs <- None;
     t.idle_moderator_borrowed <- false;
     t.invocation_executions <- background;
     t.active_cancel <- None;
@@ -7525,8 +7663,16 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     let%map () = subscription_owned t source subscription in
     subscription
   | Expire_subscriptions -> expire_subscriptions_internal t
-  | Create_script_notification (owner, source, correlation, completion, wake) ->
-    create_script_notification_internal t owner source correlation completion wake
+  | Create_script_notification
+      (owner, source, correlation, completion, wake, disclosure_pins) ->
+    create_script_notification_internal
+      t
+      owner
+      source
+      correlation
+      completion
+      wake
+      disclosure_pins
   | Read_script_notification (owner, source, id) ->
     let open Result.Let_syntax in
     let%bind _ = subscription_owner_active t owner source in
@@ -7660,6 +7806,8 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Publish_invocation_output (operation_id, invocation_id, entry) ->
     publish_invocation_output t operation_id invocation_id entry
   | Consume_deferred operation_id -> consume_deferred t operation_id
+  | Consume_notifications (operation_id, plan) ->
+    consume_notifications_internal t operation_id plan
   | Commit_worker_moderator (operation_id, snapshot) ->
     commit_worker_moderator t operation_id snapshot
   | Has_writer_attachment -> Ok (has_writer_attachment t)
@@ -7866,6 +8014,7 @@ let create_with_owner_lease_duration
     ; staged_subscriptions = Staged_subscriptions.create ()
     ; staged_schedules = Staged_schedules.create ()
     ; staged_notifications = Staged_notifications.create ()
+    ; notification_inputs = None
     ; extension_clock = Extension_clock.create ()
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
@@ -8021,6 +8170,10 @@ let commit_worker_entry t ~operation_id entry =
 ;;
 
 let consume_deferred t ~operation_id = call t (Consume_deferred operation_id)
+
+let consume_notifications t ~operation_id plan =
+  call t (Consume_notifications (operation_id, plan))
+;;
 
 let cancel_operation t ~attachment_id ~operation_id =
   call t ~priority:Priority (Cancel_operation (attachment_id, operation_id))

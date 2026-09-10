@@ -33,6 +33,14 @@ type extension_services =
   ; claim_lifecycle : event:Moderation.Event.t -> Moderator_event.claim
   ; lifecycle_started : Agent_protocol.Invocation.observer -> bool
   ; history : unit -> History_entry.t list
+  ; notification_input :
+      source:Agent_protocol.Invocation.observer
+      -> tools:Script_tool_calls.t
+      -> operation_id:Agent_protocol.Id.Operation.t
+      -> unit
+      -> ( Chat_response.In_memory_stream.Safe_point_input.batch
+           , Agent_protocol.Error.t )
+           result
   }
 
 type moderator_activation =
@@ -1126,10 +1134,22 @@ let build_with_services
         (standalone @ moderator_dispatch @ [ native ]))
   in
   let config, model, reasoning = model_config elements in
+  let notification_input =
+    match extension_services, script_tools, moderator with
+    | Some services, Some tools, Some (moderator, _) ->
+      Option.map (Manager.invocation_observer moderator.manager) ~f:(fun source ->
+        fun ~input ->
+        services.notification_input
+          ~source
+          ~tools
+          ~operation_id:input.Operation_worker.Input.operation.id)
+    | _ -> None
+  in
   let worker =
     Turn_worker.create
       ?dispatch_tool
       ?moderator_events
+      ?notification_input
       { env
       ; response_dir
       ; tools

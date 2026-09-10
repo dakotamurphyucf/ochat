@@ -49,6 +49,7 @@ type t =
   ; attempt : int
   ; status : status
   ; wake_disposition : wake_disposition option [@sexp.option]
+  ; disclosure_pins : (string * string) list option [@sexp.option]
   }
 [@@deriving equal, sexp]
 
@@ -117,6 +118,50 @@ let ownership_of_json json =
   { source = { script_id; source_sha256 }; creator }
 ;;
 
+let pins_to_json pins = `Object (List.map pins ~f:(fun (name, pin) -> name, `String pin))
+
+let validate_pins pins =
+  let open Result.Let_syntax in
+  let%bind () =
+    Json_codec.validate_limits
+      ~max_bytes:(2 * 1024 * 1024)
+      ~max_depth:2
+      (pins_to_json pins)
+  in
+  let%map _ =
+    List.fold_result pins ~init:None ~f:(fun previous (name, pin) ->
+      let%bind () = text ~name:"notification disclosure tool" ~max:256 name in
+      let%bind () =
+        match previous with
+        | Some old when String.compare old name >= 0 ->
+          invalid "notification disclosure pins must be unique and ordered"
+        | _ -> Ok ()
+      in
+      match
+        String.length pin = 64
+        && String.for_all pin ~f:(function
+          | '0' .. '9' | 'a' .. 'f' -> true
+          | _ -> false)
+      with
+      | true -> Ok (Some name)
+      | false -> invalid "notification disclosure pin must be lowercase SHA256")
+  in
+  ()
+;;
+
+let pins_of_json json =
+  let open Result.Let_syntax in
+  let%bind fields = Json_codec.fields json in
+  let%bind pins =
+    List.map (Json_codec.to_alist fields) ~f:(fun (name, json) ->
+      Result.map (Json_codec.string json) ~f:(fun pin -> name, pin))
+    |> Result.all
+  in
+  let pins = List.sort pins ~compare:(fun (a, _) (b, _) -> String.compare a b) in
+  let%map () = validate_pins pins in
+  pins
+;;
+
 let validate t =
   let open Result.Let_syntax in
   let c = t.context in
@@ -133,6 +178,7 @@ let validate t =
   in
   let%bind () = text ~name:"delivery correlation" ~max:256 c.correlation in
   let%bind () = Completion.validate c.completion in
+  let%bind () = optional_validate t.disclosure_pins validate_pins in
   let%bind () =
     match c.ownership, c.source with
     | None, _ -> Ok ()
@@ -166,8 +212,10 @@ let validate t =
       else Ok ())
 ;;
 
-let create context =
-  let t = { context; attempt = 1; status = Pending; wake_disposition = None } in
+let create ?disclosure_pins context =
+  let t =
+    { context; attempt = 1; status = Pending; wake_disposition = None; disclosure_pins }
+  in
   Result.map (validate t) ~f:(fun () -> t)
 ;;
 
@@ -243,7 +291,13 @@ let validate_transition ~previous next =
      | _ -> failure Invalid_state "new delivery must be pending on its first attempt")
   | Some previous ->
     let%bind () = validate previous in
-    if not (equal_context previous.context next.context)
+    if
+      (not (equal_context previous.context next.context))
+      || not
+           (Option.equal
+              (List.equal (Tuple2.equal ~eq1:String.equal ~eq2:String.equal))
+              previous.disclosure_pins
+              next.disclosure_pins)
     then failure Conflict "delivery context is immutable"
     else if equal previous next
     then Ok ()
@@ -361,15 +415,23 @@ let to_json t =
        @ optional "invocation_id" c.invocation_id Id.Invocation.to_json
        @ optional "work" c.work Invocation.work_to_json)
   in
-  match t.wake_disposition, c.ownership with
-  | None, None -> body
-  | None, Some ownership ->
+  match t.disclosure_pins, t.wake_disposition, c.ownership with
+  | Some pins, wake, ownership ->
+    `Object
+      ([ "schema_version", `Number "4"
+       ; "delivery", body
+       ; "disclosure_pins", pins_to_json pins
+       ]
+       @ optional "ownership" ownership ownership_to_json
+       @ optional "wake_disposition" wake wake_disposition_to_json)
+  | None, None, None -> body
+  | None, None, Some ownership ->
     `Object
       [ "schema_version", `Number "2"
       ; "delivery", body
       ; "ownership", ownership_to_json ownership
       ]
-  | Some disposition, ownership ->
+  | None, Some disposition, ownership ->
     `Object
       ([ "schema_version", `Number "3"
        ; "delivery", body
@@ -384,14 +446,14 @@ let of_json json =
   let%bind fields = Json_codec.fields json in
   let integer = Json_codec.bounded_int ~min:0 ~max:Int.max_value in
   let%bind version = Json_codec.required_as fields "schema_version" integer in
-  let%bind fields, ownership, wake_disposition =
+  let%bind fields, ownership, wake_disposition, disclosure_pins =
     match version with
-    | 1 -> Ok (fields, None, None)
+    | 1 -> Ok (fields, None, None, None)
     | 2 ->
       let%bind () = closed fields [ "schema_version"; "delivery"; "ownership" ] in
       let%bind ownership = Json_codec.required_as fields "ownership" ownership_of_json in
       let%map fields = Json_codec.required_as fields "delivery" Json_codec.fields in
-      fields, Some ownership, None
+      fields, Some ownership, None, None
     | 3 ->
       let%bind () =
         closed fields [ "schema_version"; "delivery"; "ownership"; "wake_disposition" ]
@@ -401,7 +463,27 @@ let of_json json =
         Json_codec.required_as fields "wake_disposition" wake_disposition_of_json
       in
       let%map fields = Json_codec.required_as fields "delivery" Json_codec.fields in
-      fields, ownership, Some wake_disposition
+      fields, ownership, Some wake_disposition, None
+    | 4 ->
+      let%bind () =
+        closed
+          fields
+          [ "schema_version"
+          ; "delivery"
+          ; "ownership"
+          ; "wake_disposition"
+          ; "disclosure_pins"
+          ]
+      in
+      let%bind ownership = Json_codec.optional_as fields "ownership" ownership_of_json in
+      let%bind wake_disposition =
+        Json_codec.optional_as fields "wake_disposition" wake_disposition_of_json
+      in
+      let%bind disclosure_pins =
+        Json_codec.required_as fields "disclosure_pins" pins_of_json
+      in
+      let%map fields = Json_codec.required_as fields "delivery" Json_codec.fields in
+      fields, ownership, wake_disposition, Some disclosure_pins
     | _ -> failure Incompatible_protocol "unsupported delivery version"
   in
   let%bind () =
@@ -461,7 +543,7 @@ let of_json json =
     ; ownership
     }
   in
-  let t = { context; attempt; status; wake_disposition } in
+  let t = { context; attempt; status; wake_disposition; disclosure_pins } in
   let%map () = validate t in
   t
 ;;

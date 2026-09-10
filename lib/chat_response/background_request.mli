@@ -42,6 +42,19 @@ val of_json
     resource limits. A digest is an audit pin, not proof of authorization. *)
 val fingerprint : t -> string
 
+(** Stable configuration pins for a host-selected ceiling, independent of live
+    capability IDs. Rebinding selects exactly those names and checks each actual
+    permission fingerprint. Extra current registrations never widen the result;
+    missing or changed bindings fail. These functions do not execute tools. *)
+val capability_pins
+  :  Tool_capability.t
+  -> ((string * string) list, Agent_protocol.Error.t) result
+
+val rebind_capabilities
+  :  pins:(string * string) list
+  -> capabilities:Tool_capability.t
+  -> (Tool_capability.t, Agent_protocol.Error.t) result
+
 (** Pure authority-pin check, without compiling or executing the saved request.
     A job ID alone does not grant access to a different script's selected tools. *)
 val validate_capabilities

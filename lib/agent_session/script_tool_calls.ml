@@ -142,6 +142,7 @@ let with_moderator_work t ~owner ~selected ~source ~originating ~error f =
             service
             ~owner
             ~source
+            ~selected
             ~jobs
             ~error
             (fun scope -> f ~jobs ~subscriptions ~schedules ~notifications:(Some scope))

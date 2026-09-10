@@ -288,13 +288,17 @@ type t = private
   ; attempt : int
   ; status : status
   ; wake_disposition : wake_disposition option [@sexp.option]
-    (** Envelope3 when present. Only committed Request_turn deliveries carry
+    (** Envelope3, or Envelope4 with disclosure pins. Only committed Request_turn deliveries carry
         this receipt. Source ownership is independent of wake tracking.
         Historical absent values do not acquire a new wake. *)
+  ; disclosure_pins : (string * string) list option [@sexp.option]
+    (** Envelope4: immutable ordered configuration pins for the publisher's exact
+        tool ceiling. None is historical/untracked, not authority to use the whole
+        current registry. Some [] is an explicitly empty ceiling. *)
   }
 [@@deriving equal, sexp]
 
-val create : context -> (t, Error.t) result
+val create : ?disclosure_pins:(string * string) list -> context -> (t, Error.t) result
 val validate : t -> (unit, Error.t) result
 
 (** New execution services opt into durable wake tracking with [track_wake:true].

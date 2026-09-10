@@ -257,8 +257,12 @@ The host owns authorization, canonical provenance, persistence, deduplication an
 durable wake acceptance. The driver does not re-commit supplied entries. The
 notification adapter must use supported runtime-data framing, never the legacy
 developer-text adapter. Idle scheduling, follow-up/rate policy and persisted wake
-disposition remain host responsibilities; the extensibility daemon's automatic
-notification producer and scheduler integration are still under development.
+disposition remain host responsibilities. Under its internal qualification switch,
+the extensibility daemon now supplies foreground batches after rechecking the
+publisher's captured capability selection and atomically committing data and receipt.
+It accepts a requested wake at actual model admission, or discards it when the
+operation ends without admission. Idle delivery, scheduling policy and pending-wake
+recovery are still under development.
 
 The moderator observes inserted data through `Item_appended`. A script can retain
 state and request a turn from `Turn_end`; requesting a turn directly from

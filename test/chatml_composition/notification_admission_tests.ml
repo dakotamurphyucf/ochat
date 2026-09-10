@@ -161,21 +161,37 @@ let%expect_test
                  delivery.context.completion
                  (Succeeded (`String "ready")));
              (match delivery.status with
-              | Pending -> ()
-              | _ -> failwith "intent was prematurely delivered");
+              | Committed _ -> ()
+              | status ->
+                raise_s
+                  [%sexp "notification was not delivered", (status : P.Delivery.status)]);
              let ownership = Option.value_exn delivery.context.ownership in
+             assert (Option.is_some delivery.disclosure_pins);
              assert (String.equal ownership.source.script_id "publisher");
              assert (
                Option.equal
                  P.Invocation.equal_observer
                  subscription.context.source
                  (Some ownership.source));
-             assert (
-               not
-                 (List.exists state.conversation.canonical_history ~f:(fun entry ->
-                    match entry.P.History.provenance with
-                    | Runtime_notification _ -> true
-                    | _ -> false)));
+             let notifications =
+               List.filter state.conversation.canonical_history ~f:(fun entry ->
+                 match entry.P.History.provenance with
+                 | Runtime_notification _ -> true
+                 | _ -> false)
+             in
+             [%test_eq: int] 1 (List.length notifications);
+             let notification = List.hd_exn notifications in
+             Agent_session.Notification_history.validate ~delivery notification
+             |> protocol_ok;
+             let index id =
+               List.findi_exn state.conversation.canonical_history ~f:(fun _ entry ->
+                 History_entry.Id.equal entry.id id)
+               |> fst
+             in
+             List.iter state.invocations ~f:(fun invocation ->
+               match invocation.context.origin, invocation.output_entry_id with
+               | Model, Some id -> assert (index id < index notification.id)
+               | _ -> ());
              let restored =
                Agent_session.Session_persistence.restore_snapshot
                  (Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t state))
@@ -186,15 +202,15 @@ let%expect_test
                Jsonaf.exactly_equal
                  (P.Delivery.to_json delivery)
                  (P.Delivery.to_json (List.hd_exn restored.deliveries)));
-             print_s [%sexp (mode : mode), (delivery.status : P.Delivery.status)]
+             print_s [%sexp (mode : mode), ("Committed" : string)]
            | _ -> failwith "unexpected notification admission result"));
   [%expect
     {|
-    (Immediate Pending)
-    (Queued Pending)
-    (Observation Pending)
-    (Turn_end Pending)
+    (Immediate Committed)
+    (Queued Committed)
+    (Observation Committed)
+    (Turn_end Committed)
     Invalid_ack: all staged work discarded
-    (Nested Pending)
+    (Nested Committed)
     |}]
 ;;

@@ -34,6 +34,8 @@
   delivery_wake_tests
   notification_transaction_tests
   notification_access_tests
+  notification_disclosure_tests
+  notification_delivery_tests
   notification_readiness_tests
   subscription_clock_tests
   job_artifact_retry_tests

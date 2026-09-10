@@ -314,19 +314,23 @@ let fingerprint t =
   |> fun encoded -> digest ("ochat.background-request.v1\n" ^ encoded)
 ;;
 
-let rebind t current =
+let rebind_capabilities ~pins ~capabilities:current =
   let open Result.Let_syntax in
   let%bind selected =
-    C.select current ~names:(List.map t.pins ~f:fst)
+    C.select current ~names:(List.map pins ~f:fst)
     |> Result.map_error ~f:(fun error ->
       Agent_protocol.Error.invalid_request error.C.message)
   in
-  let%bind pins = capture_pins selected in
-  match List.equal (Tuple2.equal ~eq1:String.equal ~eq2:String.equal) t.pins pins with
+  let%bind current_pins = capture_pins selected in
+  match
+    List.equal (Tuple2.equal ~eq1:String.equal ~eq2:String.equal) pins current_pins
+  with
   | true -> Ok selected
   | false -> invalid "background capability configuration changed; re-admission required"
 ;;
 
+let rebind t current = rebind_capabilities ~pins:t.pins ~capabilities:current
+let capability_pins = capture_pins
 let validate_capabilities t ~capabilities = Result.map (rebind t capabilities) ~f:ignore
 
 let prepare ~env ~current_capabilities ~policy t =

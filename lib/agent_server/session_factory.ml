@@ -1168,9 +1168,10 @@ let extension_notifications actor_ref =
   let module Service = Agent_session.Script_notification_service in
   let host : Service.host =
     { create =
-        (fun owner source ~correlation ~completion ~wake ->
+        (fun owner source ~correlation ~completion ~wake ~disclosure_pins ->
           Result.bind (extension_actor actor_ref) ~f:(fun actor ->
             A.create_script_notification
+              ~disclosure_pins
               actor
               ~owner
               ~source
@@ -1311,6 +1312,52 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
             match receipt.status with
             | Completed _ -> true
             | Running | Failed _ | Interrupted _ -> false))
+    ; notification_input =
+        (fun ~source ~tools ~operation_id () ->
+          let open Result.Let_syntax in
+          let%bind actor = extension_actor actor_ref in
+          let%bind current = A.state actor in
+          let%bind () =
+            match
+              Agent_protocol.Id.Session.equal
+                current.identity.session_id
+                state.identity.session_id
+              && Int.equal current.identity.generation state.identity.generation
+              && Agent_protocol.Id.Prompt_revision.equal
+                   current.spec.prompt_revision_id
+                   state.spec.prompt_revision_id
+              && Agent_protocol.Id.Workspace_instance.equal
+                   current.spec.workspace_instance.id
+                   state.spec.workspace_instance.id
+              && Agent_session.Workspace_instance.equal_canonical_identity
+                   current.spec.workspace_instance.canonical_root
+                   state.spec.workspace_instance.canonical_root
+              && Agent_session.Workspace_definition.equal_access
+                   current.spec.workspace_instance.access
+                   state.spec.workspace_instance.access
+              && String.equal
+                   current.spec.permission_profile_digest
+                   state.spec.permission_profile_digest
+            with
+            | true -> Ok ()
+            | false -> Error (unavailable Conflict "notification runtime pin changed")
+          in
+          let%bind plan =
+            Agent_session.Notification_delivery.prepare
+              ~state:current
+              ~source
+              ~current_capabilities:
+                (Agent_session.Script_tool_calls.current_capabilities tools)
+              ~policy:Chat_response.One_off_request.default_policy
+              ~max_count:t.limits.notifications.max_per_source
+          in
+          match
+            Eio.Cancel.protect (fun () ->
+              A.consume_notifications actor ~operation_id plan)
+          with
+          | Error { code = Conflict; _ } ->
+            Ok Chat_response.In_memory_stream.Safe_point_input.empty
+          | result -> result)
     ; history =
         (fun () ->
           let result =

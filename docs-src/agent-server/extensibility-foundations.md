@@ -2046,8 +2046,9 @@ model request; notifications require the separate delivery adapter.
 
 Publication uses `Runtime_notification(delivery_id)` provenance and commits its
 history entry and receipt together. It requires the originating initial response
-to be published. The current foundation permits publication only while the
-session is running and idle. New publications use a fixed runtime-data label and
+to be published. The explicit host publication API requires a running, idle
+session; the daemon's automatic consumer also inserts at foreground safe points
+after the complete tool batch. New publications use a fixed runtime-data label and
 a version-1 JSON envelope inside one supported user-input message. The envelope
 retains delivery/session/generation identity, creation time, source, correlation,
 invocation/work references and the structured completion. Arbitrary result text
@@ -2080,9 +2081,11 @@ after the owning save and runtime installation. Invocation, ordinary/queued even
 and observation paths carry a lexical notification transaction. A missing adapter
 fails explicitly rather than publishing outside an owning scope.
 
-New moderator-owned delivery records use a version-2 envelope containing the
-existing version-1 delivery body and immutable ownership metadata: exact script
-ID/source SHA256 and the creating invocation or moderator event. Legacy unowned
+Moderator-owned delivery records retain immutable ownership metadata: exact script
+ID/source SHA256 and the creating invocation or moderator event. The version-2
+envelope introduced that ownership around the existing version-1 body. New scoped
+publications use version 4 to also persist the publisher's exact selected capability
+fingerprints; optional wake receipts share this envelope. Legacy unowned
 records retain their JSON and S-expression format. Recovery validates the retained
 creator, session/generation and source-bound subscription correlation; a legacy
 record cannot silently gain current moderator authority.
@@ -2105,10 +2108,11 @@ session, 64 per source, 4096 retained and a 64 KiB/64-level completion payload.
 Staged reservations count toward capacity; admission never evicts retained work.
 
 Actual ChatML/daemon tests cover immediate, queued, observation, end-of-turn and
-nested publication, including invalid acknowledgement rollback. The result is a
-durable pending intent. Active-turn safe-point insertion, automatic delivery and
-wake-up coordination remain unfinished execution-service work. These surfaces do
-not advertise a generally available notification feature yet.
+nested publication, including invalid acknowledgement rollback. Publication first
+creates a durable pending intent. The foreground consumer then commits eligible
+data automatically, after the original tool response is published. Idle delivery
+and host scheduling policy remain unfinished execution-service work. These surfaces
+do not advertise a generally available notification feature yet.
 
 Owned notification commits now check acknowledgement ancestry. A nested ChatML
 tool call keeps its `Resolved` outcome and follows its parent invocation, job
@@ -2124,8 +2128,8 @@ original direct-publication rules.
 acknowledgement from an unusable ancestry that needs explicit disposition. Both
 atomic insertion and snapshot validation use this check. It does not itself
 grant result disclosure, establish a provider safe point or request a turn. Actual
-nested daemon publication is idempotent and survives snapshot restoration without
-inventing another tool output; automatic delivery and wake scheduling remain open.
+nested daemon publication is automatic at foreground safe points, idempotent and
+survives snapshot restoration without inventing another tool output.
 
 The new execution service can commit a delivery with `track_wake:true` to record
 a separate `Pending_wake` for `Request_turn`. This works for moderator and approved
@@ -2136,13 +2140,16 @@ operation. The dedicated wake delta requires that operation to be an active turn
 in the running lifecycle; repeating an already-recorded disposition remains valid
 after the turn ends. Settlement cannot insert history or replace a terminal result.
 
-Records carrying this state use delivery JSON envelope 3, with source ownership
-when present. Legacy commit callers do not opt into tracking. Existing envelopes 1/2
+Records carrying this state without disclosure pins use delivery JSON envelope 3,
+with source ownership when present; records with pins use envelope 4. Legacy commit
+callers do not opt into tracking. Existing envelopes 1/2
 and S-expressions without a wake receipt remain readable and do not acquire a new
 wake on restore. `No_wake` and `Next_turn` carry no automatic-turn request. Dropping
 or reopening a retained receipt, or using the history-insertion delta to settle a
-wake, is rejected. These records support the remaining automatic delivery and
-budget-aware scheduling integration; that integration is not yet enabled.
+wake, is rejected. The foreground consumer tracks new requested wakes and settles
+only the deliveries supplied to its operation. The before-model admission checkpoint
+accepts them; terminal cleanup discards any unadmitted requests. Idle scheduling and
+recovery of a pending wake after a crash remain separate integration work.
 
 The shared turn driver now accepts batches that separate notification data from
 user-driven continuation. Quiet data remains in history without requesting a model
@@ -2150,8 +2157,22 @@ call; requested notification wakes use the normal honor-request-turn policy and
 consecutive self-trigger budget. Sibling tool outputs finish before the batch is
 consumed. Moderator end-session requests stop continuation while retaining the
 committed data. The existing daemon and local TUI user queues use the user-input
-adapter. Automatic notification production, current disclosure checks, idle/rate
-policy and durable wake settlement still need host integration. See
+adapter. The daemon now installs the foreground notification producer under its
+internal qualification switch. It rebinds the exact persisted capability selection
+against the current registry, excluding newly added tools and rejecting removed or
+changed permissions. An absent historical ceiling cannot be inferred; an explicitly
+empty ceiling stays empty. Job-backed data also revalidates its saved request under
+that narrowed selection. Ownership and fingerprints remain host metadata outside
+the model-facing notification envelope.
+
+The producer prepares a bounded proposal over a session snapshot. The actor checks
+the operation, generation, revision, installed source and foreground tool boundary
+before atomically saving the notification frame and receipt. Failed saves leave
+both unchanged; stale proposals wait for a later boundary. Revoked disclosure or
+unusable acknowledgement ancestry retains a failed delivery with a generic
+diagnostic and inserts no result into model history. A delivery-specific history ID
+prevents duplicate insertion. Idle/rate policy, pending-wake recovery and standalone
+local-host installation remain open. See
 [safe-point input semantics](../chatml-safe-point-and-effective-history.md#notification-data-and-wake-requests).
 
 ## Recovery classifications

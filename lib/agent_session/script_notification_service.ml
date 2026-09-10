@@ -9,6 +9,7 @@ type host =
       -> correlation:Ops.correlation
       -> completion:P.Completion.t
       -> wake:P.Completion.wake
+      -> disclosure_pins:(string * string) list
       -> (int * P.Delivery.t, P.Error.t) result
   ; get :
       P.Job.launch_owner
@@ -32,6 +33,7 @@ type scope =
   ; owner : P.Job.launch_owner
   ; source : P.Invocation.observer
   ; jobs : Script_job_service.scope option
+  ; disclosure_pins : (string * string) list
   ; active : bool Atomic.t
   ; mutable issued : (int * P.Delivery.t) list
   ; mutable commit_state : commit_state
@@ -62,12 +64,18 @@ let abort scope receipt =
 
 let abort_all scope = List.iter scope.issued ~f:(fun (receipt, _) -> abort scope receipt)
 
-let with_scope service ~owner ~source ~jobs ~error f =
+let with_scope service ~owner ~source ~selected ~jobs ~error f =
+  let open Result.Let_syntax in
+  let%bind disclosure_pins =
+    Chat_response.Background_request.capability_pins selected
+    |> Result.map_error ~f:(fun failure -> error failure.P.Error.message)
+  in
   let scope =
     { service
     ; owner
     ; source
     ; jobs
+    ; disclosure_pins
     ; active = Atomic.make true
     ; issued = []
     ; commit_state = Open
@@ -112,6 +120,7 @@ let moderator_transaction scope : Ops.transaction =
                   ~correlation
                   ~completion
                   ~wake
+                  ~disclosure_pins:scope.disclosure_pins
                 |> message
               in
               scope.issued <- (receipt, value) :: scope.issued;
@@ -145,4 +154,19 @@ let moderator_transaction scope : Ops.transaction =
           scope.commit_state <- Committed;
           scope.issued <- [])
   }
+;;
+
+let validate_disclosure ~current_capabilities (delivery : P.Delivery.t) =
+  match delivery.disclosure_pins with
+  | None ->
+    Error
+      (P.Error.create
+         Permission_denied
+         ~message:"notification has no captured disclosure ceiling"
+         ~retryable:false
+         ())
+  | Some pins ->
+    Chat_response.Background_request.rebind_capabilities
+      ~pins
+      ~capabilities:current_capabilities
 ;;
