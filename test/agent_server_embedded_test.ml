@@ -438,6 +438,21 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
       let create payload =
         Agent_client.Connection.request connection (Schedule_create (request payload))
       in
+      let overflow_rejected =
+        Agent_client.Connection.request
+          connection
+          (Schedule_create
+             { (request "overflow") with
+               due = After_ms 9_223_372_037_854
+             ; idempotency_key =
+                 Agent_protocol.Idempotency_key.of_string "schedule-overflow"
+                 |> protocol_ok
+             })
+        |> function
+        | Error error ->
+          Agent_protocol.Error.equal_code error.Agent_protocol.Error.code Invalid_request
+        | Ok _ -> false
+      in
       let first = create "same" |> protocol_ok in
       let second = create "same" |> protocol_ok in
       let first_id, second_id =
@@ -466,9 +481,14 @@ let%expect_test "mutating command idempotency replays and rejects conflicts" =
           { replayed_same_id =
               (Agent_protocol.Id.Schedule.compare first_id second_id = 0 : bool)
           ; conflict : bool
+          ; overflow_rejected : bool
           ; schedule_count = (List.length snapshot.schedules : int)
           }]));
-  [%expect {| ((replayed_same_id true) (conflict true) (schedule_count 1)) |}]
+  [%expect
+    {|
+    ((replayed_same_id true) (conflict true) (overflow_rejected true)
+     (schedule_count 1))
+    |}]
 ;;
 
 let%expect_test "due schedules fail visibly when the prompt has no moderator" =

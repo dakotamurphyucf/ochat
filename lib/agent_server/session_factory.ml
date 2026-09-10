@@ -697,17 +697,6 @@ type pending_schedule_operation =
   | Add of Agent_protocol.Schedule.t
   | Cancel of Agent_protocol.Id.Schedule.t
 
-let due_after t delay_ms =
-  try
-    now t
-    |> Agent_protocol.Timestamp.to_time_ns
-    |> Fn.flip Time_ns.add (Time_ns.Span.of_ms (Float.of_int delay_ms))
-    |> Agent_protocol.Timestamp.of_time_ns
-    |> Result.return
-  with
-  | exn -> Error ("schedule due time overflow: " ^ Exn.to_string exn)
-;;
-
 let add_bound_schedule actor_ref pending schedule =
   match !actor_ref with
   | Some actor ->
@@ -729,7 +718,10 @@ let schedule_services t state actor_ref pending =
     then Error "schedule delay must be nonnegative"
     else (
       let created_at = now t in
-      let%bind next_due_at = due_after t delay_ms in
+      let%bind next_due_at =
+        Agent_protocol.Timestamp.add_ms created_at delay_ms
+        |> Result.map_error ~f:(fun error -> error.message)
+      in
       let schedule =
         Agent_protocol.Schedule.
           { id = Agent_protocol.Id.Schedule.create ()

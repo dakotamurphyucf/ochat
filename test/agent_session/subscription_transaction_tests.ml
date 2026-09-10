@@ -105,6 +105,24 @@ let%expect_test
                               ~previous
                               ~next
                           in
+                          let stamp ns =
+                            Int63.of_int64_exn ns
+                            |> Time_ns.of_int63_ns_since_epoch
+                            |> P.Timestamp.of_time_ns
+                          in
+                          (* A forged lifetime across the epoch must not wrap to a
+                             negative signed span and bypass the host ceiling. *)
+                          let excessive =
+                            S.create
+                              { value.context with
+                                created_at = stamp (-4_000_000_000_000_000_000L)
+                              ; deadline = stamp 4_000_000_000_000_000_000L
+                              }
+                            |> protocol_ok
+                          in
+                          (match stage None excessive with
+                           | Error { code = Invalid_request; _ } -> ()
+                           | _ -> failwith "subscription lifetime bypassed admission");
                           let first = stage None value |> protocol_ok in
                           assert (
                             Result.is_error

@@ -3070,6 +3070,14 @@ val of_time_ns : Core.Time_ns.t -> t
 (** [to_time_ns t] returns the underlying absolute time. *)
 val to_time_ns : t -> Core.Time_ns.t
 
+(** [diff_ns t since] returns the signed nanosecond difference without narrowing
+    it to a Time_ns span. The difference of two timestamps fits in int64. *)
+val diff_ns : t -> t -> int64
+
+(** [add_ms t delay_ms] adds a nonnegative millisecond delay. Rejects negative
+    delays and unrepresentable endpoints without wrapping or float rounding. *)
+val add_ms : t -> int -> (t, Error.t) result
+
 (** [of_string encoded] parses an RFC 3339 timestamp with an uppercase UTC [Z] suffix. *)
 val of_string : string -> (t, Error.t) result
 

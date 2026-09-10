@@ -1840,11 +1840,8 @@ let handle_schedule_get t context request =
 ;;
 
 let schedule_due now = function
-  | Agent_protocol.Schedule.At timestamp -> timestamp
-  | After_ms delay ->
-    Agent_protocol.Timestamp.to_time_ns now
-    |> Fn.flip Time_ns.add (Time_ns.Span.of_ms (Float.of_int delay))
-    |> Agent_protocol.Timestamp.of_time_ns
+  | Agent_protocol.Schedule.At timestamp -> Ok timestamp
+  | After_ms delay -> Agent_protocol.Timestamp.add_ms now delay
 ;;
 
 let handle_schedule_create t context command_audit request =
@@ -1857,6 +1854,7 @@ let handle_schedule_create t context command_audit request =
     (fun entry ->
        let%bind state = Agent_session.Session_actor.state entry.actor in
        let now = now t in
+       let%bind next_due_at = schedule_due now request.due in
        let schedule =
          Agent_protocol.Schedule.
            { id = Agent_protocol.Id.Schedule.create ()
@@ -1864,7 +1862,7 @@ let handle_schedule_create t context command_audit request =
            ; generation = state.identity.generation
            ; payload = request.payload
            ; created_at = now
-           ; next_due_at = schedule_due now request.due
+           ; next_due_at
            ; misfire = request.misfire
            ; status = Scheduled
            ; delivery_count = 0

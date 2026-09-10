@@ -16,13 +16,13 @@ let event =
     }
 ;;
 
-let with_event ?(snapshot = Setup.before) actor parent f =
+let with_event ?(snapshot = Setup.before) ?(deadline = Some deadline) actor parent f =
   A.with_job_execution
     actor
     ~job_id:parent.J.id
     ~generation:0
     ~attempt:parent.attempt
-    ~deadline:(Some deadline)
+    ~deadline
     (fun services ->
        services.claim_event
          ~event

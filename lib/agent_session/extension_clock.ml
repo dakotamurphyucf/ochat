@@ -17,13 +17,14 @@ type t = anchor Hashtbl.M(Key).t
 
 let create () = Hashtbl.create (module Key)
 
-let capture t key ~now ~delay_ms =
+let capture t key ~now ~created_at ~due_at =
   Hashtbl.set
     t
     ~key
     ~data:
       { started = now
-      ; delay = Mtime.Span.of_uint64_ns Int64.(of_int delay_ms * 1_000_000L)
+      ; delay =
+          Mtime.Span.of_uint64_ns (Int64.max 0L (P.Timestamp.diff_ns due_at created_at))
       }
 ;;
 
@@ -34,12 +35,9 @@ let reconcile t ~retained ~wall_now ~monotonic_now =
     match Hashtbl.mem t key with
     | true -> ()
     | false ->
-      let ns stamp =
-        P.Timestamp.to_time_ns stamp |> Time_ns.to_int_ns_since_epoch |> Int64.of_int
-      in
       (* Subtract in int64: two valid Time_ns timestamps may differ by more than
          a signed OCaml-int span. The nonnegative result fits an unsigned span. *)
-      let remaining = Int64.max 0L Int64.(ns due - ns wall_now) in
+      let remaining = Int64.max 0L (P.Timestamp.diff_ns due wall_now) in
       Hashtbl.set
         t
         ~key

@@ -2688,10 +2688,14 @@ let provisional_schedule t owner id =
       Agent_protocol.Id.Schedule.equal value.id id)
 ;;
 
-let schedule_span milliseconds =
-  Result.try_with (fun () -> Time_ns.Span.of_int_ms milliseconds)
-  |> Result.map_error ~f:(fun _ ->
-    error Invalid_request "schedule delay exceeds timestamp range")
+let delay_within_limit ~created_at ~due_at max_delay_ms =
+  let ns = Agent_protocol.Timestamp.diff_ns due_at created_at in
+  (* Compare rounded-up milliseconds, without converting the policy ceiling to
+     a span or overflowing the difference between valid timestamp endpoints. *)
+  let milliseconds =
+    Int64.((ns / 1_000_000L) + if ns % 1_000_000L = 0L then 0L else 1L)
+  in
+  Int64.(ns >= 0L && milliseconds <= of_int max_delay_ms)
 ;;
 
 let stage_schedule_mutation_internal
@@ -2724,19 +2728,16 @@ let stage_schedule_mutation_internal
     | None ->
       let limits = t.services.schedule_limits in
       let%bind () = Staged_schedules.validate_limits limits in
-      let%bind maximum_delay = schedule_span limits.max_delay_ms in
       let%bind () =
         match next.ownership with
         | Some ownership
           when Agent_protocol.Job.equal_launch_owner ownership.creator owner
                && Agent_protocol.Timestamp.compare next.created_at (t.services.now ())
                   <= 0
-               && Time_ns.Span.compare
-                    (Time_ns.diff
-                       (Agent_protocol.Timestamp.to_time_ns next.next_due_at)
-                       (Agent_protocol.Timestamp.to_time_ns next.created_at))
-                    maximum_delay
-                  <= 0 -> Ok ()
+               && delay_within_limit
+                    ~created_at:next.created_at
+                    ~due_at:next.next_due_at
+                    limits.max_delay_ms -> Ok ()
         | _ ->
           Error
             (error
@@ -2784,14 +2785,7 @@ let create_script_schedule_internal t owner source delay_ms payload misfire =
   in
   let created_at = t.services.now () in
   let monotonic_created_at = t.services.monotonic_now () in
-  let%bind span = schedule_span delay_ms in
-  let%bind next_due_at =
-    Result.try_with (fun () ->
-      Time_ns.add (Agent_protocol.Timestamp.to_time_ns created_at) span
-      |> Agent_protocol.Timestamp.of_time_ns)
-    |> Result.map_error ~f:(fun _ ->
-      error Invalid_request "schedule due time exceeds timestamp range")
-  in
+  let%bind next_due_at = Agent_protocol.Timestamp.add_ms created_at delay_ms in
   let schedule : Agent_protocol.Schedule.t =
     { id = Agent_protocol.Id.Schedule.create ()
     ; session_id = t.state.identity.session_id
@@ -2812,7 +2806,8 @@ let create_script_schedule_internal t owner source delay_ms payload misfire =
     t.extension_clock
     (Schedule schedule.id)
     ~now:monotonic_created_at
-    ~delay_ms;
+    ~created_at
+    ~due_at:next_due_at;
   receipt, schedule
 ;;
 
@@ -2918,16 +2913,13 @@ let stage_subscription_mutation_internal
         | false ->
           Error (error Resource_limit "subscription admission capacity exhausted")
       in
-      let lifetime =
-        Time_ns.diff
-          (Agent_protocol.Timestamp.to_time_ns next.context.deadline)
-          (Agent_protocol.Timestamp.to_time_ns next.context.created_at)
-      in
       (match
          Agent_protocol.Timestamp.compare next.context.created_at now <= 0
          && Agent_protocol.Timestamp.compare next.context.deadline now > 0
-         && Time_ns.Span.compare lifetime (Time_ns.Span.of_int_ms limits.max_lifetime_ms)
-            <= 0
+         && delay_within_limit
+              ~created_at:next.context.created_at
+              ~due_at:next.context.deadline
+              limits.max_lifetime_ms
        with
        | true -> Ok ()
        | false ->
@@ -3007,12 +2999,7 @@ let create_script_subscription_internal
   in
   let created_at = t.services.now () in
   let monotonic_created_at = t.services.monotonic_now () in
-  let deadline =
-    Time_ns.add
-      (Agent_protocol.Timestamp.to_time_ns created_at)
-      (Time_ns.Span.of_int_ms lifetime_ms)
-    |> Agent_protocol.Timestamp.of_time_ns
-  in
+  let%bind deadline = Agent_protocol.Timestamp.add_ms created_at lifetime_ms in
   let%bind subscription =
     Agent_protocol.Subscription.create
       { id = Agent_protocol.Id.Subscription.create ()
@@ -3036,7 +3023,8 @@ let create_script_subscription_internal
     t.extension_clock
     (Subscription subscription.context.id)
     ~now:monotonic_created_at
-    ~delay_ms:lifetime_ms;
+    ~created_at
+    ~due_at:deadline;
   receipt, subscription
 ;;
 

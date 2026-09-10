@@ -1531,8 +1531,15 @@ are rejected during aggregate validation.
 
 The host can configure timer admission through `Session_factory.limits.schedules`:
 defaults allow 256 active timers per session, 64 per moderator source, 4096 retained
-records, a 24-hour delay and a 64 KiB/64-level payload budget. Reservations count
-until their transaction finishes. The compiled ChatML adapter and subscription
+records, a 24-hour delay and a 64 KiB/64-level payload budget. The host may widen
+the timer delay ceiling. Admission compares the actual duration against that
+ceiling without converting the ceiling to a signed timestamp span. Requested
+delays use exact integer arithmetic and must produce a representable absolute
+timestamp; an overflowing delay returns an error before reserving a timer. The
+same checked calculation applies to legacy relative schedules and subscription
+deadlines. Elapsed anchors use the validated endpoint difference, including valid
+durations wider than a signed timestamp span, so live and recovered timers agree.
+Reservations count until their transaction finishes. The compiled ChatML adapter and subscription
 arming now use this internal staging interface in the qualified daemon. Owned
 timer payloads appear as internal JSON data to scripts, so constructor-like text
 cannot become a native tool event. The durable queue retains a private host frame
