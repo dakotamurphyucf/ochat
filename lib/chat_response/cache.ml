@@ -78,13 +78,38 @@ let of_persistent pf =
 ;;
 
 (* Binary serialisation on disk – deterministic and compact. *)
+let publication_sequence = Atomic.make 0
+
 (** [write_file ~file cache] serialises [cache] using [Bin_prot] and writes it
-    atomically to [file].  The function truncates any existing file. *)
+    to a private sibling before replacing [file]. Concurrent readers see a
+    complete old or new cache. Concurrent writers use last-publication wins;
+    this does not merge caches or promise power-loss durability. *)
 let write_file ~file cache =
-  Bin_prot_utils_eio.write_bin_prot'
-    file
-    [%bin_writer: persistent_form]
-    (to_persistent cache)
+  let directory, name = Eio.Path.split file |> Option.value_exn in
+  let sequence = Atomic.fetch_and_add publication_sequence 1 in
+  let temporary =
+    Eio.Path.(
+      directory
+      / sprintf ".%s.%d.%d.tmp" name (Core_unix.getpid () |> Pid.to_int) sequence)
+  in
+  let owned = ref false in
+  let buffer =
+    Bin_prot.Utils.bin_dump
+      ~header:true
+      [%bin_writer: persistent_form]
+      (to_persistent cache)
+  in
+  Exn.protect
+    ~finally:(fun () ->
+      match !owned with
+      | false -> ()
+      | true -> Eio.Cancel.protect (fun () -> Eio.Path.unlink temporary))
+    ~f:(fun () ->
+      Eio.Path.with_open_out ~create:(`Exclusive 0o600) temporary (fun flow ->
+        owned := true;
+        Eio.Flow.write flow [ Cstruct.of_bigarray buffer ]);
+      Eio.Path.rename temporary file;
+      owned := false)
 ;;
 
 (** [read_file ~file] loads a cache previously written with {!write_file}. *)

@@ -34,7 +34,7 @@ let captured_timer event =
   |> Result.map_error ~f:P.Error.invalid_request
 ;;
 
-let receipt_timer (receipt : E.t) =
+let receipt_snapshot (receipt : E.t) =
   let open Result.Let_syntax in
   match receipt.context.phase, receipt.context.event with
   | Internal_event, `Object fields ->
@@ -45,9 +45,99 @@ let receipt_timer (receipt : E.t) =
          |> Result.map_error ~f:(fun _ ->
            P.Error.invalid_request "invalid captured queued event snapshot")
        in
-       captured_timer event
+       Ok (Some event)
      | _ -> Ok None)
   | _ -> Ok None
+;;
+
+let receipt_timer receipt =
+  let open Result.Let_syntax in
+  let%bind snapshot = receipt_snapshot receipt in
+  match snapshot with
+  | None -> Ok None
+  | Some event -> captured_timer event
+;;
+
+let captured_ingress event =
+  Result.bind (Session.Snapshot.to_value event) ~f:Chat_response.Ingress_delivery.decode
+  |> Result.map_error ~f:P.Error.invalid_request
+;;
+
+let ingress_matches_receipt registration frame =
+  let open Result.Let_syntax in
+  match
+    List.find registration.External_ingress.receipts ~f:(fun receipt ->
+      P.Id.Ingress_event.equal receipt.id frame.Chat_response.Ingress_delivery.event_id)
+  with
+  | None -> Ok false
+  | Some receipt ->
+    let%map expected = External_ingress.delivery_frame registration receipt in
+    Chat_response.Ingress_delivery.equal frame expected
+;;
+
+let claimed_ingress_ids ~state =
+  let open Result.Let_syntax in
+  List.map state.Session_state.moderator_executions ~f:(fun receipt ->
+    let%bind event = receipt_snapshot receipt in
+    match event with
+    | None -> Ok None
+    | Some event ->
+      let%bind captured = captured_ingress event in
+      (match captured with
+       | None -> Ok None
+       | Some frame ->
+         (match
+            List.find state.ingress_registrations ~f:(fun registration ->
+              P.Id.Capability.equal registration.context.id frame.registration_id)
+          with
+          | None -> Ok None
+          | Some registration ->
+            let%map matches = ingress_matches_receipt registration frame in
+            (* A retired forged frame must not consume the identity of a valid
+               event that is still waiting later in the queue. *)
+            Option.some_if matches frame.event_id)))
+  |> Result.all
+  |> Result.map ~f:List.filter_opt
+;;
+
+let ingress_retirement_reason ~state ~observer ~event ~subscription_expired =
+  let open Result.Let_syntax in
+  let%bind frame = captured_ingress event in
+  match frame with
+  | None -> Ok None
+  | Some frame ->
+    let retained =
+      List.find state.Session_state.ingress_registrations ~f:(fun value ->
+        P.Id.Capability.equal value.External_ingress.context.id frame.registration_id)
+    in
+    (match retained with
+     | None -> Ok (Some "ingress.unknown_registration")
+     | Some registration ->
+       let c = registration.context in
+       let%bind matches = ingress_matches_receipt registration frame in
+       (match
+          matches
+          && P.Id.Session.equal c.session_id state.identity.session_id
+          && c.generation = state.identity.generation
+          && P.Invocation.equal_observer c.source observer
+        with
+        | false -> Ok (Some "ingress.stale_or_forged_delivery")
+        | true ->
+          let%bind claimed = claimed_ingress_ids ~state in
+          (match List.mem claimed frame.event_id ~equal:P.Id.Ingress_event.equal with
+           | true -> Ok (Some "ingress.duplicate_delivery")
+           | false ->
+             let active =
+               List.find state.subscriptions ~f:(fun subscription ->
+                 P.Id.Subscription.equal subscription.context.id c.subscription_id
+                 && subscription.epoch = c.epoch
+                 && Option.is_none subscription.result)
+             in
+             (match active with
+              | None -> Ok (Some "ingress.stale_subscription")
+              | Some subscription ->
+                let%map expired = subscription_expired subscription in
+                Option.some_if expired "ingress.expired_subscription"))))
 ;;
 
 let claimed_timer_ids ~state =
@@ -127,6 +217,16 @@ let timer_retirement_reason
               | None -> Ok (Some "timer.stale_subscription")))))
 ;;
 
+let delivery_retirement_reason ~state ~observer ~event ~subscription_expired =
+  let open Result.Let_syntax in
+  let%bind timer =
+    timer_retirement_reason ~state ~observer ~event ~subscription_expired
+  in
+  match timer with
+  | Some _ -> Ok timer
+  | None -> ingress_retirement_reason ~state ~observer ~event ~subscription_expired
+;;
+
 let has_unsettled_claim ~state ~(observer : P.Invocation.observer) =
   List.exists state.Session_state.moderator_executions ~f:(fun receipt ->
     receipt.context.generation = state.identity.generation
@@ -151,6 +251,7 @@ let claim_in_context ~operation_id ~state ~id ~(snapshot : S.t) ~now =
     let checked =
       let%bind value = Session.Snapshot.to_value event in
       let%bind value = Chat_response.Schedule_delivery.script_event value in
+      let%bind value = Chat_response.Ingress_delivery.script_event value in
       match value with
       | Chatml.Chatml_lang.VVariant ("Internal_event", [ payload ]) ->
         Chat_response.Moderator_invocation.internal_event payload |> Result.map ~f:ignore

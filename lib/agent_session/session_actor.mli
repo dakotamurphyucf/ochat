@@ -82,6 +82,27 @@ val create_with_owner_lease_duration
 val snapshot : t -> (Agent_protocol.Snapshot.t, Agent_protocol.Error.t) result
 val state : t -> (Session_state.t, Agent_protocol.Error.t) result
 
+(** Trusted host ingress bridge. Producer must come from authenticated transport
+    context. Preparation is read-only; commit requires the exact captured state
+    and only the proposed queue append, saving receipt and snapshot together.
+    Duplicate acknowledgements never enqueue. These are not raw model/RPC APIs. *)
+val prepare_ingress_submission
+  :  t
+  -> source:Agent_protocol.Invocation.observer
+  -> producer:Agent_protocol.Id.Principal.t
+  -> registration_id:Agent_protocol.Id.Capability.t
+  -> namespace:string
+  -> key:Agent_protocol.Idempotency_key.t
+  -> payload:Jsonaf.t
+  -> (Ingress_submission.decision, Agent_protocol.Error.t) result
+
+val commit_ingress_submission
+  :  t
+  -> Ingress_submission.t
+  -> before:Session.Moderator_state.Identity_snapshot.t
+  -> snapshot:Session.Moderator_state.Identity_snapshot.t
+  -> (External_ingress.receipt, Agent_protocol.Error.t) result
+
 (** Host-only moderator registration transactions. Creation derives the producer
     from the session's recorded creating principal; scripts cannot supply it.
     Mutations require the actual live moderator owner/source and are invisible

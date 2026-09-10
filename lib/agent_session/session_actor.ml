@@ -467,6 +467,19 @@ type _ request =
       * Agent_protocol.Schedule.t option
       * Jsonaf.t option
       -> Agent_protocol.Schedule.t request
+  | Prepare_ingress_submission :
+      Agent_protocol.Invocation.observer
+      * Agent_protocol.Id.Principal.t
+      * Agent_protocol.Id.Capability.t
+      * string
+      * Agent_protocol.Idempotency_key.t
+      * Jsonaf.t
+      -> Ingress_submission.decision request
+  | Commit_ingress_submission :
+      Ingress_submission.t
+      * Session.Moderator_state.Identity_snapshot.t
+      * Session.Moderator_state.Identity_snapshot.t
+      -> External_ingress.receipt request
   | Fail_schedule :
       Agent_protocol.Id.Schedule.t * int * Agent_protocol.Error.t
       -> Agent_protocol.Schedule.t request
@@ -2147,7 +2160,7 @@ let claim_queued_event t id operation_id snapshot =
         ~now:(t.services.now ())
     in
     let%bind retirement_reason =
-      Queued_moderator_event.timer_retirement_reason
+      Queued_moderator_event.delivery_retirement_reason
         ~state:t.state
         ~observer:receipt.context.source
         ~event
@@ -2475,7 +2488,7 @@ let commit_queued_event t borrow snapshot requests =
     match borrow.retirement_reason, borrow.receipt.status with
     | Some reason, Running ->
       let%bind current_reason =
-        Queued_moderator_event.timer_retirement_reason
+        Queued_moderator_event.delivery_retirement_reason
           ~state:t.state
           ~observer:borrow.receipt.context.source
           ~event:borrow.event
@@ -2484,7 +2497,9 @@ let commit_queued_event t borrow snapshot requests =
       let%bind () =
         match current_reason with
         | Some current when String.equal current reason -> Ok ()
-        | _ -> Error (error Conflict "timer retirement no longer matches its admission")
+        | _ ->
+          Error
+            (error Conflict "queued delivery retirement no longer matches its admission")
       in
       let%map interrupted =
         Agent_protocol.Moderator_execution.interrupt borrow.receipt ~reason
@@ -7101,6 +7116,115 @@ let retry_schedule t schedule_id generation =
     Error (error Already_resolved "schedule is already terminal")
 ;;
 
+let ingress_enqueue_available t =
+  match
+    moderator_is_borrowed t || t.idle_moderator_borrowed, t.state.halted, t.state.failure
+  with
+  | true, _, _ -> Error (error Conflict "moderator callback owns the ingress checkpoint")
+  | _, true, _ | _, _, Some _ ->
+    Error (error Invalid_state "moderator cannot accept external data")
+  | false, false, None -> Ok ()
+;;
+
+let ingress_new_admission t candidate =
+  let open Result.Let_syntax in
+  let%bind subscription =
+    lookup_subscription t candidate.External_ingress.context.subscription_id
+    |> Result.of_option
+         ~error:(error Invalid_state "ingress subscription is not retained")
+  in
+  let%bind due = subscription_is_due t subscription in
+  let%bind () =
+    match due with
+    | true ->
+      Error (error Invalid_state "ingress subscription has reached its elapsed deadline")
+    | false -> Ok ()
+  in
+  Staged_ingress.check_capacity
+    ~limits:t.services.ingress_limits
+    ~generation:t.state.identity.generation
+    ~now:(t.services.now ())
+    ~subscriptions:
+      (t.state.subscriptions @ Staged_subscriptions.values t.staged_subscriptions)
+    ~values:
+      ((candidate :: t.state.ingress_registrations)
+       @ Staged_ingress.values t.staged_ingress)
+;;
+
+let prepare_ingress_submission_internal
+      t
+      source
+      producer
+      registration_id
+      namespace
+      key
+      payload
+  =
+  let open Result.Let_syntax in
+  let%bind () = validate_installed_observer t (Some source) in
+  let%bind decision =
+    Ingress_submission.prepare
+      ~state:t.state
+      ~source
+      ~producer
+      ~registration_id
+      ~namespace
+      ~key
+      ~payload
+      ~now:(t.services.now ())
+      ~create_event_id:Agent_protocol.Id.Ingress_event.create
+  in
+  match decision with
+  | Duplicate _ -> Ok decision
+  | Enqueue proposal ->
+    let%bind () = ingress_enqueue_available t in
+    let%map () = ingress_new_admission t proposal.candidate in
+    decision
+;;
+
+let commit_ingress_submission_internal t proposal before snapshot =
+  let open Result.Let_syntax in
+  let%bind () = ingress_enqueue_available t in
+  let%bind () = validate_installed_observer t (Some proposal.Ingress_submission.source) in
+  let%bind () = check_expected_moderator_checkpoint t (Some before) in
+  let%bind next, receipt =
+    Ingress_submission.revalidate ~state:t.state ~now:(t.services.now ()) proposal
+  in
+  let%bind () = ingress_new_admission t next in
+  let%bind frame = External_ingress.delivery_frame next receipt in
+  let%bind event =
+    Chat_response.Ingress_delivery.capture frame
+    |> Session.Snapshot.of_value
+    |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+  in
+  let expected =
+    { before with queued_internal_events = before.queued_internal_events @ [ event ] }
+  in
+  let%bind () =
+    match
+      String.equal before.script_id proposal.source.script_id
+      && String.equal before.script_source_hash proposal.source.source_sha256
+      && Jsonaf.exactly_equal
+           (Runtime_builder.encode_moderator_snapshot expected)
+           (Runtime_builder.encode_moderator_snapshot snapshot)
+    with
+    | true -> Ok ()
+    | false ->
+      Error (error Conflict "ingress delivery must append its captured data frame only")
+  in
+  let%map _ =
+    transition
+      t
+      ~payloads:[]
+      ~delta:
+        (Session_delta.Batch
+           [ Ingress_changed next
+           ; Moderator_changed (Some (Runtime_builder.encode_moderator_snapshot snapshot))
+           ])
+  in
+  receipt
+;;
+
 let complete_schedule
       t
       schedule_id
@@ -8090,6 +8214,18 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
   | Commit_extensions (generation, revision, changes) ->
     commit_extensions_internal t generation revision changes
   | State -> Ok t.state
+  | Prepare_ingress_submission (source, producer, registration_id, namespace, key, payload)
+    ->
+    prepare_ingress_submission_internal
+      t
+      source
+      producer
+      registration_id
+      namespace
+      key
+      payload
+  | Commit_ingress_submission (proposal, before, snapshot) ->
+    commit_ingress_submission_internal t proposal before snapshot
   | Due_schedules -> due_schedules t
   | Read_job id -> Result.map (find_job t id) ~f:(job_with_progress t)
   | Publish_job_progress (id, progress) ->
@@ -8979,6 +9115,25 @@ let renew_owner_with_command_audit t ~command_audit ~attachment_id ~lease_genera
 let publish_recoverable t event = broadcast_recoverable t event
 let checkpoint t ~persist = call t ~priority:Priority (Checkpoint persist)
 let with_quiescent_state t ~f = call t ~priority:Priority (Quiescent_checkpoint f)
+
+let prepare_ingress_submission
+      t
+      ~source
+      ~producer
+      ~registration_id
+      ~namespace
+      ~key
+      ~payload
+  =
+  call
+    t
+    (Prepare_ingress_submission
+       (source, producer, registration_id, namespace, key, payload))
+;;
+
+let commit_ingress_submission t proposal ~before ~snapshot =
+  call t (Commit_ingress_submission (proposal, before, snapshot))
+;;
 
 module For_testing = struct
   let deliver_compaction_result t ~operation_id ~history =

@@ -65,10 +65,12 @@ val create
   -> subscription:Agent_protocol.Subscription.t
   -> (t, Agent_protocol.Error.t) result
 
-(** Recheck authenticated producer, current owner/source/epoch/lifetime and exact
+(** Recheck authenticated producer, current owner/source/lifetime and exact
     namespace before inspecting retry receipts. A repeated key with identical
     canonical JSON returns its saved receipt without allocating an event ID or
-    consuming rate/capacity. Changed payload conflicts. A new event is retained
+    consuming rate/capacity, including after its subscription finishes or advances
+    epoch. Current source/generation, producer, lifetime and explicit revocation
+    still apply to that read. Changed payload conflicts. A new event is retained
     or explicitly rejected; no receipt is evicted to make space. Rate history
     survives restore and conservatively counts future timestamps after rollback.
     Schema validation is bounded and never resolves external references. *)
@@ -89,6 +91,13 @@ val prepare
 (** Idempotent explicit revocation. The first bounded reason remains inspectable;
     it does not delete prior receipts or cancel the associated subscription. *)
 val revoke : t -> reason:string -> (t, Agent_protocol.Error.t) result
+
+(** Capture exact immutable queue metadata for an accepted receipt. Admission
+    timestamp stays in the receipt so the host can assign it at actual commit. *)
+val delivery_frame
+  :  t
+  -> receipt
+  -> (Chat_response.Ingress_delivery.t, Agent_protocol.Error.t) result
 
 (** Validate retained ownership without requiring the subscription to remain
     active; older epochs and terminal outcomes retain their audit receipts. *)

@@ -175,13 +175,19 @@ let%expect_test
       ~now:(at 100)
       ~create_event_id:P.Id.Ingress_event.create
   in
-  let current, _ = submit initial subscription "done" |> protocol_ok |> accepted in
+  let current, original = submit initial subscription "done" |> protocol_ok |> accepted in
+  let retry subscription =
+    match submit current subscription "done" |> protocol_ok with
+    | Duplicate receipt -> assert (I.equal_receipt original receipt)
+    | Accepted _ -> failwith "completed subscription retry created another event"
+  in
   let armed =
     P.Subscription.arm subscription ~expected_epoch:0 ~timer_id:None ~job_id:None
     |> protocol_ok
   in
   I.validate_owner current armed |> protocol_ok;
-  rejected "old epoch" (submit current armed "done");
+  retry armed;
+  rejected "old epoch" (submit current armed "new");
   let terminal =
     P.Subscription.finish
       subscription
@@ -192,7 +198,8 @@ let%expect_test
     |> fst
   in
   I.validate_owner current terminal |> protocol_ok;
-  rejected "terminal subscription" (submit current terminal "done");
+  retry terminal;
+  rejected "terminal subscription" (submit current terminal "new");
   let revoked = I.revoke current ~reason:"operator revoked helper" |> protocol_ok in
   I.validate_transition ~subscription ~previous:(Some current) revoked |> protocol_ok;
   let revoked = restored revoked in

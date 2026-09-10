@@ -25,6 +25,18 @@ val timer_retirement_reason
        (Agent_protocol.Subscription.t -> (bool, Agent_protocol.Error.t) result)
   -> (string option, Agent_protocol.Error.t) result
 
+(** Shared timer/external-data admission guard. Ingress frames require the exact
+    retained receipt and payload, current source/generation, active subscription
+    epoch and no prior claim. Revoking a producer prevents future submissions;
+    previously accepted data still belongs to its subscription and may run. *)
+val delivery_retirement_reason
+  :  state:Session_state.t
+  -> observer:Agent_protocol.Invocation.observer
+  -> event:Session.Snapshot.t
+  -> subscription_expired:
+       (Agent_protocol.Subscription.t -> (bool, Agent_protocol.Error.t) result)
+  -> (string option, Agent_protocol.Error.t) result
+
 (** Pure admission and completion checks for actor-owned queued moderator events.
     Failed/interrupted claims block queued execution for that source/generation,
     including after other handlers change the checkpoint. Explicit retirement is

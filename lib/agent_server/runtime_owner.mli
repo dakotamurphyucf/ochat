@@ -65,6 +65,19 @@ val parse_user_content
   -> Agent_protocol.Session.Message_content.t
   -> (History_entry.t, Agent_protocol.Error.t) result
 
+(** Producer identity is supplied by a trusted authenticated adapter, never taken
+   from the helper payload. This bridge requires a qualified runtime and commits
+   the receipt with its captured queue frame before installing the live queue. *)
+
+val submit_ingress
+  :  t
+  -> producer:Agent_protocol.Id.Principal.t
+  -> registration_id:Agent_protocol.Id.Capability.t
+  -> namespace:string
+  -> key:Agent_protocol.Idempotency_key.t
+  -> payload:Jsonaf.t
+  -> (Agent_session.External_ingress.receipt, Agent_protocol.Error.t) result
+
 (** Load the pinned runtime and prepare one external event under the actor
     checkpoint gate. Persist the schedule delivery and queue checkpoint together
     before installing the live append. Rejection does not mutate the live queue. *)

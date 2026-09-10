@@ -187,18 +187,12 @@ let validate_owner t (subscription : P.Subscription.t) =
   | false -> error Permission_denied "external ingress subscription binding changed"
 ;;
 
-let live t subscription now =
+let readable t subscription now =
   let open Result.Let_syntax in
   let%bind () = validate_owner t subscription in
-  let%bind () =
-    match t.context.epoch = subscription.P.Subscription.epoch with
-    | true -> Ok ()
-    | false -> error Permission_denied "external ingress subscription epoch changed"
-  in
-  match t.revoked, subscription.P.Subscription.result with
-  | Some _, _ -> error Permission_denied "external ingress registration is revoked"
-  | None, Some _ -> error Invalid_state "external ingress subscription is terminal"
-  | None, None ->
+  match t.revoked with
+  | Some _ -> error Permission_denied "external ingress registration is revoked"
+  | None ->
     (match
        P.Timestamp.compare now t.context.created_at >= 0
        && P.Timestamp.compare now t.context.expires_at < 0
@@ -206,6 +200,19 @@ let live t subscription now =
      | true -> Ok ()
      | false ->
        error Invalid_state "external ingress registration is outside its lifetime")
+;;
+
+let live t subscription now =
+  let open Result.Let_syntax in
+  let%bind () = readable t subscription now in
+  let%bind () =
+    match t.context.epoch = subscription.P.Subscription.epoch with
+    | true -> Ok ()
+    | false -> error Permission_denied "external ingress subscription epoch changed"
+  in
+  match subscription.P.Subscription.result with
+  | Some _ -> error Invalid_state "external ingress subscription is terminal"
+  | None -> Ok ()
 ;;
 
 let create context ~subscription =
@@ -249,7 +256,7 @@ let prepare
     | false ->
       error Permission_denied "external ingress producer or namespace is not authorized"
   in
-  let%bind () = live t subscription now in
+  let%bind () = readable t subscription now in
   let%bind payload, payload_sha256 = canonical_payload t.context payload in
   match
     List.find t.receipts ~f:(fun receipt -> P.Idempotency_key.equal receipt.key key)
@@ -259,6 +266,7 @@ let prepare
      | true -> Ok (Duplicate receipt)
      | false -> error Conflict "external ingress retry key has a different payload")
   | None ->
+    let%bind () = live t subscription now in
     let%bind () =
       match List.length t.receipts >= t.context.limits.max_receipts with
       | true -> error Resource_limit "external ingress receipt capacity is exhausted"
@@ -289,6 +297,20 @@ let prepare
     in
     let receipt = { id; key; payload; payload_sha256; accepted_at = now } in
     Ok (Accepted ({ t with receipts = t.receipts @ [ receipt ] }, receipt))
+;;
+
+let delivery_frame t receipt =
+  match List.exists t.receipts ~f:(equal_receipt receipt) with
+  | false -> error Invalid_request "ingress frame requires its retained receipt"
+  | true ->
+    Chat_response.Ingress_delivery.create
+      ~registration_id:t.context.id
+      ~event_id:receipt.id
+      ~subscription_id:t.context.subscription_id
+      ~epoch:t.context.epoch
+      ~namespace:t.context.namespace
+      ~payload:receipt.payload
+    |> Result.map_error ~f:P.Error.invalid_request
 ;;
 
 let revoke t ~reason =

@@ -2241,9 +2241,12 @@ receipts. Capacity exhaustion is an explicit rejection and does not evict result
 Registrations and receipts have an optional session snapshot field and a closed
 `Ingress_changed` journal delta. The transition guard preserves bindings and prior
 receipts, rechecks admission for each appended event, and forbids unrevocation.
-Subscription epoch changes, terminalization, expiry or explicit revocation prevent
-further submissions. Older generations retain audit data but cannot mutate current
-state. Administrative candidates cannot discard the saved registration list.
+Subscription epoch changes and terminalization prevent new events. A matching
+retry can still receive its original acknowledgement after those changes, without
+queueing more work. Current producer/source/generation, registration lifetime and
+explicit revocation are checked even for retries. Older generations retain audit
+data but cannot mutate current state. Administrative candidates cannot discard the
+saved registration list.
 
 The actor now exposes host-only create/read/revoke/select/abort registration
 operations. They require the actual live moderator owner and installed source.
@@ -2263,11 +2266,37 @@ Defaults are 64 active registrations, 256 retained registrations and 4 MiB of
 accounted storage across durable and provisional values. Accounting uses the
 largest serialized version for each ID and reserves 8 KiB per ID for bounded
 revocation growth. It never evicts old receipts. Lower host limits prevent new
-registration while still permitting revocation of existing records. External event
-submission must also enforce these aggregate limits when that path is installed.
+registration while still permitting revocation of existing records. The actor's
+external event commit also enforces these aggregate limits.
 
-Compiled ingress operations, atomic receipt-plus-queue insertion, authenticated
-ingress dispatch and the helper workflow are not installed yet. No CLI, public
+The trusted host submission bridge prepares an immutable proposal against the
+current actor revision. Commit rechecks its registration, source, subscription
+deadline, quotas and exact moderator checkpoint. It saves the receipt and one
+captured queue frame in the same transaction before installing the live queue.
+The receipt timestamp is assigned at commit, so time spent preparing a proposal
+cannot bypass rate limits. A rejected save changes neither the receipt list nor
+the live queue; a stale proposal must be prepared again. Duplicate submissions
+return their retained receipt without appending another event.
+
+Queued delivery matches the exact retained receipt, source/generation and active
+subscription epoch before running a moderator. Stale, forged and duplicate frames
+are retired atomically without invoking user code. A forged copy cannot consume
+the identity of valid data waiting behind it. Revoking a producer blocks future
+submissions, including retries, but does not retract already accepted data;
+cancel or advance the subscription to invalidate its queued workflow.
+
+The private frame preserves exact IDs, integer epochs and JSON text through
+snapshot restoration. The moderator receives an `Internal_event` with JSON fields
+`kind: "external_data"`, `registration_id`, `event_id`, `subscription_id`, `epoch`,
+`namespace` and `data`. Epoch is a decimal string to avoid rounding by the
+ChatML JSON number representation. Helper data remains nested under `data` and
+cannot become a native event constructor. Payload numbers use the normal ChatML
+JSON projection when presented to the script; their durable original text remains
+in the receipt and private frame.
+
+Compiled ingress operations, authenticated ingress dispatch and the helper
+workflow are not installed yet. The runtime-owner submission adapter currently
+accepts a producer identity only from a trusted host caller. No CLI, public
 protocol method, model tool or listener is enabled by these records. An admission
 receipt does not mean a moderator handled the data or that a subscription/model
 turn completed.

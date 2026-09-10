@@ -524,7 +524,7 @@
 (library
  (name chat_response_cache_test)
  (modules chat_response_cache_test)
- (libraries core expect_test_helpers_core chat_response)
+ (libraries core core_unix eio_main expect_test_helpers_core chat_response)
  (inline_tests)
  (preprocess
   (pps ppx_jane ppx_expect)))

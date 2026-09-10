@@ -279,6 +279,60 @@ let with_cancellable_access t f =
   | Error (exn, backtrace) -> Exn.raise_with_original_backtrace exn backtrace
 ;;
 
+let submit_ingress t ~producer ~registration_id ~namespace ~key ~payload =
+  with_cancellable_access t (fun () ->
+    let module A = Agent_session.Session_actor in
+    let open Result.Let_syntax in
+    let%bind () = Eio.Cancel.protect (fun () -> ensure_loaded_locked t) in
+    let%bind runtime, source =
+      match t.runtime with
+      | Some runtime when Option.is_some runtime.moderator_script_tools ->
+        Option.bind
+          runtime.moderator_manager
+          ~f:Chat_response.Moderator_manager.invocation_observer
+        |> Option.map ~f:(fun source -> runtime, source)
+        |> Result.of_option
+             ~error:
+               (Agent_protocol.Error.invalid_request
+                  "ingress requires a qualified moderator")
+      | _ -> Error (Agent_protocol.Error.invalid_request "ingress runtime is unavailable")
+    in
+    A.with_moderator_checkpoint t.actor (fun () ->
+      let%bind decision =
+        A.prepare_ingress_submission
+          t.actor
+          ~source
+          ~producer
+          ~registration_id
+          ~namespace
+          ~key
+          ~payload
+      in
+      match decision with
+      | Duplicate receipt -> Ok receipt
+      | Enqueue proposal ->
+        let%bind frame = Agent_session.Ingress_submission.frame proposal in
+        let%bind payload =
+          Chat_response.Ingress_delivery.capture frame
+          |> Chatml.Chatml_value_codec.Snapshot.of_value
+          |> Result.map ~f:Chatml.Chatml_value_codec.Snapshot.to_jsonaf
+          |> Result.map_error ~f:Agent_protocol.Error.invalid_request
+        in
+        let committed = ref None in
+        let%bind _ =
+          runtime.enqueue_internal_event payload ~prepare:(fun ~before ~snapshot ->
+            let%map receipt =
+              A.commit_ingress_submission t.actor proposal ~before ~snapshot
+            in
+            committed := Some receipt)
+        in
+        Result.of_option
+          !committed
+          ~error:
+            (Agent_protocol.Error.invalid_request
+               "ingress queue did not commit a receipt")))
+;;
+
 let deliver_schedule t (schedule : Agent_protocol.Schedule.t) =
   with_cancellable_access t (fun () ->
     let open Result.Let_syntax in
