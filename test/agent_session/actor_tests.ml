@@ -62,6 +62,7 @@ let%expect_test "session actor publishes committed events to multiple subscriber
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -190,6 +191,7 @@ let%expect_test "session actor enforces its configured attachment limit" =
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -236,6 +238,7 @@ let%expect_test "owner-bound actor stops after its owner disconnect grace" =
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -289,6 +292,7 @@ let%expect_test "owner-bound actor permits one owner and supports grace reclaim"
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -371,6 +375,7 @@ let%expect_test "read-only attachments cannot mutate actor state" =
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -421,6 +426,7 @@ let%expect_test "history IDs are allocated only from actor-committed blocks" =
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -482,6 +488,7 @@ let%expect_test "durable history source adapts the response engine contract" =
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -555,6 +562,7 @@ let%expect_test "foreground worker commits history before terminal operation" =
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -684,6 +692,7 @@ let%expect_test
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -755,6 +764,7 @@ let%expect_test
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }

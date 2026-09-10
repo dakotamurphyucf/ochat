@@ -2245,11 +2245,32 @@ Subscription epoch changes, terminalization, expiry or explicit revocation preve
 further submissions. Older generations retain audit data but cannot mutate current
 state. Administrative candidates cannot discard the saved registration list.
 
-This is a storage/admission foundation. Actor registration transactions, atomic
-receipt-plus-queue insertion, authenticated ingress dispatch and the helper workflow
-are not installed yet. No CLI, public protocol method, model tool or listener is
-enabled by these records. An admission receipt does not mean a moderator handled
-the data or that a subscription/model turn completed.
+The actor now exposes host-only create/read/revoke/select/abort registration
+operations. They require the actual live moderator owner and installed source.
+Creation derives the producer from the session's recorded creating principal;
+missing identity rejects registration, and callers cannot supply another producer.
+Registration is provisional until the owner's selected transaction commits. A
+failed save, cancellation or discarded owner releases its reservations.
+
+Registration can depend on a subscription created in the same transaction. The
+commit rechecks the selected subscription versions and orders registration before
+a later selected epoch invalidates it. An unselected subscription cannot authorize
+a registration. Creation checks expiry again at commit, including the subscription's
+elapsed-time deadline when the wall clock has not advanced.
+
+Shared limits live in actor services and the daemon's embedding factory options.
+Defaults are 64 active registrations, 256 retained registrations and 4 MiB of
+accounted storage across durable and provisional values. Accounting uses the
+largest serialized version for each ID and reserves 8 KiB per ID for bounded
+revocation growth. It never evicts old receipts. Lower host limits prevent new
+registration while still permitting revocation of existing records. External event
+submission must also enforce these aggregate limits when that path is installed.
+
+Compiled ingress operations, atomic receipt-plus-queue insertion, authenticated
+ingress dispatch and the helper workflow are not installed yet. No CLI, public
+protocol method, model tool or listener is enabled by these records. An admission
+receipt does not mean a moderator handled the data or that a subscription/model
+turn completed.
 
 ### Execution recovery
 

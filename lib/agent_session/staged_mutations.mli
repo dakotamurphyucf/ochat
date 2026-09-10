@@ -55,4 +55,33 @@ module Make (Value : Value) : sig
   val release_owner : t -> owner:Agent_protocol.Job.launch_owner -> unit
   val values : t -> Value.t list
   val abort_all : t -> unit
+
+  (** Dependency-aware variants. The supplied validator runs again against the
+      current predecessor on selection and commit; legacy callers keep Value's
+      fixed validator through the original functions above. *)
+  val stage_with_validation
+    :  validate_transition:
+         (previous:Value.t option -> Value.t -> (unit, Agent_protocol.Error.t) result)
+    -> t
+    -> owner:Agent_protocol.Job.launch_owner
+    -> previous:Value.t option
+    -> next:Value.t
+    -> (int, Agent_protocol.Error.t) result
+
+  val select_with_validation
+    :  validate_transition:
+         (previous:Value.t option -> Value.t -> (unit, Agent_protocol.Error.t) result)
+    -> t
+    -> owner:Agent_protocol.Job.launch_owner
+    -> receipts:int list
+    -> lookup:(Value.Id.t -> Value.t option)
+    -> (unit, Agent_protocol.Error.t) result
+
+  val selected_with_validation
+    :  validate_transition:
+         (previous:Value.t option -> Value.t -> (unit, Agent_protocol.Error.t) result)
+    -> t
+    -> owner:Agent_protocol.Job.launch_owner
+    -> lookup:(Value.Id.t -> Value.t option)
+    -> (Value.t list, Agent_protocol.Error.t) result
 end

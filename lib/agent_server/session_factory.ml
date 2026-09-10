@@ -23,6 +23,7 @@ type limits =
   ; subscriptions : Agent_session.Staged_subscriptions.limits
   ; schedules : Agent_session.Staged_schedules.limits
   ; notifications : Agent_session.Staged_notifications.limits
+  ; ingress : Agent_session.Staged_ingress.limits
   }
 
 type t =
@@ -2024,6 +2025,7 @@ let actor_services
     ; subscription_limits = t.limits.subscriptions
     ; schedule_limits = t.limits.schedules
     ; notification_limits = t.limits.notifications
+    ; ingress_limits = t.limits.ingress
     ; create_attachment_id = Agent_protocol.Id.Attachment.create
     ; create_reclaim_token =
         (fun () ->

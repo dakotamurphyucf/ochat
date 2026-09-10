@@ -28,6 +28,7 @@
   staged_jobs
   staged_mutations
   staged_subscriptions
+  staged_ingress
   staged_notifications
   staged_schedules
   script_job_service

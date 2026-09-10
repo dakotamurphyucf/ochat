@@ -48,10 +48,10 @@ module Make (Value : Value) = struct
       Option.some_if (owned entry owner && same_id entry id) entry.next)
   ;;
 
-  let stage t ~owner ~previous ~next =
+  let stage_with_validation ~validate_transition t ~owner ~previous ~next =
     let open Result.Let_syntax in
     let%bind () = Value.validate_staging next in
-    let%bind () = Value.validate_transition ~previous next in
+    let%bind () = validate_transition ~previous next in
     let%bind () =
       match List.find t.entries ~f:(fun entry -> same_id entry (Value.id next)) with
       | Some entry when not (owned entry owner) -> conflict "is staged by another owner"
@@ -74,7 +74,7 @@ module Make (Value : Value) = struct
       Ok receipt
   ;;
 
-  let validate entries ~lookup =
+  let validate entries ~lookup ~validate_transition =
     let open Result.Let_syntax in
     let provisional = Hashtbl.create (module Value.Id) in
     List.fold_result entries ~init:[] ~f:(fun values entry ->
@@ -87,13 +87,13 @@ module Make (Value : Value) = struct
       match Option.equal Value.equal current entry.previous with
       | false -> conflict "changed before its transaction committed"
       | true ->
-        let%map () = Value.validate_transition ~previous:current entry.next in
+        let%map () = validate_transition ~previous:current entry.next in
         Hashtbl.set provisional ~key:id ~data:entry.next;
         entry.next :: values)
     |> Result.map ~f:List.rev
   ;;
 
-  let select t ~owner ~receipts ~lookup =
+  let select_with_validation ~validate_transition t ~owner ~receipts ~lookup =
     let open Result.Let_syntax in
     let seen = Hash_set.create (module Int) in
     let%bind () =
@@ -116,15 +116,15 @@ module Make (Value : Value) = struct
       | true -> Ok ()
       | false -> conflict "receipts are foreign or out of execution order"
     in
-    let%map _ = validate entries ~lookup in
+    let%map _ = validate entries ~lookup ~validate_transition in
     List.iter t.entries ~f:(fun entry ->
       if owned entry owner then entry.selected <- Hash_set.mem seen entry.receipt)
   ;;
 
-  let selected t ~owner ~lookup =
+  let selected_with_validation ~validate_transition t ~owner ~lookup =
     List.rev t.entries
     |> List.filter ~f:(fun entry -> owned entry owner && entry.selected)
-    |> validate ~lookup
+    |> validate ~lookup ~validate_transition
   ;;
 
   let abort t ~owner ~receipt =
@@ -147,4 +147,30 @@ module Make (Value : Value) = struct
 
   let values t = List.map t.entries ~f:(fun entry -> entry.next)
   let abort_all t = t.entries <- []
+
+  let stage t ~owner ~previous ~next =
+    stage_with_validation
+      ~validate_transition:Value.validate_transition
+      t
+      ~owner
+      ~previous
+      ~next
+  ;;
+
+  let select t ~owner ~receipts ~lookup =
+    select_with_validation
+      ~validate_transition:Value.validate_transition
+      t
+      ~owner
+      ~receipts
+      ~lookup
+  ;;
+
+  let selected t ~owner ~lookup =
+    selected_with_validation
+      ~validate_transition:Value.validate_transition
+      t
+      ~owner
+      ~lookup
+  ;;
 end

@@ -22,6 +22,7 @@ type services =
   ; subscription_limits : Staged_subscriptions.limits
   ; schedule_limits : Staged_schedules.limits
   ; notification_limits : Staged_notifications.limits
+  ; ingress_limits : Staged_ingress.limits
   }
 
 type submission =
@@ -80,6 +81,48 @@ val create_with_owner_lease_duration
 
 val snapshot : t -> (Agent_protocol.Snapshot.t, Agent_protocol.Error.t) result
 val state : t -> (Session_state.t, Agent_protocol.Error.t) result
+
+(** Host-only moderator registration transactions. Creation derives the producer
+    from the session's recorded creating principal; scripts cannot supply it.
+    Mutations require the actual live moderator owner/source and are invisible
+    until selected and committed with its checkpoint/outcome. *)
+val create_script_ingress
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> subscription_id:Agent_protocol.Id.Subscription.t
+  -> expected_epoch:int
+  -> namespace:string
+  -> schema:Jsonaf.t
+  -> (int * External_ingress.t, Agent_protocol.Error.t) result
+
+val revoke_script_ingress
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> id:Agent_protocol.Id.Capability.t
+  -> reason:string
+  -> (int * External_ingress.t, Agent_protocol.Error.t) result
+
+val read_script_ingress
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> id:Agent_protocol.Id.Capability.t
+  -> (External_ingress.t, Agent_protocol.Error.t) result
+
+val select_ingress_mutations
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> receipts:int list
+  -> (unit, Agent_protocol.Error.t) result
+
+val abort_ingress_mutation
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> receipt:int
+  -> (unit, Agent_protocol.Error.t) result
 
 (** Host-only transactional background admission. The caller captures the opaque
     request from the current borrowed tool authority before preparing a job.

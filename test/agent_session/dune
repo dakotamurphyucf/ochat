@@ -40,6 +40,7 @@
   notification_compaction_tests
   automatic_turn_budget_tests
   external_ingress_tests
+  ingress_transaction_tests
   notification_readiness_tests
   subscription_clock_tests
   job_artifact_retry_tests

@@ -109,6 +109,7 @@ let default_options =
       ; subscriptions = Agent_session.Staged_subscriptions.default_limits
       ; schedules = Agent_session.Staged_schedules.default_limits
       ; notifications = Agent_session.Staged_notifications.default_limits
+      ; ingress = Agent_session.Staged_ingress.default_limits
       ; job_result_collection =
           { max_intents = 4096
           ; max_entries = 65_536

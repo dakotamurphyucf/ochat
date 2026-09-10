@@ -18,6 +18,7 @@ type services =
   ; subscription_limits : Staged_subscriptions.limits
   ; schedule_limits : Staged_schedules.limits
   ; notification_limits : Staged_notifications.limits
+  ; ingress_limits : Staged_ingress.limits
   }
 
 type submission =
@@ -193,6 +194,29 @@ type _ request =
       * Agent_protocol.Id.Subscription.t
       -> Agent_protocol.Subscription.t request
   | Expire_subscriptions : int request
+  | Create_script_ingress :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Agent_protocol.Id.Subscription.t
+      * int
+      * string
+      * Jsonaf.t
+      -> (int * External_ingress.t) request
+  | Revoke_script_ingress :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Agent_protocol.Id.Capability.t
+      * string
+      -> (int * External_ingress.t) request
+  | Read_script_ingress :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Agent_protocol.Id.Capability.t
+      -> External_ingress.t request
+  | Select_ingress_mutations :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Invocation.observer * int list
+      -> unit request
+  | Abort_ingress_mutation : Agent_protocol.Job.launch_owner * int -> unit request
   | Stage_schedule_mutation :
       Agent_protocol.Job.launch_owner
       * Agent_protocol.Invocation.observer
@@ -522,6 +546,7 @@ type t =
   ; mutable job_scopes : job_scope list
   ; staged_jobs : Staged_jobs.t
   ; staged_subscriptions : Staged_subscriptions.t
+  ; staged_ingress : Staged_ingress.t
   ; staged_schedules : Staged_schedules.t
   ; staged_notifications : Staged_notifications.t
   ; mutable notification_inputs :
@@ -711,6 +736,7 @@ let transition t ~delta ~payloads =
 let abort_staged_work t ~owner =
   Staged_jobs.abort_owner t.staged_jobs ~owner;
   Staged_subscriptions.release_owner t.staged_subscriptions ~owner;
+  Staged_ingress.release_owner t.staged_ingress ~owner;
   Staged_schedules.release_owner t.staged_schedules ~owner;
   Staged_notifications.release_owner t.staged_notifications ~owner;
   sync_extension_clock t
@@ -719,6 +745,7 @@ let abort_staged_work t ~owner =
 let abort_all_staged_work t =
   Staged_jobs.abort_all t.staged_jobs;
   Staged_subscriptions.abort_all t.staged_subscriptions;
+  Staged_ingress.abort_all t.staged_ingress;
   Staged_schedules.abort_all t.staged_schedules;
   Staged_notifications.abort_all t.staged_notifications;
   sync_extension_clock t
@@ -729,6 +756,7 @@ let with_staged_transaction t owner f =
   | Ok _ as result ->
     Staged_jobs.commit t.staged_jobs ~owner;
     Staged_subscriptions.release_owner t.staged_subscriptions ~owner;
+    Staged_ingress.release_owner t.staged_ingress ~owner;
     Staged_schedules.release_owner t.staged_schedules ~owner;
     Staged_notifications.release_owner t.staged_notifications ~owner;
     sync_extension_clock t;
@@ -752,6 +780,31 @@ let lookup_notification t id =
     Agent_protocol.Id.Delivery.equal value.context.id id)
 ;;
 
+let lookup_ingress t id =
+  List.find t.state.ingress_registrations ~f:(fun value ->
+    Agent_protocol.Id.Capability.equal value.External_ingress.context.id id)
+;;
+
+let ingress_subscription_lookup t subscriptions id epoch =
+  let matches value =
+    Agent_protocol.Id.Subscription.equal value.Agent_protocol.Subscription.context.id id
+  in
+  match
+    List.find (subscriptions @ t.state.subscriptions) ~f:(fun value ->
+      matches value && value.epoch = epoch)
+  with
+  | Some _ as result -> result
+  | None -> List.find (List.rev subscriptions @ t.state.subscriptions) ~f:matches
+;;
+
+let selected_ingress t owner subscriptions =
+  Staged_ingress.selected
+    t.staged_ingress
+    ~owner
+    ~lookup:(lookup_ingress t)
+    ~subscription:(ingress_subscription_lookup t subscriptions)
+;;
+
 let staged_work_changes t owner =
   let open Result.Let_syntax in
   let%bind subscriptions =
@@ -759,6 +812,44 @@ let staged_work_changes t owner =
       t.staged_subscriptions
       ~owner
       ~lookup:(lookup_subscription t)
+  in
+  let%bind registrations = selected_ingress t owner subscriptions in
+  let%bind () =
+    List.fold_result registrations ~init:() ~f:(fun () value ->
+      match lookup_ingress t value.External_ingress.context.id with
+      | Some _ -> Ok ()
+      | None ->
+        let%bind due =
+          Extension_clock.is_due
+            t.extension_clock
+            (Subscription value.context.subscription_id)
+            ~now:(t.services.monotonic_now ())
+        in
+        (match
+           (not due)
+           && Agent_protocol.Timestamp.compare
+                (t.services.now ())
+                value.context.expires_at
+              < 0
+         with
+         | true -> Ok ()
+         | false ->
+           Error
+             (error Conflict "ingress subscription expired before registration commit")))
+  in
+  let%bind () =
+    match
+      List.exists registrations ~f:(fun value ->
+        Option.is_none (lookup_ingress t value.External_ingress.context.id))
+    with
+    | false -> Ok ()
+    | true ->
+      Staged_ingress.check_capacity
+        ~limits:t.services.ingress_limits
+        ~generation:t.state.identity.generation
+        ~now:(t.services.now ())
+        ~subscriptions:(t.state.subscriptions @ subscriptions)
+        ~values:(t.state.ingress_registrations @ registrations)
   in
   let%bind schedules =
     Staged_schedules.selected t.staged_schedules ~owner ~lookup:(fun id ->
@@ -773,8 +864,7 @@ let staged_work_changes t owner =
   in
   let jobs = Staged_jobs.selected t.staged_jobs ~owner in
   ( List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
-    @ List.map subscriptions ~f:(fun subscription ->
-      Session_delta.Subscription_changed subscription)
+    @ Staged_ingress.ordered_changes ~subscriptions ~registrations
     @ List.map schedules ~f:(fun schedule -> Session_delta.Schedule_changed schedule)
     @ List.map notifications ~f:(fun delivery -> Session_delta.Delivery_changed delivery)
   , List.map jobs ~f:(fun job ->
@@ -860,6 +950,37 @@ let read_script_subscription t ~owner ~source ~id =
 ;;
 
 let expire_subscriptions t = call t Expire_subscriptions
+
+let create_script_ingress
+      t
+      ~owner
+      ~source
+      ~subscription_id
+      ~expected_epoch
+      ~namespace
+      ~schema
+  =
+  call
+    t
+    (Create_script_ingress
+       (owner, source, subscription_id, expected_epoch, namespace, schema))
+;;
+
+let revoke_script_ingress t ~owner ~source ~id ~reason =
+  call t (Revoke_script_ingress (owner, source, id, reason))
+;;
+
+let read_script_ingress t ~owner ~source ~id =
+  call t (Read_script_ingress (owner, source, id))
+;;
+
+let select_ingress_mutations t ~owner ~source ~receipts =
+  call t (Select_ingress_mutations (owner, source, receipts))
+;;
+
+let abort_ingress_mutation t ~owner ~receipt =
+  Eio.Cancel.protect (fun () -> call t (Abort_ingress_mutation (owner, receipt)))
+;;
 
 let stage_schedule_mutation t ~owner ~source ~previous ~next =
   call t (Stage_schedule_mutation (owner, source, previous, next))
@@ -3112,6 +3233,131 @@ let create_script_subscription_internal
     ~created_at
     ~due_at:deadline;
   receipt, subscription
+;;
+
+let ingress_owned t source (value : External_ingress.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      value.context.session_id
+      value.context.generation
+  in
+  match Agent_protocol.Invocation.equal_observer source value.context.source with
+  | true -> Ok ()
+  | false ->
+    Error
+      (error Permission_denied "ingress registration belongs to another moderator source")
+;;
+
+let provisional_ingress t owner id =
+  match Staged_ingress.find t.staged_ingress ~owner ~id with
+  | Some _ as value -> value
+  | None -> lookup_ingress t id
+;;
+
+let read_script_ingress_internal t owner source id =
+  let open Result.Let_syntax in
+  let%bind _ = subscription_owner_active t owner source in
+  let%bind value =
+    provisional_ingress t owner id
+    |> Result.of_option
+         ~error:(error Invalid_state "ingress registration is not retained")
+  in
+  let%map () = ingress_owned t source value in
+  value
+;;
+
+let create_script_ingress_internal
+      t
+      owner
+      source
+      subscription_id
+      expected_epoch
+      namespace
+      schema
+  =
+  let open Result.Let_syntax in
+  let%bind _ = subscription_owner_active t owner source in
+  let%bind subscription =
+    provisional_subscription t owner subscription_id
+    |> Result.of_option
+         ~error:(error Invalid_state "ingress subscription is not retained")
+  in
+  let%bind () = subscription_owned t source subscription in
+  let%bind () =
+    match subscription.epoch = expected_epoch && Option.is_none subscription.result with
+    | true -> Ok ()
+    | false ->
+      Error (error Conflict "ingress subscription is terminal or has a different epoch")
+  in
+  let%bind due = subscription_is_due t subscription in
+  let%bind () =
+    match due with
+    | false -> Ok ()
+    | true ->
+      Error (error Conflict "ingress subscription has reached its elapsed deadline")
+  in
+  let%bind producer =
+    t.state.identity.creating_principal
+    |> Result.of_option
+         ~error:
+           (error
+              Permission_denied
+              "ingress registration requires a recorded creating principal")
+  in
+  let%bind next =
+    External_ingress.create
+      { id = Agent_protocol.Id.Capability.create ()
+      ; session_id = t.state.identity.session_id
+      ; generation = t.state.identity.generation
+      ; subscription_id
+      ; epoch = expected_epoch
+      ; source
+      ; producer
+      ; namespace
+      ; schema
+      ; created_at = t.services.now ()
+      ; expires_at = subscription.context.deadline
+      ; limits = t.services.ingress_limits.registration
+      }
+      ~subscription
+  in
+  let%bind () =
+    Staged_ingress.check_capacity
+      ~limits:t.services.ingress_limits
+      ~generation:t.state.identity.generation
+      ~now:(t.services.now ())
+      ~subscriptions:
+        (t.state.subscriptions @ Staged_subscriptions.values t.staged_subscriptions)
+      ~values:
+        ((next :: t.state.ingress_registrations) @ Staged_ingress.values t.staged_ingress)
+  in
+  let%map receipt =
+    Staged_ingress.stage t.staged_ingress ~owner ~previous:None ~next ~subscription
+  in
+  receipt, next
+;;
+
+let revoke_script_ingress_internal t owner source id reason =
+  let open Result.Let_syntax in
+  let%bind previous = read_script_ingress_internal t owner source id in
+  let%bind subscription =
+    provisional_subscription t owner previous.context.subscription_id
+    |> Result.of_option
+         ~error:(error Invalid_state "ingress subscription is not retained")
+  in
+  let%bind next = External_ingress.revoke previous ~reason in
+  let%map receipt =
+    Staged_ingress.stage
+      t.staged_ingress
+      ~owner
+      ~previous:(Some previous)
+      ~next
+      ~subscription
+  in
+  receipt, next
 ;;
 
 let notification_owned t source (delivery : Agent_protocol.Delivery.t) =
@@ -7888,6 +8134,26 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     let%map () = subscription_owned t source subscription in
     subscription
   | Expire_subscriptions -> expire_subscriptions_internal t
+  | Create_script_ingress (owner, source, id, epoch, namespace, schema) ->
+    create_script_ingress_internal t owner source id epoch namespace schema
+  | Revoke_script_ingress (owner, source, id, reason) ->
+    revoke_script_ingress_internal t owner source id reason
+  | Read_script_ingress (owner, source, id) ->
+    read_script_ingress_internal t owner source id
+  | Abort_ingress_mutation (owner, receipt) ->
+    Staged_ingress.abort t.staged_ingress ~owner ~receipt
+  | Select_ingress_mutations (owner, source, receipts) ->
+    let open Result.Let_syntax in
+    let%bind _ = subscription_owner_active t owner source in
+    Staged_ingress.select
+      t.staged_ingress
+      ~owner
+      ~receipts
+      ~lookup:(lookup_ingress t)
+      ~subscription:
+        (ingress_subscription_lookup
+           t
+           (Staged_subscriptions.values t.staged_subscriptions))
   | Create_script_notification
       (owner, source, correlation, completion, wake, disclosure_pins) ->
     create_script_notification_internal
@@ -8169,6 +8435,7 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        , t.idle_moderator_borrowed
        , Staged_jobs.is_empty t.staged_jobs
          && Staged_subscriptions.is_empty t.staged_subscriptions
+         && Staged_ingress.is_empty t.staged_ingress
          && Staged_schedules.is_empty t.staged_schedules
          && Staged_notifications.is_empty t.staged_notifications
        , Active_calls.snapshot t.active_calls )
@@ -8251,6 +8518,9 @@ let create_with_owner_lease_duration
   (match Staged_subscriptions.validate_limits services.subscription_limits with
    | Ok () -> ()
    | Error error -> invalid_arg error.message);
+  (match Staged_ingress.validate_limits services.ingress_limits with
+   | Ok () -> ()
+   | Error error -> invalid_arg error.message);
   (match Staged_schedules.validate_limits services.schedule_limits with
    | Ok () -> ()
    | Error error -> invalid_arg error.message);
@@ -8283,6 +8553,7 @@ let create_with_owner_lease_duration
     ; job_scopes = []
     ; staged_jobs = Staged_jobs.create ()
     ; staged_subscriptions = Staged_subscriptions.create ()
+    ; staged_ingress = Staged_ingress.create ()
     ; staged_schedules = Staged_schedules.create ()
     ; staged_notifications = Staged_notifications.create ()
     ; notification_inputs = None

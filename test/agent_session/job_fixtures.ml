@@ -82,6 +82,7 @@ let with_actor
       ?(subscription_limits = Agent_session.Staged_subscriptions.default_limits)
       ?(schedule_limits = Agent_session.Staged_schedules.default_limits)
       ?(notification_limits = Agent_session.Staged_notifications.default_limits)
+      ?(ingress_limits = Agent_session.Staged_ingress.default_limits)
       f
   =
   with_actor_workspace (fun env workspace_instance ->
@@ -124,6 +125,7 @@ let with_actor
             ; job_results
             ; schedule_limits
             ; notification_limits
+            ; ingress_limits
             ; subscription_limits
             ; state_committed = (fun _ _ -> ())
             }

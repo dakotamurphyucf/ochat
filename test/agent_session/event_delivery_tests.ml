@@ -87,6 +87,7 @@ let%expect_test "external event delivery commits receipts before changing the li
             ; monotonic_now = (fun () -> Mtime.min_stamp)
             ; schedule_limits = Agent_session.Staged_schedules.default_limits
             ; notification_limits = Agent_session.Staged_notifications.default_limits
+            ; ingress_limits = Agent_session.Staged_ingress.default_limits
             ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
@@ -263,6 +264,7 @@ let%expect_test "two session event owners reject a wait cycle and release both b
                   ; schedule_limits = Agent_session.Staged_schedules.default_limits
                   ; notification_limits =
                       Agent_session.Staged_notifications.default_limits
+                  ; ingress_limits = Agent_session.Staged_ingress.default_limits
                   ; subscription_limits =
                       Agent_session.Staged_subscriptions.default_limits
                   ; state_committed = (fun _ _ -> ())
