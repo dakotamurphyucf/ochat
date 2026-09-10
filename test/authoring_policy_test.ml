@@ -3,6 +3,9 @@ module P = Chat_response.Authoring_policy
 module C = Chat_response.Tool_capability
 module M = Chatmd_shell_spec.Authoring_metadata
 module S = Chatmd_shell_spec.Extension_spec
+module G = Agent_protocol.Authoring_guidance
+module H = Agent_protocol.History
+module Presence = Chat_response.Authoring_presence
 
 let digest = Chatmd_shell_spec.Source_ref.digest
 
@@ -95,6 +98,131 @@ let fixture ?(author = help) ?(authentic = true) f =
 ;;
 
 let names plan = C.references (P.capabilities plan) |> List.map ~f:(fun r -> r.name)
+
+let%expect_test "guidance presence honors policy, provenance and exact effective content" =
+  fixture (fun ceiling ->
+    let plan policy =
+      P.resolve ~policy ~catalog:(catalog ()) ~ceiling ~selected_names:[ "author" ] ()
+      |> get
+    in
+    let auto = plan Auto in
+    let manual = plan Manual in
+    let preload = plan (Preload [ "chatml/basics" ]) in
+    let ok = function
+      | Ok x -> x
+      | Error error -> raise_s [%sexp (error : Agent_protocol.Error.t)]
+    in
+    let context_identity = digest "installed-runtime-and-target" in
+    let make ?(corpus = "corpus-v1") policy purpose sequence ~complete ~authored =
+      let payload =
+        `Object [ "role", `String "user"; "content", `String "Exact guidance" ]
+      in
+      let guidance =
+        G.create
+          ~context_identity
+          ~policy_fingerprint:(P.fingerprint policy)
+          ~purpose
+          ~payload
+          ~topics:
+            [ { id = "chatml/basics"
+              ; document_sha256 = digest "topic-v1"
+              ; source =
+                  (if authored
+                   then Authored (digest "custom")
+                   else Installed (digest corpus))
+              ; complete
+              }
+            ]
+        |> ok
+      in
+      H.
+        { id =
+            History_entry.Id.create ~namespace:"guidance" ~sequence
+            |> Result.ok_or_failwith
+        ; role = User
+        ; kind = Message
+        ; payload
+        ; provenance = Runtime_authoring guidance
+        ; redacted = false
+        }
+    in
+    let show label policy entry effective ~context_identity =
+      let known = Presence.remember ~previous:[] ~history:[ entry ] |> ok in
+      let result = Presence.inspect ~policy ~context_identity ~known ~effective |> ok in
+      print_s
+        [%sexp
+          (label : string)
+        , (List.map result.observations ~f:(fun item -> item.presence)
+           : Presence.presence list)
+        , (result.refresh_primer : bool)
+        , (result.missing_preload : string list)]
+    in
+    let entry = make auto Primer 0 ~complete:true ~authored:false in
+    show "present" auto entry [ entry ] ~context_identity;
+    show "compacted" auto entry [] ~context_identity;
+    show
+      "changed payload at same ID"
+      auto
+      entry
+      [ { entry with payload = `String "summary" } ]
+      ~context_identity;
+    show
+      "same text without host provenance"
+      auto
+      entry
+      [ { entry with provenance = Canonical } ]
+      ~context_identity;
+    show
+      "redacted"
+      auto
+      entry
+      [ { entry with payload = `Object []; redacted = true } ]
+      ~context_identity;
+    show "new target" auto entry [ entry ] ~context_identity:(digest "other-target");
+    show "manual after auto" manual entry [ entry ] ~context_identity;
+    show "manual after compaction" manual entry [] ~context_identity;
+    let loaded = make preload Preload 1 ~complete:true ~authored:false in
+    show "preloaded topic" preload loaded [ loaded ] ~context_identity;
+    let wrong_corpus =
+      make ~corpus:"other-corpus" preload Preload 5 ~complete:true ~authored:false
+    in
+    show "other installed corpus" preload wrong_corpus [ wrong_corpus ] ~context_identity;
+    let partial = make preload Reference 2 ~complete:false ~authored:false in
+    show "partial topic" preload partial [ partial ] ~context_identity;
+    let authored = make preload Preload 3 ~complete:true ~authored:true in
+    show "custom prose" preload authored [ authored ] ~context_identity;
+    let pointer = make preload Rediscovery 4 ~complete:false ~authored:false in
+    show "rediscovery pointer" preload pointer [ pointer ] ~context_identity;
+    let known = Presence.remember ~previous:[] ~history:[ entry ] |> ok in
+    let repeated = Presence.remember ~previous:known ~history:[ entry ] |> ok in
+    assert (List.equal Presence.equal_receipt known repeated);
+    let rebound = make preload Primer 0 ~complete:true ~authored:false in
+    assert (Result.is_error (Presence.remember ~previous:known ~history:[ rebound ]));
+    assert (
+      Result.is_error
+        (Presence.inspect
+           ~policy:auto
+           ~context_identity
+           ~known
+           ~effective:[ entry; entry ]));
+    assert (Result.is_error (Presence.remember ~previous:[] ~history:[ entry; entry ])));
+  [%expect
+    {|
+    (present (Present) false ())
+    (compacted (Absent) true ())
+    ("changed payload at same ID" (Modified) true ())
+    ("same text without host provenance" (Modified) true ())
+    (redacted (Redacted) true ())
+    ("new target" (Stale_context) true ())
+    ("manual after auto" (Stale_policy) false ())
+    ("manual after compaction" (Absent) false ())
+    ("preloaded topic" (Present) true ())
+    ("other installed corpus" (Present) true (chatml/basics))
+    ("partial topic" (Present) true (chatml/basics))
+    ("custom prose" (Present) true (chatml/basics))
+    ("rediscovery pointer" (Present) true (chatml/basics))
+    |}]
+;;
 
 let%test_unit "ordinary tools do not imply authoring from names or policy" =
   fixture (fun ceiling ->

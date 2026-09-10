@@ -48,6 +48,61 @@ module Read_request : sig
 end
 ```
 
+## authoring_guidance
+
+[JSON codec](../../lib/agent_protocol/authoring_guidance.ml) · [interface](../../lib/agent_protocol/authoring_guidance.mli)
+
+```ocaml
+(** Host-owned provenance for guidance, never inferred from message text. Source
+    identities are content hashes, not paths, credentials or executable grants. *)
+type source =
+  | Installed of string
+  | Authored of string
+[@@deriving equal, sexp]
+
+type purpose =
+  | Primer
+  | Preload
+  | Reference
+  | Rediscovery
+[@@deriving equal, sexp]
+
+type topic =
+  { id : string
+  ; document_sha256 : string
+  ; source : source
+  ; complete : bool
+  }
+[@@deriving equal, sexp]
+
+type t = private
+  { version : int
+  ; context_identity : string
+  ; policy_fingerprint : string
+  ; payload_sha256 : string
+  ; purpose : purpose
+  ; topics : topic list
+  }
+[@@deriving equal, sexp]
+
+(** [context_identity] binds installed language/runtime, target and effective
+    capability identities. [policy_fingerprint] comes from resolved author policy.
+    The payload digest binds the complete provider item, including its role.
+    Rediscovery pointers must not claim to contain complete topic content. *)
+val create
+  :  context_identity:string
+  -> policy_fingerprint:string
+  -> purpose:purpose
+  -> topics:topic list
+  -> payload:Jsonaf.t
+  -> (t, Error.t) result
+
+val validate : t -> (unit, Error.t) result
+val matches_payload : t -> Jsonaf.t -> bool
+val to_json : t -> Jsonaf.t
+val of_json : Jsonaf.t -> (t, Error.t) result
+```
+
 ## blob
 
 [JSON codec](../../lib/agent_protocol/blob.ml) · [interface](../../lib/agent_protocol/blob.mli)
@@ -877,6 +932,7 @@ type provenance =
   | Moderator_inserted
   | Moderator_replaced of Id.t
   | Runtime_notification of delivery_id
+  | Runtime_authoring of Authoring_guidance.t
 [@@deriving equal, sexp]
 
 type entry =
@@ -890,6 +946,12 @@ type entry =
 [@@deriving equal, sexp]
 
 val entry_to_json : entry -> Jsonaf.t
+
+(** Validate host provenance metadata. This does not decode a provider item or
+    claim the original guidance payload is still present; use the presence hook
+    after applying effective-history edits to determine that. *)
+val validate_entry : entry -> (unit, Error.t) result
+
 val entry_of_json : Jsonaf.t -> (entry, Error.t) result
 
 module Window_request : sig

@@ -32,6 +32,7 @@ type provenance =
   | Moderator_inserted
   | Moderator_replaced of Id.t
   | Runtime_notification of delivery_id
+  | Runtime_authoring of Authoring_guidance.t
 [@@deriving equal, sexp]
 
 type entry =
@@ -45,6 +46,12 @@ type entry =
 [@@deriving equal, sexp]
 
 val entry_to_json : entry -> Jsonaf.t
+
+(** Validate host provenance metadata. This does not decode a provider item or
+    claim the original guidance payload is still present; use the presence hook
+    after applying effective-history edits to determine that. *)
+val validate_entry : entry -> (unit, Error.t) result
+
 val entry_of_json : Jsonaf.t -> (entry, Error.t) result
 
 module Window_request : sig

@@ -32,6 +32,7 @@
   extension_clock_tests
   timer_range_tests
   notification_history_tests
+  authoring_history_tests
   delivery_ownership_tests
   delivery_wake_tests
   notification_transaction_tests

@@ -48,6 +48,7 @@ type provenance =
   | Moderator_inserted
   | Moderator_replaced of Id.t
   | Runtime_notification of delivery_id
+  | Runtime_authoring of Authoring_guidance.t
 [@@deriving equal, sexp]
 
 type entry =
@@ -59,6 +60,13 @@ type entry =
   ; redacted : bool
   }
 [@@deriving equal, sexp]
+
+let validate_entry entry =
+  match entry.provenance with
+  | Runtime_authoring guidance -> Authoring_guidance.validate guidance
+  | Canonical | Moderator_inserted | Moderator_replaced _ | Runtime_notification _ ->
+    Ok ()
+;;
 
 let role_to_string = function
   | System -> "system"
@@ -95,6 +103,11 @@ let kind_of_json =
 let provenance_to_json = function
   | Canonical -> `Object [ "type", `String "canonical" ]
   | Moderator_inserted -> `Object [ "type", `String "moderator_inserted" ]
+  | Runtime_authoring guidance ->
+    `Object
+      [ "type", `String "runtime_authoring"
+      ; "guidance", Authoring_guidance.to_json guidance
+      ]
   | Runtime_notification id ->
     `Object
       [ "type", `String "runtime_notification"; "delivery_id", Delivery_id.to_json id ]
@@ -109,6 +122,10 @@ let provenance_of_json json =
   match encoded with
   | "canonical" -> Ok Canonical
   | "moderator_inserted" -> Ok Moderator_inserted
+  | "runtime_authoring" ->
+    Result.map
+      (Json_codec.required_as fields "guidance" Authoring_guidance.of_json)
+      ~f:(fun guidance -> Runtime_authoring guidance)
   | "runtime_notification" ->
     Result.map
       (Json_codec.required_as fields "delivery_id" Delivery_id.of_json)

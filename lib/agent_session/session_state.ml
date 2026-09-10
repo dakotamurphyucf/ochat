@@ -113,11 +113,28 @@ type t =
   }
 [@@deriving sexp]
 
-let current_schema_version = 9
+let current_schema_version = 10
 
 let upgrade_schema t =
   if t.schema_version = current_schema_version
   then Ok t
+  else if
+    t.schema_version < current_schema_version
+    && List.exists
+         (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+         ~f:(fun entry ->
+           match entry.Agent_protocol.History.provenance with
+           | Runtime_authoring _ -> true
+           | _ -> false)
+  then
+    Error
+      (Agent_protocol.Error.create
+         Migration_required
+         ~message:"authoring guidance provenance requires session schema 10"
+         ~retryable:false
+         ())
+  else if t.schema_version = 9
+  then Ok { t with schema_version = current_schema_version }
   else if
     List.exists t.jobs ~f:(fun job ->
       match job.Agent_protocol.Job.delivery with
@@ -248,6 +265,12 @@ let nonnegative name value =
 
 let validate t =
   let open Result.Let_syntax in
+  let%bind () =
+    List.fold_result
+      (t.conversation.canonical_history @ t.conversation.deferred_user_entries)
+      ~init:()
+      ~f:(fun () entry -> Agent_protocol.History.validate_entry entry)
+  in
   let%bind () =
     match t.automatic_turn_budget with
     | None -> Ok ()

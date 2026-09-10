@@ -130,6 +130,10 @@ let render_protocol entries =
         Printf.sprintf
           "<!-- ochat-runtime-notification delivery_id=%S -->\n"
           (Agent_protocol.Id.Delivery.to_string id)
+      | Runtime_authoring guidance ->
+        Printf.sprintf
+          "<!-- ochat-runtime-authoring %s -->\n"
+          (Agent_protocol.Authoring_guidance.to_json guidance |> Jsonaf.to_string)
       | Canonical | Moderator_inserted | Moderator_replaced _ -> ""
     in
     annotation ^ render_entry history)

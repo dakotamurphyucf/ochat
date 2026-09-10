@@ -1852,10 +1852,10 @@ authorized inspection. Stale requests, failed saves and other admission failures
 leave delivery pending. A discarded delivery cannot be revived by journal replay
 or a later permission change.
 
-Session-state schema 9 retains this disposition and safely upgrades schema 8
+Session-state schema 9 introduced this disposition; current schema 10 safely upgrades schema 8/9
 snapshots. Older snapshots cannot contain the new disposition; unknown delivery
 versions or reasons fail decoding. Back up the complete data root before rolling
-back to a binary that cannot read schema 9; do not edit stored version numbers to
+back to a binary that cannot read the current schema; do not edit stored version numbers to
 bypass migration checks. The nested JSON delivery record uses version 1, separate
 from the session-state and invocation schema versions.
 
@@ -3373,6 +3373,36 @@ entries. Background work and generated child-session tools retain their later
 phase requirements.
 
 ## Authoring policy admission plans
+
+### Guidance provenance and effective-context inspection
+
+The host integration hooks now distinguish previously read guidance from content
+that is still present in a model input. `History.Runtime_authoring` carries
+`Authoring_guidance` version 1: topic IDs, document and installed/authored source
+hashes, completeness, purpose, context and policy fingerprints, and the digest of
+the complete provider item. This metadata is supplied by the host; text that looks
+like documentation cannot assign itself runtime provenance. JSON projections and
+ChatMD exports preserve the label. Session-state schema 10 persists it and rejects
+the new provenance inside older-schema snapshots. Ordinary schema 9 snapshots
+upgrade without acquiring guidance.
+
+`Chat_response.Authoring_presence.remember` builds serializable rediscovery
+receipts without copying prose. `inspect` compares those receipts with the actual
+effective history. Same-ID payload changes, moderator replacements (even with the
+same text), redaction and missing entries cannot count as present guidance. A
+changed target/runtime/capability context or author-policy fingerprint marks the
+old content stale. Archived entries remain evidence of past retrieval, not of
+current model context.
+
+The resulting plan can request a missing automatic primer or identify missing
+preloaded topics. Manual policy requests neither. Partial topics, rediscovery
+pointers and authored prose cannot satisfy complete installed guidance. These
+hooks perform no retrieval, tool calls, context insertion or model scheduling.
+The A01 integration still owns the compatible corpus, bounded retained pointer
+index, exact topic-version selection, budget accounting and refresh at model-input
+boundaries. This foundation does not enable authoring features for general use.
+
+### Registration and policy selection
 
 `Chatmd_shell_spec.Authoring_metadata` describes which registered tools create
 scripts or definitions. A version-1 help declaration contains a package ID,

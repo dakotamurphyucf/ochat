@@ -1244,7 +1244,7 @@ let%expect_test
                                (old_permission_field (S.sexp_of_t legacy)))
                           |> store_ok
                         in
-                        [%test_eq: int] 9 migrated.schema_version;
+                        [%test_eq: int] S.current_schema_version migrated.schema_version;
                         assert (
                           Agent_protocol.Permission.equal_owner
                             (List.hd_exn migrated.permissions).owner

@@ -45,8 +45,10 @@ let of_protocol entry =
   if entry.Agent_protocol.History.redacted
   then Error (invalid "redacted history cannot be used as canonical model input")
   else
-    Result.map (decode_item entry.payload) ~f:(fun item ->
-      History_entry.create_with_id ~id:entry.id item)
+    let open Result.Let_syntax in
+    let%bind () = Agent_protocol.History.validate_entry entry in
+    let%map item = decode_item entry.payload in
+    History_entry.create_with_id ~id:entry.id item
 ;;
 
 let canonical_encoder ~previous =

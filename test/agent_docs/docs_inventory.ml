@@ -61,6 +61,7 @@ let owner name =
         ; "completion_projection"
         ; "job_result_reference"
         ; "standalone_delivery"
+        ; "authoring"
         ]
       , "../agent-server/extensibility-foundations.md" )
     ; [ "shell" ], "../guide/chatmd-shell-host-integration.md"
