@@ -25,7 +25,9 @@ type prepare_enqueue =
   -> (unit, Agent_protocol.Error.t) result
 
 type extension_services =
-  { script_tools : Chat_response.Agent_runtime.t -> Script_tool_calls.t
+  { runtime_policy : Chat_response.Runtime_semantics.policy
+    (** Captured host policy shared by foreground and idle execution. *)
+  ; script_tools : Chat_response.Agent_runtime.t -> Script_tool_calls.t
     (** Bind shared native policy/disclosure to the exact constructed runtime.
         This service owns generic native tool approval; delegated shell tools
         still use the authorized shell runtime's policy and approval broker. *)
@@ -113,6 +115,9 @@ type t =
         moderator-tool and ordinary-event services. *)
   ; moderator_activation : moderator_activation option
     (** Deferred owned activation after installing the initial checkpoint. *)
+  ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
+    (** Enable durable accounting with this exact captured policy at installation.
+        Absent for unqualified runtimes. *)
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue

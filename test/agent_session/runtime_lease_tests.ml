@@ -18,6 +18,7 @@ let runtime ?script_tools ~close () : Builder.t =
   ; moderator_script_tools = script_tools
   ; background_executor = None
   ; idle_notifications = None
+  ; automatic_turn_policy = None
   ; moderator_activation = None
   ; start_moderator = (fun () -> Ok None)
   ; enqueue_internal_event = (fun ?prepare:_ _ -> failwith "unexpected event")

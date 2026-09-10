@@ -45,6 +45,7 @@ val create
   -> home:string
   -> model_post_stream:Agent_session.Runtime_builder.model_post_stream option
   -> qualify_chatml_extensions:bool
+  -> chatml_runtime_policy:Chat_response.Runtime_semantics.policy
   -> authoring_validation_host:Chat_response.Authoring_validation.host option
   -> durability:Agent_store.Journal_segment.durability
   -> limits:limits

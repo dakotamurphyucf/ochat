@@ -12,6 +12,7 @@ type t =
   | Deferred_entries_adopted
   | Active_operation_changed of Agent_protocol.Operation.t option
   | Automatic_turn_budget_enabled of Chat_response.Runtime_semantics.policy
+  | Automatic_turn_pauses_changed of Chat_response.Runtime_semantics.pause_condition list
   | Attachment_added of Agent_protocol.Session.Attachment.t
   | Attachment_removed of Agent_protocol.Id.Attachment.t
   | Permission_changed of Agent_protocol.Permission.t
@@ -144,6 +145,16 @@ let rec apply state = function
        let budget = Automatic_turn_budget.create policy in
        Result.map (Automatic_turn_budget.validate budget) ~f:(fun () ->
          { state with automatic_turn_budget = Some budget }))
+  | Automatic_turn_pauses_changed conditions ->
+    (match state.automatic_turn_budget with
+     | None ->
+       Error (Agent_protocol.Error.invalid_request "automatic-turn policy is not enabled")
+     | Some budget ->
+       Ok
+         { state with
+           automatic_turn_budget =
+             Some (Automatic_turn_budget.with_pauses budget conditions)
+         })
   | Attachment_added attachment ->
     Ok
       { state with

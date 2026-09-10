@@ -11,6 +11,11 @@ type t = private
 [@@deriving equal, sexp]
 
 val create : Chat_response.Runtime_semantics.policy -> t
+
+(** Change only host pause flags, retaining admission counts, rate history and
+    immutable ceilings. Repeated flags normalize to one stable representation. *)
+val with_pauses : t -> Chat_response.Runtime_semantics.pause_condition list -> t
+
 val validate : t -> (unit, Agent_protocol.Error.t) result
 
 (** Record only a newly admitted turn. State updates and compactions do not count.

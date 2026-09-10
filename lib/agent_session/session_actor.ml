@@ -288,6 +288,9 @@ type _ request =
   | Authorize_writer : Agent_protocol.Id.Attachment.t -> unit request
   | Set_operation_worker : Operation_worker.t option -> unit request
   | Enable_automatic_turn_budget : Chat_response.Runtime_semantics.policy -> unit request
+  | Set_automatic_turn_pauses :
+      Chat_response.Runtime_semantics.pause_condition list
+      -> unit request
   | Change_moderator : Jsonaf.t option -> Agent_protocol.Session.t request
   | Change_workspace : Workspace_instance.t -> Agent_protocol.Session.t request
   | Shell_approval_grants : Session.Shell_state.Approval_grant.persisted list request
@@ -8003,6 +8006,30 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        |> Result.map ~f:ignore
      | _ ->
        Error (error Conflict "cannot enable automatic-turn accounting during active work"))
+  | Set_automatic_turn_pauses conditions ->
+    (match
+       t.state.active_operation, moderator_is_borrowed t, t.idle_moderator_borrowed
+     with
+     | None, false, false ->
+       let open Result.Let_syntax in
+       let%bind budget =
+         t.state.automatic_turn_budget
+         |> Result.of_option
+              ~error:(error Invalid_state "automatic-turn policy is not enabled")
+       in
+       let next = Automatic_turn_budget.with_pauses budget conditions in
+       (match Automatic_turn_budget.equal budget next with
+        | true -> Ok ()
+        | false ->
+          transition
+            t
+            ~delta:
+              (Session_delta.Automatic_turn_pauses_changed
+                 next.policy.budget.pause_conditions)
+            ~payloads:[]
+          |> Result.map ~f:ignore)
+     | _ ->
+       Error (error Conflict "pause changes wait for active moderator or foreground work"))
   | Change_moderator moderator -> change_moderator t moderator
   | Change_workspace workspace -> change_workspace t workspace
   | Shell_approval_grants -> Ok t.state.shell.approval_grants
@@ -8303,6 +8330,7 @@ let commit_extensions t ~generation ~expected_revision changes =
 ;;
 
 let enable_automatic_turn_budget t policy = call t (Enable_automatic_turn_budget policy)
+let set_automatic_turn_pauses t conditions = call t (Set_automatic_turn_pauses conditions)
 
 let set_operation_worker t worker =
   call t ~priority:Priority (Set_operation_worker worker)

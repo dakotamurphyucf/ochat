@@ -44,6 +44,7 @@ type t =
   ; home : string
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
   ; qualify_chatml_extensions : bool
+  ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; durability : Agent_store.Journal_segment.durability
   ; limits : limits
@@ -79,6 +80,7 @@ let create
       ~home
       ~model_post_stream
       ~qualify_chatml_extensions
+      ~chatml_runtime_policy
       ~authoring_validation_host
       ~durability
       ~limits
@@ -111,6 +113,7 @@ let create
   ; home
   ; model_post_stream
   ; qualify_chatml_extensions
+  ; chatml_runtime_policy
   ; authoring_validation_host
   ; durability
   ; limits
@@ -1262,7 +1265,11 @@ let extension_services t profile actor_ref ~(state : Agent_session.Session_state
     Ok (actor, current)
   in
   Agent_session.Runtime_builder.
-    { script_tools =
+    { runtime_policy =
+        (match state.automatic_turn_budget with
+         | Some budget -> budget.policy
+         | None -> t.chatml_runtime_policy)
+    ; script_tools =
         (fun native ->
           let registry =
             Lazy.force native.Chat_response.Agent_runtime.capabilities
@@ -2376,12 +2383,10 @@ let create_loaded_entry
     let%bind () = flush_pending_schedules actor !pending_schedule_operations in
     let%bind () = flush_pending_jobs actor !pending_jobs in
     let%bind () =
-      match runtime.moderator_script_tools with
+      match runtime.automatic_turn_policy with
       | None -> Ok ()
-      | Some _ ->
-        Agent_session.Session_actor.enable_automatic_turn_budget
-          actor
-          Chat_response.Runtime_semantics.default_policy
+      | Some policy ->
+        Agent_session.Session_actor.enable_automatic_turn_budget actor policy
     in
     let%bind moderator_snapshot = runtime.start_moderator () in
     install_moderator_if_changed actor moderator_snapshot

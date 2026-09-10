@@ -21,6 +21,7 @@ type options =
   ; policy_evaluator_resolver : Catalog_builder.policy_evaluator_resolver option
   ; model_post_stream : Agent_session.Runtime_builder.model_post_stream option
   ; qualify_chatml_extensions : bool
+  ; chatml_runtime_policy : Chat_response.Runtime_semantics.policy
   ; authoring_validation_host : Chat_response.Authoring_validation.host option
   ; oauth_resolver : (string -> Authenticator.bearer_validator option) option
   }
@@ -124,6 +125,7 @@ let default_options =
   ; policy_evaluator_resolver = None
   ; model_post_stream = None
   ; qualify_chatml_extensions = false
+  ; chatml_runtime_policy = Chat_response.Runtime_semantics.default_policy
   ; authoring_validation_host = None
   ; oauth_resolver = None
   }
@@ -746,6 +748,7 @@ let compose ~sw ~env ~(config : Config.t) ~tool_dir ~home ~options store built p
       ~home
       ~model_post_stream:options.model_post_stream
       ~qualify_chatml_extensions:options.qualify_chatml_extensions
+      ~chatml_runtime_policy:options.chatml_runtime_policy
       ~authoring_validation_host:options.authoring_validation_host
       ~durability:(durability config.server)
       ~limits:factory_limits
@@ -895,6 +898,13 @@ let start
   =
   Mirage_crypto_rng_unix.use_default ();
   let open Result.Let_syntax in
+  let%bind () =
+    match options.qualify_chatml_extensions with
+    | false -> Ok ()
+    | true ->
+      Agent_session.Automatic_turn_budget.create options.chatml_runtime_policy
+      |> Agent_session.Automatic_turn_budget.validate
+  in
   let%bind store =
     open_store ~sw ~env config.server ~process_start_identity
     |> Result.map_error ~f:protocol_of_store

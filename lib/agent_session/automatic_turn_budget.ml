@@ -11,6 +11,15 @@ type t =
 
 let create policy = { policy; followup_turns = 0; started_ms = [] }
 
+let with_pauses t conditions =
+  let pause_conditions =
+    [ R.Pause_followup_turns; Pause_internal_event_drains ]
+    |> List.filter ~f:(fun value ->
+      List.mem conditions value ~equal:R.equal_pause_condition)
+  in
+  { t with policy = { t.policy with budget = { t.policy.budget with pause_conditions } } }
+;;
+
 let validate t =
   let budget = t.policy.budget in
   let valid_rate =

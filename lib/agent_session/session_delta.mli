@@ -16,6 +16,8 @@ type t =
   | Automatic_turn_budget_enabled of Chat_response.Runtime_semantics.policy
   (** Enable once, or repeat the same policy without resetting accounting.
       New operation admission updates the retained count in the same delta. *)
+  | Automatic_turn_pauses_changed of Chat_response.Runtime_semantics.pause_condition list
+  (** Host pause/resume preserves every count and ceiling. *)
   | Attachment_added of Agent_protocol.Session.Attachment.t
   | Attachment_removed of Agent_protocol.Id.Attachment.t
   | Permission_changed of Agent_protocol.Permission.t

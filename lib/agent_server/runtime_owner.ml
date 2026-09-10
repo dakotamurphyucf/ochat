@@ -32,12 +32,10 @@ let is_loaded t = Eio.Mutex.use_ro t.mutex (fun () -> Option.is_some t.runtime)
 let install t (runtime : Agent_session.Runtime_builder.t) =
   let open Result.Let_syntax in
   let%bind () =
-    match runtime.moderator_script_tools with
+    match runtime.automatic_turn_policy with
     | None -> Ok ()
-    | Some _ ->
-      Agent_session.Session_actor.enable_automatic_turn_budget
-        t.actor
-        Chat_response.Runtime_semantics.default_policy
+    | Some policy ->
+      Agent_session.Session_actor.enable_automatic_turn_budget t.actor policy
   in
   let%bind _ =
     Agent_session.Session_actor.change_moderator t.actor runtime.moderator_snapshot
@@ -351,6 +349,21 @@ let complete_idle_moderator t drain =
   | Error failure -> fail_idle_moderator t failure
 ;;
 
+let idle_callback_limit t =
+  let open Result.Let_syntax in
+  let%map state = Agent_session.Session_actor.state t.actor in
+  match state.automatic_turn_budget with
+  | None -> 32
+  | Some budget ->
+    (match
+       Chat_response.Automatic_turn_policy.has_pause_condition
+         budget.policy
+         Pause_internal_event_drains
+     with
+     | true -> 0
+     | false -> Int.min 32 budget.policy.budget.max_internal_event_drain)
+;;
+
 let drain_loaded_legacy_events t runtime =
   match Agent_session.Session_actor.claim_idle_moderator t.actor with
   | Error _ as failure -> failure
@@ -361,7 +374,7 @@ let drain_loaded_legacy_events t runtime =
      | Error failure -> fail_idle_moderator t failure)
 ;;
 
-let drain_loaded_queued_events t runtime manager =
+let drain_loaded_queued_events ~max_events t runtime manager =
   let module A = Agent_session.Session_actor in
   let module M = Chat_response.Moderator_manager in
   let open Result.Let_syntax in
@@ -411,18 +424,24 @@ let drain_loaded_queued_events t runtime manager =
            | Some _ -> Ok true
            | None -> loop (remaining - 1) true))
   in
-  loop 32 false
+  loop max_events false
 ;;
 
 let drain_loaded_idle_moderator t runtime =
-  match runtime.Agent_session.Runtime_builder.moderator_manager with
-  | Some manager
-    when Option.is_some (Chat_response.Moderator_manager.extension_definition manager) ->
-    let open Result.Let_syntax in
-    let%bind more = drain_loaded_queued_events t runtime manager in
-    let%map applied = Agent_session.Session_actor.apply_moderator_follow_up t.actor in
-    more || applied
-  | _ -> Eio.Cancel.protect (fun () -> drain_loaded_legacy_events t runtime)
+  let open Result.Let_syntax in
+  let%bind max_events = idle_callback_limit t in
+  match max_events with
+  | 0 -> Ok false
+  | _ ->
+    (match runtime.Agent_session.Runtime_builder.moderator_manager with
+     | Some manager
+       when Option.is_some (Chat_response.Moderator_manager.extension_definition manager)
+       ->
+       let open Result.Let_syntax in
+       let%bind more = drain_loaded_queued_events ~max_events t runtime manager in
+       let%map applied = Agent_session.Session_actor.apply_moderator_follow_up t.actor in
+       more || applied
+     | _ -> Eio.Cancel.protect (fun () -> drain_loaded_legacy_events t runtime))
 ;;
 
 let pending_observation state observer =
@@ -440,59 +459,70 @@ let pending_observation state observer =
 
 let drain_loaded_observations t runtime =
   let open Result.Let_syntax in
-  match
-    Option.bind runtime.Agent_session.Runtime_builder.moderator_manager ~f:(fun manager ->
-      Option.map
-        (Chat_response.Moderator_manager.invocation_observer manager)
-        ~f:(fun observer -> manager, observer))
-  with
-  | None -> Ok false
-  | Some (manager, observer) ->
-    let history = ref [] in
-    let with_history handle =
-      let%bind state = Agent_session.Session_actor.state t.actor in
-      let%bind entries =
-        Agent_session.History_codec.all_of_protocol state.conversation.canonical_history
-      in
-      history := entries;
-      handle ()
-    in
-    let drain =
-      match
-        ( runtime.moderator_script_tools
-        , Chat_response.Moderator_manager.extension_definition manager )
-      with
-      | Some script_tools, Some definition ->
-        Agent_session.Moderator_observation.drain_idle_with_tools
-          ~script_tools
-          ~definition
-          ~claim:(fun handle ->
-            Agent_session.Session_actor.with_idle_moderator_observation_tools
-              t.actor
-              ~observer
-              (fun ~observing ~execute ~commit ->
-                 with_history (fun () -> handle ~observing ~execute ~commit)))
-      | _ ->
-        Agent_session.Moderator_observation.drain_idle
-          ~on_tool_call:(fun ~name:_ ~args:_ ->
-            Ok (Chat_response.Moderation.Capabilities.Tool_error "invocation.unavailable"))
-          ~claim:(fun handle ->
-            Agent_session.Session_actor.with_idle_moderator_observation
-              t.actor
-              ~observer
-              (fun ~observing ~commit ->
-                 with_history (fun () -> handle ~observing ~commit)))
-    in
-    let%map drain =
-      drain
-        ~manager
-        ~history:(fun () -> !history)
-        ~available_tools:runtime.moderator_tools
-        ~session_meta:`Null
-        ~now:Agent_protocol.Timestamp.now
-        ()
-    in
-    drain.budget_exhausted
+  let%bind max_observations = idle_callback_limit t in
+  match max_observations with
+  | 0 -> Ok false
+  | _ ->
+    (match
+       Option.bind
+         runtime.Agent_session.Runtime_builder.moderator_manager
+         ~f:(fun manager ->
+           Option.map
+             (Chat_response.Moderator_manager.invocation_observer manager)
+             ~f:(fun observer -> manager, observer))
+     with
+     | None -> Ok false
+     | Some (manager, observer) ->
+       let history = ref [] in
+       let with_history handle =
+         let%bind state = Agent_session.Session_actor.state t.actor in
+         let%bind entries =
+           Agent_session.History_codec.all_of_protocol
+             state.conversation.canonical_history
+         in
+         history := entries;
+         handle ()
+       in
+       let drain =
+         match
+           ( runtime.moderator_script_tools
+           , Chat_response.Moderator_manager.extension_definition manager )
+         with
+         | Some script_tools, Some definition ->
+           Agent_session.Moderator_observation.drain_idle_with_tools
+             ~max_observations
+             ~script_tools
+             ~definition
+             ~claim:(fun handle ->
+               Agent_session.Session_actor.with_idle_moderator_observation_tools
+                 t.actor
+                 ~observer
+                 (fun ~observing ~execute ~commit ->
+                    with_history (fun () -> handle ~observing ~execute ~commit)))
+         | _ ->
+           Agent_session.Moderator_observation.drain_idle
+             ~max_observations
+             ~on_tool_call:(fun ~name:_ ~args:_ ->
+               Ok
+                 (Chat_response.Moderation.Capabilities.Tool_error
+                    "invocation.unavailable"))
+             ~claim:(fun handle ->
+               Agent_session.Session_actor.with_idle_moderator_observation
+                 t.actor
+                 ~observer
+                 (fun ~observing ~commit ->
+                    with_history (fun () -> handle ~observing ~commit)))
+       in
+       let%map drain =
+         drain
+           ~manager
+           ~history:(fun () -> !history)
+           ~available_tools:runtime.moderator_tools
+           ~session_meta:`Null
+           ~now:Agent_protocol.Timestamp.now
+           ()
+       in
+       drain.budget_exhausted)
 ;;
 
 let drain_loaded_notifications runtime =

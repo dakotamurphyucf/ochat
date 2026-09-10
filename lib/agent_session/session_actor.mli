@@ -392,6 +392,13 @@ val enable_automatic_turn_budget
   -> Chat_response.Runtime_semantics.policy
   -> (unit, Agent_protocol.Error.t) result
 
+(** Host-only pause/resume at a quiescent boundary. Persists pause flags without
+    replacing limits, resetting counts or altering already admitted work. *)
+val set_automatic_turn_pauses
+  :  t
+  -> Chat_response.Runtime_semantics.pause_condition list
+  -> (unit, Agent_protocol.Error.t) result
+
 (** [set_operation_worker] installs or removes the process-local runtime
     capability. It does not mutate durable session state. Callers may remove
     the worker only while no foreground operation is active. *)

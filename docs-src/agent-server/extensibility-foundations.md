@@ -2196,7 +2196,10 @@ re-emitted. The actual user operation satisfies those wakes, without consuming a
 additional automatic follow-up or leaving a duplicate turn queued. Callback
 termination preserves every committed entry and skips provider execution.
 
-Idle-drain policy, the remaining recovery/composition qualification, approved
+Idle callback drains honor the saved host pause flags and per-drain limit; see the
+[qualified daemon policy](../chatml-budget-policy.md#qualified-daemon-host) for
+pause/resume, retained accounting and activation behavior.
+The remaining recovery/composition qualification, approved
 completion/ingress adapters and standalone local-host installation remain open. See
 [safe-point input semantics](../chatml-safe-point-and-effective-history.md#notification-data-and-wake-requests).
 

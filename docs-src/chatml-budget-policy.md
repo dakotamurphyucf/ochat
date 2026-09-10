@@ -79,21 +79,24 @@ default of `100`.
 |---|---|---|---|---|
 | `max_self_triggered_turns` | `Chat_response.Runtime_semantics.policy.budget.max_self_triggered_turns` | `Chat_response.In_memory_stream` | `10` | Replaces the current hard-coded consecutive `Request_turn` cap while preserving the existing default behavior. |
 | `max_followup_turns` | `Chat_response.Runtime_semantics.policy.budget.max_followup_turns` | `chat_tui` controller and qualified daemon actor | `1` | Limits automatic host-started follow-up turns only. |
-| `max_internal_event_drain` | `Chat_response.Runtime_semantics.policy.budget.max_internal_event_drain` | `Chat_response.In_memory_stream` and `chat_tui` idle drains | `100` | Applies to every `Moderator_manager.drain_internal_events` call. |
+| `max_internal_event_drain` | `Chat_response.Runtime_semantics.policy.budget.max_internal_event_drain` | `Chat_response.In_memory_stream`, `chat_tui` and qualified daemon idle drains | `100` | Bounds each drain; qualified daemon idle batches also retain their scheduling cap of 32. |
 | `turn_rate_limit` | `Chat_response.Runtime_semantics.policy.budget.turn_rate_limit` | `chat_tui` controller and qualified daemon actor | `None` | Sliding-window limit for non-user follow-up turns only. |
-| `pause_conditions` | `Chat_response.Runtime_semantics.policy.budget.pause_conditions` | `chat_tui` controller; qualified daemon follow-up admission | `[]` | Host-only suppression of automatic follow-up turns; idle-drain pause remains TUI-specific. |
+| `pause_conditions` | `Chat_response.Runtime_semantics.policy.budget.pause_conditions` | `chat_tui` controller and qualified daemon | `[]` | Host-only suppression of automatic follow-up turns or idle callbacks. |
 | `max_spawned_jobs` | `Chat_response.Model_executor.create ?max_spawned_jobs` | `Chat_response.Model_executor` | `100` | Remains a model-executor ownership point, not a runtime-policy field. |
 
 ## Detailed field semantics
 
 ### Qualified daemon host
 
-The extensibility daemon enables the existing default policy when installing a
-qualified script-tool runtime. `Automatic_turn_policy` supplies the shared
+The extensibility daemon captures `Daemon.options.chatml_runtime_policy` when
+installing a new qualified script-tool runtime; the option defaults to the existing
+runtime policy. `Automatic_turn_policy` supplies the shared
 pause/rate/count decision; `Automatic_turn_budget` persists the selected policy,
 follow-up count and bounded rate timestamps. An embedding host can select a policy
 through `Session_actor.enable_automatic_turn_budget` before the first admission.
-The daemon currently selects the default; this adds no new CLI configuration.
+The runtime builder uses that same captured policy for foreground moderation.
+Existing sessions load their saved policy instead of adopting a changed host
+default. This adds no CLI or configuration-file setting.
 
 Counted turns use `Moderator_request` or `Idle_followup`. A newly admitted
 `User_submit` resets the count, including genuine deferred user input coalesced
@@ -109,6 +112,15 @@ the optional field until a qualified host explicitly enables accounting. Past
 untracked turns are not invented. Rebinding a retained policy through runtime
 reload is rejected.
 
+The explicit host-only `Session_actor.set_automatic_turn_pauses` operation changes
+pause flags at a quiescent boundary. It preserves counts, rate history and all
+other policy fields. Duplicate or reordered flags normalize; an unchanged set
+does not write a transaction. Failed saves leave the previous policy intact.
+Active foreground or borrowed moderator work rejects the change. The next idle
+drain samples the saved flags without requiring a runtime reload. Already admitted
+work is not cancelled. Clearing pause flags resumes eligibility without resetting
+the budget.
+
 Suppressed daemon requests retain a discarded handler/event intent and a durable
 `Moderator_notification` with the stable budget key and explanation. They append
 no user message, consume no additional budget and do not retry on each idle poll.
@@ -120,8 +132,14 @@ Idle notification wakes now use this host admission policy. Budget rejection kee
 their committed data and discards the requested wake; several eligible receipts
 can share one operation. A user that starts before the idle poll satisfies eligible
 saved wakes in its own provider admission and consumes no extra automatic turn.
-The daemon's internal-event drain pause/batch integration remains separate; the
-local TUI behavior below is unchanged.
+Qualified daemon idle observation and queued-event drains each sample the saved
+policy and process at most `min(32, max_internal_event_drain)` callbacks per batch.
+This is a bound on each drain, not their combined total for an entire scheduler
+pass. `Pause_internal_event_drains` or a zero limit skips the drain without claiming
+or failing queued records. Activation, already saved follow-up intents, notification
+publication and explicit user turns remain separate; automatic follow-ups still
+obey their own admission policy. These host pause flags do not suppress foreground
+safe-point drains. The local TUI behavior below is unchanged.
 
 ### `max_self_triggered_turns`
 

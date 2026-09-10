@@ -303,7 +303,8 @@ let run ctx input = Task.bind(Tool.call("run_chatml", `Object([
           and evaluations = ref 0
           and registry_ref = ref None in
           let services : B.extension_services =
-            { script_tools =
+            { runtime_policy = Chat_response.Runtime_semantics.default_policy
+            ; script_tools =
                 (fun native ->
                   let registry =
                     Lazy.force native.Chat_response.Agent_runtime.capabilities

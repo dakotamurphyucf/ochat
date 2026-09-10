@@ -28,15 +28,22 @@ let%expect_test
   let reject = ref false in
   let runs = ref 0 in
   let first_admission = ref None in
+  let reject_pause = ref false in
+  let saved_pause = ref None in
   Job_fixtures.with_actor
     ~now:(fun () -> !now)
     ~reject_save:(fun next ->
-      match !reject, next.Agent_session.Session_transition.state.active_operation with
-      | true, Some _ -> true
-      | false, Some { state = Starting; _ } ->
-        if Option.is_none !first_admission then first_admission := Some next;
-        false
-      | _ -> false)
+      match next.Agent_session.Session_transition.delta with
+      | Automatic_turn_pauses_changed _ ->
+        saved_pause := Some next;
+        !reject_pause
+      | _ ->
+        (match !reject, next.Agent_session.Session_transition.state.active_operation with
+         | true, Some _ -> true
+         | false, Some { state = Starting; _ } ->
+           if Option.is_none !first_admission then first_admission := Some next;
+           false
+         | _ -> false))
     (fun _ _ actor writer backend ->
        A.enable_automatic_turn_budget actor policy |> protocol_ok;
        A.set_operation_worker
@@ -117,6 +124,40 @@ let%expect_test
          |> store_ok
        in
        assert_same_session_snapshot admission.state replayed;
+       let before_pause = A.state actor |> protocol_ok in
+       let pauses = [ R.Pause_followup_turns; Pause_internal_event_drains ] in
+       reject_pause := true;
+       assert (Result.is_error (A.set_automatic_turn_pauses actor pauses));
+       assert_same_session_snapshot before_pause (A.state actor |> protocol_ok);
+       assert_same_session_snapshot
+         before_pause
+         (Agent_session.Memory_backend.state backend);
+       reject_pause := false;
+       A.set_automatic_turn_pauses actor pauses |> protocol_ok;
+       let paused = A.state actor |> protocol_ok in
+       [%test_eq: int] 1 (budget paused).followup_turns;
+       [%test_eq: int64 list] (budget before_pause).started_ms (budget paused).started_ms;
+       let pause_delta = (Option.value_exn !saved_pause).delta in
+       let restored_delta =
+         Agent_session.Session_delta.sexp_of_t pause_delta
+         |> Sexp.to_string_mach
+         |> Sexp.of_string
+         |> Agent_session.Session_delta.t_of_sexp
+       in
+       let replayed_pause =
+         Agent_session.Session_delta.apply before_pause restored_delta |> protocol_ok
+       in
+       assert (B.equal (budget paused) (budget replayed_pause));
+       let restored_pause =
+         Sexp.to_string_mach (Agent_session.Session_state.sexp_of_t paused)
+         |> Agent_session.Session_persistence.restore_snapshot
+         |> store_ok
+       in
+       assert (B.equal (budget paused) (budget restored_pause));
+       A.set_automatic_turn_pauses actor (List.rev pauses @ pauses) |> protocol_ok;
+       assert_same_session_snapshot paused (A.state actor |> protocol_ok);
+       A.set_automatic_turn_pauses actor [] |> protocol_ok;
+       assert (B.equal (budget before_pause) (budget (A.state actor |> protocol_ok)));
        let admitted =
          List.find_exn state.moderator_executions ~f:(fun event ->
            P.Id.Moderator_execution.equal event.context.id first)

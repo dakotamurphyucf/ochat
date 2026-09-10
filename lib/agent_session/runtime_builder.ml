@@ -25,7 +25,8 @@ type prepare_enqueue =
   -> (unit, Agent_protocol.Error.t) result
 
 type extension_services =
-  { script_tools : Agent_runtime.t -> Script_tool_calls.t
+  { runtime_policy : Chat_response.Runtime_semantics.policy
+  ; script_tools : Agent_runtime.t -> Script_tool_calls.t
   ; standalone_execution_limits :
       Chat_response.Extension_compiler.t -> Chatml_execution.limits
   ; one_off_policy : Chat_response.One_off_request.policy
@@ -91,6 +92,7 @@ type t =
   ; moderator_script_tools : Script_tool_calls.t option
   ; background_executor : background_executor option
   ; moderator_activation : moderator_activation option
+  ; automatic_turn_policy : Chat_response.Runtime_semantics.policy option
   ; start_moderator : unit -> (Jsonaf.t option, Agent_protocol.Error.t) result
   ; enqueue_internal_event :
       ?prepare:prepare_enqueue
@@ -314,6 +316,7 @@ let model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_di
 
 let create_moderator
       ~definition
+      ~runtime_policy
       ~sw
       ~env
       ~ctx
@@ -411,7 +414,7 @@ let create_moderator
         { manager
         ; session_id = session_text
         ; session_meta = `Null
-        ; runtime_policy = Chat_response.Runtime_semantics.default_policy
+        ; runtime_policy
         ; event_handlers = None
         }
     in
@@ -922,6 +925,11 @@ let build_with_services
   let%bind moderator, start_moderator_once =
     create_moderator
       ~definition
+      ~runtime_policy:
+        (Option.value_map
+           extension_services
+           ~default:Chat_response.Runtime_semantics.default_policy
+           ~f:(fun services -> services.runtime_policy))
       ~sw
       ~env
       ~ctx
@@ -1232,6 +1240,10 @@ let build_with_services
     ; moderator_tools = tools
     ; idle_notifications
     ; moderator_script_tools = script_tools
+    ; automatic_turn_policy =
+        (match script_tools, extension_services with
+         | Some _, Some services -> Some services.runtime_policy
+         | _ -> None)
     ; background_executor =
         (match script_tools, extension_services with
          | Some script_tools, Some services ->
