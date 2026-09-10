@@ -385,6 +385,13 @@ val with_job_invocations
       -> ('a, Agent_protocol.Error.t) result)
   -> ('a, Agent_protocol.Error.t) result
 
+(** Enable qualified host follow-up accounting once. Reinstalling the same policy
+    is a read-only success; replacement cannot reset a retained budget. *)
+val enable_automatic_turn_budget
+  :  t
+  -> Chat_response.Runtime_semantics.policy
+  -> (unit, Agent_protocol.Error.t) result
+
 (** [set_operation_worker] installs or removes the process-local runtime
     capability. It does not mutate durable session state. Callers may remove
     the worker only while no foreground operation is active. *)

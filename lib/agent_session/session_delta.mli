@@ -13,6 +13,9 @@ type t =
   | Deferred_entries_enqueued of Agent_protocol.History.entry list
   | Deferred_entries_adopted
   | Active_operation_changed of Agent_protocol.Operation.t option
+  | Automatic_turn_budget_enabled of Chat_response.Runtime_semantics.policy
+  (** Enable once, or repeat the same policy without resetting accounting.
+      New operation admission updates the retained count in the same delta. *)
   | Attachment_added of Agent_protocol.Session.Attachment.t
   | Attachment_removed of Agent_protocol.Id.Attachment.t
   | Permission_changed of Agent_protocol.Permission.t

@@ -31,6 +31,14 @@ let is_loaded t = Eio.Mutex.use_ro t.mutex (fun () -> Option.is_some t.runtime)
 
 let install t (runtime : Agent_session.Runtime_builder.t) =
   let open Result.Let_syntax in
+  let%bind () =
+    match runtime.moderator_script_tools with
+    | None -> Ok ()
+    | Some _ ->
+      Agent_session.Session_actor.enable_automatic_turn_budget
+        t.actor
+        Chat_response.Runtime_semantics.default_policy
+  in
   let%bind _ =
     Agent_session.Session_actor.change_moderator t.actor runtime.moderator_snapshot
   in

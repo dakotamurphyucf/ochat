@@ -2337,6 +2337,14 @@ let create_loaded_entry
     let open Result.Let_syntax in
     let%bind () = flush_pending_schedules actor !pending_schedule_operations in
     let%bind () = flush_pending_jobs actor !pending_jobs in
+    let%bind () =
+      match runtime.moderator_script_tools with
+      | None -> Ok ()
+      | Some _ ->
+        Agent_session.Session_actor.enable_automatic_turn_budget
+          actor
+          Chat_response.Runtime_semantics.default_policy
+    in
     let%bind moderator_snapshot = runtime.start_moderator () in
     install_moderator_if_changed actor moderator_snapshot
   with

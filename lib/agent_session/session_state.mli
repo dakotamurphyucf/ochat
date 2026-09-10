@@ -98,6 +98,9 @@ type t =
   ; lifecycle : Lifecycle.t
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
+  ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
+    (** Qualified host scheduling accounting. Historical absence is preserved
+        until the host explicitly enables it; runtime reload cannot reset it. *)
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list

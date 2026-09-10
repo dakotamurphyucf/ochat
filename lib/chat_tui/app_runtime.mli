@@ -81,7 +81,7 @@ type moderator_startup_state =
   (** Tracks whether the moderator's session-start transaction has committed.
     User turns and compaction remain deferred unless the state is [Ready]. *)
 
-type automatic_turn_decision =
+type automatic_turn_decision = Chat_response.Automatic_turn_policy.decision =
   | Allow_automatic_turn
   | Suppress_automatic_turn of
       { notice_key : string

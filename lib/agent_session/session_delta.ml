@@ -11,6 +11,7 @@ type t =
   | Deferred_entries_enqueued of Agent_protocol.History.entry list
   | Deferred_entries_adopted
   | Active_operation_changed of Agent_protocol.Operation.t option
+  | Automatic_turn_budget_enabled of Chat_response.Runtime_semantics.policy
   | Attachment_added of Agent_protocol.Session.Attachment.t
   | Attachment_removed of Agent_protocol.Id.Attachment.t
   | Permission_changed of Agent_protocol.Permission.t
@@ -119,7 +120,30 @@ let rec apply state = function
           ; deferred_user_entries = []
           }
       }
-  | Active_operation_changed active_operation -> Ok { state with active_operation }
+  | Active_operation_changed active_operation ->
+    let automatic_turn_budget =
+      match active_operation, state.active_operation with
+      | Some next, Some previous
+        when Agent_protocol.Id.Operation.equal next.id previous.id ->
+        state.automatic_turn_budget
+      | Some operation, _ ->
+        Option.map state.automatic_turn_budget ~f:(fun budget ->
+          Automatic_turn_budget.note_operation budget operation)
+      | None, _ -> state.automatic_turn_budget
+    in
+    Ok { state with active_operation; automatic_turn_budget }
+  | Automatic_turn_budget_enabled policy ->
+    (match state.automatic_turn_budget with
+     | Some budget when Chat_response.Runtime_semantics.equal_policy budget.policy policy
+       -> Ok state
+     | Some _ ->
+       Error
+         (Agent_protocol.Error.invalid_request
+            "automatic-turn policy cannot be rebound by runtime reload")
+     | None ->
+       let budget = Automatic_turn_budget.create policy in
+       Result.map (Automatic_turn_budget.validate budget) ~f:(fun () ->
+         { state with automatic_turn_budget = Some budget }))
   | Attachment_added attachment ->
     Ok
       { state with

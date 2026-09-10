@@ -93,6 +93,7 @@ type t =
   ; lifecycle : Lifecycle.t
   ; conversation : Conversation.t
   ; active_operation : Agent_protocol.Operation.t option
+  ; automatic_turn_budget : Automatic_turn_budget.t option [@sexp.option]
   ; permissions : Agent_protocol.Permission.t list
   ; grants : Agent_protocol.Grant.t list
   ; jobs : Agent_protocol.Job.t list
@@ -185,6 +186,7 @@ let create ~identity ~spec ~initial_history =
       ; compaction_archives = []
       }
   ; active_operation = None
+  ; automatic_turn_budget = None
   ; permissions = []
   ; grants = []
   ; jobs = []
@@ -222,6 +224,11 @@ let nonnegative name value =
 
 let validate t =
   let open Result.Let_syntax in
+  let%bind () =
+    match t.automatic_turn_budget with
+    | None -> Ok ()
+    | Some budget -> Automatic_turn_budget.validate budget
+  in
   let seen_invocations = Hash_set.create (module Agent_protocol.Id.Invocation) in
   let%bind () =
     List.fold_result t.invocations ~init:() ~f:(fun () invocation ->

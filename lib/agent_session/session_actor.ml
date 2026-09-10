@@ -287,6 +287,7 @@ type _ request =
   | Snapshot : Agent_protocol.Snapshot.t request
   | Authorize_writer : Agent_protocol.Id.Attachment.t -> unit request
   | Set_operation_worker : Operation_worker.t option -> unit request
+  | Enable_automatic_turn_budget : Chat_response.Runtime_semantics.policy -> unit request
   | Change_moderator : Jsonaf.t option -> Agent_protocol.Session.t request
   | Change_workspace : Workspace_instance.t -> Agent_protocol.Session.t request
   | Shell_approval_grants : Session.Shell_state.Approval_grant.persisted list request
@@ -1543,6 +1544,11 @@ let commit_administration t attachment_id expected_revision kind candidate =
         t.state.identity.session_id
       <> 0
       || (not (Int64.equal candidate.counters.revision expected_revision))
+      || (not
+            (Option.equal
+               Automatic_turn_budget.equal
+               candidate.automatic_turn_budget
+               t.state.automatic_turn_budget))
       || Int64.(
            candidate.conversation.next_history_sequence
            < t.state.conversation.next_history_sequence)
@@ -6965,7 +6971,7 @@ let drain_payloads (drain : Runtime_builder.moderator_drain) =
   List.map drain.Runtime_builder.notifications ~f:notification_payload
 ;;
 
-let start_idle_turn
+let start_idle_turn_unchecked
       ?(extra_deltas = [])
       t
       (drain : Runtime_builder.moderator_drain)
@@ -6998,6 +7004,80 @@ let start_idle_turn
   in
   let%map _ = transition t ~delta:(Session_delta.Batch deltas) ~payloads in
   launch_worker t operation
+;;
+
+let suppress_follow_up_deltas t deltas ~reason =
+  let open Result.Let_syntax in
+  List.map deltas ~f:(function
+    | (Session_delta.Invocation_changed next | Invocation_reconciled next) as delta ->
+      let%bind original =
+        List.find t.state.invocations ~f:(fun value ->
+          Agent_protocol.Id.Invocation.equal value.context.id next.context.id)
+        |> Result.of_option
+             ~error:(error Invalid_state "automatic-turn invocation is missing")
+      in
+      let%map values = Observation_follow_up.discard [ original ] ~reason in
+      (match values with
+       | [] -> delta
+       | value :: _ -> Observation_follow_up.delta value)
+    | (Moderator_execution_changed next | Moderator_execution_reconciled next) as delta ->
+      let%bind original =
+        List.find t.state.moderator_executions ~f:(fun value ->
+          Agent_protocol.Id.Moderator_execution.equal value.context.id next.context.id)
+        |> Result.of_option ~error:(error Invalid_state "automatic-turn event is missing")
+      in
+      let%map values = Observation_follow_up.discard_events [ original ] ~reason in
+      (match values with
+       | [] -> delta
+       | value :: _ -> Observation_follow_up.event_delta value)
+    | delta -> Ok delta)
+  |> Result.all
+;;
+
+let start_idle_turn
+      ?(extra_deltas = [])
+      t
+      (drain : Runtime_builder.moderator_drain)
+      ~reason
+      ~adopt_deferred
+  =
+  let reason =
+    match adopt_deferred, t.state.conversation.deferred_user_entries with
+    | true, _ :: _ -> Agent_protocol.Operation.User_submit
+    | _ -> reason
+  in
+  let decision =
+    match reason, t.state.automatic_turn_budget with
+    | (Agent_protocol.Operation.User_submit | Administrative | Recovery_retry), _
+    | _, None -> Chat_response.Automatic_turn_policy.Allow_automatic_turn
+    | (Moderator_request | Idle_followup), Some budget ->
+      (match budget.policy.honor_request_turn with
+       | true -> Automatic_turn_budget.decide budget ~now:(t.services.now ())
+       | false ->
+         Suppress_automatic_turn
+           { notice_key = "budget:request-turn-disabled"
+           ; notice_text = "Automatic follow-up turns are disabled by runtime policy."
+           })
+  in
+  match decision with
+  | Allow_automatic_turn ->
+    start_idle_turn_unchecked ~extra_deltas t drain ~reason ~adopt_deferred
+  | Suppress_automatic_turn { notice_key; notice_text } ->
+    let open Result.Let_syntax in
+    let%bind extra_deltas =
+      suppress_follow_up_deltas t extra_deltas ~reason:notice_text
+    in
+    transition
+      t
+      ~delta:
+        (Session_delta.Batch
+           (extra_deltas @ [ Moderator_changed drain.moderator_snapshot ]))
+      ~payloads:
+        (drain_payloads drain
+         @ [ Agent_protocol.Event.Durable.Payload.Moderator_notification
+               (`Object [ "key", `String notice_key; "message", `String notice_text ])
+           ])
+    |> Result.map ~f:ignore
 ;;
 
 let stop_from_idle_moderator
@@ -7772,6 +7852,20 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        Result.map (cancel_job_internal t id) ~f:ignore)
   | Snapshot -> Ok (current_snapshot t)
   | Set_operation_worker worker -> set_operation_worker t worker
+  | Enable_automatic_turn_budget policy ->
+    (match
+       t.state.automatic_turn_budget, t.state.active_operation, moderator_is_borrowed t
+     with
+     | Some budget, _, _
+       when Chat_response.Runtime_semantics.equal_policy budget.policy policy -> Ok ()
+     | _, None, false ->
+       transition
+         t
+         ~delta:(Session_delta.Automatic_turn_budget_enabled policy)
+         ~payloads:[]
+       |> Result.map ~f:ignore
+     | _ ->
+       Error (error Conflict "cannot enable automatic-turn accounting during active work"))
   | Change_moderator moderator -> change_moderator t moderator
   | Change_workspace workspace -> change_workspace t workspace
   | Shell_approval_grants -> Ok t.state.shell.approval_grants
@@ -8062,6 +8156,8 @@ let due_schedules t = call t Due_schedules
 let commit_extensions t ~generation ~expected_revision changes =
   call t (Commit_extensions (generation, expected_revision, changes))
 ;;
+
+let enable_automatic_turn_budget t policy = call t (Enable_automatic_turn_budget policy)
 
 let set_operation_worker t worker =
   call t ~priority:Priority (Set_operation_worker worker)

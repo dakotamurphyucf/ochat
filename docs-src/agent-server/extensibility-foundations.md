@@ -2171,7 +2171,13 @@ before atomically saving the notification frame and receipt. Failed saves leave
 both unchanged; stale proposals wait for a later boundary. Revoked disclosure or
 unusable acknowledgement ancestry retains a failed delivery with a generic
 diagnostic and inserts no result into model history. A delivery-specific history ID
-prevents duplicate insertion. Idle/rate policy, pending-wake recovery and standalone
+prevents duplicate insertion. Qualified daemon host-started follow-ups now share
+the TUI's pause/rate/count decision and persist accounting with operation admission.
+Suppressed handler/event requests retain a discarded intent and durable notice;
+runtime reload cannot reset the limit. Genuine deferred user input coalesces as a
+user turn and resets the count, while retaining the independent rate history.
+See [budget policy](../chatml-budget-policy.md#qualified-daemon-host).
+Idle notification insertion, pending-wake recovery, idle-drain policy and standalone
 local-host installation remain open. See
 [safe-point input semantics](../chatml-safe-point-and-effective-history.md#notification-data-and-wake-requests).
 

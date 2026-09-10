@@ -21,6 +21,8 @@ anchors:
   during one active turn loop;
 - `chat_tui` enforces the host-only follow-up, pause, and rate-limit policy
   through `Moderator_session_controller` and `App_runtime`;
+- qualified extensibility daemon sessions use the same `Automatic_turn_policy`
+  decision and retain their follow-up accounting in the actor's durable state;
 - `Chat_response.Model_executor.create ?max_spawned_jobs` continues to own the
   spawned-job cap.
 
@@ -76,13 +78,47 @@ default of `100`.
 | Policy concept | Public OCaml home | Enforcement site | Default | Required semantics |
 |---|---|---|---|---|
 | `max_self_triggered_turns` | `Chat_response.Runtime_semantics.policy.budget.max_self_triggered_turns` | `Chat_response.In_memory_stream` | `10` | Replaces the current hard-coded consecutive `Request_turn` cap while preserving the existing default behavior. |
-| `max_followup_turns` | `Chat_response.Runtime_semantics.policy.budget.max_followup_turns` | `chat_tui` host session controller | `1` | Limits automatic host-started follow-up turns only. |
+| `max_followup_turns` | `Chat_response.Runtime_semantics.policy.budget.max_followup_turns` | `chat_tui` controller and qualified daemon actor | `1` | Limits automatic host-started follow-up turns only. |
 | `max_internal_event_drain` | `Chat_response.Runtime_semantics.policy.budget.max_internal_event_drain` | `Chat_response.In_memory_stream` and `chat_tui` idle drains | `100` | Applies to every `Moderator_manager.drain_internal_events` call. |
-| `turn_rate_limit` | `Chat_response.Runtime_semantics.policy.budget.turn_rate_limit` | `chat_tui` host session controller | `None` | Sliding-window limit for non-user follow-up turns only. |
-| `pause_conditions` | `Chat_response.Runtime_semantics.policy.budget.pause_conditions` | `chat_tui` host session controller | `[]` | Host-only suppression of automatic follow-up turns and idle drains. |
+| `turn_rate_limit` | `Chat_response.Runtime_semantics.policy.budget.turn_rate_limit` | `chat_tui` controller and qualified daemon actor | `None` | Sliding-window limit for non-user follow-up turns only. |
+| `pause_conditions` | `Chat_response.Runtime_semantics.policy.budget.pause_conditions` | `chat_tui` controller; qualified daemon follow-up admission | `[]` | Host-only suppression of automatic follow-up turns; idle-drain pause remains TUI-specific. |
 | `max_spawned_jobs` | `Chat_response.Model_executor.create ?max_spawned_jobs` | `Chat_response.Model_executor` | `100` | Remains a model-executor ownership point, not a runtime-policy field. |
 
 ## Detailed field semantics
+
+### Qualified daemon host
+
+The extensibility daemon enables the existing default policy when installing a
+qualified script-tool runtime. `Automatic_turn_policy` supplies the shared
+pause/rate/count decision; `Automatic_turn_budget` persists the selected policy,
+follow-up count and bounded rate timestamps. An embedding host can select a policy
+through `Session_actor.enable_automatic_turn_budget` before the first admission.
+The daemon currently selects the default; this adds no new CLI configuration.
+
+Counted turns use `Moderator_request` or `Idle_followup`. A newly admitted
+`User_submit` resets the count, including genuine deferred user input coalesced
+with an idle request. In-loop model calls, updates to the same operation and
+compaction do not increment it. The admission delta and accounting are saved
+together: a failed save starts no worker and consumes no budget. A user turn does
+not erase the independent rate history.
+
+The same policy can be installed again without a write or reset. Runtime unload,
+stop/start, snapshot restoration and administrative rebuild preserve accounting;
+administrative candidates cannot drop or replace it. Historical snapshots omit
+the optional field until a qualified host explicitly enables accounting. Past
+untracked turns are not invented. Rebinding a retained policy through runtime
+reload is rejected.
+
+Suppressed daemon requests retain a discarded handler/event intent and a durable
+`Moderator_notification` with the stable budget key and explanation. They append
+no user message, consume no additional budget and do not retry on each idle poll.
+The local TUI continues to use its one-time notice presentation. Daemon rate
+timestamps use the protocol wall clock, retain future entries conservatively on
+rollback, and share inclusive-window semantics; cutoff arithmetic cannot wrap.
+
+This covers host-started follow-up admission. It does not yet install idle
+notification delivery or pending-wake recovery. The daemon's internal-event drain
+pause/batch integration remains separate; the local TUI behavior below is unchanged.
 
 ### `max_self_triggered_turns`
 
@@ -117,8 +153,8 @@ Each host-started outer turn begins with a fresh self-triggered-turn counter.
 
 ### `max_followup_turns`
 
-`max_followup_turns` is host-only. It is enforced only by the `chat_tui`
-session controller when deciding whether to start another turn automatically.
+`max_followup_turns` is host-only. The `chat_tui` controller and qualified daemon
+actor enforce it when deciding whether to start another turn automatically.
 
 It counts only started turns whose `App_runtime.turn_start_reason` is:
 
