@@ -2110,6 +2110,23 @@ durable pending intent. Active-turn safe-point insertion, automatic delivery and
 wake-up coordination remain unfinished execution-service work. These surfaces do
 not advertise a generally available notification feature yet.
 
+Owned notification commits now check acknowledgement ancestry. A nested ChatML
+tool call keeps its `Resolved` outcome and follows its parent invocation, job
+launch or moderator event to the enclosing model call. That model call must have
+published its original response before the notification can enter canonical
+history. Omitting the optional correlation does not bypass the creator's boundary;
+a referenced job also retains its launch boundary. Events must have committed
+successfully, and missing, cyclic, foreign-generation, discarded or interrupted
+ancestry cannot authorize insertion. Historical unowned deliveries retain their
+original direct-publication rules.
+
+`Notification_readiness.check` distinguishes a boundary still waiting for an
+acknowledgement from an unusable ancestry that needs explicit disposition. Both
+atomic insertion and snapshot validation use this check. It does not itself
+grant result disclosure, establish a provider safe point or request a turn. Actual
+nested daemon publication is idempotent and survives snapshot restoration without
+inventing another tool output; automatic delivery and wake scheduling remain open.
+
 ## Recovery classifications
 
 These classifications define the execution-service recovery work. Record replay

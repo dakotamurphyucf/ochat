@@ -94,21 +94,10 @@ let completion_for_work ~jobs ~subscriptions = function
      | None -> invalid "delivery references nonterminal job")
 ;;
 
-let delivery_ready ~invocations (delivery : P.Delivery.t) =
-  let open Result.Let_syntax in
-  match delivery.context.invocation_id with
-  | None -> Ok ()
-  | Some id ->
-    let%bind i = invocation invocations id in
-    (match i.status with
-     | P.Invocation.Published outcome ->
-       (match delivery.context.work, outcome with
-        | None, _ -> Ok ()
-        | Some expected, Pending (actual, _)
-          when P.Invocation.compare_work expected actual = 0 -> Ok ()
-        | _ -> invalid "delivery work differs from the published acknowledgement")
-     | Admitted | Dispatching | Resolved _ ->
-       invalid "initial acknowledgement is not published")
+let delivery_ready ~invocations ~jobs ~events delivery =
+  match Notification_readiness.check ~invocations ~jobs ~events delivery with
+  | Ok () -> Ok ()
+  | Error (Waiting message | Rejected message) -> invalid message
 ;;
 
 let validate
@@ -119,6 +108,7 @@ let validate
       ~deliveries
       ~jobs
       ~schedules
+      ~events
   =
   let open Result.Let_syntax in
   let seen_occurrences = Hash_set.create (module P.History.Id) in
@@ -304,7 +294,7 @@ let validate
                 else Ok ())
         in
         match d.status with
-        | Committed _ -> delivery_ready ~invocations d
+        | Committed _ -> delivery_ready ~invocations ~jobs ~events d
         | Pending | Failed _ -> Ok ()))
   in
   () |> Result.return

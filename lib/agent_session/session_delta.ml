@@ -465,7 +465,11 @@ let rec apply state = function
     in
     let%bind () = Agent_protocol.Delivery.validate_transition ~previous delivery in
     let%bind () =
-      Extension_invariants.delivery_ready ~invocations:state.invocations delivery
+      Extension_invariants.delivery_ready
+        ~invocations:state.invocations
+        ~jobs:state.jobs
+        ~events:state.moderator_executions
+        delivery
     in
     let%bind () =
       match delivery.status, entry.Agent_protocol.History.provenance with

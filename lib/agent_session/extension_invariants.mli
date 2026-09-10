@@ -13,6 +13,8 @@ val owner
 
 val delivery_ready
   :  invocations:Agent_protocol.Invocation.t list
+  -> jobs:Agent_protocol.Job.t list
+  -> events:Agent_protocol.Moderator_execution.t list
   -> Agent_protocol.Delivery.t
   -> (unit, Agent_protocol.Error.t) result
 
@@ -24,4 +26,5 @@ val validate
   -> deliveries:Agent_protocol.Delivery.t list
   -> jobs:Agent_protocol.Job.t list
   -> schedules:Agent_protocol.Schedule.t list
+  -> events:Agent_protocol.Moderator_execution.t list
   -> (unit, Agent_protocol.Error.t) result

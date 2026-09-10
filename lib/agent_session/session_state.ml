@@ -315,6 +315,7 @@ let validate t =
       ~deliveries:t.deliveries
       ~jobs:t.jobs
       ~schedules:t.schedules
+      ~events:t.moderator_executions
   in
   let%bind () =
     List.fold_result t.subscriptions ~init:() ~f:(fun () subscription ->
