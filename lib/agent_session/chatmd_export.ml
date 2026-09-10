@@ -119,3 +119,20 @@ let render_entry entry =
 ;;
 
 let render entries = List.map entries ~f:render_entry |> String.concat
+
+let render_protocol entries =
+  List.map entries ~f:(fun entry ->
+    let open Result.Let_syntax in
+    let%map history = History_codec.of_protocol entry in
+    let annotation =
+      match entry.Agent_protocol.History.provenance with
+      | Runtime_notification id ->
+        Printf.sprintf
+          "<!-- ochat-runtime-notification delivery_id=%S -->\n"
+          (Agent_protocol.Id.Delivery.to_string id)
+      | Canonical | Moderator_inserted | Moderator_replaced _ -> ""
+    in
+    annotation ^ render_entry history)
+  |> Result.all
+  |> Result.map ~f:String.concat
+;;

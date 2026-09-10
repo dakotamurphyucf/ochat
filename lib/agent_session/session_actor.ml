@@ -977,7 +977,9 @@ let commit_extensions_internal t generation expected_revision changes =
         | Extension_change.Invocation value -> Ok (Session_delta.Invocation_changed value)
         | Subscription value -> Ok (Session_delta.Subscription_changed value)
         | Delivery value -> Ok (Session_delta.Delivery_changed value)
-        | Publish (value, entry) -> Ok (Session_delta.Delivery_committed (value, entry))
+        | Publish (value, entry) ->
+          let%map () = Notification_history.validate ~delivery:value entry in
+          Session_delta.Delivery_committed (value, entry)
         | Moderator_state value -> Ok (Session_delta.Moderator_changed value)
         | Start_job job ->
           let%bind () =
@@ -3622,7 +3624,9 @@ let runtime_request_payloads summary =
 
 let completed_delta t operation summary =
   let final_protocol =
-    History_codec.all_to_protocol summary.Operation_worker.Summary.final_history
+    History_codec.all_to_protocol
+      ~previous:t.state.conversation.canonical_history
+      summary.Operation_worker.Summary.final_history
   in
   let committed = t.state.conversation.canonical_history in
   if not (history_prefix ~prefix:committed final_protocol)
@@ -3796,7 +3800,11 @@ let compaction_terminal_base_delta t operation = function
     let archive =
       Compaction_archive.reference t.state operation.Agent_protocol.Operation.id
     in
-    let history = History_codec.all_to_protocol history in
+    let history =
+      History_codec.all_to_protocol
+        ~previous:t.state.conversation.canonical_history
+        history
+    in
     let operation = operation_state t operation Agent_protocol.Operation.Completed in
     let lifecycle = terminal_lifecycle t in
     Ok

@@ -29,6 +29,7 @@
   extension_stop_tests
   extension_clock_tests
   timer_range_tests
+  notification_history_tests
   subscription_clock_tests
   job_artifact_retry_tests
   job_artifact_fixtures

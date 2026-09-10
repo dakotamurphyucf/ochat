@@ -443,14 +443,13 @@ let history_window entries =
     }
 ;;
 
-let effective_entry (entry : Chat_response.Moderation.Effective_entry.t) =
-  let provenance =
-    match entry.provenance with
-    | Canonical -> Agent_protocol.History.Canonical
-    | Moderator_inserted _ -> Moderator_inserted
-    | Moderator_replacement { target_id; _ } -> Moderator_replaced target_id
-  in
-  History_codec.to_protocol ~provenance entry.entry
+let effective_entry ~canonical (entry : Chat_response.Moderation.Effective_entry.t) =
+  match entry.provenance with
+  | Canonical -> canonical entry.entry
+  | Moderator_inserted _ ->
+    History_codec.to_protocol ~provenance:Moderator_inserted entry.entry
+  | Moderator_replacement { target_id; _ } ->
+    History_codec.to_protocol ~provenance:(Moderator_replaced target_id) entry.entry
 ;;
 
 let effective_history t =
@@ -467,7 +466,12 @@ let effective_history t =
       in
       Chat_response.Moderator_manager.effective_entries_of_snapshot snapshot history
       |> Result.ok_or_failwith
-      |> List.map ~f:effective_entry
+      |> List.map
+           ~f:
+             (effective_entry
+                ~canonical:
+                  (History_codec.canonical_encoder
+                     ~previous:t.conversation.canonical_history))
       |> history_window
       |> Option.some
     | _ -> None)

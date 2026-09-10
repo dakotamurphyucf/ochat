@@ -240,6 +240,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/native_tool_dispatch.mli` | [contract](../../lib/agent_session/native_tool_dispatch.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/native_tool_invocation.mli` | [contract](../../lib/agent_session/native_tool_invocation.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/native_tool_moderation.mli` | [contract](../../lib/agent_session/native_tool_moderation.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
+| `lib/agent_session/notification_history.mli` | [contract](../../lib/agent_session/notification_history.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/observation_follow_up.mli` | [contract](../../lib/agent_session/observation_follow_up.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/one_off_execution.mli` | [contract](../../lib/agent_session/one_off_execution.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_session/operation_worker.mli` | [contract](../../lib/agent_session/operation_worker.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |

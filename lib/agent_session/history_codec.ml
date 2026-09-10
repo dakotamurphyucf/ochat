@@ -49,7 +49,18 @@ let of_protocol entry =
       History_entry.create_with_id ~id:entry.id item)
 ;;
 
-let all_to_protocol entries = List.map entries ~f:to_protocol
+let canonical_encoder ~previous =
+  let provenance = Hashtbl.create (module History_entry.Id) in
+  List.iter previous ~f:(fun entry ->
+    Hashtbl.set provenance ~key:entry.Agent_protocol.History.id ~data:entry.provenance);
+  fun entry ->
+    to_protocol ?provenance:(Hashtbl.find provenance (History_entry.id entry)) entry
+;;
+
+let all_to_protocol ?(previous = []) entries =
+  List.map entries ~f:(canonical_encoder ~previous)
+;;
+
 let all_of_protocol entries = Result.all (List.map entries ~f:of_protocol)
 
 let user_text ~id text =

@@ -37,6 +37,7 @@ let with_daemon
       ?validation_host
       ?settle
       ?after_turn
+      ?(inspect_request = fun _ _ -> ())
       ?(expected_requests = 2)
       ?(expected_schedules = 0)
       ?(expect_moderator = false)
@@ -69,8 +70,9 @@ let with_daemon
         save (Filename.concat workspace "secret.json") "PRIVATE-REPORT-SENTINEL";
         let configuration = config root workspace (Filename.concat root "agent.chatmd") in
         let requests = ref 0 in
-        let post_stream ~sw:_ ~inputs:_ =
+        let post_stream ~sw:_ ~inputs =
           incr requests;
+          inspect_request !requests inputs;
           match !requests with
           | 1 -> call_events calls
           | request when request <= expected_requests -> Stdlib.Seq.empty

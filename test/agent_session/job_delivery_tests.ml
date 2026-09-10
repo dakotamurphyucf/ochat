@@ -63,12 +63,7 @@ let entry (delivery : D.t) =
     History_entry.Id.create ~namespace:"job-notification" ~sequence:0
     |> Result.ok_or_failwith
   in
-  Agent_session.History_codec.user_text
-    ~id
-    ("Ochat runtime result data: "
-     ^ Jsonaf.to_string (Completion.to_json delivery.context.completion))
-  |> Agent_session.History_codec.to_protocol
-       ~provenance:(Runtime_notification delivery.context.id)
+  Agent_session.Notification_history.create ~id delivery |> protocol_ok
 ;;
 
 let failure : Completion.t =

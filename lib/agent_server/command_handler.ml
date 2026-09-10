@@ -1186,11 +1186,9 @@ let render_export request snapshot entries =
                 ]
           })
     in
-    Agent_session.History_codec.all_of_protocol entries
+    Agent_session.Chatmd_export.render_protocol entries
     |> Result.map ~f:(fun history ->
-      ( "text/markdown; charset=utf-8"
-      , "session.chatmd"
-      , Agent_session.Chatmd_export.render history ))
+      "text/markdown; charset=utf-8", "session.chatmd", history)
 ;;
 
 let create_export_blob

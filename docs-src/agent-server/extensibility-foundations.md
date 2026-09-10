@@ -2047,8 +2047,26 @@ model request; notifications require the separate delivery adapter.
 Publication uses `Runtime_notification(delivery_id)` provenance and commits its
 history entry and receipt together. It requires the originating initial response
 to be published. The current foundation permits publication only while the
-session is running and idle; active-turn safe-point delivery and provider data
-framing remain unfinished execution-service work.
+session is running and idle. New publications use a fixed runtime-data label and
+a version-1 JSON envelope inside one supported user-input message. The envelope
+retains delivery/session/generation identity, creation time, source, correlation,
+invocation/work references and the structured completion. Arbitrary result text
+stays JSON data; it cannot select a provider role or replace the fixed framing.
+The actor rejects entries that differ from their delivery envelope. Previously
+persisted unframed records remain readable through the existing journal format.
+
+Runtime provider entries do not carry host provenance. Rebuilding canonical
+history therefore restores provenance by committed history ID, including worker
+completion, runtime reload and retained compaction entries. Copied text under a
+new user-message ID remains ordinary canonical input. Effective history retains
+runtime provenance for unchanged entries and marks explicit moderator replacements
+as replacements. JSON exports retain the protocol provenance; ChatMD exports
+include a runtime-delivery annotation. Export annotations do not grant authority
+when imported as a prompt.
+
+These framing and history paths are host-internal foundations. The script-facing
+`Notification.publish` adapter, active-turn safe-point insertion, automatic
+delivery and wake-up coordination remain unfinished execution-service work.
 
 ## Recovery classifications
 

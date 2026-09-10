@@ -268,12 +268,7 @@ let notification_entry delivery =
   let id =
     History_entry.Id.create ~namespace:"notification" ~sequence:0 |> Result.ok_or_failwith
   in
-  let entry =
-    Agent_session.History_codec.user_text ~id "Ochat runtime result data: ready"
-  in
-  Agent_session.History_codec.to_protocol
-    ~provenance:(Runtime_notification delivery.Agent_protocol.Delivery.context.id)
-    entry
+  Agent_session.Notification_history.create ~id delivery |> protocol_ok
 ;;
 
 let worker_output_item =

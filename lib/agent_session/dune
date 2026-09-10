@@ -53,6 +53,7 @@
   subscriber
   history_id_source
   history_codec
+  notification_history
   chatmd_export
   durable_event_log
   live_event_buffer

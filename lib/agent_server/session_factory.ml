@@ -1613,6 +1613,7 @@ let install_runtime_state state runtime shell =
       { state.conversation with
         canonical_history =
           Agent_session.History_codec.all_to_protocol
+            ~previous:state.conversation.canonical_history
             runtime.Agent_session.Runtime_builder.initial_history
       ; initial_prompt_entry_count = runtime.initial_prompt_entry_count
       ; next_history_sequence = Int64.of_int runtime.reserved_history_through
@@ -1954,6 +1955,7 @@ let prepared_state state runtime shell schedules jobs ~fresh_history =
       { conversation with
         canonical_history =
           Agent_session.History_codec.all_to_protocol
+            ~previous:(if fresh_history then [] else conversation.canonical_history)
             runtime.Agent_session.Runtime_builder.initial_history
       ; initial_prompt_entry_count =
           (if fresh_history

@@ -13,7 +13,20 @@ val of_protocol
   :  Agent_protocol.History.entry
   -> (History_entry.t, Agent_protocol.Error.t) result
 
-val all_to_protocol : History_entry.t list -> Agent_protocol.History.entry list
+(** Build an encoder retaining provenance by committed history identity. Provider
+    items do not carry host provenance; message text never establishes it. New
+    identities use Canonical provenance. Payloads are still encoded from the
+    supplied entry, allowing the caller's history consistency checks to detect
+    unauthorized content changes. *)
+val canonical_encoder
+  :  previous:Agent_protocol.History.entry list
+  -> History_entry.t
+  -> Agent_protocol.History.entry
+
+val all_to_protocol
+  :  ?previous:Agent_protocol.History.entry list
+  -> History_entry.t list
+  -> Agent_protocol.History.entry list
 
 val all_of_protocol
   :  Agent_protocol.History.entry list
