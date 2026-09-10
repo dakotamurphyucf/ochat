@@ -62,6 +62,10 @@ val scan
   -> t
   -> (scan, Store_error.t) result
 
+(** Scan already bounded bytes without filesystem access. A returned crash tail
+    is not proof of reference absence; collectors must retain candidates on it. *)
+val scan_contents : max_payload_length:int -> string -> (scan, Store_error.t) result
+
 (** [truncate_crash_tail] truncates only to the validated length returned by
     [scan]. It rejects scans that do not actually contain a crash tail. *)
 val truncate_crash_tail

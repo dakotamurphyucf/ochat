@@ -612,6 +612,40 @@ let%expect_test "pre-extension compaction archives remain readable after state m
           reference
         |> protocol_ok
       in
+      let reader =
+        Agent_store.Retention_reader.create
+          ~env
+          ~root:(Agent_store.Session_store.Handle.archive_directory handle)
+          ~max_entries:4
+          ~max_bytes:1048576
+        |> store_ok
+      in
+      let contents =
+        Agent_store.Retention_reader.read
+          reader
+          ~path:(Agent_session.Compaction_archive.filename reference)
+          ~max_bytes:1048576
+        |> store_ok
+      in
+      let bounded =
+        Agent_session.Compaction_archive.decode_file
+          ~handle
+          ~max_payload_length:1048576
+          reference
+          contents
+        |> protocol_ok
+      in
+      assert (
+        Sexp.equal
+          (Agent_session.Session_state.sexp_of_t bounded)
+          (Agent_session.Session_state.sexp_of_t restored));
+      assert (
+        Result.is_error
+          (Agent_session.Compaction_archive.decode_file
+             ~handle
+             ~max_payload_length:1048576
+             { reference with sha256 = String.make 64 '0' }
+             contents));
       print_s
         [%sexp
           { version = (restored.schema_version : int)

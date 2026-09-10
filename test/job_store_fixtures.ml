@@ -74,6 +74,7 @@ let fail_metadata_rename
       ?(on_failure = fun _ -> ())
       ?(before_unlink = fun _ -> ())
       ?(before_open_out = fun _ -> ())
+      ?(before_open_in = fun _ -> ())
       ?(matches_rename = fun path -> String.is_suffix path ~suffix:".sexp")
       (Eio.Resource.T (directory, handler) as native_directory)
       armed
@@ -101,19 +102,33 @@ let fail_metadata_rename
       before_open_out path;
       Original.open_out directory ~sw ~append ~create path
     ;;
+
+    let open_in directory ~sw path =
+      before_open_in path;
+      Original.open_in directory ~sw path
+    ;;
   end
   in
   Eio.Resource.T
     (directory, Eio.Resource.handler [ H (Eio.Fs.Pi.Dir, (module Directory)) ])
 ;;
 
-let fault_env ?on_failure ?before_unlink ?before_open_out ?matches_rename env armed =
+let fault_env
+      ?on_failure
+      ?before_unlink
+      ?before_open_out
+      ?before_open_in
+      ?matches_rename
+      env
+      armed
+  =
   let directory, path = Eio.Stdenv.fs env in
   let fs =
     ( fail_metadata_rename
         ?on_failure
         ?before_unlink
         ?before_open_out
+        ?before_open_in
         ?matches_rename
         directory
         armed

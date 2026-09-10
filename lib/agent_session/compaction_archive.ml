@@ -22,14 +22,18 @@ let prefix = function
   | Upgrade -> "upgrade"
 ;;
 
+let filename reference =
+  prefix reference.Session_state.Compaction_archive.kind
+  ^ "-"
+  ^ Agent_protocol.Id.Operation.to_string
+      reference.Session_state.Compaction_archive.operation_id
+  ^ ".frame"
+;;
+
 let path handle reference =
   Filename.concat
     (Agent_store.Session_store.Handle.archive_directory handle)
-    (prefix reference.Session_state.Compaction_archive.kind
-     ^ "-"
-     ^ Agent_protocol.Id.Operation.to_string
-         reference.Session_state.Compaction_archive.operation_id
-     ^ ".frame")
+    (filename reference)
 ;;
 
 let error message =
@@ -115,12 +119,13 @@ let decode_state handle (reference : Session_state.Compaction_archive.t) text =
   | _ -> Error (error "invalid compaction archive state")
 ;;
 
-let read ~env ~handle ~max_payload_length reference =
+let decode_file
+      ~handle
+      ~max_payload_length
+      (reference : Session_state.Compaction_archive.t)
+      contents
+  =
   let open Result.Let_syntax in
-  let%bind contents =
-    Agent_store.Durable_file.load ~env ~path:(path handle reference)
-    |> Result.map_error ~f:store_error
-  in
   let%bind decoded =
     Agent_store.Frame.decode ~max_payload_length ~contents ~offset:0
     |> Result.map_error ~f:(fun _ -> error "invalid compaction archive frame")
@@ -132,4 +137,13 @@ let read ~env ~handle ~max_payload_length reference =
     then Error (error "compaction archive checksum mismatch")
     else decode_state handle reference text
   | _ -> Error (error "incomplete compaction archive")
+;;
+
+let read ~env ~handle ~max_payload_length reference =
+  let open Result.Let_syntax in
+  let%bind contents =
+    Agent_store.Durable_file.load ~env ~path:(path handle reference)
+    |> Result.map_error ~f:store_error
+  in
+  decode_file ~handle ~max_payload_length reference contents
 ;;

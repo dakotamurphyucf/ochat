@@ -288,6 +288,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_store/migration.mli` | [contract](../../lib/agent_store/migration.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/prompt_artifact_store.mli` | [contract](../../lib/agent_store/prompt_artifact_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/recovery.mli` | [contract](../../lib/agent_store/recovery.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/retention_reader.mli` | [contract](../../lib/agent_store/retention_reader.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/session_index.mli` | [contract](../../lib/agent_store/session_index.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/session_store.mli` | [contract](../../lib/agent_store/session_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/snapshot.mli` | [contract](../../lib/agent_store/snapshot.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |

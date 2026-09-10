@@ -1580,6 +1580,13 @@ one root and distinguishes unrelated roots. The scanner does not validate storag
 or grant deletion authority: a collector must first validate every relevant durable
 root and serialize with the owning actor. That collector is not yet installed.
 
+`Retention_reader` supplies bounded file reads and incremental directory enumeration
+beneath an owned root. One collection attempt shares entry and byte budgets; each
+file has its own ceiling. Linked paths, parent traversal, file growth and exhausted
+budgets fail the attempt. Snapshot, journal-segment and archive decoders can consume
+these already bounded bytes while preserving their existing integrity checks.
+These helpers do not yet establish a complete reference proof or delete artifacts.
+
 Reads verify the session and job binding, full metadata, bounded byte count and
 SHA-256 digest before decoding the completion. Adoption refuses another target
 session or an existing destination and restores temporary data if its metadata
