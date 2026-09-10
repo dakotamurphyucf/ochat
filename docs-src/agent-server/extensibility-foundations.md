@@ -1591,9 +1591,21 @@ anchors, journal continuity and the live checkpoint, and archive identities and
 digests. All fallback snapshots must recover the same journal head. It scans decoded
 values as well as raw bytes so equivalent escaped ID spellings remain protected.
 Corruption, incomplete records, missing files or budget exhaustion return an error
-without a partial reference set. Replay buffers, cached command responses and
-blob/export consumers still need to be combined with this historical scan before
-it becomes a complete deletion decision. No automatic artifact deletion is installed.
+without a partial reference set.
+
+Replay-window validation scans every retained full event, including replacement
+snapshots, and checks session ownership, sequence continuity, payloads and projection
+anchors under event/byte ceilings. Cached-response validation scans both the durable
+file and the live cache: a failed write acknowledgement can leave a reply in only
+one of those views. It decodes JSON before scanning, rejects corrupt or duplicate
+records, and defers collection while any response is pending. Its verified callback
+holds the cache lock so a concurrent response cannot publish a reference during
+cleanup. The owning actor checkpoint must be acquired first; the callback must
+not reenter the cache or wait on the actor.
+
+These reference APIs still need to be combined with historical roots, blob/export
+consumers and active preparations before making a complete deletion decision.
+No automatic artifact deletion is installed.
 
 Reads verify the session and job binding, full metadata, bounded byte count and
 SHA-256 digest before decoding the completion. Adoption refuses another target

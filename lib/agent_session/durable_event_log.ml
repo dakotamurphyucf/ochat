@@ -73,3 +73,52 @@ let replay t ~after_sequence ~through_sequence =
 
 let oldest_sequence t = Eio.Mutex.use_ro t.mutex (fun () -> oldest t.events)
 let latest_sequence t = Eio.Mutex.use_ro t.mutex (fun () -> latest t.events)
+
+let retained_references t ~session_id ~candidates ~max_events ~max_bytes =
+  Eio.Mutex.use_ro t.mutex (fun () ->
+    let open Result.Let_syntax in
+    let%bind () =
+      match
+        max_events >= 0
+        && max_bytes >= 0
+        && List.length t.events <= max_events
+        && is_contiguous t.events
+      with
+      | true -> Ok ()
+      | false -> Error (error "retained replay window exceeds its limit or has a gap")
+    in
+    let%bind scan = Agent_store.Blob_reference_scan.create candidates in
+    let%map _ =
+      List.fold_result t.events ~init:max_bytes ~f:(fun remaining event ->
+        let%bind () =
+          match
+            ( Agent_protocol.Id.Session.equal
+                event.Agent_protocol.Event.Durable.session_id
+                session_id
+            , event.visibility )
+          with
+          | true, Full -> Ok ()
+          | _ ->
+            Error (error "retention requires the owning session's full replay events")
+        in
+        let%bind _ =
+          Agent_protocol.Event.Durable.of_json
+            (Agent_protocol.Event.Durable.to_json event)
+        in
+        let%bind _ =
+          Agent_protocol.Event.Durable.Payload.of_json ~kind:event.kind event.payload
+        in
+        let%bind _ = Agent_protocol.Event.Durable.extension_status event in
+        let%bind _ = Agent_protocol.Event.Durable.replacement_snapshot event in
+        let encoded =
+          Agent_protocol.Event.Durable.sexp_of_t event |> Sexp.to_string_mach
+        in
+        match String.length encoded <= remaining with
+        | false -> Error (error "retained replay window exceeds its byte budget")
+        | true ->
+          Agent_store.Blob_reference_scan.begin_root scan;
+          Agent_store.Blob_reference_scan.feed scan encoded;
+          Ok (remaining - String.length encoded))
+    in
+    Agent_store.Blob_reference_scan.references scan)
+;;

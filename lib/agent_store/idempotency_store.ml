@@ -189,6 +189,102 @@ let lookup t ~key ~request_digest =
     | Some record -> Conflict (restore_record_exn record))
 ;;
 
+let with_retained_references t ~candidates ~max_records ~max_bytes ~f =
+  Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
+    let open Result.Let_syntax in
+    let corrupt message = Error (Store_error.Corrupt message) in
+    try
+      let%bind () =
+        match
+          max_records >= 0 && max_bytes >= 0 && Map.length t.records <= max_records
+        with
+        | true -> Ok ()
+        | false -> corrupt "cached response retention exceeds its record budget"
+      in
+      let%bind reader =
+        Retention_reader.create
+          ~env:t.env
+          ~root:(Filename.dirname t.path)
+          ~max_entries:1
+          ~max_bytes
+      in
+      let%bind bytes =
+        Retention_reader.read reader ~path:(Filename.basename t.path) ~max_bytes
+      in
+      let%bind disk =
+        Result.try_with (fun () -> Sexp.of_string bytes |> Persisted.t_of_sexp)
+        |> Result.map_error ~f:(fun _ ->
+          Store_error.Corrupt "invalid retained idempotency file")
+      in
+      let%bind () =
+        match Int.compare disk.version version with
+        | 0 -> Ok ()
+        | n when n > 0 -> Error (Store_error.Schema_too_new disk.version)
+        | _ -> Error (Store_error.Migration_required disk.version)
+      in
+      let%bind () =
+        match List.length disk.records <= max_records - Map.length t.records with
+        | true -> Ok ()
+        | false -> corrupt "cached response retention exceeds its record budget"
+      in
+      let%bind scan =
+        Blob_reference_scan.create candidates
+        |> Result.map_error ~f:(fun error ->
+          Store_error.Corrupt error.Agent_protocol.Error.message)
+      in
+      let feed text =
+        Blob_reference_scan.begin_root scan;
+        Blob_reference_scan.feed scan text
+      in
+      let pending = ref false in
+      let inspect (record : Persisted.record) =
+        let%map restored = restore_record record in
+        feed (Persisted.sexp_of_record record |> Sexp.to_string_mach);
+        match restored.outcome with
+        | Pending -> pending := true
+        | Success value -> feed (Jsonaf.to_string value)
+        | Failure failure ->
+          feed (Agent_protocol.Error.to_json failure |> Jsonaf.to_string)
+      in
+      let seen = String.Hash_set.create () in
+      let%bind () =
+        List.fold_result disk.records ~init:() ~f:(fun () record ->
+          let key = Key.sexp_of_t record.Persisted.key |> Sexp.to_string_mach in
+          match Hash_set.mem seen key with
+          | true -> corrupt "duplicate retained idempotency key"
+          | false ->
+            Hash_set.add seen key;
+            inspect record)
+      in
+      let remaining = ref (max_bytes - String.length bytes) in
+      let%bind () =
+        Map.fold t.records ~init:(Ok ()) ~f:(fun ~key:_ ~data:record checked ->
+          let%bind () = checked in
+          let%bind () =
+            match record.Persisted.outcome with
+            | Success encoded when String.length encoded > !remaining ->
+              corrupt "cached response retention exceeds its byte budget"
+            | _ -> Ok ()
+          in
+          let encoded = Persisted.sexp_of_record record |> Sexp.to_string_mach in
+          match String.length encoded <= !remaining with
+          | false -> corrupt "cached response retention exceeds its byte budget"
+          | true ->
+            remaining := !remaining - String.length encoded;
+            inspect record)
+      in
+      match !pending with
+      | true -> Ok None
+      | false -> Result.map (f (Blob_reference_scan.references scan)) ~f:Option.some
+    with
+    | exn ->
+      Error
+        (Store_error.of_exn
+           ~operation:"retain cached response references"
+           ~path:t.path
+           exn))
+;;
+
 let record t record =
   Eio.Mutex.use_rw ~protect:true t.mutex (fun () ->
     match Map.find t.records record.key with
