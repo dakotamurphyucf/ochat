@@ -63,6 +63,21 @@ val retention_directories
   -> Session_store.Handle.t
   -> (string * string, Store_error.t) result
 
+(** Remove an unreferenced host-owned stage under a live retention scope.
+    The caller must first verify its durable private preparation intent and prove
+    absence of all references/active owners. Preflights every temporary/final
+    metadata, data, partial and matching atomic metadata temporary before mutation.
+    Removes data before metadata, then syncs both directories. Missing files allow
+    retries after partial cleanup. Never removes the private intent: its owner
+    must keep that record until this operation has durably succeeded.
+    The session-rooted reader supplies the shared scan/delete budgets. *)
+val discard_staged_unreferenced
+  :  retention
+  -> reader:Retention_reader.t
+  -> Session_store.Handle.t
+  -> metadata:Metadata.t
+  -> (unit, Store_error.t) result
+
 (** The existing exact-handle discard under a live retention scope, without
     reentering the coordinator. The caller must prove absence of every reference.
     Rejects use after the callback has returned. *)

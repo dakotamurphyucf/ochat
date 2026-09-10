@@ -49,11 +49,39 @@ val list
   -> max_count:int
   -> (t list, Store_error.t) result
 
+(** The same validated scan using an existing reader rooted at the exact session,
+    sharing the collection attempt's entry/byte budgets. Unknown entries and
+    linked paths fail; recognized atomic-write temporary files are not published
+    intents and still consume enumeration budget. Missing intent directories are
+    empty. The caller must serialize with the publisher. *)
+val list_with_reader
+  :  reader:Retention_reader.t
+  -> session:Session_store.Handle.t
+  -> max_count:int
+  -> (t list, Store_error.t) result
+
 (** Idempotent intent removal after acknowledged publication or completed
     unreferenced cleanup. Serialize with the owning actor/preparation. Never call
     merely because an acknowledgement failed. *)
 val remove
   :  env:Eio_unix.Stdenv.base
+  -> session:Session_store.Handle.t
+  -> t
+  -> (unit, Store_error.t) result
+
+(** Verify this exact durable intent and matching atomic-write temporaries,
+    remove/sync its unreferenced staged files under the blob retention scope,
+    then reverify and remove/sync intent temporaries and the intent last.
+    Failed staged-file removal or sync leaves the ownership record for retry.
+    An error acknowledging the final intent removal may occur after cleanup has
+    completed; fresh enumeration determines what remains.
+    A caller must establish all retained roots and exclude active owners
+    before invoking this operation; it does not calculate reference absence.
+    Uses the shared session-rooted reader for all preflight/reverification reads. *)
+val discard_unreferenced
+  :  env:Eio_unix.Stdenv.base
+  -> scope:Blob_store.retention
+  -> reader:Retention_reader.t
   -> session:Session_store.Handle.t
   -> t
   -> (unit, Store_error.t) result

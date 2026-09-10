@@ -761,6 +761,106 @@ let retention_directories retention session =
     Ok (Session_store.Handle.directory session, retention.store.temporary_directory)
 ;;
 
+let discard_staged_unreferenced retention ~reader session ~(metadata : Metadata.t) =
+  let open Result.Let_syntax in
+  let invalid message = Error (Store_error.Corrupt message) in
+  let%bind session_root, temporary_root = retention_directories retention session in
+  let store = retention.store in
+  let%bind _ =
+    Agent_protocol.Blob.Metadata.of_json
+      (Agent_protocol.Blob.Metadata.to_json metadata.blob)
+    |> Result.map_error ~f:(fun error ->
+      Store_error.Corrupt error.Agent_protocol.Error.message)
+  in
+  let%bind () =
+    match
+      String.equal (Retention_reader.root reader) session_root
+      && (not metadata.durable)
+      && Option.exists
+           metadata.target_session
+           ~f:(Agent_protocol.Id.Session.equal (Session_store.Handle.session_id session))
+      && Int64.(metadata.blob.byte_length <= of_int Int.max_value)
+    with
+    | true -> Ok ()
+    | false -> invalid "staged discard ownership or reader mismatch"
+  in
+  let%bind temporary_reader = Retention_reader.at_root reader ~root:temporary_root in
+  let final_directory = Filename.concat session_root "blobs" in
+  let data_limit = Int64.to_int_exn metadata.blob.byte_length in
+  let inspect_directory reader relative native ~durable =
+    let%bind names = Retention_reader.list reader ~directory:relative in
+    let expected = Metadata.sexp_of_t { metadata with durable } |> Sexp.to_string_mach in
+    let metadata_name = blob_name metadata.blob.id ".sexp" in
+    let temporaries =
+      List.filter names ~f:(fun name ->
+        Option.exists (Durable_file.temporary_target name) ~f:(String.equal metadata_name))
+    in
+    let files =
+      [ blob_name metadata.blob.id ".blob", `Data; metadata_name, `Metadata ]
+      @ (if durable then [] else [ blob_name metadata.blob.id ".part", `Partial ])
+      @ List.map temporaries ~f:(fun name -> name, `Temporary_metadata)
+    in
+    List.fold_result files ~init:[] ~f:(fun paths (name, kind) ->
+      let path = Filename.concat native name in
+      match Eio.Path.kind ~follow:false (eio_path store path) with
+      | `Not_found -> Ok paths
+      | `Regular_file ->
+        let relative =
+          if String.equal relative "." then name else Filename.concat relative name
+        in
+        let limit =
+          match kind with
+          | `Data | `Partial -> data_limit
+          | `Metadata | `Temporary_metadata -> String.length expected
+        in
+        let%bind contents =
+          Retention_reader.read reader ~path:relative ~max_bytes:limit
+        in
+        let valid =
+          match kind with
+          | `Metadata -> String.equal contents expected
+          | `Temporary_metadata -> String.is_prefix expected ~prefix:contents
+          | `Partial when String.length contents < data_limit -> true
+          | `Data | `Partial ->
+            String.length contents = data_limit
+            && String.equal
+                 metadata.blob.digest
+                 Digestif.SHA256.(digest_string contents |> to_hex)
+        in
+        (match valid with
+         | true -> Ok ((path, kind) :: paths)
+         | false -> invalid "staged discard file differs from its private preparation")
+      | _ -> invalid "staged discard encountered a non-regular file")
+  in
+  try
+    let%bind final = inspect_directory reader "blobs" final_directory ~durable:true in
+    let%bind temporary =
+      inspect_directory temporary_reader "." temporary_root ~durable:false
+    in
+    let files = final @ temporary in
+    let data, metadata_files =
+      List.partition_tf files ~f:(fun (_, kind) ->
+        match kind with
+        | `Data | `Partial -> true
+        | `Metadata | `Temporary_metadata -> false)
+    in
+    let%bind () =
+      List.fold_result (data @ metadata_files) ~init:() ~f:(fun () (path, _) ->
+        match Eio.Path.kind ~follow:false (eio_path store path) with
+        | `Regular_file ->
+          Eio.Path.unlink (eio_path store path);
+          Ok ()
+        | `Not_found -> Ok ()
+        | _ -> invalid "staged discard path changed before removal")
+    in
+    let%bind () = Durable_file.sync_directory ~env:store.env ~path:final_directory in
+    Durable_file.sync_directory ~env:store.env ~path:temporary_root
+  with
+  | exn ->
+    Error
+      (Store_error.of_exn ~operation:"discard staged result files" ~path:session_root exn)
+;;
+
 let coordinated store f =
   (* Individual operations preserve recoverable files and upload accounting on
      failure. An IO error or cancelled reader must not poison the shared mutex. *)

@@ -1636,6 +1636,23 @@ blob pairs, malformed JSON, ownership/digest mismatch and exhausted budgets refu
 the complete proof. The scanner does not remove files or choose whether an active
 preparation may be discarded; collector integration remains unfinished.
 
+Private-intent enumeration now uses the bounded reader too. The ordinary entrypoint
+derives finite allowances from its record count; the collector entrypoint shares
+the entire attempt's budget. It rejects unknown entries and recognizes the atomic
+writer's actual `target.tmp-PID-sequence` names without treating them as published
+intents. Those temporary names still consume the enumeration allowance.
+
+Staged-discard operations verify the exact durable intent before touching files.
+They preflight final/temporary data, metadata, partial uploads and matching atomic
+write residue, remove data before metadata, and sync both blob directories.
+Only then do they recheck the intent and remove its temporaries and canonical
+record, followed by a directory sync. Stage-removal or sync failure preserves the
+ownership record for retry. Failure acknowledging the final intent removal can
+happen after cleanup has completed; fresh enumeration determines what remains.
+An in-memory intent without its durable record cannot authorize deletion.
+These operations still require a caller to prove complete reference absence and
+exclude active work; automatic maintenance integration is not installed yet.
+
 Reads verify the session and job binding, full metadata, bounded byte count and
 SHA-256 digest before decoding the completion. Adoption refuses another target
 session or an existing destination and restores temporary data if its metadata

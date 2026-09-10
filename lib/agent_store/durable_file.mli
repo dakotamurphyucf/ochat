@@ -5,6 +5,11 @@ type durability =
   | Flush_file_and_directory
 [@@deriving compare, equal, sexp]
 
+(** Recognize a basename produced by the atomic writer and return its intended
+    target basename. Callers must validate that target in their own namespace.
+    Recognition grants no ownership or deletion authority. *)
+val temporary_target : string -> string option
+
 (** [replace ~env ~durability ~path contents] atomically replaces [path].
     The target must be an absolute path whose parent already exists. *)
 val replace

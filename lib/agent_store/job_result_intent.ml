@@ -89,7 +89,7 @@ let read_contents file =
     loop ())
 ;;
 
-let read_owned ~env ~session_id ~directory ~filename =
+let decode ~session_id ~filename contents =
   let open Result.Let_syntax in
   let%bind id =
     match String.chop_suffix filename ~suffix:".frame" with
@@ -99,6 +99,23 @@ let read_owned ~env ~session_id ~directory ~filename =
       |> Result.map_error ~f:(fun _ ->
         Store_error.Corrupt "invalid job result intent filename")
   in
+  match Frame.decode ~max_payload_length ~contents ~offset:0 with
+  | Ok (Complete { frame; next_offset })
+    when next_offset = String.length contents && Frame.flags frame = 0 ->
+    let%bind intent =
+      Result.try_with (fun () -> Frame.payload frame |> Sexp.of_string |> t_of_sexp)
+      |> Result.map_error ~f:(fun _ ->
+        Store_error.Corrupt "invalid job result intent payload")
+    in
+    let%bind () = validate_session session_id intent in
+    (match P.Id.Blob.equal id intent.reference.blob.id with
+     | true -> Ok intent
+     | false -> corrupt "job result intent filename differs from its blob")
+  | _ -> corrupt "job result intent is incomplete or corrupt"
+;;
+
+let read_owned ~env ~session_id ~directory ~filename =
+  let open Result.Let_syntax in
   let path = Filename.concat directory filename in
   try
     let file = Eio.Path.(Eio.Stdenv.fs env / path) in
@@ -115,19 +132,7 @@ let read_owned ~env ~session_id ~directory ~filename =
       | _ -> corrupt "job result intent file exceeds its size limit"
     in
     let%bind contents = read_contents file in
-    match Frame.decode ~max_payload_length ~contents ~offset:0 with
-    | Ok (Complete { frame; next_offset })
-      when next_offset = String.length contents && Frame.flags frame = 0 ->
-      let%bind intent =
-        Result.try_with (fun () -> Frame.payload frame |> Sexp.of_string |> t_of_sexp)
-        |> Result.map_error ~f:(fun _ ->
-          Store_error.Corrupt "invalid job result intent payload")
-      in
-      let%bind () = validate_session session_id intent in
-      (match P.Id.Blob.equal id intent.reference.blob.id with
-       | true -> Ok intent
-       | false -> corrupt "job result intent filename differs from its blob")
-    | _ -> corrupt "job result intent is incomplete or corrupt"
+    decode ~session_id ~filename contents
   with
   | exn -> Error (Store_error.of_exn ~operation:"read job result intent" ~path exn)
 ;;
@@ -230,26 +235,74 @@ let create ~env ~session ~reference ~metadata =
   t
 ;;
 
-let list ~env ~session ~max_count =
-  let path = directory session in
-  try
-    let directory = Eio.Path.(Eio.Stdenv.fs env / path) in
-    match Eio.Path.kind ~follow:false directory with
-    | `Not_found -> Ok []
-    | `Directory ->
-      let files =
-        Eio.Path.read_dir directory |> List.filter ~f:(String.is_suffix ~suffix:".frame")
+let list_with_reader ~reader ~session ~max_count =
+  let open Result.Let_syntax in
+  let%bind () =
+    match
+      max_count >= 0
+      && String.equal
+           (Retention_reader.root reader)
+           (Session_store.Handle.directory session)
+    with
+    | true -> Ok ()
+    | false -> corrupt "intent retention reader does not match its session or limits"
+  in
+  let%bind root_names = Retention_reader.list reader ~directory:"." in
+  match List.mem root_names "result-preparations" ~equal:String.equal with
+  | false -> Ok []
+  | true ->
+    let%bind names = Retention_reader.list reader ~directory:"result-preparations" in
+    let valid_name name =
+      match String.chop_suffix name ~suffix:".frame" with
+      | None -> false
+      | Some id -> Result.is_ok (P.Id.Blob.of_string id)
+    in
+    let%bind files =
+      List.fold_result names ~init:[] ~f:(fun files name ->
+        match valid_name name, Durable_file.temporary_target name with
+        | true, _ -> Ok (name :: files)
+        | false, Some target when valid_name target -> Ok files
+        | _ -> corrupt "unknown file in job result preparation directory")
+    in
+    let%bind () =
+      match List.length files <= max_count with
+      | true -> Ok ()
+      | false -> corrupt "job result intent scan exceeds its count limit"
+    in
+    List.fold_result (List.rev files) ~init:[] ~f:(fun intents filename ->
+      let%bind contents =
+        Retention_reader.read
+          reader
+          ~path:(Filename.concat "result-preparations" filename)
+          ~max_bytes:(max_payload_length + 4096)
       in
-      (match max_count >= 0 && List.length files <= max_count with
-       | false -> corrupt "job result intent scan exceeds its count limit"
-       | true ->
-         files
-         |> List.sort ~compare:String.compare
-         |> List.map ~f:(fun filename -> read ~env ~session ~filename)
-         |> Result.all)
-    | _ -> corrupt "job result preparation directory is not a regular directory"
-  with
-  | exn -> Error (Store_error.of_exn ~operation:"list job result intents" ~path exn)
+      let%map intent =
+        decode ~session_id:(Session_store.Handle.session_id session) ~filename contents
+      in
+      intent :: intents)
+    |> Result.map ~f:List.rev
+;;
+
+let list ~env ~session ~max_count =
+  let open Result.Let_syntax in
+  let%bind () =
+    match max_count >= 0 with
+    | true -> Ok ()
+    | false -> corrupt "job result intent scan exceeds its count limit"
+  in
+  let allowance ~scale ~overhead =
+    match max_count <= (Int.max_value - overhead) / scale with
+    | true -> (max_count * scale) + overhead
+    | false -> Int.max_value
+  in
+  let%bind reader =
+    Retention_reader.create
+      ~env
+      ~root:(Session_store.Handle.directory session)
+      ~max_entries:(allowance ~scale:4 ~overhead:64)
+      ~max_bytes:(allowance ~scale:(max_payload_length + 4096) ~overhead:0)
+  in
+  list_with_reader ~reader ~session ~max_count
 ;;
 
 let remove ~env ~session t =
@@ -269,4 +322,69 @@ let remove ~env ~session t =
     | _ -> corrupt "job result intent is not a regular file"
   with
   | exn -> Error (Store_error.of_exn ~operation:"remove job result intent" ~path exn)
+;;
+
+let discard_unreferenced ~env ~scope ~reader ~session t =
+  let open Result.Let_syntax in
+  let%bind () = validate session t in
+  let%bind () =
+    match
+      String.equal (Retention_reader.root reader) (Session_store.Handle.directory session)
+    with
+    | true -> Ok ()
+    | false -> corrupt "intent discard reader does not match its session"
+  in
+  let relative = Filename.concat "result-preparations" (filename t) in
+  let read_current () =
+    let%bind bytes =
+      Retention_reader.read reader ~path:relative ~max_bytes:(max_payload_length + 4096)
+    in
+    let%bind actual =
+      decode
+        ~session_id:(Session_store.Handle.session_id session)
+        ~filename:(filename t)
+        bytes
+    in
+    match Sexp.equal (sexp_of_t actual) (sexp_of_t t) with
+    | true -> Ok bytes
+    | false -> corrupt "private result intent changed before staged discard"
+  in
+  let%bind expected = read_current () in
+  let%bind names = Retention_reader.list reader ~directory:"result-preparations" in
+  let%bind temporary_paths =
+    List.fold_result names ~init:[] ~f:(fun paths name ->
+      match
+        Option.exists (Durable_file.temporary_target name) ~f:(String.equal (filename t))
+      with
+      | false -> Ok paths
+      | true ->
+        let%bind bytes =
+          Retention_reader.read
+            reader
+            ~path:(Filename.concat "result-preparations" name)
+            ~max_bytes:(String.length expected)
+        in
+        (match String.is_prefix expected ~prefix:bytes with
+         | true -> Ok (Filename.concat (directory session) name :: paths)
+         | false -> corrupt "temporary private intent differs from its preparation"))
+  in
+  let%bind () =
+    Blob_store.discard_staged_unreferenced scope ~reader session ~metadata:t.metadata
+  in
+  let%bind _ = read_current () in
+  let path = path session t in
+  try
+    let%bind () =
+      List.fold_result (temporary_paths @ [ path ]) ~init:() ~f:(fun () native_path ->
+        let file = Eio.Path.(Eio.Stdenv.fs env / native_path) in
+        match Eio.Path.kind ~follow:false file with
+        | `Not_found -> Ok ()
+        | `Regular_file ->
+          Eio.Path.unlink file;
+          Ok ()
+        | _ -> corrupt "private intent path changed before removal")
+    in
+    Durable_file.sync_directory ~env ~path:(directory session)
+  with
+  | exn -> Error (Store_error.of_exn ~operation:"finish staged result discard" ~path exn)
 ;;

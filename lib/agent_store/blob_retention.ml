@@ -49,9 +49,17 @@ let files reader directory =
   let open Result.Let_syntax in
   let%bind names = Retention_reader.list reader ~directory in
   let grouped = Hashtbl.create (module Id) in
+  let temporary name =
+    match Durable_file.temporary_target name with
+    | None -> false
+    | Some target ->
+      (match String.chop_suffix target ~suffix:".sexp" with
+       | None -> false
+       | Some id -> Result.is_ok (Id.of_string id))
+  in
   let%map () =
     List.fold_result names ~init:() ~f:(fun () name ->
-      match String.is_prefix name ~prefix:".tmp-" with
+      match temporary name with
       | true -> Ok ()
       | false ->
         let%bind base, suffix =

@@ -13,6 +13,18 @@ let temporary_path path =
   sprintf "%s.tmp-%d-%d" path (Core_unix.getpid () |> Pid.to_int) sequence
 ;;
 
+let temporary_target filename =
+  let digits text =
+    (not (String.is_empty text)) && String.for_all text ~f:Char.is_digit
+  in
+  match String.rsplit2 filename ~on:'.' with
+  | Some (target, suffix) when not (String.is_empty target) ->
+    (match String.split suffix ~on:'-' with
+     | [ "tmp"; pid; sequence ] when digits pid && digits sequence -> Some target
+     | _ -> None)
+  | _ -> None
+;;
+
 let write_temporary path contents =
   Eio.Path.with_open_out ~create:(`Exclusive 0o600) path (fun flow ->
     Eio.Flow.copy_string contents flow;
