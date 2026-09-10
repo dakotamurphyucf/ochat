@@ -73,7 +73,12 @@ let reject label result =
   | Ok _ -> failwith (label ^ " was accepted")
 ;;
 
-let with_actor ?(reject_save = fun _ -> false) ?(now = fun () -> timestamp) f =
+let with_actor
+      ?(reject_save = fun _ -> false)
+      ?(now = fun () -> timestamp)
+      ?(make_job_results = fun _ _ _ -> None)
+      f
+  =
   with_actor_workspace (fun env workspace_instance ->
     Eio.Switch.run (fun sw ->
       let initial =
@@ -83,6 +88,7 @@ let with_actor ?(reject_save = fun _ -> false) ?(now = fun () -> timestamp) f =
         Agent_session.Memory_backend.create ~event_capacity:128 ~initial_state:initial
       in
       let persistence = Agent_session.Memory_backend.persistence backend in
+      let job_results = make_job_results env sw initial in
       let actor =
         A.create
           ~sw
@@ -102,7 +108,7 @@ let with_actor ?(reject_save = fun _ -> false) ?(now = fun () -> timestamp) f =
             { now
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "background-fixture")
-            ; job_results = None
+            ; job_results
             ; state_committed = (fun _ _ -> ())
             }
       in

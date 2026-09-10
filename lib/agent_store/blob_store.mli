@@ -105,6 +105,20 @@ val iter_chunks
     an already durable handle can be reused only by its original session. *)
 val adopt : t -> Session_store.Handle.t -> Handle.t -> (Handle.t, Store_error.t) result
 
+(** Idempotently complete a host-owned staged write using the same ID and bytes.
+    Requires a durable private preparation intent and exclusive ownership from the
+    caller; allowed_use is not ownership proof. Existing files must match the
+    expected canonical metadata/content (partials must be prefixes). Refuses links
+    and conflicting files before mutation. Repairs unpaired data/metadata left by
+    interrupted writes and adoption, without rerunning the originating tool. *)
+val ensure_staged_content
+  :  t
+  -> sw:Eio.Switch.t
+  -> Session_store.Handle.t
+  -> metadata:Metadata.t
+  -> string
+  -> (Handle.t, Store_error.t) result
+
 (** Discard a host-owned artifact known not to be referenced by a committed
     transaction. Checks the exact session and unchanged metadata before removal;
     callers must establish absence of durable references. *)

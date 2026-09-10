@@ -1523,6 +1523,19 @@ may have succeeded before its acknowledgement failed. Removing such an artifact
 requires separate reconciliation proving it has no durable references. A preparation
 whose persistence was never attempted can be discarded idempotently.
 
+The publisher retains the selected completion and its reference in memory before
+the first filesystem write. Failed intent, upload or metadata writes therefore retry
+the same identity. Retries reuse matching complete files, rebuild matching partial
+uploads, and reject conflicting bytes, metadata or symlinks before changing files.
+They reestablish file and directory durability after ambiguous acknowledgements.
+This handles retries within the running process; startup recovery of unpublished
+preparations is not yet installed.
+
+A waiting parent also reuses its already selected completion while publication is
+pending. It does not reread a subsequently damaged child artifact or change that
+outcome because its deadline passes during a save retry. Explicit cancellation or
+a newer attempt still takes precedence over a cached completion.
+
 Before uploading bytes, preparation writes a checksummed versioned record beneath
 the session's private `result-preparations` directory. It binds the complete result
 reference and expected blob metadata, so a failed upload or interrupted adoption

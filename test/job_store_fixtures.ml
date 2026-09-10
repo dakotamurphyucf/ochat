@@ -73,6 +73,8 @@ let principal = P.Id.Principal.of_string "pri_job_artifact" |> protocol_ok
 let fail_metadata_rename
       ?(on_failure = fun _ -> ())
       ?(before_unlink = fun _ -> ())
+      ?(before_open_out = fun _ -> ())
+      ?(matches_rename = fun path -> String.is_suffix path ~suffix:".sexp")
       (Eio.Resource.T (directory, handler) as native_directory)
       armed
   =
@@ -81,7 +83,7 @@ let fail_metadata_rename
     include Original
 
     let rename directory source _destination target =
-      match !armed, String.is_suffix target ~suffix:".sexp" with
+      match !armed, matches_rename target with
       | Some after_rename, true ->
         armed := None;
         on_failure target;
@@ -94,15 +96,29 @@ let fail_metadata_rename
       before_unlink path;
       Original.unlink directory path
     ;;
+
+    let open_out directory ~sw ~append ~create path =
+      before_open_out path;
+      Original.open_out directory ~sw ~append ~create path
+    ;;
   end
   in
   Eio.Resource.T
     (directory, Eio.Resource.handler [ H (Eio.Fs.Pi.Dir, (module Directory)) ])
 ;;
 
-let fault_env ?on_failure ?before_unlink env armed =
+let fault_env ?on_failure ?before_unlink ?before_open_out ?matches_rename env armed =
   let directory, path = Eio.Stdenv.fs env in
-  let fs = fail_metadata_rename ?on_failure ?before_unlink directory armed, path in
+  let fs =
+    ( fail_metadata_rename
+        ?on_failure
+        ?before_unlink
+        ?before_open_out
+        ?matches_rename
+        directory
+        armed
+    , path )
+  in
   object
     method fs = fs
     method cwd = env#cwd

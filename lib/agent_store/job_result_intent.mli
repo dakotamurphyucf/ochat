@@ -6,6 +6,22 @@ type t
 val reference : t -> Agent_protocol.Job_artifact.t
 val metadata : t -> Blob_store.Metadata.t
 
+(** Allocate a validated identity without IO, so a caller can retain it before
+    the first possibly ambiguous filesystem operation. *)
+val make
+  :  session:Session_store.Handle.t
+  -> reference:Agent_protocol.Job_artifact.t
+  -> metadata:Blob_store.Metadata.t
+  -> (t, Store_error.t) result
+
+(** Durably save the same intent on retries. Refuses different/corrupt existing
+    records and links; reestablishes durability after an ambiguous acknowledgement. *)
+val save
+  :  env:Eio_unix.Stdenv.base
+  -> session:Session_store.Handle.t
+  -> t
+  -> (unit, Store_error.t) result
+
 val create
   :  env:Eio_unix.Stdenv.base
   -> session:Session_store.Handle.t

@@ -3,7 +3,8 @@ module P = Agent_protocol
 module Artifact = P.Job_artifact
 
 type phase =
-  | Prepared
+  | Allocated
+  | Prepared of Blob_store.Handle.t
   | Attempted
   | Retained
   | Discarded
@@ -13,8 +14,8 @@ type prepared =
   ; env : Eio_unix.Stdenv.base
   ; session : Session_store.Handle.t
   ; intent : Job_result_intent.t
-  ; handle : Blob_store.Handle.t
   ; reference : Artifact.t
+  ; completion : P.Completion.t
   ; mutex : Eio.Mutex.t
   ; mutable phase : phase
   }
@@ -25,7 +26,7 @@ let protocol result =
   Result.map_error result ~f:(fun error -> Store_error.Corrupt error.P.Error.message)
 ;;
 
-let prepare store ~env ~sw ~session ~job ~creating_principal ~now ~max_bytes completion =
+let allocate store ~env ~session ~job ~creating_principal ~now ~max_bytes completion =
   let open Result.Let_syntax in
   let%bind () = P.Completion.validate completion |> protocol in
   let%bind () =
@@ -66,52 +67,64 @@ let prepare store ~env ~sw ~session ~job ~creating_principal ~now ~max_bytes com
       ~blob
     |> protocol
   in
-  Eio.Cancel.protect (fun () ->
-    let expires_at =
-      Some
-        (P.Timestamp.to_time_ns now
-         |> fun at -> Time_ns.add at (Time_ns.Span.of_day 1.) |> P.Timestamp.of_time_ns)
-    in
-    let metadata : Blob_store.Metadata.t =
-      { blob
-      ; creating_principal
-      ; target_session = Some job.session_id
-      ; allowed_use = Artifact.allowed_use reference
-      ; created_at = now
-      ; expires_at
-      ; durable = false
-      }
-    in
-    let%bind intent = Job_result_intent.create ~env ~session ~reference ~metadata in
-    let%bind upload =
-      Blob_store.begin_upload
-        store
-        ~sw
-        ~id
-        ~creating_principal
-        ~target_session:(Some job.session_id)
-        ~kind:File
-        ~media_type:Artifact.media_type
-        ~display_name:(Some "job-result.json")
-        ~allowed_use:(Artifact.allowed_use reference)
-        ~created_at:now
-        ~expires_at
-    in
-    Exn.protect
-      ~finally:(fun () -> Blob_store.abort upload)
-      ~f:(fun () ->
-        let%bind () = Blob_store.write_string upload content in
-        let%bind handle = Blob_store.finish upload ~expected_digest:(Some digest) in
-        let%map handle = Blob_store.adopt store session handle in
-        { store
-        ; env
-        ; session
-        ; intent
-        ; handle
-        ; reference
-        ; mutex = Eio.Mutex.create ()
-        ; phase = Prepared
-        }))
+  let expires_at =
+    Some
+      (P.Timestamp.to_time_ns now
+       |> fun at -> Time_ns.add at (Time_ns.Span.of_day 1.) |> P.Timestamp.of_time_ns)
+  in
+  let metadata : Blob_store.Metadata.t =
+    { blob
+    ; creating_principal
+    ; target_session = Some job.session_id
+    ; allowed_use = Artifact.allowed_use reference
+    ; created_at = now
+    ; expires_at
+    ; durable = false
+    }
+  in
+  let%map intent = Job_result_intent.make ~session ~reference ~metadata in
+  { store
+  ; env
+  ; session
+  ; intent
+  ; reference
+  ; completion
+  ; mutex = Eio.Mutex.create ()
+  ; phase = Allocated
+  }
+;;
+
+let ensure_prepared prepared ~sw =
+  Eio.Mutex.use_rw ~protect:true prepared.mutex (fun () ->
+    match prepared.phase with
+    | Retained | Discarded -> Error (Store_error.Corrupt "result preparation has ended")
+    | (Allocated | Prepared _ | Attempted) as phase ->
+      let open Result.Let_syntax in
+      let%bind () =
+        Job_result_intent.save ~env:prepared.env ~session:prepared.session prepared.intent
+      in
+      let content = P.Completion.to_json prepared.completion |> Jsonaf.to_string in
+      let%map handle =
+        Blob_store.ensure_staged_content
+          prepared.store
+          ~sw
+          prepared.session
+          ~metadata:(Job_result_intent.metadata prepared.intent)
+          content
+      in
+      (match phase with
+       | Allocated | Prepared _ -> prepared.phase <- Prepared handle
+       | Attempted -> ()
+       | Retained | Discarded -> assert false))
+;;
+
+let prepare store ~env ~sw ~session ~job ~creating_principal ~now ~max_bytes completion =
+  let open Result.Let_syntax in
+  let%bind prepared =
+    allocate store ~env ~session ~job ~creating_principal ~now ~max_bytes completion
+  in
+  let%map () = ensure_prepared prepared ~sw in
+  prepared
 ;;
 
 let commit prepared ~persist =
@@ -124,7 +137,14 @@ let commit prepared ~persist =
            ~message:"result artifact preparation has ended"
            ~retryable:false
            ())
-    | Prepared | Attempted ->
+    | Allocated ->
+      Error
+        (P.Error.create
+           Invalid_state
+           ~message:"result bytes are not prepared"
+           ~retryable:true
+           ())
+    | Prepared _ | Attempted ->
       prepared.phase <- Attempted;
       let open Result.Let_syntax in
       let%map result = persist prepared.reference in
@@ -144,15 +164,15 @@ let discard prepared =
   Eio.Mutex.use_rw ~protect:true prepared.mutex (fun () ->
     match prepared.phase with
     | Retained -> Error (Store_error.Corrupt "cannot discard a retained result artifact")
-    | Attempted ->
+    | Allocated | Attempted ->
       Error
         (Store_error.Corrupt
            "result artifact requires durable reference reconciliation before discard")
     | Discarded -> Ok ()
-    | Prepared ->
+    | Prepared handle ->
       let open Result.Let_syntax in
       let%bind () =
-        Blob_store.discard_unreferenced prepared.store prepared.session prepared.handle
+        Blob_store.discard_unreferenced prepared.store prepared.session handle
       in
       let%map () =
         Job_result_intent.remove
@@ -283,10 +303,9 @@ module Publisher = struct
           | Some prepared -> Ok prepared
           | None ->
             let%map prepared =
-              prepare
+              allocate
                 t.blobs
                 ~env:t.env
-                ~sw:t.sw
                 ~session:t.session
                 ~job
                 ~creating_principal:t.principal
@@ -299,10 +318,31 @@ module Publisher = struct
             prepared
         in
         let%bind stored = P.Stored_completion.artifact (reference prepared) completion in
+        let%bind () =
+          ensure_prepared prepared ~sw:t.sw
+          |> Result.map_error ~f:Store_error.to_protocol_error
+        in
         let%map result = commit prepared ~persist:(fun _ -> persist stored) in
         t.pending
         <- List.filter t.pending ~f:(fun other -> not (phys_equal other prepared));
         result)
+  ;;
+
+  let pending_completion t ~(job : P.Job.t) =
+    Eio.Mutex.use_ro t.mutex (fun () ->
+      match job.status with
+      | Running | Waiting_completion _ ->
+        List.find_map t.pending ~f:(fun prepared ->
+          let reference = reference prepared in
+          match
+            P.Id.Session.equal reference.session_id job.session_id
+            && P.Id.Job.equal reference.job_id job.id
+            && Int.equal reference.generation job.generation
+            && Int.equal reference.attempt job.attempt
+          with
+          | true -> Some prepared.completion
+          | false -> None)
+      | _ -> None)
   ;;
 
   let load t reference =

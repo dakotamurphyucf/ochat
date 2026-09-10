@@ -5291,43 +5291,53 @@ let refresh_background_job t job_id generation attempt =
     let%bind () =
       Job_dependency.validate ~invocations:t.state.invocations ~jobs:t.state.jobs job
     in
-    let%bind target = find_job t dependency.job_id in
-    let load_artifact =
-      Option.map t.services.job_results ~f:(fun publisher ->
-        Agent_store.Job_result_store.Publisher.load publisher)
+    let selected =
+      Option.bind t.services.job_results ~f:(fun publisher ->
+        Agent_store.Job_result_store.Publisher.pending_completion publisher ~job)
     in
-    let%bind completion =
-      match Agent_protocol.Job.terminal_completion ?load_artifact target with
-      | Ok completion -> Ok completion
-      | Error failure when not failure.retryable ->
-        Ok
-          (Some
-             (Agent_protocol.Completion.Failed
-                { code = "background.artifact_unavailable"
-                ; message =
-                    "The saved background result is unavailable or failed verification."
-                ; retryable = false
-                ; details = `Null
-                }))
-      | Error _
-        when Agent_protocol.Timestamp.compare (t.services.now ()) dependency.deadline >= 0
-        -> Ok (Some Agent_protocol.Completion.Expired)
-      | Error _ as failure -> failure
-    in
-    (match completion with
+    (match selected with
      | Some completion ->
-       let completion =
-         match target.completed_at with
-         | Some at when Agent_protocol.Timestamp.compare at dependency.deadline <= 0 ->
-           completion
-         | _ -> Agent_protocol.Completion.Expired
-       in
-       let%bind completion = Job_dependency.completion dependency completion in
        complete_background_job ~waiting:true t job_id generation attempt completion
-     | None
-       when Agent_protocol.Timestamp.compare (t.services.now ()) dependency.deadline >= 0
-       -> complete_background_job ~waiting:true t job_id generation attempt Expired
-     | None -> Ok job)
+     | None ->
+       let%bind target = find_job t dependency.job_id in
+       let load_artifact =
+         Option.map t.services.job_results ~f:(fun publisher ->
+           Agent_store.Job_result_store.Publisher.load publisher)
+       in
+       let%bind completion =
+         match Agent_protocol.Job.terminal_completion ?load_artifact target with
+         | Ok completion -> Ok completion
+         | Error failure when not failure.retryable ->
+           Ok
+             (Some
+                (Agent_protocol.Completion.Failed
+                   { code = "background.artifact_unavailable"
+                   ; message =
+                       "The saved background result is unavailable or failed \
+                        verification."
+                   ; retryable = false
+                   ; details = `Null
+                   }))
+         | Error _
+           when Agent_protocol.Timestamp.compare (t.services.now ()) dependency.deadline
+                >= 0 -> Ok (Some Agent_protocol.Completion.Expired)
+         | Error _ as failure -> failure
+       in
+       (match completion with
+        | Some completion ->
+          let completion =
+            match target.completed_at with
+            | Some at when Agent_protocol.Timestamp.compare at dependency.deadline <= 0 ->
+              completion
+            | _ -> Agent_protocol.Completion.Expired
+          in
+          let%bind completion = Job_dependency.completion dependency completion in
+          complete_background_job ~waiting:true t job_id generation attempt completion
+        | None
+          when Agent_protocol.Timestamp.compare (t.services.now ()) dependency.deadline
+               >= 0 ->
+          complete_background_job ~waiting:true t job_id generation attempt Expired
+        | None -> Ok job))
   | _ -> Ok job
 ;;
 

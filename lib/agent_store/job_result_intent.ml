@@ -53,7 +53,8 @@ let ensure_directory ~env session =
   try
     let directory = Eio.Path.(Eio.Stdenv.fs env / path) in
     match Eio.Path.kind ~follow:false directory with
-    | `Directory -> Ok ()
+    | `Directory ->
+      Durable_file.sync_directory ~env ~path:(Session_store.Handle.directory session)
     | `Not_found ->
       Eio.Path.mkdir ~perm:0o700 directory;
       Durable_file.sync_directory ~env ~path:(Session_store.Handle.directory session)
@@ -63,29 +64,9 @@ let ensure_directory ~env session =
     Error (Store_error.of_exn ~operation:"create job result intent directory" ~path exn)
 ;;
 
-let create ~env ~session ~reference ~metadata =
+let make ~session ~reference ~metadata =
   let t = { version = 1; reference; metadata } in
-  let path = path session t in
-  try
-    let open Result.Let_syntax in
-    let%bind () = validate session t in
-    let%bind () = ensure_directory ~env session in
-    let%bind () =
-      match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) with
-      | `Not_found -> Ok ()
-      | _ -> corrupt "job result preparation intent already exists"
-    in
-    let%bind contents =
-      Frame.encode ~max_payload_length ~flags:0 (sexp_of_t t |> Sexp.to_string_mach)
-      |> Result.map_error ~f:(fun _ ->
-        Store_error.Corrupt "job result intent exceeds its frame limit")
-    in
-    let%map () =
-      Durable_file.replace ~env ~durability:Flush_file_and_directory ~path contents
-    in
-    t
-  with
-  | exn -> Error (Store_error.of_exn ~operation:"write job result intent" ~path exn)
+  Result.map (validate session t) ~f:(fun () -> t)
 ;;
 
 let read_contents file =
@@ -147,6 +128,40 @@ let read ~env ~session ~filename =
     | _ -> corrupt "job result intent is incomplete or corrupt"
   with
   | exn -> Error (Store_error.of_exn ~operation:"read job result intent" ~path exn)
+;;
+
+let save ~env ~session t =
+  let path = path session t in
+  try
+    let open Result.Let_syntax in
+    let%bind () = validate session t in
+    let%bind () = ensure_directory ~env session in
+    let%bind () =
+      match Eio.Path.kind ~follow:false Eio.Path.(Eio.Stdenv.fs env / path) with
+      | `Not_found -> Ok ()
+      | `Regular_file ->
+        let%bind actual = read ~env ~session ~filename:(filename t) in
+        (match Sexp.equal (sexp_of_t actual) (sexp_of_t t) with
+         | true -> Ok ()
+         | false ->
+           corrupt "job result preparation intent already belongs to another value")
+      | _ -> corrupt "job result preparation intent is not a regular file"
+    in
+    let%bind contents =
+      Frame.encode ~max_payload_length ~flags:0 (sexp_of_t t |> Sexp.to_string_mach)
+      |> Result.map_error ~f:(fun _ ->
+        Store_error.Corrupt "job result intent exceeds its frame limit")
+    in
+    Durable_file.replace ~env ~durability:Flush_file_and_directory ~path contents
+  with
+  | exn -> Error (Store_error.of_exn ~operation:"save job result intent" ~path exn)
+;;
+
+let create ~env ~session ~reference ~metadata =
+  let open Result.Let_syntax in
+  let%bind t = make ~session ~reference ~metadata in
+  let%map () = save ~env ~session t in
+  t
 ;;
 
 let list ~env ~session ~max_count =

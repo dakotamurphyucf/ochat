@@ -49,8 +49,11 @@ val load
   -> (Agent_protocol.Completion.t, Store_error.t) result
 
 (** Per-session publication service. The actor must validate the live attempt and
-    completion contract before calling it. Large completions are written once;
-    failed persistence retries reuse their exact prepared reference. *)
+    completion contract before calling it. Selection retains the completion and
+    reference before the first filesystem operation. Failed intent, upload,
+    metadata or persistence writes retry the same stage. Matching partial data can
+    be rebuilt; complete data is reused and conflicting files are rejected.
+    This cache handles retries within this process, not startup recovery. *)
 module Publisher : sig
   type t
 
@@ -88,4 +91,12 @@ module Publisher : sig
     :  t
     -> Agent_protocol.Completion.t
     -> (unit, Agent_protocol.Error.t) result
+
+  (** The completion already selected for this still-current attempt, including
+      failed intent/upload writes. Retrying a waiting parent must not recalculate
+      a different outcome while the original publication is pending. *)
+  val pending_completion
+    :  t
+    -> job:Agent_protocol.Job.t
+    -> Agent_protocol.Completion.t option
 end
