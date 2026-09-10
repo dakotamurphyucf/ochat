@@ -12,6 +12,7 @@ let subscription () =
     ; session_id = get (Id.Session.of_string "ses_parent")
     ; generation = 3
     ; invocation_id = get (Id.Invocation.of_string "inv_example")
+    ; source = None
     ; kind = "agent_response"
     ; created_at = timestamp
     ; deadline = later
@@ -107,7 +108,7 @@ let%expect_test "expiry and subscription codec reject impossible durable states"
        (replace (Subscription.to_json expired) "timer_id" (`String "sch_stale")));
   report
     (Subscription.of_json
-       (replace (Subscription.to_json s) "schema_version" (`Number "2")));
+       (replace (Subscription.to_json s) "schema_version" (`Number "3")));
   report
     (Subscription.of_json
        (replace (Subscription.to_json s) "ingress_capability" (`String "ses_forged")));
@@ -120,6 +121,49 @@ let%expect_test "expiry and subscription codec reject impossible durable states"
     incompatible_protocol
     invalid_request
     invalid_state |}]
+;;
+
+let%expect_test
+    "subscription source binding survives restore and cannot be attached to legacy \
+     authority"
+  =
+  let legacy = subscription () in
+  let source : Invocation.observer =
+    { script_id = "watcher"; source_sha256 = String.make 64 'a' }
+  in
+  let bound = Subscription.create { legacy.context with source = Some source } |> get in
+  let restored = Subscription.of_json (Subscription.to_json bound) |> get in
+  assert (Subscription.equal bound restored);
+  assert (
+    Option.is_none
+      (Subscription.of_json (Subscription.to_json legacy) |> get).context.source);
+  report (Subscription.validate_transition ~previous:(Some legacy) bound);
+  let changed =
+    Subscription.create
+      { bound.context with
+        source = Some { source with source_sha256 = String.make 64 'b' }
+      }
+    |> get
+  in
+  report (Subscription.validate_transition ~previous:(Some bound) changed);
+  let replace = Agent_invocation_test.replace_field in
+  report
+    (Subscription.of_json
+       (replace (Subscription.to_json bound) "schema_version" (`Number "1")));
+  report
+    (Subscription.of_json
+       (replace (Subscription.to_json legacy) "schema_version" (`Number "2")));
+  print_s [%sexp (restored.context.source : Invocation.observer option)];
+  [%expect
+    {|
+    conflict
+    conflict
+    invalid_request
+    invalid_request
+    (((script_id watcher)
+      (source_sha256
+       aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa)))
+    |}]
 ;;
 
 let%expect_test

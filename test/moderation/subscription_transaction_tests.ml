@@ -76,6 +76,7 @@ let%expect_test
                   ; session_id = invocation.context.session_id
                   ; generation = 0
                   ; invocation_id = invocation.context.id
+                  ; source = None
                   ; kind
                   ; created_at
                   ; deadline
@@ -256,6 +257,7 @@ let%expect_test
         ; session_id = invocation.context.session_id
         ; generation = 0
         ; invocation_id = invocation.context.id
+        ; source = None
         ; kind = "watch"
         ; created_at
         ; deadline

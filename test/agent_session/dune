@@ -35,6 +35,7 @@
   managed_moderator_dispatch_tests
   moderator_handoff_tests
   moderator_job_transaction_tests
+  subscription_transaction_tests
   moderator_descendant_tests
   moderator_lifecycle_tests
   moderator_native_calls_tests

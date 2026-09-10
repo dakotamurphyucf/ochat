@@ -36,6 +36,7 @@ let%expect_test "event and idle descendants require a live parent in the exact o
             ; create_attachment_id = Agent_protocol.Id.Attachment.create
             ; create_reclaim_token = (fun () -> "descendants")
             ; job_results = None
+            ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed = (fun _ _ -> ())
             }
       in

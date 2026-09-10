@@ -20,6 +20,7 @@
   job_dependency
   job_progress_buffer
   staged_jobs
+  staged_subscriptions
   script_job_service
   invocation_history
   invocation_recovery

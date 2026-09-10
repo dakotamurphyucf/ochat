@@ -20,6 +20,7 @@ type limits =
   ; job_result_recovery_max_count : int
   ; job_result_recovery_max_bytes : int
   ; job_result_collection : Agent_store.Job_result_store.Publisher.collection_limits
+  ; subscriptions : Agent_session.Staged_subscriptions.limits
   }
 
 type t =
@@ -1802,6 +1803,7 @@ let actor_services
   Agent_session.Session_actor.
     { now = (fun () -> now t)
     ; job_results = Some job_results
+    ; subscription_limits = t.limits.subscriptions
     ; create_attachment_id = Agent_protocol.Id.Attachment.create
     ; create_reclaim_token =
         (fun () ->

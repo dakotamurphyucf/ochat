@@ -2973,6 +2973,9 @@ type context =
   ; session_id : Id.Session.t
   ; generation : int
   ; invocation_id : Id.Invocation.t
+  ; source : Invocation.observer option [@sexp.option]
+    (** Codec 2 binds the creating moderator source. Codec 1 records decode with
+        None and must not acquire current-moderator authority implicitly. *)
   ; kind : string
   ; created_at : Timestamp.t
   ; deadline : Timestamp.t
@@ -2980,7 +2983,7 @@ type context =
   ; wake : Completion.wake
   ; ingress_capability : Id.Capability.t option
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type t = private
   { context : context
@@ -2990,7 +2993,7 @@ type t = private
   ; result : Completion.t option
   ; completed_at : Timestamp.t option
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 val create : context -> (t, Error.t) result
 val validate : t -> (unit, Error.t) result

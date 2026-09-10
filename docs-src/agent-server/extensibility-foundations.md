@@ -8,8 +8,8 @@ runnable extension tutorial.
 
 The extensibility-v1 moderator compiler also defines `Subscription.create`,
 `get`, `complete`, `fail` and `cancel`. These currently require an explicitly
-injected host transaction; daemon actor-backed admission, expiry and notification
-delivery are still being implemented. One-off and standalone tool surfaces do
+injected host transaction. Actor staging is implemented, while the script-service
+binding, expiry and notification delivery are still being implemented. One-off and standalone tool surfaces do
 not include this module.
 
 `create(kind, lifetime_ms, wake_policy)` returns a task of subscription ID. The
@@ -29,6 +29,24 @@ script. Surviving job starts and subscription mutations are selected before the
 owning save and acknowledged only after it succeeds. An ordinary or queued event
 save failure leaves moderator state and the queue unchanged. The owning host
 must discard all remaining provisional work on whole-handler failure.
+
+The actor's host-only stage/select/read/abort operations require an actual live
+moderator invocation or event borrow with the installed source identity.
+Creation belongs to the currently dispatched moderator tool; an ordinary native
+or one-off invocation cannot acquire subscription authority. The actor checks
+source/session/generation, completion schemas, ordered predecessor transitions,
+creation lifetime and admission quotas. It validates selected predecessors again
+at save time, so a concurrent terminal winner cannot be overwritten by an older
+moderator proposal. Creation followed by completion saves as two ordered changes
+with the owning acknowledgement and moderator checkpoint.
+
+Host limits default to 64 active subscriptions, 4096 retained records, a one-hour
+default lifetime and a 24-hour maximum. V1 permits at most 1024 active subscriptions
+and a 24-hour lifetime. Retained capacity is configurable; admission fails at
+capacity instead of evicting unresolved records. Provisional creations reserve
+capacity until rollback or their owning save. Failed saves, callback exit, stop
+and shutdown discard remaining staged changes; retention inspection also waits
+for the staging registry to be empty.
 
 The internal `Agent_runtime.prepare_extensions` path now prepares the full captured
 definition against the exact authorized native resources. `Runtime_builder.build_with_extensions`
@@ -1416,6 +1434,13 @@ expiry, epoch and one immutable terminal winner. Deliveries retain a completion,
 source, wake policy, attempt and one history identity. The session aggregate
 checks ownership, generation and cross-record acknowledgement/result correlation.
 One terminal work item has one delivery owner.
+
+Subscription codec 2 additionally retains the creating moderator's script ID and
+source SHA256. Codec 1 records still decode with no source binding and re-encode
+as codec 1; they cannot acquire current-source moderator authority implicitly.
+The source is immutable across updates. A subscription's source authority does
+not depend on an optional invocation observation record. Older binaries that
+support only subscription codec 1 cannot read newly bound codec 2 records.
 
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6

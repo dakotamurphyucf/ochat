@@ -18,6 +18,7 @@ type services =
   ; job_results : Agent_store.Job_result_store.Publisher.t option
     (** Optional session-owned artifact publication/loading. Absence keeps inline
         publication and fails explicitly when an existing artifact needs loading. *)
+  ; subscription_limits : Staged_subscriptions.limits
   }
 
 type submission =
@@ -117,6 +118,44 @@ val has_staged_background_job
   -> owner:Agent_protocol.Job.launch_owner
   -> id:Agent_protocol.Id.Job.t
   -> (bool, Agent_protocol.Error.t) result
+
+(** Host-only subscription transaction adapter. The actor verifies an actual
+    live moderator invocation/event borrow and its installed source. Creations
+    must belong to that currently dispatched moderator invocation; updates must
+    retain its original source/session/generation. The host must supply the
+    original declaration's completion schema and lifetime choice, never raw model
+    ownership fields. Staging checks shared admission quotas and transitions.
+    Selected changes save with the owning moderator checkpoint, and are discarded
+    on rollback, failed save, scope exit, stop or shutdown. *)
+val stage_subscription_mutation
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> previous:Agent_protocol.Subscription.t option
+  -> next:Agent_protocol.Subscription.t
+  -> (int, Agent_protocol.Error.t) result
+
+val select_subscription_mutations
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> receipts:int list
+  -> (unit, Agent_protocol.Error.t) result
+
+val abort_subscription_mutation
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> receipt:int
+  -> (unit, Agent_protocol.Error.t) result
+
+(** Source-checked read of this owner's provisional state or retained state.
+    Unbound legacy subscriptions and other moderator sources are rejected. *)
+val read_script_subscription
+  :  t
+  -> owner:Agent_protocol.Job.launch_owner
+  -> source:Agent_protocol.Invocation.observer
+  -> id:Agent_protocol.Id.Subscription.t
+  -> (Agent_protocol.Subscription.t, Agent_protocol.Error.t) result
 
 (** Read a job with optional live progress from its current attempt. Progress
     disappears when the worker scope ends and is never a durable result. *)

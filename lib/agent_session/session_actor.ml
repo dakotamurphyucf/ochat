@@ -14,6 +14,7 @@ type services =
   ; create_reclaim_token : unit -> string
   ; state_committed : Session_state.t -> Agent_protocol.Event.Durable.t list -> unit
   ; job_results : Agent_store.Job_result_store.Publisher.t option
+  ; subscription_limits : Staged_subscriptions.limits
   }
 
 type submission =
@@ -158,6 +159,21 @@ type _ request =
       Agent_protocol.Job.launch_owner * Chat_response.Background_request.t
       -> Agent_protocol.Job.t request
   | Stage_background_job : Agent_protocol.Job.t * Staged_jobs.capacity -> unit request
+  | Stage_subscription_mutation :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Agent_protocol.Subscription.t option
+      * Agent_protocol.Subscription.t
+      -> int request
+  | Select_subscription_mutations :
+      Agent_protocol.Job.launch_owner * Agent_protocol.Invocation.observer * int list
+      -> unit request
+  | Abort_subscription_mutation : Agent_protocol.Job.launch_owner * int -> unit request
+  | Read_script_subscription :
+      Agent_protocol.Job.launch_owner
+      * Agent_protocol.Invocation.observer
+      * Agent_protocol.Id.Subscription.t
+      -> Agent_protocol.Subscription.t request
   | Select_background_jobs :
       Agent_protocol.Job.launch_owner * Agent_protocol.Id.Job.t list
       -> unit request
@@ -434,6 +450,7 @@ type t =
   ; mutable invocation_executions : invocation_execution list
   ; mutable job_scopes : job_scope list
   ; staged_jobs : Staged_jobs.t
+  ; staged_subscriptions : Staged_subscriptions.t
   ; invocation_gate : Chat_response.Execution_gate.t
   ; event_sequence : int64 Atomic.t
   ; mutable state : Session_state.t
@@ -586,23 +603,48 @@ let transition t ~delta ~payloads =
   Agent_protocol.Session.(Session_state.summary t.state)
 ;;
 
+let abort_staged_work t ~owner =
+  Staged_jobs.abort_owner t.staged_jobs ~owner;
+  Staged_subscriptions.release_owner t.staged_subscriptions ~owner
+;;
+
+let abort_all_staged_work t =
+  Staged_jobs.abort_all t.staged_jobs;
+  Staged_subscriptions.abort_all t.staged_subscriptions
+;;
+
 let with_staged_transaction t owner f =
   match f () with
   | Ok _ as result ->
     Staged_jobs.commit t.staged_jobs ~owner;
+    Staged_subscriptions.release_owner t.staged_subscriptions ~owner;
     result
   | Error _ as result ->
-    Staged_jobs.abort_owner t.staged_jobs ~owner;
+    abort_staged_work t ~owner;
     result
   | exception exn ->
     let backtrace = Stdlib.Printexc.get_raw_backtrace () in
-    Staged_jobs.abort_owner t.staged_jobs ~owner;
+    abort_staged_work t ~owner;
     Stdlib.Printexc.raise_with_backtrace exn backtrace
 ;;
 
-let staged_job_changes t owner =
+let lookup_subscription t id =
+  List.find t.state.subscriptions ~f:(fun subscription ->
+    Agent_protocol.Id.Subscription.equal subscription.context.id id)
+;;
+
+let staged_work_changes t owner =
+  let open Result.Let_syntax in
+  let%map subscriptions =
+    Staged_subscriptions.selected
+      t.staged_subscriptions
+      ~owner
+      ~lookup:(lookup_subscription t)
+  in
   let jobs = Staged_jobs.selected t.staged_jobs ~owner in
   ( List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
+    @ List.map subscriptions ~f:(fun subscription ->
+      Session_delta.Subscription_changed subscription)
   , List.map jobs ~f:(fun job ->
       Agent_protocol.Event.Durable.Payload.Job_state_changed job) )
 ;;
@@ -621,6 +663,22 @@ let stage_background_job t ~job ~capacity =
 ;;
 
 let select_background_jobs t ~owner ~ids = call t (Select_background_jobs (owner, ids))
+
+let stage_subscription_mutation t ~owner ~source ~previous ~next =
+  call t (Stage_subscription_mutation (owner, source, previous, next))
+;;
+
+let select_subscription_mutations t ~owner ~source ~receipts =
+  call t (Select_subscription_mutations (owner, source, receipts))
+;;
+
+let abort_subscription_mutation t ~owner ~receipt =
+  Eio.Cancel.protect (fun () -> call t (Abort_subscription_mutation (owner, receipt)))
+;;
+
+let read_script_subscription t ~owner ~source ~id =
+  call t (Read_script_subscription (owner, source, id))
+;;
 
 let abort_background_job t ~owner ~id =
   Eio.Cancel.protect (fun () -> call t (Abort_background_job (owner, id)))
@@ -1039,7 +1097,7 @@ let stop_internal t mode =
        Option.iter borrow.cancel ~f:(fun cancel -> cancel ())
      | _ -> ());
     (match mode with
-     | Cancel -> Staged_jobs.abort_all t.staged_jobs
+     | Cancel -> abort_all_staged_work t
      | Graceful -> ());
     session
   | Some operation ->
@@ -1066,7 +1124,7 @@ let stop_internal t mode =
     in
     if Agent_protocol.Session.equal_stop_mode mode Cancel
     then (
-      Staged_jobs.abort_all t.staged_jobs;
+      abort_all_staged_work t;
       cancel_event_for_operation t operation.id;
       Option.iter t.active_cancel ~f:(fun cancel -> cancel ()));
     Ok session
@@ -1501,7 +1559,7 @@ let finish_invocation t execution outcome requests commit_starts =
   execution.accepts_children <- false;
   (match commit_starts && not cancelled, outcome with
    | true, (Complete _ | Fail _ | Pending _) -> ()
-   | false, _ | true, Cancelled _ -> Staged_jobs.abort_owner t.staged_jobs ~owner);
+   | false, _ | true, Cancelled _ -> abort_staged_work t ~owner);
   let%bind resolved =
     Agent_protocol.Invocation.resolve
       execution.dispatched
@@ -1518,7 +1576,7 @@ let finish_invocation t execution outcome requests commit_starts =
   let permissions, permission_deltas, permission_payloads =
     cleanup_invocation_permissions t [ execution.dispatched.context.id ]
   in
-  let job_deltas, job_payloads = staged_job_changes t owner in
+  let%bind job_deltas, job_payloads = staged_work_changes t owner in
   let%bind _ =
     transition
       t
@@ -1980,8 +2038,8 @@ let commit_queued_event t borrow snapshot requests =
        | _ ->
          Error (error Invalid_state "failed-head retirement cannot schedule new work"))
   in
-  let job_deltas, job_payloads =
-    staged_job_changes t (Agent_protocol.Job.Moderator_event borrow.receipt.context.id)
+  let%bind job_deltas, job_payloads =
+    staged_work_changes t (Agent_protocol.Job.Moderator_event borrow.receipt.context.id)
   in
   let%bind _ =
     transition
@@ -2003,7 +2061,7 @@ let finish_queued_event t borrow interrupted =
   let open Result.Let_syntax in
   let%bind () = validate_queued_event_borrow t borrow in
   borrow.callback_active <- false;
-  Staged_jobs.abort_owner t.staged_jobs ~owner:(Moderator_event borrow.receipt.context.id);
+  abort_staged_work t ~owner:(Moderator_event borrow.receipt.context.id);
   borrow.cancel <- None;
   let children =
     List.filter t.invocation_executions ~f:(event_execution_owned_by borrow)
@@ -2016,9 +2074,7 @@ let finish_queued_event t borrow interrupted =
   let%bind children_deltas =
     List.map children ~f:(fun execution ->
       execution.accepts_children <- false;
-      Staged_jobs.abort_owner
-        t.staged_jobs
-        ~owner:(Invocation execution.dispatched.context.id);
+      abort_staged_work t ~owner:(Invocation execution.dispatched.context.id);
       Agent_protocol.Invocation.cancel
         execution.dispatched
         ~reason:"event exited before recording its native outcome"
@@ -2302,6 +2358,156 @@ let background_owner_active t owner =
         | _ -> Error (error Conflict "background launch invocation is not executing")))
 ;;
 
+let subscription_owner_active t owner source =
+  let open Result.Let_syntax in
+  let%bind () = background_owner_active t owner in
+  let%bind () = validate_installed_observer t (Some source) in
+  match owner with
+  | Agent_protocol.Job.Invocation id ->
+    (match t.moderator_borrow with
+     | Some borrow when Agent_protocol.Id.Invocation.equal borrow.invocation.context.id id
+       ->
+       Ok
+         (match borrow.kind with
+          | Invocation -> Some borrow.invocation
+          | Observation -> None)
+     | _ ->
+       Error
+         (error Permission_denied "subscription requires a moderator invocation borrow"))
+  | Moderator_event id ->
+    (match t.queued_event_borrow with
+     | Some borrow
+       when Agent_protocol.Id.Moderator_execution.equal borrow.receipt.context.id id
+            && Agent_protocol.Invocation.equal_observer
+                 borrow.receipt.context.source
+                 source -> Ok None
+     | _ ->
+       Error (error Permission_denied "subscription requires its moderator event borrow"))
+;;
+
+let subscription_owned t source (subscription : Agent_protocol.Subscription.t) =
+  let open Result.Let_syntax in
+  let%bind () =
+    Extension_invariants.owner
+      ~session_id:t.state.identity.session_id
+      ~generation:t.state.identity.generation
+      subscription.context.session_id
+      subscription.context.generation
+  in
+  match subscription.context.source with
+  | Some actual when Agent_protocol.Invocation.equal_observer actual source -> Ok ()
+  | _ ->
+    Error
+      (error
+         Permission_denied
+         "subscription belongs to a different or unbound moderator source")
+;;
+
+let provisional_subscription t owner id =
+  match Staged_subscriptions.find t.staged_subscriptions ~owner ~id with
+  | Some value -> Some value
+  | None -> lookup_subscription t id
+;;
+
+let stage_subscription_mutation_internal
+      t
+      owner
+      source
+      previous
+      (next : Agent_protocol.Subscription.t)
+  =
+  let open Result.Let_syntax in
+  let%bind originating = subscription_owner_active t owner source in
+  let%bind () = subscription_owned t source next in
+  let%bind () =
+    match
+      Option.equal
+        Agent_protocol.Subscription.equal
+        previous
+        (provisional_subscription t owner next.context.id)
+    with
+    | true -> Ok ()
+    | false -> Error (error Conflict "subscription changed before staging")
+  in
+  let%bind () = Agent_protocol.Subscription.validate_transition ~previous next in
+  let now = t.services.now () in
+  let%bind () =
+    match previous with
+    | Some _ -> Ok ()
+    | None ->
+      let%bind () =
+        match originating with
+        | Some invocation
+          when Agent_protocol.Id.Invocation.equal
+                 invocation.context.id
+                 next.context.invocation_id
+               && Agent_protocol.Timestamp.compare
+                    next.context.created_at
+                    invocation.context.created_at
+                  >= 0 -> Ok ()
+        | _ ->
+          Error
+            (error
+               Permission_denied
+               "subscription creation requires its dispatched moderator tool")
+      in
+      let limits = t.services.subscription_limits in
+      let reserved = Staged_subscriptions.reservations t.staged_subscriptions in
+      let active =
+        List.count t.state.subscriptions ~f:(fun sub -> Option.is_none sub.result)
+      in
+      let%bind () =
+        match
+          active + reserved < limits.max_active
+          && List.length t.state.subscriptions + reserved < limits.max_retained
+        with
+        | true -> Ok ()
+        | false ->
+          Error (error Resource_limit "subscription admission capacity exhausted")
+      in
+      let lifetime =
+        Time_ns.diff
+          (Agent_protocol.Timestamp.to_time_ns next.context.deadline)
+          (Agent_protocol.Timestamp.to_time_ns next.context.created_at)
+      in
+      (match
+         Agent_protocol.Timestamp.compare next.context.created_at now <= 0
+         && Agent_protocol.Timestamp.compare next.context.deadline now > 0
+         && Time_ns.Span.compare lifetime (Time_ns.Span.of_int_ms limits.max_lifetime_ms)
+            <= 0
+       with
+       | true -> Ok ()
+       | false ->
+         Error (error Invalid_request "subscription lifetime exceeds host policy"))
+  in
+  let%bind () =
+    match previous, next.result with
+    | Some { result = Some _; _ }, _ -> Ok ()
+    | _, _
+      when Option.exists next.completed_at ~f:(fun at ->
+             Agent_protocol.Timestamp.compare at now > 0) ->
+      Error (error Invalid_request "subscription completion is in the future")
+    | _, Some Expired -> Ok ()
+    | _, _ when Agent_protocol.Timestamp.compare now next.context.deadline >= 0 ->
+      Error (error Conflict "subscription deadline has passed; record expiry")
+    | _ -> Ok ()
+  in
+  let%bind () =
+    match next.result, next.context.completion_schema with
+    | Some (Succeeded payload), Some schema ->
+      let%bind schema =
+        Chatmd_shell_spec.Tool_schema.compile schema
+        |> Result.map_error ~f:(fun _ ->
+          error Invalid_request "invalid subscription completion schema")
+      in
+      Chatmd_shell_spec.Tool_schema.validate schema payload
+      |> Result.map_error ~f:(fun _ ->
+        error Invalid_request "subscription completion schema mismatch")
+    | _ -> Ok ()
+  in
+  Staged_subscriptions.stage t.staged_subscriptions ~owner ~previous ~next
+;;
+
 let derive_background_launch t owner =
   let open Result.Let_syntax in
   let%bind () = background_owner_active t owner in
@@ -2524,9 +2730,9 @@ let commit_moderator_invocation t borrow (resolved : Agent_protocol.Invocation.t
   in
   let owner = Agent_protocol.Job.Invocation borrow.invocation.context.id in
   (match borrow.kind, resolved.status with
-   | Invocation, Resolved (Cancelled _) -> Staged_jobs.abort_owner t.staged_jobs ~owner
+   | Invocation, Resolved (Cancelled _) -> abort_staged_work t ~owner
    | _ -> ());
-  let job_deltas, job_payloads = staged_job_changes t owner in
+  let%bind job_deltas, job_payloads = staged_work_changes t owner in
   let%bind _ =
     transition
       t
@@ -2589,7 +2795,7 @@ let finish_moderator_invocation t borrow failure =
   let open Result.Let_syntax in
   let%bind () = validate_moderator_borrow t borrow in
   borrow.callback_finished <- true;
-  Staged_jobs.abort_owner t.staged_jobs ~owner:(Invocation borrow.invocation.context.id);
+  abort_staged_work t ~owner:(Invocation borrow.invocation.context.id);
   borrow.cancel <- None;
   borrow.accepts_children <- false;
   let was_committed = borrow.committed in
@@ -2605,9 +2811,7 @@ let finish_moderator_invocation t borrow failure =
   let%bind children =
     List.map unfinished ~f:(fun execution ->
       execution.accepts_children <- false;
-      Staged_jobs.abort_owner
-        t.staged_jobs
-        ~owner:(Invocation execution.dispatched.context.id);
+      abort_staged_work t ~owner:(Invocation execution.dispatched.context.id);
       Agent_protocol.Invocation.cancel
         execution.dispatched
         ~reason:
@@ -3458,9 +3662,7 @@ let worker_terminal t operation_id outcome =
     let%bind unfinished =
       List.map foreground ~f:(fun execution ->
         execution.accepts_children <- false;
-        Staged_jobs.abort_owner
-          t.staged_jobs
-          ~owner:(Invocation execution.dispatched.context.id);
+        abort_staged_work t ~owner:(Invocation execution.dispatched.context.id);
         Agent_protocol.Invocation.cancel
           execution.dispatched
           ~reason:"worker exited before recording the invocation outcome"
@@ -3471,9 +3673,7 @@ let worker_terminal t operation_id outcome =
       match borrow with
       | None -> Ok (Session_delta.Batch [])
       | Some borrow ->
-        Staged_jobs.abort_owner
-          t.staged_jobs
-          ~owner:(Invocation borrow.invocation.context.id);
+        abort_staged_work t ~owner:(Invocation borrow.invocation.context.id);
         uncommitted_borrow_delta
           t
           borrow
@@ -3484,9 +3684,7 @@ let worker_terminal t operation_id outcome =
     let%bind event_delta =
       match event_borrow with
       | Some borrow when not borrow.committed ->
-        Staged_jobs.abort_owner
-          t.staged_jobs
-          ~owner:(Moderator_event borrow.receipt.context.id);
+        abort_staged_work t ~owner:(Moderator_event borrow.receipt.context.id);
         let%map interrupted =
           Agent_protocol.Moderator_execution.interrupt
             borrow.receipt
@@ -5109,9 +5307,7 @@ let finish_job_scope t scope =
   let%bind deltas =
     List.map children ~f:(fun execution ->
       execution.accepts_children <- false;
-      Staged_jobs.abort_owner
-        t.staged_jobs
-        ~owner:(Invocation execution.dispatched.context.id);
+      abort_staged_work t ~owner:(Invocation execution.dispatched.context.id);
       Agent_protocol.Invocation.cancel
         execution.dispatched
         ~reason:"background scope exited before recording the invocation outcome"
@@ -6374,6 +6570,28 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
     Ok ()
   | Prepare_background_job (owner, request) -> prepare_background_job t owner request
   | Stage_background_job (job, capacity) -> stage_background_job_internal t job capacity
+  | Stage_subscription_mutation (owner, source, previous, next) ->
+    stage_subscription_mutation_internal t owner source previous next
+  | Select_subscription_mutations (owner, source, receipts) ->
+    let open Result.Let_syntax in
+    let%bind _ = subscription_owner_active t owner source in
+    Staged_subscriptions.select
+      t.staged_subscriptions
+      ~owner
+      ~receipts
+      ~lookup:(lookup_subscription t)
+  | Abort_subscription_mutation (owner, receipt) ->
+    Staged_subscriptions.abort t.staged_subscriptions ~owner ~receipt
+  | Read_script_subscription (owner, source, id) ->
+    let open Result.Let_syntax in
+    let%bind _ = subscription_owner_active t owner source in
+    let%bind subscription =
+      Result.of_option
+        (provisional_subscription t owner id)
+        ~error:(error Invalid_state "subscription is not retained")
+    in
+    let%map () = subscription_owned t source subscription in
+    subscription
   | Select_background_jobs (owner, ids) ->
     let open Result.Let_syntax in
     let%bind () = background_owner_active t owner in
@@ -6552,13 +6770,14 @@ let handle : type a. t -> a request -> (a, Agent_protocol.Error.t) result =
        , t.foreground_moderator
        , t.idle_moderator_borrowed
        , Staged_jobs.is_empty t.staged_jobs
+         && Staged_subscriptions.is_empty t.staged_subscriptions
        , Active_calls.snapshot t.active_calls )
      with
      | None, None, [], [], None, None, None, false, true, ([], []) ->
        Result.map (inspect t.state) ~f:Option.some
      | _ -> Ok None)
   | Shutdown ->
-    Staged_jobs.abort_all t.staged_jobs;
+    abort_all_staged_work t;
     Option.iter t.owner_timer_cancel ~f:(fun resolver -> Eio.Promise.resolve resolver ());
     t.owner_timer_cancel <- None;
     Option.iter t.active_cancel ~f:(fun cancel -> cancel ());
@@ -6629,6 +6848,9 @@ let create_with_owner_lease_duration
   =
   if max_attachments <= 0 then invalid_arg "max_attachments must be positive";
   if subscriber_capacity <= 0 then invalid_arg "subscriber_capacity must be positive";
+  (match Staged_subscriptions.validate_limits services.subscription_limits with
+   | Ok () -> ()
+   | Error error -> invalid_arg error.message);
   let t =
     { sw
     ; sleep = (fun seconds -> Eio.Time.sleep clock seconds)
@@ -6654,6 +6876,7 @@ let create_with_owner_lease_duration
     ; invocation_executions = []
     ; job_scopes = []
     ; staged_jobs = Staged_jobs.create ()
+    ; staged_subscriptions = Staged_subscriptions.create ()
     ; invocation_gate = Chat_response.Execution_gate.create ()
     ; event_sequence = Atomic.make initial_state.counters.event_sequence
     ; state = initial_state

@@ -2,11 +2,18 @@ open Core
 open Extension_codec
 module Error = Protocol_error
 
+module Jsonaf = struct
+  include Jsonaf
+
+  let equal = exactly_equal
+end
+
 type context =
   { id : Id.Subscription.t
   ; session_id : Id.Session.t
   ; generation : int
   ; invocation_id : Id.Invocation.t
+  ; source : Invocation.observer option [@sexp.option]
   ; kind : string
   ; created_at : Timestamp.t
   ; deadline : Timestamp.t
@@ -14,7 +21,7 @@ type context =
   ; wake : Completion.wake
   ; ingress_capability : Id.Capability.t option
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 type t =
   { context : context
@@ -24,7 +31,7 @@ type t =
   ; result : Completion.t option
   ; completed_at : Timestamp.t option
   }
-[@@deriving sexp]
+[@@deriving equal, sexp]
 
 let failure code message = Error (Error.create code ~message ~retryable:false ())
 
@@ -50,6 +57,18 @@ let validate t =
   in
   let%bind () = optional_validate t.job_id (validate_id Id.Job.to_json Id.Job.of_json) in
   let%bind () = text ~name:"subscription kind" ~max:128 c.kind in
+  let%bind () =
+    optional_validate c.source (fun source ->
+      let%bind () = text ~name:"subscription moderator ID" ~max:256 source.script_id in
+      match
+        String.length source.source_sha256 = 64
+        && String.for_all source.source_sha256 ~f:(function
+          | '0' .. '9' | 'a' .. 'f' -> true
+          | _ -> false)
+      with
+      | true -> Ok ()
+      | false -> invalid "subscription moderator source must be lowercase SHA256")
+  in
   let%bind () =
     optional_validate c.completion_schema (fun schema -> validate_json schema)
   in
@@ -141,11 +160,11 @@ let validate_transition ~previous next =
     else failure Invalid_state "subscription must start unarmed"
   | Some previous ->
     let%bind () = validate previous in
-    if not (Sexp.equal (sexp_of_context previous.context) (sexp_of_context next.context))
+    if not (equal_context previous.context next.context)
     then failure Conflict "subscription context is immutable"
     else if Option.is_some previous.result
     then
-      if Sexp.equal (sexp_of_t previous) (sexp_of_t next)
+      if equal previous next
       then Ok ()
       else failure Already_resolved "terminal subscription cannot change"
     else if previous.epoch = Int.max_value || next.epoch <> previous.epoch + 1
@@ -160,7 +179,11 @@ let optional name value encode =
 let to_json t =
   let c = t.context in
   `Object
-    ([ "schema_version", `Number "1"
+    ([ ( "schema_version"
+       , `Number
+           (match c.source with
+            | None -> "1"
+            | Some _ -> "2") )
      ; "id", Id.Subscription.to_json c.id
      ; "session_id", Id.Session.to_json c.session_id
      ; "generation", `Number (Int.to_string c.generation)
@@ -171,6 +194,11 @@ let to_json t =
      ; "wake", Completion.wake_to_json c.wake
      ; "epoch", `Number (Int.to_string t.epoch)
      ]
+     @ optional "source" c.source (fun source ->
+       `Object
+         [ "script_id", `String source.script_id
+         ; "source_sha256", `String source.source_sha256
+         ])
      @ optional "completion_schema" c.completion_schema Fn.id
      @ optional "ingress_capability" c.ingress_capability Id.Capability.to_json
      @ optional "timer_id" t.timer_id Id.Schedule.to_json
@@ -183,33 +211,47 @@ let of_json json =
   let open Result.Let_syntax in
   let%bind () = validate_json ~max_bytes:(18 * 1024 * 1024) ~max_depth:136 json in
   let%bind fields = Json_codec.fields json in
-  let%bind () =
-    closed
-      fields
-      [ "schema_version"
-      ; "id"
-      ; "session_id"
-      ; "generation"
-      ; "invocation_id"
-      ; "kind"
-      ; "created_at"
-      ; "deadline"
-      ; "wake"
-      ; "epoch"
-      ; "completion_schema"
-      ; "ingress_capability"
-      ; "timer_id"
-      ; "job_id"
-      ; "result"
-      ; "completed_at"
-      ]
-  in
   let integer = Json_codec.bounded_int ~min:0 ~max:Int.max_value in
   let%bind version = Json_codec.required_as fields "schema_version" integer in
   let%bind () =
-    if version = 1
-    then Ok ()
-    else failure Incompatible_protocol "unsupported subscription version"
+    match version with
+    | 1 | 2 -> Ok ()
+    | _ -> failure Incompatible_protocol "unsupported subscription version"
+  in
+  let%bind () =
+    closed
+      fields
+      ([ "schema_version"
+       ; "id"
+       ; "session_id"
+       ; "generation"
+       ; "invocation_id"
+       ; "kind"
+       ; "created_at"
+       ; "deadline"
+       ; "wake"
+       ; "epoch"
+       ; "completion_schema"
+       ; "ingress_capability"
+       ; "timer_id"
+       ; "job_id"
+       ; "result"
+       ; "completed_at"
+       ]
+       @ if version = 2 then [ "source" ] else [])
+  in
+  let%bind source =
+    match version with
+    | 1 -> Ok None
+    | _ ->
+      let%bind json = Json_codec.required fields "source" in
+      let%bind fields = Json_codec.fields json in
+      let%bind () = closed fields [ "script_id"; "source_sha256" ] in
+      let%bind script_id = Json_codec.required_as fields "script_id" Json_codec.string in
+      let%map source_sha256 =
+        Json_codec.required_as fields "source_sha256" Json_codec.string
+      in
+      Some Invocation.{ script_id; source_sha256 }
   in
   let%bind id = Json_codec.required_as fields "id" Id.Subscription.of_json in
   let%bind session_id = Json_codec.required_as fields "session_id" Id.Session.of_json in
@@ -237,6 +279,7 @@ let of_json json =
     ; session_id
     ; generation
     ; invocation_id
+    ; source
     ; kind
     ; created_at
     ; deadline

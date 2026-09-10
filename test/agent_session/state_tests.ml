@@ -913,6 +913,7 @@ let%expect_test
                   Agent_protocol.Id.Attachment.of_string "att_extension" |> protocol_ok)
             ; create_reclaim_token = (fun () -> "fixture")
             ; job_results = None
+            ; subscription_limits = Agent_session.Staged_subscriptions.default_limits
             ; state_committed =
                 (fun _ events ->
                   Int.incr callbacks;
