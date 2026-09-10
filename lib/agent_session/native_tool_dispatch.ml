@@ -23,13 +23,14 @@ let invalid_input =
 let create
       ~input
       ~(capabilities : Operation_worker.Capabilities.t)
+      ~declared
       ~registry
       ~now
       ~is_halted
       ~admit
       ~prepare_output
   =
-  let initial = registry () in
+  let initial = declared in
   let references =
     List.filter (C.references initial) ~f:(fun reference ->
       match C.resolve initial ~id:reference.id ~fingerprint:reference.fingerprint with

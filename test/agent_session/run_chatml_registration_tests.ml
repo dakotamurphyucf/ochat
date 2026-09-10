@@ -102,6 +102,8 @@ let%expect_test
           in
           let dispatch =
             Agent_session.Script_tool_calls.native_dispatch
+              ~declared:
+                (Agent_session.Script_tool_calls.current_capabilities script_tools)
               script_tools
               ~input
               ~capabilities:caps

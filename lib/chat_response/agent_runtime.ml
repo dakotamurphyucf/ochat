@@ -707,3 +707,44 @@ let prepare_extensions
   in
   { native; definition = Managed_tool_registry.definition managed; managed }
 ;;
+
+let inherit_native ~(parent : t) ~capabilities =
+  let module C = Tool_capability in
+  let open Result.Let_syntax in
+  let binding_result result =
+    Result.map_error result ~f:(fun error -> [ diagnostic error.C.code error.message ])
+  in
+  let%bind parent_capabilities = Lazy.force parent.capabilities |> binding_result in
+  let%bind functions =
+    List.fold_result (C.references capabilities) ~init:[] ~f:(fun functions reference ->
+      let%bind binding =
+        C.resolve
+          parent_capabilities
+          ~id:reference.C.id
+          ~fingerprint:reference.fingerprint
+        |> binding_result
+      in
+      match C.implementation binding with
+      | Native fn -> Ok (fn :: functions)
+      | Managed _ ->
+        Error
+          [ diagnostic
+              "delegation.owner_dispatch_unavailable"
+              "inherited managed tools require their owner's authorized dispatcher"
+          ])
+  in
+  let names =
+    C.references capabilities
+    |> List.map ~f:(fun reference -> reference.C.name)
+    |> String.Set.of_list
+  in
+  Ok
+    { parent with
+      functions = List.rev functions
+    ; capabilities = lazy (Ok capabilities)
+    ; classifications =
+        List.filter parent.classifications ~f:(fun (name, _) -> Set.mem names name)
+    ; shell_tool_names = Set.inter parent.shell_tool_names names
+    ; moderator_shell_runtime = None
+    }
+;;

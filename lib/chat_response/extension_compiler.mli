@@ -84,3 +84,16 @@ val definition_fingerprint : definition -> string
     scopes, including definitions with no moderator-handled tool declarations.
     Its fingerprint already participates in [definition_fingerprint]. *)
 val definition_capabilities : definition -> Tool_capability.t
+
+(** Compile zero or one generated lifecycle moderator under the delegated v1
+    surface, which omits direct Model, Process and stdout print. Retains the same
+    definition interface used by the owning moderator manager, without adding any
+    managed implementations or rebuilding inherited bindings. Does not initialize
+    code or authorize delegation. *)
+val prepare_delegated_definition_in_domain
+  :  ?limits:Chatml_compilation.limits
+  -> env:Eio_unix.Stdenv.base
+  -> capabilities:Tool_capability.t
+  -> scripts:Spec.script list
+  -> unit
+  -> (definition, Chatmd_shell_spec.Diagnostic.t list) result

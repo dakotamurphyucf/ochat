@@ -322,6 +322,7 @@ let model_executor ~sw ~ctx ~manifest_authorizer ~approval_provider ~response_di
 
 let create_moderator
       ~definition
+      ~delegated
       ~runtime_policy
       ~sw
       ~env
@@ -387,10 +388,13 @@ let create_moderator
     let capabilities =
       { Moderation.Capabilities.default with
         model_recipes =
-          Map.singleton
-            (module String)
-            Chat_response.Model_executor.agent_prompt_v1_name
-            durable_recipe
+          (match delegated with
+           | true -> Map.empty (module String)
+           | false ->
+             Map.singleton
+               (module String)
+               Chat_response.Model_executor.agent_prompt_v1_name
+               durable_recipe)
       ; on_schedule_after_ms =
           (fun ~delay_ms ~payload ->
             let open Result.Let_syntax in
@@ -749,13 +753,21 @@ let parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_di
     History_entry.create_with_id ~id item
 ;;
 
+type source =
+  | Authored of Prompt_revision.t
+  | Generated of
+      { definition : Generated_definition.t
+      ; artifact_store : Agent_store.Prompt_artifact_store.t
+      ; parent_runtime : Agent_runtime.t
+      }
+
 let build_with_services
       ~extension_services
       ~sw
       ~env
       ~paths
       ~storage_paths
-      ~revision
+      ~source
       ~session_id
       ~history_namespace
       ~next_history_sequence
@@ -772,18 +784,39 @@ let build_with_services
       ~job_services
   =
   let open Result.Let_syntax in
-  let elements = Prompt_revision.elements revision in
+  let elements, artifact, materialized_tree, delegated =
+    match source with
+    | Authored revision ->
+      ( Prompt_revision.elements revision
+      , Prompt_revision.artifact revision
+      , Prompt_revision.materialized_tree revision
+      , false )
+    | Generated { definition; artifact_store; _ } ->
+      let artifact = Generated_definition.artifact definition in
+      ( Chat_response.Generated_admission.elements
+          (Generated_definition.admission definition)
+      , artifact
+      , Agent_store.Prompt_artifact_store.materialized_tree
+          artifact_store
+          artifact.revision_id
+      , true )
+  in
+  let%bind generation_config =
+    match delegated with
+    | false -> Ok (model_config elements)
+    | true ->
+      (try Ok (model_config elements) with
+       | Failure _ ->
+         Error (failure "unsupported generated model/reasoning configuration"))
+  in
   let%bind () =
-    Agent_store.Prompt_artifact_store.verify_tree
-      ~root:(Prompt_revision.materialized_tree revision)
-      (Prompt_revision.artifact revision)
+    Agent_store.Prompt_artifact_store.verify_tree ~root:materialized_tree artifact
     |> Result.map_error ~f:Agent_store.Store_error.to_protocol_error
   in
   let response_dir = response_dir storage_paths in
   Eio.Path.mkdirs ~exists_ok:true ~perm:0o700 response_dir;
   let cache = cache storage_paths in
   let ctx = context ~env paths cache in
-  let%bind host = host ~env ~paths ~session_id ~elements in
   let one_off_services = ref None in
   let declares_one_off =
     List.exists elements ~f:(function
@@ -849,23 +882,35 @@ let build_with_services
            ())
   in
   let%bind agent_runtime, definition, managed =
-    create_agent_runtime
-      ~extensions:
-        (Option.is_some extension_services
-         && (declares_one_off
-             || declares_validation
-             || List.exists elements ~f:(function
-               | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
-               | _ -> false)))
-      ~native_registrations
-      ~sw
-      ~ctx
-      ~host
-      ~elements
-      ~manifest_authorizer
-      ~approval_provider
-      ~approval_store
-      ~response_dir
+    match source with
+    | Generated { definition; parent_runtime; _ } ->
+      let admission = Generated_definition.admission definition in
+      let%map native =
+        Agent_runtime.inherit_native
+          ~parent:parent_runtime
+          ~capabilities:(Chat_response.Generated_admission.capabilities admission)
+        |> map_diagnostics
+      in
+      native, Some (Chat_response.Generated_admission.definition admission), None
+    | Authored _ ->
+      let%bind host = host ~env ~paths ~session_id ~elements in
+      create_agent_runtime
+        ~extensions:
+          (Option.is_some extension_services
+           && (declares_one_off
+               || declares_validation
+               || List.exists elements ~f:(function
+                 | Prompt.Chat_markdown.Extension_script _ | Tool (Extension _) -> true
+                 | _ -> false)))
+        ~native_registrations
+        ~sw
+        ~ctx
+        ~host
+        ~elements
+        ~manifest_authorizer
+        ~approval_provider
+        ~approval_store
+        ~response_dir
   in
   let%bind () =
     match definition with
@@ -931,6 +976,7 @@ let build_with_services
   let%bind moderator, start_moderator_once =
     create_moderator
       ~definition
+      ~delegated
       ~runtime_policy:
         (Option.value_map
            extension_services
@@ -1051,8 +1097,17 @@ let build_with_services
               ())
     | _ -> None
   in
+  let%bind advertised_dispatch =
+    match script_tools with
+    | None -> Ok None
+    | Some script_tools ->
+      Lazy.force agent_runtime.capabilities
+      |> Result.map ~f:(fun declared -> Some (script_tools, declared))
+      |> Result.map_error ~f:(fun error ->
+        failure error.Chat_response.Tool_capability.message)
+  in
   let dispatch_tool =
-    Option.map script_tools ~f:(fun script_tools ->
+    Option.map advertised_dispatch ~f:(fun (script_tools, declared) ->
       fun ~input ~capabilities ->
       let event_handlers =
         Option.map moderator ~f:(fun (moderator, _) ->
@@ -1083,7 +1138,9 @@ let build_with_services
             ~event:(Moderation.Event.Pre_tool_call call)
         | Some _, None -> Error "moderator services are not installed"
       in
-      let native = Script_tool_calls.native_dispatch script_tools ~input ~capabilities in
+      let native =
+        Script_tool_calls.native_dispatch script_tools ~declared ~input ~capabilities
+      in
       let native =
         { native with
           run =
@@ -1161,7 +1218,7 @@ let build_with_services
       Chat_response.In_memory_stream.Tool_dispatch.chain
         (standalone @ moderator_dispatch @ [ native ]))
   in
-  let config, model, reasoning = model_config elements in
+  let config, model, reasoning = generation_config in
   let notification_source =
     Option.bind moderator ~f:(fun (moderator, _) ->
       Manager.invocation_observer moderator.manager)
@@ -1236,7 +1293,21 @@ let build_with_services
       }
   in
   let parse_user_content =
-    parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_dir paths
+    match delegated with
+    | false ->
+      parse_user_content ~ctx ~manifest_authorizer ~approval_provider ~response_dir paths
+    | true ->
+      fun ~id content ->
+        (match
+           content.Agent_protocol.Session.Message_content.kind, content.attachments
+         with
+         | Plain_text, [] ->
+           Ok (History_entry.create_with_id ~id (plain_user_item content.text))
+         | Chatmd, _ | Plain_text, _ :: _ ->
+           Error
+             (failure
+                "generated sessions accept plain_text messages without implicit resource \
+                 loading"))
   in
   let rec runtime =
     { worker
@@ -1351,7 +1422,13 @@ let build_with_services
           snapshot)
     ; enqueue_internal_event = enqueue_internal_event moderator
     ; drain_internal_events = drain_internal_events ~env ~session_id ~tools moderator
-    ; execute_model_job = execute_model_job moderator session_id
+    ; execute_model_job =
+        (match delegated with
+         | false -> execute_model_job moderator session_id
+         | true ->
+           fun ~recipe:_ ~payload:_ ->
+             Error
+               (failure "generated moderators must use inherited tools for model work"))
     ; enqueue_model_job_completion = enqueue_model_job_completion moderator
     ; close = (fun () -> close_runtime cache storage_paths session_id moderator)
     }
@@ -1359,8 +1436,28 @@ let build_with_services
   Ok runtime
 ;;
 
-let build = build_with_services ~extension_services:None
+let build ~sw ~env ~paths ~storage_paths ~revision =
+  build_with_services
+    ~sw
+    ~env
+    ~paths
+    ~storage_paths
+    ~source:(Authored revision)
+    ~extension_services:None
+;;
 
-let build_with_extensions ~services =
-  build_with_services ~extension_services:(Some services)
+let build_with_extensions ~services ~sw ~env ~paths ~storage_paths ~revision =
+  build_with_services
+    ~sw
+    ~env
+    ~paths
+    ~storage_paths
+    ~source:(Authored revision)
+    ~extension_services:(Some services)
+;;
+
+let build_generated ~services ~definition ~artifact_store ~parent_runtime =
+  build_with_services
+    ~source:(Generated { definition; artifact_store; parent_runtime })
+    ~extension_services:(Some services)
 ;;

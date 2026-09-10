@@ -141,9 +141,13 @@ val with_managed_tools
 (** Reuse the same live native registry, policy and disclosure service for model
     calls. The stream still supplies final-target authorization; the owning host
     should delegate these native names to this policy service to avoid duplicate
-    approval requests. This does not grant additional capabilities. *)
+    approval requests. [declared] must be the immutable registry advertised by the
+    runtime before lifecycle events, not a freshly narrowed live registry: removed
+    names must remain claimed so they cannot fall through to old runners.
+    This does not grant additional capabilities. *)
 val native_dispatch
   :  t
+  -> declared:Chat_response.Tool_capability.t
   -> input:Operation_worker.Input.t
   -> capabilities:Operation_worker.Capabilities.t
   -> Chat_response.In_memory_stream.Tool_dispatch.t

@@ -76,10 +76,11 @@ let create
   }
 ;;
 
-let native_dispatch t ~input ~capabilities =
+let native_dispatch t ~declared ~input ~capabilities =
   Native_tool_dispatch.create
     ~input
     ~capabilities
+    ~declared
     ~registry:t.registry
     ~now:t.now
     ~is_halted:t.is_halted

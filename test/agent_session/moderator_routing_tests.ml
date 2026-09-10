@@ -258,11 +258,13 @@ let%test_unit "streamed native and moderator services share pre and post routing
                    then call ~custom:false ~name:"counter" ~payload:"null" ~index:1
                    else [])
             in
+            let declared = !registry in
             let dispatch_tool ~input ~capabilities =
               let native =
                 Agent_session.Native_tool_dispatch.create
                   ~input
                   ~capabilities
+                  ~declared
                   ~registry:(fun () -> !registry)
                   ~now:Agent_protocol.Timestamp.now
                   ~is_halted:(fun () ->

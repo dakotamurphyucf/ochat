@@ -244,3 +244,42 @@ val build_with_extensions
   -> schedule_services:schedule_services
   -> job_services:job_services
   -> (t, Agent_protocol.Error.t) result
+
+(** Construct a generated child through the same worker, moderator, invocation,
+    notification and background services. Verify the immutable generated tree,
+    retain exact selected parent native bindings, and consume the already compiled
+    delegated moderator definition. No native/shell/MCP declarations are rebuilt.
+    Managed inheritance rejects without an owner-aware dispatcher. Input accepts
+    plain text; implicit ChatMD resource loading and direct model recipes reject.
+
+    This is runtime construction, not session admission. The owning coordinator
+    must have admitted the child and its model settings before initialization,
+    keep inherited resources alive, and supply services mediating current parent
+    restrictions as well as the child's own policy. A live parent registry alone
+    is not proof of delegability. General model-visible exposure remains gated. *)
+val build_generated
+  :  services:extension_services
+  -> definition:Generated_definition.t
+  -> artifact_store:Agent_store.Prompt_artifact_store.t
+  -> parent_runtime:Chat_response.Agent_runtime.t
+  -> sw:Eio.Switch.t
+  -> env:Eio_unix.Stdenv.base
+  -> paths:Runtime_paths.t
+  -> storage_paths:Runtime_paths.t
+  -> session_id:Agent_protocol.Id.Session.t
+  -> history_namespace:string
+  -> next_history_sequence:int
+  -> existing_history:History_entry.t list option
+  -> existing_moderator_snapshot:Jsonaf.t option
+  -> moderator_reservation_size:int
+  -> manifest_authorizer:Shell_runtime.Manifest_authorizer.t
+  -> approval_provider:Shell_runtime.Approval_broker.provider
+  -> approval_store:Shell_access.Approval.store
+  -> permission_profile:Permission_policy.t
+  -> model_post_stream:model_post_stream option
+  -> review_permission:
+       (Permission_policy.invocation
+        -> (Permission_reviewer.Decision.t, Permission_reviewer.Error.t) result)
+  -> schedule_services:schedule_services
+  -> job_services:job_services
+  -> (t, Agent_protocol.Error.t) result

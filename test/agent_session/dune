@@ -34,6 +34,7 @@
   notification_history_tests
   authoring_history_tests
   generated_definition_tests
+  generated_runtime_tests
   delivery_ownership_tests
   delivery_wake_tests
   notification_transaction_tests

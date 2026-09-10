@@ -397,6 +397,7 @@ let%expect_test "owned stream events consume requests at provider and terminal b
                   Agent_session.Native_tool_dispatch.create
                     ~input
                     ~capabilities
+                    ~declared:registry
                     ~registry:(fun () -> registry)
                     ~now:Agent_protocol.Timestamp.now
                     ~is_halted:(fun () -> (A.state actor |> protocol_ok).halted)

@@ -1012,8 +1012,9 @@ startup/resume wiring and complete public qualification remain required.
 ### Composed native and moderator stream dispatch
 
 `Native_tool_dispatch.create` adapts the native invocation service to the existing
-stream pipeline. It captures the selected names and exact capability references
-for that turn. Those names remain claimed even after live revocation or registry
+stream pipeline. Its explicit `declared` registry contains the names and exact
+capability references advertised when the runtime was constructed, before any
+lifecycle event or turn. Those names remain claimed after live revocation or registry
 replacement, so a stale capability produces a recorded failure rather than
 falling through to a legacy runner. Unknown names remain available to other host
 services. Transient fork requests cannot borrow the root persisted owner.
@@ -3606,3 +3607,51 @@ This is the durable storage and artifact-installation part of child creation.
 Actual child-session initialization, parent-management linking, policy enforcement,
 stop coordination and restart reconciliation remain under implementation. Neither
 a stored record nor possession of a child ID grants execution or management access.
+
+### Generated runtime construction
+
+`Runtime_builder.build_generated` now consumes the captured generated definition
+through the same worker, moderator manager, actor invocation, lifecycle,
+notification and background services as an authored session. It verifies the
+materialized artifact tree before constructing the runtime. The generated
+moderator is compiled once under `Delegated_moderator_v1` and retained through
+the common extension-definition interface; it is not recompiled under the broader
+ordinary moderator surface.
+
+`Agent_runtime.inherit_native` selects the exact admitted live parent bindings.
+It preserves their native implementations and effective resource context, filters
+advertised names/classifications, and retains the parent's shell redaction service.
+Changing the child's workspace does not rebase a parent's read roots. Removed or
+re-registered bindings reject; an equivalent newly constructed parent requires
+explicit saved-pin restoration through `Generated_definition.restore` first.
+Managed bindings currently reject with `delegation.owner_dispatch_unavailable`;
+their owner-aware service integration is still required.
+
+Generated sessions can have their own instructions and supported model/reasoning
+configuration, with or without a lifecycle moderator. Moderator snapshots restore
+against the pinned script, and startup effects still wait for actor-owned lifecycle
+activation. Plain-text input is supported without attachments; implicit ChatMD
+resource loading rejects. The delegated surface omits direct `Model`, `Process`
+and stdout `print`, the runtime supplies no direct model recipe capability, and
+the direct model-job execution entrypoint rejects. Ordinary conversation model
+turns remain available, as do effects through admitted inherited tools.
+
+Native stream routing keeps the tool registry that was advertised at runtime
+construction separate from the current execution registry. A removed tool remains
+claimed by the checked dispatcher even if revocation happened during lifecycle
+activation or an earlier turn. Its call fails current capability validation instead
+of falling through to the old native runner. Authorization waits still trigger a
+fresh live-binding check before execution.
+
+The offline actor fixture uses real parent/child directories and a scoped parent
+file tool, with fake provider turns. It covers native-only and moderated children,
+policy denial, revocation during lifecycle authorization before model dispatch,
+canonical invocation results, and moderator-state restoration with fresh equivalent
+parent bindings. It does not claim persisted child-service recovery or real-model
+authoring quality.
+
+The builder is an internal runtime component, not the child-creation service.
+The owning coordinator must still authorize model availability, mediate current
+parent restrictions, keep inherited resources alive, persist the management link,
+and coordinate creation, stop and recovery. General model-visible exposure remains
+gated on authoring-support qualification.

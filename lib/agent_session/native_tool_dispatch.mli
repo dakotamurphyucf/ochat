@@ -2,7 +2,8 @@ open Core
 
 exception Dispatch_error of Agent_protocol.Error.t
 
-(** Stream adapter for the native capabilities selected when [create] is called.
+(** Stream adapter for the native capabilities captured in [declared] when the
+    runtime advertised its tools, before any moderator event or earlier turn.
     Known names remain claimed if the live registry is later narrowed/replaced;
     they cannot fall through to a legacy runner. Unknown names return [None].
     The registry callback must be a pure read of the current selection.
@@ -17,6 +18,7 @@ exception Dispatch_error of Agent_protocol.Error.t
 val create
   :  input:Operation_worker.Input.t
   -> capabilities:Operation_worker.Capabilities.t
+  -> declared:Chat_response.Tool_capability.t
   -> registry:(unit -> Chat_response.Tool_capability.t)
   -> now:(unit -> Agent_protocol.Timestamp.t)
   -> is_halted:(unit -> bool)

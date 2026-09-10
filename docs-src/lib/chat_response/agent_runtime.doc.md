@@ -141,6 +141,17 @@ type extension_resources =
   ; managed : Managed_tool_registry.t
   }
 
+(** Select exact live native bindings from an already constructed parent runtime.
+    Retains their runners, resource context, shell redaction and classifications;
+    constructs no resources and exposes no unselected tools. Managed bindings
+    reject until an owner-aware inherited dispatcher is supplied. Disables the
+    child's direct moderator Process route. The host must still establish actual
+    delegability, ongoing parent policy mediation and parent resource lifetime. *)
+val inherit_native
+  :  parent:t
+  -> capabilities:Tool_capability.t
+  -> (t, diagnostic list) result
+
 (** Trusted host implementations selected only by an explicit Builtin declaration
     of the same name. Unselected registrations are never exposed. Revision and
     result contract participate in capability identity; duplicate supplied names

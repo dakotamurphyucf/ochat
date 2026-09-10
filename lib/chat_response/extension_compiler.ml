@@ -184,6 +184,74 @@ let compiled_scripts definition = definition.compiled_scripts
 let definition_fingerprint definition = definition.definition_fingerprint
 let definition_capabilities definition = definition.definition_capabilities
 
+let prepare_delegated_definition_in_domain
+      ?(limits = Chatml_compilation.default_limits)
+      ~env
+      ~capabilities
+      ~scripts
+      ()
+  =
+  let open Result.Let_syntax in
+  let fail code message = Error [ D.error ~code message ] in
+  let%bind () =
+    match
+      List.length scripts <= 1
+      && List.for_all scripts ~f:(fun script ->
+        Spec.equal_script_kind script.Spec.kind Moderator_script)
+      && Float.is_finite limits.wall_seconds
+      && Float.(limits.wall_seconds > 0. && limits.wall_seconds <= 30.)
+      && limits.max_source_bytes > 0
+      && limits.max_source_bytes <= 1024 * 1024
+    with
+    | true -> Ok ()
+    | false ->
+      fail
+        "chatml.invalid_limits"
+        "invalid generated moderator contract or compilation limits"
+  in
+  let%bind () =
+    List.fold_result scripts ~init:() ~f:(fun () script ->
+      validate_script ~max_source_bytes:limits.max_source_bytes script)
+  in
+  try
+    Eio.Time.Timeout.run_exn
+      (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) limits.wall_seconds)
+      (fun () ->
+         let%map compiled_scripts =
+           List.fold_result scripts ~init:[] ~f:(fun compiled script ->
+             let%map program =
+               Chatml_compilation.compile
+                 ~limits
+                 ~env
+                 ~target:Delegated_moderator_v1
+                 ~source:(Spec.script_text script)
+                 ()
+               |> Result.map_error ~f:(fun e ->
+                 [ D.error ~source:script.source_ref ~code:e.code e.message ])
+             in
+             (script, program) :: compiled)
+         in
+         let definition_fingerprint =
+           [%sexp
+             ("ochat.delegated-definition.v1" : string)
+           , (scripts : Spec.script list)
+           , (Tool_capability.fingerprint capabilities : string)
+           , (Chatml_compilation.contract Delegated_moderator_v1 : Sexp.t)]
+           |> Sexp.to_string
+           |> Chatmd_shell_spec.Source_ref.digest
+         in
+         { prepared_tools = []
+         ; compiled_scripts = List.rev compiled_scripts
+         ; definition_capabilities = capabilities
+         ; definition_fingerprint
+         })
+  with
+  | Eio.Time.Timeout ->
+    fail
+      "chatml.compile_timeout"
+      "generated definition exceeded its aggregate compilation budget"
+;;
+
 let prepare_definition_in_domain
       ?(limits = Chatml_compilation.default_limits)
       ~env

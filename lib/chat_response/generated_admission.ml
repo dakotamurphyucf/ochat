@@ -8,7 +8,7 @@ type t =
   { elements : CM.top_level_elements list
   ; capabilities : C.t
   ; authoring : Authoring_policy.t
-  ; moderators : (Spec.script * Chatml_host_runtime.compiled_script) list
+  ; definition : Extension_compiler.definition
   ; source_fingerprint : string
   ; fingerprint : string
   }
@@ -16,7 +16,8 @@ type t =
 let elements t = t.elements
 let capabilities t = t.capabilities
 let authoring t = t.authoring
-let moderators t = t.moderators
+let definition t = t.definition
+let moderators t = Extension_compiler.compiled_scripts t.definition
 let source_fingerprint t = t.source_fingerprint
 let fingerprint t = t.fingerprint
 let error ?source code message = Error [ D.error ?source ~code message ]
@@ -165,42 +166,13 @@ let prepare
     |> Result.map_error ~f:(fun e -> [ D.error ~code:e.code e.message ])
   in
   let capabilities = Authoring_policy.capabilities authoring in
-  let%bind () =
-    List.fold scripts ~init:(Ok ()) ~f:(fun state script ->
-      let%bind () = state in
-      Extension_compiler.validate_script ~max_source_bytes:limits.max_source_bytes script)
-  in
-  let%bind moderators =
-    if
-      (not (Float.is_finite limits.wall_seconds))
-      || Float.(limits.wall_seconds <= 0. || limits.wall_seconds > 30.)
-      || limits.max_source_bytes <= 0
-      || limits.max_source_bytes > 1024 * 1024
-    then error "chatml.invalid_limits" "invalid generated definition compilation limits"
-    else (
-      try
-        Eio.Time.Timeout.run_exn
-          (Eio.Time.Timeout.seconds (Eio.Stdenv.mono_clock env) limits.wall_seconds)
-          (fun () ->
-             List.fold scripts ~init:(Ok []) ~f:(fun state script ->
-               let%bind compiled = state in
-               let%map program =
-                 Chatml_compilation.compile
-                   ~limits
-                   ~env
-                   ~target:Delegated_moderator_v1
-                   ~source:(Spec.script_text script)
-                   ()
-                 |> Result.map_error ~f:(fun e ->
-                   [ D.error ~source:script.source_ref ~code:e.code e.message ])
-               in
-               (script, program) :: compiled)
-             |> Result.map ~f:List.rev)
-      with
-      | Eio.Time.Timeout ->
-        error
-          "chatml.compile_timeout"
-          "generated definition exceeded its aggregate compilation budget")
+  let%bind definition =
+    Extension_compiler.prepare_delegated_definition_in_domain
+      ~limits
+      ~env
+      ~capabilities
+      ~scripts
+      ()
   in
   let source_fingerprint = Chatmd_source_bundle.fingerprint bundle in
   let fingerprint =
@@ -217,7 +189,7 @@ let prepare
     { elements = parsed.root
     ; capabilities
     ; authoring
-    ; moderators
+    ; definition
     ; source_fingerprint
     ; fingerprint
     }

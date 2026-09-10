@@ -343,6 +343,7 @@ let main input = Task.bind(Tool.call("|}
               Agent_session.Native_tool_dispatch.create
                 ~input
                 ~capabilities:caps
+                ~declared:selected
                 ~registry:(fun () -> selected)
                 ~now:Agent_protocol.Timestamp.now
                 ~is_halted:(fun () -> false)

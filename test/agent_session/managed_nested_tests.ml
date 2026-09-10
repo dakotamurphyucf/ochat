@@ -180,7 +180,13 @@ let run ctx input =
                     ; "tools", `Array [ `String "root" ]
                     ])
             in
-            let dispatch = Calls.native_dispatch script_tools ~input ~capabilities:caps in
+            let dispatch =
+              Calls.native_dispatch
+                script_tools
+                ~declared:(Calls.current_capabilities script_tools)
+                ~input
+                ~capabilities:caps
+            in
             let call_id = "managed-run" in
             let id =
               History_entry.Id_source.allocate caps.id_source |> Result.ok_or_failwith
