@@ -9,6 +9,10 @@ val create : Agent_protocol.Id.Blob.t list -> (t, Agent_protocol.Error.t) result
     token suffix is reset so unrelated files cannot form a synthetic reference. *)
 val begin_root : t -> unit
 
+(** Reuse the candidate trie for a new dependency node, clearing found IDs and
+    partial text. Previously returned reference lists remain independent. *)
+val reset : t -> unit
+
 (** Feed successive byte chunks from one validated root. IDs split across chunks
     are retained. [ignore] may suppress a blob's reference to itself while scanning
     its own metadata/data; it must be consistent across chunks from that root.

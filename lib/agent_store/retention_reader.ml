@@ -1,10 +1,14 @@
 open Core
 
+type budget =
+  { mutable remaining_entries : int
+  ; mutable remaining_bytes : int
+  }
+
 type t =
   { env : Eio_unix.Stdenv.base
   ; root : string
-  ; mutable remaining_entries : int
-  ; mutable remaining_bytes : int
+  ; budget : budget
   }
 
 let corrupt message = Error (Store_error.Corrupt message)
@@ -14,14 +18,28 @@ let create ~env ~root ~max_entries ~max_bytes =
   let root = String.rstrip root ~drop:(Char.equal '/') in
   match Filename.is_absolute root && max_entries >= 0 && max_bytes >= 0 with
   | false -> corrupt "invalid retention scan root or limits"
-  | true -> Ok { env; root; remaining_entries = max_entries; remaining_bytes = max_bytes }
+  | true ->
+    Ok
+      { env
+      ; root
+      ; budget = { remaining_entries = max_entries; remaining_bytes = max_bytes }
+      }
+;;
+
+let root t = t.root
+
+let at_root t ~root =
+  let root = String.rstrip root ~drop:(Char.equal '/') in
+  match Filename.is_absolute root with
+  | false -> corrupt "invalid retention scan root"
+  | true -> Ok { t with root }
 ;;
 
 let charge_entry t =
-  match t.remaining_entries > 0 with
+  match t.budget.remaining_entries > 0 with
   | false -> corrupt "retention scan exceeded its entry budget"
   | true ->
-    t.remaining_entries <- t.remaining_entries - 1;
+    t.budget.remaining_entries <- t.budget.remaining_entries - 1;
     Ok ()
 ;;
 
@@ -93,7 +111,7 @@ let read t ~path:relative ~max_bytes =
       | _ -> corrupt "retention root is not a regular file"
     in
     let size = (Eio.Path.stat ~follow:false file).size |> Optint.Int63.to_int64 in
-    let limit = Int.min max_bytes t.remaining_bytes in
+    let limit = Int.min max_bytes t.budget.remaining_bytes in
     let%bind () =
       match limit >= 0 && Int64.(size >= zero && size <= of_int limit) with
       | true -> Ok ()
@@ -120,7 +138,7 @@ let read t ~path:relative ~max_bytes =
         | count when count > remaining ->
           corrupt "retention root grew beyond its byte budget"
         | count ->
-          t.remaining_bytes <- t.remaining_bytes - count;
+          t.budget.remaining_bytes <- t.budget.remaining_bytes - count;
           Buffer.add_string buffer (Cstruct.to_string (Cstruct.sub chunk 0 count));
           loop ()
       in

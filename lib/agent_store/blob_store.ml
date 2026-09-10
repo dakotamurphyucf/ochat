@@ -754,6 +754,13 @@ type retention =
   ; mutable active : bool
   }
 
+let retention_directories retention session =
+  match retention.active with
+  | false -> Error (Store_error.Corrupt "blob retention scope has ended")
+  | true ->
+    Ok (Session_store.Handle.directory session, retention.store.temporary_directory)
+;;
+
 let coordinated store f =
   (* Individual operations preserve recoverable files and upload accounting on
      failure. An IO error or cancelled reader must not poison the shared mutex. *)

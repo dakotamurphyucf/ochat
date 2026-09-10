@@ -275,6 +275,7 @@ and [executable references](../bin/chat_tui.doc.md) own operator settings.
 | `lib/agent_session/workspace_resolver.mli` | [contract](../../lib/agent_session/workspace_resolver.mli) | [integration](../agent-server/sessions-and-workspaces.md) | Public interface + current host guide. |
 | `lib/agent_store/audit_store.mli` | [contract](../../lib/agent_store/audit_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/blob_reference_scan.mli` | [contract](../../lib/agent_store/blob_reference_scan.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
+| `lib/agent_store/blob_retention.mli` | [contract](../../lib/agent_store/blob_retention.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/blob_store.mli` | [contract](../../lib/agent_store/blob_store.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/commit_writer.mli` | [contract](../../lib/agent_store/commit_writer.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |
 | `lib/agent_store/data_root.mli` | [contract](../../lib/agent_store/data_root.mli) | [integration](../agent-server/operations.md) | Public interface + current host guide. |

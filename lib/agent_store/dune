@@ -14,6 +14,7 @@
   session_store
   blob_store
   blob_reference_scan
+  blob_retention
   retention_reader
   job_result_intent
   job_result_store

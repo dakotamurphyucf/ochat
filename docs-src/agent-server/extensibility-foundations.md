@@ -1618,6 +1618,24 @@ do not poison the coordinator. Scoped discard tokens expire when their callback
 returns or raises. This establishes storage exclusion, not an unreferenced-artifact
 proof; actor/cache/publisher ordering and complete root validation still apply.
 
+`Blob_retention.scan` validates session and temporary blob consumers under that
+storage scope. Both roots share the same remaining entry and byte budgets.
+Ordinary blobs require matching metadata, length and digest; JSON is decoded before
+scanning so escaped identifiers remain visible. Private-intent candidates form
+dependency edges, while other blobs (including exports) are roots. Combining those
+roots with session/history/cache/replay references finds transitively retained
+candidates. An unrooted cycle does not retain itself.
+
+Complete staged data without installed metadata is checked against its private
+intent and decoded as a completion. Short partials and absent stages supply no
+readable completion dependencies. If a retained root reaches such a candidate,
+the graph refuses proof because its missing content could contain further
+references. This also applies transitively through another candidate.
+Unknown or unowned partials, broken ordinary
+blob pairs, malformed JSON, ownership/digest mismatch and exhausted budgets refuse
+the complete proof. The scanner does not remove files or choose whether an active
+preparation may be discarded; collector integration remains unfinished.
+
 Reads verify the session and job binding, full metadata, bounded byte count and
 SHA-256 digest before decoding the completion. Adoption refuses another target
 session or an existing destination and restores temporary data if its metadata

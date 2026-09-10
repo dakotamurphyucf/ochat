@@ -13,6 +13,13 @@ val create
   -> max_bytes:int
   -> (t, Store_error.t) result
 
+val root : t -> string
+
+(** Select another host-owned absolute root while sharing the same remaining
+    entry/byte budgets. This does not reset allowances or authorize paths. The
+    caller must own and serialize both roots; reads still reject linked paths. *)
+val at_root : t -> root:string -> (t, Store_error.t) result
+
 (** Stream directory names with a native directory handle in an Eio system thread,
     stopping at the budget. Returns sorted names. Rejects linked directories. *)
 val list : t -> directory:string -> (string list, Store_error.t) result

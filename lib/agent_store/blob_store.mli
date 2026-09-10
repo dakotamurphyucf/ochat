@@ -55,6 +55,14 @@ val with_retention
   -> f:(retention -> ('a, Store_error.t) result)
   -> ('a option, Store_error.t) result
 
+(** The exact session root and shared temporary-blob root under a live retention
+    token, for bounded reference readers. This does not authorize another session
+    or any deletion. The caller must retain the scope throughout the scan. *)
+val retention_directories
+  :  retention
+  -> Session_store.Handle.t
+  -> (string * string, Store_error.t) result
+
 (** The existing exact-handle discard under a live retention scope, without
     reentering the coordinator. The caller must prove absence of every reference.
     Rejects use after the callback has returned. *)

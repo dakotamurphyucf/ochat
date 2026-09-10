@@ -37,6 +37,11 @@ let create ids =
 
 let begin_root t = t.tail <- ""
 
+let reset t =
+  begin_root t;
+  Hash_set.clear t.found
+;;
+
 let feed ?ignore t chunk =
   let contents =
     match String.is_empty t.tail with
