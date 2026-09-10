@@ -1554,8 +1554,28 @@ and removal of only the queue head in one transaction. A rejected save leaves no
 intermediate claim and does not pop the live queue. Foreground retirement retains
 the active operation's identity. A handler that actually started and failed still
 uses explicit failure retirement; this path does not retry its external effects.
-Remaining lifecycle/clock qualification and notification delivery are separate
-work. General feature advertisement remains gated on A01.
+Cancel-stop now saves cancellation of active source-owned subscriptions and
+Scheduled/Delivering timers with the existing job, permission and lifecycle changes.
+It preserves terminal results. Graceful stop preserves this durable work; a later
+cancel-stop still applies when the session is already stopped. Rejected saves leave
+the actor, manager queue and worker cancellation state unchanged.
+
+For an owned timer already enqueued but not claimed by a handler, cancel-stop adds
+an immutable `delivery_cancellation` reason. This uses schedule JSON envelope 3;
+ordinary owned records retain envelope 2 and legacy records retain their flat
+encoding. A missing cancellation or version downgrade is rejected. The marker
+preserves the timer's Delivered status, count, timestamp and payload. It invalidates
+the queued frame without modifying a manager queue that may be borrowed; after an
+authorized start, the frame retires without invoking its handler. A callback that
+already acquired a durable execution claim instead follows interruption and
+explicit failure retirement. Completed callbacks are not relabelled as cancelled.
+
+Host subscription cancellation can terminalize retained older generations through
+a dedicated delta, without admitting new work, changing source identity or forging
+success. Explicit cancellation cannot be blocked by a wall-clock rollback: its
+subscription completion timestamp is bounded below by creation time. Active timer
+elapsed-time handling, reset/rebuild/upgrade classification and notification
+delivery remain separate work. General feature advertisement remains gated on A01.
 
 Session state schema 8 adds invocation-owned permission requests. It upgrades
 schema 7 while preserving event-owned invocation lineage, schema 6

@@ -364,6 +364,7 @@ let schedules snapshot count =
       ; status = Scheduled
       ; delivery_count = 0
       ; last_delivery_at = None
+      ; delivery_cancellation = None
       ; ownership = None
       })
 ;;

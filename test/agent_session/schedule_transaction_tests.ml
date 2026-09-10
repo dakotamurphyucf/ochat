@@ -86,7 +86,7 @@ let%expect_test
        P.Id.Schedule.of_json);
   reject "missing ownership" (S.of_json (remove envelope "ownership"));
   reject "missing version" (S.of_json (remove envelope "schema_version"));
-  reject "unknown version" (S.of_json (replace envelope "schema_version" (`Number "3")));
+  reject "unknown version" (S.of_json (replace envelope "schema_version" (`Number "4")));
   reject "legacy authority upgrade" (S.validate_transition ~previous:(Some legacy) owned);
   reject "ownership removed" (S.validate_transition ~previous:(Some owned) legacy);
   reject

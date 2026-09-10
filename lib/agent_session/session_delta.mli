@@ -31,6 +31,9 @@ type t =
   | Subscription_expired of Agent_protocol.Subscription.t
   (** Host expiry of an existing subscription, including retained older
       generations. Cannot create a record, change its context or record success. *)
+  | Subscription_cancelled of Agent_protocol.Subscription.t
+  (** Host cancellation of an existing source-owned subscription, including
+      historical generations. Cannot admit new work or rewrite terminal results. *)
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Moderator_changed of Jsonaf.t option

@@ -742,6 +742,7 @@ let schedule_services t state actor_ref pending =
           ; status = Scheduled
           ; delivery_count = 0
           ; last_delivery_at = None
+          ; delivery_cancellation = None
           ; ownership = None
           }
       in

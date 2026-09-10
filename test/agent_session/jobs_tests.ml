@@ -43,6 +43,7 @@ let%expect_test "schedule delivery is generation-checked and actor-committed" =
           ; status = Scheduled
           ; delivery_count = 0
           ; last_delivery_at = None
+          ; delivery_cancellation = None
           ; ownership = None
           }
       in

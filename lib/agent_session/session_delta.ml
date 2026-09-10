@@ -23,6 +23,7 @@ type t =
   | Moderator_execution_reconciled of Agent_protocol.Moderator_execution.t
   | Subscription_changed of Agent_protocol.Subscription.t
   | Subscription_expired of Agent_protocol.Subscription.t
+  | Subscription_cancelled of Agent_protocol.Subscription.t
   | Delivery_changed of Agent_protocol.Delivery.t
   | Delivery_committed of Agent_protocol.Delivery.t * Agent_protocol.History.entry
   | Moderator_changed of Jsonaf.t option
@@ -366,18 +367,20 @@ let rec apply state = function
           state.invocations
           ~id_of:(fun value -> value.Agent_protocol.Invocation.context.id)
     }
-  | (Subscription_changed subscription | Subscription_expired subscription) as delta ->
+  | ( Subscription_changed subscription
+    | Subscription_expired subscription
+    | Subscription_cancelled subscription ) as delta ->
     let open Result.Let_syntax in
     let c = subscription.Agent_protocol.Subscription.context in
-    let expiry =
+    let host_terminal =
       match delta with
-      | Subscription_expired _ -> true
+      | Subscription_expired _ | Subscription_cancelled _ -> true
       | _ -> false
     in
     let%bind () =
       Extension_invariants.owner
         ~session_id:state.identity.session_id
-        ~generation:(if expiry then c.generation else state.identity.generation)
+        ~generation:(if host_terminal then c.generation else state.identity.generation)
         c.session_id
         c.generation
     in
@@ -386,13 +389,17 @@ let rec apply state = function
         Agent_protocol.Id.Subscription.compare old.context.id c.id = 0)
     in
     let%bind () =
-      match expiry, previous, subscription.result with
-      | false, _, _ -> Ok ()
-      | true, Some _, Some Expired when c.generation <= state.identity.generation -> Ok ()
+      match delta, previous, subscription.result with
+      | Subscription_changed _, _, _ -> Ok ()
+      | Subscription_expired _, Some _, Some Expired
+        when c.generation <= state.identity.generation -> Ok ()
+      | Subscription_cancelled _, Some _, Some (Cancelled _)
+        when c.generation <= state.identity.generation && Option.is_some c.source -> Ok ()
       | _ ->
         Error
           (Agent_protocol.Error.invalid_request
-             "subscription expiry requires an existing record and an expired result")
+             "host subscription terminalization requires its matching existing record \
+              and result")
     in
     let%map () = Agent_protocol.Subscription.validate_transition ~previous subscription in
     { state with

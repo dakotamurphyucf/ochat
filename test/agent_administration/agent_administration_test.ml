@@ -401,6 +401,7 @@ let seeded_schedule state =
     ; status = Cancelled
     ; delivery_count = 0
     ; last_delivery_at = None
+    ; delivery_cancellation = None
     ; ownership = None
     }
 ;;

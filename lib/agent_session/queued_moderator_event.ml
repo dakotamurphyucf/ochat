@@ -50,6 +50,13 @@ let receipt_timer (receipt : E.t) =
   | _ -> Ok None
 ;;
 
+let claimed_timer_ids ~state =
+  List.map state.Session_state.moderator_executions ~f:receipt_timer
+  |> Result.all
+  |> Result.map
+       ~f:(List.filter_map ~f:(Option.map ~f:(fun (timer : P.Schedule.t) -> timer.id)))
+;;
+
 let timer_retirement_reason ~state ~(observer : P.Invocation.observer) ~event ~now =
   let open Result.Let_syntax in
   let%bind timer = captured_timer event in
@@ -88,16 +95,8 @@ let timer_retirement_reason ~state ~(observer : P.Invocation.observer) ~event ~n
      with
      | false -> Ok (Some "timer.stale_delivery")
      | true ->
-       let%bind previous =
-         List.map state.moderator_executions ~f:receipt_timer |> Result.all
-       in
-       (match
-          List.exists
-            previous
-            ~f:
-              (Option.exists ~f:(fun (previous : P.Schedule.t) ->
-                 P.Id.Schedule.equal previous.id timer.id))
-        with
+       let%bind previous = claimed_timer_ids ~state in
+       (match List.mem previous timer.id ~equal:P.Id.Schedule.equal with
         | true -> Ok (Some "timer.duplicate_delivery")
         | false ->
           (match ownership.subscription with

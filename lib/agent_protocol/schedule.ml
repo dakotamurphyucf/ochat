@@ -38,6 +38,7 @@ type t =
   ; delivery_count : int
   ; last_delivery_at : Timestamp.t option
   ; ownership : ownership option [@sexp.option]
+  ; delivery_cancellation : string option [@sexp.option]
   }
 [@@deriving sexp]
 
@@ -208,6 +209,17 @@ let ownership_of_json json =
 ;;
 
 let validate t =
+  let open Result.Let_syntax in
+  let%bind () =
+    match t.delivery_cancellation, t.ownership, t.status, t.delivery_count with
+    | None, _, _, _ -> Ok ()
+    | Some reason, Some _, Delivered, 1 ->
+      Extension_codec.text ~name:"timer delivery cancellation" ~max:256 reason
+    | Some _, _, _, _ ->
+      Error
+        (Protocol_error.invalid_request
+           "only an enqueued owned timer can cancel delivery")
+  in
   match t.ownership with
   | None -> Ok ()
   | Some ownership ->
@@ -264,10 +276,17 @@ let to_json t =
   | None -> `Object fields
   | Some ownership ->
     `Object
-      [ "schema_version", `Number "2"
-      ; "schedule", `Object fields
-      ; "ownership", ownership_to_json ownership
-      ]
+      ([ ( "schema_version"
+         , `Number
+             (match t.delivery_cancellation with
+              | None -> "2"
+              | Some _ -> "3") )
+       ; "schedule", `Object fields
+       ; "ownership", ownership_to_json ownership
+       ]
+       @ Option.to_list
+           (optional_field "delivery_cancellation" t.delivery_cancellation (fun reason ->
+              `String reason)))
 ;;
 
 let decode_identity fields =
@@ -286,23 +305,24 @@ let decode_identity fields =
 let of_json json =
   let open Result.Let_syntax in
   let%bind fields = Json_codec.fields json in
-  let%bind fields, ownership =
+  let%bind fields, ownership, delivery_cancellation =
     match Json_codec.optional fields "schema_version" with
     | None ->
       (match
          Option.is_some (Json_codec.optional fields "ownership")
          || Option.is_some (Json_codec.optional fields "schedule")
+         || Option.is_some (Json_codec.optional fields "delivery_cancellation")
        with
        | true ->
          Error
            (Protocol_error.invalid_request
               "owned schedule requires its versioned envelope")
-       | false -> Ok (fields, None))
+       | false -> Ok (fields, None, None))
     | Some encoded ->
       let%bind version = Json_codec.bounded_int ~min:1 ~max:Int.max_value encoded in
       let%bind () =
         match version with
-        | 2 -> Ok ()
+        | 2 | 3 -> Ok ()
         | _ ->
           Error
             (Protocol_error.create
@@ -312,7 +332,20 @@ let of_json json =
                ())
       in
       let%bind () =
-        Extension_codec.closed fields [ "schema_version"; "schedule"; "ownership" ]
+        Extension_codec.closed
+          fields
+          ([ "schema_version"; "schedule"; "ownership" ]
+           @
+           match version with
+           | 3 -> [ "delivery_cancellation" ]
+           | _ -> [])
+      in
+      let%bind delivery_cancellation =
+        match version with
+        | 3 ->
+          Json_codec.required_as fields "delivery_cancellation" Json_codec.string
+          |> Result.map ~f:Option.some
+        | _ -> Ok None
       in
       let%bind ownership = Json_codec.required_as fields "ownership" ownership_of_json in
       let%bind fields = Json_codec.required_as fields "schedule" Json_codec.fields in
@@ -331,7 +364,7 @@ let of_json json =
           ; "last_delivery_at"
           ]
       in
-      fields, Some ownership
+      fields, Some ownership, delivery_cancellation
   in
   let%bind id, session_id, generation = decode_identity fields in
   let%bind payload = Json_codec.required fields "payload" in
@@ -360,6 +393,7 @@ let of_json json =
     ; delivery_count
     ; last_delivery_at
     ; ownership
+    ; delivery_cancellation
     }
   in
   let%map () = validate value in
@@ -410,9 +444,26 @@ let validate_transition ~previous next =
          | None, Some _, Scheduled, Scheduled -> Ok ()
          | _ -> conflict "schedule subscription binding cannot be replaced"
        in
+       let%bind () =
+         match previous.delivery_cancellation, next.delivery_cancellation with
+         | None, None -> Ok ()
+         | None, Some _ ->
+           (match previous.status, next.status with
+            | Delivered, Delivered -> Ok ()
+            | _ -> conflict "delivery cancellation requires an already-enqueued timer")
+         | Some before, Some after when String.equal before after -> Ok ()
+         | Some _, _ ->
+           conflict "timer delivery cancellation cannot be replaced or removed"
+       in
        (match previous.status, next.status with
         | Scheduled, (Scheduled | Delivering | Delivered | Cancelled | Failed _)
         | Delivering, (Scheduled | Delivering | Delivered | Cancelled | Failed _) -> Ok ()
+        | Delivered, Delivered
+          when Option.is_none previous.delivery_cancellation
+               && Option.is_some next.delivery_cancellation
+               && Jsonaf.exactly_equal
+                    (to_json previous)
+                    (to_json { next with delivery_cancellation = None }) -> Ok ()
         | (Delivered | Cancelled | Failed _), _
           when Jsonaf.exactly_equal (to_json previous) (to_json next) -> Ok ()
         | _ -> conflict "terminal schedule cannot change")

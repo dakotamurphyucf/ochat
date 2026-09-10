@@ -24,6 +24,7 @@ let%expect_test "external event delivery commits receipts before changing the li
         ; status = Delivering
         ; delivery_count = 0
         ; last_delivery_at = None
+        ; delivery_cancellation = None
         ; ownership = None
         }
       in

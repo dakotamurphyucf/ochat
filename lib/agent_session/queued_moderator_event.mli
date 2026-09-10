@@ -7,6 +7,12 @@ val has_unsettled_claim
   -> observer:Agent_protocol.Invocation.observer
   -> bool
 
+(** IDs with a durable callback claim, including failed or retired callbacks.
+    Lifecycle cancellation must not rewrite already-claimed timer delivery. *)
+val claimed_timer_ids
+  :  state:Session_state.t
+  -> (Agent_protocol.Id.Schedule.t list, Agent_protocol.Error.t) result
+
 (** Authorize a captured timer against its retained delivered record, moderator
     source, subscription epoch/deadline and prior claims. Ordinary internal data
     returns None. A reason requests retirement without executing script code.

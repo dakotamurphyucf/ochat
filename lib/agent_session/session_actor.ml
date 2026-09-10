@@ -1144,7 +1144,7 @@ let cleanup_invocation_permissions t ids =
              { desired_state = value.desired; observed_state = value.observed })) )
 ;;
 
-let stop_transition t mode lifecycle deltas payloads =
+let stop_transition t mode ~extension_work lifecycle deltas payloads =
   let open Result.Let_syntax in
   let%bind discarded =
     Observation_follow_up.discard t.state.invocations ~reason:"session stopped"
@@ -1169,7 +1169,8 @@ let stop_transition t mode lifecycle deltas payloads =
             @ List.map events ~f:Observation_follow_up.event_delta
             @ List.map permissions ~f:(fun permission ->
               Session_delta.Permission_changed permission)
-            @ List.map jobs ~f:(fun job -> Session_delta.Job_changed job)))
+            @ List.map jobs ~f:(fun job -> Session_delta.Job_changed job)
+            @ Extension_stop.deltas extension_work))
       ~payloads:
         ((Agent_protocol.Event.Durable.Payload.Session_state_changed
             { desired_state = lifecycle.desired; observed_state = lifecycle.observed }
@@ -1177,7 +1178,8 @@ let stop_transition t mode lifecycle deltas payloads =
          @ List.map jobs ~f:(fun job ->
            Agent_protocol.Event.Durable.Payload.Job_state_changed job)
          @ List.map permissions ~f:(fun permission ->
-           Agent_protocol.Event.Durable.Payload.Permission_resolved permission))
+           Agent_protocol.Event.Durable.Payload.Permission_resolved permission)
+         @ Extension_stop.payloads extension_work)
   in
   cancel_job_scopes t jobs;
   resolve_cleaned_permission_waiters t permissions;
@@ -1196,6 +1198,10 @@ let cancel_event_for_operation t operation_id =
 ;;
 
 let stop_internal t mode =
+  let open Result.Let_syntax in
+  let%bind extension_work =
+    Extension_stop.prepare ~state:t.state ~mode ~now:(t.services.now ())
+  in
   match t.state.active_operation with
   | None ->
     let open Result.Let_syntax in
@@ -1203,13 +1209,21 @@ let stop_internal t mode =
       match t.state.lifecycle.desired, t.state.lifecycle.observed with
       | Stopped, Stopped
         when List.is_empty (stopped_jobs t mode)
+             && Extension_stop.is_empty extension_work
              && not
                   (List.exists t.state.invocations ~f:Observation_follow_up.pending
                    || List.exists
                         t.state.moderator_executions
                         ~f:Observation_follow_up.pending_event) ->
         Ok (Session_state.summary t.state)
-      | _, _ -> stop_transition t mode { desired = Stopped; observed = Stopped } [] []
+      | _, _ ->
+        stop_transition
+          t
+          mode
+          ~extension_work
+          { desired = Stopped; observed = Stopped }
+          []
+          []
     in
     (match mode, t.moderator_borrow with
      | Cancel, Some ({ operation_id = None; _ } as borrow) ->
@@ -1243,6 +1257,7 @@ let stop_internal t mode =
       stop_transition
         t
         mode
+        ~extension_work
         lifecycle
         [ Session_delta.Active_operation_changed (Some operation) ]
         []
@@ -2688,6 +2703,7 @@ let create_script_schedule_internal t owner source delay_ms payload misfire =
     ; status = Scheduled
     ; delivery_count = 0
     ; last_delivery_at = None
+    ; delivery_cancellation = None
     ; ownership = Some { source; creator = owner; subscription = None }
     }
   in
