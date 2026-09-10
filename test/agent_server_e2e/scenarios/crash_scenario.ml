@@ -267,6 +267,7 @@ let cases =
   ; "journal.partial-write-sigkill", test_journal_boundaries
   ; "sigkill.acknowledged-session", test_sigkill_committed_session
   ; "side-effect.unknown-no-replay", Crash_unknown_effect.test
+  ; "invocation.admission-publication-no-replay", Crash_invocation_publication.test
   ; "notification.wake-no-replay", Crash_notification_wake.test
   ; "notification.standalone-no-replay", Crash_standalone_notification.test
   ; "ingress.lost-ack-no-replay", Crash_ingress_delivery.test

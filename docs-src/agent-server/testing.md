@@ -94,6 +94,15 @@ These run under `@agent-docs-check`, without provider requests.
 | `@agent-e2e-safe` | Broad offline suite, including load; not a lightweight normal-test alias. |
 | `@agent-e2e-soak` | Explicit gated long-duration workload. |
 
+The crash matrix includes `invocation.admission-publication-no-replay`: an actual
+compiled standalone ChatML tool is interrupted by SIGKILL immediately after the
+invocation admission journal sync and after its outcome sync, before provider
+publication. Two fresh daemons must preserve the original invocation context and
+publish one stable response. Unstarted handling becomes interrupted; a saved
+successful outcome is published without repeating its real file mutation. Live
+progress is observed through public snapshots; raw checkpoints are inspected only
+after the child has been killed and joined.
+
 E2E fixtures use private temporary directories, generated tokens and local
 listeners; they should not touch normal stores. Reports are written under
 `_build/agent-e2e-reports`, with isolated fixture artifacts. Check cleanup and

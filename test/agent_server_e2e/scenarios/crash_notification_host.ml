@@ -5,6 +5,13 @@ module Delta = Agent_session.Session_delta
 
 let rec matches boundary = function
   | Delta.Batch deltas -> List.exists deltas ~f:(matches boundary)
+  | Invocation_changed invocation
+    when P.Invocation.equal_origin invocation.context.origin Model
+         && String.equal invocation.context.tool_name "watch" ->
+    (match invocation.status with
+     | Admitted -> String.equal boundary "invocation-admitted"
+     | Resolved _ -> String.equal boundary "invocation-resolved"
+     | Dispatching | Published _ -> false)
   | Job_changed
       { status = Succeeded | Failed _ | Cancelled | Interrupted _; delivery = Pending; _ }
     -> String.equal boundary "terminal"
